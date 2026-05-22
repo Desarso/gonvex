@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoTemplates = resolve(packageRoot, "..", "..", "templates");
-const packageTemplates = resolve(packageRoot, "templates");
+const packageTemplates = resolve(packageRoot, "dist", "templates");
 
 if (existsSync(repoTemplates)) {
   rmSync(packageTemplates, { recursive: true, force: true });

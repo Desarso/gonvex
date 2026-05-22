@@ -1,4 +1,6 @@
-.PHONY: dev services runtime dashboard packages docs
+.PHONY: dev services runtime dashboard packages docs version release-notes-preview release-dry-run release-prod
+
+OPENROUTER_MODEL ?= moonshotai/kimi-k2.5
 
 dev:
 	@bash -lc 'set -euo pipefail; \
@@ -29,3 +31,15 @@ packages:
 
 docs:
 	pnpm dev:docs
+
+version:
+	node scripts/release-cli.mjs --version-info
+
+release-notes-preview:
+	OPENROUTER_MODEL="$(OPENROUTER_MODEL)" VERSION="$(VERSION)" node scripts/release-cli.mjs --notes-preview
+
+release-dry-run:
+	OPENROUTER_MODEL="$(OPENROUTER_MODEL)" VERSION="$(VERSION)" node scripts/release-cli.mjs --dry-run
+
+release-prod:
+	OPENROUTER_MODEL="$(OPENROUTER_MODEL)" VERSION="$(VERSION)" node scripts/release-cli.mjs

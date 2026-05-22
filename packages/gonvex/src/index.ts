@@ -350,7 +350,7 @@ async function writeEnvLocal(root: string, project: string, runtime: string) {
 }
 
 function templateDir(template: string) {
-  const packageTemplate = resolve(dirname(fileURLToPath(import.meta.url)), "..", "templates", template);
+  const packageTemplate = resolve(dirname(fileURLToPath(import.meta.url)), "templates", template);
   if (existsSync(packageTemplate)) return packageTemplate;
   return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "templates", template);
 }
