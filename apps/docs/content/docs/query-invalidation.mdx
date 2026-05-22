@@ -1,0 +1,108 @@
+---
+title: Query Invalidation
+description: How Gonvex decides which live queries should refresh after writes.
+---
+
+# Query Invalidation
+
+Query invalidation decides whether a committed write can affect a live subscription.
+
+The target behavior:
+
+```txt
+affected subscription -> refresh
+unaffected subscription -> skip
+unknown impact -> refresh
+```
+
+## Why It Matters
+
+Realtime apps become expensive if every write refreshes every query. They become incorrect if a write changes visible data but the frontend never gets a fresh result.
+
+Gonvex should balance those concerns with a safe-first rule:
+
+```txt
+Refreshing too much is a performance issue.
+Missing a required refresh is a correctness issue.
+```
+
+## Generic Dependencies
+
+Invalidation should be based on generic query metadata, not app-specific concepts.
+
+Useful dependency metadata includes:
+
+- table names read
+- columns read
+- filters applied
+- indexes or ranges scanned
+- sort order
+- limit/window information
+- returned primary row IDs
+- tenant database route
+
+For example, the runtime should treat `workspace_id`, `organization_id`, or `account_id` as ordinary predicates. Those names should not be hardcoded into Gonvex core.
+
+## Write Sets
+
+Mutations should produce or imply write metadata:
+
+- table changed
+- operation type: insert, update, delete
+- changed primary row IDs where practical
+- changed columns
+- old and new indexed values where needed
+- tenant database route
+
+The runtime compares write metadata to query dependencies.
+
+## Conservative Cases
+
+Some writes require broad refreshes because result membership may change:
+
+- insert into a sorted or filtered result set
+- delete from a paginated result set
+- update to a column used by filtering
+- update to a column used by sorting
+- large write where changed IDs are too expensive to enumerate
+- query with dependencies the runtime did not capture precisely
+
+Broad refresh should only affect active subscriptions in the relevant project/tenant/database scope.
+
+## Row-Aware Cases
+
+When a query result contains primary row IDs and a small update only changes rows outside that result, the runtime can often skip refresh.
+
+Example:
+
+```txt
+subscription result ids: [a, b, c]
+mutation changed ids: [x, y]
+intersection: none
+safe action: skip, unless filters/sort/window membership can change
+```
+
+If a changed row could enter or leave the result because of filters, sorting, or pagination, refresh instead.
+
+## Tenant Scope
+
+Invalidation must respect tenant routing.
+
+Writes in tenant `acme` should not refresh subscriptions in tenant `globex` unless those subscriptions explicitly read shared landlord/project data.
+
+## Future Direction
+
+The long-term invalidation system should capture dependencies while executing registered Go functions.
+
+```txt
+query execution
+-> tracked reads: tables, predicates, ranges, returned ids
+-> dependency record stored with subscription
+
+mutation execution
+-> tracked writes: tables, ids, columns, old/new indexed values
+-> compare writes to active dependencies
+-> refresh only affected subscriptions
+```
+
+This gives Gonvex Convex-style correctness while preserving the ability to use Postgres as the backing database.

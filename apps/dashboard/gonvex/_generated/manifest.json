@@ -1,0 +1,455 @@
+{
+  "project": "dashboard",
+  "generatedAt": "2026-05-21T23:00:29.154049218Z",
+  "functions": {
+    "files.createUploadUrl": {
+      "kind": "mutation",
+      "handler": "CreateUploadURL",
+      "file": "gonvex/files.go"
+    },
+    "tasks.create": {
+      "kind": "mutation",
+      "handler": "CreateTask",
+      "file": "gonvex/tasks.go"
+    },
+    "tasks.grid": {
+      "kind": "liveGrid",
+      "handler": "TasksGrid",
+      "file": "gonvex/tasks.go"
+    },
+    "tasks.list": {
+      "kind": "query",
+      "handler": "ListTasks",
+      "file": "gonvex/tasks.go"
+    },
+    "tasks.randomizeStatusPriority": {
+      "kind": "mutation",
+      "handler": "RandomizeStatusPriority",
+      "file": "gonvex/tasks.go"
+    }
+  },
+  "schema": {
+    "tables": {
+      "files": {
+        "columns": {
+          "content_type": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "created_at": {
+            "type": "time",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "id": {
+            "type": "id",
+            "nullable": false,
+            "primaryKey": true
+          },
+          "key": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "size": {
+            "type": "int64",
+            "nullable": true,
+            "primaryKey": false
+          }
+        },
+        "indexes": {
+          "by_key": {
+            "columns": [
+              "key"
+            ],
+            "unique": true
+          }
+        }
+      },
+      "tasks": {
+        "columns": {
+          "approval_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "asset_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "assignee": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "audience": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "audience_team_ids": {
+            "type": "json",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "audience_user_ids": {
+            "type": "json",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "category_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "completed": {
+            "type": "bool",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "completed_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "created_at": {
+            "type": "time",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "created_by": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "deleted_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "description": {
+            "type": "text",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "due_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "due_date": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "estimate_minutes": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "expected_duration": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "first_viewed_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "flag_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "form_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "id": {
+            "type": "id",
+            "nullable": false,
+            "primaryKey": true
+          },
+          "label": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "latitude": {
+            "type": "float64",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "longitude": {
+            "type": "float64",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "name": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "occurrence_date": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "pg_id": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "priority": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "priority_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "progress": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "project": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "recurrence_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "reported_by_team_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "reported_by_user_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "requires_acknowledgment": {
+            "type": "bool",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "requires_signature": {
+            "type": "bool",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "row_hash": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_paused_duration": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_resolution_deadline": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_resolved_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_responded_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_response_deadline": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_started_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "spot_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "start_date": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "status_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "team_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "template_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "tenant_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "title": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "updated_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "workplan_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "workplan_instance_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "workplan_item_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "workspace_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          }
+        },
+        "indexes": {
+          "by_assignee": {
+            "columns": [
+              "assignee"
+            ],
+            "unique": false
+          },
+          "by_category": {
+            "columns": [
+              "tenant_id",
+              "category_id"
+            ],
+            "unique": false
+          },
+          "by_created_at": {
+            "columns": [
+              "created_at"
+            ],
+            "unique": false
+          },
+          "by_created_at_id": {
+            "columns": [
+              "created_at",
+              "id"
+            ],
+            "unique": false
+          },
+          "by_due_at": {
+            "columns": [
+              "due_at"
+            ],
+            "unique": false
+          },
+          "by_priority": {
+            "columns": [
+              "priority"
+            ],
+            "unique": false
+          },
+          "by_priority_id": {
+            "columns": [
+              "tenant_id",
+              "priority_id"
+            ],
+            "unique": false
+          },
+          "by_project": {
+            "columns": [
+              "project"
+            ],
+            "unique": false
+          },
+          "by_spot": {
+            "columns": [
+              "tenant_id",
+              "spot_id"
+            ],
+            "unique": false
+          },
+          "by_status": {
+            "columns": [
+              "status"
+            ],
+            "unique": false
+          },
+          "by_status_id": {
+            "columns": [
+              "tenant_id",
+              "status_id"
+            ],
+            "unique": false
+          },
+          "by_team": {
+            "columns": [
+              "tenant_id",
+              "team_id"
+            ],
+            "unique": false
+          },
+          "by_tenant_pg_id": {
+            "columns": [
+              "tenant_id",
+              "pg_id"
+            ],
+            "unique": false
+          },
+          "by_workspace": {
+            "columns": [
+              "tenant_id",
+              "workspace_id"
+            ],
+            "unique": false
+          }
+        }
+      }
+    }
+  }
+}

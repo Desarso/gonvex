@@ -1,0 +1,146 @@
+---
+title: Auth and Membership
+description: Users, tenant membership, roles, and permissions in Gonvex applications.
+---
+
+# Auth and Membership
+
+Gonvex needs a runtime-level auth and membership model because users can belong to multiple tenants, and tenants can route to different databases.
+
+## Core Model
+
+```txt
+User
+  A person or service identity. Users are global to the runtime/project, not stored only inside one tenant DB.
+
+Tenant
+  A customer/account/workspace under a project.
+
+Membership
+  A relationship between a user and a tenant.
+
+Role
+  A named bundle of permissions within a tenant.
+
+Permission
+  An action the user can perform, such as tasks:read or tasks:write.
+```
+
+## Why Users Are Separate From Tenants
+
+One user can belong to multiple tenants:
+
+```txt
+user: gabriel@example.com
+  tenant: acme     role: owner
+  tenant: globex   role: admin
+  tenant: demo     role: viewer
+```
+
+If every tenant has a separate database, the runtime still needs a central place to know that the same user can access all three tenants. That belongs in the landlord database.
+
+## Request Auth Flow
+
+```txt
+browser sends auth token
+-> runtime verifies token
+-> runtime resolves user
+-> browser selects tenant or runtime uses default tenant
+-> runtime checks membership
+-> runtime loads role/permissions
+-> function executes with scoped context
+```
+
+## Tenant Switching
+
+The frontend should be able to switch active tenants inside a project:
+
+```ts
+await gonvex.setTenant("acme");
+```
+
+After switching tenants:
+
+- active subscriptions should resubscribe under the new tenant context
+- cached rows from the previous tenant should not be shown as current data
+- generated bindings stay the same because functions are project-level
+
+## Function Authorization
+
+Functions should check permissions through context helpers:
+
+```go
+func CreateTask(ctx *gonvex.MutationCtx, args CreateTaskArgs) (Task, error) {
+  if !ctx.Can("tasks:write") {
+    return Task{}, gonvex.Forbidden()
+  }
+
+  return ctx.DB().InsertTask(ctx.TenantID(), args)
+}
+```
+
+## Dashboard Requirements
+
+The dashboard should expose:
+
+- users list
+- tenant membership list
+- invite user to tenant
+- remove user from tenant
+- role editor
+- permission viewer
+- active tenant switcher
+- project-level admins
+- tenant-level admins
+
+## Data Placement
+
+Landlord DB should store:
+
+```txt
+users
+projects
+tenants
+memberships
+roles
+permissions
+tenant database routes
+auth provider links
+```
+
+Tenant DB should store application data:
+
+```txt
+tasks
+files
+comments
+domain tables
+```
+
+This separation lets the runtime authenticate and route before opening tenant-specific data connections.
+
+## Auth Providers
+
+Gonvex should support external identity providers rather than owning passwords by default:
+
+- Clerk
+- Auth0
+- Firebase Auth
+- WorkOS
+- custom JWT
+- local dev auth
+
+Provider identity is mapped to Gonvex users in the landlord DB.
+
+## Security Rule
+
+Never trust tenant/project IDs only because the browser sent them.
+
+The runtime must verify:
+
+```txt
+authenticated user
+belongs to active tenant
+has permission for requested operation
+is routed to the correct tenant database
+```

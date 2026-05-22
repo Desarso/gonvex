@@ -1,0 +1,139 @@
+---
+title: Schema
+description: Define Postgres tables and indexes in your app-local Gonvex backend folder.
+---
+
+# Schema
+
+Gonvex schemas are written in Go and live in your app-local `gonvex/` folder.
+
+```txt
+my-app/
+  gonvex/
+    schema.go
+    _generated/
+```
+
+The schema describes the tables, columns, and indexes your project expects in Postgres.
+
+## Example
+
+```go
+package backend
+
+import "github.com/gonvex/gonvex/pkg/gonvex"
+
+func Schema(s *gonvex.Schema) {
+  s.Table("tasks", func(t *gonvex.Table) {
+    t.ID("id")
+    t.String("title")
+    t.Text("description", gonvex.Nullable)
+    t.String("status")
+    t.String("priority", gonvex.Nullable)
+    t.Time("created_at")
+    t.Time("updated_at", gonvex.Nullable)
+
+    t.Index("by_status", "status")
+    t.Index("by_created_at", "created_at")
+    t.Index("by_status_created_at", "status", "created_at")
+  })
+}
+```
+
+## Column Types
+
+The schema API should cover common Postgres-backed application data:
+
+```go
+t.ID("id")
+t.String("title")
+t.Text("body", gonvex.Nullable)
+t.Int("count")
+t.Int64("size", gonvex.Nullable)
+t.Float64("price")
+t.Bool("published")
+t.Time("created_at")
+t.JSON("metadata", gonvex.Nullable)
+```
+
+## Indexes
+
+Indexes are declared near the table they support:
+
+```go
+t.Index("by_status", "status")
+t.Index("by_tenant_created_at", "tenant_id", "created_at")
+t.UniqueIndex("by_external_id", "external_id")
+```
+
+Use indexes for queries and LiveGrid surfaces that filter, sort, or page through large tables.
+
+## Multi-Tenant Schemas
+
+How tenant scoping appears in application tables depends on the project’s tenant database strategy.
+
+```txt
+Database per tenant
+  Application tables usually do not need tenant_id because each tenant has its own database.
+
+Schema per tenant
+  Application tables usually do not need tenant_id because each tenant has its own Postgres schema.
+
+Shared tables
+  Application tables need tenant_id and all queries must be scoped by tenant.
+```
+
+The runtime should resolve the active tenant before executing functions. Application code should still use context helpers instead of trusting tenant IDs sent by the browser.
+
+## Schema Sync
+
+During development:
+
+```bash
+npx gonvex dev
+```
+
+Gonvex should read `gonvex/schema.go`, compare it to the selected project/tenant database, and apply safe changes.
+
+Safe automatic changes include:
+
+- create tables
+- add columns
+- add indexes
+- add unique indexes when existing data satisfies the constraint
+- make a nullable column required only when no existing rows contain null
+- relax a required column to nullable
+
+Unsafe changes are rejected and shown in the CLI console:
+
+- rename columns
+- change column types
+- drop columns
+- drop tables
+- rewrite large tables
+- backfill production data
+
+The rule is Convex-like: apply changes that preserve existing data automatically, reject changes that could lose or invalidate existing data.
+
+## Generated Schema Types
+
+The CLI should generate TypeScript types from schema declarations:
+
+```ts
+import type { Doc } from "./gonvex/_generated/schema";
+
+type Task = Doc<"tasks">;
+```
+
+This keeps frontend code aligned with the Go schema.
+
+## Production Direction
+
+For production, schema sync should become environment-aware and migration-safe:
+
+- preview migrations before applying
+- track migration versions
+- support rollbacks where possible
+- apply schema changes per tenant database route
+- prevent destructive changes without confirmation
+- expose schema status in the dashboard

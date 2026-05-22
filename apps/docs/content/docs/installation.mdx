@@ -1,0 +1,137 @@
+---
+title: Installation
+description: Install the Gonvex CLI and add Gonvex to an existing frontend project.
+---
+
+# Installation
+
+Gonvex should be installed like a normal JavaScript tool even though the CLI/runtime are written in Go.
+
+## New Project
+
+```bash
+npm create gonvex@latest my-app
+```
+
+Equivalent package-manager commands:
+
+```bash
+pnpm create gonvex my-app
+yarn create gonvex my-app
+bun create gonvex my-app
+```
+
+The initializer should ask:
+
+- framework: Vite, Next.js, Remix, TanStack Start, existing app
+- package manager
+- TypeScript yes/no
+- local runtime or remote runtime
+- single-tenant or multi-tenant project
+- Postgres connection strategy
+
+## Existing Project
+
+```bash
+npm install gonvex
+npx gonvex init
+```
+
+`gonvex init` should add:
+
+```txt
+gonvex/
+  schema.go
+  index.go or main.go
+  _generated/
+gonvex.json
+.env.local entries
+package.json scripts
+```
+
+Recommended scripts:
+
+```json
+{
+  "scripts": {
+    "dev": "gonvex dev -- vite",
+    "gonvex:dev": "gonvex dev",
+    "gonvex:deploy": "gonvex deploy"
+  }
+}
+```
+
+Vite React projects should use:
+
+```json
+{
+  "scripts": {
+    "dev": "gonvex dev -- vite",
+    "gonvex:dev": "gonvex dev",
+    "gonvex:deploy": "gonvex deploy --env production"
+  }
+}
+```
+
+## CLI Distribution
+
+The npm package should expose a `gonvex` binary. Internally it can ship or download prebuilt Go binaries for the current OS/architecture.
+
+Users should not need Go installed to use Gonvex in a normal frontend app.
+
+## Runtime Options
+
+You can use Gonvex in three modes:
+
+```txt
+Local runtime
+  Best for development. Runtime and Postgres run locally.
+
+Self-hosted runtime
+  You run Gonvex runtime, landlord database, tenant databases, and object storage.
+
+Hosted runtime
+  Gonvex Cloud manages runtime/project/tenant routing for you.
+```
+
+## Environment Variables
+
+A local project typically needs:
+
+```txt
+GONVEX_PROJECT=my-product
+GONVEX_PROJECT_ID=prj_2x7k9...
+GONVEX_RUNTIME_URL=http://localhost:8080
+GONVEX_PROJECT_KEY=gvx_dev_...
+GONVEX_DEPLOYMENT=local
+```
+
+The runtime needs landlord database configuration and tenant database connections. Application code should not hardcode tenant database URLs directly.
+
+Vite also needs a public WebSocket URL for the browser bundle:
+
+```txt
+VITE_GONVEX_WS_URL=ws://localhost:8080/ws
+```
+
+In production this should point to the cloud runtime:
+
+```txt
+VITE_GONVEX_WS_URL=wss://my-product.gonvex.cloud/ws
+```
+
+## Generated Files
+
+Generated files belong in:
+
+```txt
+gonvex/_generated/
+```
+
+Frontend code imports from there:
+
+```ts
+import { api } from "./gonvex/_generated/api";
+```
+
+Do not edit generated files manually.

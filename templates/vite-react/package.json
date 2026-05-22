@@ -1,0 +1,30 @@
+{
+  "name": "gonvex-vite-react-template",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "gonvex dev -- vite",
+    "vite": "vite",
+    "gonvex:dev": "gonvex dev",
+    "gonvex:once": "gonvex dev --once",
+    "gonvex:deploy": "gonvex deploy --env production",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@gonvex/client": "latest",
+    "@gonvex/react": "latest",
+    "@vitejs/plugin-react-swc": "latest",
+    "vite": "latest",
+    "typescript": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "gonvex": "latest"
+  }
+}

@@ -1,0 +1,120 @@
+---
+title: Deployment
+description: Runtime deployment model for local, self-hosted, and hosted Gonvex projects.
+---
+
+# Deployment
+
+Gonvex deployments are project-based. A deployment connects generated app code, a runtime, a landlord database, tenant databases, and object storage.
+
+## Deployment Modes
+
+```txt
+Local
+  Developer machine. Runtime, services, and app dev server run locally.
+
+Self-hosted
+  You operate Gonvex runtime, landlord DB, tenant DBs, Valkey, and object storage.
+
+Hosted
+  Gonvex Cloud operates the runtime/control plane and routes projects/tenants.
+```
+
+Frontend apps use the hosted or self-hosted runtime in production. The app ships generated TypeScript bindings and connects to the runtime over `wss://`, similar to Convex.
+
+## Components
+
+```txt
+Gonvex runtime
+  Executes functions, serves WebSockets, handles project/tenant routing.
+
+Landlord database
+  Stores projects, tenants, users, memberships, roles, database routes.
+
+Tenant databases
+  Store application data.
+
+Valkey/Redis
+  Optional cache and coordination layer.
+
+Object storage
+  S3-compatible file storage.
+```
+
+## Deploy Command
+
+The desired deploy flow:
+
+```bash
+npx gonvex deploy --project my-product --env production
+```
+
+This should:
+
+- build or package the backend manifest
+- upload/sync function metadata
+- run safe schema migrations
+- validate tenant routes
+- publish generated client environment metadata
+- notify runtime instances to reload project metadata
+
+## Environments
+
+Projects should support named environments:
+
+```txt
+development
+preview
+staging
+production
+```
+
+Each environment can have separate runtime URLs and tenant database routes.
+
+## Tenant Database Routing
+
+In production, requests route like this:
+
+```txt
+request host / project token
+-> project
+-> authenticated user
+-> active tenant
+-> tenant database connection
+-> function execution
+```
+
+The frontend should not contain raw tenant database URLs.
+
+## Dashboard Deployment Features
+
+The dashboard should support:
+
+- create project
+- create environment
+- configure runtime URL
+- create tenant
+- assign tenant database route
+- view schema sync status
+- view function manifest versions
+- view connected runtime instances
+- manage users/memberships/roles
+
+## Self-Hosting Checklist
+
+```txt
+landlord Postgres database
+runtime service
+tenant Postgres database(s)
+Valkey/Redis
+S3-compatible storage
+auth provider config
+TLS/reverse proxy
+project allowed origins
+runtime secrets
+backup policy
+```
+
+## Production Caveat
+
+Gonvex is not production-ready yet. The docs describe the intended deployment model while runtime deployment, dashboard operations, auth, and multi-tenant routing are being implemented.

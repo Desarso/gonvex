@@ -1,0 +1,17 @@
+node_modules
+dist
+coverage
+.next
+.turbo
+.vite
+.cache
+.source
+.env
+.env.local
+.env.*.local
+*.log
+*.tsbuildinfo
+*.tgz
+tmp/
+packages/gonvex/templates/
+.DS_Store

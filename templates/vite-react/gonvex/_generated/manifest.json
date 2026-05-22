@@ -1,0 +1,52 @@
+{
+  "project": "my-vite-app",
+  "generatedAt": "2026-05-21T23:52:23.045275022Z",
+  "functions": {
+    "messages.list": {
+      "kind": "query",
+      "handler": "ListMessages",
+      "file": "gonvex/messages.go"
+    },
+    "messages.send": {
+      "kind": "mutation",
+      "handler": "SendMessage",
+      "file": "gonvex/messages.go"
+    }
+  },
+  "schema": {
+    "tables": {
+      "messages": {
+        "columns": {
+          "author": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "body": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "created_at": {
+            "type": "time",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "id": {
+            "type": "id",
+            "nullable": false,
+            "primaryKey": true
+          }
+        },
+        "indexes": {
+          "by_created_at": {
+            "columns": [
+              "created_at"
+            ],
+            "unique": false
+          }
+        }
+      }
+    }
+  }
+}

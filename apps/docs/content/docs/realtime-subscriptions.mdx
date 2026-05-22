@@ -1,0 +1,131 @@
+---
+title: Realtime Subscriptions
+description: Subscribe to query results and receive fresh data when relevant writes commit.
+---
+
+# Realtime Subscriptions
+
+Gonvex subscriptions keep query results current over a WebSocket connection.
+
+The intended model is simple for app developers:
+
+```txt
+useQuery(api.tasks.list, args)
+-> runtime executes tasks.list
+-> frontend receives result
+-> relevant committed writes happen
+-> runtime refreshes affected subscriptions
+-> frontend receives fresh result
+```
+
+## React Usage
+
+```tsx
+import { api } from "./gonvex/_generated/api";
+import { useQuery } from "./gonvex/_generated/react";
+
+export function OpenTasks() {
+  const tasks = useQuery(api.tasks.list, { status: "open" });
+
+  if (tasks === undefined) return <Spinner />;
+  return <TaskList tasks={tasks} />;
+}
+```
+
+The hook subscribes when the component mounts and unsubscribes when it unmounts.
+
+## Direct Client Usage
+
+Custom surfaces can use the client directly:
+
+```ts
+const unsubscribe = client.subscribeQuery(
+  api.tasks.list,
+  { status: "open" },
+  (message) => {
+    if (message.type === "query.result") {
+      render(message.result);
+    }
+  },
+);
+
+unsubscribe();
+```
+
+## Subscription Scope
+
+Subscriptions run in runtime context:
+
+```txt
+project
+environment
+authenticated user
+active tenant
+role/permissions
+tenant database route
+```
+
+If the user switches tenants, active subscriptions should resubscribe under the new tenant context.
+
+## Protocol Concept
+
+The wire protocol can be represented as:
+
+```json
+{
+  "type": "query.subscribe",
+  "id": "client-subscription-id",
+  "path": "tasks.list",
+  "args": { "status": "open" }
+}
+```
+
+The runtime answers:
+
+```json
+{
+  "type": "query.result",
+  "id": "client-subscription-id",
+  "reason": "initial",
+  "result": []
+}
+```
+
+After relevant invalidation:
+
+```json
+{
+  "type": "query.result",
+  "id": "client-subscription-id",
+  "reason": "invalidate",
+  "result": []
+}
+```
+
+Most application code should use generated hooks/client helpers instead of constructing protocol messages manually.
+
+## Correctness Goal
+
+The realtime contract is:
+
+```txt
+If a committed write can change a subscribed result, the subscriber should receive fresh data.
+```
+
+Gonvex should prefer extra refreshes over stale visible data. Over-refreshing is a performance bug; missing a required refresh is a correctness bug.
+
+## Performance Goals
+
+Subscriptions should avoid request storms:
+
+- debounce or coalesce write bursts
+- avoid refreshing unrelated subscriptions
+- use query dependency metadata where available
+- compress WebSocket payloads
+- support large surfaces through LiveGrid windows instead of subscribing to entire tables
+
+## Tenant Safety
+
+Subscriptions must not leak data across tenants.
+
+The runtime must verify that the authenticated user can access the active tenant before running the query. Tenant selection from the browser is input to verify, not authority to trust.

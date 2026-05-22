@@ -1,0 +1,130 @@
+---
+title: LiveGrid
+description: Build large realtime data grids without subscribing to an entire table.
+---
+
+# LiveGrid
+
+LiveGrid is the Gonvex pattern for large interactive tables.
+
+Normal `useQuery` works well for result sets that fit comfortably in memory. A grid with thousands or millions of rows needs a different shape: subscribe only to the visible window, keep rendering synchronous, and refresh visible data when relevant writes commit.
+
+## Use Case
+
+LiveGrid is meant for surfaces like:
+
+- task tables
+- CRM records
+- audit logs
+- inventory grids
+- admin data browsers
+- scheduling boards
+
+## Define A LiveGrid Function
+
+```go
+func Register(app *gonvex.App) {
+  app.LiveGrid("tasks.grid", TasksGrid)
+}
+
+type TasksGridArgs struct {
+  Offset  int      `json:"offset"`
+  Limit   int      `json:"limit"`
+  Sort    []Sort   `json:"sort,omitempty"`
+  Search  string   `json:"search,omitempty"`
+  Columns []string `json:"columns,omitempty"`
+}
+
+func TasksGrid(ctx *gonvex.QueryCtx, args TasksGridArgs) (gonvex.GridResult[TaskRow], error) {
+  if !ctx.Can("tasks:read") {
+    return gonvex.GridResult[TaskRow]{}, gonvex.Forbidden()
+  }
+
+  return ctx.DB().Tasks().Grid(ctx.TenantID(), args)
+}
+```
+
+## Frontend Pattern
+
+The grid component tracks its visible row window and subscribes to that window:
+
+```ts
+const visible = getVisibleWindow();
+
+client.subscribeQuery(api.tasks.grid, {
+  offset: visible.offset,
+  limit: visible.limit,
+  sort,
+  search,
+  columns: visibleColumns,
+}, onResult);
+```
+
+When a result arrives, replace the corresponding range in the in-memory row cache.
+
+## Why A Row Cache Exists
+
+Grid libraries usually ask for cell content synchronously. Rendering cannot wait for a network request inside `getCellContent`.
+
+The recommended shape is:
+
+```txt
+visible window changes
+-> subscription args change
+-> runtime returns rows
+-> frontend updates in-memory row cache
+-> grid renders synchronously from cache
+```
+
+Offscreen cached rows are a performance optimization. They do not need to stay live. When the user scrolls back, that range becomes visible and subscribes again.
+
+## Avoid Request Storms
+
+Large grids can generate many scroll/search/sort events.
+
+Recommended controls:
+
+- bucket scroll offsets into page windows
+- add small overscan/padding around the visible rows
+- debounce text search input
+- cancel or replace older subscriptions when the window changes
+- request only visible columns when possible
+- use estimated counts where exact counts are expensive
+
+## Realtime Behavior
+
+The active visible window should be correct.
+
+```txt
+visible subscribed rows = source of truth
+offscreen cached rows = stale-allowed cache
+```
+
+If a mutation changes visible rows, the subscription should refresh. If a mutation changes only offscreen rows, it can wait until those rows become visible again.
+
+## Counts
+
+LiveGrid result shapes should support count modes:
+
+```txt
+none
+  fastest, no total row count
+
+estimate
+  cheap approximate count for scrollbars
+
+exact
+  exact count when the user or UI needs it
+```
+
+## Future Enhancements
+
+The first LiveGrid protocol can send full page results. Later improvements can add:
+
+- row-level patches
+- cell-level patches
+- server-side computed columns
+- persisted browser cache
+- optimistic row edits
+- column permission filtering
+- tenant-aware cache namespaces

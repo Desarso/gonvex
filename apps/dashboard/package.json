@@ -1,0 +1,43 @@
+{
+  "name": "@gonvex/dashboard",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "pnpm@11.1.2",
+  "scripts": {
+    "dev": "go run ../../cmd/gonvex dev --project . -- vite",
+    "dev:vite": "vite",
+    "gonvex:dev": "go run ../../cmd/gonvex dev --project .",
+    "gonvex:once": "go run ../../cmd/gonvex dev --project . --once",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@glideapps/glide-data-grid": "^6.0.3",
+    "@gonvex/client": "workspace:*",
+    "@gonvex/protocol": "workspace:*",
+    "@gonvex/react": "workspace:*",
+    "@heroui/react": "^3.0.5",
+    "@heroui/styles": "^3.0.5",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "jsdom": "^29.1.1",
+    "tailwindcss": "^4.3.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.13",
+    "vitest": "^4.1.6"
+  }
+}

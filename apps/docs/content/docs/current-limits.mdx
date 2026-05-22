@@ -1,0 +1,116 @@
+---
+title: Current Limits
+description: What is implemented today and what still needs product/runtime work.
+---
+
+# Current Limits
+
+Gonvex is under active development. These docs describe the intended product shape and the local prototype that is being built toward it.
+
+## Implemented Direction
+
+The current codebase proves these pieces locally:
+
+- app-local `gonvex/` folder
+- Go schema declarations
+- generated TypeScript API references
+- local runtime process
+- WebSocket subscriptions
+- mutation calls
+- Postgres-backed task data
+- LiveGrid-style visible-window subscriptions
+- HTTP gzip and WebSocket compression
+- local package build/watch workflow
+
+## Not Fully Generic Yet
+
+Function execution is still becoming generic. The runtime needs a general dispatcher that can execute arbitrary registered app functions without project-specific paths.
+
+## Product Commands Are Roadmap
+
+The docs use commands like:
+
+```bash
+npm create gonvex@latest my-app
+npx gonvex init
+npx gonvex project create my-product
+npx gonvex tenant create acme
+npx gonvex deploy
+```
+
+These commands define the intended user experience. Some are not implemented yet.
+
+## Multi-Project Runtime Is Roadmap
+
+The runtime should support many projects, but the current local development path is focused on one project at a time.
+
+Needed work:
+
+- landlord database schema
+- project registry
+- project switcher in dashboard
+- environment/deployment records
+- per-project schema/function manifests
+- allowed origins and runtime auth
+
+## Multi-Tenant Runtime Is Roadmap
+
+The target model supports users who belong to multiple tenants with roles and permissions. Tenants may route to separate databases.
+
+Needed work:
+
+- tenant registry
+- user registry
+- memberships
+- roles and permissions
+- active tenant switching
+- tenant database routing
+- tenant-aware cache and invalidation scoping
+
+## Invalidation Is Conservative
+
+The current invalidation strategy favors visible correctness over minimal refreshes.
+
+Future work should track query dependencies generically:
+
+- tables read
+- predicates
+- ranges
+- sort keys
+- returned row IDs
+- changed columns
+- tenant database route
+
+## Schema Migrations Are Early
+
+Schema sync is appropriate for local development and safe data-preserving changes. The runtime should reject schema changes that would break existing rows and print the error in the CLI.
+
+Production migrations need:
+
+- migration versioning
+- previews
+- explicit destructive-change confirmation
+- rollback strategy
+- per-tenant rollout control
+- large-table backfill strategy
+
+## Auth Is Early
+
+Production auth, memberships, roles, and permission checks are part of the intended runtime model but are not complete yet.
+
+Do not expose development data-browser endpoints as application APIs.
+
+## Storage Is Early
+
+S3-compatible storage is part of the architecture, but upload URL flows, tenant scoping, and storage authorization policy still need design.
+
+## Production Guidance
+
+Treat Gonvex as an active prototype until these areas are complete:
+
+- generic function execution
+- project and tenant routing
+- auth and permissions
+- production migrations
+- deployment/versioning
+- operational dashboard workflows

@@ -1,0 +1,130 @@
+---
+title: CLI Reference
+description: Commands Gonvex should provide for project setup, development, deployment, and tenant management.
+---
+
+# CLI Reference
+
+This page documents the intended CLI surface. Some commands are implemented today; others describe the product direction.
+
+## Create
+
+```bash
+npm create gonvex@latest my-app
+```
+
+Creates a new frontend app with a `gonvex/` backend folder.
+
+## Init
+
+```bash
+npx gonvex init
+```
+
+Adds Gonvex to an existing project.
+
+Options:
+
+```bash
+npx gonvex init \
+  --project my-product \
+  --runtime http://localhost:8080 \
+  --framework vite \
+  --tenant-mode multi
+```
+
+## Dev
+
+```bash
+npx gonvex dev
+```
+
+Watches `gonvex/*.go`, regenerates bindings, and syncs the runtime.
+
+With a child command:
+
+```bash
+npx gonvex dev -- vite
+```
+
+Vite React:
+
+```bash
+npx gonvex dev -- vite
+```
+
+For CI or generation-only flows:
+
+```bash
+npx gonvex dev --once
+```
+
+## Login
+
+```bash
+npx gonvex login
+```
+
+Authenticates the CLI against a hosted or self-hosted control plane.
+
+## Project Commands
+
+```bash
+npx gonvex project list
+npx gonvex project create my-product
+npx gonvex project switch my-product
+npx gonvex project delete my-product
+```
+
+## Link
+
+```bash
+npx gonvex link --project my-product
+```
+
+Links the local repo to an existing runtime project and writes `gonvex.json`.
+
+## Tenant Commands
+
+```bash
+npx gonvex tenant list
+npx gonvex tenant create acme
+npx gonvex tenant switch acme
+npx gonvex tenant db set acme "$DATABASE_URL"
+```
+
+## Deploy
+
+```bash
+npx gonvex deploy --env production
+```
+
+Syncs schema/functions to the selected project environment.
+
+## Generate
+
+```bash
+npx gonvex generate
+```
+
+Regenerates TypeScript bindings without running the dev server.
+
+## Doctor
+
+```bash
+npx gonvex doctor
+```
+
+Should validate:
+
+- runtime reachable
+- project linked
+- generated files current
+- database route configured
+- schema sync status
+- auth provider config
+- package versions
+
+## Current Implementation Note
+
+The repo currently implements the early `dev` path. The project/tenant/deploy/auth commands are part of the intended user-facing CLI surface and should guide the roadmap.

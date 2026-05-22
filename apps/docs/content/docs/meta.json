@@ -1,0 +1,19 @@
+{
+  "title": "Gonvex",
+  "pages": [
+    "index",
+    "quickstart",
+    "installation",
+    "init-project",
+    "projects-and-tenants",
+    "auth-and-membership",
+    "schema",
+    "functions-and-bindings",
+    "realtime-subscriptions",
+    "query-invalidation",
+    "live-grid",
+    "deployment",
+    "cli-reference",
+    "current-limits"
+  ]
+}

@@ -1,0 +1,146 @@
+---
+title: Functions and Bindings
+description: Define backend functions in Go and call them from the frontend through generated TypeScript bindings.
+---
+
+# Functions and Bindings
+
+Gonvex apps define backend functions in Go. The CLI reads those registrations and generates TypeScript references for the frontend.
+
+## Register Functions
+
+```go
+package backend
+
+import "github.com/gonvex/gonvex/pkg/gonvex"
+
+func Register(app *gonvex.App) {
+  app.Query("tasks.list", ListTasks)
+  app.Mutation("tasks.create", CreateTask)
+  app.Action("tasks.import", ImportTasks)
+  app.HTTP("/webhooks/stripe", StripeWebhook)
+  app.LiveGrid("tasks.grid", TasksGrid)
+}
+```
+
+## Function Kinds
+
+```txt
+Query
+  Read data. Can be subscribed to from the frontend.
+
+Mutation
+  Write data inside a transaction. Invalidates relevant live queries.
+
+Action
+  External side effects or long-running work.
+
+HTTP
+  Public HTTP route, often webhooks.
+
+LiveGrid
+  Structured realtime table/grid query for large interactive data surfaces.
+```
+
+## Args and Results
+
+Use JSON-tagged Go structs:
+
+```go
+type CreateTaskArgs struct {
+  Title string `json:"title"`
+}
+
+type Task struct {
+  ID     string `json:"id"`
+  Title  string `json:"title"`
+  Status string `json:"status"`
+}
+
+func CreateTask(ctx *gonvex.MutationCtx, args CreateTaskArgs) (Task, error) {
+  // write to tenant-scoped database
+}
+```
+
+## Generated Bindings
+
+The generated API should expose stable function references:
+
+```ts
+import { api } from "./gonvex/_generated/api";
+
+api.tasks.list
+api.tasks.create
+api.tasks.grid
+```
+
+Path-safe object references are preferred over stringly-typed calls.
+
+## React Usage
+
+```tsx
+import { api } from "./gonvex/_generated/api";
+import { useMutation, useQuery } from "./gonvex/_generated/react";
+
+export function TasksPage() {
+  const tasks = useQuery(api.tasks.list, { status: "open" });
+  const createTask = useMutation(api.tasks.create);
+
+  return (
+    <TaskList
+      tasks={tasks ?? []}
+      onCreate={(title) => createTask({ title })}
+    />
+  );
+}
+```
+
+## Direct Client Usage
+
+For lower-level surfaces like custom grids:
+
+```ts
+const unsubscribe = gonvexClient.subscribeQuery(
+  api.tasks.grid,
+  { offset: 0, limit: 300 },
+  (message) => {
+    if (message.type === "query.result") {
+      updateGrid(message.result);
+    }
+  },
+);
+```
+
+## Context
+
+Functions should receive runtime context:
+
+```go
+func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
+  projectID := ctx.ProjectID()
+  tenantID := ctx.TenantID()
+  userID := ctx.UserID()
+
+  if !ctx.Can("tasks:read") {
+    return nil, gonvex.Forbidden()
+  }
+
+  return ctx.DB().Tasks().List(tenantID, args)
+}
+```
+
+This is the model Gonvex should expose as the runtime becomes generic.
+
+## Generated Types
+
+The desired generated output is fully typed:
+
+```ts
+const tasks = useQuery(api.tasks.list, {
+  status: "open", // checked against Go arg type
+});
+
+tasks?.[0].title; // checked against Go result type
+```
+
+Current generated references are simpler while the runtime is being built out. Full type inference from Go structs is a planned improvement.

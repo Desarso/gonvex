@@ -1,0 +1,86 @@
+---
+title: Gonvex
+description: Build realtime Go + Postgres backends with generated TypeScript bindings.
+---
+
+# Gonvex
+
+Gonvex is a Convex-style backend for teams that want to write backend logic in Go while keeping the frontend developer experience tight: generated TypeScript bindings, realtime subscriptions, schema sync, and a hosted/self-hosted runtime that knows about projects, tenants, users, and roles.
+
+The intended workflow is:
+
+```bash
+npm create gonvex@latest my-app
+cd my-app
+npx gonvex dev
+```
+
+Then define backend code next to your app:
+
+```txt
+my-app/
+  gonvex/
+    schema.go
+    tasks.go
+    _generated/
+      api.ts
+      react.ts
+      client.ts
+```
+
+Your React app imports generated bindings:
+
+```ts
+import { api } from "./gonvex/_generated/api";
+
+const tasks = useQuery(api.tasks.list, { status: "open" });
+const createTask = useMutation(api.tasks.create);
+```
+
+## What Gonvex Provides
+
+- **Go backend functions**: queries, mutations, actions, HTTP handlers, and LiveGrid definitions.
+- **Generated TypeScript bindings**: frontend-safe references to your app backend functions.
+- **Postgres schema management**: define tables and indexes in Go.
+- **Realtime subscriptions**: query results refresh when relevant database changes commit.
+- **Multi-project runtime**: one runtime can host many projects.
+- **Multi-tenant projects**: projects can route users to tenant-scoped databases or schemas.
+- **User and membership model**: users can belong to multiple tenants with roles and permissions.
+- **Dashboard**: create projects, inspect schemas/functions, switch tenants, and watch live data.
+
+## Core Concepts
+
+```txt
+Project
+  A Gonvex application, usually one product/app/repo.
+
+Tenant
+  A customer/account/workspace inside a project. Tenants can have isolated databases.
+
+Landlord database
+  Runtime-owned control database that stores projects, tenants, users, memberships, and routing info.
+
+Tenant database
+  The actual application data store for one tenant or tenant group.
+
+Gonvex folder
+  The app-local backend source folder checked into your frontend repo.
+
+Generated bindings
+  TypeScript files generated from your Go backend registrations.
+```
+
+## Recommended Reading
+
+1. [Quickstart](/docs/quickstart)
+2. [Installation](/docs/installation)
+3. [Initialize a Project](/docs/init-project)
+4. [Projects and Tenants](/docs/projects-and-tenants)
+5. [Auth and Membership](/docs/auth-and-membership)
+6. [Schema](/docs/schema)
+7. [Functions and Bindings](/docs/functions-and-bindings)
+8. [Realtime Subscriptions](/docs/realtime-subscriptions)
+
+## Current Status
+
+Gonvex is under active development. The docs describe the intended product shape and the working local development model. Features that are still evolving are called out in [Current Limits](/docs/current-limits).

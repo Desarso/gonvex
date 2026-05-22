@@ -1,0 +1,7 @@
+{
+  "project": "my-vite-app",
+  "runtime": "http://localhost:8080",
+  "backendDir": "gonvex",
+  "generatedDir": "gonvex/_generated",
+  "tenantMode": "single"
+}

@@ -1,0 +1,143 @@
+---
+title: Initialize a Project
+description: What gonvex init should create and how a project connects to the runtime.
+---
+
+# Initialize a Project
+
+`gonvex init` turns an existing frontend repository into a Gonvex project.
+
+## Command
+
+```bash
+npx gonvex init
+```
+
+For non-interactive setup:
+
+```bash
+npx gonvex init \
+  --project my-product \
+  --runtime http://localhost:8080 \
+  --framework vite-react \
+  --tenant-mode multi
+```
+
+## Files Created
+
+```txt
+gonvex/
+  schema.go
+  tasks.go
+  _generated/
+    api.ts
+    client.ts
+    react.ts
+    schema.ts
+    types.ts
+
+gonvex.json
+.env.local
+```
+
+## `gonvex.json`
+
+The project config should identify the app and runtime connection:
+
+```json
+{
+  "project": "my-product",
+  "runtime": "http://localhost:8080",
+  "backendDir": "gonvex",
+  "generatedDir": "gonvex/_generated",
+  "tenantMode": "multi"
+}
+```
+
+## `.env.local`
+
+The CLI should also read `.env.local`, similar to Convex-style local development:
+
+```txt
+GONVEX_PROJECT_ID=prj_2x7k9...
+GONVEX_RUNTIME_URL=https://runtime.gonvex.cloud
+GONVEX_PROJECT_KEY=gvx_dev_...
+VITE_GONVEX_WS_URL=wss://runtime.gonvex.cloud/ws
+```
+
+`GONVEX_PROJECT_ID` tells a shared runtime which project is being synced. `GONVEX_PROJECT_KEY` authorizes dev sync/deploy operations. The browser only uses the public WebSocket URL; it should not receive the project key.
+
+## Link An Existing Runtime Project
+
+If a project already exists in the runtime:
+
+```bash
+npx gonvex link --project my-product
+```
+
+The CLI should fetch project metadata, write `gonvex.json`, and validate that the local schema can sync.
+
+## Project Registration
+
+When linked, the runtime landlord database stores:
+
+```txt
+project id
+project slug/name
+allowed origins
+deployment environments
+function/schema manifest versions
+```
+
+The frontend repo should not be the source of truth for tenant routing. It declares desired app schema/functions; the runtime owns project/tenant/user routing.
+
+## Development Loop
+
+```txt
+edit gonvex/*.go
+-> gonvex dev extracts schema/functions
+-> generated bindings update
+-> runtime receives manifest
+-> runtime applies safe schema changes
+-> frontend hot reloads with fresh api references
+```
+
+If a schema change would break existing data, the runtime rejects `/dev/sync` and the CLI prints the error in the terminal.
+
+For Vite React, the app command is typically:
+
+```json
+{
+  "scripts": {
+    "dev": "gonvex dev -- vite"
+  }
+}
+```
+
+The Gonvex runtime does not run in the browser. Local development connects to a local or tunnelled runtime, and production connects to a cloud runtime over `wss://`.
+
+## Initial Template
+
+A starter `schema.go`:
+
+```go
+func Schema(s *gonvex.Schema) {
+  s.Table("tasks", func(t *gonvex.Table) {
+    t.ID("id")
+    t.String("title")
+    t.String("status")
+    t.Time("created_at")
+  })
+}
+```
+
+A starter `tasks.go`:
+
+```go
+func Register(app *gonvex.App) {
+  app.Query("tasks.list", ListTasks)
+  app.Mutation("tasks.create", CreateTask)
+}
+```
+
+The generated `api.ts` then exposes `api.tasks.list` and `api.tasks.create` or an equivalent path-safe reference shape.

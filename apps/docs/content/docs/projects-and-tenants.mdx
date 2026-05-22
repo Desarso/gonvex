@@ -1,0 +1,148 @@
+---
+title: Projects and Tenants
+description: How Gonvex should model multi-project and multi-tenant applications.
+---
+
+# Projects and Tenants
+
+Gonvex needs to support more than a single local project. A production runtime should host many projects, and each project may have many tenants.
+
+## Definitions
+
+```txt
+Project
+  One application/product. It has schema, functions, deployments, allowed origins, and tenant settings.
+
+Tenant
+  One customer/account/workspace inside a project. A tenant can have isolated data.
+
+Landlord database
+  Runtime control database. Stores projects, tenants, users, memberships, roles, routes, and tenant DB connections.
+
+Tenant database
+  App data database for one tenant or a shard/group of tenants.
+```
+
+## Why A Landlord Database Exists
+
+The runtime cannot route requests by reading the app database first, because it needs to know which app database to connect to.
+
+The landlord database answers:
+
+```txt
+Which project is this request for?
+Which tenant is active?
+Which database/schema should be used?
+Which user is making the request?
+Can this user access this tenant?
+Which roles/permissions apply?
+```
+
+## Runtime Routing
+
+Every request/subscription should resolve this context:
+
+```txt
+runtime host/origin/token
+-> project
+-> user
+-> active tenant
+-> tenant database connection
+-> role/permission scope
+-> execute function
+```
+
+The frontend can send an active tenant ID, but the runtime must verify that the authenticated user belongs to that tenant.
+
+## Tenant Database Strategies
+
+Gonvex should support multiple strategies:
+
+```txt
+Database per tenant
+  Strong isolation. Good for enterprise customers.
+
+Schema per tenant
+  One Postgres cluster/database, multiple schemas.
+
+Shared tables with tenant_id
+  Simpler and cheaper, but requires strict row-level scoping.
+
+Hybrid
+  Small tenants in shared DB, large tenants promoted to isolated DB.
+```
+
+The project config should declare the tenant mode, and the runtime should route accordingly.
+
+## Dashboard Requirements
+
+The dashboard should not assume one project.
+
+It needs:
+
+- project list screen
+- create project screen
+- project switcher
+- tenant list inside a project
+- create tenant screen
+- tenant switcher inside a project
+- user/membership view
+- role/permission view
+- environment/deployment view
+- tenant database connection status
+
+## CLI Requirements
+
+Project lifecycle:
+
+```bash
+npx gonvex project list
+npx gonvex project create my-product
+npx gonvex project switch my-product
+npx gonvex link --project my-product
+```
+
+Tenant lifecycle:
+
+```bash
+npx gonvex tenant list
+npx gonvex tenant create acme
+npx gonvex tenant switch acme
+npx gonvex tenant db set acme "$DATABASE_URL"
+```
+
+## Function Context
+
+Backend functions should receive tenant/project/user context:
+
+```go
+func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
+  tenantID := ctx.TenantID()
+  userID := ctx.UserID()
+
+  if !ctx.Can("tasks:read") {
+    return nil, gonvex.Forbidden()
+  }
+
+  return ctx.DB().QueryTasks(tenantID, args)
+}
+```
+
+Application code should not trust tenant IDs from the client without runtime verification.
+
+## Generated Bindings In Multi-Tenant Apps
+
+Generated bindings are project-level. Tenant selection is runtime/session state.
+
+The client might look like:
+
+```ts
+const client = new GonvexClient({
+  runtimeUrl: "https://runtime.example.com",
+  project: "my-product",
+});
+
+client.setTenant("acme");
+```
+
+Then all queries/mutations execute against the verified active tenant.
