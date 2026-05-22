@@ -1,4 +1,4 @@
-.PHONY: dev services runtime dashboard packages docs version release-notes-preview release-dry-run release-prod
+.PHONY: dev services storage runtime dashboard packages docs version release-notes-preview release-dry-run release-prod
 
 OPENROUTER_MODEL ?= moonshotai/kimi-k2.5
 
@@ -18,7 +18,10 @@ dev:
 		wait -n "$$runtime_pid" "$$dashboard_pid" "$$packages_pid"'
 
 services:
-	docker compose -f infra/docker-compose.dev.yml up -d --wait minio valkey
+	docker compose -f infra/docker-compose.dev.yml up -d --wait postgres valkey
+
+storage:
+	docker compose -f infra/docker-compose.dev.yml --profile storage up -d --wait minio
 
 runtime:
 	pnpm dev:runtime

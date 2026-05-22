@@ -1,5 +1,6 @@
 node_modules
 dist
+apps/docs/out
 coverage
 .next
 .turbo

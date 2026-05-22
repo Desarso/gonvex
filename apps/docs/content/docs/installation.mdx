@@ -85,10 +85,10 @@ You can use Gonvex in three modes:
 
 ```txt
 Local runtime
-  Best for development. Runtime and Postgres run locally.
+  Best for development. Runtime, Postgres, and Valkey run locally.
 
 Self-hosted runtime
-  You run Gonvex runtime, landlord database, tenant databases, and object storage.
+  You run Gonvex runtime, landlord database, tenant databases, and optional object storage.
 
 Hosted runtime
   Gonvex Cloud manages runtime/project/tenant routing for you.
@@ -107,6 +107,18 @@ GONVEX_DEPLOYMENT=local
 ```
 
 The runtime needs landlord database configuration and tenant database connections. Application code should not hardcode tenant database URLs directly.
+
+Local development services can be started from the monorepo with:
+
+```bash
+make services
+```
+
+This starts Postgres and Valkey from `infra/docker-compose.dev.yml`. File storage is optional. If your app uses file APIs, attach any S3-compatible storage provider. For local testing only, this repo includes an example MinIO service:
+
+```bash
+make storage
+```
 
 Vite also needs a public WebSocket URL for the browser bundle:
 

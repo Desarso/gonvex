@@ -5,7 +5,7 @@ description: Runtime deployment model for local, self-hosted, and hosted Gonvex 
 
 # Deployment
 
-Gonvex deployments are project-based. A deployment connects generated app code, a runtime, a landlord database, tenant databases, and object storage.
+Gonvex deployments are project-based. A deployment connects generated app code, a runtime, a landlord database, tenant databases, and optional object storage.
 
 ## Deployment Modes
 
@@ -14,7 +14,7 @@ Local
   Developer machine. Runtime, services, and app dev server run locally.
 
 Self-hosted
-  You operate Gonvex runtime, landlord DB, tenant DBs, Valkey, and object storage.
+  You operate Gonvex runtime, landlord DB, tenant DBs, Valkey, and optional object storage.
 
 Hosted
   Gonvex Cloud operates the runtime/control plane and routes projects/tenants.
@@ -38,7 +38,7 @@ Valkey/Redis
   Optional cache and coordination layer.
 
 Object storage
-  S3-compatible file storage.
+  Optional S3-compatible file storage used only by apps that need file APIs.
 ```
 
 ## Deploy Command
@@ -107,7 +107,7 @@ landlord Postgres database
 runtime service
 tenant Postgres database(s)
 Valkey/Redis
-S3-compatible storage
+S3-compatible storage if your app uses files
 auth provider config
 TLS/reverse proxy
 project allowed origins

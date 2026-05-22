@@ -102,7 +102,7 @@ Do not expose development data-browser endpoints as application APIs.
 
 ## Storage Is Early
 
-S3-compatible storage is part of the architecture, but upload URL flows, tenant scoping, and storage authorization policy still need design.
+File storage is optional. Apps that need files should attach an S3-compatible provider; the local MinIO service in this repo is only an example for development. Upload URL flows, tenant scoping, and storage authorization policy still need design.
 
 ## Production Guidance
 

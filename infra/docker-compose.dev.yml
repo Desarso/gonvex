@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: gonvex-postgres-dev
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: gonvex_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gonvex_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   valkey:
     image: valkey/valkey:8-alpine
     container_name: gonvex-valkey-dev
@@ -16,6 +33,7 @@ services:
   minio:
     image: quay.io/minio/minio:latest
     container_name: gonvex-minio-dev
+    profiles: ["storage"]
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -32,5 +50,6 @@ services:
       retries: 20
 
 volumes:
+  postgres-data:
   valkey-data:
   minio-data:
