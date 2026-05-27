@@ -1,6 +1,7 @@
 node_modules
 dist
 apps/docs/out
+apps/dashboard/sql/
 coverage
 .next
 .turbo
