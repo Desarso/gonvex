@@ -46,15 +46,15 @@ func (s *Server) listenPostgresNotifications() {
 			return
 		}
 		if notification.Payload == "tasks" {
-			s.broadcastTableChange("tasks")
+			s.broadcastTableChange("", "tasks")
 			continue
 		}
 		var payload taskNotifyPayload
 		if err := json.Unmarshal([]byte(notification.Payload), &payload); err == nil && payload.Table == "tasks" {
 			if payload.Broad {
-				s.broadcastTableChange("tasks")
+				s.broadcastTableChange("", "tasks")
 			} else {
-				s.broadcastRowIDChange("tasks", payload.IDs)
+				s.broadcastRowIDChange("", "tasks", payload.IDs)
 			}
 		}
 	}

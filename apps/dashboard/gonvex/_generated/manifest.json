@@ -1,6 +1,6 @@
 {
   "project": "dashboard",
-  "generatedAt": "2026-05-21T23:00:29.154049218Z",
+  "generatedAt": "2026-05-26T21:06:51.611818539Z",
   "functions": {
     "files.createUploadUrl": {
       "kind": "mutation",
@@ -69,6 +69,16 @@
       },
       "tasks": {
         "columns": {
+          "all_user_avatar_urls": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "all_user_names": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
           "approval_id": {
             "type": "string",
             "nullable": true,
@@ -81,6 +91,26 @@
           },
           "assignee": {
             "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "assignee_avatar_urls": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "assignee_ids": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "assignee_names": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "attachment_count": {
+            "type": "int",
             "nullable": true,
             "primaryKey": false
           },
@@ -99,7 +129,22 @@
             "nullable": true,
             "primaryKey": false
           },
+          "category_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "category_icon": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
           "category_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "category_name": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
@@ -194,6 +239,11 @@
             "nullable": true,
             "primaryKey": false
           },
+          "notes_count": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
           "occurrence_date": {
             "type": "string",
             "nullable": true,
@@ -209,7 +259,17 @@
             "nullable": true,
             "primaryKey": false
           },
+          "priority_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
           "priority_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "priority_name": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
@@ -294,6 +354,11 @@
             "nullable": true,
             "primaryKey": false
           },
+          "spot_name": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
           "start_date": {
             "type": "time",
             "nullable": true,
@@ -304,7 +369,47 @@
             "nullable": false,
             "primaryKey": false
           },
+          "status_action": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_icon": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
           "status_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_initial": {
+            "type": "bool",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_name": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_working_animation": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "tag_colors": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "tag_names": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
@@ -334,6 +439,11 @@
             "nullable": true,
             "primaryKey": false
           },
+          "view_count": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
           "workplan_id": {
             "type": "string",
             "nullable": true,
@@ -353,12 +463,23 @@
             "type": "string",
             "nullable": true,
             "primaryKey": false
+          },
+          "workspace_name": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
           }
         },
         "indexes": {
           "by_assignee": {
             "columns": [
               "assignee"
+            ],
+            "unique": false
+          },
+          "by_assignee_names": {
+            "columns": [
+              "assignee_names"
             ],
             "unique": false
           },
@@ -388,6 +509,30 @@
             ],
             "unique": false
           },
+          "by_due_date": {
+            "columns": [
+              "due_date"
+            ],
+            "unique": false
+          },
+          "by_flag_color": {
+            "columns": [
+              "flag_color"
+            ],
+            "unique": false
+          },
+          "by_name": {
+            "columns": [
+              "name"
+            ],
+            "unique": false
+          },
+          "by_pg_id": {
+            "columns": [
+              "pg_id"
+            ],
+            "unique": false
+          },
           "by_priority": {
             "columns": [
               "priority"
@@ -398,6 +543,12 @@
             "columns": [
               "tenant_id",
               "priority_id"
+            ],
+            "unique": false
+          },
+          "by_priority_name": {
+            "columns": [
+              "priority_name"
             ],
             "unique": false
           },
@@ -414,6 +565,12 @@
             ],
             "unique": false
           },
+          "by_spot_name": {
+            "columns": [
+              "spot_name"
+            ],
+            "unique": false
+          },
           "by_status": {
             "columns": [
               "status"
@@ -424,6 +581,12 @@
             "columns": [
               "tenant_id",
               "status_id"
+            ],
+            "unique": false
+          },
+          "by_status_name": {
+            "columns": [
+              "status_name"
             ],
             "unique": false
           },
@@ -441,10 +604,22 @@
             ],
             "unique": false
           },
+          "by_updated_at": {
+            "columns": [
+              "updated_at"
+            ],
+            "unique": false
+          },
           "by_workspace": {
             "columns": [
               "tenant_id",
               "workspace_id"
+            ],
+            "unique": false
+          },
+          "by_workspace_name": {
+            "columns": [
+              "workspace_name"
             ],
             "unique": false
           }

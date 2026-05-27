@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -28,21 +29,24 @@ type RowsResult struct {
 }
 
 type RowsOptions struct {
-	Limit         int
-	Offset        int
-	Search        string
-	SortColumn    string
-	SortDirection string
-	Filters       []RowsFilter
-	Columns       []string
-	ExactTotal    bool
-	EstimateTotal bool
+	Limit           int
+	Offset          int
+	Search          string
+	SortColumn      string
+	SortDirection   string
+	Filters         []RowsFilter
+	Columns         []string
+	ExactTotal      bool
+	EstimateTotal   bool
+	CursorCreatedAt string
+	CursorID        string
 }
 
 type RowsFilter struct {
 	Column   string `json:"column"`
 	Operator string `json:"operator"`
 	Value    string `json:"value"`
+	ValueTo  string `json:"valueTo,omitempty"`
 }
 
 type InsertResult struct {
@@ -155,7 +159,23 @@ func ReadRows(ctx context.Context, databaseURL string, table string, options Row
 	args = append(args, limit, options.Offset)
 	selectList := quoteIdents(selectedColumns)
 	query := fmt.Sprintf("SELECT %s FROM %s%s%s LIMIT $%d OFFSET $%d", strings.Join(selectList, ", "), quoteIdent(table), where, orderBy, len(args)-1, len(args))
-	if useDefaultTaskPageQuery(table, allowedColumns, options, where) {
+	if useKeysetTaskPageQuery(table, allowedColumns, options, where) {
+		args = args[:len(args)-2]
+		args = append(args, options.CursorCreatedAt, options.CursorID, limit)
+		selectList = quoteQualifiedIdents("t", selectedColumns)
+		query = fmt.Sprintf(
+			"SELECT %s FROM %s t WHERE (t.%s, t.%s) < ($%d::timestamptz, $%d) ORDER BY t.%s DESC, t.%s DESC LIMIT $%d",
+			strings.Join(selectList, ", "),
+			quoteIdent(table),
+			quoteIdent("created_at"),
+			quoteIdent("id"),
+			len(args)-2,
+			len(args)-1,
+			quoteIdent("created_at"),
+			quoteIdent("id"),
+			len(args),
+		)
+	} else if useDefaultTaskPageQuery(table, allowedColumns, options, where) {
 		selectList = quoteQualifiedIdents("t", selectedColumns)
 		query = fmt.Sprintf(
 			"WITH page AS (SELECT %s, %s FROM %s ORDER BY %s DESC, %s DESC LIMIT $%d OFFSET $%d) SELECT %s FROM page JOIN %s t ON t.%s = page.%s ORDER BY page.%s DESC, page.%s DESC",
@@ -254,8 +274,16 @@ func quoteQualifiedIdents(prefix string, values []string) []string {
 	return quoted
 }
 
+func useKeysetTaskPageQuery(table string, allowedColumns map[string]bool, options RowsOptions, where string) bool {
+	return table == "tasks" && where == "" && options.SortColumn == "" &&
+		strings.TrimSpace(options.CursorID) != "" && strings.TrimSpace(options.CursorCreatedAt) != "" &&
+		allowedColumns["id"] && allowedColumns["created_at"]
+}
+
 func useDefaultTaskPageQuery(table string, allowedColumns map[string]bool, options RowsOptions, where string) bool {
-	return table == "tasks" && where == "" && options.SortColumn == "" && allowedColumns["id"] && allowedColumns["created_at"]
+	return table == "tasks" && where == "" && options.SortColumn == "" &&
+		strings.TrimSpace(options.CursorID) == "" &&
+		allowedColumns["id"] && allowedColumns["created_at"]
 }
 
 func normalizedLimit(limit int) int {
@@ -274,14 +302,12 @@ func rowsWhereClause(table string, columns []string, allowedColumns map[string]b
 	search = strings.TrimSpace(search)
 	if search != "" {
 		if table == "tasks" {
-			args = append(args, "%"+search+"%")
-			searchArg := len(args)
 			exactSearch := taskExactSearchValue(search)
+			searchExpression := taskSearchExpression(allowedColumns)
 			parts := []string{}
-			for _, column := range []string{"name", "title", "description"} {
-				if allowedColumns[column] {
-					parts = append(parts, fmt.Sprintf("%s ILIKE $%d", quoteIdent(column), searchArg))
-				}
+			if searchExpression != "" {
+				args = append(args, likeEscapedValue(search))
+				parts = append(parts, fmt.Sprintf("%s ILIKE '%%' || $%d || '%%' ESCAPE '\\'", searchExpression, len(args)))
 			}
 			for _, column := range []string{"status", "priority", "flag_color"} {
 				if allowedColumns[column] {
@@ -290,6 +316,8 @@ func rowsWhereClause(table string, columns []string, allowedColumns map[string]b
 				}
 			}
 			if allowedColumns["pg_id"] {
+				args = append(args, likeContainsPattern(search))
+				parts = append(parts, fmt.Sprintf("COALESCE(%s::text, '') ILIKE $%d ESCAPE '\\'", quoteIdent("pg_id"), len(args)))
 				if id, err := strconv.ParseInt(search, 10, 64); err == nil {
 					args = append(args, id)
 					parts = append(parts, fmt.Sprintf("%s = $%d", quoteIdent("pg_id"), len(args)))
@@ -318,21 +346,85 @@ func rowsWhereClause(table string, columns []string, allowedColumns map[string]b
 		column := quoteIdent(filter.Column)
 		switch filter.Operator {
 		case "equals":
+			if table == "tasks" && taskIntegerColumn(filter.Column) {
+				value, ok := parseIntegerFilterValue(filter.Value)
+				if !ok {
+					clauses = append(clauses, "false")
+					continue
+				}
+				args = append(args, value)
+				clauses = append(clauses, fmt.Sprintf("%s = $%d", column, len(args)))
+				continue
+			}
 			args = append(args, filter.Value)
 			clauses = append(clauses, fmt.Sprintf("%s::text = $%d", column, len(args)))
 		case "notEquals":
+			if table == "tasks" && taskIntegerColumn(filter.Column) {
+				value, ok := parseIntegerFilterValue(filter.Value)
+				if !ok {
+					continue
+				}
+				args = append(args, value)
+				clauses = append(clauses, fmt.Sprintf("(%s IS NULL OR %s <> $%d)", column, column, len(args)))
+				continue
+			}
 			args = append(args, filter.Value)
 			clauses = append(clauses, fmt.Sprintf("(%s IS NULL OR %s::text <> $%d)", column, column, len(args)))
+		case "notContains":
+			args = append(args, "%"+filter.Value+"%")
+			clauses = append(clauses, fmt.Sprintf("COALESCE(%s::text, '') NOT ILIKE $%d", column, len(args)))
 		case "startsWith":
 			args = append(args, filter.Value+"%")
 			clauses = append(clauses, fmt.Sprintf("COALESCE(%s::text, '') ILIKE $%d", column, len(args)))
 		case "endsWith":
 			args = append(args, "%"+filter.Value)
 			clauses = append(clauses, fmt.Sprintf("COALESCE(%s::text, '') ILIKE $%d", column, len(args)))
+		case "lessThan", "lessThanOrEqual", "greaterThan", "greaterThanOrEqual":
+			if strings.TrimSpace(filter.Value) == "" {
+				continue
+			}
+			operator := map[string]string{
+				"lessThan":           "<",
+				"lessThanOrEqual":    "<=",
+				"greaterThan":        ">",
+				"greaterThanOrEqual": ">=",
+			}[filter.Operator]
+			args = append(args, filter.Value)
+			clauses = append(clauses, fmt.Sprintf("(%s IS NOT NULL AND %s %s $%d)", column, column, operator, len(args)))
+		case "inRange":
+			from := strings.TrimSpace(filter.Value)
+			to := strings.TrimSpace(filter.ValueTo)
+			if from == "" && to == "" {
+				continue
+			}
+			parts := []string{fmt.Sprintf("%s IS NOT NULL", column)}
+			if from != "" {
+				args = append(args, from)
+				parts = append(parts, fmt.Sprintf("%s >= $%d", column, len(args)))
+			}
+			if to != "" {
+				args = append(args, to)
+				parts = append(parts, fmt.Sprintf("%s <= $%d", column, len(args)))
+			}
+			clauses = append(clauses, "("+strings.Join(parts, " AND ")+")")
 		case "empty":
 			clauses = append(clauses, fmt.Sprintf("(%s IS NULL OR %s::text = '')", column, column))
 		case "notEmpty":
 			clauses = append(clauses, fmt.Sprintf("(%s IS NOT NULL AND %s::text <> '')", column, column))
+		case "oneOf":
+			var values []string
+			if err := json.Unmarshal([]byte(filter.Value), &values); err != nil {
+				return "", nil, fmt.Errorf("invalid oneOf filter value for column %q", filter.Column)
+			}
+			if len(values) == 0 {
+				continue
+			}
+			placeholders := make([]string, 0, len(values))
+			for _, value := range values {
+				args = append(args, value)
+				placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+			}
+			clauses = append(clauses, fmt.Sprintf("COALESCE(%s::text, '') IN (%s)", column, strings.Join(placeholders, ", ")))
 		default:
 			args = append(args, "%"+filter.Value+"%")
 			clauses = append(clauses, fmt.Sprintf("COALESCE(%s::text, '') ILIKE $%d", column, len(args)))
@@ -345,15 +437,56 @@ func rowsWhereClause(table string, columns []string, allowedColumns map[string]b
 	return " WHERE " + strings.Join(clauses, " AND "), args, nil
 }
 
-func taskExactSearchValue(search string) string {
-	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(search), " ", "_"))
+func taskIntegerColumn(column string) bool {
+	switch column {
+	case "pg_id", "notes_count", "attachment_count", "view_count", "estimate_minutes", "progress":
+		return true
+	default:
+		return false
+	}
 }
 
-func taskSearchExpression() string {
+func parseIntegerFilterValue(value string) (int64, bool) {
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func taskExactSearchValue(search string) string {
+	return strings.ToLower(strings.ReplaceAll(normalizeSearch(search), " ", "_"))
+}
+
+func normalizeSearch(search string) string {
+	return strings.Join(strings.Fields(search), " ")
+}
+
+func likeContainsPattern(value string) string {
+	return "%" + likeEscapedValue(value) + "%"
+}
+
+func likeEscapedValue(value string) string {
+	value = normalizeSearch(value)
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	value = strings.ReplaceAll(value, `_`, `\_`)
+	return value
+}
+
+func taskSearchExpression(allowedColumns map[string]bool) string {
+	if allowedColumns["search_text"] {
+		return quoteIdent("search_text")
+	}
 	columns := []string{"name", "title", "description", "status", "priority", "assignee", "project", "label", "flag_color"}
 	parts := make([]string, 0, len(columns))
 	for _, column := range columns {
-		parts = append(parts, fmt.Sprintf("COALESCE(%s, '')", quoteIdent(column)))
+		if allowedColumns[column] {
+			parts = append(parts, fmt.Sprintf("COALESCE(%s, '')", quoteIdent(column)))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
 	}
 	return strings.Join(parts, " || ' ' || ")
 }

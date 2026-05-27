@@ -19,6 +19,7 @@ services:
   valkey:
     image: valkey/valkey:8-alpine
     container_name: gonvex-valkey-dev
+    restart: unless-stopped
     command: valkey-server --maxmemory 1gb --maxmemory-policy allkeys-lfu --appendonly no --save ""
     ports:
       - "6380:6379"

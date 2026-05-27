@@ -9,6 +9,14 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./src/react.ts",
+      "default": "./dist/react.js"
+    },
+    "./browser": {
+      "types": "./src/browser.ts",
+      "default": "./dist/browser.js"
     }
   },
   "types": "./src/index.ts",
@@ -18,6 +26,10 @@
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "prepack": "node scripts/copy-templates.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@gonvex/client": "workspace:*",
+    "@gonvex/react": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.12.4",

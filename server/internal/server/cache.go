@@ -38,9 +38,12 @@ func (c *rowsCache) close() error {
 	return c.client.Close()
 }
 
-func (c *rowsCache) rowsKey(table string, query url.Values) string {
+func (c *rowsCache) rowsKey(projectID string, table string, query url.Values) string {
 	hash := sha256.Sum256([]byte(query.Encode()))
-	return "gonvex:rows:v1:" + table + ":" + hex.EncodeToString(hash[:])
+	if projectID == "" {
+		projectID = "default"
+	}
+	return "gonvex:rows:v1:" + projectID + ":" + table + ":" + hex.EncodeToString(hash[:])
 }
 
 func (c *rowsCache) get(ctx context.Context, key string) ([]byte, bool) {
@@ -61,13 +64,16 @@ func (c *rowsCache) set(ctx context.Context, key string, value []byte) {
 	_ = c.client.Set(ctx, key, value, c.ttl).Err()
 }
 
-func (c *rowsCache) invalidateRows(ctx context.Context, table string) {
+func (c *rowsCache) invalidateRows(ctx context.Context, projectID string, table string) {
 	if !c.enabled() {
 		return
 	}
-	pattern := "gonvex:rows:v1:*"
+	if projectID == "" {
+		projectID = "default"
+	}
+	pattern := "gonvex:rows:v1:" + projectID + ":*"
 	if table != "" {
-		pattern = "gonvex:rows:v1:" + table + ":*"
+		pattern = "gonvex:rows:v1:" + projectID + ":" + table + ":*"
 	}
 	var cursor uint64
 	for {

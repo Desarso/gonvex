@@ -24,11 +24,14 @@ export type GonvexManifest = {
 export type ClientMessage =
   | { type: "query.subscribe"; id: string; path: string; args: JsonValue }
   | { type: "query.unsubscribe"; id: string }
-  | { type: "mutation.call"; id: string; path: string; args: JsonValue };
+  | { type: "mutation.call"; id: string; path: string; args: JsonValue }
+  | { type: "action.call"; id: string; path: string; args: JsonValue };
 
 export type ServerMessage =
   | { type: "query.result"; id: string; result: JsonValue; reason?: "initial" | "invalidate" }
   | { type: "query.error"; id: string; error: string }
   | { type: "mutation.result"; id: string; result: JsonValue }
   | { type: "mutation.error"; id: string; error: string }
+  | { type: "action.result"; id: string; result: JsonValue }
+  | { type: "action.error"; id: string; error: string }
   | { type: "system.reload"; reason: string };

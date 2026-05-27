@@ -17,12 +17,16 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fortawesome/fontawesome-svg-core": "^7.2.0",
+    "@fortawesome/free-solid-svg-icons": "^7.2.0",
     "@glideapps/glide-data-grid": "^6.0.3",
     "@gonvex/client": "workspace:*",
     "@gonvex/protocol": "workspace:*",
     "@gonvex/react": "workspace:*",
+    "@internationalized/date": "^3.12.1",
     "@heroui/react": "^3.0.5",
     "@heroui/styles": "^3.0.5",
+    "firebase": "^12.13.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },

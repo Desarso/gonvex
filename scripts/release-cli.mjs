@@ -9,6 +9,7 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const DEFAULT_MODEL = "moonshotai/kimi-k2.5";
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const NOTE_CONTEXT_LIMIT = 75_000;
+const RELEASE_PACKAGES = ["protocol", "client", "react", "gonvex", "create-gonvex"];
 
 const args = new Set(process.argv.slice(2));
 const dryRun = args.has("--dry-run") || process.env.DRY_RUN === "1";
@@ -47,11 +48,10 @@ async function releaseCLI() {
   console.log(`  previous tag: ${latestTag || "none"}`);
   console.log(`  version: ${version}${dryRun ? " (dry run)" : ""}`);
 
-  const restore = dryRun ? snapshotFiles([packagePath("gonvex"), packagePath("create-gonvex")]) : undefined;
+  const restore = dryRun ? snapshotFiles(RELEASE_PACKAGES.map(packagePath)) : undefined;
   try {
     console.log("=== Step 2: Update package versions ===");
-    updatePackageVersion("gonvex", version);
-    updatePackageVersion("create-gonvex", version);
+    for (const packageName of RELEASE_PACKAGES) updatePackageVersion(packageName, version);
 
     console.log("=== Step 3: Validate workspace ===");
     run("pnpm", ["-r", "typecheck"]);
@@ -63,12 +63,10 @@ async function releaseCLI() {
     const notes = await generateReleaseNotes({ version, tagName, previousTag: latestTag, outputFile: notesFile });
 
     console.log("=== Step 5: Pack check ===");
-    run("pnpm", ["--dir", "packages/gonvex", "pack", "--dry-run"]);
-    run("pnpm", ["--dir", "packages/create-gonvex", "pack", "--dry-run"]);
+    for (const packageName of RELEASE_PACKAGES) run("pnpm", ["--dir", `packages/${packageName}`, "pack", "--dry-run"]);
 
     console.log(`=== Step 6: Publish npm packages${dryRun ? " (dry run)" : ""} ===`);
-    publishPackage("packages/gonvex", dryRun);
-    publishPackage("packages/create-gonvex", dryRun);
+    for (const packageName of RELEASE_PACKAGES) publishPackage(`packages/${packageName}`, dryRun);
 
     if (dryRun) {
       console.log("");
@@ -78,7 +76,7 @@ async function releaseCLI() {
     }
 
     console.log("=== Step 7: Commit, tag, push, and create GitHub release ===");
-    run("git", ["add", "package.json", "packages/gonvex/package.json", "packages/create-gonvex/package.json", "releases"]);
+    run("git", ["add", "package.json", ...RELEASE_PACKAGES.map((packageName) => `packages/${packageName}/package.json`), "releases"]);
     run("git", ["commit", "-m", `Release ${tagName}`]);
     run("git", ["tag", "-a", tagName, "-F", notesFile]);
     run("git", ["push", "origin", "main"]);

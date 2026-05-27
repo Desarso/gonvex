@@ -30,13 +30,16 @@ type serverMessage struct {
 }
 
 type taskGridArgs struct {
-	Offset    int      `json:"offset"`
-	Limit     int      `json:"limit"`
-	Columns   []string `json:"columns"`
-	Search    string   `json:"search,omitempty"`
-	Sort      string   `json:"sort,omitempty"`
-	Direction string   `json:"direction,omitempty"`
-	Count     string   `json:"count,omitempty"`
+	Offset          int               `json:"offset"`
+	Limit           int               `json:"limit"`
+	Columns         []string          `json:"columns"`
+	Search          string            `json:"search,omitempty"`
+	Sort            string            `json:"sort,omitempty"`
+	Direction       string            `json:"direction,omitempty"`
+	Count           string            `json:"count,omitempty"`
+	Filters         []data.RowsFilter `json:"filters,omitempty"`
+	CursorCreatedAt string            `json:"cursorCreatedAt,omitempty"`
+	CursorID        string            `json:"cursorId,omitempty"`
 }
 
 type randomizeStatusPriorityArgs struct {
@@ -46,24 +49,30 @@ type randomizeStatusPriorityArgs struct {
 const tableChangeDebounce = 75 * time.Millisecond
 
 type querySubscription struct {
-	conn   *wsConn
-	id     string
-	path   string
-	args   json.RawMessage
-	rowIDs map[string]bool
+	conn    *wsConn
+	id      string
+	project string
+	path    string
+	args    json.RawMessage
+	rowIDs  map[string]bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	token   *struct{}
 }
 
 type tableChange struct {
-	table  string
-	broad  bool
-	rowIDs map[string]bool
+	project string
+	table   string
+	broad   bool
+	rowIDs  map[string]bool
 }
 
 type wsConn struct {
-	server *Server
-	conn   *websocket.Conn
-	mu     sync.Mutex
-	subs   map[string]querySubscription
+	server  *Server
+	conn    *websocket.Conn
+	project string
+	mu      sync.Mutex
+	subs    map[string]querySubscription
 }
 
 var wsUpgrader = websocket.Upgrader{
@@ -78,9 +87,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.EnableWriteCompression(true)
 	_ = conn.SetCompressionLevel(flate.BestSpeed)
-	client := &wsConn{server: s, conn: conn, subs: map[string]querySubscription{}}
+	client := &wsConn{server: s, conn: conn, project: projectID(r), subs: map[string]querySubscription{}}
 	s.addWSConn(client)
 	defer func() {
+		client.cancelSubscriptions()
 		s.removeWSConn(client)
 		_ = conn.Close()
 	}()
@@ -101,24 +111,57 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			c.write(serverMessage{Type: "query.error", ID: message.ID, Error: "query id and path are required"})
 			return
 		}
-		sub := querySubscription{conn: c, id: message.ID, path: message.Path, args: message.Args}
+		subCtx, cancel := context.WithCancel(ctx)
+		sub := querySubscription{conn: c, id: message.ID, project: c.project, path: message.Path, args: message.Args, ctx: subCtx, cancel: cancel, token: &struct{}{}}
 		c.mu.Lock()
+		previous, hadPrevious := c.subs[message.ID]
 		c.subs[message.ID] = sub
 		c.mu.Unlock()
-		c.server.executeSubscription(ctx, sub, "initial")
+		if hadPrevious && previous.cancel != nil {
+			previous.cancel()
+		}
+		go c.server.executeSubscription(subCtx, sub, "initial")
 	case "query.unsubscribe":
 		c.mu.Lock()
-		delete(c.subs, message.ID)
+		sub, ok := c.subs[message.ID]
+		if ok {
+			delete(c.subs, message.ID)
+		}
 		c.mu.Unlock()
+		if ok && sub.cancel != nil {
+			sub.cancel()
+		}
 	case "mutation.call":
-		result, err := c.server.executeMutation(ctx, message.Path, message.Args)
+		result, err := c.server.executeMutation(ctx, c.project, message.Path, message.Args)
 		if err != nil {
 			c.write(serverMessage{Type: "mutation.error", ID: message.ID, Error: err.Error()})
 			return
 		}
 		c.write(serverMessage{Type: "mutation.result", ID: message.ID, Result: result})
+	case "action.call":
+		result, err := c.server.executeAction(ctx, c.project, message.Path, message.Args)
+		if err != nil {
+			c.write(serverMessage{Type: "action.error", ID: message.ID, Error: err.Error()})
+			return
+		}
+		c.write(serverMessage{Type: "action.result", ID: message.ID, Result: result})
 	default:
 		c.write(serverMessage{Type: "query.error", ID: message.ID, Error: "unknown websocket message type"})
+	}
+}
+
+func (c *wsConn) cancelSubscriptions() {
+	c.mu.Lock()
+	subs := make([]querySubscription, 0, len(c.subs))
+	for _, sub := range c.subs {
+		subs = append(subs, sub)
+	}
+	c.subs = map[string]querySubscription{}
+	c.mu.Unlock()
+	for _, sub := range subs {
+		if sub.cancel != nil {
+			sub.cancel()
+		}
 	}
 }
 
@@ -140,22 +183,41 @@ func (s *Server) removeWSConn(conn *wsConn) {
 	delete(s.wsConns, conn)
 }
 
-func (s *Server) broadcastTableChange(table string) {
-	s.scheduleTableChange(tableChange{table: table, broad: true})
+func (s *Server) websocketStats() (int, int) {
+	s.wsMu.RLock()
+	connections := make([]*wsConn, 0, len(s.wsConns))
+	for conn := range s.wsConns {
+		connections = append(connections, conn)
+	}
+	s.wsMu.RUnlock()
+
+	subscriptions := 0
+	for _, conn := range connections {
+		conn.mu.Lock()
+		subscriptions += len(conn.subs)
+		conn.mu.Unlock()
+	}
+	return len(connections), subscriptions
 }
 
-func (s *Server) broadcastRowIDChange(table string, rowIDs []string) {
+func (s *Server) broadcastTableChange(projectID string, table string) {
+	s.scheduleTableChange(tableChange{project: projectID, table: table, broad: true})
+}
+
+func (s *Server) broadcastRowIDChange(projectID string, table string, rowIDs []string) {
 	ids := map[string]bool{}
 	for _, id := range rowIDs {
 		ids[id] = true
 	}
-	s.scheduleTableChange(tableChange{table: table, rowIDs: ids})
+	s.scheduleTableChange(tableChange{project: projectID, table: table, rowIDs: ids})
 }
 
 func (s *Server) scheduleTableChange(change tableChange) {
-	s.cache.invalidateRows(context.Background(), change.table)
+	s.cache.invalidateRows(context.Background(), change.project, change.table)
 	s.tableChangeMu.Lock()
-	pending := s.tableChanges[change.table]
+	key := change.project + ":" + change.table
+	pending := s.tableChanges[key]
+	pending.project = change.project
 	pending.table = change.table
 	pending.broad = pending.broad || change.broad
 	if pending.rowIDs == nil {
@@ -164,21 +226,21 @@ func (s *Server) scheduleTableChange(change tableChange) {
 	for id := range change.rowIDs {
 		pending.rowIDs[id] = true
 	}
-	s.tableChanges[change.table] = pending
-	if timer := s.tableChangeWait[change.table]; timer != nil {
+	s.tableChanges[key] = pending
+	if timer := s.tableChangeWait[key]; timer != nil {
 		timer.Stop()
 	}
-	s.tableChangeWait[change.table] = time.AfterFunc(tableChangeDebounce, func() {
-		s.flushTableChange(change.table)
+	s.tableChangeWait[key] = time.AfterFunc(tableChangeDebounce, func() {
+		s.flushTableChange(key)
 	})
 	s.tableChangeMu.Unlock()
 }
 
-func (s *Server) flushTableChange(table string) {
+func (s *Server) flushTableChange(key string) {
 	s.tableChangeMu.Lock()
-	change := s.tableChanges[table]
-	delete(s.tableChangeWait, table)
-	delete(s.tableChanges, table)
+	change := s.tableChanges[key]
+	delete(s.tableChangeWait, key)
+	delete(s.tableChanges, key)
 	s.tableChangeMu.Unlock()
 
 	s.wsMu.RLock()
@@ -191,13 +253,13 @@ func (s *Server) flushTableChange(table string) {
 		conn.mu.Lock()
 		subs := make([]querySubscription, 0, len(conn.subs))
 		for _, sub := range conn.subs {
-			if subscriptionTable(sub.path) == table && subscriptionIntersectsChange(sub, change) {
+			if sub.project == change.project && subscriptionTable(sub.path) == change.table && subscriptionIntersectsChange(sub, change) {
 				subs = append(subs, sub)
 			}
 		}
 		conn.mu.Unlock()
 		for _, sub := range subs {
-			s.executeSubscription(context.Background(), sub, "invalidate")
+			s.executeSubscription(sub.ctx, sub, "invalidate")
 		}
 	}
 }
@@ -224,22 +286,29 @@ func subscriptionCanChangeMembership(sub querySubscription) bool {
 			return true
 		}
 	}
-	return strings.TrimSpace(args.Search) != "" || args.Sort != ""
+	return strings.TrimSpace(args.Search) != "" || args.Sort != "" || len(args.Filters) > 0
 }
 
 func (s *Server) executeSubscription(ctx context.Context, sub querySubscription, reason string) {
-	result, err := s.executeQuery(ctx, sub.path, sub.args)
+	result, err := s.executeQuery(ctx, sub.project, sub.path, sub.args)
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
 		sub.conn.write(serverMessage{Type: "query.error", ID: sub.id, Error: err.Error()})
 		return
 	}
 	sub.rowIDs = resultRowIDs(result)
 	sub.conn.mu.Lock()
-	if current, ok := sub.conn.subs[sub.id]; ok {
+	current, ok := sub.conn.subs[sub.id]
+	if ok && current.token == sub.token {
 		current.rowIDs = sub.rowIDs
 		sub.conn.subs[sub.id] = current
 	}
 	sub.conn.mu.Unlock()
+	if !ok || current.token != sub.token {
+		return
+	}
 	sub.conn.write(serverMessage{Type: "query.result", ID: sub.id, Result: result, Reason: reason})
 }
 
@@ -257,7 +326,12 @@ func resultRowIDs(result any) map[string]bool {
 	return ids
 }
 
-func (s *Server) executeQuery(ctx context.Context, path string, rawArgs json.RawMessage) (any, error) {
+func (s *Server) executeQuery(ctx context.Context, projectID string, path string, rawArgs json.RawMessage) (result any, err error) {
+	started := time.Now()
+	defer func() {
+		s.metrics.recordFunction(path, s.functionKind(path, "query"), time.Since(started), err)
+	}()
+
 	switch path {
 	case "tasks.grid":
 		var args taskGridArgs
@@ -266,22 +340,30 @@ func (s *Server) executeQuery(ctx context.Context, path string, rawArgs json.Raw
 				return nil, err
 			}
 		}
-		return data.ReadRows(ctx, s.config.PostgresURL, "tasks", data.RowsOptions{
-			Limit:         args.Limit,
-			Offset:        args.Offset,
-			Search:        args.Search,
-			SortColumn:    args.Sort,
-			SortDirection: args.Direction,
-			Columns:       args.Columns,
-			ExactTotal:    args.Count != "false" && args.Count != "estimate",
-			EstimateTotal: args.Count == "estimate",
+		return data.ReadRows(ctx, s.databaseURLForProject(projectID), "tasks", data.RowsOptions{
+			Limit:           args.Limit,
+			Offset:          args.Offset,
+			Search:          args.Search,
+			SortColumn:      args.Sort,
+			SortDirection:   args.Direction,
+			Columns:         args.Columns,
+			Filters:         args.Filters,
+			ExactTotal:      args.Count != "false" && args.Count != "estimate",
+			EstimateTotal:   args.Count == "estimate",
+			CursorCreatedAt: args.CursorCreatedAt,
+			CursorID:        args.CursorID,
 		})
 	default:
 		return nil, fmt.Errorf("query %q is not implemented by the runtime", path)
 	}
 }
 
-func (s *Server) executeMutation(ctx context.Context, path string, rawArgs json.RawMessage) (any, error) {
+func (s *Server) executeMutation(ctx context.Context, projectID string, path string, rawArgs json.RawMessage) (result any, err error) {
+	started := time.Now()
+	defer func() {
+		s.metrics.recordFunction(path, s.functionKind(path, "mutation"), time.Since(started), err)
+	}()
+
 	switch path {
 	case "tasks.randomizeStatusPriority":
 		var args randomizeStatusPriorityArgs
@@ -290,15 +372,31 @@ func (s *Server) executeMutation(ctx context.Context, path string, rawArgs json.
 				return nil, err
 			}
 		}
-		result, err := data.RandomizeTaskStatusPriority(ctx, s.config.PostgresURL, args.Count)
+		result, err := data.RandomizeTaskStatusPriority(ctx, s.databaseURLForProject(projectID), args.Count)
 		if err != nil {
 			return nil, err
 		}
-		go s.broadcastTableChange("tasks")
+		go s.broadcastTableChange(projectID, "tasks")
 		return result, nil
 	default:
 		return nil, fmt.Errorf("mutation %q is not implemented by the runtime", path)
 	}
+}
+
+func (s *Server) executeAction(ctx context.Context, projectID string, path string, rawArgs json.RawMessage) (result any, err error) {
+	started := time.Now()
+	defer func() {
+		s.metrics.recordFunction(path, s.functionKind(path, "action"), time.Since(started), err)
+	}()
+
+	return nil, fmt.Errorf("action %q is not implemented by the runtime", path)
+}
+
+func (s *Server) functionKind(path string, fallback string) string {
+	if entry, ok := s.runtime.Manifest().Functions[path]; ok && entry.Kind != "" {
+		return string(entry.Kind)
+	}
+	return fallback
 }
 
 func subscriptionTable(path string) string {

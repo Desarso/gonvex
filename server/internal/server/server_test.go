@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -114,5 +115,76 @@ func TestDevSyncStoresManifest(t *testing.T) {
 	manifest := server.runtime.Manifest()
 	if len(manifest.Functions) != 1 {
 		t.Fatalf("expected 1 function, got %d", len(manifest.Functions))
+	}
+}
+
+func TestManifestForUnknownProjectIsEmpty(t *testing.T) {
+	server := New(config.Config{})
+	body := bytes.NewBufferString(`{"project":"app","generatedAt":"now","functions":{"tasks.list":{"kind":"query","handler":"List","file":"gonvex/tasks.go"}},"schema":{}}`)
+
+	server.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/dev/sync", body))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/dev/manifest", nil)
+	request.Header.Set("x-gonvex-project-id", "testing")
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	var payload struct {
+		Project   string         `json:"project"`
+		Functions map[string]any `json:"functions"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Project != "testing" {
+		t.Fatalf("expected testing project, got %q", payload.Project)
+	}
+	if len(payload.Functions) != 0 {
+		t.Fatalf("expected no functions for unknown project, got %d", len(payload.Functions))
+	}
+}
+
+func TestMetricsTracksDataCacheAndFunctionCalls(t *testing.T) {
+	server := New(config.Config{})
+
+	server.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dev/data/tables/tasks/rows", nil))
+	if _, err := server.executeQuery(context.Background(), "", "tasks.grid", nil); err != nil {
+		t.Fatalf("execute query: %v", err)
+	}
+	if _, err := server.executeMutation(context.Background(), "", "missing.mutation", nil); err == nil {
+		t.Fatal("expected missing mutation to fail")
+	}
+
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/metrics", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	var payload struct {
+		Functions map[string]struct {
+			Calls  int64 `json:"calls"`
+			Errors int64 `json:"errors"`
+		} `json:"functions"`
+		Cache struct {
+			Bypasses int64 `json:"bypasses"`
+		} `json:"cache"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Functions["tasks.grid"].Calls != 1 {
+		t.Fatalf("expected tasks.grid call to be tracked, got %+v", payload.Functions["tasks.grid"])
+	}
+	if payload.Functions["missing.mutation"].Errors != 1 {
+		t.Fatalf("expected missing mutation error to be tracked, got %+v", payload.Functions["missing.mutation"])
+	}
+	if payload.Cache.Bypasses != 1 {
+		t.Fatalf("expected cache bypass to be tracked, got %d", payload.Cache.Bypasses)
 	}
 }

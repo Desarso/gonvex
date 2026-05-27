@@ -17,9 +17,12 @@
     "dev:dashboard": "pnpm --filter @gonvex/dashboard dev",
     "dev:cli": "go run ./cmd/gonvex dev --project apps/dashboard",
     "dev:runtime": "air -c .air.toml",
-    "dev:runtime:air": "air -c .air.toml"
+    "dev:runtime:air": "air -c .air.toml",
+    "seed:tasks": "go run ./cmd/seed-tasks",
+    "seed:tasks:10m": "go run ./cmd/seed-tasks --count 10000000 --batch 50000 --seed 42 --clear --fast --no-trgm --analyze"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "ignoredBuiltDependencies": ["@firebase/util", "protobufjs"],
+    "onlyBuiltDependencies": ["@firebase/util", "esbuild", "protobufjs"]
   }
 }

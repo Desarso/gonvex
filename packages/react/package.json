@@ -1,8 +1,10 @@
 {
   "name": "@gonvex/react",
-  "private": true,
   "version": "0.0.0",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./src/index.tsx",

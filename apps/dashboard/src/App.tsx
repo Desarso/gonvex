@@ -6,16 +6,44 @@ import {
   type GridColumn,
   type CustomCell,
   type CustomRenderer,
+  type DrawHeaderCallback,
   type Item,
   type Rectangle,
   type GridSelection,
+  type EditableGridCell,
+  type HeaderClickedEventArgs,
+  type CellClickedEventArgs,
+  type GridMouseEventArgs,
   type SpriteMap,
   type Theme,
 } from "@glideapps/glide-data-grid";
 import "@glideapps/glide-data-grid/dist/index.css";
+import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
+import {
+  faAngleRight,
+  faBan,
+  faBolt,
+  faBroom,
+  faBroomBall,
+  faBuilding,
+  faCartFlatbedSuitcase,
+  faCartShopping,
+  faCircle,
+  faFilter,
+  faHeart,
+  faMagnifyingGlass,
+  faPause,
+  faStar,
+  faTags,
+  faTree,
+  faWrench,
+} from "@fortawesome/free-solid-svg-icons";
+import { initializeApp, getApps } from "firebase/app";
+import { getAuth, GoogleAuthProvider, signInWithPopup, type Auth } from "firebase/auth";
 import { GonvexClient } from "@gonvex/client";
-import { Button, Card, Chip, Separator } from "@heroui/react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Avatar, Button, Calendar, Card, Checkbox, Chip, DateField, DatePicker, ListBox, NumberField, SearchField, Select, Separator } from "@heroui/react";
+import { parseDate, type DateValue } from "@internationalized/date";
+import { useEffect, useRef, useState, type Dispatch, type FormEvent, type MutableRefObject, type ReactNode, type SetStateAction } from "react";
 import type { JsonValue } from "@gonvex/protocol";
 import { api } from "../gonvex/_generated/api";
 
@@ -54,6 +82,71 @@ type FunctionInfo = {
   status: string;
 };
 
+type ManifestResponse = {
+  functions?: Record<string, {
+    kind: string;
+    handler: string;
+    file: string;
+  }>;
+};
+
+type RuntimeFunctionMetricPoint = {
+  time: string;
+  calls: number;
+  errors: number;
+  averageDurationMs: number;
+};
+
+type RuntimeFunctionMetrics = {
+  kind: string;
+  calls: number;
+  errors: number;
+  averageDurationMs: number;
+  lastDurationMs: number;
+  lastCalledAt?: string;
+  series: RuntimeFunctionMetricPoint[];
+};
+
+type RuntimeCacheMetricPoint = {
+  time: string;
+  hits: number;
+  misses: number;
+  bypasses: number;
+  hitRate: number;
+};
+
+type RuntimeCacheMetrics = {
+  hits: number;
+  misses: number;
+  bypasses: number;
+  requests: number;
+  hitRate: number;
+  series: RuntimeCacheMetricPoint[];
+};
+
+type RuntimeLogEntry = {
+  time: string;
+  path: string;
+  kind: string;
+  outcome: string;
+  durationMs: number;
+  error?: string;
+  cache?: string;
+};
+
+type RuntimeMetricsResponse = {
+  functions: Record<string, RuntimeFunctionMetrics>;
+  cache: RuntimeCacheMetrics;
+  logs: RuntimeLogEntry[];
+};
+
+type FunctionStat = {
+  label: string;
+  value: string;
+  tone: "blue" | "red" | "orange";
+  series: number[];
+};
+
 type FileInfo = {
   id: string;
   size: string;
@@ -66,6 +159,28 @@ type FileInfo = {
 type ThemeMode = "dark" | "light";
 
 type ActionHandler = (message: string) => void;
+
+type DashboardSession = {
+  email: string;
+  name: string;
+  avatarUrl?: string;
+  provider?: "dev" | "google";
+};
+
+type ProjectTarget = {
+  id: string;
+  name: string;
+  environment: string;
+  runtimeUrl: string;
+  database: string;
+  storageBucket: string;
+  status: "local" | "preview" | "offline";
+  description: string;
+  provisioned?: boolean;
+  runtimeCreated?: boolean;
+  ownerEmail?: string;
+  sharedWith?: string[];
+};
 
 type SortDirection = "asc" | "desc";
 
@@ -87,6 +202,9 @@ type TestTaskGridArgs = {
   search?: string;
   sort?: string;
   direction?: SortDirection;
+  filters?: DataFilter[];
+  cursorCreatedAt?: string;
+  cursorId?: string;
 };
 
 type FileSortKey = "id" | "size" | "contentType" | "uploadedAt";
@@ -94,9 +212,44 @@ type FileSortKey = "id" | "size" | "contentType" | "uploadedAt";
 type DataFilter = {
   id: string;
   column: string;
-  operator: "contains" | "equals" | "notEquals" | "startsWith" | "endsWith" | "empty" | "notEmpty";
+  operator: "contains" | "notContains" | "equals" | "notEquals" | "startsWith" | "endsWith" | "empty" | "notEmpty" | "oneOf" | "lessThan" | "lessThanOrEqual" | "greaterThan" | "greaterThanOrEqual" | "inRange";
   value: string;
+  valueTo?: string;
 };
+
+type TestColumnFilter = {
+  operator: Exclude<DataFilter["operator"], "oneOf">;
+  value: string;
+  valueTo?: string;
+  selectedValues: string[];
+};
+
+type TestFilterKind = "text" | "set" | "date" | "number";
+
+type TestTaskColumn = GridColumn & {
+  filterKind?: TestFilterKind;
+  dataColumn?: string;
+  sortable?: boolean;
+};
+
+type TestFilterMenu = {
+  columnIndex: number;
+  column: string;
+  bounds: Rectangle;
+};
+
+type AssigneeMenu = {
+  rowIndex: number;
+  bounds: Rectangle;
+};
+
+type AssigneeProfileMenu = {
+  name: string;
+  avatarUrl?: string;
+  bounds: Rectangle;
+};
+
+const emptyFilterSelectionValue = "__gonvex_no_filter_values_selected__";
 
 type InsertRowResponse = {
   table: string;
@@ -185,12 +338,89 @@ const functions: FunctionInfo[] = functionRows.map(([name, kind, realtime, sourc
   status,
 }));
 
-const functionStats = [
-  ["Function Calls", "0", "blue"],
-  ["Errors", "0", "red"],
-  ["Execution Time", "0 ms", "orange"],
-  ["Cache Hit Rate", "100%", "blue"],
-];
+function realtimeLabel(kind: string): string {
+  switch (kind) {
+    case "query":
+      return "live";
+    case "mutation":
+      return "invalidates";
+    case "liveGrid":
+      return "patch stream";
+    case "action":
+      return "async";
+    case "http":
+      return "route";
+    case "internalMutation":
+      return "internal";
+    default:
+      return "registered";
+  }
+}
+
+function manifestFunctionsToRows(payload: ManifestResponse): FunctionInfo[] {
+  return Object.entries(payload.functions ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, entry]) => ({
+      name,
+      kind: entry.kind,
+      realtime: realtimeLabel(entry.kind),
+      source: entry.file || entry.handler,
+      status: "ready",
+    }));
+}
+
+function functionInfosToRows(items: FunctionInfo[]): GridRow[] {
+  return items.map((item) => [item.name, item.kind, item.realtime, item.source, item.status]);
+}
+
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0 ms";
+  if (ms < 10) return `${ms.toFixed(1)} ms`;
+  return `${Math.round(ms).toLocaleString()} ms`;
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) return "n/a";
+  return `${Math.round(value * 100)}%`;
+}
+
+function buildFunctionStats(metrics: RuntimeFunctionMetrics | undefined, cache: RuntimeCacheMetrics | undefined): FunctionStat[] {
+  const functionSeries = metrics?.series ?? [];
+  const cacheSeries = cache?.series ?? [];
+  const hasCacheRequests = (cache?.requests ?? 0) > 0;
+  return [
+    {
+      label: "Function Calls",
+      value: String(metrics?.calls ?? 0),
+      tone: "blue",
+      series: functionSeries.map((point) => point.calls),
+    },
+    {
+      label: "Errors",
+      value: String(metrics?.errors ?? 0),
+      tone: "red",
+      series: functionSeries.map((point) => point.errors),
+    },
+    {
+      label: "Execution Time",
+      value: formatDuration(metrics?.averageDurationMs ?? 0),
+      tone: "orange",
+      series: functionSeries.map((point) => point.averageDurationMs),
+    },
+    {
+      label: "Cache Hit Rate",
+      value: hasCacheRequests ? formatPercent(cache?.hitRate ?? 0) : "n/a",
+      tone: "blue",
+      series: cacheSeries.map((point) => point.hitRate * 100),
+    },
+  ];
+}
+
+function formatLogTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
 
 const schemaColumns: GridColumn[] = [
   { title: "Table", id: "table", width: 130 },
@@ -222,44 +452,193 @@ const schemaRows: GridRow[] = [
   ["files", "created_at", "time", "no", ""],
 ];
 
-const fallbackTables: DataTableInfo[] = [
-  {
-    name: "tasks",
-    columns: [
-      "id",
-      "assignee",
-      "completed",
-      "created_at",
-      "description",
-      "due_at",
-      "estimate_minutes",
-      "label",
-      "priority",
-      "progress",
-      "project",
-      "status",
-      "title",
-      "updated_at",
-    ],
-    rowCount: 0,
-  },
-  { name: "files", columns: ["id", "key", "content_type", "size", "created_at"], rowCount: 0 },
-];
+const emptyColumns: string[] = [];
 
-const fallbackRows: Record<string, Record<string, unknown>[]> = {
-  tasks: [],
-  files: [],
+const envRuntimeURL = String(import.meta.env.VITE_GONVEX_URL ?? import.meta.env.VITE_GONVEX_RUNTIME_URL ?? "").trim();
+const envProjectID = String(import.meta.env.VITE_GONVEX_PROJECT_ID ?? "").trim();
+const envProjects = String(import.meta.env.VITE_GONVEX_PROJECTS ?? "").trim();
+const dashboardAuthEnabled = ["1", "true", "yes", "on"].includes(String(import.meta.env.VITE_GONVEX_AUTH_ENABLED ?? "").toLowerCase());
+const firebaseConfig = {
+  apiKey: String(import.meta.env.VITE_FIREBASE_API_KEY ?? "").trim(),
+  authDomain: String(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? "").trim(),
+  projectId: String(import.meta.env.VITE_FIREBASE_PROJECT_ID ?? "").trim(),
+  appId: String(import.meta.env.VITE_FIREBASE_APP_ID ?? "").trim(),
+  messagingSenderId: String(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ?? "").trim(),
+  storageBucket: String(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ?? "").trim(),
 };
+const runtimeBaseURL = import.meta.env.MODE === "test" ? "" : trimTrailingSlash(envRuntimeURL || "http://localhost:8080");
 
-const runtimeBaseURL = import.meta.env.MODE === "test" ? "" : "http://localhost:8080";
-const gonvexClient = runtimeBaseURL ? new GonvexClient(`${runtimeBaseURL.replace(/^http/, "ws")}/ws`) : null;
-const pageSize = 300;
+const projectTargets: ProjectTarget[] = loadProjectTargets();
+
+const dashboardSessionKey = "gonvex-dashboard-session";
+const dashboardProjectKey = "gonvex-dashboard-project";
+const dashboardProjectsKey = "gonvex-dashboard-created-projects";
+
+const dataPageSize = 300;
+const testTaskPageSize = 100;
 const rowFetchPadding = 80;
-const rowFetchStride = 150;
+const dataRowFetchStride = 150;
+const testRowFetchStride = 100;
+const scrollFetchDebounceMs = 400;
+const scrollSettleMs = 80;
 const maxFrontendCachedRows = 100_000;
 
-function offsetForVisibleRow(row: number): number {
-  return Math.max(0, Math.floor(Math.max(0, row - rowFetchPadding) / rowFetchStride) * rowFetchStride);
+function offsetForVisibleRange(row: number, height: number, stride: number, pageSize: number): number {
+  const visibleStart = Math.max(0, row);
+  const visibleCount = Math.max(1, Math.ceil(height));
+  const visibleEnd = visibleStart + visibleCount;
+  const paddedOffset = Math.max(0, Math.floor(Math.max(0, visibleStart - rowFetchPadding) / stride) * stride);
+  if (paddedOffset + pageSize >= visibleEnd) return paddedOffset;
+  const visibleOffset = Math.max(0, Math.floor(visibleStart / stride) * stride);
+  if (visibleOffset + pageSize >= visibleEnd) return visibleOffset;
+  return Math.max(0, visibleEnd - pageSize);
+}
+
+function visibleRowsCached<T>(rowCache: Record<number, T>, startRow: number, height: number): boolean {
+  const visibleCount = Math.max(1, Math.ceil(height));
+  for (let index = 0; index < visibleCount; index += 1) {
+    if (!rowCache[startRow + index]) return false;
+  }
+  return true;
+}
+
+type ScrollFetchPending = { startRow: number; height: number };
+type ScrollFetchTimers = { debounceTimer: number | null; stopTimer: number | null };
+
+function commitRowFetch(
+  offset: number,
+  priority: boolean,
+  pendingScrollRef: MutableRefObject<ScrollFetchPending>,
+  rowCacheRef: MutableRefObject<Record<number, Record<string, unknown>>>,
+  requestedOffsetRef: MutableRefObject<number>,
+  inFlightOffsetRef: MutableRefObject<number | null>,
+  setRequestedOffset: (offset: number) => void,
+  setFetchNonce: Dispatch<SetStateAction<number>>,
+) {
+  const pending = pendingScrollRef.current;
+  if (!priority && visibleRowsCached(rowCacheRef.current, pending.startRow, pending.height)) return;
+  if (!priority && requestedOffsetRef.current === offset && inFlightOffsetRef.current === offset) return;
+  if (requestedOffsetRef.current === offset) {
+    setFetchNonce((nonce) => nonce + 1);
+    return;
+  }
+  setRequestedOffset(offset);
+}
+
+function scheduleScrollLiveQuery(
+  pendingScrollRef: MutableRefObject<ScrollFetchPending>,
+  fetchTimersRef: MutableRefObject<ScrollFetchTimers>,
+  rowCacheRef: MutableRefObject<Record<number, Record<string, unknown>>>,
+  liveOffsetRef: MutableRefObject<number>,
+  setLiveOffset: (offset: number) => void,
+  startRow: number,
+  height: number,
+  stride: number,
+  pageSize: number,
+) {
+  pendingScrollRef.current = { startRow, height };
+  const timers = fetchTimersRef.current;
+
+  if (timers.stopTimer !== null) {
+    window.clearTimeout(timers.stopTimer);
+  }
+  timers.stopTimer = window.setTimeout(() => {
+    timers.stopTimer = null;
+    if (timers.debounceTimer !== null) {
+      window.clearTimeout(timers.debounceTimer);
+      timers.debounceTimer = null;
+    }
+    const pending = pendingScrollRef.current;
+    const settledOffset = offsetForVisibleRange(pending.startRow, pending.height, stride, pageSize);
+    if (visibleRowsCached(rowCacheRef.current, pending.startRow, pending.height)) return;
+    if (liveOffsetRef.current !== settledOffset) {
+      setLiveOffset(settledOffset);
+    }
+  }, scrollSettleMs);
+
+  if (visibleRowsCached(rowCacheRef.current, startRow, height)) return;
+
+  if (timers.debounceTimer !== null) {
+    window.clearTimeout(timers.debounceTimer);
+  }
+  timers.debounceTimer = window.setTimeout(() => {
+    timers.debounceTimer = null;
+    const pending = pendingScrollRef.current;
+    const debouncedOffset = offsetForVisibleRange(pending.startRow, pending.height, stride, pageSize);
+    if (liveOffsetRef.current === debouncedOffset) return;
+    if (visibleRowsCached(rowCacheRef.current, pending.startRow, pending.height)) return;
+    setLiveOffset(debouncedOffset);
+  }, scrollFetchDebounceMs);
+}
+
+function scheduleScrollRowFetch(
+  pendingScrollRef: MutableRefObject<ScrollFetchPending>,
+  fetchTimersRef: MutableRefObject<ScrollFetchTimers>,
+  rowCacheRef: MutableRefObject<Record<number, Record<string, unknown>>>,
+  requestedOffsetRef: MutableRefObject<number>,
+  inFlightOffsetRef: MutableRefObject<number | null>,
+  setRequestedOffset: (offset: number) => void,
+  setFetchNonce: Dispatch<SetStateAction<number>>,
+  startRow: number,
+  height: number,
+  stride: number,
+  pageSize: number,
+) {
+  pendingScrollRef.current = { startRow, height };
+  const timers = fetchTimersRef.current;
+  const nextOffset = offsetForVisibleRange(startRow, height, stride, pageSize);
+
+  if (timers.stopTimer !== null) {
+    window.clearTimeout(timers.stopTimer);
+  }
+  timers.stopTimer = window.setTimeout(() => {
+    timers.stopTimer = null;
+    if (timers.debounceTimer !== null) {
+      window.clearTimeout(timers.debounceTimer);
+      timers.debounceTimer = null;
+    }
+    commitRowFetch(
+      nextOffset,
+      true,
+      pendingScrollRef,
+      rowCacheRef,
+      requestedOffsetRef,
+      inFlightOffsetRef,
+      setRequestedOffset,
+      setFetchNonce,
+    );
+  }, scrollSettleMs);
+
+  if (visibleRowsCached(rowCacheRef.current, startRow, height)) return;
+
+  if (timers.debounceTimer !== null) {
+    window.clearTimeout(timers.debounceTimer);
+  }
+  timers.debounceTimer = window.setTimeout(() => {
+    timers.debounceTimer = null;
+    commitRowFetch(
+      nextOffset,
+      false,
+      pendingScrollRef,
+      rowCacheRef,
+      requestedOffsetRef,
+      inFlightOffsetRef,
+      setRequestedOffset,
+      setFetchNonce,
+    );
+  }, scrollFetchDebounceMs);
+}
+
+function clearScrollRowFetch(fetchTimersRef: MutableRefObject<ScrollFetchTimers>) {
+  const timers = fetchTimersRef.current;
+  if (timers.debounceTimer !== null) {
+    window.clearTimeout(timers.debounceTimer);
+    timers.debounceTimer = null;
+  }
+  if (timers.stopTimer !== null) {
+    window.clearTimeout(timers.stopTimer);
+    timers.stopTimer = null;
+  }
 }
 
 function mergeRowsIntoCache<T>(current: Record<number, T>, rows: T[], offset: number, maxRows = maxFrontendCachedRows) {
@@ -313,12 +692,134 @@ const activity = [
   ["runtime", "safe migrations only"],
 ];
 
-const settings = [
-  ["Runtime URL", "http://localhost:8080"],
-  ["Database", "gonvex_dev"],
-  ["Storage bucket", "gonvex-dev"],
-  ["Dev script", "gonvex dev -- vite"],
-];
+const devScript = "gonvex dev -- vite";
+const localDeveloperSession: DashboardSession = {
+  email: "local@gonvex.dev",
+  name: "Local Developer",
+  provider: "dev",
+};
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+function loadProjectTargets(): ProjectTarget[] {
+  if (envProjects) {
+    try {
+      const parsed = JSON.parse(envProjects) as ProjectTarget[];
+      const valid = parsed.filter((project) => project.id && project.name && project.runtimeUrl);
+      if (valid.length > 0) return valid.map(normalizeProjectTarget);
+    } catch {
+      // Fall through to the single-project env shape used by the template.
+    }
+  }
+
+  return [normalizeProjectTarget({
+    id: envProjectID || "app",
+    name: envProjectID ? `${envProjectID} project` : "Dashboard Lab",
+    environment: "local dev",
+    runtimeUrl: runtimeBaseURL,
+    database: String(import.meta.env.VITE_GONVEX_DATABASE ?? "gonvex_dev"),
+    storageBucket: String(import.meta.env.VITE_GONVEX_STORAGE_BUCKET ?? "gonvex-dev"),
+    status: "local",
+    description: "Project target loaded from apps/dashboard/.env.local.",
+  })];
+}
+
+function normalizeProjectTarget(project: ProjectTarget): ProjectTarget {
+  return {
+    ...project,
+    provisioned: project.provisioned ?? true,
+    runtimeUrl: trimTrailingSlash(project.runtimeUrl),
+  };
+}
+
+function projectIsProvisioned(project: ProjectTarget): boolean {
+  return project.provisioned !== false;
+}
+
+function runtimeURLForProject(project: ProjectTarget): string {
+  return trimTrailingSlash(project.runtimeUrl || runtimeBaseURL);
+}
+
+function runtimeHeaders(project: ProjectTarget, headers?: HeadersInit): Headers {
+  const next = new Headers(headers);
+  next.set("x-gonvex-project-id", project.id);
+  return next;
+}
+
+const gonvexClients = new Map<string, GonvexClient>();
+
+function gonvexClientForProject(project: ProjectTarget): GonvexClient | null {
+  const baseURL = runtimeURLForProject(project);
+  if (!baseURL) return null;
+  const url = new URL(`${baseURL.replace(/^http/, "ws")}/ws`);
+  url.searchParams.set("project", project.id);
+  const key = url.toString();
+  let client = gonvexClients.get(key);
+  if (!client) {
+    client = new GonvexClient(key);
+    gonvexClients.set(key, client);
+  }
+  return client;
+}
+
+function projectFromRuntime(project: Partial<ProjectTarget> & { id: string; name: string }): ProjectTarget {
+  return normalizeProjectTarget({
+    id: project.id,
+    name: project.name,
+    environment: project.environment ?? "local dev",
+    runtimeUrl: project.runtimeUrl ?? runtimeBaseURL,
+    database: project.database ?? `${project.id.replace(/-/g, "_")}_dev`,
+    storageBucket: project.storageBucket ?? `${project.id}-dev`,
+    status: project.status ?? "local",
+    description: project.description ?? "Runtime-created project database.",
+    provisioned: project.provisioned ?? true,
+    runtimeCreated: project.runtimeCreated ?? true,
+    ownerEmail: project.ownerEmail,
+    sharedWith: project.sharedWith,
+  });
+}
+
+async function fetchRuntimeProjects(): Promise<ProjectTarget[]> {
+  if (!runtimeBaseURL) return [];
+  const response = await fetch(`${runtimeBaseURL}/dev/projects`);
+  if (!response.ok) throw new Error(response.statusText);
+  const payload = await response.json() as { projects?: Array<Partial<ProjectTarget> & { id: string; name: string }> };
+  return (payload.projects ?? []).map(projectFromRuntime);
+}
+
+async function createRuntimeProject(name: string): Promise<ProjectTarget> {
+  const response = await fetch(`${runtimeBaseURL}/dev/projects`, {
+    body: JSON.stringify({ name }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({} as { error?: string }));
+    throw new Error(payload.error ?? response.statusText);
+  }
+  const payload = await response.json() as { project: Partial<ProjectTarget> & { id: string; name: string } };
+  return projectFromRuntime(payload.project);
+}
+
+async function deleteRuntimeProject(projectID: string): Promise<void> {
+  const response = await fetch(`${runtimeBaseURL}/dev/projects/${encodeURIComponent(projectID)}`, { method: "DELETE" });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({} as { error?: string }));
+    throw new Error(payload.error ?? response.statusText);
+  }
+}
+
+function firebaseAuthConfigured(): boolean {
+  return Boolean(firebaseConfig.apiKey && firebaseConfig.authDomain && firebaseConfig.projectId && firebaseConfig.appId);
+}
+
+function getFirebaseAuth(): Auth | null {
+  if (!firebaseAuthConfigured()) return null;
+  const app = getApps()[0] ?? initializeApp(firebaseConfig);
+  return getAuth(app);
+}
 
 const darkGridTheme: Partial<Theme> = {
   accentColor: "#e5482f",
@@ -385,10 +886,10 @@ function emptyGridSelection(): GridSelection {
 
 const glideHeaderIcons: SpriteMap = {
   listFilter: ({ fgColor }) => `
-    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 30 24" fill="none" stroke="${fgColor}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M2 5h20"/>
-      <path d="M6 12h12"/>
-      <path d="M9 19h6"/>
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="${fgColor}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M5 6h14"/>
+      <path d="M8 12h8"/>
+      <path d="M11 18h2"/>
     </svg>
   `,
 };
@@ -399,6 +900,20 @@ function withHeaderFilterIcon(column: GridColumn): GridColumn {
     hasMenu: column.hasMenu ?? true,
     menuIcon: column.menuIcon ?? "listFilter",
   };
+}
+
+function isHeaderMenuPoint(x: number, y: number, bounds: Rectangle): boolean {
+  const menuSize = 34;
+  const menuWidth = Math.min(menuSize, bounds.width);
+  const menuHeight = bounds.height;
+  const menuX = bounds.width - menuWidth;
+  const menuY = 0;
+
+  return x >= menuX && x <= menuX + menuWidth && y >= menuY && y <= menuY + menuHeight;
+}
+
+function isHeaderMenuIconClick(event: HeaderClickedEventArgs): boolean {
+  return isHeaderMenuPoint(event.localEventX, event.localEventY, event.bounds);
 }
 
 function createCellGetter(rows: GridRow[]) {
@@ -424,19 +939,36 @@ function createCachedCellGetter(columns: string[], rowCache: Record<number, Reco
 }
 
 type WhTaskCellData = {
-  kind: "taskName" | "statusPill" | "priorityPill" | "dateStack" | "progressBar" | "flag";
+  kind: "taskName" | "statusPill" | "priorityPill" | "dateStack" | "progressBar" | "flag" | "assignees" | "selection" | "notes" | "config" | "form";
   primary: string;
   secondary?: string;
   color?: string;
   textColor?: string;
   muted?: boolean;
   progress?: number;
+  tagNames?: string[];
+  tagColors?: string[];
+  attachmentCount?: number;
+  viewCount?: number;
+  categoryIcon?: string;
+  categoryColor?: string;
+  hovered?: boolean;
+  selected?: boolean;
+  selectedAt?: number;
+  statusAction?: string;
+  statusIcon?: string;
+  workingAnimation?: string;
+  initial?: boolean;
+  names?: string[];
+  avatarUrls?: string[];
+  options?: string[];
+  optionAvatarUrls?: Record<string, string>;
 };
 
 function whTaskCell(data: WhTaskCellData): CustomCell<WhTaskCellData> {
   return {
     kind: GridCellKind.Custom,
-    allowOverlay: false,
+    allowOverlay: data.kind === "assignees",
     copyData: [data.primary, data.secondary].filter(Boolean).join(" "),
     data,
   };
@@ -462,44 +994,523 @@ function canvasEllipsize(ctx: CanvasRenderingContext2D, text: string, maxWidth: 
   return `${next}...`;
 }
 
+function avatarColorForName(name: string): string {
+  const colors = ["#5b8def", "#14b8a6", "#f97316", "#8b5cf6", "#ef4444", "#16a34a", "#d97706", "#0891b2"];
+  let hash = 0;
+  for (let index = 0; index < name.length; index += 1) hash = Math.imul(31, hash) + name.charCodeAt(index) | 0;
+  return colors[Math.abs(hash) % colors.length];
+}
+
+function hexToRgb(value: string): { r: number; g: number; b: number } | null {
+  const hex = value.trim().replace(/^#/, "");
+  const normalized = hex.length === 3 ? hex.split("").map((char) => char + char).join("") : hex;
+  if (!/^[0-9a-f]{6}$/i.test(normalized)) return null;
+  return {
+    r: Number.parseInt(normalized.slice(0, 2), 16),
+    g: Number.parseInt(normalized.slice(2, 4), 16),
+    b: Number.parseInt(normalized.slice(4, 6), 16),
+  };
+}
+
+function alphaColor(color: string, alpha: number): string {
+  const rgb = hexToRgb(color);
+  return rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})` : color;
+}
+
+function readableTextColor(color: string): string {
+  const rgb = hexToRgb(color);
+  if (!rgb) return "#ffffff";
+  const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+  return luminance > 0.62 ? "#111827" : "#ffffff";
+}
+
+const fontAwesomeCanvasIcons: Record<string, IconDefinition> = {
+  "angle-right": faAngleRight,
+  ban: faBan,
+  bolt: faBolt,
+  broom: faBroom,
+  "broom-ball": faBroomBall,
+  building: faBuilding,
+  "cart-flatbed-suitcase": faCartFlatbedSuitcase,
+  "cart-shopping": faCartShopping,
+  circle: faCircle,
+  filter: faFilter,
+  heart: faHeart,
+  "magnifying-glass": faMagnifyingGlass,
+  pause: faPause,
+  star: faStar,
+  tags: faTags,
+  tree: faTree,
+  wrench: faWrench,
+};
+
+function fontAwesomeIconKey(iconClass: string | undefined): string {
+  const icon = (iconClass ?? "").toLowerCase();
+  const match = icon.match(/fa-([a-z0-9-]+)/g)?.at(-1);
+  return match?.replace(/^fa-/, "") ?? icon.replace(/^fa-/, "").trim();
+}
+
+function drawFontAwesomeIcon(ctx: CanvasRenderingContext2D, iconClass: string | undefined, x: number, y: number, size: number, color: string): boolean {
+  const icon = fontAwesomeCanvasIcons[fontAwesomeIconKey(iconClass)];
+  if (!icon) return false;
+  const [width, height, , , rawPath] = icon.icon;
+  const path = Array.isArray(rawPath) ? rawPath.join(" ") : rawPath;
+  const scale = size / Math.max(width, height);
+  const drawWidth = width * scale;
+  const drawHeight = height * scale;
+  ctx.save();
+  ctx.translate(x + (size - drawWidth) / 2, y + (size - drawHeight) / 2);
+  ctx.scale(scale, scale);
+  ctx.fillStyle = color;
+  ctx.fill(new Path2D(path));
+  ctx.restore();
+  return true;
+}
+
+function drawCenteredIconText(ctx: CanvasRenderingContext2D, rect: Rectangle, label: string, theme: Theme, muted = false) {
+  ctx.fillStyle = muted ? theme.textLight : theme.textMedium;
+  ctx.font = "650 12px " + theme.fontFamily;
+  const width = ctx.measureText(label).width;
+  ctx.fillText(label, rect.x + Math.round((rect.width - width) / 2), rect.y + rect.height / 2, rect.width - 10);
+}
+
+function drawMiniLucide(ctx: CanvasRenderingContext2D, kind: "eye" | "paperclip" | "tags" | "wrench" | "plus", x: number, y: number, size: number) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(size / 24, size / 24);
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (kind === "eye") {
+    ctx.stroke(new Path2D("M2.5 12C4 8.5 7.5 5.5 12 5.5S20 8.5 21.5 12c-1.5 3.5-5 6.5-9.5 6.5S4 15.5 2.5 12z"));
+    ctx.beginPath();
+    ctx.arc(12, 12, 3, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (kind === "paperclip") {
+    ctx.stroke(new Path2D("m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"));
+  } else if (kind === "tags") {
+    ctx.stroke(new Path2D("M20.59 13.41 12 22l-8.59-8.59A2 2 0 0 1 2.83 12V4a2 2 0 0 1 2-2h8a2 2 0 0 1 1.41.59l6.35 6.35a2 2 0 0 1 0 2.82Z"));
+    ctx.beginPath();
+    ctx.arc(7.5, 7.5, 1, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (kind === "wrench") {
+    ctx.stroke(new Path2D("M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.1-3.1a6 6 0 0 1-7.9 7.9l-6 6a2.1 2.1 0 0 1-3-3l6-6a6 6 0 0 1 7.9-7.9l-3.1 3.1Z"));
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(12, 5);
+    ctx.lineTo(12, 19);
+    ctx.moveTo(5, 12);
+    ctx.lineTo(19, 12);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawCategoryBadge(ctx: CanvasRenderingContext2D, x: number, y: number, color: string, icon: string | undefined) {
+  drawRoundRect(ctx, x, y, 24, 24, 12);
+  ctx.fillStyle = color || "#6b7280";
+  ctx.fill();
+  if (drawFontAwesomeIcon(ctx, icon, x + 6, y + 6, 12, "#ffffff")) return;
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.6;
+  if ((icon ?? "").toLowerCase().includes("broom")) {
+    ctx.beginPath();
+    ctx.moveTo(x + 8, y + 16);
+    ctx.lineTo(x + 16, y + 8);
+    ctx.moveTo(x + 7, y + 17);
+    ctx.lineTo(x + 11, y + 21);
+    ctx.lineTo(x + 13, y + 18);
+    ctx.stroke();
+  } else if ((icon ?? "").toLowerCase().includes("tag")) {
+    drawMiniLucide(ctx, "tags", x + 6, y + 6, 12);
+  } else {
+    drawMiniLucide(ctx, "wrench", x + 6, y + 6, 12);
+  }
+}
+
+function statusSemantic(data: WhTaskCellData): "working" | "pending" | "done" | "initial" | "paused" | "cancelled" {
+  const action = (data.statusAction ?? "").toLowerCase();
+  const name = data.primary.toLowerCase();
+  if (action === "working" || action === "in_progress" || name.includes("progress") || name.includes("progreso")) return "working";
+  if (action === "done" || action === "completed" || action === "finished" || name.includes("done") || name.includes("listo") || name.includes("limpio")) return "done";
+  if (action === "cancelled" || action === "canceled" || name.includes("cancel")) return "cancelled";
+  if (action === "paused" || name.includes("paus")) return "paused";
+  if (data.initial || action === "initial" || name.includes("pendiente") || name.includes("nuevo")) return "initial";
+  return "pending";
+}
+
+function drawConfiguredStatusIcon(ctx: CanvasRenderingContext2D, icon: string | undefined, x: number, y: number, size: number): boolean {
+  if (drawFontAwesomeIcon(ctx, icon, x, y, size, String(ctx.fillStyle))) return true;
+  const normalized = (icon ?? "").toLowerCase();
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (normalized.includes("angle-right") || normalized.includes("chevron-right")) {
+    ctx.beginPath();
+    ctx.moveTo(size * 0.38, size * 0.25);
+    ctx.lineTo(size * 0.62, size * 0.5);
+    ctx.lineTo(size * 0.38, size * 0.75);
+    ctx.stroke();
+    ctx.restore();
+    return true;
+  }
+  if (normalized.includes("circle")) {
+    ctx.beginPath();
+    ctx.arc(size / 2, size / 2, size * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return true;
+  }
+  if (normalized.includes("pause")) {
+    ctx.beginPath();
+    ctx.moveTo(size * 0.36, size * 0.28);
+    ctx.lineTo(size * 0.36, size * 0.72);
+    ctx.moveTo(size * 0.64, size * 0.28);
+    ctx.lineTo(size * 0.64, size * 0.72);
+    ctx.stroke();
+    ctx.restore();
+    return true;
+  }
+  if (normalized.includes("ban")) {
+    ctx.beginPath();
+    ctx.arc(size / 2, size / 2, size * 0.36, 0, Math.PI * 2);
+    ctx.moveTo(size * 0.25, size * 0.75);
+    ctx.lineTo(size * 0.75, size * 0.25);
+    ctx.stroke();
+    ctx.restore();
+    return true;
+  }
+  if (normalized.includes("broom")) {
+    ctx.beginPath();
+    ctx.moveTo(size * 0.28, size * 0.72);
+    ctx.lineTo(size * 0.72, size * 0.28);
+    ctx.moveTo(size * 0.22, size * 0.78);
+    ctx.lineTo(size * 0.4, size * 0.95);
+    ctx.lineTo(size * 0.5, size * 0.84);
+    ctx.lineTo(size * 0.34, size * 0.68);
+    ctx.stroke();
+    ctx.restore();
+    return true;
+  }
+  ctx.restore();
+  return false;
+}
+
+function drawStatusFallbackIcon(ctx: CanvasRenderingContext2D, semantic: ReturnType<typeof statusSemantic>, x: number, y: number, size: number) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (semantic === "done") {
+    ctx.beginPath();
+    ctx.moveTo(size * 0.22, size * 0.52);
+    ctx.lineTo(size * 0.43, size * 0.72);
+    ctx.lineTo(size * 0.8, size * 0.3);
+    ctx.stroke();
+  } else if (semantic === "paused") {
+    ctx.beginPath();
+    ctx.moveTo(size * 0.36, size * 0.28);
+    ctx.lineTo(size * 0.36, size * 0.72);
+    ctx.moveTo(size * 0.64, size * 0.28);
+    ctx.lineTo(size * 0.64, size * 0.72);
+    ctx.stroke();
+  } else if (semantic === "cancelled") {
+    ctx.beginPath();
+    ctx.moveTo(size * 0.28, size * 0.28);
+    ctx.lineTo(size * 0.72, size * 0.72);
+    ctx.moveTo(size * 0.72, size * 0.28);
+    ctx.lineTo(size * 0.28, size * 0.72);
+    ctx.stroke();
+  } else if (semantic === "initial") {
+    ctx.beginPath();
+    ctx.moveTo(size * 0.38, size * 0.25);
+    ctx.lineTo(size * 0.62, size * 0.5);
+    ctx.lineTo(size * 0.38, size * 0.75);
+    ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.arc(size / 2, size / 2, size * 0.31, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawWorkingStatusAnimation(ctx: CanvasRenderingContext2D, type: string | undefined, x: number, y: number, size: number, timeMs: number) {
+  const time = timeMs / 1000;
+  const normalized = (type || "spinner").toLowerCase();
+  ctx.save();
+  if (normalized === "bounce") {
+    for (let index = 0; index < 3; index += 1) {
+      const phase = Math.sin((time * 7.5) + index * 0.9);
+      ctx.beginPath();
+      ctx.arc(x + 3 + index * 4, y + size / 2 - Math.max(0, phase) * 3, 1.7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (normalized === "pulse") {
+    const scale = 0.75 + Math.sin(time * 5.2) * 0.18;
+    ctx.globalAlpha = 0.7 + Math.sin(time * 5.2) * 0.25;
+    ctx.beginPath();
+    ctx.arc(x + size / 2, y + size / 2, size * 0.28 * scale, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (normalized === "wave") {
+    for (let index = 0; index < 4; index += 1) {
+      const height = 3 + (Math.sin(time * 8 + index * 0.8) + 1) * 3;
+      drawRoundRect(ctx, x + 1 + index * 3, y + size / 2 - height / 2, 2, height, 1);
+      ctx.fill();
+    }
+  } else if (normalized === "orbit") {
+    const angle = time * Math.PI * 2;
+    ctx.globalAlpha = 0.45;
+    ctx.beginPath();
+    ctx.arc(x + size / 2, y + size / 2, 2.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(x + size / 2 + Math.cos(angle) * 4.5, y + size / 2 + Math.sin(angle) * 4.5, 2, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (normalized === "ripple") {
+    const phase = (time * 1.4) % 1;
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath();
+    ctx.arc(x + size / 2, y + size / 2, 2.2 + phase * 5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(x + size / 2, y + size / 2, 2.4, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    const angle = time * Math.PI * 2.4;
+    ctx.translate(x + size / 2, y + size / 2);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.arc(0, 0, size * 0.35, -0.2, Math.PI * 1.35);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 const whTaskRenderer: CustomRenderer = {
   kind: GridCellKind.Custom,
+  needsHover: true,
   isMatch: (cell): cell is CustomCell<WhTaskCellData> => {
     const data = cell.data as Partial<WhTaskCellData> | undefined;
-    return data?.kind === "taskName" || data?.kind === "statusPill" || data?.kind === "priorityPill" || data?.kind === "dateStack" || data?.kind === "progressBar" || data?.kind === "flag";
+    return data?.kind === "taskName" || data?.kind === "statusPill" || data?.kind === "priorityPill" || data?.kind === "dateStack" || data?.kind === "progressBar" || data?.kind === "flag" || data?.kind === "assignees" || data?.kind === "selection" || data?.kind === "notes" || data?.kind === "config" || data?.kind === "form";
   },
   draw: (args, cell) => {
-    const { ctx, rect, theme } = args;
+    const { ctx, rect, theme, hoverAmount } = args;
     const data = cell.data as WhTaskCellData;
     ctx.save();
     ctx.textBaseline = "middle";
     if (data.kind === "taskName") {
       const compact = rect.width < 260 || rect.height < 58;
+      const hasCategory = Boolean(data.categoryIcon || data.categoryColor);
+      const left = rect.x + 14;
+      const titleX = left + (hasCategory ? 34 : 0);
+      if (hasCategory) {
+        drawCategoryBadge(ctx, left, rect.y + Math.round((rect.height - 24) / 2), data.categoryColor || theme.accentColor, data.categoryIcon);
+      }
       ctx.fillStyle = theme.textDark;
       ctx.font = "650 14px " + theme.fontFamily;
-      const primary = canvasEllipsize(ctx, data.primary, rect.width - 28);
-      ctx.fillText(primary, rect.x + 14, rect.y + (compact ? rect.height / 2 : 22), rect.width - 28);
+      const indicatorSpace = (data.tagNames?.length ? 20 : 0) + (data.viewCount ? 20 : 0) + (data.attachmentCount ? 20 : 0) + 8;
+      const titleWidth = rect.width - (titleX - rect.x) - indicatorSpace - 12;
+      const primary = canvasEllipsize(ctx, data.primary, titleWidth);
+      const titleY = rect.y + (compact ? rect.height / 2 : 22);
+      ctx.fillText(primary, titleX, titleY, titleWidth);
+      if (hoverAmount > 0) {
+        const underlineWidth = Math.min(ctx.measureText(primary).width, titleWidth);
+        ctx.strokeStyle = "rgba(76, 68, 64, 0.38)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(titleX, titleY + 8);
+        ctx.lineTo(titleX + underlineWidth, titleY + 8);
+        ctx.stroke();
+      }
+      let indicatorX = titleX + Math.min(ctx.measureText(primary).width, titleWidth) + 10;
+      ctx.strokeStyle = "#5DCAA5";
+      ctx.fillStyle = "#5DCAA5";
+      if (data.viewCount) {
+        const chipX = indicatorX - 4;
+        const chipY = titleY - 12;
+        drawRoundRect(ctx, chipX, chipY, 20, 16, 8);
+        ctx.fillStyle = alphaColor("#5DCAA5", hoverAmount > 0 ? 0.18 : 0.10);
+        ctx.fill();
+        ctx.strokeStyle = "#5DCAA5";
+        drawMiniLucide(ctx, "eye", chipX + 4, chipY + 2, 12);
+        indicatorX += 22;
+      }
+      ctx.strokeStyle = theme.textLight;
+      if (data.attachmentCount) {
+        const chipX = indicatorX - 4;
+        const chipY = titleY - 12;
+        drawRoundRect(ctx, chipX, chipY, 20, 16, 8);
+        ctx.fillStyle = alphaColor("#ef4444", hoverAmount > 0 ? 0.18 : 0.10);
+        ctx.fill();
+        ctx.strokeStyle = "#ef4444";
+        drawMiniLucide(ctx, "paperclip", chipX + 4, chipY + 2, 12);
+        indicatorX += 22;
+      }
+      if (data.tagNames?.length) {
+        ctx.strokeStyle = data.tagColors?.[0] || theme.accentColor;
+        drawMiniLucide(ctx, "tags", indicatorX, titleY - 8, 14);
+      }
       if (data.secondary && !compact) {
         ctx.fillStyle = theme.textMedium;
         ctx.font = "12px " + theme.fontFamily;
-        const secondary = canvasEllipsize(ctx, data.secondary, rect.width - 28);
-        ctx.fillText(secondary, rect.x + 14, rect.y + 43, rect.width - 28);
+        const secondary = canvasEllipsize(ctx, data.secondary, rect.width - (titleX - rect.x) - 12);
+        ctx.fillText(secondary, titleX, rect.y + 43, rect.width - (titleX - rect.x) - 12);
+      }
+      if (hoverAmount > 0 && !data.tagNames?.length && !compact) {
+        ctx.strokeStyle = theme.accentColor;
+        ctx.setLineDash([2, 2]);
+        ctx.beginPath();
+        ctx.arc(titleX + 9, rect.y + 43, 9, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.strokeStyle = theme.accentColor;
+        drawMiniLucide(ctx, "plus", titleX + 3, rect.y + 37, 12);
       }
     } else if (data.kind === "statusPill" || data.kind === "priorityPill") {
       const label = data.primary || "None";
       ctx.font = "650 12px " + theme.fontFamily;
-      const width = Math.min(rect.width - 18, Math.max(68, ctx.measureText(label).width + 24));
+      const isStatus = data.kind === "statusPill";
+      const hasIcon = isStatus;
+      const iconSize = 12;
+      const pillColor = data.color ?? theme.bgBubble;
+      const width = Math.min(rect.width - 18, Math.max(68, ctx.measureText(label).width + (hasIcon ? 38 : 36)));
       const x = rect.x + 10;
-      const y = rect.y + Math.round((rect.height - 26) / 2);
-      drawRoundRect(ctx, x, y, width, 26, 13);
-      ctx.fillStyle = data.color ?? theme.bgBubble;
+      const y = rect.y + Math.round((rect.height - 20) / 2);
+      drawRoundRect(ctx, x, y, width, 20, 10);
+      ctx.fillStyle = isStatus ? pillColor : alphaColor(pillColor, 0.14);
       ctx.fill();
-      ctx.fillStyle = data.textColor ?? "#111827";
-      ctx.fillText(label, x + 12, y + 13, width - 20);
+      if (hoverAmount > 0.05) {
+        ctx.strokeStyle = isStatus ? alphaColor(readableTextColor(pillColor), 0.45) : alphaColor(pillColor, 0.55);
+        ctx.lineWidth = 1.3;
+        ctx.stroke();
+      }
+      const pillTextColor = data.textColor ?? (isStatus ? readableTextColor(pillColor) : pillColor);
+      ctx.fillStyle = pillTextColor;
+      ctx.strokeStyle = pillTextColor;
+      if (hasIcon) {
+        const iconX = x + 10;
+        const iconY = y + 4;
+        const semantic = statusSemantic(data);
+        if (semantic === "working") {
+          args.requestAnimationFrame();
+          drawWorkingStatusAnimation(ctx, data.workingAnimation, iconX, iconY, iconSize, args.frameTime);
+        } else if (!drawConfiguredStatusIcon(ctx, data.statusIcon, iconX, iconY, iconSize)) {
+          drawStatusFallbackIcon(ctx, semantic, iconX, iconY, iconSize);
+        }
+      } else {
+        ctx.beginPath();
+        ctx.arc(x + 12, y + 10, 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = pillColor;
+        ctx.fill();
+        ctx.fillStyle = data.textColor ?? pillColor;
+      }
+      ctx.fillText(label, x + (hasIcon ? 27 : 24), y + 10, width - (hasIcon ? 34 : 30));
+    } else if (data.kind === "assignees") {
+      const names = (data.names ?? []).filter(Boolean).slice(0, 3);
+      const remaining = Math.max(0, (data.names?.length ?? 0) - names.length);
+      const avatarSize = 28;
+      const directHovered = hoverAmount > 0.05;
+      const rowHovered = Boolean(data.hovered);
+      const overlap = directHovered ? 4 : 10;
+      const startX = rect.x + 12;
+      const centerY = rect.y + rect.height / 2;
+      const drawAddCircle = (x: number, active: boolean, alpha = 1) => {
+        const centerX = x + avatarSize / 2;
+        const centerYLocal = centerY;
+        ctx.save();
+        ctx.globalAlpha *= alpha;
+        ctx.beginPath();
+        ctx.setLineDash([2.2, 2.2]);
+        ctx.arc(centerX, centerYLocal, avatarSize / 2 - 1, 0, Math.PI * 2);
+        ctx.strokeStyle = active ? theme.accentColor : theme.textLight;
+        ctx.lineWidth = 1.3;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = active ? theme.accentColor : theme.textLight;
+        ctx.font = "700 14px " + theme.fontFamily;
+        const plusWidth = ctx.measureText("+").width;
+        ctx.fillText("+", centerX - plusWidth / 2, centerYLocal + 0.5, avatarSize);
+        ctx.restore();
+      };
+      if (names.length === 0) {
+        drawAddCircle(startX, directHovered || rowHovered);
+        ctx.fillStyle = directHovered || rowHovered ? theme.textMedium : theme.textLight;
+        ctx.font = "550 12px " + theme.fontFamily;
+        ctx.fillText("Assign", startX + 36, centerY, rect.width - 48);
+      } else if (rowHovered && !directHovered && remaining === 0) {
+        drawAddCircle(startX + names.length * (avatarSize - overlap) - 8, false, 0.9);
+      }
+      names.forEach((name, index) => {
+        const x = startX + index * (avatarSize - overlap);
+        const y = centerY - avatarSize / 2;
+        ctx.beginPath();
+        ctx.arc(x + avatarSize / 2, y + avatarSize / 2, avatarSize / 2, 0, Math.PI * 2);
+        const image = data.avatarUrls?.[index] ? args.imageLoader.loadOrGetImage(data.avatarUrls[index], args.col, args.row) : undefined;
+        if (image) {
+          ctx.save();
+          ctx.clip();
+          ctx.drawImage(image, x, y, avatarSize, avatarSize);
+          ctx.restore();
+        } else {
+          ctx.fillStyle = avatarColorForName(name);
+          ctx.fill();
+        }
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = directHovered ? theme.accentColor : theme.bgCell;
+        ctx.stroke();
+        if (directHovered) {
+          ctx.beginPath();
+          ctx.arc(x + avatarSize / 2, y + avatarSize / 2, avatarSize / 2 + 2.5, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(220, 59, 57, 0.22)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        if (!image) {
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "700 11px " + theme.fontFamily;
+          const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?";
+          const textWidth = ctx.measureText(initials).width;
+          ctx.fillText(initials, x + (avatarSize - textWidth) / 2, centerY + 0.5, avatarSize);
+        }
+      });
+      if (remaining > 0) {
+        const x = startX + names.length * (avatarSize - overlap);
+        const y = centerY - avatarSize / 2;
+        ctx.beginPath();
+        ctx.arc(x + avatarSize / 2, y + avatarSize / 2, avatarSize / 2, 0, Math.PI * 2);
+        ctx.fillStyle = theme.bgBubble;
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = theme.bgCell;
+        ctx.stroke();
+        ctx.fillStyle = theme.textMedium;
+        ctx.font = "700 11px " + theme.fontFamily;
+        ctx.fillText(`+${remaining}`, x + 7, centerY + 0.5, avatarSize - 8);
+      } else if (names.length > 0 && directHovered) {
+        drawAddCircle(startX + names.length * (avatarSize - overlap) + 4, true);
+      }
     } else if (data.kind === "dateStack") {
-      ctx.fillStyle = data.muted ? theme.textLight : theme.textDark;
-      ctx.font = "650 12px " + theme.fontFamily;
-      ctx.fillText(data.primary, rect.x + 12, rect.y + 21, rect.width - 24);
+      if (data.color && data.primary) {
+        ctx.font = "650 12px " + theme.fontFamily;
+        const width = Math.min(rect.width - 18, Math.max(56, ctx.measureText(data.primary).width + 18));
+        const x = rect.x + 10;
+        const y = rect.y + Math.round((rect.height - 24) / 2);
+        drawRoundRect(ctx, x, y, width, 24, 6);
+        ctx.fillStyle = data.color;
+        ctx.fill();
+        ctx.fillStyle = data.textColor ?? theme.textDark;
+        ctx.fillText(data.primary, x + 9, y + 12, width - 16);
+      } else if (data.primary) {
+        ctx.fillStyle = data.muted ? theme.textLight : theme.textMedium;
+        ctx.font = `${data.muted ? "400" : "550"} 12px ` + theme.fontFamily;
+        ctx.fillText(data.primary, rect.x + 12, rect.y + rect.height / 2, rect.width - 24);
+      }
       if (data.secondary) {
         ctx.fillStyle = data.muted ? theme.textLight : theme.textMedium;
         ctx.font = "11px " + theme.fontFamily;
@@ -519,10 +1530,87 @@ const whTaskRenderer: CustomRenderer = {
       ctx.font = "11px " + theme.fontFamily;
       ctx.fillText(`${data.progress ?? 0}%`, x, y + 24, width);
     } else if (data.kind === "flag") {
-      const color = data.color || "#94a3b8";
-      drawRoundRect(ctx, rect.x + 20, rect.y + 16, 18, 28, 5);
-      ctx.fillStyle = color;
-      ctx.fill();
+      const iconSize = 18;
+      const x = rect.x + Math.round((rect.width - iconSize) / 2);
+      const y = rect.y + Math.round((rect.height - iconSize) / 2);
+      ctx.save();
+      ctx.globalAlpha = data.color ? 1 : 0.38;
+      ctx.translate(x, y);
+      ctx.scale(iconSize / 24, iconSize / 24);
+      ctx.strokeStyle = data.color || theme.textLight;
+      ctx.lineWidth = 2;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.stroke(new Path2D("M4 22V4a1 1 0 0 1 .4-.8A6 6 0 0 1 8 2c3 0 5 2 7.333 2q2 0 3.067-.8A1 1 0 0 1 20 4v10a1 1 0 0 1-.4.8A6 6 0 0 1 16 16c-3 0-5-2-8-2a6 6 0 0 0-4 1.528"));
+      ctx.restore();
+    } else if (data.kind === "selection") {
+      const selectedProgress = data.selectedAt ? Math.min(1, Math.max(0, (Date.now() - data.selectedAt) / 180)) : data.selected ? 1 : 0;
+      if (data.selected && selectedProgress < 1) args.requestAnimationFrame();
+      if (data.selected) {
+        ctx.globalAlpha = selectedProgress;
+        ctx.fillStyle = theme.accentColor;
+        ctx.fillRect(rect.x, rect.y, 3, rect.height);
+        ctx.globalAlpha = 1;
+      }
+      ctx.beginPath();
+      ctx.arc(rect.x + rect.width / 2, rect.y + rect.height / 2, 9, 0, Math.PI * 2);
+      ctx.lineWidth = data.selected ? 5 : 1.6;
+      ctx.strokeStyle = data.selected ? alphaColor(theme.accentColor, selectedProgress) : hoverAmount > 0 ? alphaColor(theme.accentColor, 0.55) : alphaColor(theme.textLight, 0.35);
+      ctx.stroke();
+    } else if (data.kind === "notes") {
+      const count = Number(data.primary || 0);
+      const iconSize = 18;
+      const x = rect.x + Math.round((rect.width - iconSize) / 2);
+      const y = rect.y + Math.round((rect.height - iconSize) / 2);
+      if (hoverAmount > 0.05) {
+        drawRoundRect(ctx, x - 7, y - 7, iconSize + 14, iconSize + 14, 7);
+        ctx.fillStyle = alphaColor(count > 0 ? "#22c55e" : "#867b76", 0.10);
+        ctx.fill();
+      }
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(iconSize / 24, iconSize / 24);
+      ctx.strokeStyle = count > 0 ? "#22c55e" : theme.textLight;
+      ctx.lineWidth = 2;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.stroke(new Path2D("M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"));
+      ctx.restore();
+      if (count > 0) {
+        const badgeText = count > 99 ? "99+" : String(count);
+        ctx.font = "700 9px " + theme.fontFamily;
+        const badgeWidth = Math.max(15, ctx.measureText(badgeText).width + 7);
+        const badgeX = x + iconSize - 5;
+        const badgeY = y - 7;
+        drawRoundRect(ctx, badgeX, badgeY, badgeWidth, 15, 7.5);
+        ctx.fillStyle = "#22c55e";
+        ctx.fill();
+        ctx.strokeStyle = theme.bgCell;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(badgeText, badgeX + (badgeWidth - ctx.measureText(badgeText).width) / 2, badgeY + 7.5, badgeWidth - 4);
+      }
+    } else if (data.kind === "config") {
+      if (!data.primary) {
+        ctx.restore();
+        return;
+      }
+      const x = rect.x + Math.round((rect.width - 18) / 2);
+      const y = rect.y + Math.round((rect.height - 18) / 2);
+      drawRoundRect(ctx, x, y, 18, 18, 5);
+      ctx.strokeStyle = theme.textLight;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x + 5, y + 9);
+      ctx.lineTo(x + 8, y + 12);
+      ctx.lineTo(x + 13, y + 6);
+      ctx.strokeStyle = theme.accentColor;
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+    } else if (data.kind === "form") {
+      drawCenteredIconText(ctx, rect, data.primary || "-", theme, !data.primary);
     }
     ctx.restore();
   },
@@ -574,6 +1662,62 @@ function nextTestSort(current: TestSortState, key: string): TestSortState {
   return { key, direction: "default" };
 }
 
+function testColumnFilterKind(column: string): TestFilterKind {
+  return testTaskColumns.find((item) => String(item.id) === column)?.filterKind ?? "text";
+}
+
+function testColumnDataColumn(column: string): string {
+  return testTaskColumns.find((item) => String(item.id) === column)?.dataColumn ?? testSortColumns[column] ?? column;
+}
+
+function emptyTestColumnFilter(kind: TestFilterKind = "text"): TestColumnFilter {
+  return { operator: kind === "date" || kind === "number" ? "equals" : "contains", value: "", selectedValues: [] };
+}
+
+function isTestColumnFilterActive(filter: TestColumnFilter | undefined, kind: TestFilterKind = "text"): boolean {
+  if (!filter) return false;
+  if (kind === "set") return filter.selectedValues.length > 0;
+  if (filter.operator === "empty" || filter.operator === "notEmpty") return true;
+  if (filter.operator === "inRange") return filter.value.trim() !== "" || (filter.valueTo ?? "").trim() !== "";
+  return filter.value.trim() !== "";
+}
+
+function testColumnFilterToDataFilter(column: string, filter: TestColumnFilter | undefined): DataFilter | null {
+  const kind = testColumnFilterKind(column);
+  if (!isTestColumnFilterActive(filter, kind)) return null;
+  if (!filter) return null;
+  const dataColumn = testColumnDataColumn(column);
+  if (kind === "set" && filter.selectedValues.length > 0) {
+    return { id: dataColumn, column: dataColumn, operator: "oneOf", value: JSON.stringify(filter.selectedValues) };
+  }
+  return { id: dataColumn, column: dataColumn, operator: filter.operator, value: filter.value.trim(), valueTo: filter.valueTo?.trim() };
+}
+
+function sortedUniqueColumnValues(rows: Record<number, Record<string, unknown>>, column: string): string[] {
+  const dataColumn = testColumnDataColumn(column);
+  return Array.from(new Set(Object.values(rows).map((row) => formatCellValue(row[dataColumn]))))
+    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function mergeSortedValues(left: string[], right: string[]): string[] {
+  return Array.from(new Set([...left, ...right]))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function pickerDateValue(value: string | undefined): DateValue | null {
+  const date = (value ?? "").trim().slice(0, 10);
+  if (!date) return null;
+  try {
+    return parseDate(date);
+  } catch {
+    return null;
+  }
+}
+
+function pickerDateString(value: DateValue | null): string {
+  return value?.toString() ?? "";
+}
+
 function defaultValueForColumn(column: string): string {
   if (column.endsWith("_at")) return new Date().toISOString();
   return "";
@@ -607,17 +1751,101 @@ function getPage(id: PageID) {
 }
 
 function pageFromPath(pathname: string): PageID {
-  const candidate = pathname.replace(/^\/+/, "").split("/")[0] || "overview";
+  const parts = pathname.replace(/^\/+/, "").split("/").filter(Boolean);
+  const candidate = parts[0] === "projects" && parts[1] ? parts[2] || "overview" : parts[0] || "overview";
   return pages.some((page) => page.id === candidate) ? candidate as PageID : "overview";
 }
 
-function pathForPage(id: PageID): string {
-  return `/${id}`;
+function projectIDFromPath(pathname: string): string | null {
+  const parts = pathname.replace(/^\/+/, "").split("/").filter(Boolean);
+  return parts[0] === "projects" && parts[1] ? decodeURIComponent(parts[1]) : null;
+}
+
+function storedProjectID(): string | null {
+  if (typeof window === "undefined" || window.location.pathname === "/projects") return null;
+  return projectIDFromPath(window.location.pathname) ?? window.localStorage.getItem(dashboardProjectKey);
+}
+
+function pathForProjectPage(projectID: string, id: PageID): string {
+  return `/projects/${encodeURIComponent(projectID)}/${id}`;
 }
 
 function storedTheme(): ThemeMode {
   if (typeof window === "undefined") return "dark";
   return window.localStorage.getItem("gonvex-theme") === "light" ? "light" : "dark";
+}
+
+function useViewportHeight() {
+  const [height, setHeight] = useState(() => window.innerHeight);
+
+  useEffect(() => {
+    const onResize = () => setHeight(window.innerHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  return height;
+}
+
+function storedSession(): DashboardSession | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(dashboardSessionKey);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<DashboardSession>;
+    if (!parsed.email || !parsed.name) return null;
+    return { email: parsed.email, name: parsed.name };
+  } catch {
+    return null;
+  }
+}
+
+function storedCreatedProjects(): ProjectTarget[] {
+  if (typeof window === "undefined") return [];
+  const raw = window.localStorage.getItem(dashboardProjectsKey);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as ProjectTarget[];
+    return parsed.filter((project) => project.id && project.name && project.runtimeUrl).map(normalizeProjectTarget);
+  } catch {
+    return [];
+  }
+}
+
+function projectByID(projects: ProjectTarget[], id: string | null): ProjectTarget | null {
+  if (!id) return null;
+  return projects.find((project) => project.id === id) ?? null;
+}
+
+function visibleProjectsForSession(projects: ProjectTarget[], session: DashboardSession): ProjectTarget[] {
+  const email = session.email.toLowerCase();
+  return projects.filter((project) => {
+    if (!project.ownerEmail) return true;
+    if (project.ownerEmail.toLowerCase() === email) return true;
+    return (project.sharedWith ?? []).some((share) => share === "*" || share.toLowerCase() === email);
+  });
+}
+
+function projectIDFromName(name: string, existingProjects: ProjectTarget[]): string {
+  const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";
+  const existing = new Set(existingProjects.map((project) => project.id));
+  if (!existing.has(base)) return base;
+  let index = 2;
+  while (existing.has(`${base}-${index}`)) index += 1;
+  return `${base}-${index}`;
+}
+
+function projectInitial(name: string): string {
+  return (name.trim()[0] ?? "P").toUpperCase();
+}
+
+function displayNameFromEmail(email: string): string {
+  const [name] = email.split("@");
+  return name
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((part) => part[0].toUpperCase() + part.slice(1))
+    .join(" ") || email;
 }
 
 function ManifestGrid(props: {
@@ -630,43 +1858,134 @@ function ManifestGrid(props: {
   rowHeight?: number;
   themeMode: ThemeMode;
   clearSelection?: boolean;
+  disableSelection?: boolean;
+  noGridLines?: boolean;
+  zebraRows?: boolean;
+  hideRowMarkers?: boolean;
+  activeFilterColumnIds?: readonly string[];
   onHeaderClick?: (column: number) => void;
-  onHeaderMenuClick?: (column: number) => void;
+  onHeaderMenuClick?: (column: number, bounds: Rectangle) => void;
+  onCellEdited?: (cell: Item, newValue: EditableGridCell) => void;
+  onCellClick?: (cell: Item, event: CellClickedEventArgs) => void;
+  onItemHovered?: (event: GridMouseEventArgs) => void;
+  hoveredRow?: number | null;
+  selectedRows?: ReadonlySet<number>;
+  overlay?: ReactNode;
   onColumnResize?: (column: GridColumn, newSize: number, columnIndex: number) => void;
   onVisibleRegionChanged?: (range: Rectangle) => void;
 }) {
   const rows = props.rows ?? [];
   const [gridSelection, setGridSelection] = useState<GridSelection>(() => emptyGridSelection());
+  const [hoveredHeaderMenuColumn, setHoveredHeaderMenuColumn] = useState<number | null>(null);
+  const activeFilterColumnIds = new Set(props.activeFilterColumnIds ?? []);
+
+  const drawHeader: DrawHeaderCallback = (args, draw) => {
+    const columnId = String(args.column.id ?? "");
+    const hasMenu = Boolean(args.column.hasMenu);
+    const active = activeFilterColumnIds.has(columnId);
+    const hovered = hasMenu && (hoveredHeaderMenuColumn === args.columnIndex || args.isHovered);
+    const { ctx, menuBounds } = args;
+    const iconSize = args.theme.headerIconSize;
+    const iconX = Math.round(menuBounds.x + (menuBounds.width - iconSize) / 2);
+    const iconY = Math.round(menuBounds.y + (menuBounds.height - iconSize) / 2);
+    const hoverSize = iconSize + 8;
+    const hoverX = Math.round(iconX - (hoverSize - iconSize) / 2);
+    const hoverY = Math.round(iconY - (hoverSize - iconSize) / 2);
+
+    if (hovered) {
+      ctx.save();
+      drawRoundRect(ctx, hoverX, hoverY, hoverSize, hoverSize, 6);
+      ctx.fillStyle = "rgba(15, 23, 42, 0.18)";
+      ctx.fill();
+      ctx.restore();
+    }
+
+    draw();
+
+    if (hasMenu && active && !args.isHovered) {
+      args.spriteManager.drawSprite(args.column.menuIcon ?? "listFilter", "normal", ctx, iconX, iconY, iconSize, args.theme);
+    }
+
+    if (hasMenu && active) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(iconX + iconSize - 2, iconY + 2, 2.5, 0, Math.PI * 2);
+      ctx.fillStyle = args.theme.accentColor;
+      ctx.shadowColor = "rgba(15, 23, 42, 0.35)";
+      ctx.shadowBlur = 3;
+      ctx.fill();
+      ctx.restore();
+    }
+  };
+
+  const handleMouseMove = (event: GridMouseEventArgs) => {
+    props.onItemHovered?.(event);
+    const nextColumn = event.kind === "header" && props.columns[event.location[0]]?.hasMenu
+      ? event.location[0]
+      : null;
+    setHoveredHeaderMenuColumn((current) => current === nextColumn ? current : nextColumn);
+  };
 
   useEffect(() => {
     if (props.clearSelection) setGridSelection(emptyGridSelection());
   }, [props.clearSelection]);
 
+  const theme = props.noGridLines
+    ? {
+      ...gridThemeFor(props.themeMode),
+      borderColor: "transparent",
+      horizontalBorderColor: "transparent",
+    }
+    : gridThemeFor(props.themeMode);
+
   return (
     <div className="grid-frame" data-testid="function-grid">
       <DataEditor
-        columns={props.columns.map(withHeaderFilterIcon)}
+        columns={props.onHeaderMenuClick ? props.columns.map(withHeaderFilterIcon) : props.columns}
         customRenderers={props.customRenderers}
         getCellContent={props.getCellContent ?? createCellGetter(rows)}
         gridSelection={gridSelection}
+        drawHeader={drawHeader}
         headerIcons={glideHeaderIcons}
         headerHeight={38}
         height={props.height ?? 360}
+        getRowThemeOverride={(row) => props.selectedRows?.has(row) ? {
+          bgCell: props.themeMode === "dark" ? "#352a2f" : "#eee7f4",
+          bgCellMedium: props.themeMode === "dark" ? "#3a2e34" : "#e6ddeb",
+        } : row === props.hoveredRow ? {
+          bgCell: props.themeMode === "dark" ? "#322928" : "#efe0de",
+          bgCellMedium: props.themeMode === "dark" ? "#362d2b" : "#ead8d5",
+        } : props.zebraRows && row % 2 === 1 ? {
+          bgCell: props.themeMode === "dark" ? "#272120" : "#f6eeee",
+          bgCellMedium: props.themeMode === "dark" ? "#2d2624" : "#efe4e2",
+        } : undefined}
         maxColumnWidth={700}
         minColumnWidth={80}
+        columnSelect={props.disableSelection ? "none" : "multi"}
+        rangeSelect={props.disableSelection ? "none" : "rect"}
+        rowSelect={props.disableSelection ? "none" : "multi"}
+        onCellClicked={props.onCellClick}
         onColumnResize={props.onColumnResize}
-        onGridSelectionChange={setGridSelection}
-        onHeaderClicked={props.onHeaderClick ? (column) => props.onHeaderClick?.(column) : undefined}
-        onHeaderMenuClick={props.onHeaderMenuClick ?? props.onHeaderClick}
+        onCellEdited={props.onCellEdited}
+        onGridSelectionChange={props.disableSelection ? () => setGridSelection(emptyGridSelection()) : setGridSelection}
+        onHeaderClicked={props.onHeaderClick ? (column, event) => {
+          if (isHeaderMenuIconClick(event)) return;
+          props.onHeaderClick?.(column);
+        } : undefined}
+        onHeaderMenuClick={props.onHeaderMenuClick}
+        onItemHovered={handleMouseMove}
+        onMouseMove={handleMouseMove}
         onVisibleRegionChanged={props.onVisibleRegionChanged ? (range) => props.onVisibleRegionChanged?.(range) : undefined}
         rowHeight={props.rowHeight ?? 40}
-        rowMarkers="number"
+        rowMarkers={props.hideRowMarkers ? "none" : "number"}
         rows={props.rowCount ?? rows.length}
         smoothScrollX
         smoothScrollY
-        theme={gridThemeFor(props.themeMode)}
+        theme={theme}
+        verticalBorder={!props.noGridLines}
         width="100%"
       />
+      {props.overlay ? <div className="grid-overlay" role="status">{props.overlay}</div> : null}
     </div>
   );
 }
@@ -674,39 +1993,163 @@ function ManifestGrid(props: {
 export function App() {
   const [activePage, setActivePage] = useState<PageID>(() => pageFromPath(window.location.pathname));
   const [theme, setTheme] = useState<ThemeMode>(() => storedTheme());
+  const [session, setSession] = useState<DashboardSession | null>(() => dashboardAuthEnabled ? storedSession() : localDeveloperSession);
+  const [projects, setProjects] = useState<ProjectTarget[]>(() => projectTargets);
+  const [activeProjectID, setActiveProjectID] = useState<string | null>(() => storedProjectID());
   const [actionMessage, setActionMessage] = useState("");
   const page = getPage(activePage);
+  const currentSession = session ?? localDeveloperSession;
+  const visibleProjects = visibleProjectsForSession(projects, currentSession);
+  const activeProject = projectByID(visibleProjects, activeProjectID);
   const themeLabel = theme === "dark" ? "Light mode" : "Dark mode";
   const toggleTheme = () => setTheme((current) => (current === "dark" ? "light" : "dark"));
   const reportAction: ActionHandler = (message) => setActionMessage(message);
 
+  const login = (nextSession: DashboardSession) => {
+    setSession(nextSession);
+    window.localStorage.setItem(dashboardSessionKey, JSON.stringify(nextSession));
+    window.history.replaceState(null, "", "/projects");
+  };
+
+  const logout = () => {
+    setSession(dashboardAuthEnabled ? null : localDeveloperSession);
+    setActiveProjectID(null);
+    window.localStorage.removeItem(dashboardSessionKey);
+    window.history.replaceState(null, "", dashboardAuthEnabled ? "/login" : "/projects");
+    reportAction("Signed out of the dashboard");
+  };
+
+  const showProjects = () => {
+    setActiveProjectID(null);
+    window.localStorage.removeItem(dashboardProjectKey);
+    window.history.pushState(null, "", "/projects");
+  };
+
+  const openProject = (projectID: string) => {
+    setActivePage("overview");
+    setActiveProjectID(projectID);
+    window.localStorage.setItem(dashboardProjectKey, projectID);
+    window.history.pushState(null, "", pathForProjectPage(projectID, "overview"));
+  };
+
+  const switchProject = (projectID: string) => {
+    const nextProject = projectByID(visibleProjects, projectID) ?? visibleProjects[0];
+    if (!nextProject) return;
+    setActiveProjectID(nextProject.id);
+    window.localStorage.setItem(dashboardProjectKey, nextProject.id);
+    window.history.pushState(null, "", pathForProjectPage(nextProject.id, activePage));
+    reportAction(`Switched to ${nextProject.name}`);
+  };
+
+  const createProject = async (name: string) => {
+    const ownedProject = { ...await createRuntimeProject(name), ownerEmail: currentSession.email };
+    setProjects((current) => {
+      const next = [...current.filter((item) => item.id !== ownedProject.id), ownedProject];
+      return next;
+    });
+    reportAction(`Created ${ownedProject.name}`);
+  };
+
+  const deleteProject = async (projectID: string) => {
+    const project = projectByID(projects, projectID);
+    if (!project?.runtimeCreated) return;
+    await deleteRuntimeProject(projectID);
+    setProjects((current) => current.filter((item) => item.id !== projectID));
+    if (activeProjectID === projectID) {
+      setActiveProjectID(null);
+      window.localStorage.removeItem(dashboardProjectKey);
+      window.history.pushState(null, "", "/projects");
+    }
+    reportAction(`Deleted ${project.name}`);
+  };
+
   const navigatePage = (id: PageID) => {
+    const projectID = activeProject?.id ?? activeProjectID;
+    if (!projectID) return;
     setActivePage(id);
-    const nextPath = pathForPage(id);
+    const nextPath = pathForProjectPage(projectID, id);
     if (window.location.pathname !== nextPath) {
       window.history.pushState(null, "", nextPath);
     }
   };
 
   useEffect(() => {
-    const currentPath = pathForPage(activePage);
-    if (window.location.pathname !== currentPath) {
-      window.history.replaceState(null, "", currentPath);
-    }
-    const onPopState = () => setActivePage(pageFromPath(window.location.pathname));
+    const onPopState = () => {
+      setActivePage(pageFromPath(window.location.pathname));
+      setActiveProjectID(projectIDFromPath(window.location.pathname));
+    };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  useEffect(() => {
+    if (dashboardAuthEnabled && !session) {
+      if (window.location.pathname !== "/login") window.history.replaceState(null, "", "/login");
+      return;
+    }
+    if (!activeProject) {
+      if (!projectIDFromPath(window.location.pathname) && window.location.pathname !== "/projects") window.history.replaceState(null, "", "/projects");
+      return;
+    }
+    const currentPath = pathForProjectPage(activeProject.id, activePage);
+    if (window.location.pathname !== currentPath) {
+      window.history.replaceState(null, "", currentPath);
+    }
+  }, [activePage, activeProject, session]);
 
   useEffect(() => {
     window.localStorage.setItem("gonvex-theme", theme);
   }, [theme]);
 
   useEffect(() => {
+    let cancelled = false;
+    fetchRuntimeProjects()
+      .then((runtimeProjects) => {
+        if (cancelled || runtimeProjects.length === 0) return;
+        setProjects((current) => {
+          const runtimeIDs = new Set(runtimeProjects.map((project) => project.id));
+          return [...current.filter((project) => !runtimeIDs.has(project.id)), ...runtimeProjects];
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!actionMessage) return;
     const timeout = window.setTimeout(() => setActionMessage(""), 2600);
     return () => window.clearTimeout(timeout);
   }, [actionMessage]);
+
+  if (dashboardAuthEnabled && !session) {
+    return (
+      <LoginPage
+        onLogin={login}
+        onToggleTheme={toggleTheme}
+        theme={theme}
+        themeLabel={themeLabel}
+      />
+    );
+  }
+
+  if (!activeProject) {
+    return (
+      <ProjectsPage
+        onCreateProject={createProject}
+        onDeleteProject={deleteProject}
+        onLogout={logout}
+        onOpenProject={openProject}
+        onToggleTheme={toggleTheme}
+        authEnabled={dashboardAuthEnabled}
+        projects={visibleProjects}
+        session={currentSession}
+        theme={theme}
+        themeLabel={themeLabel}
+      />
+    );
+  }
 
   return (
     <main className="app-shell" data-theme={theme}>
@@ -732,11 +2175,17 @@ export function App() {
           ))}
         </nav>
 
+        <div className="project-card" aria-label="Active project">
+          <span>Project</span>
+          <strong>{activeProject.name}</strong>
+          <small>{activeProject.environment}</small>
+        </div>
+
         <div className="sidebar-status">
           <Chip color="accent" size="sm" variant="soft">
-            local dev
+            {activeProject.status}
           </Chip>
-          <span>Vite harness</span>
+          <span>{currentSession.name}</span>
         </div>
       </aside>
 
@@ -750,6 +2199,35 @@ export function App() {
             </div>
 
             <div className="topbar-actions">
+              <div className="project-switcher">
+                <span>Project</span>
+                <Select
+                  aria-label="Active project"
+                  className="project-switcher-select"
+                  onSelectionChange={(key) => {
+                    if (key) switchProject(String(key));
+                  }}
+                  selectedKey={activeProject.id}
+                >
+                  <Select.Trigger className="project-switcher-trigger">
+                    <Select.Value />
+                    <Select.Indicator />
+                  </Select.Trigger>
+                  <Select.Popover className="project-switcher-popover">
+                    <ListBox>
+                      {visibleProjects.map((project) => (
+                        <ListBox.Item id={project.id} key={project.id} textValue={project.name}>
+                          <span>{project.name}</span>
+                          <ListBox.ItemIndicator />
+                        </ListBox.Item>
+                      ))}
+                    </ListBox>
+                  </Select.Popover>
+                </Select>
+              </div>
+              <Button size="sm" variant="ghost" onPress={showProjects}>
+                Projects
+              </Button>
               <Chip color="success" size="sm" variant="soft">
                 realtime on
               </Chip>
@@ -761,6 +2239,9 @@ export function App() {
               </Button>
               <Button size="sm" variant="primary" onPress={() => reportAction("Dashboard test harness is mounted")}> 
                 Ready for tests
+              </Button>
+              <Button size="sm" variant="ghost" onPress={logout}>
+                Sign out
               </Button>
             </div>
           </header>
@@ -780,13 +2261,15 @@ export function App() {
             </section>
           )}
 
-          {activePage === "overview" ? <OverviewPage themeMode={theme} /> : null}
-          {activePage === "functions" ? <FunctionsPage themeMode={theme} onAction={reportAction} /> : null}
-          {activePage === "data" ? <DataPage themeMode={theme} onAction={reportAction} /> : null}
-          {activePage === "test" ? <TestPage themeMode={theme} onAction={reportAction} /> : null}
-          {activePage === "files" ? <FilesPage themeLabel={themeLabel} onToggleTheme={toggleTheme} onAction={reportAction} /> : null}
+          {activePage === "overview" ? <OverviewPage project={activeProject} themeMode={theme} /> : null}
+          {activePage === "functions" ? <FunctionsPage project={activeProject} themeMode={theme} onAction={reportAction} /> : null}
+          {activePage === "data" ? <DataPage project={activeProject} themeMode={theme} onAction={reportAction} /> : null}
+          {activePage === "test" ? <TestPage project={activeProject} themeMode={theme} onAction={reportAction} /> : null}
+          {activePage === "files" ? (
+            <FilesPage project={activeProject} themeLabel={themeLabel} onToggleTheme={toggleTheme} onAction={reportAction} />
+          ) : null}
           {activePage === "realtime" ? <RealtimePage /> : null}
-          {activePage === "settings" ? <SettingsPage /> : null}
+          {activePage === "settings" ? <SettingsPage project={activeProject} /> : null}
         </div>
       </section>
       {actionMessage ? <div className="action-toast" role="status">{actionMessage}</div> : null}
@@ -794,7 +2277,239 @@ export function App() {
   );
 }
 
-function OverviewPage(props: { themeMode: ThemeMode }) {
+function LoginPage(props: {
+  onLogin: (session: DashboardSession) => void;
+  onToggleTheme: () => void;
+  theme: ThemeMode;
+  themeLabel: string;
+}) {
+  const [email, setEmail] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [googleLoading, setGoogleLoading] = useState(false);
+
+  const signInWithGoogle = async () => {
+    setAuthError("");
+    const auth = getFirebaseAuth();
+    if (!auth) {
+      setAuthError("Firebase is not configured. Add VITE_FIREBASE_* values to apps/dashboard/.env.local.");
+      return;
+    }
+    setGoogleLoading(true);
+    try {
+      const result = await signInWithPopup(auth, new GoogleAuthProvider());
+      const user = result.user;
+      props.onLogin({
+        email: user.email ?? "google-user@gonvex.local",
+        name: user.displayName ?? user.email ?? "Google user",
+        avatarUrl: user.photoURL ?? undefined,
+        provider: "google",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Google sign-in failed.";
+      setAuthError(message);
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail) return;
+    props.onLogin({ email: normalizedEmail, name: displayNameFromEmail(normalizedEmail), provider: "dev" });
+  };
+
+  return (
+    <main className="login-shell" data-theme={props.theme}>
+      <Card className="login-card" variant="default">
+        <Card.Header className="login-card-header">
+          <div className="brand-lockup login-brand" aria-label="Gonvex dashboard">
+            <span className="brand-mark">G</span>
+            <span className="brand-name">Gonvex</span>
+          </div>
+          <div>
+            <Card.Title>Welcome back</Card.Title>
+            <p>Sign in to continue to Gonvex.</p>
+          </div>
+        </Card.Header>
+        <Card.Content>
+          <button className="google-login-button" disabled={googleLoading} onClick={signInWithGoogle} type="button">
+            <svg aria-hidden="true" className="google-mark" viewBox="0 0 18 18">
+              <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.9c1.7-1.56 2.7-3.86 2.7-6.62Z" />
+              <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.26c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.58-5.05-3.72H.96v2.34A9 9 0 0 0 9 18Z" />
+              <path fill="#FBBC05" d="M3.95 10.7a5.41 5.41 0 0 1 0-3.4V4.96H.96a9 9 0 0 0 0 8.08l2.99-2.34Z" />
+              <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58A8.62 8.62 0 0 0 9 0 9 9 0 0 0 .96 4.96L3.95 7.3C4.66 5.16 6.65 3.58 9 3.58Z" />
+            </svg>
+            <span>{googleLoading ? "Opening Google..." : "Sign in with Google"}</span>
+          </button>
+          {authError ? <p className="login-error" role="alert">{authError}</p> : null}
+          <div className="login-divider"><span>or</span></div>
+          <form className="login-form" onSubmit={submit}>
+            <label className="setting-field">
+              <span>Email</span>
+              <input
+                autoComplete="email"
+                className="table-search"
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="you@example.com"
+                type="email"
+                value={email}
+              />
+            </label>
+            <div className="login-actions">
+              <Button type="submit" variant="secondary">Continue with email</Button>
+              <Button size="sm" variant="ghost" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
+            </div>
+          </form>
+        </Card.Content>
+      </Card>
+    </main>
+  );
+}
+
+function ProjectsPage(props: {
+  onCreateProject: (name: string) => Promise<void>;
+  onDeleteProject: (projectID: string) => Promise<void>;
+  onLogout: () => void;
+  onOpenProject: (projectID: string) => void;
+  onToggleTheme: () => void;
+  authEnabled: boolean;
+  projects: ProjectTarget[];
+  session: DashboardSession;
+  theme: ThemeMode;
+  themeLabel: string;
+}) {
+  const [name, setName] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createError, setCreateError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [deletingProjectID, setDeletingProjectID] = useState<string | null>(null);
+
+  const createProject = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const cleanName = name.trim();
+    if (!cleanName) return;
+    setCreating(true);
+    setCreateError("");
+    try {
+      await props.onCreateProject(cleanName);
+      setName("");
+      setCreateOpen(false);
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : "Could not create project");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const deleteProject = async (project: ProjectTarget) => {
+    if (!project.runtimeCreated) return;
+    setDeletingProjectID(project.id);
+    try {
+      await props.onDeleteProject(project.id);
+    } finally {
+      setDeletingProjectID(null);
+    }
+  };
+
+  return (
+    <main className="projects-shell" data-theme={props.theme}>
+      <header className="projects-header">
+        <div className="brand-lockup" aria-label="Gonvex dashboard">
+          <span className="brand-mark">G</span>
+          <span className="brand-name">Gonvex</span>
+        </div>
+        <div className="topbar-actions">
+          <span className="projects-user">{props.session.name}</span>
+          <Button size="sm" variant="secondary" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
+          {props.authEnabled ? <Button size="sm" variant="ghost" onPress={props.onLogout}>Sign out</Button> : null}
+        </div>
+      </header>
+
+      <section className="projects-title">
+        <p className="eyebrow">Projects</p>
+        <h1>Choose a project</h1>
+        <p className="lede">Each project can point to the same Postgres instance with a different database and its own generated code manifest.</p>
+      </section>
+
+      <section className="projects-grid" aria-label="Projects">
+        {props.projects.map((project) => (
+          <Card className="project-tile" key={project.id} variant="default">
+            <Card.Header className="project-tile-header">
+              <div>
+                <Card.Title>{project.name}</Card.Title>
+                <p>{project.id}</p>
+              </div>
+              <Chip color={projectIsProvisioned(project) ? "accent" : "warning"} size="sm" variant="soft">
+                {projectIsProvisioned(project) ? project.environment : "setup"}
+              </Chip>
+            </Card.Header>
+            <Card.Content className="project-tile-content">
+              <div className="project-glyph" aria-hidden="true">{projectInitial(project.name)}</div>
+              <div className="project-tile-actions">
+                <Button variant="primary" onPress={() => props.onOpenProject(project.id)}>
+                  Open project
+                </Button>
+                {project.runtimeCreated ? (
+                  <Button
+                    isDisabled={deletingProjectID === project.id}
+                    onPress={() => deleteProject(project)}
+                    variant="ghost"
+                  >
+                    {deletingProjectID === project.id ? "Deleting" : "Delete"}
+                  </Button>
+                ) : null}
+              </div>
+            </Card.Content>
+          </Card>
+        ))}
+
+        <button className="project-create-tile" onClick={() => setCreateOpen(true)} type="button">
+          <span aria-hidden="true">+</span>
+          <strong>Create project</strong>
+        </button>
+      </section>
+
+      {createOpen ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setCreateOpen(false)}>
+          <section
+            aria-labelledby="create-project-title"
+            className="document-modal project-create-modal"
+            onMouseDown={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <header>
+              <div>
+                <h2 id="create-project-title">Create project</h2>
+                <p>Start a new local Gonvex project entry.</p>
+              </div>
+              <Button size="sm" variant="ghost" onPress={() => setCreateOpen(false)}>Close</Button>
+            </header>
+            <form className="project-modal-form" onSubmit={createProject}>
+              <label className="setting-field">
+                <span>Name</span>
+                <input autoFocus className="table-search" onChange={(event) => setName(event.target.value)} value={name} />
+              </label>
+              {createError ? <p className="project-modal-error">{createError}</p> : null}
+              <footer>
+                <Button variant="ghost" onPress={() => setCreateOpen(false)}>Cancel</Button>
+                <Button isDisabled={creating} type="submit" variant="primary">{creating ? "Creating" : "Create project"}</Button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      ) : null}
+    </main>
+  );
+}
+
+function OverviewPage(props: { project: ProjectTarget; themeMode: ThemeMode }) {
+  const projectRows = [
+    ["Runtime URL", runtimeURLForProject(props.project) || "not configured"],
+    ["Database", props.project.database],
+    ["Storage bucket", props.project.storageBucket],
+  ];
+
   return (
     <div className="dashboard-layout">
       <section className="main-column">
@@ -808,25 +2523,101 @@ function OverviewPage(props: { themeMode: ThemeMode }) {
         </section>
 
         <GridCard title="LiveGrid test surface" eyebrow="Function manifest" chip="Glide Data Grid">
-          <ManifestGrid columns={functionColumns} rows={functionRows} height={330} themeMode={props.themeMode} />
+          <ManifestGrid columns={functionColumns} rows={[]} height={330} themeMode={props.themeMode} />
         </GridCard>
       </section>
 
       <aside className="right-rail" aria-label="Runtime activity">
         <ListCard title="Runtime activity" rows={activity} />
-        <ListCard title="Project target" rows={settings.slice(0, 3)} />
+        <ListCard title="Project target" rows={projectRows} />
       </aside>
     </div>
   );
 }
 
-function FunctionsPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
+function MiniChart(props: { series: number[]; tone: FunctionStat["tone"] }) {
+  const values = props.series.length > 0 ? props.series : [0];
+  const max = Math.max(...values, 1);
+  const width = 100;
+  const height = 100;
+  const points = values.map((value, index) => {
+    const x = values.length === 1 ? width : (index / (values.length - 1)) * width;
+    const y = height - (Math.max(0, value) / max) * (height - 12) - 6;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+
+  return (
+    <div className="mini-chart" data-tone={props.tone}>
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+        <polyline points={points} />
+      </svg>
+    </div>
+  );
+}
+
+function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onAction: ActionHandler }) {
   const [search, setSearch] = useState("");
-  const [selectedName, setSelectedName] = useState(functions[0].name);
-  const selectedFunction = functions.find((item) => item.name === selectedName) ?? functions[0];
-  const visibleFunctions = functions.filter((item) =>
+  const [runtimeFunctions, setRuntimeFunctions] = useState<FunctionInfo[]>([]);
+  const [runtimeMetrics, setRuntimeMetrics] = useState<RuntimeMetricsResponse | null>(null);
+  const [selectedName, setSelectedName] = useState("");
+  const [activeTab, setActiveTab] = useState<"statistics" | "logs">("statistics");
+  const selectedFunction = runtimeFunctions.find((item) => item.name === selectedName) ?? runtimeFunctions[0] ?? null;
+  const functionStats = buildFunctionStats(selectedFunction ? runtimeMetrics?.functions[selectedFunction.name] : undefined, runtimeMetrics?.cache);
+  const functionLogs = selectedFunction ? (runtimeMetrics?.logs ?? []).filter((entry) => entry.path === selectedFunction.name) : [];
+  const visibleFunctions = runtimeFunctions.filter((item) =>
     [item.name, item.kind, item.source].some((value) => value.toLowerCase().includes(search.toLowerCase())),
   );
+  const runtimeFunctionRows = functionInfosToRows(runtimeFunctions);
+
+  useEffect(() => {
+    if (!runtimeBaseURL || !projectIsProvisioned(props.project)) {
+      setRuntimeFunctions([]);
+      setSelectedName("");
+      return;
+    }
+    let cancelled = false;
+
+    fetch(`${runtimeBaseURL}/dev/manifest`, { headers: runtimeHeaders(props.project) })
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
+      .then((payload: ManifestResponse) => {
+        if (cancelled) return;
+        const nextFunctions = manifestFunctionsToRows(payload);
+        setRuntimeFunctions(nextFunctions);
+        setSelectedName((current) => (nextFunctions.some((item) => item.name === current) ? current : nextFunctions[0]?.name ?? ""));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRuntimeFunctions([]);
+          setSelectedName("");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [props.project]);
+
+  useEffect(() => {
+    if (!runtimeBaseURL) return;
+    let cancelled = false;
+    const loadMetrics = () => {
+      fetch(`${runtimeBaseURL}/dev/metrics`)
+        .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
+        .then((payload: RuntimeMetricsResponse) => {
+          if (!cancelled) setRuntimeMetrics(payload);
+        })
+        .catch(() => {
+          if (!cancelled) setRuntimeMetrics(null);
+        });
+    };
+
+    loadMetrics();
+    const interval = window.setInterval(loadMetrics, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   return (
     <div className="function-browser">
@@ -834,7 +2625,7 @@ function FunctionsPage(props: { themeMode: ThemeMode; onAction: ActionHandler })
         <div className="table-browser-heading">
           <span>Functions</span>
           <Chip color="default" size="sm" variant="secondary">
-            {functions.length}
+            {runtimeFunctions.length}
           </Chip>
         </div>
         <input
@@ -862,61 +2653,82 @@ function FunctionsPage(props: { themeMode: ThemeMode; onAction: ActionHandler })
         </div>
       </aside>
 
-      <section className="function-detail-panel" aria-labelledby="function-detail-title">
-        <header className="function-detail-header">
-          <div>
-            <div className="function-title-row">
-              <h2 id="function-detail-title">{selectedFunction.name}</h2>
-              <Chip color="warning" size="sm" variant="soft">
-                {selectedFunction.kind}
-              </Chip>
+        <section className="function-detail-panel" aria-labelledby="function-detail-title">
+        {selectedFunction ? (
+          <header className="function-detail-header">
+            <div>
+              <div className="function-title-row">
+                <h2 id="function-detail-title">{selectedFunction.name}</h2>
+                <Chip color="warning" size="sm" variant="soft">
+                  {selectedFunction.kind}
+                </Chip>
+              </div>
+              <p>{selectedFunction.source}</p>
             </div>
-            <p>{selectedFunction.source}</p>
-          </div>
-          <Button size="sm" variant="primary" onPress={() => props.onAction(`${selectedFunction.name} queued for local execution MVP`)}>
-            Run Function
-          </Button>
-        </header>
+            <Button size="sm" variant="primary" onPress={() => props.onAction(`${selectedFunction.name} queued for local execution MVP`)}>
+              Run Function
+            </Button>
+          </header>
+        ) : (
+          <header className="function-detail-header">
+            <div>
+              <div className="function-title-row">
+                <h2 id="function-detail-title">No functions</h2>
+              </div>
+              <p>This project has not pushed a function manifest yet.</p>
+            </div>
+          </header>
+        )}
 
         <div className="function-tabs" role="tablist" aria-label="Function detail tabs">
-          <Button size="sm" variant="secondary">
+          <Button size="sm" variant={activeTab === "statistics" ? "secondary" : "ghost"} onPress={() => setActiveTab("statistics")}>
             Statistics
           </Button>
-          <Button size="sm" variant="ghost">
+          <Button size="sm" variant={activeTab === "logs" ? "secondary" : "ghost"} onPress={() => setActiveTab("logs")}>
             Logs
           </Button>
         </div>
 
-        <div className="function-stat-grid" aria-label="Function statistics">
-          {functionStats.map(([label, value, tone]) => (
-            <Card className="function-stat-card" key={label} variant="default">
-              <Card.Header className="list-card-heading">
-                <Card.Title>{label}</Card.Title>
-                <strong>{value}</strong>
-              </Card.Header>
-              <Card.Content>
-                <div className="mini-chart" data-tone={tone}>
-                  <span />
-                  <span />
-                  <span />
-                  <span />
+        {activeTab === "statistics" ? (
+          <div className="function-stat-grid" aria-label="Function statistics">
+            {functionStats.map((stat) => (
+              <Card className="function-stat-card" key={stat.label} variant="default">
+                <Card.Header className="list-card-heading">
+                  <Card.Title>{stat.label}</Card.Title>
+                  <strong>{stat.value}</strong>
+                </Card.Header>
+                <Card.Content>
+                  <MiniChart series={stat.series} tone={stat.tone} />
+                </Card.Content>
+              </Card>
+            ))}
+          </div>
+        ) : (
+          <Card className="function-log-card" variant="default">
+            <Card.Content>
+              {functionLogs.length > 0 ? functionLogs.map((entry) => (
+                <div className="function-log-row" key={`${entry.time}:${entry.path}:${entry.outcome}`} data-outcome={entry.outcome}>
+                  <span>{formatLogTime(entry.time)}</span>
+                  <strong>{entry.outcome}</strong>
+                  <code>{formatDuration(entry.durationMs)}</code>
+                  {entry.error ? <em>{entry.error}</em> : null}
                 </div>
-              </Card.Content>
-            </Card>
-          ))}
-        </div>
+              )) : <p className="empty-state">No runtime logs for this function yet.</p>}
+            </Card.Content>
+          </Card>
+        )}
 
         <GridCard title="Registered functions" eyebrow="Generated API" chip="manifest.json">
-          <ManifestGrid columns={functionColumns} rows={functionRows} height={260} themeMode={props.themeMode} />
+          <ManifestGrid columns={functionColumns} rows={runtimeFunctionRows} height={260} themeMode={props.themeMode} />
         </GridCard>
       </section>
     </div>
   );
 }
 
-function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
-  const [tables, setTables] = useState<DataTableInfo[]>(fallbackTables);
-  const [selectedTable, setSelectedTable] = useState(fallbackTables[0].name);
+function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onAction: ActionHandler }) {
+  const [tables, setTables] = useState<DataTableInfo[]>([]);
+  const [selectedTable, setSelectedTable] = useState("");
   const [rowCache, setRowCache] = useState<Record<number, Record<string, unknown>>>({});
   const [requestedOffset, setRequestedOffset] = useState(0);
   const [visibleOffset, setVisibleOffset] = useState(0);
@@ -932,33 +2744,55 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
   const [addValues, setAddValues] = useState<Record<string, string>>({});
   const [addError, setAddError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [status, setStatus] = useState("Local schema fallback");
+  const [status, setStatus] = useState("Loading tables...");
   const [runtimeAvailable, setRuntimeAvailable] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-  const activeTable = tables.find((table) => table.name === selectedTable) ?? tables[0];
-  const filtersKey = JSON.stringify(filters.filter((filter) => activeTable.columns.includes(filter.column)));
+  const [fetchNonce, setFetchNonce] = useState(0);
+  const rowCacheRef = useRef(rowCache);
+  const requestedOffsetRef = useRef(requestedOffset);
+  const inFlightOffsetRef = useRef<number | null>(null);
+  const fetchTimersRef = useRef<ScrollFetchTimers>({ debounceTimer: null, stopTimer: null });
+  const pendingScrollRef = useRef<ScrollFetchPending>({ startRow: 0, height: 1 });
+  rowCacheRef.current = rowCache;
+  requestedOffsetRef.current = requestedOffset;
+  const activeTable = tables.find((table) => table.name === selectedTable) ?? null;
+  const activeColumns = activeTable?.columns ?? emptyColumns;
+  const filtersKey = JSON.stringify(filters.filter((filter) => activeColumns.includes(filter.column)));
 
   useEffect(() => {
     let cancelled = false;
-    if (!runtimeBaseURL) {
-      setStatus("Runtime offline, showing schema fallback");
+    const baseURL = runtimeURLForProject(props.project);
+    if (!projectIsProvisioned(props.project)) {
+      setTables([]);
+      setSelectedTable("");
+      setStatus("Project database is not configured yet");
+      setRuntimeAvailable(false);
+      return;
+    }
+    if (!baseURL) {
+      setTables([]);
+      setSelectedTable("");
+      setStatus("Runtime offline");
       setRuntimeAvailable(false);
       return;
     }
 
     setStatus("Loading tables...");
-    fetch(`${runtimeBaseURL}/dev/data/tables`)
+    fetch(`${baseURL}/dev/data/tables`, { headers: runtimeHeaders(props.project) })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
       .then((payload: { tables: DataTableInfo[] }) => {
-        if (cancelled || payload.tables.length === 0) return;
-        setTables(payload.tables);
+        if (cancelled) return;
+        const nextTables = payload.tables ?? [];
+        setTables(nextTables);
         setStatus("Connected to Gonvex Runtime");
         setRuntimeAvailable(true);
-        setSelectedTable((current) => (payload.tables.some((table) => table.name === current) ? current : payload.tables[0].name));
+        setSelectedTable((current) => (nextTables.some((table) => table.name === current) ? current : nextTables[0]?.name ?? ""));
       })
       .catch(() => {
         if (!cancelled) {
-          setStatus("Runtime offline, showing schema fallback");
+          setTables([]);
+          setSelectedTable("");
+          setStatus("Runtime offline");
           setRuntimeAvailable(false);
         }
       });
@@ -966,13 +2800,13 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
     return () => {
       cancelled = true;
     };
-  }, [refreshKey]);
+  }, [props.project, refreshKey]);
 
   useEffect(() => {
     setRequestedOffset(0);
     setVisibleOffset(0);
     setRowCache({});
-  }, [filtersKey, rowSearch, rowSort, selectedTable]);
+  }, [filtersKey, props.project.id, rowSearch, rowSort, selectedTable]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setRowSearch(rowSearchInput), 300);
@@ -982,16 +2816,22 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
-    if (!runtimeBaseURL) {
-      const fallback = fallbackRows[selectedTable] ?? [];
-      setRowCache(Object.fromEntries(fallback.map((row, index) => [index, row])));
-      setMatchingRows(fallbackRows[selectedTable]?.length ?? 0);
+    const baseURL = runtimeURLForProject(props.project);
+    if (!activeTable || !projectIsProvisioned(props.project)) {
+      setRowCache({});
+      setMatchingRows(0);
+      setRuntimeAvailable(false);
+      return;
+    }
+    if (!baseURL) {
+      setRowCache({});
+      setMatchingRows(0);
       setRuntimeAvailable(false);
       return;
     }
     const params = new URLSearchParams({
       offset: String(requestedOffset),
-      limit: String(pageSize),
+      limit: String(dataPageSize),
     });
     if (rowSearch.trim()) params.set("search", rowSearch.trim());
     if (rowSort) {
@@ -1000,11 +2840,17 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
     }
     if (filtersKey !== "[]") params.set("filters", filtersKey);
 
-    fetch(`${runtimeBaseURL}/dev/data/tables/${selectedTable}/rows?${params.toString()}`, { signal: controller.signal })
+    inFlightOffsetRef.current = requestedOffset;
+
+    fetch(`${baseURL}/dev/data/tables/${selectedTable}/rows?${params.toString()}`, {
+      headers: runtimeHeaders(props.project),
+      signal: controller.signal,
+    })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
       .then((payload: DataRowsResponse) => {
         if (cancelled) return;
         const offset = payload.offset ?? requestedOffset;
+        if (offset !== requestedOffsetRef.current) return;
         setRowCache((current) => mergeRowsIntoCache(current, payload.rows, offset));
         setMatchingRows(payload.total ?? (rowSearch.trim() || filtersKey !== "[]" ? payload.rows.length : activeTable.rowCount));
         setStatus(payload.total === undefined ? "Connected to Gonvex Runtime (restart needed for server sort)" : "Connected to Gonvex Runtime");
@@ -1013,48 +2859,73 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
       .catch(() => {
         if (controller.signal.aborted) return;
         if (!cancelled) {
-          const fallback = fallbackRows[selectedTable] ?? [];
-          setRowCache(Object.fromEntries(fallback.map((row, index) => [index, row])));
-          setMatchingRows(fallbackRows[selectedTable]?.length ?? 0);
+          setRowCache({});
+          setMatchingRows(0);
           setRuntimeAvailable(false);
+        }
+      })
+      .finally(() => {
+        if (!cancelled && inFlightOffsetRef.current === requestedOffset) {
+          inFlightOffsetRef.current = null;
         }
       });
 
     return () => {
       cancelled = true;
       controller.abort();
+      if (inFlightOffsetRef.current === requestedOffset) {
+        inFlightOffsetRef.current = null;
+      }
+      clearScrollRowFetch(fetchTimersRef);
     };
-  }, [activeTable.rowCount, filtersKey, refreshKey, requestedOffset, rowSearch, rowSort, selectedTable]);
+  }, [activeTable, filtersKey, props.project, refreshKey, requestedOffset, rowSearch, rowSort, fetchNonce, selectedTable]);
 
   useEffect(() => {
-    setAddValues(Object.fromEntries(activeTable.columns.map((column) => [column, defaultValueForColumn(column)])));
+    setAddValues(Object.fromEntries(activeColumns.map((column) => [column, defaultValueForColumn(column)])));
     setAddError("");
-  }, [selectedTable]);
+  }, [activeColumns, selectedTable]);
 
   const visibleTables = tables.filter((table) => table.name.toLowerCase().includes(tableSearch.toLowerCase()));
-  const dataColumns = columnsForDataTable(activeTable.columns).map((column) => ({
+  const dataColumns = columnsForDataTable(activeColumns).map((column) => ({
     ...column,
     width: columnWidths[String(column.id)] ?? ("width" in column ? column.width : 150),
     title: titleWithSort(column.title, rowSort, String(column.id)),
   }));
-  const gridRowCount = runtimeAvailable ? matchingRows : Object.keys(rowCache).length;
-  const dataCellGetter = createCachedCellGetter(activeTable.columns, rowCache);
+  const gridRowCount = activeTable ? (runtimeAvailable ? matchingRows : Object.keys(rowCache).length) : 0;
+  const dataCellGetter = createCachedCellGetter(activeColumns, rowCache);
   const openAddDocument = () => {
+    if (!activeTable) {
+      props.onAction("No runtime table is selected");
+      return;
+    }
+    if (!projectIsProvisioned(props.project)) {
+      props.onAction("Configure this project's database before inserting documents");
+      return;
+    }
     if (!runtimeAvailable) {
       props.onAction("Start Gonvex Runtime with `pnpm dev:runtime` before inserting documents");
       return;
     }
-    setAddValues(Object.fromEntries(activeTable.columns.map((column) => [column, defaultValueForColumn(column)])));
+    setAddValues(Object.fromEntries(activeColumns.map((column) => [column, defaultValueForColumn(column)])));
     setAddError("");
     setAddOpen(true);
   };
   const addFilter = () => {
+    if (!activeTable) return;
     setFilters((current) => [
       ...current,
-      { id: String(Date.now()), column: activeTable.columns[0] ?? "id", operator: "contains", value: "" },
+      { id: String(Date.now()), column: activeColumns[0] ?? "id", operator: "contains", value: "" },
     ]);
   };
   const insertDocument = async () => {
+    if (!activeTable) {
+      setAddError("No runtime table is selected.");
+      return;
+    }
+    if (!projectIsProvisioned(props.project)) {
+      setAddError("This project does not have a database configured yet.");
+      return;
+    }
     if (!runtimeAvailable) {
       setAddError("Gonvex Runtime is offline. Start it with `pnpm dev:runtime`, then refresh this page.");
       return;
@@ -1062,9 +2933,9 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
     setSubmitting(true);
     setAddError("");
     try {
-      const response = await fetch(`${runtimeBaseURL}/dev/data/tables/${selectedTable}/rows`, {
+      const response = await fetch(`${runtimeURLForProject(props.project)}/dev/data/tables/${selectedTable}/rows`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: runtimeHeaders(props.project, { "content-type": "application/json" }),
         body: JSON.stringify(addValues),
       });
       if (!response.ok) {
@@ -1081,7 +2952,7 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
       props.onAction(`Inserted ${activeTable.name} row into the runtime database`);
     } catch (error) {
       const message = error instanceof TypeError
-        ? "Cannot reach Gonvex Runtime at http://localhost:8080. Start it with `pnpm dev:runtime`."
+        ? `Cannot reach Gonvex Runtime at ${runtimeURLForProject(props.project) || "the configured URL"}. Start it with \`pnpm dev:runtime\`.`
         : error instanceof Error ? error.message : "Insert failed";
       setAddError(message);
     } finally {
@@ -1120,7 +2991,9 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
           ))}
           {visibleTables.length === 0 ? <span className="empty-list-note">No matching tables</span> : null}
         </div>
-        <Button className="schema-button" size="sm" variant="secondary" onPress={() => props.onAction(`${activeTable.name}: ${activeTable.columns.join(", ")}`)}>
+        <Button className="schema-button" isDisabled={!activeTable} size="sm" variant="secondary" onPress={() => {
+          if (activeTable) props.onAction(`${activeTable.name}: ${activeTable.columns.join(", ")}`);
+        }}>
           Schema
         </Button>
       </aside>
@@ -1129,8 +3002,10 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
         <header className="data-table-toolbar">
           <div>
             <p className="eyebrow">{status}</p>
-            <h2 id="data-table-title">{activeTable.name}</h2>
-            <span className="row-count">{activeTable.rowCount} rows · {activeTable.columns.length} columns</span>
+            <h2 id="data-table-title">{activeTable?.name ?? "No tables"}</h2>
+            <span className="row-count">
+              {activeTable ? `${activeTable.rowCount} rows · ${activeTable.columns.length} columns` : "No schema pushed for this project"}
+            </span>
           </div>
           <div className="topbar-actions">
             <Button size="sm" variant="secondary" onPress={() => {
@@ -1145,10 +3020,10 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
             <Button size="sm" variant="secondary" onPress={() => {
               setFilterOpen((open) => !open);
               props.onAction(filterOpen ? "Closed filters" : "Opened filters");
-            }}>
+            }} isDisabled={!activeTable}>
               Filter & Sort{filters.length > 0 ? ` (${filters.length})` : ""}
             </Button>
-            <Button size="sm" variant="primary" onPress={openAddDocument} isDisabled={!runtimeAvailable}>
+            <Button size="sm" variant="primary" onPress={openAddDocument} isDisabled={!runtimeAvailable || !activeTable}>
               + Add Document
             </Button>
           </div>
@@ -1165,7 +3040,7 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
           <span>{matchingRows} matching rows</span>
         </div>
 
-        {filterOpen ? (
+        {filterOpen && activeTable ? (
           <div className="filter-panel" role="region" aria-label="Filter and sort">
             <div className="filter-toolbar">
               <span>{rowSort ? `Sorting by ${rowSort.key} ${rowSort.direction}` : "Click a grid header to sort, or configure filters below."}</span>
@@ -1178,7 +3053,7 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
                   setRowSort(event.target.value ? { key: event.target.value, direction: rowSort?.direction ?? "asc" } : null);
                 }}>
                   <option value="">None</option>
-                  {activeTable.columns.map((column) => <option key={column} value={column}>{column}</option>)}
+                  {activeColumns.map((column) => <option key={column} value={column}>{column}</option>)}
                 </select>
               </label>
               <label>
@@ -1201,7 +3076,7 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
                 <select value={filter.column} onChange={(event) => {
                   setFilters((current) => current.map((item) => item.id === filter.id ? { ...item, column: event.target.value } : item));
                 }}>
-                  {activeTable.columns.map((column) => <option key={column} value={column}>{column}</option>)}
+                  {activeColumns.map((column) => <option key={column} value={column}>{column}</option>)}
                 </select>
                 <select value={filter.operator} onChange={(event) => {
                   setFilters((current) => current.map((item) => item.id === filter.id ? { ...item, operator: event.target.value as DataFilter["operator"] } : item));
@@ -1237,8 +3112,8 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
             rowCount={gridRowCount}
             themeMode={props.themeMode}
             onHeaderClick={(columnIndex) => {
-              const column = activeTable.columns[columnIndex];
-              if (column) {
+              const column = activeColumns[columnIndex];
+              if (column && activeTable) {
                 setRowCache({});
                 setRequestedOffset(0);
                 setRowSort((current) => nextSort(current, column));
@@ -1249,32 +3124,43 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
               setColumnWidths((current) => ({ ...current, [String(column.id)]: newSize }));
             }}
             onVisibleRegionChanged={(range) => {
-              const nextOffset = offsetForVisibleRow(Math.floor(range.y));
-              const hasVisibleRows = Array.from({ length: Math.ceil(range.height) }, (_, index) => rowCache[Math.floor(range.y) + index])
-                .every(Boolean);
-              if (!hasVisibleRows && nextOffset !== visibleOffset) {
-                setVisibleOffset(nextOffset);
-                setRequestedOffset(nextOffset);
-              }
+              const startRow = Math.floor(range.y);
+              const nextOffset = offsetForVisibleRange(startRow, range.height, dataRowFetchStride, dataPageSize);
+              setVisibleOffset((current) => current === nextOffset ? current : nextOffset);
+              scheduleScrollRowFetch(
+                pendingScrollRef,
+                fetchTimersRef,
+                rowCacheRef,
+                requestedOffsetRef,
+                inFlightOffsetRef,
+                setRequestedOffset,
+                setFetchNonce,
+                startRow,
+                range.height,
+                dataRowFetchStride,
+                dataPageSize,
+              );
             }}
           />
           {gridRowCount === 0 ? (
             <div className="data-empty-state" role="status">
               <div className="empty-icon">▦</div>
-              <strong>{runtimeAvailable ? "This table is empty." : "Runtime is offline."}</strong>
+              <strong>{activeTable ? (runtimeAvailable ? "This table is empty." : "Runtime is offline.") : "No tables yet."}</strong>
               <span>
-                {runtimeAvailable
+                {!activeTable
+                  ? "Connect a project and push its schema before tables appear here."
+                  : runtimeAvailable
                   ? "Create a document or run a mutation to start storing data."
                   : "Start Gonvex Runtime with `pnpm dev:runtime` to read and insert real database rows."}
               </span>
-              <Button size="sm" variant="primary" onPress={openAddDocument} isDisabled={!runtimeAvailable}>
+              <Button size="sm" variant="primary" onPress={openAddDocument} isDisabled={!runtimeAvailable || !activeTable}>
                 {runtimeAvailable ? "+ Add Document" : "Runtime Required"}
               </Button>
             </div>
           ) : null}
         </div>
       </section>
-      {addOpen ? (
+      {addOpen && activeTable ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setAddOpen(false)}>
           <section className="document-modal" role="dialog" aria-modal="true" aria-labelledby="add-document-title" onMouseDown={(event) => event.stopPropagation()}>
             <header>
@@ -1285,7 +3171,7 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
               <Button size="sm" variant="ghost" onPress={() => setAddOpen(false)}>Close</Button>
             </header>
             <div className="document-form">
-              {activeTable.columns.map((column) => (
+              {activeColumns.map((column) => (
                 <label key={column}>
                   <span>{column}{column === "id" ? " (auto)" : ""}</span>
                   <input
@@ -1315,16 +3201,21 @@ function DataPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
   );
 }
 
-const testTaskColumns: GridColumn[] = [
-  { title: "ID", id: "pg_id", width: 72 },
-  { title: "Task", id: "name", width: 420 },
-  { title: "Status", id: "status", width: 180 },
-  { title: "Priority", id: "priority", width: 140 },
-  { title: "Owner", id: "assignee", width: 150 },
-  { title: "Dates", id: "due_date", width: 180 },
-  { title: "Location", id: "spot", width: 150 },
-  { title: "Progress", id: "progress", width: 130 },
-  { title: "Flag", id: "flag_color", width: 76 },
+const testTaskColumns: TestTaskColumn[] = [
+  { title: "", id: "selection", width: 42, sortable: false },
+  { title: "ID", id: "pg_id", width: 55, filterKind: "number" },
+  { title: "", id: "flag_color", width: 50, sortable: true },
+  { title: "Name", id: "name", width: 360, filterKind: "text" },
+  { title: "Config", id: "config", width: 78, sortable: false },
+  { title: "Form", id: "form_id", width: 72, sortable: false },
+  { title: "", id: "notes", width: 60, sortable: false },
+  { title: "Status", id: "status", width: 220, filterKind: "set", dataColumn: "status_name" },
+  { title: "Priority", id: "priority", width: 120, filterKind: "set", dataColumn: "priority_name" },
+  { title: "Assignee", id: "assignee", width: 140, filterKind: "set", dataColumn: "assignee_names" },
+  { title: "Dates", id: "due_date", width: 140, filterKind: "date" },
+  { title: "Location", id: "spot", width: 180, filterKind: "set", dataColumn: "spot_name" },
+  { title: "Created", id: "created_at", width: 120, filterKind: "date" },
+  { title: "Modified", id: "updated_at", width: 120, filterKind: "date" },
 ];
 
 const testTaskDataColumns = [
@@ -1333,35 +3224,102 @@ const testTaskDataColumns = [
   "name",
   "title",
   "description",
+  "form_id",
+  "sla_id",
+  "approval_id",
+  "notes_count",
+  "category_icon",
+  "category_color",
+  "category_name",
+  "tag_names",
+  "tag_colors",
+  "attachment_count",
+  "view_count",
   "status",
+  "status_name",
+  "status_color",
+  "status_action",
+  "status_icon",
+  "status_working_animation",
+  "status_initial",
   "priority",
+  "priority_name",
+  "priority_color",
   "assignee",
+  "assignee_names",
+  "assignee_ids",
+  "assignee_avatar_urls",
+  "all_user_names",
+  "all_user_avatar_urls",
   "due_date",
   "due_at",
   "start_date",
   "spot_id",
+  "spot_name",
+  "workspace_name",
   "progress",
   "flag_color",
+  "created_at",
+  "updated_at",
 ];
 
 const testSortColumns: Record<string, string> = {
-  spot: "spot_id",
+  status: "status_name",
+  priority: "priority_name",
+  assignee: "assignee_names",
+  spot: "spot_name",
 };
 
-function testTaskGridArgs(offset: number, search: string, sort: TestSortState): TestTaskGridArgs {
+function taskGridCursor(rowCache: Record<number, Record<string, unknown>>, offset: number): Pick<TestTaskGridArgs, "cursorCreatedAt" | "cursorId"> {
+  if (offset <= 0) return {};
+  const anchor = rowCache[offset - 1];
+  if (!anchor) return {};
+  const cursorId = formatCellValue(anchor.id);
+  const cursorCreatedAt = formatCellValue(anchor.created_at);
+  if (!cursorId || !cursorCreatedAt) return {};
+  return { cursorCreatedAt, cursorId };
+}
+
+function testTaskGridArgs(
+  offset: number,
+  search: string,
+  sort: TestSortState,
+  filters: DataFilter[],
+  rowCache: Record<number, Record<string, unknown>>,
+): TestTaskGridArgs {
   const trimmedSearch = search.trim();
   return {
     offset,
-    limit: 300,
+    limit: testTaskPageSize,
     columns: testTaskDataColumns,
     count: trimmedSearch ? "false" : "estimate",
+    ...taskGridCursor(rowCache, offset),
     ...(sort.direction !== "default" ? { sort: testSortColumns[sort.key] ?? sort.key, direction: sort.direction } : {}),
+    ...(filters.length > 0 ? { filters } : {}),
     ...(trimmedSearch ? { search: trimmedSearch } : {}),
   };
 }
 
-function testTaskGridStateKey(search: string, sort: TestSortState): string {
-  return JSON.stringify({ search: search.trim(), sort });
+function testTaskGridStateKey(search: string, sort: TestSortState, filters: DataFilter[]): string {
+  return JSON.stringify({ search: search.trim(), sort, filters });
+}
+
+function taskGridSearchParams(args: TestTaskGridArgs): URLSearchParams {
+  const params = new URLSearchParams({
+    offset: String(args.offset),
+    limit: String(args.limit),
+    count: args.count,
+    columns: args.columns.join(","),
+  });
+  if (args.search) params.set("search", args.search);
+  if (args.sort) {
+    params.set("sort", args.sort);
+    if (args.direction) params.set("direction", args.direction);
+  }
+  if (args.filters?.length) params.set("filters", JSON.stringify(args.filters));
+  if (args.cursorCreatedAt) params.set("cursorCreatedAt", args.cursorCreatedAt);
+  if (args.cursorId) params.set("cursorId", args.cursorId);
+  return params;
 }
 
 const statusColors: Record<string, string> = {
@@ -1400,66 +3358,523 @@ function formatShortDate(value: unknown): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function createWhagonsTaskCellGetter(rowCache: Record<number, Record<string, unknown>>) {
+function formatWhagonsRelativeDate(value: unknown): { primary: string; secondary?: string; muted?: boolean; color?: string; textColor?: string } {
+  const raw = formatCellValue(value);
+  if (!raw) return { primary: "", muted: true };
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return { primary: raw };
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(date);
+  target.setHours(0, 0, 0, 0);
+  const days = Math.round((target.getTime() - today.getTime()) / 86_400_000);
+  if (days < 0) return { primary: `${Math.abs(days)} ${Math.abs(days) === 1 ? "day" : "days"} overdue`, color: "rgba(239, 68, 68, 0.08)", textColor: "#dc2626" };
+  if (days === 0) return { primary: "Today", color: "rgba(245, 158, 11, 0.10)", textColor: "#d97706" };
+  return { primary: `in ${days} ${days === 1 ? "day" : "days"}`, muted: days > 3 };
+}
+
+function splitAssigneeNames(row: Record<string, unknown>): string[] {
+  return formatCellValue(row.assignee_names || row.assignee)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function splitAssigneeAvatarUrls(row: Record<string, unknown>): string[] {
+  return formatCellValue(row.assignee_avatar_urls)
+    .split(",")
+    .map((value) => value.trim());
+}
+
+function splitAllUserNames(row: Record<string, unknown>): string[] {
+  return formatCellValue(row.all_user_names)
+    .split("|")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function splitAllUserAvatarUrls(row: Record<string, unknown>): string[] {
+  return formatCellValue(row.all_user_avatar_urls)
+    .split("|")
+    .map((value) => value.trim());
+}
+
+type AssigneeClickTarget = { kind: "add" } | { kind: "avatar"; index: number };
+
+function assigneeClickTarget(row: Record<string, unknown>, localX: number, localY: number, cellHeight: number): AssigneeClickTarget | null {
+  const names = splitAssigneeNames(row).slice(0, 3);
+  const avatarSize = 28;
+  const step = avatarSize - 4;
+  const startX = 12;
+  const centerY = cellHeight / 2;
+  const withinCircle = (x: number) => {
+    const dx = localX - (x + avatarSize / 2);
+    const dy = localY - centerY;
+    return Math.hypot(dx, dy) <= avatarSize / 2;
+  };
+
+  if (names.length === 0) return withinCircle(startX) ? { kind: "add" } : null;
+  if ((splitAssigneeNames(row).length - names.length) === 0 && withinCircle(startX + names.length * step + 4)) {
+    return { kind: "add" };
+  }
+  for (let index = names.length - 1; index >= 0; index -= 1) {
+    if (withinCircle(startX + index * step)) return { kind: "avatar", index };
+  }
+  return null;
+}
+
+function createWhagonsTaskCellGetter(rowCache: Record<number, Record<string, unknown>>, hoveredRow: number | null, selectedRows: ReadonlySet<number>, selectedRowTimes: Readonly<Record<number, number>>) {
+  const assigneeAvatarByName: Record<string, string> = {};
+  for (const row of Object.values(rowCache)) {
+    const names = [...splitAllUserNames(row), ...splitAssigneeNames(row)];
+    const urls = [...splitAllUserAvatarUrls(row), ...splitAssigneeAvatarUrls(row)];
+    names.forEach((name, index) => {
+      if (urls[index] && !assigneeAvatarByName[name]) assigneeAvatarByName[name] = urls[index];
+    });
+  }
+  const assigneeOptions = Array.from(new Set(Object.values(rowCache).flatMap((row) => [...splitAllUserNames(row), ...splitAssigneeNames(row)])))
+    .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
+
   return ([column, rowIndex]: Item): GridCell => {
     const row = rowCache[rowIndex];
     const columnId = String(testTaskColumns[column]?.id ?? "");
-    if (!row) return whTaskCell({ kind: "taskName", primary: "Loading...", muted: true });
+    if (!row) return columnId === "name" ? whTaskCell({ kind: "taskName", primary: "Loading...", muted: true }) : { kind: GridCellKind.Text, allowOverlay: false, displayData: "", data: "" };
     switch (columnId) {
+      case "selection":
+        return whTaskCell({ kind: "selection", primary: "", hovered: hoveredRow === rowIndex, selected: selectedRows.has(rowIndex), selectedAt: selectedRowTimes[rowIndex] });
       case "pg_id":
-        return { kind: GridCellKind.Text, allowOverlay: false, displayData: `#${formatCellValue(row.pg_id || row.id)}`, data: `#${formatCellValue(row.pg_id || row.id)}` };
-      case "name":
-        return whTaskCell({ kind: "taskName", primary: formatCellValue(row.name || row.title), secondary: formatCellValue(row.description) });
-      case "status": {
-        const value = formatCellValue(row.status);
-        return whTaskCell({ kind: "statusPill", primary: prettify(value), color: statusColors[value] ?? "#e5e7eb" });
-      }
-      case "priority": {
-        const value = formatCellValue(row.priority);
-        return whTaskCell({ kind: "priorityPill", primary: prettify(value), color: priorityColors[value] ?? "#e5e7eb" });
-      }
-      case "due_date":
-        return whTaskCell({ kind: "dateStack", primary: formatShortDate(row.due_date || row.due_at), secondary: `Started ${formatShortDate(row.start_date)}` });
-      case "progress":
-        return whTaskCell({ kind: "progressBar", primary: formatCellValue(row.progress), progress: Number(row.progress ?? 0), color: "#22c55e" });
+        return { kind: GridCellKind.Text, allowOverlay: false, displayData: formatCellValue(row.pg_id || row.id), data: formatCellValue(row.pg_id || row.id) };
       case "flag_color": {
         const color = formatCellValue(row.flag_color);
         return whTaskCell({ kind: "flag", primary: color || "none", color: flagColors[color] });
       }
+      case "name":
+        return whTaskCell({
+          kind: "taskName",
+          primary: formatCellValue(row.name || row.title),
+          secondary: formatCellValue(row.description),
+          hovered: hoveredRow === rowIndex,
+          categoryIcon: formatCellValue(row.category_icon),
+          categoryColor: formatCellValue(row.category_color),
+          tagNames: formatCellValue(row.tag_names).split("|").filter(Boolean),
+          tagColors: formatCellValue(row.tag_colors).split("|").filter(Boolean),
+          attachmentCount: Number(row.attachment_count ?? 0),
+          viewCount: Number(row.view_count ?? 0),
+        });
+      case "config":
+        return whTaskCell({ kind: "config", primary: formatCellValue(row.sla_id || row.approval_id) ? "SLA" : "" });
+      case "form_id":
+        return whTaskCell({ kind: "form", primary: formatCellValue(row.form_id) ? "Form" : "" });
+      case "notes":
+        return whTaskCell({ kind: "notes", primary: formatCellValue(row.notes_count || 0) });
+      case "status": {
+        const value = formatCellValue(row.status_name || row.status);
+        const color = formatCellValue(row.status_color);
+        return whTaskCell({
+          kind: "statusPill",
+          primary: value || "No Status",
+          color: color || statusColors[formatCellValue(row.status)] || "#e5e7eb",
+          statusAction: formatCellValue(row.status_action),
+          statusIcon: formatCellValue(row.status_icon),
+          workingAnimation: formatCellValue(row.status_working_animation),
+          initial: row.status_initial === true || formatCellValue(row.status_initial) === "true",
+        });
+      }
+      case "priority": {
+        const value = formatCellValue(row.priority_name || row.priority);
+        const color = formatCellValue(row.priority_color);
+        return whTaskCell({ kind: "priorityPill", primary: value || "No Priority", color: color || priorityColors[formatCellValue(row.priority)] || "#e5e7eb" });
+      }
+      case "assignee":
+        return whTaskCell({ kind: "assignees", primary: formatCellValue(row.assignee_names || row.assignee), hovered: hoveredRow === rowIndex, names: splitAssigneeNames(row), avatarUrls: splitAssigneeAvatarUrls(row), options: assigneeOptions, optionAvatarUrls: assigneeAvatarByName });
+      case "due_date": {
+        const date = formatWhagonsRelativeDate(row.due_date || row.due_at || row.start_date);
+        return whTaskCell({ kind: "dateStack", primary: date.primary, secondary: date.secondary, muted: date.muted, color: date.color, textColor: date.textColor });
+      }
       case "spot":
-        return { kind: GridCellKind.Text, allowOverlay: false, displayData: formatCellValue(row.spot_id), data: formatCellValue(row.spot_id) };
+        return { kind: GridCellKind.Text, allowOverlay: false, displayData: formatCellValue(row.spot_name || row.spot_id), data: formatCellValue(row.spot_name || row.spot_id) };
+      case "created_at":
+      case "updated_at":
+        return { kind: GridCellKind.Text, allowOverlay: false, displayData: formatShortDate(row[columnId]), data: formatShortDate(row[columnId]) };
       default:
         return { kind: GridCellKind.Text, allowOverlay: false, displayData: formatCellValue(row[columnId]), data: formatCellValue(row[columnId]) };
     }
   };
 }
 
-function TestPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
+const testFilterOperators: Array<{ value: TestColumnFilter["operator"]; label: string }> = [
+  { value: "contains", label: "Contains" },
+  { value: "notContains", label: "Does not contain" },
+  { value: "equals", label: "Equals" },
+  { value: "notEquals", label: "Does not equal" },
+  { value: "startsWith", label: "Starts with" },
+  { value: "endsWith", label: "Ends with" },
+  { value: "empty", label: "Is empty" },
+  { value: "notEmpty", label: "Is not empty" },
+];
+
+const testComparableFilterOperators: Array<{ value: TestColumnFilter["operator"]; label: string }> = [
+  { value: "equals", label: "Equals" },
+  { value: "notEquals", label: "Does not equal" },
+  { value: "lessThan", label: "Less than" },
+  { value: "lessThanOrEqual", label: "Less than or equal" },
+  { value: "greaterThan", label: "Greater than" },
+  { value: "greaterThanOrEqual", label: "Greater than or equal" },
+  { value: "inRange", label: "In range" },
+  { value: "empty", label: "Is empty" },
+  { value: "notEmpty", label: "Is not empty" },
+];
+
+function operatorsForFilterKind(kind: TestFilterKind): Array<{ value: TestColumnFilter["operator"]; label: string }> {
+  return kind === "date" || kind === "number" ? testComparableFilterOperators : testFilterOperators;
+}
+
+function TestTaskFilterCard(props: {
+  menu: TestFilterMenu;
+  filter: TestColumnFilter;
+  kind: TestFilterKind;
+  values: string[];
+  onChange: (filter: TestColumnFilter) => void;
+  onClose: () => void;
+}) {
+  const width = 300;
+  const left = Math.max(16, Math.min(window.innerWidth - width - 16, props.menu.bounds.x + props.menu.bounds.width - width));
+  const top = Math.max(8, Math.min(window.innerHeight - 280, props.menu.bounds.y + props.menu.bounds.height + 4));
+  const [miniFilter, setMiniFilter] = useState("");
+  const filterValue = miniFilter.trim().toLowerCase();
+  const visibleValues = props.values
+    .filter((value) => !filterValue || value.toLowerCase().includes(filterValue))
+    .slice(0, 40);
+  const allSelected = props.filter.selectedValues.length === 0;
+  const noneSelected = props.filter.selectedValues.includes(emptyFilterSelectionValue);
+  const partiallySelected = !allSelected && !noneSelected;
+  const isSetFilter = props.kind === "set";
+  const valueDisabled = props.filter.operator === "empty" || props.filter.operator === "notEmpty";
+  const operators = operatorsForFilterKind(props.kind);
+
+  const updateOperator = (operator: TestColumnFilter["operator"]) => {
+    props.onChange({ ...props.filter, operator, value: "", valueTo: undefined, selectedValues: [] });
+  };
+
+  const updateValue = (value: string, key: "value" | "valueTo" = "value") => {
+    props.onChange({ ...props.filter, [key]: value, selectedValues: [] });
+  };
+
+  const toggleValue = (value: string, selected: boolean) => {
+    const nextValues = noneSelected && selected
+      ? [value]
+      : allSelected && !selected
+      ? props.values.filter((item) => item !== value)
+      : selected
+      ? [...props.filter.selectedValues.filter((item) => item !== emptyFilterSelectionValue), value]
+      : props.filter.selectedValues.filter((item) => item !== value && item !== emptyFilterSelectionValue);
+    props.onChange({ ...props.filter, selectedValues: Array.from(new Set(nextValues)) });
+  };
+
+  const toggleAllValues = () => {
+    props.onChange({ ...props.filter, selectedValues: allSelected ? [emptyFilterSelectionValue] : [] });
+  };
+
+  const renderCheckbox = (label: string, isSelected: boolean, onChange: (selected: boolean) => void, isIndeterminate = false) => (
+    <Checkbox.Root className="filter-checkbox" isIndeterminate={isIndeterminate} isSelected={isSelected} onChange={onChange}>
+      <Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>
+      <Checkbox.Content>{label}</Checkbox.Content>
+    </Checkbox.Root>
+  );
+
+  return (
+    <div className="grid-filter-layer" onMouseDown={props.onClose} role="presentation">
+      <Card className="grid-filter-card" style={{ left, top, width }} onMouseDown={(event) => event.stopPropagation()}>
+        <Card.Content className="grid-filter-content">
+          <Select
+            aria-label="Filter condition"
+            className="filter-card-select"
+            fullWidth
+            isDisabled={isSetFilter}
+            onSelectionChange={(key) => updateOperator(String(key) as TestColumnFilter["operator"])}
+            selectedKey={props.filter.operator}
+          >
+            <Select.Trigger>
+              <Select.Value />
+              <Select.Indicator />
+            </Select.Trigger>
+            <Select.Popover className="filter-card-select-popover">
+              <ListBox>
+                {operators.map((operator) => (
+                  <ListBox.Item id={operator.value} key={operator.value} textValue={operator.label}>
+                    <span>{operator.label}</span>
+                    <ListBox.ItemIndicator />
+                  </ListBox.Item>
+                ))}
+              </ListBox>
+            </Select.Popover>
+          </Select>
+
+          {props.kind === "text" ? (
+            <SearchField
+              aria-label={`Filter ${props.menu.column}`}
+              className="filter-card-search-field"
+              fullWidth
+              isDisabled={valueDisabled}
+              onChange={(value) => updateValue(value)}
+              value={props.filter.value}
+            >
+              <SearchField.Group>
+                <SearchField.SearchIcon />
+                <SearchField.Input autoFocus placeholder="Filter..." />
+                <SearchField.ClearButton />
+              </SearchField.Group>
+            </SearchField>
+          ) : null}
+
+          {props.kind === "date" ? (
+            <div className="filter-card-range-fields">
+              <DatePicker
+                aria-label={`Filter ${props.menu.column}`}
+                autoFocus
+                className="filter-card-date-picker"
+                isDisabled={valueDisabled}
+                onChange={(value) => updateValue(pickerDateString(value))}
+                value={pickerDateValue(props.filter.value)}
+              >
+                <DateField.Group className="filter-card-date-group" fullWidth>
+                  <DateField.Input>
+                    {(segment) => <DateField.Segment segment={segment} />}
+                  </DateField.Input>
+                  <DateField.Suffix>
+                    <DatePicker.Trigger>
+                      <DatePicker.TriggerIndicator />
+                    </DatePicker.Trigger>
+                  </DateField.Suffix>
+                </DateField.Group>
+                <DatePicker.Popover className="filter-card-date-popover">
+                  <Calendar aria-label={`Choose ${props.menu.column} date`}>
+                    <Calendar.Header>
+                      <Calendar.YearPickerTrigger>
+                        <Calendar.YearPickerTriggerHeading />
+                        <Calendar.YearPickerTriggerIndicator />
+                      </Calendar.YearPickerTrigger>
+                      <Calendar.NavButton slot="previous" />
+                      <Calendar.NavButton slot="next" />
+                    </Calendar.Header>
+                    <Calendar.Grid>
+                      <Calendar.GridHeader>{(day) => <Calendar.HeaderCell>{day}</Calendar.HeaderCell>}</Calendar.GridHeader>
+                      <Calendar.GridBody>{(date) => <Calendar.Cell date={date} />}</Calendar.GridBody>
+                    </Calendar.Grid>
+                  </Calendar>
+                </DatePicker.Popover>
+              </DatePicker>
+              {props.filter.operator === "inRange" ? (
+                <DatePicker
+                  aria-label={`Filter ${props.menu.column} to`}
+                  className="filter-card-date-picker"
+                  onChange={(value) => updateValue(pickerDateString(value), "valueTo")}
+                  value={pickerDateValue(props.filter.valueTo)}
+                >
+                  <DateField.Group className="filter-card-date-group" fullWidth>
+                    <DateField.Input>
+                      {(segment) => <DateField.Segment segment={segment} />}
+                    </DateField.Input>
+                    <DateField.Suffix>
+                      <DatePicker.Trigger>
+                        <DatePicker.TriggerIndicator />
+                      </DatePicker.Trigger>
+                    </DateField.Suffix>
+                  </DateField.Group>
+                  <DatePicker.Popover className="filter-card-date-popover">
+                    <Calendar aria-label={`Choose ${props.menu.column} end date`}>
+                      <Calendar.Header>
+                        <Calendar.YearPickerTrigger>
+                          <Calendar.YearPickerTriggerHeading />
+                          <Calendar.YearPickerTriggerIndicator />
+                        </Calendar.YearPickerTrigger>
+                        <Calendar.NavButton slot="previous" />
+                        <Calendar.NavButton slot="next" />
+                      </Calendar.Header>
+                      <Calendar.Grid>
+                        <Calendar.GridHeader>{(day) => <Calendar.HeaderCell>{day}</Calendar.HeaderCell>}</Calendar.GridHeader>
+                        <Calendar.GridBody>{(date) => <Calendar.Cell date={date} />}</Calendar.GridBody>
+                      </Calendar.Grid>
+                    </Calendar>
+                  </DatePicker.Popover>
+                </DatePicker>
+              ) : null}
+            </div>
+          ) : null}
+
+          {props.kind === "number" ? (
+            <div className="filter-card-range-fields">
+              <NumberField aria-label={`Filter ${props.menu.column}`} className="filter-card-number-field" fullWidth isDisabled={valueDisabled} onChange={(value) => updateValue(Number.isFinite(value) ? String(value) : "")} value={props.filter.value === "" ? undefined : Number(props.filter.value)}>
+                <NumberField.Group>
+                  <NumberField.Input autoFocus placeholder="Value" />
+                </NumberField.Group>
+              </NumberField>
+              {props.filter.operator === "inRange" ? (
+                <NumberField aria-label={`Filter ${props.menu.column} to`} className="filter-card-number-field" fullWidth onChange={(value) => updateValue(Number.isFinite(value) ? String(value) : "", "valueTo")} value={!props.filter.valueTo ? undefined : Number(props.filter.valueTo)}>
+                  <NumberField.Group>
+                    <NumberField.Input placeholder="To" />
+                  </NumberField.Group>
+                </NumberField>
+              ) : null}
+            </div>
+          ) : null}
+
+          {isSetFilter ? (
+            <>
+              <SearchField aria-label={`Search ${props.menu.column} values`} className="filter-card-search-field" fullWidth onChange={setMiniFilter} value={miniFilter}>
+                <SearchField.Group>
+                  <SearchField.SearchIcon />
+                  <SearchField.Input autoFocus placeholder="Search values..." />
+                  <SearchField.ClearButton />
+                </SearchField.Group>
+              </SearchField>
+              <div className="filter-value-list" role="group" aria-label={`${props.menu.column} values`}>
+                {renderCheckbox("(Select All)", allSelected, toggleAllValues, partiallySelected)}
+                {visibleValues.map((value) => (
+                  <span key={value}>
+                    {renderCheckbox(value || "(Blank)", !noneSelected && (allSelected || props.filter.selectedValues.includes(value)), (selected) => toggleValue(value, selected))}
+                  </span>
+                ))}
+              </div>
+            </>
+          ) : null}
+        </Card.Content>
+      </Card>
+    </div>
+  );
+}
+
+function AssigneePickerCard(props: {
+  menu: AssigneeMenu;
+  names: string[];
+  options: string[];
+  avatarUrls: Record<string, string>;
+  onApply: (names: string[]) => void;
+  onClose: () => void;
+}) {
+  const width = 240;
+  const left = Math.max(16, Math.min(window.innerWidth - width - 16, props.menu.bounds.x + 12));
+  const top = Math.max(8, Math.min(window.innerHeight - 360, props.menu.bounds.y + 12));
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<string[]>(() => props.names);
+  const options = props.options
+    .filter((name) => !search.trim() || name.toLowerCase().includes(search.trim().toLowerCase()))
+    .slice(0, 8);
+  const toggle = (name: string, checked: boolean) => {
+    setSelected((current) => checked ? Array.from(new Set([...current, name])) : current.filter((item) => item !== name));
+  };
+
+  return (
+    <div className="grid-filter-layer" onMouseDown={props.onClose} role="presentation">
+      <div className="assignee-editor assignee-editor--floating" style={{ left, top, width }} onMouseDown={(event) => event.stopPropagation()}>
+        <SearchField aria-label="Search users" className="assignee-editor-search" fullWidth onChange={setSearch} value={search}>
+          <SearchField.Group>
+            <SearchField.SearchIcon />
+            <SearchField.Input autoFocus placeholder="Search users..." />
+            <SearchField.ClearButton />
+          </SearchField.Group>
+        </SearchField>
+        <div className="assignee-editor-list">
+          {options.map((name) => (
+            <label className="assignee-editor-row" key={name}>
+              <input checked={selected.includes(name)} onChange={(event) => toggle(name, event.currentTarget.checked)} type="checkbox" />
+              <Avatar className="assignee-editor-avatar">
+                {props.avatarUrls[name] ? <Avatar.Image alt={name} src={props.avatarUrls[name]} /> : null}
+                <Avatar.Fallback>{name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?"}</Avatar.Fallback>
+              </Avatar>
+              <span>{name}</span>
+            </label>
+          ))}
+        </div>
+        <div className="assignee-editor-footer">
+          <span>{selected.length} selected</span>
+          <button type="button" onClick={() => props.onApply(selected)}>Apply</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AssigneeProfileCard(props: { menu: AssigneeProfileMenu; onClose: () => void }) {
+  const width = 220;
+  const left = Math.max(16, Math.min(window.innerWidth - width - 16, props.menu.bounds.x + 12));
+  const top = Math.max(8, Math.min(window.innerHeight - 180, props.menu.bounds.y + 12));
+
+  return (
+    <div className="grid-filter-layer" onMouseDown={props.onClose} role="presentation">
+      <div className="assignee-profile-card" style={{ left, top, width }} onMouseDown={(event) => event.stopPropagation()}>
+        <Avatar className="assignee-profile-avatar">
+          {props.menu.avatarUrl ? <Avatar.Image alt={props.menu.name} src={props.menu.avatarUrl} /> : null}
+          <Avatar.Fallback>{props.menu.name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?"}</Avatar.Fallback>
+        </Avatar>
+        <div>
+          <strong>{props.menu.name}</strong>
+          <span>Assigned user</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onAction: ActionHandler }) {
   const [rowCache, setRowCache] = useState<Record<number, Record<string, unknown>>>({});
-  const [requestedOffset, setRequestedOffset] = useState(0);
   const [visibleOffset, setVisibleOffset] = useState(0);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<TestSortState>({ key: "name", direction: "default" });
+  const [columnFilters, setColumnFilters] = useState<Record<string, TestColumnFilter>>({});
+  const [filterValuesByColumn, setFilterValuesByColumn] = useState<Record<string, string[]>>({});
+  const [filterMenu, setFilterMenu] = useState<TestFilterMenu | null>(null);
+  const [assigneeMenu, setAssigneeMenu] = useState<AssigneeMenu | null>(null);
+  const [assigneeProfileMenu, setAssigneeProfileMenu] = useState<AssigneeProfileMenu | null>(null);
+  const [hoveredRow, setHoveredRow] = useState<number | null>(null);
+  const [selectedRows, setSelectedRows] = useState<Set<number>>(() => new Set());
+  const [selectedRowTimes, setSelectedRowTimes] = useState<Record<number, number>>({});
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const [total, setTotal] = useState(0);
   const [status, setStatus] = useState("Loading Whagons-style task rows...");
+  const [queryLoading, setQueryLoading] = useState(true);
   const [randomizing, setRandomizing] = useState(false);
+  const [liveOffset, setLiveOffset] = useState(0);
+  const [client, setClient] = useState(() => projectIsProvisioned(props.project) ? gonvexClientForProject(props.project) : null);
+  const viewportHeight = useViewportHeight();
+  const gridHeight = Math.max(420, Math.min(620, viewportHeight - 396));
+  const activeFilters = Object.entries(columnFilters)
+    .map(([column, filter]) => testColumnFilterToDataFilter(column, filter))
+    .filter((filter): filter is DataFilter => filter !== null);
+  const activeFiltersKey = JSON.stringify(activeFilters);
+  const activeFilterColumnIds = Object.entries(columnFilters)
+    .filter(([column, filter]) => isTestColumnFilterActive(filter, testColumnFilterKind(column)))
+    .map(([column]) => column);
+  const filterColumnValues = filterMenu ? filterValuesByColumn[filterMenu.column] ?? [] : [];
+  const assigneeAvatarByName: Record<string, string> = {};
+  for (const row of Object.values(rowCache)) {
+    const names = [...splitAllUserNames(row), ...splitAssigneeNames(row)];
+    const urls = [...splitAllUserAvatarUrls(row), ...splitAssigneeAvatarUrls(row)];
+    names.forEach((name, index) => {
+      if (urls[index] && !assigneeAvatarByName[name]) assigneeAvatarByName[name] = urls[index];
+    });
+  }
+  const assigneeOptions = Array.from(new Set(Object.values(rowCache).flatMap((row) => [...splitAllUserNames(row), ...splitAssigneeNames(row)])))
+    .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
   const sortKeyRef = useRef(`${sort.key}:${sort.direction}`);
-  const mountedRef = useRef(true);
-  const gridStateKey = testTaskGridStateKey(search, sort);
+  const rowCacheRef = useRef(rowCache);
+  const liveOffsetRef = useRef(liveOffset);
+  const fetchTimersRef = useRef<ScrollFetchTimers>({ debounceTimer: null, stopTimer: null });
+  const pendingScrollRef = useRef<ScrollFetchPending>({ startRow: 0, height: 1 });
+  const gridStateKey = testTaskGridStateKey(search, sort, activeFilters);
   const gridStateKeyRef = useRef(gridStateKey);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
+  rowCacheRef.current = rowCache;
+  liveOffsetRef.current = liveOffset;
 
   useEffect(() => {
     gridStateKeyRef.current = gridStateKey;
   }, [gridStateKey]);
+
+  useEffect(() => {
+    return () => clearScrollRowFetch(fetchTimersRef);
+  }, []);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setSearch(searchInput), 300);
@@ -1467,45 +3882,80 @@ function TestPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
   }, [searchInput]);
 
   useEffect(() => {
-    setRequestedOffset(0);
+    if (!projectIsProvisioned(props.project)) {
+      setClient(null);
+      setTotal(0);
+      setQueryLoading(false);
+      setStatus("Project database is not configured yet");
+      return;
+    }
+    setClient(gonvexClientForProject(props.project));
+    setQueryLoading(true);
+    setStatus(`Loading ${props.project.name} task rows...`);
+  }, [props.project.id, props.project.name]);
+
+  useEffect(() => {
+    clearScrollRowFetch(fetchTimersRef);
+    setLiveOffset(0);
     setVisibleOffset(0);
     setRowCache({});
-  }, [search]);
+    setTotal(0);
+    setQueryLoading(true);
+  }, [props.project.id, search, activeFiltersKey]);
 
   useEffect(() => {
     const nextSortKey = `${sort.key}:${sort.direction}`;
     if (sortKeyRef.current === nextSortKey) return;
     sortKeyRef.current = nextSortKey;
+    clearScrollRowFetch(fetchTimersRef);
     setRowCache({});
-    setRequestedOffset(visibleOffset);
-  }, [sort, visibleOffset]);
+    setVisibleOffset(0);
+    setLiveOffset(0);
+    setQueryLoading(true);
+  }, [sort]);
 
   useEffect(() => {
-    if (!gonvexClient) return;
-    const args = testTaskGridArgs(requestedOffset, search, sort);
-    const stateKey = gridStateKey;
-    return gonvexClient.subscribeQuery(api["tasks.grid"], args as unknown as JsonValue, (message) => {
-      if (!mountedRef.current || gridStateKeyRef.current !== stateKey) return;
+    if (!client) return;
+    let cancelled = false;
+    client.connect();
+    const subscribedOffset = liveOffset;
+    const subscribedStateKey = gridStateKeyRef.current;
+    const args = testTaskGridArgs(subscribedOffset, search, sort, activeFilters, rowCacheRef.current);
+    if (Object.keys(rowCacheRef.current).length === 0) setQueryLoading(true);
+    const unsubscribe = client.subscribeQuery(api["tasks.grid"], args as unknown as JsonValue, (message) => {
+      if (cancelled) return;
       if (message.type === "query.error") {
+        setQueryLoading(false);
         setStatus(message.error);
         return;
       }
-      if (message.type === "query.result") {
-        const payload = message.result as DataRowsResponse;
-        const offset = payload.offset ?? requestedOffset;
-        setRowCache((current) => replaceRowsInCache(current, payload.rows, offset, payload.limit ?? pageSize));
-        setTotal(payload.total ?? payload.rows.length);
-        setStatus("Live via Gonvex binding");
-      }
+      if (message.type !== "query.result") return;
+      const payload = message.result as DataRowsResponse;
+      const offset = payload.offset ?? subscribedOffset;
+      if (offset !== subscribedOffset) return;
+      if (liveOffsetRef.current !== subscribedOffset) return;
+      if (gridStateKeyRef.current !== subscribedStateKey) return;
+      setRowCache((current) => mergeRowsIntoCache(current, payload.rows, offset));
+      setTotal(payload.total ?? payload.rows.length);
+      setQueryLoading(false);
+      setStatus(message.reason === "invalidate" ? "Live · updated" : "Live via Gonvex binding");
     });
-  }, [gridStateKey, requestedOffset, search, sort]);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [activeFiltersKey, client, gridStateKey, liveOffset, search, sort]);
+
+  const updateColumnFilter = (column: string, filter: TestColumnFilter) => {
+    setColumnFilters((current) => ({ ...current, [column]: filter }));
+  };
 
   const randomizeVisibleTaskFields = async () => {
-    if (!gonvexClient || randomizing) return;
+    if (!client || randomizing) return;
     setRandomizing(true);
     setStatus("Randomizing 3k task statuses/priorities...");
     try {
-      const result = await gonvexClient.mutation<RandomizeTasksResponse>(
+      const result = await client.mutation<RandomizeTasksResponse>(
         api["tasks.randomizeStatusPriority"],
         { count: 3000 } as unknown as JsonValue,
       );
@@ -1517,6 +3967,8 @@ function TestPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
       setRandomizing(false);
     }
   };
+
+  const showInitialQueryLoading = queryLoading && Object.keys(rowCache).length === 0;
 
   return (
     <section className="test-table-shell">
@@ -1540,40 +3992,183 @@ function TestPage(props: { themeMode: ThemeMode; onAction: ActionHandler }) {
         </div>
       </header>
       <ManifestGrid
+        key={gridStateKey}
+        activeFilterColumnIds={activeFilterColumnIds}
         columns={testTaskColumns.map((column) => ({
           ...column,
+          hasMenu: Boolean(column.filterKind),
           title: titleWithTestSort(column.title, sort, String(column.id)),
           width: columnWidths[String(column.id)] ?? ("width" in column ? column.width : 150),
         }))}
         customRenderers={[whTaskRenderer]}
         clearSelection={sort.direction === "default"}
-        getCellContent={createWhagonsTaskCellGetter(rowCache)}
-        height={620}
+        disableSelection
+        noGridLines
+        zebraRows
+        hideRowMarkers
+        hoveredRow={hoveredRow}
+        selectedRows={selectedRows}
+        overlay={showInitialQueryLoading ? (
+          <div className="test-grid-loading">
+            <span className="grid-loading-spinner" />
+            <strong>Loading matching tasks...</strong>
+            <span>{search.trim() ? `Searching "${search.trim()}"` : "Fetching task rows"}</span>
+          </div>
+        ) : null}
+        getCellContent={createWhagonsTaskCellGetter(rowCache, hoveredRow, selectedRows, selectedRowTimes)}
+        height={gridHeight}
         rowCount={total}
         rowHeight={64}
         themeMode={props.themeMode}
+        onCellClick={(cell, event) => {
+          const columnId = String(testTaskColumns[cell[0]]?.id ?? "");
+          if (columnId === "selection") {
+            event.preventDefault();
+            setSelectedRows((current) => {
+              const next = new Set(current);
+              if (next.has(cell[1])) {
+                next.delete(cell[1]);
+                setSelectedRowTimes((times) => {
+                  const { [cell[1]]: _removed, ...rest } = times;
+                  return rest;
+                });
+              } else {
+                next.add(cell[1]);
+                setSelectedRowTimes((times) => ({ ...times, [cell[1]]: Date.now() }));
+              }
+              return next;
+            });
+            setAssigneeMenu(null);
+            setAssigneeProfileMenu(null);
+            setFilterMenu(null);
+            return;
+          }
+          if (columnId === "assignee") {
+            event.preventDefault();
+            setFilterMenu(null);
+            const row = rowCache[cell[1]] ?? {};
+            const bounds = {
+              x: event.bounds.x + event.localEventX,
+              y: event.bounds.y + event.localEventY,
+              width: 0,
+              height: 0,
+            };
+            const target = assigneeClickTarget(row, event.localEventX, event.localEventY, event.bounds.height);
+            if (target?.kind === "add") {
+              setAssigneeProfileMenu(null);
+              setAssigneeMenu({ rowIndex: cell[1], bounds });
+            } else if (target?.kind === "avatar") {
+              const names = splitAssigneeNames(row);
+              const avatarUrls = splitAssigneeAvatarUrls(row);
+              setAssigneeMenu(null);
+              setAssigneeProfileMenu({ name: names[target.index] ?? "User", avatarUrl: avatarUrls[target.index], bounds });
+            } else {
+              setAssigneeMenu(null);
+              setAssigneeProfileMenu(null);
+            }
+          } else {
+            setAssigneeMenu(null);
+            setAssigneeProfileMenu(null);
+          }
+        }}
+        onItemHovered={(event) => {
+          const nextRow = event.kind === "cell" ? event.location[1] : null;
+          setHoveredRow((current) => current === nextRow ? current : nextRow);
+        }}
+        onCellEdited={(cell, newValue) => {
+          const columnId = String(testTaskColumns[cell[0]]?.id ?? "");
+          if (columnId !== "assignee" || newValue.kind !== GridCellKind.Custom) return;
+          const data = newValue.data as WhTaskCellData;
+          setRowCache((current) => ({
+            ...current,
+            [cell[1]]: {
+              ...current[cell[1]],
+              assignee_names: (data.names ?? []).join(", "),
+              assignee_avatar_urls: (data.avatarUrls ?? []).join(","),
+            },
+          }));
+        }}
         onHeaderClick={(columnIndex) => {
-          const column = String(testTaskColumns[columnIndex]?.id ?? "");
-          if (!column) return;
+          const columnConfig = testTaskColumns[columnIndex];
+          const column = String(columnConfig?.id ?? "");
+          if (!column || columnConfig?.sortable === false) return;
           setSort((current) => nextTestSort(current, column));
           props.onAction(`Test table sorting by ${column}`);
+        }}
+        onHeaderMenuClick={(columnIndex, bounds) => {
+          const columnConfig = testTaskColumns[columnIndex];
+          const column = String(columnConfig?.id ?? "");
+          if (!column || !columnConfig?.filterKind) return;
+          const values = sortedUniqueColumnValues(rowCache, column);
+          if (values.length > 0) {
+            setFilterValuesByColumn((current) => ({
+              ...current,
+              [column]: mergeSortedValues(current[column] ?? [], values),
+            }));
+          }
+          setAssigneeMenu(null);
+          setAssigneeProfileMenu(null);
+          setFilterMenu({ columnIndex, column, bounds });
+          props.onAction(`Opening ${column} filter`);
         }}
         onColumnResize={(column, newSize) => {
           setColumnWidths((current) => ({ ...current, [String(column.id)]: newSize }));
         }}
         onVisibleRegionChanged={(range) => {
-          const nextOffset = offsetForVisibleRow(Math.floor(range.y));
-          if (nextOffset !== visibleOffset) {
-            setVisibleOffset(nextOffset);
-            setRequestedOffset(nextOffset);
-          }
+          const startRow = Math.floor(range.y);
+          const nextOffset = offsetForVisibleRange(startRow, range.height, testRowFetchStride, testTaskPageSize);
+          setVisibleOffset((current) => current === nextOffset ? current : nextOffset);
+          scheduleScrollLiveQuery(
+            pendingScrollRef,
+            fetchTimersRef,
+            rowCacheRef,
+            liveOffsetRef,
+            setLiveOffset,
+            startRow,
+            range.height,
+            testRowFetchStride,
+            testTaskPageSize,
+          );
         }}
       />
+      {filterMenu ? (
+        <TestTaskFilterCard
+          menu={filterMenu}
+          filter={columnFilters[filterMenu.column] ?? emptyTestColumnFilter(testColumnFilterKind(filterMenu.column))}
+          kind={testColumnFilterKind(filterMenu.column)}
+          values={filterColumnValues}
+          onChange={(filter) => updateColumnFilter(filterMenu.column, filter)}
+          onClose={() => setFilterMenu(null)}
+        />
+      ) : null}
+      {assigneeMenu ? (
+        <AssigneePickerCard
+          menu={assigneeMenu}
+          names={splitAssigneeNames(rowCache[assigneeMenu.rowIndex] ?? {})}
+          options={assigneeOptions}
+          avatarUrls={assigneeAvatarByName}
+          onApply={(names) => {
+            setRowCache((current) => ({
+              ...current,
+              [assigneeMenu.rowIndex]: {
+                ...current[assigneeMenu.rowIndex],
+                assignee_names: names.join(", "),
+                assignee_avatar_urls: names.map((name) => assigneeAvatarByName[name] ?? "").join(","),
+              },
+            }));
+            setAssigneeMenu(null);
+          }}
+          onClose={() => setAssigneeMenu(null)}
+        />
+      ) : null}
+      {assigneeProfileMenu ? (
+        <AssigneeProfileCard menu={assigneeProfileMenu} onClose={() => setAssigneeProfileMenu(null)} />
+      ) : null}
     </section>
   );
 }
 
-function FilesPage(props: { themeLabel: string; onToggleTheme: () => void; onAction: ActionHandler }) {
+function FilesPage(props: { project: ProjectTarget; themeLabel: string; onToggleTheme: () => void; onAction: ActionHandler }) {
   const [search, setSearch] = useState("");
   const [runtimeFiles, setRuntimeFiles] = useState<FileInfo[]>([]);
   const [localFiles, setLocalFiles] = useState<FileInfo[]>([]);
@@ -1586,13 +4181,14 @@ function FilesPage(props: { themeLabel: string; onToggleTheme: () => void; onAct
 
   useEffect(() => {
     let cancelled = false;
-    if (!runtimeBaseURL) {
+    const baseURL = runtimeURLForProject(props.project);
+    if (!baseURL) {
       setRuntimeFiles([]);
       setStatus("Runtime offline. Select files to preview local uploads.");
       return;
     }
 
-    fetch(`${runtimeBaseURL}/dev/data/tables/files/rows?limit=100`)
+    fetch(`${baseURL}/dev/data/tables/files/rows?limit=100`, { headers: runtimeHeaders(props.project) })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
       .then((payload: DataRowsResponse) => {
         if (cancelled) return;
@@ -1609,7 +4205,7 @@ function FilesPage(props: { themeLabel: string; onToggleTheme: () => void; onAct
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [props.project]);
 
   const uploadLocalFiles = (fileList: FileList | null) => {
     const selected = Array.from(fileList ?? []);
@@ -1784,8 +4380,12 @@ function RealtimePage() {
   );
 }
 
-function SettingsPage() {
-  const [activeSection, setActiveSection] = useState<"general" | "environment" | "authentication">("general");
+function SettingsPage(props: { project: ProjectTarget }) {
+  const [activeSection, setActiveSection] = useState<"general" | "connection" | "environment" | "authentication">("general");
+  const dashboardURL = typeof window === "undefined"
+    ? pathForProjectPage(props.project.id, "overview")
+    : `${window.location.origin}${pathForProjectPage(props.project.id, "overview")}`;
+  const runtimeURL = runtimeURLForProject(props.project) || "not configured";
 
   return (
     <div className="settings-shell">
@@ -1796,6 +4396,13 @@ function SettingsPage() {
           variant={activeSection === "general" ? "secondary" : "ghost"}
         >
           General
+        </Button>
+        <Button
+          data-active={activeSection === "connection" ? "true" : undefined}
+          onPress={() => setActiveSection("connection")}
+          variant={activeSection === "connection" ? "secondary" : "ghost"}
+        >
+          Connection
         </Button>
         <Button
           data-active={activeSection === "environment" ? "true" : undefined}
@@ -1817,10 +4424,24 @@ function SettingsPage() {
         {activeSection === "general" ? (
           <SettingsCard title="General" description="Local deployment details used by gonvex dev and the runtime.">
             <div className="settings-grid">
-              <SettingField label="Project" value="app" />
-              <SettingField label="Runtime URL" value="http://localhost:8080" />
-              <SettingField label="Dev script" value="gonvex dev -- vite" />
-              <SettingField label="Database" value="gonvex_dev" />
+              <SettingField label="Project" value={props.project.id} />
+              <SettingField label="Runtime URL" value={runtimeURL} />
+              <SettingField label="Dev script" value={devScript} />
+              <SettingField label="Database" value={props.project.database} />
+            </div>
+          </SettingsCard>
+        ) : null}
+
+        {activeSection === "connection" ? (
+          <SettingsCard title="Connection" description="Use these values to connect a local app/runtime to this project.">
+            <div className="settings-grid">
+              <SettingField label="Dashboard URL" value={dashboardURL} />
+              <SettingField label="Runtime URL" value={runtimeURL} />
+              <SettingField label="Project ID" value={props.project.id} />
+              <SettingField label="Project header" value={`x-gonvex-project-id: ${props.project.id}`} />
+              <SettingField label="App env" value={`VITE_GONVEX_PROJECT_ID=${props.project.id}`} />
+              <SettingField label="Runtime env" value={`GONVEX_PROJECT=${props.project.id}`} />
+              <SettingField label="Sync key" value="server-side .env only" muted />
             </div>
           </SettingsCard>
         ) : null}
@@ -1828,7 +4449,7 @@ function SettingsPage() {
         {activeSection === "environment" ? (
           <SettingsCard title="Environment Variables" description="Variables loaded by the local Gonvex Runtime from .env.">
             <div className="env-table" role="table" aria-label="Environment variables">
-              {["DATABASE_URL", "S3_ENDPOINT", "S3_BUCKET", "S3_FORCE_PATH_STYLE"].map((name) => (
+              {["VITE_GONVEX_URL", "VITE_GONVEX_PROJECT_ID", "VITE_GONVEX_PROJECTS"].map((name) => (
                 <div className="env-row" role="row" key={name}>
                   <code role="cell">{name}</code>
                   <span role="cell">Configured locally</span>

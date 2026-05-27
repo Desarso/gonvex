@@ -1,12 +1,82 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
+async function renderProjectApp() {
+  const user = userEvent.setup();
+  window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({ email: "gabriel@example.com", name: "Gabriel" }));
+  render(<App />);
+  await user.click(screen.getByRole("button", { name: /open project/i }));
+  return user;
+}
+
 describe("App", () => {
-  it("renders the dashboard overview", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("signs in to the project list", async () => {
+    const user = userEvent.setup();
     render(<App />);
 
+    expect(screen.getByRole("heading", { name: /welcome back/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /sign in with google/i })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+
+    await user.type(screen.getByLabelText(/email/i), "gabriel@example.com");
+    await user.click(screen.getByRole("button", { name: /continue with email/i }));
+
+    expect(screen.getByRole("heading", { name: /choose a project/i })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/projects");
+    expect(screen.getByRole("button", { name: /open project/i })).toBeInTheDocument();
+  });
+
+  it("redirects protected URLs to login", () => {
+    window.history.replaceState(null, "", "/settings");
+    render(<App />);
+
+    expect(screen.getByRole("heading", { name: /welcome back/i })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+  });
+
+  it("creates a runtime project card", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      json: async () => ({
+        project: {
+          id: "acme-app",
+          name: "Acme App",
+          environment: "local dev",
+          database: "gonvex_acme_app",
+          storageBucket: "acme-app-dev",
+          status: "local",
+          description: "Runtime-created project database.",
+          provisioned: true,
+          runtimeCreated: true,
+        },
+      }),
+      ok: true,
+      statusText: "OK",
+    }));
+    window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({ email: "gabriel@example.com", name: "Gabriel" }));
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /create project/i }));
+    const dialog = screen.getByRole("dialog", { name: /create project/i });
+    await user.type(within(dialog).getByLabelText(/name/i), "Acme App");
+    await user.click(within(dialog).getByRole("button", { name: /create project/i }));
+
+    expect(screen.getByText("Acme App")).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("renders the dashboard overview", async () => {
+    await renderProjectApp();
+
+    expect(window.location.pathname).toBe("/projects/app/overview");
     expect(
       screen.getByRole("heading", { name: /realtime control room/i }),
     ).toBeInTheDocument();
@@ -15,16 +85,15 @@ describe("App", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders the Glide Data Grid test surface", () => {
-    render(<App />);
+  it("renders the Glide Data Grid test surface", async () => {
+    await renderProjectApp();
 
     expect(screen.getByRole("heading", { name: /livegrid test surface/i })).toBeInTheDocument();
     expect(screen.getByTestId("function-grid")).toBeInTheDocument();
   });
 
   it("renders an accessible React Aria button", async () => {
-    const user = userEvent.setup();
-    render(<App />);
+    const user = await renderProjectApp();
 
     const button = screen.getByRole("button", { name: /ready for tests/i });
     await user.click(button);
@@ -33,8 +102,7 @@ describe("App", () => {
   });
 
   it("switches pages from the sidebar", async () => {
-    const user = userEvent.setup();
-    render(<App />);
+    const user = await renderProjectApp();
 
     await user.click(screen.getByRole("button", { name: /data/i }));
     expect(screen.getByRole("heading", { name: /postgres project schema/i })).toBeInTheDocument();
@@ -45,8 +113,7 @@ describe("App", () => {
   });
 
   it("shows real file storage shell without fake rows", async () => {
-    const user = userEvent.setup();
-    render(<App />);
+    const user = await renderProjectApp();
 
     await user.click(within(screen.getByLabelText("Primary sections")).getByRole("button", { name: /files/i }));
 
@@ -56,30 +123,30 @@ describe("App", () => {
   });
 
   it("shows settings sections", async () => {
-    const user = userEvent.setup();
-    render(<App />);
+    const user = await renderProjectApp();
 
     await user.click(within(screen.getByLabelText("Primary sections")).getByRole("button", { name: /settings/i }));
     expect(screen.getByRole("button", { name: /general/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /connection/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /environment variables/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /authentication/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /connection/i }));
+    expect(screen.getByText(/x-gonvex-project-id: app/i)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /authentication/i }));
     expect(screen.getByText(/authentication providers configured/i)).toBeInTheDocument();
   });
 
-  it("shows selectable tables on the data page", async () => {
-    const user = userEvent.setup();
-    render(<App />);
+  it("does not show schema before the project pushes tables", async () => {
+    const user = await renderProjectApp();
 
     await user.click(screen.getByRole("button", { name: /data/i }));
 
     const tables = screen.getByLabelText("Tables");
-    expect(within(tables).getByRole("button", { name: /tasks/i })).toBeInTheDocument();
-
-    await user.click(within(tables).getByRole("button", { name: /files/i }));
-
-    expect(screen.getByRole("heading", { name: /^files$/i })).toBeInTheDocument();
-    expect(screen.getByText(/runtime is offline/i)).toBeInTheDocument();
+    expect(within(tables).queryByRole("button", { name: /tasks/i })).not.toBeInTheDocument();
+    expect(within(tables).queryByRole("button", { name: /files/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /no tables/i })).toBeInTheDocument();
+    expect(screen.getByText(/connect a project and push its schema/i)).toBeInTheDocument();
   });
 });

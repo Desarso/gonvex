@@ -126,9 +126,12 @@ pnpm build
 
 ## Releases
 
-Current automated releases are CLI-focused. The release script publishes the npm packages that developers install in apps:
+Current automated releases publish the npm packages that developers install in apps:
 
 ```txt
+packages/protocol/       `@gonvex/protocol`
+packages/client/         `@gonvex/client`
+packages/react/          `@gonvex/react`
 packages/gonvex/         `npx gonvex`
 packages/create-gonvex/  `npm create gonvex`
 ```
