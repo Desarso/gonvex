@@ -3,5 +3,6 @@ packages:
   - "apps/*"
 allowBuilds:
   '@firebase/util': true
-  esbuild: set this to true or false
+  esbuild: true
   protobufjs: true
+  sharp: true

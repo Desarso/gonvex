@@ -1,5 +1,24 @@
 import "@testing-library/jest-dom/vitest";
 
+function createStorageMock(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear: () => values.clear(),
+    getItem: (key: string) => values.get(key) ?? null,
+    key: (index: number) => Array.from(values.keys())[index] ?? null,
+    removeItem: (key: string) => values.delete(key),
+    setItem: (key: string, value: string) => values.set(key, String(value)),
+  };
+}
+
+Object.defineProperty(window, "localStorage", {
+  configurable: true,
+  value: createStorageMock(),
+});
+
 class ResizeObserverMock implements ResizeObserver {
   observe() {}
   unobserve() {}

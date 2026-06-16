@@ -457,7 +457,12 @@ const emptyColumns: string[] = [];
 const envRuntimeURL = String(import.meta.env.VITE_GONVEX_URL ?? import.meta.env.VITE_GONVEX_RUNTIME_URL ?? "").trim();
 const envProjectID = String(import.meta.env.VITE_GONVEX_PROJECT_ID ?? "").trim();
 const envProjects = String(import.meta.env.VITE_GONVEX_PROJECTS ?? "").trim();
-const dashboardAuthEnabled = ["1", "true", "yes", "on"].includes(String(import.meta.env.VITE_GONVEX_AUTH_ENABLED ?? "").toLowerCase());
+const truthyEnvValues = new Set(["1", "true", "yes", "on"]);
+const falsyEnvValues = new Set(["0", "false", "no", "off"]);
+const dashboardAuthEnabled = optionalEnvBoolean(import.meta.env.VITE_GONVEX_AUTH_ENABLED)
+  ?? (import.meta.env.PROD || import.meta.env.MODE === "test");
+const dashboardDevLoginEnabled = optionalEnvBoolean(import.meta.env.VITE_GONVEX_DEV_LOGIN_ENABLED)
+  ?? (!import.meta.env.PROD || import.meta.env.MODE === "test");
 const firebaseConfig = {
   apiKey: String(import.meta.env.VITE_FIREBASE_API_KEY ?? "").trim(),
   authDomain: String(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? "").trim(),
@@ -698,6 +703,14 @@ const localDeveloperSession: DashboardSession = {
   name: "Local Developer",
   provider: "dev",
 };
+
+function optionalEnvBoolean(value: string | undefined): boolean | null {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) return null;
+  if (truthyEnvValues.has(normalized)) return true;
+  if (falsyEnvValues.has(normalized)) return false;
+  return null;
+}
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
@@ -2126,6 +2139,7 @@ export function App() {
   if (dashboardAuthEnabled && !session) {
     return (
       <LoginPage
+        devLoginEnabled={dashboardDevLoginEnabled}
         onLogin={login}
         onToggleTheme={toggleTheme}
         theme={theme}
@@ -2278,6 +2292,7 @@ export function App() {
 }
 
 function LoginPage(props: {
+  devLoginEnabled: boolean;
   onLogin: (session: DashboardSession) => void;
   onToggleTheme: () => void;
   theme: ThemeMode;
@@ -2291,7 +2306,9 @@ function LoginPage(props: {
     setAuthError("");
     const auth = getFirebaseAuth();
     if (!auth) {
-      setAuthError("Firebase is not configured. Add VITE_FIREBASE_* values to apps/dashboard/.env.local.");
+      setAuthError(import.meta.env.PROD
+        ? "Google sign-in is not configured for this dashboard deployment."
+        : "Firebase is not configured. Add VITE_FIREBASE_* values to apps/dashboard/.env.local.");
       return;
     }
     setGoogleLoading(true);
@@ -2314,6 +2331,7 @@ function LoginPage(props: {
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (!props.devLoginEnabled) return;
     const normalizedEmail = email.trim();
     if (!normalizedEmail) return;
     props.onLogin({ email: normalizedEmail, name: displayNameFromEmail(normalizedEmail), provider: "dev" });
@@ -2343,24 +2361,32 @@ function LoginPage(props: {
             <span>{googleLoading ? "Opening Google..." : "Sign in with Google"}</span>
           </button>
           {authError ? <p className="login-error" role="alert">{authError}</p> : null}
-          <div className="login-divider"><span>or</span></div>
-          <form className="login-form" onSubmit={submit}>
-            <label className="setting-field">
-              <span>Email</span>
-              <input
-                autoComplete="email"
-                className="table-search"
-                onChange={(event) => setEmail(event.target.value)}
-                placeholder="you@example.com"
-                type="email"
-                value={email}
-              />
-            </label>
+          {props.devLoginEnabled ? (
+            <>
+              <div className="login-divider"><span>or</span></div>
+              <form className="login-form" onSubmit={submit}>
+                <label className="setting-field">
+                  <span>Email</span>
+                  <input
+                    autoComplete="email"
+                    className="table-search"
+                    onChange={(event) => setEmail(event.target.value)}
+                    placeholder="you@example.com"
+                    type="email"
+                    value={email}
+                  />
+                </label>
+                <div className="login-actions">
+                  <Button type="submit" variant="secondary">Continue with email</Button>
+                  <Button size="sm" variant="ghost" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
+                </div>
+              </form>
+            </>
+          ) : (
             <div className="login-actions">
-              <Button type="submit" variant="secondary">Continue with email</Button>
               <Button size="sm" variant="ghost" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
             </div>
-          </form>
+          )}
         </Card.Content>
       </Card>
     </main>
