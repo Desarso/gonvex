@@ -9,9 +9,9 @@ export const sessionCookieName = "gonvex_dashboard_session";
 
 const rootDir = process.env.DASHBOARD_STATIC_ROOT ?? "/usr/share/nginx/html";
 const port = Number(process.env.PORT ?? "80");
-const authEnabled = envFlag(process.env.DASHBOARD_AUTH_ENABLED ?? process.env.DASHBOARD_BASIC_AUTH_ENABLED, true);
-const authUser = normalizeEmail(process.env.DASHBOARD_AUTH_USER ?? process.env.DASHBOARD_BASIC_AUTH_USER ?? "");
-const authPassword = process.env.DASHBOARD_AUTH_PASSWORD ?? process.env.DASHBOARD_BASIC_AUTH_PASSWORD ?? "";
+const authEnabled = envFlag(process.env.DASHBOARD_AUTH_ENABLED, true);
+const authUser = normalizeEmail(process.env.DASHBOARD_AUTH_USER ?? "");
+const authPassword = process.env.DASHBOARD_AUTH_PASSWORD ?? "";
 const sessionSecret = process.env.DASHBOARD_SESSION_SECRET ?? authPassword;
 const cookieSecure = envFlag(process.env.DASHBOARD_COOKIE_SECURE, true);
 
