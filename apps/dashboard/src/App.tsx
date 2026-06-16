@@ -164,7 +164,7 @@ type DashboardSession = {
   email: string;
   name: string;
   avatarUrl?: string;
-  provider?: "dev" | "google";
+  provider?: "dev" | "gonvex" | "google";
 };
 
 type ProjectTarget = {
@@ -461,8 +461,11 @@ const truthyEnvValues = new Set(["1", "true", "yes", "on"]);
 const falsyEnvValues = new Set(["0", "false", "no", "off"]);
 const dashboardAuthEnabled = optionalEnvBoolean(import.meta.env.VITE_GONVEX_AUTH_ENABLED)
   ?? (import.meta.env.PROD || import.meta.env.MODE === "test");
-const dashboardDevLoginEnabled = optionalEnvBoolean(import.meta.env.VITE_GONVEX_DEV_LOGIN_ENABLED)
+const dashboardAllowedEmails = parseEmailAllowlist(import.meta.env.VITE_GONVEX_ALLOWED_EMAILS);
+const dashboardAllowUnlistedEmails = optionalEnvBoolean(import.meta.env.VITE_GONVEX_ALLOW_UNLISTED_EMAILS)
   ?? (!import.meta.env.PROD || import.meta.env.MODE === "test");
+const dashboardEmailLoginEnabled = optionalEnvBoolean(import.meta.env.VITE_GONVEX_EMAIL_LOGIN_ENABLED)
+  ?? (dashboardAllowUnlistedEmails || dashboardAllowedEmails.length > 0);
 const firebaseConfig = {
   apiKey: String(import.meta.env.VITE_FIREBASE_API_KEY ?? "").trim(),
   authDomain: String(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? "").trim(),
@@ -710,6 +713,26 @@ function optionalEnvBoolean(value: string | undefined): boolean | null {
   if (truthyEnvValues.has(normalized)) return true;
   if (falsyEnvValues.has(normalized)) return false;
   return null;
+}
+
+export function normalizeDashboardEmail(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+export function parseEmailAllowlist(value: string | undefined): string[] {
+  const seen = new Set<string>();
+  for (const part of String(value ?? "").split(/[,\n;]/)) {
+    const email = normalizeDashboardEmail(part);
+    if (email) seen.add(email);
+  }
+  return [...seen];
+}
+
+export function dashboardEmailAllowed(email: string, allowlist: readonly string[], allowUnlisted: boolean): boolean {
+  const normalized = normalizeDashboardEmail(email);
+  if (!normalized) return false;
+  if (allowlist.length === 0) return allowUnlisted;
+  return allowlist.includes(normalized);
 }
 
 function trimTrailingSlash(value: string): string {
@@ -2139,7 +2162,10 @@ export function App() {
   if (dashboardAuthEnabled && !session) {
     return (
       <LoginPage
-        devLoginEnabled={dashboardDevLoginEnabled}
+        allowUnlistedEmails={dashboardAllowUnlistedEmails}
+        allowedEmails={dashboardAllowedEmails}
+        emailLoginEnabled={dashboardEmailLoginEnabled}
+        googleLoginEnabled={firebaseAuthConfigured()}
         onLogin={login}
         onToggleTheme={toggleTheme}
         theme={theme}
@@ -2292,7 +2318,10 @@ export function App() {
 }
 
 function LoginPage(props: {
-  devLoginEnabled: boolean;
+  allowUnlistedEmails: boolean;
+  allowedEmails: readonly string[];
+  emailLoginEnabled: boolean;
+  googleLoginEnabled: boolean;
   onLogin: (session: DashboardSession) => void;
   onToggleTheme: () => void;
   theme: ThemeMode;
@@ -2331,10 +2360,15 @@ function LoginPage(props: {
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!props.devLoginEnabled) return;
-    const normalizedEmail = email.trim();
+    if (!props.emailLoginEnabled) return;
+    const normalizedEmail = normalizeDashboardEmail(email);
     if (!normalizedEmail) return;
-    props.onLogin({ email: normalizedEmail, name: displayNameFromEmail(normalizedEmail), provider: "dev" });
+    if (!dashboardEmailAllowed(normalizedEmail, props.allowedEmails, props.allowUnlistedEmails)) {
+      setAuthError("That email is not allowed for this Gonvex dashboard.");
+      return;
+    }
+    setAuthError("");
+    props.onLogin({ email: normalizedEmail, name: displayNameFromEmail(normalizedEmail), provider: "gonvex" });
   };
 
   return (
@@ -2351,19 +2385,21 @@ function LoginPage(props: {
           </div>
         </Card.Header>
         <Card.Content>
-          <button className="google-login-button" disabled={googleLoading} onClick={signInWithGoogle} type="button">
-            <svg aria-hidden="true" className="google-mark" viewBox="0 0 18 18">
-              <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.9c1.7-1.56 2.7-3.86 2.7-6.62Z" />
-              <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.26c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.58-5.05-3.72H.96v2.34A9 9 0 0 0 9 18Z" />
-              <path fill="#FBBC05" d="M3.95 10.7a5.41 5.41 0 0 1 0-3.4V4.96H.96a9 9 0 0 0 0 8.08l2.99-2.34Z" />
-              <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58A8.62 8.62 0 0 0 9 0 9 9 0 0 0 .96 4.96L3.95 7.3C4.66 5.16 6.65 3.58 9 3.58Z" />
-            </svg>
-            <span>{googleLoading ? "Opening Google..." : "Sign in with Google"}</span>
-          </button>
+          {props.googleLoginEnabled ? (
+            <button className="google-login-button" disabled={googleLoading} onClick={signInWithGoogle} type="button">
+              <svg aria-hidden="true" className="google-mark" viewBox="0 0 18 18">
+                <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.9c1.7-1.56 2.7-3.86 2.7-6.62Z" />
+                <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.26c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.58-5.05-3.72H.96v2.34A9 9 0 0 0 9 18Z" />
+                <path fill="#FBBC05" d="M3.95 10.7a5.41 5.41 0 0 1 0-3.4V4.96H.96a9 9 0 0 0 0 8.08l2.99-2.34Z" />
+                <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58A8.62 8.62 0 0 0 9 0 9 9 0 0 0 .96 4.96L3.95 7.3C4.66 5.16 6.65 3.58 9 3.58Z" />
+              </svg>
+              <span>{googleLoading ? "Opening Google..." : "Sign in with Google"}</span>
+            </button>
+          ) : null}
           {authError ? <p className="login-error" role="alert">{authError}</p> : null}
-          {props.devLoginEnabled ? (
+          {props.emailLoginEnabled ? (
             <>
-              <div className="login-divider"><span>or</span></div>
+              {props.googleLoginEnabled ? <div className="login-divider"><span>or</span></div> : null}
               <form className="login-form" onSubmit={submit}>
                 <label className="setting-field">
                   <span>Email</span>
@@ -2377,15 +2413,18 @@ function LoginPage(props: {
                   />
                 </label>
                 <div className="login-actions">
-                  <Button type="submit" variant="secondary">Continue with email</Button>
+                  <Button type="submit" variant="secondary">Continue with Gonvex email</Button>
                   <Button size="sm" variant="ghost" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
                 </div>
               </form>
             </>
           ) : (
-            <div className="login-actions">
-              <Button size="sm" variant="ghost" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
-            </div>
+            <>
+              {!props.googleLoginEnabled ? <p className="login-error" role="alert">No sign-in method is configured for this Gonvex dashboard.</p> : null}
+              <div className="login-actions">
+                <Button size="sm" variant="ghost" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
+              </div>
+            </>
           )}
         </Card.Content>
       </Card>

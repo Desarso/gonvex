@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App } from "./App";
+import { App, dashboardEmailAllowed, parseEmailAllowlist } from "./App";
 
 async function renderProjectApp() {
   const user = userEvent.setup();
@@ -23,11 +23,11 @@ describe("App", () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: /welcome back/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /sign in with google/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /sign in with google/i })).not.toBeInTheDocument();
     expect(window.location.pathname).toBe("/login");
 
     await user.type(screen.getByLabelText(/email/i), "gabriel@example.com");
-    await user.click(screen.getByRole("button", { name: /continue with email/i }));
+    await user.click(screen.getByRole("button", { name: /continue with gonvex email/i }));
 
     expect(screen.getByRole("heading", { name: /choose a project/i })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/projects");
@@ -40,6 +40,22 @@ describe("App", () => {
 
     expect(screen.getByRole("heading", { name: /welcome back/i })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/login");
+  });
+
+  it("normalizes dashboard email allowlists", () => {
+    expect(parseEmailAllowlist(" Gabriel@Example.com, gabriel@example.com ; admin@example.com\n")).toEqual([
+      "gabriel@example.com",
+      "admin@example.com",
+    ]);
+  });
+
+  it("checks dashboard email allowlists case-insensitively", () => {
+    const allowlist = parseEmailAllowlist("gabriel@example.com");
+
+    expect(dashboardEmailAllowed(" Gabriel@Example.com ", allowlist, false)).toBe(true);
+    expect(dashboardEmailAllowed("other@example.com", allowlist, false)).toBe(false);
+    expect(dashboardEmailAllowed("other@example.com", [], true)).toBe(true);
+    expect(dashboardEmailAllowed("other@example.com", [], false)).toBe(false);
   });
 
   it("creates a runtime project card", async () => {
