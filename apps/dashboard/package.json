@@ -11,7 +11,7 @@
     "gonvex:once": "go run ../../cmd/gonvex dev --project . --once",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run && node --test server.node-test.mjs",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit"

@@ -466,6 +466,8 @@ const dashboardAllowUnlistedEmails = optionalEnvBoolean(import.meta.env.VITE_GON
   ?? (!import.meta.env.PROD || import.meta.env.MODE === "test");
 const dashboardEmailLoginEnabled = optionalEnvBoolean(import.meta.env.VITE_GONVEX_EMAIL_LOGIN_ENABLED)
   ?? (dashboardAllowUnlistedEmails || dashboardAllowedEmails.length > 0);
+const dashboardPasswordLoginEnabled = optionalEnvBoolean(import.meta.env.VITE_GONVEX_PASSWORD_LOGIN_ENABLED)
+  ?? import.meta.env.PROD;
 const firebaseConfig = {
   apiKey: String(import.meta.env.VITE_FIREBASE_API_KEY ?? "").trim(),
   authDomain: String(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? "").trim(),
@@ -741,6 +743,27 @@ export function dashboardEmailAllowed(email: string, allowlist: readonly string[
 
 export function googleLoginEnabled(value: string | undefined, hasFirebaseConfig: boolean): boolean {
   return optionalEnvBoolean(value) === true && hasFirebaseConfig;
+}
+
+async function createDashboardPasswordSession(email: string, password: string): Promise<DashboardSession> {
+  const response = await fetch("/api/dashboard/login", {
+    body: JSON.stringify({ email, password }),
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  const payload = await response.json().catch(() => ({})) as { error?: string; session?: DashboardSession };
+  if (!response.ok || !payload.session) {
+    throw new Error(payload.error ?? "Unable to sign in.");
+  }
+  return payload.session;
+}
+
+async function destroyDashboardPasswordSession(): Promise<void> {
+  await fetch("/api/dashboard/logout", {
+    credentials: "include",
+    method: "POST",
+  }).catch(() => undefined);
 }
 
 function trimTrailingSlash(value: string): string {
@@ -2037,7 +2060,11 @@ function ManifestGrid(props: {
 export function App() {
   const [activePage, setActivePage] = useState<PageID>(() => pageFromPath(window.location.pathname));
   const [theme, setTheme] = useState<ThemeMode>(() => storedTheme());
-  const [session, setSession] = useState<DashboardSession | null>(() => dashboardAuthEnabled ? storedSession() : localDeveloperSession);
+  const [session, setSession] = useState<DashboardSession | null>(() => {
+    if (!dashboardAuthEnabled) return localDeveloperSession;
+    if (dashboardPasswordLoginEnabled) return null;
+    return storedSession();
+  });
   const [projects, setProjects] = useState<ProjectTarget[]>(() => projectTargets);
   const [activeProjectID, setActiveProjectID] = useState<string | null>(() => storedProjectID());
   const [actionMessage, setActionMessage] = useState("");
@@ -2055,7 +2082,12 @@ export function App() {
     window.history.replaceState(null, "", "/projects");
   };
 
+  const loginWithPassword = async (email: string, password: string) => {
+    login(await createDashboardPasswordSession(email, password));
+  };
+
   const logout = () => {
+    if (dashboardPasswordLoginEnabled) void destroyDashboardPasswordSession();
     setSession(dashboardAuthEnabled ? null : localDeveloperSession);
     setActiveProjectID(null);
     window.localStorage.removeItem(dashboardSessionKey);
@@ -2175,7 +2207,9 @@ export function App() {
         emailLoginEnabled={dashboardEmailLoginEnabled}
         googleLoginEnabled={dashboardGoogleLoginEnabled}
         onLogin={login}
+        onPasswordLogin={loginWithPassword}
         onToggleTheme={toggleTheme}
+        passwordLoginEnabled={dashboardPasswordLoginEnabled}
         theme={theme}
         themeLabel={themeLabel}
       />
@@ -2331,13 +2365,17 @@ function LoginPage(props: {
   emailLoginEnabled: boolean;
   googleLoginEnabled: boolean;
   onLogin: (session: DashboardSession) => void;
+  onPasswordLogin: (email: string, password: string) => Promise<void>;
   onToggleTheme: () => void;
+  passwordLoginEnabled: boolean;
   theme: ThemeMode;
   themeLabel: string;
 }) {
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [passwordLoading, setPasswordLoading] = useState(false);
 
   const signInWithGoogle = async () => {
     setAuthError("");
@@ -2366,11 +2404,24 @@ function LoginPage(props: {
     }
   };
 
-  const submit = (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!props.emailLoginEnabled) return;
+    if (!props.emailLoginEnabled && !props.passwordLoginEnabled) return;
     const normalizedEmail = normalizeDashboardEmail(email);
     if (!normalizedEmail) return;
+    if (props.passwordLoginEnabled) {
+      if (!password) return;
+      setAuthError("");
+      setPasswordLoading(true);
+      try {
+        await props.onPasswordLogin(normalizedEmail, password);
+      } catch (error) {
+        setAuthError(error instanceof Error ? error.message : "Unable to sign in.");
+      } finally {
+        setPasswordLoading(false);
+      }
+      return;
+    }
     if (!dashboardEmailAllowed(normalizedEmail, props.allowedEmails, props.allowUnlistedEmails)) {
       setAuthError("That email is not allowed for this Gonvex dashboard.");
       return;
@@ -2405,7 +2456,7 @@ function LoginPage(props: {
             </button>
           ) : null}
           {authError ? <p className="login-error" role="alert">{authError}</p> : null}
-          {props.emailLoginEnabled ? (
+          {props.emailLoginEnabled || props.passwordLoginEnabled ? (
             <>
               {props.googleLoginEnabled ? <div className="login-divider"><span>or</span></div> : null}
               <form className="login-form" onSubmit={submit}>
@@ -2420,8 +2471,23 @@ function LoginPage(props: {
                     value={email}
                   />
                 </label>
+                {props.passwordLoginEnabled ? (
+                  <label className="setting-field">
+                    <span>Password</span>
+                    <input
+                      autoComplete="current-password"
+                      className="table-search"
+                      onChange={(event) => setPassword(event.target.value)}
+                      placeholder="Dashboard password"
+                      type="password"
+                      value={password}
+                    />
+                  </label>
+                ) : null}
                 <div className="login-actions">
-                  <Button type="submit" variant="secondary">Continue with Gonvex email</Button>
+                  <Button type="submit" variant="secondary">
+                    {passwordLoading ? "Signing in..." : "Continue"}
+                  </Button>
                   <Button size="sm" variant="ghost" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
                 </div>
               </form>

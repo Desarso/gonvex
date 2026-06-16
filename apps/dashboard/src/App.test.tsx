@@ -27,7 +27,7 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/login");
 
     await user.type(screen.getByLabelText(/email/i), "gabriel@example.com");
-    await user.click(screen.getByRole("button", { name: /continue with gonvex email/i }));
+    await user.click(screen.getByRole("button", { name: /^continue$/i }));
 
     expect(screen.getByRole("heading", { name: /choose a project/i })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/projects");
