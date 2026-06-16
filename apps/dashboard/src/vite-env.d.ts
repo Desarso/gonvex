@@ -11,6 +11,7 @@ interface ImportMetaEnv {
   readonly VITE_GONVEX_ALLOW_UNLISTED_EMAILS?: string;
   readonly VITE_GONVEX_DEV_LOGIN_ENABLED?: string;
   readonly VITE_GONVEX_EMAIL_LOGIN_ENABLED?: string;
+  readonly VITE_GONVEX_GOOGLE_LOGIN_ENABLED?: string;
   readonly VITE_GONVEX_DATABASE?: string;
   readonly VITE_GONVEX_STORAGE_BUCKET?: string;
   readonly VITE_GONVEX_PROJECTS?: string;

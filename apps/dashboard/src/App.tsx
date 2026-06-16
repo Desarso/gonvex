@@ -474,6 +474,10 @@ const firebaseConfig = {
   messagingSenderId: String(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ?? "").trim(),
   storageBucket: String(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ?? "").trim(),
 };
+const dashboardGoogleLoginEnabled = googleLoginEnabled(
+  import.meta.env.VITE_GONVEX_GOOGLE_LOGIN_ENABLED,
+  firebaseAuthConfigured(),
+);
 const runtimeBaseURL = import.meta.env.MODE === "test" ? "" : trimTrailingSlash(envRuntimeURL || "http://localhost:8080");
 
 const projectTargets: ProjectTarget[] = loadProjectTargets();
@@ -733,6 +737,10 @@ export function dashboardEmailAllowed(email: string, allowlist: readonly string[
   if (!normalized) return false;
   if (allowlist.length === 0) return allowUnlisted;
   return allowlist.includes(normalized);
+}
+
+export function googleLoginEnabled(value: string | undefined, hasFirebaseConfig: boolean): boolean {
+  return optionalEnvBoolean(value) === true && hasFirebaseConfig;
 }
 
 function trimTrailingSlash(value: string): string {
@@ -2165,7 +2173,7 @@ export function App() {
         allowUnlistedEmails={dashboardAllowUnlistedEmails}
         allowedEmails={dashboardAllowedEmails}
         emailLoginEnabled={dashboardEmailLoginEnabled}
-        googleLoginEnabled={firebaseAuthConfigured()}
+        googleLoginEnabled={dashboardGoogleLoginEnabled}
         onLogin={login}
         onToggleTheme={toggleTheme}
         theme={theme}

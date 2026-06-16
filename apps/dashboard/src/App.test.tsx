@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, dashboardEmailAllowed, parseEmailAllowlist } from "./App";
+import { App, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist } from "./App";
 
 async function renderProjectApp() {
   const user = userEvent.setup();
@@ -56,6 +56,13 @@ describe("App", () => {
     expect(dashboardEmailAllowed("other@example.com", allowlist, false)).toBe(false);
     expect(dashboardEmailAllowed("other@example.com", [], true)).toBe(true);
     expect(dashboardEmailAllowed("other@example.com", [], false)).toBe(false);
+  });
+
+  it("keeps Google login disabled unless explicitly enabled", () => {
+    expect(googleLoginEnabled(undefined, true)).toBe(false);
+    expect(googleLoginEnabled("false", true)).toBe(false);
+    expect(googleLoginEnabled("true", false)).toBe(false);
+    expect(googleLoginEnabled("true", true)).toBe(true);
   });
 
   it("creates a runtime project card", async () => {
