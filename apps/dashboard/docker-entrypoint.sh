@@ -15,7 +15,7 @@ else
   mkdir -p "$(dirname "$auth_file")"
   password_hash="$(openssl passwd -apr1 "$DASHBOARD_BASIC_AUTH_PASSWORD")"
   printf '%s:%s\n' "$DASHBOARD_BASIC_AUTH_USER" "$password_hash" > "$auth_file"
-  chmod 600 "$auth_file"
+  chmod 644 "$auth_file"
 
   {
     printf 'auth_basic "Gonvex Dashboard";\n'
