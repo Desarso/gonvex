@@ -5,20 +5,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/server/internal/data"
 	"github.com/gorilla/websocket"
 )
 
 type clientMessage struct {
-	Type string          `json:"type"`
-	ID   string          `json:"id"`
-	Path string          `json:"path,omitempty"`
-	Args json.RawMessage `json:"args,omitempty"`
+	Type   string          `json:"type"`
+	ID     string          `json:"id"`
+	Path   string          `json:"path,omitempty"`
+	Args   json.RawMessage `json:"args,omitempty"`
+	Token  string          `json:"token,omitempty"`
+	Tenant string          `json:"tenant,omitempty"`
 }
 
 type serverMessage struct {
@@ -46,15 +50,20 @@ type randomizeStatusPriorityArgs struct {
 	Count int `json:"count"`
 }
 
-const tableChangeDebounce = 75 * time.Millisecond
+const (
+	tableChangeDebounce    = 75 * time.Millisecond
+	tableChangeFanoutLimit = 16
+)
 
 type querySubscription struct {
 	conn    *wsConn
 	id      string
 	project string
+	tenant  string
 	path    string
 	args    json.RawMessage
 	rowIDs  map[string]bool
+	caller  callerContext
 	ctx     context.Context
 	cancel  context.CancelFunc
 	token   *struct{}
@@ -62,6 +71,7 @@ type querySubscription struct {
 
 type tableChange struct {
 	project string
+	tenant  string
 	table   string
 	broad   bool
 	rowIDs  map[string]bool
@@ -71,8 +81,17 @@ type wsConn struct {
 	server  *Server
 	conn    *websocket.Conn
 	project string
+	tenant  string
+	user    *gonvex.User
+	perms   map[string]any
+	auth    bool
 	mu      sync.Mutex
 	subs    map[string]querySubscription
+}
+
+type callerContext struct {
+	user        *gonvex.User
+	permissions map[string]any
 }
 
 var wsUpgrader = websocket.Upgrader{
@@ -87,7 +106,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.EnableWriteCompression(true)
 	_ = conn.SetCompressionLevel(flate.BestSpeed)
-	client := &wsConn{server: s, conn: conn, project: projectID(r), subs: map[string]querySubscription{}}
+	project := projectID(r)
+	client := &wsConn{server: s, conn: conn, project: project, tenant: tenantIDFromRequest(project, tenantID(r)), subs: map[string]querySubscription{}}
 	s.addWSConn(client)
 	defer func() {
 		client.cancelSubscriptions()
@@ -106,13 +126,29 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 	switch message.Type {
+	case "auth":
+		user, permissions, tenant, err := c.server.authenticateSocket(ctx, c.project, c.tenant, message.Token, message.Tenant)
+		if err != nil {
+			c.write(serverMessage{Type: "auth.error", ID: message.ID, Error: err.Error()})
+			return
+		}
+		c.mu.Lock()
+		c.user = user
+		c.perms = permissions
+		c.tenant = tenant
+		c.auth = true
+		c.mu.Unlock()
+		c.write(serverMessage{Type: "auth.result", ID: message.ID, Result: map[string]any{"userId": user.ID, "tenantId": tenant}})
 	case "query.subscribe":
+		if !c.requireAuth("query.error", message.ID) {
+			return
+		}
 		if message.ID == "" || message.Path == "" {
 			c.write(serverMessage{Type: "query.error", ID: message.ID, Error: "query id and path are required"})
 			return
 		}
 		subCtx, cancel := context.WithCancel(ctx)
-		sub := querySubscription{conn: c, id: message.ID, project: c.project, path: message.Path, args: message.Args, ctx: subCtx, cancel: cancel, token: &struct{}{}}
+		sub := querySubscription{conn: c, id: message.ID, project: c.project, tenant: c.tenant, path: message.Path, args: message.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: &struct{}{}}
 		c.mu.Lock()
 		previous, hadPrevious := c.subs[message.ID]
 		c.subs[message.ID] = sub
@@ -132,14 +168,20 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			sub.cancel()
 		}
 	case "mutation.call":
-		result, err := c.server.executeMutation(ctx, c.project, message.Path, message.Args)
+		if !c.requireAuth("mutation.error", message.ID) {
+			return
+		}
+		result, err := c.server.executeTenantMutationForCaller(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
 		if err != nil {
 			c.write(serverMessage{Type: "mutation.error", ID: message.ID, Error: err.Error()})
 			return
 		}
 		c.write(serverMessage{Type: "mutation.result", ID: message.ID, Result: result})
 	case "action.call":
-		result, err := c.server.executeAction(ctx, c.project, message.Path, message.Args)
+		if !c.requireAuth("action.error", message.ID) {
+			return
+		}
+		result, err := c.server.executeTenantActionForCaller(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
 		if err != nil {
 			c.write(serverMessage{Type: "action.error", ID: message.ID, Error: err.Error()})
 			return
@@ -148,6 +190,26 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 	default:
 		c.write(serverMessage{Type: "query.error", ID: message.ID, Error: "unknown websocket message type"})
 	}
+}
+
+func (c *wsConn) requireAuth(errorType string, id string) bool {
+	if !c.server.config.RequireAuth {
+		return true
+	}
+	c.mu.Lock()
+	authenticated := c.auth
+	c.mu.Unlock()
+	if authenticated {
+		return true
+	}
+	c.write(serverMessage{Type: errorType, ID: id, Error: "authentication is required"})
+	return false
+}
+
+func (c *wsConn) caller() callerContext {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return callerContext{user: c.user, permissions: c.perms}
 }
 
 func (c *wsConn) cancelSubscriptions() {
@@ -201,23 +263,32 @@ func (s *Server) websocketStats() (int, int) {
 }
 
 func (s *Server) broadcastTableChange(projectID string, table string) {
-	s.scheduleTableChange(tableChange{project: projectID, table: table, broad: true})
+	s.broadcastTenantTableChange(projectID, tenantIDFromRequest(projectID, ""), table)
+}
+
+func (s *Server) broadcastTenantTableChange(projectID string, tenantID string, table string) {
+	s.scheduleTableChange(tableChange{project: projectID, tenant: tenantIDFromRequest(projectID, tenantID), table: table, broad: true})
 }
 
 func (s *Server) broadcastRowIDChange(projectID string, table string, rowIDs []string) {
+	s.broadcastTenantRowIDChange(projectID, tenantIDFromRequest(projectID, ""), table, rowIDs)
+}
+
+func (s *Server) broadcastTenantRowIDChange(projectID string, tenantID string, table string, rowIDs []string) {
 	ids := map[string]bool{}
 	for _, id := range rowIDs {
 		ids[id] = true
 	}
-	s.scheduleTableChange(tableChange{project: projectID, table: table, rowIDs: ids})
+	s.scheduleTableChange(tableChange{project: projectID, tenant: tenantIDFromRequest(projectID, tenantID), table: table, rowIDs: ids})
 }
 
 func (s *Server) scheduleTableChange(change tableChange) {
-	s.cache.invalidateRows(context.Background(), change.project, change.table)
+	s.cache.invalidateRows(context.Background(), change.project, change.tenant, change.table)
 	s.tableChangeMu.Lock()
-	key := change.project + ":" + change.table
+	key := strings.Join([]string{change.project, change.tenant, change.table}, ":")
 	pending := s.tableChanges[key]
 	pending.project = change.project
+	pending.tenant = change.tenant
 	pending.table = change.table
 	pending.broad = pending.broad || change.broad
 	if pending.rowIDs == nil {
@@ -249,19 +320,40 @@ func (s *Server) flushTableChange(key string) {
 		connections = append(connections, conn)
 	}
 	s.wsMu.RUnlock()
+	subs := []querySubscription{}
 	for _, conn := range connections {
 		conn.mu.Lock()
-		subs := make([]querySubscription, 0, len(conn.subs))
 		for _, sub := range conn.subs {
-			if sub.project == change.project && subscriptionTable(sub.path) == change.table && subscriptionIntersectsChange(sub, change) {
+			if sub.project == change.project && sub.tenant == change.tenant && subscriptionTable(sub.path) == change.table && subscriptionIntersectsChange(sub, change) {
 				subs = append(subs, sub)
 			}
 		}
 		conn.mu.Unlock()
-		for _, sub := range subs {
-			s.executeSubscription(sub.ctx, sub, "invalidate")
-		}
 	}
+	s.rerunSubscriptions(subs, "invalidate")
+}
+
+func (s *Server) rerunSubscriptions(subs []querySubscription, reason string) {
+	if len(subs) == 0 {
+		return
+	}
+	limit := tableChangeFanoutLimit
+	if len(subs) < limit {
+		limit = len(subs)
+	}
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	for _, sub := range subs {
+		sub := sub
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			s.executeSubscription(sub.ctx, sub, reason)
+		}()
+	}
+	wg.Wait()
 }
 
 func subscriptionIntersectsChange(sub querySubscription, change tableChange) bool {
@@ -290,7 +382,7 @@ func subscriptionCanChangeMembership(sub querySubscription) bool {
 }
 
 func (s *Server) executeSubscription(ctx context.Context, sub querySubscription, reason string) {
-	result, err := s.executeQuery(ctx, sub.project, sub.path, sub.args)
+	result, err := s.executeTenantQueryForCaller(ctx, sub.project, sub.tenant, sub.caller, sub.path, sub.args)
 	if ctx.Err() != nil {
 		return
 	}
@@ -327,11 +419,33 @@ func resultRowIDs(result any) map[string]bool {
 }
 
 func (s *Server) executeQuery(ctx context.Context, projectID string, path string, rawArgs json.RawMessage) (result any, err error) {
+	return s.executeTenantQuery(ctx, projectID, tenantIDFromRequest(projectID, ""), path, rawArgs)
+}
+
+func (s *Server) executeTenantQuery(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (result any, err error) {
+	return s.executeTenantQueryForCaller(ctx, projectID, tenantID, callerContext{}, path, rawArgs)
+}
+
+func (s *Server) executeTenantQueryForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
 	started := time.Now()
 	defer func() {
 		s.metrics.recordFunction(path, s.functionKind(path, "query"), time.Since(started), err)
 	}()
 
+	if isLegacyTaskQuery(path) {
+		return s.executeLegacyQuery(ctx, projectID, tenantID, path, rawArgs)
+	}
+	if _, ok := s.app.Lookup(path); ok {
+		queryCtx, err := s.queryContext(ctx, projectID, tenantID, caller)
+		if err != nil {
+			return nil, err
+		}
+		return s.app.ExecuteQuery(queryCtx, path, rawArgs)
+	}
+	return nil, fmt.Errorf("query %q is not implemented by the runtime", path)
+}
+
+func (s *Server) executeLegacyQuery(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (any, error) {
 	switch path {
 	case "tasks.grid":
 		var args taskGridArgs
@@ -340,7 +454,7 @@ func (s *Server) executeQuery(ctx context.Context, projectID string, path string
 				return nil, err
 			}
 		}
-		return data.ReadRows(ctx, s.databaseURLForProject(projectID), "tasks", data.RowsOptions{
+		return data.ReadRows(ctx, s.databaseURLForTenant(projectID, tenantID), "tasks", data.RowsOptions{
 			Limit:           args.Limit,
 			Offset:          args.Offset,
 			Search:          args.Search,
@@ -359,11 +473,57 @@ func (s *Server) executeQuery(ctx context.Context, projectID string, path string
 }
 
 func (s *Server) executeMutation(ctx context.Context, projectID string, path string, rawArgs json.RawMessage) (result any, err error) {
+	return s.executeTenantMutation(ctx, projectID, tenantIDFromRequest(projectID, ""), path, rawArgs)
+}
+
+func (s *Server) executeTenantMutation(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (result any, err error) {
+	return s.executeTenantMutationForCaller(ctx, projectID, tenantID, callerContext{}, path, rawArgs)
+}
+
+func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
 	started := time.Now()
 	defer func() {
 		s.metrics.recordFunction(path, s.functionKind(path, "mutation"), time.Since(started), err)
 	}()
 
+	if isLegacyTaskMutation(path) {
+		return s.executeLegacyMutation(ctx, projectID, tenantID, path, rawArgs)
+	}
+	if _, ok := s.app.Lookup(path); ok {
+		mutationCtx, err := s.mutationContext(ctx, projectID, tenantID, caller)
+		if err != nil {
+			return nil, err
+		}
+		return s.executeRegisteredMutation(mutationCtx, path, rawArgs)
+	}
+	return nil, fmt.Errorf("mutation %q is not implemented by the runtime", path)
+}
+
+func (s *Server) executeRegisteredMutation(mutationCtx *gonvex.MutationCtx, path string, rawArgs json.RawMessage) (any, error) {
+	if mutationCtx.DB == nil {
+		return s.app.ExecuteMutation(mutationCtx, path, rawArgs)
+	}
+	if mutationCtx.Context == nil {
+		mutationCtx.Context = context.Background()
+	}
+	tx, err := mutationCtx.DB.BeginTx(mutationCtx.Context, nil)
+	if err != nil {
+		return nil, err
+	}
+	mutationCtx.Tx = tx
+	result, err := s.app.ExecuteMutation(mutationCtx, path, rawArgs)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	mutationCtx.Tx = nil
+	return result, nil
+}
+
+func (s *Server) executeLegacyMutation(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (any, error) {
 	switch path {
 	case "tasks.randomizeStatusPriority":
 		var args randomizeStatusPriorityArgs
@@ -372,11 +532,11 @@ func (s *Server) executeMutation(ctx context.Context, projectID string, path str
 				return nil, err
 			}
 		}
-		result, err := data.RandomizeTaskStatusPriority(ctx, s.databaseURLForProject(projectID), args.Count)
+		result, err := data.RandomizeTaskStatusPriority(ctx, s.databaseURLForTenant(projectID, tenantID), args.Count)
 		if err != nil {
 			return nil, err
 		}
-		go s.broadcastTableChange(projectID, "tasks")
+		go s.broadcastTenantTableChange(projectID, tenantID, "tasks")
 		return result, nil
 	default:
 		return nil, fmt.Errorf("mutation %q is not implemented by the runtime", path)
@@ -384,24 +544,94 @@ func (s *Server) executeMutation(ctx context.Context, projectID string, path str
 }
 
 func (s *Server) executeAction(ctx context.Context, projectID string, path string, rawArgs json.RawMessage) (result any, err error) {
+	return s.executeTenantAction(ctx, projectID, tenantIDFromRequest(projectID, ""), path, rawArgs)
+}
+
+func (s *Server) executeTenantAction(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (result any, err error) {
+	return s.executeTenantActionForCaller(ctx, projectID, tenantID, callerContext{}, path, rawArgs)
+}
+
+func (s *Server) executeTenantActionForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
 	started := time.Now()
 	defer func() {
 		s.metrics.recordFunction(path, s.functionKind(path, "action"), time.Since(started), err)
 	}()
 
+	if _, ok := s.app.Lookup(path); ok {
+		actionCtx, err := s.actionContext(ctx, projectID, tenantID, caller)
+		if err != nil {
+			return nil, err
+		}
+		return s.app.ExecuteAction(actionCtx, path, rawArgs)
+	}
 	return nil, fmt.Errorf("action %q is not implemented by the runtime", path)
 }
 
 func (s *Server) functionKind(path string, fallback string) string {
+	if function, ok := s.app.Lookup(path); ok && function.Kind != "" {
+		return string(function.Kind)
+	}
 	if entry, ok := s.runtime.Manifest().Functions[path]; ok && entry.Kind != "" {
 		return string(entry.Kind)
 	}
 	return fallback
 }
 
-func subscriptionTable(path string) string {
-	if strings.HasPrefix(path, "tasks.") {
-		return "tasks"
+func (s *Server) queryContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (*gonvex.QueryCtx, error) {
+	runtimeCtx, err := s.runtimeContext(ctx, projectID, tenantID, caller)
+	if err != nil {
+		return nil, err
 	}
-	return ""
+	return &gonvex.QueryCtx{RuntimeContext: runtimeCtx}, nil
+}
+
+func (s *Server) mutationContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (*gonvex.MutationCtx, error) {
+	runtimeCtx, err := s.runtimeContext(ctx, projectID, tenantID, caller)
+	if err != nil {
+		return nil, err
+	}
+	return &gonvex.MutationCtx{RuntimeContext: runtimeCtx}, nil
+}
+
+func (s *Server) actionContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (*gonvex.ActionCtx, error) {
+	runtimeCtx, err := s.runtimeContext(ctx, projectID, tenantID, caller)
+	if err != nil {
+		return nil, err
+	}
+	return &gonvex.ActionCtx{RuntimeContext: runtimeCtx}, nil
+}
+
+func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (gonvex.RuntimeContext, error) {
+	activeTenant := tenantIDFromRequest(projectID, tenantID)
+	databaseURL := s.databaseURLForTenant(projectID, activeTenant)
+	store, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, activeTenant), databaseURL)
+	if err != nil {
+		return gonvex.RuntimeContext{}, err
+	}
+	return gonvex.RuntimeContext{
+		Context:     ctx,
+		ProjectID:   projectID,
+		TenantID:    activeTenant,
+		DatabaseURL: store.DatabaseURL,
+		DB:          store.DB,
+		User:        caller.user,
+		Permissions: caller.permissions,
+		Logger:      slog.Default().With("project", projectID, "tenant", activeTenant),
+	}, nil
+}
+
+func isLegacyTaskQuery(path string) bool {
+	return path == "tasks.grid"
+}
+
+func isLegacyTaskMutation(path string) bool {
+	return path == "tasks.randomizeStatusPriority"
+}
+
+func subscriptionTable(path string) string {
+	prefix, _, ok := strings.Cut(path, ".")
+	if !ok || prefix == "" {
+		return ""
+	}
+	return prefix
 }

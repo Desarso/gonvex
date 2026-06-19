@@ -38,12 +38,10 @@ func (c *rowsCache) close() error {
 	return c.client.Close()
 }
 
-func (c *rowsCache) rowsKey(projectID string, table string, query url.Values) string {
+func (c *rowsCache) rowsKey(projectID string, tenantID string, table string, query url.Values) string {
 	hash := sha256.Sum256([]byte(query.Encode()))
-	if projectID == "" {
-		projectID = "default"
-	}
-	return "gonvex:rows:v1:" + projectID + ":" + table + ":" + hex.EncodeToString(hash[:])
+	projectID, tenantID = cacheScope(projectID, tenantID)
+	return "gonvex:rows:v2:" + projectID + ":" + tenantID + ":" + table + ":" + hex.EncodeToString(hash[:])
 }
 
 func (c *rowsCache) get(ctx context.Context, key string) ([]byte, bool) {
@@ -64,16 +62,14 @@ func (c *rowsCache) set(ctx context.Context, key string, value []byte) {
 	_ = c.client.Set(ctx, key, value, c.ttl).Err()
 }
 
-func (c *rowsCache) invalidateRows(ctx context.Context, projectID string, table string) {
+func (c *rowsCache) invalidateRows(ctx context.Context, projectID string, tenantID string, table string) {
 	if !c.enabled() {
 		return
 	}
-	if projectID == "" {
-		projectID = "default"
-	}
-	pattern := "gonvex:rows:v1:" + projectID + ":*"
+	projectID, tenantID = cacheScope(projectID, tenantID)
+	pattern := "gonvex:rows:v2:" + projectID + ":" + tenantID + ":*"
 	if table != "" {
-		pattern = "gonvex:rows:v1:" + projectID + ":" + table + ":*"
+		pattern = "gonvex:rows:v2:" + projectID + ":" + tenantID + ":" + table + ":*"
 	}
 	var cursor uint64
 	for {
@@ -89,4 +85,14 @@ func (c *rowsCache) invalidateRows(ctx context.Context, projectID string, table 
 		}
 		cursor = nextCursor
 	}
+}
+
+func cacheScope(projectID string, tenantID string) (string, string) {
+	if projectID == "" {
+		projectID = "default"
+	}
+	if tenantID == "" {
+		tenantID = projectID
+	}
+	return projectID, tenantID
 }

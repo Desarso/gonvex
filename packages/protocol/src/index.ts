@@ -22,12 +22,15 @@ export type GonvexManifest = {
 };
 
 export type ClientMessage =
+  | { type: "auth"; id: string; token?: string; tenant?: string }
   | { type: "query.subscribe"; id: string; path: string; args: JsonValue }
   | { type: "query.unsubscribe"; id: string }
   | { type: "mutation.call"; id: string; path: string; args: JsonValue }
   | { type: "action.call"; id: string; path: string; args: JsonValue };
 
 export type ServerMessage =
+  | { type: "auth.result"; id: string; result: JsonValue }
+  | { type: "auth.error"; id: string; error: string }
   | { type: "query.result"; id: string; result: JsonValue; reason?: "initial" | "invalidate" }
   | { type: "query.error"; id: string; error: string }
   | { type: "mutation.result"; id: string; result: JsonValue }

@@ -8,8 +8,22 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/server/internal/config"
 )
+
+type registeredQueryArgs struct {
+	Name string `json:"name"`
+}
+
+type registeredMutationArgs struct {
+	Title string `json:"title"`
+}
+
+type registeredMutationResult struct {
+	Title     string `json:"title"`
+	ProjectID string `json:"projectId"`
+}
 
 func TestHealth(t *testing.T) {
 	server := New(config.Config{PostgresURL: "postgres://example", S3Endpoint: "http://localhost:9000", S3Bucket: "gonvex-dev"})
@@ -145,6 +159,54 @@ func TestManifestForUnknownProjectIsEmpty(t *testing.T) {
 	}
 	if len(payload.Functions) != 0 {
 		t.Fatalf("expected no functions for unknown project, got %d", len(payload.Functions))
+	}
+}
+
+func TestExecuteRegisteredQuery(t *testing.T) {
+	app := gonvex.NewApp()
+	app.Query("custom.echo", func(ctx *gonvex.QueryCtx, args registeredQueryArgs) (map[string]any, error) {
+		return map[string]any{
+			"name":      args.Name,
+			"projectId": ctx.ProjectID,
+			"tenantId":  ctx.TenantID,
+			"hasDB":     ctx.DB != nil,
+		}, nil
+	})
+	server := NewWithApp(config.Config{}, app)
+
+	result, err := server.executeQuery(context.Background(), "project-a", "custom.echo", json.RawMessage(`{"name":"Ada"}`))
+	if err != nil {
+		t.Fatalf("execute registered query: %v", err)
+	}
+	payload, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", result)
+	}
+	if payload["name"] != "Ada" || payload["projectId"] != "project-a" || payload["tenantId"] != "project-a" || payload["hasDB"] != false {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestExecuteRegisteredMutation(t *testing.T) {
+	app := gonvex.NewApp()
+	app.Mutation("custom.create", func(ctx *gonvex.MutationCtx, args registeredMutationArgs) (registeredMutationResult, error) {
+		if ctx.Tx != nil {
+			t.Fatal("expected nil transaction without configured database")
+		}
+		return registeredMutationResult{Title: args.Title, ProjectID: ctx.ProjectID}, nil
+	})
+	server := NewWithApp(config.Config{}, app)
+
+	result, err := server.executeMutation(context.Background(), "project-a", "custom.create", json.RawMessage(`{"title":"Ship"}`))
+	if err != nil {
+		t.Fatalf("execute registered mutation: %v", err)
+	}
+	payload, ok := result.(registeredMutationResult)
+	if !ok {
+		t.Fatalf("expected registeredMutationResult, got %T", result)
+	}
+	if payload.Title != "Ship" || payload.ProjectID != "project-a" {
+		t.Fatalf("unexpected payload: %#v", payload)
 	}
 }
 
@@ -306,5 +368,20 @@ func TestProjectIDPrefersHeaderThenQuery(t *testing.T) {
 	request = httptest.NewRequest(http.MethodGet, "/dev/manifest", nil)
 	if got := projectID(request); got != "" {
 		t.Fatalf("expected empty project, got %q", got)
+	}
+}
+
+func TestSubscriptionTableUsesPathPrefix(t *testing.T) {
+	tests := map[string]string{
+		"tasks.grid":    "tasks",
+		"messages.list": "messages",
+		"users.profile": "users",
+		"badpath":       "",
+		".missing":      "",
+	}
+	for path, want := range tests {
+		if got := subscriptionTable(path); got != want {
+			t.Fatalf("subscriptionTable(%q) = %q, want %q", path, got, want)
+		}
 	}
 }

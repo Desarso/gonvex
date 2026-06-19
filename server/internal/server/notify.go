@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/server/internal/schema"
 	"github.com/jackc/pgx/v5"
 )
 
-const taskNotifyChannel = "gonvex_table_change"
-
-type taskNotifyPayload struct {
+type tableNotifyPayload struct {
 	Table string   `json:"table"`
 	Broad bool     `json:"broad"`
 	IDs   []string `json:"ids"`
@@ -33,10 +33,10 @@ func (s *Server) listenPostgresNotifications() {
 	}
 	defer conn.Close(context.Background())
 
-	if err := ensureTaskNotifyTrigger(context.Background(), conn); err != nil {
+	if err := ensureBaseNotifyTriggers(context.Background(), conn); err != nil {
 		return
 	}
-	if _, err := conn.Exec(context.Background(), "LISTEN "+taskNotifyChannel); err != nil {
+	if _, err := conn.Exec(context.Background(), "LISTEN "+schema.NotifyChannel); err != nil {
 		return
 	}
 
@@ -45,107 +45,51 @@ func (s *Server) listenPostgresNotifications() {
 		if err != nil {
 			return
 		}
-		if notification.Payload == "tasks" {
-			s.broadcastTableChange("", "tasks")
+		if notification.Payload != "" && notification.Payload[0] != '{' {
+			s.broadcastTableChange("", notification.Payload)
 			continue
 		}
-		var payload taskNotifyPayload
-		if err := json.Unmarshal([]byte(notification.Payload), &payload); err == nil && payload.Table == "tasks" {
+		var payload tableNotifyPayload
+		if err := json.Unmarshal([]byte(notification.Payload), &payload); err == nil && payload.Table != "" {
 			if payload.Broad {
-				s.broadcastTableChange("", "tasks")
+				s.broadcastTableChange("", payload.Table)
 			} else {
-				s.broadcastRowIDChange("", "tasks", payload.IDs)
+				s.broadcastRowIDChange("", payload.Table, payload.IDs)
 			}
 		}
 	}
 }
 
-func ensureTaskNotifyTrigger(ctx context.Context, conn *pgx.Conn) error {
-	_, err := conn.Exec(ctx, `
-CREATE OR REPLACE FUNCTION gonvex_notify_tasks_insert()
-RETURNS trigger AS $$
-DECLARE
-  row_count integer;
-  ids text[];
-BEGIN
-  SELECT count(*), COALESCE(array_agg(id), ARRAY[]::text[])
-  INTO row_count, ids
-  FROM (SELECT id FROM new_rows WHERE id IS NOT NULL LIMIT 500) limited;
+func ensureBaseNotifyTriggers(ctx context.Context, conn *pgx.Conn) error {
+	rows, err := conn.Query(ctx, `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'tasks'
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
 
-  PERFORM pg_notify('gonvex_table_change', json_build_object(
-    'table', 'tasks',
-    'broad', true,
-    'count', row_count,
-    'ids', ARRAY[]::text[]
-  )::text);
-  RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
+	table := manifest.Table{Columns: map[string]manifest.Column{}}
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return err
+		}
+		table.Columns[column] = manifest.Column{Type: "string"}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(table.Columns) == 0 {
+		return nil
+	}
 
-CREATE OR REPLACE FUNCTION gonvex_notify_tasks_update()
-RETURNS trigger AS $$
-DECLARE
-  row_count integer;
-  ids text[];
-BEGIN
-  SELECT count(*), COALESCE(array_agg(id), ARRAY[]::text[])
-  INTO row_count, ids
-  FROM (SELECT id FROM new_rows WHERE id IS NOT NULL LIMIT 500) limited;
-
-  PERFORM pg_notify('gonvex_table_change', json_build_object(
-    'table', 'tasks',
-    'broad', row_count >= 500,
-    'count', row_count,
-    'ids', CASE WHEN row_count < 500 THEN ids ELSE ARRAY[]::text[] END
-  )::text);
-  RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE OR REPLACE FUNCTION gonvex_notify_tasks_delete()
-RETURNS trigger AS $$
-DECLARE
-  row_count integer;
-  ids text[];
-BEGIN
-  SELECT count(*), COALESCE(array_agg(id), ARRAY[]::text[])
-  INTO row_count, ids
-  FROM (SELECT id FROM old_rows WHERE id IS NOT NULL LIMIT 500) limited;
-
-  PERFORM pg_notify('gonvex_table_change', json_build_object(
-    'table', 'tasks',
-    'broad', true,
-    'count', row_count,
-    'ids', ARRAY[]::text[]
-  )::text);
-  RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS gonvex_tasks_notify ON tasks;
-DROP TRIGGER IF EXISTS gonvex_tasks_notify_insert ON tasks;
-DROP TRIGGER IF EXISTS gonvex_tasks_notify_update ON tasks;
-DROP TRIGGER IF EXISTS gonvex_tasks_notify_delete ON tasks;
-
-DO $$
-BEGIN
-  IF to_regclass('public.tasks') IS NOT NULL THEN
-    CREATE TRIGGER gonvex_tasks_notify_insert
-    AFTER INSERT ON tasks
-    REFERENCING NEW TABLE AS new_rows
-    FOR EACH STATEMENT EXECUTE FUNCTION gonvex_notify_tasks_insert();
-
-    CREATE TRIGGER gonvex_tasks_notify_update
-    AFTER UPDATE ON tasks
-    REFERENCING NEW TABLE AS new_rows
-    FOR EACH STATEMENT EXECUTE FUNCTION gonvex_notify_tasks_update();
-
-    CREATE TRIGGER gonvex_tasks_notify_delete
-    AFTER DELETE ON tasks
-    REFERENCING OLD TABLE AS old_rows
-    FOR EACH STATEMENT EXECUTE FUNCTION gonvex_notify_tasks_delete();
-  END IF;
-END $$;
-`)
+	statement, err := schema.NotifySQLForTable("tasks", table)
+	if err != nil {
+		return err
+	}
+	_, err = conn.Exec(ctx, statement)
 	return err
 }

@@ -1,0 +1,114 @@
+package schema
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+
+	"github.com/gonvex/gonvex/pkg/manifest"
+)
+
+const NotifyChannel = "gonvex_table_change"
+
+func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]manifest.Table) ([]string, error) {
+	var applied []string
+	for _, tableName := range sortedTableNames(tables) {
+		table := tables[tableName]
+		statement, err := notifySQLForTable(tableName, table)
+		if err != nil {
+			return applied, err
+		}
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			return applied, err
+		}
+		applied = append(applied, fmt.Sprintf("ensured notify triggers for %s", tableName))
+	}
+	return applied, nil
+}
+
+func NotifySQLForTable(tableName string, table manifest.Table) (string, error) {
+	return notifySQLForTable(tableName, table)
+}
+
+func notifySQLForTable(tableName string, table manifest.Table) (string, error) {
+	if !validIdent(tableName) {
+		return "", fmt.Errorf("invalid table name %q", tableName)
+	}
+	hasID := false
+	if column, ok := table.Columns["id"]; ok && column.Type != "" {
+		hasID = true
+	}
+
+	functionPrefix := "gonvex_notify_" + tableName
+	insertFunction := quoteIdent(functionPrefix + "_insert")
+	updateFunction := quoteIdent(functionPrefix + "_update")
+	deleteFunction := quoteIdent(functionPrefix + "_delete")
+	insertTrigger := quoteIdent("gonvex_" + tableName + "_notify_insert")
+	updateTrigger := quoteIdent("gonvex_" + tableName + "_notify_update")
+	deleteTrigger := quoteIdent("gonvex_" + tableName + "_notify_delete")
+	tableIdent := quoteIdent(tableName)
+
+	return strings.Join([]string{
+		notifyFunctionSQL(insertFunction, tableName, "new_rows", hasID, true),
+		notifyFunctionSQL(updateFunction, tableName, "new_rows", hasID, false),
+		notifyFunctionSQL(deleteFunction, tableName, "old_rows", hasID, true),
+		fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", quoteIdent("gonvex_"+tableName+"_notify"), tableIdent),
+		fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", insertTrigger, tableIdent),
+		fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", updateTrigger, tableIdent),
+		fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", deleteTrigger, tableIdent),
+		fmt.Sprintf(`CREATE TRIGGER %s
+AFTER INSERT ON %s
+REFERENCING NEW TABLE AS new_rows
+FOR EACH STATEMENT EXECUTE FUNCTION %s();`, insertTrigger, tableIdent, insertFunction),
+		fmt.Sprintf(`CREATE TRIGGER %s
+AFTER UPDATE ON %s
+REFERENCING NEW TABLE AS new_rows
+FOR EACH STATEMENT EXECUTE FUNCTION %s();`, updateTrigger, tableIdent, updateFunction),
+		fmt.Sprintf(`CREATE TRIGGER %s
+AFTER DELETE ON %s
+REFERENCING OLD TABLE AS old_rows
+FOR EACH STATEMENT EXECUTE FUNCTION %s();`, deleteTrigger, tableIdent, deleteFunction),
+	}, "\n\n"), nil
+}
+
+func notifyFunctionSQL(functionName string, tableName string, transitionTable string, hasID bool, broad bool) string {
+	idRead := fmt.Sprintf(`SELECT count(*), COALESCE(array_agg(id::text), ARRAY[]::text[])
+  INTO row_count, ids
+  FROM (SELECT id FROM %s WHERE id IS NOT NULL LIMIT 500) limited;`, transitionTable)
+	if !hasID {
+		idRead = fmt.Sprintf(`SELECT count(*)
+  INTO row_count
+  FROM %s;
+  ids := ARRAY[]::text[];`, transitionTable)
+	}
+
+	broadExpression := "row_count >= 500"
+	idsExpression := "CASE WHEN row_count < 500 THEN ids ELSE ARRAY[]::text[] END"
+	if broad || !hasID {
+		broadExpression = "true"
+		idsExpression = "ARRAY[]::text[]"
+	}
+
+	return fmt.Sprintf(`CREATE OR REPLACE FUNCTION %s()
+RETURNS trigger AS $$
+DECLARE
+  row_count integer;
+  ids text[];
+BEGIN
+  %s
+
+  PERFORM pg_notify(%q, json_build_object(
+    'table', %s,
+    'broad', %s,
+    'count', row_count,
+    'ids', %s
+  )::text);
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;`, functionName, idRead, quoteLiteral(NotifyChannel), quoteLiteral(tableName), broadExpression, idsExpression)
+}
+
+func quoteLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}

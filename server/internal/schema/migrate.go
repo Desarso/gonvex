@@ -73,6 +73,12 @@ func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Re
 		result.Applied = append(result.Applied, applied...)
 	}
 
+	applied, err := InstallNotifyTriggers(ctx, db, desired.Tables)
+	if err != nil {
+		return result, err
+	}
+	result.Applied = append(result.Applied, applied...)
+
 	return result, nil
 }
 
@@ -126,6 +132,9 @@ func existingColumns(ctx context.Context, db *sql.DB, table string) (map[string]
 }
 
 func createTableSQL(name string, table manifest.Table) (string, error) {
+	if !validIdent(name) {
+		return "", fmt.Errorf("invalid table name %q", name)
+	}
 	columnNames := sortedColumnNames(table.Columns)
 	if len(columnNames) == 0 {
 		return "", fmt.Errorf("table %s has no columns", name)

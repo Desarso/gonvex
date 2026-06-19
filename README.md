@@ -53,6 +53,33 @@ func Register(app *gonvex.App) {
 }
 ```
 
+Runtime execution uses an app-linked Go binary: create a small `main` that imports
+your app's `gonvex/` package, calls `Register(app)`, and serves Gonvex with the
+public runtime wrapper. This compiles handlers directly into the runtime and
+avoids Go `plugin` loading.
+
+```go
+package main
+
+import (
+  "log/slog"
+  "os"
+
+  appgonvex "my-app/gonvex"
+  "github.com/gonvex/gonvex/pkg/gonvex"
+  gonvexruntime "github.com/gonvex/gonvex/server/pkg/runtime"
+)
+
+func main() {
+  app := gonvex.NewApp()
+  appgonvex.Register(app)
+  if err := gonvexruntime.ListenAndServe(app); err != nil {
+    slog.Error("gonvex runtime stopped", "error", err)
+    os.Exit(1)
+  }
+}
+```
+
 React imports generated bindings:
 
 ```ts

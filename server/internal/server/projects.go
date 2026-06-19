@@ -114,7 +114,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(s.projects, projectID)
 	delete(s.config.ProjectDatabases, projectID)
-	s.cache.invalidateRows(r.Context(), projectID, "")
+	s.cache.invalidateRows(r.Context(), projectID, tenantIDFromRequest(projectID, ""), "")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

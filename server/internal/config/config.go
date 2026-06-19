@@ -10,13 +10,16 @@ import (
 
 type Config struct {
 	Addr             string
+	LandlordURL      string
 	PostgresURL      string
+	TenantDatabases  map[string]string
 	ProjectDatabases map[string]string
 	ValkeyURL        string
 	RowsCacheTTL     time.Duration
 	S3Endpoint       string
 	S3Bucket         string
 	DevSyncKey       string
+	RequireAuth      bool
 }
 
 func FromEnv() Config {
@@ -24,14 +27,26 @@ func FromEnv() Config {
 
 	return Config{
 		Addr:             env("GONVEX_ADDR", ":8080"),
+		LandlordURL:      env("GONVEX_LANDLORD_DATABASE_URL", env("LANDLORD_DATABASE_URL", "")),
 		PostgresURL:      env("DATABASE_URL", env("POSTGRES_URL", "")),
+		TenantDatabases:  envStringMap("GONVEX_TENANT_DATABASE_URLS"),
 		ProjectDatabases: envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
 		ValkeyURL:        env("VALKEY_URL", env("REDIS_URL", "")),
 		RowsCacheTTL:     envDuration("GONVEX_ROWS_CACHE_TTL", 15*time.Second),
 		S3Endpoint:       env("S3_ENDPOINT", ""),
 		S3Bucket:         env("S3_BUCKET", ""),
 		DevSyncKey:       env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
+		RequireAuth:      envBool("GONVEX_REQUIRE_AUTH", false),
 	}
+}
+
+func (cfg Config) TenantDatabaseURL(tenantID string) string {
+	if tenantID != "" && cfg.TenantDatabases != nil {
+		if value := cfg.TenantDatabases[tenantID]; value != "" {
+			return value
+		}
+	}
+	return cfg.DatabaseURL(tenantID)
 }
 
 func (cfg Config) DatabaseURL(projectID string) string {
@@ -82,6 +97,21 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return duration
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func envStringMap(key string) map[string]string {

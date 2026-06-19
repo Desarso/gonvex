@@ -7,16 +7,32 @@ export type FunctionReference = {
   path: string;
 };
 
+export type GonvexClientAuth = {
+  token?: string;
+  tenant?: string;
+};
+
 export class GonvexClient {
   private socket: WebSocket | undefined;
   private readonly handlers = new Map<string, SubscriptionHandler>();
+  private auth: GonvexClientAuth = {};
 
-  constructor(private readonly url: string) {}
+  constructor(private readonly url: string, auth: GonvexClientAuth = {}) {
+    this.auth = auth;
+  }
+
+  setAuth(auth: GonvexClientAuth) {
+    this.auth = auth;
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.sendAuth();
+    }
+  }
 
   connect() {
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
 
     this.socket = new WebSocket(this.url);
+    this.socket.addEventListener("open", () => this.sendAuth());
     this.socket.addEventListener("message", (event) => {
       let message: ServerMessage;
       try {
@@ -107,6 +123,11 @@ export class GonvexClient {
     });
   }
 
+  private sendAuth() {
+    if (!this.auth.token && !this.auth.tenant) return;
+    this.send({ type: "auth", id: randomID(), token: this.auth.token, tenant: this.auth.tenant });
+  }
+
   private send(message: ClientMessage) {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -118,8 +139,8 @@ export class GonvexClient {
 }
 
 export class ConvexReactClient extends GonvexClient {
-  constructor(url: string) {
-    super(toWebSocketURL(url));
+  constructor(url: string, auth: GonvexClientAuth = {}) {
+    super(toWebSocketURL(url), auth);
   }
 }
 

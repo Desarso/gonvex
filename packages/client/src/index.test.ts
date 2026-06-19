@@ -111,6 +111,30 @@ describe("GonvexClient", () => {
     ]);
   });
 
+  it("sends auth before queued messages when the socket opens", () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { token: "session-token", tenant: "tenant-a" });
+
+    client.subscribeQuery(ref, { status: "open" }, () => undefined);
+    const socket = latestSocket();
+    socket.open();
+
+    expect(sentMessages(socket)).toMatchObject([
+      { type: "auth", token: "session-token", tenant: "tenant-a" },
+      { type: "query.subscribe", path: "tasks.list", args: { status: "open" } },
+    ]);
+  });
+
+  it("sends auth updates on an open socket", () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+
+    client.setAuth({ token: "next-token", tenant: "tenant-b" });
+
+    expect(sentMessages(socket).at(-1)).toMatchObject({ type: "auth", token: "next-token", tenant: "tenant-b" });
+  });
+
   it("routes query subscription results to the matching handler", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const handler = vi.fn();

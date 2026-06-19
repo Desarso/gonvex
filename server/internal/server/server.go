@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -8,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/config"
 	"github.com/gonvex/gonvex/server/internal/data"
@@ -18,10 +20,13 @@ import (
 type Server struct {
 	config          config.Config
 	runtime         *runtime.Runtime
+	app             *gonvex.App
+	tenantStores    *tenantStoreResolver
 	cache           *rowsCache
 	metrics         *runtimeMetrics
 	projectMu       sync.RWMutex
 	projects        map[string]projectTarget
+	tenants         map[string]tenantTarget
 	wsMu            sync.RWMutex
 	wsConns         map[*wsConn]bool
 	tableChangeMu   sync.Mutex
@@ -30,17 +35,29 @@ type Server struct {
 }
 
 func New(cfg config.Config) *Server {
+	return NewWithApp(cfg, nil)
+}
+
+func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
+	if app == nil {
+		app = gonvex.NewApp()
+	}
 	cache, _ := newRowsCache(cfg.ValkeyURL, cfg.RowsCacheTTL)
 	server := &Server{
 		config:          cfg,
 		runtime:         runtime.New(),
+		app:             app,
 		cache:           cache,
 		metrics:         newRuntimeMetrics(),
 		projects:        map[string]projectTarget{},
+		tenants:         map[string]tenantTarget{},
 		wsConns:         map[*wsConn]bool{},
 		tableChangeWait: map[string]*time.Timer{},
 		tableChanges:    map[string]tableChange{},
 	}
+	server.tenantStores = newTenantStoreResolver(&server.config)
+	server.tenantStores.StartIdleReaper(context.Background())
+	server.startLandlordMigrations()
 	server.startPostgresNotifications()
 	return server
 }
@@ -53,6 +70,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/projects", s.handleProjects)
 	mux.HandleFunc("POST /dev/projects", s.handleCreateProject)
 	mux.HandleFunc("DELETE /dev/projects/{project}", s.handleDeleteProject)
+	mux.HandleFunc("GET /dev/tenants", s.handleTenants)
+	mux.HandleFunc("POST /dev/tenants", s.handleCreateTenant)
+	mux.HandleFunc("DELETE /dev/tenants/{tenant}", s.handleDeleteTenant)
 	mux.HandleFunc("GET /dev/data/tables", s.handleDataTables)
 	mux.HandleFunc("GET /dev/data/tables/{table}/rows", s.handleDataRows)
 	mux.HandleFunc("POST /dev/data/tables/{table}/rows", s.handleInsertDataRow)
@@ -93,8 +113,9 @@ func (s *Server) handleDataTables(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
 	table := r.PathValue("table")
 	project := projectID(r)
+	tenant := tenantIDFromRequest(project, tenantID(r))
 	if s.cache.enabled() {
-		key := s.cache.rowsKey(project, table, r.URL.Query())
+		key := s.cache.rowsKey(project, tenant, table, r.URL.Query())
 		if payload, ok := s.cache.get(r.Context(), key); ok {
 			s.metrics.recordCache("hit")
 			w.Header().Set("content-type", "application/json")
@@ -141,7 +162,7 @@ func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.cache.enabled() {
-		s.cache.set(r.Context(), s.cache.rowsKey(project, table, r.URL.Query()), payload)
+		s.cache.set(r.Context(), s.cache.rowsKey(project, tenant, table, r.URL.Query()), payload)
 	}
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -184,7 +205,7 @@ func (s *Server) handleInsertDataRow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	s.broadcastTableChange(projectID(r), r.PathValue("table"))
+	s.broadcastTenantTableChange(projectID(r), tenantIDFromRequest(projectID(r), tenantID(r)), r.PathValue("table"))
 	writeJSON(w, http.StatusCreated, result)
 }
 
@@ -222,7 +243,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.runtime.SyncManifest(next)
-	s.cache.invalidateRows(r.Context(), next.Project, "")
+	s.cache.invalidateRows(r.Context(), next.Project, tenantIDFromRequest(next.Project, ""), "")
 	s.broadcastTableChange(next.Project, "tasks")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":              true,
@@ -254,8 +275,18 @@ func projectID(r *http.Request) string {
 	return ""
 }
 
+func tenantID(r *http.Request) string {
+	if value := strings.TrimSpace(r.Header.Get("x-gonvex-tenant-id")); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(r.URL.Query().Get("tenant")); value != "" {
+		return value
+	}
+	return ""
+}
+
 func (s *Server) databaseURL(r *http.Request) string {
-	return s.databaseURLForProject(projectID(r))
+	return s.databaseURLForTenant(projectID(r), tenantID(r))
 }
 
 func (s *Server) databaseURLForProject(projectID string) string {
@@ -264,10 +295,28 @@ func (s *Server) databaseURLForProject(projectID string) string {
 	return s.config.DatabaseURL(projectID)
 }
 
+func (s *Server) databaseURLForTenant(projectID string, tenantID string) string {
+	s.projectMu.RLock()
+	defer s.projectMu.RUnlock()
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" || tenantID == projectID {
+		return s.config.DatabaseURL(projectID)
+	}
+	if s.config.TenantDatabases != nil {
+		if value := s.config.TenantDatabases[tenantStoreKey(projectID, tenantID)]; value != "" {
+			return value
+		}
+		if value := s.config.TenantDatabases[tenantID]; value != "" {
+			return value
+		}
+	}
+	return s.config.DatabaseURL(projectID)
+}
+
 func withJSON(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("access-control-allow-origin", "*")
-		w.Header().Set("access-control-allow-headers", "content-type, authorization, x-gonvex-project-id")
+		w.Header().Set("access-control-allow-headers", "content-type, authorization, x-gonvex-project-id, x-gonvex-tenant-id")
 		w.Header().Set("access-control-allow-methods", "GET, POST, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
