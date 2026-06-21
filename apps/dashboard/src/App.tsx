@@ -389,7 +389,10 @@ const functionRows: GridRow[] = [
   ["tasks.list", "query", "live", "gonvex/tasks.go", "ready"],
   ["tasks.create", "mutation", "invalidates", "gonvex/tasks.go", "ready"],
   ["tasks.randomizeStatusPriority", "mutation", "coalesced", "gonvex/tasks.go", "ready"],
-  ["files.createUploadUrl", "mutation", "storage", "gonvex/files.go", "planned"],
+  ["files.createUploadUrl", "mutation", "storage", "gonvex/files.go", "ready"],
+  ["files.getUrl", "query", "storage", "gonvex/files.go", "ready"],
+  ["files.getMetadata", "query", "storage", "gonvex/files.go", "ready"],
+  ["files.delete", "mutation", "storage", "gonvex/files.go", "ready"],
   ["tasks.grid", "liveGrid", "patch stream", "gonvex/tasks.go", "ready"],
 ];
 

@@ -63,6 +63,21 @@ func gonvexHostSymbols() map[string]map[string]reflect.Value {
 			"Schema":      reflect.ValueOf(gonvex.Schema{}),
 			"Table":       reflect.ValueOf(gonvex.Table{}),
 			"Nullable":    reflect.ValueOf(gonvex.Nullable),
+
+			// Storage API surface, available to app code as ctx.Storage.
+			"StorageAPI":              reflect.ValueOf((*gonvex.StorageAPI)(nil)),
+			"FileMetadata":            reflect.ValueOf((*gonvex.FileMetadata)(nil)),
+			"UploadOptions":           reflect.ValueOf((*gonvex.UploadOptions)(nil)),
+			"UploadTarget":            reflect.ValueOf((*gonvex.UploadTarget)(nil)),
+			"FileVisibility":          reflect.ValueOf((*gonvex.FileVisibility)(nil)),
+			"FileVisibilityPrivate":   reflect.ValueOf(gonvex.FileVisibilityPrivate),
+			"FileVisibilityTenant":    reflect.ValueOf(gonvex.FileVisibilityTenant),
+			"FileVisibilityPublic":    reflect.ValueOf(gonvex.FileVisibilityPublic),
+			"FileStatusPending":       reflect.ValueOf(gonvex.FileStatusPending),
+			"FileStatusUploaded":      reflect.ValueOf(gonvex.FileStatusUploaded),
+			"ErrStorageNotConfigured": reflect.ValueOf(&gonvex.ErrStorageNotConfigured).Elem(),
+			"ErrFileNotFound":         reflect.ValueOf(&gonvex.ErrFileNotFound).Elem(),
+			"ErrForbidden":            reflect.ValueOf(&gonvex.ErrForbidden).Elem(),
 		},
 	}
 }

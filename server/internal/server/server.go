@@ -13,6 +13,7 @@ import (
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/pkg/projectbundle"
+	"github.com/gonvex/gonvex/pkg/storage"
 	"github.com/gonvex/gonvex/server/internal/config"
 	"github.com/gonvex/gonvex/server/internal/data"
 	"github.com/gonvex/gonvex/server/internal/runtime"
@@ -23,6 +24,7 @@ type Server struct {
 	config            config.Config
 	runtime           *runtime.Runtime
 	app               *gonvex.App
+	storage           *storage.Factory
 	tenantStores      *tenantStoreResolver
 	cache             *rowsCache
 	metrics           *runtimeMetrics
@@ -49,9 +51,17 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	}
 	cache, _ := newRowsCache(cfg.ValkeyURL, cfg.RowsCacheTTL)
 	server := &Server{
-		config:            cfg,
-		runtime:           runtime.NewWithLoader(projectbundle.NewLoader("", cfg.GonvexModuleRoot)),
-		app:               app,
+		config:  cfg,
+		runtime: runtime.NewWithLoader(projectbundle.NewLoader("", cfg.GonvexModuleRoot)),
+		app:     app,
+		storage: storage.NewFactory(storage.Config{
+			Endpoint:        cfg.S3Endpoint,
+			Region:          cfg.S3Region,
+			Bucket:          cfg.S3Bucket,
+			AccessKeyID:     cfg.S3AccessKeyID,
+			SecretAccessKey: cfg.S3SecretAccessKey,
+			ForcePathStyle:  cfg.S3ForcePathStyle,
+		}),
 		cache:             cache,
 		metrics:           newRuntimeMetrics(cfg.TelemetryLogPath),
 		telemetryWrites:   make(chan struct{}, 4),
@@ -98,7 +108,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"postgresSet": s.config.PostgresURL != "",
 		"valkeySet":   s.config.ValkeyURL != "",
 		"rowsCache":   s.cache.enabled(),
-		"s3Set":       s.config.S3Endpoint != "" && s.config.S3Bucket != "",
+		"s3Set":       s.storage != nil,
 	})
 }
 

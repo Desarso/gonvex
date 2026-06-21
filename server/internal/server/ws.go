@@ -3,6 +3,7 @@ package server
 import (
 	"compress/flate"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -825,6 +826,7 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 	if err != nil {
 		return gonvex.RuntimeContext{}, err
 	}
+	logger := slog.Default().With("project", projectID, "tenant", activeTenant)
 	return gonvex.RuntimeContext{
 		Context:     ctx,
 		ProjectID:   projectID,
@@ -833,10 +835,31 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		DB:          store.DB,
 		LandlordDB:  landlordStore.DB,
 		TenantDB:    store.DB,
+		Storage:     s.storageForTenant(ctx, projectID, activeTenant, store.DB, caller, logger),
 		User:        caller.user,
 		Permissions: caller.permissions,
-		Logger:      slog.Default().With("project", projectID, "tenant", activeTenant),
+		Logger:      logger,
 	}, nil
+}
+
+// storageForTenant builds the per-request storage handle bound to the active
+// tenant database. It returns nil (leaving the not-configured fallback in
+// place) when storage is unconfigured or the metadata table cannot be ensured,
+// so storage problems never break functions that don't use storage.
+func (s *Server) storageForTenant(ctx context.Context, projectID, tenantID string, db *sql.DB, caller callerContext, logger *slog.Logger) gonvex.StorageAPI {
+	if s.storage == nil || db == nil {
+		return nil
+	}
+	ownerID := ""
+	if caller.user != nil {
+		ownerID = caller.user.ID
+	}
+	tenant, err := s.storage.Tenant(ctx, db, projectID, tenantID, ownerID)
+	if err != nil {
+		logger.Warn("storage unavailable for tenant", "error", err)
+		return nil
+	}
+	return tenant
 }
 
 func isLegacyTaskQuery(path string) bool {

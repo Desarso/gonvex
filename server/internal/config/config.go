@@ -9,44 +9,52 @@ import (
 )
 
 type Config struct {
-	Addr             string
-	LandlordURL      string
-	PostgresURL      string
-	TenantDatabases  map[string]string
-	ProjectDatabases map[string]string
-	ProjectKeys      map[string]string
-	GonvexModuleRoot string
-	ValkeyURL        string
-	RowsCacheTTL     time.Duration
-	TelemetryEnabled bool
-	TelemetryLogPath string
-	S3Endpoint       string
-	S3Bucket         string
-	DevSyncKey       string
-	AdminKey         string
-	RequireAuth      bool
+	Addr              string
+	LandlordURL       string
+	PostgresURL       string
+	TenantDatabases   map[string]string
+	ProjectDatabases  map[string]string
+	ProjectKeys       map[string]string
+	GonvexModuleRoot  string
+	ValkeyURL         string
+	RowsCacheTTL      time.Duration
+	TelemetryEnabled  bool
+	TelemetryLogPath  string
+	S3Endpoint        string
+	S3Region          string
+	S3Bucket          string
+	S3AccessKeyID     string
+	S3SecretAccessKey string
+	S3ForcePathStyle  bool
+	DevSyncKey        string
+	AdminKey          string
+	RequireAuth       bool
 }
 
 func FromEnv() Config {
 	loadDotEnv(".env")
 
 	return Config{
-		Addr:             env("GONVEX_ADDR", ":8080"),
-		LandlordURL:      env("GONVEX_LANDLORD_DATABASE_URL", env("LANDLORD_DATABASE_URL", "")),
-		PostgresURL:      env("DATABASE_URL", env("POSTGRES_URL", "")),
-		TenantDatabases:  envStringMap("GONVEX_TENANT_DATABASE_URLS"),
-		ProjectDatabases: envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
-		ProjectKeys:      envStringMap("GONVEX_PROJECT_KEYS"),
-		GonvexModuleRoot: env("GONVEX_MODULE_ROOT", ""),
-		ValkeyURL:        env("VALKEY_URL", env("REDIS_URL", "")),
-		RowsCacheTTL:     envDuration("GONVEX_ROWS_CACHE_TTL", 15*time.Second),
-		TelemetryEnabled: envBool("GONVEX_TELEMETRY_ENABLED", true),
-		TelemetryLogPath: env("GONVEX_TELEMETRY_LOG", "tmp/gonvex-telemetry.jsonl"),
-		S3Endpoint:       env("S3_ENDPOINT", ""),
-		S3Bucket:         env("S3_BUCKET", ""),
-		DevSyncKey:       env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
-		AdminKey:         env("GONVEX_ADMIN_KEY", ""),
-		RequireAuth:      envBool("GONVEX_REQUIRE_AUTH", false),
+		Addr:              env("GONVEX_ADDR", ":8080"),
+		LandlordURL:       env("GONVEX_LANDLORD_DATABASE_URL", env("LANDLORD_DATABASE_URL", "")),
+		PostgresURL:       env("DATABASE_URL", env("POSTGRES_URL", "")),
+		TenantDatabases:   envStringMap("GONVEX_TENANT_DATABASE_URLS"),
+		ProjectDatabases:  envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
+		ProjectKeys:       envStringMap("GONVEX_PROJECT_KEYS"),
+		GonvexModuleRoot:  env("GONVEX_MODULE_ROOT", ""),
+		ValkeyURL:         env("VALKEY_URL", env("REDIS_URL", "")),
+		RowsCacheTTL:      envDuration("GONVEX_ROWS_CACHE_TTL", 15*time.Second),
+		TelemetryEnabled:  envBool("GONVEX_TELEMETRY_ENABLED", true),
+		TelemetryLogPath:  env("GONVEX_TELEMETRY_LOG", "tmp/gonvex-telemetry.jsonl"),
+		S3Endpoint:        env("S3_ENDPOINT", ""),
+		S3Region:          env("S3_REGION", "us-east-1"),
+		S3Bucket:          env("S3_BUCKET", ""),
+		S3AccessKeyID:     env("S3_ACCESS_KEY_ID", ""),
+		S3SecretAccessKey: env("S3_SECRET_ACCESS_KEY", ""),
+		S3ForcePathStyle:  envBool("S3_FORCE_PATH_STYLE", true),
+		DevSyncKey:        env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
+		AdminKey:          env("GONVEX_ADMIN_KEY", ""),
+		RequireAuth:       envBool("GONVEX_REQUIRE_AUTH", false),
 	}
 }
 

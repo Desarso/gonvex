@@ -56,6 +56,7 @@ type RuntimeContext struct {
 	LandlordDB  *sql.DB
 	TenantDB    *sql.DB
 	Tx          *sql.Tx
+	Storage     StorageAPI
 	Logger      *slog.Logger
 }
 
@@ -330,6 +331,9 @@ func (c *RuntimeContext) normalize() {
 	}
 	if c.TenantID == "" {
 		c.TenantID = c.ProjectID
+	}
+	if c.Storage == nil {
+		c.Storage = storageUnavailable{}
 	}
 }
 
