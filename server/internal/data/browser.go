@@ -59,11 +59,10 @@ func ListTables(ctx context.Context, databaseURL string) ([]TableInfo, error) {
 		return []TableInfo{}, nil
 	}
 
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openDB(databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
 
 	rows, err := db.QueryContext(ctx, `
 		SELECT table_name
@@ -111,11 +110,10 @@ func ReadRows(ctx context.Context, databaseURL string, table string, options Row
 		options.Offset = 0
 	}
 
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openDB(databaseURL)
 	if err != nil {
 		return RowsResult{}, err
 	}
-	defer db.Close()
 
 	columns, err := tableColumns(ctx, db, table)
 	if err != nil {
@@ -525,11 +523,10 @@ func InsertRow(ctx context.Context, databaseURL string, table string, values map
 		return InsertResult{}, fmt.Errorf("database URL is not configured")
 	}
 
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openDB(databaseURL)
 	if err != nil {
 		return InsertResult{}, err
 	}
-	defer db.Close()
 
 	columns, err := tableColumns(ctx, db, table)
 	if err != nil {
@@ -608,6 +605,20 @@ func InsertRow(ctx context.Context, databaseURL string, table string, values map
 
 func blankValue(value any) bool {
 	return value == nil || value == ""
+}
+
+func cleanDeleteIDs(ids []string) []string {
+	cleaned := make([]string, 0, len(ids))
+	seen := map[string]bool{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		cleaned = append(cleaned, id)
+	}
+	return cleaned
 }
 
 func nextNumericID(ctx context.Context, db *sql.DB, table string) (string, error) {

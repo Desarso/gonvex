@@ -1,5 +1,7 @@
 export {
   ConvexProvider,
+  ConvexProviderWithAuth,
+  ConvexReactClient,
   GonvexProvider,
   useAction,
   useConvex,

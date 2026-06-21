@@ -43,11 +43,12 @@ import { getAuth, GoogleAuthProvider, signInWithPopup, type Auth } from "firebas
 import { GonvexClient } from "@gonvex/client";
 import { Avatar, Button, Calendar, Card, Checkbox, Chip, DateField, DatePicker, ListBox, NumberField, SearchField, Select, Separator } from "@heroui/react";
 import { parseDate, type DateValue } from "@internationalized/date";
-import { useEffect, useRef, useState, type Dispatch, type FormEvent, type MutableRefObject, type ReactNode, type SetStateAction } from "react";
+import { Background, Controls, MarkerType, MiniMap, ReactFlow, applyNodeChanges, type Edge, type Node, type NodeChange } from "@xyflow/react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type MutableRefObject, type ReactNode, type SetStateAction } from "react";
 import type { JsonValue } from "@gonvex/protocol";
 import { api } from "../gonvex/_generated/api";
 
-type PageID = "overview" | "functions" | "data" | "test" | "files" | "realtime" | "settings";
+type PageID = "overview" | "functions" | "data" | "test" | "logs" | "files" | "realtime" | "settings";
 
 type GridRow = string[];
 
@@ -74,6 +75,17 @@ type DataRowsResponse = {
   limit?: number;
 };
 
+type TenantTarget = {
+  id: string;
+  projectId: string;
+  name: string;
+  database: string;
+  status: string;
+  description: string;
+  provisioned?: boolean;
+  runtimeCreated?: boolean;
+};
+
 type FunctionInfo = {
   name: string;
   kind: string;
@@ -88,6 +100,17 @@ type ManifestResponse = {
     handler: string;
     file: string;
   }>;
+  schema?: ManifestSchema;
+};
+
+type ManifestTable = {
+  columns?: Record<string, unknown>;
+};
+
+type ManifestSchema = {
+  landlordTables?: Record<string, ManifestTable>;
+  tenantTables?: Record<string, ManifestTable>;
+  tables?: Record<string, ManifestTable>;
 };
 
 type RuntimeFunctionMetricPoint = {
@@ -160,6 +183,12 @@ type ThemeMode = "dark" | "light";
 
 type ActionHandler = (message: string) => void;
 
+type SelectOption = {
+  value: string;
+  label: string;
+  description?: string;
+};
+
 type DashboardSession = {
   email: string;
   name: string;
@@ -181,6 +210,23 @@ type ProjectTarget = {
   ownerEmail?: string;
   sharedWith?: string[];
 };
+
+type EnvVariable = {
+  name: string;
+  value?: string;
+  masked: string;
+  source: string;
+  sensitive: boolean;
+};
+
+type CreatedProject = {
+  project: ProjectTarget;
+  projectKey: string;
+};
+
+type DatabaseMode = "single" | "multiTenant";
+
+type DataViewMode = "rows" | "erd";
 
 type SortDirection = "asc" | "desc";
 
@@ -256,6 +302,16 @@ type InsertRowResponse = {
   row: Record<string, unknown>;
 };
 
+type DeleteRowsResponse = {
+  table: string;
+  ids: string[];
+  deleted: number;
+};
+
+type CreateTenantResponse = {
+  tenant: TenantTarget;
+};
+
 type RandomizeTasksResponse = {
   updated: number;
   requested: number;
@@ -290,6 +346,13 @@ const pages: Page[] = [
     eyebrow: "Task table lab",
     title: "Whagons-style Glide table",
     description: "Temporary sandbox for rendering task rows with custom Glide Data Grid cells inspired by the Whagons workspace table.",
+  },
+  {
+    id: "logs",
+    label: "Logs",
+    eyebrow: "Runtime stream",
+    title: "Runtime logs",
+    description: "Function execution, cache, and runtime activity emitted by the local Gonvex Runtime.",
   },
   {
     id: "files",
@@ -422,6 +485,30 @@ function formatLogTime(value: string): string {
   return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+function formatLogDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function logEntryText(entry: RuntimeLogEntry): string {
+  return [
+    entry.time,
+    entry.path,
+    entry.kind,
+    entry.outcome,
+    entry.cache ?? "",
+    entry.error ?? "",
+    formatDuration(entry.durationMs),
+  ].join(" ").toLowerCase();
+}
+
 const schemaColumns: GridColumn[] = [
   { title: "Table", id: "table", width: 130 },
   { title: "Column", id: "column", width: 150 },
@@ -451,6 +538,26 @@ const schemaRows: GridRow[] = [
   ["files", "size", "int64", "yes", ""],
   ["files", "created_at", "time", "no", ""],
 ];
+
+const dataFilterOperators: SelectOption[] = [
+  { value: "contains", label: "contains" },
+  { value: "equals", label: "equals" },
+  { value: "notEquals", label: "does not equal" },
+  { value: "startsWith", label: "starts with" },
+  { value: "endsWith", label: "ends with" },
+  { value: "empty", label: "is empty" },
+  { value: "notEmpty", label: "is not empty" },
+];
+const dataFilterOperatorSet = new Set<string>([
+  ...dataFilterOperators.map((operator) => operator.value),
+  "notContains",
+  "oneOf",
+  "lessThan",
+  "lessThanOrEqual",
+  "greaterThan",
+  "greaterThanOrEqual",
+  "inRange",
+]);
 
 const emptyColumns: string[] = [];
 
@@ -487,6 +594,18 @@ const projectTargets: ProjectTarget[] = loadProjectTargets();
 const dashboardSessionKey = "gonvex-dashboard-session";
 const dashboardProjectKey = "gonvex-dashboard-project";
 const dashboardProjectsKey = "gonvex-dashboard-created-projects";
+const dashboardDatabaseModesKey = "gonvex-dashboard-database-modes";
+const dashboardHideTestTenantsKey = "gonvex-dashboard-hide-test-tenants";
+const landlordDataSourceID = "__gonvex_landlord__";
+const dataDatabaseQueryParam = "db";
+const dataTableQueryParam = "table";
+const dataSearchQueryParam = "q";
+const dataTableSearchQueryParam = "tables";
+const dataSortQueryParam = "sort";
+const dataSortDirectionQueryParam = "dir";
+const dataFiltersQueryParam = "filters";
+const dataViewQueryParam = "view";
+const erdLayoutStoragePrefix = "gonvex-erd-layout";
 
 const dataPageSize = 300;
 const testTaskPageSize = 100;
@@ -809,23 +928,25 @@ function runtimeURLForProject(project: ProjectTarget): string {
   return trimTrailingSlash(project.runtimeUrl || runtimeBaseURL);
 }
 
-function runtimeHeaders(project: ProjectTarget, headers?: HeadersInit): Headers {
+function runtimeHeaders(project: ProjectTarget, headers?: HeadersInit, tenantID = ""): Headers {
   const next = new Headers(headers);
   next.set("x-gonvex-project-id", project.id);
+  if (tenantID) next.set("x-gonvex-tenant-id", tenantID);
   return next;
 }
 
 const gonvexClients = new Map<string, GonvexClient>();
 
-function gonvexClientForProject(project: ProjectTarget): GonvexClient | null {
+function gonvexClientForProject(project: ProjectTarget, tenantID = ""): GonvexClient | null {
   const baseURL = runtimeURLForProject(project);
   if (!baseURL) return null;
   const url = new URL(`${baseURL.replace(/^http/, "ws")}/ws`);
   url.searchParams.set("project", project.id);
+  if (tenantID) url.searchParams.set("tenant", tenantID);
   const key = url.toString();
   let client = gonvexClients.get(key);
   if (!client) {
-    client = new GonvexClient(key);
+    client = new GonvexClient(key, { telemetry: false });
     gonvexClients.set(key, client);
   }
   return client;
@@ -856,7 +977,7 @@ async function fetchRuntimeProjects(): Promise<ProjectTarget[]> {
   return (payload.projects ?? []).map(projectFromRuntime);
 }
 
-async function createRuntimeProject(name: string): Promise<ProjectTarget> {
+async function createRuntimeProject(name: string): Promise<CreatedProject> {
   const response = await fetch(`${runtimeBaseURL}/dev/projects`, {
     body: JSON.stringify({ name }),
     headers: { "content-type": "application/json" },
@@ -866,8 +987,11 @@ async function createRuntimeProject(name: string): Promise<ProjectTarget> {
     const payload = await response.json().catch(() => ({} as { error?: string }));
     throw new Error(payload.error ?? response.statusText);
   }
-  const payload = await response.json() as { project: Partial<ProjectTarget> & { id: string; name: string } };
-  return projectFromRuntime(payload.project);
+  const payload = await response.json() as { project: Partial<ProjectTarget> & { id: string; name: string }; projectKey?: string };
+  return {
+    project: projectFromRuntime(payload.project),
+    projectKey: payload.projectKey ?? "",
+  };
 }
 
 async function deleteRuntimeProject(projectID: string): Promise<void> {
@@ -1698,6 +1822,37 @@ function formatCellValue(value: unknown): string {
   return String(value);
 }
 
+function selectedRowIDs(selectedRows: ReadonlySet<number>, rowCache: Record<number, Record<string, unknown>>): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  Array.from(selectedRows).sort((left, right) => left - right).forEach((index) => {
+    const id = formatCellValue(rowCache[index]?.id).trim();
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  });
+  return ids;
+}
+
+function saveERDNodePositions(key: string, nodes: Node<ERDNodeData>[]) {
+  if (typeof window === "undefined") return;
+  const positions = Object.fromEntries(nodes.map((node) => [node.id, node.position]));
+  window.localStorage.setItem(key, JSON.stringify(positions));
+}
+
+function applySavedERDNodePositions(nodes: Node<ERDNodeData>[], key: string): Node<ERDNodeData>[] {
+  if (typeof window === "undefined") return nodes;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(key) ?? "{}") as Record<string, { x: number; y: number }>;
+    return nodes.map((node) => {
+      const position = parsed[node.id];
+      return Number.isFinite(position?.x) && Number.isFinite(position?.y) ? { ...node, position } : node;
+    });
+  } catch {
+    return nodes;
+  }
+}
+
 function compareValues(left: unknown, right: unknown, direction: SortDirection): number {
   const leftValue = formatCellValue(left).toLowerCase();
   const rightValue = formatCellValue(right).toLowerCase();
@@ -1837,9 +1992,183 @@ function pathForProjectPage(projectID: string, id: PageID): string {
   return `/projects/${encodeURIComponent(projectID)}/${id}`;
 }
 
+function dataSourceFromURL(): string {
+  if (typeof window === "undefined") return landlordDataSourceID;
+  const raw = new URLSearchParams(window.location.search).get(dataDatabaseQueryParam)?.trim() ?? "";
+  return raw && raw !== "landlord" ? raw : landlordDataSourceID;
+}
+
+function dataStateFromURL(): {
+  filters: DataFilter[];
+  rowSearch: string;
+  sort: SortState<string> | null;
+  sourceID: string;
+  table: string;
+  tableSearch: string;
+  view: DataViewMode;
+} {
+  if (typeof window === "undefined") {
+    return { filters: [], rowSearch: "", sort: null, sourceID: landlordDataSourceID, table: "", tableSearch: "", view: "rows" };
+  }
+  const params = new URLSearchParams(window.location.search);
+  const sortKey = params.get(dataSortQueryParam)?.trim() ?? "";
+  const direction = params.get(dataSortDirectionQueryParam) === "desc" ? "desc" : "asc";
+  return {
+    filters: parseDataFiltersParam(params.get(dataFiltersQueryParam) ?? ""),
+    rowSearch: params.get(dataSearchQueryParam) ?? "",
+    sort: sortKey ? { key: sortKey, direction } : null,
+    sourceID: dataSourceFromURL(),
+    table: params.get(dataTableQueryParam)?.trim() ?? "",
+    tableSearch: params.get(dataTableSearchQueryParam) ?? "",
+    view: params.get(dataViewQueryParam) === "erd" ? "erd" : "rows",
+  };
+}
+
+function tenantDatabaseLabel(tenant: TenantTarget | null, fallback: string): string {
+  const database = tenant?.database?.trim();
+  return database || fallback;
+}
+
+function tenantDisplayLabel(tenant: TenantTarget | null, fallback: string): string {
+  const database = tenantDatabaseLabel(tenant, fallback);
+  const name = tenant?.name?.trim();
+  return name && name !== database ? `${database} (${name})` : database;
+}
+
+function parseDataFiltersParam(value: string): DataFilter[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as Partial<DataFilter>[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((filter, index) => ({
+        id: String(filter.id ?? `url-${index}`),
+        column: String(filter.column ?? ""),
+        operator: dataFilterOperatorSet.has(String(filter.operator)) ? filter.operator as DataFilter["operator"] : "contains",
+        value: String(filter.value ?? ""),
+        ...(filter.valueTo === undefined ? {} : { valueTo: String(filter.valueTo) }),
+      }))
+      .filter((filter) => filter.column);
+  } catch {
+    return [];
+  }
+}
+
+function encodeDataFiltersParam(filters: DataFilter[]): string {
+  return JSON.stringify(filters.map((filter) => ({
+    column: filter.column,
+    operator: filter.operator,
+    value: filter.value,
+    ...(filter.valueTo === undefined ? {} : { valueTo: filter.valueTo }),
+  })));
+}
+
+function setDataStateInURL(update: {
+  filters?: DataFilter[];
+  rowSearch?: string;
+  sort?: SortState<string> | null;
+  sourceID?: string;
+  table?: string;
+  tableSearch?: string;
+  view?: DataViewMode;
+}, replace = false) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (update.sourceID !== undefined) {
+    url.searchParams.set(dataDatabaseQueryParam, update.sourceID && update.sourceID !== landlordDataSourceID ? update.sourceID : "landlord");
+  }
+  if (update.table !== undefined) {
+    if (update.table) url.searchParams.set(dataTableQueryParam, update.table);
+    else url.searchParams.delete(dataTableQueryParam);
+  }
+  if (update.rowSearch !== undefined) {
+    if (update.rowSearch.trim()) url.searchParams.set(dataSearchQueryParam, update.rowSearch.trim());
+    else url.searchParams.delete(dataSearchQueryParam);
+  }
+  if (update.tableSearch !== undefined) {
+    if (update.tableSearch.trim()) url.searchParams.set(dataTableSearchQueryParam, update.tableSearch.trim());
+    else url.searchParams.delete(dataTableSearchQueryParam);
+  }
+  if (update.sort !== undefined) {
+    if (update.sort) {
+      url.searchParams.set(dataSortQueryParam, update.sort.key);
+      url.searchParams.set(dataSortDirectionQueryParam, update.sort.direction);
+    } else {
+      url.searchParams.delete(dataSortQueryParam);
+      url.searchParams.delete(dataSortDirectionQueryParam);
+    }
+  }
+  if (update.filters !== undefined) {
+    if (update.filters.length > 0) url.searchParams.set(dataFiltersQueryParam, encodeDataFiltersParam(update.filters));
+    else url.searchParams.delete(dataFiltersQueryParam);
+  }
+  if (update.view !== undefined) {
+    if (update.view === "erd") url.searchParams.set(dataViewQueryParam, "erd");
+    else url.searchParams.delete(dataViewQueryParam);
+  }
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (next === current) return;
+  if (replace) window.history.replaceState(null, "", next);
+  else window.history.pushState(null, "", next);
+}
+
+function setDataSourceInURL(sourceID: string, replace = false) {
+  setDataStateInURL({ sourceID }, replace);
+}
+
 function storedTheme(): ThemeMode {
   if (typeof window === "undefined") return "dark";
   return window.localStorage.getItem("gonvex-theme") === "light" ? "light" : "dark";
+}
+
+function storedDatabaseModes(): Record<string, DatabaseMode> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(dashboardDatabaseModesKey) ?? "{}") as Record<string, string>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, mode]) => mode === "single" || mode === "multiTenant"),
+    ) as Record<string, DatabaseMode>;
+  } catch {
+    return {};
+  }
+}
+
+function databaseModeForProject(modes: Record<string, DatabaseMode>, projectID: string): DatabaseMode {
+  return modes[projectID] ?? "single";
+}
+
+function storedHideTestTenants(): Record<string, boolean> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(dashboardHideTestTenantsKey) ?? "{}") as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(parsed).filter(([, value]) => typeof value === "boolean")) as Record<string, boolean>;
+  } catch {
+    return {};
+  }
+}
+
+function hideTestTenantsForProject(settings: Record<string, boolean>, projectID: string): boolean {
+  return settings[projectID] ?? true;
+}
+
+function tenantLooksInternalOrTest(tenant: TenantTarget): boolean {
+  const values = [tenant.id, tenant.name, tenant.database, tenant.description]
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  return values.some((value) => {
+    const normalized = value.replace(/\s+/g, "-");
+    return normalized === "test"
+      || /^test\d+$/.test(normalized)
+      || normalized === "telemetry"
+      || normalized.endsWith("-telemetry")
+      || normalized.endsWith("_telemetry")
+      || normalized.startsWith("e2e-")
+      || normalized.startsWith("e2e_")
+      || normalized.includes("-e2e-")
+      || normalized.includes("_e2e_")
+      || normalized.includes("testing");
+  });
 }
 
 function useViewportHeight() {
@@ -1915,16 +2244,100 @@ function displayNameFromEmail(email: string): string {
     .join(" ") || email;
 }
 
+function AppSelect(props: {
+  ariaLabel: string;
+  className?: string;
+  isDisabled?: boolean;
+  label?: string;
+  onChange: (value: string) => void;
+  options: SelectOption[];
+  searchable?: boolean;
+  searchPlaceholder?: string;
+  selectedKey: string;
+}) {
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const [popoverWidth, setPopoverWidth] = useState<number | undefined>();
+  const [search, setSearch] = useState("");
+  const visibleOptions = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!props.searchable || !query) return props.options;
+    return props.options.filter((option) => [option.label, option.description ?? "", option.value].some((value) => value.toLowerCase().includes(query)));
+  }, [props.options, props.searchable, search]);
+
+  useEffect(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const updateWidth = () => setPopoverWidth(trigger.getBoundingClientRect().width);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(trigger);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div className={["app-select-field", props.className].filter(Boolean).join(" ")}>
+      {props.label ? <span>{props.label}</span> : null}
+      <Select
+        aria-label={props.ariaLabel}
+        className="app-select"
+        isDisabled={props.isDisabled}
+        onSelectionChange={(key) => {
+          if (key !== null) props.onChange(String(key));
+        }}
+        selectedKey={props.selectedKey}
+      >
+        <Select.Trigger ref={triggerRef} className="app-select-trigger">
+          <Select.Value />
+          <Select.Indicator />
+        </Select.Trigger>
+        <Select.Popover className="app-select-popover" style={popoverWidth ? { width: popoverWidth } : undefined}>
+          {props.searchable ? (
+            <div className="app-select-search" onKeyDown={(event) => event.stopPropagation()}>
+              <input
+                aria-label={`Search ${props.ariaLabel}`}
+                autoComplete="off"
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder={props.searchPlaceholder ?? "Search..."}
+                value={search}
+              />
+            </div>
+          ) : null}
+          <ListBox>
+            {visibleOptions.map((option) => (
+              <ListBox.Item id={option.value} key={option.value} textValue={option.label}>
+                <span className="app-select-option-text">
+                  <strong>{option.label}</strong>
+                  {option.description ? <small>{option.description}</small> : null}
+                </span>
+                <ListBox.ItemIndicator />
+              </ListBox.Item>
+            ))}
+            {visibleOptions.length === 0 ? (
+              <ListBox.Item id="__gonvex_no_options__" key="__gonvex_no_options__" isDisabled textValue="No matching databases">
+                <span className="app-select-option-text">
+                  <strong>No matches</strong>
+                  <small>Try another search</small>
+                </span>
+              </ListBox.Item>
+            ) : null}
+          </ListBox>
+        </Select.Popover>
+      </Select>
+    </div>
+  );
+}
+
 function ManifestGrid(props: {
   columns: GridColumn[];
   rows?: GridRow[];
   rowCount?: number;
   getCellContent?: (item: Item) => GridCell;
   customRenderers?: readonly CustomRenderer[];
-  height?: number;
+  height?: number | string;
   rowHeight?: number;
   themeMode: ThemeMode;
   clearSelection?: boolean;
+  clearSelectionKey?: number;
   disableSelection?: boolean;
   noGridLines?: boolean;
   zebraRows?: boolean;
@@ -1940,6 +2353,7 @@ function ManifestGrid(props: {
   overlay?: ReactNode;
   onColumnResize?: (column: GridColumn, newSize: number, columnIndex: number) => void;
   onVisibleRegionChanged?: (range: Rectangle) => void;
+  onSelectionChange?: (selection: GridSelection) => void;
 }) {
   const rows = props.rows ?? [];
   const [gridSelection, setGridSelection] = useState<GridSelection>(() => emptyGridSelection());
@@ -1994,8 +2408,19 @@ function ManifestGrid(props: {
   };
 
   useEffect(() => {
-    if (props.clearSelection) setGridSelection(emptyGridSelection());
+    if (props.clearSelection) {
+      const empty = emptyGridSelection();
+      setGridSelection(empty);
+      props.onSelectionChange?.(empty);
+    }
   }, [props.clearSelection]);
+
+  useEffect(() => {
+    if (props.clearSelectionKey === undefined) return;
+    const empty = emptyGridSelection();
+    setGridSelection(empty);
+    props.onSelectionChange?.(empty);
+  }, [props.clearSelectionKey]);
 
   const theme = props.noGridLines
     ? {
@@ -2034,7 +2459,14 @@ function ManifestGrid(props: {
         onCellClicked={props.onCellClick}
         onColumnResize={props.onColumnResize}
         onCellEdited={props.onCellEdited}
-        onGridSelectionChange={props.disableSelection ? () => setGridSelection(emptyGridSelection()) : setGridSelection}
+        onGridSelectionChange={props.disableSelection ? () => {
+          const empty = emptyGridSelection();
+          setGridSelection(empty);
+          props.onSelectionChange?.(empty);
+        } : (selection) => {
+          setGridSelection(selection);
+          props.onSelectionChange?.(selection);
+        }}
         onHeaderClicked={props.onHeaderClick ? (column, event) => {
           if (isHeaderMenuIconClick(event)) return;
           props.onHeaderClick?.(column);
@@ -2067,11 +2499,15 @@ export function App() {
   });
   const [projects, setProjects] = useState<ProjectTarget[]>(() => projectTargets);
   const [activeProjectID, setActiveProjectID] = useState<string | null>(() => storedProjectID());
+  const [databaseModes, setDatabaseModes] = useState<Record<string, DatabaseMode>>(() => storedDatabaseModes());
+  const [hideTestTenants, setHideTestTenants] = useState<Record<string, boolean>>(() => storedHideTestTenants());
   const [actionMessage, setActionMessage] = useState("");
   const page = getPage(activePage);
   const currentSession = session ?? localDeveloperSession;
   const visibleProjects = visibleProjectsForSession(projects, currentSession);
   const activeProject = projectByID(visibleProjects, activeProjectID);
+  const activeDatabaseMode = activeProject ? databaseModeForProject(databaseModes, activeProject.id) : "single";
+  const activeHideTestTenants = activeProject ? hideTestTenantsForProject(hideTestTenants, activeProject.id) : true;
   const themeLabel = theme === "dark" ? "Light mode" : "Dark mode";
   const toggleTheme = () => setTheme((current) => (current === "dark" ? "light" : "dark"));
   const reportAction: ActionHandler = (message) => setActionMessage(message);
@@ -2117,13 +2553,15 @@ export function App() {
     reportAction(`Switched to ${nextProject.name}`);
   };
 
-  const createProject = async (name: string) => {
-    const ownedProject = { ...await createRuntimeProject(name), ownerEmail: currentSession.email };
+  const createProject = async (name: string): Promise<CreatedProject> => {
+    const createdProject = await createRuntimeProject(name);
+    const ownedProject = { ...createdProject.project, ownerEmail: currentSession.email };
     setProjects((current) => {
       const next = [...current.filter((item) => item.id !== ownedProject.id), ownedProject];
       return next;
     });
     reportAction(`Created ${ownedProject.name}`);
+    return { project: ownedProject, projectKey: createdProject.projectKey };
   };
 
   const deleteProject = async (projectID: string) => {
@@ -2147,6 +2585,26 @@ export function App() {
     if (window.location.pathname !== nextPath) {
       window.history.pushState(null, "", nextPath);
     }
+  };
+
+  const updateProjectDatabaseMode = (mode: DatabaseMode) => {
+    if (!activeProject) return;
+    setDatabaseModes((current) => {
+      const next = { ...current, [activeProject.id]: mode };
+      window.localStorage.setItem(dashboardDatabaseModesKey, JSON.stringify(next));
+      return next;
+    });
+    reportAction(mode === "multiTenant" ? "Using landlord and tenant databases" : "Using a single project database");
+  };
+
+  const updateProjectHideTestTenants = (hidden: boolean) => {
+    if (!activeProject) return;
+    setHideTestTenants((current) => {
+      const next = { ...current, [activeProject.id]: hidden };
+      window.localStorage.setItem(dashboardHideTestTenantsKey, JSON.stringify(next));
+      return next;
+    });
+    reportAction(hidden ? "Hiding test tenant databases" : "Showing all tenant databases");
   };
 
   useEffect(() => {
@@ -2175,6 +2633,9 @@ export function App() {
 
   useEffect(() => {
     window.localStorage.setItem("gonvex-theme", theme);
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.classList.toggle("dark", theme === "dark");
+    document.documentElement.classList.toggle("light", theme === "light");
   }, [theme]);
 
   useEffect(() => {
@@ -2319,9 +2780,6 @@ export function App() {
               }}>
                 {themeLabel}
               </Button>
-              <Button size="sm" variant="primary" onPress={() => reportAction("Dashboard test harness is mounted")}> 
-                Ready for tests
-              </Button>
               <Button size="sm" variant="ghost" onPress={logout}>
                 Sign out
               </Button>
@@ -2329,7 +2787,7 @@ export function App() {
           </header>
         )}
 
-        <div className={activePage === "files" ? "content-stack content-stack--flush" : "content-stack"}>
+        <div className={activePage === "files" ? "content-stack content-stack--flush" : activePage === "data" ? "content-stack content-stack--data" : "content-stack"}>
           {activePage === "files" ? null : (
             <section className="page-heading">
               <div>
@@ -2343,15 +2801,32 @@ export function App() {
             </section>
           )}
 
-          {activePage === "overview" ? <OverviewPage project={activeProject} themeMode={theme} /> : null}
+          {activePage === "overview" ? <OverviewPage project={activeProject} /> : null}
           {activePage === "functions" ? <FunctionsPage project={activeProject} themeMode={theme} onAction={reportAction} /> : null}
-          {activePage === "data" ? <DataPage project={activeProject} themeMode={theme} onAction={reportAction} /> : null}
+          {activePage === "data" ? (
+            <DataPage
+              databaseMode={activeDatabaseMode}
+              hideTestTenants={activeHideTestTenants}
+              project={activeProject}
+              themeMode={theme}
+              onAction={reportAction}
+            />
+          ) : null}
           {activePage === "test" ? <TestPage project={activeProject} themeMode={theme} onAction={reportAction} /> : null}
+          {activePage === "logs" ? <LogsPage project={activeProject} onAction={reportAction} /> : null}
           {activePage === "files" ? (
             <FilesPage project={activeProject} themeLabel={themeLabel} onToggleTheme={toggleTheme} onAction={reportAction} />
           ) : null}
           {activePage === "realtime" ? <RealtimePage /> : null}
-          {activePage === "settings" ? <SettingsPage project={activeProject} /> : null}
+          {activePage === "settings" ? (
+            <SettingsPage
+              databaseMode={activeDatabaseMode}
+              hideTestTenants={activeHideTestTenants}
+              onDatabaseModeChange={updateProjectDatabaseMode}
+              onHideTestTenantsChange={updateProjectHideTestTenants}
+              project={activeProject}
+            />
+          ) : null}
         </div>
       </section>
       {actionMessage ? <div className="action-toast" role="status">{actionMessage}</div> : null}
@@ -2507,7 +2982,7 @@ function LoginPage(props: {
 }
 
 function ProjectsPage(props: {
-  onCreateProject: (name: string) => Promise<void>;
+  onCreateProject: (name: string) => Promise<CreatedProject>;
   onDeleteProject: (projectID: string) => Promise<void>;
   onLogout: () => void;
   onOpenProject: (projectID: string) => void;
@@ -2522,7 +2997,14 @@ function ProjectsPage(props: {
   const [createOpen, setCreateOpen] = useState(false);
   const [createError, setCreateError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [createdProject, setCreatedProject] = useState<CreatedProject | null>(null);
   const [deletingProjectID, setDeletingProjectID] = useState<string | null>(null);
+
+  const closeCreateModal = () => {
+    setCreateOpen(false);
+    setCreateError("");
+    setCreatedProject(null);
+  };
 
   const createProject = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -2531,9 +3013,9 @@ function ProjectsPage(props: {
     setCreating(true);
     setCreateError("");
     try {
-      await props.onCreateProject(cleanName);
+      const created = await props.onCreateProject(cleanName);
+      setCreatedProject(created);
       setName("");
-      setCreateOpen(false);
     } catch (error) {
       setCreateError(error instanceof Error ? error.message : "Could not create project");
     } finally {
@@ -2610,7 +3092,7 @@ function ProjectsPage(props: {
       </section>
 
       {createOpen ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setCreateOpen(false)}>
+        <div className="modal-backdrop" role="presentation" onMouseDown={closeCreateModal}>
           <section
             aria-labelledby="create-project-title"
             className="document-modal project-create-modal"
@@ -2619,22 +3101,41 @@ function ProjectsPage(props: {
           >
             <header>
               <div>
-                <h2 id="create-project-title">Create project</h2>
-                <p>Start a new local Gonvex project entry.</p>
+                <h2 id="create-project-title">{createdProject ? "Project key" : "Create project"}</h2>
+                <p>{createdProject ? "Add this to the app that owns the Gonvex schema." : "Start a new local Gonvex project entry."}</p>
               </div>
-              <Button size="sm" variant="ghost" onPress={() => setCreateOpen(false)}>Close</Button>
+              <Button size="sm" variant="ghost" onPress={closeCreateModal}>Close</Button>
             </header>
-            <form className="project-modal-form" onSubmit={createProject}>
-              <label className="setting-field">
-                <span>Name</span>
-                <input autoFocus className="table-search" onChange={(event) => setName(event.target.value)} value={name} />
-              </label>
-              {createError ? <p className="project-modal-error">{createError}</p> : null}
-              <footer>
-                <Button variant="ghost" onPress={() => setCreateOpen(false)}>Cancel</Button>
-                <Button isDisabled={creating} type="submit" variant="primary">{creating ? "Creating" : "Create project"}</Button>
-              </footer>
-            </form>
+            {createdProject ? (
+              <div className="project-modal-form">
+                <div className="project-key-block">
+                  <span>{createdProject.project.id}</span>
+                  <textarea
+                    readOnly
+                    value={[
+                      `GONVEX_RUNTIME_URL=${runtimeURLForProject(createdProject.project)}`,
+                      `GONVEX_PROJECT_KEY=${createdProject.projectKey}`,
+                      `VITE_GONVEX_WS_URL=${runtimeURLForProject(createdProject.project).replace(/^http/, "ws")}/ws`,
+                    ].join("\n")}
+                  />
+                </div>
+                <footer>
+                  <Button variant="primary" onPress={closeCreateModal}>Done</Button>
+                </footer>
+              </div>
+            ) : (
+              <form className="project-modal-form" onSubmit={createProject}>
+                <label className="setting-field">
+                  <span>Name</span>
+                  <input autoFocus className="table-search" onChange={(event) => setName(event.target.value)} value={name} />
+                </label>
+                {createError ? <p className="project-modal-error">{createError}</p> : null}
+                <footer>
+                  <Button variant="ghost" onPress={closeCreateModal}>Cancel</Button>
+                  <Button isDisabled={creating} type="submit" variant="primary">{creating ? "Creating" : "Create project"}</Button>
+                </footer>
+              </form>
+            )}
           </section>
         </div>
       ) : null}
@@ -2642,7 +3143,7 @@ function ProjectsPage(props: {
   );
 }
 
-function OverviewPage(props: { project: ProjectTarget; themeMode: ThemeMode }) {
+function OverviewPage(props: { project: ProjectTarget }) {
   const projectRows = [
     ["Runtime URL", runtimeURLForProject(props.project) || "not configured"],
     ["Database", props.project.database],
@@ -2660,10 +3161,6 @@ function OverviewPage(props: { project: ProjectTarget; themeMode: ThemeMode }) {
             </Card>
           ))}
         </section>
-
-        <GridCard title="LiveGrid test surface" eyebrow="Function manifest" chip="Glide Data Grid">
-          <ManifestGrid columns={functionColumns} rows={[]} height={330} themeMode={props.themeMode} />
-        </GridCard>
       </section>
 
       <aside className="right-rail" aria-label="Runtime activity">
@@ -2702,7 +3199,7 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
   const [activeTab, setActiveTab] = useState<"statistics" | "logs">("statistics");
   const selectedFunction = runtimeFunctions.find((item) => item.name === selectedName) ?? runtimeFunctions[0] ?? null;
   const functionStats = buildFunctionStats(selectedFunction ? runtimeMetrics?.functions[selectedFunction.name] : undefined, runtimeMetrics?.cache);
-  const functionLogs = selectedFunction ? (runtimeMetrics?.logs ?? []).filter((entry) => entry.path === selectedFunction.name) : [];
+  const recentLogs = (runtimeMetrics?.logs ?? []).slice(0, 20);
   const visibleFunctions = runtimeFunctions.filter((item) =>
     [item.name, item.kind, item.source].some((value) => value.toLowerCase().includes(search.toLowerCase())),
   );
@@ -2845,14 +3342,15 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
         ) : (
           <Card className="function-log-card" variant="default">
             <Card.Content>
-              {functionLogs.length > 0 ? functionLogs.map((entry) => (
-                <div className="function-log-row" key={`${entry.time}:${entry.path}:${entry.outcome}`} data-outcome={entry.outcome}>
+              {recentLogs.length > 0 ? recentLogs.map((entry, index) => (
+                <div className="function-log-row" key={`${entry.time}:${entry.path}:${entry.outcome}:${index}`} data-outcome={entry.outcome}>
                   <span>{formatLogTime(entry.time)}</span>
+                  <code>{entry.kind}</code>
                   <strong>{entry.outcome}</strong>
-                  <code>{formatDuration(entry.durationMs)}</code>
-                  {entry.error ? <em>{entry.error}</em> : null}
+                  <code>{entry.path}</code>
+                  <em>{entry.error ? entry.error : entry.cache ? `cache ${entry.cache}` : formatDuration(entry.durationMs)}</em>
                 </div>
-              )) : <p className="empty-state">No runtime logs for this function yet.</p>}
+              )) : <p className="empty-state">No runtime logs yet.</p>}
             </Card.Content>
           </Card>
         )}
@@ -2865,24 +3363,35 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
   );
 }
 
-function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onAction: ActionHandler }) {
+function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean; project: ProjectTarget; themeMode: ThemeMode; onAction: ActionHandler }) {
   const [tables, setTables] = useState<DataTableInfo[]>([]);
-  const [selectedTable, setSelectedTable] = useState("");
+  const [tenants, setTenants] = useState<TenantTarget[]>([]);
+  const [selectedTenant, setSelectedTenant] = useState(() => dataSourceFromURL());
+  const [selectedTable, setSelectedTable] = useState(() => dataStateFromURL().table);
   const [rowCache, setRowCache] = useState<Record<number, Record<string, unknown>>>({});
   const [requestedOffset, setRequestedOffset] = useState(0);
   const [visibleOffset, setVisibleOffset] = useState(0);
   const [matchingRows, setMatchingRows] = useState(0);
-  const [tableSearch, setTableSearch] = useState("");
-  const [rowSearchInput, setRowSearchInput] = useState("");
-  const [rowSearch, setRowSearch] = useState("");
-  const [rowSort, setRowSort] = useState<SortState<string> | null>(null);
-  const [filters, setFilters] = useState<DataFilter[]>([]);
+  const [tableSearch, setTableSearch] = useState(() => dataStateFromURL().tableSearch);
+  const [rowSearchInput, setRowSearchInput] = useState(() => dataStateFromURL().rowSearch);
+  const [rowSearch, setRowSearch] = useState(() => dataStateFromURL().rowSearch);
+  const [rowSort, setRowSort] = useState<SortState<string> | null>(() => dataStateFromURL().sort);
+  const [filters, setFilters] = useState<DataFilter[]>(() => dataStateFromURL().filters);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
-  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(() => dataStateFromURL().filters.length > 0);
   const [addOpen, setAddOpen] = useState(false);
   const [addValues, setAddValues] = useState<Record<string, string>>({});
   const [addError, setAddError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [creatingTenant, setCreatingTenant] = useState(false);
+  const [deletingTenant, setDeletingTenant] = useState(false);
+  const [erdFullscreen, setErdFullscreen] = useState(false);
+  const [erdNodes, setErdNodes] = useState<Node<ERDNodeData>[]>([]);
+  const [selectedERDTable, setSelectedERDTable] = useState("");
+  const [viewMode, setViewMode] = useState<DataViewMode>(() => dataStateFromURL().view);
+  const [selectedDataRows, setSelectedDataRows] = useState<Set<number>>(() => new Set());
+  const [selectionClearKey, setSelectionClearKey] = useState(0);
   const [status, setStatus] = useState("Loading tables...");
   const [runtimeAvailable, setRuntimeAvailable] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -2894,9 +3403,118 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   const pendingScrollRef = useRef<ScrollFetchPending>({ startRow: 0, height: 1 });
   rowCacheRef.current = rowCache;
   requestedOffsetRef.current = requestedOffset;
+  const currentTenantID = selectedTenant !== landlordDataSourceID ? selectedTenant : "";
+  const activeTenant = tenants.find((tenant) => tenant.id === currentTenantID) ?? null;
+  const visibleTenants = useMemo(
+    () => props.hideTestTenants ? tenants.filter((tenant) => !tenantLooksInternalOrTest(tenant)) : tenants,
+    [props.hideTestTenants, tenants],
+  );
+  const activeTenantDatabase = tenantDatabaseLabel(activeTenant, currentTenantID);
+  const activeTenantDisplay = tenantDisplayLabel(activeTenant, currentTenantID);
   const activeTable = tables.find((table) => table.name === selectedTable) ?? null;
   const activeColumns = activeTable?.columns ?? emptyColumns;
   const filtersKey = JSON.stringify(filters.filter((filter) => activeColumns.includes(filter.column)));
+
+  useEffect(() => {
+    const state = dataStateFromURL();
+    setSelectedTenant(state.sourceID);
+    setSelectedTable(state.table);
+    setTableSearch(state.tableSearch);
+    setRowSearchInput(state.rowSearch);
+    setRowSearch(state.rowSearch);
+    setRowSort(state.sort);
+    setFilters(state.filters);
+    setFilterOpen(state.filters.length > 0);
+    setViewMode(state.view);
+    setTenants([]);
+  }, [props.project.id]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const state = dataStateFromURL();
+      setSelectedTenant(state.sourceID);
+      setSelectedTable(state.table);
+      setTableSearch(state.tableSearch);
+      setRowSearchInput(state.rowSearch);
+      setRowSearch(state.rowSearch);
+      setRowSort(state.sort);
+      setFilters(state.filters);
+      setFilterOpen(state.filters.length > 0);
+      setViewMode(state.view);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  useEffect(() => {
+    setDataStateInURL({
+      filters,
+      rowSearch,
+      sort: rowSort,
+      table: selectedTable,
+      tableSearch,
+      view: viewMode,
+    }, true);
+  }, [filters, rowSearch, rowSort, selectedTable, tableSearch, viewMode]);
+
+  useEffect(() => {
+    if (!erdFullscreen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setErdFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [erdFullscreen]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const baseURL = runtimeURLForProject(props.project);
+    if (!projectIsProvisioned(props.project) || !baseURL) {
+      setTenants([]);
+      return;
+    }
+
+    const params = new URLSearchParams({ project: props.project.id });
+    fetch(`${baseURL}/dev/tenants?${params.toString()}`, { headers: runtimeHeaders(props.project) })
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
+      .then((payload: { tenants?: TenantTarget[] }) => {
+        if (cancelled) return;
+        const nextTenants = payload.tenants ?? [];
+        const selectableTenants = props.hideTestTenants ? nextTenants.filter((tenant) => !tenantLooksInternalOrTest(tenant)) : nextTenants;
+        setTenants(nextTenants);
+        setSelectedTenant((current) => {
+          const nextSource = current === landlordDataSourceID || selectableTenants.some((tenant) => tenant.id === current)
+            ? current
+            : landlordDataSourceID;
+          if (nextSource !== current) setDataSourceInURL(nextSource, true);
+          return nextSource;
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setTenants([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [props.hideTestTenants, props.project]);
+
+  useEffect(() => {
+    if (!props.hideTestTenants || !currentTenantID) return;
+    const selected = tenants.find((tenant) => tenant.id === currentTenantID);
+    if (!selected || !tenantLooksInternalOrTest(selected)) return;
+    setSelectedTenant(landlordDataSourceID);
+    setDataSourceInURL(landlordDataSourceID, true);
+    setSelectedTable("");
+    setRowCache({});
+    setRequestedOffset(0);
+    setVisibleOffset(0);
+  }, [currentTenantID, props.hideTestTenants, tenants]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2917,13 +3535,17 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     }
 
     setStatus("Loading tables...");
-    fetch(`${baseURL}/dev/data/tables`, { headers: runtimeHeaders(props.project) })
+    const params = new URLSearchParams();
+    if (currentTenantID) params.set("tenant", currentTenantID);
+    const tablesQuery = params.toString();
+    const tablesURL = `${baseURL}/dev/data/tables${tablesQuery ? `?${tablesQuery}` : ""}`;
+    fetch(tablesURL, { headers: runtimeHeaders(props.project, undefined, currentTenantID) })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
       .then((payload: { tables: DataTableInfo[] }) => {
         if (cancelled) return;
         const nextTables = payload.tables ?? [];
         setTables(nextTables);
-        setStatus("Connected to Gonvex Runtime");
+        setStatus(currentTenantID ? `Viewing tenant database: ${activeTenantDisplay}` : "Viewing landlord / project database");
         setRuntimeAvailable(true);
         setSelectedTable((current) => (nextTables.some((table) => table.name === current) ? current : nextTables[0]?.name ?? ""));
       })
@@ -2931,7 +3553,7 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
         if (!cancelled) {
           setTables([]);
           setSelectedTable("");
-          setStatus("Runtime offline");
+          setStatus(currentTenantID ? `Tenant database unavailable: ${activeTenantDisplay}` : "Runtime offline");
           setRuntimeAvailable(false);
         }
       });
@@ -2939,13 +3561,15 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     return () => {
       cancelled = true;
     };
-  }, [props.project, refreshKey]);
+  }, [activeTenantDisplay, currentTenantID, props.project, refreshKey]);
 
   useEffect(() => {
     setRequestedOffset(0);
     setVisibleOffset(0);
     setRowCache({});
-  }, [filtersKey, props.project.id, rowSearch, rowSort, selectedTable]);
+    setSelectedDataRows(new Set());
+    setSelectionClearKey((key) => key + 1);
+  }, [currentTenantID, filtersKey, props.project.id, rowSearch, rowSort, selectedTable]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setRowSearch(rowSearchInput), 300);
@@ -2959,7 +3583,6 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     if (!activeTable || !projectIsProvisioned(props.project)) {
       setRowCache({});
       setMatchingRows(0);
-      setRuntimeAvailable(false);
       return;
     }
     if (!baseURL) {
@@ -2978,11 +3601,12 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       params.set("direction", rowSort.direction);
     }
     if (filtersKey !== "[]") params.set("filters", filtersKey);
+    if (currentTenantID) params.set("tenant", currentTenantID);
 
     inFlightOffsetRef.current = requestedOffset;
 
     fetch(`${baseURL}/dev/data/tables/${selectedTable}/rows?${params.toString()}`, {
-      headers: runtimeHeaders(props.project),
+      headers: runtimeHeaders(props.project, undefined, currentTenantID),
       signal: controller.signal,
     })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
@@ -2992,7 +3616,9 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
         if (offset !== requestedOffsetRef.current) return;
         setRowCache((current) => mergeRowsIntoCache(current, payload.rows, offset));
         setMatchingRows(payload.total ?? (rowSearch.trim() || filtersKey !== "[]" ? payload.rows.length : activeTable.rowCount));
-        setStatus(payload.total === undefined ? "Connected to Gonvex Runtime (restart needed for server sort)" : "Connected to Gonvex Runtime");
+        setStatus(payload.total === undefined
+          ? "Connected to Gonvex Runtime (restart needed for server sort)"
+          : currentTenantID ? `Viewing tenant database: ${activeTenantDisplay}` : "Viewing landlord / project database");
         setRuntimeAvailable(true);
       })
       .catch(() => {
@@ -3017,7 +3643,7 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       }
       clearScrollRowFetch(fetchTimersRef);
     };
-  }, [activeTable, filtersKey, props.project, refreshKey, requestedOffset, rowSearch, rowSort, fetchNonce, selectedTable]);
+  }, [activeTable, activeTenantDisplay, currentTenantID, filtersKey, props.project, refreshKey, requestedOffset, rowSearch, rowSort, fetchNonce, selectedTable]);
 
   useEffect(() => {
     setAddValues(Object.fromEntries(activeColumns.map((column) => [column, defaultValueForColumn(column)])));
@@ -3032,6 +3658,24 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   }));
   const gridRowCount = activeTable ? (runtimeAvailable ? matchingRows : Object.keys(rowCache).length) : 0;
   const dataCellGetter = createCachedCellGetter(activeColumns, rowCache);
+  const rowsSelectedForDelete = selectedRowIDs(selectedDataRows, rowCache);
+  const erdGraph = useMemo(() => createERDGraph(tables), [tables]);
+  const erdLayoutKey = `${erdLayoutStoragePrefix}:${props.project.id}:${currentTenantID || "landlord"}`;
+  const selectedERDTableInfo = tables.find((table) => table.name === selectedERDTable) ?? null;
+  const selectedERDRelations = erdGraph.edges.filter((edge) => edge.source === selectedERDTable || edge.target === selectedERDTable);
+  const handleERDNodesChange = useCallback((changes: NodeChange<Node<ERDNodeData>>[]) => {
+    setErdNodes((current) => {
+      const next = applyNodeChanges(changes, current);
+      saveERDNodePositions(erdLayoutKey, next);
+      return next;
+    });
+  }, [erdLayoutKey]);
+
+  useEffect(() => {
+    setErdNodes(applySavedERDNodePositions(erdGraph.nodes, erdLayoutKey));
+    setSelectedERDTable((current) => (current && tables.some((table) => table.name === current) ? current : ""));
+  }, [erdGraph.nodes, erdLayoutKey, tables]);
+
   const openAddDocument = () => {
     if (!activeTable) {
       props.onAction("No runtime table is selected");
@@ -3072,9 +3716,12 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     setSubmitting(true);
     setAddError("");
     try {
-      const response = await fetch(`${runtimeURLForProject(props.project)}/dev/data/tables/${selectedTable}/rows`, {
+      const params = new URLSearchParams();
+      if (currentTenantID) params.set("tenant", currentTenantID);
+      const query = params.toString();
+      const response = await fetch(`${runtimeURLForProject(props.project)}/dev/data/tables/${selectedTable}/rows${query ? `?${query}` : ""}`, {
         method: "POST",
-        headers: runtimeHeaders(props.project, { "content-type": "application/json" }),
+        headers: runtimeHeaders(props.project, { "content-type": "application/json" }, currentTenantID),
         body: JSON.stringify(addValues),
       });
       if (!response.ok) {
@@ -3096,6 +3743,135 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       setAddError(message);
     } finally {
       setSubmitting(false);
+    }
+  };
+  const deleteSelectedRows = async () => {
+    if (!activeTable || rowsSelectedForDelete.length === 0) {
+      props.onAction("Select one or more loaded rows with an id to delete");
+      return;
+    }
+    const confirmed = window.confirm(`Delete ${rowsSelectedForDelete.length} row${rowsSelectedForDelete.length === 1 ? "" : "s"} from ${activeTable.name}?`);
+    if (!confirmed) return;
+
+    setDeleting(true);
+    try {
+      const params = new URLSearchParams();
+      if (currentTenantID) params.set("tenant", currentTenantID);
+      const query = params.toString();
+      const response = await fetch(`${runtimeURLForProject(props.project)}/dev/data/tables/${selectedTable}/rows${query ? `?${query}` : ""}`, {
+        method: "DELETE",
+        headers: runtimeHeaders(props.project, { "content-type": "application/json" }, currentTenantID),
+        body: JSON.stringify({ ids: rowsSelectedForDelete }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({ error: response.statusText }));
+        throw new Error(payload.error ?? response.statusText);
+      }
+      const payload = await response.json() as DeleteRowsResponse;
+      setSelectedDataRows(new Set());
+      setSelectionClearKey((key) => key + 1);
+      setRowCache({});
+      setRequestedOffset(0);
+      setVisibleOffset(0);
+      setMatchingRows((current) => Math.max(0, current - payload.deleted));
+      setTables((current) => current.map((table) => (
+        table.name === activeTable.name ? { ...table, rowCount: Math.max(0, table.rowCount - payload.deleted) } : table
+      )));
+      setRefreshKey((key) => key + 1);
+      props.onAction(`Deleted ${payload.deleted.toLocaleString()} ${activeTable.name} row${payload.deleted === 1 ? "" : "s"}`);
+    } catch (error) {
+      const message = error instanceof TypeError
+        ? `Cannot reach Gonvex Runtime at ${runtimeURLForProject(props.project) || "the configured URL"}.`
+        : error instanceof Error ? error.message : "Delete failed";
+      props.onAction(message);
+    } finally {
+      setDeleting(false);
+    }
+  };
+  const createTenantDatabase = async () => {
+    const name = window.prompt("Tenant database name");
+    const cleanName = name?.trim();
+    if (!cleanName) return;
+    const baseURL = runtimeURLForProject(props.project);
+    if (!baseURL) {
+      props.onAction("Runtime offline");
+      return;
+    }
+
+    setCreatingTenant(true);
+    try {
+      const response = await fetch(`${baseURL}/dev/tenants`, {
+        method: "POST",
+        headers: runtimeHeaders(props.project, { "content-type": "application/json" }),
+        body: JSON.stringify({ name: cleanName, projectId: props.project.id }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({ error: response.statusText }));
+        throw new Error(payload.error ?? response.statusText);
+      }
+      const payload = await response.json() as CreateTenantResponse;
+      setTenants((current) => [...current.filter((tenant) => tenant.id !== payload.tenant.id), payload.tenant]);
+      setSelectedTenant(payload.tenant.id);
+      setDataSourceInURL(payload.tenant.id);
+      setSelectedTable("");
+      setRowCache({});
+      setRequestedOffset(0);
+      setVisibleOffset(0);
+      setRefreshKey((key) => key + 1);
+      props.onAction(`Created tenant database ${payload.tenant.database}`);
+    } catch (error) {
+      const message = error instanceof TypeError
+        ? `Cannot reach Gonvex Runtime at ${baseURL}.`
+        : error instanceof Error ? error.message : "Could not create tenant database";
+      props.onAction(message);
+    } finally {
+      setCreatingTenant(false);
+    }
+  };
+  const deleteTenantDatabase = async () => {
+    if (!currentTenantID || !activeTenant) {
+      props.onAction("Select a tenant database to delete");
+      return;
+    }
+    const label = tenantDisplayLabel(activeTenant, currentTenantID);
+    const confirmed = window.confirm(
+      `Delete tenant "${label}"?\n\nThis drops the tenant database and removes its standard landlord references from tenants, users, and userTenantMap.`,
+    );
+    if (!confirmed) return;
+
+    const baseURL = runtimeURLForProject(props.project);
+    if (!baseURL) {
+      props.onAction("Runtime offline");
+      return;
+    }
+
+    setDeletingTenant(true);
+    try {
+      const params = new URLSearchParams({ project: props.project.id });
+      const response = await fetch(`${baseURL}/dev/tenants/${encodeURIComponent(currentTenantID)}?${params.toString()}`, {
+        method: "DELETE",
+        headers: runtimeHeaders(props.project, undefined, currentTenantID),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({ error: response.statusText }));
+        throw new Error(payload.error ?? response.statusText);
+      }
+      setTenants((current) => current.filter((tenant) => tenant.id !== currentTenantID));
+      setSelectedTenant(landlordDataSourceID);
+      setDataSourceInURL(landlordDataSourceID);
+      setSelectedTable("");
+      setRowCache({});
+      setRequestedOffset(0);
+      setVisibleOffset(0);
+      setRefreshKey((key) => key + 1);
+      props.onAction(`Deleted tenant database ${activeTenantDatabase}`);
+    } catch (error) {
+      const message = error instanceof TypeError
+        ? `Cannot reach Gonvex Runtime at ${baseURL}.`
+        : error instanceof Error ? error.message : "Could not delete tenant database";
+      props.onAction(message);
+    } finally {
+      setDeletingTenant(false);
     }
   };
 
@@ -3146,6 +3922,44 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
               {activeTable ? `${activeTable.rowCount} rows · ${activeTable.columns.length} columns` : "No schema pushed for this project"}
             </span>
           </div>
+          <div className="data-source-group">
+            <AppSelect
+              ariaLabel="Active database"
+              className="data-source-picker"
+              label="Active database"
+              searchable
+              searchPlaceholder="Search databases..."
+              selectedKey={selectedTenant}
+              onChange={(value) => {
+                if (value === "__gonvex_no_options__") return;
+                setSelectedTenant(value);
+                setDataSourceInURL(value);
+                setSelectedTable("");
+                setRowCache({});
+                setRequestedOffset(0);
+                setVisibleOffset(0);
+                const tenant = tenants.find((item) => item.id === value) ?? null;
+                props.onAction(value === landlordDataSourceID ? "Viewing landlord / project database" : `Viewing tenant database ${tenantDisplayLabel(tenant, value)}`);
+              }}
+              options={[
+                { value: landlordDataSourceID, label: "Landlord" },
+                ...visibleTenants.map((tenant) => ({
+                  value: tenant.id,
+                  label: tenant.database || tenant.id,
+                  description: tenant.name && tenant.name !== tenant.database ? tenant.name : undefined,
+                })),
+              ]}
+            />
+            <Button size="sm" variant="secondary" onPress={createTenantDatabase} isDisabled={creatingTenant || !runtimeAvailable}>
+              {creatingTenant ? "Creating" : "+ Tenant DB"}
+            </Button>
+            <Button size="sm" variant="secondary" onPress={deleteTenantDatabase} isDisabled={deletingTenant || !currentTenantID || !runtimeURLForProject(props.project)}>
+              {deletingTenant ? "Deleting" : "Delete Tenant"}
+            </Button>
+            <span className="data-source-note">
+              {currentTenantID ? `${activeTenantDatabase} tenant DB` : `${visibleTenants.length} tenant DB${visibleTenants.length === 1 ? "" : "s"}${props.hideTestTenants && tenants.length !== visibleTenants.length ? ` (${tenants.length - visibleTenants.length} hidden)` : ""}`}
+            </span>
+          </div>
           <div className="topbar-actions">
             <Button size="sm" variant="secondary" onPress={() => {
               setRowCache({});
@@ -3162,12 +3976,26 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
             }} isDisabled={!activeTable}>
               Filter & Sort{filters.length > 0 ? ` (${filters.length})` : ""}
             </Button>
+            <Button size="sm" variant="secondary" onPress={deleteSelectedRows} isDisabled={deleting || rowsSelectedForDelete.length === 0 || !runtimeAvailable || !activeTable}>
+              {deleting ? "Deleting" : `Delete${rowsSelectedForDelete.length > 0 ? ` (${rowsSelectedForDelete.length})` : ""}`}
+            </Button>
             <Button size="sm" variant="primary" onPress={openAddDocument} isDisabled={!runtimeAvailable || !activeTable}>
               + Add Document
             </Button>
           </div>
         </header>
 
+        <div className="data-view-tabs" role="tablist" aria-label="Data view">
+          <Button size="sm" variant={viewMode === "rows" ? "secondary" : "ghost"} onPress={() => setViewMode("rows")}>
+            Rows
+          </Button>
+          <Button size="sm" variant={viewMode === "erd" ? "secondary" : "ghost"} onPress={() => setViewMode("erd")}>
+            ERD
+          </Button>
+        </div>
+
+        {viewMode === "rows" ? (
+          <>
         <div className="data-controls">
             <input
               className="table-search"
@@ -3186,48 +4014,51 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
               <Button size="sm" variant="secondary" onPress={addFilter}>+ Add Filter</Button>
             </div>
             <div className="sort-controls">
-              <label>
-                Sort column
-                <select value={rowSort?.key ?? ""} onChange={(event) => {
-                  setRowSort(event.target.value ? { key: event.target.value, direction: rowSort?.direction ?? "asc" } : null);
-                }}>
-                  <option value="">None</option>
-                  {activeColumns.map((column) => <option key={column} value={column}>{column}</option>)}
-                </select>
-              </label>
-              <label>
-                Direction
-                <select
-                  value={rowSort?.direction ?? "asc"}
-                  onChange={(event) => {
-                    if (rowSort) setRowSort({ key: rowSort.key, direction: event.target.value as SortDirection });
-                  }}
-                  disabled={!rowSort}
-                >
-                  <option value="asc">Ascending</option>
-                  <option value="desc">Descending</option>
-                </select>
-              </label>
+              <AppSelect
+                ariaLabel="Sort column"
+                label="Sort column"
+                selectedKey={rowSort?.key ?? ""}
+                onChange={(value) => {
+                  setRowSort(value ? { key: value, direction: rowSort?.direction ?? "asc" } : null);
+                }}
+                options={[
+                  { value: "", label: "None" },
+                  ...activeColumns.map((column) => ({ value: column, label: column })),
+                ]}
+              />
+              <AppSelect
+                ariaLabel="Sort direction"
+                isDisabled={!rowSort}
+                label="Direction"
+                selectedKey={rowSort?.direction ?? "asc"}
+                onChange={(value) => {
+                  if (rowSort) setRowSort({ key: rowSort.key, direction: value as SortDirection });
+                }}
+                options={[
+                  { value: "asc", label: "Ascending" },
+                  { value: "desc", label: "Descending" },
+                ]}
+              />
             </div>
             {filters.length === 0 ? <p>No filters applied.</p> : null}
             {filters.map((filter) => (
               <div className="filter-row" key={filter.id}>
-                <select value={filter.column} onChange={(event) => {
-                  setFilters((current) => current.map((item) => item.id === filter.id ? { ...item, column: event.target.value } : item));
-                }}>
-                  {activeColumns.map((column) => <option key={column} value={column}>{column}</option>)}
-                </select>
-                <select value={filter.operator} onChange={(event) => {
-                  setFilters((current) => current.map((item) => item.id === filter.id ? { ...item, operator: event.target.value as DataFilter["operator"] } : item));
-                }}>
-                  <option value="contains">contains</option>
-                  <option value="equals">equals</option>
-                  <option value="notEquals">does not equal</option>
-                  <option value="startsWith">starts with</option>
-                  <option value="endsWith">ends with</option>
-                  <option value="empty">is empty</option>
-                  <option value="notEmpty">is not empty</option>
-                </select>
+                <AppSelect
+                  ariaLabel={`Filter column ${filter.id}`}
+                  selectedKey={filter.column}
+                  onChange={(value) => {
+                    setFilters((current) => current.map((item) => item.id === filter.id ? { ...item, column: value } : item));
+                  }}
+                  options={activeColumns.map((column) => ({ value: column, label: column }))}
+                />
+                <AppSelect
+                  ariaLabel={`Filter operator ${filter.id}`}
+                  selectedKey={filter.operator}
+                  onChange={(value) => {
+                    setFilters((current) => current.map((item) => item.id === filter.id ? { ...item, operator: value as DataFilter["operator"] } : item));
+                  }}
+                  options={dataFilterOperators}
+                />
                 <input
                   value={filter.value}
                   onChange={(event) => {
@@ -3241,15 +4072,16 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
               </div>
             ))}
           </div>
-        ) : null}
+          ) : null}
 
         <div className="data-grid-wrap">
           <ManifestGrid
             columns={dataColumns}
             getCellContent={dataCellGetter}
-            height={520}
+            height="100%"
             rowCount={gridRowCount}
             themeMode={props.themeMode}
+            clearSelectionKey={selectionClearKey}
             onHeaderClick={(columnIndex) => {
               const column = activeColumns[columnIndex];
               if (column && activeTable) {
@@ -3280,6 +4112,7 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
                 dataPageSize,
               );
             }}
+            onSelectionChange={(selection) => setSelectedDataRows(new Set(selection.rows.toArray()))}
           />
           {gridRowCount === 0 ? (
             <div className="data-empty-state" role="status">
@@ -3298,6 +4131,87 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
             </div>
           ) : null}
         </div>
+          </>
+        ) : (
+          <div className={erdFullscreen ? "erd-panel erd-panel--fullscreen" : "erd-panel"}>
+            {tables.length > 0 ? (
+              <>
+                <div className="erd-toolbar">
+                  <div>
+                    <strong>Entity diagram</strong>
+                    <span>{tables.length} tables · {erdGraph.edges.length} inferred relationships</span>
+                  </div>
+                  <Button size="sm" variant="secondary" onPress={() => setErdFullscreen((current) => !current)}>
+                    {erdFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+                  </Button>
+                </div>
+                <ReactFlow
+                  key={erdFullscreen ? "erd-fullscreen" : "erd-inline"}
+                  nodes={erdNodes}
+                  edges={erdGraph.edges}
+                  onNodesChange={handleERDNodesChange}
+                  onNodeClick={(_, node) => setSelectedERDTable(node.id)}
+                  onPaneClick={() => setSelectedERDTable("")}
+                  fitView
+                  fitViewOptions={{ padding: erdFullscreen ? 0.12 : 0.18 }}
+                  minZoom={0.08}
+                  maxZoom={1.8}
+                  nodeDragThreshold={1}
+                  nodesDraggable
+                  proOptions={{ hideAttribution: true }}
+                >
+                  <Background gap={18} color="var(--separator)" />
+                  <MiniMap pannable zoomable nodeStrokeWidth={3} />
+                  <Controls showInteractive={false} />
+                </ReactFlow>
+                {selectedERDTableInfo ? (
+                  <aside className="erd-detail-panel" aria-label={`${selectedERDTableInfo.name} table details`}>
+                    <header>
+                      <div>
+                        <p className="eyebrow">Table</p>
+                        <h3>{selectedERDTableInfo.name}</h3>
+                      </div>
+                      <Button size="sm" variant="ghost" onPress={() => setSelectedERDTable("")}>Close</Button>
+                    </header>
+                    <div className="erd-detail-stats">
+                      <span>{selectedERDTableInfo.rowCount.toLocaleString()} rows</span>
+                      <span>{selectedERDTableInfo.columns.length.toLocaleString()} columns</span>
+                      <span>{selectedERDRelations.length.toLocaleString()} relations</span>
+                    </div>
+                    <section>
+                      <strong>Relationships</strong>
+                      {selectedERDRelations.length > 0 ? (
+                        <div className="erd-relation-list">
+                          {selectedERDRelations.map((edge) => (
+                            <span key={edge.id}>
+                              {edge.source === selectedERDTableInfo.name
+                                ? `${erdEdgeColumn(edge)} -> ${edge.target}`
+                                : `${edge.source} -> ${erdEdgeColumn(edge)}`}
+                            </span>
+                          ))}
+                        </div>
+                      ) : <p>No inferred relationships.</p>}
+                    </section>
+                    <section>
+                      <strong>Columns</strong>
+                      <div className="erd-detail-columns">
+                        {selectedERDTableInfo.columns.map((column) => (
+                          <span className={isLikelyRelationshipColumn(column) ? "erd-column erd-column--relation" : "erd-column"} key={column}>{column}</span>
+                        ))}
+                      </div>
+                    </section>
+                  </aside>
+                ) : null}
+              </>
+            ) : (
+              <div className="data-empty-state" role="status">
+                <div className="empty-icon">-</div>
+                <strong>No tables to diagram.</strong>
+                <span>Select a tenant database or push a schema to render an ERD.</span>
+              </div>
+            )}
+          </div>
+        )}
       </section>
       {addOpen && activeTable ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setAddOpen(false)}>
@@ -3338,6 +4252,164 @@ function DataPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       ) : null}
     </div>
   );
+}
+
+type ERDNodeData = {
+  label: ReactNode;
+};
+
+function createERDGraph(tables: DataTableInfo[]): { nodes: Node<ERDNodeData>[]; edges: Edge[] } {
+  const sortedTables = [...tables].sort((left, right) => left.name.localeCompare(right.name));
+  const edges = inferERDEdges(sortedTables);
+  const positions = erdNodePositions(sortedTables, edges);
+  const degree = erdDegreeByTable(sortedTables, edges);
+  const nodes = sortedTables.map((table, index) => {
+    const relations = degree.get(table.name) ?? 0;
+    return {
+      id: table.name,
+      type: "default",
+      position: positions[table.name] ?? erdGridPosition(index, sortedTables.length),
+      className: relations > 0 ? "erd-table-node erd-table-node--connected" : "erd-table-node",
+      width: erdNodeWidth,
+      height: erdNodeHeight,
+      data: {
+        label: (
+          <div className="erd-table-bubble">
+            <strong>{table.name}</strong>
+            <div>
+              <span>{table.rowCount.toLocaleString()} rows</span>
+              <span>{relations.toLocaleString()} links</span>
+            </div>
+          </div>
+        ),
+      },
+    } satisfies Node<ERDNodeData>;
+  });
+  return { nodes, edges };
+}
+
+const erdNodeWidth = 178;
+const erdNodeHeight = 74;
+
+function erdDegreeByTable(tables: DataTableInfo[], edges: Edge[]): Map<string, number> {
+  const degree = new Map<string, number>();
+  tables.forEach((table) => degree.set(table.name, 0));
+  edges.forEach((edge) => {
+    degree.set(edge.source, (degree.get(edge.source) ?? 0) + 1);
+    degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1);
+  });
+  return degree;
+}
+
+function erdGridPosition(index: number, total: number): { x: number; y: number } {
+  const columns = total > 20 ? 6 : total > 12 ? 5 : total > 6 ? 3 : 2;
+  return {
+    x: (index % columns) * 260,
+    y: Math.floor(index / columns) * 180,
+  };
+}
+
+function erdNodePositions(tables: DataTableInfo[], edges: Edge[]): Record<string, { x: number; y: number }> {
+  if (tables.length === 0) return {};
+  const degree = erdDegreeByTable(tables, edges);
+
+  const sorted = [...tables].sort((left, right) => {
+    const byDegree = (degree.get(right.name) ?? 0) - (degree.get(left.name) ?? 0);
+    return byDegree !== 0 ? byDegree : left.name.localeCompare(right.name);
+  });
+  const centerCount = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(tables.length) / 1.2)));
+  const center = sorted.slice(0, centerCount);
+  const rest = sorted.slice(centerCount);
+  const positions: Record<string, { x: number; y: number }> = {};
+  const centerSpacingX = 300;
+  const centerStartX = -((center.length - 1) * centerSpacingX) / 2;
+  center.forEach((table, index) => {
+    positions[table.name] = { x: centerStartX + index * centerSpacingX, y: 0 };
+  });
+
+  const lanes = 4;
+  const laneBuckets = Array.from({ length: lanes }, () => [] as DataTableInfo[]);
+  rest.forEach((table, index) => laneBuckets[index % lanes].push(table));
+  const laneConfig = [
+    { x: -620, y: -280 },
+    { x: 620, y: -280 },
+    { x: -620, y: 260 },
+    { x: 620, y: 260 },
+  ];
+  laneBuckets.forEach((bucket, laneIndex) => {
+    const config = laneConfig[laneIndex];
+    bucket.forEach((table, index) => {
+      positions[table.name] = {
+        x: config.x,
+        y: config.y + index * 150,
+      };
+    });
+  });
+  return positions;
+}
+
+function inferERDEdges(tables: DataTableInfo[]): Edge[] {
+  const tableNames = new Map(tables.map((table) => [normalizeRelationName(table.name), table.name]));
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+  for (const table of tables) {
+    for (const column of table.columns) {
+      const target = relationTargetForColumn(column, tableNames);
+      if (!target || target === table.name) continue;
+      const id = `${table.name}:${column}:${target}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      edges.push({
+        id,
+        source: table.name,
+        target,
+        type: "smoothstep",
+        animated: false,
+        markerEnd: { type: MarkerType.ArrowClosed },
+        className: "erd-edge",
+        data: { column },
+      });
+    }
+  }
+  return edges;
+}
+
+function erdEdgeColumn(edge: Edge): string {
+  const data = edge.data as { column?: unknown } | undefined;
+  return typeof data?.column === "string" ? data.column : "id";
+}
+
+function relationTargetForColumn(column: string, tableNames: Map<string, string>): string | null {
+  const normalized = normalizeRelationName(column);
+  const rawBase = normalized.endsWith("ids")
+    ? normalized.slice(0, -3)
+    : normalized.endsWith("id")
+    ? normalized.slice(0, -2)
+    : "";
+  const base = rawBase.replace(/[_-]+$/, "");
+  if (!base || base === normalized) return null;
+
+  const candidates = [
+    base,
+    `${base}s`,
+    `${base}es`,
+    base.endsWith("y") ? `${base.slice(0, -1)}ies` : "",
+    `${base}map`,
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const target = tableNames.get(candidate);
+    if (target) return target;
+  }
+  return null;
+}
+
+function normalizeRelationName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+}
+
+function isLikelyRelationshipColumn(column: string): boolean {
+  const normalized = normalizeRelationName(column);
+  return normalized !== "id" && (normalized.endsWith("id") || normalized.endsWith("ids"));
 }
 
 const testTaskColumns: TestTaskColumn[] = [
@@ -3975,6 +5047,10 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   const [queryLoading, setQueryLoading] = useState(true);
   const [randomizing, setRandomizing] = useState(false);
   const [liveOffset, setLiveOffset] = useState(0);
+  const [tenants, setTenants] = useState<TenantTarget[]>([]);
+  const [selectedTenant, setSelectedTenant] = useState<string>(landlordDataSourceID);
+  const currentTenantID = selectedTenant !== landlordDataSourceID ? selectedTenant : "";
+  const activeTenant = tenants.find((tenant) => tenant.id === currentTenantID) ?? null;
   const [client, setClient] = useState(() => projectIsProvisioned(props.project) ? gonvexClientForProject(props.project) : null);
   const viewportHeight = useViewportHeight();
   const gridHeight = Math.max(420, Math.min(620, viewportHeight - 396));
@@ -4021,6 +5097,34 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   }, [searchInput]);
 
   useEffect(() => {
+    setSelectedTenant(landlordDataSourceID);
+    let cancelled = false;
+    const baseURL = runtimeURLForProject(props.project);
+    if (!projectIsProvisioned(props.project) || !baseURL) {
+      setTenants([]);
+      return;
+    }
+    const params = new URLSearchParams({ project: props.project.id });
+    fetch(`${baseURL}/dev/tenants?${params.toString()}`, { headers: runtimeHeaders(props.project) })
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
+      .then((payload: { tenants?: TenantTarget[] }) => {
+        if (cancelled) return;
+        const nextTenants = payload.tenants ?? [];
+        setTenants(nextTenants);
+        // Default to the first real tenant so the lab shows live data instead of
+        // the typically empty landlord database.
+        const firstReal = nextTenants.find((tenant) => !tenantLooksInternalOrTest(tenant));
+        if (firstReal) setSelectedTenant(firstReal.id);
+      })
+      .catch(() => {
+        if (!cancelled) setTenants([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.project.id]);
+
+  useEffect(() => {
     if (!projectIsProvisioned(props.project)) {
       setClient(null);
       setTotal(0);
@@ -4028,10 +5132,11 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       setStatus("Project database is not configured yet");
       return;
     }
-    setClient(gonvexClientForProject(props.project));
+    setClient(gonvexClientForProject(props.project, currentTenantID));
     setQueryLoading(true);
-    setStatus(`Loading ${props.project.name} task rows...`);
-  }, [props.project.id, props.project.name]);
+    const target = currentTenantID ? tenantDisplayLabel(activeTenant, currentTenantID) : props.project.name;
+    setStatus(`Loading ${target} task rows...`);
+  }, [props.project.id, props.project.name, currentTenantID]);
 
   useEffect(() => {
     clearScrollRowFetch(fetchTimersRef);
@@ -4040,7 +5145,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     setRowCache({});
     setTotal(0);
     setQueryLoading(true);
-  }, [props.project.id, search, activeFiltersKey]);
+  }, [props.project.id, currentTenantID, search, activeFiltersKey]);
 
   useEffect(() => {
     const nextSortKey = `${sort.key}:${sort.direction}`;
@@ -4118,6 +5223,27 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
           <span>{total} matching rows · Glide custom renderers · Whagons-like fields</span>
         </div>
         <div className="test-table-actions">
+          <AppSelect
+            ariaLabel="Active database"
+            className="test-table-tenant"
+            label="Database"
+            searchable
+            searchPlaceholder="Search databases..."
+            selectedKey={selectedTenant}
+            onChange={(value) => {
+              setSelectedTenant(value);
+              const tenant = tenants.find((item) => item.id === value) ?? null;
+              props.onAction(value === landlordDataSourceID ? "Viewing landlord tasks" : `Viewing ${tenantDisplayLabel(tenant, value)} tasks`);
+            }}
+            options={[
+              { value: landlordDataSourceID, label: "Landlord" },
+              ...tenants.map((tenant) => ({
+                value: tenant.id,
+                label: tenant.database || tenant.id,
+                description: tenant.name && tenant.name !== tenant.database ? tenant.name : undefined,
+              })),
+            ]}
+          />
           <Button size="sm" variant="secondary" onPress={randomizeVisibleTaskFields} isDisabled={randomizing}>
             {randomizing ? "Randomizing..." : "Randomize 3k"}
           </Button>
@@ -4404,9 +5530,14 @@ function FilesPage(props: { project: ProjectTarget; themeLabel: string; onToggle
         <div>
           <div className="file-storage-title-row">
             <h1 id="file-storage-title">File Storage</h1>
-            <select className="project-select" aria-label="Project">
-              <option>app</option>
-            </select>
+            <AppSelect
+              ariaLabel="Project"
+              className="project-select"
+              isDisabled
+              selectedKey={props.project.id}
+              onChange={() => undefined}
+              options={[{ value: props.project.id, label: props.project.name }]}
+            />
           </div>
           <p>Total Files {files.length}</p>
           <p>{status}</p>
@@ -4480,6 +5611,135 @@ function FilesPage(props: { project: ProjectTarget; themeLabel: string; onToggle
   );
 }
 
+function LogsPage(props: { project: ProjectTarget; onAction: ActionHandler }) {
+  const [metrics, setMetrics] = useState<RuntimeMetricsResponse | null>(null);
+  const [status, setStatus] = useState("Loading runtime logs...");
+  const [search, setSearch] = useState("");
+  const [outcome, setOutcome] = useState("all");
+  const [kind, setKind] = useState("all");
+  const logs = metrics?.logs ?? [];
+  const outcomes = Array.from(new Set(logs.map((entry) => entry.outcome || "unknown"))).sort();
+  const kinds = Array.from(new Set(logs.map((entry) => entry.kind || "unknown"))).sort();
+  const visibleLogs = logs.filter((entry) => {
+    const entryOutcome = entry.outcome || "unknown";
+    const entryKind = entry.kind || "unknown";
+    if (outcome !== "all" && entryOutcome !== outcome) return false;
+    if (kind !== "all" && entryKind !== kind) return false;
+    return !search.trim() || logEntryText(entry).includes(search.trim().toLowerCase());
+  });
+
+  useEffect(() => {
+    const baseURL = runtimeURLForProject(props.project);
+    if (!baseURL || !projectIsProvisioned(props.project)) {
+      setMetrics(null);
+      setStatus("Runtime offline");
+      return;
+    }
+
+    let cancelled = false;
+    const loadMetrics = () => {
+      fetch(`${baseURL}/dev/metrics`, { headers: runtimeHeaders(props.project) })
+        .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
+        .then((payload: RuntimeMetricsResponse) => {
+          if (cancelled) return;
+          setMetrics(payload);
+          setStatus(`Showing ${payload.logs?.length ?? 0} runtime log entries`);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setMetrics(null);
+          setStatus("Runtime offline");
+        });
+    };
+
+    loadMetrics();
+    const interval = window.setInterval(loadMetrics, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [props.project]);
+
+  return (
+    <div className="logs-shell">
+      <section className="logs-toolbar" aria-label="Log filters">
+        <input
+          className="table-search logs-search"
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search logs..."
+          value={search}
+          aria-label="Search logs"
+        />
+        <AppSelect
+          ariaLabel="Log outcome"
+          label="Outcome"
+          selectedKey={outcome}
+          onChange={setOutcome}
+          options={[
+            { value: "all", label: "All" },
+            ...outcomes.map((item) => ({ value: item, label: item })),
+          ]}
+        />
+        <AppSelect
+          ariaLabel="Log kind"
+          label="Kind"
+          selectedKey={kind}
+          onChange={setKind}
+          options={[
+            { value: "all", label: "All" },
+            ...kinds.map((item) => ({ value: item, label: item })),
+          ]}
+        />
+        <Button size="sm" variant="secondary" onPress={() => {
+          setSearch("");
+          setOutcome("all");
+          setKind("all");
+          props.onAction("Cleared log filters");
+        }}>
+          Clear
+        </Button>
+      </section>
+
+      <section className="logs-panel" aria-label="Runtime logs">
+        <header className="logs-panel-header">
+          <div>
+            <p className="eyebrow">{status}</p>
+            <h2>All runtime logs</h2>
+          </div>
+          <Chip color={metrics ? "success" : "warning"} size="sm" variant="soft">
+            {metrics ? `${visibleLogs.length} visible` : "offline"}
+          </Chip>
+        </header>
+        <div className="logs-table" role="table" aria-label="Runtime log entries">
+          <div className="logs-row logs-row--head" role="row">
+            <span role="columnheader">Time</span>
+            <span role="columnheader">Kind</span>
+            <span role="columnheader">Outcome</span>
+            <span role="columnheader">Path</span>
+            <span role="columnheader">Detail</span>
+          </div>
+          {visibleLogs.map((entry, index) => (
+            <div className="logs-row" role="row" key={`${entry.time}:${entry.path}:${entry.kind}:${index}`} data-outcome={entry.outcome}>
+              <span role="cell">{formatLogDateTime(entry.time)}</span>
+              <code role="cell">{entry.kind || "unknown"}</code>
+              <strong role="cell">{entry.outcome || "unknown"}</strong>
+              <code role="cell">{entry.path || "runtime"}</code>
+              <span role="cell">
+                {entry.error ? entry.error : entry.cache ? `cache ${entry.cache}` : formatDuration(entry.durationMs)}
+              </span>
+            </div>
+          ))}
+          {visibleLogs.length === 0 ? (
+            <div className="logs-empty" role="row">
+              <span role="cell">{metrics ? "No logs match the current filters." : "No runtime logs are available yet."}</span>
+            </div>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function RealtimePage() {
   return (
     <div className="dashboard-layout dashboard-layout--wide">
@@ -4519,12 +5779,126 @@ function RealtimePage() {
   );
 }
 
-function SettingsPage(props: { project: ProjectTarget }) {
-  const [activeSection, setActiveSection] = useState<"general" | "connection" | "environment" | "authentication">("general");
+function SettingsPage(props: {
+  databaseMode: DatabaseMode;
+  hideTestTenants: boolean;
+  onDatabaseModeChange: (mode: DatabaseMode) => void;
+  onHideTestTenantsChange: (hidden: boolean) => void;
+  project: ProjectTarget;
+}) {
+  const [activeSection, setActiveSection] = useState<"general" | "database" | "connection" | "environment" | "authentication">("general");
+  const [projectKey, setProjectKey] = useState("");
+  const [projectKeyStatus, setProjectKeyStatus] = useState("");
+  const [projectKeyLoading, setProjectKeyLoading] = useState(false);
+  const [envVars, setEnvVars] = useState<EnvVariable[]>([]);
+  const [envName, setEnvName] = useState("");
+  const [envValue, setEnvValue] = useState("");
+  const [envStatus, setEnvStatus] = useState("");
+  const [envLoading, setEnvLoading] = useState(false);
+  const [envSaving, setEnvSaving] = useState(false);
   const dashboardURL = typeof window === "undefined"
     ? pathForProjectPage(props.project.id, "overview")
     : `${window.location.origin}${pathForProjectPage(props.project.id, "overview")}`;
   const runtimeURL = runtimeURLForProject(props.project) || "not configured";
+  const projectEnvSnippet = projectKey
+    ? [
+      `GONVEX_RUNTIME_URL=${runtimeURL}`,
+      `GONVEX_PROJECT_KEY=${projectKey}`,
+      `VITE_GONVEX_WS_URL=${runtimeURL.replace(/^http/, "ws")}/ws`,
+    ].join("\n")
+    : "";
+
+  const revealProjectKey = async () => {
+    setProjectKeyLoading(true);
+    setProjectKeyStatus("");
+    try {
+      const response = await fetch(`/api/dashboard/projects/${encodeURIComponent(props.project.id)}/key`, { method: "POST" });
+      const payload = await response.json() as { projectKey?: string; error?: string };
+      if (!response.ok || !payload.projectKey) throw new Error(payload.error ?? response.statusText);
+      setProjectKey(payload.projectKey);
+      setProjectKeyStatus("Project key revealed");
+    } catch (error) {
+      setProjectKeyStatus(error instanceof Error ? error.message : "Could not reveal project key");
+    } finally {
+      setProjectKeyLoading(false);
+    }
+  };
+
+  const copyProjectKey = async () => {
+    if (!projectEnvSnippet) return;
+    await navigator.clipboard.writeText(projectEnvSnippet).catch(() => undefined);
+    setProjectKeyStatus("Copied .env.local values");
+  };
+
+  const loadEnvVars = useCallback(async () => {
+    setEnvLoading(true);
+    setEnvStatus("");
+    try {
+      const response = await fetch(`/api/dashboard/projects/${encodeURIComponent(props.project.id)}/env`);
+      const payload = await response.json() as { variables?: EnvVariable[]; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? response.statusText);
+      setEnvVars(payload.variables ?? []);
+    } catch (error) {
+      setEnvStatus(error instanceof Error ? error.message : "Could not load environment variables");
+    } finally {
+      setEnvLoading(false);
+    }
+  }, [props.project.id]);
+
+  useEffect(() => {
+    if (activeSection === "environment") void loadEnvVars();
+  }, [activeSection, loadEnvVars]);
+
+  const saveEnvVar = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = envName.trim();
+    if (!name) return;
+    setEnvSaving(true);
+    setEnvStatus("");
+    try {
+      const response = await fetch(`/api/dashboard/projects/${encodeURIComponent(props.project.id)}/env`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, value: envValue }),
+      });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? response.statusText);
+      setEnvName("");
+      setEnvValue("");
+      setEnvStatus(`${name} saved`);
+      await loadEnvVars();
+    } catch (error) {
+      setEnvStatus(error instanceof Error ? error.message : "Could not save environment variable");
+    } finally {
+      setEnvSaving(false);
+    }
+  };
+
+  const editEnvVar = (variable: EnvVariable) => {
+    setEnvName(variable.name);
+    setEnvValue(variable.value ?? "");
+    setEnvStatus(variable.sensitive ? "Sensitive values stay masked. Paste a new value to replace it." : "");
+  };
+
+  const deleteEnvVar = async (name: string) => {
+    setEnvSaving(true);
+    setEnvStatus("");
+    try {
+      const response = await fetch(`/api/dashboard/projects/${encodeURIComponent(props.project.id)}/env`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? response.statusText);
+      setEnvStatus(`${name} deleted`);
+      await loadEnvVars();
+    } catch (error) {
+      setEnvStatus(error instanceof Error ? error.message : "Could not delete environment variable");
+    } finally {
+      setEnvSaving(false);
+    }
+  };
 
   return (
     <div className="settings-shell">
@@ -4535,6 +5909,13 @@ function SettingsPage(props: { project: ProjectTarget }) {
           variant={activeSection === "general" ? "secondary" : "ghost"}
         >
           General
+        </Button>
+        <Button
+          data-active={activeSection === "database" ? "true" : undefined}
+          onPress={() => setActiveSection("database")}
+          variant={activeSection === "database" ? "secondary" : "ghost"}
+        >
+          Database
         </Button>
         <Button
           data-active={activeSection === "connection" ? "true" : undefined}
@@ -4580,21 +5961,132 @@ function SettingsPage(props: { project: ProjectTarget }) {
               <SettingField label="Project header" value={`x-gonvex-project-id: ${props.project.id}`} />
               <SettingField label="App env" value={`VITE_GONVEX_PROJECT_ID=${props.project.id}`} />
               <SettingField label="Runtime env" value={`GONVEX_PROJECT=${props.project.id}`} />
-              <SettingField label="Sync key" value="server-side .env only" muted />
+            </div>
+            <div className="project-key-block">
+              <span>Project key</span>
+              {projectKey ? (
+                <textarea readOnly value={projectEnvSnippet} />
+              ) : (
+                <output data-muted="true">Hidden until revealed</output>
+              )}
+              <div className="project-tile-actions">
+                <Button isDisabled={projectKeyLoading} onPress={revealProjectKey} variant="secondary">
+                  {projectKeyLoading ? "Revealing" : projectKey ? "Refresh key" : "Reveal key"}
+                </Button>
+                {projectKey ? <Button onPress={copyProjectKey} variant="ghost">Copy env</Button> : null}
+              </div>
+              {projectKeyStatus ? <p className="settings-note">{projectKeyStatus}</p> : null}
             </div>
           </SettingsCard>
         ) : null}
 
+        {activeSection === "database" ? (
+          <SettingsCard title="Database Structure" description="Choose whether this project stores app data in one project database or splits it across landlord and tenant databases.">
+            <div className="settings-grid">
+              <AppSelect
+                ariaLabel="Database structure"
+                className="setting-field"
+                label="Structure"
+                selectedKey={props.databaseMode}
+                onChange={(value) => props.onDatabaseModeChange(value as DatabaseMode)}
+                options={[
+                  { value: "single", label: "Single project database" },
+                  { value: "multiTenant", label: "Landlord + tenant databases" },
+                ]}
+              />
+              <SettingField
+                label="Data browser"
+                value={props.databaseMode === "multiTenant" ? "Shows landlord/project DB plus tenant DB selector" : "Shows project DB only"}
+              />
+              <label className="setting-field setting-checkbox-field">
+                <span>Tenant selector</span>
+                <Checkbox.Root
+                  className="filter-checkbox setting-checkbox"
+                  isSelected={props.hideTestTenants}
+                  onChange={props.onHideTestTenantsChange}
+                >
+                  <Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>
+                  <Checkbox.Content>Hide test and internal tenant DBs</Checkbox.Content>
+                </Checkbox.Root>
+              </label>
+              <SettingField label="Landlord DB" value={props.project.database} />
+            </div>
+            <p className="settings-note">
+              Tenant databases are created and listed by the runtime. The Data tab sends the selected tenant id to the runtime when browsing rows.
+            </p>
+          </SettingsCard>
+        ) : null}
+
         {activeSection === "environment" ? (
-          <SettingsCard title="Environment Variables" description="Variables loaded by the local Gonvex Runtime from .env.">
+          <SettingsCard title="Environment Variables" description={`Project environment variables for ${props.project.id}.`}>
+            <form className="env-form" onSubmit={saveEnvVar}>
+              <label className="setting-field">
+                <span>Name</span>
+                <input
+                  autoComplete="off"
+                  onChange={(event) => setEnvName(event.target.value)}
+                  placeholder="GONVEX_FIREBASE_PROJECT_ID"
+                  value={envName}
+                />
+              </label>
+              <label className="setting-field env-value-field">
+                <span>Value</span>
+                <textarea
+                  onChange={(event) => setEnvValue(event.target.value)}
+                  placeholder="whagons-5"
+                  spellCheck={false}
+                  value={envValue}
+                />
+              </label>
+              <div className="env-actions">
+                <Button isDisabled={envSaving || !envName.trim()} type="submit" variant="primary">
+                  {envSaving ? "Saving" : "Save Variable"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onPress={() => {
+                    setEnvName("GONVEX_FIREBASE_PROJECT_ID");
+                    setEnvValue("whagons-5");
+                    setEnvStatus("");
+                  }}
+                >
+                  Firebase Project
+                </Button>
+                <Button isDisabled={envLoading} type="button" variant="ghost" onPress={loadEnvVars}>
+                  Refresh
+                </Button>
+              </div>
+            </form>
+            <p className="settings-note">
+              These values are scoped to this Gonvex project and are available to functions through the runtime context.
+            </p>
             <div className="env-table" role="table" aria-label="Environment variables">
-              {["VITE_GONVEX_URL", "VITE_GONVEX_PROJECT_ID", "VITE_GONVEX_PROJECTS"].map((name) => (
-                <div className="env-row" role="row" key={name}>
-                  <code role="cell">{name}</code>
-                  <span role="cell">Configured locally</span>
+              <div className="env-row env-row--head" role="row">
+                <span role="columnheader">Name</span>
+                <span role="columnheader">Value</span>
+                <span role="columnheader">Source</span>
+                <span role="columnheader">Actions</span>
+              </div>
+              {envVars.length === 0 ? (
+                <div className="env-empty">{envLoading ? "Loading variables" : "No runtime variables found"}</div>
+              ) : envVars.map((variable) => (
+                <div className="env-row" role="row" key={variable.name}>
+                  <code role="cell">{variable.name}</code>
+                  <span role="cell">{variable.sensitive ? variable.masked : variable.value ?? variable.masked}</span>
+                  <span role="cell">{variable.source}</span>
+                  <div className="env-row-actions" role="cell">
+                    <Button size="sm" type="button" variant="ghost" onPress={() => editEnvVar(variable)}>
+                      Edit
+                    </Button>
+                    <Button className="env-delete-button" size="sm" type="button" variant="ghost" onPress={() => void deleteEnvVar(variable.name)}>
+                      Delete
+                    </Button>
+                  </div>
                 </div>
               ))}
             </div>
+            {envStatus ? <p className="settings-note">{envStatus}</p> : null}
           </SettingsCard>
         ) : null}
 

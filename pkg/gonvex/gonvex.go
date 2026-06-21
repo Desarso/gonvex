@@ -53,6 +53,8 @@ type RuntimeContext struct {
 	Permissions map[string]any
 	DatabaseURL string
 	DB          *sql.DB
+	LandlordDB  *sql.DB
+	TenantDB    *sql.DB
 	Tx          *sql.Tx
 	Logger      *slog.Logger
 }
@@ -361,6 +363,12 @@ func Nullable(options *columnOptions) {
 }
 
 func (s *Schema) Table(name string, define func(*Table)) {}
+func (s *Schema) LandlordTable(name string, define func(*Table)) {
+	s.Table(name, define)
+}
+func (s *Schema) TenantTable(name string, define func(*Table)) {
+	s.Table(name, define)
+}
 
 func (t *Table) ID(name string)                               {}
 func (t *Table) String(name string, options ...ColumnOption)  {}

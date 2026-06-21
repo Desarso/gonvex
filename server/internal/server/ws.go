@@ -17,20 +17,61 @@ import (
 )
 
 type clientMessage struct {
-	Type   string          `json:"type"`
-	ID     string          `json:"id"`
-	Path   string          `json:"path,omitempty"`
-	Args   json.RawMessage `json:"args,omitempty"`
-	Token  string          `json:"token,omitempty"`
-	Tenant string          `json:"tenant,omitempty"`
+	Type               string          `json:"type"`
+	ID                 string          `json:"id"`
+	Path               string          `json:"path,omitempty"`
+	Args               json.RawMessage `json:"args,omitempty"`
+	Token              string          `json:"token,omitempty"`
+	Tenant             string          `json:"tenant,omitempty"`
+	Trace              *messageTrace   `json:"trace,omitempty"`
+	Kind               string          `json:"kind,omitempty"`
+	Reason             string          `json:"reason,omitempty"`
+	Outcome            string          `json:"outcome,omitempty"`
+	Error              string          `json:"error,omitempty"`
+	ClientSentAtMS     float64         `json:"clientSentAtMs,omitempty"`
+	ClientReceivedAtMS float64         `json:"clientReceivedAtMs,omitempty"`
+	ClientDurationMS   float64         `json:"clientDurationMs,omitempty"`
+	Device             json.RawMessage `json:"device,omitempty"`
 }
 
 type serverMessage struct {
 	Type   string `json:"type"`
 	ID     string `json:"id,omitempty"`
+	Path   string `json:"path,omitempty"`
 	Result any    `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	Trace  any    `json:"trace,omitempty"`
+}
+
+type messageTrace struct {
+	ClientSentAtMS                float64 `json:"clientSentAtMs,omitempty"`
+	ServerReceivedAtMS            float64 `json:"serverReceivedAtMs,omitempty"`
+	ServerMutationStartedAtMS     float64 `json:"serverMutationStartedAtMs,omitempty"`
+	ServerMutationCommittedAtMS   float64 `json:"serverMutationCommittedAtMs,omitempty"`
+	ServerCompletedAtMS           float64 `json:"serverCompletedAtMs,omitempty"`
+	ServerBroadcastScheduledAtMS  float64 `json:"serverBroadcastScheduledAtMs,omitempty"`
+	ServerChangeCommittedAtMS     float64 `json:"serverChangeCommittedAtMs,omitempty"`
+	ServerSubscriptionStartedAtMS float64 `json:"serverSubscriptionStartedAtMs,omitempty"`
+	ServerSubscriptionSentAtMS    float64 `json:"serverSubscriptionSentAtMs,omitempty"`
+	ServerDurationMS              float64 `json:"serverDurationMs,omitempty"`
+}
+
+type clientDeviceInfo struct {
+	UserAgent               string  `json:"userAgent,omitempty"`
+	BrowserName             string  `json:"browserName,omitempty"`
+	BrowserVersion          string  `json:"browserVersion,omitempty"`
+	DeviceType              string  `json:"deviceType,omitempty"`
+	Platform                string  `json:"platform,omitempty"`
+	Language                string  `json:"language,omitempty"`
+	Timezone                string  `json:"timezone,omitempty"`
+	ViewportWidth           int     `json:"viewportWidth,omitempty"`
+	ViewportHeight          int     `json:"viewportHeight,omitempty"`
+	HardwareConcurrency     int     `json:"hardwareConcurrency,omitempty"`
+	DeviceMemory            float64 `json:"deviceMemory,omitempty"`
+	TouchPoints             int     `json:"touchPoints,omitempty"`
+	ConnectionType          string  `json:"connectionType,omitempty"`
+	EffectiveConnectionType string  `json:"effectiveConnectionType,omitempty"`
 }
 
 type taskGridArgs struct {
@@ -70,11 +111,12 @@ type querySubscription struct {
 }
 
 type tableChange struct {
-	project string
-	tenant  string
-	table   string
-	broad   bool
-	rowIDs  map[string]bool
+	project     string
+	tenant      string
+	table       string
+	broad       bool
+	rowIDs      map[string]bool
+	changedAtMS float64
 }
 
 type wsConn struct {
@@ -125,6 +167,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *wsConn) handle(ctx context.Context, message clientMessage) {
+	receivedAt := time.Now()
 	switch message.Type {
 	case "auth":
 		user, permissions, tenant, err := c.server.authenticateSocket(ctx, c.project, c.tenant, message.Token, message.Tenant)
@@ -137,8 +180,24 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.perms = permissions
 		c.tenant = tenant
 		c.auth = true
+		caller := callerContext{user: user, permissions: permissions}
+		subs := make([]querySubscription, 0, len(c.subs))
+		for id, sub := range c.subs {
+			if sub.cancel != nil {
+				sub.cancel()
+			}
+			subCtx, cancel := context.WithCancel(ctx)
+			sub.ctx = subCtx
+			sub.cancel = cancel
+			sub.tenant = tenant
+			sub.caller = caller
+			sub.token = &struct{}{}
+			c.subs[id] = sub
+			subs = append(subs, sub)
+		}
 		c.mu.Unlock()
 		c.write(serverMessage{Type: "auth.result", ID: message.ID, Result: map[string]any{"userId": user.ID, "tenantId": tenant}})
+		c.server.rerunSubscriptions(subs, "initial", 0)
 	case "query.subscribe":
 		if !c.requireAuth("query.error", message.ID) {
 			return
@@ -156,7 +215,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		if hadPrevious && previous.cancel != nil {
 			previous.cancel()
 		}
-		go c.server.executeSubscription(subCtx, sub, "initial")
+		go c.server.executeSubscription(subCtx, sub, "initial", 0)
 	case "query.unsubscribe":
 		c.mu.Lock()
 		sub, ok := c.subs[message.ID]
@@ -171,25 +230,142 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		if !c.requireAuth("mutation.error", message.ID) {
 			return
 		}
+		trace := traceFromClient(message.Trace)
+		trace.ServerReceivedAtMS = epochMillis(receivedAt)
+		trace.ServerMutationStartedAtMS = epochMillis(time.Now())
 		result, err := c.server.executeTenantMutationForCaller(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
+		committedAt := time.Now().UTC()
+		trace.ServerMutationCommittedAtMS = epochMillis(committedAt)
+		trace.ServerCompletedAtMS = epochMillis(committedAt)
+		trace.ServerDurationMS = float64(committedAt.Sub(receivedAt).Microseconds()) / 1000
 		if err != nil {
-			c.write(serverMessage{Type: "mutation.error", ID: message.ID, Error: err.Error()})
+			c.write(serverMessage{Type: "mutation.error", ID: message.ID, Path: message.Path, Error: err.Error(), Trace: trace})
+			c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "mutation", message.Path, "server", "", "error", err.Error(), trace))
 			return
 		}
-		c.write(serverMessage{Type: "mutation.result", ID: message.ID, Result: result})
+		trace.ServerBroadcastScheduledAtMS = epochMillis(time.Now())
+		c.write(serverMessage{Type: "mutation.result", ID: message.ID, Path: message.Path, Result: result, Trace: trace})
+		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "mutation", message.Path, "server", "", "ok", "", trace))
+		c.server.broadcastTenantTableChangeAt(c.project, c.tenant, mutationInvalidationTable(message.Path), committedAt)
 	case "action.call":
 		if !c.requireAuth("action.error", message.ID) {
 			return
 		}
+		trace := traceFromClient(message.Trace)
+		trace.ServerReceivedAtMS = epochMillis(receivedAt)
 		result, err := c.server.executeTenantActionForCaller(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
+		completedAt := time.Now().UTC()
+		trace.ServerCompletedAtMS = epochMillis(completedAt)
+		trace.ServerDurationMS = float64(completedAt.Sub(receivedAt).Microseconds()) / 1000
 		if err != nil {
-			c.write(serverMessage{Type: "action.error", ID: message.ID, Error: err.Error()})
+			c.write(serverMessage{Type: "action.error", ID: message.ID, Path: message.Path, Error: err.Error(), Trace: trace})
+			c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "action", message.Path, "server", "", "error", err.Error(), trace))
 			return
 		}
-		c.write(serverMessage{Type: "action.result", ID: message.ID, Result: result})
+		c.write(serverMessage{Type: "action.result", ID: message.ID, Path: message.Path, Result: result, Trace: trace})
+		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "action", message.Path, "server", "", "ok", "", trace))
+	case "telemetry.event":
+		c.server.recordTransactionTelemetry(transactionEntryFromClientTelemetry(c.project, c.tenant, message))
 	default:
 		c.write(serverMessage{Type: "query.error", ID: message.ID, Error: "unknown websocket message type"})
 	}
+}
+
+func traceFromClient(in *messageTrace) *messageTrace {
+	if in == nil {
+		return &messageTrace{}
+	}
+	copy := *in
+	return &copy
+}
+
+func epochMillis(t time.Time) float64 {
+	return float64(t.UTC().UnixNano()) / float64(time.Millisecond)
+}
+
+func transactionEntryFromTrace(project string, tenant string, operationID string, kind string, path string, phase string, reason string, outcome string, errorMessage string, trace *messageTrace) transactionTelemetryEntry {
+	now := time.Now().UTC()
+	entry := transactionTelemetryEntry{
+		Time:        now.Format(time.RFC3339Nano),
+		Project:     project,
+		Tenant:      tenant,
+		OperationID: operationID,
+		Kind:        kind,
+		Path:        path,
+		Phase:       phase,
+		Reason:      reason,
+		Outcome:     outcome,
+		Error:       errorMessage,
+	}
+	if trace == nil {
+		return entry
+	}
+	entry.ClientSentAtMS = trace.ClientSentAtMS
+	entry.ServerReceivedAtMS = trace.ServerReceivedAtMS
+	entry.ServerCommittedAtMS = trace.ServerMutationCommittedAtMS
+	entry.ServerCompletedAtMS = trace.ServerCompletedAtMS
+	entry.ServerSentAtMS = trace.ServerSubscriptionSentAtMS
+	entry.ChangeCommittedAtMS = trace.ServerChangeCommittedAtMS
+	entry.ServerDurationMS = trace.ServerDurationMS
+	if trace.ServerMutationStartedAtMS > 0 && trace.ServerMutationCommittedAtMS > 0 {
+		entry.ServerCommitMS = float64(trace.ServerMutationCommittedAtMS - trace.ServerMutationStartedAtMS)
+	} else if trace.ServerReceivedAtMS > 0 && trace.ServerMutationCommittedAtMS > 0 {
+		entry.ServerCommitMS = float64(trace.ServerMutationCommittedAtMS - trace.ServerReceivedAtMS)
+	}
+	if trace.ClientSentAtMS > 0 && trace.ServerMutationCommittedAtMS > 0 {
+		entry.ClientToCommitMS = float64(trace.ServerMutationCommittedAtMS - trace.ClientSentAtMS)
+	}
+	if trace.ServerSubscriptionStartedAtMS > 0 && trace.ServerSubscriptionSentAtMS > 0 {
+		entry.SubscriptionDurationMS = float64(trace.ServerSubscriptionSentAtMS - trace.ServerSubscriptionStartedAtMS)
+	}
+	return entry
+}
+
+func transactionEntryFromClientTelemetry(project string, tenant string, message clientMessage) transactionTelemetryEntry {
+	trace := traceFromClient(message.Trace)
+	entry := transactionEntryFromTrace(project, tenant, message.ID, message.Kind, message.Path, "browser", message.Reason, message.Outcome, message.Error, trace)
+	entry.ClientReceivedAtMS = message.ClientReceivedAtMS
+	entry.ClientDurationMS = message.ClientDurationMS
+	if len(message.Device) > 0 {
+		entry.DeviceJSON = string(message.Device)
+		var device clientDeviceInfo
+		if err := json.Unmarshal(message.Device, &device); err == nil {
+			entry.UserAgent = device.UserAgent
+			entry.BrowserName = device.BrowserName
+			entry.BrowserVersion = device.BrowserVersion
+			entry.DeviceType = device.DeviceType
+			entry.Platform = device.Platform
+			entry.Language = device.Language
+			entry.Timezone = device.Timezone
+			entry.ViewportWidth = device.ViewportWidth
+			entry.ViewportHeight = device.ViewportHeight
+		}
+	}
+	if entry.Time == "" {
+		entry.Time = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	if message.ClientReceivedAtMS > 0 {
+		if message.ClientSentAtMS > 0 {
+			entry.ClientSentAtMS = message.ClientSentAtMS
+		}
+		if message.ClientDurationMS > 0 {
+			entry.ClientRoundTripMS = message.ClientDurationMS
+		} else if entry.ClientSentAtMS > 0 {
+			entry.ClientRoundTripMS = float64(message.ClientReceivedAtMS - entry.ClientSentAtMS)
+		}
+		if trace.ServerCompletedAtMS > 0 {
+			entry.ServerToBrowserMS = float64(message.ClientReceivedAtMS - trace.ServerCompletedAtMS)
+		} else if trace.ServerSubscriptionSentAtMS > 0 {
+			entry.ServerToBrowserMS = float64(message.ClientReceivedAtMS - trace.ServerSubscriptionSentAtMS)
+		}
+		if trace.ServerChangeCommittedAtMS > 0 {
+			entry.ChangeToBrowserMS = float64(message.ClientReceivedAtMS - trace.ServerChangeCommittedAtMS)
+		}
+	}
+	if entry.Outcome == "" {
+		entry.Outcome = "ok"
+	}
+	return entry
 }
 
 func (c *wsConn) requireAuth(errorType string, id string) bool {
@@ -267,7 +443,11 @@ func (s *Server) broadcastTableChange(projectID string, table string) {
 }
 
 func (s *Server) broadcastTenantTableChange(projectID string, tenantID string, table string) {
-	s.scheduleTableChange(tableChange{project: projectID, tenant: tenantIDFromRequest(projectID, tenantID), table: table, broad: true})
+	s.broadcastTenantTableChangeAt(projectID, tenantID, table, time.Now().UTC())
+}
+
+func (s *Server) broadcastTenantTableChangeAt(projectID string, tenantID string, table string, changedAt time.Time) {
+	s.scheduleTableChange(tableChange{project: projectID, tenant: tenantIDFromRequest(projectID, tenantID), table: table, broad: true, changedAtMS: epochMillis(changedAt)})
 }
 
 func (s *Server) broadcastRowIDChange(projectID string, table string, rowIDs []string) {
@@ -279,7 +459,7 @@ func (s *Server) broadcastTenantRowIDChange(projectID string, tenantID string, t
 	for _, id := range rowIDs {
 		ids[id] = true
 	}
-	s.scheduleTableChange(tableChange{project: projectID, tenant: tenantIDFromRequest(projectID, tenantID), table: table, rowIDs: ids})
+	s.scheduleTableChange(tableChange{project: projectID, tenant: tenantIDFromRequest(projectID, tenantID), table: table, rowIDs: ids, changedAtMS: epochMillis(time.Now())})
 }
 
 func (s *Server) scheduleTableChange(change tableChange) {
@@ -291,6 +471,9 @@ func (s *Server) scheduleTableChange(change tableChange) {
 	pending.tenant = change.tenant
 	pending.table = change.table
 	pending.broad = pending.broad || change.broad
+	if change.changedAtMS > pending.changedAtMS {
+		pending.changedAtMS = change.changedAtMS
+	}
 	if pending.rowIDs == nil {
 		pending.rowIDs = map[string]bool{}
 	}
@@ -324,16 +507,20 @@ func (s *Server) flushTableChange(key string) {
 	for _, conn := range connections {
 		conn.mu.Lock()
 		for _, sub := range conn.subs {
-			if sub.project == change.project && sub.tenant == change.tenant && subscriptionTable(sub.path) == change.table && subscriptionIntersectsChange(sub, change) {
+			if sub.project == change.project && sub.tenant == change.tenant && tableChangeMatchesSubscription(sub, change) && subscriptionIntersectsChange(sub, change) {
 				subs = append(subs, sub)
 			}
 		}
 		conn.mu.Unlock()
 	}
-	s.rerunSubscriptions(subs, "invalidate")
+	s.rerunSubscriptions(subs, "invalidate", change.changedAtMS)
 }
 
-func (s *Server) rerunSubscriptions(subs []querySubscription, reason string) {
+func tableChangeMatchesSubscription(sub querySubscription, change tableChange) bool {
+	return change.table == "" || subscriptionDependsOnTable(sub.path, change.table)
+}
+
+func (s *Server) rerunSubscriptions(subs []querySubscription, reason string, changeCommittedAtMS float64) {
 	if len(subs) == 0 {
 		return
 	}
@@ -350,7 +537,7 @@ func (s *Server) rerunSubscriptions(subs []querySubscription, reason string) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			s.executeSubscription(sub.ctx, sub, reason)
+			s.executeSubscription(sub.ctx, sub, reason, changeCommittedAtMS)
 		}()
 	}
 	wg.Wait()
@@ -381,13 +568,26 @@ func subscriptionCanChangeMembership(sub querySubscription) bool {
 	return strings.TrimSpace(args.Search) != "" || args.Sort != "" || len(args.Filters) > 0
 }
 
-func (s *Server) executeSubscription(ctx context.Context, sub querySubscription, reason string) {
+func (s *Server) executeSubscription(ctx context.Context, sub querySubscription, reason string, changeCommittedAtMS float64) {
+	startedAt := time.Now().UTC()
 	result, err := s.executeTenantQueryForCaller(ctx, sub.project, sub.tenant, sub.caller, sub.path, sub.args)
 	if ctx.Err() != nil {
 		return
 	}
 	if err != nil {
 		sub.conn.write(serverMessage{Type: "query.error", ID: sub.id, Error: err.Error()})
+		s.recordTransactionTelemetry(transactionTelemetryEntry{
+			Time:        time.Now().UTC().Format(time.RFC3339Nano),
+			Project:     sub.project,
+			Tenant:      sub.tenant,
+			OperationID: sub.id,
+			Kind:        "query",
+			Path:        sub.path,
+			Phase:       "server",
+			Reason:      reason,
+			Outcome:     "error",
+			Error:       err.Error(),
+		})
 		return
 	}
 	sub.rowIDs = resultRowIDs(result)
@@ -401,7 +601,15 @@ func (s *Server) executeSubscription(ctx context.Context, sub querySubscription,
 	if !ok || current.token != sub.token {
 		return
 	}
-	sub.conn.write(serverMessage{Type: "query.result", ID: sub.id, Result: result, Reason: reason})
+	sentAt := time.Now().UTC()
+	trace := &messageTrace{
+		ServerChangeCommittedAtMS:     changeCommittedAtMS,
+		ServerSubscriptionStartedAtMS: epochMillis(startedAt),
+		ServerSubscriptionSentAtMS:    epochMillis(sentAt),
+		ServerDurationMS:              float64(sentAt.Sub(startedAt).Microseconds()) / 1000,
+	}
+	sub.conn.write(serverMessage{Type: "query.result", ID: sub.id, Path: sub.path, Result: result, Reason: reason, Trace: trace})
+	s.recordTransactionTelemetry(transactionEntryFromTrace(sub.project, sub.tenant, sub.id, "query", sub.path, "server", reason, "ok", "", trace))
 }
 
 func resultRowIDs(result any) map[string]bool {
@@ -435,12 +643,13 @@ func (s *Server) executeTenantQueryForCaller(ctx context.Context, projectID stri
 	if isLegacyTaskQuery(path) {
 		return s.executeLegacyQuery(ctx, projectID, tenantID, path, rawArgs)
 	}
-	if _, ok := s.app.Lookup(path); ok {
+	app := s.appForProject(ctx, projectID)
+	if _, ok := app.Lookup(path); ok {
 		queryCtx, err := s.queryContext(ctx, projectID, tenantID, caller)
 		if err != nil {
 			return nil, err
 		}
-		return s.app.ExecuteQuery(queryCtx, path, rawArgs)
+		return app.ExecuteQuery(queryCtx, path, rawArgs)
 	}
 	return nil, fmt.Errorf("query %q is not implemented by the runtime", path)
 }
@@ -454,7 +663,7 @@ func (s *Server) executeLegacyQuery(ctx context.Context, projectID string, tenan
 				return nil, err
 			}
 		}
-		return data.ReadRows(ctx, s.databaseURLForTenant(projectID, tenantID), "tasks", data.RowsOptions{
+		return data.ReadTaskGrid(ctx, s.databaseURLForTenant(projectID, tenantID), data.RowsOptions{
 			Limit:           args.Limit,
 			Offset:          args.Offset,
 			Search:          args.Search,
@@ -489,19 +698,20 @@ func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID s
 	if isLegacyTaskMutation(path) {
 		return s.executeLegacyMutation(ctx, projectID, tenantID, path, rawArgs)
 	}
-	if _, ok := s.app.Lookup(path); ok {
+	app := s.appForProject(ctx, projectID)
+	if _, ok := app.Lookup(path); ok {
 		mutationCtx, err := s.mutationContext(ctx, projectID, tenantID, caller)
 		if err != nil {
 			return nil, err
 		}
-		return s.executeRegisteredMutation(mutationCtx, path, rawArgs)
+		return s.executeRegisteredMutation(app, mutationCtx, path, rawArgs)
 	}
 	return nil, fmt.Errorf("mutation %q is not implemented by the runtime", path)
 }
 
-func (s *Server) executeRegisteredMutation(mutationCtx *gonvex.MutationCtx, path string, rawArgs json.RawMessage) (any, error) {
+func (s *Server) executeRegisteredMutation(app *gonvex.App, mutationCtx *gonvex.MutationCtx, path string, rawArgs json.RawMessage) (any, error) {
 	if mutationCtx.DB == nil {
-		return s.app.ExecuteMutation(mutationCtx, path, rawArgs)
+		return app.ExecuteMutation(mutationCtx, path, rawArgs)
 	}
 	if mutationCtx.Context == nil {
 		mutationCtx.Context = context.Background()
@@ -511,7 +721,7 @@ func (s *Server) executeRegisteredMutation(mutationCtx *gonvex.MutationCtx, path
 		return nil, err
 	}
 	mutationCtx.Tx = tx
-	result, err := s.app.ExecuteMutation(mutationCtx, path, rawArgs)
+	result, err := app.ExecuteMutation(mutationCtx, path, rawArgs)
 	if err != nil {
 		_ = tx.Rollback()
 		return nil, err
@@ -557,12 +767,13 @@ func (s *Server) executeTenantActionForCaller(ctx context.Context, projectID str
 		s.metrics.recordFunction(path, s.functionKind(path, "action"), time.Since(started), err)
 	}()
 
-	if _, ok := s.app.Lookup(path); ok {
+	app := s.appForProject(ctx, projectID)
+	if _, ok := app.Lookup(path); ok {
 		actionCtx, err := s.actionContext(ctx, projectID, tenantID, caller)
 		if err != nil {
 			return nil, err
 		}
-		return s.app.ExecuteAction(actionCtx, path, rawArgs)
+		return app.ExecuteAction(actionCtx, path, rawArgs)
 	}
 	return nil, fmt.Errorf("action %q is not implemented by the runtime", path)
 }
@@ -603,8 +814,14 @@ func (s *Server) actionContext(ctx context.Context, projectID string, tenantID s
 
 func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (gonvex.RuntimeContext, error) {
 	activeTenant := tenantIDFromRequest(projectID, tenantID)
+	s.hydrateProjectTenantDatabases(ctx, projectID)
 	databaseURL := s.databaseURLForTenant(projectID, activeTenant)
 	store, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, activeTenant), databaseURL)
+	if err != nil {
+		return gonvex.RuntimeContext{}, err
+	}
+	landlordURL := s.databaseURLForProject(projectID)
+	landlordStore, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, "__landlord__"), landlordURL)
 	if err != nil {
 		return gonvex.RuntimeContext{}, err
 	}
@@ -614,6 +831,8 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		TenantID:    activeTenant,
 		DatabaseURL: store.DatabaseURL,
 		DB:          store.DB,
+		LandlordDB:  landlordStore.DB,
+		TenantDB:    store.DB,
 		User:        caller.user,
 		Permissions: caller.permissions,
 		Logger:      slog.Default().With("project", projectID, "tenant", activeTenant),
@@ -634,4 +853,92 @@ func subscriptionTable(path string) string {
 		return ""
 	}
 	return prefix
+}
+
+func subscriptionDependsOnTable(path string, table string) bool {
+	table = strings.TrimSpace(table)
+	if table == "" {
+		return true
+	}
+	for _, dep := range subscriptionTables(path) {
+		if dep == table {
+			return true
+		}
+	}
+	return false
+}
+
+func subscriptionTables(path string) []string {
+	switch path {
+	case "bulk.allReferenceData":
+		return []string{
+			"approvalApprovers",
+			"approvals",
+			"audienceTeams",
+			"audienceUserTeams",
+			"categories",
+			"categoryCustomFields",
+			"categoryPriorities",
+			"cleaningStatuses",
+			"customFields",
+			"employeeProfiles",
+			"fieldUpdatePermissions",
+			"formFields",
+			"formVersions",
+			"forms",
+			"invitations",
+			"jobPositions",
+			"notificationSoundRules",
+			"priorities",
+			"properties",
+			"roles",
+			"slaPolicies",
+			"slas",
+			"spotTypes",
+			"spots",
+			"statusTransitionGroups",
+			"statusTransitions",
+			"tags",
+			"taskApprovalInstances",
+			"taskForms",
+			"teamSettingsWorkspaces",
+			"teams",
+			"templates",
+			"userTeams",
+			"users",
+			"workspaceGroups",
+			"workspaces",
+		}
+	case "bulk.tasksByWorkspace", "bulk.taskSummaryCounts", "bulk.workspaceTaskCounts", "bulk.cachedWorkspaceTaskCounts":
+		return []string{"tasks", "taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances"}
+	case "bulk.taskPivotData":
+		return []string{"taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances", "tasks"}
+	case "roles.effectivePermissions":
+		return []string{"roles", "rolePermissions", "userTeams", "users"}
+	case "users.myTenants":
+		return []string{"tenants", "userTenantMap", "users"}
+	}
+	if strings.HasPrefix(path, "tasks.") {
+		return []string{"tasks", "taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances"}
+	}
+	if strings.HasPrefix(path, "taskFindings.") {
+		return []string{"taskFindings", "tasks"}
+	}
+	if strings.HasPrefix(path, "settings.") {
+		return []string{"settings", "plugins", "envVars"}
+	}
+	if table := subscriptionTable(path); table != "" {
+		return []string{table}
+	}
+	return nil
+}
+
+func mutationInvalidationTable(path string) string {
+	if strings.HasPrefix(path, "techSupport.") {
+		return "supportSessions"
+	}
+	if strings.HasPrefix(path, "taskFindings.") {
+		return "taskFindings"
+	}
+	return subscriptionTable(path)
 }

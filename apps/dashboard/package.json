@@ -23,9 +23,10 @@
     "@gonvex/client": "workspace:*",
     "@gonvex/protocol": "workspace:*",
     "@gonvex/react": "workspace:*",
-    "@internationalized/date": "^3.12.1",
     "@heroui/react": "^3.0.5",
     "@heroui/styles": "^3.0.5",
+    "@internationalized/date": "^3.12.1",
+    "@xyflow/react": "^12.11.0",
     "firebase": "^12.13.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"

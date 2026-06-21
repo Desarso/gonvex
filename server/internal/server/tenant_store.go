@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	defaultTenantStoreMaxOpenConns = 8
-	defaultTenantStoreMaxIdleConns = 2
+	defaultTenantStoreMaxOpenConns = 2
+	defaultTenantStoreMaxIdleConns = 1
 	defaultTenantStoreIdleTTL      = 5 * time.Minute
 )
 

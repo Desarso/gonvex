@@ -6,6 +6,7 @@
     "installation",
     "init-project",
     "projects-and-tenants",
+    "frontend-multitenancy",
     "auth-and-membership",
     "schema",
     "functions-and-bindings",

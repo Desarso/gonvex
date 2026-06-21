@@ -98,7 +98,7 @@ DECLARE
 BEGIN
   %s
 
-  PERFORM pg_notify(%q, json_build_object(
+  PERFORM pg_notify(%s, json_build_object(
     'table', %s,
     'broad', %s,
     'count', row_count,

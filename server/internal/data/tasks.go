@@ -2,7 +2,6 @@ package data
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"time"
 )
@@ -24,11 +23,10 @@ func RandomizeTaskStatusPriority(ctx context.Context, databaseURL string, count 
 		count = 3000
 	}
 
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := openDB(databaseURL)
 	if err != nil {
 		return RandomizeTasksResult{}, err
 	}
-	defer db.Close()
 
 	started := time.Now()
 	result, err := db.ExecContext(ctx, `

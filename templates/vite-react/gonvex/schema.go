@@ -3,7 +3,7 @@ package backend
 import "github.com/gonvex/gonvex/pkg/gonvex"
 
 func Schema(s *gonvex.Schema) {
-	s.Table("messages", func(t *gonvex.Table) {
+	s.TenantTable("messages", func(t *gonvex.Table) {
 		t.ID("id")
 		t.String("body")
 		t.String("author")

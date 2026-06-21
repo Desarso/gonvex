@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,6 +71,119 @@ func TestUniqueProjectIDFallsBackForPunctuationOnlyNames(t *testing.T) {
 	}
 }
 
+func TestConfiguredProjectsHydrateIntoProjectList(t *testing.T) {
+	server := New(config.Config{
+		ProjectDatabases: map[string]string{
+			"whagons-5": "postgres://postgres:postgres@127.0.0.1:5432/gonvex_whagons_5?sslmode=disable",
+		},
+		ProjectKeys: map[string]string{
+			"whagons-5": "secret",
+		},
+	})
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/projects", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	var payload struct {
+		Projects []projectTarget `json:"projects"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Projects) != 1 {
+		t.Fatalf("expected one configured project, got %d", len(payload.Projects))
+	}
+	project := payload.Projects[0]
+	if project.ID != "whagons-5" || project.Database != "gonvex_whagons_5" || project.RuntimeCreated {
+		t.Fatalf("unexpected configured project: %+v", project)
+	}
+}
+
+func TestTenantsEndpointIncludesGlobalTenantsForProject(t *testing.T) {
+	server := New(config.Config{
+		TenantDatabases: map[string]string{
+			"global-tenant":      "postgres://postgres:postgres@127.0.0.1:5432/gonvex_global_tenant?sslmode=disable",
+			"other:project-only": "postgres://postgres:postgres@127.0.0.1:5432/gonvex_other_project_only?sslmode=disable",
+			"whagons-5:local":    "postgres://postgres:postgres@127.0.0.1:5432/gonvex_whagons_5_local?sslmode=disable",
+		},
+	})
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/tenants?project=whagons-5", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	var payload struct {
+		Tenants []tenantTarget `json:"tenants"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	got := map[string]bool{}
+	for _, tenant := range payload.Tenants {
+		got[tenant.ID] = true
+	}
+	if !got["global-tenant"] || !got["local"] {
+		t.Fatalf("expected global and project tenants, got %+v", got)
+	}
+	if got["project-only"] {
+		t.Fatalf("did not expect other project's tenant, got %+v", got)
+	}
+}
+
+func TestProjectKeyEndpointReturnsConfiguredProjectKey(t *testing.T) {
+	server := New(config.Config{
+		AdminKey: "admin-secret",
+		ProjectDatabases: map[string]string{
+			"whagons-5": "postgres://postgres:postgres@127.0.0.1:5432/gonvex_whagons_5?sslmode=disable",
+		},
+		ProjectKeys: map[string]string{
+			"whagons-5": "secret",
+		},
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/dev/projects/whagons-5/key", nil)
+	request.Header.Set("authorization", "Bearer admin-secret")
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	var payload struct {
+		ProjectKey string `json:"projectKey"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.ProjectKey != "secret" {
+		t.Fatalf("expected configured key, got %q", payload.ProjectKey)
+	}
+}
+
+func TestProjectKeyEndpointRequiresAdminKey(t *testing.T) {
+	server := New(config.Config{
+		AdminKey: "admin-secret",
+		ProjectDatabases: map[string]string{
+			"whagons-5": "postgres://postgres:postgres@127.0.0.1:5432/gonvex_whagons_5?sslmode=disable",
+		},
+		ProjectKeys: map[string]string{
+			"whagons-5": "secret",
+		},
+	})
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/projects/whagons-5/key", nil))
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, recorder.Code)
+	}
+}
+
 func TestUniqueDatabaseNameUsesProjectIDSlug(t *testing.T) {
 	server := New(config.Config{})
 	server.projects["existing"] = projectTarget{databaseName: "gonvex_acme_app"}
@@ -80,6 +194,15 @@ func TestUniqueDatabaseNameUsesProjectIDSlug(t *testing.T) {
 
 	if got != "gonvex_acme_app_2" {
 		t.Fatalf("expected gonvex_acme_app_2, got %q", got)
+	}
+}
+
+func TestTelemetryDatabaseNameIsPerProject(t *testing.T) {
+	if got := telemetryDatabaseName("Whagons 5"); got != "gonvex_whagons_5_telemetry" {
+		t.Fatalf("expected project telemetry database name, got %q", got)
+	}
+	if got := telemetryDatabaseName(""); got != "gonvex_default_telemetry" {
+		t.Fatalf("expected default telemetry database name, got %q", got)
 	}
 }
 
@@ -97,6 +220,34 @@ func TestDatabaseURLRewritesPathAndPreservesConnectionOptions(t *testing.T) {
 func TestDatabaseURLRejectsInvalidBaseURL(t *testing.T) {
 	if _, err := databaseURL("://bad-url", "new_db"); err == nil {
 		t.Fatal("expected invalid base URL to fail")
+	}
+}
+
+func TestGenerateProjectKeyHasExpectedShape(t *testing.T) {
+	first, err := generateProjectKey("whagons-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := generateProjectKey("whagons-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(first, "gvx_") || len(first) < 40 {
+		t.Fatalf("unexpected project key shape: %q", first)
+	}
+	if first == second {
+		t.Fatal("expected generated project keys to be unique")
+	}
+	if got := projectIDFromProjectKey(first); got != "whagons-5" {
+		t.Fatalf("expected key to encode project id, got %q", got)
+	}
+}
+
+func TestProjectIDFromProjectKeyRejectsLegacyOrMalformedKeys(t *testing.T) {
+	for _, key := range []string{"", "secret", "gvx_onlytwo", "gvx_!!!_secret"} {
+		if got := projectIDFromProjectKey(key); got != "" {
+			t.Fatalf("expected malformed key %q to decode empty project, got %q", key, got)
+		}
 	}
 }
 
@@ -176,6 +327,28 @@ func TestTenantDatabaseNameIncludesProjectAndTenant(t *testing.T) {
 	got := tenantDatabaseName("Acme App", "West Coast")
 	if got != "gonvex_acme_app_west_coast" {
 		t.Fatalf("unexpected tenant database name: %q", got)
+	}
+}
+
+func TestTenantReferenceAliasesIncludeTenantIdentityAndDatabase(t *testing.T) {
+	got := tenantReferenceAliases(tenantTarget{
+		ID:           "kh7y5pbycsqxej1d5pq388d5gs84je8c",
+		Name:         "Cala Luna",
+		Database:     "calaluna",
+		databaseName: "calaluna",
+		domain:       "calaluna",
+	})
+
+	want := map[string]bool{
+		"kh7y5pbycsqxej1d5pq388d5gs84je8c": true,
+		"calaluna":                         true,
+		"Cala Luna":                        true,
+	}
+	for _, value := range got {
+		delete(want, value)
+	}
+	if len(want) > 0 {
+		t.Fatalf("missing aliases: %+v from %v", want, got)
 	}
 }
 

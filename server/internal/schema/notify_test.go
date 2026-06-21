@@ -20,7 +20,7 @@ func TestNotifySQLForTableUsesTableNameAndChannel(t *testing.T) {
 		"gonvex_notify_messages_insert",
 		"gonvex_messages_notify_update",
 		"AFTER DELETE ON \"messages\"",
-		NotifyChannel,
+		"pg_notify('gonvex_table_change'",
 		"'table', 'messages'",
 		"CASE WHEN row_count < 500 THEN ids ELSE ARRAY[]::text[] END",
 	} {

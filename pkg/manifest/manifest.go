@@ -18,7 +18,9 @@ type FunctionEntry struct {
 }
 
 type Schema struct {
-	Tables map[string]Table `json:"tables"`
+	Tables         map[string]Table `json:"tables"`
+	LandlordTables map[string]Table `json:"landlordTables,omitempty"`
+	TenantTables   map[string]Table `json:"tenantTables,omitempty"`
 }
 
 type Table struct {
@@ -42,8 +44,46 @@ type Manifest struct {
 	GeneratedAt string                   `json:"generatedAt"`
 	Functions   map[string]FunctionEntry `json:"functions"`
 	Schema      Schema                   `json:"schema"`
+	Bundle      *SourceBundle            `json:"bundle,omitempty"`
 }
 
 func EmptySchema() Schema {
-	return Schema{Tables: map[string]Table{}}
+	return Schema{
+		Tables:         map[string]Table{},
+		LandlordTables: map[string]Table{},
+		TenantTables:   map[string]Table{},
+	}
+}
+
+func (s Schema) Normalize() Schema {
+	if s.Tables == nil {
+		s.Tables = map[string]Table{}
+	}
+	if s.LandlordTables == nil && s.TenantTables == nil {
+		return s
+	}
+	if s.LandlordTables == nil {
+		s.LandlordTables = map[string]Table{}
+	}
+	if s.TenantTables == nil {
+		s.TenantTables = s.Tables
+	}
+	s.Tables = s.TenantTables
+	return s
+}
+
+func (s Schema) LandlordSchema() Schema {
+	s = s.Normalize()
+	if s.LandlordTables == nil {
+		return Schema{Tables: s.Tables}
+	}
+	return Schema{Tables: s.LandlordTables}
+}
+
+func (s Schema) TenantSchema() Schema {
+	s = s.Normalize()
+	if s.TenantTables == nil {
+		return Schema{Tables: s.Tables}
+	}
+	return Schema{Tables: s.TenantTables}
 }

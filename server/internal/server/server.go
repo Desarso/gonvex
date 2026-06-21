@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/pkg/projectbundle"
 	"github.com/gonvex/gonvex/server/internal/config"
 	"github.com/gonvex/gonvex/server/internal/data"
 	"github.com/gonvex/gonvex/server/internal/runtime"
@@ -18,20 +20,23 @@ import (
 )
 
 type Server struct {
-	config          config.Config
-	runtime         *runtime.Runtime
-	app             *gonvex.App
-	tenantStores    *tenantStoreResolver
-	cache           *rowsCache
-	metrics         *runtimeMetrics
-	projectMu       sync.RWMutex
-	projects        map[string]projectTarget
-	tenants         map[string]tenantTarget
-	wsMu            sync.RWMutex
-	wsConns         map[*wsConn]bool
-	tableChangeMu   sync.Mutex
-	tableChangeWait map[string]*time.Timer
-	tableChanges    map[string]tableChange
+	config            config.Config
+	runtime           *runtime.Runtime
+	app               *gonvex.App
+	tenantStores      *tenantStoreResolver
+	cache             *rowsCache
+	metrics           *runtimeMetrics
+	telemetryWrites   chan struct{}
+	projectMu         sync.RWMutex
+	projects          map[string]projectTarget
+	tenants           map[string]tenantTarget
+	tenantDiscoveryMu sync.Mutex
+	tenantDiscoveryAt map[string]time.Time
+	wsMu              sync.RWMutex
+	wsConns           map[*wsConn]bool
+	tableChangeMu     sync.Mutex
+	tableChangeWait   map[string]*time.Timer
+	tableChanges      map[string]tableChange
 }
 
 func New(cfg config.Config) *Server {
@@ -44,20 +49,24 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	}
 	cache, _ := newRowsCache(cfg.ValkeyURL, cfg.RowsCacheTTL)
 	server := &Server{
-		config:          cfg,
-		runtime:         runtime.New(),
-		app:             app,
-		cache:           cache,
-		metrics:         newRuntimeMetrics(),
-		projects:        map[string]projectTarget{},
-		tenants:         map[string]tenantTarget{},
-		wsConns:         map[*wsConn]bool{},
-		tableChangeWait: map[string]*time.Timer{},
-		tableChanges:    map[string]tableChange{},
+		config:            cfg,
+		runtime:           runtime.NewWithLoader(projectbundle.NewLoader("", cfg.GonvexModuleRoot)),
+		app:               app,
+		cache:             cache,
+		metrics:           newRuntimeMetrics(cfg.TelemetryLogPath),
+		telemetryWrites:   make(chan struct{}, 4),
+		projects:          map[string]projectTarget{},
+		tenants:           map[string]tenantTarget{},
+		tenantDiscoveryAt: map[string]time.Time{},
+		wsConns:           map[*wsConn]bool{},
+		tableChangeWait:   map[string]*time.Timer{},
+		tableChanges:      map[string]tableChange{},
 	}
 	server.tenantStores = newTenantStoreResolver(&server.config)
+	server.loadConfiguredTenantDatabases()
 	server.tenantStores.StartIdleReaper(context.Background())
 	server.startLandlordMigrations()
+	go server.hydrateRuntimeState(context.Background())
 	server.startPostgresNotifications()
 	return server
 }
@@ -69,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/metrics", s.handleMetrics)
 	mux.HandleFunc("GET /dev/projects", s.handleProjects)
 	mux.HandleFunc("POST /dev/projects", s.handleCreateProject)
+	mux.HandleFunc("POST /dev/projects/{project}/key", s.handleProjectKey)
 	mux.HandleFunc("DELETE /dev/projects/{project}", s.handleDeleteProject)
 	mux.HandleFunc("GET /dev/tenants", s.handleTenants)
 	mux.HandleFunc("POST /dev/tenants", s.handleCreateTenant)
@@ -93,6 +103,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
+	s.hydrateRuntimeStateForProject(r.Context(), projectID(r))
 	writeJSON(w, http.StatusOK, s.runtime.ManifestForProject(projectID(r)))
 }
 
@@ -102,6 +113,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleDataTables(w http.ResponseWriter, r *http.Request) {
+	s.hydrateProjectTenantDatabases(r.Context(), projectID(r))
 	tables, err := data.ListTables(r.Context(), s.databaseURL(r))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -111,6 +123,7 @@ func (s *Server) handleDataTables(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
+	s.hydrateProjectTenantDatabases(r.Context(), projectID(r))
 	table := r.PathValue("table")
 	project := projectID(r)
 	tenant := tenantIDFromRequest(project, tenantID(r))
@@ -236,13 +249,25 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		next.Schema = manifest.EmptySchema()
 	}
 
-	migrationResult, err := schema.Apply(r.Context(), s.databaseURLForProject(next.Project), next.Schema)
+	migrationResult, err := schema.Apply(r.Context(), s.databaseURLForProject(next.Project), next.Schema.LandlordSchema())
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	tenantMigrationResult, err := s.applyTenantSchemasForProject(r.Context(), next.Project, next.Schema)
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
 
-	s.runtime.SyncManifest(next)
+	if err := s.runtime.SyncManifest(next); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := s.saveRuntimeManifest(r.Context(), next); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	s.cache.invalidateRows(r.Context(), next.Project, tenantIDFromRequest(next.Project, ""), "")
 	s.broadcastTableChange(next.Project, "tasks")
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -250,6 +275,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		"project":         next.Project,
 		"functionCount":   len(next.Functions),
 		"schema":          migrationResult,
+		"tenantSchema":    tenantMigrationResult,
 		"runtimeReloaded": true,
 	})
 }
@@ -263,6 +289,17 @@ func syncKey(r *http.Request) string {
 		return strings.TrimSpace(value[len("Bearer "):])
 	}
 	return ""
+}
+
+func (s *Server) acceptsAdminKey(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	if s.config.AdminKey != "" && key == s.config.AdminKey {
+		return true
+	}
+	return s.config.AdminKey == "" && s.config.DevSyncKey != "" && key == s.config.DevSyncKey
 }
 
 func projectID(r *http.Request) string {
@@ -302,15 +339,125 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 	if tenantID == "" || tenantID == projectID {
 		return s.config.DatabaseURL(projectID)
 	}
-	if s.config.TenantDatabases != nil {
-		if value := s.config.TenantDatabases[tenantStoreKey(projectID, tenantID)]; value != "" {
+	if value := s.configuredTenantDatabaseURLLocked(projectID, tenantTarget{ID: tenantID}); value != "" {
+		return value
+	}
+	if tenant, ok := s.tenants[tenantStoreKey(projectID, tenantID)]; ok {
+		if value := s.configuredTenantDatabaseURLLocked(projectID, tenant); value != "" {
 			return value
 		}
-		if value := s.config.TenantDatabases[tenantID]; value != "" {
-			return value
+		if tenant.databaseURL != "" {
+			return tenant.databaseURL
 		}
 	}
 	return s.config.DatabaseURL(projectID)
+}
+
+func (s *Server) hydrateRuntimeState(ctx context.Context) {
+	manifests, err := s.loadRuntimeManifests(ctx)
+	if err != nil {
+		slog.Debug("load persisted Gonvex runtime manifests", "error", err)
+		return
+	}
+	for _, next := range manifests {
+		if err := s.runtime.SyncManifest(next); err != nil {
+			slog.Warn("load persisted Gonvex runtime manifest", "project", next.Project, "error", err)
+		}
+	}
+}
+
+func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID string) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" || s.runtime.AppForProject(projectID) != nil {
+		return
+	}
+	next, ok, err := s.loadRuntimeManifest(ctx, projectID)
+	if err != nil {
+		slog.Debug("load persisted Gonvex project runtime manifest", "project", projectID, "error", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if err := s.runtime.SyncManifest(next); err != nil {
+		slog.Warn("load persisted Gonvex project runtime manifest", "project", projectID, "error", err)
+	}
+}
+
+func (s *Server) appForProject(ctx context.Context, projectID string) *gonvex.App {
+	s.hydrateRuntimeStateForProject(ctx, projectID)
+	if app := s.runtime.AppForProject(projectID); app != nil {
+		return app
+	}
+	return s.app
+}
+
+func (s *Server) configuredTenantDatabaseURLLocked(projectID string, tenant tenantTarget) string {
+	if s.config.TenantDatabases == nil {
+		return ""
+	}
+	for _, candidate := range tenantLookupCandidates(tenant) {
+		if candidate == "" {
+			continue
+		}
+		if value := s.config.TenantDatabases[tenantStoreKey(projectID, candidate)]; value != "" {
+			return value
+		}
+		if value := s.config.TenantDatabases[candidate]; value != "" {
+			return value
+		}
+	}
+	needles := tenantDatabaseNeedles(tenant)
+	for _, value := range s.config.TenantDatabases {
+		databaseName := databaseNameFromURL(value, "")
+		normalizedDatabase := normalizeDatabaseAlias(databaseName)
+		for _, needle := range needles {
+			if needle != "" && strings.Contains(normalizedDatabase, needle) {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func tenantLookupCandidates(tenant tenantTarget) []string {
+	return uniqueStrings([]string{
+		tenant.ID,
+		tenant.Database,
+		tenant.domain,
+		slug(tenant.Name),
+		strings.ReplaceAll(slug(tenant.Name), "_", "-"),
+	})
+}
+
+func tenantDatabaseNeedles(tenant tenantTarget) []string {
+	values := []string{tenant.ID, tenant.Database, tenant.domain, tenant.Name}
+	needles := make([]string, 0, len(values))
+	for _, value := range values {
+		needle := normalizeDatabaseAlias(value)
+		if len(needle) >= 4 {
+			needles = append(needles, needle)
+		}
+	}
+	return uniqueStrings(needles)
+}
+
+func normalizeDatabaseAlias(value string) string {
+	return strings.ToLower(strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.TrimSpace(value)))
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
 }
 
 func withJSON(next http.Handler) http.Handler {

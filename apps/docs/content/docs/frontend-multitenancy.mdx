@@ -1,0 +1,197 @@
+---
+title: Frontend Multitenancy
+description: How React apps choose an active Gonvex tenant and how that tenant reaches the runtime.
+---
+
+# Frontend Multitenancy
+
+Gonvex generated bindings are project-level. A tenant is not a different generated API; it is runtime context.
+
+That means this stays the same for every tenant:
+
+```ts
+import { api } from "./gonvex/_generated/api";
+
+const tasks = useQuery(api.tasks.list, {});
+const createTask = useMutation(api.tasks.create);
+```
+
+What changes is the active tenant attached to the Gonvex client session.
+
+## Runtime Context
+
+Every frontend call should resolve to this runtime context:
+
+```txt
+runtime URL
+-> project id
+-> auth token / user
+-> active tenant id
+-> tenant database route
+-> function context
+```
+
+The frontend can choose a tenant, but it is not trusted as authority. The runtime must verify that the authenticated user belongs to that tenant before executing queries, mutations, actions, or subscriptions.
+
+## Configure the Client
+
+For a Vite app, configure the runtime URL and project id in environment variables:
+
+```txt
+VITE_GONVEX_WS_URL=ws://localhost:8080/ws
+VITE_GONVEX_PROJECT_ID=whagons-5
+```
+
+Create the client once for the selected project:
+
+```tsx
+import { ConvexReactClient, GonvexProvider } from "./gonvex/_generated/react";
+
+const gonvex = new ConvexReactClient(import.meta.env.VITE_GONVEX_WS_URL, {
+  project: import.meta.env.VITE_GONVEX_PROJECT_ID,
+});
+
+export function AppRoot() {
+  return (
+    <GonvexProvider client={gonvex}>
+      <App />
+    </GonvexProvider>
+  );
+}
+```
+
+The project id is sent as a `project` query parameter on the WebSocket URL.
+
+## Set the Active Tenant
+
+Today the client exposes tenant context through `setAuth`:
+
+```ts
+gonvex.setAuth({
+  token: sessionToken,
+  tenant: activeTenantId,
+});
+```
+
+If you do not have auth wired yet in local development, you can still set only the tenant:
+
+```ts
+gonvex.setAuth({ tenant: "acme" });
+```
+
+For production apps, always send a real auth token too. The runtime should reject tenant access unless the user is a member of that tenant.
+
+## Safe Tenant Switching Pattern
+
+When the active tenant changes, do not keep showing data from the previous tenant as if it belongs to the new tenant.
+
+The safe current pattern is to key the provider or tenant-scoped app subtree by tenant id:
+
+```tsx
+function TenantShell(props: { token: string; tenantId: string }) {
+  const client = useMemo(() => {
+    const next = new ConvexReactClient(import.meta.env.VITE_GONVEX_WS_URL, {
+      project: import.meta.env.VITE_GONVEX_PROJECT_ID,
+      token: props.token,
+      tenant: props.tenantId,
+    });
+    return next;
+  }, [props.token, props.tenantId]);
+
+  useEffect(() => () => client.close(), [client]);
+
+  return (
+    <GonvexProvider key={props.tenantId} client={client}>
+      <TenantApp tenantId={props.tenantId} />
+    </GonvexProvider>
+  );
+}
+```
+
+This forces tenant-scoped subscriptions and local query results to start fresh for the selected tenant.
+
+The lighter pattern is:
+
+```ts
+gonvex.setAuth({ token, tenant: nextTenantId });
+```
+
+Use that only when the surrounding UI also clears tenant-scoped local state and remounts active subscriptions. Existing subscriptions are not automatically resubscribed under the new tenant yet.
+
+## Landlord Data vs Tenant Data
+
+Multi-tenant apps usually have two kinds of data:
+
+```txt
+Landlord / project data
+  projects, tenants, memberships, billing, routing, global users
+
+Tenant data
+  tasks, workspaces, customers, files, domain tables
+```
+
+The frontend should normally query tenant data through generated functions after selecting a tenant. It should not connect directly to tenant databases or store tenant database URLs.
+
+Tenant list and membership screens should come from landlord/project-level functions or runtime endpoints. Tenant business screens should run under the active tenant context.
+
+## Generated Table Scopes
+
+The generated frontend folder separates landlord and tenant table metadata:
+
+```txt
+gonvex/_generated/
+  schema.ts
+  landlord/tables.ts
+  tenant/tables.ts
+```
+
+Use the tenant metadata for business-data UI and the landlord metadata for app-owned project/control-plane UI:
+
+```ts
+import { landlord, tenant } from "./gonvex/_generated/schema";
+import { tables as landlordTables } from "./gonvex/_generated/landlord/tables";
+import { tables as tenantTables } from "./gonvex/_generated/tenant/tables";
+
+const tenantTableNames = Object.keys(tenantTables);
+const landlordTableNames = Object.keys(landlordTables);
+```
+
+All tenant databases for a project use the same `tenant.tables` schema. Switching tenants changes which database those tables target; it does not change the generated TypeScript bindings.
+
+## Dashboard Data Browser
+
+The dashboard Data tab mirrors the same idea for development:
+
+- `Landlord / project DB` means no tenant id is attached.
+- A tenant DB selection sends the selected tenant id.
+- Row/table requests include `tenant=<tenantId>` and `x-gonvex-tenant-id: <tenantId>`.
+- The runtime resolves that tenant id to the configured tenant database.
+
+The rows in a `tenants` table are just rows in the currently selected database. They are not the same thing as the dashboard's active tenant database selector. Tenant databases must be created or configured through the runtime tenant registry.
+
+## Backend Function Context
+
+Backend functions should read tenant context from Gonvex, not from user-provided args:
+
+```go
+func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
+  tenantID := ctx.TenantID()
+
+  if !ctx.Can("tasks:read") {
+    return nil, gonvex.Forbidden()
+  }
+
+  return ctx.DB().QueryTasks(tenantID, args)
+}
+```
+
+For database-per-tenant projects, the database route already scopes the data. For shared-table projects, functions and generated DB helpers must also enforce tenant predicates such as `WHERE tenant_id = $1`.
+
+## Rules of Thumb
+
+- Generated bindings are shared by all tenants in a project.
+- The selected tenant belongs in client/runtime session state, not in every function argument.
+- Tenant IDs from the browser are inputs to verify, not security proof.
+- Clear or remount tenant-scoped UI state when switching tenants.
+- Never put tenant database URLs in frontend code.
+- Use landlord/project data only for routing, membership, and tenant selection; keep business data tenant-local.

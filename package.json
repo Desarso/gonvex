@@ -22,7 +22,17 @@
     "seed:tasks:10m": "go run ./cmd/seed-tasks --count 10000000 --batch 50000 --seed 42 --clear --fast --no-trgm --analyze"
   },
   "pnpm": {
-    "ignoredBuiltDependencies": ["@firebase/util", "protobufjs"],
-    "onlyBuiltDependencies": ["@firebase/util", "esbuild", "protobufjs"]
+    "ignoredBuiltDependencies": [
+      "@firebase/util",
+      "protobufjs"
+    ],
+    "onlyBuiltDependencies": [
+      "@firebase/util",
+      "esbuild",
+      "protobufjs"
+    ]
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.0"
   }
 }

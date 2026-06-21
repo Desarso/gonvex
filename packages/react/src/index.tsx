@@ -1,8 +1,9 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import type { FunctionReference, GonvexClient } from "@gonvex/client";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { ConvexReactClient, type FunctionReference, type GonvexClient } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
 const GonvexContext = createContext<GonvexClient | null>(null);
+const GonvexAuthContext = createContext<AuthState>({ isLoading: false, isAuthenticated: true });
 
 export const ConvexProvider = GonvexProvider;
 
@@ -10,21 +11,73 @@ export function GonvexProvider(props: { client: GonvexClient; children: ReactNod
   return <GonvexContext.Provider value={props.client}>{props.children}</GonvexContext.Provider>;
 }
 
+export { ConvexReactClient };
+
+type AuthState = {
+  isLoading: boolean;
+  isAuthenticated: boolean;
+  fetchAccessToken?: (args: { forceRefreshToken: boolean }) => Promise<string | null>;
+};
+
+export function ConvexProviderWithAuth(props: {
+  client: ConvexReactClient;
+  children: ReactNode;
+  useAuth: () => AuthState;
+}) {
+  const auth = props.useAuth();
+  const [tokenReady, setTokenReady] = useState(false);
+
+  useEffect(() => {
+    setTokenReady(false);
+    if (auth.isLoading || !auth.isAuthenticated || !auth.fetchAccessToken) return;
+    let cancelled = false;
+    void auth.fetchAccessToken({ forceRefreshToken: false }).then((token) => {
+      if (!cancelled) {
+        props.client.setAuth({ token: token ?? undefined });
+        setTokenReady(Boolean(token));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [auth.isLoading, auth.isAuthenticated, auth.fetchAccessToken, props.client]);
+
+  const authValue = useMemo<AuthState>(
+    () => ({
+      ...auth,
+      isLoading: auth.isLoading || (auth.isAuthenticated && !tokenReady),
+      isAuthenticated: auth.isAuthenticated && tokenReady,
+    }),
+    [auth, tokenReady],
+  );
+
+  const shouldHoldChildren = auth.isLoading || (auth.isAuthenticated && !tokenReady);
+
+  return (
+    <GonvexAuthContext.Provider value={authValue}>
+      <GonvexProvider client={props.client}>{shouldHoldChildren ? null : props.children}</GonvexProvider>
+    </GonvexAuthContext.Provider>
+  );
+}
+
 export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
   const client = useGonvexClient();
   const [result, setResult] = useState<T>();
+  const path = ref.path;
+  const kind = ref.kind;
+  const argsKey = JSON.stringify(args);
 
   useEffect(() => {
     if (args === "skip") {
       setResult(undefined);
       return;
     }
-    return client.subscribeQuery(ref, args, (message) => {
+    return client.subscribeQuery({ kind, path }, args, (message) => {
       if (message.type === "query.result") {
         setResult(message.result as T);
       }
     });
-  }, [client, ref, JSON.stringify(args)]);
+  }, [client, kind, path, argsKey]);
 
   return result;
 }
@@ -44,7 +97,7 @@ export function useConvex() {
 }
 
 export function useConvexAuth() {
-  return { isLoading: false, isAuthenticated: true };
+  return useContext(GonvexAuthContext);
 }
 
 export function useConvexConnectionState() {

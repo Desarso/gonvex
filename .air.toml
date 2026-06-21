@@ -2,8 +2,8 @@ root = "."
 tmp_dir = "tmp/air"
 
 [build]
-  cmd = "go build -o ./tmp/air/gonvex-runtime ./server/cmd/gonvex-runtime"
-  bin = "./tmp/air/gonvex-runtime"
+  cmd = "go build -o ./tmp/air/gonvex-runtime.exe ./server/cmd/gonvex-runtime"
+  bin = "./tmp/air/gonvex-runtime.exe"
   delay = 1000
   exclude_dir = ["apps", "node_modules", "tmp", ".next", "dist"]
   include_ext = ["go", "env"]

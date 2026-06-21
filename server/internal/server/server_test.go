@@ -3,14 +3,29 @@ package server
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/server/internal/config"
 )
+
+type recordingDB struct {
+	exec func(query string, args ...any)
+}
+
+func (db *recordingDB) ExecContext(_ context.Context, query string, args ...any) (sql.Result, error) {
+	if db.exec != nil {
+		db.exec(query, args...)
+	}
+	return nil, nil
+}
 
 type registeredQueryArgs struct {
 	Name string `json:"name"`
@@ -251,6 +266,167 @@ func TestMetricsTracksDataCacheAndFunctionCalls(t *testing.T) {
 	}
 }
 
+func TestMetricsTracksTransactionTelemetry(t *testing.T) {
+	telemetryPath := filepath.Join(t.TempDir(), "telemetry.jsonl")
+	server := New(config.Config{TelemetryLogPath: telemetryPath})
+
+	server.metrics.recordTransaction(transactionTelemetryEntry{
+		Time:             "2026-06-20T00:00:00Z",
+		Project:          "project-a",
+		Tenant:           "tenant-a",
+		OperationID:      "op-1",
+		Kind:             "mutation",
+		Path:             "tasks.create",
+		Phase:            "server",
+		Outcome:          "ok",
+		ServerDurationMS: 25,
+		ServerCommitMS:   20,
+		ClientToCommitMS: 35,
+	})
+	server.metrics.recordTransaction(transactionTelemetryEntry{
+		Time:              "2026-06-20T00:00:01Z",
+		Project:           "project-a",
+		Tenant:            "tenant-a",
+		OperationID:       "op-2",
+		Kind:              "query",
+		Path:              "tasks.grid",
+		Phase:             "browser",
+		Reason:            "invalidate",
+		Outcome:           "ok",
+		ClientRoundTripMS: 45,
+		ServerToBrowserMS: 7,
+		ChangeToBrowserMS: 52,
+	})
+
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/metrics", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	var payload struct {
+		Transactions map[string]struct {
+			ServerEvents             int64   `json:"serverEvents"`
+			BrowserEvents            int64   `json:"browserEvents"`
+			AverageServerCommitMS    float64 `json:"averageServerCommitMs"`
+			AverageClientToCommitMS  float64 `json:"averageClientToCommitMs"`
+			AverageServerToBrowserMS float64 `json:"averageServerToBrowserMs"`
+			AverageChangeToBrowserMS float64 `json:"averageChangeToBrowserMs"`
+		} `json:"transactions"`
+		TelemetryLogs []transactionTelemetryEntry `json:"telemetryLogs"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Transactions["mutation:tasks.create"].ServerEvents != 1 {
+		t.Fatalf("expected mutation server event, got %+v", payload.Transactions["mutation:tasks.create"])
+	}
+	if payload.Transactions["mutation:tasks.create"].AverageServerCommitMS != 20 {
+		t.Fatalf("expected commit average to be recorded, got %+v", payload.Transactions["mutation:tasks.create"])
+	}
+	if payload.Transactions["mutation:tasks.create"].AverageClientToCommitMS != 35 {
+		t.Fatalf("expected client-to-commit average to be recorded, got %+v", payload.Transactions["mutation:tasks.create"])
+	}
+	if payload.Transactions["query:tasks.grid"].BrowserEvents != 1 {
+		t.Fatalf("expected query browser event, got %+v", payload.Transactions["query:tasks.grid"])
+	}
+	if payload.Transactions["query:tasks.grid"].AverageServerToBrowserMS != 7 || payload.Transactions["query:tasks.grid"].AverageChangeToBrowserMS != 52 {
+		t.Fatalf("expected browser delivery averages to be recorded, got %+v", payload.Transactions["query:tasks.grid"])
+	}
+	if len(payload.TelemetryLogs) != 2 {
+		t.Fatalf("expected telemetry logs in snapshot, got %d", len(payload.TelemetryLogs))
+	}
+	ledger, err := os.ReadFile(telemetryPath)
+	if err != nil {
+		t.Fatalf("read telemetry ledger: %v", err)
+	}
+	if !strings.Contains(string(ledger), `"path":"tasks.create"`) || !strings.Contains(string(ledger), `"path":"tasks.grid"`) {
+		t.Fatalf("expected telemetry ledger to contain both events, got %s", string(ledger))
+	}
+}
+
+func TestTransactionTelemetryCanBeDisabled(t *testing.T) {
+	telemetryPath := filepath.Join(t.TempDir(), "telemetry.jsonl")
+	server := New(config.Config{TelemetryEnabled: false, TelemetryLogPath: telemetryPath})
+
+	server.recordTransactionTelemetry(transactionTelemetryEntry{
+		Time:        "2026-06-20T00:00:00Z",
+		Project:     "project-a",
+		Tenant:      "tenant-a",
+		OperationID: "op-1",
+		Kind:        "query",
+		Path:        "bulk.allReferenceData",
+		Phase:       "browser",
+		Outcome:     "ok",
+	})
+
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/metrics", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	var payload struct {
+		TelemetryLogs []transactionTelemetryEntry `json:"telemetryLogs"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.TelemetryLogs) != 0 {
+		t.Fatalf("expected no telemetry logs when disabled, got %d", len(payload.TelemetryLogs))
+	}
+	if _, err := os.Stat(telemetryPath); !os.IsNotExist(err) {
+		t.Fatalf("expected telemetry file to be absent when disabled, got err=%v", err)
+	}
+}
+
+func TestClientTelemetryEntryIncludesBrowserDeviceInfo(t *testing.T) {
+	entry := transactionEntryFromClientTelemetry("project-a", "tenant-a", clientMessage{
+		Type:               "telemetry.event",
+		ID:                 "op-1",
+		Kind:               "query",
+		Path:               "tasks.grid",
+		Reason:             "invalidate",
+		Outcome:            "ok",
+		ClientReceivedAtMS: 123.456,
+		Device:             json.RawMessage(`{"browserName":"Chrome","browserVersion":"126.0.0.0","deviceType":"desktop","platform":"Win32","userAgent":"Mozilla/5.0 Chrome/126.0.0.0","language":"en-US","timezone":"America/Los_Angeles","viewportWidth":1440,"viewportHeight":900}`),
+		Trace:              &messageTrace{ServerChangeCommittedAtMS: 100.125, ServerSubscriptionSentAtMS: 110.25},
+	})
+
+	if entry.Project != "project-a" || entry.Tenant != "tenant-a" || entry.Kind != "query" || entry.Path != "tasks.grid" {
+		t.Fatalf("unexpected telemetry identity: %+v", entry)
+	}
+	if entry.BrowserName != "Chrome" || entry.DeviceType != "desktop" || entry.Platform != "Win32" {
+		t.Fatalf("expected browser/device info to be parsed, got %+v", entry)
+	}
+	if entry.ViewportWidth != 1440 || entry.ViewportHeight != 900 {
+		t.Fatalf("expected viewport info to be parsed, got %+v", entry)
+	}
+	if entry.ChangeToBrowserMS <= 23 || entry.ChangeToBrowserMS >= 24 {
+		t.Fatalf("expected fractional change-to-browser timing, got %+v", entry.ChangeToBrowserMS)
+	}
+	if !strings.Contains(entry.DeviceJSON, `"browserName":"Chrome"`) {
+		t.Fatalf("expected raw device json to be preserved, got %q", entry.DeviceJSON)
+	}
+}
+
+func TestTelemetrySchemaUsesDedicatedEventsTable(t *testing.T) {
+	statements := []string{}
+	db := &recordingDB{exec: func(query string, args ...any) {
+		statements = append(statements, query)
+	}}
+	if err := ensureTelemetrySchema(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(statements, "\n")
+	if !strings.Contains(joined, "CREATE TABLE IF NOT EXISTS telemetry_events") {
+		t.Fatalf("expected dedicated telemetry_events table in:\n%s", joined)
+	}
+	if strings.Contains(joined, "gonvex_runtime_telemetry_events") {
+		t.Fatalf("did not expect main registry telemetry table in:\n%s", joined)
+	}
+}
+
 func TestDevSyncRequiresConfiguredKey(t *testing.T) {
 	server := New(config.Config{DevSyncKey: "secret"})
 	body := bytes.NewBufferString(`{"project":"app","generatedAt":"now","functions":{},"schema":{}}`)
@@ -305,6 +481,25 @@ func TestDevSyncUsesHeaderProjectWhenManifestProjectIsEmpty(t *testing.T) {
 	}
 	if got := server.runtime.ManifestForProject("header-project").Project; got != "header-project" {
 		t.Fatalf("expected header project manifest, got %q", got)
+	}
+}
+
+func TestDevSyncKeepsProjectManifestAvailableAfterSync(t *testing.T) {
+	server := New(config.Config{})
+	body := bytes.NewBufferString(`{"project":"persisted-project","generatedAt":"now","functions":{"messages.list":{"kind":"query","handler":"ListMessages","file":"gonvex/messages.go"}},"schema":{"tables":{}}}`)
+
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", body))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	manifest := server.runtime.ManifestForProject("persisted-project")
+	if manifest.Project != "persisted-project" {
+		t.Fatalf("expected synced project manifest, got %q", manifest.Project)
+	}
+	if _, ok := manifest.Functions["messages.list"]; !ok {
+		t.Fatalf("expected synced function manifest, got %+v", manifest.Functions)
 	}
 }
 
@@ -382,6 +577,54 @@ func TestSubscriptionTableUsesPathPrefix(t *testing.T) {
 	for path, want := range tests {
 		if got := subscriptionTable(path); got != want {
 			t.Fatalf("subscriptionTable(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestMutationInvalidationTableUsesFocusedTable(t *testing.T) {
+	tests := map[string]string{
+		"tasks.create":                "tasks",
+		"roles.update":                "roles",
+		"techSupport.recordHeartbeat": "supportSessions",
+		"badpath":                     "",
+	}
+	for path, want := range tests {
+		if got := mutationInvalidationTable(path); got != want {
+			t.Fatalf("mutationInvalidationTable(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestTableChangeMatchesSubscription(t *testing.T) {
+	sub := querySubscription{path: "bulk.allReferenceData"}
+	if tableChangeMatchesSubscription(sub, tableChange{table: "tasks"}) {
+		t.Fatal("expected task changes not to invalidate reference data")
+	}
+	if !tableChangeMatchesSubscription(sub, tableChange{table: "users"}) {
+		t.Fatal("expected user changes to invalidate reference data")
+	}
+	if !tableChangeMatchesSubscription(sub, tableChange{table: ""}) {
+		t.Fatal("expected broad table change to invalidate subscription")
+	}
+}
+
+func TestTableChangeMatchesDerivedTaskSubscriptions(t *testing.T) {
+	tests := []struct {
+		path  string
+		table string
+		want  bool
+	}{
+		{path: "bulk.tasksByWorkspace", table: "tasks", want: true},
+		{path: "bulk.tasksByWorkspace", table: "taskTags", want: true},
+		{path: "bulk.taskPivotData", table: "taskCustomFieldValues", want: true},
+		{path: "bulk.tasksByWorkspace", table: "users", want: false},
+		{path: "tasks.tasksPage", table: "tasks", want: true},
+		{path: "tasks.tasksPage", table: "users", want: false},
+	}
+	for _, test := range tests {
+		got := tableChangeMatchesSubscription(querySubscription{path: test.path}, tableChange{table: test.table})
+		if got != test.want {
+			t.Fatalf("tableChangeMatchesSubscription(%q, %q) = %v, want %v", test.path, test.table, got, test.want)
 		}
 	}
 }

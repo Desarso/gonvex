@@ -1,6 +1,9 @@
 package server
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -9,16 +12,20 @@ import (
 )
 
 const (
-	metricsBucketWidth = 30 * time.Second
-	metricsBucketCount = 24
-	metricsLogLimit    = 100
+	metricsBucketWidth       = 30 * time.Second
+	metricsBucketCount       = 24
+	metricsLogLimit          = 100
+	metricsTelemetryLogLimit = 1000
 )
 
 type runtimeMetrics struct {
-	mu        sync.Mutex
-	functions map[string]*functionMetrics
-	cache     cacheMetrics
-	logs      []runtimeLogEntry
+	mu            sync.Mutex
+	functions     map[string]*functionMetrics
+	transactions  map[string]*transactionMetrics
+	cache         cacheMetrics
+	logs          []runtimeLogEntry
+	telemetryLogs []transactionTelemetryEntry
+	telemetryPath string
 }
 
 type functionMetrics struct {
@@ -60,12 +67,91 @@ type runtimeLogEntry struct {
 	Cache      string  `json:"cache,omitempty"`
 }
 
+type transactionTelemetryEntry struct {
+	Time                   string  `json:"time"`
+	Project                string  `json:"project,omitempty"`
+	Tenant                 string  `json:"tenant,omitempty"`
+	OperationID            string  `json:"operationId,omitempty"`
+	Kind                   string  `json:"kind"`
+	Path                   string  `json:"path"`
+	Phase                  string  `json:"phase"`
+	Reason                 string  `json:"reason,omitempty"`
+	Outcome                string  `json:"outcome"`
+	Error                  string  `json:"error,omitempty"`
+	ClientSentAtMS         float64 `json:"clientSentAtMs,omitempty"`
+	ClientReceivedAtMS     float64 `json:"clientReceivedAtMs,omitempty"`
+	ClientDurationMS       float64 `json:"clientDurationMs,omitempty"`
+	ServerReceivedAtMS     float64 `json:"serverReceivedAtMs,omitempty"`
+	ServerCommittedAtMS    float64 `json:"serverCommittedAtMs,omitempty"`
+	ServerCompletedAtMS    float64 `json:"serverCompletedAtMs,omitempty"`
+	ServerSentAtMS         float64 `json:"serverSentAtMs,omitempty"`
+	ChangeCommittedAtMS    float64 `json:"changeCommittedAtMs,omitempty"`
+	ServerDurationMS       float64 `json:"serverDurationMs,omitempty"`
+	ServerCommitMS         float64 `json:"serverCommitMs,omitempty"`
+	ClientToCommitMS       float64 `json:"clientToCommitMs,omitempty"`
+	ClientRoundTripMS      float64 `json:"clientRoundTripMs,omitempty"`
+	ServerToBrowserMS      float64 `json:"serverToBrowserMs,omitempty"`
+	ChangeToBrowserMS      float64 `json:"changeToBrowserMs,omitempty"`
+	SubscriptionDurationMS float64 `json:"subscriptionDurationMs,omitempty"`
+	BrowserName            string  `json:"browserName,omitempty"`
+	BrowserVersion         string  `json:"browserVersion,omitempty"`
+	DeviceType             string  `json:"deviceType,omitempty"`
+	Platform               string  `json:"platform,omitempty"`
+	UserAgent              string  `json:"userAgent,omitempty"`
+	Language               string  `json:"language,omitempty"`
+	Timezone               string  `json:"timezone,omitempty"`
+	ViewportWidth          int     `json:"viewportWidth,omitempty"`
+	ViewportHeight         int     `json:"viewportHeight,omitempty"`
+	DeviceJSON             string  `json:"device,omitempty"`
+}
+
+type transactionMetrics struct {
+	Kind                        string
+	Path                        string
+	ServerEvents                int64
+	BrowserEvents               int64
+	Errors                      int64
+	TotalServerDurationMS       float64
+	TotalServerCommitMS         float64
+	ServerCommitSamples         int64
+	TotalClientToCommitMS       float64
+	ClientToCommitSamples       int64
+	TotalClientRoundTripMS      float64
+	ClientRoundTripSamples      int64
+	TotalServerToBrowserMS      float64
+	ServerToBrowserSamples      int64
+	TotalChangeToBrowserMS      float64
+	ChangeToBrowserSamples      int64
+	TotalSubscriptionDurationMS float64
+	SubscriptionDurationSamples int64
+	LastEventAt                 time.Time
+	Buckets                     map[int64]*transactionMetricsBucket
+}
+
+type transactionMetricsBucket struct {
+	ServerEvents           int64
+	BrowserEvents          int64
+	Errors                 int64
+	TotalServerDurationMS  float64
+	TotalServerCommitMS    float64
+	ServerCommitSamples    int64
+	TotalClientRoundTripMS float64
+	ClientRoundTripSamples int64
+	TotalServerToBrowserMS float64
+	ServerToBrowserSamples int64
+	TotalChangeToBrowserMS float64
+	ChangeToBrowserSamples int64
+}
+
 type runtimeMetricsSnapshot struct {
-	GeneratedAt string                            `json:"generatedAt"`
-	Functions   map[string]functionMetricSnapshot `json:"functions"`
-	Cache       cacheMetricSnapshot               `json:"cache"`
-	WebSocket   websocketMetricSnapshot           `json:"websocket"`
-	Logs        []runtimeLogEntry                 `json:"logs"`
+	GeneratedAt      string                               `json:"generatedAt"`
+	Functions        map[string]functionMetricSnapshot    `json:"functions"`
+	Transactions     map[string]transactionMetricSnapshot `json:"transactions"`
+	Cache            cacheMetricSnapshot                  `json:"cache"`
+	WebSocket        websocketMetricSnapshot              `json:"websocket"`
+	Logs             []runtimeLogEntry                    `json:"logs"`
+	TelemetryLogs    []transactionTelemetryEntry          `json:"telemetryLogs"`
+	TelemetryLogPath string                               `json:"telemetryLogPath,omitempty"`
 }
 
 type functionMetricSnapshot struct {
@@ -103,15 +189,50 @@ type cacheMetricPoint struct {
 	HitRate  float64 `json:"hitRate"`
 }
 
+type transactionMetricSnapshot struct {
+	Kind                          string                   `json:"kind"`
+	Path                          string                   `json:"path"`
+	ServerEvents                  int64                    `json:"serverEvents"`
+	BrowserEvents                 int64                    `json:"browserEvents"`
+	Errors                        int64                    `json:"errors"`
+	AverageServerDurationMS       float64                  `json:"averageServerDurationMs"`
+	AverageServerCommitMS         float64                  `json:"averageServerCommitMs"`
+	AverageClientToCommitMS       float64                  `json:"averageClientToCommitMs"`
+	AverageClientRoundTripMS      float64                  `json:"averageClientRoundTripMs"`
+	AverageServerToBrowserMS      float64                  `json:"averageServerToBrowserMs"`
+	AverageChangeToBrowserMS      float64                  `json:"averageChangeToBrowserMs"`
+	AverageSubscriptionDurationMS float64                  `json:"averageSubscriptionDurationMs"`
+	LastEventAt                   string                   `json:"lastEventAt,omitempty"`
+	Series                        []transactionMetricPoint `json:"series"`
+}
+
+type transactionMetricPoint struct {
+	Time                     string  `json:"time"`
+	ServerEvents             int64   `json:"serverEvents"`
+	BrowserEvents            int64   `json:"browserEvents"`
+	Errors                   int64   `json:"errors"`
+	AverageServerDurationMS  float64 `json:"averageServerDurationMs"`
+	AverageServerCommitMS    float64 `json:"averageServerCommitMs"`
+	AverageClientRoundTripMS float64 `json:"averageClientRoundTripMs"`
+	AverageServerToBrowserMS float64 `json:"averageServerToBrowserMs"`
+	AverageChangeToBrowserMS float64 `json:"averageChangeToBrowserMs"`
+}
+
 type websocketMetricSnapshot struct {
 	Connections   int `json:"connections"`
 	Subscriptions int `json:"subscriptions"`
 }
 
-func newRuntimeMetrics() *runtimeMetrics {
+func newRuntimeMetrics(telemetryPath ...string) *runtimeMetrics {
+	path := ""
+	if len(telemetryPath) > 0 {
+		path = telemetryPath[0]
+	}
 	return &runtimeMetrics{
-		functions: map[string]*functionMetrics{},
-		cache:     cacheMetrics{Buckets: map[int64]*cacheMetricsBucket{}},
+		functions:     map[string]*functionMetrics{},
+		transactions:  map[string]*transactionMetrics{},
+		cache:         cacheMetrics{Buckets: map[int64]*cacheMetricsBucket{}},
+		telemetryPath: path,
 	}
 }
 
@@ -196,6 +317,89 @@ func (m *runtimeMetrics) recordCache(outcome string) {
 	})
 }
 
+func (m *runtimeMetrics) recordTransaction(entry transactionTelemetryEntry) {
+	if m == nil || entry.Path == "" || entry.Kind == "" {
+		return
+	}
+	if entry.Time == "" {
+		entry.Time = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	if entry.Outcome == "" {
+		entry.Outcome = "ok"
+	}
+	now, err := time.Parse(time.RFC3339Nano, entry.Time)
+	if err != nil {
+		now = time.Now().UTC()
+		entry.Time = now.Format(time.RFC3339Nano)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := entry.Kind + ":" + entry.Path
+	metrics := m.transactions[key]
+	if metrics == nil {
+		metrics = &transactionMetrics{Kind: entry.Kind, Path: entry.Path, Buckets: map[int64]*transactionMetricsBucket{}}
+		m.transactions[key] = metrics
+	}
+	metrics.Kind = entry.Kind
+	metrics.Path = entry.Path
+	if entry.Outcome == "error" {
+		metrics.Errors++
+	}
+	metrics.LastEventAt = now
+	bucket := metrics.bucket(now)
+	if entry.Outcome == "error" {
+		bucket.Errors++
+	}
+	if entry.Phase == "browser" {
+		metrics.BrowserEvents++
+		bucket.BrowserEvents++
+	} else {
+		metrics.ServerEvents++
+		bucket.ServerEvents++
+	}
+	if entry.ServerDurationMS > 0 {
+		metrics.TotalServerDurationMS += entry.ServerDurationMS
+		bucket.TotalServerDurationMS += entry.ServerDurationMS
+	}
+	if entry.ServerCommitMS > 0 {
+		metrics.TotalServerCommitMS += entry.ServerCommitMS
+		metrics.ServerCommitSamples++
+		bucket.TotalServerCommitMS += entry.ServerCommitMS
+		bucket.ServerCommitSamples++
+	}
+	if entry.ClientToCommitMS > 0 {
+		metrics.TotalClientToCommitMS += entry.ClientToCommitMS
+		metrics.ClientToCommitSamples++
+	}
+	if entry.ClientRoundTripMS > 0 {
+		metrics.TotalClientRoundTripMS += entry.ClientRoundTripMS
+		metrics.ClientRoundTripSamples++
+		bucket.TotalClientRoundTripMS += entry.ClientRoundTripMS
+		bucket.ClientRoundTripSamples++
+	}
+	if entry.ServerToBrowserMS > 0 {
+		metrics.TotalServerToBrowserMS += entry.ServerToBrowserMS
+		metrics.ServerToBrowserSamples++
+		bucket.TotalServerToBrowserMS += entry.ServerToBrowserMS
+		bucket.ServerToBrowserSamples++
+	}
+	if entry.ChangeToBrowserMS > 0 {
+		metrics.TotalChangeToBrowserMS += entry.ChangeToBrowserMS
+		metrics.ChangeToBrowserSamples++
+		bucket.TotalChangeToBrowserMS += entry.ChangeToBrowserMS
+		bucket.ChangeToBrowserSamples++
+	}
+	if entry.SubscriptionDurationMS > 0 {
+		metrics.TotalSubscriptionDurationMS += entry.SubscriptionDurationMS
+		metrics.SubscriptionDurationSamples++
+	}
+	metrics.trimBuckets(now)
+	m.appendTelemetryLog(entry)
+	m.appendTelemetryFileLocked(entry)
+}
+
 func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, subscriptions int) runtimeMetricsSnapshot {
 	now := time.Now().UTC()
 	m.mu.Lock()
@@ -221,15 +425,28 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 		return logs[left].Time > logs[right].Time
 	})
 
+	transactions := map[string]transactionMetricSnapshot{}
+	for key, metrics := range m.transactions {
+		transactions[key] = metrics.snapshot(now)
+	}
+	telemetryLogs := make([]transactionTelemetryEntry, len(m.telemetryLogs))
+	copy(telemetryLogs, m.telemetryLogs)
+	sort.Slice(telemetryLogs, func(left, right int) bool {
+		return telemetryLogs[left].Time > telemetryLogs[right].Time
+	})
+
 	return runtimeMetricsSnapshot{
-		GeneratedAt: now.Format(time.RFC3339Nano),
-		Functions:   functions,
-		Cache:       m.cache.snapshot(now),
+		GeneratedAt:  now.Format(time.RFC3339Nano),
+		Functions:    functions,
+		Transactions: transactions,
+		Cache:        m.cache.snapshot(now),
 		WebSocket: websocketMetricSnapshot{
 			Connections:   connections,
 			Subscriptions: subscriptions,
 		},
-		Logs: logs,
+		Logs:             logs,
+		TelemetryLogs:    telemetryLogs,
+		TelemetryLogPath: m.telemetryPath,
 	}
 }
 
@@ -238,6 +455,29 @@ func (m *runtimeMetrics) appendLog(entry runtimeLogEntry) {
 	if len(m.logs) > metricsLogLimit {
 		m.logs = m.logs[len(m.logs)-metricsLogLimit:]
 	}
+}
+
+func (m *runtimeMetrics) appendTelemetryLog(entry transactionTelemetryEntry) {
+	m.telemetryLogs = append(m.telemetryLogs, entry)
+	if len(m.telemetryLogs) > metricsTelemetryLogLimit {
+		m.telemetryLogs = m.telemetryLogs[len(m.telemetryLogs)-metricsTelemetryLogLimit:]
+	}
+}
+
+func (m *runtimeMetrics) appendTelemetryFileLocked(entry transactionTelemetryEntry) {
+	if m.telemetryPath == "" {
+		return
+	}
+	if dir := filepath.Dir(m.telemetryPath); dir != "." && dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	file, err := os.OpenFile(m.telemetryPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	encoder := json.NewEncoder(file)
+	_ = encoder.Encode(entry)
 }
 
 func (m *functionMetrics) bucket(now time.Time) *functionMetricsBucket {
@@ -299,6 +539,70 @@ func (m *functionMetrics) series(now time.Time) []functionMetricPoint {
 	return points
 }
 
+func (m *transactionMetrics) bucket(now time.Time) *transactionMetricsBucket {
+	key := bucketKey(now)
+	bucket := m.Buckets[key]
+	if bucket == nil {
+		bucket = &transactionMetricsBucket{}
+		m.Buckets[key] = bucket
+	}
+	return bucket
+}
+
+func (m *transactionMetrics) trimBuckets(now time.Time) {
+	oldest := bucketKey(now.Add(-metricsBucketWidth * metricsBucketCount))
+	for key := range m.Buckets {
+		if key < oldest {
+			delete(m.Buckets, key)
+		}
+	}
+}
+
+func (m *transactionMetrics) snapshot(now time.Time) transactionMetricSnapshot {
+	lastEventAt := ""
+	if !m.LastEventAt.IsZero() {
+		lastEventAt = m.LastEventAt.Format(time.RFC3339Nano)
+	}
+	return transactionMetricSnapshot{
+		Kind:                          m.Kind,
+		Path:                          m.Path,
+		ServerEvents:                  m.ServerEvents,
+		BrowserEvents:                 m.BrowserEvents,
+		Errors:                        m.Errors,
+		AverageServerDurationMS:       divide(m.TotalServerDurationMS, m.ServerEvents),
+		AverageServerCommitMS:         divide(m.TotalServerCommitMS, m.ServerCommitSamples),
+		AverageClientToCommitMS:       divide(m.TotalClientToCommitMS, m.ClientToCommitSamples),
+		AverageClientRoundTripMS:      divide(m.TotalClientRoundTripMS, m.ClientRoundTripSamples),
+		AverageServerToBrowserMS:      divide(m.TotalServerToBrowserMS, m.ServerToBrowserSamples),
+		AverageChangeToBrowserMS:      divide(m.TotalChangeToBrowserMS, m.ChangeToBrowserSamples),
+		AverageSubscriptionDurationMS: divide(m.TotalSubscriptionDurationMS, m.SubscriptionDurationSamples),
+		LastEventAt:                   lastEventAt,
+		Series:                        m.series(now),
+	}
+}
+
+func (m *transactionMetrics) series(now time.Time) []transactionMetricPoint {
+	points := make([]transactionMetricPoint, 0, metricsBucketCount)
+	start := now.Truncate(metricsBucketWidth).Add(-metricsBucketWidth * (metricsBucketCount - 1))
+	for index := 0; index < metricsBucketCount; index++ {
+		bucketStart := start.Add(metricsBucketWidth * time.Duration(index))
+		bucket := m.Buckets[bucketStart.UnixMilli()]
+		point := transactionMetricPoint{Time: bucketStart.Format(time.RFC3339Nano)}
+		if bucket != nil {
+			point.ServerEvents = bucket.ServerEvents
+			point.BrowserEvents = bucket.BrowserEvents
+			point.Errors = bucket.Errors
+			point.AverageServerDurationMS = divide(bucket.TotalServerDurationMS, bucket.ServerEvents)
+			point.AverageServerCommitMS = divide(bucket.TotalServerCommitMS, bucket.ServerCommitSamples)
+			point.AverageClientRoundTripMS = divide(bucket.TotalClientRoundTripMS, bucket.ClientRoundTripSamples)
+			point.AverageServerToBrowserMS = divide(bucket.TotalServerToBrowserMS, bucket.ServerToBrowserSamples)
+			point.AverageChangeToBrowserMS = divide(bucket.TotalChangeToBrowserMS, bucket.ChangeToBrowserSamples)
+		}
+		points = append(points, point)
+	}
+	return points
+}
+
 func (m *cacheMetrics) bucket(now time.Time) *cacheMetricsBucket {
 	key := bucketKey(now)
 	bucket := m.Buckets[key]
@@ -346,6 +650,13 @@ func (m *cacheMetrics) series(now time.Time) []cacheMetricPoint {
 		points = append(points, point)
 	}
 	return points
+}
+
+func divide(total float64, count int64) float64 {
+	if count == 0 {
+		return 0
+	}
+	return total / float64(count)
 }
 
 func cacheHitRate(hits int64, misses int64) float64 {

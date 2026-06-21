@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/server/internal/landlord"
@@ -24,7 +26,14 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 
 	session, err := landlord.ValidateSession(ctx, s.config.LandlordURL, token, requestedTenantID)
 	if err != nil {
-		return nil, nil, "", err
+		if s.config.RequireAuth {
+			return nil, nil, "", err
+		}
+		tenant := tenantIDFromRequest(projectID, requestedTenantID)
+		if requestedTenantID == "" {
+			tenant = tenantIDFromRequest(projectID, currentTenantID)
+		}
+		return devUserFromJWT(token), map[string]any{}, tenant, nil
 	}
 	user := &gonvex.User{ID: session.UserID, Email: session.Email}
 	permissions, err := s.loadTenantPermissions(ctx, projectID, session.ActiveTenantID, session.UserID)
@@ -32,6 +41,32 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 		return nil, nil, "", err
 	}
 	return user, permissions, session.ActiveTenantID, nil
+}
+
+func devUserFromJWT(token string) *gonvex.User {
+	user := &gonvex.User{ID: "dev"}
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return user
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return user
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return user
+	}
+	for _, key := range []string{"sub", "user_id", "uid"} {
+		if value := strings.TrimSpace(fmt.Sprint(claims[key])); value != "" && value != "<nil>" {
+			user.ID = value
+			break
+		}
+	}
+	if email := strings.TrimSpace(fmt.Sprint(claims["email"])); email != "" && email != "<nil>" {
+		user.Email = email
+	}
+	return user
 }
 
 func (s *Server) loadTenantPermissions(ctx context.Context, projectID string, tenantID string, userID string) (map[string]any, error) {

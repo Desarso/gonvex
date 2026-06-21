@@ -334,3 +334,11 @@ func TestBlankValue(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanDeleteIDsTrimsAndDeduplicates(t *testing.T) {
+	got := cleanDeleteIDs([]string{" one ", "", "two", "one", "two "})
+	want := []string{"one", "two"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+}

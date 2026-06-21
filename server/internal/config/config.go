@@ -14,11 +14,16 @@ type Config struct {
 	PostgresURL      string
 	TenantDatabases  map[string]string
 	ProjectDatabases map[string]string
+	ProjectKeys      map[string]string
+	GonvexModuleRoot string
 	ValkeyURL        string
 	RowsCacheTTL     time.Duration
+	TelemetryEnabled bool
+	TelemetryLogPath string
 	S3Endpoint       string
 	S3Bucket         string
 	DevSyncKey       string
+	AdminKey         string
 	RequireAuth      bool
 }
 
@@ -31,11 +36,16 @@ func FromEnv() Config {
 		PostgresURL:      env("DATABASE_URL", env("POSTGRES_URL", "")),
 		TenantDatabases:  envStringMap("GONVEX_TENANT_DATABASE_URLS"),
 		ProjectDatabases: envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
+		ProjectKeys:      envStringMap("GONVEX_PROJECT_KEYS"),
+		GonvexModuleRoot: env("GONVEX_MODULE_ROOT", ""),
 		ValkeyURL:        env("VALKEY_URL", env("REDIS_URL", "")),
 		RowsCacheTTL:     envDuration("GONVEX_ROWS_CACHE_TTL", 15*time.Second),
+		TelemetryEnabled: envBool("GONVEX_TELEMETRY_ENABLED", true),
+		TelemetryLogPath: env("GONVEX_TELEMETRY_LOG", "tmp/gonvex-telemetry.jsonl"),
 		S3Endpoint:       env("S3_ENDPOINT", ""),
 		S3Bucket:         env("S3_BUCKET", ""),
 		DevSyncKey:       env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
+		AdminKey:         env("GONVEX_ADMIN_KEY", ""),
 		RequireAuth:      envBool("GONVEX_REQUIRE_AUTH", false),
 	}
 }
