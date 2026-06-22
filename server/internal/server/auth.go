@@ -21,7 +21,7 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 		if requestedTenantID == "" {
 			tenant = tenantIDFromRequest(projectID, currentTenantID)
 		}
-		return &gonvex.User{ID: "dev"}, map[string]any{}, tenant, nil
+		return devUserFromJWT(token), map[string]any{}, tenant, nil
 	}
 
 	session, err := landlord.ValidateSession(ctx, s.config.LandlordURL, token, requestedTenantID)

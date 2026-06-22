@@ -28,7 +28,7 @@ func (l *Loader) compileAndRegister(projectDir string, _ string, hash string) (*
 		return nil, fmt.Errorf("lookup Register symbol: %w", err)
 	}
 
-	registerFn, ok := symbol.(func(*gonvex.App))
+	_, ok := symbol.(func(*gonvex.App))
 	if !ok {
 		value := reflect.ValueOf(symbol)
 		if value.Kind() != reflect.Func {
@@ -54,6 +54,13 @@ func (l *Loader) compileAndRegister(projectDir string, _ string, hash string) (*
 }
 
 func runGoBuild(projectDir string, outputPath string) error {
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = projectDir
+	tidy.Env = append(os.Environ(), "CGO_ENABLED=1")
+	if output, err := tidy.CombinedOutput(); err != nil {
+		return fmt.Errorf("tidy project bundle module: %w: %s", err, string(output))
+	}
+
 	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", outputPath, ".")
 	cmd.Dir = projectDir
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")

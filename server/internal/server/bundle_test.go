@@ -78,5 +78,5 @@ func gonvexModuleRoot() (string, error) {
 	if !ok {
 		return "", os.ErrInvalid
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..")), nil
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..")), nil
 }

@@ -753,6 +753,13 @@ async function runtimeHasManifest(settings: Settings, manifest: Manifest) {
 async function ensureProjectSettings(root: string, settings: Settings, options: { keyWasExplicit: boolean; runtimeWasExplicit: boolean }): Promise<Settings> {
   if (settings.key) return settings;
   if (options.keyWasExplicit) return settings;
+  const configuredProject = await findRuntimeProject(settings.runtimeURL, settings.projectID).catch(() => null);
+  if (configuredProject) {
+    await writeProjectEnv(root, settings.runtimeURL, configuredProject.id, settings.key);
+    console.log(`[gonvex] configured ${configuredProject.id} in .env.local`);
+    console.warn("[gonvex] GONVEX_PROJECT_KEY is not configured; runtime sync will fail if the runtime requires project keys.");
+    return { ...settings, projectID: configuredProject.id };
+  }
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.warn("[gonvex] GONVEX_PROJECT_KEY is not configured; runtime sync will fail if the runtime requires project keys.");
     return settings;
@@ -779,24 +786,14 @@ async function ensureProjectSettings(root: string, settings: Settings, options: 
         const projectKey = await promptDefault(rl, "Project key from dashboard", "");
         if (!projectKey) throw new Error("Gonvex project key is required for existing projects");
         const next = { ...settings, projectID: project.id, key: projectKey };
-        await upsertEnvLocal(root, {
-          GONVEX_RUNTIME_URL: runtimeURL,
-          VITE_GONVEX_URL: runtimeURL,
-          GONVEX_PROJECT_KEY: projectKey,
-          VITE_GONVEX_WS_URL: webSocketURL(runtimeURL),
-        });
+        await writeProjectEnv(root, runtimeURL, project.id, projectKey);
         console.log(`[gonvex] configured ${project.id} in .env.local`);
         return next;
       } else {
         const created = await createRuntimeProject(runtimeURL, await promptDefault(rl, "New project name", basename(root)));
         project = created.project;
         const next = { ...settings, projectID: project.id, key: created.projectKey };
-        await upsertEnvLocal(root, {
-          GONVEX_RUNTIME_URL: runtimeURL,
-          VITE_GONVEX_URL: runtimeURL,
-          GONVEX_PROJECT_KEY: created.projectKey,
-          VITE_GONVEX_WS_URL: webSocketURL(runtimeURL),
-        });
+        await writeProjectEnv(root, runtimeURL, project.id, created.projectKey);
         console.log(`[gonvex] configured ${project.id} in .env.local`);
         return next;
       }
@@ -804,18 +801,20 @@ async function ensureProjectSettings(root: string, settings: Settings, options: 
       const created = await createRuntimeProject(runtimeURL, await promptDefault(rl, "New project name", basename(root)));
       project = created.project;
       const next = { ...settings, projectID: project.id, key: created.projectKey };
-      await upsertEnvLocal(root, {
-        GONVEX_RUNTIME_URL: runtimeURL,
-        VITE_GONVEX_URL: runtimeURL,
-        GONVEX_PROJECT_KEY: created.projectKey,
-        VITE_GONVEX_WS_URL: webSocketURL(runtimeURL),
-      });
+      await writeProjectEnv(root, runtimeURL, project.id, created.projectKey);
       console.log(`[gonvex] configured ${project.id} in .env.local`);
       return next;
     }
   } finally {
     rl.close();
   }
+}
+
+async function findRuntimeProject(runtimeURL: string, projectID: string): Promise<RuntimeProject | null> {
+  const wanted = projectID.trim();
+  if (!wanted) return null;
+  const projects = await fetchRuntimeProjects(runtimeURL);
+  return projects.find((project) => project.id === wanted) ?? null;
 }
 
 async function fetchRuntimeProjects(runtimeURL: string): Promise<RuntimeProject[]> {
@@ -840,6 +839,17 @@ async function createRuntimeProject(runtimeURL: string, name: string): Promise<C
 async function promptDefault(rl: ReturnType<typeof createInterface>, label: string, fallback: string) {
   const answer = (await rl.question(`${label} (${fallback}): `)).trim();
   return answer || fallback;
+}
+
+async function writeProjectEnv(root: string, runtimeURL: string, projectID: string, projectKey: string) {
+  await upsertEnvLocal(root, {
+    GONVEX_PROJECT_ID: projectID,
+    GONVEX_RUNTIME_URL: runtimeURL,
+    GONVEX_PROJECT_KEY: projectKey,
+    VITE_GONVEX_PROJECT_ID: projectID,
+    VITE_GONVEX_URL: runtimeURL,
+    VITE_GONVEX_WS_URL: webSocketURL(runtimeURL),
+  });
 }
 
 async function upsertEnvLocal(root: string, values: Record<string, string>) {

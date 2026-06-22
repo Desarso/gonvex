@@ -163,7 +163,7 @@ func reconcileColumns(ctx context.Context, db *sql.DB, tableName string, table m
 	var warnings []string
 	for columnName := range existing {
 		if _, ok := table.Columns[columnName]; !ok {
-			return applied, warnings, fmt.Errorf("unsafe schema change for %s.%s: dropping columns is not automatic", tableName, columnName)
+			warnings = append(warnings, fmt.Sprintf("kept existing column %s.%s not declared in schema", tableName, columnName))
 		}
 	}
 	for _, columnName := range sortedColumnNames(table.Columns) {
