@@ -37,6 +37,7 @@ type Column struct {
 type Index struct {
 	Columns []string `json:"columns"`
 	Unique  bool     `json:"unique"`
+	Kind    string   `json:"kind,omitempty"`
 }
 
 type Manifest struct {

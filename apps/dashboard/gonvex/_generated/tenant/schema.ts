@@ -442,9 +442,35 @@ export const schema = {
         }
       },
       "indexes": {
+        "by_active_created_at": {
+          "columns": [
+            "deleted_at",
+            "created_at",
+            "id"
+          ],
+          "unique": false
+        },
+        "by_active_pg_id": {
+          "columns": [
+            "deleted_at",
+            "pg_id",
+            "id"
+          ],
+          "unique": false
+        },
         "by_assignee": {
           "columns": [
             "assignee"
+          ],
+          "unique": false
+        },
+        "by_assignee_created_at": {
+          "columns": [
+            "tenant_id",
+            "assignee",
+            "deleted_at",
+            "created_at",
+            "id"
           ],
           "unique": false
         },
@@ -480,6 +506,16 @@ export const schema = {
           ],
           "unique": false
         },
+        "by_due_created_at": {
+          "columns": [
+            "tenant_id",
+            "due_at",
+            "deleted_at",
+            "created_at",
+            "id"
+          ],
+          "unique": false
+        },
         "by_due_date": {
           "columns": [
             "due_date"
@@ -507,6 +543,16 @@ export const schema = {
         "by_priority": {
           "columns": [
             "priority"
+          ],
+          "unique": false
+        },
+        "by_priority_created_at": {
+          "columns": [
+            "tenant_id",
+            "priority_id",
+            "deleted_at",
+            "created_at",
+            "id"
           ],
           "unique": false
         },
@@ -545,6 +591,16 @@ export const schema = {
         "by_status": {
           "columns": [
             "status"
+          ],
+          "unique": false
+        },
+        "by_status_created_at": {
+          "columns": [
+            "tenant_id",
+            "status_id",
+            "deleted_at",
+            "created_at",
+            "id"
           ],
           "unique": false
         },
@@ -588,11 +644,67 @@ export const schema = {
           ],
           "unique": false
         },
+        "by_workspace_created_at": {
+          "columns": [
+            "tenant_id",
+            "workspace_id",
+            "deleted_at",
+            "created_at",
+            "id"
+          ],
+          "unique": false
+        },
         "by_workspace_name": {
           "columns": [
             "workspace_name"
           ],
           "unique": false
+        },
+        "by_workspace_pg_id": {
+          "columns": [
+            "tenant_id",
+            "workspace_id",
+            "deleted_at",
+            "pg_id",
+            "id"
+          ],
+          "unique": false
+        },
+        "description_trgm": {
+          "columns": [
+            "description"
+          ],
+          "unique": false,
+          "kind": "trigram"
+        },
+        "name_trgm": {
+          "columns": [
+            "name"
+          ],
+          "unique": false,
+          "kind": "trigram"
+        },
+        "search_text_trgm": {
+          "columns": [
+            "name",
+            "title",
+            "description",
+            "status",
+            "priority",
+            "assignee",
+            "project",
+            "label",
+            "flag_color"
+          ],
+          "unique": false,
+          "kind": "trigram"
+        },
+        "title_trgm": {
+          "columns": [
+            "title"
+          ],
+          "unique": false,
+          "kind": "trigram"
         }
       }
     }

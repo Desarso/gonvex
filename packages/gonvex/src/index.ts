@@ -23,7 +23,7 @@ type Column = {
 
 type Table = {
   columns: Record<string, Column>;
-  indexes: Record<string, { columns: string[]; unique: boolean }>;
+  indexes: Record<string, { columns: string[]; unique: boolean; kind?: string }>;
 };
 
 type SchemaDefinition = {
@@ -388,7 +388,7 @@ async function parseSchema(file: string) {
   const source = await readFile(file, "utf8");
   const tablePattern = /s\.(Table|TenantTable|LandlordTable)\(\s*"([^"]+)"\s*,\s*func\([^)]*\)\s*\{([\s\S]*?)\n\s*\}\s*\)/g;
   const columnPattern = /t\.(ID|String|Text|Int|Int64|Float64|Bool|Time|JSON)\(\s*"([^"]+)"([^)]*)\)/g;
-  const indexPattern = /t\.(Index|UniqueIndex)\(\s*"([^"]+)"([^)]*)\)/g;
+  const indexPattern = /t\.(Index|UniqueIndex|TrigramIndex)\(\s*"([^"]+)"([^)]*)\)/g;
   const schema = emptySchemaDefinition();
   for (const tableMatch of source.matchAll(tablePattern)) {
     const table: Table = { columns: {}, indexes: {} };
@@ -407,6 +407,7 @@ async function parseSchema(file: string) {
       table.indexes[indexMatch[2]!] = {
         columns: stringArgs(indexMatch[3]!),
         unique: indexMatch[1] === "UniqueIndex",
+        ...(indexMatch[1] === "TrigramIndex" ? { kind: "trigram" } : {}),
       };
     }
     if (scope === "LandlordTable") {

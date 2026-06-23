@@ -108,6 +108,18 @@ func Schema(s *gonvex.Schema) {
 		t.Index("by_created_at", "created_at")
 		t.Index("by_created_at_id", "created_at", "id")
 		t.Index("by_updated_at", "updated_at")
+		t.Index("by_active_created_at", "deleted_at", "created_at", "id")
+		t.Index("by_active_pg_id", "deleted_at", "pg_id", "id")
+		t.Index("by_workspace_created_at", "tenant_id", "workspace_id", "deleted_at", "created_at", "id")
+		t.Index("by_workspace_pg_id", "tenant_id", "workspace_id", "deleted_at", "pg_id", "id")
+		t.Index("by_status_created_at", "tenant_id", "status_id", "deleted_at", "created_at", "id")
+		t.Index("by_priority_created_at", "tenant_id", "priority_id", "deleted_at", "created_at", "id")
+		t.Index("by_assignee_created_at", "tenant_id", "assignee", "deleted_at", "created_at", "id")
+		t.Index("by_due_created_at", "tenant_id", "due_at", "deleted_at", "created_at", "id")
+		t.TrigramIndex("name_trgm", "name")
+		t.TrigramIndex("title_trgm", "title")
+		t.TrigramIndex("description_trgm", "description")
+		t.TrigramIndex("search_text_trgm", "name", "title", "description", "status", "priority", "assignee", "project", "label", "flag_color")
 	})
 
 	s.Table("files", func(t *gonvex.Table) {

@@ -384,5 +384,6 @@ func (t *Table) Bool(name string, options ...ColumnOption)    {}
 func (t *Table) Time(name string, options ...ColumnOption)    {}
 func (t *Table) JSON(name string, options ...ColumnOption)    {}
 
-func (t *Table) Index(name string, columns ...string)       {}
-func (t *Table) UniqueIndex(name string, columns ...string) {}
+func (t *Table) Index(name string, columns ...string)        {}
+func (t *Table) UniqueIndex(name string, columns ...string)  {}
+func (t *Table) TrigramIndex(name string, columns ...string) {}

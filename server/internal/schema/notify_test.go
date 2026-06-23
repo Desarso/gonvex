@@ -53,3 +53,39 @@ func TestCreateTableSQLRejectsInvalidTableName(t *testing.T) {
 		t.Fatal("expected invalid table name error")
 	}
 }
+
+func TestColumnDefinitionCanDeferNotNullForExistingRows(t *testing.T) {
+	column := manifest.Column{Type: "text"}
+
+	enforced, err := columnDefinition("title", column, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(enforced, "NOT NULL") {
+		t.Fatalf("expected enforced column to contain NOT NULL: %s", enforced)
+	}
+
+	deferred, err := columnDefinition("title", column, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(deferred, "NOT NULL") {
+		t.Fatalf("expected deferred column to omit NOT NULL: %s", deferred)
+	}
+}
+
+func TestTrigramIndexSQLUsesGinTrigramOps(t *testing.T) {
+	sql := trigramIndexSQL("tasks_search_text_trgm", "tasks", []string{"name", "title", "description"})
+
+	for _, want := range []string{
+		`CREATE INDEX IF NOT EXISTS "tasks_search_text_trgm" ON "tasks" USING gin`,
+		`COALESCE("name"::text, '')`,
+		`COALESCE("title"::text, '')`,
+		`COALESCE("description"::text, '')`,
+		`gin_trgm_ops`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected trigram SQL to contain %q:\n%s", want, sql)
+		}
+	}
+}

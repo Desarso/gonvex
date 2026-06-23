@@ -28,6 +28,7 @@ func Schema(s *gonvex.Schema) {
 	s.Table("messages", func(t *gonvex.Table) {
 		t.ID("id")
 		t.String("body")
+		t.TrigramIndex("body_trgm", "body")
 	})
 }
 `
@@ -50,6 +51,13 @@ func Schema(s *gonvex.Schema) {
 	}
 	if _, ok := schema.Tables["billing_accounts"]; ok {
 		t.Fatalf("did not expect landlord table in legacy tenant tables")
+	}
+	index := schema.TenantTables["messages"].Indexes["body_trgm"]
+	if index.Kind != "trigram" {
+		t.Fatalf("expected trigram index kind, got %q", index.Kind)
+	}
+	if len(index.Columns) != 1 || index.Columns[0] != "body" {
+		t.Fatalf("expected body trigram index column, got %#v", index.Columns)
 	}
 }
 

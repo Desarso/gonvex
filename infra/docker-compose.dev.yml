@@ -2,6 +2,7 @@ services:
   postgres:
     image: postgres:17-alpine
     container_name: gonvex-postgres-dev
+    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -35,6 +36,7 @@ services:
     image: quay.io/minio/minio:latest
     container_name: gonvex-minio-dev
     profiles: ["storage"]
+    restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -49,6 +51,25 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
+  minio-init:
+    image: quay.io/minio/mc:latest
+    container_name: gonvex-minio-init-dev
+    profiles: ["storage"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      S3_BUCKET: gonvex-dev
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "local/$$S3_BUCKET"
+    restart: "no"
 
 volumes:
   postgres-data:

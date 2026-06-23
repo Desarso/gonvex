@@ -611,10 +611,11 @@ const dataViewQueryParam = "view";
 const erdLayoutStoragePrefix = "gonvex-erd-layout";
 
 const dataPageSize = 300;
-const testTaskPageSize = 100;
+const testTaskPageSize = 50;
 const rowFetchPadding = 80;
 const dataRowFetchStride = 150;
-const testRowFetchStride = 100;
+const testRowFetchStride = 50;
+const testRowFetchBuffer = 20;
 const scrollFetchDebounceMs = 400;
 const scrollSettleMs = 80;
 const maxFrontendCachedRows = 100_000;
@@ -636,6 +637,12 @@ function visibleRowsCached<T>(rowCache: Record<number, T>, startRow: number, hei
     if (!rowCache[startRow + index]) return false;
   }
   return true;
+}
+
+function liveWindowCoversRange(offset: number, pageSize: number, startRow: number, height: number): boolean {
+  const visibleStart = Math.max(0, Math.floor(startRow));
+  const visibleEnd = visibleStart + Math.max(1, Math.ceil(height));
+  return offset <= visibleStart && offset + pageSize >= visibleEnd;
 }
 
 type ScrollFetchPending = { startRow: number; height: number };
@@ -664,47 +671,28 @@ function commitRowFetch(
 function scheduleScrollLiveQuery(
   pendingScrollRef: MutableRefObject<ScrollFetchPending>,
   fetchTimersRef: MutableRefObject<ScrollFetchTimers>,
-  rowCacheRef: MutableRefObject<Record<number, Record<string, unknown>>>,
   liveOffsetRef: MutableRefObject<number>,
   setLiveOffset: (offset: number) => void,
   startRow: number,
   height: number,
-  stride: number,
   pageSize: number,
 ) {
   pendingScrollRef.current = { startRow, height };
   const timers = fetchTimersRef.current;
-
   if (timers.stopTimer !== null) {
     window.clearTimeout(timers.stopTimer);
-  }
-  timers.stopTimer = window.setTimeout(() => {
     timers.stopTimer = null;
-    if (timers.debounceTimer !== null) {
-      window.clearTimeout(timers.debounceTimer);
-      timers.debounceTimer = null;
-    }
-    const pending = pendingScrollRef.current;
-    const settledOffset = offsetForVisibleRange(pending.startRow, pending.height, stride, pageSize);
-    if (visibleRowsCached(rowCacheRef.current, pending.startRow, pending.height)) return;
-    if (liveOffsetRef.current !== settledOffset) {
-      setLiveOffset(settledOffset);
-    }
-  }, scrollSettleMs);
-
-  if (visibleRowsCached(rowCacheRef.current, startRow, height)) return;
-
+  }
   if (timers.debounceTimer !== null) {
     window.clearTimeout(timers.debounceTimer);
-  }
-  timers.debounceTimer = window.setTimeout(() => {
     timers.debounceTimer = null;
-    const pending = pendingScrollRef.current;
-    const debouncedOffset = offsetForVisibleRange(pending.startRow, pending.height, stride, pageSize);
-    if (liveOffsetRef.current === debouncedOffset) return;
-    if (visibleRowsCached(rowCacheRef.current, pending.startRow, pending.height)) return;
-    setLiveOffset(debouncedOffset);
-  }, scrollFetchDebounceMs);
+  }
+
+  if (liveWindowCoversRange(liveOffsetRef.current, pageSize, startRow, height)) return;
+
+  const visibleStart = Math.max(0, Math.floor(startRow));
+  const nextOffset = Math.max(0, visibleStart - testRowFetchBuffer);
+  if (liveOffsetRef.current !== nextOffset) setLiveOffset(nextOffset);
 }
 
 function scheduleScrollRowFetch(
@@ -5389,12 +5377,10 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
           scheduleScrollLiveQuery(
             pendingScrollRef,
             fetchTimersRef,
-            rowCacheRef,
             liveOffsetRef,
             setLiveOffset,
             startRow,
             range.height,
-            testRowFetchStride,
             testTaskPageSize,
           );
         }}

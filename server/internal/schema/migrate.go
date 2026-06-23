@@ -182,7 +182,8 @@ func reconcileColumns(ctx context.Context, db *sql.DB, tableName string, table m
 					return applied, warnings, err
 				}
 				if nullCount > 0 {
-					return applied, warnings, fmt.Errorf("unsafe schema change for %s.%s: cannot make column non-null while %d existing row(s) contain null", tableName, columnName, nullCount)
+					warnings = append(warnings, fmt.Sprintf("kept %s.%s nullable because %d existing row(s) contain null", tableName, columnName, nullCount))
+					continue
 				}
 				statement := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL", quoteIdent(tableName), quoteIdent(columnName))
 				if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -207,10 +208,8 @@ func reconcileColumns(ctx context.Context, db *sql.DB, tableName string, table m
 		if column.PrimaryKey && !empty {
 			return applied, warnings, fmt.Errorf("unsafe schema change for %s.%s: cannot add primary key column to table with existing rows", tableName, columnName)
 		}
-		if !column.Nullable && !column.PrimaryKey && !empty {
-			return applied, warnings, fmt.Errorf("unsafe schema change for %s.%s: cannot add required column to %s because existing rows need a value", tableName, columnName, tableName)
-		}
-		definition, err := columnDefinition(columnName, column, empty)
+		enforceNotNull := empty || column.Nullable || column.PrimaryKey
+		definition, err := columnDefinition(columnName, column, enforceNotNull)
 		if err != nil {
 			return applied, warnings, err
 		}
@@ -221,6 +220,9 @@ func reconcileColumns(ctx context.Context, db *sql.DB, tableName string, table m
 		}
 
 		applied = append(applied, fmt.Sprintf("added column %s.%s", tableName, columnName))
+		if !column.Nullable && !column.PrimaryKey && !empty {
+			warnings = append(warnings, fmt.Sprintf("added %s.%s as nullable because %s has existing rows", tableName, columnName, tableName))
+		}
 	}
 
 	return applied, warnings, nil
@@ -277,6 +279,7 @@ func compatibleColumnType(current string, desired string) bool {
 
 func createIndexes(ctx context.Context, db *sql.DB, tableName string, table manifest.Table) ([]string, error) {
 	var applied []string
+	installedTrigram := false
 	for _, indexName := range sortedIndexNames(table.Indexes) {
 		index := table.Indexes[indexName]
 		if len(index.Columns) == 0 {
@@ -300,7 +303,24 @@ func createIndexes(ctx context.Context, db *sql.DB, tableName string, table mani
 			return applied, fmt.Errorf("invalid index name %q", physicalName)
 		}
 
-		statement := fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)", unique, quoteIdent(physicalName), quoteIdent(tableName), strings.Join(columns, ", "))
+		statement := ""
+		switch index.Kind {
+		case "", "btree":
+			statement = fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)", unique, quoteIdent(physicalName), quoteIdent(tableName), strings.Join(columns, ", "))
+		case "trigram":
+			if index.Unique {
+				return applied, fmt.Errorf("trigram index %s.%s cannot be unique", tableName, indexName)
+			}
+			if !installedTrigram {
+				if _, err := db.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS pg_trgm`); err != nil {
+					return applied, err
+				}
+				installedTrigram = true
+			}
+			statement = trigramIndexSQL(physicalName, tableName, index.Columns)
+		default:
+			return applied, fmt.Errorf("unsupported index kind %q for %s.%s", index.Kind, tableName, indexName)
+		}
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return applied, err
 		}
@@ -308,6 +328,19 @@ func createIndexes(ctx context.Context, db *sql.DB, tableName string, table mani
 	}
 
 	return applied, nil
+}
+
+func trigramIndexSQL(indexName string, tableName string, columns []string) string {
+	if len(columns) == 1 {
+		return fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s USING gin (%s gin_trgm_ops)", quoteIdent(indexName), quoteIdent(tableName), quoteIdent(columns[0]))
+	}
+
+	parts := make([]string, 0, len(columns))
+	for _, column := range columns {
+		parts = append(parts, fmt.Sprintf("COALESCE(%s::text, '')", quoteIdent(column)))
+	}
+	expression := strings.Join(parts, " || ' ' || ")
+	return fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s USING gin ((%s) gin_trgm_ops)", quoteIdent(indexName), quoteIdent(tableName), expression)
 }
 
 func columnDefinition(name string, column manifest.Column, creatingTable bool) (string, error) {

@@ -1,4 +1,4 @@
-.PHONY: dev services storage runtime dashboard packages docs version release-notes-preview release-dry-run release-prod
+.PHONY: dev services storage files runtime dashboard packages docs version release-notes-preview release-dry-run release-prod
 
 OPENROUTER_MODEL ?= moonshotai/kimi-k2.5
 
@@ -22,6 +22,9 @@ services:
 
 storage:
 	docker compose -f infra/docker-compose.dev.yml --profile storage up -d --wait minio
+	docker compose -f infra/docker-compose.dev.yml --profile storage run --rm minio-init
+
+files: storage
 
 runtime:
 	pnpm dev:runtime

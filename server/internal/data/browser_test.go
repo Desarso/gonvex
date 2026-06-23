@@ -308,6 +308,74 @@ func TestTaskPagingQuerySelection(t *testing.T) {
 	}
 }
 
+func TestTaskGridPrefersNormalizedCamelCaseShape(t *testing.T) {
+	if readTaskGridFlat(map[string]bool{"status_name": true}) != true {
+		t.Fatal("expected legacy flat mirror shape to use direct table reads")
+	}
+	if readTaskGridFlat(map[string]bool{"statusId": true}) != false {
+		t.Fatal("expected normalized camelCase shape to use joined projection")
+	}
+	if readTaskGridFlat(map[string]bool{"statusId": true, "status_name": true}) != false {
+		t.Fatal("expected mixed schema to prefer normalized camelCase columns")
+	}
+}
+
+func TestTaskGridSourceUsesConvexStyleReferenceIDs(t *testing.T) {
+	tables := map[string]bool{
+		"statuses":   true,
+		"priorities": true,
+	}
+	taskColumns := map[string]bool{
+		"_id":        true,
+		"id":         true,
+		"name":       true,
+		"statusId":   true,
+		"priorityId": true,
+		"createdAt":  true,
+	}
+	tableColumnSets := map[string]map[string]bool{
+		"statuses":   {"_id": true, "name": true, "color": true},
+		"priorities": {"_id": true, "name": true, "color": true},
+	}
+	joins := resolveTaskGridJoins(tables, tableColumnSets, taskColumns)
+	projection := taskGridProjectionColumns(taskColumns, joins)
+	source := taskGridSource(projection, joins, false)
+
+	for _, want := range []string{
+		`t."_id" AS "id"`,
+		`t."id" AS "pg_id"`,
+		`LEFT JOIN "statuses" "s" ON "s"."_id" = t."statusId"`,
+		`LEFT JOIN "priorities" "p" ON "p"."_id" = t."priorityId"`,
+		`"s"."name" AS "status_name"`,
+		`"p"."name" AS "priority_name"`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("expected source to contain %q, got %q", want, source)
+		}
+	}
+	if strings.Contains(source, `"s"."id" = t."statusId"`) {
+		t.Fatalf("source should not assume status id column exists: %q", source)
+	}
+}
+
+func TestTaskGridSourceSkipsReferenceJoinWithoutIDColumn(t *testing.T) {
+	tables := map[string]bool{"statuses": true}
+	taskColumns := map[string]bool{"id": true, "statusId": true, "status_name": true}
+	tableColumnSets := map[string]map[string]bool{
+		"statuses": {"name": true},
+	}
+	joins := resolveTaskGridJoins(tables, tableColumnSets, taskColumns)
+	projection := taskGridProjectionColumns(taskColumns, joins)
+	source := taskGridSource(projection, joins, false)
+
+	if strings.Contains(source, `JOIN "statuses"`) {
+		t.Fatalf("source should skip reference joins without id/_id columns: %q", source)
+	}
+	if !strings.Contains(source, `t."status_name" AS "status_name"`) {
+		t.Fatalf("expected source to fall back to flat task status_name: %q", source)
+	}
+}
+
 func TestIdentifierAndQuotingHelpers(t *testing.T) {
 	if !validIdent("tasks_2026") {
 		t.Fatal("expected identifier to be valid")
