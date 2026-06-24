@@ -16,6 +16,7 @@ type Config struct {
 	ProjectDatabases  map[string]string
 	ProjectKeys       map[string]string
 	GonvexModuleRoot  string
+	PluginCacheDir    string
 	ValkeyURL         string
 	RowsCacheTTL      time.Duration
 	TelemetryEnabled  bool
@@ -43,6 +44,7 @@ func FromEnv() Config {
 		ProjectDatabases:  envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
 		ProjectKeys:       envStringMap("GONVEX_PROJECT_KEYS"),
 		GonvexModuleRoot:  env("GONVEX_MODULE_ROOT", ""),
+		PluginCacheDir:    env("GONVEX_PLUGIN_CACHE_DIR", ""),
 		ValkeyURL:         env("VALKEY_URL", env("REDIS_URL", "")),
 		RowsCacheTTL:      envDuration("GONVEX_ROWS_CACHE_TTL", 15*time.Second),
 		TelemetryEnabled:  envBool("GONVEX_TELEMETRY_ENABLED", true),

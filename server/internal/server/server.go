@@ -52,7 +52,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	cache, _ := newRowsCache(cfg.ValkeyURL, cfg.RowsCacheTTL)
 	server := &Server{
 		config:  cfg,
-		runtime: runtime.NewWithLoader(projectbundle.NewLoader("", cfg.GonvexModuleRoot)),
+		runtime: runtime.NewWithLoader(projectbundle.NewLoader(cfg.PluginCacheDir, cfg.GonvexModuleRoot)),
 		app:     app,
 		storage: storage.NewFactory(storage.Config{
 			Endpoint:        cfg.S3Endpoint,
