@@ -92,6 +92,7 @@ func Register(app *gonvex.App) {
 	app.Mutation("tasks.randomizeStatusPriority", RandomizeStatusPriority)
 	app.LiveGrid("tasks.grid", TasksGrid)
 	RegisterFiles(app)
+	RegisterSystem(app)
 }
 
 func ListTasks(ctx *gonvex.QueryCtx, args struct{}) ([]Task, error) {

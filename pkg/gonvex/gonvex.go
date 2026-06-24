@@ -27,6 +27,7 @@ const (
 type App struct {
 	mu        sync.RWMutex
 	functions map[string]Function
+	crons     []CronSpec
 }
 
 type Function struct {
@@ -57,6 +58,7 @@ type RuntimeContext struct {
 	TenantDB    *sql.DB
 	Tx          *sql.Tx
 	Storage     StorageAPI
+	Scheduler   Scheduler
 	Logger      *slog.Logger
 }
 
@@ -334,6 +336,9 @@ func (c *RuntimeContext) normalize() {
 	}
 	if c.Storage == nil {
 		c.Storage = storageUnavailable{}
+	}
+	if c.Scheduler == nil {
+		c.Scheduler = schedulerUnavailable{}
 	}
 }
 

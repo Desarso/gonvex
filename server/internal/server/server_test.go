@@ -266,6 +266,44 @@ func TestMetricsTracksDataCacheAndFunctionCalls(t *testing.T) {
 	}
 }
 
+func TestMetricsExposesRunningAndScheduler(t *testing.T) {
+	server := New(config.Config{})
+
+	if _, err := server.executeQuery(context.Background(), "", "tasks.grid", nil); err != nil {
+		t.Fatalf("execute query: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/metrics", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	var payload struct {
+		Running struct {
+			Current map[string]int64     `json:"current"`
+			Series  []runningMetricPoint `json:"series"`
+		} `json:"running"`
+		Scheduler *schedulerSnapshot `json:"scheduler"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Scheduler == nil {
+		t.Fatal("expected scheduler block in metrics snapshot")
+	}
+	if len(payload.Scheduler.Series) != metricsBucketCount {
+		t.Fatalf("expected %d scheduler buckets, got %d", metricsBucketCount, len(payload.Scheduler.Series))
+	}
+	if len(payload.Running.Series) != metricsBucketCount {
+		t.Fatalf("expected %d running buckets, got %d", metricsBucketCount, len(payload.Running.Series))
+	}
+	// Start/end are balanced, so the live gauge settles back to zero.
+	if payload.Running.Current["query"] != 0 {
+		t.Fatalf("expected running query gauge to settle at 0, got %d", payload.Running.Current["query"])
+	}
+}
+
 func TestMetricsTracksTransactionTelemetry(t *testing.T) {
 	telemetryPath := filepath.Join(t.TempDir(), "telemetry.jsonl")
 	server := New(config.Config{TelemetryLogPath: telemetryPath})

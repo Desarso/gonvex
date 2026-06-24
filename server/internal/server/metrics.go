@@ -19,13 +19,15 @@ const (
 )
 
 type runtimeMetrics struct {
-	mu            sync.Mutex
-	functions     map[string]*functionMetrics
-	transactions  map[string]*transactionMetrics
-	cache         cacheMetrics
-	logs          []runtimeLogEntry
-	telemetryLogs []transactionTelemetryEntry
-	telemetryPath string
+	mu             sync.Mutex
+	functions      map[string]*functionMetrics
+	transactions   map[string]*transactionMetrics
+	cache          cacheMetrics
+	runningByKind  map[string]int64
+	runningBuckets map[int64]map[string]int64
+	logs           []runtimeLogEntry
+	telemetryLogs  []transactionTelemetryEntry
+	telemetryPath  string
 }
 
 type functionMetrics struct {
@@ -148,10 +150,25 @@ type runtimeMetricsSnapshot struct {
 	Functions        map[string]functionMetricSnapshot    `json:"functions"`
 	Transactions     map[string]transactionMetricSnapshot `json:"transactions"`
 	Cache            cacheMetricSnapshot                  `json:"cache"`
+	Running          runningMetricSnapshot                `json:"running"`
 	WebSocket        websocketMetricSnapshot              `json:"websocket"`
+	Scheduler        *schedulerSnapshot                   `json:"scheduler,omitempty"`
 	Logs             []runtimeLogEntry                    `json:"logs"`
 	TelemetryLogs    []transactionTelemetryEntry          `json:"telemetryLogs"`
 	TelemetryLogPath string                               `json:"telemetryLogPath,omitempty"`
+}
+
+type runningMetricSnapshot struct {
+	Current map[string]int64     `json:"current"`
+	Total   int64                `json:"total"`
+	Series  []runningMetricPoint `json:"series"`
+}
+
+type runningMetricPoint struct {
+	Time     string `json:"time"`
+	Query    int64  `json:"query"`
+	Mutation int64  `json:"mutation"`
+	Action   int64  `json:"action"`
 }
 
 type functionMetricSnapshot struct {
@@ -229,10 +246,71 @@ func newRuntimeMetrics(telemetryPath ...string) *runtimeMetrics {
 		path = telemetryPath[0]
 	}
 	return &runtimeMetrics{
-		functions:     map[string]*functionMetrics{},
-		transactions:  map[string]*transactionMetrics{},
-		cache:         cacheMetrics{Buckets: map[int64]*cacheMetricsBucket{}},
-		telemetryPath: path,
+		functions:      map[string]*functionMetrics{},
+		transactions:   map[string]*transactionMetrics{},
+		cache:          cacheMetrics{Buckets: map[int64]*cacheMetricsBucket{}},
+		runningByKind:  map[string]int64{},
+		runningBuckets: map[int64]map[string]int64{},
+		telemetryPath:  path,
+	}
+}
+
+// normalizeRunningKind collapses the runtime's function kinds into the three
+// concurrency lanes the dashboard charts (queries, mutations, actions).
+func normalizeRunningKind(kind string) string {
+	switch kind {
+	case "mutation", "internalMutation":
+		return "mutation"
+	case "action":
+		return "action"
+	default:
+		return "query"
+	}
+}
+
+// recordFunctionStart marks a function as in-flight so the dashboard can chart
+// live concurrency. Every call must be paired with recordFunctionEnd.
+func (m *runtimeMetrics) recordFunctionStart(kind string) {
+	if m == nil {
+		return
+	}
+	lane := normalizeRunningKind(kind)
+	now := time.Now().UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runningByKind[lane]++
+	m.observeRunningLocked(now)
+}
+
+func (m *runtimeMetrics) recordFunctionEnd(kind string) {
+	if m == nil {
+		return
+	}
+	lane := normalizeRunningKind(kind)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.runningByKind[lane] > 0 {
+		m.runningByKind[lane]--
+	}
+}
+
+func (m *runtimeMetrics) observeRunningLocked(now time.Time) {
+	key := bucketKey(now)
+	bucket := m.runningBuckets[key]
+	if bucket == nil {
+		bucket = map[string]int64{}
+		m.runningBuckets[key] = bucket
+	}
+	for lane, count := range m.runningByKind {
+		if count > bucket[lane] {
+			bucket[lane] = count
+		}
+	}
+	oldest := bucketKey(now.Add(-metricsBucketWidth * metricsBucketCount))
+	for existing := range m.runningBuckets {
+		if existing < oldest {
+			delete(m.runningBuckets, existing)
+		}
 	}
 }
 
@@ -440,6 +518,7 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 		Functions:    functions,
 		Transactions: transactions,
 		Cache:        m.cache.snapshot(now),
+		Running:      m.runningSnapshot(now),
 		WebSocket: websocketMetricSnapshot{
 			Connections:   connections,
 			Subscriptions: subscriptions,
@@ -448,6 +527,30 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 		TelemetryLogs:    telemetryLogs,
 		TelemetryLogPath: m.telemetryPath,
 	}
+}
+
+func (m *runtimeMetrics) runningSnapshot(now time.Time) runningMetricSnapshot {
+	current := make(map[string]int64, len(m.runningByKind))
+	var total int64
+	for lane, count := range m.runningByKind {
+		current[lane] = count
+		total += count
+	}
+
+	points := make([]runningMetricPoint, 0, metricsBucketCount)
+	start := now.Truncate(metricsBucketWidth).Add(-metricsBucketWidth * (metricsBucketCount - 1))
+	for index := 0; index < metricsBucketCount; index++ {
+		bucketStart := start.Add(metricsBucketWidth * time.Duration(index))
+		bucket := m.runningBuckets[bucketStart.UnixMilli()]
+		point := runningMetricPoint{Time: bucketStart.Format(time.RFC3339Nano)}
+		if bucket != nil {
+			point.Query = bucket["query"]
+			point.Mutation = bucket["mutation"]
+			point.Action = bucket["action"]
+		}
+		points = append(points, point)
+	}
+	return runningMetricSnapshot{Current: current, Total: total, Series: points}
 }
 
 func (m *runtimeMetrics) appendLog(entry runtimeLogEntry) {

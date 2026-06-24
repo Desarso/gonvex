@@ -636,9 +636,12 @@ func (s *Server) executeTenantQuery(ctx context.Context, projectID string, tenan
 }
 
 func (s *Server) executeTenantQueryForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
+	kind := s.functionKind(path, "query")
+	s.metrics.recordFunctionStart(kind)
 	started := time.Now()
 	defer func() {
-		s.metrics.recordFunction(path, s.functionKind(path, "query"), time.Since(started), err)
+		s.metrics.recordFunctionEnd(kind)
+		s.metrics.recordFunction(path, kind, time.Since(started), err)
 	}()
 
 	if isLegacyTaskQuery(path) {
@@ -691,9 +694,12 @@ func (s *Server) executeTenantMutation(ctx context.Context, projectID string, te
 }
 
 func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
+	kind := s.functionKind(path, "mutation")
+	s.metrics.recordFunctionStart(kind)
 	started := time.Now()
 	defer func() {
-		s.metrics.recordFunction(path, s.functionKind(path, "mutation"), time.Since(started), err)
+		s.metrics.recordFunctionEnd(kind)
+		s.metrics.recordFunction(path, kind, time.Since(started), err)
 	}()
 
 	if isLegacyTaskMutation(path) {
@@ -711,8 +717,16 @@ func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID s
 }
 
 func (s *Server) executeRegisteredMutation(app *gonvex.App, mutationCtx *gonvex.MutationCtx, path string, rawArgs json.RawMessage) (any, error) {
+	return s.runMutationInTx(mutationCtx, path, rawArgs, app.ExecuteMutation)
+}
+
+// runMutationInTx runs a mutation-style handler inside a database transaction
+// when a database is configured, committing on success and rolling back on
+// error. It is shared by client-triggered mutations and scheduled internal
+// mutations so both get the same transactional guarantees.
+func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, rawArgs json.RawMessage, exec func(*gonvex.MutationCtx, string, json.RawMessage) (any, error)) (any, error) {
 	if mutationCtx.DB == nil {
-		return app.ExecuteMutation(mutationCtx, path, rawArgs)
+		return exec(mutationCtx, path, rawArgs)
 	}
 	if mutationCtx.Context == nil {
 		mutationCtx.Context = context.Background()
@@ -722,7 +736,7 @@ func (s *Server) executeRegisteredMutation(app *gonvex.App, mutationCtx *gonvex.
 		return nil, err
 	}
 	mutationCtx.Tx = tx
-	result, err := app.ExecuteMutation(mutationCtx, path, rawArgs)
+	result, err := exec(mutationCtx, path, rawArgs)
 	if err != nil {
 		_ = tx.Rollback()
 		return nil, err
@@ -763,9 +777,12 @@ func (s *Server) executeTenantAction(ctx context.Context, projectID string, tena
 }
 
 func (s *Server) executeTenantActionForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
+	kind := s.functionKind(path, "action")
+	s.metrics.recordFunctionStart(kind)
 	started := time.Now()
 	defer func() {
-		s.metrics.recordFunction(path, s.functionKind(path, "action"), time.Since(started), err)
+		s.metrics.recordFunctionEnd(kind)
+		s.metrics.recordFunction(path, kind, time.Since(started), err)
 	}()
 
 	app := s.appForProject(ctx, projectID)
@@ -836,6 +853,7 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		LandlordDB:  landlordStore.DB,
 		TenantDB:    store.DB,
 		Storage:     s.storageForTenant(ctx, projectID, activeTenant, store.DB, caller, logger),
+		Scheduler:   s.scheduler.For(projectID, activeTenant),
 		User:        caller.user,
 		Permissions: caller.permissions,
 		Logger:      logger,

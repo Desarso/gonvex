@@ -47,6 +47,18 @@ import { Background, Controls, MarkerType, MiniMap, ReactFlow, applyNodeChanges,
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type MutableRefObject, type ReactNode, type SetStateAction } from "react";
 import type { JsonValue } from "@gonvex/protocol";
 import { api } from "../gonvex/_generated/api";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 type PageID = "overview" | "functions" | "data" | "test" | "logs" | "files" | "realtime" | "settings";
 
@@ -157,9 +169,66 @@ type RuntimeLogEntry = {
   cache?: string;
 };
 
+type RuntimeRunningMetrics = {
+  current: Record<string, number>;
+  total: number;
+  series: { time: string; query: number; mutation: number; action: number }[];
+};
+
+type RuntimeWebSocketMetrics = {
+  connections: number;
+  subscriptions: number;
+};
+
+type RuntimeSchedulerCron = {
+  name: string;
+  project?: string;
+  function: string;
+  schedule: string;
+  nextRun?: string;
+  lastRun?: string;
+  status?: string;
+  runs: number;
+  failures: number;
+};
+
+type RuntimeSchedulerRun = {
+  time: string;
+  project?: string;
+  function: string;
+  cron?: string;
+  outcome: string;
+  lagMs: number;
+  durationMs: number;
+  error?: string;
+};
+
+type RuntimeSchedulerPoint = {
+  time: string;
+  completed: number;
+  failed: number;
+  avgLagMs: number;
+  maxRunning: number;
+};
+
+type RuntimeSchedulerMetrics = {
+  running: number;
+  queued: number;
+  scheduled: number;
+  completed: number;
+  failed: number;
+  lagMs: number;
+  crons: RuntimeSchedulerCron[];
+  recent: RuntimeSchedulerRun[];
+  series: RuntimeSchedulerPoint[];
+};
+
 type RuntimeMetricsResponse = {
   functions: Record<string, RuntimeFunctionMetrics>;
   cache: RuntimeCacheMetrics;
+  running?: RuntimeRunningMetrics;
+  websocket?: RuntimeWebSocketMetrics;
+  scheduler?: RuntimeSchedulerMetrics | null;
   logs: RuntimeLogEntry[];
 };
 
@@ -801,20 +870,6 @@ function replaceRowsInCache<T>(current: Record<number, T>, rows: T[], offset: nu
   }
   return mergeRowsIntoCache(next, rows, offset);
 }
-
-const metrics = [
-  ["Queries", "1 live"],
-  ["Mutations", "2 wired"],
-  ["Storage", "planned"],
-  ["Tables", "2 synced"],
-];
-
-const activity = [
-  ["schema", "tasks/files applied to gonvex_dev"],
-  ["codegen", "4 generated function bindings"],
-  ["grid", "Glide Data Grid mounted"],
-  ["runtime", "safe migrations only"],
-];
 
 const devScript = "gonvex dev -- vite";
 const localDeveloperSession: DashboardSession = {
@@ -1944,12 +1999,13 @@ function formatBytes(bytes: number): string {
 
 function fileFromRuntimeRow(row: Record<string, unknown>): FileInfo {
   const id = formatCellValue(row.id ?? row.key);
-  const sizeValue = Number(row.size ?? 0);
+  const rawSize = row.size_bytes ?? row.size;
+  const sizeValue = Number(rawSize ?? 0);
   return {
     id: id || "unknown-file",
-    size: Number.isFinite(sizeValue) && sizeValue > 0 ? formatBytes(sizeValue) : formatCellValue(row.size),
+    size: Number.isFinite(sizeValue) && sizeValue > 0 ? formatBytes(sizeValue) : formatCellValue(rawSize),
     contentType: formatCellValue(row.content_type) || "application/octet-stream",
-    uploadedAt: formatCellValue(row.created_at) || "unknown",
+    uploadedAt: formatCellValue(row.uploaded_at ?? row.created_at) || "unknown",
     source: "runtime",
   };
 }
@@ -2786,7 +2842,7 @@ export function App() {
                 <h1 id="app-title">{page.title}</h1>
                 <p className="lede">{page.description}</p>
               </div>
-              <Chip color="accent" size="lg" variant="soft">
+              <Chip color="accent" size="sm" variant="soft">
                 {page.label}
               </Chip>
             </section>
@@ -3134,7 +3190,183 @@ function ProjectsPage(props: {
   );
 }
 
+const HEALTH_COLORS = {
+  calls: "#4f7cff",
+  errors: "var(--danger)",
+  cache: "var(--success)",
+  latency: "var(--warning)",
+  query: "#4f7cff",
+  mutation: "var(--success)",
+  action: "var(--warning)",
+  lag: "var(--accent)",
+  completed: "var(--success)",
+  failed: "var(--danger)",
+};
+
+const HEALTH_TOOLTIP_STYLE = {
+  background: "var(--surface)",
+  border: "1px solid var(--border)",
+  borderRadius: "10px",
+  fontSize: "12px",
+  color: "var(--surface-foreground)",
+  boxShadow: "0 10px 30px rgba(0, 0, 0, 0.18)",
+};
+
+const HEALTH_AXIS_TICK = { fontSize: 10, fill: "var(--muted)" };
+const HEALTH_CHART_MARGIN = { top: 10, right: 12, left: -14, bottom: 0 };
+const healthCompactNumber = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+
+function formatCount(value: number): string {
+  return healthCompactNumber.format(value);
+}
+
+function shortClockLabel(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+type OverviewCallsPoint = { label: string; calls: number; errors: number; failureRate: number; avgDurationMs: number };
+
+function aggregateFunctionSeries(functions: Record<string, RuntimeFunctionMetrics>): OverviewCallsPoint[] {
+  const series = Object.values(functions)
+    .map((fn) => fn.series)
+    .filter((points) => points.length > 0);
+  if (series.length === 0) return [];
+  const length = Math.max(...series.map((points) => points.length));
+  const result: OverviewCallsPoint[] = [];
+  for (let index = 0; index < length; index += 1) {
+    let calls = 0;
+    let errors = 0;
+    let weightedDuration = 0;
+    let time = "";
+    for (const points of series) {
+      const point = points[index];
+      if (!point) continue;
+      time = point.time;
+      calls += point.calls;
+      errors += point.errors;
+      weightedDuration += point.averageDurationMs * point.calls;
+    }
+    result.push({
+      label: shortClockLabel(time),
+      calls,
+      errors,
+      failureRate: calls > 0 ? (errors / calls) * 100 : 0,
+      avgDurationMs: calls > 0 ? weightedDuration / calls : 0,
+    });
+  }
+  return result;
+}
+
+function HealthStat(props: { label: string; value: string; sub?: string; tone?: "default" | "danger" | "success" | "warning" }) {
+  return (
+    <Card className="health-stat" variant="default">
+      <span className="health-stat-label">{props.label}</span>
+      <strong className="health-stat-value" data-tone={props.tone ?? "default"}>{props.value}</strong>
+      {props.sub ? <span className="health-stat-sub">{props.sub}</span> : null}
+    </Card>
+  );
+}
+
+function HealthChartCard(props: { title: string; value?: string; tone?: "default" | "danger" | "success" | "warning"; hint?: string; children: ReactNode }) {
+  return (
+    <Card className="health-card" variant="default">
+      <div className="health-card-head">
+        <span className="health-card-title">{props.title}</span>
+        {props.value !== undefined ? (
+          <strong className="health-card-value" data-tone={props.tone ?? "default"}>{props.value}</strong>
+        ) : null}
+      </div>
+      <div className="health-chart">{props.children}</div>
+      {props.hint ? <span className="health-card-hint">{props.hint}</span> : null}
+    </Card>
+  );
+}
+
 function OverviewPage(props: { project: ProjectTarget }) {
+  const [metrics, setMetrics] = useState<RuntimeMetricsResponse | null>(null);
+  const [reachable, setReachable] = useState(true);
+
+  useEffect(() => {
+    if (!runtimeBaseURL) return;
+    let cancelled = false;
+    const load = () => {
+      fetch(`${runtimeBaseURL}/dev/metrics`)
+        .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
+        .then((payload: RuntimeMetricsResponse) => {
+          if (cancelled) return;
+          setMetrics(payload);
+          setReachable(true);
+        })
+        .catch(() => {
+          if (!cancelled) setReachable(false);
+        });
+    };
+    load();
+    const interval = window.setInterval(load, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  const derived = useMemo(() => {
+    const functions = metrics?.functions ?? {};
+    const callsSeries = aggregateFunctionSeries(functions);
+    let totalCalls = 0;
+    let totalErrors = 0;
+    let totalDuration = 0;
+    for (const fn of Object.values(functions)) {
+      totalCalls += fn.calls;
+      totalErrors += fn.errors;
+      totalDuration += fn.averageDurationMs * fn.calls;
+    }
+    const cacheSeries = (metrics?.cache?.series ?? []).map((point) => ({
+      label: shortClockLabel(point.time),
+      hitRate: point.hitRate * 100,
+    }));
+    const runningSeries = (metrics?.running?.series ?? []).map((point) => ({
+      label: shortClockLabel(point.time),
+      Queries: point.query,
+      Mutations: point.mutation,
+      Actions: point.action,
+    }));
+    const schedulerSeries = (metrics?.scheduler?.series ?? []).map((point) => ({
+      label: shortClockLabel(point.time),
+      lag: point.avgLagMs,
+      Completed: point.completed,
+      Failed: point.failed,
+    }));
+    const topFunctions = Object.entries(functions)
+      .map(([name, fn]) => ({ name, calls: fn.calls, errors: fn.errors }))
+      .filter((fn) => fn.calls > 0)
+      .sort((left, right) => right.calls - left.calls)
+      .slice(0, 5);
+    return {
+      callsSeries,
+      cacheSeries,
+      runningSeries,
+      schedulerSeries,
+      topFunctions,
+      totalCalls,
+      totalErrors,
+      failureRate: totalCalls > 0 ? (totalErrors / totalCalls) * 100 : 0,
+      avgDuration: totalCalls > 0 ? totalDuration / totalCalls : 0,
+    };
+  }, [metrics]);
+
+  const cacheHitRate = (metrics?.cache?.hitRate ?? 0) * 100;
+  const connections = metrics?.websocket?.connections ?? 0;
+  const subscriptions = metrics?.websocket?.subscriptions ?? 0;
+  const runningNow = metrics?.running?.total ?? 0;
+  const scheduler = metrics?.scheduler ?? null;
+  const lagMs = scheduler?.lagMs ?? 0;
+  const queued = scheduler?.queued ?? 0;
+  const crons = scheduler?.crons ?? [];
+  const recentJobs = scheduler?.recent ?? [];
+  const hasTraffic = derived.totalCalls > 0;
+
   const projectRows = [
     ["Runtime URL", runtimeURLForProject(props.project) || "not configured"],
     ["Database", props.project.database],
@@ -3142,20 +3374,215 @@ function OverviewPage(props: { project: ProjectTarget }) {
   ];
 
   return (
-    <div className="dashboard-layout">
+    <div className="dashboard-layout dashboard-layout--wide">
       <section className="main-column">
-        <section className="metric-row" aria-label="Function summary">
-          {metrics.map(([label, value]) => (
-            <Card key={label} className="metric-card" variant="default">
-              <span>{label}</span>
-              <strong>{value}</strong>
-            </Card>
-          ))}
+        <div className="health-status-line">
+          <span className={`health-pulse ${reachable ? "is-live" : "is-down"}`} aria-hidden="true" />
+          <span>{reachable ? "Live · refreshing every 2s" : "Runtime unreachable — retrying"}</span>
+          {!hasTraffic && reachable ? <span className="health-status-note">waiting for traffic…</span> : null}
+        </div>
+
+        <section className="health-stat-row" aria-label="Runtime summary">
+          <HealthStat label="Function calls" value={formatCount(derived.totalCalls)} sub={`${formatCount(derived.totalErrors)} errors`} />
+          <HealthStat label="Failure rate" value={`${derived.failureRate.toFixed(1)}%`} tone={derived.failureRate > 0 ? "danger" : "success"} />
+          <HealthStat label="Cache hit rate" value={`${cacheHitRate.toFixed(0)}%`} tone="success" />
+          <HealthStat label="Connections" value={String(connections)} sub={`${subscriptions} subscriptions`} />
+          <HealthStat label="Running now" value={String(runningNow)} tone={runningNow > 0 ? "warning" : "default"} />
+          <HealthStat label="Scheduler lag" value={formatDuration(lagMs)} sub={`${queued} queued`} tone={lagMs > 1000 ? "danger" : "default"} />
+        </section>
+
+        <section className="health-section" aria-label="Functions">
+          <div className="health-section-head">
+            <h3>Functions</h3>
+            <span>last 12 min · 30s buckets</span>
+          </div>
+          <div className="health-grid">
+            <HealthChartCard title="Function Calls" value={formatCount(derived.totalCalls)} hint="calls per 30s across all functions">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={derived.callsSeries} margin={HEALTH_CHART_MARGIN}>
+                  <defs>
+                    <linearGradient id="healthCallsFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={HEALTH_COLORS.calls} stopOpacity={0.35} />
+                      <stop offset="100%" stopColor={HEALTH_COLORS.calls} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={30} allowDecimals={false} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} />
+                  <Area type="monotone" dataKey="calls" name="Calls" stroke={HEALTH_COLORS.calls} strokeWidth={2} fill="url(#healthCallsFill)" isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+
+            <HealthChartCard title="Failure Rate" value={`${derived.failureRate.toFixed(1)}%`} tone={derived.failureRate > 0 ? "danger" : "default"} hint="errors ÷ calls per 30s">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={derived.callsSeries} margin={HEALTH_CHART_MARGIN}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={34} domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => `${Number(value).toFixed(1)}%`} />
+                  <Line type="monotone" dataKey="failureRate" name="Failure rate" stroke={HEALTH_COLORS.errors} strokeWidth={2} dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+
+            <HealthChartCard title="Cache Hit Rate" value={`${cacheHitRate.toFixed(0)}%`} tone="success" hint="row cache hits ÷ requests">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={derived.cacheSeries} margin={HEALTH_CHART_MARGIN}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={34} domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => `${Number(value).toFixed(0)}%`} />
+                  <Line type="monotone" dataKey="hitRate" name="Hit rate" stroke={HEALTH_COLORS.cache} strokeWidth={2} dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+
+            <HealthChartCard title="Execution Time" value={formatDuration(derived.avgDuration)} tone="warning" hint="avg server duration per 30s">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={derived.callsSeries} margin={HEALTH_CHART_MARGIN}>
+                  <defs>
+                    <linearGradient id="healthLatencyFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={HEALTH_COLORS.latency} stopOpacity={0.3} />
+                      <stop offset="100%" stopColor={HEALTH_COLORS.latency} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={36} tickFormatter={(value) => `${Math.round(value)}`} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => formatDuration(Number(value))} />
+                  <Area type="monotone" dataKey="avgDurationMs" name="Avg duration" stroke={HEALTH_COLORS.latency} strokeWidth={2} fill="url(#healthLatencyFill)" isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+          </div>
+        </section>
+
+        <section className="health-section" aria-label="Concurrency and scheduler">
+          <div className="health-section-head">
+            <h3>Concurrency &amp; scheduler</h3>
+            <span>{runningNow} running · {queued} queued</span>
+          </div>
+          <div className="health-grid">
+            <HealthChartCard title="Running Functions" value={String(runningNow)} tone={runningNow > 0 ? "warning" : "default"} hint="peak concurrent executions by type">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={derived.runningSeries} margin={HEALTH_CHART_MARGIN}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={28} allowDecimals={false} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} iconType="plainline" />
+                  <Line type="monotone" dataKey="Queries" stroke={HEALTH_COLORS.query} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Mutations" stroke={HEALTH_COLORS.mutation} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Actions" stroke={HEALTH_COLORS.action} strokeWidth={2} dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+
+            <HealthChartCard title="Scheduler Lag" value={formatDuration(lagMs)} tone={lagMs > 1000 ? "danger" : "default"} hint="delay between scheduled and actual start">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={derived.schedulerSeries} margin={HEALTH_CHART_MARGIN}>
+                  <defs>
+                    <linearGradient id="healthLagFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={HEALTH_COLORS.lag} stopOpacity={0.3} />
+                      <stop offset="100%" stopColor={HEALTH_COLORS.lag} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={36} tickFormatter={(value) => `${Math.round(value)}`} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => formatDuration(Number(value))} />
+                  <Area type="monotone" dataKey="lag" name="Lag" stroke={HEALTH_COLORS.lag} strokeWidth={2} fill="url(#healthLagFill)" isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+
+            <HealthChartCard title="Job Throughput" value={`${scheduler?.completed ?? 0} done`} tone={scheduler && scheduler.failed > 0 ? "danger" : "success"} hint="completed vs failed scheduled jobs">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={derived.schedulerSeries} margin={HEALTH_CHART_MARGIN}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={28} allowDecimals={false} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} iconType="plainline" />
+                  <Line type="monotone" dataKey="Completed" stroke={HEALTH_COLORS.completed} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Failed" stroke={HEALTH_COLORS.failed} strokeWidth={2} dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+          </div>
         </section>
       </section>
 
-      <aside className="right-rail" aria-label="Runtime activity">
-        <ListCard title="Runtime activity" rows={activity} />
+      <aside className="right-rail" aria-label="Scheduler and project">
+        <Card className="health-rail-card" variant="default">
+          <div className="health-card-head">
+            <span className="health-card-title">Scheduled jobs</span>
+            <Chip color="default" size="sm" variant="secondary">{crons.length}</Chip>
+          </div>
+          {crons.length > 0 ? (
+            <div className="health-cron-list">
+              {crons.map((cron) => (
+                <div className="health-cron-row" key={cron.name}>
+                  <div className="health-cron-main">
+                    <strong>{cron.name}</strong>
+                    <code>{cron.function}</code>
+                  </div>
+                  <div className="health-cron-meta">
+                    <span>{cron.schedule}</span>
+                    <span>{cron.nextRun ? `next ${shortClockLabel(cron.nextRun)}` : "—"}</span>
+                  </div>
+                  <div className="health-cron-stats">
+                    <span>{cron.runs} runs</span>
+                    {cron.failures > 0 ? <span data-tone="danger">{cron.failures} failed</span> : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state">
+              No crons registered. Add one with <code>app.Cron("cleanup", time.Minute, "system.cleanup", nil)</code> in your project, or schedule one-shot work with <code>ctx.Scheduler.RunAfter(...)</code>.
+            </p>
+          )}
+        </Card>
+
+        <Card className="health-rail-card" variant="default">
+          <div className="health-card-head">
+            <span className="health-card-title">Recent jobs</span>
+            <Chip color="default" size="sm" variant="secondary">{recentJobs.length}</Chip>
+          </div>
+          {recentJobs.length > 0 ? (
+            <div className="health-job-list">
+              {recentJobs.slice(0, 8).map((job, index) => (
+                <div className="health-job-row" key={`${job.time}:${job.function}:${index}`} data-outcome={job.outcome}>
+                  <span>{shortClockLabel(job.time)}</span>
+                  <code>{job.cron ? job.cron : job.function}</code>
+                  <em>{job.error ? job.error : formatDuration(job.durationMs)}</em>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state">No scheduled runs yet.</p>
+          )}
+        </Card>
+
+        {derived.topFunctions.length > 0 ? (
+          <Card className="health-rail-card" variant="default">
+            <div className="health-card-head">
+              <span className="health-card-title">Busiest functions</span>
+            </div>
+            <div className="health-top-list">
+              {derived.topFunctions.map((fn) => (
+                <div className="health-top-row" key={fn.name}>
+                  <code>{fn.name}</code>
+                  <span>{formatCount(fn.calls)} calls{fn.errors > 0 ? ` · ${fn.errors} err` : ""}</span>
+                </div>
+              ))}
+            </div>
+          </Card>
+        ) : null}
+
         <ListCard title="Project target" rows={projectRows} />
       </aside>
     </div>
@@ -5442,17 +5869,18 @@ function FilesPage(props: { project: ProjectTarget; themeLabel: string; onToggle
       return;
     }
 
-    fetch(`${baseURL}/dev/data/tables/files/rows?limit=100`, { headers: runtimeHeaders(props.project) })
+    fetch(`${baseURL}/dev/data/tables/_gonvex_files/rows?limit=100&sort=created_at&direction=desc`, { headers: runtimeHeaders(props.project) })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
       .then((payload: DataRowsResponse) => {
         if (cancelled) return;
-        setRuntimeFiles(payload.rows.map(fileFromRuntimeRow));
-        setStatus("Connected to Gonvex Runtime");
+        const rows = payload.rows.filter((row) => !row.deleted_at).map(fileFromRuntimeRow);
+        setRuntimeFiles(rows);
+        setStatus(rows.length > 0 ? "Connected to Gonvex Runtime" : "Connected — no files in storage yet");
       })
       .catch(() => {
         if (!cancelled) {
           setRuntimeFiles([]);
-          setStatus("Runtime offline. Select files to preview local uploads.");
+          setStatus("Could not load files — runtime unreachable or storage not initialized.");
         }
       });
 

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -28,6 +29,7 @@ type Server struct {
 	tenantStores      *tenantStoreResolver
 	cache             *rowsCache
 	metrics           *runtimeMetrics
+	scheduler         *scheduler
 	telemetryWrites   chan struct{}
 	projectMu         sync.RWMutex
 	projects          map[string]projectTarget
@@ -74,13 +76,73 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		tableChangeWait:   map[string]*time.Timer{},
 		tableChanges:      map[string]tableChange{},
 	}
+	server.scheduler = newScheduler(server.runScheduledJob)
 	server.tenantStores = newTenantStoreResolver(&server.config)
 	server.loadConfiguredTenantDatabases()
 	server.tenantStores.StartIdleReaper(context.Background())
 	server.startLandlordMigrations()
+	server.scheduler.start(context.Background())
 	go server.hydrateRuntimeState(context.Background())
 	server.startPostgresNotifications()
 	return server
+}
+
+// runScheduledJob is the scheduler's executor: it dispatches a due job through
+// the same mutation/action execution path as client-triggered calls, so
+// scheduled work shows up in the function and concurrency metrics too.
+func (s *Server) runScheduledJob(ctx context.Context, job scheduledJob) error {
+	app := s.appForProject(ctx, job.ProjectID)
+	function, ok := app.Lookup(job.FunctionPath)
+	if !ok {
+		return fmt.Errorf("scheduled function %q is not registered", job.FunctionPath)
+	}
+	switch function.Kind {
+	case gonvex.FunctionKindAction:
+		_, err := s.executeTenantAction(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
+		return err
+	case gonvex.FunctionKindMutation:
+		_, err := s.executeTenantMutation(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
+		return err
+	case gonvex.FunctionKindInternalMutation:
+		return s.executeScheduledInternalMutation(ctx, job)
+	default:
+		return fmt.Errorf("scheduled function %q must be a mutation or action, got %s", job.FunctionPath, function.Kind)
+	}
+}
+
+// executeScheduledInternalMutation runs an internal mutation from the scheduler.
+// Internal mutations aren't reachable from clients, so they're dispatched here
+// rather than through executeTenantMutation, but still get metrics and a
+// surrounding transaction.
+func (s *Server) executeScheduledInternalMutation(ctx context.Context, job scheduledJob) (err error) {
+	const kind = "internalMutation"
+	s.metrics.recordFunctionStart(kind)
+	started := time.Now()
+	defer func() {
+		s.metrics.recordFunctionEnd(kind)
+		s.metrics.recordFunction(job.FunctionPath, kind, time.Since(started), err)
+	}()
+
+	app := s.appForProject(ctx, job.ProjectID)
+	mutationCtx, ctxErr := s.mutationContext(ctx, job.ProjectID, job.TenantID, callerContext{})
+	if ctxErr != nil {
+		return ctxErr
+	}
+	_, err = s.runMutationInTx(mutationCtx, job.FunctionPath, job.Args, app.ExecuteInternalMutation)
+	return err
+}
+
+// registerProjectCrons mirrors a project's declared crons into the scheduler.
+// Safe to call repeatedly; unchanged crons keep their run history.
+func (s *Server) registerProjectCrons(projectID string) {
+	if s.scheduler == nil {
+		return
+	}
+	app := s.runtime.AppForProject(projectID)
+	if app == nil {
+		return
+	}
+	s.scheduler.syncCrons(projectID, app.Crons())
 }
 
 func (s *Server) Handler() http.Handler {
@@ -122,7 +184,12 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	connections, subscriptions := s.websocketStats()
-	writeJSON(w, http.StatusOK, s.metrics.snapshot(s.runtime.Manifest(), connections, subscriptions))
+	snapshot := s.metrics.snapshot(s.runtime.Manifest(), connections, subscriptions)
+	if s.scheduler != nil {
+		schedulerSnapshot := s.scheduler.snapshot()
+		snapshot.Scheduler = &schedulerSnapshot
+	}
+	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (s *Server) handleDataTables(w http.ResponseWriter, r *http.Request) {
@@ -285,6 +352,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
+	s.registerProjectCrons(next.Project)
 	if err := s.saveRuntimeManifest(r.Context(), next); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -404,7 +472,9 @@ func (s *Server) hydrateRuntimeState(ctx context.Context) {
 	for _, next := range manifests {
 		if err := s.runtime.SyncManifest(next); err != nil {
 			slog.Warn("load persisted Gonvex runtime manifest", "project", next.Project, "error", err)
+			continue
 		}
+		s.registerProjectCrons(next.Project)
 	}
 }
 
@@ -438,7 +508,9 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 	}
 	if err := s.runtime.SyncManifest(next); err != nil {
 		slog.Warn("load persisted Gonvex project runtime manifest", "project", projectID, "error", err)
+		return
 	}
+	s.registerProjectCrons(projectID)
 }
 
 func (s *Server) appForProject(ctx context.Context, projectID string) *gonvex.App {
