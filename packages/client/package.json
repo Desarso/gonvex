@@ -7,11 +7,11 @@
   },
   "exports": {
     ".": {
-      "types": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
   },
-  "types": "./src/index.ts",
+  "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
@@ -24,5 +24,9 @@
   "devDependencies": {
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"
-  }
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "dist"
+  ]
 }

@@ -54,9 +54,14 @@ async function releaseCLI() {
     for (const packageName of RELEASE_PACKAGES) updatePackageVersion(packageName, version);
 
     console.log("=== Step 3: Validate workspace ===");
-    run("pnpm", ["-r", "typecheck"]);
+    // Scope validation to the packages being published. A whole-workspace
+    // `-r` run also pulls in apps/ (docs, dashboard), whose unrelated build
+    // state must not gate an npm package release.
+    const releaseFilters = ["@gonvex/protocol", "@gonvex/client", "@gonvex/react", "gonvex", "create-gonvex"]
+      .flatMap((name) => ["--filter", name]);
+    run("pnpm", [...releaseFilters, "typecheck"]);
     run("go", ["test", "./..."]);
-    run("pnpm", ["-r", "build"]);
+    run("pnpm", [...releaseFilters, "build"]);
 
     console.log("=== Step 4: Generate release notes ===");
     const notesFile = dryRun ? `/tmp/gonvex-release-notes-${version}.md` : join(ROOT, "releases", `${tagName}.md`);
