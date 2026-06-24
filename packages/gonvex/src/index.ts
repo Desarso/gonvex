@@ -191,7 +191,13 @@ async function runDev(argv: string[]) {
     return;
   }
 
-  await watchProject(projectRoot, settings, once);
+  const result = await watchProject(projectRoot, settings, once);
+  // In one-shot mode (CI/Docker `gonvex dev --once`), a failed sync must fail
+  // the process so the build doesn't silently ship un-deployed functions.
+  if (once && !result.lastSyncSucceeded) {
+    console.error("[gonvex] one-shot sync did not succeed; exiting non-zero");
+    process.exitCode = 1;
+  }
 }
 
 async function runEnv(argv: string[]) {
