@@ -1,14 +1,29 @@
-FROM golang:1.26-alpine AS build
+# The runtime compiles each project's synced Go functions into a -buildmode=plugin
+# .so at sync time and dlopen()s it, so the *running* image needs a full Go
+# toolchain + cgo (gcc) and the gonvex module source — not just the static binary.
+# Debian (glibc) is used rather than Alpine/musl because Go plugins are unreliable
+# under musl. The runtime binary and the plugins must be built with the same Go
+# version and the same gonvex source (via the go.mod replace) for plugin ABI match.
+FROM golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/gonvex-runtime ./server/cmd/gonvex-runtime
+# cgo-enabled: -buildmode=plugin requires the host binary to be cgo/dynamically linked.
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/gonvex-runtime ./server/cmd/gonvex-runtime
 
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+FROM golang:1.26
 WORKDIR /app
+# Gonvex module source: synced project bundles render
+#   replace github.com/gonvex/gonvex => $GONVEX_MODULE_ROOT
+# so the plugin build resolves the framework against this checkout.
+COPY --from=build /src /src
+# Warm module cache so plugin `go mod tidy`/build resolves deps without refetching.
+COPY --from=build /go/pkg/mod /go/pkg/mod
 COPY --from=build /out/gonvex-runtime /usr/local/bin/gonvex-runtime
-ENV GONVEX_ADDR=0.0.0.0:8080
+ENV GONVEX_ADDR=0.0.0.0:8080 \
+    GONVEX_MODULE_ROOT=/src \
+    CGO_ENABLED=1 \
+    GOFLAGS=-mod=mod
 EXPOSE 8080
 CMD ["gonvex-runtime"]
