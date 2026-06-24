@@ -29,12 +29,15 @@ import {
   faCartFlatbedSuitcase,
   faCartShopping,
   faCircle,
+  faCopy,
+  faDownload,
   faFilter,
   faHeart,
   faMagnifyingGlass,
   faPause,
   faStar,
   faTags,
+  faTrash,
   faTree,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
@@ -5863,6 +5866,24 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   );
 }
 
+function FaIcon(props: { icon: IconDefinition; className?: string }) {
+  const [width, height, , , pathData] = props.icon.icon;
+  const path = Array.isArray(pathData) ? pathData[pathData.length - 1] : pathData;
+  return (
+    <svg
+      className={props.className}
+      viewBox={`0 0 ${width} ${height}`}
+      width="1em"
+      height="1em"
+      fill="currentColor"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d={path} />
+    </svg>
+  );
+}
+
 function FilesPage(props: { project: ProjectTarget; themeLabel: string; onToggleTheme: () => void; onAction: ActionHandler }) {
   const [search, setSearch] = useState("");
   const [runtimeFiles, setRuntimeFiles] = useState<FileInfo[]>([]);
@@ -6029,16 +6050,16 @@ function FilesPage(props: { project: ProjectTarget; themeLabel: string; onToggle
         {visibleFiles.map((file) => (
           <div className="file-grid-row" role="row" key={file.id}>
             <div className="check-cell" role="cell"><span aria-hidden="true" /></div>
-            <div className="file-id-cell" role="cell"><code>{file.id}</code><button aria-label={`Copy ${file.id}`} onClick={() => {
+            <div className="file-id-cell" role="cell"><code>{file.id}</code><button className="file-icon-button" aria-label={`Copy ${file.id}`} title="Copy ID" onClick={() => {
               void navigator.clipboard?.writeText(file.id);
               props.onAction(`Copied ${file.id}`);
-            }}>Copy</button></div>
+            }}><FaIcon icon={faCopy} /></button></div>
             <div role="cell">{file.size}</div>
             <div role="cell">{file.contentType}</div>
             <div role="cell">{file.uploadedAt}</div>
             <div className="file-actions" role="cell">
-              <button aria-label={`Download ${file.id}`} onClick={() => downloadFile(file)}>Download</button>
-              <button aria-label={`Delete ${file.id}`} onClick={() => deleteFile(file)}>Delete</button>
+              <button className="file-icon-button" aria-label={`Download ${file.id}`} title="Download" onClick={() => downloadFile(file)}><FaIcon icon={faDownload} /></button>
+              <button className="file-icon-button file-icon-button--danger" aria-label={`Delete ${file.id}`} title="Delete" onClick={() => deleteFile(file)}><FaIcon icon={faTrash} /></button>
             </div>
           </div>
         ))}

@@ -2517,8 +2517,10 @@ h1 {
 
 .action-cell,
 .file-actions {
-  width: 88px;
-  text-align: right;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
 }
 
 .file-id-cell {
@@ -2537,17 +2539,35 @@ h1 {
   color: #241f1d;
 }
 
-.file-id-cell button,
-.file-actions button {
+.file-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 0;
   background: transparent;
   color: #69a7ff;
   cursor: pointer;
-  font-size: 0.68rem;
-  padding: 2px 4px;
+  font-size: 0.95rem;
+  line-height: 0;
+  padding: 5px;
+  border-radius: 6px;
+  transition: background 120ms ease, color 120ms ease;
 }
 
-.file-actions button:last-child {
+.file-icon-button:hover {
+  background: color-mix(in oklab, currentColor 16%, transparent);
+}
+
+.file-id-cell .file-icon-button {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.file-id-cell .file-icon-button:hover {
+  color: #69a7ff;
+}
+
+.file-icon-button--danger {
   color: #ffb4a8;
 }
 
