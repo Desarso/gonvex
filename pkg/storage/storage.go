@@ -129,6 +129,50 @@ func (f *Factory) VerifyProxyGet(objectKey string, exp int64, sig string) bool {
 	return f != nil && f.client.VerifyProxyGet(objectKey, exp, sig)
 }
 
+// Bucket returns the configured bucket name, or "" when not configured.
+func (f *Factory) Bucket() string {
+	if f == nil || f.client == nil {
+		return ""
+	}
+	return f.client.Bucket()
+}
+
+// ListProjectFiles lists stored objects for a project (optionally narrowed to a
+// tenant) straight from object storage, so the dashboard can show files even
+// when the _gonvex_files metadata table is empty. It mirrors the object-key
+// scheme used on upload ({project}/{tenant}/{fileID}).
+func (f *Factory) ListProjectFiles(ctx context.Context, projectID, tenantID string, maxKeys int) ([]ListedObject, error) {
+	if f == nil || f.client == nil {
+		return nil, gonvex.ErrStorageNotConfigured
+	}
+	parts := make([]string, 0, 2)
+	project := sanitizeSegment(projectID)
+	if project != "" {
+		parts = append(parts, project)
+	}
+	if tenant := sanitizeSegment(tenantID); tenant != "" && tenant != project {
+		parts = append(parts, tenant)
+	}
+	prefix := ""
+	if len(parts) > 0 {
+		prefix = path.Join(parts...) + "/"
+	}
+	return f.client.ListObjects(ctx, prefix, maxKeys)
+}
+
+// DownloadURLForKey returns a browser-reachable, time-limited URL for an object
+// key: a runtime storage-proxy URL when a public base URL is configured,
+// otherwise a presigned S3 URL.
+func (f *Factory) DownloadURLForKey(objectKey string) (string, error) {
+	if f == nil || f.client == nil {
+		return "", gonvex.ErrStorageNotConfigured
+	}
+	if f.client.cfg.PublicBaseURL != "" {
+		return f.client.ProxyGetURL(objectKey, f.downloadTTL), nil
+	}
+	return f.client.PresignGet(objectKey, f.downloadTTL)
+}
+
 // Tenant is the per-request StorageAPI implementation.
 type Tenant struct {
 	ctx         context.Context

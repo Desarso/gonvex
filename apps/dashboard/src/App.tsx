@@ -1997,15 +1997,29 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
-function fileFromRuntimeRow(row: Record<string, unknown>): FileInfo {
-  const id = formatCellValue(row.id ?? row.key);
-  const rawSize = row.size_bytes ?? row.size;
-  const sizeValue = Number(rawSize ?? 0);
+type StorageFileEntry = {
+  id: string;
+  key: string;
+  size: number;
+  contentType?: string;
+  uploadedAt: string;
+  url?: string;
+};
+
+type StorageFilesResponse = {
+  configured: boolean;
+  bucket?: string;
+  files: StorageFileEntry[];
+};
+
+function fileFromStorageObject(entry: StorageFileEntry): FileInfo {
+  const uploaded = entry.uploadedAt ? new Date(entry.uploadedAt) : null;
   return {
-    id: id || "unknown-file",
-    size: Number.isFinite(sizeValue) && sizeValue > 0 ? formatBytes(sizeValue) : formatCellValue(rawSize),
-    contentType: formatCellValue(row.content_type) || "application/octet-stream",
-    uploadedAt: formatCellValue(row.uploaded_at ?? row.created_at) || "unknown",
+    id: entry.id || "unknown-file",
+    size: entry.size > 0 ? formatBytes(entry.size) : "—",
+    contentType: entry.contentType || "application/octet-stream",
+    uploadedAt: uploaded && !Number.isNaN(uploaded.getTime()) ? uploaded.toLocaleString() : entry.uploadedAt || "unknown",
+    objectUrl: entry.url,
     source: "runtime",
   };
 }
@@ -5869,18 +5883,24 @@ function FilesPage(props: { project: ProjectTarget; themeLabel: string; onToggle
       return;
     }
 
-    fetch(`${baseURL}/dev/data/tables/_gonvex_files/rows?limit=100&sort=created_at&direction=desc`, { headers: runtimeHeaders(props.project) })
+    fetch(`${baseURL}/dev/storage/files`, { headers: runtimeHeaders(props.project) })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-      .then((payload: DataRowsResponse) => {
+      .then((payload: StorageFilesResponse) => {
         if (cancelled) return;
-        const rows = payload.rows.filter((row) => !row.deleted_at).map(fileFromRuntimeRow);
+        const rows = (payload.files ?? []).map(fileFromStorageObject);
         setRuntimeFiles(rows);
-        setStatus(rows.length > 0 ? "Connected to Gonvex Runtime" : "Connected — no files in storage yet");
+        if (!payload.configured) {
+          setStatus("Object storage is not configured for this runtime.");
+        } else if (rows.length > 0) {
+          setStatus(`Connected — ${rows.length} file${rows.length === 1 ? "" : "s"} in ${payload.bucket ?? "storage"}`);
+        } else {
+          setStatus("Connected — no files in storage yet");
+        }
       })
       .catch(() => {
         if (!cancelled) {
           setRuntimeFiles([]);
-          setStatus("Could not load files — runtime unreachable or storage not initialized.");
+          setStatus("Could not load files — runtime unreachable.");
         }
       });
 

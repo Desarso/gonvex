@@ -10,6 +10,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -208,6 +209,157 @@ func (c *Client) DeleteObject(ctx context.Context, key string) error {
 		return responseError("delete object", resp)
 	}
 	return nil
+}
+
+// ListedObject is one entry returned by ListObjects.
+type ListedObject struct {
+	Key          string
+	Size         int64
+	LastModified time.Time
+	ETag         string
+}
+
+type listBucketResult struct {
+	XMLName               xml.Name `xml:"ListBucketResult"`
+	IsTruncated           bool     `xml:"IsTruncated"`
+	NextContinuationToken string   `xml:"NextContinuationToken"`
+	Contents              []struct {
+		Key          string    `xml:"Key"`
+		Size         int64     `xml:"Size"`
+		LastModified time.Time `xml:"LastModified"`
+		ETag         string    `xml:"ETag"`
+	} `xml:"Contents"`
+}
+
+// ListObjects returns up to maxKeys objects whose keys start with prefix, using
+// the S3 ListObjectsV2 API and following continuation tokens as needed.
+func (c *Client) ListObjects(ctx context.Context, prefix string, maxKeys int) ([]ListedObject, error) {
+	if maxKeys <= 0 {
+		maxKeys = 1000
+	}
+	var objects []ListedObject
+	continuation := ""
+	for {
+		pageSize := maxKeys - len(objects)
+		if pageSize > 1000 {
+			pageSize = 1000
+		}
+		page, next, err := c.listObjectsPage(ctx, prefix, pageSize, continuation)
+		if err != nil {
+			return nil, err
+		}
+		objects = append(objects, page...)
+		if next == "" || len(objects) >= maxKeys {
+			break
+		}
+		continuation = next
+	}
+	if len(objects) > maxKeys {
+		objects = objects[:maxKeys]
+	}
+	return objects, nil
+}
+
+func (c *Client) listObjectsPage(ctx context.Context, prefix string, maxKeys int, continuationToken string) ([]ListedObject, string, error) {
+	urlStr, host, canonicalURI := c.buildBucketURL()
+	query := map[string]string{
+		"list-type": "2",
+		"max-keys":  strconv.Itoa(maxKeys),
+	}
+	if prefix != "" {
+		query["prefix"] = prefix
+	}
+	if continuationToken != "" {
+		query["continuation-token"] = continuationToken
+	}
+	canonicalQuery := canonicalQueryString(query)
+
+	now := c.now().UTC()
+	amzDate := now.Format(amzDateFormat)
+	dateStamp := now.Format(dateStampFormat)
+	scope := credentialScope(dateStamp, c.cfg.Region)
+
+	headers := map[string]string{
+		"host":                 host,
+		"x-amz-content-sha256": emptyPayloadHash,
+		"x-amz-date":           amzDate,
+	}
+	signedHeaders, canonicalHeaders := canonicalHeaderBlock(headers)
+	canonicalRequest := strings.Join([]string{
+		http.MethodGet,
+		canonicalURI,
+		canonicalQuery,
+		canonicalHeaders,
+		signedHeaders,
+		emptyPayloadHash,
+	}, "\n")
+	signature := c.sign(canonicalRequest, amzDate, dateStamp, scope)
+	authorization := fmt.Sprintf(
+		"%s Credential=%s/%s, SignedHeaders=%s, Signature=%s",
+		signingAlgorithm, c.cfg.AccessKeyID, scope, signedHeaders, signature,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr+"?"+canonicalQuery, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Authorization", authorization)
+	req.Header.Set("X-Amz-Date", amzDate)
+	req.Header.Set("X-Amz-Content-Sha256", emptyPayloadHash)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", responseError("list objects", resp)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, "", err
+	}
+	var parsed listBucketResult
+	if err := xml.Unmarshal(body, &parsed); err != nil {
+		return nil, "", fmt.Errorf("storage: parse list objects: %w", err)
+	}
+	objects := make([]ListedObject, 0, len(parsed.Contents))
+	for _, item := range parsed.Contents {
+		objects = append(objects, ListedObject{
+			Key:          item.Key,
+			Size:         item.Size,
+			LastModified: item.LastModified,
+			ETag:         strings.Trim(item.ETag, `"`),
+		})
+	}
+	next := ""
+	if parsed.IsTruncated {
+		next = parsed.NextContinuationToken
+	}
+	return objects, next, nil
+}
+
+// buildBucketURL returns the request URL, signing host, and canonical path for
+// a bucket-level (not object-level) operation such as ListObjectsV2.
+func (c *Client) buildBucketURL() (urlStr, host, canonicalURI string) {
+	base, err := url.Parse(c.cfg.Endpoint)
+	if err != nil || base.Host == "" {
+		base = &url.URL{Scheme: "https", Host: strings.TrimPrefix(strings.TrimPrefix(c.cfg.Endpoint, "https://"), "http://")}
+	}
+	scheme := base.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	basePath := strings.TrimRight(base.Path, "/")
+	if c.cfg.ForcePathStyle {
+		host = base.Host
+		canonicalURI = encodePath(basePath + "/" + c.cfg.Bucket)
+	} else {
+		host = c.cfg.Bucket + "." + base.Host
+		canonicalURI = encodePath(basePath + "/")
+	}
+	urlStr = scheme + "://" + host + canonicalURI
+	return urlStr, host, canonicalURI
 }
 
 // presign builds a query-string-authenticated SigV4 URL for method/key.

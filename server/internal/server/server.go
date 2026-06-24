@@ -158,6 +158,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/tenants", s.handleTenants)
 	mux.HandleFunc("POST /dev/tenants", s.handleCreateTenant)
 	mux.HandleFunc("DELETE /dev/tenants/{tenant}", s.handleDeleteTenant)
+	mux.HandleFunc("GET /dev/storage/files", s.handleStorageFiles)
 	mux.HandleFunc("GET /dev/data/tables", s.handleDataTables)
 	mux.HandleFunc("GET /dev/data/tables/{table}/rows", s.handleDataRows)
 	mux.HandleFunc("POST /dev/data/tables/{table}/rows", s.handleInsertDataRow)
