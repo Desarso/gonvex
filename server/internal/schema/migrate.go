@@ -274,6 +274,13 @@ func compatibleColumnType(current string, desired string) bool {
 	if current == "string" && (desired == "id" || desired == "text") {
 		return true
 	}
+	// A wider existing integer column (BIGINT) already holds every value of a
+	// narrower desired INTEGER, so keep it as-is rather than forcing an unsafe
+	// narrowing. Cloned tenants infer int64/BIGINT from JSON numbers where the
+	// declared schema uses int/INTEGER.
+	if current == "int64" && desired == "int" {
+		return true
+	}
 	return false
 }
 
