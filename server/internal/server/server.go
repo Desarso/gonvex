@@ -234,7 +234,15 @@ func (s *Server) handleInsertDataRow(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
-	if s.config.DevSyncKey != "" && syncKey(r) != s.config.DevSyncKey {
+	// Per-project auth: the sync uploads source the runtime compiles and runs,
+	// so it must present the target project's own key. Hydrate the project first
+	// so its key is loaded, then require it. Falls back to the global
+	// GONVEX_DEV_SYNC_KEY only for projects that have no key yet.
+	syncProjectID := strings.TrimSpace(r.Header.Get("x-gonvex-project-id"))
+	if syncProjectID != "" {
+		s.hydrateRuntimeStateForProject(r.Context(), syncProjectID)
+	}
+	if !s.acceptsSyncKey(syncProjectID, syncKey(r)) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid Gonvex sync key"})
 		return
 	}
@@ -310,6 +318,23 @@ func (s *Server) acceptsAdminKey(key string) bool {
 		return true
 	}
 	return s.config.AdminKey == "" && s.config.DevSyncKey != "" && key == s.config.DevSyncKey
+}
+
+// acceptsSyncKey gates POST /dev/sync. If the target project has a registered
+// key, exactly that key is required (per-project). Otherwise it falls back to
+// the global GONVEX_DEV_SYNC_KEY, and if neither is configured the endpoint is
+// open (local dev only).
+func (s *Server) acceptsSyncKey(projectID, provided string) bool {
+	provided = strings.TrimSpace(provided)
+	if projectID != "" {
+		if key := strings.TrimSpace(s.config.ProjectKeys[projectID]); key != "" {
+			return provided != "" && provided == key
+		}
+	}
+	if s.config.DevSyncKey != "" {
+		return provided != "" && provided == s.config.DevSyncKey
+	}
+	return true
 }
 
 func projectID(r *http.Request) string {
