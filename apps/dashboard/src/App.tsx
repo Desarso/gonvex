@@ -5894,6 +5894,26 @@ function FilesPage(props: { project: ProjectTarget; themeLabel: string; onToggle
   const visibleFiles = sortFiles(files.filter((file) =>
     [file.id, file.contentType].some((value) => value.toLowerCase().includes(search.toLowerCase())),
   ), fileSort);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const selectedVisible = visibleFiles.filter((file) => selectedIds.has(file.id));
+  const allVisibleSelected = visibleFiles.length > 0 && selectedVisible.length === visibleFiles.length;
+  const someVisibleSelected = selectedVisible.length > 0 && !allVisibleSelected;
+
+  const toggleFileSelected = (id: string) => setSelectedIds((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+  const toggleAllVisible = () => setSelectedIds((current) => {
+    const next = new Set(current);
+    if (visibleFiles.every((file) => next.has(file.id))) {
+      visibleFiles.forEach((file) => next.delete(file.id));
+    } else {
+      visibleFiles.forEach((file) => next.add(file.id));
+    }
+    return next;
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -6038,9 +6058,28 @@ function FilesPage(props: { project: ProjectTarget; themeLabel: string; onToggle
         </div>
       </div>
 
+      {selectedVisible.length > 0 ? (
+        <div className="file-selection-bar">
+          <span>{selectedVisible.length} selected</span>
+          <div className="file-selection-actions">
+            <Button size="sm" variant="secondary" onPress={() => selectedVisible.forEach((file) => downloadFile(file))}>Download</Button>
+            <Button size="sm" variant="ghost" onPress={() => setSelectedIds(new Set())}>Clear</Button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="file-table-shell" role="table" aria-label="Stored files">
         <div className="file-grid-row file-grid-head" role="row">
-          <div className="check-cell" role="columnheader"><span aria-hidden="true" /></div>
+          <div className="check-cell" role="columnheader">
+            <input
+              type="checkbox"
+              className="file-checkbox"
+              aria-label="Select all files"
+              checked={allVisibleSelected}
+              ref={(el) => { if (el) el.indeterminate = someVisibleSelected; }}
+              onChange={toggleAllVisible}
+            />
+          </div>
           <div role="columnheader">{renderHeader("id", "ID")} <span className="help-dot">?</span></div>
           <div role="columnheader">{renderHeader("size", "Size")}</div>
           <div role="columnheader">{renderHeader("contentType", "Content type")}</div>
@@ -6048,8 +6087,16 @@ function FilesPage(props: { project: ProjectTarget; themeLabel: string; onToggle
           <div className="action-cell" role="columnheader"><Button size="sm" variant="secondary" aria-label="Column settings" onPress={() => props.onAction("All file columns are visible")}>Cols</Button></div>
         </div>
         {visibleFiles.map((file) => (
-          <div className="file-grid-row" role="row" key={file.id}>
-            <div className="check-cell" role="cell"><span aria-hidden="true" /></div>
+          <div className="file-grid-row" role="row" key={file.id} data-selected={selectedIds.has(file.id) ? "true" : undefined}>
+            <div className="check-cell" role="cell">
+              <input
+                type="checkbox"
+                className="file-checkbox"
+                aria-label={`Select ${file.id}`}
+                checked={selectedIds.has(file.id)}
+                onChange={() => toggleFileSelected(file.id)}
+              />
+            </div>
             <div className="file-id-cell" role="cell"><code>{file.id}</code><button className="file-icon-button" aria-label={`Copy ${file.id}`} title="Copy ID" onClick={() => {
               void navigator.clipboard?.writeText(file.id);
               props.onAction(`Copied ${file.id}`);

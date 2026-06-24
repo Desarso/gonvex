@@ -2493,6 +2493,37 @@ h1 {
   border-color: #a59a95;
 }
 
+.file-checkbox {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.file-grid-row[data-selected="true"] {
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+}
+
+.file-selection-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--field-radius);
+  background: color-mix(in oklab, var(--accent) 8%, var(--surface));
+  font-size: 0.8rem;
+}
+
+.file-selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .help-dot,
 .sort-dot {
   display: inline-grid;

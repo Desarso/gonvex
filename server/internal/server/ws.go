@@ -659,6 +659,12 @@ func (s *Server) executeTenantQueryForCaller(ctx context.Context, projectID stri
 }
 
 func (s *Server) executeLegacyQuery(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (any, error) {
+	// Resolve the project/tenant database before reading. The registered-function
+	// path hydrates via appForProject + runtimeContext, but the legacy grid path
+	// skips both, so without this the first query after a (re)start hits the
+	// fallback control DB and fails with relation "tasks" does not exist.
+	s.hydrateRuntimeStateForProject(ctx, projectID)
+	s.hydrateProjectTenantDatabases(ctx, projectID)
 	switch path {
 	case "tasks.grid":
 		var args taskGridArgs
@@ -749,6 +755,8 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 }
 
 func (s *Server) executeLegacyMutation(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (any, error) {
+	s.hydrateRuntimeStateForProject(ctx, projectID)
+	s.hydrateProjectTenantDatabases(ctx, projectID)
 	switch path {
 	case "tasks.randomizeStatusPriority":
 		var args randomizeStatusPriorityArgs
