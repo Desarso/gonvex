@@ -26,6 +26,7 @@ type Config struct {
 	S3AccessKeyID     string
 	S3SecretAccessKey string
 	S3ForcePathStyle  bool
+	StoragePublicURL  string
 	DevSyncKey        string
 	AdminKey          string
 	RequireAuth       bool
@@ -52,6 +53,7 @@ func FromEnv() Config {
 		S3AccessKeyID:     env("S3_ACCESS_KEY_ID", ""),
 		S3SecretAccessKey: env("S3_SECRET_ACCESS_KEY", ""),
 		S3ForcePathStyle:  envBool("S3_FORCE_PATH_STYLE", true),
+		StoragePublicURL:  env("GONVEX_PUBLIC_URL", ""),
 		DevSyncKey:        env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
 		AdminKey:          env("GONVEX_ADMIN_KEY", ""),
 		RequireAuth:       envBool("GONVEX_REQUIRE_AUTH", false),

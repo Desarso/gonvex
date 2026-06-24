@@ -61,6 +61,8 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 			AccessKeyID:     cfg.S3AccessKeyID,
 			SecretAccessKey: cfg.S3SecretAccessKey,
 			ForcePathStyle:  cfg.S3ForcePathStyle,
+			PublicBaseURL:   cfg.StoragePublicURL,
+			URLSigningKey:   cfg.S3SecretAccessKey,
 		}),
 		cache:             cache,
 		metrics:           newRuntimeMetrics(cfg.TelemetryLogPath),
@@ -84,6 +86,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /storage/{key...}", s.handleStorageProxy)
 	mux.HandleFunc("GET /dev/manifest", s.handleManifest)
 	mux.HandleFunc("GET /dev/metrics", s.handleMetrics)
 	mux.HandleFunc("GET /dev/projects", s.handleProjects)

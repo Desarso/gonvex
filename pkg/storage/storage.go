@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"path"
 	"strings"
 	"sync"
@@ -114,6 +115,20 @@ func (f *Factory) ensureTable(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// FetchObject streams a stored object from the (internal) S3 endpoint, for the
+// runtime's storage proxy handler. The caller must close the response body.
+func (f *Factory) FetchObject(ctx context.Context, objectKey string) (*http.Response, error) {
+	if f == nil {
+		return nil, gonvex.ErrStorageNotConfigured
+	}
+	return f.client.GetObject(ctx, objectKey)
+}
+
+// VerifyProxyGet validates a storage-proxy URL signature + expiry for objectKey.
+func (f *Factory) VerifyProxyGet(objectKey string, exp int64, sig string) bool {
+	return f != nil && f.client.VerifyProxyGet(objectKey, exp, sig)
+}
+
 // Tenant is the per-request StorageAPI implementation.
 type Tenant struct {
 	ctx         context.Context
@@ -172,6 +187,9 @@ func (t *Tenant) GetURL(fileID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if t.client.cfg.PublicBaseURL != "" {
+		return t.client.ProxyGetURL(meta.ObjectKey, t.downloadTTL), nil
+	}
 	if meta.Visibility == gonvex.FileVisibilityPublic {
 		return t.client.PublicURL(meta.ObjectKey), nil
 	}
@@ -186,6 +204,9 @@ func (t *Tenant) GenerateDownloadURL(fileID string, ttl time.Duration) (string, 
 	}
 	if ttl <= 0 {
 		ttl = t.downloadTTL
+	}
+	if t.client.cfg.PublicBaseURL != "" {
+		return t.client.ProxyGetURL(meta.ObjectKey, ttl), nil
 	}
 	return t.client.PresignGet(meta.ObjectKey, ttl)
 }

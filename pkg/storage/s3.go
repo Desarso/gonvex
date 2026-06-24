@@ -41,6 +41,12 @@ type Config struct {
 	// ForcePathStyle uses http://host/bucket/key instead of
 	// http://bucket.host/key. Required for MinIO and most self-hosted backends.
 	ForcePathStyle bool
+	// PublicBaseURL, when set, makes the runtime hand out browser-reachable
+	// proxy URLs (served by the runtime's GET /storage handler) instead of
+	// presigned URLs that point at the (often private) internal S3 endpoint.
+	PublicBaseURL string
+	// URLSigningKey signs those proxy URLs (HMAC). Defaults to SecretAccessKey.
+	URLSigningKey string
 }
 
 // Configured reports whether the minimum required fields are present to make
@@ -85,10 +91,49 @@ func (c *Client) PresignPut(key string, expires time.Duration) (string, error) {
 	return c.presign(http.MethodPut, key, expires)
 }
 
+// GetObject performs a SigV4-signed GET against the (internal) endpoint and
+// returns the response for streaming. The caller must close resp.Body.
+func (c *Client) GetObject(ctx context.Context, key string) (*http.Response, error) {
+	req, err := c.signedRequest(ctx, http.MethodGet, key, nil, emptyPayloadHash, "")
+	if err != nil {
+		return nil, err
+	}
+	return c.httpClient.Do(req)
+}
+
 // PublicURL returns the unsigned object URL, suitable for public-read objects.
 func (c *Client) PublicURL(key string) string {
 	urlStr, _, _ := c.buildURL(key)
 	return urlStr
+}
+
+// ProxyGetURL builds a browser-reachable, time-limited download URL served by
+// the runtime's GET /storage handler (which streams the object from the private
+// S3 endpoint). Used when PublicBaseURL is configured.
+func (c *Client) ProxyGetURL(key string, expires time.Duration) string {
+	if expires <= 0 {
+		expires = 15 * time.Minute
+	}
+	exp := c.now().Add(expires).Unix()
+	base := strings.TrimRight(c.cfg.PublicBaseURL, "/")
+	// encodePath returns a leading-slash path; reuse it for per-segment encoding.
+	return fmt.Sprintf("%s/storage%s?exp=%d&sig=%s", base, encodePath(key), exp, c.proxySignature(key, exp))
+}
+
+// VerifyProxyGet validates a proxy download signature and expiry for key.
+func (c *Client) VerifyProxyGet(key string, exp int64, sig string) bool {
+	if exp <= 0 || exp < c.now().Unix() {
+		return false
+	}
+	return hmac.Equal([]byte(c.proxySignature(key, exp)), []byte(sig))
+}
+
+func (c *Client) proxySignature(key string, exp int64) string {
+	secret := c.cfg.URLSigningKey
+	if secret == "" {
+		secret = c.cfg.SecretAccessKey
+	}
+	return hex.EncodeToString(hmacSHA256([]byte("gonvex-storage:"+secret), key+"\n"+strconv.FormatInt(exp, 10)))
 }
 
 // PutObject uploads bytes to key using a SigV4-signed PUT request.
