@@ -392,6 +392,10 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 }
 
 func (s *Server) hydrateRuntimeState(ctx context.Context) {
+	// Resolve every project's database + key from the control plane so
+	// databaseURLForProject works right after a restart, without waiting for
+	// something to list projects first.
+	s.hydrateProjects()
 	manifests, err := s.loadRuntimeManifests(ctx)
 	if err != nil {
 		slog.Debug("load persisted Gonvex runtime manifests", "error", err)
@@ -406,7 +410,22 @@ func (s *Server) hydrateRuntimeState(ctx context.Context) {
 
 func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID string) {
 	projectID = strings.TrimSpace(projectID)
-	if projectID == "" || s.runtime.AppForProject(projectID) != nil {
+	if projectID == "" {
+		return
+	}
+	// Projects are created dynamically, so resolve this project's database from
+	// the control plane (gonvex_runtime_projects) on demand if we haven't yet.
+	// Without this, databaseURLForProject falls back to POSTGRES_URL and the
+	// runtime reads landlord tables from the wrong (control) database. This must
+	// run even when the app/manifest is already loaded, since the DB mapping is
+	// independent of the compiled bundle.
+	s.projectMu.RLock()
+	_, haveDB := s.config.ProjectDatabases[projectID]
+	s.projectMu.RUnlock()
+	if !haveDB {
+		s.hydrateProjects()
+	}
+	if s.runtime.AppForProject(projectID) != nil {
 		return
 	}
 	next, ok, err := s.loadRuntimeManifest(ctx, projectID)
