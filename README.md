@@ -1,123 +1,194 @@
 # Gonvex
 
-Gonvex is a Convex-style backend platform for developers who want the Convex developer experience with Go, Postgres, and TypeScript.
+Gonvex is an open source Convex-style backend for teams that want the same fast app-building loop with Go, Postgres, TypeScript, React, and realtime subscriptions.
 
-Write backend functions and schema next to your app, generate frontend-safe TypeScript bindings, run a local runtime during development, and subscribe to realtime data from React.
+You write backend functions next to your app, Gonvex generates type-safe frontend bindings, and your React UI calls queries and mutations over a realtime runtime.
 
-> Status: beta. The repo contains the working runtime, client packages, app template, dashboard lab, and documentation site. APIs and packaging are still evolving, so expect breaking changes before a stable 1.0.
+```tsx
+import { api } from "./gonvex/_generated/api";
+import { useMutation, useQuery } from "./gonvex/_generated/react";
 
-## Documentation
+export function Tasks() {
+  const tasks = useQuery(api.tasks.list, { status: "open" });
+  const createTask = useMutation(api.tasks.create);
 
-- Hosted docs: https://desarso.github.io/gonvex/
-- Local docs: `pnpm dev:docs`
-- Architecture notes: [`gonvex_architecture.md`](./gonvex_architecture.md)
+  return <TaskList tasks={tasks ?? []} onCreate={createTask} />;
+}
+```
 
-Start with:
+Gonvex is for developers who like Convex's product shape but want infrastructure they can inspect, extend, and self-host.
 
-1. [Quickstart](https://desarso.github.io/gonvex/docs/quickstart/)
-2. [Installation](https://desarso.github.io/gonvex/docs/installation/)
-3. [Schema](https://desarso.github.io/gonvex/docs/schema/)
-4. [Functions and Bindings](https://desarso.github.io/gonvex/docs/functions-and-bindings/)
-5. [Realtime Subscriptions](https://desarso.github.io/gonvex/docs/realtime-subscriptions/)
+> Status: beta. Gonvex is usable for local development and experimentation, but the production hosting, self-hosting, auth, migrations, and multi-tenant operations story is still stabilizing before 1.0.
 
-## Developer Experience
+## Why Gonvex
 
-The intended app workflow is:
+- **Go backend functions**: define queries, mutations, actions, HTTP handlers, schema, and LiveGrid-style data views in Go.
+- **TypeScript client bindings**: generate frontend-safe API references and React hooks from your backend.
+- **Realtime by default**: subscribe to query results over WebSockets and refresh UI when data changes.
+- **Postgres underneath**: keep your data in a database you already know how to run, back up, inspect, and tune.
+- **Self-hostable runtime**: run Gonvex with Postgres, Valkey/Redis, and optional S3-compatible object storage.
+- **Open source core**: the runtime, CLI, client packages, dashboard, docs, and starter templates live in this repo.
+
+## Quickstart
+
+Create a new app:
 
 ```bash
 npm create gonvex@latest my-app
 cd my-app
-npx gonvex dev
+npm run dev
 ```
 
-In an app repo, Gonvex code lives beside the frontend:
+Or start Gonvex in an existing app:
+
+```bash
+npm install -D @gonvex/cli
+npm install @gonvex/client @gonvex/react
+npx gonvex init
+npx gonvex dev -- vite
+```
+
+A Gonvex app keeps backend code beside the frontend:
 
 ```txt
 my-app/
-  src/
   gonvex/
     schema.go
     tasks.go
     _generated/
       api.ts
-      react.ts
       client.ts
+      react.ts
+  src/
+  gonvex.json
+  package.json
 ```
 
-Backend functions are registered in Go:
+## Define Your Backend
+
+Schema and functions are written in Go:
 
 ```go
+package backend
+
+import "github.com/gonvex/gonvex/pkg/gonvex"
+
+func Schema(s *gonvex.Schema) {
+  s.Table("tasks", func(t *gonvex.Table) {
+    t.ID("id")
+    t.String("title")
+    t.String("status")
+    t.Time("created_at")
+    t.Index("by_status", "status")
+  })
+}
+
+type ListTasksArgs struct {
+  Status string `json:"status,omitempty"`
+}
+
 func Register(app *gonvex.App) {
   app.Query("tasks.list", ListTasks)
   app.Mutation("tasks.create", CreateTask)
 }
-```
 
-Runtime execution uses an app-linked Go binary: create a small `main` that imports
-your app's `gonvex/` package, calls `Register(app)`, and serves Gonvex with the
-public runtime wrapper. This compiles handlers directly into the runtime and
-avoids Go `plugin` loading.
-
-```go
-package main
-
-import (
-  "log/slog"
-  "os"
-
-  appgonvex "my-app/gonvex"
-  "github.com/gonvex/gonvex/pkg/gonvex"
-  gonvexruntime "github.com/gonvex/gonvex/server/pkg/runtime"
-)
-
-func main() {
-  app := gonvex.NewApp()
-  appgonvex.Register(app)
-  if err := gonvexruntime.ListenAndServe(app); err != nil {
-    slog.Error("gonvex runtime stopped", "error", err)
-    os.Exit(1)
-  }
+func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
+  // Query Postgres through Gonvex APIs.
 }
 ```
 
-React imports generated bindings:
+During development, `gonvex dev` watches the `gonvex/` folder, regenerates TypeScript bindings, syncs schema/function metadata, and runs your app dev server.
 
-```ts
-import { api } from "./gonvex/_generated/api";
-import { useMutation, useQuery } from "./gonvex/_generated/react";
+## Self-Hosting
 
-const tasks = useQuery(api.tasks.list, { status: "open" });
-const createTask = useMutation(api.tasks.create);
+Gonvex is designed to be self-hosted. A full deployment has:
+
+```txt
+Gonvex runtime       Executes functions, serves HTTP/WebSocket traffic, routes projects and tenants
+Postgres            Stores app data and Gonvex control-plane data
+Valkey or Redis     Coordinates cache, realtime invalidation, and runtime state
+Object storage      Optional S3-compatible storage for apps that use file APIs
+Dashboard           Optional web UI for inspecting projects, tables, functions, logs, and metrics
 ```
 
-## What Gonvex Provides
+For local self-hosting, run the full stack with Docker:
 
-- App-local Go backend functions: queries, mutations, actions, HTTP handlers, and LiveGrid definitions.
-- Generated TypeScript bindings for frontend calls.
-- Postgres-backed schema and data APIs.
-- Realtime WebSocket subscriptions and query invalidation.
-- React client hooks.
-- File upload/storage plumbing for S3-compatible backends.
-- A dashboard for inspecting functions, tables, data, metrics, and realtime grid behavior.
-- Project and tenant concepts for multi-tenant apps.
+```bash
+git clone https://github.com/Desarso/gonvex.git
+cd gonvex
+cp .env.example .env
+make stack
+```
+
+This starts:
+
+```txt
+Runtime:   http://localhost:8080
+Dashboard: http://localhost:3000
+Postgres:  localhost:5432
+Valkey:    localhost:6380
+S3 API:    http://localhost:9000
+MinIO UI:  http://localhost:9001
+```
+
+For production self-hosting, put the runtime behind TLS, provide managed Postgres and Valkey/Redis, configure backups, set allowed origins, and use S3-compatible storage only if your app needs files. Production deployment automation is still early, so treat the Docker stack as the best current reference implementation rather than a finished operations guide.
+
+## Current Scope
+
+Gonvex currently includes:
+
+- local runtime server
+- app-local Go schema/function declarations
+- generated TypeScript API references
+- React provider and hooks
+- browser WebSocket client
+- Postgres-backed data paths
+- realtime subscriptions and invalidation
+- dashboard for local inspection
+- Vite React starter template
+- docs site and package workspace
+
+Still in progress before a stable production release:
+
+- generic production function dispatch across arbitrary apps
+- hosted control plane
+- hardened self-hosting deployment workflow
+- production auth, membership, roles, and tenant routing
+- migration previews and safe rollout controls
+- versioned runtime/dashboard distribution
+
+## Documentation
+
+- Docs: https://desarso.github.io/gonvex/
+- Quickstart: https://desarso.github.io/gonvex/docs/quickstart/
+- Installation: https://desarso.github.io/gonvex/docs/installation/
+- Deployment model: https://desarso.github.io/gonvex/docs/deployment/
+- Current limits: https://desarso.github.io/gonvex/docs/current-limits/
+
+Run the docs locally:
+
+```bash
+pnpm install
+pnpm dev:docs
+```
 
 ## Repository Layout
 
 ```txt
-apps/dashboard/         Gonvex dashboard and integration test harness
-apps/docs/              Fumadocs documentation site
-packages/client/        Browser WebSocket client
-packages/react/         React provider and hooks
-packages/protocol/      Shared TypeScript protocol types
-packages/gonvex/        npm CLI package for `npx gonvex`
-packages/create-gonvex/ npm initializer for `npm create gonvex`
-templates/vite-react/   default Vite React starter template
-cmd/gonvex/             contributor/local Go CLI prototype
-server/                 Go Gonvex runtime server
-infra/                  local infrastructure helpers
+apps/dashboard/          Dashboard and local integration harness
+apps/docs/               Documentation site
+packages/client/         Browser WebSocket client
+packages/react/          React provider and hooks
+packages/protocol/       Shared TypeScript protocol types
+packages/gonvex/         CLI package
+packages/create-gonvex/  App initializer
+templates/vite-react/    Default starter template
+cmd/gonvex/              Local Go CLI prototype
+server/                  Go runtime server
+infra/                   Local infrastructure helpers
 ```
 
-## Local Development
+## Contributing
 
 Install dependencies:
 
@@ -125,21 +196,16 @@ Install dependencies:
 pnpm install
 ```
 
-Start the main development stack:
+Start the local development stack:
 
 ```bash
 make dev
 ```
 
-Useful individual commands:
+Run the full Docker stack:
 
 ```bash
-make services      # start local Postgres and Valkey helpers
-make storage       # optionally start example MinIO S3-compatible storage
-make runtime       # run the Go runtime with Air
-make dashboard     # run the dashboard app
-make packages      # watch/build npm packages
-make docs          # run docs at http://localhost:3001
+make stack
 ```
 
 Useful checks:
@@ -151,61 +217,15 @@ pnpm test:go
 pnpm build
 ```
 
-## Releases
-
-Current automated releases publish the npm packages that developers install in apps:
-
-```txt
-packages/protocol/       `@gonvex/protocol`
-packages/client/         `@gonvex/client`
-packages/react/          `@gonvex/react`
-packages/gonvex/         `npx gonvex`
-packages/create-gonvex/  `npm create gonvex`
-```
-
-Release helpers:
+Useful development commands:
 
 ```bash
-make release-notes-preview VERSION=0.0.1
-make release-dry-run VERSION=0.0.1
-make release-prod VERSION=0.0.1
+make services      # start local Postgres and Valkey
+make runtime       # run the Go runtime with Air
+make dashboard     # run the dashboard app
+make packages      # watch/build npm packages
+make docs          # run docs at http://localhost:3001
 ```
-
-The Go runtime, hosted control plane, dashboard, and deployment artifacts are not yet independently packaged by this release flow. For now they are developed from this monorepo; runtime distribution will become a separate release track when the hosting/self-hosting story is ready.
-
-## Local Services
-
-Local runtime configuration lives in `.env`, which is intentionally gitignored. `.env.example` contains safe template values for the local Postgres and Valkey services.
-
-Start local database/cache services with:
-
-```bash
-make services
-```
-
-File APIs are optional. If you use files, point Gonvex at any S3-compatible storage provider. For local testing, this repo includes an optional MinIO example:
-
-```bash
-make storage
-```
-
-Example MinIO defaults:
-
-```txt
-S3 API: http://localhost:9000
-Console: http://localhost:9001
-Bucket: gonvex-dev
-```
-
-## Publishing Docs
-
-Documentation is deployed to GitHub Pages from `apps/docs` through the `Deploy docs to GitHub Pages` workflow. Pushes to `main` that touch docs or the workflow rebuild the static site and deploy it to:
-
-```txt
-https://desarso.github.io/gonvex/
-```
-
-GitHub repository settings must use **Pages -> Source -> GitHub Actions**.
 
 ## License
 

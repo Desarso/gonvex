@@ -144,9 +144,9 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 	for rows.Next() {
 		var tenantID string
 		var name string
-		var databaseName string
+		var databaseAlias string
 		var domain string
-		if err := rows.Scan(&tenantID, &name, &databaseName, &domain); err != nil {
+		if err := rows.Scan(&tenantID, &name, &databaseAlias, &domain); err != nil {
 			return
 		}
 		tenantID = strings.TrimSpace(tenantID)
@@ -163,11 +163,11 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 			ID:           tenantID,
 			ProjectID:    project,
 			Name:         name,
-			Database:     databaseName,
+			Database:     databaseAlias,
 			Status:       "local",
 			Description:  "Persisted tenant from landlord database.",
-			Provisioned:  true,
-			databaseName: databaseName,
+			Provisioned:  false,
+			databaseName: tenantDatabaseNameWithAlias(project, tenantID, databaseAlias),
 			domain:       domain,
 		}
 		imported[tenantStoreKey(project, tenantID)] = tenant
@@ -182,8 +182,12 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 		s.config.TenantDatabases = map[string]string{}
 	}
 	for key, tenant := range imported {
+		existing := s.tenants[key]
 		tenant = s.resolveTenantDatabaseURLLocked(project, tenant)
-		previousURL := s.tenants[key].databaseURL
+		previousURL := existing.databaseURL
+		if existing.Provisioned && existing.databaseURL != "" && existing.databaseURL == tenant.databaseURL {
+			tenant.Provisioned = true
+		}
 		s.tenants[key] = tenant
 		if tenant.databaseURL != "" {
 			s.config.TenantDatabases[key] = tenant.databaseURL
@@ -258,10 +262,15 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"tenant": existing})
 		return
 	}
-	databaseName := tenantDatabaseName(project, tenantID)
-	if requestedTenantID == "" {
-		databaseName = s.uniqueTenantDatabaseNameLocked(project, tenantID)
+	databaseAlias := slug(name)
+	if databaseAlias == "" {
+		databaseAlias = tenantID
 	}
+	if s.tenantDatabaseAliasTakenLocked(project, databaseAlias, key) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "tenant database name already exists for this project"})
+		return
+	}
+	databaseName := tenantDatabaseNameWithAlias(project, tenantID, databaseAlias)
 	createdDatabase := true
 	tenantDatabaseURL, err := createProjectDatabase(r.Context(), s.config.PostgresURL, databaseName)
 	if err != nil {
@@ -291,7 +300,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		ID:             tenantID,
 		ProjectID:      project,
 		Name:           name,
-		Database:       databaseName,
+		Database:       databaseAlias,
 		Status:         "local",
 		Description:    "Runtime-created tenant database.",
 		Provisioned:    true,
@@ -497,6 +506,22 @@ func (s *Server) uniqueTenantDatabaseNameLocked(projectID string, tenantID strin
 	})
 }
 
+func (s *Server) tenantDatabaseAliasTakenLocked(projectID string, alias string, exceptKey string) bool {
+	alias = normalizeDatabaseAlias(alias)
+	if alias == "" {
+		return false
+	}
+	for key, tenant := range s.tenants {
+		if key == exceptKey || tenant.ProjectID != projectID {
+			continue
+		}
+		if normalizeDatabaseAlias(tenant.Database) == alias {
+			return true
+		}
+	}
+	return false
+}
+
 func provisionTenantDatabase(ctx context.Context, databaseURL string, desiredSchema manifest.Schema) error {
 	if databaseURL == "" {
 		return fmt.Errorf("tenant database URL is not configured")
@@ -516,6 +541,110 @@ func provisionTenantDatabase(ctx context.Context, databaseURL string, desiredSch
 		return err
 	}
 	return nil
+}
+
+func (s *Server) ensureRuntimeTenantDatabase(ctx context.Context, project string, tenantID string, tenantDatabaseURL string) (string, error) {
+	project = strings.TrimSpace(project)
+	tenantID = strings.TrimSpace(tenantID)
+	tenantDatabaseURL = strings.TrimSpace(tenantDatabaseURL)
+	if project == "" || tenantID == "" || tenantID == project || tenantDatabaseURL == "" {
+		return tenantDatabaseURL, nil
+	}
+
+	key := tenantStoreKey(project, tenantID)
+	s.projectMu.RLock()
+	tenant, ok := s.tenants[key]
+	projectDatabaseURL := s.config.DatabaseURL(project)
+	postgresURL := strings.TrimSpace(s.config.PostgresURL)
+	s.projectMu.RUnlock()
+	if !ok || tenant.databaseURL == "" || tenant.databaseURL != tenantDatabaseURL || tenantDatabaseURL == projectDatabaseURL {
+		return tenantDatabaseURL, nil
+	}
+	if tenant.Provisioned {
+		return tenantDatabaseURL, nil
+	}
+
+	desiredSchema := s.runtime.ManifestForProject(project).Schema.TenantSchema()
+	if err := provisionTenantDatabase(ctx, tenantDatabaseURL, desiredSchema); err == nil {
+		s.markTenantDatabaseProvisioned(project, tenantID, tenantDatabaseURL)
+		return tenantDatabaseURL, nil
+	} else if !isMissingTenantDatabaseError(err) {
+		return "", err
+	}
+
+	if postgresURL == "" {
+		return "", fmt.Errorf("tenant database %q does not exist and DATABASE_URL is not configured", databaseNameFromURL(tenantDatabaseURL, tenant.databaseName))
+	}
+	databaseName := strings.TrimSpace(tenant.databaseName)
+	if databaseName == "" {
+		databaseName = databaseNameFromURL(tenantDatabaseURL, tenantDatabaseName(project, tenantID))
+	}
+	createdURL, err := createProjectDatabase(ctx, postgresURL, databaseName)
+	if err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "already exists") {
+			return "", err
+		}
+		createdURL, err = databaseURL(postgresURL, databaseName)
+		if err != nil {
+			return "", err
+		}
+	}
+	if err := provisionTenantDatabase(ctx, createdURL, desiredSchema); err != nil {
+		return "", err
+	}
+	s.markTenantDatabaseProvisioned(project, tenantID, createdURL)
+	return createdURL, nil
+}
+
+func (s *Server) markTenantDatabaseProvisioned(project string, tenantID string, databaseURL string) {
+	key := tenantStoreKey(project, tenantID)
+	s.projectMu.Lock()
+	defer s.projectMu.Unlock()
+	tenant := s.tenants[key]
+	tenant.ID = tenantID
+	tenant.ProjectID = project
+	tenant.databaseURL = databaseURL
+	tenant.databaseName = databaseNameFromURL(databaseURL, tenant.databaseName)
+	if tenant.Database == "" {
+		tenant.Database = tenant.databaseName
+	}
+	tenant.Provisioned = true
+	s.tenants[key] = tenant
+	if s.config.TenantDatabases == nil {
+		s.config.TenantDatabases = map[string]string{}
+	}
+	s.config.TenantDatabases[key] = databaseURL
+}
+
+func (s *Server) provisionCreatedTenant(ctx context.Context, project string, result any) error {
+	tenantID := tenantIDFromMutationResult(result)
+	if tenantID == "" {
+		return nil
+	}
+	s.hydrateLandlordTenants(ctx, project)
+	databaseURL := s.databaseURLForTenant(project, tenantID)
+	_, err := s.ensureRuntimeTenantDatabase(ctx, project, tenantID, databaseURL)
+	return err
+}
+
+func tenantIDFromMutationResult(result any) string {
+	switch value := result.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case map[string]any:
+		for _, key := range []string{"_id", "id", "domain", "database"} {
+			if id := strings.TrimSpace(fmt.Sprint(value[key])); id != "" && id != "<nil>" {
+				return id
+			}
+		}
+	case map[string]string:
+		for _, key := range []string{"_id", "id", "domain", "database"} {
+			if id := strings.TrimSpace(value[key]); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
 }
 
 func (s *Server) applyTenantSchemasForProject(ctx context.Context, project string, desiredSchema manifest.Schema) (schema.Result, error) {
@@ -613,14 +742,15 @@ func (s *Server) discoverProjectTenantDatabases(ctx context.Context, project str
 	}
 	defer db.Close()
 
-	prefix := tenantDatabaseName(project, "")
+	projectSuffix := tenantDatabaseProjectSuffix(project)
+	projectSuffixPattern := strings.ReplaceAll(projectSuffix, "_", `\_`)
 	projectDatabase := databaseNameFromURL(s.databaseURLForProject(project), "")
 	rows, err := db.QueryContext(ctx, `
 		SELECT datname
 		FROM pg_database
-		WHERE datistemplate = false AND datname LIKE $1
+		WHERE datistemplate = false AND datname LIKE $1 ESCAPE '\'
 		ORDER BY datname
-	`, prefix+`\_%`)
+	`, `%\_`+projectSuffixPattern)
 	if err != nil {
 		return nil, err
 	}
@@ -632,14 +762,14 @@ func (s *Server) discoverProjectTenantDatabases(ctx context.Context, project str
 		if err := rows.Scan(&databaseName); err != nil {
 			return nil, err
 		}
-		if databaseName == projectDatabase || databaseName == prefix || databaseName == prefix+"_landlord" || databaseName == prefix+"_telemetry" {
+		if databaseName == projectDatabase {
 			continue
 		}
-		suffix := strings.TrimPrefix(databaseName, prefix+"_")
-		if suffix == "" {
+		alias, ok := strings.CutSuffix(databaseName, "_"+projectSuffix)
+		if !ok || alias == "" {
 			continue
 		}
-		tenantID := strings.ReplaceAll(suffix, "_", "-")
+		tenantID := strings.ReplaceAll(alias, "_", "-")
 		databaseURL, err := databaseURL(s.config.PostgresURL, databaseName)
 		if err != nil {
 			return nil, err
@@ -648,7 +778,7 @@ func (s *Server) discoverProjectTenantDatabases(ctx context.Context, project str
 			ID:             tenantID,
 			ProjectID:      project,
 			Name:           tenantID,
-			Database:       databaseName,
+			Database:       alias,
 			Status:         "local",
 			Description:    "Discovered local tenant database.",
 			Provisioned:    true,

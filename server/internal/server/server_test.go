@@ -109,6 +109,45 @@ func TestDataRowsRejectsInvalidTableName(t *testing.T) {
 	}
 }
 
+func TestInternalDataTablesAreHidden(t *testing.T) {
+	tests := []struct {
+		name  string
+		table string
+		want  bool
+	}{
+		{name: "files metadata", table: "_gonvex_files", want: true},
+		{name: "dashboard users", table: "gonvex_dashboard_users", want: true},
+		{name: "project members", table: "gonvex_project_members", want: true},
+		{name: "project invitations", table: "gonvex_project_invitations", want: true},
+		{name: "project env", table: "gonvex_project_env", want: true},
+		{name: "runtime projects", table: "gonvex_runtime_projects", want: true},
+		{name: "runtime manifests", table: "gonvex_runtime_manifests", want: true},
+		{name: "telemetry", table: "telemetry_events", want: true},
+		{name: "app users", table: "users", want: false},
+		{name: "app tenants", table: "tenants", want: false},
+		{name: "app join table", table: "userTenantMap", want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := internalDataTable(test.table); got != test.want {
+				t.Fatalf("expected %q internal=%v, got %v", test.table, test.want, got)
+			}
+		})
+	}
+}
+
+func TestDataRowsRejectsInternalTable(t *testing.T) {
+	server := New(config.Config{})
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/data/tables/_gonvex_files/rows", nil))
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d", http.StatusNotFound, recorder.Code)
+	}
+}
+
 func TestInsertDataRowsWithoutDatabaseFails(t *testing.T) {
 	server := New(config.Config{})
 	recorder := httptest.NewRecorder()
@@ -118,6 +157,18 @@ func TestInsertDataRowsWithoutDatabaseFails(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, recorder.Code)
+	}
+}
+
+func TestInsertDataRowsRejectsInternalTable(t *testing.T) {
+	server := New(config.Config{})
+	recorder := httptest.NewRecorder()
+	body := bytes.NewBufferString(`{"id":"secret"}`)
+
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/data/tables/gonvex_project_members/rows", body))
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d", http.StatusNotFound, recorder.Code)
 	}
 }
 
@@ -292,6 +343,9 @@ func TestMetricsLogsAreProjectScoped(t *testing.T) {
 	server.metrics.recordFunction("project-a", "tasks.list", "query", 25*time.Millisecond, nil)
 	server.metrics.recordFunction("project-a", "tasks.grid", "query", 25*time.Millisecond, fmt.Errorf("dashboard probe"))
 	server.metrics.recordFunction("project-b", "messages.list", "query", 25*time.Millisecond, fmt.Errorf("boom"))
+	dataRequest := httptest.NewRequest(http.MethodGet, "/dev/data/tables", nil)
+	dataRequest.Header.Set("x-gonvex-project-id", "project-a")
+	server.Handler().ServeHTTP(httptest.NewRecorder(), dataRequest)
 
 	request := httptest.NewRequest(http.MethodGet, "/dev/metrics", nil)
 	request.Header.Set("x-gonvex-project-id", "project-a")
@@ -307,11 +361,20 @@ func TestMetricsLogsAreProjectScoped(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(payload.Logs) != 1 || payload.Logs[0].Project != "project-a" {
+	if len(payload.Logs) != 3 {
 		t.Fatalf("expected only project-a logs, got %+v", payload.Logs)
 	}
-	if payload.Logs[0].Path != "tasks.list" {
-		t.Fatalf("expected only declared project-a function logs, got %+v", payload.Logs)
+	seen := map[string]bool{}
+	for _, entry := range payload.Logs {
+		if entry.Project != "project-a" {
+			t.Fatalf("expected project-a scoped log, got %+v", entry)
+		}
+		seen[entry.Path] = true
+	}
+	for _, path := range []string{"tasks.list", "tasks.grid", "dev.data.tables"} {
+		if !seen[path] {
+			t.Fatalf("expected project-a log path %q in %+v", path, payload.Logs)
+		}
 	}
 
 	clearRequest := httptest.NewRequest(http.MethodDelete, "/dev/logs", nil)
@@ -327,8 +390,8 @@ func TestMetricsLogsAreProjectScoped(t *testing.T) {
 	if err := json.NewDecoder(clearRecorder.Body).Decode(&clearPayload); err != nil {
 		t.Fatalf("decode clear response: %v", err)
 	}
-	if clearPayload.Cleared != 2 {
-		t.Fatalf("expected two cleared project-a logs, got %d", clearPayload.Cleared)
+	if clearPayload.Cleared != 3 {
+		t.Fatalf("expected three cleared project-a logs, got %d", clearPayload.Cleared)
 	}
 
 	projectBRequest := httptest.NewRequest(http.MethodGet, "/dev/metrics", nil)
@@ -340,6 +403,51 @@ func TestMetricsLogsAreProjectScoped(t *testing.T) {
 	}
 	if len(payload.Logs) != 1 || payload.Logs[0].Project != "project-b" || payload.Logs[0].Path != "messages.list" {
 		t.Fatalf("expected project-b log to remain, got %+v", payload.Logs)
+	}
+}
+
+func TestMetricsStreamsProjectLogs(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	id, logs, recent := metrics.subscribeLogs("project-a")
+	defer metrics.unsubscribeLogs(id)
+	if len(recent) != 0 {
+		t.Fatalf("expected no recent logs, got %+v", recent)
+	}
+
+	metrics.recordFunction("project-b", "messages.list", "query", 10*time.Millisecond, nil)
+	select {
+	case entry := <-logs:
+		t.Fatalf("did not expect project-b log on project-a stream: %+v", entry)
+	default:
+	}
+
+	metrics.recordFunction("project-a", "tasks.list", "query", 10*time.Millisecond, nil)
+	select {
+	case entry := <-logs:
+		if entry.Project != "project-a" || entry.Path != "tasks.list" {
+			t.Fatalf("unexpected streamed log: %+v", entry)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for project log")
+	}
+
+	_, _, recent = metrics.subscribeLogs("project-a")
+	if len(recent) != 1 || recent[0].Project != "project-a" {
+		t.Fatalf("expected one retained project-a log, got %+v", recent)
+	}
+}
+
+func TestLogStreamReplayFlag(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/dev/logs/stream", nil)
+	if !logStreamReplay(request) {
+		t.Fatal("expected log stream to replay retained logs by default")
+	}
+
+	for _, value := range []string{"0", "false", "no", "off"} {
+		request := httptest.NewRequest(http.MethodGet, "/dev/logs/stream?replay="+value, nil)
+		if logStreamReplay(request) {
+			t.Fatalf("expected replay=%s to disable retained log replay", value)
+		}
 	}
 }
 

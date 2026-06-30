@@ -153,9 +153,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /storage/{key...}", s.handleStorageUpload)
 	mux.HandleFunc("GET /dev/manifest", s.handleManifest)
 	mux.HandleFunc("GET /dev/metrics", s.handleMetrics)
+	mux.HandleFunc("GET /dev/metrics/stream", s.handleMetricsStream)
 	mux.HandleFunc("DELETE /dev/logs", s.handleClearLogs)
+	mux.HandleFunc("GET /dev/logs/stream", s.handleLogStream)
+	mux.HandleFunc("POST /dev/auth/login", s.handleDashboardLogin)
+	mux.HandleFunc("GET /dev/auth/users", s.handleDashboardUsers)
+	mux.HandleFunc("POST /dev/auth/users", s.handleDashboardUsers)
 	mux.HandleFunc("GET /dev/projects", s.handleProjects)
 	mux.HandleFunc("POST /dev/projects", s.handleCreateProject)
+	mux.HandleFunc("PATCH /dev/projects/{project}", s.handleUpdateProject)
+	mux.HandleFunc("GET /dev/projects/{project}/members", s.handleProjectMembers)
+	mux.HandleFunc("POST /dev/projects/{project}/invitations", s.handleCreateProjectInvitation)
 	mux.HandleFunc("POST /dev/projects/{project}/key", s.handleProjectKey)
 	mux.HandleFunc("GET /dev/projects/{project}/env", s.handleProjectEnv)
 	mux.HandleFunc("POST /dev/projects/{project}/env", s.handleSetProjectEnv)
@@ -171,7 +179,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /dev/data/tables/{table}/rows", s.handleInsertDataRow)
 	mux.HandleFunc("POST /dev/sync", s.handleDevSync)
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
-	return withGzip(withJSON(mux))
+	return withGzip(withJSON(s.withDashboardProjectAuth(mux)))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -191,15 +199,18 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.metricsSnapshot(r.Context(), projectID(r)))
+}
+
+func (s *Server) metricsSnapshot(ctx context.Context, project string) runtimeMetricsSnapshot {
 	connections, subscriptions := s.websocketStats()
-	project := projectID(r)
-	s.hydrateRuntimeStateForProject(r.Context(), project)
+	s.hydrateRuntimeStateForProject(ctx, project)
 	snapshot := s.metrics.snapshot(s.runtime.ManifestForProject(project), connections, subscriptions, project)
 	if s.scheduler != nil {
 		schedulerSnapshot := s.scheduler.snapshot()
 		snapshot.Scheduler = &schedulerSnapshot
 	}
-	writeJSON(w, http.StatusOK, snapshot)
+	return snapshot
 }
 
 func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) {
@@ -207,26 +218,31 @@ func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"cleared": cleared})
 }
 
-// runtimeInternalTables are runtime/registry bookkeeping tables that should not
-// appear in the Data browser (project env vars, the project registry, manifests,
-// and telemetry).
-var runtimeInternalTables = map[string]bool{
-	"gonvex_project_env":       true,
-	"gonvex_runtime_projects":  true,
-	"gonvex_runtime_manifests": true,
-	"telemetry_events":         true,
+// internalDataTable reports runtime-owned tables that should not be browsed as
+// project data. The prefixes are reserved for Gonvex registry/auth tables and
+// internal metadata such as _gonvex_files.
+func internalDataTable(name string) bool {
+	return name == "telemetry_events" || strings.HasPrefix(name, "gonvex_") || strings.HasPrefix(name, "_gonvex_")
 }
 
 func (s *Server) handleDataTables(w http.ResponseWriter, r *http.Request) {
-	s.hydrateProjectTenantDatabases(r.Context(), projectID(r))
+	project := projectID(r)
+	started := time.Now()
+	var opErr error
+	defer func() {
+		s.metrics.recordRuntimeOperation(project, "dev.data.tables", "runtime", time.Since(started), opErr, "")
+	}()
+
+	s.hydrateProjectTenantDatabases(r.Context(), project)
 	tables, err := data.ListTables(r.Context(), s.databaseURL(r))
 	if err != nil {
+		opErr = err
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	visible := tables[:0]
 	for _, table := range tables {
-		if runtimeInternalTables[table.Name] {
+		if internalDataTable(table.Name) {
 			continue
 		}
 		visible = append(visible, table)
@@ -235,13 +251,26 @@ func (s *Server) handleDataTables(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
-	s.hydrateProjectTenantDatabases(r.Context(), projectID(r))
-	table := r.PathValue("table")
 	project := projectID(r)
+	started := time.Now()
+	cacheOutcome := ""
+	var opErr error
+	defer func() {
+		s.metrics.recordRuntimeOperation(project, "dev.data.rows", "runtime", time.Since(started), opErr, cacheOutcome)
+	}()
+
+	s.hydrateProjectTenantDatabases(r.Context(), project)
+	table := r.PathValue("table")
+	if internalDataTable(table) {
+		opErr = fmt.Errorf("table not found")
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "table not found"})
+		return
+	}
 	tenant := tenantIDFromRequest(project, tenantID(r))
 	if s.cache.enabled() {
 		key := s.cache.rowsKey(project, tenant, table, r.URL.Query())
 		if payload, ok := s.cache.get(r.Context(), key); ok {
+			cacheOutcome = "hit"
 			s.metrics.recordCache(project, "hit")
 			w.Header().Set("content-type", "application/json")
 			w.Header().Set("x-gonvex-cache", "hit")
@@ -249,9 +278,11 @@ func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write(payload)
 			return
 		}
+		cacheOutcome = "miss"
 		s.metrics.recordCache(project, "miss")
 		w.Header().Set("x-gonvex-cache", "miss")
 	} else {
+		cacheOutcome = "bypass"
 		s.metrics.recordCache(project, "bypass")
 		w.Header().Set("x-gonvex-cache", "bypass")
 	}
@@ -260,6 +291,7 @@ func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	filters, err := parseRowsFilters(r.URL.Query().Get("filters"))
 	if err != nil {
+		opErr = err
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -278,11 +310,13 @@ func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
 		CursorID:        r.URL.Query().Get("cursorId"),
 	})
 	if err != nil {
+		opErr = err
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	payload, err := json.Marshal(result)
 	if err != nil {
+		opErr = err
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -318,6 +352,10 @@ func parseRowsFilters(raw string) ([]data.RowsFilter, error) {
 
 func (s *Server) handleInsertDataRow(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	if internalDataTable(r.PathValue("table")) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "table not found"})
+		return
+	}
 
 	var payload map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {

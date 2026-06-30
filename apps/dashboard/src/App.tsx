@@ -267,6 +267,8 @@ type DashboardSession = {
   name: string;
   avatarUrl?: string;
   provider?: "dev" | "gonvex" | "google";
+  role?: "admin" | "user";
+  accessToken?: string;
 };
 
 type ProjectTarget = {
@@ -275,6 +277,7 @@ type ProjectTarget = {
   environment: string;
   runtimeUrl: string;
   database: string;
+  databaseMode?: DatabaseMode;
   storageBucket: string;
   status: "local" | "preview" | "offline";
   description: string;
@@ -283,6 +286,28 @@ type ProjectTarget = {
   testTab?: boolean;
   ownerEmail?: string;
   sharedWith?: string[];
+  role?: "owner" | "admin" | "dev" | "viewer";
+};
+
+type DashboardUser = {
+  email: string;
+  name: string;
+  role: "admin" | "user";
+};
+
+type ProjectMember = {
+  email: string;
+  name: string;
+  role: "owner" | "admin" | "dev" | "viewer";
+};
+
+type ProjectInvitation = {
+  id: string;
+  projectId: string;
+  email: string;
+  role: "owner" | "admin" | "dev" | "viewer";
+  expiresAt: string;
+  accepted: boolean;
 };
 
 type EnvVariable = {
@@ -903,6 +928,7 @@ const localDeveloperSession: DashboardSession = {
   email: "local@gonvex.dev",
   name: "Local Developer",
   provider: "dev",
+  role: "admin",
 };
 
 function optionalEnvBoolean(value: string | undefined): boolean | null {
@@ -989,10 +1015,53 @@ function loadProjectTargets(): ProjectTarget[] {
 function normalizeProjectTarget(project: ProjectTarget): ProjectTarget {
   return {
     ...project,
+    databaseMode: project.databaseMode === "multiTenant" ? "multiTenant" : project.databaseMode === "single" ? "single" : undefined,
     provisioned: project.provisioned ?? true,
     runtimeUrl: trimTrailingSlash(project.runtimeUrl),
     testTab: project.testTab ?? false,
   };
+}
+
+function defaultProjectID(): string {
+  return envProjectID || "app";
+}
+
+function defaultProjectName(): string {
+  return envProjectID ? `${envProjectID} project` : "Dashboard Lab";
+}
+
+function defaultProjectDatabase(): string {
+  return String(import.meta.env.VITE_GONVEX_DATABASE ?? "gonvex_dev");
+}
+
+function isDefaultProjectTarget(project: ProjectTarget): boolean {
+  return project.id === defaultProjectID()
+    && project.name === defaultProjectName()
+    && project.database === defaultProjectDatabase()
+    && project.runtimeCreated !== true;
+}
+
+function mergeRuntimeProjects(current: ProjectTarget[], runtimeProjects: ProjectTarget[]): ProjectTarget[] {
+  if (runtimeProjects.length === 0) return current;
+  const runtimeIDs = new Set(runtimeProjects.map((project) => project.id));
+  const runtimeDatabases = new Set(runtimeProjects.map((project) => project.database));
+  const keepCurrent = current.filter((project) => {
+    if (runtimeIDs.has(project.id)) return false;
+    if (isDefaultProjectTarget(project) && runtimeDatabases.has(project.database)) return false;
+    return true;
+  });
+  return [...keepCurrent, ...runtimeProjects];
+}
+
+function preferredRuntimeProject(current: ProjectTarget | null, runtimeProjects: ProjectTarget[]): ProjectTarget | null {
+  if (runtimeProjects.length === 0) return null;
+  if (current) {
+    const byID = runtimeProjects.find((project) => project.id === current.id);
+    if (byID) return byID;
+    const byDatabase = runtimeProjects.find((project) => project.database === current.database);
+    if (byDatabase) return byDatabase;
+  }
+  return runtimeProjects.find((project) => project.database === defaultProjectDatabase()) ?? runtimeProjects[0] ?? null;
 }
 
 function projectIsProvisioned(project: ProjectTarget): boolean {
@@ -1003,11 +1072,106 @@ function runtimeURLForProject(project: ProjectTarget): string {
   return trimTrailingSlash(project.runtimeUrl || runtimeBaseURL);
 }
 
+function runtimeWebSocketURL(project: ProjectTarget, path: string): string {
+  const baseURL = runtimeURLForProject(project);
+  if (!baseURL) return "";
+  const url = new URL(path, `${baseURL}/`);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
+}
+
 function runtimeHeaders(project: ProjectTarget, headers?: HeadersInit, tenantID = ""): Headers {
   const next = new Headers(headers);
   next.set("x-gonvex-project-id", project.id);
   if (tenantID) next.set("x-gonvex-tenant-id", tenantID);
+  const token = dashboardAccessToken();
+  if (token) next.set("authorization", `Bearer ${token}`);
   return next;
+}
+
+function dashboardAuthHeaders(headers?: HeadersInit): Headers {
+  const next = new Headers(headers);
+  const token = dashboardAccessToken();
+  if (token) next.set("authorization", `Bearer ${token}`);
+  return next;
+}
+
+function dashboardAccessToken(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(dashboardSessionKey) ?? "{}") as Partial<DashboardSession>;
+    return String(parsed.accessToken ?? "");
+  } catch {
+    return "";
+  }
+}
+
+function useRuntimeMetrics(project: ProjectTarget, enabled = true) {
+  const [metrics, setMetrics] = useState<RuntimeMetricsResponse | null>(null);
+  const [reachable, setReachable] = useState(true);
+
+  useEffect(() => {
+    if (!enabled) {
+      setMetrics(null);
+      setReachable(false);
+      return;
+    }
+    const wsURL = runtimeWebSocketURL(project, "/dev/metrics/stream");
+    const baseURL = runtimeURLForProject(project);
+    if (!wsURL || !baseURL || typeof WebSocket === "undefined") {
+      setMetrics(null);
+      setReachable(false);
+      return;
+    }
+
+    let cancelled = false;
+    let fallbackStarted = false;
+    let receivedMetrics = false;
+    const loadFallbackOnce = () => {
+      if (fallbackStarted || cancelled || receivedMetrics) return;
+      fallbackStarted = true;
+      fetch(`${baseURL}/dev/metrics`, { headers: runtimeHeaders(project) })
+        .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
+        .then((payload: RuntimeMetricsResponse) => {
+          if (cancelled) return;
+          setMetrics(payload);
+          setReachable(true);
+        })
+        .catch(() => {
+          if (!cancelled) setReachable(false);
+        });
+    };
+
+    const url = new URL(wsURL);
+    url.searchParams.set("project", project.id);
+    const socket = new WebSocket(url.toString());
+    const fallbackTimer = window.setTimeout(loadFallbackOnce, 2000);
+    socket.addEventListener("open", () => {
+      window.clearTimeout(fallbackTimer);
+      if (!cancelled) setReachable(true);
+    });
+    socket.addEventListener("message", (event) => {
+      try {
+        const payload = JSON.parse(String(event.data)) as { type?: string; metrics?: RuntimeMetricsResponse };
+        if (!cancelled && payload.type === "metrics" && payload.metrics) {
+          receivedMetrics = true;
+          setMetrics(payload.metrics);
+          setReachable(true);
+        }
+      } catch {
+        // Ignore malformed stream frames.
+      }
+    });
+    socket.addEventListener("error", loadFallbackOnce);
+    socket.addEventListener("close", loadFallbackOnce);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(fallbackTimer);
+      socket.close();
+    };
+  }, [enabled, project]);
+
+  return { metrics, reachable, setMetrics };
 }
 
 const gonvexClients = new Map<string, GonvexClient>();
@@ -1034,6 +1198,7 @@ function projectFromRuntime(project: Partial<ProjectTarget> & { id: string; name
     environment: project.environment ?? "local dev",
     runtimeUrl: project.runtimeUrl ?? runtimeBaseURL,
     database: project.database ?? `${project.id.replace(/-/g, "_")}_dev`,
+    databaseMode: project.databaseMode === "multiTenant" ? "multiTenant" : "single",
     storageBucket: project.storageBucket ?? `${project.id}-dev`,
     status: project.status ?? "local",
     description: project.description ?? "Runtime-created project database.",
@@ -1042,21 +1207,34 @@ function projectFromRuntime(project: Partial<ProjectTarget> & { id: string; name
     testTab: project.testTab ?? false,
     ownerEmail: project.ownerEmail,
     sharedWith: project.sharedWith,
+    role: project.role as ProjectTarget["role"],
   });
 }
 
 async function fetchRuntimeProjects(): Promise<ProjectTarget[]> {
-  if (!runtimeBaseURL) return [];
-  const response = await fetch(`${runtimeBaseURL}/dev/projects`);
-  if (!response.ok) throw new Error(response.statusText);
-  const payload = await response.json() as { projects?: Array<Partial<ProjectTarget> & { id: string; name: string }> };
-  return (payload.projects ?? []).map(projectFromRuntime);
+  if (import.meta.env.MODE === "test") return [];
+  const urls = runtimeBaseURL ? [`${runtimeBaseURL}/dev/projects`, "/dev/projects"] : ["/dev/projects"];
+  let lastError = "runtime projects unavailable";
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, { headers: dashboardAuthHeaders() });
+      if (!response.ok) {
+        lastError = response.statusText || `HTTP ${response.status}`;
+        continue;
+      }
+      const payload = await response.json() as { projects?: Array<Partial<ProjectTarget> & { id: string; name: string }> };
+      return (payload.projects ?? []).map(projectFromRuntime);
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  throw new Error(lastError);
 }
 
-async function createRuntimeProject(name: string): Promise<RuntimeCreatedProject> {
+async function createRuntimeProject(name: string, databaseMode: DatabaseMode): Promise<RuntimeCreatedProject> {
   const response = await fetch(`${runtimeBaseURL}/dev/projects`, {
-    body: JSON.stringify({ name, testTab: false }),
-    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, databaseMode, testTab: false }),
+    headers: dashboardAuthHeaders({ "content-type": "application/json" }),
     method: "POST",
   });
   if (!response.ok) {
@@ -1070,12 +1248,59 @@ async function createRuntimeProject(name: string): Promise<RuntimeCreatedProject
   };
 }
 
-async function deleteRuntimeProject(projectID: string): Promise<void> {
-  const response = await fetch(`${runtimeBaseURL}/dev/projects/${encodeURIComponent(projectID)}`, { method: "DELETE" });
+async function updateRuntimeProject(project: ProjectTarget, update: { databaseMode?: DatabaseMode }): Promise<ProjectTarget> {
+  const baseURL = runtimeURLForProject(project);
+  if (!baseURL) return { ...project, ...update };
+  const response = await fetch(`${baseURL}/dev/projects/${encodeURIComponent(project.id)}`, {
+    body: JSON.stringify(update),
+    headers: runtimeHeaders(project, { "content-type": "application/json" }),
+    method: "PATCH",
+  });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({} as { error?: string }));
     throw new Error(payload.error ?? response.statusText);
   }
+  const payload = await response.json() as { project?: Partial<ProjectTarget> & { id: string; name: string } };
+  return payload.project ? projectFromRuntime(payload.project) : { ...project, ...update };
+}
+
+async function deleteRuntimeProject(projectID: string): Promise<void> {
+  const response = await fetch(`${runtimeBaseURL}/dev/projects/${encodeURIComponent(projectID)}`, { headers: dashboardAuthHeaders(), method: "DELETE" });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({} as { error?: string }));
+    throw new Error(payload.error ?? response.statusText);
+  }
+}
+
+async function createDashboardUser(email: string, name: string, password: string, role: DashboardUser["role"]): Promise<DashboardUser> {
+  const response = await fetch(`${runtimeBaseURL}/dev/auth/users`, {
+    body: JSON.stringify({ email, name, password, role }),
+    headers: dashboardAuthHeaders({ "content-type": "application/json" }),
+    method: "POST",
+  });
+  const payload = await response.json().catch(() => ({} as { error?: string; user?: DashboardUser }));
+  if (!response.ok || !payload.user) throw new Error(payload.error ?? response.statusText);
+  return payload.user;
+}
+
+async function fetchProjectMembers(project: ProjectTarget): Promise<{ members: ProjectMember[]; invitations: ProjectInvitation[] }> {
+  const response = await fetch(`${runtimeURLForProject(project)}/dev/projects/${encodeURIComponent(project.id)}/members`, {
+    headers: runtimeHeaders(project),
+  });
+  const payload = await response.json().catch(() => ({} as { error?: string; members?: ProjectMember[]; invitations?: ProjectInvitation[] }));
+  if (!response.ok) throw new Error(payload.error ?? response.statusText);
+  return { members: payload.members ?? [], invitations: payload.invitations ?? [] };
+}
+
+async function inviteProjectMember(project: ProjectTarget, email: string, role: ProjectMember["role"]): Promise<ProjectInvitation> {
+  const response = await fetch(`${runtimeURLForProject(project)}/dev/projects/${encodeURIComponent(project.id)}/invitations`, {
+    body: JSON.stringify({ email, role }),
+    headers: runtimeHeaders(project, { "content-type": "application/json" }),
+    method: "POST",
+  });
+  const payload = await response.json().catch(() => ({} as { error?: string; invitation?: ProjectInvitation }));
+  if (!response.ok || !payload.invitation) throw new Error(payload.error ?? response.statusText);
+  return payload.invitation;
 }
 
 function firebaseAuthConfigured(): boolean {
@@ -2265,9 +2490,13 @@ function tenantLooksInternalOrTest(tenant: TenantTarget): boolean {
       || normalized.startsWith("e2e-")
       || normalized.startsWith("e2e_")
       || normalized.includes("-e2e-")
-      || normalized.includes("_e2e_")
-      || normalized.includes("testing");
+      || normalized.includes("_e2e_");
   });
+}
+
+function tablesLookMultiTenant(tables: DataTableInfo[]): boolean {
+  const names = new Set(tables.map((table) => table.name));
+  return names.has("tenants") && (names.has("userTenantMap") || names.has("users"));
 }
 
 function useViewportHeight() {
@@ -2603,7 +2832,9 @@ function ManifestGrid(props: {
 export function App() {
   const [activePage, setActivePage] = useState<PageID>(() => pageFromPath(window.location.pathname));
   const [theme, setTheme] = useState<ThemeMode>(() => storedTheme());
+  const [signedOut, setSignedOut] = useState(() => window.location.pathname === "/login");
   const [session, setSession] = useState<DashboardSession | null>(() => {
+    if (window.location.pathname === "/login") return null;
     if (!dashboardAuthEnabled) return localDeveloperSession;
     if (dashboardPasswordLoginEnabled) return null;
     return storedSession();
@@ -2620,18 +2851,26 @@ export function App() {
   });
   const [hideTestTenants, setHideTestTenants] = useState<Record<string, boolean>>(() => storedHideTestTenants());
   const [actionMessage, setActionMessage] = useState("");
+  const [projectDiscoveryError, setProjectDiscoveryError] = useState("");
+  const [projectDiscoveryLoading, setProjectDiscoveryLoading] = useState(false);
   const currentSession = session ?? localDeveloperSession;
   const visibleProjects = visibleProjectsForSession(projects, currentSession);
   const activeProject = projectByID(visibleProjects, activeProjectID);
+  const activeProjectRef = useRef<ProjectTarget | null>(null);
+  activeProjectRef.current = activeProject;
+  const didAutoDiscoverProjects = useRef(false);
   const activePages = activeProject ? pagesForProject(activeProject) : pages;
   const page = activePages.find((item) => item.id === activePage) ?? activePages[0] ?? getPage("overview");
-  const activeDatabaseMode = activeProject ? databaseModeForProject(databaseModes, activeProject.id) : "single";
+  const activeDatabaseMode = activeProject ? activeProject.databaseMode ?? databaseModeForProject(databaseModes, activeProject.id) : "single";
   const activeHideTestTenants = activeProject ? hideTestTenantsForProject(hideTestTenants, activeProject.id) : true;
   const themeLabel = theme === "dark" ? "Light mode" : "Dark mode";
   const toggleTheme = () => setTheme((current) => (current === "dark" ? "light" : "dark"));
   const reportAction: ActionHandler = (message) => setActionMessage(message);
+  const loginRequired = dashboardAuthEnabled || signedOut;
+  const canSignOut = dashboardAuthEnabled || dashboardPasswordLoginEnabled || Boolean(session?.accessToken) || session?.provider === "gonvex";
 
   const login = (nextSession: DashboardSession) => {
+    setSignedOut(false);
     setSession(nextSession);
     window.localStorage.setItem(dashboardSessionKey, JSON.stringify(nextSession));
     window.history.replaceState(null, "", "/projects");
@@ -2642,11 +2881,12 @@ export function App() {
   };
 
   const logout = () => {
-    if (dashboardPasswordLoginEnabled) void destroyDashboardPasswordSession();
-    setSession(dashboardAuthEnabled ? null : localDeveloperSession);
+    void destroyDashboardPasswordSession();
+    setSignedOut(true);
+    setSession(null);
     setActiveProjectID(null);
     window.localStorage.removeItem(dashboardSessionKey);
-    window.history.replaceState(null, "", dashboardAuthEnabled ? "/login" : "/projects");
+    window.history.replaceState(null, "", "/login");
     reportAction("Signed out of the dashboard");
   };
 
@@ -2675,8 +2915,8 @@ export function App() {
   };
 
   const createProject = async (name: string, databaseMode: DatabaseMode): Promise<CreatedProject> => {
-    const createdProject = await createRuntimeProject(name);
-    const ownedProject = { ...createdProject.project, ownerEmail: currentSession.email };
+    const createdProject = await createRuntimeProject(name, databaseMode);
+    const ownedProject = { ...createdProject.project, databaseMode, ownerEmail: currentSession.email };
     setProjects((current) => {
       const next = [...current.filter((item) => item.id !== ownedProject.id), ownedProject];
       return next;
@@ -2688,6 +2928,12 @@ export function App() {
     });
     reportAction(`Created ${ownedProject.name}`);
     return { project: ownedProject, databaseMode, projectKey: createdProject.projectKey };
+  };
+
+  const createUser = async (email: string, name: string, password: string, role: DashboardUser["role"]): Promise<DashboardUser> => {
+    const user = await createDashboardUser(email, name, password, role);
+    reportAction(`Created ${user.email}`);
+    return user;
   };
 
   const deleteProject = async (projectID: string) => {
@@ -2715,12 +2961,34 @@ export function App() {
 
   const updateProjectDatabaseMode = (mode: DatabaseMode) => {
     if (!activeProject) return;
+    const previousProject = activeProject;
+    const previousMode = activeDatabaseMode;
+    setProjects((current) => current.map((project) => (
+      project.id === activeProject.id ? { ...project, databaseMode: mode } : project
+    )));
     setDatabaseModes((current) => {
       const next = { ...current, [activeProject.id]: mode };
       window.localStorage.setItem(dashboardDatabaseModesKey, JSON.stringify(next));
       return next;
     });
     reportAction(mode === "multiTenant" ? "Using landlord and tenant databases" : "Using a single project database");
+    void updateRuntimeProject(previousProject, { databaseMode: mode })
+      .then((savedProject) => {
+        setProjects((current) => current.map((project) => (
+          project.id === savedProject.id ? { ...project, ...savedProject } : project
+        )));
+      })
+      .catch((error) => {
+        setProjects((current) => current.map((project) => (
+          project.id === previousProject.id ? previousProject : project
+        )));
+        setDatabaseModes((current) => {
+          const next = { ...current, [previousProject.id]: previousMode };
+          window.localStorage.setItem(dashboardDatabaseModesKey, JSON.stringify(next));
+          return next;
+        });
+        reportAction(error instanceof Error ? error.message : "Could not save database structure");
+      });
   };
 
   const handleTenantsDetected = (projectID: string, hasTenants: boolean) => {
@@ -2742,6 +3010,26 @@ export function App() {
     reportAction(hidden ? "Hiding test tenant databases" : "Showing all tenant databases");
   };
 
+  const refreshRuntimeProjects = useCallback(async () => {
+    setProjectDiscoveryLoading(true);
+    setProjectDiscoveryError("");
+    try {
+      const runtimeProjects = await fetchRuntimeProjects();
+      if (runtimeProjects.length === 0) return;
+      const currentActiveProject = activeProjectRef.current;
+      const preferred = preferredRuntimeProject(currentActiveProject, runtimeProjects);
+      setProjects((current) => mergeRuntimeProjects(current, runtimeProjects));
+      if (preferred && currentActiveProject?.id !== preferred.id && (!currentActiveProject || isDefaultProjectTarget(currentActiveProject))) {
+        setActiveProjectID(preferred.id);
+        window.localStorage.setItem(dashboardProjectKey, preferred.id);
+      }
+    } catch (error) {
+      setProjectDiscoveryError(error instanceof Error ? error.message : "Could not load runtime projects");
+    } finally {
+      setProjectDiscoveryLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     const onPopState = () => {
       setActivePage(pageFromPath(window.location.pathname));
@@ -2752,7 +3040,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (dashboardAuthEnabled && !session) {
+    if (loginRequired && !session) {
       if (window.location.pathname !== "/login") window.history.replaceState(null, "", "/login");
       return;
     }
@@ -2770,7 +3058,7 @@ export function App() {
     if (window.location.pathname !== currentPath) {
       window.history.replaceState(null, "", currentPath);
     }
-  }, [activePage, activeProject, session]);
+  }, [activePage, activeProject, loginRequired, session]);
 
   useEffect(() => {
     window.localStorage.setItem("gonvex-theme", theme);
@@ -2780,20 +3068,10 @@ export function App() {
   }, [theme]);
 
   useEffect(() => {
-    let cancelled = false;
-    fetchRuntimeProjects()
-      .then((runtimeProjects) => {
-        if (cancelled || runtimeProjects.length === 0) return;
-        setProjects((current) => {
-          const runtimeIDs = new Set(runtimeProjects.map((project) => project.id));
-          return [...current.filter((project) => !runtimeIDs.has(project.id)), ...runtimeProjects];
-        });
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (didAutoDiscoverProjects.current) return;
+    didAutoDiscoverProjects.current = true;
+    void refreshRuntimeProjects();
+  }, [refreshRuntimeProjects]);
 
   useEffect(() => {
     if (!actionMessage) return;
@@ -2801,7 +3079,7 @@ export function App() {
     return () => window.clearTimeout(timeout);
   }, [actionMessage]);
 
-  if (dashboardAuthEnabled && !session) {
+  if (loginRequired && !session) {
     return (
       <LoginPage
         allowUnlistedEmails={dashboardAllowUnlistedEmails}
@@ -2811,7 +3089,7 @@ export function App() {
         onLogin={login}
         onPasswordLogin={loginWithPassword}
         onToggleTheme={toggleTheme}
-        passwordLoginEnabled={dashboardPasswordLoginEnabled}
+        passwordLoginEnabled={dashboardPasswordLoginEnabled || signedOut}
         theme={theme}
         themeLabel={themeLabel}
       />
@@ -2822,11 +3100,15 @@ export function App() {
     return (
       <ProjectsPage
         onCreateProject={createProject}
+        onCreateUser={createUser}
         onDeleteProject={deleteProject}
         onLogout={logout}
         onOpenProject={openProject}
+        onRefreshProjects={refreshRuntimeProjects}
         onToggleTheme={toggleTheme}
-        authEnabled={dashboardAuthEnabled}
+        authEnabled={canSignOut}
+        discoveryError={projectDiscoveryError}
+        discoveryLoading={projectDiscoveryLoading}
         projects={visibleProjects}
         session={currentSession}
         theme={theme}
@@ -3122,11 +3404,15 @@ function LoginPage(props: {
 
 function ProjectsPage(props: {
   onCreateProject: (name: string, databaseMode: DatabaseMode) => Promise<CreatedProject>;
+  onCreateUser: (email: string, name: string, password: string, role: DashboardUser["role"]) => Promise<DashboardUser>;
   onDeleteProject: (projectID: string) => Promise<void>;
   onLogout: () => void;
   onOpenProject: (projectID: string) => void;
+  onRefreshProjects: () => Promise<void>;
   onToggleTheme: () => void;
   authEnabled: boolean;
+  discoveryError: string;
+  discoveryLoading: boolean;
   projects: ProjectTarget[];
   session: DashboardSession;
   theme: ThemeMode;
@@ -3139,12 +3425,28 @@ function ProjectsPage(props: {
   const [creating, setCreating] = useState(false);
   const [createdProject, setCreatedProject] = useState<CreatedProject | null>(null);
   const [deletingProjectID, setDeletingProjectID] = useState<string | null>(null);
+  const [userOpen, setUserOpen] = useState(false);
+  const [userEmail, setUserEmail] = useState("");
+  const [userName, setUserName] = useState("");
+  const [userPassword, setUserPassword] = useState("");
+  const [userRole, setUserRole] = useState<DashboardUser["role"]>("user");
+  const [userStatus, setUserStatus] = useState("");
+  const [userSaving, setUserSaving] = useState(false);
 
   const closeCreateModal = () => {
     setCreateOpen(false);
     setCreateError("");
     setCreatedProject(null);
     setDatabaseMode("single");
+  };
+
+  const closeUserModal = () => {
+    setUserOpen(false);
+    setUserEmail("");
+    setUserName("");
+    setUserPassword("");
+    setUserRole("user");
+    setUserStatus("");
   };
 
   const createProject = async (event: FormEvent<HTMLFormElement>) => {
@@ -3174,6 +3476,21 @@ function ProjectsPage(props: {
     }
   };
 
+  const createUser = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!userEmail.trim() || !userPassword) return;
+    setUserSaving(true);
+    setUserStatus("");
+    try {
+      await props.onCreateUser(userEmail, userName, userPassword, userRole);
+      closeUserModal();
+    } catch (error) {
+      setUserStatus(error instanceof Error ? error.message : "Could not create user");
+    } finally {
+      setUserSaving(false);
+    }
+  };
+
   return (
     <main className="projects-shell" data-theme={props.theme}>
       <header className="projects-header">
@@ -3183,6 +3500,7 @@ function ProjectsPage(props: {
         </div>
         <div className="topbar-actions">
           <span className="projects-user">{props.session.name}</span>
+          {props.session.role === "admin" ? <Button size="sm" variant="secondary" onPress={() => setUserOpen(true)}>New user</Button> : null}
           <Button size="sm" variant="secondary" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
           {props.authEnabled ? <Button size="sm" variant="ghost" onPress={props.onLogout}>Sign out</Button> : null}
         </div>
@@ -3192,6 +3510,12 @@ function ProjectsPage(props: {
         <p className="eyebrow">Projects</p>
         <h1>Choose a project</h1>
         <p className="lede">Each project can point to the same Postgres instance with a different database and its own generated code manifest.</p>
+        <div className="projects-discovery">
+          <Button size="sm" variant="secondary" isDisabled={props.discoveryLoading} onPress={() => { void props.onRefreshProjects(); }}>
+            {props.discoveryLoading ? "Checking runtime" : "Refresh projects"}
+          </Button>
+          {props.discoveryError ? <p className="login-error" role="alert">Runtime projects unavailable: {props.discoveryError}</p> : null}
+        </div>
       </section>
 
       <section className="projects-grid" aria-label="Projects">
@@ -3231,6 +3555,55 @@ function ProjectsPage(props: {
           <strong>Create project</strong>
         </button>
       </section>
+
+      {userOpen ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={closeUserModal}>
+          <section
+            aria-labelledby="create-user-title"
+            className="document-modal project-create-modal"
+            onMouseDown={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <header>
+              <div>
+                <h2 id="create-user-title">Create user</h2>
+                <p>New users can sign in and create their own projects. They only see existing projects after an invite.</p>
+              </div>
+              <Button size="sm" variant="ghost" onPress={closeUserModal}>Close</Button>
+            </header>
+            <form className="project-modal-form" onSubmit={createUser}>
+              <label className="setting-field">
+                <span>Email</span>
+                <input className="table-search" onChange={(event) => setUserEmail(event.target.value)} type="email" value={userEmail} />
+              </label>
+              <label className="setting-field">
+                <span>Name</span>
+                <input className="table-search" onChange={(event) => setUserName(event.target.value)} value={userName} />
+              </label>
+              <label className="setting-field">
+                <span>Password</span>
+                <input className="table-search" onChange={(event) => setUserPassword(event.target.value)} type="password" value={userPassword} />
+              </label>
+              <AppSelect
+                ariaLabel="Dashboard role"
+                className="setting-field"
+                label="Dashboard role"
+                selectedKey={userRole}
+                onChange={(value) => setUserRole(value as DashboardUser["role"])}
+                options={[
+                  { value: "user", label: "User", description: "Can create own projects and access invited projects" },
+                  { value: "admin", label: "Admin", description: "Can create users; project access still requires ownership or invite" },
+                ]}
+              />
+              {userStatus ? <p className="project-modal-error">{userStatus}</p> : null}
+              <footer>
+                <Button variant="ghost" onPress={closeUserModal}>Cancel</Button>
+                <Button isDisabled={userSaving} type="submit" variant="primary">{userSaving ? "Creating" : "Create user"}</Button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      ) : null}
 
       {createOpen ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={closeCreateModal}>
@@ -3393,31 +3766,7 @@ function HealthChartCard(props: { title: string; value?: string; tone?: "default
 }
 
 function OverviewPage(props: { project: ProjectTarget }) {
-  const [metrics, setMetrics] = useState<RuntimeMetricsResponse | null>(null);
-  const [reachable, setReachable] = useState(true);
-
-  useEffect(() => {
-    if (!runtimeBaseURL) return;
-    let cancelled = false;
-    const load = () => {
-      fetch(`${runtimeBaseURL}/dev/metrics`)
-        .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-        .then((payload: RuntimeMetricsResponse) => {
-          if (cancelled) return;
-          setMetrics(payload);
-          setReachable(true);
-        })
-        .catch(() => {
-          if (!cancelled) setReachable(false);
-        });
-    };
-    load();
-    const interval = window.setInterval(load, 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, []);
+  const { metrics, reachable } = useRuntimeMetrics(props.project);
 
   const derived = useMemo(() => {
     const functions = metrics?.functions ?? {};
@@ -3720,7 +4069,7 @@ function MiniChart(props: { series: number[]; tone: FunctionStat["tone"] }) {
 function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onAction: ActionHandler }) {
   const [search, setSearch] = useState("");
   const [runtimeFunctions, setRuntimeFunctions] = useState<FunctionInfo[]>([]);
-  const [runtimeMetrics, setRuntimeMetrics] = useState<RuntimeMetricsResponse | null>(null);
+  const { metrics: runtimeMetrics } = useRuntimeMetrics(props.project, projectIsProvisioned(props.project));
   const [selectedName, setSelectedName] = useState("");
   const [activeTab, setActiveTab] = useState<"statistics" | "logs">("statistics");
   const selectedFunction = runtimeFunctions.find((item) => item.name === selectedName) ?? runtimeFunctions[0] ?? null;
@@ -3758,28 +4107,6 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
       cancelled = true;
     };
   }, [props.project]);
-
-  useEffect(() => {
-    if (!runtimeBaseURL) return;
-    let cancelled = false;
-    const loadMetrics = () => {
-      fetch(`${runtimeBaseURL}/dev/metrics`)
-        .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-        .then((payload: RuntimeMetricsResponse) => {
-          if (!cancelled) setRuntimeMetrics(payload);
-        })
-        .catch(() => {
-          if (!cancelled) setRuntimeMetrics(null);
-        });
-    };
-
-    loadMetrics();
-    const interval = window.setInterval(loadMetrics, 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, []);
 
   return (
     <div className="function-browser">
@@ -3922,6 +4249,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   const [selectionClearKey, setSelectionClearKey] = useState(0);
   const [status, setStatus] = useState("Loading tables...");
   const [runtimeAvailable, setRuntimeAvailable] = useState(false);
+  const [detectedMultiTenant, setDetectedMultiTenant] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [fetchNonce, setFetchNonce] = useState(0);
   const rowCacheRef = useRef(rowCache);
@@ -3931,7 +4259,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   const pendingScrollRef = useRef<ScrollFetchPending>({ startRow: 0, height: 1 });
   rowCacheRef.current = rowCache;
   requestedOffsetRef.current = requestedOffset;
-  const multiTenantMode = props.databaseMode === "multiTenant";
+  const multiTenantMode = props.databaseMode === "multiTenant" || detectedMultiTenant;
   const currentTenantID = multiTenantMode && selectedTenant !== landlordDataSourceID ? selectedTenant : "";
   const activeTenant = tenants.find((tenant) => tenant.id === currentTenantID) ?? null;
   const visibleTenants = useMemo(
@@ -3956,10 +4284,11 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
     setFilterOpen(state.filters.length > 0);
     setViewMode(state.view);
     setTenants([]);
+    setDetectedMultiTenant(false);
   }, [props.databaseMode, props.project.id]);
 
   useEffect(() => {
-    if (props.databaseMode === "multiTenant") return;
+    if (multiTenantMode) return;
     setSelectedTenant(landlordDataSourceID);
     setDataSourceInURL(landlordDataSourceID, true);
     setTenants([]);
@@ -3967,12 +4296,12 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
     setRowCache({});
     setRequestedOffset(0);
     setVisibleOffset(0);
-  }, [props.databaseMode]);
+  }, [multiTenantMode]);
 
   useEffect(() => {
     const onPopState = () => {
       const state = dataStateFromURL();
-      setSelectedTenant(props.databaseMode === "multiTenant" ? state.sourceID : landlordDataSourceID);
+      setSelectedTenant(multiTenantMode ? state.sourceID : landlordDataSourceID);
       setSelectedTable(state.table);
       setTableSearch(state.tableSearch);
       setRowSearchInput(state.rowSearch);
@@ -3984,7 +4313,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [props.databaseMode]);
+  }, [multiTenantMode]);
 
   useEffect(() => {
     setDataStateInURL({
@@ -4014,7 +4343,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   useEffect(() => {
     let cancelled = false;
     const baseURL = runtimeURLForProject(props.project);
-    if (props.databaseMode !== "multiTenant" || !projectIsProvisioned(props.project) || !baseURL) {
+    if (!projectIsProvisioned(props.project) || !baseURL) {
       setTenants([]);
       return;
     }
@@ -4026,8 +4355,10 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
         if (cancelled) return;
         const nextTenants = payload.tenants ?? [];
         const selectableTenants = props.hideTestTenants ? nextTenants.filter((tenant) => !tenantLooksInternalOrTest(tenant)) : nextTenants;
+        const hasTenants = nextTenants.length > 0;
         setTenants(nextTenants);
-        props.onTenantsDetected?.(nextTenants.length > 0);
+        if (hasTenants) setDetectedMultiTenant(true);
+        props.onTenantsDetected?.(hasTenants);
         setSelectedTenant((current) => {
           const nextSource = current === landlordDataSourceID || selectableTenants.some((tenant) => tenant.id === current)
             ? current
@@ -4043,7 +4374,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
     return () => {
       cancelled = true;
     };
-  }, [props.databaseMode, props.hideTestTenants, props.project]);
+  }, [props.hideTestTenants, props.project]);
 
   useEffect(() => {
     if (!props.hideTestTenants || !currentTenantID) return;
@@ -4085,6 +4416,10 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
       .then((payload: { tables: DataTableInfo[] }) => {
         if (cancelled) return;
         const nextTables = payload.tables ?? [];
+        if (!currentTenantID && tablesLookMultiTenant(nextTables)) {
+          setDetectedMultiTenant(true);
+          props.onTenantsDetected?.(true);
+        }
         setTables(nextTables);
         setStatus(currentTenantID ? `Viewing tenant database: ${activeTenantDisplay}` : "Viewing landlord / project database");
         setRuntimeAvailable(true);
@@ -6227,7 +6562,7 @@ function FilesPage(props: {
 }
 
 function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onAction: ActionHandler }) {
-  const [metrics, setMetrics] = useState<RuntimeMetricsResponse | null>(null);
+  const { metrics, reachable, setMetrics } = useRuntimeMetrics(props.project, projectIsProvisioned(props.project));
   const [status, setStatus] = useState("Loading runtime logs...");
   const [search, setSearch] = useState("");
   const [outcome, setOutcome] = useState("all");
@@ -6329,37 +6664,13 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   };
 
   useEffect(() => {
-    const baseURL = runtimeURLForProject(props.project);
-    if (!baseURL || !projectIsProvisioned(props.project)) {
-      setMetrics(null);
+    if (!projectIsProvisioned(props.project) || !reachable) {
       setStatus("Runtime offline");
       return;
     }
-
-    let cancelled = false;
-    const loadMetrics = () => {
-      fetch(`${baseURL}/dev/metrics`, { headers: runtimeHeaders(props.project) })
-        .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-        .then((payload: RuntimeMetricsResponse) => {
-          if (cancelled) return;
-          setMetrics(payload);
-          const projectLogCount = (payload.logs ?? []).filter((entry) => entry.project === props.project.id).length;
-          setStatus(`Showing ${projectLogCount} runtime log ${projectLogCount === 1 ? "entry" : "entries"} for ${props.project.name}`);
-        })
-        .catch(() => {
-          if (cancelled) return;
-          setMetrics(null);
-          setStatus("Runtime offline");
-        });
-    };
-
-    loadMetrics();
-    const interval = window.setInterval(loadMetrics, 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [props.project]);
+    const projectLogCount = logs.length;
+    setStatus(`Showing ${projectLogCount} runtime log ${projectLogCount === 1 ? "entry" : "entries"} for ${props.project.name}`);
+  }, [logs.length, props.project, reachable]);
 
   return (
     <div className="logs-shell">
@@ -6442,38 +6753,16 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
 }
 
 function SchedulesPage(props: { project: ProjectTarget }) {
-  const [metrics, setMetrics] = useState<RuntimeMetricsResponse | null>(null);
+  const { metrics, reachable } = useRuntimeMetrics(props.project, projectIsProvisioned(props.project));
   const [status, setStatus] = useState("Loading scheduler...");
 
   useEffect(() => {
-    const baseURL = runtimeURLForProject(props.project);
-    if (!baseURL || !projectIsProvisioned(props.project)) {
-      setMetrics(null);
+    if (!projectIsProvisioned(props.project) || !reachable) {
       setStatus("Runtime offline");
       return;
     }
-    let cancelled = false;
-    const load = () => {
-      fetch(`${baseURL}/dev/metrics`, { headers: runtimeHeaders(props.project) })
-        .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-        .then((payload: RuntimeMetricsResponse) => {
-          if (cancelled) return;
-          setMetrics(payload);
-          setStatus(payload.scheduler ? `${payload.scheduler.crons.length} cron${payload.scheduler.crons.length === 1 ? "" : "s"} registered` : "No scheduler data");
-        })
-        .catch(() => {
-          if (cancelled) return;
-          setMetrics(null);
-          setStatus("Runtime offline");
-        });
-    };
-    load();
-    const interval = window.setInterval(load, 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [props.project]);
+    setStatus(metrics?.scheduler ? `${metrics.scheduler.crons.length} cron${metrics.scheduler.crons.length === 1 ? "" : "s"} registered` : "No scheduler data");
+  }, [metrics, props.project, reachable]);
 
   const scheduler = metrics?.scheduler ?? null;
   const crons = scheduler?.crons ?? [];
@@ -6628,7 +6917,7 @@ function SettingsPage(props: {
   onHideTestTenantsChange: (hidden: boolean) => void;
   project: ProjectTarget;
 }) {
-  const [activeSection, setActiveSection] = useState<"general" | "database" | "connection" | "environment" | "authentication">("general");
+  const [activeSection, setActiveSection] = useState<"general" | "database" | "connection" | "environment" | "members" | "authentication">("general");
   const [projectKey, setProjectKey] = useState("");
   const [projectKeyStatus, setProjectKeyStatus] = useState("");
   const [projectKeyLoading, setProjectKeyLoading] = useState(false);
@@ -6640,6 +6929,13 @@ function SettingsPage(props: {
   const [envSaving, setEnvSaving] = useState(false);
   const [envPasteMode, setEnvPasteMode] = useState(false);
   const [envPasteText, setEnvPasteText] = useState("");
+  const [members, setMembers] = useState<ProjectMember[]>([]);
+  const [invitations, setInvitations] = useState<ProjectInvitation[]>([]);
+  const [memberStatus, setMemberStatus] = useState("");
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<ProjectMember["role"]>("dev");
+  const [inviteSaving, setInviteSaving] = useState(false);
   const dashboardURL = typeof window === "undefined"
     ? pathForProjectPage(props.project.id, "overview")
     : `${window.location.origin}${pathForProjectPage(props.project.id, "overview")}`;
@@ -6704,6 +7000,42 @@ function SettingsPage(props: {
   useEffect(() => {
     if (activeSection === "environment") void loadEnvVars();
   }, [activeSection, loadEnvVars]);
+
+  const loadMembers = useCallback(async () => {
+    setMembersLoading(true);
+    setMemberStatus("");
+    try {
+      const payload = await fetchProjectMembers(props.project);
+      setMembers(payload.members);
+      setInvitations(payload.invitations);
+    } catch (error) {
+      setMemberStatus(error instanceof Error ? error.message : "Could not load members");
+    } finally {
+      setMembersLoading(false);
+    }
+  }, [props.project]);
+
+  useEffect(() => {
+    if (activeSection === "members") void loadMembers();
+  }, [activeSection, loadMembers]);
+
+  const inviteMember = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!inviteEmail.trim()) return;
+    setInviteSaving(true);
+    setMemberStatus("");
+    try {
+      await inviteProjectMember(props.project, inviteEmail, inviteRole);
+      setInviteEmail("");
+      setInviteRole("dev");
+      setMemberStatus("Invitation saved");
+      await loadMembers();
+    } catch (error) {
+      setMemberStatus(error instanceof Error ? error.message : "Could not invite member");
+    } finally {
+      setInviteSaving(false);
+    }
+  };
 
   const saveEnvVar = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -6823,6 +7155,13 @@ function SettingsPage(props: {
           variant={activeSection === "environment" ? "secondary" : "ghost"}
         >
           Environment Variables
+        </Button>
+        <Button
+          data-active={activeSection === "members" ? "true" : undefined}
+          onPress={() => setActiveSection("members")}
+          variant={activeSection === "members" ? "secondary" : "ghost"}
+        >
+          Members
         </Button>
         <Button
           data-active={activeSection === "authentication" ? "true" : undefined}
@@ -7001,6 +7340,71 @@ function SettingsPage(props: {
               ))}
             </div>
             {envStatus ? <p className="settings-note">{envStatus}</p> : null}
+          </SettingsCard>
+        ) : null}
+
+        {activeSection === "members" ? (
+          <SettingsCard title="Members" description="Invite users who may access this project. Users can sign in only after an admin creates their account.">
+            <form className="env-form" onSubmit={inviteMember}>
+              <label className="setting-field">
+                <span>Email</span>
+                <input
+                  autoComplete="email"
+                  className="table-search"
+                  onChange={(event) => setInviteEmail(event.target.value)}
+                  placeholder="teammate@example.com"
+                  type="email"
+                  value={inviteEmail}
+                />
+              </label>
+              <AppSelect
+                ariaLabel="Project role"
+                className="setting-field"
+                label="Project role"
+                selectedKey={inviteRole}
+                onChange={(value) => setInviteRole(value as ProjectMember["role"])}
+                options={[
+                  { value: "admin", label: "Admin", description: "Manage project settings and members" },
+                  { value: "dev", label: "Developer", description: "Use project runtime tools" },
+                  { value: "viewer", label: "Viewer", description: "Read-only dashboard access" },
+                ]}
+              />
+              <div className="env-actions">
+                <Button isDisabled={inviteSaving || !inviteEmail.trim()} type="submit" variant="primary">
+                  {inviteSaving ? "Inviting" : "Invite member"}
+                </Button>
+                <Button isDisabled={membersLoading} type="button" variant="ghost" onPress={loadMembers}>
+                  Refresh
+                </Button>
+              </div>
+            </form>
+            <div className="env-table" role="table" aria-label="Project members">
+              <div className="env-row env-row--head" role="row">
+                <span role="columnheader">Email</span>
+                <span role="columnheader">Name</span>
+                <span role="columnheader">Role</span>
+                <span role="columnheader">State</span>
+              </div>
+              {members.length === 0 ? (
+                <div className="env-empty">{membersLoading ? "Loading members" : "No members found"}</div>
+              ) : members.map((member) => (
+                <div className="env-row" role="row" key={member.email}>
+                  <code role="cell">{member.email}</code>
+                  <span role="cell">{member.name}</span>
+                  <span role="cell">{member.role}</span>
+                  <span role="cell">active</span>
+                </div>
+              ))}
+              {invitations.filter((invitation) => !invitation.accepted).map((invitation) => (
+                <div className="env-row" role="row" key={invitation.id}>
+                  <code role="cell">{invitation.email}</code>
+                  <span role="cell">Pending user</span>
+                  <span role="cell">{invitation.role}</span>
+                  <span role="cell">invited</span>
+                </div>
+              ))}
+            </div>
+            {memberStatus ? <p className="settings-note">{memberStatus}</p> : null}
           </SettingsCard>
         ) : null}
 

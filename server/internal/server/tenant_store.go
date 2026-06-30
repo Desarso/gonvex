@@ -164,12 +164,37 @@ func tenantIDFromRequest(projectID string, rawTenantID string) string {
 }
 
 func tenantDatabaseName(projectID string, tenantID string) string {
-	base := "gonvex_" + strings.ReplaceAll(slug(projectID), "-", "_") + "_" + strings.ReplaceAll(slug(tenantID), "-", "_")
-	base = strings.Trim(base, "_")
-	if base == "gonvex" || base == "" {
-		base = "gonvex_tenant"
+	return tenantDatabaseNameWithAlias(projectID, tenantID, tenantID)
+}
+
+func tenantDatabaseNameWithAlias(projectID string, tenantID string, alias string) string {
+	base := strings.ReplaceAll(slug(alias), "-", "_")
+	if base == "" {
+		base = strings.ReplaceAll(slug(tenantID), "-", "_")
 	}
-	return base
+	if base == "" {
+		base = "tenant"
+	}
+	suffix := tenantDatabaseProjectSuffix(projectID)
+	maxBaseLength := 63 - len(suffix) - 1
+	if maxBaseLength < 1 {
+		maxBaseLength = 1
+	}
+	if len(base) > maxBaseLength {
+		base = strings.Trim(base[:maxBaseLength], "_")
+	}
+	if base == "" {
+		base = "tenant"
+	}
+	return base + "_" + suffix
+}
+
+func tenantDatabaseProjectSuffix(projectID string) string {
+	suffix := strings.ReplaceAll(slug(projectID), "-", "_")
+	if suffix == "" {
+		return "default"
+	}
+	return suffix
 }
 
 func tenantStoreKey(projectID string, tenantID string) string {

@@ -70,7 +70,15 @@ func devUserFromJWT(token string) *gonvex.User {
 }
 
 func (s *Server) loadTenantPermissions(ctx context.Context, projectID string, tenantID string, userID string) (map[string]any, error) {
-	store, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, tenantID), s.databaseURLForTenant(projectID, tenantID))
+	s.hydrateLandlordTenants(ctx, projectID)
+	s.hydrateProjectTenantDatabases(ctx, projectID)
+	databaseURL := s.databaseURLForTenant(projectID, tenantID)
+	var err error
+	databaseURL, err = s.ensureRuntimeTenantDatabase(ctx, projectID, tenantIDFromRequest(projectID, tenantID), databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	store, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, tenantID), databaseURL)
 	if err != nil {
 		return nil, err
 	}

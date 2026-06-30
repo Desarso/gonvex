@@ -28,6 +28,13 @@ type runtimeMetrics struct {
 	logs           []runtimeLogEntry
 	telemetryLogs  []transactionTelemetryEntry
 	telemetryPath  string
+	logSubscribers map[int]logSubscriber
+	nextLogSubID   int
+}
+
+type logSubscriber struct {
+	project string
+	ch      chan runtimeLogEntry
 }
 
 type functionMetrics struct {
@@ -253,6 +260,7 @@ func newRuntimeMetrics(telemetryPath ...string) *runtimeMetrics {
 		runningByKind:  map[string]int64{},
 		runningBuckets: map[int64]map[string]int64{},
 		telemetryPath:  path,
+		logSubscribers: map[int]logSubscriber{},
 	}
 }
 
@@ -319,6 +327,13 @@ func (m *runtimeMetrics) recordFunction(project string, path string, kind string
 	if m == nil || path == "" {
 		return
 	}
+	m.recordRuntimeOperation(project, path, kind, duration, err, "")
+}
+
+func (m *runtimeMetrics) recordRuntimeOperation(project string, path string, kind string, duration time.Duration, err error, cache string) {
+	if m == nil || path == "" {
+		return
+	}
 	now := time.Now().UTC()
 	durationMS := float64(duration.Microseconds()) / 1000
 	outcome := "ok"
@@ -331,38 +346,43 @@ func (m *runtimeMetrics) recordFunction(project string, path string, kind string
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	entry := m.functions[path]
-	if entry == nil {
-		entry = &functionMetrics{Kind: kind, Buckets: map[int64]*functionMetricsBucket{}}
-		m.functions[path] = entry
-	}
-	if kind != "" {
-		entry.Kind = kind
-	}
-	entry.Calls++
-	entry.TotalDurationMS += durationMS
-	entry.LastDurationMS = durationMS
-	entry.LastCalledAt = now
-	if err != nil {
-		entry.Errors++
-	}
+	logKind := kind
+	if kind != "runtime" {
+		entry := m.functions[path]
+		if entry == nil {
+			entry = &functionMetrics{Kind: kind, Buckets: map[int64]*functionMetricsBucket{}}
+			m.functions[path] = entry
+		}
+		if kind != "" {
+			entry.Kind = kind
+		}
+		logKind = entry.Kind
+		entry.Calls++
+		entry.TotalDurationMS += durationMS
+		entry.LastDurationMS = durationMS
+		entry.LastCalledAt = now
+		if err != nil {
+			entry.Errors++
+		}
 
-	bucket := entry.bucket(now)
-	bucket.Calls++
-	bucket.TotalDurationMS += durationMS
-	if err != nil {
-		bucket.Errors++
+		bucket := entry.bucket(now)
+		bucket.Calls++
+		bucket.TotalDurationMS += durationMS
+		if err != nil {
+			bucket.Errors++
+		}
+		entry.trimBuckets(now)
 	}
-	entry.trimBuckets(now)
 
 	m.appendLog(runtimeLogEntry{
 		Time:       now.Format(time.RFC3339Nano),
 		Project:    project,
 		Path:       path,
-		Kind:       entry.Kind,
+		Kind:       logKind,
 		Outcome:    outcome,
 		DurationMS: durationMS,
 		Error:      errorMessage,
+		Cache:      cache,
 	})
 }
 
@@ -388,14 +408,6 @@ func (m *runtimeMetrics) recordCache(project string, outcome string) {
 		outcome = "bypass"
 	}
 	m.cache.trimBuckets(now)
-	m.appendLog(runtimeLogEntry{
-		Time:    now.Format(time.RFC3339Nano),
-		Project: project,
-		Path:    "dev.data.rows",
-		Kind:    "cache",
-		Outcome: "ok",
-		Cache:   outcome,
-	})
 }
 
 func (m *runtimeMetrics) recordTransaction(entry transactionTelemetryEntry) {
@@ -501,17 +513,8 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 	}
 
 	logs := make([]runtimeLogEntry, 0, len(m.logs))
-	allowedLogPaths := map[string]bool{}
-	if projectFilter != "" {
-		for path := range current.Functions {
-			allowedLogPaths[path] = true
-		}
-	}
 	for _, entry := range m.logs {
 		if projectFilter != "" && entry.Project != projectFilter {
-			continue
-		}
-		if projectFilter != "" && !allowedLogPaths[entry.Path] {
 			continue
 		}
 		logs = append(logs, entry)
@@ -575,6 +578,37 @@ func (m *runtimeMetrics) appendLog(entry runtimeLogEntry) {
 	if len(m.logs) > metricsLogLimit {
 		m.logs = m.logs[len(m.logs)-metricsLogLimit:]
 	}
+	for _, subscriber := range m.logSubscribers {
+		if subscriber.project != "" && subscriber.project != entry.Project {
+			continue
+		}
+		select {
+		case subscriber.ch <- entry:
+		default:
+		}
+	}
+}
+
+func (m *runtimeMetrics) subscribeLogs(project string) (int, <-chan runtimeLogEntry, []runtimeLogEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextLogSubID++
+	id := m.nextLogSubID
+	ch := make(chan runtimeLogEntry, 64)
+	m.logSubscribers[id] = logSubscriber{project: project, ch: ch}
+	recent := make([]runtimeLogEntry, 0, len(m.logs))
+	for _, entry := range m.logs {
+		if project == "" || entry.Project == project {
+			recent = append(recent, entry)
+		}
+	}
+	return id, ch, recent
+}
+
+func (m *runtimeMetrics) unsubscribeLogs(id int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.logSubscribers, id)
 }
 
 // clearLogs drops all retained runtime log entries and reports how many were

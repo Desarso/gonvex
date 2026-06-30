@@ -79,6 +79,7 @@ describe("App", () => {
           description: "Runtime-created project database.",
           provisioned: true,
           runtimeCreated: true,
+          databaseMode: "single",
           testTab: false,
         },
       }),
@@ -100,7 +101,7 @@ describe("App", () => {
     expect(JSON.parse(window.localStorage.getItem("gonvex-dashboard-database-modes") ?? "{}")).toEqual({
       "acme-app": "single",
     });
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"))).toMatchObject({ testTab: false });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"))).toMatchObject({ databaseMode: "single", testTab: false });
     expect(screen.queryByRole("button", { name: /^test$/i })).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });

@@ -74,6 +74,21 @@ type RuntimeEnvVariable = {
   sensitive: boolean;
 };
 
+type RuntimeLogEntry = {
+  time?: string;
+  project?: string;
+  path?: string;
+  kind?: string;
+  outcome?: string;
+  durationMs?: number;
+  error?: string;
+  cache?: string;
+};
+
+type RuntimeLogOptions = {
+  verbose: boolean;
+};
+
 type WatchState = {
   lastFingerprint: string;
   lastManifest: Manifest | null;
@@ -95,11 +110,18 @@ type FunctionDiff = {
 const defaultRuntimeURL = "http://localhost:8080";
 const runtimeSyncRetryMs = 5000;
 const runtimeStateCheckMs = 2500;
+const supportsColor = process.env.NO_COLOR === undefined && (process.env.FORCE_COLOR !== undefined || process.stdout.isTTY);
+
+function ansi(code: string, value: string) {
+  return supportsColor ? `\x1b[${code}m${value}\x1b[0m` : value;
+}
 
 const color = {
-  green: (value: string) => `\x1b[32m${value}\x1b[0m`,
-  red: (value: string) => `\x1b[31m${value}\x1b[0m`,
-  yellow: (value: string) => `\x1b[33m${value}\x1b[0m`,
+  dim: (value: string) => ansi("2", value),
+  green: (value: string) => ansi("32", value),
+  orange: (value: string) => ansi("38;5;208", value),
+  red: (value: string) => ansi("31", value),
+  yellow: (value: string) => ansi("33", value),
 };
 
 export async function main(argv = process.argv.slice(2)) {
@@ -160,6 +182,7 @@ async function runDev(argv: string[]) {
   const childCommand = split === -1 ? [] : argv.slice(split + 1);
   const projectRoot = resolve(valueFor(flagArgs, "--project") ?? ".");
   const once = flagArgs.includes("--once");
+  const verboseLogs = flagArgs.includes("--verbose-logs");
   if (once && childCommand.length > 0) throw new Error("--once cannot be used with a child command");
 
   let settings = await loadSettings(projectRoot, {
@@ -175,6 +198,7 @@ async function runDev(argv: string[]) {
   if (childCommand.length > 0) {
     const initialState = await watchProject(projectRoot, settings, true);
     const controller = new AbortController();
+    const logStream = startRuntimeLogStream(settings, controller.signal, { verbose: verboseLogs });
     const watcher = watchProject(projectRoot, settings, false, controller.signal, initialState);
     const child = spawn(childCommand[0]!, childCommand.slice(1), {
       cwd: projectRoot,
@@ -184,6 +208,7 @@ async function runDev(argv: string[]) {
     });
     const code = await new Promise<number | null>((resolve) => child.on("exit", resolve));
     controller.abort();
+    await logStream.catch(() => {});
     await watcher.catch((error) => {
       if (error?.name !== "AbortError") throw error;
     });
@@ -191,7 +216,11 @@ async function runDev(argv: string[]) {
     return;
   }
 
+  const controller = new AbortController();
+  const logStream = once ? Promise.resolve() : startRuntimeLogStream(settings, controller.signal, { verbose: verboseLogs });
   const result = await watchProject(projectRoot, settings, once);
+  controller.abort();
+  await logStream.catch(() => {});
   // In one-shot mode (CI/Docker `gonvex dev --once`), a failed sync must fail
   // the process so the build doesn't silently ship un-deployed functions.
   if (once && !result.lastSyncSucceeded) {
@@ -890,6 +919,87 @@ function webSocketURL(runtimeURL: string) {
   return runtimeURL.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/$/, "") + "/ws";
 }
 
+function logStreamURL(settings: Settings) {
+  const url = new URL(settings.runtimeURL.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/$/, "") + "/dev/logs/stream");
+  if (settings.projectID) url.searchParams.set("project", settings.projectID);
+  if (settings.key) url.searchParams.set("key", settings.key);
+  url.searchParams.set("replay", "0");
+  return url.toString();
+}
+
+async function startRuntimeLogStream(settings: Settings, signal: AbortSignal, options: RuntimeLogOptions) {
+  if (!settings.projectID || typeof globalThis.WebSocket !== "function") return;
+  let warned = false;
+  let retryDelay = 500;
+  let stopped = false;
+  signal.addEventListener("abort", () => {
+    stopped = true;
+  }, { once: true });
+
+  while (!stopped && !signal.aborted) {
+    const socket = new globalThis.WebSocket(logStreamURL(settings));
+    const closed = new Promise<void>((resolve) => {
+      const close = () => resolve();
+      socket.addEventListener("open", () => {
+        retryDelay = 500;
+      });
+      socket.addEventListener("message", (event) => {
+        printRuntimeLogMessage(event.data, options);
+      });
+      socket.addEventListener("error", () => {
+        if (!warned) {
+          warned = true;
+          console.warn(`[gonvex] runtime log stream unavailable for ${settings.projectID}; continuing without streamed logs`);
+        }
+      });
+      socket.addEventListener("close", close, { once: true });
+      signal.addEventListener("abort", () => {
+        try {
+          socket.close();
+        } catch {
+          // ignore close races
+        }
+        close();
+      }, { once: true });
+    });
+    await closed;
+    if (stopped || signal.aborted) return;
+    await sleep(retryDelay, signal).catch(() => {});
+    retryDelay = Math.min(retryDelay * 2, 5000);
+  }
+}
+
+function printRuntimeLogMessage(data: unknown, options: RuntimeLogOptions) {
+  let payload: { type?: string; log?: RuntimeLogEntry };
+  try {
+    payload = JSON.parse(typeof data === "string" ? data : Buffer.from(data as ArrayBuffer).toString("utf8"));
+  } catch {
+    return;
+  }
+  if (payload.type !== "log" || !payload.log) return;
+  const entry = payload.log;
+  if (!shouldPrintRuntimeLogEntry(entry, options)) return;
+  const duration = typeof entry.durationMs === "number" ? ` ${entry.durationMs.toFixed(1)}ms` : "";
+  const cache = entry.cache ? ` cache=${entry.cache}` : "";
+  const error = entry.error ? ` ${color.red(entry.error)}` : "";
+  const outcome = colorRuntimeOutcome(entry.outcome ?? "ok");
+  console.log(`${color.dim("[gonvex runtime]")} ${entry.kind ?? "event"} ${entry.path ?? ""} ${outcome}${duration}${cache}${error}`.trimEnd());
+}
+
+function colorRuntimeOutcome(outcome: string) {
+  const normalized = outcome.toLowerCase();
+  if (normalized === "error" || normalized === "failed" || normalized === "failure") return color.red(outcome);
+  if (normalized === "warn" || normalized === "warning") return color.orange(outcome);
+  if (normalized === "ok" || normalized === "success" || normalized === "succeeded") return color.green(outcome);
+  return color.yellow(outcome);
+}
+
+function shouldPrintRuntimeLogEntry(entry: RuntimeLogEntry, options: RuntimeLogOptions) {
+  if (options.verbose) return true;
+  const outcome = String(entry.outcome ?? "").toLowerCase();
+  return Boolean(entry.error) || outcome === "error" || outcome === "warn" || outcome === "warning";
+}
+
 async function loadSettings(root: string, overrides: Partial<Settings>): Promise<Settings> {
   loadDotEnv(join(root, ".env.local"));
   loadDotEnv(join(root, ".env"));
@@ -1060,7 +1170,7 @@ function sleep(ms: number, signal?: AbortSignal) {
 
 function printHelp() {
   console.log("Usage: gonvex <dev|init|create|env> [options]");
-  console.log("  gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [-- <command>]");
+  console.log("  gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--verbose-logs] [-- <command>]");
   console.log("  gonvex init [--template vite-react] [--project <id>] [--runtime <url>]");
   console.log("  gonvex create <app-name> [--template vite-react]");
   console.log("  gonvex env <list|get|set|remove> [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>]");

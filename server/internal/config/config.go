@@ -31,6 +31,7 @@ type Config struct {
 	DevSyncKey        string
 	AdminKey          string
 	RequireAuth       bool
+	DashboardSecret   string
 }
 
 func FromEnv() Config {
@@ -59,6 +60,7 @@ func FromEnv() Config {
 		DevSyncKey:        env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
 		AdminKey:          env("GONVEX_ADMIN_KEY", ""),
 		RequireAuth:       envBool("GONVEX_REQUIRE_AUTH", false),
+		DashboardSecret:   env("GONVEX_DASHBOARD_SESSION_SECRET", env("DASHBOARD_SESSION_SECRET", "")),
 	}
 }
 

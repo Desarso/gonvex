@@ -14,6 +14,7 @@ const authUser = normalizeEmail(process.env.DASHBOARD_AUTH_USER ?? "");
 const authPassword = process.env.DASHBOARD_AUTH_PASSWORD ?? "";
 const sessionSecret = process.env.DASHBOARD_SESSION_SECRET ?? authPassword;
 const cookieSecure = envFlag(process.env.DASHBOARD_COOKIE_SECURE, true);
+const runtimeURL = (process.env.GONVEX_RUNTIME_URL ?? process.env.VITE_GONVEX_RUNTIME_URL ?? "http://127.0.0.1:8080").replace(/\/+$/, "");
 
 const mimeTypes = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -146,22 +147,36 @@ async function handleAPI(request, response, url) {
         session: { email: "local@gonvex.dev", name: "Local Developer", provider: "dev" },
       });
     }
-    if (!authUser || !authPassword) return writeJSON(response, 503, { error: "dashboard auth is not configured" });
     let parsed;
     try {
       parsed = JSON.parse(await readBody(request));
     } catch {
       return writeJSON(response, 400, { error: "invalid login request" });
     }
-    if (!verifyCredentials(parsed.email, parsed.password, authUser, authPassword)) {
-      return writeJSON(response, 401, { error: "invalid email or password" });
+    let session;
+    try {
+      const runtimeResponse = await fetch(`${runtimeURL}/dev/auth/login`, {
+        body: JSON.stringify({ email: parsed.email, password: parsed.password }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      const payload = await runtimeResponse.json().catch(() => ({}));
+      if (!runtimeResponse.ok || !payload.session) {
+        return writeJSON(response, runtimeResponse.status || 401, { error: payload.error ?? "invalid email or password" });
+      }
+      session = payload.session;
+    } catch {
+      if (!authUser || !authPassword) return writeJSON(response, 503, { error: "dashboard auth is not configured" });
+      if (!verifyCredentials(parsed.email, parsed.password, authUser, authPassword)) {
+        return writeJSON(response, 401, { error: "invalid email or password" });
+      }
+      session = {
+        email: authUser,
+        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+        name: displayNameFromEmail(authUser),
+        provider: "gonvex",
+      };
     }
-    const session = {
-      email: authUser,
-      expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
-      name: displayNameFromEmail(authUser),
-      provider: "gonvex",
-    };
     return writeJSON(response, 200, { session }, {
       "Set-Cookie": `${sessionCookieName}=${encodeURIComponent(signSession(session, sessionSecret))}; ${cookieOptions(7 * 24 * 60 * 60)}`,
     });
@@ -212,8 +227,8 @@ async function handleRequest(request, response) {
 }
 
 export function createDashboardServer() {
-  if (authEnabled && (!authUser || !authPassword || !sessionSecret)) {
-    throw new Error("DASHBOARD_AUTH_USER, DASHBOARD_AUTH_PASSWORD, and DASHBOARD_SESSION_SECRET are required.");
+  if (authEnabled && !sessionSecret) {
+    throw new Error("DASHBOARD_SESSION_SECRET is required.");
   }
   return createServer((request, response) => {
     handleRequest(request, response).catch((error) => {

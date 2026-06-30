@@ -1,4 +1,4 @@
-.PHONY: dev services storage files runtime dashboard packages docs version release-notes-preview release-dry-run release-prod
+.PHONY: dev stack stack-storage services storage files runtime dashboard packages docs version release-notes-preview release-dry-run release-prod
 
 OPENROUTER_MODEL ?= moonshotai/kimi-k2.5
 
@@ -23,6 +23,12 @@ dev:
 
 services:
 	docker compose -f infra/docker-compose.dev.yml up -d --wait postgres valkey
+
+stack:
+	docker compose up -d --build --wait postgres valkey minio runtime dashboard
+	docker compose run --rm minio-init
+
+stack-storage: stack
 
 storage:
 	docker compose -f infra/docker-compose.dev.yml --profile storage up -d --wait minio

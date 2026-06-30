@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -71,6 +72,22 @@ func TestUniqueProjectIDFallsBackForPunctuationOnlyNames(t *testing.T) {
 	}
 }
 
+func TestGenerateProjectIDReturnsUUID(t *testing.T) {
+	got, err := generateProjectID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 36 {
+		t.Fatalf("expected UUID length, got %d for %q", len(got), got)
+	}
+	if got[8] != '-' || got[13] != '-' || got[18] != '-' || got[23] != '-' {
+		t.Fatalf("expected UUID separators, got %q", got)
+	}
+	if got[14] != '4' {
+		t.Fatalf("expected UUID v4 marker, got %q", got)
+	}
+}
+
 func TestConfiguredProjectsHydrateIntoProjectList(t *testing.T) {
 	server := New(config.Config{
 		ProjectDatabases: map[string]string{
@@ -99,6 +116,36 @@ func TestConfiguredProjectsHydrateIntoProjectList(t *testing.T) {
 	project := payload.Projects[0]
 	if project.ID != "whagons-5" || project.Database != "gonvex_whagons_5" || project.RuntimeCreated || project.TestTab {
 		t.Fatalf("unexpected configured project: %+v", project)
+	}
+}
+
+func TestUpdateProjectPersistsDatabaseMode(t *testing.T) {
+	server := New(config.Config{})
+	server.projects["whagons-5"] = projectTarget{
+		ID:           "whagons-5",
+		Name:         "whagons 5",
+		Database:     "gonvex_dev",
+		DatabaseMode: "single",
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/dev/projects/whagons-5", bytes.NewBufferString(`{"databaseMode":"multiTenant"}`))
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Project projectTarget `json:"project"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Project.DatabaseMode != "multiTenant" {
+		t.Fatalf("expected multiTenant mode, got %q", payload.Project.DatabaseMode)
+	}
+	if got := server.projects["whagons-5"].DatabaseMode; got != "multiTenant" {
+		t.Fatalf("expected in-memory project mode to update, got %q", got)
 	}
 }
 
@@ -323,10 +370,45 @@ func TestUniqueTenantIDChecksProjectScopedCollisions(t *testing.T) {
 	}
 }
 
-func TestTenantDatabaseNameIncludesProjectAndTenant(t *testing.T) {
-	got := tenantDatabaseName("Acme App", "West Coast")
-	if got != "gonvex_acme_app_west_coast" {
-		t.Fatalf("unexpected tenant database name: %q", got)
+func TestTenantDatabaseNameUsesAliasWithScopedSuffix(t *testing.T) {
+	projectID := "a7f9f7df-6a7b-45f7-b44d-bde2068dca27"
+	got := tenantDatabaseNameWithAlias(projectID, "west-coast", "testing")
+	want := "testing_a7f9f7df_6a7b_45f7_b44d_bde2068dca27"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+	if got == "testing" {
+		t.Fatalf("expected scoped physical database name, got %q", got)
+	}
+	if len(got) > 63 {
+		t.Fatalf("expected Postgres-safe name length, got %d for %q", len(got), got)
+	}
+	otherProject := tenantDatabaseNameWithAlias("Other App", "West Coast", "testing")
+	if otherProject == got {
+		t.Fatalf("expected project-scoped tenant database names, got %q for both projects", got)
+	}
+	otherTenant := tenantDatabaseNameWithAlias(projectID, "east-coast", "testing")
+	if otherTenant != got {
+		t.Fatalf("expected same project and alias to map to the same physical DB before collision guard, got %q and %q", got, otherTenant)
+	}
+}
+
+func TestTenantDatabaseAliasTakenChecksProjectScope(t *testing.T) {
+	server := New(config.Config{})
+	server.tenants["project-a:testing"] = tenantTarget{
+		ID:        "testing",
+		ProjectID: "project-a",
+		Database:  "testing",
+	}
+
+	if !server.tenantDatabaseAliasTakenLocked("project-a", "testing", "project-a:other") {
+		t.Fatal("expected same-project tenant database alias collision")
+	}
+	if server.tenantDatabaseAliasTakenLocked("project-b", "testing", "project-b:testing") {
+		t.Fatal("did not expect cross-project tenant database alias collision")
+	}
+	if server.tenantDatabaseAliasTakenLocked("project-a", "testing", "project-a:testing") {
+		t.Fatal("did not expect current tenant key to collide with itself")
 	}
 }
 

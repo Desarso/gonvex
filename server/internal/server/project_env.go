@@ -62,6 +62,15 @@ func (s *Server) handleProjectEnv(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
 		return
 	}
+	actor, ok := s.dashboardActorFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
+		return
+	}
+	if !s.canAccessProject(r.Context(), actor, project) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project access is required"})
+		return
+	}
 	vars, err := s.loadProjectEnv(r.Context(), project)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -76,6 +85,15 @@ func (s *Server) handleSetProjectEnv(w http.ResponseWriter, r *http.Request) {
 	project := projectFromEnvRequest(r)
 	if project == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
+		return
+	}
+	actor, ok := s.dashboardActorFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
+		return
+	}
+	if !s.canManageProject(r.Context(), actor, project) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
 		return
 	}
 	var payload struct {
@@ -114,6 +132,15 @@ func (s *Server) handleBulkProjectEnv(w http.ResponseWriter, r *http.Request) {
 	project := projectFromEnvRequest(r)
 	if project == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
+		return
+	}
+	actor, ok := s.dashboardActorFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
+		return
+	}
+	if !s.canManageProject(r.Context(), actor, project) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
 		return
 	}
 	var payload struct {
@@ -187,6 +214,15 @@ func (s *Server) handleDeleteProjectEnv(w http.ResponseWriter, r *http.Request) 
 	project := projectFromEnvRequest(r)
 	if project == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
+		return
+	}
+	actor, ok := s.dashboardActorFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
+		return
+	}
+	if !s.canManageProject(r.Context(), actor, project) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
 		return
 	}
 	var payload struct {

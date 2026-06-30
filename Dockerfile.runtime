@@ -10,7 +10,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # cgo-enabled: -buildmode=plugin requires the host binary to be cgo/dynamically linked.
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/gonvex-runtime ./server/cmd/gonvex-runtime
+RUN CGO_ENABLED=1 go build -o /out/gonvex-runtime ./server/cmd/gonvex-runtime
 
 FROM golang:1.26
 WORKDIR /app

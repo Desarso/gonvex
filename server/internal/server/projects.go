@@ -23,12 +23,15 @@ type projectTarget struct {
 	Name           string `json:"name"`
 	Environment    string `json:"environment"`
 	Database       string `json:"database"`
+	DatabaseMode   string `json:"databaseMode"`
 	StorageBucket  string `json:"storageBucket"`
 	Status         string `json:"status"`
 	Description    string `json:"description"`
 	Provisioned    bool   `json:"provisioned"`
 	RuntimeCreated bool   `json:"runtimeCreated"`
 	TestTab        bool   `json:"testTab"`
+	OwnerEmail     string `json:"ownerEmail,omitempty"`
+	Role           string `json:"role,omitempty"`
 	databaseURL    string
 	databaseName   string
 	syncKey        string
@@ -39,13 +42,23 @@ type createProjectResponse struct {
 	ProjectKey string        `json:"projectKey"`
 }
 
-func (s *Server) handleProjects(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.dashboardActorFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
+		return
+	}
 	s.hydrateProjects()
 
 	s.projectMu.RLock()
 	projects := make([]projectTarget, 0, len(s.projects))
 	for _, project := range s.projects {
-		projects = append(projects, project)
+		if s.dashboardAuthOptional() || s.canAccessProject(r.Context(), actor, project.ID) {
+			if project.OwnerEmail == "" && s.dashboardAuthOptional() {
+				project.OwnerEmail = actor.Email
+			}
+			projects = append(projects, project)
+		}
 	}
 	s.projectMu.RUnlock()
 
@@ -58,6 +71,25 @@ func (s *Server) handleProjects(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) hydrateProjects() {
 	s.hydratePersistedProjects()
 	s.hydrateConfiguredProjects()
+}
+
+func normalizedDatabaseMode(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case "", "single":
+		return "single"
+	case "multiTenant":
+		return "multiTenant"
+	default:
+		return ""
+	}
+}
+
+func normalizedDatabaseModeWithDefault(mode string) string {
+	normalized := normalizedDatabaseMode(mode)
+	if normalized == "" {
+		return "single"
+	}
+	return normalized
 }
 
 func (s *Server) hydratePersistedProjects() {
@@ -106,6 +138,7 @@ func (s *Server) hydrateConfiguredProjects() {
 			Name:          projectNameFromID(projectID),
 			Environment:   "local dev",
 			Database:      databaseNameFromURL(databaseURL, projectID),
+			DatabaseMode:  "single",
 			StorageBucket: projectID + "-dev",
 			Status:        "local",
 			Description:   "Configured project database.",
@@ -125,10 +158,16 @@ func (s *Server) hydrateConfiguredProjects() {
 }
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.dashboardActorFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
+		return
+	}
 	defer r.Body.Close()
 	var payload struct {
-		Name    string `json:"name"`
-		TestTab bool   `json:"testTab"`
+		Name         string `json:"name"`
+		DatabaseMode string `json:"databaseMode"`
+		TestTab      bool   `json:"testTab"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -137,6 +176,11 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(payload.Name)
 	if name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project name is required"})
+		return
+	}
+	databaseMode := normalizedDatabaseMode(payload.DatabaseMode)
+	if databaseMode == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "databaseMode must be single or multiTenant"})
 		return
 	}
 	if s.config.PostgresURL == "" {
@@ -149,7 +193,11 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	s.projectMu.Lock()
 	defer s.projectMu.Unlock()
 
-	projectID := s.uniqueProjectIDLocked(name)
+	projectID, err := s.uniqueRuntimeProjectIDLocked()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	databaseName := s.uniqueDatabaseNameLocked(projectID)
 	databaseURL, err := createProjectDatabase(r.Context(), s.config.PostgresURL, databaseName)
 	if err != nil {
@@ -175,12 +223,15 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		Name:           name,
 		Environment:    "local dev",
 		Database:       databaseName,
+		DatabaseMode:   databaseMode,
 		StorageBucket:  projectID + "-dev",
 		Status:         "local",
 		Description:    "Runtime-created project database.",
 		Provisioned:    true,
 		RuntimeCreated: true,
 		TestTab:        payload.TestTab,
+		OwnerEmail:     actor.Email,
+		Role:           "owner",
 		databaseURL:    databaseURL,
 		databaseName:   databaseName,
 		syncKey:        projectKey,
@@ -194,12 +245,71 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if err := s.ensureProjectOwnerMember(r.Context(), project.ID, actor); err != nil {
+		_ = dropProjectDatabase(context.Background(), s.config.PostgresURL, databaseName)
+		_ = s.deleteProjectRegistry(context.Background(), projectID)
+		delete(s.projects, projectID)
+		delete(s.config.ProjectDatabases, projectID)
+		delete(s.config.ProjectKeys, projectID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 
 	writeJSON(w, http.StatusCreated, createProjectResponse{Project: project, ProjectKey: projectKey})
 }
 
+func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.dashboardActorFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
+		return
+	}
+	defer r.Body.Close()
+	projectID := strings.TrimSpace(r.PathValue("project"))
+	if !s.canManageProject(r.Context(), actor, projectID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
+		return
+	}
+	var payload struct {
+		DatabaseMode *string `json:"databaseMode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if payload.DatabaseMode == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no project fields provided"})
+		return
+	}
+	databaseMode := normalizedDatabaseMode(*payload.DatabaseMode)
+	if databaseMode == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "databaseMode must be single or multiTenant"})
+		return
+	}
+
+	s.hydrateProjects()
+
+	s.projectMu.Lock()
+	project, ok := s.projects[projectID]
+	if ok {
+		project.DatabaseMode = databaseMode
+		s.projects[projectID] = project
+	}
+	s.projectMu.Unlock()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
+	}
+	if err := s.saveProjectRegistry(r.Context(), project); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"project": project})
+}
+
 func (s *Server) handleProjectKey(w http.ResponseWriter, r *http.Request) {
-	if !s.acceptsAdminKey(syncKey(r)) {
+	actor, signedIn := s.dashboardActorFromRequest(r)
+	if !signedIn && !s.acceptsAdminKey(syncKey(r)) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid Gonvex admin key"})
 		return
 	}
@@ -207,6 +317,10 @@ func (s *Server) handleProjectKey(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.PathValue("project"))
 	if projectID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
+		return
+	}
+	if signedIn && !s.canManageProject(r.Context(), actor, projectID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
 		return
 	}
 
@@ -243,9 +357,18 @@ func (s *Server) handleProjectKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.dashboardActorFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
+		return
+	}
 	projectID := strings.TrimSpace(r.PathValue("project"))
 	if projectID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
+		return
+	}
+	if !s.canManageProject(r.Context(), actor, projectID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
 		return
 	}
 
@@ -305,6 +428,7 @@ func ensureProjectRegistry(ctx context.Context, db *sql.DB) error {
 		name TEXT NOT NULL,
 		environment TEXT NOT NULL,
 		database_name TEXT NOT NULL,
+		database_mode TEXT NOT NULL DEFAULT 'single',
 		database_url TEXT NOT NULL,
 		storage_bucket TEXT NOT NULL,
 		status TEXT NOT NULL,
@@ -313,12 +437,55 @@ func ensureProjectRegistry(ctx context.Context, db *sql.DB) error {
 		provisioned BOOLEAN NOT NULL DEFAULT TRUE,
 		runtime_created BOOLEAN NOT NULL DEFAULT TRUE,
 		test_tab BOOLEAN NOT NULL DEFAULT FALSE,
+		owner_email TEXT NOT NULL DEFAULT '',
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS test_tab BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS database_mode TEXT NOT NULL DEFAULT 'single'`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS owner_email TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_dashboard_users (
+		email TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		role TEXT NOT NULL DEFAULT 'user',
+		password_hash TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_project_members (
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		email TEXT NOT NULL,
+		name TEXT NOT NULL DEFAULT '',
+		role TEXT NOT NULL DEFAULT 'dev',
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (project_id, email)
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_project_members_by_email ON gonvex_project_members (email, project_id)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_project_invitations (
+		id TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		email TEXT NOT NULL,
+		role TEXT NOT NULL DEFAULT 'dev',
+		token_hash TEXT NOT NULL,
+		invited_by TEXT NOT NULL DEFAULT '',
+		expires_at TIMESTAMPTZ NOT NULL,
+		accepted_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_manifests (
@@ -352,7 +519,7 @@ func (s *Server) loadProjectRegistry(ctx context.Context) ([]projectTarget, erro
 	}
 	defer db.Close()
 
-	rows, err := db.QueryContext(ctx, `SELECT id, name, environment, database_name, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, COALESCE(test_tab, false) FROM gonvex_runtime_projects ORDER BY name`)
+	rows, err := db.QueryContext(ctx, `SELECT id, name, environment, database_name, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, COALESCE(test_tab, false), COALESCE(NULLIF(database_mode, ''), 'single'), COALESCE(owner_email, '') FROM gonvex_runtime_projects ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -361,9 +528,10 @@ func (s *Server) loadProjectRegistry(ctx context.Context) ([]projectTarget, erro
 	var projects []projectTarget
 	for rows.Next() {
 		var project projectTarget
-		if err := rows.Scan(&project.ID, &project.Name, &project.Environment, &project.databaseName, &project.databaseURL, &project.StorageBucket, &project.Status, &project.Description, &project.syncKey, &project.Provisioned, &project.RuntimeCreated, &project.TestTab); err != nil {
+		if err := rows.Scan(&project.ID, &project.Name, &project.Environment, &project.databaseName, &project.databaseURL, &project.StorageBucket, &project.Status, &project.Description, &project.syncKey, &project.Provisioned, &project.RuntimeCreated, &project.TestTab, &project.DatabaseMode, &project.OwnerEmail); err != nil {
 			return nil, err
 		}
+		project.DatabaseMode = normalizedDatabaseModeWithDefault(project.DatabaseMode)
 		project.Database = project.databaseName
 		projects = append(projects, project)
 	}
@@ -381,13 +549,15 @@ func (s *Server) saveProjectRegistry(ctx context.Context, project projectTarget)
 	if databaseName == "" {
 		databaseName = project.Database
 	}
+	project.DatabaseMode = normalizedDatabaseModeWithDefault(project.DatabaseMode)
 	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_runtime_projects (
-		id, name, environment, database_name, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, test_tab, updated_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+		id, name, environment, database_name, database_mode, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, test_tab, owner_email, updated_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
 	ON CONFLICT (id) DO UPDATE SET
 		name = EXCLUDED.name,
 		environment = EXCLUDED.environment,
 		database_name = EXCLUDED.database_name,
+		database_mode = EXCLUDED.database_mode,
 		database_url = EXCLUDED.database_url,
 		storage_bucket = EXCLUDED.storage_bucket,
 		status = EXCLUDED.status,
@@ -396,11 +566,13 @@ func (s *Server) saveProjectRegistry(ctx context.Context, project projectTarget)
 		provisioned = EXCLUDED.provisioned,
 		runtime_created = EXCLUDED.runtime_created,
 		test_tab = EXCLUDED.test_tab,
+		owner_email = EXCLUDED.owner_email,
 		updated_at = now()`,
 		project.ID,
 		project.Name,
 		project.Environment,
 		databaseName,
+		project.DatabaseMode,
 		project.databaseURL,
 		project.StorageBucket,
 		project.Status,
@@ -409,6 +581,7 @@ func (s *Server) saveProjectRegistry(ctx context.Context, project projectTarget)
 		project.Provisioned,
 		project.RuntimeCreated,
 		project.TestTab,
+		project.OwnerEmail,
 	)
 	return err
 }
@@ -423,6 +596,26 @@ func (s *Server) deleteProjectRegistry(ctx context.Context, projectID string) er
 		return err
 	}
 	_, err = db.ExecContext(ctx, `DELETE FROM gonvex_runtime_projects WHERE id = $1`, projectID)
+	return err
+}
+
+func (s *Server) ensureProjectOwnerMember(ctx context.Context, projectID string, actor dashboardActor) error {
+	db, err := s.openProjectRegistry(ctx)
+	if err != nil || db == nil {
+		return err
+	}
+	defer db.Close()
+	name := strings.TrimSpace(actor.Name)
+	if name == "" {
+		name = displayNameFromEmail(actor.Email)
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_project_members (
+		project_id, email, name, role
+	) VALUES ($1, $2, $3, 'owner')
+	ON CONFLICT (project_id, email) DO UPDATE SET
+		name = EXCLUDED.name,
+		role = 'owner'`,
+		projectID, actor.Email, name)
 	return err
 }
 
@@ -571,6 +764,33 @@ func projectIDFromProjectKey(key string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(decoded))
+}
+
+func generateProjectID() (string, error) {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "", fmt.Errorf("generate project id: %w", err)
+	}
+	bytes[6] = (bytes[6] & 0x0f) | 0x40
+	bytes[8] = (bytes[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16]), nil
+}
+
+func (s *Server) uniqueRuntimeProjectIDLocked() (string, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		projectID, err := generateProjectID()
+		if err != nil {
+			return "", err
+		}
+		if _, ok := s.projects[projectID]; ok {
+			continue
+		}
+		if s.config.ProjectDatabases != nil && s.config.ProjectDatabases[projectID] != "" {
+			continue
+		}
+		return projectID, nil
+	}
+	return "", fmt.Errorf("generate project id: exhausted collision retries")
 }
 
 func (s *Server) uniqueProjectIDLocked(name string) string {

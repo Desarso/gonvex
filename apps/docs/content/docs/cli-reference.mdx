@@ -41,6 +41,13 @@ npx gonvex dev
 
 Watches `gonvex/*.go`, regenerates bindings, and syncs the runtime.
 
+By default, runtime log streaming only prints warnings and errors. To tail every
+runtime query, mutation, and action:
+
+```bash
+npx gonvex dev --verbose-logs
+```
+
 With a child command:
 
 ```bash
