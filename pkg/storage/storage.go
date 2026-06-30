@@ -129,6 +129,22 @@ func (f *Factory) VerifyProxyGet(objectKey string, exp int64, sig string) bool {
 	return f != nil && f.client.VerifyProxyGet(objectKey, exp, sig)
 }
 
+// VerifyProxyPut validates a storage-proxy upload URL signature + expiry for
+// objectKey, for the runtime's storage upload handler.
+func (f *Factory) VerifyProxyPut(objectKey string, exp int64, sig string) bool {
+	return f != nil && f.client.VerifyProxyPut(objectKey, exp, sig)
+}
+
+// UploadObject writes bytes to objectKey via the (internal) S3 endpoint, for the
+// runtime's storage upload proxy handler. The metadata row was already inserted
+// (status pending) by GenerateUploadURL and is finalized lazily on first read.
+func (f *Factory) UploadObject(ctx context.Context, objectKey string, body []byte, contentType string) error {
+	if f == nil || f.client == nil {
+		return gonvex.ErrStorageNotConfigured
+	}
+	return f.client.PutObject(ctx, objectKey, body, contentType)
+}
+
 // Bucket returns the configured bucket name, or "" when not configured.
 func (f *Factory) Bucket() string {
 	if f == nil || f.client == nil {
@@ -212,6 +228,19 @@ func (t *Tenant) GenerateUploadURL(opts gonvex.UploadOptions) (gonvex.UploadTarg
 	if ttl <= 0 {
 		ttl = t.uploadTTL
 	}
+
+	// With a PublicBaseURL the browser must not reach the (often private) S3
+	// endpoint directly, so hand back a runtime upload-proxy URL the same way
+	// GetURL hands back a download-proxy URL. The proxy accepts a POST of the
+	// bytes and returns the storage id, matching the Convex upload protocol.
+	if t.client.cfg.PublicBaseURL != "" {
+		target := gonvex.UploadTarget{FileID: fileID, URL: t.client.ProxyPutURL(objectKey, ttl), Method: http.MethodPost}
+		if opts.ContentType != "" {
+			target.Headers = map[string]string{"Content-Type": opts.ContentType}
+		}
+		return target, nil
+	}
+
 	url, err := t.client.PresignPut(objectKey, ttl)
 	if err != nil {
 		return gonvex.UploadTarget{}, err

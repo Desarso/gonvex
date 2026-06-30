@@ -5,6 +5,7 @@ export const api = {
   "files.delete": { kind: "mutation", path: "files.delete" },
   "files.getMetadata": { kind: "query", path: "files.getMetadata" },
   "files.getUrl": { kind: "query", path: "files.getUrl" },
+  "system.heartbeat": { kind: "internalMutation", path: "system.heartbeat" },
   "tasks.create": { kind: "mutation", path: "tasks.create" },
   "tasks.grid": { kind: "liveGrid", path: "tasks.grid" },
   "tasks.list": { kind: "query", path: "tasks.list" },

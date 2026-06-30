@@ -973,6 +973,7 @@ button {
 }
 
 .content-stack--data {
+  gap: 10px;
   overflow-x: hidden;
   overflow-y: auto;
 }
@@ -1010,19 +1011,19 @@ h1 {
   border: 1px solid var(--border);
   border-radius: calc(var(--field-radius) + 4px);
   background: color-mix(in oklab, var(--surface) 86%, transparent);
-  padding: 9px 14px;
+  padding: 5px 14px;
 }
 
 .page-heading h1 {
-  font-size: 1.12rem;
-  line-height: 1.2;
+  font-size: 0.98rem;
+  line-height: 1.15;
   letter-spacing: -0.02em;
 }
 
 .page-heading .lede {
-  margin-top: 2px;
-  font-size: 0.78rem;
-  line-height: 1.35;
+  margin-top: 1px;
+  font-size: 0.73rem;
+  line-height: 1.3;
 }
 
 .metric-row {
@@ -1536,7 +1537,9 @@ h1 {
 
 .logs-shell {
   display: flex;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   flex-direction: column;
   gap: 12px;
 }
@@ -1557,11 +1560,120 @@ h1 {
 }
 
 .logs-panel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--field-radius);
   background: var(--surface);
+}
+
+.logs-grid-wrap {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+.logs-grid-wrap .grid-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+/* Schedules page */
+.schedules-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+  gap: 10px;
+}
+
+.schedules-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--field-radius);
+  background: var(--surface);
+  padding: 10px 14px;
+}
+
+.schedules-stat-label {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.schedules-stat-value {
+  font-size: 1.1rem;
+  letter-spacing: -0.02em;
+}
+
+.logs-panel .sched-table {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+}
+
+.sched-row {
+  display: grid;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--separator);
+  padding: 9px 16px;
+  font-size: 0.8rem;
+}
+
+.sched-table--crons .sched-row {
+  grid-template-columns: minmax(120px, 1fr) minmax(150px, 1.4fr) minmax(110px, 1fr) minmax(140px, 1fr) 64px 78px;
+}
+
+.sched-table--runs .sched-row {
+  grid-template-columns: minmax(150px, 1fr) minmax(170px, 1.4fr) minmax(110px, 1fr) 90px 100px;
+}
+
+.sched-row--head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in oklab, var(--surface-secondary) 60%, var(--surface));
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sched-row code,
+.sched-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sched-row code {
+  color: var(--foreground);
+}
+
+.sched-row[data-outcome="error"] strong,
+.sched-row[data-status="warn"] strong {
+  color: var(--danger);
+}
+
+.sched-empty {
+  padding: 16px;
+  color: var(--muted);
+  font-size: 0.82rem;
 }
 
 .logs-panel-header {
@@ -1576,6 +1688,12 @@ h1 {
 .logs-panel-header h2 {
   margin: 4px 0 0;
   font-size: 1.05rem;
+}
+
+.logs-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .logs-table {
@@ -1777,44 +1895,66 @@ h1 {
 
 .data-table-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
+  gap: 6px 16px;
   border-bottom: 1px solid var(--separator);
-  padding: 16px 18px;
+  padding: 7px 18px;
+}
+
+/* Meta (status + table name + counts) sits on its own first row. */
+.data-table-meta {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.data-table-meta .eyebrow {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-table-nameline {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
 }
 
 .data-table-toolbar h2 {
   margin: 0;
-  font-size: 1.35rem;
-  letter-spacing: -0.04em;
+  font-size: 1.02rem;
+  letter-spacing: -0.03em;
+  white-space: nowrap;
 }
 
 .data-source-picker {
   display: grid;
-  min-width: min(280px, 100%);
+  min-width: min(220px, 100%);
   gap: 6px;
 }
 
-.data-source-group {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto;
-  align-items: end;
-  gap: 8px;
-  min-width: min(430px, 100%);
+.data-source-picker .app-select-trigger {
+  min-height: 32px;
 }
 
+/* Picker + tenant buttons sit on the left of the second row. */
+.data-source-group {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.row-count,
 .data-source-note {
-  grid-column: 1 / -1;
+  display: block;
+  white-space: nowrap;
   color: var(--muted);
   font-size: 0.72rem;
-}
-
-.row-count {
-  display: block;
-  margin-top: 4px;
-  color: var(--muted);
-  font-size: 0.78rem;
 }
 
 .data-grid-wrap {
@@ -1832,12 +1972,21 @@ h1 {
   min-width: 0;
 }
 
+/* Rows/ERD tabs and the row-search share a single band. */
+.data-view-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--separator);
+  padding: 5px 14px;
+}
+
 .data-view-tabs {
   display: flex;
   align-items: center;
   gap: 8px;
-  border-bottom: 1px solid var(--separator);
-  padding: 10px 14px;
+  flex: 0 0 auto;
 }
 
 .erd-panel {
@@ -2127,14 +2276,21 @@ h1 {
 
 .test-table-shell {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  flex: 1 1 auto;
   gap: 14px;
   min-width: 0;
+  min-height: 0;
   border: 1px solid var(--separator);
   border-radius: 18px;
   background:
     linear-gradient(135deg, color-mix(in oklab, var(--surface) 94%, var(--accent)), var(--surface));
   padding: 14px;
   box-shadow: 0 18px 70px rgb(0 0 0 / 8%);
+}
+
+.test-table-shell .grid-frame {
+  min-height: 0;
 }
 
 .test-table-toolbar {
@@ -2394,7 +2550,7 @@ h1 {
 .file-table-shell {
   position: relative;
   overflow: auto;
-  width: min(960px, 100%);
+  width: 100%;
   max-height: calc(100vh - 178px);
   border: 1px solid #514946;
   border-radius: 7px;
@@ -2615,8 +2771,9 @@ h1 {
 .settings-shell {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
+  flex: 1 1 auto;
   overflow: hidden;
-  min-height: 520px;
+  min-height: 0;
   border: 1px solid var(--border);
   border-radius: calc(var(--field-radius) + 4px);
   background: var(--surface);
@@ -2644,6 +2801,8 @@ h1 {
 
 .settings-panel {
   padding: 24px;
+  overflow: auto;
+  min-height: 0;
 }
 
 .settings-card {
@@ -2779,6 +2938,38 @@ h1 {
   gap: 8px;
 }
 
+.env-mode-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.env-paste {
+  display: grid;
+  gap: 12px;
+}
+
+.env-paste .env-actions {
+  display: flex;
+}
+
+.env-paste-textarea {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  border: 1px solid var(--separator);
+  border-radius: var(--field-radius);
+  background: color-mix(in oklab, var(--surface-secondary) 62%, var(--surface));
+  color: var(--foreground);
+  font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  outline: none;
+  padding: 12px;
+}
+
+.env-paste-textarea:focus {
+  border-color: var(--focus);
+}
+
 .env-row {
   display: grid;
   grid-template-columns: minmax(210px, 0.7fr) minmax(260px, 1fr) 110px 160px;
@@ -2844,11 +3035,11 @@ h1 {
 
 .data-controls {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-bottom: 1px solid var(--separator);
-  padding: 10px 14px;
+  min-width: 0;
 }
 
 .data-controls .table-search {
@@ -2960,6 +3151,80 @@ h1 {
   gap: 12px;
 }
 
+/* Contextual bar shown above the grid when rows are selected. */
+.data-selection-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--separator);
+  background: color-mix(in oklab, var(--accent) 12%, var(--surface));
+  padding: 5px 14px;
+}
+
+.data-selection-count {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.data-selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Small, low-emphasis destructive button (Delete tenant / Delete rows). */
+.tenant-delete-button {
+  color: var(--danger);
+}
+
+.tenant-delete-button:hover {
+  background: color-mix(in oklab, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+.delete-tenant-modal {
+  width: min(480px, 100%);
+}
+
+.delete-tenant-body {
+  display: grid;
+  gap: 14px;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.delete-tenant-body code {
+  font-size: 0.82em;
+  color: var(--foreground);
+}
+
+.delete-tenant-field {
+  display: grid;
+  gap: 6px;
+}
+
+.delete-tenant-field > span {
+  font-size: 0.8rem;
+  color: var(--foreground);
+}
+
+.delete-tenant-field input {
+  width: 100%;
+  border: 1px solid var(--separator);
+  border-radius: var(--field-radius);
+  background: var(--surface);
+  color: var(--foreground);
+  font: inherit;
+  padding: 8px 10px;
+}
+
+.delete-tenant-field input:focus {
+  outline: none;
+  border-color: var(--danger);
+}
+
 .document-modal h2 {
   margin: 0;
   font-size: 1.2rem;
@@ -2998,13 +3263,9 @@ h1 {
   background: color-mix(in oklab, var(--warning) 12%, var(--surface));
 }
 
-.file-storage-page {
-  background: var(--background);
-  color: var(--foreground);
-}
-
+.file-storage-page,
 [data-theme="light"] .file-storage-page {
-  background: var(--background);
+  background: transparent;
   color: var(--foreground);
 }
 

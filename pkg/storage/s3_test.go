@@ -76,6 +76,57 @@ func TestPathStyleURL(t *testing.T) {
 	}
 }
 
+// TestProxyPutURLRoundTrip checks the upload-proxy signature: a freshly issued
+// URL verifies, an expired or tampered one does not, and a download (GET)
+// signature cannot be replayed to authorize an upload (domain separation).
+func TestProxyPutURLRoundTrip(t *testing.T) {
+	client := NewClient(Config{
+		Endpoint:        "http://minio:9000",
+		Region:          "us-east-1",
+		Bucket:          "gonvex-dev",
+		AccessKeyID:     "key",
+		SecretAccessKey: "secret",
+		ForcePathStyle:  true,
+		PublicBaseURL:   "https://runtime.example.com",
+	})
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	client.now = fixedTime(now)
+
+	const key = "proj/tenant/file123"
+	raw := client.ProxyPutURL(key, 15*time.Minute)
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	if parsed.Host != "runtime.example.com" {
+		t.Fatalf("host = %q, want runtime.example.com", parsed.Host)
+	}
+	if parsed.Path != "/storage/proj/tenant/file123" {
+		t.Fatalf("path = %q", parsed.Path)
+	}
+	if parsed.Query().Get("upload") != "1" {
+		t.Fatalf("missing upload=1 marker: %s", raw)
+	}
+	exp, _ := strconv.ParseInt(parsed.Query().Get("exp"), 10, 64)
+	sig := parsed.Query().Get("sig")
+	if !client.VerifyProxyPut(key, exp, sig) {
+		t.Fatalf("freshly issued upload signature did not verify")
+	}
+	// Expired.
+	if client.VerifyProxyPut(key, now.Add(-time.Second).Unix(), sig) {
+		t.Fatalf("expired upload signature verified")
+	}
+	// Tampered key.
+	if client.VerifyProxyPut("proj/tenant/other", exp, sig) {
+		t.Fatalf("upload signature verified for a different key")
+	}
+	// A GET (download) signature must NOT authorize an upload.
+	getSig := client.proxySignature(key, exp)
+	if client.VerifyProxyPut(key, exp, getSig) {
+		t.Fatalf("download signature replayed as an upload signature")
+	}
+}
+
 func TestUriEncode(t *testing.T) {
 	cases := []struct {
 		in          string

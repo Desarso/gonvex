@@ -15,7 +15,11 @@ dev:
 		pnpm dev:packages & packages_pid=$$!; \
 		pnpm dev:runtime & runtime_pid=$$!; \
 		pnpm dev:dashboard & dashboard_pid=$$!; \
-		wait -n "$$runtime_pid" "$$dashboard_pid" "$$packages_pid"'
+		while kill -0 "$$packages_pid" 2>/dev/null \
+			&& kill -0 "$$runtime_pid" 2>/dev/null \
+			&& kill -0 "$$dashboard_pid" 2>/dev/null; do \
+			sleep 1; \
+		done'
 
 services:
 	docker compose -f infra/docker-compose.dev.yml up -d --wait postgres valkey

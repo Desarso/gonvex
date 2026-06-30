@@ -137,6 +137,38 @@ func (c *Client) proxySignature(key string, exp int64) string {
 	return hex.EncodeToString(hmacSHA256([]byte("gonvex-storage:"+secret), key+"\n"+strconv.FormatInt(exp, 10)))
 }
 
+// ProxyPutURL builds a browser-reachable, time-limited upload URL served by the
+// runtime's POST /storage handler (which writes the bytes to the private S3
+// endpoint). Used when PublicBaseURL is configured so the browser never PUTs
+// straight to the internal S3 host. Mirrors ProxyGetURL but signs an
+// upload-scoped signature so a download URL cannot be replayed as an upload.
+func (c *Client) ProxyPutURL(key string, expires time.Duration) string {
+	if expires <= 0 {
+		expires = 15 * time.Minute
+	}
+	exp := c.now().Add(expires).Unix()
+	base := strings.TrimRight(c.cfg.PublicBaseURL, "/")
+	return fmt.Sprintf("%s/storage%s?exp=%d&sig=%s&upload=1", base, encodePath(key), exp, c.proxyUploadSignature(key, exp))
+}
+
+// VerifyProxyPut validates a proxy upload signature and expiry for key.
+func (c *Client) VerifyProxyPut(key string, exp int64, sig string) bool {
+	if exp <= 0 || exp < c.now().Unix() {
+		return false
+	}
+	return hmac.Equal([]byte(c.proxyUploadSignature(key, exp)), []byte(sig))
+}
+
+// proxyUploadSignature is domain-separated from proxySignature ("...-upload:")
+// so a GET (download) signature can never be replayed to authorize an upload.
+func (c *Client) proxyUploadSignature(key string, exp int64) string {
+	secret := c.cfg.URLSigningKey
+	if secret == "" {
+		secret = c.cfg.SecretAccessKey
+	}
+	return hex.EncodeToString(hmacSHA256([]byte("gonvex-storage-upload:"+secret), key+"\n"+strconv.FormatInt(exp, 10)))
+}
+
 // PutObject uploads bytes to key using a SigV4-signed PUT request.
 func (c *Client) PutObject(ctx context.Context, key string, body []byte, contentType string) error {
 	payloadHash := sha256Hex(body)

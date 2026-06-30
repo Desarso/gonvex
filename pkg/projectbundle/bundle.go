@@ -16,6 +16,11 @@ import (
 
 var safeProjectID = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
+// godanticImportPath is the module the AI-assistant project bundle imports to
+// embed the godantic agent. When a bundle imports it, renderGoMod wires a
+// require+replace to the copy vendored at <moduleRoot>/third_party/godantic.
+const godanticImportPath = "github.com/Desarso/godantic"
+
 type Loader struct {
 	cacheDir   string
 	moduleRoot string
@@ -81,10 +86,14 @@ func (l *Loader) Load(projectID string, bundle manifest.SourceBundle) (*gonvex.A
 		return nil, fmt.Errorf("create project bundle dir: %w", err)
 	}
 
+	needsGodantic := false
 	for relPath, encoded := range bundle.Files {
 		content, err := decodeFile(encoded)
 		if err != nil {
 			return nil, fmt.Errorf("decode %s: %w", relPath, err)
+		}
+		if strings.Contains(string(content), godanticImportPath) {
+			needsGodantic = true
 		}
 		target := filepath.Join(projectDir, filepath.FromSlash(relPath))
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -99,7 +108,7 @@ func (l *Loader) Load(projectID string, bundle manifest.SourceBundle) (*gonvex.A
 	if err := os.WriteFile(filepath.Join(projectDir, "plugin_main.go"), []byte(renderPluginMain(buildModulePath, packageName)), 0o644); err != nil {
 		return nil, fmt.Errorf("write plugin main: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(projectDir, "go.mod"), []byte(renderGoMod(buildModulePath, bundle.GoVersion, l.moduleRoot)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectDir, "go.mod"), []byte(renderGoMod(buildModulePath, bundle.GoVersion, l.moduleRoot, needsGodantic)), 0o644); err != nil {
 		return nil, fmt.Errorf("write go.mod: %w", err)
 	}
 
@@ -172,7 +181,7 @@ func Register(app *gonvexpkg.App) {
 `, modulePath)
 }
 
-func renderGoMod(modulePath string, goVersion string, moduleRoot string) string {
+func renderGoMod(modulePath string, goVersion string, moduleRoot string, includeGodantic bool) string {
 	if strings.TrimSpace(goVersion) == "" {
 		goVersion = "1.22"
 	}
@@ -186,6 +195,19 @@ func renderGoMod(modulePath string, goVersion string, moduleRoot string) string 
 		builder.WriteString("\nreplace github.com/gonvex/gonvex => ")
 		builder.WriteString(filepath.ToSlash(moduleRoot))
 		builder.WriteString("\n")
+	}
+	// Optional godantic wiring: only when the bundle imports godantic AND a
+	// vendored copy exists at <moduleRoot>/third_party/godantic. This lets gonvex
+	// actions embed the godantic agent (the AI assistant) while leaving projects
+	// that don't use it untouched. go mod tidy resolves it from the local replace.
+	if includeGodantic && moduleRoot != "" {
+		godanticRoot := filepath.Join(moduleRoot, "third_party", "godantic")
+		if _, err := os.Stat(filepath.Join(godanticRoot, "go.mod")); err == nil {
+			builder.WriteString("\nrequire github.com/Desarso/godantic v0.0.0\n")
+			builder.WriteString("\nreplace github.com/Desarso/godantic => ")
+			builder.WriteString(filepath.ToSlash(godanticRoot))
+			builder.WriteString("\n")
+		}
 	}
 	return builder.String()
 }
