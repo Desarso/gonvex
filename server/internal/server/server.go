@@ -120,7 +120,7 @@ func (s *Server) executeScheduledInternalMutation(ctx context.Context, job sched
 	started := time.Now()
 	defer func() {
 		s.metrics.recordFunctionEnd(kind)
-		s.metrics.recordFunction(job.FunctionPath, kind, time.Since(started), err)
+		s.metrics.recordFunction(job.ProjectID, job.FunctionPath, kind, time.Since(started), err)
 	}()
 
 	app := s.appForProject(ctx, job.ProjectID)
@@ -149,11 +149,18 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /storage/{key...}", s.handleStorageProxy)
+	mux.HandleFunc("POST /storage/{key...}", s.handleStorageUpload)
+	mux.HandleFunc("PUT /storage/{key...}", s.handleStorageUpload)
 	mux.HandleFunc("GET /dev/manifest", s.handleManifest)
 	mux.HandleFunc("GET /dev/metrics", s.handleMetrics)
+	mux.HandleFunc("DELETE /dev/logs", s.handleClearLogs)
 	mux.HandleFunc("GET /dev/projects", s.handleProjects)
 	mux.HandleFunc("POST /dev/projects", s.handleCreateProject)
 	mux.HandleFunc("POST /dev/projects/{project}/key", s.handleProjectKey)
+	mux.HandleFunc("GET /dev/projects/{project}/env", s.handleProjectEnv)
+	mux.HandleFunc("POST /dev/projects/{project}/env", s.handleSetProjectEnv)
+	mux.HandleFunc("PUT /dev/projects/{project}/env", s.handleBulkProjectEnv)
+	mux.HandleFunc("DELETE /dev/projects/{project}/env", s.handleDeleteProjectEnv)
 	mux.HandleFunc("DELETE /dev/projects/{project}", s.handleDeleteProject)
 	mux.HandleFunc("GET /dev/tenants", s.handleTenants)
 	mux.HandleFunc("POST /dev/tenants", s.handleCreateTenant)
@@ -183,14 +190,31 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.runtime.ManifestForProject(projectID(r)))
 }
 
-func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	connections, subscriptions := s.websocketStats()
-	snapshot := s.metrics.snapshot(s.runtime.Manifest(), connections, subscriptions)
+	project := projectID(r)
+	s.hydrateRuntimeStateForProject(r.Context(), project)
+	snapshot := s.metrics.snapshot(s.runtime.ManifestForProject(project), connections, subscriptions, project)
 	if s.scheduler != nil {
 		schedulerSnapshot := s.scheduler.snapshot()
 		snapshot.Scheduler = &schedulerSnapshot
 	}
 	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) {
+	cleared := s.metrics.clearLogs(projectID(r))
+	writeJSON(w, http.StatusOK, map[string]int{"cleared": cleared})
+}
+
+// runtimeInternalTables are runtime/registry bookkeeping tables that should not
+// appear in the Data browser (project env vars, the project registry, manifests,
+// and telemetry).
+var runtimeInternalTables = map[string]bool{
+	"gonvex_project_env":       true,
+	"gonvex_runtime_projects":  true,
+	"gonvex_runtime_manifests": true,
+	"telemetry_events":         true,
 }
 
 func (s *Server) handleDataTables(w http.ResponseWriter, r *http.Request) {
@@ -200,7 +224,14 @@ func (s *Server) handleDataTables(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tables": tables})
+	visible := tables[:0]
+	for _, table := range tables {
+		if runtimeInternalTables[table.Name] {
+			continue
+		}
+		visible = append(visible, table)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tables": visible})
 }
 
 func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
@@ -211,17 +242,17 @@ func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
 	if s.cache.enabled() {
 		key := s.cache.rowsKey(project, tenant, table, r.URL.Query())
 		if payload, ok := s.cache.get(r.Context(), key); ok {
-			s.metrics.recordCache("hit")
+			s.metrics.recordCache(project, "hit")
 			w.Header().Set("content-type", "application/json")
 			w.Header().Set("x-gonvex-cache", "hit")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(payload)
 			return
 		}
-		s.metrics.recordCache("miss")
+		s.metrics.recordCache(project, "miss")
 		w.Header().Set("x-gonvex-cache", "miss")
 	} else {
-		s.metrics.recordCache("bypass")
+		s.metrics.recordCache(project, "bypass")
 		w.Header().Set("x-gonvex-cache", "bypass")
 	}
 
@@ -594,7 +625,7 @@ func withJSON(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("access-control-allow-origin", "*")
 		w.Header().Set("access-control-allow-headers", "content-type, authorization, x-gonvex-project-id, x-gonvex-tenant-id")
-		w.Header().Set("access-control-allow-methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

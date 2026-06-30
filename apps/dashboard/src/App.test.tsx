@@ -67,7 +67,7 @@ describe("App", () => {
 
   it("creates a runtime project card", async () => {
     const user = userEvent.setup();
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    const fetchMock = vi.fn().mockResolvedValue({
       json: async () => ({
         project: {
           id: "acme-app",
@@ -79,20 +79,29 @@ describe("App", () => {
           description: "Runtime-created project database.",
           provisioned: true,
           runtimeCreated: true,
+          testTab: false,
         },
       }),
       ok: true,
       statusText: "OK",
-    }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
     window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({ email: "gabriel@example.com", name: "Gabriel" }));
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: /create project/i }));
     const dialog = screen.getByRole("dialog", { name: /create project/i });
+    expect(within(dialog).getByText(/database structure/i)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: /single project database/i })).toBeInTheDocument();
     await user.type(within(dialog).getByLabelText(/name/i), "Acme App");
     await user.click(within(dialog).getByRole("button", { name: /create project/i }));
 
     expect(screen.getByText("Acme App")).toBeInTheDocument();
+    expect(JSON.parse(window.localStorage.getItem("gonvex-dashboard-database-modes") ?? "{}")).toEqual({
+      "acme-app": "single",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"))).toMatchObject({ testTab: false });
+    expect(screen.queryByRole("button", { name: /^test$/i })).not.toBeInTheDocument();
     vi.unstubAllGlobals();
   });
 
@@ -108,11 +117,11 @@ describe("App", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders the Glide Data Grid test surface", async () => {
+  it("hides the task-grid test surface for existing projects", async () => {
     await renderProjectApp();
 
-    expect(screen.getByRole("heading", { name: /livegrid test surface/i })).toBeInTheDocument();
-    expect(screen.getByTestId("function-grid")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Primary sections")).queryByRole("button", { name: /^test$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /livegrid test surface/i })).not.toBeInTheDocument();
   });
 
   it("renders an accessible React Aria button", async () => {
@@ -142,6 +151,7 @@ describe("App", () => {
 
     expect(screen.getByRole("table", { name: /stored files/i })).toBeInTheDocument();
     expect(screen.getByText(/no files yet/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /dashboard lab/i })).not.toBeDisabled();
     expect(screen.queryByText(/kg27zrhezshg/i)).not.toBeInTheDocument();
   });
 
@@ -171,5 +181,8 @@ describe("App", () => {
     expect(within(tables).queryByRole("button", { name: /files/i })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /no tables/i })).toBeInTheDocument();
     expect(screen.getByText(/connect a project and push its schema/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/active database/i)).toHaveTextContent(/gonvex_dev/i);
+    expect(screen.queryByText(/^landlord$/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /\+ tenant db/i })).not.toBeInTheDocument();
   });
 });

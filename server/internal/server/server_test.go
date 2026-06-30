@@ -5,14 +5,17 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
+	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/config"
 )
 
@@ -263,6 +266,80 @@ func TestMetricsTracksDataCacheAndFunctionCalls(t *testing.T) {
 	}
 	if payload.Cache.Bypasses != 1 {
 		t.Fatalf("expected cache bypass to be tracked, got %d", payload.Cache.Bypasses)
+	}
+}
+
+func TestMetricsLogsAreProjectScoped(t *testing.T) {
+	server := New(config.Config{})
+	if err := server.runtime.SyncManifest(manifest.Manifest{
+		Project: "project-a",
+		Functions: map[string]manifest.FunctionEntry{
+			"tasks.list": {Kind: manifest.FunctionKindQuery, Handler: "ListTasks", File: "gonvex/tasks.go"},
+		},
+		Schema: manifest.EmptySchema(),
+	}); err != nil {
+		t.Fatalf("sync project-a manifest: %v", err)
+	}
+	if err := server.runtime.SyncManifest(manifest.Manifest{
+		Project: "project-b",
+		Functions: map[string]manifest.FunctionEntry{
+			"messages.list": {Kind: manifest.FunctionKindQuery, Handler: "ListMessages", File: "gonvex/messages.go"},
+		},
+		Schema: manifest.EmptySchema(),
+	}); err != nil {
+		t.Fatalf("sync project-b manifest: %v", err)
+	}
+	server.metrics.recordFunction("project-a", "tasks.list", "query", 25*time.Millisecond, nil)
+	server.metrics.recordFunction("project-a", "tasks.grid", "query", 25*time.Millisecond, fmt.Errorf("dashboard probe"))
+	server.metrics.recordFunction("project-b", "messages.list", "query", 25*time.Millisecond, fmt.Errorf("boom"))
+
+	request := httptest.NewRequest(http.MethodGet, "/dev/metrics", nil)
+	request.Header.Set("x-gonvex-project-id", "project-a")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+
+	var payload struct {
+		Logs []runtimeLogEntry `json:"logs"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Logs) != 1 || payload.Logs[0].Project != "project-a" {
+		t.Fatalf("expected only project-a logs, got %+v", payload.Logs)
+	}
+	if payload.Logs[0].Path != "tasks.list" {
+		t.Fatalf("expected only declared project-a function logs, got %+v", payload.Logs)
+	}
+
+	clearRequest := httptest.NewRequest(http.MethodDelete, "/dev/logs", nil)
+	clearRequest.Header.Set("x-gonvex-project-id", "project-a")
+	clearRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(clearRecorder, clearRequest)
+	if clearRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, clearRecorder.Code)
+	}
+	var clearPayload struct {
+		Cleared int `json:"cleared"`
+	}
+	if err := json.NewDecoder(clearRecorder.Body).Decode(&clearPayload); err != nil {
+		t.Fatalf("decode clear response: %v", err)
+	}
+	if clearPayload.Cleared != 2 {
+		t.Fatalf("expected two cleared project-a logs, got %d", clearPayload.Cleared)
+	}
+
+	projectBRequest := httptest.NewRequest(http.MethodGet, "/dev/metrics", nil)
+	projectBRequest.Header.Set("x-gonvex-project-id", "project-b")
+	projectBRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(projectBRecorder, projectBRequest)
+	if err := json.NewDecoder(projectBRecorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode project-b response: %v", err)
+	}
+	if len(payload.Logs) != 1 || payload.Logs[0].Project != "project-b" || payload.Logs[0].Path != "messages.list" {
+		t.Fatalf("expected project-b log to remain, got %+v", payload.Logs)
 	}
 }
 

@@ -28,6 +28,7 @@ type projectTarget struct {
 	Description    string `json:"description"`
 	Provisioned    bool   `json:"provisioned"`
 	RuntimeCreated bool   `json:"runtimeCreated"`
+	TestTab        bool   `json:"testTab"`
 	databaseURL    string
 	databaseName   string
 	syncKey        string
@@ -126,7 +127,8 @@ func (s *Server) hydrateConfiguredProjects() {
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var payload struct {
-		Name string `json:"name"`
+		Name    string `json:"name"`
+		TestTab bool   `json:"testTab"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -178,6 +180,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		Description:    "Runtime-created project database.",
 		Provisioned:    true,
 		RuntimeCreated: true,
+		TestTab:        payload.TestTab,
 		databaseURL:    databaseURL,
 		databaseName:   databaseName,
 		syncKey:        projectKey,
@@ -309,17 +312,32 @@ func ensureProjectRegistry(ctx context.Context, db *sql.DB) error {
 		project_key TEXT NOT NULL DEFAULT '',
 		provisioned BOOLEAN NOT NULL DEFAULT TRUE,
 		runtime_created BOOLEAN NOT NULL DEFAULT TRUE,
+		test_tab BOOLEAN NOT NULL DEFAULT FALSE,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`); err != nil {
 		return err
 	}
-	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_manifests (
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS test_tab BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_manifests (
 		project_id TEXT PRIMARY KEY,
 		manifest JSONB NOT NULL,
 		bundle_hash TEXT NOT NULL DEFAULT '',
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return err
+	}
+	// Project environment variables, stored in the runtime registry (not in any
+	// browsable tenant/project database) and hidden from the Data browser.
+	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_project_env (
+		project_id TEXT NOT NULL,
+		name TEXT NOT NULL,
+		value TEXT NOT NULL DEFAULT '',
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (project_id, name)
 	)`)
 	if err != nil {
 		return err
@@ -334,7 +352,7 @@ func (s *Server) loadProjectRegistry(ctx context.Context) ([]projectTarget, erro
 	}
 	defer db.Close()
 
-	rows, err := db.QueryContext(ctx, `SELECT id, name, environment, database_name, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created FROM gonvex_runtime_projects ORDER BY name`)
+	rows, err := db.QueryContext(ctx, `SELECT id, name, environment, database_name, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, COALESCE(test_tab, false) FROM gonvex_runtime_projects ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +361,7 @@ func (s *Server) loadProjectRegistry(ctx context.Context) ([]projectTarget, erro
 	var projects []projectTarget
 	for rows.Next() {
 		var project projectTarget
-		if err := rows.Scan(&project.ID, &project.Name, &project.Environment, &project.databaseName, &project.databaseURL, &project.StorageBucket, &project.Status, &project.Description, &project.syncKey, &project.Provisioned, &project.RuntimeCreated); err != nil {
+		if err := rows.Scan(&project.ID, &project.Name, &project.Environment, &project.databaseName, &project.databaseURL, &project.StorageBucket, &project.Status, &project.Description, &project.syncKey, &project.Provisioned, &project.RuntimeCreated, &project.TestTab); err != nil {
 			return nil, err
 		}
 		project.Database = project.databaseName
@@ -364,8 +382,8 @@ func (s *Server) saveProjectRegistry(ctx context.Context, project projectTarget)
 		databaseName = project.Database
 	}
 	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_runtime_projects (
-		id, name, environment, database_name, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, updated_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+		id, name, environment, database_name, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, test_tab, updated_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
 	ON CONFLICT (id) DO UPDATE SET
 		name = EXCLUDED.name,
 		environment = EXCLUDED.environment,
@@ -377,6 +395,7 @@ func (s *Server) saveProjectRegistry(ctx context.Context, project projectTarget)
 		project_key = EXCLUDED.project_key,
 		provisioned = EXCLUDED.provisioned,
 		runtime_created = EXCLUDED.runtime_created,
+		test_tab = EXCLUDED.test_tab,
 		updated_at = now()`,
 		project.ID,
 		project.Name,
@@ -389,6 +408,7 @@ func (s *Server) saveProjectRegistry(ctx context.Context, project projectTarget)
 		project.syncKey,
 		project.Provisioned,
 		project.RuntimeCreated,
+		project.TestTab,
 	)
 	return err
 }

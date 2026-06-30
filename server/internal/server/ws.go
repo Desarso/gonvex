@@ -636,12 +636,12 @@ func (s *Server) executeTenantQuery(ctx context.Context, projectID string, tenan
 }
 
 func (s *Server) executeTenantQueryForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
-	kind := s.functionKind(path, "query")
+	kind := s.functionKind(projectID, path, "query")
 	s.metrics.recordFunctionStart(kind)
 	started := time.Now()
 	defer func() {
 		s.metrics.recordFunctionEnd(kind)
-		s.metrics.recordFunction(path, kind, time.Since(started), err)
+		s.metrics.recordFunction(projectID, path, kind, time.Since(started), err)
 	}()
 
 	if isLegacyTaskQuery(path) {
@@ -700,12 +700,12 @@ func (s *Server) executeTenantMutation(ctx context.Context, projectID string, te
 }
 
 func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
-	kind := s.functionKind(path, "mutation")
+	kind := s.functionKind(projectID, path, "mutation")
 	s.metrics.recordFunctionStart(kind)
 	started := time.Now()
 	defer func() {
 		s.metrics.recordFunctionEnd(kind)
-		s.metrics.recordFunction(path, kind, time.Since(started), err)
+		s.metrics.recordFunction(projectID, path, kind, time.Since(started), err)
 	}()
 
 	if isLegacyTaskMutation(path) {
@@ -785,12 +785,12 @@ func (s *Server) executeTenantAction(ctx context.Context, projectID string, tena
 }
 
 func (s *Server) executeTenantActionForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
-	kind := s.functionKind(path, "action")
+	kind := s.functionKind(projectID, path, "action")
 	s.metrics.recordFunctionStart(kind)
 	started := time.Now()
 	defer func() {
 		s.metrics.recordFunctionEnd(kind)
-		s.metrics.recordFunction(path, kind, time.Since(started), err)
+		s.metrics.recordFunction(projectID, path, kind, time.Since(started), err)
 	}()
 
 	app := s.appForProject(ctx, projectID)
@@ -804,11 +804,11 @@ func (s *Server) executeTenantActionForCaller(ctx context.Context, projectID str
 	return nil, fmt.Errorf("action %q is not implemented by the runtime", path)
 }
 
-func (s *Server) functionKind(path string, fallback string) string {
+func (s *Server) functionKind(projectID string, path string, fallback string) string {
 	if function, ok := s.app.Lookup(path); ok && function.Kind != "" {
 		return string(function.Kind)
 	}
-	if entry, ok := s.runtime.Manifest().Functions[path]; ok && entry.Kind != "" {
+	if entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]; ok && entry.Kind != "" {
 		return string(entry.Kind)
 	}
 	return fallback

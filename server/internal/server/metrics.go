@@ -14,7 +14,7 @@ import (
 const (
 	metricsBucketWidth       = 30 * time.Second
 	metricsBucketCount       = 24
-	metricsLogLimit          = 100
+	metricsLogLimit          = 1000
 	metricsTelemetryLogLimit = 1000
 )
 
@@ -61,6 +61,7 @@ type cacheMetricsBucket struct {
 
 type runtimeLogEntry struct {
 	Time       string  `json:"time"`
+	Project    string  `json:"project,omitempty"`
 	Path       string  `json:"path"`
 	Kind       string  `json:"kind"`
 	Outcome    string  `json:"outcome"`
@@ -314,7 +315,7 @@ func (m *runtimeMetrics) observeRunningLocked(now time.Time) {
 	}
 }
 
-func (m *runtimeMetrics) recordFunction(path string, kind string, duration time.Duration, err error) {
+func (m *runtimeMetrics) recordFunction(project string, path string, kind string, duration time.Duration, err error) {
 	if m == nil || path == "" {
 		return
 	}
@@ -356,6 +357,7 @@ func (m *runtimeMetrics) recordFunction(path string, kind string, duration time.
 
 	m.appendLog(runtimeLogEntry{
 		Time:       now.Format(time.RFC3339Nano),
+		Project:    project,
 		Path:       path,
 		Kind:       entry.Kind,
 		Outcome:    outcome,
@@ -364,7 +366,7 @@ func (m *runtimeMetrics) recordFunction(path string, kind string, duration time.
 	})
 }
 
-func (m *runtimeMetrics) recordCache(outcome string) {
+func (m *runtimeMetrics) recordCache(project string, outcome string) {
 	if m == nil {
 		return
 	}
@@ -388,6 +390,7 @@ func (m *runtimeMetrics) recordCache(outcome string) {
 	m.cache.trimBuckets(now)
 	m.appendLog(runtimeLogEntry{
 		Time:    now.Format(time.RFC3339Nano),
+		Project: project,
 		Path:    "dev.data.rows",
 		Kind:    "cache",
 		Outcome: "ok",
@@ -478,7 +481,7 @@ func (m *runtimeMetrics) recordTransaction(entry transactionTelemetryEntry) {
 	m.appendTelemetryFileLocked(entry)
 }
 
-func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, subscriptions int) runtimeMetricsSnapshot {
+func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, subscriptions int, projectFilter string) runtimeMetricsSnapshot {
 	now := time.Now().UTC()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -497,8 +500,22 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 		}
 	}
 
-	logs := make([]runtimeLogEntry, len(m.logs))
-	copy(logs, m.logs)
+	logs := make([]runtimeLogEntry, 0, len(m.logs))
+	allowedLogPaths := map[string]bool{}
+	if projectFilter != "" {
+		for path := range current.Functions {
+			allowedLogPaths[path] = true
+		}
+	}
+	for _, entry := range m.logs {
+		if projectFilter != "" && entry.Project != projectFilter {
+			continue
+		}
+		if projectFilter != "" && !allowedLogPaths[entry.Path] {
+			continue
+		}
+		logs = append(logs, entry)
+	}
 	sort.Slice(logs, func(left, right int) bool {
 		return logs[left].Time > logs[right].Time
 	})
@@ -558,6 +575,30 @@ func (m *runtimeMetrics) appendLog(entry runtimeLogEntry) {
 	if len(m.logs) > metricsLogLimit {
 		m.logs = m.logs[len(m.logs)-metricsLogLimit:]
 	}
+}
+
+// clearLogs drops all retained runtime log entries and reports how many were
+// removed. Other metrics (function counters, transactions, telemetry) are left
+// untouched.
+func (m *runtimeMetrics) clearLogs(projectFilter string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if projectFilter == "" {
+		cleared := len(m.logs)
+		m.logs = nil
+		return cleared
+	}
+	kept := m.logs[:0]
+	cleared := 0
+	for _, entry := range m.logs {
+		if entry.Project == projectFilter {
+			cleared++
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	m.logs = kept
+	return cleared
 }
 
 func (m *runtimeMetrics) appendTelemetryLog(entry transactionTelemetryEntry) {

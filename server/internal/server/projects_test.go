@@ -97,7 +97,7 @@ func TestConfiguredProjectsHydrateIntoProjectList(t *testing.T) {
 		t.Fatalf("expected one configured project, got %d", len(payload.Projects))
 	}
 	project := payload.Projects[0]
-	if project.ID != "whagons-5" || project.Database != "gonvex_whagons_5" || project.RuntimeCreated {
+	if project.ID != "whagons-5" || project.Database != "gonvex_whagons_5" || project.RuntimeCreated || project.TestTab {
 		t.Fatalf("unexpected configured project: %+v", project)
 	}
 }
