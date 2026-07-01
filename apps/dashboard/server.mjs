@@ -169,7 +169,7 @@ async function handleAPI(request, response, url) {
       });
       const payload = await runtimeResponse.json().catch(() => ({}));
       if (!runtimeResponse.ok || !payload.session) {
-        return writeJSON(response, runtimeResponse.status || 401, { error: payload.error ?? "invalid email or password" });
+        throw new Error(payload.error ?? "runtime dashboard login failed");
       }
       session = payload.session;
     } catch {
