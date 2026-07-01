@@ -231,6 +231,9 @@ func (s *Server) dashboardActorFromRequest(r *http.Request) (dashboardActor, boo
 	if actor, ok := s.verifyDashboardToken(token); ok {
 		return actor, true
 	}
+	if s.acceptsAdminKey(token) {
+		return dashboardActor{Email: "admin@gonvex.local", Name: "Gonvex Admin", Role: "admin"}, true
+	}
 	if s.dashboardAuthOptional() {
 		return dashboardActor{Email: "local@gonvex.dev", Name: "Local Developer", Role: "admin"}, true
 	}
@@ -238,6 +241,9 @@ func (s *Server) dashboardActorFromRequest(r *http.Request) (dashboardActor, boo
 }
 
 func (s *Server) dashboardAuthOptional() bool {
+	if s.config.RequireAuth {
+		return false
+	}
 	return strings.TrimSpace(s.dashboardSecret()) == "" && s.configDashboardUser() == ""
 }
 

@@ -308,8 +308,9 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleProjectKey(w http.ResponseWriter, r *http.Request) {
+	adminKey := s.acceptsAdminKey(syncKey(r))
 	actor, signedIn := s.dashboardActorFromRequest(r)
-	if !signedIn && !s.acceptsAdminKey(syncKey(r)) {
+	if !signedIn && !adminKey {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid Gonvex admin key"})
 		return
 	}
@@ -319,7 +320,7 @@ func (s *Server) handleProjectKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
 		return
 	}
-	if signedIn && !s.canManageProject(r.Context(), actor, projectID) {
+	if signedIn && !adminKey && !s.canManageProject(r.Context(), actor, projectID) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
 		return
 	}

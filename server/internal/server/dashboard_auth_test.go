@@ -54,3 +54,14 @@ func TestProjectsEndpointRequiresDashboardTokenWhenConfigured(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, recorder.Code)
 	}
 }
+
+func TestProjectsEndpointRequiresDashboardTokenWhenRequireAuth(t *testing.T) {
+	server := New(config.Config{RequireAuth: true})
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/projects", nil))
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, recorder.Code)
+	}
+}
