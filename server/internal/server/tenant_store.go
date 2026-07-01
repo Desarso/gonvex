@@ -100,7 +100,12 @@ func (r *tenantStoreResolver) Store(ctx context.Context, tenantID string, databa
 	}
 
 	r.mu.Lock()
-	if previous := r.stores[tenantID]; previous != nil {
+	if previous := r.stores[tenantID]; previous != nil && previous.DatabaseURL == databaseURL {
+		previous.lastUsed = r.now()
+		r.mu.Unlock()
+		_ = db.Close()
+		return previous, nil
+	} else if previous != nil {
 		_ = previous.DB.Close()
 	}
 	r.stores[tenantID] = store
