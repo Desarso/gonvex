@@ -269,6 +269,7 @@ type DashboardSession = {
   provider?: "dev" | "gonvex" | "google";
   role?: "admin" | "user";
   accessToken?: string;
+  expiresAt?: number;
 };
 
 type ProjectTarget = {
@@ -984,6 +985,14 @@ async function destroyDashboardPasswordSession(): Promise<void> {
   }).catch(() => undefined);
 }
 
+async function fetchDashboardSession(): Promise<DashboardSession | null> {
+  const response = await fetch("/api/dashboard/session", { credentials: "include" });
+  if (response.status === 401) return null;
+  const payload = await response.json().catch(() => ({})) as { session?: DashboardSession };
+  if (!response.ok || !payload.session) return null;
+  return payload.session;
+}
+
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
 }
@@ -1219,7 +1228,13 @@ async function fetchRuntimeProjects(): Promise<ProjectTarget[]> {
     try {
       const response = await fetch(url, { headers: dashboardAuthHeaders() });
       if (!response.ok) {
-        lastError = response.statusText || `HTTP ${response.status}`;
+        const payload = await response.json().catch(() => ({} as { error?: string }));
+        lastError = payload.error ?? response.statusText ?? `HTTP ${response.status}`;
+        continue;
+      }
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("application/json")) {
+        lastError = response.url.includes("/login") ? "dashboard sign-in is required" : "runtime returned a non-JSON response";
         continue;
       }
       const payload = await response.json() as { projects?: Array<Partial<ProjectTarget> & { id: string; name: string }> };
@@ -2518,7 +2533,15 @@ function storedSession(): DashboardSession | null {
   try {
     const parsed = JSON.parse(raw) as Partial<DashboardSession>;
     if (!parsed.email || !parsed.name) return null;
-    return { email: parsed.email, name: parsed.name };
+    return {
+      accessToken: parsed.accessToken,
+      avatarUrl: parsed.avatarUrl,
+      email: parsed.email,
+      expiresAt: parsed.expiresAt,
+      name: parsed.name,
+      provider: parsed.provider,
+      role: parsed.role,
+    };
   } catch {
     return null;
   }
@@ -2836,7 +2859,6 @@ export function App() {
   const [session, setSession] = useState<DashboardSession | null>(() => {
     if (window.location.pathname === "/login") return null;
     if (!dashboardAuthEnabled) return localDeveloperSession;
-    if (dashboardPasswordLoginEnabled) return null;
     return storedSession();
   });
   const [projects, setProjects] = useState<ProjectTarget[]>(() => projectTargets);
@@ -2874,6 +2896,13 @@ export function App() {
     setSession(nextSession);
     window.localStorage.setItem(dashboardSessionKey, JSON.stringify(nextSession));
     window.history.replaceState(null, "", "/projects");
+  };
+
+  const restoreSession = (nextSession: DashboardSession) => {
+    setSignedOut(false);
+    setSession(nextSession);
+    window.localStorage.setItem(dashboardSessionKey, JSON.stringify(nextSession));
+    if (window.location.pathname === "/login") window.history.replaceState(null, "", "/projects");
   };
 
   const loginWithPassword = async (email: string, password: string) => {
@@ -3028,6 +3057,21 @@ export function App() {
     } finally {
       setProjectDiscoveryLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    if (import.meta.env.MODE === "test") return;
+    if (!dashboardAuthEnabled) return;
+    let cancelled = false;
+    fetchDashboardSession()
+      .then((nextSession) => {
+        if (cancelled || !nextSession) return;
+        restoreSession(nextSession);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
