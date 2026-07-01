@@ -179,6 +179,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /dev/data/tables/{table}/rows", s.handleInsertDataRow)
 	mux.HandleFunc("POST /dev/sync", s.handleDevSync)
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
+	mux.HandleFunc("/", s.handleRegisteredHTTP)
 	return withGzip(withJSON(s.withDashboardProjectAuth(mux)))
 }
 
@@ -662,8 +663,8 @@ func uniqueStrings(values []string) []string {
 func withJSON(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("access-control-allow-origin", "*")
-		w.Header().Set("access-control-allow-headers", "content-type, authorization, x-gonvex-project-id, x-gonvex-tenant-id")
-		w.Header().Set("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("access-control-allow-headers", "content-type, authorization, x-api-key, x-gonvex-project-id, x-gonvex-tenant-id")
+		w.Header().Set("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

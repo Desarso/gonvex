@@ -54,6 +54,18 @@ func (r *Runtime) AppForProject(projectID string) *gonvex.App {
 	return r.loader.AppForProject(projectID)
 }
 
+func (r *Runtime) ProjectIDs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ids := make([]string, 0, len(r.manifests))
+	for projectID := range r.manifests {
+		if projectID != "" {
+			ids = append(ids, projectID)
+		}
+	}
+	return ids
+}
+
 func (r *Runtime) Manifest() manifest.Manifest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

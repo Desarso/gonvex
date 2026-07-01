@@ -78,6 +78,50 @@ type HTTPContext struct {
 	RuntimeContext
 }
 
+type HTTPRequest struct {
+	Method     string              `json:"method"`
+	Path       string              `json:"path"`
+	RawQuery   string              `json:"rawQuery,omitempty"`
+	Query      map[string][]string `json:"query,omitempty"`
+	Headers    map[string][]string `json:"headers,omitempty"`
+	Body       []byte              `json:"body,omitempty"`
+	RemoteAddr string              `json:"remoteAddr,omitempty"`
+}
+
+type HTTPResponse struct {
+	Status  int                 `json:"status,omitempty"`
+	Headers map[string][]string `json:"headers,omitempty"`
+	Body    []byte              `json:"body,omitempty"`
+}
+
+func TextResponse(status int, body string, contentType string) HTTPResponse {
+	if contentType == "" {
+		contentType = "text/plain; charset=utf-8"
+	}
+	return HTTPResponse{
+		Status: status,
+		Headers: map[string][]string{
+			"content-type": []string{contentType},
+		},
+		Body: []byte(body),
+	}
+}
+
+func JSONResponse(status int, value any) HTTPResponse {
+	body, err := json.Marshal(value)
+	if err != nil {
+		body = []byte(`{"error":"failed to encode response"}`)
+		status = 500
+	}
+	return HTTPResponse{
+		Status: status,
+		Headers: map[string][]string{
+			"content-type": []string{"application/json"},
+		},
+		Body: body,
+	}
+}
+
 type DispatchError struct {
 	Code    string
 	Path    string
@@ -170,6 +214,25 @@ func (a *App) ExecuteAction(ctx *ActionCtx, path string, rawArgs json.RawMessage
 		ctx = &ActionCtx{}
 	}
 	return a.execute(path, rawArgs, ctx, FunctionKindAction)
+}
+
+func (a *App) ExecuteHTTP(ctx *HTTPContext, path string, request HTTPRequest) (HTTPResponse, error) {
+	if ctx == nil {
+		ctx = &HTTPContext{}
+	}
+	rawArgs, err := json.Marshal(request)
+	if err != nil {
+		return HTTPResponse{}, err
+	}
+	result, err := a.execute(path, rawArgs, ctx, FunctionKindHTTP)
+	if err != nil {
+		return HTTPResponse{}, err
+	}
+	response, ok := result.(HTTPResponse)
+	if !ok {
+		return HTTPResponse{}, &DispatchError{Code: "invalid_response", Path: path, Message: fmt.Sprintf("HTTP function %q returned %T, want gonvex.HTTPResponse", path, result)}
+	}
+	return response, nil
 }
 
 func (a *App) register(kind FunctionKind, path string, handler any) {
