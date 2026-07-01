@@ -415,7 +415,9 @@ func writeBindings(root string, m manifest.Manifest) error {
 		return err
 	}
 
-	manifestJSON, err := json.MarshalIndent(m, "", "  ")
+	bindingManifest := m
+	bindingManifest.Bundle = nil
+	manifestJSON, err := json.MarshalIndent(bindingManifest, "", "  ")
 	if err != nil {
 		return err
 	}
