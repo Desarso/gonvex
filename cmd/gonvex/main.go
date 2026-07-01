@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/pkg/projectbundle"
 )
 
 const defaultRuntimeURL = "http://localhost:8080"
@@ -216,7 +218,24 @@ func fingerprint(files []string) (string, error) {
 func buildManifest(root string, files []string, projectID string) (manifest.Manifest, error) {
 	functions := map[string]manifest.FunctionEntry{}
 	schema := manifest.EmptySchema()
+	bundleFiles := map[string]string{}
+	packageName := ""
 	for _, file := range files {
+		source, err := os.ReadFile(file)
+		if err != nil {
+			return manifest.Manifest{}, err
+		}
+		rel, err := filepath.Rel(root, file)
+		if err != nil {
+			return manifest.Manifest{}, err
+		}
+		rel = filepath.ToSlash(rel)
+		bundleRel := strings.TrimPrefix(rel, "gonvex/")
+		bundleFiles[path.Join("app", bundleRel)] = projectbundle.EncodeFile(source)
+		if packageName == "" {
+			packageName = projectbundle.DetectPackageName(string(source))
+		}
+
 		entries, err := parseRegistrations(root, file)
 		if err != nil {
 			return manifest.Manifest{}, err
@@ -247,6 +266,12 @@ func buildManifest(root string, files []string, projectID string) (manifest.Mani
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Functions:   functions,
 		Schema:      schema,
+		Bundle: &manifest.SourceBundle{
+			Hash:        projectbundle.HashFiles(bundleFiles),
+			ModulePath:  projectbundle.DefaultModulePath(projectID),
+			PackageName: packageName,
+			Files:       bundleFiles,
+		},
 	}, nil
 }
 
