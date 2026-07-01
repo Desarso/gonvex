@@ -14,7 +14,7 @@ const authUser = normalizeEmail(process.env.DASHBOARD_AUTH_USER ?? "");
 const authPassword = process.env.DASHBOARD_AUTH_PASSWORD ?? "";
 const sessionSecret = process.env.DASHBOARD_SESSION_SECRET ?? authPassword;
 const cookieSecure = envFlag(process.env.DASHBOARD_COOKIE_SECURE, true);
-const runtimeURL = (process.env.GONVEX_RUNTIME_URL ?? process.env.VITE_GONVEX_RUNTIME_URL ?? "http://127.0.0.1:8080").replace(/\/+$/, "");
+const runtimeURL = (process.env.GONVEX_RUNTIME_URL ?? process.env.VITE_GONVEX_RUNTIME_URL ?? process.env.VITE_GONVEX_URL ?? "http://127.0.0.1:8080").replace(/\/+$/, "");
 
 const mimeTypes = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -128,11 +128,18 @@ function sessionFromRequest(request) {
   return verifySessionCookie(parseCookies(request.headers.cookie).get(sessionCookieName), sessionSecret);
 }
 
+function signedSession(session) {
+  const { accessToken: _ignored, ...payload } = session;
+  const accessToken = signSession(payload, sessionSecret);
+  return { accessToken, session: { ...payload, accessToken } };
+}
+
 async function handleAPI(request, response, url) {
   if (url.pathname === "/api/dashboard/session" && request.method === "GET") {
     const session = sessionFromRequest(request);
     if (!session) return writeJSON(response, 401, { error: "unauthorized" });
-    return writeJSON(response, 200, { session });
+    const token = parseCookies(request.headers.cookie).get(sessionCookieName);
+    return writeJSON(response, 200, { session: { ...session, accessToken: token } });
   }
 
   if (url.pathname === "/api/dashboard/logout" && request.method === "POST") {
@@ -177,8 +184,9 @@ async function handleAPI(request, response, url) {
         provider: "gonvex",
       };
     }
-    return writeJSON(response, 200, { session }, {
-      "Set-Cookie": `${sessionCookieName}=${encodeURIComponent(signSession(session, sessionSecret))}; ${cookieOptions(7 * 24 * 60 * 60)}`,
+    const signed = signedSession(session);
+    return writeJSON(response, 200, { session: signed.session }, {
+      "Set-Cookie": `${sessionCookieName}=${encodeURIComponent(signed.accessToken)}; ${cookieOptions(7 * 24 * 60 * 60)}`,
     });
   }
 
