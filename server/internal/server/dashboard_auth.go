@@ -510,6 +510,15 @@ func (s *Server) addProjectMemberIfUserExists(ctx context.Context, db *sql.DB, p
 		name = EXCLUDED.name,
 		role = EXCLUDED.role`,
 		projectID, email, name, role)
+	if err != nil {
+		return err
+	}
+	if role == "owner" {
+		_, err = db.ExecContext(ctx, `UPDATE gonvex_runtime_projects
+			SET owner_email = $1, updated_at = now()
+			WHERE id = $2 AND COALESCE(owner_email, '') = ''`,
+			email, projectID)
+	}
 	return err
 }
 
