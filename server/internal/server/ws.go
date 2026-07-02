@@ -45,6 +45,17 @@ type serverMessage struct {
 	Trace  any    `json:"trace,omitempty"`
 }
 
+// explicitNull makes a nil handler result serialize as an explicit JSON null
+// on *.result messages. Convex resolves null-returning functions to null;
+// omitting the field (omitempty) would leave clients reading `undefined`,
+// which useQuery treats as "still loading".
+func explicitNull(result any) any {
+	if result == nil {
+		return json.RawMessage("null")
+	}
+	return result
+}
+
 type messageTrace struct {
 	ClientSentAtMS                float64 `json:"clientSentAtMs,omitempty"`
 	ServerReceivedAtMS            float64 `json:"serverReceivedAtMs,omitempty"`
@@ -245,7 +256,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			return
 		}
 		trace.ServerBroadcastScheduledAtMS = epochMillis(time.Now())
-		c.write(serverMessage{Type: "mutation.result", ID: message.ID, Path: message.Path, Result: result, Trace: trace})
+		c.write(serverMessage{Type: "mutation.result", ID: message.ID, Path: message.Path, Result: explicitNull(result), Trace: trace})
 		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "mutation", message.Path, "server", "", "ok", "", trace))
 		c.server.broadcastTenantTableChangeAt(c.project, c.tenant, mutationInvalidationTable(message.Path), committedAt)
 	case "action.call":
@@ -263,7 +274,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "action", message.Path, "server", "", "error", err.Error(), trace))
 			return
 		}
-		c.write(serverMessage{Type: "action.result", ID: message.ID, Path: message.Path, Result: result, Trace: trace})
+		c.write(serverMessage{Type: "action.result", ID: message.ID, Path: message.Path, Result: explicitNull(result), Trace: trace})
 		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "action", message.Path, "server", "", "ok", "", trace))
 	case "telemetry.event":
 		c.server.recordTransactionTelemetry(transactionEntryFromClientTelemetry(c.project, c.tenant, message))
@@ -609,7 +620,7 @@ func (s *Server) executeSubscription(ctx context.Context, sub querySubscription,
 		ServerSubscriptionSentAtMS:    epochMillis(sentAt),
 		ServerDurationMS:              float64(sentAt.Sub(startedAt).Microseconds()) / 1000,
 	}
-	sub.conn.write(serverMessage{Type: "query.result", ID: sub.id, Path: sub.path, Result: result, Reason: reason, Trace: trace})
+	sub.conn.write(serverMessage{Type: "query.result", ID: sub.id, Path: sub.path, Result: explicitNull(result), Reason: reason, Trace: trace})
 	s.recordTransactionTelemetry(transactionEntryFromTrace(sub.project, sub.tenant, sub.id, "query", sub.path, "server", reason, "ok", "", trace))
 }
 
