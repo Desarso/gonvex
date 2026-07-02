@@ -39,6 +39,21 @@ func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Re
 		return Result{}, err
 	}
 
+	// Serialize schema application per database with a Postgres advisory lock.
+	// CREATE TABLE/INDEX IF NOT EXISTS is NOT concurrency-safe: the existence
+	// check and the pg_class insert are not atomic, so two sessions applying the
+	// same schema at once (e.g. a runtime sync racing a tenant clone/normalize
+	// pass, or overlapping syncs) both pass the check and one loses with
+	// "duplicate key ... pg_class_relname_nsp_index" (23505). The lock makes any
+	// second applier wait until the first finishes, after which IF NOT EXISTS
+	// correctly no-ops. The key is derived from the database name so applies to
+	// different databases still run in parallel.
+	unlock, err := acquireSchemaLock(ctx, db)
+	if err != nil {
+		return Result{}, err
+	}
+	defer unlock()
+
 	result := Result{}
 	tableNames := sortedTableNames(desired.Tables)
 	for _, tableName := range tableNames {
@@ -80,6 +95,30 @@ func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Re
 	result.Applied = append(result.Applied, applied...)
 
 	return result, nil
+}
+
+// acquireSchemaLock takes a session-level Postgres advisory lock on a dedicated
+// connection, keyed by the current database, and returns a function that
+// releases the lock and returns the connection. Holding the lock on one
+// connection is enough to exclude any other applier for this database; the DDL
+// itself may run on other pool connections. The returned unlock is safe to call
+// once via defer.
+func acquireSchemaLock(ctx context.Context, db *sql.DB) (func(), error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// hashtext yields a stable int4 from the database name; two sessions on the
+	// same database contend on the same key, different databases do not.
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtext('gonvex_schema_apply:' || current_database()))`); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return func() {
+		// Release with a fresh context so unlock still runs if ctx is cancelled.
+		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtext('gonvex_schema_apply:' || current_database()))`)
+		conn.Close()
+	}, nil
 }
 
 func tableExists(ctx context.Context, db *sql.DB, table string) (bool, error) {

@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -43,6 +45,15 @@ type Server struct {
 	tableChanges      map[string]tableChange
 	projectEnvMu      sync.Mutex
 	projectEnvCache   map[string]projectEnvCacheEntry
+	// syncLocks serializes /dev/sync work per project so overlapping syncs
+	// (e.g. a failed-then-retried push, or a client that fires twice) can't run
+	// catalog DDL concurrently and trip "tuple concurrently updated".
+	syncLockMu sync.Mutex
+	syncLocks  map[string]*sync.Mutex
+	// schemaHash records the fingerprint of the schema last applied to each
+	// project's database, so an unchanged sync skips the trigger/DDL reapply.
+	schemaHashMu sync.Mutex
+	schemaHash   map[string]string
 }
 
 func New(cfg config.Config) *Server {
@@ -77,6 +88,8 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		wsConns:           map[*wsConn]bool{},
 		tableChangeWait:   map[string]*time.Timer{},
 		tableChanges:      map[string]tableChange{},
+		syncLocks:         map[string]*sync.Mutex{},
+		schemaHash:        map[string]string{},
 	}
 	server.scheduler = newScheduler(server.runScheduledJob)
 	server.tenantStores = newTenantStoreResolver(&server.config)
@@ -417,15 +430,38 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		next.Schema = manifest.EmptySchema()
 	}
 
-	migrationResult, err := schema.Apply(r.Context(), s.databaseURLForProject(next.Project), next.Schema.LandlordSchema())
-	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-		return
-	}
-	tenantMigrationResult, err := s.applyTenantSchemasForProject(r.Context(), next.Project, next.Schema)
-	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-		return
+	// Serialize per project: schema.Apply reinstalls NOTIFY triggers via
+	// DROP/CREATE TRIGGER + CREATE OR REPLACE FUNCTION, which update pg_catalog
+	// rows. Two overlapping syncs (or a sync racing live query traffic) trip
+	// Postgres' "tuple concurrently updated". One sync at a time per project.
+	lock := s.projectSyncLock(next.Project)
+	lock.Lock()
+	defer lock.Unlock()
+
+	var (
+		migrationResult       schema.Result
+		tenantMigrationResult schema.Result
+		schemaSkipped         bool
+		err                   error
+	)
+	// Skip the DDL reapply when the schema is byte-identical to what we last
+	// applied. This is the common dev case (editing a handler, not the schema)
+	// and avoids reinstalling every table's trigger against live traffic.
+	fingerprint := schemaFingerprint(next.Schema)
+	if fingerprint != "" && s.schemaFingerprintApplied(next.Project, fingerprint) {
+		schemaSkipped = true
+	} else {
+		migrationResult, err = schema.Apply(r.Context(), s.databaseURLForProject(next.Project), next.Schema.LandlordSchema())
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		tenantMigrationResult, err = s.applyTenantSchemasForProject(r.Context(), next.Project, next.Schema)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		s.markSchemaFingerprint(next.Project, fingerprint)
 	}
 
 	if err := s.runtime.SyncManifest(next); err != nil {
@@ -445,8 +481,50 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		"functionCount":   len(next.Functions),
 		"schema":          migrationResult,
 		"tenantSchema":    tenantMigrationResult,
+		"schemaSkipped":   schemaSkipped,
 		"runtimeReloaded": true,
 	})
+}
+
+// projectSyncLock returns the mutex that serializes /dev/sync work for a project.
+func (s *Server) projectSyncLock(projectID string) *sync.Mutex {
+	s.syncLockMu.Lock()
+	defer s.syncLockMu.Unlock()
+	mu, ok := s.syncLocks[projectID]
+	if !ok {
+		mu = &sync.Mutex{}
+		s.syncLocks[projectID] = mu
+	}
+	return mu
+}
+
+// schemaFingerprint hashes the desired schema so an unchanged sync can skip the
+// DDL reapply. json.Marshal sorts map keys, so the output is deterministic.
+func schemaFingerprint(sc manifest.Schema) string {
+	data, err := json.Marshal(sc.Normalize())
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// schemaFingerprintApplied reports whether fingerprint matches the schema last
+// applied to this project's database.
+func (s *Server) schemaFingerprintApplied(projectID, fingerprint string) bool {
+	s.schemaHashMu.Lock()
+	defer s.schemaHashMu.Unlock()
+	return s.schemaHash[projectID] == fingerprint
+}
+
+// markSchemaFingerprint records the schema fingerprint applied to a project.
+func (s *Server) markSchemaFingerprint(projectID, fingerprint string) {
+	if fingerprint == "" {
+		return
+	}
+	s.schemaHashMu.Lock()
+	defer s.schemaHashMu.Unlock()
+	s.schemaHash[projectID] = fingerprint
 }
 
 func syncKey(r *http.Request) string {
@@ -554,6 +632,10 @@ func (s *Server) hydrateRuntimeState(ctx context.Context) {
 			slog.Warn("load persisted Gonvex runtime manifest", "project", next.Project, "error", err)
 			continue
 		}
+		// The persisted manifest's schema was already applied before this
+		// restart, so seed its fingerprint to skip the DDL reapply on the first
+		// identical sync (air restarts the runtime often in dev).
+		s.markSchemaFingerprint(next.Project, schemaFingerprint(next.Schema))
 		s.registerProjectCrons(next.Project)
 	}
 }
@@ -590,6 +672,7 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 		slog.Warn("load persisted Gonvex project runtime manifest", "project", projectID, "error", err)
 		return
 	}
+	s.markSchemaFingerprint(projectID, schemaFingerprint(next.Schema))
 	s.registerProjectCrons(projectID)
 }
 
