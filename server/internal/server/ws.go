@@ -276,6 +276,11 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		}
 		c.write(serverMessage{Type: "action.result", ID: message.ID, Path: message.Path, Result: explicitNull(result), Trace: trace})
 		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "action", message.Path, "server", "", "ok", "", trace))
+		// Actions write rows too (assistant.processThread appends the reply,
+		// tasks.bulkDelete soft-deletes, ...). Without a broadcast their writes
+		// never invalidate live queries, so clients sit on stale results until a
+		// reload. Mirror the mutation path's completion broadcast.
+		c.server.broadcastTenantTableChangeAt(c.project, c.tenant, mutationInvalidationTable(message.Path), completedAt)
 	case "telemetry.event":
 		c.server.recordTransactionTelemetry(transactionEntryFromClientTelemetry(c.project, c.tenant, message))
 	default:
