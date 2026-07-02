@@ -906,6 +906,7 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		NotifyTableChange: func(table string) {
 			s.broadcastTenantTableChange(projectID, activeTenant, table)
 		},
+		Env: s.projectEnvValues(ctx, projectID),
 	}, nil
 }
 

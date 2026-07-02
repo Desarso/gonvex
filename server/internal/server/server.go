@@ -41,6 +41,8 @@ type Server struct {
 	tableChangeMu     sync.Mutex
 	tableChangeWait   map[string]*time.Timer
 	tableChanges      map[string]tableChange
+	projectEnvMu      sync.Mutex
+	projectEnvCache   map[string]projectEnvCacheEntry
 }
 
 func New(cfg config.Config) *Server {

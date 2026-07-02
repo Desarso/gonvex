@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -24,6 +25,59 @@ func projectFromEnvRequest(r *http.Request) string {
 		return p
 	}
 	return projectID(r)
+}
+
+const projectEnvCacheTTL = 30 * time.Second
+
+type projectEnvCacheEntry struct {
+	values    map[string]string
+	fetchedAt time.Time
+}
+
+// projectEnvValues returns the project's env store as a name→value map for
+// injection into function runtime contexts. Values are cached briefly so the
+// registry database isn't hit on every function call; the cache is dropped on
+// any env write so dashboard edits apply on the next call.
+func (s *Server) projectEnvValues(ctx context.Context, project string) map[string]string {
+	if project == "" {
+		return nil
+	}
+	s.projectEnvMu.Lock()
+	entry, ok := s.projectEnvCache[project]
+	s.projectEnvMu.Unlock()
+	if ok && time.Since(entry.fetchedAt) < projectEnvCacheTTL {
+		return entry.values
+	}
+
+	vars, err := s.loadProjectEnv(ctx, project)
+	if err != nil || vars == nil {
+		// vars == nil (with nil err) means the registry handle wasn't available —
+		// distinct from an empty store, which returns an empty non-nil slice.
+		// Never cache that as "project has no env" or functions would silently
+		// lose their keys for a full TTL window.
+		slog.Warn("project env load failed; functions fall back to process env", "project", project, "error", err)
+		if ok {
+			return entry.values
+		}
+		return nil
+	}
+	values := make(map[string]string, len(vars))
+	for _, v := range vars {
+		values[v.Name] = v.Value
+	}
+	s.projectEnvMu.Lock()
+	if s.projectEnvCache == nil {
+		s.projectEnvCache = map[string]projectEnvCacheEntry{}
+	}
+	s.projectEnvCache[project] = projectEnvCacheEntry{values: values, fetchedAt: time.Now()}
+	s.projectEnvMu.Unlock()
+	return values
+}
+
+func (s *Server) invalidateProjectEnvCache(project string) {
+	s.projectEnvMu.Lock()
+	delete(s.projectEnvCache, project)
+	s.projectEnvMu.Unlock()
 }
 
 func (s *Server) loadProjectEnv(ctx context.Context, project string) ([]projectEnvVar, error) {
@@ -87,6 +141,7 @@ func (s *Server) handleSetProjectEnv(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
 		return
 	}
+	defer s.invalidateProjectEnvCache(project)
 	actor, ok := s.dashboardActorFromRequest(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
@@ -134,6 +189,7 @@ func (s *Server) handleBulkProjectEnv(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
 		return
 	}
+	defer s.invalidateProjectEnvCache(project)
 	actor, ok := s.dashboardActorFromRequest(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
@@ -216,6 +272,7 @@ func (s *Server) handleDeleteProjectEnv(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
 		return
 	}
+	defer s.invalidateProjectEnvCache(project)
 	actor, ok := s.dashboardActorFromRequest(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})

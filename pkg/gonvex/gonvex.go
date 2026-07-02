@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -66,6 +67,23 @@ type RuntimeContext struct {
 	// NotifyTableChanged after committing writes so subscribed clients refresh
 	// mid-run instead of only when the function returns.
 	NotifyTableChange func(table string)
+
+	// Env holds the project-scoped environment variables (the dashboard's
+	// per-project env store), wired by the host server. Read through EnvValue
+	// so process env remains the fallback.
+	Env map[string]string
+}
+
+// EnvValue resolves an environment variable for the executing function:
+// project-scoped values (dashboard env store) win, the process environment is
+// the fallback. Nil-safe for tests and offline tools.
+func (rc *RuntimeContext) EnvValue(name string) string {
+	if rc != nil {
+		if v, ok := rc.Env[name]; ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return os.Getenv(name)
 }
 
 // NotifyTableChanged pushes a live-query invalidation for each table. It is a
