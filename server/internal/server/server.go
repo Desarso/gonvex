@@ -99,12 +99,19 @@ func (s *Server) runScheduledJob(ctx context.Context, job scheduledJob) error {
 	switch function.Kind {
 	case gonvex.FunctionKindAction:
 		_, err := s.executeTenantAction(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
+		// Scheduled work commits outside a client call, so nothing else tells
+		// subscribers about its writes — broadcast like ws.go does for
+		// client-initiated mutation.call/action.call.
+		s.broadcastTenantTableChange(job.ProjectID, job.TenantID, mutationInvalidationTable(job.FunctionPath))
 		return err
 	case gonvex.FunctionKindMutation:
 		_, err := s.executeTenantMutation(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
+		s.broadcastTenantTableChange(job.ProjectID, job.TenantID, mutationInvalidationTable(job.FunctionPath))
 		return err
 	case gonvex.FunctionKindInternalMutation:
-		return s.executeScheduledInternalMutation(ctx, job)
+		err := s.executeScheduledInternalMutation(ctx, job)
+		s.broadcastTenantTableChange(job.ProjectID, job.TenantID, mutationInvalidationTable(job.FunctionPath))
+		return err
 	default:
 		return fmt.Errorf("scheduled function %q must be a mutation or action, got %s", job.FunctionPath, function.Kind)
 	}

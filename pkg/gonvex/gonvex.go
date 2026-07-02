@@ -60,6 +60,23 @@ type RuntimeContext struct {
 	Storage     StorageAPI
 	Scheduler   Scheduler
 	Logger      *slog.Logger
+
+	// NotifyTableChange, when set by the host server, broadcasts a table
+	// invalidation to live query subscribers. Long-running actions call
+	// NotifyTableChanged after committing writes so subscribed clients refresh
+	// mid-run instead of only when the function returns.
+	NotifyTableChange func(table string)
+}
+
+// NotifyTableChanged pushes a live-query invalidation for each table. It is a
+// no-op when the host has not wired NotifyTableChange (tests, offline tools).
+func (rc *RuntimeContext) NotifyTableChanged(tables ...string) {
+	if rc == nil || rc.NotifyTableChange == nil {
+		return
+	}
+	for _, table := range tables {
+		rc.NotifyTableChange(table)
+	}
 }
 
 type QueryCtx struct {
