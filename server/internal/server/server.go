@@ -464,6 +464,11 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		s.markSchemaFingerprint(next.Project, fingerprint)
 	}
 
+	bundleHash := ""
+	if next.Bundle != nil {
+		bundleHash = next.Bundle.Hash
+	}
+	slog.Info("dev sync applying manifest", "project", next.Project, "functions", len(next.Functions), "bundleHash", bundleHash)
 	if err := s.runtime.SyncManifest(next); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
