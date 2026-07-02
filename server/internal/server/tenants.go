@@ -140,6 +140,7 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 	}
 	defer rows.Close()
 
+	existingDatabases := s.existingLocalDatabaseNames(ctx)
 	imported := map[string]tenantTarget{}
 	for rows.Next() {
 		var tenantID string
@@ -167,7 +168,7 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 			Status:       "local",
 			Description:  "Persisted tenant from landlord database.",
 			Provisioned:  false,
-			databaseName: tenantDatabaseNameWithAlias(project, tenantID, databaseAlias),
+			databaseName: tenantDatabaseNameForPersistedTenant(project, tenantID, databaseAlias, domain, existingDatabases),
 			domain:       domain,
 		}
 		imported[tenantStoreKey(project, tenantID)] = tenant
@@ -788,6 +789,45 @@ func (s *Server) discoverProjectTenantDatabases(ctx context.Context, project str
 		})
 	}
 	return tenants, rows.Err()
+}
+
+func (s *Server) existingLocalDatabaseNames(ctx context.Context) map[string]bool {
+	if strings.TrimSpace(s.config.PostgresURL) == "" {
+		return nil
+	}
+	db, err := openMaintenanceDB(s.config.PostgresURL)
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `
+		SELECT datname
+		FROM pg_database
+		WHERE datistemplate = false
+	`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	names := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil
+		}
+		names[name] = true
+	}
+	return names
+}
+
+func tenantDatabaseNameForPersistedTenant(project string, tenantID string, databaseAlias string, domain string, existingDatabases map[string]bool) string {
+	for _, candidate := range uniqueStrings([]string{databaseAlias, tenantID, domain}) {
+		if existingDatabases[candidate] {
+			return candidate
+		}
+	}
+	return tenantDatabaseNameWithAlias(project, tenantID, databaseAlias)
 }
 
 func isMissingTenantDatabaseError(err error) bool {

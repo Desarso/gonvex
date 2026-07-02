@@ -393,6 +393,34 @@ func TestTenantDatabaseNameUsesAliasWithScopedSuffix(t *testing.T) {
 	}
 }
 
+func TestPersistedTenantDatabaseNamePrefersExistingDatabaseAlias(t *testing.T) {
+	got := tenantDatabaseNameForPersistedTenant(
+		"whagons-5",
+		"calaluna",
+		"calaluna",
+		"calaluna",
+		map[string]bool{"calaluna": true, "calaluna_whagons_5": true},
+	)
+
+	if got != "calaluna" {
+		t.Fatalf("expected existing database alias to win, got %q", got)
+	}
+}
+
+func TestPersistedTenantDatabaseNameFallsBackToProjectScopedName(t *testing.T) {
+	got := tenantDatabaseNameForPersistedTenant(
+		"whagons-5",
+		"calaluna",
+		"calaluna",
+		"calaluna",
+		map[string]bool{"calaluna_whagons_5": true},
+	)
+
+	if got != "calaluna_whagons_5" {
+		t.Fatalf("expected project-scoped fallback, got %q", got)
+	}
+}
+
 func TestTenantDatabaseAliasTakenChecksProjectScope(t *testing.T) {
 	server := New(config.Config{})
 	server.tenants["project-a:testing"] = tenantTarget{
