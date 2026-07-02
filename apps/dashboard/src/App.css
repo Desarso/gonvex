@@ -943,13 +943,14 @@ button {
   display: none;
 }
 
-.app-select-popover [role="option"][data-focused="true"],
-.app-select-popover [role="option"][data-hovered="true"],
-.app-select-popover [role="option"]:hover {
-  background: color-mix(in oklab, var(--accent) 18%, transparent) !important;
+.app-select-popover [role="option"][data-focused="true"]:not([data-selected="true"]),
+.app-select-popover [role="option"][data-hovered="true"]:not([data-selected="true"]),
+.app-select-popover [role="option"]:hover:not([data-selected="true"]) {
+  background: color-mix(in oklab, var(--overlay-foreground) 10%, transparent) !important;
 }
 
 .app-select-popover [role="option"][data-selected="true"] {
+  background: color-mix(in oklab, var(--accent) 16%, transparent) !important;
   color: var(--accent) !important;
   font-weight: 700;
 }
