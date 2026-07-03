@@ -987,6 +987,7 @@ func subscriptionTables(path string) []string {
 			"slas",
 			"spotTypes",
 			"spots",
+			"statuses",
 			"statusTransitionGroups",
 			"statusTransitions",
 			"tags",
