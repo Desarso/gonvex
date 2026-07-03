@@ -39,7 +39,19 @@ func init() {
 type Gemini_Model struct {
 	Model           string                                 `json:"model"`
 	SystemPrompt    string                                 `json:"system_prompt,omitempty"`
+	APIKey          string                                 `json:"-"` // Per-instance API key; when empty, falls back to the GEMINI_API_KEY process env.
 	WarningCallback func(warnings []models.HistoryWarning) `json:"-"` // Called when history is adapted with warnings
+}
+
+// resolvedAPIKey returns the per-instance APIKey when set, otherwise the process
+// GEMINI_API_KEY. Threading this through request builders lets callers (e.g. a
+// multi-project runtime) supply a project-scoped key without mutating the shared
+// process environment, which would race across concurrent requests.
+func (g *Gemini_Model) resolvedAPIKey() string {
+	if k := strings.TrimSpace(g.APIKey); k != "" {
+		return k
+	}
+	return os.Getenv("GEMINI_API_KEY")
 }
 
 // SetHistoryWarningCallback sets the callback function for history adaptation warnings
@@ -168,7 +180,7 @@ func (g *Gemini_Model) Stream_Model_Request(request models.Model_Request, tools 
 }
 
 func (g *Gemini_Model) model_request(model string, message models.User_Message, tools []models.FunctionDeclaration, toolResults *[]models.Tool_Result, conversationHistory []stores.Message) (Gemini_response, error) {
-	result, err := create_gemini_request(message, tools, toolResults, conversationHistory, g.SystemPrompt)
+	result, err := create_gemini_request(message, tools, toolResults, conversationHistory, g.SystemPrompt, g.resolvedAPIKey())
 	if err != nil {
 		return Gemini_response{}, fmt.Errorf("failed to create gemini request: %w", err)
 	}
@@ -188,12 +200,12 @@ func (g *Gemini_Model) model_request(model string, message models.User_Message, 
 		return Gemini_response{}, fmt.Errorf("failed to write request body to file: %w", err)
 	}
 
-	return make_request(string(jsonBytes), model)
+	return make_request(string(jsonBytes), model, g.resolvedAPIKey())
 }
 
 func (g *Gemini_Model) stream_model_request(model string, message models.User_Message, tools []models.FunctionDeclaration, toolResults *[]models.Tool_Result, conversationHistory []stores.Message) (<-chan Gemini_response, <-chan error) {
 	// create_gemini_request now handles potentially empty 'message' if 'toolResults' is present
-	result, err := create_gemini_request(message, tools, toolResults, conversationHistory, g.SystemPrompt)
+	result, err := create_gemini_request(message, tools, toolResults, conversationHistory, g.SystemPrompt, g.resolvedAPIKey())
 	if err != nil {
 		errChan := make(chan error, 1)
 		errChan <- fmt.Errorf("failed to create gemini stream request body: %w", err)
@@ -228,12 +240,12 @@ func (g *Gemini_Model) stream_model_request(model string, message models.User_Me
 	// 	log.Printf("Warning: failed to write stream request body to file: %v", err)
 	// }
 
-	return make_request_stream(string(jsonBytes), model)
+	return make_request_stream(string(jsonBytes), model, g.resolvedAPIKey())
 }
 
-func make_request(request_body string, model string) (Gemini_response, error) {
+func make_request(request_body string, model string, apiKey string) (Gemini_response, error) {
 
-	resp, err := http.Post(fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, os.Getenv("GEMINI_API_KEY")), "application/json", strings.NewReader(request_body))
+	resp, err := http.Post(fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, apiKey), "application/json", strings.NewReader(request_body))
 	if err != nil {
 		fmt.Println("Error:", err)
 		return Gemini_response{}, err
@@ -257,7 +269,7 @@ func make_request(request_body string, model string) (Gemini_response, error) {
 
 }
 
-func make_request_stream(request_body string, model string) (<-chan Gemini_response, <-chan error) {
+func make_request_stream(request_body string, model string, apiKey string) (<-chan Gemini_response, <-chan error) {
 	resChan := make(chan Gemini_response)
 	errChan := make(chan error, 1) // Buffered error channel
 
@@ -265,7 +277,7 @@ func make_request_stream(request_body string, model string) (<-chan Gemini_respo
 		defer close(resChan)
 		defer close(errChan)
 
-		resp, err := http.Post(fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?key=%s", model, os.Getenv("GEMINI_API_KEY")), "application/json", strings.NewReader(request_body))
+		resp, err := http.Post(fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?key=%s", model, apiKey), "application/json", strings.NewReader(request_body))
 		if err != nil {
 			errChan <- fmt.Errorf("error making POST request: %w", err)
 			return
@@ -342,7 +354,7 @@ func SimplePrompt(prompt string) (Gemini_response, error) {
 			}
 		]
 	}`, prompt)
-	return make_request(request_body, "gemini-2.0-flash")
+	return make_request(request_body, "gemini-2.0-flash", os.Getenv("GEMINI_API_KEY"))
 }
 
 func StreamPrompt(prompt string) (<-chan Gemini_response, <-chan error) {
@@ -357,12 +369,11 @@ func StreamPrompt(prompt string) (<-chan Gemini_response, <-chan error) {
 			}
 		]
 	}`, prompt)
-	return make_request_stream(request_body, "gemini-2.0-flash")
+	return make_request_stream(request_body, "gemini-2.0-flash", os.Getenv("GEMINI_API_KEY"))
 }
 
-func uploadFileFromURLToGemini(fileURL string) (string, error) {
-	// 1. Get API Key from Environment
-	apiKey := os.Getenv("GEMINI_API_KEY")
+func uploadFileFromURLToGemini(fileURL string, apiKey string) (string, error) {
+	// 1. API key is supplied by the caller (per-instance key, env fallback resolved upstream).
 	if apiKey == "" {
 		return "", fmt.Errorf("GEMINI_API_KEY environment variable not set")
 	}
@@ -557,7 +568,7 @@ type GeminiRequestResult struct {
 
 // create_gemini_request turns User_Message to something gemini likes
 // Returns the request body and any warnings about content that was filtered/skipped
-func create_gemini_request(message models.User_Message, tools []models.FunctionDeclaration, toolResults *[]models.Tool_Result, conversationHistory []stores.Message, systemPrompt string) (GeminiRequestResult, error) {
+func create_gemini_request(message models.User_Message, tools []models.FunctionDeclaration, toolResults *[]models.Tool_Result, conversationHistory []stores.Message, systemPrompt string, apiKey string) (GeminiRequestResult, error) {
 	var warnings []models.HistoryWarning
 	allContents := []Gemini_Content{}
 
@@ -612,7 +623,7 @@ func create_gemini_request(message models.User_Message, tools []models.FunctionD
 							}
 							// If inline didn't work or file is too large, upload to Gemini
 							if inlineDataPart == nil {
-								uri, err := uploadFileFromURLToGemini(p.ImageData.FileUrl)
+								uri, err := uploadFileFromURLToGemini(p.ImageData.FileUrl, apiKey)
 								if err != nil {
 									log.Printf("Warning: Failed to upload ImageData to Gemini: %v", err)
 									warnings = append(warnings, models.HistoryWarning{
@@ -661,7 +672,7 @@ func create_gemini_request(message models.User_Message, tools []models.FunctionD
 							}
 							// If inline didn't work or file is too large, upload to Gemini
 							if inlineDataPart == nil {
-								uri, err := uploadFileFromURLToGemini(p.FileData.FileUrl)
+								uri, err := uploadFileFromURLToGemini(p.FileData.FileUrl, apiKey)
 								if err != nil {
 									log.Printf("Warning: Failed to upload FileData to Gemini: %v", err)
 									warnings = append(warnings, models.HistoryWarning{
@@ -803,7 +814,7 @@ func create_gemini_request(message models.User_Message, tools []models.FunctionD
 								currentUserParts = append(currentUserParts, Request_Part{InlineData: &InlineData{MimeType: part.FileData.MimeType, Data: inline}})
 							} else {
 								log.Printf("Failed to get inline data for %s, attempting upload.", part.FileData.FileUrl)
-								uri, err = uploadFileFromURLToGemini(part.FileData.FileUrl)
+								uri, err = uploadFileFromURLToGemini(part.FileData.FileUrl, apiKey)
 								if err != nil {
 									return GeminiRequestResult{}, fmt.Errorf("failed to upload file %s after failed inline attempt: %w", part.FileData.FileUrl, err)
 								}
@@ -811,7 +822,7 @@ func create_gemini_request(message models.User_Message, tools []models.FunctionD
 								currentUserParts = append(currentUserParts, Request_Part{FileData: &FileData{URI: uri, MimeType: part.FileData.MimeType}})
 							}
 						} else {
-							uri, err = uploadFileFromURLToGemini(part.FileData.FileUrl)
+							uri, err = uploadFileFromURLToGemini(part.FileData.FileUrl, apiKey)
 							if err != nil {
 								return GeminiRequestResult{}, fmt.Errorf("failed to upload file %s to gemini: %w", part.FileData.FileUrl, err)
 							}
