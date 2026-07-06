@@ -6996,7 +6996,15 @@ function SettingsPage(props: {
     setProjectKeyLoading(true);
     setProjectKeyStatus("");
     try {
-      const response = await fetch(`/api/dashboard/projects/${encodeURIComponent(props.project.id)}/key`, { method: "POST" });
+      // Call the runtime directly like every other project API — the old
+      // /api/dashboard/projects/{id}/key path was never implemented in the
+      // dashboard's node server, so reveal always got its literal 404 "not found".
+      const baseURL = runtimeURLForProject(props.project);
+      if (!baseURL) throw new Error("runtime URL is not configured for this project");
+      const response = await fetch(`${baseURL}/dev/projects/${encodeURIComponent(props.project.id)}/key`, {
+        headers: dashboardAuthHeaders(),
+        method: "POST",
+      });
       const payload = await response.json() as { projectKey?: string; error?: string };
       if (!response.ok || !payload.projectKey) throw new Error(payload.error ?? response.statusText);
       setProjectKey(payload.projectKey);
