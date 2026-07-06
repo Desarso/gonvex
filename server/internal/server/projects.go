@@ -136,7 +136,7 @@ func (s *Server) hydrateConfiguredProjects() {
 		project := projectTarget{
 			ID:            projectID,
 			Name:          projectNameFromID(projectID),
-			Environment:   "local dev",
+			Environment:   s.config.Environment,
 			Database:      databaseNameFromURL(databaseURL, projectID),
 			DatabaseMode:  "single",
 			StorageBucket: projectID + "-dev",
@@ -221,7 +221,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	project := projectTarget{
 		ID:             projectID,
 		Name:           name,
-		Environment:    "local dev",
+		Environment:    s.config.Environment,
 		Database:       databaseName,
 		DatabaseMode:   databaseMode,
 		StorageBucket:  projectID + "-dev",

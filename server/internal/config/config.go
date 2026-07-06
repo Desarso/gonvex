@@ -32,6 +32,10 @@ type Config struct {
 	AdminKey          string
 	RequireAuth       bool
 	DashboardSecret   string
+	// Environment labels projects created/imported on this runtime instance in the
+	// dashboard ("local dev", "production", ...). Deployed runtimes set
+	// GONVEX_ENVIRONMENT so their projects stop claiming to be local dev.
+	Environment string
 }
 
 func FromEnv() Config {
@@ -61,6 +65,7 @@ func FromEnv() Config {
 		AdminKey:          env("GONVEX_ADMIN_KEY", ""),
 		RequireAuth:       envBool("GONVEX_REQUIRE_AUTH", false),
 		DashboardSecret:   env("GONVEX_DASHBOARD_SESSION_SECRET", env("DASHBOARD_SESSION_SECRET", "")),
+		Environment:       env("GONVEX_ENVIRONMENT", "local dev"),
 	}
 }
 
