@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"path"
 	"strings"
@@ -282,6 +283,27 @@ func (t *Tenant) GenerateDownloadURL(fileID string, ttl time.Duration) (string, 
 		return t.client.ProxyGetURL(meta.ObjectKey, ttl), nil
 	}
 	return t.client.PresignGet(meta.ObjectKey, ttl)
+}
+
+// Open streams the stored bytes for server-side processing (e.g. data-file
+// ingestion). Callers must Close the returned reader.
+func (t *Tenant) Open(fileID string) (io.ReadCloser, error) {
+	meta, err := t.GetMetadata(fileID)
+	if err != nil {
+		return nil, err
+	}
+	if meta.Status != gonvex.FileStatusUploaded {
+		return nil, gonvex.ErrFileNotFound
+	}
+	resp, err := t.client.GetObject(t.ctx, meta.ObjectKey)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("storage: fetch object %s: %s", fileID, resp.Status)
+	}
+	return resp.Body, nil
 }
 
 // GetMetadata returns the metadata record. When the file is still pending it

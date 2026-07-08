@@ -59,6 +59,8 @@ type RuntimeContext struct {
 	TenantDB    *sql.DB
 	Tx          *sql.Tx
 	Storage     StorageAPI
+	Sandbox     SandboxAPI
+	Data        DataAPI
 	Scheduler   Scheduler
 	Logger      *slog.Logger
 

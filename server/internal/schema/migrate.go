@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -12,6 +13,12 @@ import (
 
 	"github.com/gonvex/gonvex/pkg/manifest"
 )
+
+// ErrUnsafeChange marks migrations Apply refuses to perform automatically
+// (type changes, primary-key changes). Callers that apply a schema to
+// databases they merely discovered — rather than own — can errors.Is on it
+// and skip instead of failing.
+var ErrUnsafeChange = errors.New("unsafe schema change")
 
 type Result struct {
 	Applied  []string `json:"applied"`
@@ -210,10 +217,10 @@ func reconcileColumns(ctx context.Context, db *sql.DB, tableName string, table m
 		current, ok := existing[columnName]
 		if ok {
 			if current.Type != "" && !compatibleColumnType(current.Type, column.Type) {
-				return applied, warnings, fmt.Errorf("unsafe schema change for %s.%s: existing type %s does not match desired type %s", tableName, columnName, current.Type, column.Type)
+				return applied, warnings, fmt.Errorf("%w for %s.%s: existing type %s does not match desired type %s", ErrUnsafeChange, tableName, columnName, current.Type, column.Type)
 			}
 			if current.PrimaryKey != column.PrimaryKey {
-				return applied, warnings, fmt.Errorf("unsafe schema change for %s.%s: primary key changes are not automatic", tableName, columnName)
+				return applied, warnings, fmt.Errorf("%w for %s.%s: primary key changes are not automatic", ErrUnsafeChange, tableName, columnName)
 			}
 			if current.Nullable && !column.Nullable && !column.PrimaryKey {
 				nullCount, err := nullRowCount(ctx, db, tableName, columnName)
@@ -245,7 +252,7 @@ func reconcileColumns(ctx context.Context, db *sql.DB, tableName string, table m
 			return applied, warnings, err
 		}
 		if column.PrimaryKey && !empty {
-			return applied, warnings, fmt.Errorf("unsafe schema change for %s.%s: cannot add primary key column to table with existing rows", tableName, columnName)
+			return applied, warnings, fmt.Errorf("%w for %s.%s: cannot add primary key column to table with existing rows", ErrUnsafeChange, tableName, columnName)
 		}
 		enforceNotNull := empty || column.Nullable || column.PrimaryKey
 		definition, err := columnDefinition(columnName, column, enforceNotNull)

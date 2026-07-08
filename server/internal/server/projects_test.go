@@ -421,6 +421,33 @@ func TestPersistedTenantDatabaseNameFallsBackToProjectScopedName(t *testing.T) {
 	}
 }
 
+func TestStandaloneTenantDiscoveryCandidateSkipsControlAndProjectDatabases(t *testing.T) {
+	server := New(config.Config{})
+	tests := []struct {
+		name            string
+		database        string
+		projectDatabase string
+		want            bool
+	}{
+		{name: "standalone fixture", database: "big", projectDatabase: "gonvex_dev", want: true},
+		{name: "project database", database: "gonvex_dev", projectDatabase: "gonvex_dev", want: false},
+		{name: "control database", database: "postgres", projectDatabase: "gonvex_dev", want: false},
+		{name: "gonvex database", database: "gonvex_whagons_5_telemetry", projectDatabase: "gonvex_dev", want: false},
+		{name: "project scoped tenant", database: "big_whagons_5", projectDatabase: "gonvex_dev", want: false},
+		{name: "dashboard database", database: "testing2_dashboard", projectDatabase: "gonvex_dev", want: false},
+		{name: "e2e database", database: "e2e_task_create", projectDatabase: "gonvex_dev", want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := server.isStandaloneTenantDatabaseCandidate("whagons-5", test.projectDatabase, test.database)
+			if got != test.want {
+				t.Fatalf("expected %v for %q, got %v", test.want, test.database, got)
+			}
+		})
+	}
+}
+
 func TestTenantDatabaseAliasTakenChecksProjectScope(t *testing.T) {
 	server := New(config.Config{})
 	server.tenants["project-a:testing"] = tenantTarget{

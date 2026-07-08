@@ -21,8 +21,14 @@ COPY --from=build /src /src
 # Warm module cache so plugin `go mod tidy`/build resolves deps without refetching.
 COPY --from=build /go/pkg/mod /go/pkg/mod
 COPY --from=build /out/gonvex-runtime /usr/local/bin/gonvex-runtime
+# Data-file artifacts (DuckDB databases for assistant-uploaded CSV/XLSX/XLS)
+# live here; mount a volume to keep them across deploys. Artifacts re-ingest
+# from object storage on miss, so an ephemeral dir also works (just slower on
+# first access after a redeploy).
+RUN mkdir -p /var/lib/gonvex/data
 ENV GONVEX_ADDR=0.0.0.0:8080 \
     GONVEX_MODULE_ROOT=/src \
+    GONVEX_DATA_DIR=/var/lib/gonvex/data \
     CGO_ENABLED=1 \
     GOFLAGS=-mod=mod
 EXPOSE 8080

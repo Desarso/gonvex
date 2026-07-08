@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/gonvex/gonvex/pkg/storage"
 	"github.com/gonvex/gonvex/server/internal/config"
 	"github.com/gonvex/gonvex/server/internal/data"
+	"github.com/gonvex/gonvex/server/internal/datafiles"
 	"github.com/gonvex/gonvex/server/internal/runtime"
 	"github.com/gonvex/gonvex/server/internal/schema"
 )
@@ -28,6 +30,7 @@ type Server struct {
 	runtime           *runtime.Runtime
 	app               *gonvex.App
 	storage           *storage.Factory
+	dataFiles         *datafiles.Manager
 	tenantStores      *tenantStoreResolver
 	cache             *rowsCache
 	metrics           *runtimeMetrics
@@ -91,6 +94,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		syncLocks:         map[string]*sync.Mutex{},
 		schemaHash:        map[string]string{},
 	}
+	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
 	server.scheduler = newScheduler(server.runScheduledJob)
 	server.tenantStores = newTenantStoreResolver(&server.config)
 	server.loadConfiguredTenantDatabases()

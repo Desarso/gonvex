@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -28,6 +29,11 @@ type tenantTarget struct {
 	databaseURL    string
 	databaseName   string
 	domain         string
+	// standaloneDiscovered marks databases claimed by pg_database scanning with
+	// no project suffix or registration tying them to this project. Any project
+	// that syncs will "discover" them, so schema conflicts there are expected
+	// (another project's tenant) and must not fail the owning project's sync.
+	standaloneDiscovered bool
 }
 
 func (s *Server) handleTenants(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +86,9 @@ func dedupeTenantTargets(tenants []tenantTarget) []tenantTarget {
 
 func tenantTargetPriority(tenant tenantTarget) int {
 	if tenant.Description == "Persisted tenant from landlord database." {
+		return 3
+	}
+	if tenant.Description == "Discovered local tenant database." {
 		return 2
 	}
 	if tenant.ProjectID != "" {
@@ -675,6 +684,14 @@ func (s *Server) applyTenantSchemasForProject(ctx context.Context, project strin
 				result.Warnings = append(result.Warnings, fmt.Sprintf("%s: skipped missing tenant database", tenant.ID))
 				continue
 			}
+			// A standalone-discovered database that rejects this schema almost
+			// certainly belongs to a different project (e.g. the dashboard app
+			// syncing while whagons tenant databases exist in the same cluster).
+			// Skip it instead of failing the whole sync.
+			if tenant.standaloneDiscovered && errors.Is(err, schema.ErrUnsafeChange) {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("%s: skipped standalone-discovered database with incompatible schema: %v", tenant.ID, err))
+				continue
+			}
 			return result, fmt.Errorf("tenant %s schema sync failed: %w", tenant.ID, err)
 		}
 		for _, statement := range applied.Applied {
@@ -788,7 +805,115 @@ func (s *Server) discoverProjectTenantDatabases(ctx context.Context, project str
 			databaseName:   databaseName,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	standalone, err := s.discoverStandaloneTenantDatabases(ctx, db, project, projectDatabase)
+	if err != nil {
+		return nil, err
+	}
+	tenants = append(tenants, standalone...)
+	return tenants, nil
+}
+
+func (s *Server) discoverStandaloneTenantDatabases(ctx context.Context, maintenanceDB *sql.DB, project string, projectDatabase string) ([]tenantTarget, error) {
+	rows, err := maintenanceDB.QueryContext(ctx, `
+		SELECT datname
+		FROM pg_database
+		WHERE datistemplate = false
+		ORDER BY datname
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tenants []tenantTarget
+	for rows.Next() {
+		var databaseName string
+		if err := rows.Scan(&databaseName); err != nil {
+			return nil, err
+		}
+		if !s.isStandaloneTenantDatabaseCandidate(project, projectDatabase, databaseName) {
+			continue
+		}
+		databaseURL, err := databaseURL(s.config.PostgresURL, databaseName)
+		if err != nil {
+			return nil, err
+		}
+		if !tenantDatabaseHasAppTables(ctx, databaseURL) {
+			continue
+		}
+		tenantID := strings.ReplaceAll(databaseName, "_", "-")
+		tenants = append(tenants, tenantTarget{
+			ID:                   tenantID,
+			ProjectID:            project,
+			Name:                 tenantID,
+			Database:             databaseName,
+			Status:               "local",
+			Description:          "Discovered standalone local tenant database.",
+			Provisioned:          true,
+			RuntimeCreated:       true,
+			databaseURL:          databaseURL,
+			databaseName:         databaseName,
+			standaloneDiscovered: true,
+		})
+	}
 	return tenants, rows.Err()
+}
+
+func (s *Server) isStandaloneTenantDatabaseCandidate(project string, projectDatabase string, databaseName string) bool {
+	databaseName = strings.TrimSpace(databaseName)
+	if databaseName == "" || databaseName == projectDatabase {
+		return false
+	}
+	switch databaseName {
+	case "postgres", "gonvex_app_telemetry", "gonvex_test", "gonvex_test_telemetry":
+		return false
+	}
+	if strings.HasPrefix(databaseName, "gonvex_") {
+		return false
+	}
+	projectSuffix := tenantDatabaseProjectSuffix(project)
+	if projectSuffix != "" && strings.HasSuffix(databaseName, "_"+projectSuffix) {
+		return false
+	}
+	if strings.HasSuffix(databaseName, "_dashboard") {
+		return false
+	}
+	if strings.HasPrefix(databaseName, "e2e_") || strings.HasPrefix(databaseName, "testing_") {
+		return false
+	}
+	return true
+}
+
+func tenantDatabaseHasAppTables(ctx context.Context, databaseURL string) bool {
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `
+		SELECT table_name
+		FROM information_schema.tables
+		WHERE table_schema = 'public'
+			AND table_name = ANY($1)
+	`, []string{"tasks", "workspaces", "spots", "teams"})
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+
+	found := map[string]bool{}
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			return false
+		}
+		found[table] = true
+	}
+	return found["tasks"] && found["workspaces"]
 }
 
 func (s *Server) existingLocalDatabaseNames(ctx context.Context) map[string]bool {

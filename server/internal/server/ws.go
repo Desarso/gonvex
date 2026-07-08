@@ -14,6 +14,7 @@ import (
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/server/internal/data"
+	"github.com/gonvex/gonvex/server/internal/sandbox"
 	"github.com/gorilla/websocket"
 )
 
@@ -890,6 +891,8 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		return gonvex.RuntimeContext{}, err
 	}
 	logger := slog.Default().With("project", projectID, "tenant", activeTenant)
+	storageAPI := s.storageForTenant(ctx, projectID, activeTenant, store.DB, caller, logger)
+	dataAPI := s.dataForTenant(projectID, activeTenant, storageAPI)
 	return gonvex.RuntimeContext{
 		Context:     ctx,
 		ProjectID:   projectID,
@@ -898,7 +901,9 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		DB:          store.DB,
 		LandlordDB:  landlordStore.DB,
 		TenantDB:    store.DB,
-		Storage:     s.storageForTenant(ctx, projectID, activeTenant, store.DB, caller, logger),
+		Storage:     storageAPI,
+		Sandbox:     s.sandboxForCaller(projectID, activeTenant, caller, dataAPI),
+		Data:        dataAPI,
 		Scheduler:   s.scheduler.For(projectID, activeTenant),
 		User:        caller.user,
 		Permissions: caller.permissions,
@@ -908,6 +913,117 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		},
 		Env: s.projectEnvValues(ctx, projectID),
 	}, nil
+}
+
+func (s *Server) sandboxForCaller(projectID string, tenantID string, caller callerContext, dataAPI gonvex.DataAPI) gonvex.SandboxAPI {
+	if dataAPI == nil {
+		dataAPI = gonvex.UnavailableData()
+	}
+	runner := sandbox.NewRunner("")
+	runner.Host = sandbox.HostFunc(func(ctx context.Context, req sandbox.HostCallRequest) (any, error) {
+		args := req.Args
+		if len(args) == 0 {
+			args = json.RawMessage(`{}`)
+		}
+		switch strings.TrimSpace(req.Kind) {
+		case "query":
+			path, resolvedArgs, err := s.resolveSandboxFunction(ctx, projectID, tenantID, caller, "query", strings.TrimSpace(req.Path), args)
+			if err != nil {
+				return nil, err
+			}
+			return s.executeTenantQueryForCaller(ctx, projectID, tenantID, caller, path, resolvedArgs)
+		case "action":
+			path := strings.TrimSpace(req.Path)
+			// Curated-action parity with the browser sandbox: names that are not
+			// registered runtime actions (e.g. "spots.bulkCreate") route through
+			// the app's assistant.sandboxAction dispatcher when one is registered,
+			// so whagonsAction(name, args) supports the same curated surface as
+			// api.whagons.action in the TS sandbox.
+			app := s.appForProject(ctx, projectID)
+			if fn, ok := app.Lookup(path); !ok || fn.Kind != gonvex.FunctionKindAction {
+				if _, ok := app.Lookup("assistant.sandboxAction"); ok {
+					wrapped, wrapErr := json.Marshal(map[string]any{"name": path, "args": json.RawMessage(args)})
+					if wrapErr != nil {
+						return nil, wrapErr
+					}
+					result, err := s.executeTenantActionForCaller(ctx, projectID, tenantID, caller, "assistant.sandboxAction", wrapped)
+					if err == nil {
+						s.broadcastTenantTableChange(projectID, tenantID, mutationInvalidationTable(path))
+					}
+					return result, err
+				}
+			}
+			result, err := s.executeTenantActionForCaller(ctx, projectID, tenantID, caller, path, args)
+			if err == nil {
+				s.broadcastTenantTableChange(projectID, tenantID, mutationInvalidationTable(req.Path))
+			}
+			return result, err
+		case "mutation":
+			path, resolvedArgs, err := s.resolveSandboxFunction(ctx, projectID, tenantID, caller, "mutation", strings.TrimSpace(req.Path), args)
+			if err != nil {
+				return nil, err
+			}
+			result, err := s.executeTenantMutationForCaller(ctx, projectID, tenantID, caller, path, resolvedArgs)
+			if err == nil {
+				s.broadcastTenantTableChange(projectID, tenantID, mutationInvalidationTable(path))
+			}
+			return result, err
+		case "data.inspect":
+			var inspectReq gonvex.DataInspectRequest
+			if err := json.Unmarshal(args, &inspectReq); err != nil {
+				return nil, fmt.Errorf("invalid data.inspect args: %w", err)
+			}
+			return dataAPI.Inspect(ctx, inspectReq)
+		case "data.query":
+			var queryReq gonvex.DataQueryRequest
+			if err := json.Unmarshal(args, &queryReq); err != nil {
+				return nil, fmt.Errorf("invalid data.query args: %w", err)
+			}
+			return dataAPI.Query(ctx, queryReq)
+		case "data.profile":
+			var profileReq gonvex.DataProfileRequest
+			if err := json.Unmarshal(args, &profileReq); err != nil {
+				return nil, fmt.Errorf("invalid data.profile args: %w", err)
+			}
+			return dataAPI.Profile(ctx, profileReq)
+		default:
+			return nil, fmt.Errorf("unsupported sandbox host call kind %q", req.Kind)
+		}
+	})
+	return runner
+}
+
+// resolveSandboxFunction gates sandbox-originated query/mutation calls through
+// the app's assistant.sandboxResolve query when one is registered. The app
+// owns the policy (blocked modules, name aliases like tasks.list); the runtime
+// just executes whatever {name, args} the resolver returns. Apps without a
+// resolver keep the raw path — same behavior as before this hook existed.
+func (s *Server) resolveSandboxFunction(ctx context.Context, projectID string, tenantID string, caller callerContext, kind string, path string, args json.RawMessage) (string, json.RawMessage, error) {
+	app := s.appForProject(ctx, projectID)
+	if _, ok := app.Lookup("assistant.sandboxResolve"); !ok {
+		return path, args, nil
+	}
+	wrapped, err := json.Marshal(map[string]any{"kind": kind, "name": path, "args": args})
+	if err != nil {
+		return "", nil, err
+	}
+	resolved, err := s.executeTenantQueryForCaller(ctx, projectID, tenantID, caller, "assistant.sandboxResolve", wrapped)
+	if err != nil {
+		return "", nil, err
+	}
+	resolvedMap, ok := resolved.(map[string]any)
+	if !ok {
+		return "", nil, fmt.Errorf("assistant.sandboxResolve returned an unexpected result for %q", path)
+	}
+	name, _ := resolvedMap["name"].(string)
+	if strings.TrimSpace(name) == "" {
+		return "", nil, fmt.Errorf("assistant.sandboxResolve returned no function name for %q", path)
+	}
+	resolvedArgs, err := json.Marshal(resolvedMap["args"])
+	if err != nil {
+		return "", nil, err
+	}
+	return name, resolvedArgs, nil
 }
 
 // storageForTenant builds the per-request storage handle bound to the active
