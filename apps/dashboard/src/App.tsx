@@ -311,6 +311,16 @@ type ProjectInvitation = {
   accepted: boolean;
 };
 
+type DashboardNotification = {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  projectId?: string;
+  read: boolean;
+  createdAt: string;
+};
+
 type EnvVariable = {
   name: string;
   value?: string;
@@ -1296,6 +1306,122 @@ async function createDashboardUser(email: string, name: string, password: string
   const payload = await response.json().catch(() => ({} as { error?: string; user?: DashboardUser }));
   if (!response.ok || !payload.user) throw new Error(payload.error ?? response.statusText);
   return payload.user;
+}
+
+async function fetchDashboardNotifications(): Promise<{ notifications: DashboardNotification[]; unread: number }> {
+  const response = await fetch(`${runtimeBaseURL}/dev/auth/notifications`, { headers: dashboardAuthHeaders() });
+  const payload = await response.json().catch(() => ({} as { error?: string; notifications?: DashboardNotification[]; unread?: number }));
+  if (!response.ok) throw new Error(payload.error ?? response.statusText);
+  return { notifications: payload.notifications ?? [], unread: payload.unread ?? 0 };
+}
+
+async function markDashboardNotificationsRead(ids?: string[]): Promise<void> {
+  const response = await fetch(`${runtimeBaseURL}/dev/auth/notifications/read`, {
+    body: JSON.stringify(ids && ids.length > 0 ? { ids } : {}),
+    headers: dashboardAuthHeaders({ "content-type": "application/json" }),
+    method: "POST",
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({} as { error?: string }));
+    throw new Error(payload.error ?? response.statusText);
+  }
+}
+
+function formatNotificationTime(iso: string): string {
+  const time = Date.parse(iso);
+  if (Number.isNaN(time)) return "";
+  const diffMs = Date.now() - time;
+  const minutes = Math.round(diffMs / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(time).toLocaleDateString();
+}
+
+function NotificationBell() {
+  const [open, setOpen] = useState(false);
+  const [notifications, setNotifications] = useState<DashboardNotification[]>([]);
+  const [unread, setUnread] = useState(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const payload = await fetchDashboardNotifications();
+      setNotifications(payload.notifications);
+      setUnread(payload.unread);
+    } catch {
+      // Notifications are non-critical; ignore transient fetch failures.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 30000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as globalThis.Node)) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (next && unread > 0) {
+      setUnread(0);
+      setNotifications((current) => current.map((item) => ({ ...item, read: true })));
+      try {
+        await markDashboardNotificationsRead();
+      } catch {
+        // Ignore; the badge will re-sync on the next poll.
+      }
+    }
+  };
+
+  return (
+    <div className="notification-bell" ref={containerRef}>
+      <button
+        aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
+        className="notification-bell-button"
+        onClick={() => void toggle()}
+        type="button"
+      >
+        <svg aria-hidden="true" fill="none" height="18" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24" width="18">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+        {unread > 0 ? <span className="notification-bell-badge">{unread > 9 ? "9+" : unread}</span> : null}
+      </button>
+      {open ? (
+        <div className="notification-panel" role="dialog" aria-label="Notifications">
+          <div className="notification-panel-header">Notifications</div>
+          {notifications.length === 0 ? (
+            <div className="notification-empty">You're all caught up.</div>
+          ) : (
+            <ul className="notification-list">
+              {notifications.map((item) => (
+                <li className={item.read ? "notification-item" : "notification-item notification-item--unread"} key={item.id}>
+                  <div className="notification-item-title">{item.title}</div>
+                  {item.body ? <div className="notification-item-body">{item.body}</div> : null}
+                  <div className="notification-item-time">{formatNotificationTime(item.createdAt)}</div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 async function fetchProjectMembers(project: ProjectTarget): Promise<{ members: ProjectMember[]; invitations: ProjectInvitation[] }> {
@@ -3241,6 +3367,7 @@ export function App() {
               <Chip color="success" size="sm" variant="soft">
                 realtime on
               </Chip>
+              <NotificationBell />
               <Button size="sm" variant="secondary" onPress={() => {
                 toggleTheme();
                 reportAction(`Switched to ${theme === "dark" ? "light" : "dark"} mode`);

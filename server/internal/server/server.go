@@ -185,6 +185,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /dev/auth/login", s.handleDashboardLogin)
 	mux.HandleFunc("GET /dev/auth/users", s.handleDashboardUsers)
 	mux.HandleFunc("POST /dev/auth/users", s.handleDashboardUsers)
+	mux.HandleFunc("GET /dev/auth/notifications", s.handleListNotifications)
+	mux.HandleFunc("POST /dev/auth/notifications/read", s.handleReadNotifications)
 	mux.HandleFunc("GET /dev/projects", s.handleProjects)
 	mux.HandleFunc("POST /dev/projects", s.handleCreateProject)
 	mux.HandleFunc("PATCH /dev/projects/{project}", s.handleUpdateProject)

@@ -503,6 +503,10 @@ func (s *Server) addProjectMemberIfUserExists(ctx context.Context, db *sql.DB, p
 	if err != nil {
 		return err
 	}
+	var alreadyMember bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM gonvex_project_members WHERE project_id = $1 AND email = $2)`, projectID, email).Scan(&alreadyMember); err != nil {
+		return err
+	}
 	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_project_members (
 		project_id, email, name, role
 	) VALUES ($1, $2, $3, $4)
@@ -514,12 +518,17 @@ func (s *Server) addProjectMemberIfUserExists(ctx context.Context, db *sql.DB, p
 		return err
 	}
 	if role == "owner" {
-		_, err = db.ExecContext(ctx, `UPDATE gonvex_runtime_projects
+		if _, err := db.ExecContext(ctx, `UPDATE gonvex_runtime_projects
 			SET owner_email = $1, updated_at = now()
 			WHERE id = $2 AND COALESCE(owner_email, '') = ''`,
-			email, projectID)
+			email, projectID); err != nil {
+			return err
+		}
 	}
-	return err
+	if !alreadyMember {
+		return s.notifyProjectMembership(ctx, db, projectID, email, role)
+	}
+	return nil
 }
 
 func (s *Server) acceptPendingProjectInvitations(ctx context.Context, email string) error {

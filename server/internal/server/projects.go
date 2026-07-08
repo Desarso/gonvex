@@ -489,6 +489,21 @@ func ensureProjectRegistry(ctx context.Context, db *sql.DB) error {
 	)`); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_dashboard_notifications (
+		id TEXT PRIMARY KEY,
+		email TEXT NOT NULL,
+		type TEXT NOT NULL DEFAULT 'info',
+		title TEXT NOT NULL,
+		body TEXT NOT NULL DEFAULT '',
+		project_id TEXT,
+		read_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_dashboard_notifications_by_email ON gonvex_dashboard_notifications (email, created_at DESC)`); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_manifests (
 		project_id TEXT PRIMARY KEY,
 		manifest JSONB NOT NULL,
