@@ -1,6 +1,6 @@
 {
   "project": "dashboard",
-  "generatedAt": "2026-07-08T01:05:16.269007Z",
+  "generatedAt": "2026-07-08T17:51:30.025690301Z",
   "functions": {
     "files.createUploadUrl": {
       "kind": "mutation",
