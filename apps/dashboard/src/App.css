@@ -781,9 +781,9 @@ button {
   justify-content: center;
   width: 32px;
   height: 32px;
-  border: 1px solid var(--border);
+  border: none;
   border-radius: var(--radius);
-  background: var(--surface);
+  background: transparent;
   color: var(--foreground);
   cursor: pointer;
 }

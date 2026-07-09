@@ -1018,6 +1018,15 @@ function loadProjectTargets(): ProjectTarget[] {
     }
   }
 
+  // In a hosted, multi-user deployment (dashboard auth enabled) the project
+  // list comes from the runtime API, already scoped per signed-in user by
+  // canAccessProject. Seeding a bundled placeholder here would surface an
+  // ownerless phantom project to every user — e.g. a stale VITE_GONVEX_PROJECT_ID
+  // baked into the build showing up as "<id> project" for invited members who
+  // aren't actually on it. Only seed the template project in the local-dev/test
+  // flow where there is no runtime-backed project list.
+  if (dashboardAuthEnabled && import.meta.env.MODE !== "test") return [];
+
   return [normalizeProjectTarget({
     id: envProjectID || "app",
     name: envProjectID ? `${envProjectID} project` : "Dashboard Lab",
@@ -2693,6 +2702,12 @@ function projectByID(projects: ProjectTarget[], id: string | null): ProjectTarge
 function visibleProjectsForSession(projects: ProjectTarget[], session: DashboardSession): ProjectTarget[] {
   const email = session.email.toLowerCase();
   return projects.filter((project) => {
+    // Runtime projects are already access-scoped per user by the server
+    // (canAccessProject covers ownership AND gonvex_project_members). The
+    // /dev/projects response doesn't echo membership back as `sharedWith`, so
+    // re-filtering on ownerEmail here would wrongly hide a project a member was
+    // invited to but doesn't own. Trust the server-scoped list.
+    if (project.runtimeCreated) return true;
     if (!project.ownerEmail) return true;
     if (project.ownerEmail.toLowerCase() === email) return true;
     return (project.sharedWith ?? []).some((share) => share === "*" || share.toLowerCase() === email);
