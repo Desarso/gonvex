@@ -403,21 +403,36 @@ func (s *Server) handleInsertDataRow(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	// Surface every sync attempt (success and failure) in the project Logs tab,
+	// so a failing `gonvex dev` sync is visible in the dashboard and not only on
+	// the developer's terminal.
+	started := time.Now()
+	logProject := ""
+	var syncErr error
+	defer func() {
+		if logProject != "" {
+			s.metrics.recordRuntimeOperation(logProject, "dev.sync", "runtime", time.Since(started), syncErr, "")
+		}
+	}()
+
 	// Per-project auth: the sync uploads source the runtime compiles and runs,
 	// so it must present the target project's own key. Hydrate the project first
 	// so its key is loaded, then require it. Falls back to the global
 	// GONVEX_DEV_SYNC_KEY only for projects that have no key yet.
 	syncProjectID := strings.TrimSpace(r.Header.Get("x-gonvex-project-id"))
+	logProject = syncProjectID
 	if syncProjectID != "" {
 		s.hydrateRuntimeStateForProject(r.Context(), syncProjectID)
 	}
 	if !s.acceptsSyncKey(syncProjectID, syncKey(r)) {
+		syncErr = fmt.Errorf("invalid Gonvex sync key")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid Gonvex sync key"})
 		return
 	}
 
 	var next manifest.Manifest
 	if err := json.NewDecoder(r.Body).Decode(&next); err != nil {
+		syncErr = err
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -428,7 +443,11 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	if next.Project == "" {
 		next.Project = r.Header.Get("x-gonvex-project-id")
 	}
+	if next.Project != "" {
+		logProject = next.Project
+	}
 	if headerProject := r.Header.Get("x-gonvex-project-id"); headerProject != "" && next.Project != "" && headerProject != next.Project {
+		syncErr = fmt.Errorf("manifest project does not match x-gonvex-project-id")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "manifest project does not match x-gonvex-project-id"})
 		return
 	}
@@ -459,11 +478,13 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	} else {
 		migrationResult, err = schema.Apply(r.Context(), s.databaseURLForProject(next.Project), next.Schema.LandlordSchema())
 		if err != nil {
+			syncErr = err
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		tenantMigrationResult, err = s.applyTenantSchemasForProject(r.Context(), next.Project, next.Schema)
 		if err != nil {
+			syncErr = err
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
@@ -476,11 +497,13 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("dev sync applying manifest", "project", next.Project, "functions", len(next.Functions), "bundleHash", bundleHash)
 	if err := s.runtime.SyncManifest(next); err != nil {
+		syncErr = err
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
 	s.registerProjectCrons(next.Project)
 	if err := s.saveRuntimeManifest(r.Context(), next); err != nil {
+		syncErr = err
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

@@ -65,3 +65,38 @@ func TestProjectsEndpointRequiresDashboardTokenWhenRequireAuth(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, recorder.Code)
 	}
 }
+
+// The `gonvex dev` watch loop verifies each sync via GET /dev/manifest using the
+// project sync key (not a dashboard session). If that read 401s, the CLI reads
+// it as "runtime state missing" and resyncs forever, so the manifest health
+// check must accept the same key POST /dev/sync accepts.
+func TestManifestEndpointAcceptsProjectSyncKey(t *testing.T) {
+	server := New(config.Config{
+		DashboardSecret: "test-secret",
+		ProjectKeys:     map[string]string{"proj-1": "gvx_secret"},
+	})
+
+	noCreds := httptest.NewRecorder()
+	server.Handler().ServeHTTP(noCreds, httptest.NewRequest(http.MethodGet, "/dev/manifest?project=proj-1", nil))
+	if noCreds.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without credentials, got %d", noCreds.Code)
+	}
+
+	withKey := httptest.NewRequest(http.MethodGet, "/dev/manifest?project=proj-1", nil)
+	withKey.Header.Set("x-gonvex-project-id", "proj-1")
+	withKey.Header.Set("x-gonvex-key", "gvx_secret")
+	keyed := httptest.NewRecorder()
+	server.Handler().ServeHTTP(keyed, withKey)
+	if keyed.Code != http.StatusOK {
+		t.Fatalf("expected 200 with valid project sync key, got %d", keyed.Code)
+	}
+
+	wrongKey := httptest.NewRequest(http.MethodGet, "/dev/manifest?project=proj-1", nil)
+	wrongKey.Header.Set("x-gonvex-project-id", "proj-1")
+	wrongKey.Header.Set("x-gonvex-key", "nope")
+	rejected := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rejected, wrongKey)
+	if rejected.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with wrong project sync key, got %d", rejected.Code)
+	}
+}

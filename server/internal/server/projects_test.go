@@ -427,6 +427,7 @@ func TestStandaloneTenantDiscoveryCandidateSkipsControlAndProjectDatabases(t *te
 		name            string
 		database        string
 		projectDatabase string
+		otherSuffixes   map[string]bool
 		want            bool
 	}{
 		{name: "standalone fixture", database: "big", projectDatabase: "gonvex_dev", want: true},
@@ -436,11 +437,13 @@ func TestStandaloneTenantDiscoveryCandidateSkipsControlAndProjectDatabases(t *te
 		{name: "project scoped tenant", database: "big_whagons_5", projectDatabase: "gonvex_dev", want: false},
 		{name: "dashboard database", database: "testing2_dashboard", projectDatabase: "gonvex_dev", want: false},
 		{name: "e2e database", database: "e2e_task_create", projectDatabase: "gonvex_dev", want: false},
+		{name: "other project's tenant", database: "antigua_whagons5_dev", projectDatabase: "gonvex_dev", otherSuffixes: map[string]bool{"whagons5_dev": true}, want: false},
+		{name: "unclaimed standalone tenant", database: "antigua_whagons5_dev", projectDatabase: "gonvex_dev", otherSuffixes: map[string]bool{"other_project": true}, want: true},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := server.isStandaloneTenantDatabaseCandidate("whagons-5", test.projectDatabase, test.database)
+			got := server.isStandaloneTenantDatabaseCandidate("whagons-5", test.projectDatabase, test.database, test.otherSuffixes)
 			if got != test.want {
 				t.Fatalf("expected %v for %q, got %v", test.want, test.database, got)
 			}

@@ -829,13 +829,21 @@ func (s *Server) discoverStandaloneTenantDatabases(ctx context.Context, maintena
 	}
 	defer rows.Close()
 
+	// Databases that follow another registered project's deterministic tenant
+	// naming (<tenant>_<projectSuffix>) belong to that project, not this one.
+	// Without this guard, cluster-wide standalone discovery poaches those
+	// databases into every multiTenant project (e.g. the whagons5-dev tenant
+	// databases antigua_whagons5_dev / nca_whagons5_dev showing up under an
+	// unrelated freshly created project).
+	otherSuffixes := s.otherProjectTenantSuffixes(project)
+
 	var tenants []tenantTarget
 	for rows.Next() {
 		var databaseName string
 		if err := rows.Scan(&databaseName); err != nil {
 			return nil, err
 		}
-		if !s.isStandaloneTenantDatabaseCandidate(project, projectDatabase, databaseName) {
+		if !s.isStandaloneTenantDatabaseCandidate(project, projectDatabase, databaseName, otherSuffixes) {
 			continue
 		}
 		databaseURL, err := databaseURL(s.config.PostgresURL, databaseName)
@@ -863,7 +871,26 @@ func (s *Server) discoverStandaloneTenantDatabases(ctx context.Context, maintena
 	return tenants, rows.Err()
 }
 
-func (s *Server) isStandaloneTenantDatabaseCandidate(project string, projectDatabase string, databaseName string) bool {
+// otherProjectTenantSuffixes returns the deterministic tenant-database suffixes
+// of every registered project except the one passed in. A standalone tenant
+// database whose name ends with one of these suffixes belongs to that other
+// project and must not be discovered as a tenant of this project.
+func (s *Server) otherProjectTenantSuffixes(project string) map[string]bool {
+	s.projectMu.RLock()
+	defer s.projectMu.RUnlock()
+	suffixes := make(map[string]bool, len(s.projects))
+	for id := range s.projects {
+		if id == project {
+			continue
+		}
+		if suffix := tenantDatabaseProjectSuffix(id); suffix != "" {
+			suffixes[suffix] = true
+		}
+	}
+	return suffixes
+}
+
+func (s *Server) isStandaloneTenantDatabaseCandidate(project string, projectDatabase string, databaseName string, otherProjectSuffixes map[string]bool) bool {
 	databaseName = strings.TrimSpace(databaseName)
 	if databaseName == "" || databaseName == projectDatabase {
 		return false
@@ -878,6 +905,11 @@ func (s *Server) isStandaloneTenantDatabaseCandidate(project string, projectData
 	projectSuffix := tenantDatabaseProjectSuffix(project)
 	if projectSuffix != "" && strings.HasSuffix(databaseName, "_"+projectSuffix) {
 		return false
+	}
+	for suffix := range otherProjectSuffixes {
+		if suffix != "" && strings.HasSuffix(databaseName, "_"+suffix) {
+			return false
+		}
 	}
 	if strings.HasSuffix(databaseName, "_dashboard") {
 		return false

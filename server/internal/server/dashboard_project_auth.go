@@ -11,6 +11,19 @@ func (s *Server) withDashboardProjectAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// The dev CLI (`gonvex dev`) polls GET /dev/manifest after each sync to
+		// confirm the runtime still holds its manifest, authenticating with the
+		// project sync key — the same credential POST /dev/sync accepts — not a
+		// dashboard session. Honor that key here for the read-only manifest
+		// check. Without this the poll 401s, runtimeHasManifest reads any
+		// non-200 as "state missing", and the watch loop resyncs every couple of
+		// seconds forever.
+		if r.Method == http.MethodGet && r.URL.Path == "/dev/manifest" {
+			if project := projectID(r); project != "" && s.acceptsSyncKey(project, syncKey(r)) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
 		actor, ok := s.dashboardActorFromRequest(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
