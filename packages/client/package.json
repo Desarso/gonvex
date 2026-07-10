@@ -19,9 +19,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@gonvex/protocol": "workspace:*"
+    "@gonvex/protocol": "workspace:*",
+    "dexie": "^4.4.4"
   },
   "devDependencies": {
+    "fake-indexeddb": "^6.2.4",
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"
   },

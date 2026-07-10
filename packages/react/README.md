@@ -43,6 +43,10 @@ function Tasks() {
 }
 ```
 
+`useQuery` automatically benefits from the browser query-result cache. On a
+warm load it may receive the last scoped snapshot first, followed by the
+authoritative server result. Its signature and return type do not change.
+
 ## Convex Compatibility
 
 The package also exports Convex-style names for incremental migration:

@@ -31,6 +31,7 @@ type Config struct {
 	DevSyncKey        string
 	AdminKey          string
 	RequireAuth       bool
+	QueryCacheEnabled bool
 	DashboardSecret   string
 	// Environment labels projects created/imported on this runtime instance in the
 	// dashboard ("local dev", "production", ...). Deployed runtimes set
@@ -64,6 +65,7 @@ func FromEnv() Config {
 		DevSyncKey:        env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
 		AdminKey:          env("GONVEX_ADMIN_KEY", ""),
 		RequireAuth:       envBool("GONVEX_REQUIRE_AUTH", false),
+		QueryCacheEnabled: envBool("GONVEX_BROWSER_QUERY_CACHE_ENABLED", true),
 		DashboardSecret:   env("GONVEX_DASHBOARD_SESSION_SECRET", env("DASHBOARD_SESSION_SECRET", "")),
 		Environment:       env("GONVEX_ENVIRONMENT", "local dev"),
 	}

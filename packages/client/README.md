@@ -43,13 +43,36 @@ unsubscribe();
 client.close();
 ```
 
+## Transparent Browser Cache
+
+Live query results are persisted automatically in supported browsers when the
+runtime advertises a safe cache scope. A warm `subscribeQuery`, `watchQuery`, or
+React `useQuery` can replay its last result while the normal server subscription
+runs in parallel. The server result always wins and refreshes the snapshot,
+including results produced by realtime invalidation.
+
+Caching is isolated by runtime deployment, project, tenant, user, and current
+permissions. New clients connected to older runtimes stay server-only.
+
+No setup is required. To opt out or clear the disposable cache:
+
+```ts
+const client = new GonvexClient(url, { queryCache: false });
+
+await client.clearQueryCache();
+await client.clearQueryCache({ allScopes: true });
+```
+
+Dexie is loaded asynchronously only after a cache-capable session is confirmed,
+so IndexedDB setup does not delay the WebSocket query path.
+
 ## Exports
 
 The package exports:
 
 - `GonvexClient`
 - `ConvexReactClient` compatibility alias
-- cache helpers for browser and persistent query state
+- transparent persistent query caching and lower-level experimental cache helpers
 - browser capability and telemetry helpers
 
 ## Related Packages

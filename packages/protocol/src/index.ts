@@ -44,6 +44,13 @@ export type BrowserTelemetryInfo = {
   effectiveConnectionType?: string;
 };
 
+export type QueryCacheDirective = {
+  protocolVersion: 1;
+  scope: string;
+  epoch: string;
+  maxAgeMs: number;
+};
+
 export type GonvexManifest = {
   project: string;
   generatedAt: string;
@@ -73,9 +80,20 @@ export type ClientMessage =
   };
 
 export type ServerMessage =
+  | { type: "session.ready"; project?: string; tenant?: string; queryCache?: QueryCacheDirective }
+  | { type: "session.scope"; queryCache?: QueryCacheDirective }
   | { type: "auth.result"; id: string; result: JsonValue }
   | { type: "auth.error"; id: string; error: string }
-  | { type: "query.result"; id: string; path?: string; result: JsonValue; reason?: "initial" | "invalidate"; trace?: MessageTrace }
+  | {
+    type: "query.result";
+    id: string;
+    path?: string;
+    result: JsonValue;
+    reason?: "initial" | "invalidate";
+    trace?: MessageTrace;
+    cacheScope?: string;
+    cacheRevision?: string;
+  }
   | { type: "query.error"; id: string; path?: string; error: string }
   | { type: "mutation.result"; id: string; path?: string; result: JsonValue; trace?: MessageTrace }
   | { type: "mutation.error"; id: string; path?: string; error: string; trace?: MessageTrace }

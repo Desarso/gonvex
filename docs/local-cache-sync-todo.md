@@ -1,5 +1,10 @@
 # Gonvex Local Cache + Shape Sync TODO
 
+> Future-design note: this document describes a possible row-shape/local-SQL
+> system. It is not the browser cache used by `useQuery`. The implemented cache
+> stores exact query-result snapshots in IndexedDB; see
+> `apps/docs/content/docs/browser-query-cache.mdx`.
+
 Goal: keep normal app code on `useQuery`, while Gonvex automatically uses a persistent browser SQL cache only when it is safe, complete, and not corrupt. Server/Postgres remains authoritative.
 
 ## Non-Negotiable Invariants
@@ -298,7 +303,9 @@ Tests added or extended:
 - `packages/client/src/browser-cache-client.test.ts`
 - `packages/client/src/browser-capabilities.test.ts`
 - `packages/client/src/persistent-cache.test.ts`
-- `tests/e2e/cache-routing.spec.ts`
+
+The former localStorage-only `tests/e2e/cache-routing.spec.ts` placeholder was
+removed when the production query-snapshot cache gained a real browser fixture.
 
 Still intentionally not implemented:
 

@@ -37,13 +37,18 @@ type clientMessage struct {
 }
 
 type serverMessage struct {
-	Type   string `json:"type"`
-	ID     string `json:"id,omitempty"`
-	Path   string `json:"path,omitempty"`
-	Result any    `json:"result,omitempty"`
-	Error  string `json:"error,omitempty"`
-	Reason string `json:"reason,omitempty"`
-	Trace  any    `json:"trace,omitempty"`
+	Type          string               `json:"type"`
+	ID            string               `json:"id,omitempty"`
+	Path          string               `json:"path,omitempty"`
+	Project       string               `json:"project,omitempty"`
+	Tenant        string               `json:"tenant,omitempty"`
+	Result        any                  `json:"result,omitempty"`
+	Error         string               `json:"error,omitempty"`
+	Reason        string               `json:"reason,omitempty"`
+	Trace         any                  `json:"trace,omitempty"`
+	QueryCache    *queryCacheDirective `json:"queryCache,omitempty"`
+	CacheScope    string               `json:"cacheScope,omitempty"`
+	CacheRevision string               `json:"cacheRevision,omitempty"`
 }
 
 // explicitNull makes a nil handler result serialize as an explicit JSON null
@@ -110,17 +115,18 @@ const (
 )
 
 type querySubscription struct {
-	conn    *wsConn
-	id      string
-	project string
-	tenant  string
-	path    string
-	args    json.RawMessage
-	rowIDs  map[string]bool
-	caller  callerContext
-	ctx     context.Context
-	cancel  context.CancelFunc
-	token   *struct{}
+	conn       *wsConn
+	id         string
+	project    string
+	tenant     string
+	path       string
+	args       json.RawMessage
+	rowIDs     map[string]bool
+	caller     callerContext
+	ctx        context.Context
+	cancel     context.CancelFunc
+	token      *struct{}
+	cacheScope string
 }
 
 type tableChange struct {
@@ -133,15 +139,16 @@ type tableChange struct {
 }
 
 type wsConn struct {
-	server  *Server
-	conn    *websocket.Conn
-	project string
-	tenant  string
-	user    *gonvex.User
-	perms   map[string]any
-	auth    bool
-	mu      sync.Mutex
-	subs    map[string]querySubscription
+	server     *Server
+	conn       *websocket.Conn
+	project    string
+	tenant     string
+	user       *gonvex.User
+	perms      map[string]any
+	auth       bool
+	cacheScope string
+	mu         sync.Mutex
+	subs       map[string]querySubscription
 }
 
 type callerContext struct {
@@ -169,6 +176,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.removeWSConn(client)
 		_ = conn.Close()
 	}()
+	var initialCache *queryCacheDirective
+	if !s.config.RequireAuth {
+		initialCache = s.queryCacheDirective(client.project, client.tenant, callerContext{})
+		if initialCache != nil {
+			client.cacheScope = initialCache.Scope
+		}
+	}
+	client.write(serverMessage{
+		Type:       "session.ready",
+		Project:    client.project,
+		Tenant:     client.tenant,
+		QueryCache: initialCache,
+	})
 
 	for {
 		var message clientMessage
@@ -185,15 +205,22 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 	case "auth":
 		user, permissions, tenant, err := c.server.authenticateSocket(ctx, c.project, c.tenant, message.Token, message.Tenant)
 		if err != nil {
+			c.clearAuthentication()
 			c.write(serverMessage{Type: "auth.error", ID: message.ID, Error: err.Error()})
 			return
+		}
+		caller := callerContext{user: user, permissions: permissions}
+		directive := c.server.queryCacheDirective(c.project, tenant, caller)
+		cacheScope := ""
+		if directive != nil {
+			cacheScope = directive.Scope
 		}
 		c.mu.Lock()
 		c.user = user
 		c.perms = permissions
 		c.tenant = tenant
 		c.auth = true
-		caller := callerContext{user: user, permissions: permissions}
+		c.cacheScope = cacheScope
 		subs := make([]querySubscription, 0, len(c.subs))
 		for id, sub := range c.subs {
 			if sub.cancel != nil {
@@ -205,11 +232,16 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			sub.tenant = tenant
 			sub.caller = caller
 			sub.token = &struct{}{}
+			sub.cacheScope = cacheScope
 			c.subs[id] = sub
 			subs = append(subs, sub)
 		}
 		c.mu.Unlock()
-		c.write(serverMessage{Type: "auth.result", ID: message.ID, Result: map[string]any{"userId": user.ID, "tenantId": tenant}})
+		authResult := map[string]any{"userId": user.ID, "tenantId": tenant}
+		if directive != nil {
+			authResult["queryCache"] = directive
+		}
+		c.write(serverMessage{Type: "auth.result", ID: message.ID, Result: authResult})
 		c.server.rerunSubscriptions(subs, "initial", 0)
 	case "query.subscribe":
 		if !c.requireAuth("query.error", message.ID) {
@@ -220,7 +252,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			return
 		}
 		subCtx, cancel := context.WithCancel(ctx)
-		sub := querySubscription{conn: c, id: message.ID, project: c.project, tenant: c.tenant, path: message.Path, args: message.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: &struct{}{}}
+		sub := querySubscription{conn: c, id: message.ID, project: c.project, tenant: c.tenant, path: message.Path, args: message.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: &struct{}{}, cacheScope: c.currentCacheScope()}
 		c.mu.Lock()
 		previous, hadPrevious := c.subs[message.ID]
 		c.subs[message.ID] = sub
@@ -406,6 +438,30 @@ func (c *wsConn) caller() callerContext {
 	return callerContext{user: c.user, permissions: c.perms}
 }
 
+func (c *wsConn) clearAuthentication() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.user = nil
+	c.perms = nil
+	c.auth = false
+	c.cacheScope = ""
+	for id, sub := range c.subs {
+		if sub.cancel != nil {
+			sub.cancel()
+		}
+		sub.caller = callerContext{}
+		sub.cacheScope = ""
+		sub.token = &struct{}{}
+		c.subs[id] = sub
+	}
+}
+
+func (c *wsConn) currentCacheScope() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cacheScope
+}
+
 func (c *wsConn) cancelSubscriptions() {
 	c.mu.Lock()
 	subs := make([]querySubscription, 0, len(c.subs))
@@ -588,6 +644,7 @@ func subscriptionCanChangeMembership(sub querySubscription) bool {
 
 func (s *Server) executeSubscription(ctx context.Context, sub querySubscription, reason string, changeCommittedAtMS float64) {
 	startedAt := time.Now().UTC()
+	cacheRevision := s.nextQueryCacheRevision()
 	result, err := s.executeTenantQueryForCaller(ctx, sub.project, sub.tenant, sub.caller, sub.path, sub.args)
 	if ctx.Err() != nil {
 		return
@@ -626,7 +683,7 @@ func (s *Server) executeSubscription(ctx context.Context, sub querySubscription,
 		ServerSubscriptionSentAtMS:    epochMillis(sentAt),
 		ServerDurationMS:              float64(sentAt.Sub(startedAt).Microseconds()) / 1000,
 	}
-	sub.conn.write(serverMessage{Type: "query.result", ID: sub.id, Path: sub.path, Result: explicitNull(result), Reason: reason, Trace: trace})
+	sub.conn.write(serverMessage{Type: "query.result", ID: sub.id, Path: sub.path, Result: explicitNull(result), Reason: reason, Trace: trace, CacheScope: sub.cacheScope, CacheRevision: cacheRevision})
 	s.recordTransactionTelemetry(transactionEntryFromTrace(sub.project, sub.tenant, sub.id, "query", sub.path, "server", reason, "ok", "", trace))
 }
 

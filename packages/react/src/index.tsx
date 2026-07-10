@@ -72,11 +72,20 @@ export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue 
       setResult(undefined);
       return;
     }
-    return client.subscribeQuery({ kind, path }, args, (message) => {
+    setResult(undefined);
+    const unsubscribeScope = client.onSessionScopeChange(() => setResult(undefined));
+    const unsubscribeQuery = client.subscribeQuery({ kind, path }, args, (message) => {
       if (message.type === "query.result") {
         setResult(message.result as T);
       }
+      if (message.type === "query.error") {
+        setResult(undefined);
+      }
     });
+    return () => {
+      unsubscribeScope();
+      unsubscribeQuery();
+    };
   }, [client, kind, path, argsKey]);
 
   return result;

@@ -11,6 +11,7 @@
     "schema",
     "functions-and-bindings",
     "realtime-subscriptions",
+    "browser-query-cache",
     "query-invalidation",
     "live-grid",
     "deployment",

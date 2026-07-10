@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
@@ -55,8 +56,10 @@ type Server struct {
 	syncLocks  map[string]*sync.Mutex
 	// schemaHash records the fingerprint of the schema last applied to each
 	// project's database, so an unchanged sync skips the trigger/DDL reapply.
-	schemaHashMu sync.Mutex
-	schemaHash   map[string]string
+	schemaHashMu          sync.Mutex
+	schemaHash            map[string]string
+	queryCacheStartedAtMS int64
+	queryCacheSequence    atomic.Uint64
 }
 
 func New(cfg config.Config) *Server {
@@ -82,17 +85,18 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 			PublicBaseURL:   cfg.StoragePublicURL,
 			URLSigningKey:   cfg.S3SecretAccessKey,
 		}),
-		cache:             cache,
-		metrics:           newRuntimeMetrics(cfg.TelemetryLogPath),
-		telemetryWrites:   make(chan struct{}, 4),
-		projects:          map[string]projectTarget{},
-		tenants:           map[string]tenantTarget{},
-		tenantDiscoveryAt: map[string]time.Time{},
-		wsConns:           map[*wsConn]bool{},
-		tableChangeWait:   map[string]*time.Timer{},
-		tableChanges:      map[string]tableChange{},
-		syncLocks:         map[string]*sync.Mutex{},
-		schemaHash:        map[string]string{},
+		cache:                 cache,
+		metrics:               newRuntimeMetrics(cfg.TelemetryLogPath),
+		telemetryWrites:       make(chan struct{}, 4),
+		projects:              map[string]projectTarget{},
+		tenants:               map[string]tenantTarget{},
+		tenantDiscoveryAt:     map[string]time.Time{},
+		wsConns:               map[*wsConn]bool{},
+		tableChangeWait:       map[string]*time.Timer{},
+		tableChanges:          map[string]tableChange{},
+		syncLocks:             map[string]*sync.Mutex{},
+		schemaHash:            map[string]string{},
+		queryCacheStartedAtMS: time.Now().UTC().UnixMilli(),
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
 	server.scheduler = newScheduler(server.runScheduledJob)

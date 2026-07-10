@@ -1,0 +1,95 @@
+---
+title: Browser Query Cache
+description: How Gonvex transparently replays scoped query snapshots and revalidates them against the runtime.
+---
+
+# Browser Query Cache
+
+Gonvex automatically persists exact live-query results in IndexedDB. Existing
+application code does not change:
+
+```tsx
+const tasks = useQuery(api.tasks.list, { status: "open" });
+```
+
+On a warm load, the SDK races the local snapshot against the normal WebSocket
+subscription. If IndexedDB wins, the hook renders the snapshot. The runtime
+still executes the query, and its authoritative result silently replaces the
+snapshot and refreshes the cache.
+
+```txt
+useQuery
+  ├─ read scoped snapshot from IndexedDB
+  └─ subscribe to the runtime
+
+first valid result renders
+runtime result always replaces it
+invalidation results update both UI and IndexedDB
+```
+
+## Safety and Scoping
+
+The runtime—not the browser—issues an opaque cache scope after it confirms the
+session. The scope changes when any of these change:
+
+- runtime manifest or function bundle
+- project
+- tenant
+- authenticated user
+- role or permissions
+- cache protocol version
+
+The SDK does not persist auth tokens or raw query arguments. Authenticated
+snapshots are not read until the matching scope is confirmed by the runtime.
+Changing auth or tenant context immediately clears the active hook state while
+the new scope is established.
+
+An older runtime does not advertise a cache scope, so a newer SDK simply uses
+the existing server-only behavior.
+
+## Defaults
+
+- snapshots expire after 24 hours
+- individual results larger than 2 MiB are skipped
+- each scope keeps at most 100 entries and 20 MiB
+- the global Gonvex cache is capped at 50 MiB
+- older revisions cannot overwrite newer results from another tab
+- quota, private-mode, IndexedDB, or migration failures fall back silently
+
+Dexie is loaded as a separate asynchronous module only when caching is
+available. It is not part of the initial application path.
+
+## Controls
+
+Caching is enabled by default. Applications can opt out without changing query
+code:
+
+```ts
+const gonvex = new ConvexReactClient(runtimeURL, {
+  project: projectID,
+  queryCache: false,
+});
+```
+
+Clear the current confirmed scope or every Gonvex scope stored by the origin:
+
+```ts
+await gonvex.clearQueryCache();
+await gonvex.clearQueryCache({ allScopes: true });
+```
+
+Runtime operators can disable cache advertisement with:
+
+```txt
+GONVEX_BROWSER_QUERY_CACHE_ENABLED=false
+```
+
+## Current Limits
+
+- `client.query()` remains server-only because a one-shot promise cannot be
+  silently updated after it resolves.
+- This cache does not make authenticated applications work offline; establishing
+  the authorized scope still requires the runtime.
+- Gonvex stores exact query results. It does not mirror tables or execute SQL in
+  the browser.
+- Mutations and optimistic writes are not persisted in this version.

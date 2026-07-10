@@ -1,4 +1,5 @@
-import type { BrowserTelemetryInfo, ClientMessage, JsonValue, MessageTrace, ServerMessage } from "@gonvex/protocol";
+import type { BrowserTelemetryInfo, ClientMessage, JsonValue, MessageTrace, QueryCacheDirective, ServerMessage } from "@gonvex/protocol";
+import { createQueryCacheStore, type QueryCacheOptions, type QueryCacheStatus, type QueryCacheStore } from "./query-cache.js";
 export * from "./cache.js";
 export * from "./cache-coordinator.js";
 export * from "./browser-cache.js";
@@ -6,6 +7,8 @@ export * from "./browser-cache-client.js";
 export * from "./browser-cache-shared-worker.js";
 export * from "./browser-capabilities.js";
 export * from "./persistent-cache.js";
+export * from "./query-cache.js";
+export type { QueryCacheDirective } from "@gonvex/protocol";
 
 type SubscriptionHandler = (message: ServerMessage) => void;
 type WatchUpdateHandler = () => void;
@@ -18,6 +21,8 @@ type QuerySubscription = {
   listeners: Set<SubscriptionHandler>;
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
   lastMessage?: ServerMessage;
+  serverSettled: boolean;
+  cacheReadGeneration?: number;
 };
 
 export type FunctionReference = {
@@ -30,6 +35,10 @@ export type GonvexClientAuth = {
   token?: string;
   tenant?: string;
   telemetry?: boolean;
+};
+
+export type GonvexClientOptions = GonvexClientAuth & {
+  queryCache?: false | QueryCacheOptions;
 };
 
 export type GonvexTelemetryEvent = {
@@ -55,19 +64,30 @@ export class GonvexClient {
   private auth: GonvexClientAuth = {};
   private authInFlight = false;
   private telemetryEnabled = false;
+  private readonly queryCache: QueryCacheStore | undefined;
+  private queryCacheDirective: QueryCacheDirective | undefined;
+  private queryCacheGeneration = 0;
+  private readonly sessionScopeHandlers = new Set<() => void>();
 
-  constructor(private readonly url: string, auth: GonvexClientAuth = {}) {
-    this.auth = auth;
-    this.telemetryEnabled = auth.telemetry === true;
+  constructor(private readonly url: string, options: GonvexClientOptions = {}) {
+    this.auth = authFromOptions(options);
+    this.telemetryEnabled = options.telemetry === true;
+    this.queryCache = createQueryCacheStore(options.queryCache);
   }
 
   setAuth(auth: GonvexClientAuth) {
+    const scopeMayChange = (hasOwn(auth, "token") && auth.token !== this.auth.token)
+      || (hasOwn(auth, "tenant") && auth.tenant !== this.auth.tenant)
+      || (hasOwn(auth, "project") && auth.project !== this.auth.project);
+    if (scopeMayChange) {
+      this.resetQueryCacheScope();
+    }
     this.auth = { ...this.auth, ...auth };
     if (auth.telemetry !== undefined) {
       this.telemetryEnabled = auth.telemetry === true;
     }
     if (this.socket?.readyState === WebSocket.OPEN) {
-      this.sendAuth();
+      this.sendAuth(true);
     }
   }
 
@@ -75,7 +95,7 @@ export class GonvexClient {
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
 
     this.socket = new WebSocket(this.url);
-    this.socket.addEventListener("open", () => this.sendAuth());
+    this.socket.addEventListener("open", () => this.sendAuth(false));
     this.socket.addEventListener("message", (event) => {
       let message: ServerMessage;
       try {
@@ -83,8 +103,23 @@ export class GonvexClient {
       } catch {
         return;
       }
+      if (message.type === "session.ready") {
+        if (!this.auth.token && !this.auth.tenant) {
+          this.installQueryCacheDirective(message.queryCache);
+        }
+        return;
+      }
+      if (message.type === "session.scope") {
+        this.installQueryCacheDirective(message.queryCache);
+        return;
+      }
       if (message.type === "auth.result" || message.type === "auth.error") {
         this.authInFlight = false;
+        if (message.type === "auth.result") {
+          this.installQueryCacheDirective(queryCacheDirectiveFromAuthResult(message.result));
+        } else {
+          this.resetQueryCacheScope();
+        }
         this.flushPendingMessages();
       }
       const id = "id" in message ? message.id : "system";
@@ -95,6 +130,10 @@ export class GonvexClient {
   close() {
     this.handlers.clear();
     this.querySubscriptions.clear();
+    this.sessionScopeHandlers.clear();
+    this.queryCacheGeneration += 1;
+    this.queryCacheDirective = undefined;
+    this.queryCache?.close();
     if (!this.socket) return;
     this.socket.close();
     this.socket = undefined;
@@ -103,6 +142,27 @@ export class GonvexClient {
   onTelemetry(handler: TelemetryHandler) {
     this.telemetryHandlers.add(handler);
     return () => this.telemetryHandlers.delete(handler);
+  }
+
+  onSessionScopeChange(handler: () => void) {
+    this.sessionScopeHandlers.add(handler);
+    return () => this.sessionScopeHandlers.delete(handler);
+  }
+
+  async clearQueryCache(options: { allScopes?: boolean } = {}) {
+    if (!this.queryCache) return;
+    const scope = options.allScopes ? undefined : this.queryCacheDirective?.scope;
+    if (!options.allScopes && !scope) return;
+    await this.queryCache.clear(scope);
+  }
+
+  getQueryCacheStatus(): QueryCacheStatus {
+    return this.queryCache?.status() ?? {
+      enabled: false,
+      readsEnabled: false,
+      writesEnabled: false,
+      reason: "disabled-by-client",
+    };
   }
 
   subscribeQuery(ref: FunctionReference, args: JsonValue = {}, onMessage: SubscriptionHandler) {
@@ -115,6 +175,7 @@ export class GonvexClient {
         existing.unsubscribeTimer = undefined;
       }
       existing.listeners.add(onMessage);
+      this.startQueryCacheRead(existing);
       // Replay the latest result/error to this late joiner. Coalesced subscriptions
       // share a single server subscription, so the server only sends `initial` once —
       // to the first subscriber. Without this replay, components that mount after the
@@ -136,10 +197,15 @@ export class GonvexClient {
       path: ref.path,
       args,
       listeners: new Set([onMessage]),
+      serverSettled: false,
     };
     this.querySubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => {
       if (message.type === "query.result") {
+        if (message.cacheScope && message.cacheScope !== this.queryCacheDirective?.scope) {
+          return;
+        }
+        subscription.serverSettled = true;
         subscription.lastMessage = message;
         this.recordTelemetry({
           type: "query",
@@ -152,6 +218,7 @@ export class GonvexClient {
         });
       }
       if (message.type === "query.error") {
+        subscription.serverSettled = true;
         subscription.lastMessage = message;
         this.recordTelemetry({
           type: "query",
@@ -165,8 +232,14 @@ export class GonvexClient {
       for (const listener of Array.from(subscription.listeners)) {
         listener(message);
       }
+      if (message.type === "query.result") {
+        this.persistQueryResult(subscription, message);
+      } else if (message.type === "query.error") {
+        this.deleteCachedQuery(subscription);
+      }
     });
     this.send({ type: "query.subscribe", id: subscription.id, path: ref.path, args });
+    this.startQueryCacheRead(subscription);
 
     return () => this.unsubscribeQueryListener(key, onMessage);
   }
@@ -187,6 +260,11 @@ export class GonvexClient {
         for (const handler of updateHandlers) handler();
       }
     });
+    const unsubscribeScope = this.onSessionScopeChange(() => {
+      latest = undefined;
+      latestError = undefined;
+      for (const handler of updateHandlers) handler();
+    });
 
     return {
       localQueryResult() {
@@ -197,7 +275,10 @@ export class GonvexClient {
         updateHandlers.add(handler);
         return () => {
           updateHandlers.delete(handler);
-          if (updateHandlers.size === 0) unsubscribe();
+          if (updateHandlers.size === 0) {
+            unsubscribe();
+            unsubscribeScope();
+          }
         };
       },
     };
@@ -302,6 +383,107 @@ export class GonvexClient {
     }, 250);
   }
 
+  private installQueryCacheDirective(value: QueryCacheDirective | undefined) {
+    if (!validQueryCacheDirective(value)) {
+      if (this.queryCacheDirective) this.resetQueryCacheScope();
+      return;
+    }
+    if (this.queryCacheDirective?.scope === value.scope) {
+      this.queryCacheDirective = value;
+      return;
+    }
+    if (this.queryCacheDirective) {
+      this.resetQueryCacheScope();
+    }
+    this.queryCacheDirective = value;
+    for (const subscription of this.querySubscriptions.values()) {
+      this.startQueryCacheRead(subscription);
+    }
+  }
+
+  private resetQueryCacheScope() {
+    const hadScope = this.queryCacheDirective !== undefined;
+    this.queryCacheGeneration += 1;
+    this.queryCacheDirective = undefined;
+    for (const subscription of this.querySubscriptions.values()) {
+      subscription.lastMessage = undefined;
+      subscription.serverSettled = false;
+      subscription.cacheReadGeneration = undefined;
+    }
+    if (hadScope || this.querySubscriptions.size > 0) {
+      for (const handler of this.sessionScopeHandlers) handler();
+    }
+  }
+
+  private startQueryCacheRead(subscription: QuerySubscription) {
+    const store = this.queryCache;
+    const directive = this.queryCacheDirective;
+    if (!store || !directive || subscription.serverSettled) return;
+    const generation = this.queryCacheGeneration;
+    if (subscription.cacheReadGeneration === generation) return;
+    subscription.cacheReadGeneration = generation;
+    void store.read(directive.scope, subscription.path, subscription.args, directive.maxAgeMs).then((cached) => {
+      const current = this.querySubscriptions.get(subscription.key);
+      if (
+        !cached
+        || current !== subscription
+        || subscription.serverSettled
+        || subscription.listeners.size === 0
+        || this.queryCacheGeneration !== generation
+        || this.queryCacheDirective?.scope !== directive.scope
+      ) {
+        return;
+      }
+      const message: ServerMessage = {
+        type: "query.result",
+        id: subscription.id,
+        path: subscription.path,
+        result: cached.result,
+        reason: "initial",
+        cacheScope: directive.scope,
+        cacheRevision: cached.revision,
+      };
+      subscription.lastMessage = message;
+      for (const listener of Array.from(subscription.listeners)) {
+        listener(message);
+      }
+    }).catch(() => {
+      // Persistent cache failures never affect the server query path.
+    });
+  }
+
+  private persistQueryResult(subscription: QuerySubscription, message: Extract<ServerMessage, { type: "query.result" }>) {
+    const store = this.queryCache;
+    const directive = this.queryCacheDirective;
+    if (
+      !store
+      || !directive
+      || message.cacheScope !== directive.scope
+      || !message.cacheRevision
+    ) {
+      return;
+    }
+    const generation = this.queryCacheGeneration;
+    queueMicrotask(() => {
+      if (this.queryCacheGeneration !== generation || this.queryCacheDirective?.scope !== directive.scope) return;
+      void store.write({
+        scope: directive.scope,
+        path: subscription.path,
+        args: subscription.args,
+        result: message.result,
+        revision: message.cacheRevision!,
+        maxAgeMs: directive.maxAgeMs,
+      }).catch(() => undefined);
+    });
+  }
+
+  private deleteCachedQuery(subscription: QuerySubscription) {
+    const store = this.queryCache;
+    const directive = this.queryCacheDirective;
+    if (!store || !directive) return;
+    void store.delete(directive.scope, subscription.path, subscription.args).catch(() => undefined);
+  }
+
   private emitTelemetryFromCall(
     kind: "mutation" | "action",
     id: string,
@@ -355,8 +537,8 @@ export class GonvexClient {
     });
   }
 
-  private sendAuth() {
-    if (!this.auth.token && !this.auth.tenant) return;
+  private sendAuth(force: boolean) {
+    if (!force && !this.auth.token && !this.auth.tenant) return;
     this.authInFlight = true;
     this.sendNow({ type: "auth", id: randomID(), token: this.auth.token, tenant: this.auth.tenant });
   }
@@ -411,9 +593,43 @@ function stableStringify(value: JsonValue): string {
 }
 
 export class ConvexReactClient extends GonvexClient {
-  constructor(url: string, auth: GonvexClientAuth = {}) {
-    super(toWebSocketURL(url, auth.project), auth);
+  constructor(url: string, options: GonvexClientOptions = {}) {
+    super(toWebSocketURL(url, options.project), options);
   }
+}
+
+function authFromOptions(options: GonvexClientOptions): GonvexClientAuth {
+  return {
+    project: options.project,
+    token: options.token,
+    tenant: options.tenant,
+    telemetry: options.telemetry,
+  };
+}
+
+function queryCacheDirectiveFromAuthResult(result: JsonValue): QueryCacheDirective | undefined {
+  if (!isJsonRecord(result)) return undefined;
+  return validQueryCacheDirective(result.queryCache) ? result.queryCache : undefined;
+}
+
+function validQueryCacheDirective(value: unknown): value is QueryCacheDirective {
+  if (!isJsonRecord(value)) return false;
+  return value.protocolVersion === 1
+    && typeof value.scope === "string"
+    && value.scope.length >= 16
+    && typeof value.epoch === "string"
+    && value.epoch.length >= 16
+    && typeof value.maxAgeMs === "number"
+    && Number.isFinite(value.maxAgeMs)
+    && value.maxAgeMs > 0;
+}
+
+function isJsonRecord(value: unknown): value is Record<string, JsonValue> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOwn<T extends object>(value: T, key: PropertyKey) {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function toWebSocketURL(url: string, project?: string) {
