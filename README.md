@@ -208,6 +208,24 @@ Run the full Docker stack:
 make stack
 ```
 
+### Releasing npm packages
+
+The package release runs through Make. Without `VERSION`, it selects the next
+patch after both the newest `v*` Git tag and the highest checked-in publishable
+package version. This keeps a stale tag from producing an already-published or
+lower package version.
+
+```bash
+make version
+make release-test
+make release-dry-run
+make release-prod
+```
+
+Set `VERSION=x.y.z` on the Make command only when choosing an explicit higher
+version. The release script rejects a version that does not advance every
+package and the latest release tag.
+
 Useful checks:
 
 ```bash

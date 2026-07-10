@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { compareVersions, selectReleaseVersion } from "./release-version.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -37,9 +38,7 @@ async function releaseCLI() {
   if (!dryRun) ensureNPMLogin();
 
   const latestTag = latestReleaseTag();
-  const currentVersion = latestTag ? latestTag.replace(/^v/, "") : readJSON(packagePath("gonvex")).version;
-  const version = requestedVersion() || bumpPatch(currentVersion);
-  validateVersion(version);
+  const { version } = currentReleaseSelection(latestTag);
   const tagName = `v${version}`;
 
   if (tagExists(tagName)) throw new Error(`Tag ${tagName} already exists.`);
@@ -57,7 +56,8 @@ async function releaseCLI() {
     // Scope validation to the packages being published. A whole-workspace
     // `-r` run also pulls in apps/ (docs, dashboard), whose unrelated build
     // state must not gate an npm package release.
-    const releaseFilters = ["@gonvex/protocol", "@gonvex/client", "@gonvex/react", "gonvex", "create-gonvex"]
+    const releaseFilters = RELEASE_PACKAGES
+      .map((packageName) => readJSON(packagePath(packageName)).name)
       .flatMap((name) => ["--filter", name]);
     run("pnpm", [...releaseFilters, "typecheck"]);
     run("go", ["test", "./..."]);
@@ -97,9 +97,7 @@ async function releaseCLI() {
 
 async function generatePreviewNotes() {
   const latestTag = latestReleaseTag();
-  const currentVersion = latestTag ? latestTag.replace(/^v/, "") : readJSON(packagePath("gonvex")).version;
-  const version = requestedVersion() || bumpPatch(currentVersion);
-  validateVersion(version);
+  const { version } = currentReleaseSelection(latestTag);
   const tagName = `v${version}`;
   const outputFile = process.env.RELEASE_NOTES_FILE || `/tmp/gonvex-release-notes-${version}.md`;
 
@@ -228,13 +226,21 @@ function publishPackage(path, dryRunPublish) {
 
 function printVersionInfo() {
   const latestTag = latestReleaseTag();
-  const currentVersion = readJSON(packagePath("gonvex")).version;
-  const nextVersion = requestedVersion() || bumpPatch(latestTag ? latestTag.replace(/^v/, "") : currentVersion);
+  const { baselineVersion, highestPackageVersion, version } = currentReleaseSelection(latestTag);
   console.log("=== Version Info ===");
   console.log(`latest tag:      ${latestTag || "none"}`);
-  console.log(`gonvex package: ${currentVersion}`);
-  console.log(`next version:   ${nextVersion}`);
+  console.log(`highest package: ${highestPackageVersion}`);
+  console.log(`release baseline: ${baselineVersion}`);
+  console.log(`next version:     ${version}`);
   console.log(`git hash:       ${git(["rev-parse", "--short", "HEAD"])}`);
+}
+
+function currentReleaseSelection(latestTag) {
+  return selectReleaseVersion({
+    latestTag,
+    packageVersions: RELEASE_PACKAGES.map((packageName) => readJSON(packagePath(packageName)).version),
+    requestedVersion: requestedVersion(),
+  });
 }
 
 function latestReleaseTag() {
@@ -254,28 +260,6 @@ function tagExists(tagName) {
 
 function requestedVersion() {
   return process.env.VERSION || process.env.RELEASE_VERSION || "";
-}
-
-function bumpPatch(version) {
-  const parts = version.split(".").map((part) => Number(part));
-  if (parts.length !== 3 || parts.some((part) => !Number.isInteger(part) || part < 0)) {
-    throw new Error(`Cannot auto-bump invalid version: ${version}`);
-  }
-  parts[2] += 1;
-  return parts.join(".");
-}
-
-function compareVersions(a, b) {
-  const left = a.replace(/^v/, "").split(".").map(Number);
-  const right = b.replace(/^v/, "").split(".").map(Number);
-  for (let index = 0; index < 3; index += 1) {
-    if (left[index] !== right[index]) return left[index] - right[index];
-  }
-  return 0;
-}
-
-function validateVersion(version) {
-  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`Invalid semver version: ${version}`);
 }
 
 function ensureCleanWorkingTree() {

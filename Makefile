@@ -1,4 +1,4 @@
-.PHONY: dev stack stack-storage services storage files runtime dashboard packages docs version release-notes-preview release-dry-run release-prod
+.PHONY: dev stack stack-storage services storage files runtime dashboard packages docs version release-test release-notes-preview release-dry-run release-prod
 
 OPENROUTER_MODEL ?= moonshotai/kimi-k2.5
 
@@ -50,6 +50,9 @@ docs:
 
 version:
 	node scripts/release-cli.mjs --version-info
+
+release-test:
+	node --test scripts/release-cli.test.mjs
 
 release-notes-preview:
 	OPENROUTER_MODEL="$(OPENROUTER_MODEL)" VERSION="$(VERSION)" node scripts/release-cli.mjs --notes-preview

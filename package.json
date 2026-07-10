@@ -9,6 +9,7 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "test:go": "go test ./...",
+    "test:release": "node --test scripts/release-cli.test.mjs",
     "release:cli": "node scripts/release-cli.mjs",
     "release:cli:dry-run": "node scripts/release-cli.mjs --dry-run",
     "release:notes": "node scripts/release-cli.mjs --notes-preview",
