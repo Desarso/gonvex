@@ -24,6 +24,13 @@ func (s *Server) withDashboardProjectAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
+		// The runtime admin key is the machine credential used by trusted
+		// automation such as the release monitor. It is intentionally global,
+		// so it must not be constrained by dashboard project membership.
+		if s.acceptsAdminKey(syncKey(r)) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		actor, ok := s.dashboardActorFromRequest(r)
 		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})

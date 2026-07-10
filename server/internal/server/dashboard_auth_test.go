@@ -100,3 +100,19 @@ func TestManifestEndpointAcceptsProjectSyncKey(t *testing.T) {
 		t.Fatalf("expected 401 with wrong project sync key, got %d", rejected.Code)
 	}
 }
+
+func TestProjectEndpointAcceptsRuntimeAdminKeyWithoutMembership(t *testing.T) {
+	server := New(config.Config{
+		RequireAuth: true,
+		AdminKey:    "admin-secret",
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/dev/tenants?project=whagons5-dev", nil)
+	request.Header.Set("authorization", "Bearer admin-secret")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected runtime admin key to bypass dashboard project membership, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
