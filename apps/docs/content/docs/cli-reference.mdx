@@ -1,137 +1,115 @@
 ---
 title: CLI Reference
-description: Commands Gonvex should provide for project setup, development, deployment, and tenant management.
+description: Commands and flags implemented by the current Gonvex npm CLI.
 ---
 
 # CLI Reference
 
-This page documents the intended CLI surface. Some commands are implemented today; others describe the product direction.
+Install the CLI as a development dependency:
 
-## Create
+```bash
+npm install --save-dev @gonvex/cli
+```
+
+The package exposes the `gonvex` binary. The current CLI implements `dev`, `init`,
+`create`, and `env`.
+
+## `gonvex init`
+
+Add the Vite React starter files to the current directory without overwriting existing
+files:
+
+```bash
+npx gonvex init [--template vite-react] [--project <id>] [--runtime <url>]
+```
+
+| Option | Default |
+| --- | --- |
+| `--template` | `vite-react` |
+| `--project` | current directory name |
+| `--runtime` | `http://localhost:8080` |
+
+See [Initialize an Existing Project](./init-project) for the required manual merge
+steps.
+
+## `gonvex create`
+
+Create a new app directory from the complete starter:
+
+```bash
+npx gonvex create my-app [--template vite-react]
+```
+
+Most users should invoke the dedicated initializer package instead:
 
 ```bash
 npm create gonvex@latest my-app
 ```
 
-Creates a new frontend app with a `gonvex/` backend folder.
+Both paths use `vite-react` by default. Creation fails if the target path already
+exists.
 
-## Init
+## `gonvex dev`
 
-```bash
-npx gonvex init
-```
-
-Adds Gonvex to an existing project.
-
-Options:
-
-```bash
-npx gonvex init \
-  --project my-product \
-  --runtime http://localhost:8080 \
-  --framework vite \
-  --tenant-mode multi
-```
-
-## Dev
+Build the backend manifest, regenerate TypeScript bindings, sync the runtime, and
+watch `gonvex/**/*.go`:
 
 ```bash
 npx gonvex dev
 ```
 
-Watches `gonvex/*.go`, regenerates bindings, and syncs the runtime.
-
-By default, runtime log streaming only prints warnings and errors. To tail every
-runtime query, mutation, and action:
-
-```bash
-npx gonvex dev --verbose-logs
-```
-
-With a child command:
+Run a frontend command alongside the watcher by placing it after `--`:
 
 ```bash
 npx gonvex dev -- vite
 ```
 
-Vite React:
+### Options
 
-```bash
-npx gonvex dev -- vite
+```txt
+--project <path>       Project root; defaults to the current directory
+--runtime-url <url>    Override the configured runtime URL
+--project-id <id>      Override the configured project ID
+--key <key>            Override the project key
+--once                 Build and sync once, then exit
+--verbose-logs         Print all streamed runtime calls, not only warnings/errors
 ```
 
-For CI or generation-only flows:
+`--once` cannot be combined with a child command. It exits non-zero when runtime sync
+does not succeed, making it suitable for CI checks.
+
+The CLI loads settings in this order: command-line overrides, `.env.local`, `.env`,
+`gonvex.json`, then built-in defaults. A project ID encoded in a valid project key can
+also determine the selected project.
+
+## `gonvex env`
+
+Manage server-side environment variables stored for the selected runtime project:
 
 ```bash
-npx gonvex dev --once
+npx gonvex env list
+npx gonvex env get NAME
+npx gonvex env set NAME value
+npx gonvex env remove NAME
 ```
 
-## Login
+The command accepts the same `--project`, `--runtime-url`, `--project-id`, and `--key`
+connection options as `dev`. A `GONVEX_PROJECT_KEY` or equivalent `--key` is required.
 
-```bash
-npx gonvex login
+## Commands not implemented yet
+
+The current npm CLI does **not** implement these commands:
+
+```txt
+gonvex login
+gonvex link
+gonvex project ...
+gonvex tenant ...
+gonvex deploy
+gonvex generate
+gonvex doctor
 ```
 
-Authenticates the CLI against a hosted or self-hosted control plane.
-
-## Project Commands
-
-```bash
-npx gonvex project list
-npx gonvex project create my-product
-npx gonvex project switch my-product
-npx gonvex project delete my-product
-```
-
-## Link
-
-```bash
-npx gonvex link --project my-product
-```
-
-Links the local repo to an existing runtime project and writes `gonvex.json`.
-
-## Tenant Commands
-
-```bash
-npx gonvex tenant list
-npx gonvex tenant create acme
-npx gonvex tenant switch acme
-npx gonvex tenant db set acme "$DATABASE_URL"
-```
-
-## Deploy
-
-```bash
-npx gonvex deploy --env production
-```
-
-Syncs schema/functions to the selected project environment.
-
-## Generate
-
-```bash
-npx gonvex generate
-```
-
-Regenerates TypeScript bindings without running the dev server.
-
-## Doctor
-
-```bash
-npx gonvex doctor
-```
-
-Should validate:
-
-- runtime reachable
-- project linked
-- generated files current
-- database route configured
-- schema sync status
-- auth provider config
-- package versions
-
-## Current Implementation Note
-
-The repo currently implements the early `dev` path. The project/tenant/deploy/auth commands are part of the intended user-facing CLI surface and should guide the roadmap.
+They are product roadmap concepts, not commands to use in current setup or deployment
+scripts. Today, project selection/creation happens interactively during `gonvex dev`,
+and development manifests are uploaded by that command.

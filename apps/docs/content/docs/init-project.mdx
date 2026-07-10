@@ -1,48 +1,133 @@
 ---
-title: Initialize a Project
-description: What gonvex init should create and how a project connects to the runtime.
+title: Initialize an Existing Project
+description: Add Gonvex to a Vite React app, connect a runtime, and start the development loop.
 ---
 
-# Initialize a Project
+<div className="docs-hero">
+  <div className="docs-hero__label">Existing app · about 5 minutes</div>
+  <h2>Bring your frontend.<br /><em>Add a realtime Go backend.</em></h2>
+  <p>
+    Run one command from the root of an existing Vite React project. Gonvex adds a
+    colocated backend, generated TypeScript bindings, and local runtime settings.
+  </p>
+</div>
 
-`gonvex init` turns an existing frontend repository into a Gonvex project.
+<div className="docs-steps" aria-label="Setup overview">
+  <span><b>01</b> Install</span>
+  <span><b>02</b> Initialize</span>
+  <span><b>03</b> Review</span>
+  <span><b>04</b> Run</span>
+</div>
 
-## Command
+## Before you begin
+
+You need an existing **Vite + React** project and a recent Node.js/npm installation.
+The initializer currently ships one template, `vite-react`.
+
+<div className="docs-callout docs-callout--warning">
+  <span className="docs-callout__icon">!</span>
+  <div>
+    <strong>Hosted Gonvex is not publicly available</strong>
+    <p>There is no generally available paid or public Gonvex Cloud runtime today. Use the local self-hosted stack below for development, or operate the open-source runtime on your own infrastructure.</p>
+  </div>
+</div>
+
+<div className="docs-callout docs-callout--note">
+  <span className="docs-callout__icon">i</span>
+  <div>
+    <strong>Starting from an empty directory?</strong>
+    <p>Use <code>npm create gonvex@latest my-app</code> instead. It creates the complete starter and gives it the right package name.</p>
+  </div>
+</div>
+
+## 1. Install the packages
+
+From your app's root directory:
+
+```bash
+npm install @gonvex/client @gonvex/react
+npm install --save-dev @gonvex/cli
+```
+
+The CLI is a development dependency; the client and React hooks ship with your app.
+
+## 2. Initialize Gonvex
 
 ```bash
 npx gonvex init
 ```
 
-For non-interactive setup:
+By default, the project ID is the current directory name and the runtime is
+`http://localhost:8080`. You can set both explicitly:
 
 ```bash
 npx gonvex init \
   --project my-product \
-  --runtime http://localhost:8080 \
-  --framework vite-react \
-  --tenant-mode multi
+  --runtime http://localhost:8080
 ```
 
-## Files Created
+The full command surface available today is:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--template vite-react` | `vite-react` | Selects the starter files to copy. |
+| `--project <id>` | current folder name | Sets the local runtime project ID. |
+| `--runtime <url>` | `http://localhost:8080` | Sets the Gonvex runtime URL. |
+
+## 3. Review what changed
+
+The initializer copies the Vite React starter into your current directory. Existing
+files are **never overwritten**. Along with the Gonvex files below, it may add any
+missing Vite starter files such as `vite.config.ts`, `tsconfig.json`, or files under
+`src/`, so review the complete diff before continuing:
 
 ```txt
 gonvex/
-  schema.go
-  tasks.go
-  _generated/
-    api.ts
-    client.ts
-    react.ts
-    schema.ts
-    types.ts
+├── schema.go
+├── messages.go
+└── _generated/
+    ├── api.ts
+    ├── client.ts
+    ├── manifest.json
+    ├── react.ts
+    ├── schema.ts
+    └── types.ts
 
 gonvex.json
 .env.local
 ```
 
-## `gonvex.json`
+<div className="docs-callout docs-callout--warning">
+  <span className="docs-callout__icon">!</span>
+  <div>
+    <strong>Existing config files are left untouched</strong>
+    <p>If your app already has <code>package.json</code>, <code>.env.local</code>, Vite config, or source files, the initializer does not merge them. Add the scripts and environment values below yourself.</p>
+  </div>
+</div>
 
-The project config should identify the app and runtime connection:
+### Add the development scripts
+
+Merge these into the `scripts` object in your existing `package.json`:
+
+```json
+{
+  "scripts": {
+    "dev": "gonvex dev -- vite",
+    "vite": "vite",
+    "gonvex:dev": "gonvex dev",
+    "gonvex:once": "gonvex dev --once"
+  }
+}
+```
+
+`gonvex dev -- vite` watches backend files, syncs them to the runtime, regenerates
+bindings, and keeps Vite running in the same terminal.
+
+### Check the project config
+
+`gonvex.json` tells the CLI where your backend and generated files live. The current
+initializer copies this file from the template; it does **not** rewrite its `project`
+field from `--project` or the current directory. Update it so it matches your app:
 
 ```json
 {
@@ -50,94 +135,166 @@ The project config should identify the app and runtime connection:
   "runtime": "http://localhost:8080",
   "backendDir": "gonvex",
   "generatedDir": "gonvex/_generated",
-  "tenantMode": "multi"
+  "tenantMode": "single"
 }
 ```
 
-## `.env.local`
+Environment variables take precedence over this file when the CLI loads project and
+runtime settings. Keeping both in sync still makes the project easier to understand.
+If `gonvex.json` already existed, it is also left unchanged.
 
-The CLI should also read `.env.local`, similar to Convex-style local development:
+### Check the environment
 
-```txt
-GONVEX_PROJECT_ID=prj_2x7k9...
-GONVEX_RUNTIME_URL=https://runtime.gonvex.cloud
-GONVEX_PROJECT_KEY=gvx_dev_...
-VITE_GONVEX_WS_URL=wss://runtime.gonvex.cloud/ws
+For a new `.env.local`, the initializer writes:
+
+```dotenv
+GONVEX_PROJECT_ID=my-product
+GONVEX_RUNTIME_URL=http://localhost:8080
+GONVEX_PROJECT_KEY=
+VITE_GONVEX_WS_URL=ws://localhost:8080/ws
 ```
 
-`GONVEX_PROJECT_ID` tells a shared runtime which project is being synced. `GONVEX_PROJECT_KEY` authorizes dev sync/deploy operations. The browser only uses the public WebSocket URL; it should not receive the project key.
+`GONVEX_PROJECT_KEY` is intentionally blank until the app is connected to a runtime
+project. It is server-side only: never expose it through a `VITE_` variable.
 
-## Link An Existing Runtime Project
+If `.env.local` already exists, add these values yourself. The CLI reads both
+`.env.local` and `.env`.
 
-If a project already exists in the runtime:
+After interactive project setup, the CLI also adds the public project ID and runtime
+URL used by the browser client:
+
+```dotenv
+VITE_GONVEX_PROJECT_ID=my-product
+VITE_GONVEX_URL=http://localhost:8080
+```
+
+## 4. Start development
+
+You need a running Gonvex runtime before starting the app. The quickest supported
+path today is the repository's Docker Compose stack.
+
+### Run Gonvex locally with Docker
+
+In a separate terminal, clone the Gonvex repository and start its reference stack:
 
 ```bash
-npx gonvex link --project my-product
+git clone https://github.com/Desarso/gonvex.git
+cd gonvex
+make stack
 ```
 
-The CLI should fetch project metadata, write `gonvex.json`, and validate that the local schema can sync.
+This builds and starts:
 
-## Project Registration
+| Service | Local address | Role |
+| --- | --- | --- |
+| Runtime | `http://localhost:8080` | Functions, HTTP, WebSockets, and project routing |
+| Dashboard | `http://localhost:3000` | Local project and runtime inspection |
+| Postgres | `localhost:5432` | Control-plane and application data |
+| Valkey | `localhost:6380` | Cache and realtime coordination |
+| MinIO API | `http://localhost:9000` | Optional S3-compatible file storage |
+| MinIO console | `http://localhost:9001` | Local storage administration |
 
-When linked, the runtime landlord database stores:
+`make stack` waits for the core services to become healthy and creates the
+`gonvex-dev` MinIO bucket. Confirm the runtime independently with:
 
-```txt
-project id
-project slug/name
-allowed origins
-deployment environments
-function/schema manifest versions
+```bash
+curl http://localhost:8080/healthz
 ```
 
-The frontend repo should not be the source of truth for tenant routing. It declares desired app schema/functions; the runtime owns project/tenant/user routing.
+The credentials and ports in `docker-compose.yml` are development defaults. Do not
+expose this stack directly to the internet.
 
-## Development Loop
+### Connect and run your app
 
-```txt
-edit gonvex/*.go
--> gonvex dev extracts schema/functions
--> generated bindings update
--> runtime receives manifest
--> runtime applies safe schema changes
--> frontend hot reloads with fresh api references
+Back in your application directory, ensure `GONVEX_RUNTIME_URL` is
+`http://localhost:8080`, then run:
+
+```bash
+npm run dev
 ```
 
-If a schema change would break existing data, the runtime rejects `/dev/sync` and the CLI prints the error in the terminal.
+On the first run, `gonvex dev` checks the configured runtime. If it cannot find a
+matching project, it guides you through selecting an existing project or creating a
+new one, then saves the project ID and key to `.env.local`.
 
-For Vite React, the app command is typically:
+You should see the CLI generate bindings and report a successful runtime sync before
+Vite prints its local URL.
 
-```json
-{
-  "scripts": {
-    "dev": "gonvex dev -- vite"
-  }
+<div className="docs-callout docs-callout--success">
+  <span className="docs-callout__icon">✓</span>
+  <div>
+    <strong>Your app is connected</strong>
+    <p>Edit a file in <code>gonvex/</code>. The CLI rebuilds the manifest, refreshes <code>gonvex/_generated/</code>, and syncs the change without restarting Vite.</p>
+  </div>
+</div>
+
+### Self-host beyond localhost
+
+For a remote development or production-like environment, deploy the runtime from
+this repository and point your app at its public HTTPS address:
+
+```dotenv
+GONVEX_RUNTIME_URL=https://gonvex.example.com
+VITE_GONVEX_URL=https://gonvex.example.com
+VITE_GONVEX_WS_URL=wss://gonvex.example.com/ws
+```
+
+At minimum, replace all development credentials, terminate TLS at a reverse proxy,
+use durable Postgres and Valkey services, persist runtime data, and configure backups.
+S3-compatible storage is optional unless your app uses file APIs.
+
+Gonvex is still beta: production auth, migrations, tenant operations, and deployment
+automation are not hardened. See [Self-hosting and deployment](./deployment) before
+putting real workloads on the runtime.
+
+## Use the generated client
+
+Import the generated API references and React hooks from your app:
+
+```tsx
+import { api } from "./gonvex/_generated/api";
+import { useMutation, useQuery } from "./gonvex/_generated/react";
+
+export function Messages() {
+  const messages = useQuery(api["messages.list"], {});
+  const send = useMutation(api["messages.send"]);
+
+  return (
+    <button onClick={() => send({ body: "Hello from Gonvex" })}>
+      {messages?.length ?? 0} messages
+    </button>
+  );
 }
 ```
 
-The Gonvex runtime does not run in the browser. Local development connects to a local or tunnelled runtime, and production connects to a cloud runtime over `wss://`.
+Do not edit anything in `gonvex/_generated/` by hand; `gonvex dev` owns those files.
+The generated API currently uses quoted path keys, so functions are accessed with
+bracket notation such as `api["messages.list"]`.
 
-## Initial Template
+## Troubleshooting
 
-A starter `schema.go`:
+<details>
+  <summary><strong>The runtime cannot be reached</strong></summary>
+  <p>Confirm <code>GONVEX_RUNTIME_URL</code> points to a running runtime. For local development the default is <code>http://localhost:8080</code>.</p>
+</details>
 
-```go
-func Schema(s *gonvex.Schema) {
-  s.Table("tasks", func(t *gonvex.Table) {
-    t.ID("id")
-    t.String("title")
-    t.String("status")
-    t.Time("created_at")
-  })
-}
-```
+<details>
+  <summary><strong>Runtime sync is unauthorized</strong></summary>
+  <p>Set <code>GONVEX_PROJECT_KEY</code> to the key for this project. The interactive first-run setup can create a project and write the key for you.</p>
+</details>
 
-A starter `tasks.go`:
+<details>
+  <summary><strong>The frontend cannot connect</strong></summary>
+  <p>Check that <code>VITE_GONVEX_WS_URL</code> uses <code>ws://</code> for HTTP runtimes or <code>wss://</code> for HTTPS runtimes, with the <code>/ws</code> path.</p>
+</details>
 
-```go
-func Register(app *gonvex.App) {
-  app.Query("tasks.list", ListTasks)
-  app.Mutation("tasks.create", CreateTask)
-}
-```
+<details>
+  <summary><strong>Initialization did not change package.json</strong></summary>
+  <p>This is expected for an existing project. The initializer protects existing files rather than merging them; add the development scripts from step 3 manually.</p>
+</details>
 
-The generated `api.ts` then exposes `api.tasks.list` and `api.tasks.create` or an equivalent path-safe reference shape.
+## Next steps
+
+- Define your data model in [Schema](./schema).
+- Add queries and mutations in [Functions and Bindings](./functions-and-bindings).
+- Understand the current command surface in [CLI Reference](./cli-reference).

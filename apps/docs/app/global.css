@@ -1,9 +1,190 @@
 :root {
   --docs-accent: #f0a04f;
+  --docs-ink: #231a12;
+  --docs-paper: #fffaf0;
 }
 
 body {
   margin: 0;
+}
+
+/* Documentation pages use a warm, workshop-inspired visual language: code and
+   structure stay precise while the amber accents make long guides easier to scan. */
+.docs-hero {
+  position: relative;
+  overflow: hidden;
+  margin: 0 0 2rem;
+  border: 1px solid color-mix(in srgb, var(--docs-accent) 35%, transparent);
+  border-radius: 1.5rem;
+  background:
+    linear-gradient(115deg, rgb(28 20 14 / 98%), rgb(49 31 17 / 96%)),
+    #1c140e;
+  padding: clamp(1.5rem, 4vw, 3rem);
+  color: #fff8eb;
+  box-shadow: 0 24px 70px rgb(45 25 8 / 14%);
+}
+
+.docs-hero::after {
+  position: absolute;
+  top: -5rem;
+  right: -4rem;
+  width: 14rem;
+  height: 14rem;
+  border: 1px solid rgb(240 160 79 / 26%);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2rem rgb(240 160 79 / 5%), 0 0 0 4rem rgb(240 160 79 / 4%);
+  content: '';
+}
+
+.docs-hero__label {
+  position: relative;
+  z-index: 1;
+  color: var(--docs-accent);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.docs-hero h2 {
+  position: relative;
+  z-index: 1;
+  max-width: 15ch;
+  margin: 0.8rem 0 1rem;
+  color: inherit;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  font-weight: 600;
+  letter-spacing: -0.045em;
+  line-height: 1.02;
+}
+
+.docs-hero h2 em {
+  color: #f5b66f;
+  font-weight: 400;
+}
+
+.docs-hero p {
+  position: relative;
+  z-index: 1;
+  max-width: 60ch;
+  margin: 0;
+  color: #dfceb9;
+  font-size: 1rem;
+  line-height: 1.7;
+}
+
+.docs-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  overflow: hidden;
+  margin: 0 0 2.5rem;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 1rem;
+}
+
+.docs-steps span {
+  padding: 0.85rem 1rem;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.docs-steps span + span {
+  border-left: 1px solid var(--color-fd-border);
+}
+
+.docs-steps b {
+  margin-right: 0.4rem;
+  color: #c96c19;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.68rem;
+}
+
+.docs-callout {
+  display: grid;
+  grid-template-columns: 2rem 1fr;
+  gap: 0.8rem;
+  margin: 1.5rem 0;
+  border: 1px solid var(--color-fd-border);
+  border-left: 3px solid var(--docs-accent);
+  border-radius: 0.9rem;
+  background: color-mix(in srgb, var(--docs-accent) 7%, transparent);
+  padding: 1rem 1.1rem;
+}
+
+.docs-callout__icon {
+  display: grid;
+  width: 1.75rem;
+  height: 1.75rem;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--docs-accent);
+  color: #21150b;
+  font-family: Georgia, serif;
+  font-weight: 800;
+}
+
+.docs-callout strong {
+  display: block;
+  margin-top: 0.12rem;
+}
+
+.docs-callout p {
+  margin: 0.35rem 0 0;
+  color: var(--color-fd-muted-foreground);
+  line-height: 1.6;
+}
+
+.docs-callout--warning {
+  border-left-color: #e05e3d;
+  background: color-mix(in srgb, #e05e3d 7%, transparent);
+}
+
+.docs-callout--warning .docs-callout__icon {
+  background: #e05e3d;
+  color: white;
+}
+
+.docs-callout--success {
+  border-left-color: #3c9470;
+  background: color-mix(in srgb, #3c9470 7%, transparent);
+}
+
+.docs-callout--success .docs-callout__icon {
+  background: #3c9470;
+  color: white;
+}
+
+.prose details {
+  margin: 0.7rem 0;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 0.8rem;
+  padding: 0.85rem 1rem;
+}
+
+.prose details summary {
+  cursor: pointer;
+}
+
+.prose details p {
+  margin-bottom: 0.15rem;
+  color: var(--color-fd-muted-foreground);
+}
+
+@media (max-width: 640px) {
+  .docs-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .docs-steps span:nth-child(3) {
+    border-top: 1px solid var(--color-fd-border);
+    border-left: 0;
+  }
+
+  .docs-steps span:nth-child(4) {
+    border-top: 1px solid var(--color-fd-border);
+  }
 }
 
 .gonvex-home {

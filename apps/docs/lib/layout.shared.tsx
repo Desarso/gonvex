@@ -7,8 +7,9 @@ export function baseOptions(): BaseLayoutProps {
     },
     links: [
       {
-        text: 'Dashboard Lab',
-        url: 'http://localhost:5173',
+        text: 'GitHub',
+        url: 'https://github.com/Desarso/gonvex',
+        external: true,
       },
     ],
   };

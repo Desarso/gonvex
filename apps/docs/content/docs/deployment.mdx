@@ -1,120 +1,154 @@
 ---
-title: Deployment
-description: Runtime deployment model for local, self-hosted, and hosted Gonvex projects.
+title: Self-hosting and Deployment
+description: Run the current Gonvex stack locally and understand what production self-hosting requires.
 ---
 
-# Deployment
+# Self-hosting and Deployment
 
-Gonvex deployments are project-based. A deployment connects generated app code, a runtime, a landlord database, tenant databases, and optional object storage.
+Gonvex is open source and currently **self-hosted first**. A generally available
+hosted Gonvex Cloud service is not open to the public, so new projects should run the
+runtime locally or deploy it on infrastructure they control.
 
-## Deployment Modes
+<div className="docs-callout docs-callout--warning">
+  <span className="docs-callout__icon">!</span>
+  <div>
+    <strong>Beta software</strong>
+    <p>The Docker stack is the current reference deployment, not a hardened production platform. Production auth, migration controls, tenant operations, upgrades, and deployment automation are still evolving.</p>
+  </div>
+</div>
 
-```txt
-Local
-  Developer machine. Runtime, services, and app dev server run locally.
+## Run the reference stack
 
-Self-hosted
-  You operate Gonvex runtime, landlord DB, tenant DBs, Valkey, and optional object storage.
-
-Hosted
-  Gonvex Cloud operates the runtime/control plane and routes projects/tenants.
-```
-
-Frontend apps use the hosted or self-hosted runtime in production. The app ships generated TypeScript bindings and connects to the runtime over `wss://`, similar to Convex.
-
-## Components
-
-```txt
-Gonvex runtime
-  Executes functions, serves WebSockets, handles project/tenant routing.
-
-Landlord database
-  Stores projects, tenants, users, memberships, roles, database routes.
-
-Tenant databases
-  Store application data.
-
-Valkey/Redis
-  Optional cache and coordination layer.
-
-Object storage
-  Optional S3-compatible file storage used only by apps that need file APIs.
-```
-
-## Deploy Command
-
-The desired deploy flow:
+Requirements: Git, Docker with the Compose plugin, and `make`.
 
 ```bash
-npx gonvex deploy --project my-product --env production
+git clone https://github.com/Desarso/gonvex.git
+cd gonvex
+make stack
 ```
 
-This should:
+The command runs `docker compose up --build --wait` for Postgres, Valkey, MinIO, the
+runtime, and dashboard, then creates the local object-storage bucket.
 
-- build or package the backend manifest
-- upload/sync function metadata
-- run safe schema migrations
-- validate tenant routes
-- publish generated client environment metadata
-- notify runtime instances to reload project metadata
+| Service | Address | Container port |
+| --- | --- | --- |
+| Runtime | `http://localhost:8080` | `8080` |
+| Dashboard | `http://localhost:3000` | `80` |
+| Postgres | `localhost:5432` | `5432` |
+| Valkey | `localhost:6380` | `6379` |
+| MinIO API | `http://localhost:9000` | `9000` |
+| MinIO console | `http://localhost:9001` | `9001` |
 
-## Environments
+Check the runtime:
 
-Projects should support named environments:
+```bash
+curl http://localhost:8080/healthz
+```
+
+Inspect or stop the stack with standard Compose commands:
+
+```bash
+docker compose ps
+docker compose logs -f runtime
+docker compose down
+```
+
+Do not add `-v` to `docker compose down` unless you intentionally want to delete the
+local Postgres, Valkey, MinIO, and runtime volumes.
+
+## Connect an application
+
+Use the runtime's browser-reachable address—not its internal Compose service name—in
+your app's `.env.local`:
+
+```dotenv
+GONVEX_PROJECT_ID=my-product
+GONVEX_RUNTIME_URL=http://localhost:8080
+GONVEX_PROJECT_KEY=
+VITE_GONVEX_PROJECT_ID=my-product
+VITE_GONVEX_URL=http://localhost:8080
+VITE_GONVEX_WS_URL=ws://localhost:8080/ws
+```
+
+Run `npx gonvex dev`. In an interactive terminal, the CLI can create a project on the
+runtime and write the returned project ID and key to `.env.local`. For an existing
+project, obtain its key from the dashboard when prompted.
+
+Keep `GONVEX_PROJECT_KEY` server-side. Only variables prefixed with `VITE_` are meant
+for the browser bundle.
+
+## What each component does
 
 ```txt
-development
-preview
-staging
-production
+Runtime
+  Executes uploaded Go functions and serves HTTP and WebSocket traffic.
+
+Postgres
+  Stores runtime control data and application data in the reference stack.
+
+Valkey
+  Provides cache and realtime coordination.
+
+Dashboard
+  Inspects and manages the development runtime.
+
+S3-compatible storage
+  Optional for file APIs. The reference stack uses MinIO.
 ```
 
-Each environment can have separate runtime URLs and tenant database routes.
+The Compose stack uses one Postgres instance and development credentials for
+convenience. Gonvex also supports project-specific database routing through
+`GONVEX_PROJECT_DATABASE_URLS`, but operating those databases remains your
+responsibility.
 
-## Tenant Database Routing
+## Moving beyond localhost
 
-In production, requests route like this:
+For a remote runtime, the application-facing values change to HTTPS and secure
+WebSockets:
 
-```txt
-request host / project token
--> project
--> authenticated user
--> active tenant
--> tenant database connection
--> function execution
+```dotenv
+GONVEX_RUNTIME_URL=https://gonvex.example.com
+VITE_GONVEX_URL=https://gonvex.example.com
+VITE_GONVEX_WS_URL=wss://gonvex.example.com/ws
 ```
 
-The frontend should not contain raw tenant database URLs.
+The runtime listens on port `8080` in the reference image. Put it behind a reverse
+proxy or load balancer that terminates TLS and supports WebSocket upgrades.
 
-## Dashboard Deployment Features
+### Minimum operations checklist
 
-The dashboard should support:
+- Replace the Compose database, MinIO, and dashboard development credentials.
+- Use durable Postgres storage and test database restoration.
+- Persist `/var/lib/gonvex` for runtime plugin and telemetry data.
+- Run Valkey/Redis with an appropriate durability and eviction policy for your load.
+- Back up every application database and object-storage bucket.
+- Restrict access to the dashboard and `/dev/*` management endpoints.
+- Configure TLS and preserve WebSocket upgrades on `/ws`.
+- Set `GONVEX_PUBLIC_URL` to the externally reachable runtime URL.
+- Monitor `/healthz`, container restarts, database capacity, and runtime logs.
+- Pin and test image versions before upgrading.
 
-- create project
-- create environment
-- configure runtime URL
-- create tenant
-- assign tenant database route
-- view schema sync status
-- view function manifest versions
-- view connected runtime instances
-- manage users/memberships/roles
+<div className="docs-callout docs-callout--note">
+  <span className="docs-callout__icon">i</span>
+  <div>
+    <strong>MinIO is optional</strong>
+    <p>If the app does not use Gonvex file APIs, production object storage is not required. When it is required, any compatible S3 provider can replace the local MinIO example.</p>
+  </div>
+</div>
 
-## Self-Hosting Checklist
+## Current deployment limits
 
-```txt
-landlord Postgres database
-runtime service
-tenant Postgres database(s)
-Valkey/Redis
-S3-compatible storage if your app uses files
-auth provider config
-TLS/reverse proxy
-project allowed origins
-runtime secrets
-backup policy
-```
+There is no implemented `gonvex deploy` command in the current npm CLI. The commands
+available today are `dev`, `init`, `create`, and `env`; `gonvex dev` performs the
+development manifest upload and schema sync.
 
-## Production Caveat
+Before treating Gonvex as production-ready, account for these unfinished areas:
 
-Gonvex is not production-ready yet. The docs describe the intended deployment model while runtime deployment, dashboard operations, auth, and multi-tenant routing are being implemented.
+- production-grade authentication, membership, and permission policy;
+- migration previews, destructive-change approval, and rollback tooling;
+- hardened multi-tenant database operations;
+- automated releases, rollbacks, and zero-downtime runtime upgrades;
+- a supported public hosted control plane;
+- a fully hardened dashboard and management API security model.
+
+For the complete status, see [Current Limits](./current-limits).

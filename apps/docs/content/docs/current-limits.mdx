@@ -26,32 +26,33 @@ The current codebase proves these pieces locally:
 
 Function execution is still becoming generic. The runtime needs a general dispatcher that can execute arbitrary registered app functions without project-specific paths.
 
-## Product Commands Are Roadmap
+## Current CLI Boundary
 
-The docs use commands like:
+The npm CLI currently implements:
 
 ```bash
 npm create gonvex@latest my-app
 npx gonvex init
-npx gonvex project create my-product
-npx gonvex tenant create acme
-npx gonvex deploy
+npx gonvex dev
+npx gonvex env list
 ```
 
-These commands define the intended user experience. Some are not implemented yet.
+`login`, `link`, `project`, `tenant`, `deploy`, `generate`, and `doctor` are roadmap
+commands and are not implemented. See the [CLI Reference](./cli-reference) for the
+current flags.
 
-## Multi-Project Runtime Is Roadmap
+## Multi-Project Operations Are Early
 
-The runtime should support many projects, but the current local development path is focused on one project at a time.
+The runtime and dashboard have development project registry endpoints, project keys,
+environment variables, and per-project manifests. The operational model is not yet a
+hardened hosted control plane.
 
 Needed work:
 
-- landlord database schema
-- project registry
-- project switcher in dashboard
-- environment/deployment records
-- per-project schema/function manifests
 - allowed origins and runtime auth
+- environment/deployment records
+- hardened key lifecycle and project administration
+- production upgrade and rollback workflows
 
 ## Multi-Tenant Runtime Is Roadmap
 
