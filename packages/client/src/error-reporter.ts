@@ -12,6 +12,7 @@ export type ErrorReporterOptions = {
   sampleRate?: number;
   beforeSend?: (event: ErrorEventPayload) => ErrorEventPayload | null;
   captureGlobalErrors?: boolean;
+  maxQueueSize?: number;
 };
 
 export type ErrorEventPayload = {
@@ -50,14 +51,19 @@ export class GonvexErrorReporter {
   private readonly deviceId = persistedId("gonvex-error-device");
   private readonly sessionId = randomId();
   private removeGlobal?: () => void;
+  private readonly queueKey: string;
 
   constructor(options: ErrorReporterOptions) {
-    this.options = { sampleRate: 1, captureGlobalErrors: true, ...options };
+    this.options = { sampleRate: 1, captureGlobalErrors: true, maxQueueSize: 100, ...options };
+    this.queueKey = `gonvex-error-queue:${options.project}`;
+    this.queue = readQueue(this.queueKey);
     if (this.options.captureGlobalErrors && typeof window !== "undefined") this.installGlobalHandlers();
+    if (this.queue.length) this.scheduleFlush();
   }
 
   setUser(user?: ErrorUser) { this.options.user = user; }
   setTenant(tenant?: string) { this.options.tenant = tenant; }
+  setProject(project: string) { this.options.project = project; }
 
   addBreadcrumb(category: string, message: string, data?: ErrorContext) {
     this.breadcrumbs.push({ timestamp: new Date().toISOString(), category, message, data: scrub(data) as ErrorContext });
@@ -84,6 +90,7 @@ export class GonvexErrorReporter {
     const prepared = this.options.beforeSend?.(event) ?? event;
     if (!prepared) return;
     this.queue.push(prepared);
+    this.persistQueue();
     this.scheduleFlush();
     return event.eventId;
   }
@@ -92,13 +99,15 @@ export class GonvexErrorReporter {
     if (!this.queue.length) return;
     const batch = this.queue.splice(0, 20);
     try {
-      const response = await fetch(this.options.endpoint.replace(/\/$/, "") + "/errors/envelope", {
-        method: "POST", headers: { "content-type": "application/json" }, keepalive: true,
+      const response = await fetch(errorEndpoint(this.options.endpoint), {
+        method: "POST", headers: { "content-type": "application/json", "x-gonvex-project-id": this.options.project, ...(this.options.tenant ? { "x-gonvex-tenant-id": this.options.tenant } : {}) }, keepalive: true,
         body: JSON.stringify({ events: batch }),
       });
       if (!response.ok) throw new Error(`error ingestion returned ${response.status}`);
+      this.persistQueue();
     } catch {
-      this.queue = [...batch, ...this.queue].slice(0, 100);
+      this.queue = [...batch, ...this.queue].slice(0, this.options.maxQueueSize ?? 100);
+      this.persistQueue();
     }
   }
 
@@ -112,10 +121,14 @@ export class GonvexErrorReporter {
   private installGlobalHandlers() {
     const onError = (event: ErrorEvent) => this.captureException(event.error ?? event.message, { source: event.filename, line: event.lineno, column: event.colno });
     const onRejection = (event: PromiseRejectionEvent) => this.captureException(event.reason, { mechanism: "unhandledrejection" });
+    const onPageHide = () => { void this.flush(); };
     window.addEventListener("error", onError);
     window.addEventListener("unhandledrejection", onRejection);
-    this.removeGlobal = () => { window.removeEventListener("error", onError); window.removeEventListener("unhandledrejection", onRejection); };
+    window.addEventListener("pagehide", onPageHide);
+    this.removeGlobal = () => { window.removeEventListener("error", onError); window.removeEventListener("unhandledrejection", onRejection); window.removeEventListener("pagehide", onPageHide); };
   }
+
+  private persistQueue() { writeQueue(this.queueKey, this.queue.slice(0, this.options.maxQueueSize ?? 100)); }
 }
 
 function normalizeError(value: unknown): { name?: string; message: string; stack?: string } {
@@ -137,3 +150,6 @@ function firstAppFrame(stack?: string) { return stack?.split("\n").find((line) =
 function stripQuery(url: string) { try { const parsed = new URL(url); parsed.search = ""; parsed.hash = ""; return parsed.toString(); } catch { return url.split(/[?#]/)[0]; } }
 function randomId() { return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`; }
 function persistedId(key: string) { try { const current = localStorage.getItem(key); if (current) return current; const next = randomId(); localStorage.setItem(key, next); return next; } catch { return randomId(); } }
+function readQueue(key: string): ErrorEventPayload[] { try { const value = JSON.parse(localStorage.getItem(key) ?? "[]"); return Array.isArray(value) ? value.slice(0, 100) : []; } catch { return []; } }
+function writeQueue(key: string, queue: ErrorEventPayload[]) { try { if (queue.length) localStorage.setItem(key, JSON.stringify(queue)); else localStorage.removeItem(key); } catch { /* reporting must never break the app */ } }
+function errorEndpoint(raw: string) { const value = raw.replace(/\/$/, ""); if (value.startsWith("ws://")) return `http://${value.slice(5)}/errors/envelope`; if (value.startsWith("wss://")) return `https://${value.slice(6)}/errors/envelope`; return `${value}/errors/envelope`; }

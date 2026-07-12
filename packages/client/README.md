@@ -66,6 +66,27 @@ await client.clearQueryCache({ allScopes: true });
 Dexie is loaded asynchronously only after a cache-capable session is confirmed,
 so IndexedDB setup does not delay the WebSocket query path.
 
+## Lightweight Error Tracking
+
+Capture global browser failures and failed Gonvex operations with the same
+client. Reports are batched, retried locally, scrubbed, persisted by the runtime,
+and grouped in the Gonvex dashboard:
+
+```ts
+const client = new GonvexClient(url, {
+  project: "my-project",
+  tenant: "acme",
+  errorReporting: {
+    release: "2.4.0+abc123",
+    environment: "production",
+  },
+});
+```
+
+Use `GonvexErrorReporter` directly when integrating an existing application
+logger. See the Error Tracking guide in the full documentation for privacy,
+grouping, persistence, and dashboard details.
+
 ## Exports
 
 The package exports:
@@ -74,6 +95,7 @@ The package exports:
 - `ConvexReactClient` compatibility alias
 - transparent persistent query caching and lower-level experimental cache helpers
 - browser capability and telemetry helpers
+- `GonvexErrorReporter` and automatic operation error reporting
 
 ## Related Packages
 

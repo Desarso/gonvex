@@ -6950,6 +6950,11 @@ type DashboardErrorGroup = {
   fingerprint: string; title: string; culprit?: string; status: string; priority: string;
   count: number; firstSeen: string; lastSeen: string; tenants: Record<string, number>;
   users: Record<string, number>; devices: Record<string, number>; releases: Record<string, number>;
+  environments: Record<string, number>; regression?: boolean; assignee?: string;
+  latest: {
+    timestamp: string; stack?: string; url?: string; userAgent?: string; release?: string; tenant?: string; environment?: string;
+    user?: Record<string, unknown>; context?: Record<string, unknown>; breadcrumbs?: Array<Record<string, unknown>>;
+  };
 };
 
 function ErrorsPage(props: { project: ProjectTarget }) {
@@ -6957,11 +6962,15 @@ function ErrorsPage(props: { project: ProjectTarget }) {
   const [status, setStatus] = useState("unresolved");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${runtimeURLForProject(props.project)}/dev/errors/groups?status=${encodeURIComponent(status)}`, { headers: runtimeHeaders(props.project) });
+      const statusQuery = status === "all" ? "" : `?status=${encodeURIComponent(status)}`;
+      const response = await fetch(`${runtimeURLForProject(props.project)}/dev/errors/groups${statusQuery}`, { headers: runtimeHeaders(props.project) });
       const payload = await response.json() as { groups?: DashboardErrorGroup[]; error?: string };
       if (!response.ok) throw new Error(payload.error ?? response.statusText);
       setGroups(payload.groups ?? []); setError("");
@@ -6971,39 +6980,83 @@ function ErrorsPage(props: { project: ProjectTarget }) {
 
   useEffect(() => { void load(); }, [load]);
 
-  const resolve = async (group: DashboardErrorGroup) => {
-    await fetch(`${runtimeURLForProject(props.project)}/dev/errors/groups/${group.fingerprint}`, { method: "PATCH", headers: runtimeHeaders(props.project, { "content-type": "application/json" }), body: JSON.stringify({ status: "resolved" }) });
+  const updateGroup = async (group: DashboardErrorGroup, update: Record<string, string>) => {
+    const response = await fetch(`${runtimeURLForProject(props.project)}/dev/errors/groups/${group.fingerprint}`, { method: "PATCH", headers: runtimeHeaders(props.project, { "content-type": "application/json" }), body: JSON.stringify(update) });
+    if (!response.ok) { const payload = await response.json().catch(() => ({})) as { error?: string }; setError(payload.error ?? "Could not update error group"); return; }
     void load();
   };
 
   const copyBrief = async (group: DashboardErrorGroup) => {
     const response = await fetch(`${runtimeURLForProject(props.project)}/dev/errors/groups/${group.fingerprint}/bug-report`, { headers: runtimeHeaders(props.project) });
     const payload = await response.json() as { markdown?: string };
-    if (payload.markdown) await navigator.clipboard.writeText(payload.markdown);
+    if (payload.markdown) { await navigator.clipboard.writeText(payload.markdown); setCopied(group.fingerprint); window.setTimeout(() => setCopied(null), 1800); }
   };
 
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleGroups = groups.filter((group) => !normalizedSearch || [group.title, group.culprit, group.fingerprint, ...Object.keys(group.tenants), ...Object.keys(group.releases)].some((value) => value?.toLowerCase().includes(normalizedSearch)));
+  const impactedTenants = new Set(groups.flatMap((group) => Object.keys(group.tenants))).size;
+  const occurrences = groups.reduce((total, group) => total + group.count, 0);
+  const regressions = groups.filter((group) => group.regression).length;
+
   return <section className="errors-inbox" aria-label="Error groups">
+    <div className="errors-command-header">
+      <div><p className="eyebrow">Incident intelligence</p><h2>Errors affecting real users</h2><p>Grouped by root cause, enriched with tenant, release, user, and machine context.</p></div>
+      <div className="errors-live-indicator"><span aria-hidden="true" /><strong>Capturing</strong><small>Gonvex runtime</small></div>
+    </div>
+    <div className="errors-stat-strip" aria-label="Error impact summary">
+      <div><span>Groups</span><strong>{groups.length}</strong></div>
+      <div><span>Occurrences</span><strong>{occurrences}</strong></div>
+      <div><span>Tenants hit</span><strong>{impactedTenants}</strong></div>
+      <div data-alert={regressions > 0 ? "true" : undefined}><span>Regressions</span><strong>{regressions}</strong></div>
+    </div>
     <div className="errors-toolbar">
-      <div><p className="eyebrow">Triage queue</p><h2>Errors affecting real users</h2><p>One row per root cause, ranked by recent impact.</p></div>
+      <input className="errors-search" aria-label="Search error groups" placeholder="Search message, tenant, release, fingerprint…" value={search} onChange={(event) => setSearch(event.target.value)} />
       <div className="errors-toolbar-actions">
         <Select aria-label="Error status" selectedKey={status} onSelectionChange={(key) => setStatus(String(key))}>
           <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
-          <Select.Popover><ListBox><ListBox.Item id="unresolved">Unresolved</ListBox.Item><ListBox.Item id="resolved">Resolved</ListBox.Item><ListBox.Item id="ignored">Ignored</ListBox.Item></ListBox></Select.Popover>
+          <Select.Popover><ListBox><ListBox.Item id="unresolved">Unresolved</ListBox.Item><ListBox.Item id="resolved">Resolved</ListBox.Item><ListBox.Item id="ignored">Ignored</ListBox.Item><ListBox.Item id="all">All groups</ListBox.Item></ListBox></Select.Popover>
         </Select>
         <Button size="sm" variant="secondary" onPress={() => void load()}>Refresh</Button>
       </div>
     </div>
     {error ? <p className="form-error" role="alert">{error}</p> : null}
     {loading ? <p>Loading error groups…</p> : null}
-    {!loading && groups.length === 0 ? <div className="errors-empty"><strong>No {status} errors</strong><span>Captured browser failures will appear here automatically.</span></div> : null}
+    {!loading && visibleGroups.length === 0 ? <div className="errors-empty"><span className="errors-empty-mark">✓</span><strong>{groups.length ? "No matching groups" : `No ${status === "all" ? "captured" : status} errors`}</strong><span>{groups.length ? "Try a tenant, release, or part of the error message." : "Captured browser and Gonvex operation failures will appear here automatically."}</span></div> : null}
     <div className="error-group-list">
-      {groups.map((group) => <article className="error-group-card" key={group.fingerprint}>
-        <div className="error-group-main"><div className="error-group-title"><Chip color={group.priority === "high" ? "danger" : "warning"} size="sm" variant="soft">{group.priority}</Chip><strong>{group.title}</strong></div><code>{group.culprit || group.fingerprint}</code><span>Last seen {new Date(group.lastSeen).toLocaleString()}</span></div>
-        <div className="error-impact"><strong>{group.count}</strong><span>events</span><strong>{Object.keys(group.tenants).length}</strong><span>tenants</span><strong>{Object.keys(group.users).length}</strong><span>users</span><strong>{Object.keys(group.devices).length}</strong><span>devices</span></div>
-        <div className="error-group-actions"><Button size="sm" variant="secondary" onPress={() => void copyBrief(group)}>Copy agent brief</Button>{group.status !== "resolved" ? <Button size="sm" variant="ghost" onPress={() => void resolve(group)}>Resolve</Button> : null}</div>
-      </article>)}
+      {visibleGroups.map((group) => {
+        const expanded = selected === group.fingerprint;
+        return <article className="error-group-card" data-expanded={expanded ? "true" : undefined} data-priority={group.priority} key={group.fingerprint}>
+          <button className="error-group-summary" type="button" aria-expanded={expanded} onClick={() => setSelected(expanded ? null : group.fingerprint)}>
+            <div className="error-group-main"><div className="error-group-title"><span className="error-priority">{group.priority}</span>{group.regression ? <span className="error-regression">regression</span> : null}<strong>{group.title}</strong></div><code>{group.culprit || group.fingerprint}</code><span>Last seen {new Date(group.lastSeen).toLocaleString()} · first seen {new Date(group.firstSeen).toLocaleDateString()}</span></div>
+            <div className="error-impact"><div><strong>{group.count}</strong><span>events</span></div><div><strong>{Object.keys(group.tenants).length}</strong><span>tenants</span></div><div><strong>{Object.keys(group.users).length}</strong><span>users</span></div><div><strong>{Object.keys(group.devices).length}</strong><span>machines</span></div></div>
+            <span className="error-expand-mark" aria-hidden="true">{expanded ? "−" : "+"}</span>
+          </button>
+          {expanded ? <div className="error-group-detail">
+            <div className="error-detail-primary">
+              <div className="error-detail-heading"><div><span>Latest exception</span><strong>{group.latest.release || "Unknown release"}</strong></div><code>{group.fingerprint}</code></div>
+              <pre>{group.latest.stack || group.title}</pre>
+              <dl className="error-context-grid">
+                <div><dt>Tenant</dt><dd>{group.latest.tenant || "—"}</dd></div><div><dt>Environment</dt><dd>{group.latest.environment || "—"}</dd></div>
+                <div><dt>URL</dt><dd title={group.latest.url}>{group.latest.url || "—"}</dd></div><div><dt>User agent</dt><dd title={group.latest.userAgent}>{group.latest.userAgent || "—"}</dd></div>
+              </dl>
+              {group.latest.breadcrumbs?.length ? <div className="error-breadcrumbs"><span>Recent breadcrumbs</span>{group.latest.breadcrumbs.slice(-5).map((crumb, index) => <code key={index}>{String(crumb.category ?? "event")} · {String(crumb.message ?? "")}</code>)}</div> : null}
+            </div>
+            <aside className="error-detail-rail">
+              <ErrorBreakdown title="Tenants" values={group.tenants} />
+              <ErrorBreakdown title="Releases" values={group.releases} />
+              <ErrorBreakdown title="Machines" values={group.devices} maskKeys />
+              <div className="error-triage-actions"><span>Triage</span><div><Button size="sm" variant="secondary" onPress={() => void copyBrief(group)}>{copied === group.fingerprint ? "Brief copied" : "Copy agent brief"}</Button>{group.status === "resolved" ? <Button size="sm" variant="ghost" onPress={() => void updateGroup(group, { status: "unresolved" })}>Reopen</Button> : <Button size="sm" variant="ghost" onPress={() => void updateGroup(group, { status: "resolved" })}>Resolve</Button>}<Button size="sm" variant="ghost" onPress={() => void updateGroup(group, { status: "ignored" })}>Ignore</Button></div></div>
+            </aside>
+          </div> : null}
+        </article>;
+      })}
     </div>
   </section>;
+}
+
+function ErrorBreakdown(props: { title: string; values: Record<string, number>; maskKeys?: boolean }) {
+  const entries = Object.entries(props.values).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  return <div className="error-breakdown"><span>{props.title}</span>{entries.length ? entries.map(([key, count]) => <div key={key}><code title={key}>{props.maskKeys ? `${key.slice(0, 8)}…` : key}</code><strong>{count}</strong></div>) : <small>No data</small>}</div>;
 }
 
 function SchedulesPage(props: { project: ProjectTarget }) {

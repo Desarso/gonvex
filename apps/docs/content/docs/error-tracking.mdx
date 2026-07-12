@@ -1,0 +1,103 @@
+---
+title: Error Tracking
+description: Capture lightweight browser errors, group root causes, and turn incidents into agent-ready bug reports.
+---
+
+# Error Tracking
+
+Gonvex includes a lightweight browser reporter and a persistent error inbox in
+the dashboard. Reports are grouped by normalized error type, message, project,
+and application stack frame. Release asset hashes, line numbers, generated IDs,
+and URLs do not split the same root cause into separate groups.
+
+Each group tracks impact across tenants, releases, environments, users, and
+browser installations. Open **Errors** in the Gonvex dashboard to search,
+inspect the latest stack and breadcrumbs, resolve or ignore a group, and copy an
+agent-ready bug brief.
+
+## Automatic Gonvex operation errors
+
+Enable reporting when constructing the client. This captures global browser
+exceptions, unhandled rejections, and failed Gonvex queries, mutations, and
+actions without changing individual call sites:
+
+```ts
+import { ConvexReactClient } from "@gonvex/client";
+
+const client = new ConvexReactClient(import.meta.env.VITE_GONVEX_URL, {
+  project: "my-project",
+  tenant: currentTenant,
+  errorReporting: {
+    release: `${APP_VERSION}+${GIT_COMMIT}`,
+    environment: import.meta.env.MODE,
+  },
+});
+```
+
+Update tenant context normally with `client.setAuth({ tenant })`; the reporter
+follows the active tenant.
+
+## Manual capture
+
+Applications with an existing logger can use the reporter directly:
+
+```ts
+import { GonvexErrorReporter } from "@gonvex/client";
+
+const errors = new GonvexErrorReporter({
+  endpoint: import.meta.env.VITE_GONVEX_URL,
+  project: "my-project",
+  tenant: currentTenant,
+  release: "2.4.0+abc123",
+  environment: "production",
+});
+
+errors.setUser({ id: user.id, email: user.email });
+errors.addBreadcrumb("checkout", "Submitting order", { cartId });
+
+try {
+  await submitOrder();
+} catch (error) {
+  errors.captureException(error, { cartId });
+}
+```
+
+The reporter has no monitoring dependency. It batches at most 20 events,
+retains failed batches in local storage, retries when the browser reconnects,
+uses `keepalive` during page exit, and caps its local queue.
+
+## Privacy and safety
+
+- Query strings and URL fragments are removed.
+- Password, token, authorization, cookie, secret, and API-key fields are
+  replaced with `[Filtered]` in both the SDK and runtime.
+- Context depth, collection length, string length, envelope size, batch size,
+  and ingestion rate are bounded.
+- Circular values are replaced rather than breaking the queue.
+- The dashboard inspection routes use normal project authorization.
+- The ingestion project is taken from `x-gonvex-project-id`, not from an event
+  payload. A tenant header similarly scopes the batch.
+
+## Persistence and regressions
+
+Events and aggregates are stored in the project's dedicated Gonvex telemetry
+database. Event IDs are idempotent, and aggregate updates use a transaction lock
+so concurrent runtime replicas cannot lose counts. A resolved group that appears
+in a different release is reopened and marked as a regression.
+
+When PostgreSQL is unavailable in a minimal local runtime, Gonvex uses a bounded
+in-memory inbox. Production projects should configure PostgreSQL so groups
+survive restarts.
+
+## HTTP endpoints
+
+The browser sends envelopes to `POST /errors/envelope`. Authenticated dashboard
+clients use:
+
+- `GET /dev/errors/groups`
+- `GET /dev/errors/groups/:fingerprint`
+- `PATCH /dev/errors/groups/:fingerprint`
+- `GET /dev/errors/groups/:fingerprint/bug-report`
+
+The bug-report response contains Markdown plus structured `agentContext` with
+the fingerprint, stack, release, breadcrumbs, context, and impact breakdowns.

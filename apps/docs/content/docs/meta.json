@@ -12,6 +12,7 @@
     "functions-and-bindings",
     "realtime-subscriptions",
     "browser-query-cache",
+    "error-tracking",
     "query-invalidation",
     "live-grid",
     "deployment",

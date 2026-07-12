@@ -1,5 +1,6 @@
 import type { BrowserTelemetryInfo, ClientMessage, JsonValue, MessageTrace, QueryCacheDirective, ServerMessage } from "@gonvex/protocol";
 import { createQueryCacheStore, type QueryCacheOptions, type QueryCacheStatus, type QueryCacheStore } from "./query-cache.js";
+import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
 export * from "./cache.js";
 export * from "./cache-coordinator.js";
 export * from "./browser-cache.js";
@@ -40,6 +41,7 @@ export type GonvexClientAuth = {
 
 export type GonvexClientOptions = GonvexClientAuth & {
   queryCache?: false | QueryCacheOptions;
+  errorReporting?: false | Omit<ErrorReporterOptions, "endpoint" | "project" | "tenant">;
 };
 
 export type GonvexTelemetryEvent = {
@@ -69,11 +71,15 @@ export class GonvexClient {
   private queryCacheDirective: QueryCacheDirective | undefined;
   private queryCacheGeneration = 0;
   private readonly sessionScopeHandlers = new Set<() => void>();
+  private readonly errorReporter: GonvexErrorReporter | undefined;
 
   constructor(private readonly url: string, options: GonvexClientOptions = {}) {
     this.auth = authFromOptions(options);
     this.telemetryEnabled = options.telemetry === true;
     this.queryCache = createQueryCacheStore(options.queryCache);
+    if (options.errorReporting && options.project) {
+      this.errorReporter = new GonvexErrorReporter({ endpoint: url, project: options.project, tenant: options.tenant, ...options.errorReporting });
+    }
   }
 
   setAuth(auth: GonvexClientAuth) {
@@ -84,6 +90,8 @@ export class GonvexClient {
       this.resetQueryCacheScope();
     }
     this.auth = { ...this.auth, ...auth };
+    if (auth.tenant !== undefined) this.errorReporter?.setTenant(auth.tenant);
+    if (auth.project !== undefined) this.errorReporter?.setProject(auth.project);
     if (auth.telemetry !== undefined) {
       this.telemetryEnabled = auth.telemetry === true;
     }
@@ -135,6 +143,7 @@ export class GonvexClient {
     this.queryCacheGeneration += 1;
     this.queryCacheDirective = undefined;
     this.queryCache?.close();
+    this.errorReporter?.close();
     if (!this.socket) return;
     this.socket.close();
     this.socket = undefined;
@@ -510,6 +519,12 @@ export class GonvexClient {
 
   private recordTelemetry(event: GonvexTelemetryEvent) {
     this.emitTelemetry(event);
+    if (event.outcome === "error") {
+      this.errorReporter?.captureException(new Error(event.error || `${event.type} failed`), {
+        gonvexOperation: { type: event.type, path: event.path, operationId: event.id, reason: event.reason },
+        serverTrace: event.serverTrace,
+      });
+    }
     if (this.telemetryEnabled) {
       this.reportTelemetry(event);
     }

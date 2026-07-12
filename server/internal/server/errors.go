@@ -1,11 +1,14 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -35,21 +38,30 @@ type capturedError struct {
 }
 
 type errorGroup struct {
-	Fingerprint string         `json:"fingerprint"`
-	Project     string         `json:"project"`
-	Title       string         `json:"title"`
-	Culprit     string         `json:"culprit,omitempty"`
-	Status      string         `json:"status"`
-	Priority    string         `json:"priority"`
-	Assignee    string         `json:"assignee,omitempty"`
-	FirstSeen   string         `json:"firstSeen"`
-	LastSeen    string         `json:"lastSeen"`
-	Count       int            `json:"count"`
-	Tenants     map[string]int `json:"tenants"`
-	Releases    map[string]int `json:"releases"`
-	Users       map[string]int `json:"users"`
-	Devices     map[string]int `json:"devices"`
-	Latest      capturedError  `json:"latest"`
+	Fingerprint  string         `json:"fingerprint"`
+	Project      string         `json:"project"`
+	Title        string         `json:"title"`
+	Culprit      string         `json:"culprit,omitempty"`
+	Status       string         `json:"status"`
+	Priority     string         `json:"priority"`
+	Assignee     string         `json:"assignee,omitempty"`
+	FirstSeen    string         `json:"firstSeen"`
+	LastSeen     string         `json:"lastSeen"`
+	Count        int            `json:"count"`
+	Tenants      map[string]int `json:"tenants"`
+	Releases     map[string]int `json:"releases"`
+	Environments map[string]int `json:"environments"`
+	Users        map[string]int `json:"users"`
+	Devices      map[string]int `json:"devices"`
+	Regression   bool           `json:"regression"`
+	Latest       capturedError  `json:"latest"`
+}
+
+type errorGroupUpdate struct {
+	Status      string
+	Priority    string
+	Assignee    string
+	AssigneeSet bool
 }
 
 type errorTracker struct {
@@ -57,10 +69,16 @@ type errorTracker struct {
 	groups            map[string]*errorGroup
 	eventIDs          map[string]struct{}
 	maxEvents, events int
+	rateWindows       map[string]errorRateWindow
+}
+
+type errorRateWindow struct {
+	started time.Time
+	count   int
 }
 
 func newErrorTracker(max int) *errorTracker {
-	return &errorTracker{groups: map[string]*errorGroup{}, eventIDs: map[string]struct{}{}, maxEvents: max}
+	return &errorTracker{groups: map[string]*errorGroup{}, eventIDs: map[string]struct{}{}, maxEvents: max, rateWindows: map[string]errorRateWindow{}}
 }
 
 func (t *errorTracker) capture(event capturedError) (string, bool) {
@@ -81,29 +99,52 @@ func (t *errorTracker) capture(event capturedError) (string, bool) {
 		now = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	group := t.groups[fp]
+	when := eventTime(now)
 	if group == nil {
-		group = &errorGroup{Fingerprint: fp, Project: event.Project, Title: event.Message, Culprit: event.Culprit, Status: "unresolved", Priority: "medium", FirstSeen: now, Tenants: map[string]int{}, Releases: map[string]int{}, Users: map[string]int{}, Devices: map[string]int{}}
+		group = newErrorGroup(event, fp, when)
 		t.groups[fp] = group
+	} else {
+		applyErrorToGroup(group, event, when)
+	}
+	t.events++
+	return fp, true
+}
+
+func newErrorGroup(event capturedError, fp string, when time.Time) *errorGroup {
+	group := &errorGroup{Fingerprint: fp, Project: event.Project, Title: event.Message, Culprit: event.Culprit, Status: "unresolved", Priority: "medium", FirstSeen: when.Format(time.RFC3339Nano), Tenants: map[string]int{}, Releases: map[string]int{}, Environments: map[string]int{}, Users: map[string]int{}, Devices: map[string]int{}}
+	applyErrorToGroup(group, event, when)
+	return group
+}
+
+func applyErrorToGroup(group *errorGroup, event capturedError, when time.Time) {
+	previousRelease := group.Latest.Release
+	if group.Status == "resolved" && event.Release != "" && previousRelease != "" && event.Release != previousRelease {
+		group.Status = "unresolved"
+		group.Regression = true
 	}
 	group.Count++
-	group.LastSeen = now
+	group.LastSeen = when.Format(time.RFC3339Nano)
 	group.Latest = event
-	t.events++
 	if event.Tenant != "" {
 		group.Tenants[event.Tenant]++
 	}
 	if event.Release != "" {
 		group.Releases[event.Release]++
 	}
+	if event.Environment != "" {
+		group.Environments[event.Environment]++
+	}
 	if event.DeviceID != "" {
 		group.Devices[event.DeviceID]++
 	}
-	if id := stringValue(event.User["id"]); id != "" {
+	if id := errorUserID(event); id != "" {
 		group.Users[id]++
-	} else if email := stringValue(event.User["email"]); email != "" {
-		group.Users[email]++
 	}
-	return fp, true
+	if group.Count >= 500 || len(group.Tenants) >= 25 {
+		group.Priority = "critical"
+	} else if group.Count >= 100 || len(group.Tenants) >= 10 {
+		group.Priority = "high"
+	}
 }
 
 func fingerprint(e capturedError) string {
@@ -116,22 +157,191 @@ func fingerprint(e capturedError) string {
 			}
 		}
 	}
-	normalized := strings.ToLower(strings.TrimSpace(e.Name + "|" + normalizeErrorMessage(e.Message) + "|" + stack + "|" + e.Project))
+	normalized := strings.ToLower(strings.TrimSpace(e.Name + "|" + normalizeErrorMessage(e.Message) + "|" + normalizeStackFrame(stack) + "|" + e.Project))
 	sum := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(sum[:8])
 }
 
 func normalizeErrorMessage(value string) string {
-	fields := strings.Fields(value)
-	for i, field := range fields {
-		if len(field) > 5 && (strings.ContainsAny(field, "0123456789") || strings.HasPrefix(field, "http")) {
-			fields[i] = "?"
-		}
+	value = errorURLPattern.ReplaceAllString(value, "<url>")
+	value = errorUUIDPattern.ReplaceAllString(value, "<id>")
+	value = errorHexPattern.ReplaceAllString(value, "<id>")
+	value = errorNumberPattern.ReplaceAllString(value, "<n>")
+	return strings.Join(strings.Fields(value), " ")
+}
+
+var (
+	errorURLPattern      = regexp.MustCompile(`https?://[^\s)]+`)
+	errorUUIDPattern     = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f-]{27,}\b`)
+	errorHexPattern      = regexp.MustCompile(`(?i)\b[0-9a-f]{12,}\b`)
+	errorNumberPattern   = regexp.MustCompile(`\b\d{3,}\b`)
+	stackLocationPattern = regexp.MustCompile(`:\d+(?::\d+)?\)?\s*$`)
+	assetHashPattern     = regexp.MustCompile(`([._-])[A-Za-z0-9_-]{6,}(\.js\b)`)
+)
+
+func normalizeStackFrame(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Split(value, "?")[0]
+	closing := ""
+	if strings.HasSuffix(value, ")") {
+		closing = ")"
 	}
-	return strings.Join(fields, " ")
+	value = stackLocationPattern.ReplaceAllString(value, closing)
+	value = assetHashPattern.ReplaceAllString(value, `${1}<build>${2}`)
+	if open := strings.Index(value, "("); open >= 0 {
+		prefix, location := value[:open+1], value[open+1:]
+		if parsed := strings.Index(location, "/assets/"); parsed >= 0 {
+			location = location[parsed+1:]
+		}
+		value = prefix + location
+	}
+	return value
+}
+
+const filteredErrorValue = "[Filtered]"
+
+var secretErrorKey = regexp.MustCompile(`(?i)password|passwd|secret|token|authorization|cookie|api[-_]?key`)
+var sensitiveErrorTextPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+`),
+	regexp.MustCompile(`(?i)((?:password|passwd|token|secret|api[-_]?key)\s*[=:]\s*)[^\s&,;]+`),
+}
+var jwtErrorTextPattern = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`)
+
+func sanitizeCapturedError(event capturedError) capturedError {
+	event.EventID = truncateErrorString(event.EventID, 160)
+	event.Timestamp = truncateErrorString(event.Timestamp, 64)
+	event.Level = truncateErrorString(event.Level, 24)
+	event.Message = scrubSensitiveErrorText(truncateErrorString(event.Message, 4000))
+	event.Name = truncateErrorString(event.Name, 200)
+	event.Stack = scrubSensitiveErrorText(truncateErrorString(event.Stack, 32000))
+	event.Culprit = scrubSensitiveErrorText(truncateErrorString(event.Culprit, 2000))
+	event.Project = truncateErrorString(event.Project, 200)
+	event.Tenant = truncateErrorString(event.Tenant, 200)
+	event.Release = truncateErrorString(event.Release, 200)
+	event.Environment = truncateErrorString(event.Environment, 100)
+	event.DeviceID = truncateErrorString(event.DeviceID, 200)
+	event.SessionID = truncateErrorString(event.SessionID, 200)
+	event.URL = truncateErrorString(strings.Split(strings.Split(event.URL, "?")[0], "#")[0], 2000)
+	event.UserAgent = truncateErrorString(event.UserAgent, 2000)
+	event.User = sanitizeErrorMap(event.User, 0)
+	event.Context = sanitizeErrorMap(event.Context, 0)
+	trimmedTags := map[string]string{}
+	count := 0
+	for key, value := range event.Tags {
+		if count >= 50 {
+			break
+		}
+		if secretErrorKey.MatchString(key) {
+			value = filteredErrorValue
+		}
+		trimmedTags[truncateErrorString(key, 100)] = truncateErrorString(value, 500)
+		count++
+	}
+	event.Tags = trimmedTags
+	if len(event.Breadcrumbs) > 30 {
+		event.Breadcrumbs = event.Breadcrumbs[len(event.Breadcrumbs)-30:]
+	}
+	for index := range event.Breadcrumbs {
+		event.Breadcrumbs[index] = sanitizeErrorMap(event.Breadcrumbs[index], 0)
+	}
+	return event
+}
+
+func sanitizeErrorMap(value map[string]any, depth int) map[string]any {
+	if value == nil {
+		return nil
+	}
+	if depth > 5 {
+		return map[string]any{"truncated": true}
+	}
+	result := map[string]any{}
+	count := 0
+	for key, raw := range value {
+		if count >= 100 {
+			break
+		}
+		key = truncateErrorString(key, 100)
+		if secretErrorKey.MatchString(key) {
+			result[key] = filteredErrorValue
+		} else {
+			result[key] = sanitizeErrorValue(raw, depth+1)
+		}
+		count++
+	}
+	return result
+}
+
+func sanitizeErrorValue(value any, depth int) any {
+	switch typed := value.(type) {
+	case string:
+		return truncateErrorString(typed, 4000)
+	case map[string]any:
+		return sanitizeErrorMap(typed, depth)
+	case []any:
+		if len(typed) > 50 {
+			typed = typed[:50]
+		}
+		result := make([]any, len(typed))
+		for i := range typed {
+			result[i] = sanitizeErrorValue(typed[i], depth+1)
+		}
+		return result
+	case nil, bool, float64:
+		return typed
+	default:
+		return truncateErrorString(fmt.Sprint(typed), 4000)
+	}
+}
+
+func truncateErrorString(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	return value[:max]
+}
+
+func scrubSensitiveErrorText(value string) string {
+	for _, pattern := range sensitiveErrorTextPatterns {
+		value = pattern.ReplaceAllString(value, `${1}`+filteredErrorValue)
+	}
+	return jwtErrorTextPattern.ReplaceAllString(value, filteredErrorValue)
+}
+func generatedEventID(event capturedError) string {
+	sum := sha256.Sum256([]byte(event.Timestamp + "|" + event.Message + "|" + event.Stack + "|" + event.DeviceID))
+	return "generated-" + hex.EncodeToString(sum[:12])
+}
+
+func (t *errorTracker) allow(key string, now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	window := t.rateWindows[key]
+	if window.started.IsZero() || now.Sub(window.started) >= time.Minute {
+		window = errorRateWindow{started: now}
+	}
+	if window.count >= 120 {
+		return false
+	}
+	window.count++
+	t.rateWindows[key] = window
+	return true
 }
 
 func (s *Server) handleErrorEnvelope(w http.ResponseWriter, r *http.Request) {
+	project := projectID(r)
+	if project == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "x-gonvex-project-id is required"})
+		return
+	}
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if host == "" {
+		host = r.RemoteAddr
+	}
+	if !s.errorTracker.allow(project+":"+host, time.Now()) {
+		w.Header().Set("retry-after", "60")
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "error ingestion rate limit exceeded"})
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 512<<10)
 	var envelope struct {
 		Events []capturedError `json:"events"`
@@ -143,10 +353,30 @@ func (s *Server) handleErrorEnvelope(w http.ResponseWriter, r *http.Request) {
 	accepted := 0
 	fingerprints := []string{}
 	for _, event := range envelope.Events {
-		if event.Project == "" || event.Message == "" {
+		event.Project = project
+		if scopedTenant := tenantID(r); scopedTenant != "" {
+			event.Tenant = scopedTenant
+		}
+		event = sanitizeCapturedError(event)
+		if event.Message == "" {
 			continue
 		}
-		fp, ok := s.errorTracker.capture(event)
+		if event.EventID == "" {
+			event.EventID = generatedEventID(event)
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		available, persisted, persistErr := s.persistError(ctx, event)
+		cancel()
+		if persistErr != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "error store unavailable"})
+			return
+		}
+		fp, ok := fingerprint(event), persisted
+		if !available {
+			fp, ok = s.errorTracker.capture(event)
+		} else if persisted {
+			_, _ = s.errorTracker.capture(event)
+		}
 		if ok {
 			accepted++
 			fingerprints = append(fingerprints, fp)
@@ -156,10 +386,17 @@ func (s *Server) handleErrorEnvelope(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleErrorGroups(w http.ResponseWriter, r *http.Request) {
+	project, status := projectID(r), r.URL.Query().Get("status")
+	if groups, available, err := s.persistentErrorGroups(r.Context(), project, status); err != nil {
+		writeJSON(w, 503, map[string]any{"error": "error store unavailable"})
+		return
+	} else if available {
+		writeJSON(w, 200, map[string]any{"groups": groups})
+		return
+	}
 	s.errorTracker.mu.RLock()
 	defer s.errorTracker.mu.RUnlock()
 	groups := make([]*errorGroup, 0, len(s.errorTracker.groups))
-	project, status := projectID(r), r.URL.Query().Get("status")
 	for _, group := range s.errorTracker.groups {
 		if project != "" && group.Project != project {
 			continue
@@ -175,6 +412,17 @@ func (s *Server) handleErrorGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleErrorGroup(w http.ResponseWriter, r *http.Request) {
+	if group, available, err := s.persistentErrorGroup(r.Context(), projectID(r), r.PathValue("fingerprint")); err != nil {
+		writeJSON(w, 503, map[string]any{"error": "error store unavailable"})
+		return
+	} else if available {
+		if group == nil {
+			writeJSON(w, 404, map[string]any{"error": "error group not found"})
+		} else {
+			writeJSON(w, 200, group)
+		}
+		return
+	}
 	s.errorTracker.mu.RLock()
 	defer s.errorTracker.mu.RUnlock()
 	group := s.errorTracker.groups[r.PathValue("fingerprint")]
@@ -187,12 +435,31 @@ func (s *Server) handleErrorGroup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateErrorGroup(w http.ResponseWriter, r *http.Request) {
 	var update struct {
-		Status   string `json:"status"`
-		Priority string `json:"priority"`
-		Assignee string `json:"assignee"`
+		Status   string  `json:"status"`
+		Priority string  `json:"priority"`
+		Assignee *string `json:"assignee"`
 	}
 	if json.NewDecoder(r.Body).Decode(&update) != nil {
 		writeJSON(w, 400, map[string]any{"error": "invalid update"})
+		return
+	}
+	groupUpdate := errorGroupUpdate{Status: update.Status, Priority: update.Priority, AssigneeSet: update.Assignee != nil}
+	if update.Assignee != nil {
+		groupUpdate.Assignee = *update.Assignee
+	}
+	if err := validateErrorGroupUpdate(groupUpdate); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if group, available, err := s.updatePersistentErrorGroup(r.Context(), projectID(r), r.PathValue("fingerprint"), groupUpdate); err != nil {
+		writeJSON(w, 503, map[string]any{"error": "error store unavailable"})
+		return
+	} else if available {
+		if group == nil {
+			writeJSON(w, 404, map[string]any{"error": "error group not found"})
+		} else {
+			writeJSON(w, 200, group)
+		}
 		return
 	}
 	s.errorTracker.mu.Lock()
@@ -208,13 +475,24 @@ func (s *Server) handleUpdateErrorGroup(w http.ResponseWriter, r *http.Request) 
 	if update.Priority != "" {
 		group.Priority = update.Priority
 	}
-	if update.Assignee != "" {
-		group.Assignee = update.Assignee
+	if update.Assignee != nil {
+		group.Assignee = *update.Assignee
 	}
 	writeJSON(w, 200, group)
 }
 
 func (s *Server) handleErrorBugReport(w http.ResponseWriter, r *http.Request) {
+	if group, available, err := s.persistentErrorGroup(r.Context(), projectID(r), r.PathValue("fingerprint")); err != nil {
+		writeJSON(w, 503, map[string]any{"error": "error store unavailable"})
+		return
+	} else if available {
+		if group == nil {
+			writeJSON(w, 404, map[string]any{"error": "error group not found"})
+		} else {
+			writeErrorBugReport(w, group)
+		}
+		return
+	}
 	s.errorTracker.mu.RLock()
 	defer s.errorTracker.mu.RUnlock()
 	group := s.errorTracker.groups[r.PathValue("fingerprint")]
@@ -222,7 +500,11 @@ func (s *Server) handleErrorBugReport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]any{"error": "error group not found"})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"title": group.Title, "markdown": bugReport(group), "agentContext": map[string]any{"fingerprint": group.Fingerprint, "project": group.Project, "release": group.Latest.Release, "culprit": group.Culprit, "stack": group.Latest.Stack, "breadcrumbs": group.Latest.Breadcrumbs, "context": group.Latest.Context}})
+	writeErrorBugReport(w, group)
+}
+
+func writeErrorBugReport(w http.ResponseWriter, group *errorGroup) {
+	writeJSON(w, 200, map[string]any{"title": group.Title, "markdown": bugReport(group), "agentContext": map[string]any{"fingerprint": group.Fingerprint, "project": group.Project, "tenantImpact": group.Tenants, "userImpact": group.Users, "deviceImpact": group.Devices, "release": group.Latest.Release, "culprit": group.Culprit, "stack": group.Latest.Stack, "breadcrumbs": group.Latest.Breadcrumbs, "context": group.Latest.Context}})
 }
 
 func bugReport(g *errorGroup) string {

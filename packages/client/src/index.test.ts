@@ -1,6 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConvexReactClient, GonvexClient, type FunctionReference } from "./index";
 
+const captureReportedError = vi.hoisted(() => vi.fn());
+vi.mock("./error-reporter.js", () => ({
+  GonvexErrorReporter: class {
+    captureException = captureReportedError;
+    close() {}
+    setTenant() {}
+    setProject() {}
+  },
+}));
+
 type Listener = (event: { data?: string }) => void;
 
 class FakeWebSocket {
@@ -56,6 +66,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal("WebSocket", FakeWebSocket);
   vi.stubGlobal("window", { setTimeout: globalThis.setTimeout });
+  captureReportedError.mockClear();
 });
 
 afterEach(() => {
@@ -444,6 +455,21 @@ describe("GonvexClient", () => {
 
     await expect(mutation).rejects.toThrow("mutation failed");
     await expect(action).rejects.toThrow("action failed");
+  });
+
+  it("automatically reports failed Gonvex operations when error reporting is enabled", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { project: "shop", tenant: "acme", errorReporting: { release: "1.2.3", captureGlobalErrors: false } });
+    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const socket = latestSocket();
+    socket.open();
+    const [auth] = sentMessages(socket);
+    socket.receive({ type: "auth.result", id: auth.id, result: { ok: true } });
+    const call = sentMessages(socket).at(-1)!;
+    socket.receive({ type: "mutation.error", id: call.id, error: "permission denied" });
+    await expect(mutation).rejects.toThrow("permission denied");
+    expect(captureReportedError).toHaveBeenCalledWith(expect.objectContaining({ message: "permission denied" }), expect.objectContaining({
+      gonvexOperation: expect.objectContaining({ type: "mutation", path: "tasks.create" }),
+    }));
   });
 
   it("drops handlers and closes the socket when closed", () => {

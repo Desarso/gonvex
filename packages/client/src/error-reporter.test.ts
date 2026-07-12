@@ -13,6 +13,7 @@ describe("GonvexErrorReporter", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.events[0]).toMatchObject({ project: "shop", tenant: "acme", release: "1.4.2", message: "checkout failed", context: { password: "[Filtered]", cartId: "cart-1" } });
     expect(body.events[0].deviceId).toBeTruthy();
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ "x-gonvex-project-id": "shop", "x-gonvex-tenant-id": "acme" });
   });
 
   it("requeues a failed batch", async () => {

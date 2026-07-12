@@ -110,12 +110,8 @@ describe("App", () => {
     await renderProjectApp();
 
     expect(window.location.pathname).toBe("/projects/app/overview");
-    expect(
-      screen.getByRole("heading", { name: /realtime control room/i }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/watch the local project runtime/i),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /runtime summary/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^functions$/i })).toBeInTheDocument();
   });
 
   it("hides the task-grid test surface for existing projects", async () => {
@@ -128,7 +124,7 @@ describe("App", () => {
   it("renders an accessible React Aria button", async () => {
     const user = await renderProjectApp();
 
-    const button = screen.getByRole("button", { name: /ready for tests/i });
+    const button = screen.getByRole("button", { name: /light mode/i });
     await user.click(button);
 
     expect(button).toBeInTheDocument();
@@ -138,8 +134,8 @@ describe("App", () => {
     const user = await renderProjectApp();
 
     await user.click(screen.getByRole("button", { name: /data/i }));
-    expect(screen.getByRole("heading", { name: /postgres project schema/i })).toBeInTheDocument();
-    expect(screen.getByText(/tables, columns, and indexes/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /no tables/i })).toBeInTheDocument();
+    expect(screen.getByLabelText("Tables", { selector: "aside" })).toBeInTheDocument();
 
     await user.click(within(screen.getByLabelText("Primary sections")).getByRole("button", { name: /files/i }));
     expect(screen.getByRole("heading", { name: /file storage/i })).toBeInTheDocument();
@@ -152,8 +148,30 @@ describe("App", () => {
 
     expect(screen.getByRole("table", { name: /stored files/i })).toBeInTheDocument();
     expect(screen.getByText(/no files yet/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /dashboard lab/i })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: /column settings/i })).not.toBeDisabled();
     expect(screen.queryByText(/kg27zrhezshg/i)).not.toBeInTheDocument();
+  });
+
+  it("expands a grouped error with tenant, release, and machine context", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/dev/errors/groups")) {
+        return { ok: true, statusText: "OK", json: async () => ({ groups: [{
+          fingerprint: "group-1", title: "Checkout failed", culprit: "at submitOrder (src/checkout.ts:40:3)", status: "unresolved", priority: "high",
+          count: 8, firstSeen: "2026-07-11T10:00:00Z", lastSeen: "2026-07-12T10:00:00Z", tenants: { acme: 5, beta: 3 }, users: { ada: 4 }, devices: { laptop: 5, phone: 3 }, releases: { "5.1.0": 8 }, environments: { production: 8 },
+          latest: { timestamp: "2026-07-12T10:00:00Z", stack: "TypeError: Checkout failed\n at submitOrder (src/checkout.ts:40:3)", tenant: "acme", release: "5.1.0", environment: "production", url: "https://acme.example.com/checkout", userAgent: "Chrome" },
+        }] }) } as Response;
+      }
+      return { ok: true, statusText: "OK", json: async () => ({}) } as Response;
+    }));
+    const user = await renderProjectApp();
+    await user.click(within(screen.getByLabelText("Primary sections")).getByRole("button", { name: /^errors$/i }));
+
+    expect(await screen.findByText("Checkout failed")).toBeInTheDocument();
+    expect(screen.getByText("2", { selector: ".errors-stat-strip strong" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /checkout failed/i }));
+    expect(screen.getByText(/latest exception/i)).toBeInTheDocument();
+    expect(screen.getByText("5.1.0", { selector: ".error-detail-heading strong" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /copy agent brief/i })).toBeInTheDocument();
   });
 
   it("shows settings sections", async () => {
