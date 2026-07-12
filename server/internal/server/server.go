@@ -60,6 +60,7 @@ type Server struct {
 	schemaHash            map[string]string
 	queryCacheStartedAtMS int64
 	queryCacheSequence    atomic.Uint64
+	errorTracker          *errorTracker
 }
 
 func New(cfg config.Config) *Server {
@@ -97,6 +98,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		syncLocks:             map[string]*sync.Mutex{},
 		schemaHash:            map[string]string{},
 		queryCacheStartedAtMS: time.Now().UTC().UnixMilli(),
+		errorTracker:          newErrorTracker(10000),
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
 	server.scheduler = newScheduler(server.runScheduledJob)
@@ -210,6 +212,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/data/tables/{table}/rows", s.handleDataRows)
 	mux.HandleFunc("POST /dev/data/tables/{table}/rows", s.handleInsertDataRow)
 	mux.HandleFunc("POST /dev/sync", s.handleDevSync)
+	mux.HandleFunc("POST /errors/envelope", s.handleErrorEnvelope)
+	mux.HandleFunc("GET /dev/errors/groups", s.handleErrorGroups)
+	mux.HandleFunc("GET /dev/errors/groups/{fingerprint}", s.handleErrorGroup)
+	mux.HandleFunc("PATCH /dev/errors/groups/{fingerprint}", s.handleUpdateErrorGroup)
+	mux.HandleFunc("GET /dev/errors/groups/{fingerprint}/bug-report", s.handleErrorBugReport)
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
 	mux.HandleFunc("/", s.handleRegisteredHTTP)
 	return withGzip(withJSON(s.withDashboardProjectAuth(mux)))

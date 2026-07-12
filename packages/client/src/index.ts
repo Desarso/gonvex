@@ -8,6 +8,7 @@ export * from "./browser-cache-shared-worker.js";
 export * from "./browser-capabilities.js";
 export * from "./persistent-cache.js";
 export * from "./query-cache.js";
+export * from "./error-reporter.js";
 export type { QueryCacheDirective } from "@gonvex/protocol";
 
 type SubscriptionHandler = (message: ServerMessage) => void;

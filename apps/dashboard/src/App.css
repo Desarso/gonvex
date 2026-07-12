@@ -3800,3 +3800,19 @@ h1 {
   .health-stat-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .health-grid { grid-template-columns: minmax(0, 1fr); }
 }
+/* Error inbox: dense enough for triage while keeping impact readable at a glance. */
+.errors-inbox { display: grid; gap: 18px; }
+.errors-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
+.errors-toolbar h2, .errors-toolbar p { margin: 0; }
+.errors-toolbar-actions { display: flex; align-items: center; gap: 10px; }
+.errors-empty { min-height: 220px; display: grid; place-content: center; gap: 6px; text-align: center; border: 1px dashed var(--border); border-radius: 14px; color: var(--text-muted); }
+.error-group-list { display: grid; gap: 10px; }
+.error-group-card { display: grid; grid-template-columns: minmax(280px, 1fr) auto auto; align-items: center; gap: 24px; padding: 18px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.error-group-main { min-width: 0; display: grid; gap: 7px; }
+.error-group-title { display: flex; align-items: center; gap: 9px; }
+.error-group-main code { overflow: hidden; text-overflow: ellipsis; color: var(--text-muted); }
+.error-group-main > span { color: var(--text-muted); font-size: 12px; }
+.error-impact { display: grid; grid-template-columns: repeat(4, auto); column-gap: 7px; align-items: baseline; }
+.error-impact span { margin-right: 7px; color: var(--text-muted); font-size: 12px; }
+.error-group-actions { display: flex; gap: 8px; }
+@media (max-width: 1000px) { .error-group-card { grid-template-columns: 1fr; } .errors-toolbar { align-items: stretch; flex-direction: column; } }

@@ -63,7 +63,7 @@ import {
   YAxis,
 } from "recharts";
 
-type PageID = "overview" | "functions" | "data" | "test" | "logs" | "files" | "schedules" | "realtime" | "settings";
+type PageID = "overview" | "functions" | "data" | "test" | "logs" | "errors" | "files" | "schedules" | "realtime" | "settings";
 
 type GridRow = string[];
 
@@ -467,6 +467,13 @@ const pages: Page[] = [
     eyebrow: "Runtime stream",
     title: "Runtime logs",
     description: "Function execution, cache, and runtime activity emitted by the local Gonvex Runtime.",
+  },
+  {
+    id: "errors",
+    label: "Errors",
+    eyebrow: "Issue intelligence",
+    title: "User error inbox",
+    description: "Grouped frontend failures enriched with tenant, release, user, and device impact.",
   },
   {
     id: "files",
@@ -3413,6 +3420,7 @@ export function App() {
             <TestPage project={activeProject} themeMode={theme} onAction={reportAction} />
           ) : null}
           {activePage === "logs" ? <LogsPage project={activeProject} themeMode={theme} onAction={reportAction} /> : null}
+          {activePage === "errors" ? <ErrorsPage project={activeProject} /> : null}
           {activePage === "schedules" ? <SchedulesPage project={activeProject} /> : null}
           {activePage === "files" ? (
             <FilesPage
@@ -6936,6 +6944,66 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       </section>
     </div>
   );
+}
+
+type DashboardErrorGroup = {
+  fingerprint: string; title: string; culprit?: string; status: string; priority: string;
+  count: number; firstSeen: string; lastSeen: string; tenants: Record<string, number>;
+  users: Record<string, number>; devices: Record<string, number>; releases: Record<string, number>;
+};
+
+function ErrorsPage(props: { project: ProjectTarget }) {
+  const [groups, setGroups] = useState<DashboardErrorGroup[]>([]);
+  const [status, setStatus] = useState("unresolved");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await fetch(`${runtimeURLForProject(props.project)}/dev/errors/groups?status=${encodeURIComponent(status)}`, { headers: runtimeHeaders(props.project) });
+      const payload = await response.json() as { groups?: DashboardErrorGroup[]; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? response.statusText);
+      setGroups(payload.groups ?? []); setError("");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load error groups"); }
+    finally { setLoading(false); }
+  }, [props.project, status]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const resolve = async (group: DashboardErrorGroup) => {
+    await fetch(`${runtimeURLForProject(props.project)}/dev/errors/groups/${group.fingerprint}`, { method: "PATCH", headers: runtimeHeaders(props.project, { "content-type": "application/json" }), body: JSON.stringify({ status: "resolved" }) });
+    void load();
+  };
+
+  const copyBrief = async (group: DashboardErrorGroup) => {
+    const response = await fetch(`${runtimeURLForProject(props.project)}/dev/errors/groups/${group.fingerprint}/bug-report`, { headers: runtimeHeaders(props.project) });
+    const payload = await response.json() as { markdown?: string };
+    if (payload.markdown) await navigator.clipboard.writeText(payload.markdown);
+  };
+
+  return <section className="errors-inbox" aria-label="Error groups">
+    <div className="errors-toolbar">
+      <div><p className="eyebrow">Triage queue</p><h2>Errors affecting real users</h2><p>One row per root cause, ranked by recent impact.</p></div>
+      <div className="errors-toolbar-actions">
+        <Select aria-label="Error status" selectedKey={status} onSelectionChange={(key) => setStatus(String(key))}>
+          <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
+          <Select.Popover><ListBox><ListBox.Item id="unresolved">Unresolved</ListBox.Item><ListBox.Item id="resolved">Resolved</ListBox.Item><ListBox.Item id="ignored">Ignored</ListBox.Item></ListBox></Select.Popover>
+        </Select>
+        <Button size="sm" variant="secondary" onPress={() => void load()}>Refresh</Button>
+      </div>
+    </div>
+    {error ? <p className="form-error" role="alert">{error}</p> : null}
+    {loading ? <p>Loading error groups…</p> : null}
+    {!loading && groups.length === 0 ? <div className="errors-empty"><strong>No {status} errors</strong><span>Captured browser failures will appear here automatically.</span></div> : null}
+    <div className="error-group-list">
+      {groups.map((group) => <article className="error-group-card" key={group.fingerprint}>
+        <div className="error-group-main"><div className="error-group-title"><Chip color={group.priority === "high" ? "danger" : "warning"} size="sm" variant="soft">{group.priority}</Chip><strong>{group.title}</strong></div><code>{group.culprit || group.fingerprint}</code><span>Last seen {new Date(group.lastSeen).toLocaleString()}</span></div>
+        <div className="error-impact"><strong>{group.count}</strong><span>events</span><strong>{Object.keys(group.tenants).length}</strong><span>tenants</span><strong>{Object.keys(group.users).length}</strong><span>users</span><strong>{Object.keys(group.devices).length}</strong><span>devices</span></div>
+        <div className="error-group-actions"><Button size="sm" variant="secondary" onPress={() => void copyBrief(group)}>Copy agent brief</Button>{group.status !== "resolved" ? <Button size="sm" variant="ghost" onPress={() => void resolve(group)}>Resolve</Button> : null}</div>
+      </article>)}
+    </div>
+  </section>;
 }
 
 function SchedulesPage(props: { project: ProjectTarget }) {
