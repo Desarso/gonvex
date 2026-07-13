@@ -6995,6 +6995,49 @@ type DashboardErrorGroup = {
   };
 };
 
+type ErrorTrackingRuntimeState = "checking" | "capturing" | "unavailable";
+
+async function readErrorTrackingResponse<T>(
+  response: Response,
+  options: { action: string; runtimeURL: string; routeRequired?: boolean },
+): Promise<T> {
+  let payload: unknown = {};
+  let rawBody = "";
+
+  try {
+    // Reading the body as text first lets us turn legacy runtime responses such
+    // as `404 page not found` into a useful compatibility message. Calling
+    // response.json() directly reports the confusing "non-whitespace" parser
+    // error because the leading HTTP status happens to be a valid JSON number.
+    if (typeof response.text === "function") {
+      rawBody = await response.text();
+      payload = rawBody.trim() ? JSON.parse(rawBody) : {};
+    } else {
+      // A small fallback keeps lightweight Response doubles useful in tests.
+      payload = await response.json();
+    }
+  } catch {
+    if (response.status === 404 && options.routeRequired) {
+      throw new Error(`Error tracking is unavailable at ${options.runtimeURL}. Restart Gonvex with the current runtime build, then refresh this page.`);
+    }
+    const responseSummary = rawBody.trim().replace(/\s+/g, " ").slice(0, 160);
+    const status = [response.status, response.statusText].filter(Boolean).join(" ");
+    throw new Error(`${options.action} failed: the Gonvex runtime returned invalid JSON${status ? ` (${status})` : ""}${responseSummary ? ` — ${responseSummary}` : ""}.`);
+  }
+
+  if (!response.ok) {
+    if (response.status === 404 && options.routeRequired) {
+      throw new Error(`Error tracking is unavailable at ${options.runtimeURL}. Restart Gonvex with the current runtime build, then refresh this page.`);
+    }
+    const runtimeError = payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+      ? payload.error
+      : "";
+    throw new Error(runtimeError || `${options.action} failed (${response.status}${response.statusText ? ` ${response.statusText}` : ""}).`);
+  }
+
+  return payload as T;
+}
+
 function ErrorsPage(props: { project: ProjectTarget }) {
   const [groups, setGroups] = useState<DashboardErrorGroup[]>([]);
   const [status, setStatus] = useState("unresolved");
@@ -7003,31 +7046,55 @@ function ErrorsPage(props: { project: ProjectTarget }) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [runtimeState, setRuntimeState] = useState<ErrorTrackingRuntimeState>("checking");
 
   const load = useCallback(async () => {
     setLoading(true);
+    setRuntimeState("checking");
+    const runtimeURL = runtimeURLForProject(props.project);
     try {
       const statusQuery = status === "all" ? "" : `?status=${encodeURIComponent(status)}`;
-      const response = await fetch(`${runtimeURLForProject(props.project)}/dev/errors/groups${statusQuery}`, { headers: runtimeHeaders(props.project) });
-      const payload = await response.json() as { groups?: DashboardErrorGroup[]; error?: string };
-      if (!response.ok) throw new Error(payload.error ?? response.statusText);
-      setGroups(payload.groups ?? []); setError("");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load error groups"); }
+      const response = await fetch(`${runtimeURL}/dev/errors/groups${statusQuery}`, { headers: runtimeHeaders(props.project) });
+      const payload = await readErrorTrackingResponse<{ groups?: DashboardErrorGroup[] }>(response, {
+        action: "Loading error groups",
+        routeRequired: true,
+        runtimeURL,
+      });
+      setGroups(payload.groups ?? []);
+      setError("");
+      setRuntimeState("capturing");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load error groups");
+      setRuntimeState("unavailable");
+    }
     finally { setLoading(false); }
   }, [props.project, status]);
 
   useEffect(() => { void load(); }, [load]);
 
   const updateGroup = async (group: DashboardErrorGroup, update: Record<string, string>) => {
-    const response = await fetch(`${runtimeURLForProject(props.project)}/dev/errors/groups/${group.fingerprint}`, { method: "PATCH", headers: runtimeHeaders(props.project, { "content-type": "application/json" }), body: JSON.stringify(update) });
-    if (!response.ok) { const payload = await response.json().catch(() => ({})) as { error?: string }; setError(payload.error ?? "Could not update error group"); return; }
-    void load();
+    const runtimeURL = runtimeURLForProject(props.project);
+    try {
+      const response = await fetch(`${runtimeURL}/dev/errors/groups/${group.fingerprint}`, { method: "PATCH", headers: runtimeHeaders(props.project, { "content-type": "application/json" }), body: JSON.stringify(update) });
+      await readErrorTrackingResponse<DashboardErrorGroup>(response, { action: "Updating error group", runtimeURL });
+      void load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update error group");
+    }
   };
 
   const copyBrief = async (group: DashboardErrorGroup) => {
-    const response = await fetch(`${runtimeURLForProject(props.project)}/dev/errors/groups/${group.fingerprint}/bug-report`, { headers: runtimeHeaders(props.project) });
-    const payload = await response.json() as { markdown?: string };
-    if (payload.markdown) { await navigator.clipboard.writeText(payload.markdown); setCopied(group.fingerprint); window.setTimeout(() => setCopied(null), 1800); }
+    const runtimeURL = runtimeURLForProject(props.project);
+    try {
+      const response = await fetch(`${runtimeURL}/dev/errors/groups/${group.fingerprint}/bug-report`, { headers: runtimeHeaders(props.project) });
+      const payload = await readErrorTrackingResponse<{ markdown?: string }>(response, { action: "Creating agent brief", runtimeURL });
+      if (!payload.markdown) throw new Error("The runtime returned an empty agent brief.");
+      await navigator.clipboard.writeText(payload.markdown);
+      setCopied(group.fingerprint);
+      window.setTimeout(() => setCopied(null), 1800);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create agent brief");
+    }
   };
 
   const normalizedSearch = search.trim().toLowerCase();
@@ -7035,11 +7102,16 @@ function ErrorsPage(props: { project: ProjectTarget }) {
   const impactedTenants = new Set(groups.flatMap((group) => Object.keys(group.tenants))).size;
   const occurrences = groups.reduce((total, group) => total + group.count, 0);
   const regressions = groups.filter((group) => group.regression).length;
+  const runtimeStatus = runtimeState === "capturing"
+    ? { label: "Capturing", detail: "Gonvex runtime" }
+    : runtimeState === "checking"
+      ? { label: "Checking", detail: "Verifying runtime" }
+      : { label: "Unavailable", detail: "Update runtime" };
 
   return <section className="errors-inbox" aria-label="Error groups">
     <div className="errors-command-header">
       <div><p className="eyebrow">Incident intelligence</p><h2>Errors affecting real users</h2><p>Grouped by root cause, enriched with tenant, release, user, and machine context.</p></div>
-      <div className="errors-live-indicator"><span aria-hidden="true" /><strong>Capturing</strong><small>Gonvex runtime</small></div>
+      <div className="errors-live-indicator" data-state={runtimeState} aria-live="polite"><span aria-hidden="true" /><strong>{runtimeStatus.label}</strong><small>{runtimeStatus.detail}</small></div>
     </div>
     <div className="errors-stat-strip" aria-label="Error impact summary">
       <div><span>Groups</span><strong>{groups.length}</strong></div>
@@ -7059,7 +7131,7 @@ function ErrorsPage(props: { project: ProjectTarget }) {
     </div>
     {error ? <p className="form-error" role="alert">{error}</p> : null}
     {loading ? <p>Loading error groups…</p> : null}
-    {!loading && visibleGroups.length === 0 ? <div className="errors-empty"><span className="errors-empty-mark">✓</span><strong>{groups.length ? "No matching groups" : `No ${status === "all" ? "captured" : status} errors`}</strong><span>{groups.length ? "Try a tenant, release, or part of the error message." : "Captured browser and Gonvex operation failures will appear here automatically."}</span></div> : null}
+    {!loading && !error && visibleGroups.length === 0 ? <div className="errors-empty"><span className="errors-empty-mark">✓</span><strong>{groups.length ? "No matching groups" : `No ${status === "all" ? "captured" : status} errors`}</strong><span>{groups.length ? "Try a tenant, release, or part of the error message." : "Captured browser and Gonvex operation failures will appear here automatically."}</span></div> : null}
     <div className="error-group-list">
       {visibleGroups.map((group) => {
         const expanded = selected === group.fingerprint;

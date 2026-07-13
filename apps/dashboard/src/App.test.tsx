@@ -11,6 +11,46 @@ async function renderProjectApp() {
   return user;
 }
 
+const trackedErrorProject = {
+  id: "error-app",
+  name: "Error App",
+  environment: "local dev",
+  runtimeUrl: "http://127.0.0.1:8080",
+  database: "gonvex_error_app",
+  storageBucket: "error-app-dev",
+  status: "local",
+  description: "Error tracking test project.",
+  provisioned: false,
+  runtimeCreated: true,
+  databaseMode: "single",
+  testTab: false,
+  errorTrackingEnabled: true,
+};
+
+async function renderTrackedErrorProject(groupsResponse: () => Promise<Response>) {
+  vi.stubGlobal("WebSocket", undefined);
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes("/dev/projects") && init?.method === "POST") {
+      return { ok: true, status: 200, statusText: "OK", json: async () => ({ project: trackedErrorProject, projectKey: "test-project-key" }) } as Response;
+    }
+    if (String(input).includes("/dev/errors/groups")) return groupsResponse();
+    return { ok: true, status: 200, statusText: "OK", json: async () => ({}) } as Response;
+  }));
+  const user = userEvent.setup();
+  window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({ email: "gabriel@example.com", name: "Gabriel" }));
+  render(<App />);
+  await user.click(screen.getByRole("button", { name: /create project/i }));
+  const createDialog = screen.getByRole("dialog", { name: /create project/i });
+  await user.type(within(createDialog).getByLabelText(/name/i), "Error App");
+  await user.click(within(createDialog).getByRole("button", { name: /create project/i }));
+  await user.click(await screen.findByRole("button", { name: /^done$/i }));
+  const projectTile = screen.getByText("Error App").closest(".project-tile");
+  expect(projectTile).not.toBeNull();
+  await user.click(within(projectTile as HTMLElement).getByRole("button", { name: /open project/i }));
+  await user.click(within(screen.getByLabelText("Primary sections")).getByRole("button", { name: /^errors$/i }));
+  return user;
+}
+
 describe("App", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -169,38 +209,18 @@ describe("App", () => {
   });
 
   it("expands a grouped error with tenant, release, and machine context", async () => {
-    vi.stubGlobal("WebSocket", undefined);
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).includes("/dev/projects") && init?.method === "POST") {
-        return { ok: true, statusText: "OK", json: async () => ({ project: {
-          id: "error-app", name: "Error App", environment: "local dev", runtimeUrl: "http://127.0.0.1:8080",
-          database: "gonvex_error_app", storageBucket: "error-app-dev", status: "local", description: "Error tracking test project.",
-          provisioned: false, runtimeCreated: true, databaseMode: "single", testTab: false, errorTrackingEnabled: true,
-        }, projectKey: "test-project-key" }) } as Response;
-      }
-      if (String(input).includes("/dev/errors/groups")) {
-        return { ok: true, statusText: "OK", json: async () => ({ groups: [{
+    const user = await renderTrackedErrorProject(async () => ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({ groups: [{
           fingerprint: "group-1", title: "Checkout failed", culprit: "at submitOrder (src/checkout.ts:40:3)", status: "unresolved", priority: "high",
           count: 8, firstSeen: "2026-07-11T10:00:00Z", lastSeen: "2026-07-12T10:00:00Z", tenants: { acme: 5, beta: 3 }, users: { ada: 4 }, devices: { laptop: 5, phone: 3 }, releases: { "5.1.0": 8 }, environments: { production: 8 },
           latest: { timestamp: "2026-07-12T10:00:00Z", stack: "TypeError: Checkout failed\n at submitOrder (src/checkout.ts:40:3)", tenant: "acme", release: "5.1.0", environment: "production", url: "https://acme.example.com/checkout", userAgent: "Chrome" },
-        }] }) } as Response;
-      }
-      return { ok: true, statusText: "OK", json: async () => ({}) } as Response;
-    }));
-    const user = userEvent.setup();
-    window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({ email: "gabriel@example.com", name: "Gabriel" }));
-    render(<App />);
-    await user.click(screen.getByRole("button", { name: /create project/i }));
-    const createDialog = screen.getByRole("dialog", { name: /create project/i });
-    await user.type(within(createDialog).getByLabelText(/name/i), "Error App");
-    await user.click(within(createDialog).getByRole("button", { name: /create project/i }));
-    await user.click(await screen.findByRole("button", { name: /^done$/i }));
-    const projectTile = screen.getByText("Error App").closest(".project-tile");
-    expect(projectTile).not.toBeNull();
-    await user.click(within(projectTile as HTMLElement).getByRole("button", { name: /open project/i }));
+        }] }),
+    }) as Response);
 
     expect(within(screen.getByLabelText("Primary sections")).getByRole("button", { name: /^errors$/i })).toBeInTheDocument();
-    await user.click(within(screen.getByLabelText("Primary sections")).getByRole("button", { name: /^errors$/i }));
 
     expect(await screen.findByText("Checkout failed")).toBeInTheDocument();
     expect(screen.getByText("2", { selector: ".errors-stat-strip strong" })).toBeInTheDocument();
@@ -208,6 +228,20 @@ describe("App", () => {
     expect(screen.getByText(/latest exception/i)).toBeInTheDocument();
     expect(screen.getByText("5.1.0", { selector: ".error-detail-heading strong" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /copy agent brief/i })).toBeInTheDocument();
+  });
+
+  it("explains when the connected runtime predates error tracking", async () => {
+    await renderTrackedErrorProject(async () => ({
+      ok: false,
+      status: 404,
+      statusText: "Not Found",
+      text: async () => "404 page not found\n",
+    }) as Response);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/error tracking is unavailable at http:\/\/127\.0\.0\.1:8080/i);
+    expect(screen.getByText("Unavailable", { selector: ".errors-live-indicator strong" })).toBeInTheDocument();
+    expect(screen.queryByText(/unexpected non-whitespace character/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no unresolved errors/i)).not.toBeInTheDocument();
   });
 
   it("shows settings sections", async () => {
