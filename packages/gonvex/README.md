@@ -56,8 +56,14 @@ Manage project environment variables:
 ```bash
 npx gonvex env list
 npx gonvex env set NAME value
+npx gonvex env push .env.production
 npx gonvex env remove NAME
 ```
+
+`env push` resolves the file from the selected project root and atomically
+replaces that project's server-side environment-variable set. Pass a dedicated
+deployment env file; the CLI refuses to upload `GONVEX_PROJECT_KEY` and related
+CLI credentials.
 
 ## Runtime Settings
 

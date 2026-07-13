@@ -226,6 +226,56 @@ describe("App", () => {
     expect(screen.getByText(/authentication providers configured/i)).toBeInTheDocument();
   });
 
+  it("renames a project from general settings without changing its id", async () => {
+    vi.stubGlobal("WebSocket", undefined);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { name?: string };
+      const project = {
+        id: "rename-app",
+        name: body.name ?? "Original Project",
+        environment: "local dev",
+        runtimeUrl: "http://runtime.test",
+        database: "gonvex_rename_app",
+        databaseMode: "single",
+        storageBucket: "rename-app-dev",
+        status: "local",
+        description: "Rename test project.",
+        provisioned: true,
+        runtimeCreated: true,
+      };
+      return new Response(JSON.stringify({ project, projectKey: "rename-test-key" }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({ email: "gabriel@example.com", name: "Gabriel" }));
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /create project/i }));
+    const createDialog = screen.getByRole("dialog", { name: /create project/i });
+    await user.type(within(createDialog).getByLabelText(/name/i), "Original Project");
+    await user.click(within(createDialog).getByRole("button", { name: /create project/i }));
+    await user.click(await screen.findByRole("button", { name: /^done$/i }));
+    const projectTile = screen.getByText("Original Project").closest(".project-tile");
+    expect(projectTile).not.toBeNull();
+    await user.click(within(projectTile as HTMLElement).getByRole("button", { name: /open project/i }));
+    await user.click(within(screen.getByLabelText("Primary sections")).getByRole("button", { name: /settings/i }));
+
+    const nameInput = screen.getByRole("textbox", { name: /project name/i });
+    await user.clear(nameInput);
+    await user.type(nameInput, "Renamed Project");
+    await user.click(screen.getByRole("button", { name: /save name/i }));
+
+    expect(await screen.findByText("Project name saved")).toBeInTheDocument();
+    expect(screen.getByText("Renamed Project", { selector: ".project-card strong" })).toBeInTheDocument();
+    const patchCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
+    expect(patchCall).toBeDefined();
+    expect(String(patchCall?.[0])).toContain("/dev/projects/rename-app");
+    expect(JSON.parse(String(patchCall?.[1]?.body))).toEqual({ name: "Renamed Project" });
+  });
+
   it("does not show schema before the project pushes tables", async () => {
     const user = await renderProjectApp();
 

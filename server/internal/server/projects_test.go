@@ -83,8 +83,18 @@ func TestGenerateProjectIDReturnsUUID(t *testing.T) {
 	if got[8] != '-' || got[13] != '-' || got[18] != '-' || got[23] != '-' {
 		t.Fatalf("expected UUID separators, got %q", got)
 	}
-	if got[14] != '4' {
-		t.Fatalf("expected UUID v4 marker, got %q", got)
+	if got[14] != '6' {
+		t.Fatalf("expected UUID v6 marker, got %q", got)
+	}
+}
+
+func TestGenerateRelationshipIDReturnsUUIDv6(t *testing.T) {
+	got, err := generateRelationshipID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isUUIDv6(got) {
+		t.Fatalf("expected UUID v6 relationship id, got %q", got)
 	}
 }
 
@@ -149,6 +159,60 @@ func TestUpdateProjectPersistsDatabaseMode(t *testing.T) {
 	}
 }
 
+func TestUpdateProjectPersistsTrimmedNameWithoutChangingIdentity(t *testing.T) {
+	server := New(config.Config{})
+	original := projectTarget{
+		ID:            "whagons-5",
+		Name:          "whagons 5",
+		Database:      "gonvex_dev",
+		DatabaseMode:  "multiTenant",
+		StorageBucket: "whagons-5-dev",
+		databaseURL:   "postgres://example/gonvex_dev",
+		databaseName:  "gonvex_dev",
+	}
+	server.projects[original.ID] = original
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/dev/projects/whagons-5", bytes.NewBufferString(`{"name":"  Customer Portal  "}`))
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Project projectTarget `json:"project"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Project.Name != "Customer Portal" {
+		t.Fatalf("expected trimmed project name, got %q", payload.Project.Name)
+	}
+	if payload.Project.ID != original.ID || payload.Project.Database != original.Database || payload.Project.DatabaseMode != original.DatabaseMode || payload.Project.StorageBucket != original.StorageBucket {
+		t.Fatalf("rename changed project identity or storage relationship: before=%+v after=%+v", original, payload.Project)
+	}
+	updated := server.projects[original.ID]
+	if updated.Name != "Customer Portal" || updated.databaseURL != original.databaseURL || updated.databaseName != original.databaseName {
+		t.Fatalf("unexpected in-memory project after rename: %+v", updated)
+	}
+}
+
+func TestUpdateProjectRejectsBlankName(t *testing.T) {
+	server := New(config.Config{})
+	server.projects["whagons-5"] = projectTarget{ID: "whagons-5", Name: "whagons 5", DatabaseMode: "single"}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/dev/projects/whagons-5", bytes.NewBufferString(`{"name":"   "}`))
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+	if got := server.projects["whagons-5"].Name; got != "whagons 5" {
+		t.Fatalf("blank rename changed project name to %q", got)
+	}
+}
+
 func TestTenantsEndpointIncludesGlobalTenantsForProject(t *testing.T) {
 	server := New(config.Config{
 		TenantDatabases: map[string]string{
@@ -179,6 +243,35 @@ func TestTenantsEndpointIncludesGlobalTenantsForProject(t *testing.T) {
 	}
 	if got["project-only"] {
 		t.Fatalf("did not expect other project's tenant, got %+v", got)
+	}
+}
+
+func TestUUIDv6ProjectDoesNotInheritLegacyGlobalTenants(t *testing.T) {
+	projectID, err := generateProjectID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(config.Config{
+		TenantDatabases: map[string]string{
+			"global-tenant": "postgres://postgres:postgres@127.0.0.1:5432/unrelated_tenant?sslmode=disable",
+		},
+	})
+	server.projects[projectID] = projectTarget{ID: projectID, DatabaseMode: "multiTenant", RuntimeCreated: true}
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/tenants?project="+projectID, nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	var payload struct {
+		Tenants []tenantTarget `json:"tenants"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Tenants) != 0 {
+		t.Fatalf("new UUIDv6 project inherited unrelated global tenants: %+v", payload.Tenants)
 	}
 }
 
@@ -357,6 +450,53 @@ func TestDatabaseURLForTenantPrefersProjectTenantMap(t *testing.T) {
 	}
 }
 
+func TestUUIDv6ProjectRequiresExplicitTenantRelationship(t *testing.T) {
+	projectID, err := generateProjectID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(config.Config{
+		PostgresURL: "postgres://example/base",
+		ProjectDatabases: map[string]string{
+			projectID: "postgres://example/project",
+		},
+		TenantDatabases: map[string]string{
+			"unrelated":                      "postgres://example/unrelated",
+			projectID + ":registered-tenant": "postgres://example/registered",
+		},
+	})
+
+	if got := server.databaseURLForTenant(projectID, "unrelated"); got != "" {
+		t.Fatalf("unknown tenant must not fall back to another or the project database, got %q", got)
+	}
+	if got := server.databaseURLForTenant(projectID, "registered-tenant"); got != "postgres://example/registered" {
+		t.Fatalf("expected explicitly related tenant database URL, got %q", got)
+	}
+	if got := server.databaseURLForTenant(projectID, ""); got != "postgres://example/project" {
+		t.Fatalf("expected landlord/project database URL, got %q", got)
+	}
+}
+
+func TestDataEndpointRejectsUnknownUUIDv6ProjectTenant(t *testing.T) {
+	projectID, err := generateProjectID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(config.Config{})
+	server.projects[projectID] = projectTarget{ID: projectID, DatabaseMode: "multiTenant", RuntimeCreated: true}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/dev/data/tables?project="+projectID+"&tenant=unrelated", nil)
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected unknown tenant to return %d, got %d: %s", http.StatusNotFound, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "is not related to project") {
+		t.Fatalf("expected relationship error, got %s", recorder.Body.String())
+	}
+}
+
 func TestUniqueTenantIDChecksProjectScopedCollisions(t *testing.T) {
 	server := New(config.Config{TenantDatabases: map[string]string{"project-a:acme": "postgres://example/acme"}})
 	server.tenants["project-a:acme-2"] = tenantTarget{ID: "acme-2", ProjectID: "project-a"}
@@ -421,33 +561,40 @@ func TestPersistedTenantDatabaseNameFallsBackToProjectScopedName(t *testing.T) {
 	}
 }
 
-func TestStandaloneTenantDiscoveryCandidateSkipsControlAndProjectDatabases(t *testing.T) {
-	server := New(config.Config{})
+func TestLegacyTenantDatabaseMigrationRequiresExactProjectSuffix(t *testing.T) {
 	tests := []struct {
-		name            string
-		database        string
-		projectDatabase string
-		otherSuffixes   map[string]bool
-		want            bool
+		name      string
+		project   string
+		database  string
+		wantAlias string
+		want      bool
 	}{
-		{name: "standalone fixture", database: "big", projectDatabase: "gonvex_dev", want: true},
-		{name: "project database", database: "gonvex_dev", projectDatabase: "gonvex_dev", want: false},
-		{name: "control database", database: "postgres", projectDatabase: "gonvex_dev", want: false},
-		{name: "gonvex database", database: "gonvex_whagons_5_telemetry", projectDatabase: "gonvex_dev", want: false},
-		{name: "project scoped tenant", database: "big_whagons_5", projectDatabase: "gonvex_dev", want: false},
-		{name: "dashboard database", database: "testing2_dashboard", projectDatabase: "gonvex_dev", want: false},
-		{name: "e2e database", database: "e2e_task_create", projectDatabase: "gonvex_dev", want: false},
-		{name: "other project's tenant", database: "antigua_whagons5_dev", projectDatabase: "gonvex_dev", otherSuffixes: map[string]bool{"whagons5_dev": true}, want: false},
-		{name: "unclaimed standalone tenant", database: "antigua_whagons5_dev", projectDatabase: "gonvex_dev", otherSuffixes: map[string]bool{"other_project": true}, want: true},
+		{name: "own antigua tenant", project: "whagons5-dev", database: "antigua_whagons5_dev", wantAlias: "antigua", want: true},
+		{name: "own nca tenant", project: "whagons5-dev", database: "nca_whagons5_dev", wantAlias: "nca", want: true},
+		{name: "unrelated project", project: "legacy-project", database: "antigua_whagons5_dev", want: false},
+		{name: "standalone database", project: "whagons5-dev", database: "antigua", want: false},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := server.isStandaloneTenantDatabaseCandidate("whagons-5", test.projectDatabase, test.database, test.otherSuffixes)
-			if got != test.want {
-				t.Fatalf("expected %v for %q, got %v", test.want, test.database, got)
+			alias, got := legacyTenantDatabaseAlias(test.project, test.database)
+			if got != test.want || alias != test.wantAlias {
+				t.Fatalf("expected (%q, %v) for %q, got (%q, %v)", test.wantAlias, test.want, test.database, alias, got)
 			}
 		})
+	}
+}
+
+func TestUUIDv6ProjectsNeverRunLegacyTenantDiscovery(t *testing.T) {
+	project, err := generateProjectID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldMigrateLegacyTenantRelationships(project) {
+		t.Fatalf("UUIDv6 project %q must not infer tenant ownership from database names", project)
+	}
+	if !shouldMigrateLegacyTenantRelationships("whagons5-dev") {
+		t.Fatal("legacy project ids must retain exact-suffix migration support")
 	}
 }
 

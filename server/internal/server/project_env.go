@@ -109,6 +109,47 @@ func (s *Server) loadProjectEnv(ctx context.Context, project string) ([]projectE
 	return vars, rows.Err()
 }
 
+// authorizeProjectEnvRequest accepts either an owner/admin dashboard session or
+// the exact project key used by the CLI. Project keys must be registered and
+// non-empty; unlike the local-dev sync endpoint, this never treats an
+// unconfigured key as open access.
+func (s *Server) authorizeProjectEnvRequest(w http.ResponseWriter, r *http.Request, project string, manage bool) bool {
+	provided := strings.TrimSpace(syncKey(r))
+	if provided != "" {
+		s.hydrateProjects()
+		s.projectMu.RLock()
+		expected := strings.TrimSpace(s.config.ProjectKeys[project])
+		if expected == "" {
+			if target, ok := s.projects[project]; ok {
+				expected = strings.TrimSpace(target.syncKey)
+			}
+		}
+		devKey := strings.TrimSpace(s.config.DevSyncKey)
+		s.projectMu.RUnlock()
+		if (expected != "" && provided == expected) || (expected == "" && devKey != "" && provided == devKey) {
+			return true
+		}
+	}
+
+	actor, ok := s.dashboardActorFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in or project key is required"})
+		return false
+	}
+	if manage {
+		if !s.canManageProject(r.Context(), actor, project) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
+			return false
+		}
+		return true
+	}
+	if !s.canAccessProject(r.Context(), actor, project) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project access is required"})
+		return false
+	}
+	return true
+}
+
 // GET /dev/projects/{project}/env
 func (s *Server) handleProjectEnv(w http.ResponseWriter, r *http.Request) {
 	project := projectFromEnvRequest(r)
@@ -116,13 +157,7 @@ func (s *Server) handleProjectEnv(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
 		return
 	}
-	actor, ok := s.dashboardActorFromRequest(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
-		return
-	}
-	if !s.canAccessProject(r.Context(), actor, project) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project access is required"})
+	if !s.authorizeProjectEnvRequest(w, r, project, false) {
 		return
 	}
 	vars, err := s.loadProjectEnv(r.Context(), project)
@@ -142,13 +177,7 @@ func (s *Server) handleSetProjectEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.invalidateProjectEnvCache(project)
-	actor, ok := s.dashboardActorFromRequest(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
-		return
-	}
-	if !s.canManageProject(r.Context(), actor, project) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
+	if !s.authorizeProjectEnvRequest(w, r, project, true) {
 		return
 	}
 	var payload struct {
@@ -181,7 +210,8 @@ func (s *Server) handleSetProjectEnv(w http.ResponseWriter, r *http.Request) {
 }
 
 // PUT /dev/projects/{project}/env  { content?: ".env text", variables?: [{name,value}] }
-// Replaces the project's entire env set. Used by the dashboard "paste .env" mode.
+// Replaces the project's entire env set. Used by the dashboard "paste .env"
+// mode and `gonvex env push`.
 func (s *Server) handleBulkProjectEnv(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	project := projectFromEnvRequest(r)
@@ -190,13 +220,7 @@ func (s *Server) handleBulkProjectEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.invalidateProjectEnvCache(project)
-	actor, ok := s.dashboardActorFromRequest(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
-		return
-	}
-	if !s.canManageProject(r.Context(), actor, project) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
+	if !s.authorizeProjectEnvRequest(w, r, project, true) {
 		return
 	}
 	var payload struct {
@@ -273,13 +297,7 @@ func (s *Server) handleDeleteProjectEnv(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer s.invalidateProjectEnvCache(project)
-	actor, ok := s.dashboardActorFromRequest(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
-		return
-	}
-	if !s.canManageProject(r.Context(), actor, project) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
+	if !s.authorizeProjectEnvRequest(w, r, project, true) {
 		return
 	}
 	var payload struct {

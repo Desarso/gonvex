@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -91,6 +92,10 @@ func normalizedDatabaseModeWithDefault(mode string) string {
 		return "single"
 	}
 	return normalized
+}
+
+func normalizedProjectName(name string) string {
+	return strings.TrimSpace(name)
 }
 
 func (s *Server) hydratePersistedProjects() {
@@ -174,7 +179,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	name := strings.TrimSpace(payload.Name)
+	name := normalizedProjectName(payload.Name)
 	if name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project name is required"})
 		return
@@ -272,6 +277,7 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var payload struct {
+		Name                 *string `json:"name"`
 		DatabaseMode         *string `json:"databaseMode"`
 		ErrorTrackingEnabled *bool   `json:"errorTrackingEnabled"`
 	}
@@ -279,9 +285,17 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if payload.DatabaseMode == nil && payload.ErrorTrackingEnabled == nil {
+	if payload.Name == nil && payload.DatabaseMode == nil && payload.ErrorTrackingEnabled == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no project fields provided"})
 		return
+	}
+	name := ""
+	if payload.Name != nil {
+		name = normalizedProjectName(*payload.Name)
+		if name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project name is required"})
+			return
+		}
 	}
 	databaseMode := ""
 	if payload.DatabaseMode != nil {
@@ -296,24 +310,27 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 
 	s.projectMu.Lock()
 	project, ok := s.projects[projectID]
-	if ok {
-		if payload.DatabaseMode != nil {
-			project.DatabaseMode = databaseMode
-		}
-		if payload.ErrorTrackingEnabled != nil {
-			project.ErrorTrackingEnabled = *payload.ErrorTrackingEnabled
-		}
-		s.projects[projectID] = project
-	}
-	s.projectMu.Unlock()
 	if !ok {
+		s.projectMu.Unlock()
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
 		return
 	}
+	if payload.Name != nil {
+		project.Name = name
+	}
+	if payload.DatabaseMode != nil {
+		project.DatabaseMode = databaseMode
+	}
+	if payload.ErrorTrackingEnabled != nil {
+		project.ErrorTrackingEnabled = *payload.ErrorTrackingEnabled
+	}
 	if err := s.saveProjectRegistry(r.Context(), project); err != nil {
+		s.projectMu.Unlock()
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.projects[projectID] = project
+	s.projectMu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"project": project})
 }
 
@@ -402,6 +419,17 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	for key, tenant := range s.tenants {
+		if tenant.ProjectID != projectID {
+			continue
+		}
+		delete(s.tenants, key)
+		if s.config.TenantDatabases != nil {
+			delete(s.config.TenantDatabases, key)
+		}
+	}
+	s.invalidateProjectTenantHydration(projectID)
+	s.tenantStores.Close()
 	s.cache.invalidateRows(r.Context(), projectID, tenantIDFromRequest(projectID, ""), "")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -426,14 +454,46 @@ func (s *Server) openProjectRegistry(ctx context.Context) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
-	if err := ensureProjectRegistry(ctx, db); err != nil {
+	s.registryMu.Lock()
+	if s.registryReady {
+		s.registryMu.Unlock()
+		return db, nil
+	}
+	connection, err := db.Conn(ctx)
+	if err != nil {
+		s.registryMu.Unlock()
 		db.Close()
 		return nil, err
 	}
+	// CREATE TABLE IF NOT EXISTS is not race-free in PostgreSQL when two
+	// runtime startup/request paths create the same relation concurrently. Hold
+	// a cluster-wide advisory lock on one dedicated connection for the complete
+	// control-plane migration.
+	if _, err := connection.ExecContext(ctx, `SELECT pg_advisory_lock(1735351662, 20260713)`); err != nil {
+		connection.Close()
+		s.registryMu.Unlock()
+		db.Close()
+		return nil, err
+	}
+	if err := ensureProjectRegistry(ctx, connection); err != nil {
+		_, _ = connection.ExecContext(context.Background(), `SELECT pg_advisory_unlock(1735351662, 20260713)`)
+		connection.Close()
+		s.registryMu.Unlock()
+		db.Close()
+		return nil, err
+	}
+	_, _ = connection.ExecContext(context.Background(), `SELECT pg_advisory_unlock(1735351662, 20260713)`)
+	connection.Close()
+	s.registryReady = true
+	s.registryMu.Unlock()
 	return db, nil
 }
 
-func ensureProjectRegistry(ctx context.Context, db *sql.DB) error {
+type projectRegistryExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error {
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_projects (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -465,6 +525,34 @@ func ensureProjectRegistry(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS owner_email TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_tenants (
+		relationship_id TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		tenant_id TEXT NOT NULL,
+		name TEXT NOT NULL,
+		database_alias TEXT NOT NULL DEFAULT '',
+		database_name TEXT NOT NULL DEFAULT '',
+		database_url TEXT NOT NULL DEFAULT '',
+		domain TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'local',
+		description TEXT NOT NULL DEFAULT '',
+		provisioned BOOLEAN NOT NULL DEFAULT FALSE,
+		runtime_created BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		UNIQUE (project_id, tenant_id)
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS gonvex_runtime_tenants_project_database
+		ON gonvex_runtime_tenants (project_id, database_name)
+		WHERE database_name <> ''`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_runtime_tenants_project
+		ON gonvex_runtime_tenants (project_id, name, tenant_id)`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_dashboard_users (
@@ -809,13 +897,24 @@ func projectIDFromProjectKey(key string) string {
 }
 
 func generateProjectID() (string, error) {
-	var bytes [16]byte
-	if _, err := rand.Read(bytes[:]); err != nil {
+	projectID, err := uuid.NewV6()
+	if err != nil {
 		return "", fmt.Errorf("generate project id: %w", err)
 	}
-	bytes[6] = (bytes[6] & 0x0f) | 0x40
-	bytes[8] = (bytes[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16]), nil
+	return projectID.String(), nil
+}
+
+func generateRelationshipID() (string, error) {
+	relationshipID, err := uuid.NewV6()
+	if err != nil {
+		return "", fmt.Errorf("generate relationship id: %w", err)
+	}
+	return relationshipID.String(), nil
+}
+
+func isUUIDv6(value string) bool {
+	parsed, err := uuid.Parse(strings.TrimSpace(value))
+	return err == nil && parsed.Version() == uuid.Version(6)
 }
 
 func (s *Server) uniqueRuntimeProjectIDLocked() (string, error) {

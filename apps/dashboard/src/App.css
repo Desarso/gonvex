@@ -2935,6 +2935,18 @@ h1 {
   padding: 16px 24px 24px;
 }
 
+.project-name-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.project-name-form .table-search {
+  min-height: 38px;
+  margin: 0;
+}
+
 .settings-grid,
 .auth-provider-grid {
   display: grid;
@@ -3559,6 +3571,7 @@ h1 {
   .metric-row,
   .function-stat-grid,
   .settings-grid,
+  .project-name-form,
   .auth-provider-grid,
   .auth-provider-grid--wide,
   .document-form,

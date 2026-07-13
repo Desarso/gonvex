@@ -40,8 +40,10 @@ type Server struct {
 	projectMu         sync.RWMutex
 	projects          map[string]projectTarget
 	tenants           map[string]tenantTarget
-	tenantDiscoveryMu sync.Mutex
-	tenantDiscoveryAt map[string]time.Time
+	registryMu        sync.Mutex
+	registryReady     bool
+	tenantHydrationMu sync.Mutex
+	tenantHydrationAt map[string]time.Time
 	wsMu              sync.RWMutex
 	wsConns           map[*wsConn]bool
 	tableChangeMu     sync.Mutex
@@ -91,7 +93,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		telemetryWrites:       make(chan struct{}, 4),
 		projects:              map[string]projectTarget{},
 		tenants:               map[string]tenantTarget{},
-		tenantDiscoveryAt:     map[string]time.Time{},
+		tenantHydrationAt:     map[string]time.Time{},
 		wsConns:               map[*wsConn]bool{},
 		tableChangeWait:       map[string]*time.Timer{},
 		tableChanges:          map[string]tableChange{},
@@ -275,8 +277,13 @@ func (s *Server) handleDataTables(w http.ResponseWriter, r *http.Request) {
 		s.metrics.recordRuntimeOperation(project, "dev.data.tables", "runtime", time.Since(started), opErr, "")
 	}()
 
-	s.hydrateProjectTenantDatabases(r.Context(), project)
-	tables, err := data.ListTables(r.Context(), s.databaseURL(r))
+	databaseURL, err := s.dataRequestDatabaseURL(r)
+	if err != nil {
+		opErr = err
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	tables, err := data.ListTables(r.Context(), databaseURL)
 	if err != nil {
 		opErr = err
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -301,7 +308,12 @@ func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
 		s.metrics.recordRuntimeOperation(project, "dev.data.rows", "runtime", time.Since(started), opErr, cacheOutcome)
 	}()
 
-	s.hydrateProjectTenantDatabases(r.Context(), project)
+	databaseURL, err := s.dataRequestDatabaseURL(r)
+	if err != nil {
+		opErr = err
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
 	table := r.PathValue("table")
 	if internalDataTable(table) {
 		opErr = fmt.Errorf("table not found")
@@ -338,7 +350,7 @@ func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	countMode := r.URL.Query().Get("count")
-	result, err := data.ReadRows(r.Context(), s.databaseURL(r), table, data.RowsOptions{
+	result, err := data.ReadRows(r.Context(), databaseURL, table, data.RowsOptions{
 		Limit:           limit,
 		Offset:          offset,
 		Search:          r.URL.Query().Get("search"),
@@ -398,6 +410,11 @@ func (s *Server) handleInsertDataRow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "table not found"})
 		return
 	}
+	databaseURL, err := s.dataRequestDatabaseURL(r)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
 
 	var payload map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -405,7 +422,7 @@ func (s *Server) handleInsertDataRow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := data.InsertRow(r.Context(), s.databaseURL(r), r.PathValue("table"), payload)
+	result, err := data.InsertRow(r.Context(), databaseURL, r.PathValue("table"), payload)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -633,8 +650,14 @@ func tenantID(r *http.Request) string {
 	return ""
 }
 
-func (s *Server) databaseURL(r *http.Request) string {
-	return s.databaseURLForTenant(projectID(r), tenantID(r))
+func (s *Server) dataRequestDatabaseURL(r *http.Request) (string, error) {
+	project := projectID(r)
+	s.hydrateProjectTenantDatabases(r.Context(), project)
+	databaseURL := s.databaseURLForTenant(project, tenantID(r))
+	if tenant := tenantID(r); tenant != "" && databaseURL == "" {
+		return "", fmt.Errorf("tenant %q is not related to project %q", tenant, project)
+	}
+	return databaseURL, nil
 }
 
 func (s *Server) databaseURLForProject(projectID string) string {
@@ -650,9 +673,6 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 	if tenantID == "" || tenantID == projectID {
 		return s.config.DatabaseURL(projectID)
 	}
-	if value := s.configuredTenantDatabaseURLLocked(projectID, tenantTarget{ID: tenantID}); value != "" {
-		return value
-	}
 	if tenant, ok := s.tenants[tenantStoreKey(projectID, tenantID)]; ok {
 		if value := s.configuredTenantDatabaseURLLocked(projectID, tenant); value != "" {
 			return value
@@ -661,7 +681,16 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 			return tenant.databaseURL
 		}
 	}
-	return s.config.DatabaseURL(projectID)
+	if !isUUIDv6(projectID) {
+		if value := s.configuredTenantDatabaseURLLocked(projectID, tenantTarget{ID: tenantID}); value != "" {
+			return value
+		}
+		// Preserve the historical single-database fallback for existing project
+		// IDs. UUIDv6 projects require an explicit tenant relationship and never
+		// route an unknown tenant to the landlord database.
+		return s.config.DatabaseURL(projectID)
+	}
+	return ""
 }
 
 func (s *Server) hydrateRuntimeState(ctx context.Context) {
@@ -742,17 +771,24 @@ func (s *Server) configuredTenantDatabaseURLLocked(projectID string, tenant tena
 		if value := s.config.TenantDatabases[tenantStoreKey(projectID, candidate)]; value != "" {
 			return value
 		}
-		if value := s.config.TenantDatabases[candidate]; value != "" {
-			return value
+		if !isUUIDv6(projectID) {
+			if value := s.config.TenantDatabases[candidate]; value != "" {
+				return value
+			}
 		}
 	}
-	needles := tenantDatabaseNeedles(tenant)
-	for _, value := range s.config.TenantDatabases {
-		databaseName := databaseNameFromURL(value, "")
-		normalizedDatabase := normalizeDatabaseAlias(databaseName)
-		for _, needle := range needles {
-			if needle != "" && strings.Contains(normalizedDatabase, needle) {
-				return value
+	if !isUUIDv6(projectID) {
+		needles := tenantDatabaseNeedles(tenant)
+		for key, value := range s.config.TenantDatabases {
+			configuredProject, _ := splitTenantDatabaseKey(key)
+			if configuredProject != "" && configuredProject != projectID {
+				continue
+			}
+			normalizedDatabase := normalizeDatabaseAlias(databaseNameFromURL(value, ""))
+			for _, needle := range needles {
+				if needle != "" && strings.Contains(normalizedDatabase, needle) {
+					return value
+				}
 			}
 		}
 	}

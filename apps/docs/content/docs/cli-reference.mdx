@@ -90,11 +90,19 @@ Manage server-side environment variables stored for the selected runtime project
 npx gonvex env list
 npx gonvex env get NAME
 npx gonvex env set NAME value
+npx gonvex env push .env.production
 npx gonvex env remove NAME
 ```
 
 The command accepts the same `--project`, `--runtime-url`, `--project-id`, and `--key`
 connection options as `dev`. A `GONVEX_PROJECT_KEY` or equivalent `--key` is required.
+
+`env push FILE` (also available as `env upload FILE`) reads the file relative to the
+selected project root and atomically replaces the complete server-side variable set
+for that project. You can use `--file FILE` instead of the positional path. Keep the
+project connection settings in `.env.local` and upload a separate deployment env file;
+the CLI refuses files containing `GONVEX_PROJECT_KEY`, `GONVEX_DEPLOY_KEY`, or
+`GONVEX_KEY` so a project credential cannot be copied into function environments.
 
 ## Commands not implemented yet
 

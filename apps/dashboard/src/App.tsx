@@ -91,6 +91,7 @@ type DataRowsResponse = {
 };
 
 type TenantTarget = {
+  relationshipId?: string;
   id: string;
   projectId: string;
   name: string;
@@ -1292,7 +1293,7 @@ async function createRuntimeProject(name: string, databaseMode: DatabaseMode): P
   };
 }
 
-async function updateRuntimeProject(project: ProjectTarget, update: { databaseMode?: DatabaseMode }): Promise<ProjectTarget> {
+async function updateRuntimeProject(project: ProjectTarget, update: { name?: string; databaseMode?: DatabaseMode }): Promise<ProjectTarget> {
   const baseURL = runtimeURLForProject(project);
   if (!baseURL) return { ...project, ...update };
   const response = await fetch(`${baseURL}/dev/projects/${encodeURIComponent(project.id)}`, {
@@ -3177,6 +3178,33 @@ export function App() {
       });
   };
 
+  const updateProjectName = async (name: string) => {
+    if (!activeProject) throw new Error("No active project selected");
+    const nextName = name.trim();
+    if (!nextName) throw new Error("Project name is required");
+    if (nextName === activeProject.name) return;
+
+    const previousProject = activeProject;
+    setProjects((current) => current.map((project) => (
+      project.id === previousProject.id ? { ...project, name: nextName } : project
+    )));
+    try {
+      const savedProject = await updateRuntimeProject(previousProject, { name: nextName });
+      setProjects((current) => current.map((project) => (
+        project.id === savedProject.id ? { ...project, name: savedProject.name } : project
+      )));
+      reportAction(`Renamed project to ${savedProject.name}`);
+    } catch (error) {
+      setProjects((current) => current.map((project) => (
+        project.id === previousProject.id && project.name === nextName
+          ? { ...project, name: previousProject.name }
+          : project
+      )));
+      reportAction(error instanceof Error ? error.message : "Could not rename project");
+      throw error;
+    }
+  };
+
   const handleTenantsDetected = (projectID: string, hasTenants: boolean) => {
     setDetectedTenantProjects((current) => {
       if (current[projectID] === hasTenants) return current;
@@ -3448,6 +3476,7 @@ export function App() {
               hideTestTenants={activeHideTestTenants}
               onDatabaseModeChange={updateProjectDatabaseMode}
               onHideTestTenantsChange={updateProjectHideTestTenants}
+              onProjectNameChange={updateProjectName}
               project={activeProject}
             />
           ) : null}
@@ -7231,9 +7260,13 @@ function SettingsPage(props: {
   hideTestTenants: boolean;
   onDatabaseModeChange: (mode: DatabaseMode) => void;
   onHideTestTenantsChange: (hidden: boolean) => void;
+  onProjectNameChange: (name: string) => Promise<void>;
   project: ProjectTarget;
 }) {
   const [activeSection, setActiveSection] = useState<"general" | "database" | "connection" | "environment" | "members" | "authentication">("general");
+  const [projectName, setProjectName] = useState(props.project.name);
+  const [projectNameStatus, setProjectNameStatus] = useState("");
+  const [projectNameSaving, setProjectNameSaving] = useState(false);
   const [projectKey, setProjectKey] = useState("");
   const [projectKeyStatus, setProjectKeyStatus] = useState("");
   const [projectKeyLoading, setProjectKeyLoading] = useState(false);
@@ -7263,6 +7296,36 @@ function SettingsPage(props: {
       `VITE_GONVEX_WS_URL=${runtimeURL.replace(/^http/, "ws")}/ws`,
     ].join("\n")
     : "";
+
+  useEffect(() => {
+    setProjectName(props.project.name);
+  }, [props.project.id, props.project.name]);
+
+  useEffect(() => {
+    setProjectNameStatus("");
+  }, [props.project.id]);
+
+  const saveProjectName = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = projectName.trim();
+    if (!name) {
+      setProjectNameStatus("Project name is required");
+      return;
+    }
+    if (name === props.project.name) return;
+
+    setProjectNameSaving(true);
+    setProjectNameStatus("");
+    try {
+      await props.onProjectNameChange(name);
+      setProjectName(name);
+      setProjectNameStatus("Project name saved");
+    } catch (error) {
+      setProjectNameStatus(error instanceof Error ? error.message : "Could not rename project");
+    } finally {
+      setProjectNameSaving(false);
+    }
+  };
 
   const revealProjectKey = async () => {
     setProjectKeyLoading(true);
@@ -7499,8 +7562,27 @@ function SettingsPage(props: {
       <section className="settings-panel" aria-live="polite">
         {activeSection === "general" ? (
           <SettingsCard title="General" description="Local deployment details used by gonvex dev and the runtime.">
+            <form className="project-name-form" onSubmit={saveProjectName}>
+              <label className="setting-field">
+                <span>Project name</span>
+                <input
+                  autoComplete="off"
+                  className="table-search"
+                  onChange={(event) => setProjectName(event.target.value)}
+                  value={projectName}
+                />
+              </label>
+              <Button
+                isDisabled={projectNameSaving || !projectName.trim() || projectName.trim() === props.project.name}
+                type="submit"
+                variant="primary"
+              >
+                {projectNameSaving ? "Saving" : "Save name"}
+              </Button>
+            </form>
+            {projectNameStatus ? <p className="settings-note" role="status">{projectNameStatus}</p> : null}
             <div className="settings-grid">
-              <SettingField label="Project" value={props.project.id} />
+              <SettingField label="Project ID" value={props.project.id} />
               <SettingField label="Runtime URL" value={runtimeURL} />
               <SettingField label="Dev script" value={devScript} />
               <SettingField label="Database" value={props.project.database} />

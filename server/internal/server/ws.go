@@ -738,7 +738,6 @@ func (s *Server) executeLegacyQuery(ctx context.Context, projectID string, tenan
 	// skips both, so without this the first query after a (re)start hits the
 	// fallback control DB and fails with relation "tasks" does not exist.
 	s.hydrateRuntimeStateForProject(ctx, projectID)
-	s.hydrateLandlordTenants(ctx, projectID)
 	s.hydrateProjectTenantDatabases(ctx, projectID)
 	databaseURL := s.databaseURLForTenant(projectID, tenantID)
 	var err error
@@ -855,7 +854,12 @@ func (s *Server) executeLegacyMutation(ctx context.Context, projectID string, te
 				return nil, err
 			}
 		}
-		result, err := data.RandomizeTaskStatusPriority(ctx, s.databaseURLForTenant(projectID, tenantID), args.Count)
+		databaseURL := s.databaseURLForTenant(projectID, tenantID)
+		databaseURL, err := s.ensureRuntimeTenantDatabase(ctx, projectID, tenantIDFromRequest(projectID, tenantID), databaseURL)
+		if err != nil {
+			return nil, err
+		}
+		result, err := data.RandomizeTaskStatusPriority(ctx, databaseURL, args.Count)
 		if err != nil {
 			return nil, err
 		}
@@ -930,7 +934,6 @@ func (s *Server) actionContext(ctx context.Context, projectID string, tenantID s
 
 func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (gonvex.RuntimeContext, error) {
 	activeTenant := tenantIDFromRequest(projectID, tenantID)
-	s.hydrateLandlordTenants(ctx, projectID)
 	s.hydrateProjectTenantDatabases(ctx, projectID)
 	databaseURL := s.databaseURLForTenant(projectID, activeTenant)
 	var err error

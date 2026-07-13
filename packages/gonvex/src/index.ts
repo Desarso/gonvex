@@ -273,6 +273,33 @@ async function runEnv(argv: string[]) {
     return;
   }
 
+  if (action === "push" || action === "upload") {
+    const optionPath = parsedArgs.options["--file"];
+    if (optionPath && parsedArgs.positional.length > 0) {
+      throw new Error("pass the env file either as FILE or --file, not both");
+    }
+    if (parsedArgs.positional.length > 1) throw new Error("usage: gonvex env push FILE");
+    const file = optionPath ?? parsedArgs.positional[0];
+    if (!file) throw new Error("usage: gonvex env push FILE");
+    const envPath = resolve(projectRoot, file);
+    let content: string;
+    try {
+      content = await readFile(envPath, "utf8");
+    } catch (error) {
+      throw new Error(`could not read env file ${file}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const names = dotEnvVariableNames(content);
+    if (names.length === 0) throw new Error(`env file ${file} contains no variables; refusing to replace the project env with an empty set`);
+    const credentialName = names.find((name) => ["GONVEX_PROJECT_KEY", "GONVEX_DEPLOY_KEY", "GONVEX_KEY"].includes(name));
+    if (credentialName) {
+      throw new Error(`env file ${file} contains ${credentialName}; keep CLI project credentials out of uploaded function environment variables`);
+    }
+    const count = await replaceProjectEnv(settings, content);
+    const displayPath = relative(projectRoot, envPath) || file;
+    console.log(`[gonvex] replaced project env for ${settings.projectID} with ${count} variable(s) from ${displayPath}`);
+    return;
+  }
+
   if (action === "remove" || action === "rm" || action === "unset" || action === "delete") {
     const name = parsedArgs.positional[0];
     if (!name) throw new Error("usage: gonvex env remove NAME");
@@ -715,6 +742,20 @@ async function saveProjectEnv(settings: Settings, name: string, value: string) {
   if (!response.ok) throw new Error(`runtime returned ${response.status} ${response.statusText}: ${await response.text()}`);
 }
 
+async function replaceProjectEnv(settings: Settings, content: string): Promise<number> {
+  const response = await fetch(projectEnvURL(settings), {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      ...projectAuthHeaders(settings),
+    },
+    body: JSON.stringify({ content }),
+  });
+  if (!response.ok) throw new Error(`runtime returned ${response.status} ${response.statusText}: ${await response.text()}`);
+  const payload = await response.json() as { count?: number };
+  return typeof payload.count === "number" ? payload.count : 0;
+}
+
 async function deleteProjectEnv(settings: Settings, name: string) {
   const response = await fetch(projectEnvURL(settings), {
     method: "DELETE",
@@ -747,13 +788,27 @@ function parseEnvSetArgs(positional: string[]) {
   return { name: first, value };
 }
 
+function dotEnvVariableNames(content: string): string[] {
+  const names = new Set<string>();
+  for (const rawLine of content.split(/\r?\n/)) {
+    let line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith("export ")) line = line.slice("export ".length).trimStart();
+    const equalsIndex = line.indexOf("=");
+    if (equalsIndex < 1) continue;
+    const name = line.slice(0, equalsIndex).trim();
+    if (name) names.add(name);
+  }
+  return [...names];
+}
+
 function parseEnvCommandArgs(argv: string[]) {
   const options: Record<string, string> = {};
   const positional: string[] = [];
   let action = "";
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
-    if (["--project", "--runtime-url", "--project-id", "--key"].includes(arg)) {
+    if (["--project", "--runtime-url", "--project-id", "--key", "--file"].includes(arg)) {
       const value = argv[index + 1];
       if (value === undefined) throw new Error(`${arg} requires a value`);
       options[arg] = value;
@@ -1173,7 +1228,7 @@ function printHelp() {
   console.log("  gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--verbose-logs] [-- <command>]");
   console.log("  gonvex init [--template vite-react] [--project <id>] [--runtime <url>]");
   console.log("  gonvex create <app-name> [--template vite-react]");
-  console.log("  gonvex env <list|get|set|remove> [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>]");
+  console.log("  gonvex env <list|get|set|push|remove> [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>]");
 }
 
 function printEnvHelp() {
@@ -1182,6 +1237,8 @@ function printEnvHelp() {
   console.log("  gonvex env get NAME");
   console.log("  gonvex env set NAME VALUE");
   console.log("  gonvex env set NAME=VALUE");
+  console.log("  gonvex env push FILE");
+  console.log("  gonvex env push --file FILE");
   console.log("  gonvex env remove NAME");
 }
 
