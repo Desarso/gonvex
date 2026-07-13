@@ -34,6 +34,11 @@ const client = new ConvexReactClient(import.meta.env.VITE_GONVEX_URL, {
 });
 ```
 
+The reporter registers this capability with the runtime in the background. The
+dashboard shows the **Errors** sidebar item only for projects that have enabled
+reporting. The first captured envelope also enables the project, so clients from
+before capability registration remain compatible.
+
 Update tenant context normally with `client.setAuth({ tenant })`; the reporter
 follows the active tenant.
 
@@ -91,9 +96,10 @@ survive restarts.
 
 ## HTTP endpoints
 
-The browser sends envelopes to `POST /errors/envelope`. Authenticated dashboard
-clients use:
+The browser registers the project capability with `POST /errors/register` and
+sends envelopes to `POST /errors/envelope`. Authenticated dashboard clients use:
 
+- `GET /dev/errors/status`
 - `GET /dev/errors/groups`
 - `GET /dev/errors/groups/:fingerprint`
 - `PATCH /dev/errors/groups/:fingerprint`

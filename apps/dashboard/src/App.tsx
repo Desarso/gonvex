@@ -285,6 +285,7 @@ type ProjectTarget = {
   provisioned?: boolean;
   runtimeCreated?: boolean;
   testTab?: boolean;
+  errorTrackingEnabled?: boolean;
   ownerEmail?: string;
   sharedWith?: string[];
   role?: "owner" | "admin" | "dev" | "viewer";
@@ -1054,6 +1055,7 @@ function normalizeProjectTarget(project: ProjectTarget): ProjectTarget {
     provisioned: project.provisioned ?? true,
     runtimeUrl: trimTrailingSlash(project.runtimeUrl),
     testTab: project.testTab ?? false,
+    errorTrackingEnabled: project.errorTrackingEnabled ?? false,
   };
 }
 
@@ -1240,6 +1242,7 @@ function projectFromRuntime(project: Partial<ProjectTarget> & { id: string; name
     provisioned: project.provisioned ?? true,
     runtimeCreated: project.runtimeCreated ?? true,
     testTab: project.testTab ?? false,
+    errorTrackingEnabled: project.errorTrackingEnabled ?? false,
     ownerEmail: project.ownerEmail,
     sharedWith: project.sharedWith,
     role: project.role as ProjectTarget["role"],
@@ -2446,11 +2449,17 @@ function getPage(id: PageID) {
 }
 
 function pagesForProject(project: ProjectTarget): Page[] {
-  return pages.filter((page) => page.id !== "test" || project.testTab === true);
+  return pages.filter((page) => {
+    if (page.id === "test") return project.testTab === true;
+    if (page.id === "errors") return project.errorTrackingEnabled === true;
+    return true;
+  });
 }
 
 function pageAvailableForProject(project: ProjectTarget, pageID: PageID): boolean {
-  return pageID !== "test" || project.testTab === true;
+  if (pageID === "test") return project.testTab === true;
+  if (pageID === "errors") return project.errorTrackingEnabled === true;
+  return true;
 }
 
 function pageFromPath(pathname: string): PageID {

@@ -327,6 +327,55 @@ func (t *errorTracker) allow(key string, now time.Time) bool {
 	return true
 }
 
+func (s *Server) enableProjectErrorTracking(ctx context.Context, projectID string) bool {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return false
+	}
+	s.hydrateProjects()
+	s.projectMu.Lock()
+	project, ok := s.projects[projectID]
+	changed := ok && !project.ErrorTrackingEnabled
+	if changed {
+		project.ErrorTrackingEnabled = true
+		s.projects[projectID] = project
+	}
+	s.projectMu.Unlock()
+	if changed {
+		// The in-memory flag is enough for minimal local runtimes. Persist it when
+		// a project registry is available so dashboard navigation survives restarts.
+		_ = s.persistProjectErrorTrackingEnabled(ctx, projectID)
+	}
+	return ok
+}
+
+func (s *Server) projectErrorTrackingEnabled(projectID string) bool {
+	s.hydrateProjects()
+	s.projectMu.RLock()
+	defer s.projectMu.RUnlock()
+	return s.projects[strings.TrimSpace(projectID)].ErrorTrackingEnabled
+}
+
+func (s *Server) handleErrorRegistration(w http.ResponseWriter, r *http.Request) {
+	project := projectID(r)
+	if project == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "x-gonvex-project-id is required"})
+		return
+	}
+	if !s.enableProjectErrorTracking(r.Context(), project) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "project not found"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"enabled": true, "project": project})
+}
+
+func (s *Server) handleErrorStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled": s.projectErrorTrackingEnabled(projectID(r)),
+		"project": projectID(r),
+	})
+}
+
 func (s *Server) handleErrorEnvelope(w http.ResponseWriter, r *http.Request) {
 	project := projectID(r)
 	if project == "" {
@@ -350,6 +399,7 @@ func (s *Server) handleErrorEnvelope(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid error envelope"})
 		return
 	}
+	s.enableProjectErrorTracking(r.Context(), project)
 	accepted := 0
 	fingerprints := []string{}
 	for _, event := range envelope.Events {

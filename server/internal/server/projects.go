@@ -19,22 +19,23 @@ import (
 )
 
 type projectTarget struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	Environment    string `json:"environment"`
-	Database       string `json:"database"`
-	DatabaseMode   string `json:"databaseMode"`
-	StorageBucket  string `json:"storageBucket"`
-	Status         string `json:"status"`
-	Description    string `json:"description"`
-	Provisioned    bool   `json:"provisioned"`
-	RuntimeCreated bool   `json:"runtimeCreated"`
-	TestTab        bool   `json:"testTab"`
-	OwnerEmail     string `json:"ownerEmail,omitempty"`
-	Role           string `json:"role,omitempty"`
-	databaseURL    string
-	databaseName   string
-	syncKey        string
+	ID                   string `json:"id"`
+	Name                 string `json:"name"`
+	Environment          string `json:"environment"`
+	Database             string `json:"database"`
+	DatabaseMode         string `json:"databaseMode"`
+	StorageBucket        string `json:"storageBucket"`
+	Status               string `json:"status"`
+	Description          string `json:"description"`
+	Provisioned          bool   `json:"provisioned"`
+	RuntimeCreated       bool   `json:"runtimeCreated"`
+	TestTab              bool   `json:"testTab"`
+	ErrorTrackingEnabled bool   `json:"errorTrackingEnabled"`
+	OwnerEmail           string `json:"ownerEmail,omitempty"`
+	Role                 string `json:"role,omitempty"`
+	databaseURL          string
+	databaseName         string
+	syncKey              string
 }
 
 type createProjectResponse struct {
@@ -271,20 +272,24 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var payload struct {
-		DatabaseMode *string `json:"databaseMode"`
+		DatabaseMode         *string `json:"databaseMode"`
+		ErrorTrackingEnabled *bool   `json:"errorTrackingEnabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if payload.DatabaseMode == nil {
+	if payload.DatabaseMode == nil && payload.ErrorTrackingEnabled == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no project fields provided"})
 		return
 	}
-	databaseMode := normalizedDatabaseMode(*payload.DatabaseMode)
-	if databaseMode == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "databaseMode must be single or multiTenant"})
-		return
+	databaseMode := ""
+	if payload.DatabaseMode != nil {
+		databaseMode = normalizedDatabaseMode(*payload.DatabaseMode)
+		if databaseMode == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "databaseMode must be single or multiTenant"})
+			return
+		}
 	}
 
 	s.hydrateProjects()
@@ -292,7 +297,12 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	s.projectMu.Lock()
 	project, ok := s.projects[projectID]
 	if ok {
-		project.DatabaseMode = databaseMode
+		if payload.DatabaseMode != nil {
+			project.DatabaseMode = databaseMode
+		}
+		if payload.ErrorTrackingEnabled != nil {
+			project.ErrorTrackingEnabled = *payload.ErrorTrackingEnabled
+		}
 		s.projects[projectID] = project
 	}
 	s.projectMu.Unlock()
@@ -438,6 +448,7 @@ func ensureProjectRegistry(ctx context.Context, db *sql.DB) error {
 		provisioned BOOLEAN NOT NULL DEFAULT TRUE,
 		runtime_created BOOLEAN NOT NULL DEFAULT TRUE,
 		test_tab BOOLEAN NOT NULL DEFAULT FALSE,
+		error_tracking_enabled BOOLEAN NOT NULL DEFAULT FALSE,
 		owner_email TEXT NOT NULL DEFAULT '',
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -445,6 +456,9 @@ func ensureProjectRegistry(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS test_tab BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS error_tracking_enabled BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS database_mode TEXT NOT NULL DEFAULT 'single'`); err != nil {
@@ -535,7 +549,7 @@ func (s *Server) loadProjectRegistry(ctx context.Context) ([]projectTarget, erro
 	}
 	defer db.Close()
 
-	rows, err := db.QueryContext(ctx, `SELECT id, name, environment, database_name, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, COALESCE(test_tab, false), COALESCE(NULLIF(database_mode, ''), 'single'), COALESCE(owner_email, '') FROM gonvex_runtime_projects ORDER BY name`)
+	rows, err := db.QueryContext(ctx, `SELECT id, name, environment, database_name, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, COALESCE(test_tab, false), COALESCE(error_tracking_enabled, false), COALESCE(NULLIF(database_mode, ''), 'single'), COALESCE(owner_email, '') FROM gonvex_runtime_projects ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -544,7 +558,7 @@ func (s *Server) loadProjectRegistry(ctx context.Context) ([]projectTarget, erro
 	var projects []projectTarget
 	for rows.Next() {
 		var project projectTarget
-		if err := rows.Scan(&project.ID, &project.Name, &project.Environment, &project.databaseName, &project.databaseURL, &project.StorageBucket, &project.Status, &project.Description, &project.syncKey, &project.Provisioned, &project.RuntimeCreated, &project.TestTab, &project.DatabaseMode, &project.OwnerEmail); err != nil {
+		if err := rows.Scan(&project.ID, &project.Name, &project.Environment, &project.databaseName, &project.databaseURL, &project.StorageBucket, &project.Status, &project.Description, &project.syncKey, &project.Provisioned, &project.RuntimeCreated, &project.TestTab, &project.ErrorTrackingEnabled, &project.DatabaseMode, &project.OwnerEmail); err != nil {
 			return nil, err
 		}
 		project.DatabaseMode = normalizedDatabaseModeWithDefault(project.DatabaseMode)
@@ -567,8 +581,8 @@ func (s *Server) saveProjectRegistry(ctx context.Context, project projectTarget)
 	}
 	project.DatabaseMode = normalizedDatabaseModeWithDefault(project.DatabaseMode)
 	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_runtime_projects (
-		id, name, environment, database_name, database_mode, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, test_tab, owner_email, updated_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+		id, name, environment, database_name, database_mode, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, test_tab, error_tracking_enabled, owner_email, updated_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
 	ON CONFLICT (id) DO UPDATE SET
 		name = EXCLUDED.name,
 		environment = EXCLUDED.environment,
@@ -582,6 +596,7 @@ func (s *Server) saveProjectRegistry(ctx context.Context, project projectTarget)
 		provisioned = EXCLUDED.provisioned,
 		runtime_created = EXCLUDED.runtime_created,
 		test_tab = EXCLUDED.test_tab,
+		error_tracking_enabled = EXCLUDED.error_tracking_enabled,
 		owner_email = EXCLUDED.owner_email,
 		updated_at = now()`,
 		project.ID,
@@ -597,8 +612,19 @@ func (s *Server) saveProjectRegistry(ctx context.Context, project projectTarget)
 		project.Provisioned,
 		project.RuntimeCreated,
 		project.TestTab,
+		project.ErrorTrackingEnabled,
 		project.OwnerEmail,
 	)
+	return err
+}
+
+func (s *Server) persistProjectErrorTrackingEnabled(ctx context.Context, projectID string) error {
+	db, err := s.openProjectRegistry(ctx)
+	if err != nil || db == nil {
+		return err
+	}
+	defer db.Close()
+	_, err = db.ExecContext(ctx, `UPDATE gonvex_runtime_projects SET error_tracking_enabled = TRUE, updated_at = now() WHERE id = $1`, projectID)
 	return err
 }
 

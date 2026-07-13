@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist } from "./App";
@@ -121,6 +121,22 @@ describe("App", () => {
     expect(screen.queryByRole("heading", { name: /livegrid test surface/i })).not.toBeInTheDocument();
   });
 
+  it("hides error tracking navigation for projects that have not enabled it", async () => {
+    await renderProjectApp();
+
+    expect(within(screen.getByLabelText("Primary sections")).queryByRole("button", { name: /^errors$/i })).not.toBeInTheDocument();
+  });
+
+  it("redirects an unavailable error tracking deep link to the project overview", async () => {
+    window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({ email: "gabriel@example.com", name: "Gabriel" }));
+    window.history.replaceState(null, "", "/projects/app/errors");
+
+    render(<App />);
+
+    await waitFor(() => expect(window.location.pathname).toBe("/projects/app/overview"));
+    expect(screen.getByRole("region", { name: /runtime summary/i })).toBeInTheDocument();
+  });
+
   it("renders an accessible React Aria button", async () => {
     const user = await renderProjectApp();
 
@@ -153,7 +169,15 @@ describe("App", () => {
   });
 
   it("expands a grouped error with tenant, release, and machine context", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal("WebSocket", undefined);
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/dev/projects") && init?.method === "POST") {
+        return { ok: true, statusText: "OK", json: async () => ({ project: {
+          id: "error-app", name: "Error App", environment: "local dev", runtimeUrl: "http://127.0.0.1:8080",
+          database: "gonvex_error_app", storageBucket: "error-app-dev", status: "local", description: "Error tracking test project.",
+          provisioned: false, runtimeCreated: true, databaseMode: "single", testTab: false, errorTrackingEnabled: true,
+        }, projectKey: "test-project-key" }) } as Response;
+      }
       if (String(input).includes("/dev/errors/groups")) {
         return { ok: true, statusText: "OK", json: async () => ({ groups: [{
           fingerprint: "group-1", title: "Checkout failed", culprit: "at submitOrder (src/checkout.ts:40:3)", status: "unresolved", priority: "high",
@@ -163,7 +187,19 @@ describe("App", () => {
       }
       return { ok: true, statusText: "OK", json: async () => ({}) } as Response;
     }));
-    const user = await renderProjectApp();
+    const user = userEvent.setup();
+    window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({ email: "gabriel@example.com", name: "Gabriel" }));
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /create project/i }));
+    const createDialog = screen.getByRole("dialog", { name: /create project/i });
+    await user.type(within(createDialog).getByLabelText(/name/i), "Error App");
+    await user.click(within(createDialog).getByRole("button", { name: /create project/i }));
+    await user.click(await screen.findByRole("button", { name: /^done$/i }));
+    const projectTile = screen.getByText("Error App").closest(".project-tile");
+    expect(projectTile).not.toBeNull();
+    await user.click(within(projectTile as HTMLElement).getByRole("button", { name: /open project/i }));
+
+    expect(within(screen.getByLabelText("Primary sections")).getByRole("button", { name: /^errors$/i })).toBeInTheDocument();
     await user.click(within(screen.getByLabelText("Primary sections")).getByRole("button", { name: /^errors$/i }));
 
     expect(await screen.findByText("Checkout failed")).toBeInTheDocument();

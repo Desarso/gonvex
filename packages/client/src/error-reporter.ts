@@ -57,13 +57,18 @@ export class GonvexErrorReporter {
     this.options = { sampleRate: 1, captureGlobalErrors: true, maxQueueSize: 100, ...options };
     this.queueKey = `gonvex-error-queue:${options.project}`;
     this.queue = readQueue(this.queueKey);
+    this.registerProject();
     if (this.options.captureGlobalErrors && typeof window !== "undefined") this.installGlobalHandlers();
     if (this.queue.length) this.scheduleFlush();
   }
 
   setUser(user?: ErrorUser) { this.options.user = user; }
   setTenant(tenant?: string) { this.options.tenant = tenant; }
-  setProject(project: string) { this.options.project = project; }
+  setProject(project: string) {
+    if (project === this.options.project) return;
+    this.options.project = project;
+    this.registerProject();
+  }
 
   addBreadcrumb(category: string, message: string, data?: ErrorContext) {
     this.breadcrumbs.push({ timestamp: new Date().toISOString(), category, message, data: scrub(data) as ErrorContext });
@@ -113,6 +118,19 @@ export class GonvexErrorReporter {
 
   close() { this.removeGlobal?.(); if (this.timer) clearTimeout(this.timer); void this.flush(); }
 
+  private registerProject() {
+    if (typeof fetch !== "function") return;
+    try {
+      void fetch(errorEndpoint(this.options.endpoint, "register"), {
+        method: "POST",
+        headers: { "x-gonvex-project-id": this.options.project },
+        keepalive: true,
+      }).catch(() => undefined);
+    } catch {
+      // Registration is capability discovery only and must never affect the app.
+    }
+  }
+
   private scheduleFlush() {
     if (this.timer) return;
     this.timer = setTimeout(() => { this.timer = undefined; void this.flush(); }, 1000);
@@ -152,4 +170,4 @@ function randomId() { return `${Date.now().toString(36)}${Math.random().toString
 function persistedId(key: string) { try { const current = localStorage.getItem(key); if (current) return current; const next = randomId(); localStorage.setItem(key, next); return next; } catch { return randomId(); } }
 function readQueue(key: string): ErrorEventPayload[] { try { const value = JSON.parse(localStorage.getItem(key) ?? "[]"); return Array.isArray(value) ? value.slice(0, 100) : []; } catch { return []; } }
 function writeQueue(key: string, queue: ErrorEventPayload[]) { try { if (queue.length) localStorage.setItem(key, JSON.stringify(queue)); else localStorage.removeItem(key); } catch { /* reporting must never break the app */ } }
-function errorEndpoint(raw: string) { const value = raw.replace(/\/$/, ""); if (value.startsWith("ws://")) return `http://${value.slice(5)}/errors/envelope`; if (value.startsWith("wss://")) return `https://${value.slice(6)}/errors/envelope`; return `${value}/errors/envelope`; }
+function errorEndpoint(raw: string, resource = "envelope") { const value = raw.replace(/\/$/, ""); if (value.startsWith("ws://")) return `http://${value.slice(5)}/errors/${resource}`; if (value.startsWith("wss://")) return `https://${value.slice(6)}/errors/${resource}`; return `${value}/errors/${resource}`; }

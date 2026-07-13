@@ -47,6 +47,7 @@ func TestFingerprintSurvivesBuildAndLineNumberChanges(t *testing.T) {
 
 func TestErrorEnvelopeRequiresProjectHeaderAndOverridesPayloadProject(t *testing.T) {
 	server := New(config.Config{})
+	server.projects["trusted"] = projectTarget{ID: "trusted", Name: "Trusted"}
 	body := bytes.NewBufferString(`{"events":[{"eventId":"one","project":"spoofed","message":"boom"}]}`)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/errors/envelope", body))
@@ -65,6 +66,45 @@ func TestErrorEnvelopeRequiresProjectHeaderAndOverridesPayloadProject(t *testing
 	for _, group := range server.errorTracker.groups {
 		if group.Project != "trusted" {
 			t.Fatalf("payload selected project %q", group.Project)
+		}
+	}
+	if !server.projects["trusted"].ErrorTrackingEnabled {
+		t.Fatal("first accepted envelope did not enable project error tracking")
+	}
+}
+
+func TestErrorTrackingRegistrationIsProjectScoped(t *testing.T) {
+	server := New(config.Config{})
+	server.projects["shop"] = projectTarget{ID: "shop", Name: "Shop"}
+	server.projects["admin"] = projectTarget{ID: "admin", Name: "Admin"}
+
+	request := httptest.NewRequest(http.MethodPost, "/errors/register", nil)
+	request.Header.Set("x-gonvex-project-id", "shop")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("registration failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if !server.projects["shop"].ErrorTrackingEnabled {
+		t.Fatal("registration did not mark the project as enabled")
+	}
+
+	for projectID, want := range map[string]bool{"shop": true, "admin": false} {
+		request = httptest.NewRequest(http.MethodGet, "/dev/errors/status", nil)
+		request.Header.Set("x-gonvex-project-id", projectID)
+		recorder = httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status for %s failed: %d %s", projectID, recorder.Code, recorder.Body.String())
+		}
+		var payload struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Enabled != want {
+			t.Fatalf("project %s enabled=%v, want %v", projectID, payload.Enabled, want)
 		}
 	}
 }
