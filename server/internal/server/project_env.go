@@ -109,29 +109,48 @@ func (s *Server) loadProjectEnv(ctx context.Context, project string) ([]projectE
 	return vars, rows.Err()
 }
 
+// acceptsProjectEnvKey is deliberately stricter than acceptsSyncKey. A sync key
+// may be runtime-wide for bootstrapping local projects, but environment values
+// are project-scoped secrets and require a credential bound to the exact project
+// in the route. Persisted/configured project keys are authoritative. The legacy
+// single-key runtime configuration remains supported only for generated Gonvex
+// keys, whose project identifier is encoded in the key itself.
+func (s *Server) acceptsProjectEnvKey(project string, provided string) bool {
+	project = strings.TrimSpace(project)
+	provided = strings.TrimSpace(provided)
+	if project == "" || provided == "" {
+		return false
+	}
+
+	s.hydrateProjects()
+	s.projectMu.RLock()
+	expected := strings.TrimSpace(s.config.ProjectKeys[project])
+	if expected == "" {
+		if target, ok := s.projects[project]; ok {
+			expected = strings.TrimSpace(target.syncKey)
+		}
+	}
+	devKey := strings.TrimSpace(s.config.DevSyncKey)
+	s.projectMu.RUnlock()
+
+	if expected != "" {
+		return constantTimeString(provided, expected)
+	}
+	return devKey != "" &&
+		constantTimeString(provided, devKey) &&
+		projectIDFromProjectKey(provided) == project
+}
+
 // authorizeProjectEnvRequest accepts either an owner/admin dashboard session or
-// the exact project key used by the CLI. Project keys must be registered and
+// the exact project key used by the CLI. Project keys must be project-bound and
 // non-empty; unlike the local-dev sync endpoint, this never treats an
 // unconfigured key as open access.
 func (s *Server) authorizeProjectEnvRequest(w http.ResponseWriter, r *http.Request, project string, manage bool) bool {
-	provided := strings.TrimSpace(syncKey(r))
-	if provided != "" {
-		s.hydrateProjects()
-		s.projectMu.RLock()
-		expected := strings.TrimSpace(s.config.ProjectKeys[project])
-		if expected == "" {
-			if target, ok := s.projects[project]; ok {
-				expected = strings.TrimSpace(target.syncKey)
-			}
-		}
-		devKey := strings.TrimSpace(s.config.DevSyncKey)
-		s.projectMu.RUnlock()
-		if (expected != "" && provided == expected) || (expected == "" && devKey != "" && provided == devKey) {
-			return true
-		}
+	if s.acceptsProjectEnvKey(project, syncKey(r)) {
+		return true
 	}
 
-	actor, ok := s.dashboardActorFromRequest(r)
+	actor, ok := s.projectEnvDashboardActorFromRequest(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in or project key is required"})
 		return false
@@ -148,6 +167,27 @@ func (s *Server) authorizeProjectEnvRequest(w http.ResponseWriter, r *http.Reque
 		return false
 	}
 	return true
+}
+
+// projectEnvDashboardActorFromRequest accepts signed dashboard sessions and the
+// explicitly configured runtime admin key. It intentionally does not use the
+// legacy DevSyncKey-as-admin fallback: allowing a runtime-wide sync credential
+// here would bypass project-key scoping.
+func (s *Server) projectEnvDashboardActorFromRequest(r *http.Request) (dashboardActor, bool) {
+	token := strings.TrimSpace(r.Header.Get("authorization"))
+	if strings.HasPrefix(strings.ToLower(token), "bearer ") {
+		token = strings.TrimSpace(token[len("Bearer "):])
+	}
+	if actor, ok := s.verifyDashboardToken(token); ok {
+		return actor, true
+	}
+	if adminKey := strings.TrimSpace(s.config.AdminKey); adminKey != "" && constantTimeString(token, adminKey) {
+		return dashboardActor{Email: "admin@gonvex.local", Name: "Gonvex Admin", Role: "admin"}, true
+	}
+	if s.dashboardAuthOptional() {
+		return dashboardActor{Email: "local@gonvex.dev", Name: "Local Developer", Role: "admin"}, true
+	}
+	return dashboardActor{}, false
 }
 
 // GET /dev/projects/{project}/env

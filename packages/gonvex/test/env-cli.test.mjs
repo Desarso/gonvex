@@ -21,6 +21,67 @@ function isolateProjectSettings() {
   };
 }
 
+test("env list, set, and remove use the selected project's key", async (t) => {
+  const restoreSettings = isolateProjectSettings();
+  t.after(restoreSettings);
+
+  const received = [];
+  const server = createServer(async (request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    for await (const chunk of request) body += chunk;
+    received.push({ body, headers: request.headers, method: request.method, url: request.url });
+    response.writeHead(200, { "content-type": "application/json" });
+    if (request.method === "GET") {
+      response.end(JSON.stringify({
+        variables: [{ name: "AUTH_TEST_ALPHA", value: "alpha-value", masked: "", source: "project", sensitive: false }],
+      }));
+      return;
+    }
+    response.end(JSON.stringify({ ok: true }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+  const address = server.address();
+  assert.notEqual(address, null);
+  assert.equal(typeof address, "object");
+
+  const root = await mkdtemp(join(tmpdir(), "gonvex-env-commands-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, ".env.local"), [
+    "GONVEX_PROJECT_ID=project-v6",
+    `GONVEX_RUNTIME_URL=http://127.0.0.1:${address.port}`,
+    "GONVEX_PROJECT_KEY=project-v6-key",
+    "",
+  ].join("\n"));
+
+  const messages = [];
+  const originalLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => { console.log = originalLog; });
+
+  await main(["env", "list", "--project", root]);
+  await main(["env", "set", "AUTH_TEST_BETA", "beta-value", "--project", root]);
+  await main(["env", "remove", "AUTH_TEST_BETA", "--project", root]);
+
+  assert.deepEqual(received.map(({ method, url }) => ({ method, url })), [
+    { method: "GET", url: "/dev/projects/project-v6/env" },
+    { method: "POST", url: "/dev/projects/project-v6/env" },
+    { method: "DELETE", url: "/dev/projects/project-v6/env" },
+  ]);
+  for (const request of received) {
+    assert.equal(request.headers.authorization, "Bearer project-v6-key");
+    assert.equal(request.headers["x-gonvex-key"], "project-v6-key");
+  }
+  assert.equal(received[0].body, "");
+  assert.deepEqual(JSON.parse(received[1].body), { name: "AUTH_TEST_BETA", value: "beta-value" });
+  assert.deepEqual(JSON.parse(received[2].body), { name: "AUTH_TEST_BETA" });
+  assert.ok(messages.some((message) => message.includes("AUTH_TEST_ALPHA")));
+});
+
 test("env push uploads one file to the selected project with its project key", async (t) => {
   const restoreSettings = isolateProjectSettings();
   t.after(restoreSettings);

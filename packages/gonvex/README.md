@@ -55,6 +55,7 @@ Manage project environment variables:
 
 ```bash
 npx gonvex env list
+npx gonvex env get NAME
 npx gonvex env set NAME value
 npx gonvex env push .env.production
 npx gonvex env remove NAME
@@ -64,6 +65,13 @@ npx gonvex env remove NAME
 replaces that project's server-side environment-variable set. Pass a dedicated
 deployment env file; the CLI refuses to upload `GONVEX_PROJECT_KEY` and related
 CLI credentials.
+
+Environment commands require a runtime built from Gonvex v0.1.9 or newer. The
+CLI sends the selected project key in both supported authentication headers, and
+the runtime scopes that key to the exact project in the request. If environment
+commands return `dashboard sign-in is required` while `gonvex dev --once` works,
+upgrade and recreate the runtime; updating this npm package alone does not update
+the deployed Go runtime.
 
 ## Runtime Settings
 

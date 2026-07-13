@@ -56,6 +56,48 @@ docker compose down
 Do not add `-v` to `docker compose down` unless you intentionally want to delete the
 local Postgres, Valkey, MinIO, and runtime volumes.
 
+## Upgrade the runtime
+
+The npm CLI and the Go runtime are separate artifacts. Installing a newer
+`@gonvex/cli` changes the client on your workstation, but it does not replace an
+already running runtime binary or container. The reference runtime image is compiled
+from the source in the Docker build context.
+
+After updating the checkout, rebuild and recreate only the runtime service:
+
+```bash
+git pull --ff-only
+docker compose build --no-cache runtime
+docker compose up -d --force-recreate runtime
+docker compose logs --tail=100 runtime
+curl http://localhost:8080/healthz
+```
+
+This preserves the existing Postgres and runtime volumes. No manual database
+migration is required for project environment variables; the runtime creates or
+updates its control-plane tables during startup. Do not use `docker compose down -v`
+as part of this upgrade.
+
+Project-key authentication for project environment variables first shipped in
+runtime v0.1.9 (source commit `c49ef6a`). The exact response
+`{"error":"dashboard sign-in is required"}` from
+`/dev/projects/{project}/env` identifies the v0.1.8-or-earlier handler, even when a
+newer CLI successfully authenticates to `/dev/sync`. Deploy the current checkout to
+also enforce the stricter rule that a runtime-wide development sync key is not a
+project environment credential.
+
+Verify the rollout from an application directory without printing its key:
+
+```bash
+npx gonvex dev --once
+npx gonvex env list
+```
+
+For a proxied deployment, preserve `Authorization`, `x-gonvex-key`, and
+`x-gonvex-project-id`, and forward `/dev/projects/*` and `/dev/sync` to the same
+runtime. A proxy-generated dashboard-auth 401 means the request did not reach the
+route-specific project environment authorization.
+
 ## Connect an application
 
 Use the runtime's browser-reachable address—not its internal Compose service name—in
@@ -123,6 +165,7 @@ proxy or load balancer that terminates TLS and supports WebSocket upgrades.
 - Run Valkey/Redis with an appropriate durability and eviction policy for your load.
 - Back up every application database and object-storage bucket.
 - Restrict access to the dashboard and `/dev/*` management endpoints.
+- Preserve project authentication headers on proxied `/dev/*` requests.
 - Configure TLS and preserve WebSocket upgrades on `/ws`.
 - Set `GONVEX_PUBLIC_URL` to the externally reachable runtime URL.
 - Monitor `/healthz`, container restarts, database capacity, and runtime logs.
