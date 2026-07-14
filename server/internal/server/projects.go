@@ -399,12 +399,28 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Include relationships loaded from the registry after a restart. Auth can
+	// create tenant databases immediately before a later create/doctor step
+	// fails, so project rollback must delete those physical databases too.
+	s.hydrateProjectTenantDatabases(r.Context(), projectID)
 	s.projectMu.Lock()
 	defer s.projectMu.Unlock()
 	project, ok := s.projects[projectID]
 	if !ok || !project.RuntimeCreated {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "runtime-created project not found"})
 		return
+	}
+	tenantDatabaseNames := map[string]bool{}
+	for _, tenant := range s.tenants {
+		if tenant.ProjectID == projectID && tenant.RuntimeCreated && tenant.databaseName != "" {
+			tenantDatabaseNames[tenant.databaseName] = true
+		}
+	}
+	for databaseName := range tenantDatabaseNames {
+		if err := dropProjectDatabase(r.Context(), s.config.PostgresURL, databaseName); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("drop tenant database %s: %v", databaseName, err)})
+			return
+		}
 	}
 	if err := dropProjectDatabase(r.Context(), s.config.PostgresURL, project.databaseName); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -418,6 +434,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.invalidateAppAuthRequirement(projectID)
 	for key, tenant := range s.tenants {
 		if tenant.ProjectID != projectID {
 			continue
@@ -485,6 +502,25 @@ func (s *Server) openProjectRegistry(ctx context.Context) (*sql.DB, error) {
 	connection.Close()
 	s.registryReady = true
 	s.registryMu.Unlock()
+	return db, nil
+}
+
+// pooledProjectRegistry returns the process-wide connection pool used by
+// latency-sensitive authorization reads. Callers must not close the returned
+// database; database/sql replaces broken connections in the pool as needed.
+func (s *Server) pooledProjectRegistry(ctx context.Context) (*sql.DB, error) {
+	s.authRegistryMu.Lock()
+	defer s.authRegistryMu.Unlock()
+	if s.authRegistryDB != nil {
+		return s.authRegistryDB, nil
+	}
+	db, err := s.openProjectRegistry(ctx)
+	if err != nil || db == nil {
+		return db, err
+	}
+	db.SetMaxOpenConns(16)
+	db.SetMaxIdleConns(4)
+	s.authRegistryDB = db
 	return db, nil
 }
 
@@ -648,10 +684,14 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
 		provider TEXT NOT NULL,
 		enabled BOOLEAN NOT NULL DEFAULT TRUE,
+		signup_mode TEXT NOT NULL DEFAULT 'personal',
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		PRIMARY KEY (project_id, provider)
 	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS signup_mode TEXT NOT NULL DEFAULT 'personal'`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_redirect_uris (
@@ -672,6 +712,7 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 		email_verified BOOLEAN NOT NULL DEFAULT FALSE,
 		name TEXT NOT NULL DEFAULT '',
 		picture TEXT NOT NULL DEFAULT '',
+		disabled_at TIMESTAMPTZ,
 		last_signed_in_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -679,8 +720,19 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	)`); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_auth_users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS gonvex_auth_users_project_id
+		ON gonvex_auth_users (project_id, id)`); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_users_by_project
 		ON gonvex_auth_users (project_id, created_at DESC)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_users_by_email
+		ON gonvex_auth_users (project_id, lower(email))`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_transactions (
@@ -696,6 +748,10 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	)`); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_transactions_by_expiry
+		ON gonvex_auth_transactions (expires_at)`); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_codes (
 		code_hash TEXT PRIMARY KEY,
 		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
@@ -708,18 +764,121 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	)`); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_codes_by_expiry
+		ON gonvex_auth_codes (expires_at)`); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_sessions (
 		token_hash TEXT PRIMARY KEY,
 		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
 		user_id TEXT NOT NULL REFERENCES gonvex_auth_users(id) ON DELETE CASCADE,
+		family_id TEXT NOT NULL DEFAULT '',
 		expires_at TIMESTAMPTZ NOT NULL,
+		revoked_at TIMESTAMPTZ,
+		last_seen_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_auth_sessions ADD COLUMN IF NOT EXISTS family_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_auth_sessions ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ`); err != nil {
+		return err
+	}
+	// Sessions created before rotating refresh tokens existed used a much longer
+	// bearer lifetime and have no family id. Cap those legacy rows on upgrade so
+	// deploying the hardened session model does not leave seven-day access tokens
+	// valid in the background.
+	if _, err := db.ExecContext(ctx, `UPDATE gonvex_auth_sessions
+		SET expires_at = LEAST(expires_at, created_at + interval '15 minutes')
+		WHERE family_id = '' AND expires_at > created_at + interval '15 minutes'`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_sessions_by_user
+		ON gonvex_auth_sessions (project_id, user_id, expires_at DESC)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_sessions_by_family
+		ON gonvex_auth_sessions (family_id) WHERE family_id <> ''`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_sessions_by_expiry
+		ON gonvex_auth_sessions (expires_at)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_refresh_tokens (
+		token_hash TEXT PRIMARY KEY,
+		family_id TEXT NOT NULL,
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		user_id TEXT NOT NULL REFERENCES gonvex_auth_users(id) ON DELETE CASCADE,
+		expires_at TIMESTAMPTZ NOT NULL,
+		used_at TIMESTAMPTZ,
 		revoked_at TIMESTAMPTZ,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_sessions_by_user
-		ON gonvex_auth_sessions (project_id, user_id, expires_at DESC)`); err != nil {
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_refresh_tokens_by_family
+		ON gonvex_auth_refresh_tokens (family_id, created_at DESC)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_refresh_tokens_by_expiry
+		ON gonvex_auth_refresh_tokens (expires_at)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_memberships (
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		user_id TEXT NOT NULL,
+		tenant_id TEXT NOT NULL,
+		role TEXT NOT NULL DEFAULT 'member',
+		permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (project_id, user_id, tenant_id),
+		FOREIGN KEY (project_id, user_id) REFERENCES gonvex_auth_users(project_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (project_id, tenant_id) REFERENCES gonvex_runtime_tenants(project_id, tenant_id) ON DELETE CASCADE
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_memberships_by_tenant
+		ON gonvex_auth_memberships (project_id, tenant_id, role, user_id)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_membership_invitations (
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		tenant_id TEXT NOT NULL,
+		email TEXT NOT NULL,
+		role TEXT NOT NULL DEFAULT 'member',
+		permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
+		invited_by TEXT NOT NULL DEFAULT '',
+		expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '7 days'),
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (project_id, tenant_id, email),
+		FOREIGN KEY (project_id, tenant_id) REFERENCES gonvex_runtime_tenants(project_id, tenant_id) ON DELETE CASCADE
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_auth_membership_invitations
+		ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '7 days')`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_membership_invitations_by_email
+		ON gonvex_auth_membership_invitations (project_id, email)`); err != nil {
+		return err
+	}
+	// Backfill the project-shaped membership scope used by single-database auth
+	// projects. This also upgrades projects enabled before that scope existed.
+	if _, err := db.ExecContext(ctx, `INSERT INTO gonvex_runtime_tenants (
+		relationship_id, project_id, tenant_id, name, status, description, provisioned, runtime_created, updated_at
+	)
+	SELECT 'auth-single:' || p.id, p.id, p.id, p.name, 'active',
+		'Single-database app membership scope.', TRUE, FALSE, now()
+	FROM gonvex_runtime_projects p
+	WHERE COALESCE(NULLIF(p.database_mode, ''), 'single') = 'single'
+	AND EXISTS (SELECT 1 FROM gonvex_auth_providers a WHERE a.project_id = p.id)
+	ON CONFLICT (project_id, tenant_id) DO UPDATE SET name = EXCLUDED.name, updated_at = now()`); err != nil {
 		return err
 	}
 	return nil
@@ -798,6 +957,23 @@ func (s *Server) saveProjectRegistry(ctx context.Context, project projectTarget)
 		project.ErrorTrackingEnabled,
 		project.OwnerEmail,
 	)
+	if err != nil {
+		return err
+	}
+	if project.DatabaseMode == "multiTenant" {
+		_, err = db.ExecContext(ctx, `DELETE FROM gonvex_runtime_tenants
+			WHERE project_id = $1 AND tenant_id = $1 AND relationship_id = $2`,
+			project.ID, singleAppAuthTenantRelationshipID(project.ID))
+	} else {
+		_, err = db.ExecContext(ctx, `INSERT INTO gonvex_runtime_tenants (
+			relationship_id, project_id, tenant_id, name, status, description, provisioned, runtime_created, updated_at
+		)
+		SELECT $2, p.id, p.id, p.name, 'active', 'Single-database app membership scope.', TRUE, FALSE, now()
+		FROM gonvex_runtime_projects p WHERE p.id = $1
+		AND EXISTS (SELECT 1 FROM gonvex_auth_providers a WHERE a.project_id = p.id)
+		ON CONFLICT (project_id, tenant_id) DO UPDATE SET name = EXCLUDED.name, updated_at = now()`,
+			project.ID, singleAppAuthTenantRelationshipID(project.ID))
+	}
 	return err
 }
 

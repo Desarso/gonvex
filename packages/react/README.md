@@ -67,14 +67,16 @@ function Root() {
 }
 
 function Account() {
-  const { user } = useGonvexAuth();
-  return <>{user?.email}<GoogleSignInButton /></>;
+  const { activeTenant, user } = useGonvexAuth();
+  return <>{user?.email} · {activeTenant?.name}<GoogleSignInButton /></>;
 }
 ```
 
 The provider performs Authorization Code + PKCE against the Gonvex runtime and
-attaches the resulting project-scoped session to the realtime client. It does not
-load Firebase or a Google browser SDK.
+attaches the resulting project-scoped session to the realtime client. Access tokens
+are short-lived and refresh tokens rotate across tabs. Multi-tenant memberships are
+verified by the runtime and switched with `setActiveTenant`. The provider does not
+load a Google browser SDK.
 
 ## Convex Compatibility
 

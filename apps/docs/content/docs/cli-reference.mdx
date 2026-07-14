@@ -49,6 +49,10 @@ npx gonvex token create "Developer CLI"
 # Broad project administration without account/token administration
 npx gonvex token create "Project automation" --permission 'projects:*'
 
+# Runtime-wide project administration (dashboard administrators only)
+npx gonvex token create "Runtime automation" \
+  --permission 'projects:*' --permission 'admin:projects'
+
 # Explicit full account permissions
 npx gonvex token create "Account automation" --full
 ```
@@ -57,7 +61,9 @@ Repeat `--permission` to grant multiple permissions. Run
 `gonvex token permissions` to list accepted values. The secret is returned only by
 the create response; the runtime stores a hash. List token metadata with
 `gonvex token list` and revoke a token with `gonvex token revoke <token-id>`.
-Tokens remain bound to their owner, so project membership checks still apply.
+Project membership checks still apply unless an administrator explicitly grants
+`admin:projects`. Dashboard administrators can create and revoke the same runtime-wide
+credentials from their account profile on the project chooser.
 
 ## `gonvex project`
 
@@ -83,32 +89,63 @@ Enable project-scoped Google login without Firebase or a per-app Google Cloud se
 
 ```bash
 npx gonvex auth add google --origin http://localhost:5173
-npx gonvex auth add google --origin https://app.example.com
+npx gonvex auth add google \
+  --origin https://preview.example.com \
+  --origin https://app.example.com \
+  --signup-mode personal
+npx gonvex auth remove google --origin https://preview.example.com
 ```
 
-The default callback path is `/auth/callback`; override it with
+The default callback path is `/`; override it with
 `--callback-path`. The command requires the selected project's
 `GONVEX_PROJECT_KEY`, registers the exact callback with the runtime, updates
 `gonvex.json`, and writes `gonvex/auth.tsx` with `GonvexAuthProvider`,
-`GoogleSignInButton`, and `useGonvexAuth` exports.
+`GoogleSignInButton`, and `useGonvexAuth` exports. An untouched Vite React starter
+is wired automatically; custom applications keep their existing source and use
+the generated module explicitly.
 
 Inspect the provider or list accounts created by successful sign-ins:
 
 ```bash
 npx gonvex auth status
 npx gonvex auth status --json
+npx gonvex auth doctor
 npx gonvex auth users
 npx gonvex auth users --json
 ```
 
-Disable new Google sign-ins with `gonvex auth remove google`. Existing account and
+`auth doctor` checks the central broker configuration, provider state, exact
+callbacks recorded in `gonvex.json`, and invite-only bootstrap requirements. It
+exits non-zero on any issue, making it suitable for production deployment gates.
+
+For a multi-tenant project, manage workspaces, invitations, memberships, and app
+accounts without direct database changes:
+
+```bash
+npx gonvex auth tenants list
+npx gonvex auth tenants create "Acme" --owner owner@acme.example
+npx gonvex auth memberships list --tenant <tenant-id>
+npx gonvex auth memberships add --tenant <tenant-id> --email user@example.com --role member
+npx gonvex auth memberships remove --tenant <tenant-id> --user <user-id>
+npx gonvex auth memberships remove --tenant <tenant-id> --email pending@example.com
+npx gonvex auth user disable <user-id>
+npx gonvex auth user enable <user-id>
+npx gonvex auth user delete <user-id>
+```
+
+Remove a retired callback with `gonvex auth remove google --origin <url>`; this
+keeps the provider enabled. Disable all new Google sign-ins with
+`gonvex auth remove google`. Existing account and
 session records are retained; disabling the provider prevents new authorization
-flows. The Gonvex runtime operator must configure one central Google OAuth client as
+flows and removes native-auth enforcement from that project unless the runtime has
+`GONVEX_REQUIRE_AUTH=true`. The Gonvex runtime operator must configure one central Google OAuth client as
 described in [Self-hosting and Deployment](./deployment#one-time-google-auth-broker-setup).
 
-Native Google login currently applies to `single` database-mode projects. The
-runtime refuses to enable it on `multiTenant` projects until tenant membership can
-be assigned explicitly.
+Native Google login applies to both `single` and `multiTenant` database modes.
+For `single`, `--signup-mode personal` is open signup into the shared project scope
+and `inviteOnly` requires an invitation whose tenant ID is the project ID. For
+`multiTenant`, `personal` creates a personal workspace on first sign-in and
+`inviteOnly` prevents public workspace creation.
 
 ## `gonvex init`
 
@@ -130,7 +167,7 @@ steps.
 
 ## `gonvex create`
 
-Create a new app directory from the complete starter:
+Create a local app directory from the complete starter:
 
 ```bash
 npx gonvex create my-app [--template vite-react]
@@ -144,6 +181,26 @@ npm create gonvex@latest my-app
 
 Both paths use `vite-react` by default. Creation fails if the target path already
 exists.
+
+Provision the runtime project and ship a wired Google sign-in screen in the same
+command:
+
+```bash
+npm create gonvex@latest my-app -- \
+  --runtime-url https://gonvex.example.com \
+  --database-mode multiTenant \
+  --google-auth \
+  --origin https://my-app.example.com \
+  --signup-mode inviteOnly \
+  --owner owner@example.com
+```
+
+`--google-auth` implies `--provision`. Repeat `--origin` for preview and production
+sites. `--owner` is required for an invite-only app and bootstraps its first
+workspace/scope invitation in the same command. An HTTPS origin triggers `auth
+doctor`; use `--allow-unready` only while the runtime operator is deliberately
+completing the one-time Google broker setup. If provisioning fails, the CLI removes
+the newly created local directory and attempts to delete the new runtime project.
 
 ## `gonvex dev`
 

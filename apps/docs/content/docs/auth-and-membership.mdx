@@ -9,8 +9,18 @@ Gonvex needs a runtime-level auth and membership model because users can belong 
 
 ## Native Google login
 
-For a single-database project, Google login can be enabled without Firebase, the
-Firebase CLI, or the Google Cloud CLI:
+Google login works for both single-database and multi-tenant projects without a
+Firebase CLI or Google Cloud CLI in the application workflow. For a new app, the
+complete provision-and-wire path is one command:
+
+```bash
+npm create gonvex@latest my-app -- \
+  --runtime-url https://gonvex.example.com \
+  --google-auth \
+  --origin https://my-app.example.com
+```
+
+For an existing project:
 
 ```bash
 npx gonvex auth add google --origin http://localhost:5173
@@ -51,21 +61,41 @@ function Account() {
 }
 ```
 
-Vite serves the callback as an SPA route automatically. Frameworks that do not
-fall back to the app entry point must serve `gonvex.json`'s configured callback
-path (by default `/auth/callback`). Register another exact origin by running the
-same command with a different `--origin`, for example the production site.
+The default callback is the app root (`/`). Frameworks must serve the application
+entry point for the configured callback path. Register local, preview, and
+production origins together by repeating `--origin`:
+
+```bash
+npx gonvex auth add google \
+  --origin http://localhost:5173 \
+  --origin https://preview.example.com \
+  --origin https://app.example.com
+
+# Retire a preview origin without disabling Google for the app.
+npx gonvex auth remove google --origin https://preview.example.com
+```
 
 List the accounts created for a project with:
 
 ```bash
 npx gonvex auth status
+npx gonvex auth doctor
 npx gonvex auth users
 ```
+
+`auth doctor` exits non-zero until the runtime broker, provider, and exact local
+callbacks are production-ready. `gonvex create --google-auth` runs this check
+automatically when a production HTTPS origin is supplied.
 
 Backend functions receive the account as `ctx.User`. The user ID is generated per
 Gonvex project, so the same Google account is not exposed as one shared identifier
 to unrelated applications.
+
+Registered HTTP functions use the same runtime boundary: once Google is enabled,
+anonymous requests receive `401`, and a valid project session populates `ctx.User`
+and `ctx.Permissions`. For a direct `fetch`, obtain the token from
+`useGonvexAuth().fetchAccessToken(...)` and send it as
+`Authorization: Bearer <token>`.
 
 ### Why no app needs a Google Cloud project
 
@@ -75,7 +105,7 @@ Gonvex installation registers one Google web OAuth client and one callback:
 ```txt
 app -> Gonvex /auth/google/authorize -> Google
 Google -> Gonvex /auth/google/callback
-Gonvex -> app /auth/callback?code=...
+Gonvex -> app /?code=...
 app -> Gonvex /auth/token (one-time code + PKCE verifier)
 Gonvex -> project-scoped session + account
 ```
@@ -84,19 +114,79 @@ The app callback never has to be registered with Google. It is registered with
 Gonvex and matched exactly before the flow starts. Authorization codes are
 short-lived, single-use, and bound to the app callback with PKCE S256. Gonvex also
 verifies Google's ID-token signature, issuer, audience, expiry, and nonce before it
-creates an account. Stored session and code values are hashed.
+creates an account. Stored session, refresh-token, and code values are hashed.
+Browser access tokens last 15 minutes. Refresh tokens last up to 30 days, rotate
+on every use, and revoke their full login family when stale-token reuse is
+detected. Signing out can revoke one login or every device.
 
 The operator still performs one Google Cloud setup for the Gonvex installation; see
 [Self-hosting and Deployment](./deployment#one-time-google-auth-broker-setup). Apps
 created on that installation do not repeat it.
 
-<div className="docs-callout docs-callout--warning">
+<div className="docs-callout">
   <span className="docs-callout__icon">!</span>
   <div>
-    <strong>Current scope</strong>
-    <p>Native Google login currently supports single-database projects. Gonvex rejects enabling it for a multi-tenant project until tenant membership assignment is configured, so a browser-supplied tenant ID can never become authorization by itself.</p>
+    <strong>Project auth is enforced by the runtime</strong>
+    <p>Enabling Google makes that project require a valid Gonvex app session even when the runtime also hosts public development projects. Hiding data behind a sign-in component is not the security boundary.</p>
   </div>
 </div>
+
+## Multi-tenant signup and membership
+
+Single-database and multi-tenant projects support two signup modes. In a
+single-database project, `personal` is open signup into the shared project scope;
+`inviteOnly` requires membership in that scope. In a multi-tenant project:
+
+- `personal` creates a personal workspace and owner membership on first sign-in;
+- `inviteOnly` accepts only verified Google emails with a pre-created invitation.
+
+Choose the mode when enabling auth:
+
+```bash
+npx gonvex auth add google --origin https://app.example.com --signup-mode inviteOnly
+npx gonvex auth tenants create "Acme" --owner owner@acme.example
+npx gonvex auth tenants list
+```
+
+For an invite-only single-database project, use the Gonvex project ID as the
+tenant scope when adding its first owner:
+
+```bash
+npx gonvex auth memberships add --tenant <project-id> --email owner@example.com --role owner
+```
+
+Manage application memberships and account lifecycle from the CLI:
+
+```bash
+npx gonvex auth memberships add --tenant <tenant-id> --email teammate@example.com --role member
+npx gonvex auth memberships list --tenant <tenant-id>
+npx gonvex auth memberships remove --tenant <tenant-id> --user <user-id>
+npx gonvex auth memberships remove --tenant <tenant-id> --email pending@example.com
+npx gonvex auth user disable <user-id>
+npx gonvex auth user enable <user-id>
+npx gonvex auth user delete <user-id>
+```
+
+The React hook exposes the same app-facing lifecycle:
+
+```tsx
+const auth = useGonvexAuth();
+
+await auth.setActiveTenant(tenantId);
+await auth.createTenant("Another workspace");
+await auth.inviteMember(tenantId, "teammate@example.com", {
+  role: "viewer",
+  permissions: { "tasks:read": true },
+});
+await auth.revokeInvitation(tenantId, "teammate@example.com");
+await auth.signOut({ allDevices: true });
+```
+
+Invitations expire after seven days and can be revoked before they are claimed.
+Tenant selection is verified against the central membership registry before the
+runtime opens a tenant database. Role or permission changes revoke the affected
+user's existing sessions, and the last owner cannot be removed, disabled, or
+demoted.
 
 ## Core Model
 
@@ -151,8 +241,10 @@ The CLI supports two account authentication modes:
 
 Personal access tokens are stored hashed in the landlord database, belong to one
 account email, can expire, and carry an explicit permission list. `projects:*` grants
-broad project lifecycle access while still applying the owner's project membership;
-`*` additionally allows account-token administration. The provisioning-oriented
+broad project lifecycle access while still applying the owner's project membership.
+Dashboard administrators can add `admin:projects` to make a token runtime-wide; the
+profile's **Admin API keys** panel creates that combination for CI and provisioning.
+Non-admin accounts cannot grant `admin:projects` or `*`. The provisioning-oriented
 default is `projects:read`, `projects:create`, and `projects:keys:read`.
 
 Account credentials authorize control-plane operations such as listing and creating
@@ -162,16 +254,16 @@ user config and writes only the returned project ID/key into an app's `.env.loca
 
 ## Tenant Switching
 
-The frontend should be able to switch active tenants inside a project:
+The native auth hook switches to one of the signed-in user's verified memberships:
 
 ```ts
-await gonvex.setTenant("acme");
+await auth.setActiveTenant("acme");
 ```
 
 After switching tenants:
 
-- active subscriptions should resubscribe under the new tenant context
-- cached rows from the previous tenant should not be shown as current data
+- active subscriptions resubscribe under the new tenant context
+- cached rows from the previous tenant are cleared from the current scope
 - generated bindings stay the same because functions are project-level
 
 ## Function Authorization
@@ -188,19 +280,18 @@ func CreateTask(ctx *gonvex.MutationCtx, args CreateTaskArgs) (Task, error) {
 }
 ```
 
-## Dashboard Requirements
+## Control-plane operations
 
-The dashboard should expose:
+The runtime and CLI expose:
 
 - users list
 - tenant membership list
 - invite user to tenant
 - remove user from tenant
-- role editor
-- permission viewer
+- role and permission assignment
 - active tenant switcher
 - project-level admins
-- tenant-level admins
+- tenant-level owners and admins
 
 ## Data Placement
 

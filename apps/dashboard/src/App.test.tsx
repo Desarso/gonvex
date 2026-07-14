@@ -82,6 +82,42 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/login");
   });
 
+  it("stays on the project chooser after reload and runtime discovery", async () => {
+    const fetchMock = vi.fn(async () => ({
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({
+        projects: [{
+          id: "remote-app",
+          name: "Remote App",
+          environment: "production",
+          runtimeUrl: "https://runtime.example.test",
+          database: "gonvex_remote_app",
+          storageBucket: "remote-app-production",
+          status: "local",
+          description: "Runtime project",
+          provisioned: true,
+          runtimeCreated: true,
+          databaseMode: "single",
+        }],
+      }),
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      url: "/dev/projects",
+    } as Response));
+    vi.stubGlobal("fetch", fetchMock);
+    window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({ email: "gabriel@example.com", name: "Gabriel" }));
+    window.localStorage.setItem("gonvex-dashboard-project", "previous-project");
+    window.history.replaceState(null, "", "/projects");
+
+    render(<App />);
+
+    const projectsGrid = await screen.findByLabelText("Projects");
+    expect(await within(projectsGrid).findByText("Remote App")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /choose a project/i })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/projects");
+  });
+
   it("normalizes dashboard email allowlists", () => {
     expect(parseEmailAllowlist(" Gabriel@Example.com, gabriel@example.com ; admin@example.com\n")).toEqual([
       "gabriel@example.com",
@@ -141,9 +177,76 @@ describe("App", () => {
     expect(JSON.parse(window.localStorage.getItem("gonvex-dashboard-database-modes") ?? "{}")).toEqual({
       "acme-app": "single",
     });
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"))).toMatchObject({ databaseMode: "single", testTab: false });
+    const createCall = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(JSON.parse(String(createCall?.[1]?.body ?? "{}"))).toMatchObject({ databaseMode: "single", testTab: false });
     expect(screen.queryByRole("button", { name: /^test$/i })).not.toBeInTheDocument();
     vi.unstubAllGlobals();
+  });
+
+  it("creates and revokes a runtime-wide admin API key from the account profile", async () => {
+    const user = userEvent.setup();
+    const existingToken = {
+      id: "pat_existing",
+      name: "Existing automation",
+      prefix: "gvx_pat_existing",
+      permissions: ["projects:*", "admin:projects"],
+      createdAt: "2026-07-01T12:00:00Z",
+    };
+    const createdToken = {
+      id: "pat_created",
+      name: "Production provisioning",
+      prefix: "gvx_pat_created",
+      permissions: ["projects:*", "admin:projects"],
+      createdAt: "2026-07-14T12:00:00Z",
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/dev/auth/tokens") && init?.method === "POST") {
+        return {
+          ok: true,
+          status: 201,
+          statusText: "Created",
+          json: async () => ({ token: createdToken, accessToken: "synthetic-admin-key-for-ui-test" }),
+        } as Response;
+      }
+      if (url.endsWith("/dev/auth/tokens/pat_existing") && init?.method === "DELETE") {
+        return { ok: true, status: 200, statusText: "OK", json: async () => ({ ok: true }) } as Response;
+      }
+      if (url.endsWith("/dev/auth/tokens")) {
+        return { ok: true, status: 200, statusText: "OK", json: async () => ({ tokens: [existingToken] }) } as Response;
+      }
+      return { ok: true, status: 200, statusText: "OK", json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({
+      accessToken: "synthetic-dashboard-session",
+      email: "admin@example.com",
+      name: "Gabriel Admin",
+      role: "admin",
+    }));
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /open account profile/i }));
+
+    const profile = screen.getByRole("dialog", { name: /gabriel admin/i });
+    expect(within(profile).getByText("admin@example.com")).toBeInTheDocument();
+    expect(within(profile).getByText("All projects")).toBeInTheDocument();
+    expect(await within(profile).findByText("Existing automation")).toBeInTheDocument();
+
+    await user.type(within(profile).getByLabelText(/key name/i), "Production provisioning");
+    await user.click(within(profile).getByRole("button", { name: /create admin key/i }));
+
+    expect(within(profile).getByLabelText(/new admin api key/i)).toHaveValue("synthetic-admin-key-for-ui-test");
+    const createCall = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(JSON.parse(String(createCall?.[1]?.body))).toMatchObject({
+      name: "Production provisioning",
+      permissions: ["projects:*", "admin:projects"],
+    });
+
+    const existingRow = within(profile).getByText("Existing automation").closest(".account-token-row");
+    expect(existingRow).not.toBeNull();
+    await user.click(within(existingRow as HTMLElement).getByRole("button", { name: /revoke/i }));
+    await waitFor(() => expect(existingRow).toHaveAttribute("data-status", "revoked"));
   });
 
   it("renders the dashboard overview", async () => {
@@ -177,13 +280,20 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: /errors affecting real users/i })).toBeInTheDocument();
   });
 
-  it("renders an accessible React Aria button", async () => {
+  it("uses a compact icon theme toggle and an uncluttered project switcher", async () => {
     const user = await renderProjectApp();
 
-    const button = screen.getByRole("button", { name: /light mode/i });
+    const switcher = document.querySelector(".project-switcher");
+    expect(switcher).not.toBeNull();
+    expect(within(switcher as HTMLElement).queryByText(/^project$/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /all projects/i })).toBeInTheDocument();
+
+    const button = screen.getByRole("button", { name: /switch to light mode/i });
+    expect(button).toHaveTextContent("");
+    expect(button.querySelectorAll("svg")).toHaveLength(2);
     await user.click(button);
 
-    expect(button).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /switch to dark mode/i })).toBeInTheDocument();
   });
 
   it("switches pages from the sidebar", async () => {

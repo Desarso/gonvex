@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -42,6 +43,8 @@ type Server struct {
 	tenants           map[string]tenantTarget
 	registryMu        sync.Mutex
 	registryReady     bool
+	authRegistryMu    sync.Mutex
+	authRegistryDB    *sql.DB
 	tenantHydrationMu sync.Mutex
 	tenantHydrationAt map[string]time.Time
 	wsMu              sync.RWMutex
@@ -64,6 +67,9 @@ type Server struct {
 	queryCacheSequence    atomic.Uint64
 	errorTracker          *errorTracker
 	googleKeys            googleKeyCache
+	authRateLimiter       appAuthRateLimiter
+	appAuthConfigMu       sync.Mutex
+	appAuthRequirements   map[string]appAuthRequirementCacheEntry
 }
 
 func New(cfg config.Config) *Server {
@@ -102,6 +108,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		schemaHash:            map[string]string{},
 		queryCacheStartedAtMS: time.Now().UTC().UnixMilli(),
 		errorTracker:          newErrorTracker(10000),
+		appAuthRequirements:   map[string]appAuthRequirementCacheEntry{},
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
 	server.scheduler = newScheduler(server.runScheduledJob)
@@ -214,6 +221,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /dev/projects/{project}/auth/google", s.handleProjectGoogleAuth)
 	mux.HandleFunc("DELETE /dev/projects/{project}/auth/google", s.handleProjectGoogleAuth)
 	mux.HandleFunc("GET /dev/projects/{project}/auth/users", s.handleProjectAuthUsers)
+	mux.HandleFunc("PATCH /dev/projects/{project}/auth/users/{user}", s.handleProjectAuthUser)
+	mux.HandleFunc("DELETE /dev/projects/{project}/auth/users/{user}", s.handleProjectAuthUser)
+	mux.HandleFunc("GET /dev/projects/{project}/auth/memberships", s.handleProjectAuthMemberships)
+	mux.HandleFunc("PUT /dev/projects/{project}/auth/memberships", s.handleProjectAuthMemberships)
+	mux.HandleFunc("DELETE /dev/projects/{project}/auth/memberships", s.handleProjectAuthMemberships)
+	mux.HandleFunc("GET /dev/projects/{project}/auth/tenants", s.handleProjectAuthTenants)
+	mux.HandleFunc("POST /dev/projects/{project}/auth/tenants", s.handleProjectAuthTenants)
 	mux.HandleFunc("DELETE /dev/projects/{project}", s.handleDeleteProject)
 	mux.HandleFunc("GET /dev/tenants", s.handleTenants)
 	mux.HandleFunc("POST /dev/tenants", s.handleCreateTenant)
@@ -228,6 +242,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/google/callback", s.handleGoogleCallback)
 	mux.HandleFunc("POST /auth/token", s.handleAppAuthToken)
 	mux.HandleFunc("POST /auth/logout", s.handleAppAuthLogout)
+	mux.HandleFunc("GET /auth/me", s.handleAppAuthMe)
+	mux.HandleFunc("GET /auth/tenants", s.handleAppAuthTenants)
+	mux.HandleFunc("POST /auth/tenants", s.handleAppAuthTenants)
+	mux.HandleFunc("GET /auth/tenants/{tenant}/members", s.handleAppAuthTenantMembers)
+	mux.HandleFunc("POST /auth/tenants/{tenant}/members", s.handleAppAuthTenantMembers)
+	mux.HandleFunc("DELETE /auth/tenants/{tenant}/members/{member}", s.handleDeleteAppAuthTenantMember)
+	mux.HandleFunc("DELETE /auth/tenants/{tenant}/invitations/{email}", s.handleDeleteAppAuthTenantInvitation)
 	mux.HandleFunc("POST /errors/register", s.handleErrorRegistration)
 	mux.HandleFunc("POST /errors/envelope", s.handleErrorEnvelope)
 	mux.HandleFunc("GET /dev/errors/status", s.handleErrorStatus)
@@ -248,12 +269,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"valkeySet":   s.config.ValkeyURL != "",
 		"rowsCache":   s.cache.enabled(),
 		"s3Set":       s.storage != nil,
+		"googleAuth": map[string]any{
+			"ready": s.googleAuthBrokerReady(), "callbackUrl": s.configuredGoogleCallbackURL(),
+			"issues": s.googleAuthReadinessIssues(),
+		},
 	})
 }
 
 func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
-	s.hydrateRuntimeStateForProject(r.Context(), projectID(r))
-	writeJSON(w, http.StatusOK, s.runtime.ManifestForProject(projectID(r)))
+	project := projectID(r)
+	if err := s.requireProjectDatabase(project); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	s.hydrateRuntimeStateForProject(r.Context(), project)
+	writeJSON(w, http.StatusOK, s.runtime.ManifestForProject(project))
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -495,6 +525,11 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "manifest project does not match x-gonvex-project-id"})
 		return
 	}
+	if err := s.requireProjectDatabase(next.Project); err != nil {
+		syncErr = err
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
 	if next.Schema.Tables == nil {
 		next.Schema = manifest.EmptySchema()
 	}
@@ -666,6 +701,9 @@ func tenantID(r *http.Request) string {
 
 func (s *Server) dataRequestDatabaseURL(r *http.Request) (string, error) {
 	project := projectID(r)
+	if err := s.requireProjectDatabase(project); err != nil {
+		return "", err
+	}
 	s.hydrateProjectTenantDatabases(r.Context(), project)
 	databaseURL := s.databaseURLForTenant(project, tenantID(r))
 	if tenant := tenantID(r); tenant != "" && databaseURL == "" {
@@ -678,6 +716,43 @@ func (s *Server) databaseURLForProject(projectID string) string {
 	s.projectMu.RLock()
 	defer s.projectMu.RUnlock()
 	return s.config.DatabaseURL(projectID)
+}
+
+// requireProjectDatabase preserves the zero-configuration, single-database
+// local runtime while preventing a multi-project runtime from routing a typo
+// or stale project id into its control database. That fallback can make a
+// function appear healthy while it reads an empty set of landlord tables.
+func (s *Server) requireProjectDatabase(projectID string) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil
+	}
+
+	configured := func() (string, bool, int) {
+		s.projectMu.RLock()
+		defer s.projectMu.RUnlock()
+		databaseURL, exists := s.config.ProjectDatabases[projectID]
+		return strings.TrimSpace(databaseURL), exists, len(s.config.ProjectDatabases)
+	}
+
+	databaseURL, exists, count := configured()
+	if exists && databaseURL != "" {
+		return nil
+	}
+	if !exists && count == 0 {
+		s.hydrateProjects()
+		databaseURL, exists, count = configured()
+		if exists && databaseURL != "" {
+			return nil
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	if exists {
+		return fmt.Errorf("project %q is registered without a database", projectID)
+	}
+	return fmt.Errorf("project %q is not registered with a database; use the same Gonvex project id for the client and deploy", projectID)
 }
 
 func (s *Server) databaseURLForTenant(projectID string, tenantID string) string {
@@ -854,6 +929,14 @@ func withJSON(next http.Handler) http.Handler {
 		w.Header().Set("access-control-allow-origin", "*")
 		w.Header().Set("access-control-allow-headers", "content-type, authorization, x-api-key, x-gonvex-key, x-gonvex-project-id, x-gonvex-tenant-id")
 		w.Header().Set("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		if strings.HasPrefix(r.URL.Path, "/auth/") {
+			w.Header().Set("cache-control", "no-store")
+			w.Header().Set("pragma", "no-cache")
+			w.Header().Set("referrer-policy", "no-referrer")
+			w.Header().Set("x-content-type-options", "nosniff")
+			w.Header().Set("x-frame-options", "DENY")
+			w.Header().Set("content-security-policy", "default-src 'none'; frame-ancestors 'none'")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

@@ -554,7 +554,7 @@ export class GonvexClient {
   }
 
   private sendAuth(force: boolean) {
-    if (!force && !this.auth.token && !this.auth.tenant) return;
+    if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project) return;
     this.authInFlight = true;
     this.sendNow({ type: "auth", id: randomID(), token: this.auth.token, project: this.auth.project, tenant: this.auth.tenant });
   }

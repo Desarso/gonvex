@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { chmod, mkdir, readFile, readdir, stat, writeFile, copyFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rm, stat, writeFile, copyFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline/promises";
 import { dirname, join, relative, resolve } from "node:path";
@@ -68,6 +68,7 @@ type ProjectConfig = {
         enabled?: boolean;
         callbackPath?: string;
         redirectUris?: string[];
+        signupMode?: "personal" | "inviteOnly";
       };
     };
   };
@@ -79,7 +80,14 @@ type ProjectGoogleAuth = {
   enabled: boolean;
   redirectUris?: string[];
   runtimeConfigured?: boolean;
+  ready?: boolean;
+  issues?: string[];
   brokerCallbackUrl?: string;
+  signupMode?: "personal" | "inviteOnly";
+  tenantCount?: number;
+  membershipCount?: number;
+  invitationCount?: number;
+  databaseMode?: string;
 };
 
 type AppAuthUser = {
@@ -205,6 +213,7 @@ const accountTokenPermissions = [
   "projects:env:read",
   "projects:env:write",
   "projects:*",
+  "admin:projects",
   "tokens:read",
   "tokens:create",
   "tokens:revoke",
@@ -277,16 +286,75 @@ export async function main(argv = process.argv.slice(2)) {
 }
 
 export async function runCreate(argv: string[]) {
-  const target = argv.find((arg) => !arg.startsWith("-")) ?? "my-gonvex-app";
+  const optionNames = ["--template", "--runtime-url", "--runtime", "--database-mode", "--origin", "--callback-path", "--signup-mode", "--owner"];
+  const target = positionalArgs(argv, optionNames)[0] ?? "my-gonvex-app";
   const appName = basename(target);
   const template = valueFor(argv, "--template") ?? "vite-react";
+  const runtimeURL = (valueFor(argv, "--runtime-url") ?? valueFor(argv, "--runtime") ?? defaultRuntimeURL).replace(/\/$/, "");
+  const databaseMode = valueFor(argv, "--database-mode") ?? "single";
+  if (databaseMode !== "single" && databaseMode !== "multiTenant") throw new Error("--database-mode must be single or multiTenant");
+  const googleAuth = argv.includes("--google-auth");
+  const signupMode = normalizeAuthSignupMode(valueFor(argv, "--signup-mode") ?? "personal");
+  const ownerEmail = valueFor(argv, "--owner")?.trim() ?? "";
+  if (googleAuth && signupMode === "inviteOnly" && !ownerEmail) {
+    throw new Error("--owner <verified-google-email> is required when creating an invite-only Google app");
+  }
+  const shouldProvision = googleAuth || argv.includes("--provision") || Boolean(valueFor(argv, "--runtime-url") ?? valueFor(argv, "--runtime"));
   const root = resolve(target);
   if (existsSync(root)) throw new Error(`${target} already exists`);
 
-  await copyTemplate(template, root);
-  await rewritePackageName(root, appName);
-  await rewriteGonvexConfig(root, appName, defaultRuntimeURL);
-  await writeEnvLocal(root, appName, defaultRuntimeURL);
+  let created: CreatedRuntimeProject | null = null;
+  let provisioningAccountToken: string | undefined;
+  try {
+    await copyTemplate(template, root);
+    await rewritePackageName(root, appName);
+    await rewriteGonvexConfig(root, appName, runtimeURL);
+    if (shouldProvision) {
+      provisioningAccountToken = await accountAccessTokenForRuntime(runtimeURL);
+      created = await createRuntimeProject(runtimeURL, appName, provisioningAccountToken, databaseMode);
+      await rewriteGonvexConfig(root, created.project.id, runtimeURL);
+      await writeProjectEnv(root, runtimeURL, created.project.id, created.projectKey, true);
+      if (googleAuth) {
+        const authArgs = ["add", "google", "--project", root, "--signup-mode", signupMode];
+        const callbackPath = valueFor(argv, "--callback-path");
+        if (callbackPath) authArgs.push("--callback-path", callbackPath);
+        const suppliedOrigins = valuesFor(argv, "--origin");
+        const origins = suppliedOrigins.length > 0 ? suppliedOrigins : [
+          process.env.GONVEX_APP_ORIGIN ?? process.env.VITE_APP_URL ?? "http://localhost:5173",
+        ];
+        for (const origin of origins) authArgs.push("--origin", origin);
+        await runAuth(authArgs);
+        if (signupMode === "inviteOnly") {
+          if (databaseMode === "multiTenant") {
+            await runAuth(["tenants", "create", `${appName} workspace`, "--owner", ownerEmail, "--project", root]);
+          } else {
+            await runAuth(["memberships", "add", "--tenant", created.project.id, "--email", ownerEmail, "--role", "owner", "--project", root]);
+          }
+        }
+        const hasProductionOrigin = origins.some((origin) => normalizeAppOrigin(origin).startsWith("https://"));
+        if (hasProductionOrigin && !argv.includes("--allow-unready")) {
+          await runAuth(["doctor", "--project", root]);
+        }
+      }
+    } else {
+      await writeEnvLocal(root, appName, runtimeURL);
+    }
+  } catch (error) {
+    if (created) {
+      try {
+        await runtimeJSON(await fetch(`${runtimeURL}/dev/projects/${encodeURIComponent(created.project.id)}`, {
+          method: "DELETE",
+          headers: provisioningAccountToken
+            ? accountHeaders(provisioningAccountToken)
+            : projectAuthHeaders({ runtimeURL, projectID: created.project.id, key: created.projectKey }),
+        }));
+      } catch (cleanupError) {
+        console.warn(`[gonvex] could not roll back runtime project ${created.project.id}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+      }
+    }
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
   console.log(`[gonvex] created ${target} from ${template} template`);
   console.log(`[gonvex] next: cd ${target} && npm install && npm run dev`);
 }
@@ -632,7 +700,7 @@ async function runEnv(argv: string[]) {
 }
 
 export async function runAuth(argv: string[]) {
-  const optionsWithValues = ["--project", "--runtime-url", "--project-id", "--key", "--origin", "--callback-path"];
+  const optionsWithValues = ["--project", "--runtime-url", "--project-id", "--key", "--origin", "--callback-path", "--signup-mode", "--tenant", "--email", "--owner", "--role", "--user"];
   const positional = positionalArgs(argv, optionsWithValues);
   const action = positional[0];
   if (!action || action === "help") {
@@ -651,27 +719,30 @@ export async function runAuth(argv: string[]) {
   if (action === "add" || action === "enable") {
     const provider = positional[1];
     if (provider !== "google") throw new Error("usage: gonvex auth add google [--origin URL]");
-    const callbackPath = normalizeAuthCallbackPath(valueFor(argv, "--callback-path") ?? "/auth/callback");
-    const origin = normalizeAppOrigin(
-      valueFor(argv, "--origin")
-      ?? process.env.GONVEX_APP_ORIGIN
-      ?? process.env.VITE_APP_URL
-      ?? "http://localhost:5173",
-    );
-    const redirectUri = new URL(callbackPath, `${origin}/`).toString();
-    const response = await fetch(endpoint, {
-      method: "PUT",
-      headers: { ...projectAuthHeaders(settings), "content-type": "application/json" },
-      body: JSON.stringify({ redirectUri }),
-    });
-    const configured = await runtimeJSON<ProjectGoogleAuth>(response);
-    await saveGoogleAuthProjectConfig(projectRoot, callbackPath, redirectUri);
+    const callbackPath = normalizeAuthCallbackPath(valueFor(argv, "--callback-path") ?? "/");
+    const signupMode = normalizeAuthSignupMode(valueFor(argv, "--signup-mode") ?? "personal");
+    const suppliedOrigins = valuesFor(argv, "--origin");
+    const rawOrigins = suppliedOrigins.length > 0 ? suppliedOrigins : [
+      process.env.GONVEX_APP_ORIGIN ?? process.env.VITE_APP_URL ?? "http://localhost:5173",
+    ];
+    const redirectUris = [...new Set(rawOrigins.map((raw) => new URL(callbackPath, `${normalizeAppOrigin(raw)}/`).toString()))];
+    let configured: ProjectGoogleAuth | null = null;
+    for (const redirectUri of redirectUris) {
+      configured = await runtimeJSON<ProjectGoogleAuth>(await fetch(endpoint, {
+        method: "PUT",
+        headers: { ...projectAuthHeaders(settings), "content-type": "application/json" },
+        body: JSON.stringify({ redirectUri, signupMode }),
+      }));
+    }
+    await saveGoogleAuthProjectConfig(projectRoot, callbackPath, redirectUris, signupMode);
     await writeGonvexAuthModule(projectRoot, settings, callbackPath);
+    const wired = await wireViteReactGoogleAuth(projectRoot);
     console.log(`[gonvex] enabled Google auth for ${settings.projectID}`);
-    console.log(`[gonvex] registered callback ${redirectUri}`);
+    for (const redirectUri of redirectUris) console.log(`[gonvex] registered callback ${redirectUri}`);
     console.log(`[gonvex] wrote gonvex/auth.tsx; wrap your app with GonvexAuthProvider and render GoogleSignInButton`);
-    if (!configured.runtimeConfigured) {
-      console.warn("[gonvex] this runtime still needs its one-time GONVEX_GOOGLE_CLIENT_ID and GONVEX_GOOGLE_CLIENT_SECRET operator configuration");
+    if (wired) console.log("[gonvex] wired the Vite React starter with a production-ready sign-in screen");
+    if (!configured?.ready) {
+      console.warn(`[gonvex] Google auth is registered but the runtime is not production-ready: ${(configured?.issues ?? ["runtime broker configuration is incomplete"]).join("; ")}`);
     }
     return;
   }
@@ -679,6 +750,20 @@ export async function runAuth(argv: string[]) {
   if (action === "remove" || action === "disable") {
     const provider = positional[1];
     if (provider !== "google") throw new Error("usage: gonvex auth remove google");
+    const suppliedOrigins = valuesFor(argv, "--origin");
+    if (suppliedOrigins.length > 0) {
+      const localConfig = await loadConfig(projectRoot);
+      const callbackPath = normalizeAuthCallbackPath(valueFor(argv, "--callback-path") ?? localConfig.auth?.providers?.google?.callbackPath ?? "/");
+      const redirectUris = [...new Set(suppliedOrigins.map((raw) => new URL(callbackPath, `${normalizeAppOrigin(raw)}/`).toString()))];
+      for (const redirectUri of redirectUris) {
+        const url = new URL(endpoint);
+        url.searchParams.set("redirect_uri", redirectUri);
+        await runtimeJSON(await fetch(url, { method: "DELETE", headers: projectAuthHeaders(settings) }));
+      }
+      await removeGoogleAuthProjectRedirects(projectRoot, redirectUris);
+      for (const redirectUri of redirectUris) console.log(`[gonvex] removed Google callback ${redirectUri}`);
+      return;
+    }
     await runtimeJSON(await fetch(endpoint, { method: "DELETE", headers: projectAuthHeaders(settings) }));
     await setGoogleAuthProjectEnabled(projectRoot, false);
     console.log(`[gonvex] disabled Google auth for ${settings.projectID}`);
@@ -692,9 +777,36 @@ export async function runAuth(argv: string[]) {
       return;
     }
     console.log(`Google: ${configured.enabled ? "enabled" : "disabled"}`);
-    console.log(`Broker: ${configured.runtimeConfigured ? "configured" : "missing Google credentials"}`);
+    console.log(`Broker: ${configured.ready ? "ready" : "not ready"}`);
+    console.log(`Signup: ${configured.signupMode ?? "personal"}`);
     for (const redirectUri of configured.redirectUris ?? []) console.log(`Callback: ${redirectUri}`);
     if (configured.brokerCallbackUrl) console.log(`Google Cloud redirect URI: ${configured.brokerCallbackUrl}`);
+    for (const issue of configured.issues ?? []) console.log(`Issue: ${issue}`);
+    return;
+  }
+
+  if (action === "doctor") {
+    const configured = await runtimeJSON<ProjectGoogleAuth>(await fetch(endpoint, { headers: projectAuthHeaders(settings) }));
+    const localConfig = await loadConfig(projectRoot);
+    const localRedirects = localConfig.auth?.providers?.google?.redirectUris ?? [];
+    const missing = localRedirects.filter((redirectUri) => !(configured.redirectUris ?? []).includes(redirectUri));
+    const untracked = (configured.redirectUris ?? []).filter((redirectUri) => !localRedirects.includes(redirectUri));
+    const issues = [...(configured.issues ?? [])];
+    if (!configured.enabled) issues.push("Google provider is disabled for this project");
+    for (const redirectUri of missing) issues.push(`local callback is not registered: ${redirectUri}`);
+    for (const redirectUri of untracked) issues.push(`runtime callback is not tracked in gonvex.json: ${redirectUri}`);
+    if ((configured.redirectUris ?? []).length === 0) issues.push("no app callback is registered");
+    if (configured.signupMode === "inviteOnly" && (configured.tenantCount ?? 0) === 0) issues.push("invite-only signup needs at least one tenant scope");
+    if (configured.signupMode === "inviteOnly" && (configured.membershipCount ?? 0) + (configured.invitationCount ?? 0) === 0) issues.push("invite-only signup needs at least one member or invitation");
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify({ ...configured, issues, ready: configured.ready && issues.length === 0 }, null, 2));
+    } else if (configured.ready && issues.length === 0) {
+      console.log(`[gonvex] Google auth is ready for production (${configured.brokerCallbackUrl})`);
+      for (const redirectUri of configured.redirectUris ?? []) console.log(`Callback: ${redirectUri}`);
+    } else {
+      for (const issue of issues) console.error(`[gonvex] ${issue}`);
+    }
+    if (!configured.ready || issues.length > 0) throw new Error("Google auth production readiness check failed");
     return;
   }
 
@@ -714,6 +826,98 @@ export async function runAuth(argv: string[]) {
       console.log(`${user.id}\t${user.email ?? ""}\t${user.name ?? ""}\t${user.provider}`);
     }
     return;
+  }
+
+  if (action === "tenants" || action === "tenant") {
+    const operation = positional[1] ?? "list";
+    const tenantsEndpoint = `${settings.runtimeURL}/dev/projects/${encodeURIComponent(settings.projectID)}/auth/tenants`;
+    if (operation === "list" || operation === "ls") {
+      const payload = await runtimeJSON<{ tenants?: Array<{ id: string; name: string; memberCount: number }> }>(
+        await fetch(tenantsEndpoint, { headers: projectAuthHeaders(settings) }),
+      );
+      if (argv.includes("--json")) {
+        console.log(JSON.stringify(payload.tenants ?? [], null, 2));
+        return;
+      }
+      for (const tenant of payload.tenants ?? []) console.log(`${tenant.id}\t${tenant.name}\t${tenant.memberCount} member(s)`);
+      return;
+    }
+    if (operation === "create") {
+      const name = positional[2];
+      if (!name) throw new Error("usage: gonvex auth tenants create <name> [--owner email]");
+      const payload = await runtimeJSON<{ tenant: { id: string; name: string } }>(await fetch(tenantsEndpoint, {
+        method: "POST", headers: { ...projectAuthHeaders(settings), "content-type": "application/json" },
+        body: JSON.stringify({ name, ownerEmail: valueFor(argv, "--owner") ?? "" }),
+      }));
+      console.log(`[gonvex] created tenant ${payload.tenant.name} (${payload.tenant.id})`);
+      return;
+    }
+    throw new Error(`unknown auth tenants command ${operation}`);
+  }
+
+  if (action === "members" || action === "memberships") {
+    const operation = positional[1] ?? "list";
+    const tenant = valueFor(argv, "--tenant") ?? positional[2];
+    if (!tenant) throw new Error("--tenant is required for membership commands");
+    const membershipEndpoint = `${settings.runtimeURL}/dev/projects/${encodeURIComponent(settings.projectID)}/auth/memberships?tenant=${encodeURIComponent(tenant)}`;
+    if (operation === "list" || operation === "ls") {
+      const payload = await runtimeJSON<{ members?: Array<{ userId: string; email: string; name: string; role: string }>; invitations?: Array<{ email: string; role: string; expiresAt?: string }> }>(
+        await fetch(membershipEndpoint, { headers: projectAuthHeaders(settings) }),
+      );
+      if (argv.includes("--json")) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+      for (const member of payload.members ?? []) console.log(`${member.userId}\t${member.email}\t${member.role}\t${member.name}`);
+      for (const invitation of payload.invitations ?? []) console.log(`invited\t${invitation.email}\t${invitation.role}\t${invitation.expiresAt ?? ""}`);
+      return;
+    }
+    if (operation === "add" || operation === "invite") {
+      const email = valueFor(argv, "--email") ?? positional[2];
+      if (!email) throw new Error("--email is required when adding a membership");
+      const role = valueFor(argv, "--role") ?? "member";
+      await runtimeJSON(await fetch(membershipEndpoint, {
+        method: "PUT", headers: { ...projectAuthHeaders(settings), "content-type": "application/json" },
+        body: JSON.stringify({ email, role }),
+      }));
+      console.log(`[gonvex] granted ${role} access to ${email} for tenant ${tenant}`);
+      return;
+    }
+    if (operation === "remove" || operation === "rm") {
+      const user = valueFor(argv, "--user");
+      const email = valueFor(argv, "--email");
+      if (!user && !email) throw new Error("--user is required to remove a member, or --email to revoke an invitation");
+      const target = user ? `user=${encodeURIComponent(user)}` : `email=${encodeURIComponent(email!)}`;
+      await runtimeJSON(await fetch(`${membershipEndpoint}&${target}`, {
+        method: "DELETE", headers: projectAuthHeaders(settings),
+      }));
+      console.log(user
+        ? `[gonvex] removed ${user} from tenant ${tenant}`
+        : `[gonvex] revoked the invitation for ${email} from tenant ${tenant}`);
+      return;
+    }
+    throw new Error(`unknown auth memberships command ${operation}`);
+  }
+
+  if (action === "user") {
+    const operation = positional[1];
+    const user = valueFor(argv, "--user") ?? positional[2];
+    if (!operation || !user) throw new Error("usage: gonvex auth user <disable|enable|delete> <user-id>");
+    const userEndpoint = `${settings.runtimeURL}/dev/projects/${encodeURIComponent(settings.projectID)}/auth/users/${encodeURIComponent(user)}`;
+    if (operation === "disable" || operation === "enable") {
+      await runtimeJSON(await fetch(userEndpoint, {
+        method: "PATCH", headers: { ...projectAuthHeaders(settings), "content-type": "application/json" },
+        body: JSON.stringify({ disabled: operation === "disable" }),
+      }));
+      console.log(`[gonvex] ${operation}d app account ${user}`);
+      return;
+    }
+    if (operation === "delete" || operation === "remove") {
+      await runtimeJSON(await fetch(userEndpoint, { method: "DELETE", headers: projectAuthHeaders(settings) }));
+      console.log(`[gonvex] deleted app account ${user}`);
+      return;
+    }
+    throw new Error(`unknown auth user command ${operation}`);
   }
 
   printAuthHelp();
@@ -745,16 +949,22 @@ function normalizeAuthCallbackPath(raw: string) {
   return value;
 }
 
-async function saveGoogleAuthProjectConfig(root: string, callbackPath: string, redirectUri: string) {
+function normalizeAuthSignupMode(raw: string): "personal" | "inviteOnly" {
+  if (raw === "personal") return raw;
+  if (raw === "inviteOnly" || raw === "invite-only" || raw === "invited") return "inviteOnly";
+  throw new Error("--signup-mode must be personal or inviteOnly");
+}
+
+async function saveGoogleAuthProjectConfig(root: string, callbackPath: string, addedRedirectUris: string[], signupMode: "personal" | "inviteOnly") {
   const configPath = join(root, "gonvex.json");
   const config = await loadConfig(root);
   const existing = config.auth?.providers?.google;
-  const redirectUris = [...new Set([...(existing?.redirectUris ?? []), redirectUri])].sort();
+  const redirectUris = [...new Set([...(existing?.redirectUris ?? []), ...addedRedirectUris])].sort();
   config.auth = {
     ...(config.auth ?? {}),
     providers: {
       ...(config.auth?.providers ?? {}),
-      google: { ...(existing ?? {}), enabled: true, callbackPath, redirectUris },
+      google: { ...(existing ?? {}), enabled: true, callbackPath, redirectUris, signupMode },
     },
   };
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
@@ -767,6 +977,21 @@ async function setGoogleAuthProjectEnabled(root: string, enabled: boolean) {
   config.auth = {
     ...(config.auth ?? {}),
     providers: { ...(config.auth?.providers ?? {}), google: { ...existing, enabled } },
+  };
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+async function removeGoogleAuthProjectRedirects(root: string, removedRedirectUris: string[]) {
+  const configPath = join(root, "gonvex.json");
+  const config = await loadConfig(root);
+  const existing = config.auth?.providers?.google ?? {};
+  const removed = new Set(removedRedirectUris);
+  config.auth = {
+    ...(config.auth ?? {}),
+    providers: {
+      ...(config.auth?.providers ?? {}),
+      google: { ...existing, redirectUris: (existing.redirectUris ?? []).filter((redirectUri) => !removed.has(redirectUri)) },
+    },
   };
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 }
@@ -790,6 +1015,44 @@ async function writeGonvexAuthModule(root: string, settings: Settings, callbackP
     "",
   ].join("\n");
   await writeFileIfChanged(join(root, "gonvex", "auth.tsx"), source);
+}
+
+async function wireViteReactGoogleAuth(root: string) {
+  const mainPath = join(root, "src", "main.tsx");
+  const appPath = join(root, "src", "App.tsx");
+  if (!existsSync(mainPath) || !existsSync(appPath)) return false;
+  let main = await readFile(mainPath, "utf8");
+  let app = await readFile(appPath, "utf8");
+  if (main.includes('from "../gonvex/auth"') && app.includes("GoogleSignInButton")) return true;
+  const providerImport = 'import { GonvexProvider } from "../gonvex/_generated/react";';
+  const reactImport = 'import { useMutation, useQuery } from "../gonvex/_generated/react";';
+  const appStart = 'export default function App(props: { runtimeURL: string }) {\n  const messages = useQuery<Message[]>(api["messages.list"], {}) ?? [];';
+  if (!main.includes(providerImport) || !main.includes("<GonvexProvider client={gonvex}>") || !app.includes(reactImport) || !app.includes(appStart)) {
+    return false;
+  }
+  main = main
+    .replace(providerImport, 'import { GonvexAuthProvider } from "../gonvex/auth";')
+    .replace("<GonvexProvider client={gonvex}>", "<GonvexAuthProvider client={gonvex}>")
+    .replace("</GonvexProvider>", "</GonvexAuthProvider>");
+  app = app
+    .replace(reactImport, `${reactImport}\nimport { GoogleSignInButton, useGonvexAuth } from "../gonvex/auth";`)
+    .replace(appStart, [
+      "export default function App(props: { runtimeURL: string }) {",
+      "  const auth = useGonvexAuth();",
+      "  if (!auth.isAuthenticated) {",
+      '    return <main className="shell"><section className="hero"><div className="status">Secure Gonvex account</div><h1>Sign in to continue.</h1><p>Your app uses Gonvex-native Google authentication—no Firebase SDK or per-app Google Cloud project.</p><GoogleSignInButton />{auth.error ? <p role="alert">{auth.error}</p> : null}</section></main>;',
+      "  }",
+      "  return <AuthenticatedApp runtimeURL={props.runtimeURL} />;",
+      "}",
+      "",
+      "function AuthenticatedApp(props: { runtimeURL: string }) {",
+      "  const auth = useGonvexAuth();",
+      '  const messages = useQuery<Message[]>(api["messages.list"], {}) ?? [];',
+    ].join("\n"))
+    .replace('<div className="status">Connected to {props.runtimeURL}</div>', '<div className="status"><span>Connected to {props.runtimeURL} as {auth.user?.email}</span><GoogleSignInButton /></div>');
+  await writeFile(mainPath, main);
+  await writeFile(appPath, app);
+  return true;
 }
 
 async function watchProject(root: string, settings: Settings, once: boolean, signal?: AbortSignal, initialState?: WatchState): Promise<WatchState> {
@@ -970,7 +1233,7 @@ async function writeBindings(root: string, manifest: Manifest): Promise<BindingW
   const outputs: Record<string, string> = {
     "api.ts": renderAPI(manifest),
     "client.ts": '// Generated by gonvex dev. Do not edit.\nexport { GonvexClient, ConvexReactClient } from "@gonvex/client";\n',
-    "react.ts": '// Generated by gonvex dev. Do not edit.\nexport { ConvexProvider, ConvexProviderWithAuth, ConvexReactClient, createGonvexAuth, GonvexAuthProvider, GonvexGoogleAuthButton, GonvexProvider, useAction, useConvex, useConvexAuth, useConvexConnectionState, useGonvexAuth, useMutation, usePaginatedQuery, useQuery } from "@gonvex/react";\nexport type { GonvexAuthConfig, GonvexAuthUser, GonvexAuthValue } from "@gonvex/react";\n',
+    "react.ts": '// Generated by gonvex dev. Do not edit.\nexport { ConvexProvider, ConvexProviderWithAuth, ConvexReactClient, createGonvexAuth, GonvexAuthProvider, GonvexGoogleAuthButton, GonvexProvider, useAction, useConvex, useConvexAuth, useConvexConnectionState, useGonvexAuth, useMutation, usePaginatedQuery, useQuery } from "@gonvex/react";\nexport type { GonvexAuthConfig, GonvexAuthTenant, GonvexAuthUser, GonvexAuthValue } from "@gonvex/react";\n',
     "types.ts": "// Generated by gonvex dev. Do not edit.\nexport type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };\n",
     "schema.ts": renderSchemaIndex(manifest),
     "landlord/schema.ts": renderScopedSchemaModule("landlord", manifest.schema.landlordTables),
@@ -1462,7 +1725,8 @@ async function upsertEnvLocal(root: string, values: Record<string, string>, over
   for (const [key, value] of Object.entries(values)) {
     if (!seen.has(key)) next.push(`${key}=${value}`);
   }
-  await writeFile(envPath, `${next.join("\n")}\n`);
+  await writeFile(envPath, `${next.join("\n")}\n`, { mode: 0o600 });
+  await chmod(envPath, 0o600).catch(() => {});
 }
 
 function envLineValue(line: string) {
@@ -1707,8 +1971,13 @@ async function loadSettings(root: string, overrides: Partial<Settings>): Promise
   const cliConfig = await readCLIConfig();
   const key = overrides.key ?? process.env.GONVEX_PROJECT_KEY ?? process.env.GONVEX_DEPLOY_KEY ?? process.env.GONVEX_KEY ?? "";
   const explicitProjectID = overrides.projectID ?? process.env.GONVEX_PROJECT_ID ?? process.env.GONVEX_PROJECT ?? config.project;
+  const overriddenProjectID = overrides.projectID?.trim() || undefined;
+  const keyedProjectID = projectIDFromKey(key);
+  if (overriddenProjectID && keyedProjectID && overriddenProjectID !== keyedProjectID) {
+    throw new Error(`project id ${JSON.stringify(overriddenProjectID)} does not match the project key for ${JSON.stringify(keyedProjectID)}`);
+  }
   return {
-    projectID: overrides.projectID ?? projectIDFromKey(key) ?? explicitProjectID ?? basename(root),
+    projectID: overriddenProjectID ?? keyedProjectID ?? (explicitProjectID?.trim() || basename(root)),
     runtimeURL: normalizeRuntimeURL(overrides.runtimeURL ?? process.env.GONVEX_RUNTIME_URL ?? config.runtime ?? cliConfig.currentRuntime ?? defaultRuntimeURL),
     key,
   };
@@ -1792,7 +2061,7 @@ async function copyDir(source: string, target: string, overwrite: boolean) {
   await mkdir(target, { recursive: true });
   for (const entry of await readdir(source, { withFileTypes: true })) {
     const sourcePath = join(source, entry.name);
-    const targetPath = join(target, entry.name);
+    const targetPath = join(target, entry.name === "_gitignore" ? ".gitignore" : entry.name);
     if (entry.isDirectory()) {
       await copyDir(sourcePath, targetPath, overwrite);
     } else if (overwrite || !existsSync(targetPath)) {
@@ -1822,7 +2091,7 @@ async function writeEnvLocal(root: string, project: string, runtime: string) {
   const envPath = join(root, ".env.local");
   if (existsSync(envPath)) return;
   const wsURL = runtime.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/$/, "") + "/ws";
-  await writeFile(envPath, `GONVEX_PROJECT_ID=${project}\nGONVEX_RUNTIME_URL=${runtime}\nGONVEX_PROJECT_KEY=\nVITE_GONVEX_WS_URL=${wsURL}\n`);
+  await writeFile(envPath, `GONVEX_PROJECT_ID=${project}\nGONVEX_RUNTIME_URL=${runtime}\nGONVEX_PROJECT_KEY=\nVITE_GONVEX_PROJECT_ID=${project}\nVITE_GONVEX_URL=${runtime}\nVITE_GONVEX_WS_URL=${wsURL}\n`);
 }
 
 function templateDir(template: string) {
@@ -1897,7 +2166,7 @@ function printHelp() {
   console.log("Usage: gonvex <dev|init|create|env|auth|login|logout|whoami|project|token> [options]");
   console.log("  gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--verbose-logs] [-- <command>]");
   console.log("  gonvex init [--template vite-react] [--project <id>] [--runtime <url>]");
-  console.log("  gonvex create <app-name> [--template vite-react]");
+  console.log("  gonvex create <app-name> [--runtime-url <url>] [--provision] [--database-mode single|multiTenant] [--google-auth] [--origin <url>]... [--signup-mode personal|inviteOnly] [--owner <email>]");
   console.log("  gonvex env <list|get|set|push|remove> [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>]");
   console.log("  gonvex auth <add|remove|status|users> [google] [options]");
   console.log("  gonvex login [--runtime-url <url>] [--email <email> | --token <personal-access-token>]");
@@ -1909,10 +2178,17 @@ function printHelp() {
 
 function printAuthHelp() {
   console.log("Usage: gonvex auth <command> [options]");
-  console.log("  gonvex auth add google [--origin https://app.example.com] [--callback-path /auth/callback]");
-  console.log("  gonvex auth remove google");
+  console.log("  gonvex auth add google [--origin URL]... [--callback-path /] [--signup-mode personal|inviteOnly]");
+  console.log("  gonvex auth remove google [--origin URL]... [--callback-path /]");
   console.log("  gonvex auth status [--json]");
+  console.log("  gonvex auth doctor [--json]");
   console.log("  gonvex auth users [--json]");
+  console.log("  gonvex auth tenants list [--json]");
+  console.log("  gonvex auth tenants create <name> [--owner <email>]");
+  console.log("  gonvex auth memberships list --tenant <tenant-id> [--json]");
+  console.log("  gonvex auth memberships add --tenant <tenant-id> --email <email> [--role member]");
+  console.log("  gonvex auth memberships remove --tenant <tenant-id> (--user <user-id> | --email <invited-email>)");
+  console.log("  gonvex auth user <disable|enable|delete> <user-id>");
 }
 
 function printEnvHelp() {

@@ -9,9 +9,11 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -25,8 +27,14 @@ const (
 	googleProvider           = "google"
 	authTransactionTTL       = 10 * time.Minute
 	authCodeTTL              = 5 * time.Minute
-	appSessionTTL            = 7 * 24 * time.Hour
+	appSessionTTL            = 15 * time.Minute
+	appRefreshSessionTTL     = 30 * 24 * time.Hour
+	appRefreshReuseGrace     = 5 * time.Second
 	defaultGoogleKeyCacheTTL = time.Hour
+	maxAppAuthRedirectURIs   = 32
+	maxAppAuthRedirectLength = 2048
+	appAuthSignupPersonal    = "personal"
+	appAuthSignupInviteOnly  = "inviteOnly"
 )
 
 var pkceValuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43,128}$`)
@@ -38,8 +46,26 @@ type appAuthUser struct {
 	Name           string    `json:"name,omitempty"`
 	Picture        string    `json:"picture,omitempty"`
 	Provider       string    `json:"provider"`
+	Disabled       bool      `json:"disabled"`
 	CreatedAt      time.Time `json:"createdAt,omitempty"`
 	LastSignedInAt time.Time `json:"lastSignedInAt,omitempty"`
+}
+
+type appAuthTenant struct {
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	Role        string         `json:"role"`
+	Permissions map[string]any `json:"permissions,omitempty"`
+}
+
+type appAuthProviderConfiguration struct {
+	Enabled    bool
+	SignupMode string
+}
+
+type appAuthRequirementCacheEntry struct {
+	Enabled   bool
+	ExpiresAt time.Time
 }
 
 type authTransaction struct {
@@ -86,21 +112,34 @@ func (s *Server) handleProjectGoogleAuth(w http.ResponseWriter, r *http.Request)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		providerConfig, err := s.appAuthProviderConfiguration(r.Context(), projectID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		tenantCount, membershipCount, invitationCount := s.appAuthProjectCounts(r.Context(), projectID)
+		databaseMode, _ := s.projectDatabaseMode(r.Context(), projectID)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"provider":          googleProvider,
 			"enabled":           enabled,
+			"signupMode":        providerConfig.SignupMode,
 			"redirectUris":      redirectURIs,
 			"runtimeConfigured": s.googleAuthBrokerReady(),
+			"ready":             enabled && s.googleAuthBrokerReady(),
+			"issues":            s.googleAuthReadinessIssues(),
 			"brokerCallbackUrl": s.configuredGoogleCallbackURL(),
+			"tenantCount":       tenantCount, "membershipCount": membershipCount, "invitationCount": invitationCount,
+			"databaseMode": databaseMode,
 		})
 	case http.MethodPut:
-		if err := s.requireSingleDatabaseProject(r.Context(), projectID); err != nil {
+		if _, err := s.projectDatabaseMode(r.Context(), projectID); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		defer r.Body.Close()
 		var payload struct {
 			RedirectURI string `json:"redirectUri"`
+			SignupMode  string `json:"signupMode"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&payload); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Google auth configuration"})
@@ -111,7 +150,12 @@ func (s *Server) handleProjectGoogleAuth(w http.ResponseWriter, r *http.Request)
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if err := s.enableGoogleAuth(r.Context(), projectID, redirectURI); err != nil {
+		signupMode, err := normalizeAppAuthSignupMode(payload.SignupMode)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := s.enableGoogleAuth(r.Context(), projectID, redirectURI, signupMode); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -123,11 +167,34 @@ func (s *Server) handleProjectGoogleAuth(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"provider":          googleProvider,
 			"enabled":           true,
+			"signupMode":        signupMode,
 			"redirectUris":      redirectURIs,
 			"runtimeConfigured": s.googleAuthBrokerReady(),
+			"ready":             s.googleAuthBrokerReady(),
+			"issues":            s.googleAuthReadinessIssues(),
 			"brokerCallbackUrl": s.configuredGoogleCallbackURL(),
 		})
 	case http.MethodDelete:
+		if rawRedirectURI := strings.TrimSpace(r.URL.Query().Get("redirect_uri")); rawRedirectURI != "" {
+			redirectURI, err := normalizeAppRedirectURI(rawRedirectURI)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			if err := s.deleteGoogleAuthRedirectURI(r.Context(), projectID, redirectURI); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			redirectURIs, enabled, err := s.googleAuthConfiguration(r.Context(), projectID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"provider": googleProvider, "enabled": enabled, "redirectUris": redirectURIs,
+			})
+			return
+		}
 		if err := s.disableGoogleAuth(r.Context(), projectID); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -136,6 +203,33 @@ func (s *Server) handleProjectGoogleAuth(w http.ResponseWriter, r *http.Request)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) deleteGoogleAuthRedirectURI(ctx context.Context, projectID string, redirectURI string) error {
+	db, err := s.openProjectRegistry(ctx)
+	if err != nil || db == nil {
+		return fmt.Errorf("project auth store is unavailable")
+	}
+	defer db.Close()
+	_, err = db.ExecContext(ctx, `DELETE FROM gonvex_auth_redirect_uris
+		WHERE project_id = $1 AND provider = $2 AND redirect_uri = $3`, projectID, googleProvider, redirectURI)
+	return err
+}
+
+func (s *Server) appAuthProjectCounts(ctx context.Context, projectID string) (int, int, int) {
+	db, err := s.openProjectRegistry(ctx)
+	if err != nil || db == nil {
+		return 0, 0, 0
+	}
+	defer db.Close()
+	var tenantCount, membershipCount, invitationCount int
+	_ = db.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM gonvex_runtime_tenants WHERE project_id = $1),
+		(SELECT count(*) FROM gonvex_auth_memberships WHERE project_id = $1),
+		(SELECT count(*) FROM gonvex_auth_membership_invitations WHERE project_id = $1 AND expires_at > now())`, projectID).Scan(
+		&tenantCount, &membershipCount, &invitationCount,
+	)
+	return tenantCount, membershipCount, invitationCount
 }
 
 func (s *Server) handleProjectAuthUsers(w http.ResponseWriter, r *http.Request) {
@@ -153,7 +247,7 @@ func (s *Server) handleProjectAuthUsers(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer db.Close()
-	rows, err := db.QueryContext(r.Context(), `SELECT id, email, email_verified, name, picture, provider, created_at, last_signed_in_at
+	rows, err := db.QueryContext(r.Context(), `SELECT id, email, email_verified, name, picture, provider, disabled_at IS NOT NULL, created_at, last_signed_in_at
 		FROM gonvex_auth_users WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -163,7 +257,7 @@ func (s *Server) handleProjectAuthUsers(w http.ResponseWriter, r *http.Request) 
 	users := []appAuthUser{}
 	for rows.Next() {
 		var user appAuthUser
-		if err := rows.Scan(&user.ID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt); err != nil {
+		if err := rows.Scan(&user.ID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.Disabled, &user.CreatedAt, &user.LastSignedInAt); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -204,27 +298,37 @@ func (s *Server) authorizeProjectAuthRequest(w http.ResponseWriter, r *http.Requ
 	return true
 }
 
-func (s *Server) requireSingleDatabaseProject(ctx context.Context, projectID string) error {
-	db, err := s.openProjectRegistry(ctx)
+func (s *Server) projectDatabaseMode(ctx context.Context, projectID string) (string, error) {
+	db, err := s.pooledProjectRegistry(ctx)
 	if err != nil || db == nil {
-		return fmt.Errorf("project registry is unavailable")
+		return "", fmt.Errorf("project registry is unavailable")
 	}
-	defer db.Close()
 	var mode string
 	if err := db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(database_mode, ''), 'single') FROM gonvex_runtime_projects WHERE id = $1`, projectID).Scan(&mode); err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("project %q was not found", projectID)
+			return "", fmt.Errorf("project %q was not found", projectID)
 		}
-		return err
+		return "", err
 	}
-	if normalizedDatabaseModeWithDefault(mode) != "single" {
-		return fmt.Errorf("Google auth currently requires a single-database project; tenant membership setup is required for multi-tenant projects")
+	return normalizedDatabaseModeWithDefault(mode), nil
+}
+
+func normalizeAppAuthSignupMode(value string) (string, error) {
+	switch strings.TrimSpace(value) {
+	case "", appAuthSignupPersonal:
+		return appAuthSignupPersonal, nil
+	case appAuthSignupInviteOnly, "invite-only", "invited":
+		return appAuthSignupInviteOnly, nil
+	default:
+		return "", fmt.Errorf("signupMode must be personal or inviteOnly")
 	}
-	return nil
 }
 
 func normalizeAppRedirectURI(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
+	if len(raw) > maxAppAuthRedirectLength {
+		return "", fmt.Errorf("redirect URI must be at most %d bytes", maxAppAuthRedirectLength)
+	}
 	parsed, err := url.Parse(raw)
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
 		return "", fmt.Errorf("redirect URI must be an absolute http or https URL")
@@ -240,7 +344,15 @@ func normalizeAppRedirectURI(raw string) (string, error) {
 	return parsed.String(), nil
 }
 
-func (s *Server) enableGoogleAuth(ctx context.Context, projectID string, redirectURI string) error {
+func (s *Server) enableGoogleAuth(ctx context.Context, projectID string, redirectURI string, signupMode string) error {
+	var err error
+	signupMode, err = normalizeAppAuthSignupMode(signupMode)
+	if err != nil {
+		return err
+	}
+	if err := s.ensureSingleAppAuthTenant(ctx, projectID); err != nil {
+		return err
+	}
 	db, err := s.openProjectRegistry(ctx)
 	if err != nil || db == nil {
 		return fmt.Errorf("project auth store is unavailable")
@@ -251,16 +363,59 @@ func (s *Server) enableGoogleAuth(ctx context.Context, projectID string, redirec
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO gonvex_auth_providers (project_id, provider, enabled, updated_at)
-		VALUES ($1, $2, TRUE, now())
-		ON CONFLICT (project_id, provider) DO UPDATE SET enabled = TRUE, updated_at = now()`, projectID, googleProvider); err != nil {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "gonvex-auth-redirects:"+projectID); err != nil {
 		return err
+	}
+	previouslyEnabled := false
+	if err := tx.QueryRowContext(ctx, `SELECT enabled FROM gonvex_auth_providers
+		WHERE project_id = $1 AND provider = $2`, projectID, googleProvider).Scan(&previouslyEnabled); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO gonvex_auth_providers (project_id, provider, enabled, signup_mode, updated_at)
+		VALUES ($1, $2, TRUE, $3, now())
+		ON CONFLICT (project_id, provider) DO UPDATE SET enabled = TRUE, signup_mode = EXCLUDED.signup_mode, updated_at = now()`, projectID, googleProvider, signupMode); err != nil {
+		return err
+	}
+	var redirectCount int
+	var redirectExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT count(*), EXISTS (
+		SELECT 1 FROM gonvex_auth_redirect_uris WHERE project_id = $1 AND provider = $2 AND redirect_uri = $3
+	) FROM gonvex_auth_redirect_uris WHERE project_id = $1 AND provider = $2`,
+		projectID, googleProvider, redirectURI).Scan(&redirectCount, &redirectExists); err != nil {
+		return err
+	}
+	if !redirectExists && redirectCount >= maxAppAuthRedirectURIs {
+		return fmt.Errorf("a project can register at most %d Google callback URLs", maxAppAuthRedirectURIs)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO gonvex_auth_redirect_uris (project_id, provider, redirect_uri)
 		VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, projectID, googleProvider, redirectURI); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateAppAuthRequirement(projectID)
+	if !previouslyEnabled {
+		s.enforceNativeAppAuthConnections(projectID)
+	}
+	return nil
+}
+
+func (s *Server) appAuthProviderConfiguration(ctx context.Context, projectID string) (appAuthProviderConfiguration, error) {
+	db, err := s.openProjectRegistry(ctx)
+	if err != nil || db == nil {
+		return appAuthProviderConfiguration{}, fmt.Errorf("project auth store is unavailable")
+	}
+	defer db.Close()
+	configuration := appAuthProviderConfiguration{SignupMode: appAuthSignupPersonal}
+	err = db.QueryRowContext(ctx, `SELECT enabled, COALESCE(NULLIF(signup_mode, ''), $3)
+		FROM gonvex_auth_providers WHERE project_id = $1 AND provider = $2`, projectID, googleProvider, appAuthSignupPersonal).Scan(
+		&configuration.Enabled, &configuration.SignupMode,
+	)
+	if err == sql.ErrNoRows {
+		return configuration, nil
+	}
+	return configuration, err
 }
 
 func (s *Server) disableGoogleAuth(ctx context.Context, projectID string) error {
@@ -271,7 +426,70 @@ func (s *Server) disableGoogleAuth(ctx context.Context, projectID string) error 
 	defer db.Close()
 	_, err = db.ExecContext(ctx, `UPDATE gonvex_auth_providers SET enabled = FALSE, updated_at = now()
 		WHERE project_id = $1 AND provider = $2`, projectID, googleProvider)
+	if err == nil {
+		s.invalidateAppAuthRequirement(projectID)
+	}
 	return err
+}
+
+func (s *Server) invalidateAppAuthRequirement(projectID string) {
+	s.appAuthConfigMu.Lock()
+	delete(s.appAuthRequirements, strings.TrimSpace(projectID))
+	s.appAuthConfigMu.Unlock()
+}
+
+func (s *Server) nativeAppAuthEnabled(ctx context.Context, projectID string) (bool, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return false, nil
+	}
+	now := time.Now()
+	s.appAuthConfigMu.Lock()
+	cached, ok := s.appAuthRequirements[projectID]
+	if ok && now.Before(cached.ExpiresAt) {
+		s.appAuthConfigMu.Unlock()
+		return cached.Enabled, nil
+	}
+	s.appAuthConfigMu.Unlock()
+	db, err := s.pooledProjectRegistry(ctx)
+	if err != nil || db == nil {
+		return false, fmt.Errorf("project auth store is unavailable")
+	}
+	var projectExists, enabled bool
+	err = db.QueryRowContext(ctx, `SELECT
+		EXISTS (SELECT 1 FROM gonvex_runtime_projects WHERE id = $1),
+		EXISTS (SELECT 1 FROM gonvex_auth_providers
+			WHERE project_id = $1 AND provider = $2 AND enabled = TRUE)`, projectID, googleProvider).Scan(
+		&projectExists, &enabled,
+	)
+	if err != nil {
+		return false, err
+	}
+	// Never let attacker-controlled project headers grow this process cache.
+	// Real projects are bounded by the registry; unknown IDs stay uncached.
+	if !projectExists {
+		return false, nil
+	}
+	s.appAuthConfigMu.Lock()
+	s.appAuthRequirements[projectID] = appAuthRequirementCacheEntry{Enabled: enabled, ExpiresAt: now.Add(5 * time.Second)}
+	s.appAuthConfigMu.Unlock()
+	return enabled, nil
+}
+
+func (s *Server) projectRequiresAuthentication(ctx context.Context, projectID string) bool {
+	if s.config.RequireAuth {
+		return true
+	}
+	if strings.TrimSpace(s.projectRegistryURL()) == "" {
+		return false
+	}
+	enabled, err := s.nativeAppAuthEnabled(ctx, projectID)
+	if err != nil {
+		// A configured control database that cannot answer an authorization query
+		// must not turn a protected project into an anonymous one.
+		return true
+	}
+	return enabled
 }
 
 func (s *Server) googleAuthConfiguration(ctx context.Context, projectID string) ([]string, bool, error) {
@@ -332,40 +550,97 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 	if enabled && s.googleAuthBrokerReady() {
 		providers = append(providers, googleProvider)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"project": projectID, "providers": providers})
+	providerConfig, _ := s.appAuthProviderConfiguration(r.Context(), projectID)
+	mode, _ := s.projectDatabaseMode(r.Context(), projectID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"project": projectID, "providers": providers, "databaseMode": mode,
+		"signupMode":                  providerConfig.SignupMode,
+		"accessTokenLifetimeSeconds":  int(appSessionTTL.Seconds()),
+		"refreshTokenLifetimeSeconds": int(appRefreshSessionTTL.Seconds()),
+	})
 }
 
 func (s *Server) googleAuthBrokerReady() bool {
-	return strings.TrimSpace(s.config.GoogleClientID) != "" && strings.TrimSpace(s.config.GoogleClientSecret) != ""
+	return len(s.googleAuthReadinessIssues()) == 0
+}
+
+func (s *Server) googleAuthReadinessIssues() []string {
+	issues := []string{}
+	if strings.TrimSpace(s.config.GoogleClientID) == "" {
+		issues = append(issues, "GONVEX_GOOGLE_CLIENT_ID is not configured")
+	}
+	if strings.TrimSpace(s.config.GoogleClientSecret) == "" {
+		issues = append(issues, "GONVEX_GOOGLE_CLIENT_SECRET is not configured")
+	}
+	if _, err := normalizeAuthPublicURL(s.config.AuthPublicURL); err != nil {
+		issues = append(issues, err.Error())
+	}
+	for _, trustedProxy := range s.config.TrustedProxyCIDRs {
+		trustedProxy = strings.TrimSpace(trustedProxy)
+		if net.ParseIP(trustedProxy) == nil {
+			if _, _, err := net.ParseCIDR(trustedProxy); err != nil {
+				issues = append(issues, "GONVEX_TRUSTED_PROXY_CIDRS contains an invalid IP address or CIDR: "+trustedProxy)
+			}
+		}
+	}
+	for _, endpoint := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "GONVEX_GOOGLE_AUTHORIZE_URL", raw: s.config.GoogleAuthorizeURL},
+		{name: "GONVEX_GOOGLE_TOKEN_URL", raw: s.config.GoogleTokenURL},
+		{name: "GONVEX_GOOGLE_JWKS_URL", raw: s.config.GoogleJWKSURL},
+	} {
+		name, raw := endpoint.name, endpoint.raw
+		parsed, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || !parsed.IsAbs() || parsed.Host == "" {
+			issues = append(issues, name+" is not a valid absolute URL")
+			continue
+		}
+		hostname := strings.ToLower(parsed.Hostname())
+		local := hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1"
+		if parsed.Scheme != "https" && !(parsed.Scheme == "http" && local) {
+			issues = append(issues, name+" must use https")
+		}
+	}
+	return issues
+}
+
+func normalizeAuthPublicURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
+		return "", fmt.Errorf("GONVEX_AUTH_URL must be the browser-facing runtime origin")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return "", fmt.Errorf("GONVEX_AUTH_URL must contain only scheme, host, and optional port")
+	}
+	hostname := strings.ToLower(parsed.Hostname())
+	local := hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1"
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && local) {
+		return "", fmt.Errorf("GONVEX_AUTH_URL must use https (http is allowed only for localhost)")
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
 func (s *Server) configuredGoogleCallbackURL() string {
-	base := strings.TrimRight(strings.TrimSpace(s.config.AuthPublicURL), "/")
-	if base == "" {
+	base, err := normalizeAuthPublicURL(s.config.AuthPublicURL)
+	if err != nil {
 		return ""
 	}
 	return base + "/auth/google/callback"
 }
 
-func (s *Server) googleCallbackURL(r *http.Request) (string, error) {
+func (s *Server) googleCallbackURL(_ *http.Request) (string, error) {
 	if configured := s.configuredGoogleCallbackURL(); configured != "" {
 		return configured, nil
 	}
-	if r.Host == "" {
-		return "", fmt.Errorf("GONVEX_AUTH_URL is required")
-	}
-	scheme := strings.TrimSpace(r.Header.Get("x-forwarded-proto"))
-	if scheme == "" {
-		if r.TLS != nil {
-			scheme = "https"
-		} else {
-			scheme = "http"
-		}
-	}
-	return scheme + "://" + r.Host + "/auth/google/callback", nil
+	return "", fmt.Errorf("GONVEX_AUTH_URL is required")
 }
 
 func (s *Server) handleGoogleAuthorize(w http.ResponseWriter, r *http.Request) {
+	if !s.allowAppAuthRequest(w, r, "authorize", 30, time.Minute) {
+		return
+	}
 	if !s.googleAuthBrokerReady() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google auth is not configured on this Gonvex runtime"})
 		return
@@ -469,6 +744,9 @@ func (s *Server) consumeAuthTransaction(ctx context.Context, token string) (auth
 }
 
 func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
+	if !s.allowAppAuthRequest(w, r, "google-callback", 60, time.Minute) {
+		return
+	}
 	transaction, err := s.consumeAuthTransaction(r.Context(), strings.TrimSpace(r.URL.Query().Get("state")))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -493,9 +771,21 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		redirectToApp(w, r, transaction.RedirectURI, map[string]string{"error": "invalid_google_identity", "state": transaction.AppState})
 		return
 	}
+	if !identity.EmailVerified || identity.Email == "" {
+		redirectToApp(w, r, transaction.RedirectURI, map[string]string{"error": "verified_google_email_required", "state": transaction.AppState})
+		return
+	}
 	user, err := s.upsertAppAuthUser(r.Context(), transaction.ProjectID, identity)
 	if err != nil {
 		redirectToApp(w, r, transaction.RedirectURI, map[string]string{"error": "account_creation_failed", "state": transaction.AppState})
+		return
+	}
+	if err := s.ensureAppAuthMemberships(r.Context(), transaction.ProjectID, user); err != nil {
+		errorCode := "membership_setup_failed"
+		if errors.Is(err, errAppAuthInvitationRequired) {
+			errorCode = "invitation_required"
+		}
+		redirectToApp(w, r, transaction.RedirectURI, map[string]string{"error": errorCode, "state": transaction.AppState})
 		return
 	}
 	authCode, err := s.createAppAuthCode(r.Context(), transaction, user.ID)
@@ -572,6 +862,7 @@ func (s *Server) upsertAppAuthUser(ctx context.Context, projectID string, identi
 		picture = EXCLUDED.picture,
 		last_signed_in_at = now(),
 		updated_at = now()
+	WHERE gonvex_auth_users.disabled_at IS NULL
 	RETURNING id, email, email_verified, name, picture, provider, created_at, last_signed_in_at`,
 		userID, projectID, googleProvider, identity.Subject, identity.Email, identity.EmailVerified, identity.Name, identity.Picture).Scan(
 		&user.ID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
@@ -598,6 +889,10 @@ func (s *Server) createAppAuthCode(ctx context.Context, transaction authTransact
 }
 
 func (s *Server) handleAppAuthToken(w http.ResponseWriter, r *http.Request) {
+	if !s.allowAppAuthRequest(w, r, "token", 60, time.Minute) {
+		return
+	}
+	s.cleanupExpiredAppAuthRecords(r.Context())
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	defer r.Body.Close()
 	var payload struct {
@@ -606,6 +901,8 @@ func (s *Server) handleAppAuthToken(w http.ResponseWriter, r *http.Request) {
 		Code         string `json:"code"`
 		CodeVerifier string `json:"codeVerifier"`
 		RedirectURI  string `json:"redirectUri"`
+		RefreshToken string `json:"refreshToken"`
+		Tenant       string `json:"tenant"`
 	}
 	if strings.HasPrefix(strings.ToLower(r.Header.Get("content-type")), "application/json") {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -622,39 +919,93 @@ func (s *Server) handleAppAuthToken(w http.ResponseWriter, r *http.Request) {
 		payload.Code = r.Form.Get("code")
 		payload.CodeVerifier = r.Form.Get("code_verifier")
 		payload.RedirectURI = r.Form.Get("redirect_uri")
+		payload.RefreshToken = r.Form.Get("refresh_token")
+		payload.Tenant = r.Form.Get("tenant")
 	}
-	if payload.GrantType != "authorization_code" || strings.TrimSpace(payload.Project) == "" || strings.TrimSpace(payload.Code) == "" || !pkceValuePattern.MatchString(payload.CodeVerifier) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "authorization code, project, redirect URI, and PKCE verifier are required"})
+	projectID := strings.TrimSpace(payload.Project)
+	if projectID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
 		return
 	}
-	redirectURI, err := normalizeAppRedirectURI(payload.RedirectURI)
+	var grant appAuthSessionGrant
+	var user appAuthUser
+	var err error
+	switch payload.GrantType {
+	case "authorization_code":
+		if strings.TrimSpace(payload.Code) == "" || !pkceValuePattern.MatchString(payload.CodeVerifier) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "authorization code, redirect URI, and PKCE verifier are required"})
+			return
+		}
+		redirectURI, normalizeErr := normalizeAppRedirectURI(payload.RedirectURI)
+		if normalizeErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": normalizeErr.Error()})
+			return
+		}
+		grant, user, err = s.exchangeAppAuthCode(r.Context(), projectID, strings.TrimSpace(payload.Code), payload.CodeVerifier, redirectURI)
+	case "refresh_token":
+		if !strings.HasPrefix(strings.TrimSpace(payload.RefreshToken), "gvx_refresh_") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "refresh token is required"})
+			return
+		}
+		grant, user, err = s.refreshAppSession(r.Context(), projectID, strings.TrimSpace(payload.RefreshToken))
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "grantType must be authorization_code or refresh_token"})
+		return
+	}
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		var invalidGrant *invalidAppAuthGrantError
+		if errors.As(err, &invalidGrant) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": invalidGrant.Error()})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "auth session service is temporarily unavailable"})
+		}
 		return
 	}
-	accessToken, expiresAt, user, err := s.exchangeAppAuthCode(r.Context(), strings.TrimSpace(payload.Project), strings.TrimSpace(payload.Code), payload.CodeVerifier, redirectURI)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"accessToken": accessToken,
-		"tokenType":   "Bearer",
-		"expiresIn":   int(appSessionTTL.Seconds()),
-		"expiresAt":   expiresAt.UnixMilli(),
-		"user":        user,
-	})
+	s.writeAppAuthSession(w, r, projectID, grant, user, payload.Tenant)
 }
 
-func (s *Server) exchangeAppAuthCode(ctx context.Context, projectID string, code string, verifier string, redirectURI string) (string, time.Time, appAuthUser, error) {
+func (s *Server) cleanupExpiredAppAuthRecords(ctx context.Context) {
 	db, err := s.openProjectRegistry(ctx)
 	if err != nil || db == nil {
-		return "", time.Time{}, appAuthUser{}, fmt.Errorf("auth session store is unavailable")
+		return
+	}
+	defer db.Close()
+	_, _ = db.ExecContext(ctx, `DELETE FROM gonvex_auth_transactions WHERE expires_at < now() - interval '1 day'`)
+	_, _ = db.ExecContext(ctx, `DELETE FROM gonvex_auth_codes WHERE expires_at < now() - interval '1 day'`)
+	_, _ = db.ExecContext(ctx, `DELETE FROM gonvex_auth_sessions WHERE expires_at < now() - interval '7 days'`)
+	_, _ = db.ExecContext(ctx, `DELETE FROM gonvex_auth_refresh_tokens WHERE expires_at < now() - interval '7 days'`)
+	_, _ = db.ExecContext(ctx, `DELETE FROM gonvex_auth_membership_invitations WHERE expires_at <= now()`)
+}
+
+type appAuthSessionGrant struct {
+	AccessToken      string
+	AccessExpiresAt  time.Time
+	RefreshToken     string
+	RefreshExpiresAt time.Time
+	FamilyID         string
+}
+
+type invalidAppAuthGrantError struct {
+	message string
+}
+
+func (err *invalidAppAuthGrantError) Error() string {
+	return err.message
+}
+
+func invalidAppAuthGrant(message string) error {
+	return &invalidAppAuthGrantError{message: message}
+}
+
+func (s *Server) exchangeAppAuthCode(ctx context.Context, projectID string, code string, verifier string, redirectURI string) (appAuthSessionGrant, appAuthUser, error) {
+	db, err := s.openProjectRegistry(ctx)
+	if err != nil || db == nil {
+		return appAuthSessionGrant{}, appAuthUser{}, fmt.Errorf("auth session store is unavailable")
 	}
 	defer db.Close()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", time.Time{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthUser{}, err
 	}
 	defer tx.Rollback()
 	var storedProject, userID, storedRedirect, challenge string
@@ -663,42 +1014,181 @@ func (s *Server) exchangeAppAuthCode(ctx context.Context, projectID string, code
 		&storedProject, &userID, &storedRedirect, &challenge,
 	)
 	if err == sql.ErrNoRows {
-		return "", time.Time{}, appAuthUser{}, fmt.Errorf("invalid or expired authorization code")
+		return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("invalid or expired authorization code")
 	}
 	if err != nil {
-		return "", time.Time{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthUser{}, err
 	}
 	if storedProject != projectID || storedRedirect != redirectURI || !constantTimeString(challenge, pkceChallenge(verifier)) {
-		return "", time.Time{}, appAuthUser{}, fmt.Errorf("authorization code does not match this client")
+		return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("authorization code does not match this client")
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_codes SET used_at = now() WHERE code_hash = $1`, sha256Hex(code)); err != nil {
-		return "", time.Time{}, appAuthUser{}, err
-	}
-	sessionID, err := randomID("session")
-	if err != nil {
-		return "", time.Time{}, appAuthUser{}, err
-	}
-	var secret [32]byte
-	if _, err := rand.Read(secret[:]); err != nil {
-		return "", time.Time{}, appAuthUser{}, err
-	}
-	accessToken := "gvx_" + sessionID + "." + base64.RawURLEncoding.EncodeToString(secret[:])
-	expiresAt := time.Now().Add(appSessionTTL).UTC()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO gonvex_auth_sessions (token_hash, project_id, user_id, expires_at)
-		VALUES ($1, $2, $3, $4)`, sha256Hex(accessToken), projectID, userID, expiresAt); err != nil {
-		return "", time.Time{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthUser{}, err
 	}
 	var user appAuthUser
 	if err := tx.QueryRowContext(ctx, `SELECT id, email, email_verified, name, picture, provider, created_at, last_signed_in_at
-		FROM gonvex_auth_users WHERE id = $1 AND project_id = $2`, userID, projectID).Scan(
+		FROM gonvex_auth_users WHERE id = $1 AND project_id = $2 AND disabled_at IS NULL`, userID, projectID).Scan(
 		&user.ID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
 	); err != nil {
-		return "", time.Time{}, appAuthUser{}, err
+		if err == sql.ErrNoRows {
+			return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("account is unavailable")
+		}
+		return appAuthSessionGrant{}, appAuthUser{}, err
+	}
+	familyID, err := randomID("family")
+	if err != nil {
+		return appAuthSessionGrant{}, appAuthUser{}, err
+	}
+	grant, err := issueAppAuthSessionGrant(ctx, tx, projectID, userID, familyID, time.Now().Add(appRefreshSessionTTL).UTC())
+	if err != nil {
+		return appAuthSessionGrant{}, appAuthUser{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return "", time.Time{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthUser{}, err
 	}
-	return accessToken, expiresAt, user, nil
+	return grant, user, nil
+}
+
+func issueAppAuthSessionGrant(ctx context.Context, tx *sql.Tx, projectID string, userID string, familyID string, refreshExpiresAt time.Time) (appAuthSessionGrant, error) {
+	accessToken, err := newAppAuthToken("session")
+	if err != nil {
+		return appAuthSessionGrant{}, err
+	}
+	refreshToken, err := newAppAuthToken("refresh")
+	if err != nil {
+		return appAuthSessionGrant{}, err
+	}
+	grant := appAuthSessionGrant{
+		AccessToken: accessToken, AccessExpiresAt: time.Now().Add(appSessionTTL).UTC(),
+		RefreshToken: refreshToken, RefreshExpiresAt: refreshExpiresAt.UTC(), FamilyID: familyID,
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO gonvex_auth_sessions
+		(token_hash, project_id, user_id, family_id, expires_at)
+		VALUES ($1, $2, $3, $4, $5)`, sha256Hex(grant.AccessToken), projectID, userID, familyID, grant.AccessExpiresAt); err != nil {
+		return appAuthSessionGrant{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO gonvex_auth_refresh_tokens
+		(token_hash, family_id, project_id, user_id, expires_at)
+		VALUES ($1, $2, $3, $4, $5)`, sha256Hex(grant.RefreshToken), familyID, projectID, userID, grant.RefreshExpiresAt); err != nil {
+		return appAuthSessionGrant{}, err
+	}
+	return grant, nil
+}
+
+func newAppAuthToken(kind string) (string, error) {
+	id, err := randomID(kind)
+	if err != nil {
+		return "", err
+	}
+	var secret [32]byte
+	if _, err := rand.Read(secret[:]); err != nil {
+		return "", err
+	}
+	return "gvx_" + id + "." + base64.RawURLEncoding.EncodeToString(secret[:]), nil
+}
+
+func (s *Server) refreshAppSession(ctx context.Context, projectID string, refreshToken string) (appAuthSessionGrant, appAuthUser, error) {
+	db, err := s.openProjectRegistry(ctx)
+	if err != nil || db == nil {
+		return appAuthSessionGrant{}, appAuthUser{}, fmt.Errorf("auth session store is unavailable")
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return appAuthSessionGrant{}, appAuthUser{}, err
+	}
+	defer tx.Rollback()
+	var storedProject, userID, familyID string
+	var refreshExpiresAt time.Time
+	var usedAt, revokedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT project_id, user_id, family_id, expires_at, used_at, revoked_at
+		FROM gonvex_auth_refresh_tokens WHERE token_hash = $1 FOR UPDATE`, sha256Hex(refreshToken)).Scan(
+		&storedProject, &userID, &familyID, &refreshExpiresAt, &usedAt, &revokedAt,
+	)
+	if err == sql.ErrNoRows {
+		return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("invalid or expired refresh token")
+	}
+	if err != nil {
+		return appAuthSessionGrant{}, appAuthUser{}, err
+	}
+	if storedProject != projectID || revokedAt.Valid || refreshExpiresAt.Before(time.Now()) {
+		return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("invalid or expired refresh token")
+	}
+	if usedAt.Valid {
+		if time.Since(usedAt.Time) <= appRefreshReuseGrace {
+			// Never issue a second child token from the same refresh token. A
+			// duplicate request inside the short grace window is rejected without
+			// revoking the winner; older reuse is treated as replay and revokes the
+			// complete family.
+			return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("refresh token was already rotated; use the latest session")
+		}
+		if err := revokeAppAuthFamilyTx(ctx, tx, familyID); err != nil {
+			return appAuthSessionGrant{}, appAuthUser{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return appAuthSessionGrant{}, appAuthUser{}, err
+		}
+		s.revokeAppAuthConnections(storedProject, userID)
+		return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("refresh token reuse detected; this login was revoked")
+	} else {
+		if _, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_refresh_tokens SET used_at = now()
+			WHERE token_hash = $1 AND used_at IS NULL`, sha256Hex(refreshToken)); err != nil {
+			return appAuthSessionGrant{}, appAuthUser{}, err
+		}
+	}
+	var user appAuthUser
+	if err := tx.QueryRowContext(ctx, `SELECT id, email, email_verified, name, picture, provider, created_at, last_signed_in_at
+		FROM gonvex_auth_users WHERE id = $1 AND project_id = $2 AND disabled_at IS NULL`, userID, projectID).Scan(
+		&user.ID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("account is unavailable")
+		}
+		return appAuthSessionGrant{}, appAuthUser{}, err
+	}
+	grant, err := issueAppAuthSessionGrant(ctx, tx, projectID, userID, familyID, refreshExpiresAt)
+	if err != nil {
+		return appAuthSessionGrant{}, appAuthUser{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return appAuthSessionGrant{}, appAuthUser{}, err
+	}
+	return grant, user, nil
+}
+
+func revokeAppAuthFamilyTx(ctx context.Context, tx *sql.Tx, familyID string) error {
+	if familyID == "" {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_sessions SET revoked_at = COALESCE(revoked_at, now())
+		WHERE family_id = $1`, familyID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_refresh_tokens SET revoked_at = COALESCE(revoked_at, now())
+		WHERE family_id = $1`, familyID)
+	return err
+}
+
+func (s *Server) writeAppAuthSession(w http.ResponseWriter, r *http.Request, projectID string, grant appAuthSessionGrant, user appAuthUser, requestedTenant string) {
+	tenants, err := s.listAppAuthTenants(r.Context(), projectID, user.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tenant memberships are unavailable"})
+		return
+	}
+	activeTenantID := ""
+	if len(tenants) > 0 {
+		active, selectErr := selectAppAuthTenant(tenants, requestedTenant)
+		if selectErr != nil {
+			active = tenants[0]
+		}
+		activeTenantID = active.ID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accessToken": grant.AccessToken, "tokenType": "Bearer",
+		"expiresIn": int(appSessionTTL.Seconds()), "expiresAt": grant.AccessExpiresAt.UnixMilli(),
+		"refreshToken": grant.RefreshToken, "refreshExpiresAt": grant.RefreshExpiresAt.UnixMilli(),
+		"user": user, "tenants": tenants, "activeTenantId": activeTenantID,
+	})
 }
 
 func pkceChallenge(verifier string) string {
@@ -707,56 +1197,134 @@ func pkceChallenge(verifier string) string {
 }
 
 func (s *Server) handleAppAuthLogout(w http.ResponseWriter, r *http.Request) {
-	token := bearerToken(r)
-	if token != "" {
-		db, err := s.openProjectRegistry(r.Context())
-		if err == nil && db != nil {
-			_, _ = db.ExecContext(r.Context(), `UPDATE gonvex_auth_sessions SET revoked_at = now()
-				WHERE token_hash = $1 AND revoked_at IS NULL`, sha256Hex(token))
-			db.Close()
-		}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	defer r.Body.Close()
+	var payload struct {
+		RefreshToken string `json:"refreshToken"`
+		All          bool   `json:"all"`
 	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+	_ = s.revokeAppAuthSession(r.Context(), bearerToken(r), strings.TrimSpace(payload.RefreshToken), payload.All)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-type validatedAppSession struct {
-	ProjectID string
-	User      appAuthUser
-}
-
-func (s *Server) validateAppSession(ctx context.Context, requestedProjectID string, token string, requestedTenantID string) (validatedAppSession, string, error) {
-	if !strings.HasPrefix(strings.TrimSpace(token), "gvx_session_") {
-		return validatedAppSession{}, "", fmt.Errorf("not a Gonvex app session")
-	}
+func (s *Server) revokeAppAuthSession(ctx context.Context, accessToken string, refreshToken string, all bool) error {
 	db, err := s.openProjectRegistry(ctx)
 	if err != nil || db == nil {
-		return validatedAppSession{}, "", fmt.Errorf("auth session store is unavailable")
+		return err
 	}
 	defer db.Close()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var familyID, projectID, userID string
+	err = sql.ErrNoRows
+	if accessToken != "" {
+		err = tx.QueryRowContext(ctx, `SELECT family_id, project_id, user_id FROM gonvex_auth_sessions
+			WHERE token_hash = $1`, sha256Hex(accessToken)).Scan(&familyID, &projectID, &userID)
+	}
+	if (accessToken == "" || err == sql.ErrNoRows) && refreshToken != "" {
+		err = tx.QueryRowContext(ctx, `SELECT family_id, project_id, user_id FROM gonvex_auth_refresh_tokens
+			WHERE token_hash = $1`, sha256Hex(refreshToken)).Scan(&familyID, &projectID, &userID)
+	} else if accessToken == "" {
+		return nil
+	}
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if all {
+		if _, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_sessions SET revoked_at = COALESCE(revoked_at, now())
+			WHERE project_id = $1 AND user_id = $2`, projectID, userID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_refresh_tokens SET revoked_at = COALESCE(revoked_at, now())
+			WHERE project_id = $1 AND user_id = $2`, projectID, userID); err != nil {
+			return err
+		}
+	} else if familyID != "" {
+		if err := revokeAppAuthFamilyTx(ctx, tx, familyID); err != nil {
+			return err
+		}
+	} else if accessToken != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_sessions SET revoked_at = COALESCE(revoked_at, now())
+			WHERE token_hash = $1`, sha256Hex(accessToken)); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if all {
+		s.revokeAppAuthConnections(projectID, userID)
+	} else if accessToken != "" {
+		s.revokeAppAuthTokenConnection(accessToken)
+	}
+	return nil
+}
+
+type validatedAppSession struct {
+	ProjectID   string
+	User        appAuthUser
+	Tenant      appAuthTenant
+	Permissions map[string]any
+}
+
+func (s *Server) loadAppSessionIdentity(ctx context.Context, token string) (validatedAppSession, error) {
+	if !strings.HasPrefix(strings.TrimSpace(token), "gvx_session_") {
+		return validatedAppSession{}, fmt.Errorf("not a Gonvex app session")
+	}
+	db, err := s.pooledProjectRegistry(ctx)
+	if err != nil || db == nil {
+		return validatedAppSession{}, fmt.Errorf("auth session store is unavailable")
+	}
 	var session validatedAppSession
 	err = db.QueryRowContext(ctx, `SELECT s.project_id, u.id, u.email, u.email_verified, u.name, u.picture, u.provider, u.created_at, u.last_signed_in_at
 		FROM gonvex_auth_sessions s JOIN gonvex_auth_users u ON u.id = s.user_id AND u.project_id = s.project_id
-		WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()`, sha256Hex(token)).Scan(
+		WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.disabled_at IS NULL`, sha256Hex(token)).Scan(
 		&session.ProjectID, &session.User.ID, &session.User.Email, &session.User.EmailVerified, &session.User.Name,
 		&session.User.Picture, &session.User.Provider, &session.User.CreatedAt, &session.User.LastSignedInAt,
 	)
 	if err == sql.ErrNoRows {
-		return validatedAppSession{}, "", fmt.Errorf("invalid or expired app session")
+		return validatedAppSession{}, fmt.Errorf("invalid or expired app session")
 	}
+	if err != nil {
+		return validatedAppSession{}, err
+	}
+	_, _ = db.ExecContext(ctx, `UPDATE gonvex_auth_sessions SET last_seen_at = now()
+		WHERE token_hash = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '5 minutes')`, sha256Hex(token))
+	return session, nil
+}
+
+func (s *Server) validateAppSession(ctx context.Context, requestedProjectID string, token string, requestedTenantID string) (validatedAppSession, string, error) {
+	session, err := s.loadAppSessionIdentity(ctx, token)
 	if err != nil {
 		return validatedAppSession{}, "", err
 	}
 	if requestedProjectID != "" && requestedProjectID != session.ProjectID {
 		return validatedAppSession{}, "", fmt.Errorf("app session was issued for a different project")
 	}
-	tenantID := strings.TrimSpace(requestedTenantID)
-	if tenantID == "" {
-		tenantID = session.ProjectID
+	tenants, err := s.listAppAuthTenants(ctx, session.ProjectID, session.User.ID)
+	if err != nil {
+		return validatedAppSession{}, "", err
 	}
-	if tenantID != session.ProjectID {
-		return validatedAppSession{}, "", fmt.Errorf("app session does not grant access to tenant %q", tenantID)
+	tenant, err := selectAppAuthTenant(tenants, requestedTenantID)
+	if err != nil {
+		return validatedAppSession{}, "", err
 	}
-	return session, tenantID, nil
+	session.Tenant = tenant
+	session.Permissions = map[string]any{}
+	for key, value := range tenant.Permissions {
+		session.Permissions[key] = value
+	}
+	// Membership role is authoritative and cannot be shadowed by arbitrary
+	// custom permission JSON from an older record.
+	session.Permissions["role"] = tenant.Role
+	return session, tenant.ID, nil
 }
 
 func (s *Server) verifyGoogleIDToken(ctx context.Context, token string, expectedNonce string) (googleIdentity, error) {

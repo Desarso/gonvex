@@ -15,4 +15,4 @@ export {
   usePaginatedQuery,
   useQuery,
 } from "@gonvex/react";
-export type { GonvexAuthConfig, GonvexAuthUser, GonvexAuthValue } from "@gonvex/react";
+export type { GonvexAuthConfig, GonvexAuthTenant, GonvexAuthUser, GonvexAuthValue } from "@gonvex/react";

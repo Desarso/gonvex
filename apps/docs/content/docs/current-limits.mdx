@@ -37,12 +37,16 @@ npx gonvex login
 npx gonvex project create my-app
 npx gonvex token create "Developer CLI"
 npx gonvex auth add google --origin http://localhost:5173
+npx gonvex auth doctor
+npx gonvex auth tenants list
 npx gonvex dev
 npx gonvex env list
 npx gonvex env push .env.production
 ```
 
-`tenant`, `deploy`, `generate`, and `doctor` remain roadmap commands. See the
+Top-level `tenant`, `deploy`, `generate`, and general runtime `doctor` remain
+roadmap commands; project authentication has its own implemented `auth doctor`.
+See the
 [CLI Reference](./cli-reference) for current authentication and project-provisioning
 flags.
 
@@ -54,24 +58,26 @@ hardened hosted control plane.
 
 Needed work:
 
-- allowed origins and runtime auth
 - environment/deployment records
 - dashboard UI for personal-token lifecycle and more granular custom roles
 - production upgrade and rollback workflows
 
-## Multi-Tenant Runtime Is Roadmap
+## Multi-Tenant Auth and Routing
 
-The target model supports users who belong to multiple tenants with roles and permissions. Tenants may route to separate databases.
+Users can belong to multiple tenants with owner, admin, member, or viewer roles;
+each membership may carry additional JSON permissions. The central registry verifies
+membership before tenant routing, and runtime-created tenants receive separate
+PostgreSQL databases. Native auth supports personal-workspace and invite-only
+signup, tenant switching, invitation claiming, account disable/delete, and session
+revocation after membership changes.
 
-Needed work:
+Remaining operational work is mostly fleet-level:
 
-- tenant registry
-- user registry
-- memberships
-- roles and permissions
-- active tenant switching
-- tenant database routing
-- tenant-aware cache and invalidation scoping
+- backup/restore orchestration across many tenant databases
+- staged schema rollouts and backfills
+- tenant move/export workflows
+- custom named-role editing and audit export in the dashboard
+- quota, billing, and organization policy
 
 ## Invalidation Is Conservative
 
@@ -104,10 +110,12 @@ Production migrations need:
 
 Dashboard sessions, account personal access tokens, project memberships, and scoped
 project/token permissions are implemented. Native brokered Google OAuth is
-implemented for single-database app projects with Authorization Code + PKCE,
-server-side Google ID-token validation, hashed sessions, and exact callback
-allowlists. Multi-tenant auth membership, additional providers, device
-authorization, organization roles, recovery flows, and hosted-control-plane
+implemented for single-database and multi-tenant app projects with Authorization
+Code + PKCE, server-side Google ID-token validation, exact callback allowlists,
+short-lived access tokens, rotating refresh-token families, tenant memberships,
+invitations, role/permission propagation, account lifecycle controls, and live
+WebSocket revocation. Additional providers, device authorization, enterprise
+organization policy, recovery flows, audit export, and hosted-control-plane
 hardening are still incomplete.
 
 Do not expose development data-browser endpoints as application APIs.
@@ -121,8 +129,7 @@ File storage is optional. Apps that need files should attach an S3-compatible pr
 Treat Gonvex as an active prototype until these areas are complete:
 
 - generic function execution
-- project and tenant routing
-- auth and permissions
 - production migrations
 - deployment/versioning
+- tenant fleet backup/restore
 - operational dashboard workflows

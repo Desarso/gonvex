@@ -101,18 +101,33 @@ During development, `gonvex dev` watches the `gonvex/` folder, regenerates TypeS
 
 ## Native Google Login
 
-Add Google login to a single-database app through Gonvex itself:
+Create, provision, and wire a production-origin Google app through Gonvex itself:
+
+```bash
+npm create gonvex@latest my-app -- \
+  --runtime-url https://gonvex.example.com \
+  --google-auth \
+  --origin https://my-app.example.com
+```
+
+Or add Google to an existing single-database or multi-tenant project:
 
 ```bash
 npx gonvex auth add google --origin http://localhost:5173
+npx gonvex auth doctor
 ```
+
+Invite-only creation accepts `--owner <verified-google-email>` so the first
+scope/workspace is usable immediately. Registered preview callbacks can be retired
+with `gonvex auth remove google --origin <url>`.
 
 This registers the app callback with the runtime and generates `gonvex/auth.tsx`
 with `GonvexAuthProvider`, `GoogleSignInButton`, and `useGonvexAuth`. Apps do not
 install Firebase or create their own Google Cloud project. The Gonvex installation
 owns one centrally configured Google OAuth client, validates Google identity
-server-side, and issues project-scoped accounts and sessions using Authorization
-Code + PKCE.
+server-side, and issues project-scoped accounts and rotating sessions using
+Authorization Code + PKCE. Enabling the provider also makes the runtime enforce
+authentication for that project; the sign-in screen is not the security boundary.
 
 ## Self-Hosting
 

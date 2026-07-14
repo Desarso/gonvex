@@ -424,6 +424,47 @@ button {
   font-weight: 650;
 }
 
+.projects-profile-trigger {
+  min-height: 42px;
+  gap: 9px;
+  border: 1px solid transparent;
+  padding: 4px 8px 4px 5px;
+}
+
+.projects-profile-trigger:hover {
+  border-color: var(--border);
+  background: color-mix(in oklab, var(--surface-secondary) 78%, transparent);
+}
+
+.projects-profile-trigger > span:not(.avatar) {
+  display: grid;
+  gap: 1px;
+  text-align: left;
+}
+
+.projects-profile-trigger strong {
+  color: var(--foreground);
+  font-size: 0.8rem;
+  font-weight: 720;
+}
+
+.projects-profile-trigger small {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 560;
+}
+
+.projects-profile-avatar {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in oklab, var(--accent) 32%, var(--border));
+  background: color-mix(in oklab, var(--accent) 13%, var(--surface));
+  color: var(--accent);
+  font-size: 0.68rem;
+  font-weight: 820;
+}
+
 .projects-title {
   margin: 58px auto 20px;
   max-width: 1180px;
@@ -598,6 +639,303 @@ button {
   gap: 8px;
 }
 
+.account-profile-backdrop {
+  background:
+    radial-gradient(circle at 50% 28%, color-mix(in oklab, var(--accent) 16%, transparent), transparent 32rem),
+    rgb(0 0 0 / 68%);
+  backdrop-filter: blur(5px);
+}
+
+.account-profile-modal {
+  width: min(820px, 100%);
+  gap: 0;
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 92% 0%, color-mix(in oklab, var(--accent) 12%, transparent), transparent 18rem),
+    var(--surface);
+  padding: 0;
+  overflow: hidden auto;
+}
+
+.account-profile-header {
+  padding: 22px 24px 18px;
+}
+
+.account-profile-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 14px;
+}
+
+.account-profile-avatar {
+  width: 54px;
+  height: 54px;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in oklab, var(--accent) 36%, var(--border));
+  border-radius: 17px;
+  background: color-mix(in oklab, var(--accent) 14%, var(--surface));
+  color: var(--accent);
+  font-size: 1rem;
+  font-weight: 850;
+}
+
+.account-profile-identity .eyebrow,
+.account-token-heading .eyebrow {
+  margin: 0 0 4px;
+  font-size: 0.65rem;
+}
+
+.account-profile-identity h2 {
+  font-size: 1.3rem;
+}
+
+.account-profile-identity span {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+}
+
+.account-profile-role-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-block: 1px solid var(--border);
+  background: color-mix(in oklab, var(--surface-secondary) 62%, transparent);
+}
+
+.account-profile-role-strip > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 13px 24px;
+}
+
+.account-profile-role-strip > div + div {
+  border-left: 1px solid var(--border);
+}
+
+.account-profile-role-strip span {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 680;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.account-profile-role-strip strong {
+  font-size: 0.84rem;
+  font-weight: 730;
+}
+
+.account-token-section {
+  display: grid;
+  gap: 16px;
+  padding: 22px 24px 24px;
+}
+
+.account-token-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.account-token-heading h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  letter-spacing: -0.025em;
+}
+
+.account-token-heading p:not(.eyebrow) {
+  max-width: 560px;
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 0.79rem;
+  line-height: 1.5;
+}
+
+.account-token-scope {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in oklab, var(--accent) 28%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--accent) 10%, var(--surface));
+  color: var(--accent);
+  font: 0.66rem ui-monospace, SFMono-Regular, Consolas, monospace;
+  padding: 5px 8px;
+}
+
+.account-token-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 170px auto;
+  align-items: end;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: color-mix(in oklab, var(--surface-secondary) 48%, transparent);
+  padding: 12px;
+}
+
+.account-token-create .table-search {
+  margin: 0;
+}
+
+.account-token-create .button {
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.account-token-reveal {
+  display: grid;
+  gap: 10px;
+  border: 1px solid color-mix(in oklab, var(--warning) 42%, var(--border));
+  border-radius: 13px;
+  background:
+    linear-gradient(115deg, color-mix(in oklab, var(--warning) 12%, var(--surface)), var(--surface));
+  padding: 14px;
+}
+
+.account-token-reveal > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.account-token-reveal strong {
+  font-size: 0.86rem;
+}
+
+.account-token-reveal span {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.account-token-reveal textarea {
+  width: 100%;
+  min-height: 58px;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  font: 0.76rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding: 10px;
+}
+
+.account-token-reveal-actions {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.account-token-reveal-actions > span {
+  margin-right: auto;
+}
+
+.account-token-list {
+  display: grid;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  overflow: hidden;
+}
+
+.account-token-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.account-token-row + .account-token-row {
+  border-top: 1px solid var(--border);
+}
+
+.account-token-row[data-status="revoked"],
+.account-token-row[data-status="expired"] {
+  opacity: 0.6;
+}
+
+.account-token-mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid color-mix(in oklab, var(--accent) 24%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--accent) 9%, var(--surface));
+  color: var(--accent);
+  font-size: 1.15rem;
+}
+
+.account-token-main {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.account-token-main > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.account-token-main strong {
+  overflow: hidden;
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-token-main code {
+  color: var(--muted);
+  font: 0.7rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.account-token-main small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.67rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-token-state {
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--success) 16%, var(--surface));
+  color: var(--success-foreground);
+  font-size: 0.59rem;
+  font-weight: 750;
+  padding: 2px 6px;
+  text-transform: uppercase;
+}
+
+[data-status="revoked"] .account-token-state,
+[data-status="expired"] .account-token-state {
+  background: var(--default);
+  color: var(--muted);
+}
+
+.account-token-empty,
+.account-token-notice {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  padding: 16px;
+}
+
+.account-token-notice {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-secondary);
+  padding: 10px 12px;
+}
+
 @media (max-width: 680px) {
   .projects-grid {
     grid-template-columns: 1fr;
@@ -605,6 +943,41 @@ button {
 
   .project-tile {
     min-height: 184px;
+  }
+
+  .projects-profile-trigger > span:not(.avatar) {
+    display: none;
+  }
+
+  .account-profile-header,
+  .account-token-section {
+    padding-inline: 16px;
+  }
+
+  .account-profile-role-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .account-profile-role-strip > div {
+    padding-inline: 16px;
+  }
+
+  .account-profile-role-strip > div + div {
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
+  .account-token-create {
+    grid-template-columns: 1fr;
+  }
+
+  .account-token-row {
+    grid-template-columns: 34px minmax(0, 1fr);
+  }
+
+  .account-token-row > .button {
+    grid-column: 2;
+    justify-self: start;
   }
 }
 
@@ -707,8 +1080,7 @@ button {
 }
 
 .project-card span,
-.project-card small,
-.project-switcher span {
+.project-card small {
   color: var(--muted);
   font-size: 0.68rem;
   font-weight: 700;
@@ -772,6 +1144,68 @@ button {
 .notification-bell {
   position: relative;
   display: inline-flex;
+}
+
+.theme-toggle {
+  position: relative;
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--separator);
+  border-radius: var(--field-radius);
+  background: color-mix(in oklab, var(--surface) 88%, transparent);
+  color: var(--muted);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 7%);
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease, transform 120ms ease;
+}
+
+.theme-toggle:hover {
+  border-color: var(--border);
+  background: var(--default);
+  color: var(--foreground);
+}
+
+.theme-toggle:active {
+  transform: translateY(1px);
+}
+
+.theme-toggle:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--focus) 65%, transparent);
+  outline-offset: 2px;
+}
+
+.theme-toggle-icon {
+  position: absolute;
+  width: 15px;
+  height: 15px;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: opacity 500ms ease, transform 500ms ease;
+}
+
+.theme-toggle-sun {
+  opacity: 1;
+  transform: rotate(0deg) scale(1);
+}
+
+.theme-toggle-moon {
+  opacity: 0;
+  transform: rotate(90deg) scale(0);
+}
+
+.theme-toggle[data-current-theme="dark"] .theme-toggle-sun {
+  opacity: 0;
+  transform: rotate(-90deg) scale(0);
+}
+
+.theme-toggle[data-current-theme="dark"] .theme-toggle-moon {
+  opacity: 1;
+  transform: rotate(0deg) scale(1);
 }
 
 .notification-bell-button {
@@ -877,7 +1311,6 @@ button {
 .project-switcher {
   display: flex;
   align-items: center;
-  gap: 8px;
 }
 
 .project-switcher-select {

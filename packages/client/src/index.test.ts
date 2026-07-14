@@ -142,6 +142,21 @@ describe("GonvexClient", () => {
     ]);
   });
 
+  it("identifies a project before signed-out queries so project auth can be enforced", () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { project: "secure-app" });
+
+    client.subscribeQuery(ref, {}, () => undefined);
+    const socket = latestSocket();
+    socket.open();
+
+    expect(sentMessages(socket)).toMatchObject([{ type: "auth", project: "secure-app" }]);
+    expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(false);
+
+    const [{ id: authID }] = sentMessages(socket);
+    socket.receive({ type: "auth.error", id: authID, error: "a Gonvex app session is required" });
+    expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", path: "tasks.list" });
+  });
+
   it("queues subscription messages while an auth update is in flight", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     client.connect();

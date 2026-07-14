@@ -13,12 +13,24 @@ import (
 )
 
 func (s *Server) authenticateSocket(ctx context.Context, projectID string, currentTenantID string, token string, requestedTenantID string) (*gonvex.User, map[string]any, string, string, error) {
+	if err := s.requireProjectDatabase(projectID); err != nil {
+		return nil, nil, "", "", err
+	}
 	if strings.HasPrefix(strings.TrimSpace(token), "gvx_session_") {
 		session, tenantID, err := s.validateAppSession(ctx, projectID, token, requestedTenantID)
 		if err != nil {
 			return nil, nil, "", "", err
 		}
-		return &gonvex.User{ID: session.User.ID, Email: session.User.Email}, map[string]any{}, session.ProjectID, tenantID, nil
+		return &gonvex.User{ID: session.User.ID, Email: session.User.Email}, session.Permissions, session.ProjectID, tenantID, nil
+	}
+	if strings.TrimSpace(s.projectRegistryURL()) != "" {
+		nativeEnabled, err := s.nativeAppAuthEnabled(ctx, projectID)
+		if err != nil {
+			return nil, nil, "", "", fmt.Errorf("project authentication configuration is unavailable")
+		}
+		if nativeEnabled {
+			return nil, nil, "", "", fmt.Errorf("a Gonvex app session is required")
+		}
 	}
 	if s.config.LandlordURL == "" {
 		if s.config.RequireAuth {
@@ -105,7 +117,7 @@ func (s *Server) loadTenantPermissions(ctx context.Context, projectID string, te
 		return nil, err
 	}
 
-	permissions := map[string]any{"role": role}
+	permissions := map[string]any{}
 	if len(rawPermissions) > 0 {
 		var parsed map[string]any
 		if err := json.Unmarshal(rawPermissions, &parsed); err != nil {
@@ -115,5 +127,6 @@ func (s *Server) loadTenantPermissions(ctx context.Context, projectID string, te
 			permissions[key] = value
 		}
 	}
+	permissions["role"] = role
 	return permissions, nil
 }

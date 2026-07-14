@@ -35,6 +35,24 @@ func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 		s.metrics.recordFunction(project, r.URL.Path, kind, time.Since(started), opErr)
 	}()
 
+	tenant := tenantIDFromRequest(project, tenantID(r))
+	caller := callerContext{}
+	token := bearerToken(r)
+	if s.projectRequiresAuthentication(r.Context(), project) || token != "" {
+		user, permissions, authenticatedProject, authenticatedTenant, err := s.authenticateSocket(
+			r.Context(), project, tenant, token, tenantID(r),
+		)
+		if err != nil {
+			opErr = err
+			w.Header().Set("www-authenticate", "Bearer")
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		project = authenticatedProject
+		tenant = authenticatedTenant
+		caller = callerContext{user: user, permissions: permissions}
+	}
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRegisteredHTTPBodyBytes+1))
 	if err != nil {
 		opErr = err
@@ -47,7 +65,7 @@ func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpCtx, err := s.httpContext(r.Context(), project, tenantIDFromRequest(project, tenantID(r)), callerContext{})
+	httpCtx, err := s.httpContext(r.Context(), project, tenant, caller)
 	if err != nil {
 		opErr = err
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

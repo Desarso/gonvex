@@ -24,11 +24,9 @@
   },
   "pnpm": {
     "ignoredBuiltDependencies": [
-      "@firebase/util",
       "protobufjs"
     ],
     "onlyBuiltDependencies": [
-      "@firebase/util",
       "esbuild",
       "protobufjs"
     ]

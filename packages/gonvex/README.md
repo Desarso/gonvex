@@ -40,10 +40,12 @@ npx gonvex project create my-app
 ```
 
 The default token permissions are `projects:read`, `projects:create`, and
-`projects:keys:read`. Use repeated `--permission` flags, `--permission 'projects:*'`,
-or `--full` to choose broader access. Account credentials are stored per runtime in a
-user config file with mode `0600`; project credentials stay in the app's
-`.env.local`.
+`projects:keys:read`. Use repeated `--permission` flags or `--permission 'projects:*'`
+to choose broader owner-scoped access. Dashboard administrators can combine
+`projects:*` with `admin:projects` for runtime-wide project automation, or create the
+same admin key from their profile in the dashboard. Account credentials are stored
+per runtime in a user config file with mode `0600`; project credentials stay in the
+app's `.env.local`.
 
 Initialize Gonvex files in an existing app:
 
@@ -87,6 +89,7 @@ project:
 ```bash
 npx gonvex auth add google --origin http://localhost:5173
 npx gonvex auth status
+npx gonvex auth doctor
 npx gonvex auth users
 ```
 
@@ -94,6 +97,19 @@ The command registers the exact callback with the runtime and writes
 `gonvex/auth.tsx`, which exports a configured provider, hook, and Google sign-in
 button. A Gonvex installation operator configures one central Google OAuth client;
 future app projects reuse it through the runtime.
+
+For a new app, provision and wire everything at once:
+
+```bash
+npm create gonvex@latest my-app -- --runtime-url https://gonvex.example.com --google-auth --origin https://my-app.example.com
+```
+
+Both single-database and multi-tenant projects are supported. Use
+`--signup-mode personal|inviteOnly`, `gonvex auth tenants`, and
+`gonvex auth memberships` for workspace onboarding. An invite-only app created in
+one command also takes `--owner <verified-google-email>` to bootstrap its first
+scope/workspace invitation. Retire a callback with
+`gonvex auth remove google --origin <url>` without disabling the provider.
 
 `env push` resolves the file from the selected project root and atomically
 replaces that project's server-side environment-variable set. Pass a dedicated

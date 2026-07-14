@@ -691,6 +691,31 @@ func TestDevSyncRejectsHeaderProjectMismatch(t *testing.T) {
 	}
 }
 
+func TestDevSyncRejectsUnregisteredProjectInsteadOfUsingControlDatabase(t *testing.T) {
+	server := New(config.Config{
+		PostgresURL: "postgres://control.example/gonvex_control",
+		ProjectDatabases: map[string]string{
+			"whagons-5": "postgres://app.example/whagons_5",
+		},
+	})
+	body := bytes.NewBufferString(`{"project":"whagons5-dev","generatedAt":"now","functions":{},"schema":{}}`)
+	request := httptest.NewRequest(http.MethodPost, "/dev/sync", body)
+	request.Header.Set("x-gonvex-project-id", "whagons5-dev")
+
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "same Gonvex project id") {
+		t.Fatalf("expected an actionable project mismatch, got %s", recorder.Body.String())
+	}
+	if manifest := server.runtime.ManifestForProject("whagons5-dev"); len(manifest.Functions) != 0 {
+		t.Fatalf("unregistered project was synced into runtime: %+v", manifest)
+	}
+}
+
 func TestDevSyncUsesHeaderProjectWhenManifestProjectIsEmpty(t *testing.T) {
 	server := New(config.Config{})
 	body := bytes.NewBufferString(`{"generatedAt":"now","functions":{},"schema":{}}`)

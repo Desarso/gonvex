@@ -41,9 +41,8 @@ import {
   faTree,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
-import { initializeApp, getApps } from "firebase/app";
-import { getAuth, GoogleAuthProvider, signInWithPopup, type Auth } from "firebase/auth";
 import { GonvexClient } from "@gonvex/client";
+import type { GonvexAuthValue } from "@gonvex/react";
 import { Avatar, Button, Calendar, Card, Checkbox, Chip, DateField, DatePicker, ListBox, NumberField, SearchField, Select, Separator } from "@heroui/react";
 import { parseDate, type DateValue } from "@internationalized/date";
 import { Background, Controls, MarkerType, MiniMap, ReactFlow, applyNodeChanges, type Edge, type Node, type NodeChange } from "@xyflow/react";
@@ -296,6 +295,22 @@ type DashboardUser = {
   email: string;
   name: string;
   role: "admin" | "user";
+};
+
+type AccountAccessToken = {
+  id: string;
+  name: string;
+  prefix: string;
+  permissions: string[];
+  createdAt: string;
+  expiresAt?: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+};
+
+type CreatedAccountAccessToken = {
+  token: AccountAccessToken;
+  accessToken: string;
 };
 
 type ProjectMember = {
@@ -717,17 +732,10 @@ const dashboardEmailLoginEnabled = optionalEnvBoolean(import.meta.env.VITE_GONVE
   ?? (dashboardAllowUnlistedEmails || dashboardAllowedEmails.length > 0);
 const dashboardPasswordLoginEnabled = optionalEnvBoolean(import.meta.env.VITE_GONVEX_PASSWORD_LOGIN_ENABLED)
   ?? import.meta.env.PROD;
-const firebaseConfig = {
-  apiKey: String(import.meta.env.VITE_FIREBASE_API_KEY ?? "").trim(),
-  authDomain: String(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? "").trim(),
-  projectId: String(import.meta.env.VITE_FIREBASE_PROJECT_ID ?? "").trim(),
-  appId: String(import.meta.env.VITE_FIREBASE_APP_ID ?? "").trim(),
-  messagingSenderId: String(import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ?? "").trim(),
-  storageBucket: String(import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ?? "").trim(),
-};
+const dashboardNativeAuthProjectID = String(import.meta.env.VITE_GONVEX_DASHBOARD_AUTH_PROJECT_ID ?? "").trim();
 const dashboardGoogleLoginEnabled = googleLoginEnabled(
   import.meta.env.VITE_GONVEX_GOOGLE_LOGIN_ENABLED,
-  firebaseAuthConfigured(),
+  Boolean(dashboardNativeAuthProjectID),
 );
 const runtimeBaseURL = import.meta.env.MODE === "test" ? "" : trimTrailingSlash(envRuntimeURL || "http://localhost:8080");
 
@@ -979,8 +987,8 @@ export function dashboardEmailAllowed(email: string, allowlist: readonly string[
   return allowlist.includes(normalized);
 }
 
-export function googleLoginEnabled(value: string | undefined, hasFirebaseConfig: boolean): boolean {
-  return optionalEnvBoolean(value) === true && hasFirebaseConfig;
+export function googleLoginEnabled(value: string | undefined, hasNativeAuthConfig: boolean): boolean {
+  return optionalEnvBoolean(value) === true && hasNativeAuthConfig;
 }
 
 async function createDashboardPasswordSession(email: string, password: string): Promise<DashboardSession> {
@@ -1010,6 +1018,27 @@ async function fetchDashboardSession(): Promise<DashboardSession | null> {
   const payload = await response.json().catch(() => ({})) as { session?: DashboardSession };
   if (!response.ok || !payload.session) return null;
   return payload.session;
+}
+
+async function validateNativeDashboardSession(accessToken: string, user: NonNullable<GonvexAuthValue["user"]>): Promise<DashboardSession> {
+  const response = await fetch(`${runtimeBaseURL}/dev/auth/me`, {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  const payload = await response.json().catch(() => ({})) as {
+    account?: { email?: string; name?: string; role?: "admin" | "user" };
+    error?: string;
+  };
+  if (!response.ok || !payload.account?.email) {
+    throw new Error(payload.error ?? "This Google account is not authorized to use the Gonvex dashboard.");
+  }
+  return {
+    accessToken,
+    avatarUrl: user.picture,
+    email: payload.account.email,
+    name: payload.account.name || user.name || payload.account.email,
+    provider: "google",
+    role: payload.account.role,
+  };
 }
 
 function trimTrailingSlash(value: string): string {
@@ -1251,7 +1280,6 @@ function projectFromRuntime(project: Partial<ProjectTarget> & { id: string; name
 }
 
 async function fetchRuntimeProjects(): Promise<ProjectTarget[]> {
-  if (import.meta.env.MODE === "test") return [];
   const urls = runtimeBaseURL ? [`${runtimeBaseURL}/dev/projects`, "/dev/projects"] : ["/dev/projects"];
   let lastError = "runtime projects unavailable";
   for (const url of urls) {
@@ -1326,6 +1354,41 @@ async function createDashboardUser(email: string, name: string, password: string
   const payload = await response.json().catch(() => ({} as { error?: string; user?: DashboardUser }));
   if (!response.ok || !payload.user) throw new Error(payload.error ?? response.statusText);
   return payload.user;
+}
+
+async function fetchAccountAccessTokens(): Promise<AccountAccessToken[]> {
+  const response = await fetch(`${runtimeBaseURL}/dev/auth/tokens`, { headers: dashboardAuthHeaders() });
+  const payload = await response.json().catch(() => ({} as { error?: string; tokens?: AccountAccessToken[] }));
+  if (!response.ok) throw new Error(payload.error ?? response.statusText);
+  return payload.tokens ?? [];
+}
+
+async function createGlobalAdminAccessToken(name: string, expiresAt?: string): Promise<CreatedAccountAccessToken> {
+  const response = await fetch(`${runtimeBaseURL}/dev/auth/tokens`, {
+    body: JSON.stringify({
+      name,
+      permissions: ["projects:*", "admin:projects"],
+      ...(expiresAt ? { expiresAt } : {}),
+    }),
+    headers: dashboardAuthHeaders({ "content-type": "application/json" }),
+    method: "POST",
+  });
+  const payload = await response.json().catch(() => ({} as { error?: string }));
+  if (!response.ok || !(payload as CreatedAccountAccessToken).accessToken) {
+    throw new Error((payload as { error?: string }).error ?? response.statusText);
+  }
+  return payload as CreatedAccountAccessToken;
+}
+
+async function revokeAccountAccessToken(tokenID: string): Promise<void> {
+  const response = await fetch(`${runtimeBaseURL}/dev/auth/tokens/${encodeURIComponent(tokenID)}`, {
+    headers: dashboardAuthHeaders(),
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({} as { error?: string }));
+    throw new Error(payload.error ?? response.statusText);
+  }
 }
 
 async function fetchDashboardNotifications(): Promise<{ notifications: DashboardNotification[]; unread: number }> {
@@ -1462,16 +1525,6 @@ async function inviteProjectMember(project: ProjectTarget, email: string, role: 
   const payload = await response.json().catch(() => ({} as { error?: string; invitation?: ProjectInvitation }));
   if (!response.ok || !payload.invitation) throw new Error(payload.error ?? response.statusText);
   return payload.invitation;
-}
-
-function firebaseAuthConfigured(): boolean {
-  return Boolean(firebaseConfig.apiKey && firebaseConfig.authDomain && firebaseConfig.projectId && firebaseConfig.appId);
-}
-
-function getFirebaseAuth(): Auth | null {
-  if (!firebaseAuthConfigured()) return null;
-  const app = getApps()[0] ?? initializeApp(firebaseConfig);
-  return getAuth(app);
 }
 
 const darkGridTheme: Partial<Theme> = {
@@ -2472,8 +2525,12 @@ function projectIDFromPath(pathname: string): string | null {
   return parts[0] === "projects" && parts[1] ? decodeURIComponent(parts[1]) : null;
 }
 
+function isProjectChooserPath(pathname: string): boolean {
+  return pathname.replace(/\/+$/, "") === "/projects";
+}
+
 function storedProjectID(): string | null {
-  if (typeof window === "undefined" || window.location.pathname === "/projects") return null;
+  if (typeof window === "undefined" || isProjectChooserPath(window.location.pathname)) return null;
   return projectIDFromPath(window.location.pathname) ?? window.localStorage.getItem(dashboardProjectKey);
 }
 
@@ -3008,7 +3065,7 @@ function ManifestGrid(props: {
   );
 }
 
-export function App() {
+export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
   const [activePage, setActivePage] = useState<PageID>(() => pageFromPath(window.location.pathname));
   const [theme, setTheme] = useState<ThemeMode>(() => storedTheme());
   const [signedOut, setSignedOut] = useState(() => window.location.pathname === "/login");
@@ -3029,6 +3086,7 @@ export function App() {
   });
   const [hideTestTenants, setHideTestTenants] = useState<Record<string, boolean>>(() => storedHideTestTenants());
   const [actionMessage, setActionMessage] = useState("");
+  const [nativeLoginError, setNativeLoginError] = useState("");
   const [projectDiscoveryError, setProjectDiscoveryError] = useState("");
   const [projectDiscoveryLoading, setProjectDiscoveryLoading] = useState(false);
   const currentSession = session ?? localDeveloperSession;
@@ -3045,7 +3103,7 @@ export function App() {
   const toggleTheme = () => setTheme((current) => (current === "dark" ? "light" : "dark"));
   const reportAction: ActionHandler = (message) => setActionMessage(message);
   const loginRequired = dashboardAuthEnabled || signedOut;
-  const canSignOut = dashboardAuthEnabled || dashboardPasswordLoginEnabled || Boolean(session?.accessToken) || session?.provider === "gonvex";
+  const canSignOut = dashboardAuthEnabled || dashboardPasswordLoginEnabled || Boolean(session?.accessToken) || session?.provider === "gonvex" || nativeAuth?.isAuthenticated === true;
 
   const login = (nextSession: DashboardSession) => {
     setSignedOut(false);
@@ -3065,8 +3123,15 @@ export function App() {
     login(await createDashboardPasswordSession(email, password));
   };
 
+  const loginWithGoogle = async () => {
+    if (!nativeAuth) throw new Error("Gonvex native Google sign-in is not configured for this dashboard.");
+    setNativeLoginError("");
+    await nativeAuth.signIn();
+  };
+
   const logout = () => {
     void destroyDashboardPasswordSession();
+    if (nativeAuth?.isAuthenticated) void nativeAuth.signOut();
     setSignedOut(true);
     setSession(null);
     setActiveProjectID(null);
@@ -3231,7 +3296,10 @@ export function App() {
       const currentActiveProject = activeProjectRef.current;
       const preferred = preferredRuntimeProject(currentActiveProject, runtimeProjects);
       setProjects((current) => mergeRuntimeProjects(current, runtimeProjects));
-      if (preferred && currentActiveProject?.id !== preferred.id && (!currentActiveProject || isDefaultProjectTarget(currentActiveProject))) {
+      if (!isProjectChooserPath(window.location.pathname)
+        && preferred
+        && currentActiveProject?.id !== preferred.id
+        && (!currentActiveProject || isDefaultProjectTarget(currentActiveProject))) {
         setActiveProjectID(preferred.id);
         window.localStorage.setItem(dashboardProjectKey, preferred.id);
       }
@@ -3256,6 +3324,43 @@ export function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!nativeAuth || nativeAuth.isLoading || !nativeAuth.isAuthenticated || !nativeAuth.user) return;
+    let cancelled = false;
+    const user = nativeAuth.user;
+    void nativeAuth.fetchAccessToken?.({ forceRefreshToken: false })
+      .then(async (accessToken) => {
+        if (!accessToken) throw new Error("The Gonvex Google session did not provide an access token.");
+        const nextSession = await validateNativeDashboardSession(accessToken, user);
+        if (cancelled) return;
+        setNativeLoginError("");
+        restoreSession(nextSession);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setNativeLoginError(error instanceof Error ? error.message : "Google sign-in failed.");
+        setSignedOut(true);
+        setSession(null);
+        setActiveProjectID(null);
+        window.localStorage.removeItem(dashboardSessionKey);
+        if (window.location.pathname !== "/login") window.history.replaceState(null, "", "/login");
+        void nativeAuth.signOut();
+      });
+    return () => { cancelled = true; };
+  }, [nativeAuth]);
+
+  useEffect(() => {
+    if (!nativeAuth || nativeAuth.isLoading || nativeAuth.isAuthenticated || session?.provider !== "google") return;
+    // The dashboard's display session mirrors the native rotating session. Do
+    // not leave a stale Google dashboard session usable in the UI after the
+    // native refresh token expires or is revoked.
+    setSignedOut(true);
+    setSession(null);
+    setActiveProjectID(null);
+    window.localStorage.removeItem(dashboardSessionKey);
+    if (window.location.pathname !== "/login") window.history.replaceState(null, "", "/login");
+  }, [nativeAuth, session?.provider]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -3312,8 +3417,10 @@ export function App() {
         allowUnlistedEmails={dashboardAllowUnlistedEmails}
         allowedEmails={dashboardAllowedEmails}
         emailLoginEnabled={dashboardEmailLoginEnabled}
+        googleAuthError={nativeLoginError || nativeAuth?.error || ""}
         googleLoginEnabled={dashboardGoogleLoginEnabled}
         onLogin={login}
+        onGoogleLogin={loginWithGoogle}
         onPasswordLogin={loginWithPassword}
         onToggleTheme={toggleTheme}
         passwordLoginEnabled={dashboardPasswordLoginEnabled || signedOut}
@@ -3393,7 +3500,6 @@ export function App() {
 
             <div className="topbar-actions">
               <div className="project-switcher">
-                <span>Project</span>
                 <Select
                   aria-label="Active project"
                   className="project-switcher-select"
@@ -3419,18 +3525,16 @@ export function App() {
                 </Select>
               </div>
               <Button size="sm" variant="ghost" onPress={showProjects}>
-                Projects
+                All projects
               </Button>
               <Chip color="success" size="sm" variant="soft">
                 realtime on
               </Chip>
               <NotificationBell />
-              <Button size="sm" variant="secondary" onPress={() => {
+              <ThemeToggle themeLabel={themeLabel} onToggle={() => {
                 toggleTheme();
                 reportAction(`Switched to ${theme === "dark" ? "light" : "dark"} mode`);
-              }}>
-                {themeLabel}
-              </Button>
+              }} />
               <Button size="sm" variant="ghost" onPress={logout}>
                 Sign out
               </Button>
@@ -3485,11 +3589,37 @@ export function App() {
   );
 }
 
+function ThemeToggle(props: { className?: string; onToggle: () => void; themeLabel: string }) {
+  const currentTheme = props.themeLabel === "Light mode" ? "dark" : "light";
+  const label = `Switch to ${props.themeLabel.toLowerCase()}`;
+  return (
+    <button
+      aria-label={label}
+      aria-pressed={currentTheme === "dark"}
+      className={`theme-toggle ${props.className ?? ""}`.trim()}
+      data-current-theme={currentTheme}
+      onClick={props.onToggle}
+      title={label}
+      type="button"
+    >
+      <svg aria-hidden="true" className="theme-toggle-icon theme-toggle-sun" fill="none" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41" />
+      </svg>
+      <svg aria-hidden="true" className="theme-toggle-icon theme-toggle-moon" fill="none" viewBox="0 0 24 24">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z" />
+      </svg>
+    </button>
+  );
+}
+
 function LoginPage(props: {
   allowUnlistedEmails: boolean;
   allowedEmails: readonly string[];
   emailLoginEnabled: boolean;
+  googleAuthError: string;
   googleLoginEnabled: boolean;
+  onGoogleLogin: () => Promise<void>;
   onLogin: (session: DashboardSession) => void;
   onPasswordLogin: (email: string, password: string) => Promise<void>;
   onToggleTheme: () => void;
@@ -3505,23 +3635,9 @@ function LoginPage(props: {
 
   const signInWithGoogle = async () => {
     setAuthError("");
-    const auth = getFirebaseAuth();
-    if (!auth) {
-      setAuthError(import.meta.env.PROD
-        ? "Google sign-in is not configured for this dashboard deployment."
-        : "Firebase is not configured. Add VITE_FIREBASE_* values to apps/dashboard/.env.local.");
-      return;
-    }
     setGoogleLoading(true);
     try {
-      const result = await signInWithPopup(auth, new GoogleAuthProvider());
-      const user = result.user;
-      props.onLogin({
-        email: user.email ?? "google-user@gonvex.local",
-        name: user.displayName ?? user.email ?? "Google user",
-        avatarUrl: user.photoURL ?? undefined,
-        provider: "google",
-      });
+      await props.onGoogleLogin();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Google sign-in failed.";
       setAuthError(message);
@@ -3581,7 +3697,7 @@ function LoginPage(props: {
               <span>{googleLoading ? "Opening Google..." : "Sign in with Google"}</span>
             </button>
           ) : null}
-          {authError ? <p className="login-error" role="alert">{authError}</p> : null}
+          {authError || props.googleAuthError ? <p className="login-error" role="alert">{authError || props.googleAuthError}</p> : null}
           {props.emailLoginEnabled || props.passwordLoginEnabled ? (
             <>
               {props.googleLoginEnabled ? <div className="login-divider"><span>or</span></div> : null}
@@ -3614,7 +3730,7 @@ function LoginPage(props: {
                   <Button type="submit" variant="secondary">
                     {passwordLoading ? "Signing in..." : "Continue"}
                   </Button>
-                  <Button size="sm" variant="ghost" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
+                  <ThemeToggle themeLabel={props.themeLabel} onToggle={props.onToggleTheme} />
                 </div>
               </form>
             </>
@@ -3622,7 +3738,7 @@ function LoginPage(props: {
             <>
               {!props.googleLoginEnabled ? <p className="login-error" role="alert">No sign-in method is configured for this Gonvex dashboard.</p> : null}
               <div className="login-actions">
-                <Button size="sm" variant="ghost" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
+                <ThemeToggle themeLabel={props.themeLabel} onToggle={props.onToggleTheme} />
               </div>
             </>
           )}
@@ -3655,6 +3771,7 @@ function ProjectsPage(props: {
   const [creating, setCreating] = useState(false);
   const [createdProject, setCreatedProject] = useState<CreatedProject | null>(null);
   const [deletingProjectID, setDeletingProjectID] = useState<string | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [userOpen, setUserOpen] = useState(false);
   const [userEmail, setUserEmail] = useState("");
   const [userName, setUserName] = useState("");
@@ -3729,9 +3846,24 @@ function ProjectsPage(props: {
           <span className="brand-name">Gonvex</span>
         </div>
         <div className="topbar-actions">
-          <span className="projects-user">{props.session.name}</span>
+          <Button
+            aria-label="Open account profile"
+            className="projects-profile-trigger"
+            onPress={() => setProfileOpen(true)}
+            size="sm"
+            variant="ghost"
+          >
+            <Avatar className="projects-profile-avatar">
+              {props.session.avatarUrl ? <Avatar.Image alt="" src={props.session.avatarUrl} /> : null}
+              <Avatar.Fallback>{profileInitials(props.session.name)}</Avatar.Fallback>
+            </Avatar>
+            <span>
+              <strong>{props.session.name}</strong>
+              <small>{props.session.role === "admin" ? "Administrator" : "Account"}</small>
+            </span>
+          </Button>
           {props.session.role === "admin" ? <Button size="sm" variant="secondary" onPress={() => setUserOpen(true)}>New user</Button> : null}
-          <Button size="sm" variant="secondary" onPress={props.onToggleTheme}>{props.themeLabel}</Button>
+          <ThemeToggle themeLabel={props.themeLabel} onToggle={props.onToggleTheme} />
           {props.authEnabled ? <Button size="sm" variant="ghost" onPress={props.onLogout}>Sign out</Button> : null}
         </div>
       </header>
@@ -3785,6 +3917,8 @@ function ProjectsPage(props: {
           <strong>Create project</strong>
         </button>
       </section>
+
+      {profileOpen ? <AccountProfileDialog onClose={() => setProfileOpen(false)} session={props.session} /> : null}
 
       {userOpen ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={closeUserModal}>
@@ -3898,6 +4032,233 @@ function ProjectsPage(props: {
         </div>
       ) : null}
     </main>
+  );
+}
+
+function profileInitials(name: string): string {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?";
+}
+
+function tokenDateLabel(value?: string): string {
+  if (!value) return "Never";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  return date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+function tokenStatus(token: AccountAccessToken): "active" | "expired" | "revoked" {
+  if (token.revokedAt) return "revoked";
+  if (token.expiresAt && Date.parse(token.expiresAt) <= Date.now()) return "expired";
+  return "active";
+}
+
+function adminTokenExpiration(duration: string): string | undefined {
+  const days = Number(duration);
+  if (!Number.isFinite(days) || days <= 0) return undefined;
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function AccountProfileDialog(props: { session: DashboardSession; onClose: () => void }) {
+  const isAdmin = props.session.role === "admin";
+  const [tokens, setTokens] = useState<AccountAccessToken[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [tokenName, setTokenName] = useState("");
+  const [duration, setDuration] = useState("90");
+  const [creating, setCreating] = useState(false);
+  const [revokingID, setRevokingID] = useState("");
+  const [createdToken, setCreatedToken] = useState<CreatedAccountAccessToken | null>(null);
+  const [copyStatus, setCopyStatus] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    void fetchAccountAccessTokens()
+      .then((nextTokens) => {
+        if (!cancelled) setTokens(nextTokens);
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : "Could not load API keys");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const createToken = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = tokenName.trim();
+    if (!name || !isAdmin) return;
+    setCreating(true);
+    setError("");
+    setCopyStatus("");
+    try {
+      const created = await createGlobalAdminAccessToken(name, adminTokenExpiration(duration));
+      setCreatedToken(created);
+      setTokens((current) => [created.token, ...current]);
+      setTokenName("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create API key");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const revokeToken = async (tokenID: string) => {
+    setRevokingID(tokenID);
+    setError("");
+    try {
+      await revokeAccountAccessToken(tokenID);
+      const revokedAt = new Date().toISOString();
+      setTokens((current) => current.map((token) => token.id === tokenID ? { ...token, revokedAt } : token));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not revoke API key");
+    } finally {
+      setRevokingID("");
+    }
+  };
+
+  const copyCreatedToken = async () => {
+    if (!createdToken) return;
+    try {
+      await navigator.clipboard.writeText(createdToken.accessToken);
+      setCopyStatus("Copied");
+    } catch {
+      setCopyStatus("Select and copy the key manually");
+    }
+  };
+
+  return (
+    <div className="modal-backdrop account-profile-backdrop" onMouseDown={props.onClose} role="presentation">
+      <section
+        aria-labelledby="account-profile-title"
+        className="document-modal account-profile-modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <header className="account-profile-header">
+          <div className="account-profile-identity">
+            <Avatar className="account-profile-avatar">
+              {props.session.avatarUrl ? <Avatar.Image alt="" src={props.session.avatarUrl} /> : null}
+              <Avatar.Fallback>{profileInitials(props.session.name)}</Avatar.Fallback>
+            </Avatar>
+            <div>
+              <p className="eyebrow">Account control plane</p>
+              <h2 id="account-profile-title">{props.session.name}</h2>
+              <span>{props.session.email}</span>
+            </div>
+          </div>
+          <Button size="sm" variant="ghost" onPress={props.onClose}>Close</Button>
+        </header>
+
+        <div className="account-profile-role-strip">
+          <div>
+            <span>Dashboard role</span>
+            <strong>{isAdmin ? "Administrator" : "Member"}</strong>
+          </div>
+          <div>
+            <span>Credential reach</span>
+            <strong>{isAdmin ? "All projects" : "Assigned projects"}</strong>
+          </div>
+          <div>
+            <span>Project creation</span>
+            <strong>Allowed</strong>
+          </div>
+        </div>
+
+        <section className="account-token-section" aria-labelledby="account-token-title">
+          <div className="account-token-heading">
+            <div>
+              <p className="eyebrow">Automation</p>
+              <h3 id="account-token-title">Admin API keys</h3>
+              <p>Account-level credentials for provisioning and managing projects without a browser session.</p>
+            </div>
+            <span className="account-token-scope">runtime-wide</span>
+          </div>
+
+          {createdToken ? (
+            <div className="account-token-reveal" role="status">
+              <div>
+                <strong>Copy this key now</strong>
+                <span>For security, Gonvex stores only its hash and cannot show it again.</span>
+              </div>
+              <textarea aria-label="New admin API key" readOnly value={createdToken.accessToken} />
+              <div className="account-token-reveal-actions">
+                <span>{copyStatus}</span>
+                <Button size="sm" variant="secondary" onPress={copyCreatedToken}>Copy key</Button>
+                <Button size="sm" variant="ghost" onPress={() => setCreatedToken(null)}>I saved it</Button>
+              </div>
+            </div>
+          ) : null}
+
+          {isAdmin ? (
+            <form className="account-token-create" onSubmit={createToken}>
+              <label className="setting-field">
+                <span>Key name</span>
+                <input
+                  aria-label="Key name"
+                  className="table-search"
+                  onChange={(event) => setTokenName(event.target.value)}
+                  placeholder="Production provisioning"
+                  value={tokenName}
+                />
+              </label>
+              <AppSelect
+                ariaLabel="Key expiration"
+                className="setting-field"
+                label="Expiration"
+                onChange={setDuration}
+                options={[
+                  { value: "30", label: "30 days" },
+                  { value: "90", label: "90 days" },
+                  { value: "365", label: "1 year" },
+                  { value: "never", label: "No expiration" },
+                ]}
+                selectedKey={duration}
+              />
+              <Button isDisabled={creating || !tokenName.trim()} type="submit" variant="primary">
+                {creating ? "Creating" : "Create admin key"}
+              </Button>
+            </form>
+          ) : (
+            <p className="account-token-notice">Only dashboard administrators can issue runtime-wide API keys.</p>
+          )}
+
+          {error ? <p className="project-modal-error" role="alert">{error}</p> : null}
+
+          <div className="account-token-list" aria-label="API keys">
+            {loading ? <p className="account-token-empty">Loading API keys…</p> : null}
+            {!loading && tokens.length === 0 ? (
+              <p className="account-token-empty">No account API keys yet. Create one for CI, deployment tooling, or project provisioning.</p>
+            ) : null}
+            {tokens.map((token) => {
+              const status = tokenStatus(token);
+              return (
+                <article className="account-token-row" data-status={status} key={token.id}>
+                  <div className="account-token-mark" aria-hidden="true">⌁</div>
+                  <div className="account-token-main">
+                    <div>
+                      <strong>{token.name}</strong>
+                      <span className="account-token-state">{status}</span>
+                    </div>
+                    <code>{token.prefix}••••••••</code>
+                    <small>
+                      Created {tokenDateLabel(token.createdAt)} · Last used {token.lastUsedAt ? tokenDateLabel(token.lastUsedAt) : "never"} · Expires {tokenDateLabel(token.expiresAt)}
+                    </small>
+                  </div>
+                  {status === "active" ? (
+                    <Button isDisabled={revokingID === token.id} size="sm" variant="ghost" onPress={() => { void revokeToken(token.id); }}>
+                      {revokingID === token.id ? "Revoking" : "Revoke"}
+                    </Button>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      </section>
+    </div>
   );
 }
 
@@ -6695,12 +7056,10 @@ function FilesPage(props: {
           <p>Total Files {files.length}</p>
           <p>{status}</p>
         </div>
-        <Button className="file-theme-toggle" size="sm" variant="secondary" onPress={() => {
+        <ThemeToggle className="file-theme-toggle" themeLabel={props.themeLabel} onToggle={() => {
           props.onToggleTheme();
           props.onAction(`Switched to ${props.themeLabel.toLowerCase().replace(" mode", "")}`);
-        }}>
-          {props.themeLabel}
-        </Button>
+        }} />
       </header>
 
       <div className="file-storage-toolbar">
@@ -7742,7 +8101,7 @@ function SettingsPage(props: {
                   <textarea
                     className="env-paste-textarea"
                     onChange={(event) => setEnvPasteText(event.target.value)}
-                    placeholder={"GONVEX_FIREBASE_PROJECT_ID=whagons-5\nSTRIPE_SECRET_KEY=sk_live_...\n# comments and blank lines are ignored"}
+                    placeholder={"GOOGLE_MAPS_API_KEY=...\nSTRIPE_SECRET_KEY=sk_live_...\n# comments and blank lines are ignored"}
                     spellCheck={false}
                     value={envPasteText}
                   />
@@ -7764,7 +8123,7 @@ function SettingsPage(props: {
                   <input
                     autoComplete="off"
                     onChange={(event) => setEnvName(event.target.value)}
-                    placeholder="GONVEX_FIREBASE_PROJECT_ID"
+                    placeholder="GOOGLE_MAPS_API_KEY"
                     value={envName}
                   />
                 </label>
@@ -7890,19 +8249,18 @@ function SettingsPage(props: {
             description="These are the authentication providers configured for this deployment."
           >
             <div className="auth-provider-grid">
-              <SettingField label="Domain" value="https://securetoken.google.com/gonvex-dev" />
-              <SettingField label="Application ID" value="gonvex-dev" />
-              <SettingField label="Type" value="OIDC provider" muted />
+              <SettingField label="Broker callback" value={`${runtimeURLForProject(props.project)}/auth/google/callback`} />
+              <SettingField label="Application ID" value={props.project.id} />
+              <SettingField label="Provider" value="Google OpenID Connect" muted />
             </div>
             <Separator />
             <div className="auth-provider-grid auth-provider-grid--wide">
-              <SettingField label="Issuer" value="https://gonvex.local/dev-auth" />
-              <SettingField label="JWKS URL" value="data:application/json;base64,eyJrZXlzIjpbXX0" />
-              <SettingField label="Algorithm" value="RS256" />
-              <SettingField label="Application ID" value="gonvex-dev-local" />
-              <SettingField label="Type" value="Custom JWT provider" muted />
+              <SettingField label="Access session" value="15 minutes" />
+              <SettingField label="Refresh session" value="30 days, rotating" />
+              <SettingField label="Browser flow" value="Authorization Code + PKCE" />
+              <SettingField label="Identity validation" value="RS256, issuer, audience, nonce, verified email" />
             </div>
-            <p className="settings-note">Deploy keys will live in General Deployment Settings later.</p>
+            <p className="settings-note">Use <code>gonvex auth status</code> or <code>gonvex auth doctor</code> for live configuration checks.</p>
           </SettingsCard>
         ) : null}
       </section>

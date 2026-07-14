@@ -184,6 +184,30 @@ func TestPostgresUUIDv6ProjectIgnoresUnrelatedAppDatabase(t *testing.T) {
 	if persistedName != "Renamed Relationship Test" {
 		t.Fatalf("renamed project did not survive restart: got %q", persistedName)
 	}
+
+	server.config.RequireAuth = false
+	deleteProjectRequest := httptest.NewRequest(http.MethodDelete, "/dev/projects/"+projectID, nil)
+	deleteProjectRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(deleteProjectRecorder, deleteProjectRequest)
+	if deleteProjectRecorder.Code != http.StatusOK {
+		t.Fatalf("delete project: expected %d, got %d: %s", http.StatusOK, deleteProjectRecorder.Code, deleteProjectRecorder.Body.String())
+	}
+	maintenanceDB, err := openMaintenanceDB(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenanceDB.Close()
+	for _, databaseName := range []string{createdProject.Project.Database, createdTenantDatabase} {
+		var exists bool
+		if err := maintenanceDB.QueryRowContext(context.Background(), `SELECT EXISTS (
+			SELECT 1 FROM pg_database WHERE datname = $1
+		)`, databaseName).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists {
+			t.Fatalf("project deletion left database %q behind", databaseName)
+		}
+	}
 }
 
 func TestPostgresLegacyProjectTenantBackfillSurvivesRestart(t *testing.T) {

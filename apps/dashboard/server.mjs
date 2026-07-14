@@ -226,11 +226,11 @@ async function handleRequest(request, response) {
   if (url.pathname.startsWith("/assets/")) return serveFile(response, staticPath(url.pathname), true);
   if (basename(url.pathname).includes(".")) return serveFile(response, staticPath(url.pathname));
 
-  const session = sessionFromRequest(request);
-  if (url.pathname === "/" && !session) return redirect(response, "/login");
-  if (url.pathname === "/" && session) return redirect(response, "/projects");
-  if (url.pathname !== "/login" && !session) return redirect(response, "/login");
-  if (url.pathname === "/login" && session) return redirect(response, "/projects");
+  // Authentication for native Google sessions lives in the SPA's rotating
+  // Gonvex token store, so the static server cannot decide access from an
+  // HttpOnly password-session cookie alone. Serve the shell for every route;
+  // the runtime APIs remain authenticated and App.tsx owns route gating.
+  if (url.pathname === "/") return redirect(response, "/projects");
   return serveFile(response, join(rootDir, "index.html"));
 }
 

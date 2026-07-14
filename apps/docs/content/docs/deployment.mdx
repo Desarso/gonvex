@@ -125,9 +125,15 @@ Individual Gonvex apps do not need Firebase or their own Google Cloud project. T
 operator of a Gonvex installation creates one Google OAuth client for the runtime.
 This is a one-time infrastructure setup, not a per-app step.
 
+That OAuth client presents the Gonvex installation's shared verified brand and
+consent screen. The operator is responsible for ensuring every app using the broker
+belongs under that service and complies with Google's OAuth policies; do not use one
+brand to impersonate unrelated third-party applications.
+
 1. Create or select the Google Cloud project that represents the Gonvex service.
 2. Configure the Google Auth Platform branding and audience. A public hosted service
-   should use a production External app and complete the applicable brand review.
+   should use a production External app, publish a real homepage and privacy policy,
+   verify its domains, and complete any brand review Google requires.
 3. Create a **Web application** OAuth client.
 4. Add exactly one authorized redirect URI:
    `https://your-gonvex-runtime.example.com/auth/google/callback`.
@@ -140,7 +146,10 @@ GONVEX_GOOGLE_CLIENT_SECRET=...
 ```
 
 `GONVEX_AUTH_URL` is browser-facing and must match the origin/path registered with
-Google. Keep the client secret only on the runtime. Gonvex requests `openid email
+Google. Inject the client secret from your infrastructure secret manager; never put
+it in an app's `.env.local`, browser bundle, image, or source repository. Restrict
+access to the credential, rotate it on suspected exposure, and keep separate
+credentials for non-production infrastructure. Gonvex requests `openid email
 profile`, exchanges Google's code server-side, and validates the returned ID token
 against Google's JWKS. See Google's official [web-server OAuth
 guide](https://developers.google.com/identity/protocols/oauth2/web-server) and
@@ -150,11 +159,55 @@ After the runtime is configured, every app owner only runs:
 
 ```bash
 npx gonvex auth add google --origin https://app.example.com
+npx gonvex auth doctor
 ```
 
 For local apps, `http://localhost` origins are accepted. Non-local callback origins
 must use HTTPS. The runtime keeps an exact per-project callback allowlist and never
 accepts an arbitrary redirect URL from the browser.
+
+The doctor is a configuration/readiness check. Before launch, also complete one
+real sign-in on every production app origin; that is the only end-to-end test of
+the Google client ID, secret, consent screen, redirect registration, proxy, and app
+route together.
+
+The SPA provider keeps its short-lived access token and rotating refresh token in
+origin-scoped browser storage so it can work across app origins without third-party
+cookies. Treat XSS prevention as credential protection: deploy a restrictive CSP,
+avoid untrusted scripts, review dependencies, and never log or copy the stored
+session. Server-side token values are stored only as hashes.
+
+### Native Google login for the Gonvex dashboard
+
+The dashboard itself can use the same native broker instead of a separate identity
+SDK. Give it a dedicated Gonvex project so sessions from customer applications can
+never become control-plane credentials:
+
+```bash
+npx gonvex project create dashboard-auth --database-mode single
+npx gonvex project select <dashboard-auth-project-id>
+npx gonvex auth add google \
+  --origin https://dashboard.example.com \
+  --callback-path /login
+npx gonvex auth doctor
+```
+
+Configure the runtime and dashboard build with the same project ID:
+
+```dotenv
+# Runtime
+GONVEX_DASHBOARD_AUTH_PROJECT_ID=<dashboard-auth-project-id>
+DASHBOARD_AUTH_USER=admin@example.com
+
+# apps/dashboard build-time values
+VITE_GONVEX_DASHBOARD_AUTH_PROJECT_ID=<dashboard-auth-project-id>
+VITE_GONVEX_GOOGLE_LOGIN_ENABLED=true
+VITE_GONVEX_AUTH_ENABLED=true
+```
+
+The runtime accepts a dashboard Google session only when it was minted for that
+exact project, contains a verified email, and the email is already a dashboard user
+or matches `DASHBOARD_AUTH_USER`. App sessions from every other project are rejected.
 
 ## What each component does
 
@@ -194,6 +247,17 @@ VITE_GONVEX_WS_URL=wss://gonvex.example.com/ws
 The runtime listens on port `8080` in the reference image. Put it behind a reverse
 proxy or load balancer that terminates TLS and supports WebSocket upgrades.
 
+Auth rate limits use the direct peer address by default. When a trusted reverse
+proxy supplies `X-Forwarded-For`, configure only its IPs or networks so clients
+cannot spoof rate-limit identities:
+
+```dotenv
+GONVEX_TRUSTED_PROXY_CIDRS=10.0.0.0/8,192.0.2.10
+```
+
+The built-in limiter is per runtime process. Multi-replica deployments should add
+a distributed edge/WAF limit as well.
+
 ### Minimum operations checklist
 
 - Replace the Compose database, MinIO, and dashboard development credentials.
@@ -206,6 +270,8 @@ proxy or load balancer that terminates TLS and supports WebSocket upgrades.
 - Configure TLS and preserve WebSocket upgrades on `/ws`.
 - Set `GONVEX_PUBLIC_URL` to the externally reachable runtime URL.
 - Set `GONVEX_AUTH_URL` and the one Google client ID/secret when native Google login is offered.
+- Set `GONVEX_TRUSTED_PROXY_CIDRS` when honoring a proxy's forwarded client addresses.
+- Run `gonvex auth doctor` and a real Google sign-in for every production origin.
 - Monitor `/healthz`, container restarts, database capacity, and runtime logs.
 - Pin and test image versions before upgrading.
 
@@ -224,13 +290,12 @@ available today include `dev`, `init`, `create`, `project`, `env`, `auth`, accou
 login, and personal-token management; `gonvex dev` performs the development manifest
 upload and schema sync.
 
-Before treating Gonvex as production-ready, account for these unfinished areas:
+Before treating the broader platform as production-ready, account for these unfinished areas:
 
-- production-grade authentication, membership, and permission policy;
 - migration previews, destructive-change approval, and rollback tooling;
-- hardened multi-tenant database operations;
+- automated tenant-database backup, restore, and fleet rollout operations;
 - automated releases, rollbacks, and zero-downtime runtime upgrades;
 - a supported public hosted control plane;
-- a fully hardened dashboard and management API security model.
+- organization-specific dashboard roles, audit export, and SSO policy.
 
 For the complete status, see [Current Limits](./current-limits).

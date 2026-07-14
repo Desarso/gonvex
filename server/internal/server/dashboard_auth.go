@@ -234,6 +234,9 @@ func (s *Server) dashboardActorFromRequest(r *http.Request) (dashboardActor, boo
 		actor.credentialKind = "session"
 		return actor, true
 	}
+	if actor, ok := s.dashboardActorFromNativeSession(r.Context(), token); ok {
+		return actor, true
+	}
 	if s.acceptsAdminKey(token) {
 		return dashboardActor{Email: "admin@gonvex.local", Name: "Gonvex Admin", Role: "admin", credentialKind: "adminKey"}, true
 	}
@@ -243,8 +246,29 @@ func (s *Server) dashboardActorFromRequest(r *http.Request) (dashboardActor, boo
 	return dashboardActor{}, false
 }
 
+func (s *Server) dashboardActorFromNativeSession(ctx context.Context, token string) (dashboardActor, bool) {
+	trustedProjectID := strings.TrimSpace(s.config.DashboardAuthProjectID)
+	if trustedProjectID == "" || !strings.HasPrefix(strings.TrimSpace(token), "gvx_session_") {
+		return dashboardActor{}, false
+	}
+	session, err := s.loadAppSessionIdentity(ctx, token)
+	if err != nil || session.ProjectID != trustedProjectID || !session.User.EmailVerified || session.User.Email == "" {
+		return dashboardActor{}, false
+	}
+	db, err := s.pooledProjectRegistry(ctx)
+	if err != nil || db == nil {
+		return dashboardActor{}, false
+	}
+	actor, ok := s.accountActorForEmail(ctx, db, session.User.Email)
+	if !ok {
+		return dashboardActor{}, false
+	}
+	actor.credentialKind = "nativeGoogle"
+	return actor, true
+}
+
 func (s *Server) dashboardAuthOptional() bool {
-	if s.config.RequireAuth {
+	if s.config.RequireAuth || strings.TrimSpace(s.config.DashboardAuthProjectID) != "" {
 		return false
 	}
 	return strings.TrimSpace(s.dashboardSecret()) == "" && s.configDashboardUser() == ""
@@ -379,6 +403,9 @@ func (s *Server) canAccessProject(ctx context.Context, actor dashboardActor, pro
 	if s.dashboardAuthOptional() {
 		return true
 	}
+	if actor.hasGlobalProjectAccess() {
+		return true
+	}
 	db, err := s.openProjectRegistry(ctx)
 	if err != nil || db == nil {
 		return false
@@ -397,6 +424,9 @@ func (s *Server) canAccessProject(ctx context.Context, actor dashboardActor, pro
 
 func (s *Server) canManageProject(ctx context.Context, actor dashboardActor, projectID string) bool {
 	if s.dashboardAuthOptional() {
+		return true
+	}
+	if actor.hasGlobalProjectAccess() {
 		return true
 	}
 	db, err := s.openProjectRegistry(ctx)

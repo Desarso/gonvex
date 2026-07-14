@@ -140,16 +140,18 @@ type tableChange struct {
 }
 
 type wsConn struct {
-	server     *Server
-	conn       *websocket.Conn
-	project    string
-	tenant     string
-	user       *gonvex.User
-	perms      map[string]any
-	auth       bool
-	cacheScope string
-	mu         sync.Mutex
-	subs       map[string]querySubscription
+	server        *Server
+	conn          *websocket.Conn
+	project       string
+	tenant        string
+	user          *gonvex.User
+	perms         map[string]any
+	auth          bool
+	authToken     string
+	authCheckedAt time.Time
+	cacheScope    string
+	mu            sync.Mutex
+	subs          map[string]querySubscription
 }
 
 type callerContext struct {
@@ -178,7 +180,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 	}()
 	var initialCache *queryCacheDirective
-	if !s.config.RequireAuth {
+	if !s.projectRequiresAuthentication(r.Context(), client.project) {
 		initialCache = s.queryCacheDirective(client.project, client.tenant, callerContext{})
 		if initialCache != nil {
 			client.cacheScope = initialCache.Scope
@@ -226,6 +228,8 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.project = project
 		c.tenant = tenant
 		c.auth = true
+		c.authToken = message.Token
+		c.authCheckedAt = time.Now()
 		c.cacheScope = cacheScope
 		subs := make([]querySubscription, 0, len(c.subs))
 		for id, sub := range c.subs {
@@ -251,7 +255,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.write(serverMessage{Type: "auth.result", ID: message.ID, Result: authResult})
 		c.server.rerunSubscriptions(subs, "initial", 0)
 	case "query.subscribe":
-		if !c.requireAuth("query.error", message.ID) {
+		if !c.requireAuth(ctx, "query.error", message.ID) {
 			return
 		}
 		if message.ID == "" || message.Path == "" {
@@ -279,7 +283,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			sub.cancel()
 		}
 	case "mutation.call":
-		if !c.requireAuth("mutation.error", message.ID) {
+		if !c.requireAuth(ctx, "mutation.error", message.ID) {
 			return
 		}
 		trace := traceFromClient(message.Trace)
@@ -300,7 +304,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "mutation", message.Path, "server", "", "ok", "", trace))
 		c.server.broadcastTenantTableChangeAt(c.project, c.tenant, mutationInvalidationTable(message.Path), committedAt)
 	case "action.call":
-		if !c.requireAuth("action.error", message.ID) {
+		if !c.requireAuth(ctx, "action.error", message.ID) {
 			return
 		}
 		trace := traceFromClient(message.Trace)
@@ -425,18 +429,64 @@ func transactionEntryFromClientTelemetry(project string, tenant string, message 
 	return entry
 }
 
-func (c *wsConn) requireAuth(errorType string, id string) bool {
-	if !c.server.config.RequireAuth {
+func (c *wsConn) requireAuth(ctx context.Context, errorType string, id string) bool {
+	if !c.server.projectRequiresAuthentication(ctx, c.project) {
 		return true
 	}
 	c.mu.Lock()
 	authenticated := c.auth
 	c.mu.Unlock()
-	if authenticated {
+	if authenticated && c.revalidateAppAuth(ctx) == nil {
 		return true
+	}
+	if authenticated {
+		c.clearAuthentication()
 	}
 	c.write(serverMessage{Type: errorType, ID: id, Error: "authentication is required"})
 	return false
+}
+
+func (c *wsConn) revalidateAppAuth(ctx context.Context) error {
+	c.mu.Lock()
+	token := c.authToken
+	project := c.project
+	tenant := c.tenant
+	checkedAt := c.authCheckedAt
+	authenticated := c.auth
+	c.mu.Unlock()
+	nativeEnabled := false
+	if strings.TrimSpace(c.server.projectRegistryURL()) != "" {
+		var err error
+		nativeEnabled, err = c.server.nativeAppAuthEnabled(ctx, project)
+		if err != nil {
+			return fmt.Errorf("project authentication configuration is unavailable")
+		}
+	}
+	if !c.server.config.RequireAuth && !nativeEnabled {
+		return nil
+	}
+	if !authenticated {
+		return fmt.Errorf("authentication is required")
+	}
+	nativeToken := strings.HasPrefix(strings.TrimSpace(token), "gvx_session_")
+	if nativeEnabled && !nativeToken {
+		return fmt.Errorf("a Gonvex app session is required")
+	}
+	if !nativeToken || time.Since(checkedAt) < 5*time.Second {
+		return nil
+	}
+	session, _, err := c.server.validateAppSession(ctx, project, token, tenant)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if c.authToken == token {
+		c.user = &gonvex.User{ID: session.User.ID, Email: session.User.Email}
+		c.perms = session.Permissions
+		c.authCheckedAt = time.Now()
+	}
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *wsConn) caller() callerContext {
@@ -451,6 +501,8 @@ func (c *wsConn) clearAuthentication() {
 	c.user = nil
 	c.perms = nil
 	c.auth = false
+	c.authToken = ""
+	c.authCheckedAt = time.Time{}
 	c.cacheScope = ""
 	for id, sub := range c.subs {
 		if sub.cancel != nil {
@@ -500,6 +552,66 @@ func (s *Server) removeWSConn(conn *wsConn) {
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
 	delete(s.wsConns, conn)
+}
+
+func (s *Server) revokeAppAuthConnections(projectID string, userID string) {
+	s.wsMu.RLock()
+	connections := make([]*wsConn, 0, len(s.wsConns))
+	for connection := range s.wsConns {
+		connections = append(connections, connection)
+	}
+	s.wsMu.RUnlock()
+	for _, connection := range connections {
+		connection.mu.Lock()
+		matches := connection.project == projectID && connection.user != nil && connection.user.ID == userID && strings.HasPrefix(connection.authToken, "gvx_session_")
+		connection.mu.Unlock()
+		if matches {
+			connection.clearAuthentication()
+			connection.write(serverMessage{Type: "auth.error", ID: "session-revoked", Error: "authentication session was revoked"})
+		}
+	}
+}
+
+func (s *Server) revokeAppAuthTokenConnection(token string) {
+	if token == "" {
+		return
+	}
+	s.wsMu.RLock()
+	connections := make([]*wsConn, 0, len(s.wsConns))
+	for connection := range s.wsConns {
+		connections = append(connections, connection)
+	}
+	s.wsMu.RUnlock()
+	for _, connection := range connections {
+		connection.mu.Lock()
+		matches := constantTimeString(connection.authToken, token)
+		connection.mu.Unlock()
+		if matches {
+			connection.clearAuthentication()
+			connection.write(serverMessage{Type: "auth.error", ID: "session-revoked", Error: "authentication session was revoked"})
+		}
+	}
+}
+
+// enforceNativeAppAuthConnections immediately cancels anonymous and legacy
+// subscriptions when a project transitions from public/legacy auth to native
+// app auth. Existing native sessions can remain and are revalidated normally.
+func (s *Server) enforceNativeAppAuthConnections(projectID string) {
+	s.wsMu.RLock()
+	connections := make([]*wsConn, 0, len(s.wsConns))
+	for connection := range s.wsConns {
+		connections = append(connections, connection)
+	}
+	s.wsMu.RUnlock()
+	for _, connection := range connections {
+		connection.mu.Lock()
+		matches := connection.project == projectID && !strings.HasPrefix(strings.TrimSpace(connection.authToken), "gvx_session_")
+		connection.mu.Unlock()
+		if matches {
+			connection.clearAuthentication()
+			connection.write(serverMessage{Type: "auth.error", ID: "auth-required", Error: "this project now requires a Gonvex app session"})
+		}
+	}
 }
 
 func (s *Server) websocketStats() (int, int) {
@@ -650,6 +762,11 @@ func subscriptionCanChangeMembership(sub querySubscription) bool {
 }
 
 func (s *Server) executeSubscription(ctx context.Context, sub querySubscription, reason string, changeCommittedAtMS float64) {
+	if err := sub.conn.revalidateAppAuth(ctx); err != nil {
+		sub.conn.clearAuthentication()
+		sub.conn.write(serverMessage{Type: "query.error", ID: sub.id, Error: "authentication is required"})
+		return
+	}
 	startedAt := time.Now().UTC()
 	cacheRevision := s.nextQueryCacheRevision()
 	result, err := s.executeTenantQueryForCaller(ctx, sub.project, sub.tenant, sub.caller, sub.path, sub.args)
@@ -940,6 +1057,9 @@ func (s *Server) actionContext(ctx context.Context, projectID string, tenantID s
 }
 
 func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (gonvex.RuntimeContext, error) {
+	if err := s.requireProjectDatabase(projectID); err != nil {
+		return gonvex.RuntimeContext{}, err
+	}
 	activeTenant := tenantIDFromRequest(projectID, tenantID)
 	s.hydrateProjectTenantDatabases(ctx, projectID)
 	databaseURL := s.databaseURLForTenant(projectID, activeTenant)

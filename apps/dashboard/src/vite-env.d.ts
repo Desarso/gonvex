@@ -12,16 +12,11 @@ interface ImportMetaEnv {
   readonly VITE_GONVEX_DEV_LOGIN_ENABLED?: string;
   readonly VITE_GONVEX_EMAIL_LOGIN_ENABLED?: string;
   readonly VITE_GONVEX_GOOGLE_LOGIN_ENABLED?: string;
+  readonly VITE_GONVEX_DASHBOARD_AUTH_PROJECT_ID?: string;
   readonly VITE_GONVEX_PASSWORD_LOGIN_ENABLED?: string;
   readonly VITE_GONVEX_DATABASE?: string;
   readonly VITE_GONVEX_STORAGE_BUCKET?: string;
   readonly VITE_GONVEX_PROJECTS?: string;
-  readonly VITE_FIREBASE_API_KEY?: string;
-  readonly VITE_FIREBASE_AUTH_DOMAIN?: string;
-  readonly VITE_FIREBASE_PROJECT_ID?: string;
-  readonly VITE_FIREBASE_APP_ID?: string;
-  readonly VITE_FIREBASE_MESSAGING_SENDER_ID?: string;
-  readonly VITE_FIREBASE_STORAGE_BUCKET?: string;
 }
 
 interface ImportMeta {

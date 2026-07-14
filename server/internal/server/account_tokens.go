@@ -23,6 +23,7 @@ const (
 	permissionProjectsMembersWrite = "projects:members:write"
 	permissionProjectsEnvRead      = "projects:env:read"
 	permissionProjectsEnvWrite     = "projects:env:write"
+	permissionAdminProjects        = "admin:projects"
 	permissionTokensRead           = "tokens:read"
 	permissionTokensCreate         = "tokens:create"
 	permissionTokensRevoke         = "tokens:revoke"
@@ -40,6 +41,7 @@ var accountTokenPermissions = map[string]struct{}{
 	permissionProjectsMembersWrite: {},
 	permissionProjectsEnvRead:      {},
 	permissionProjectsEnvWrite:     {},
+	permissionAdminProjects:        {},
 	"tokens:*":                     {},
 	permissionTokensRead:           {},
 	permissionTokensCreate:         {},
@@ -103,6 +105,18 @@ func (actor dashboardActor) hasAccountPermission(permission string) bool {
 }
 
 func (actor dashboardActor) canGrantAccountPermission(permission string) bool {
+	// Global project administration is deliberately separate from projects:*
+	// so a project-scoped token can never become a runtime-wide credential.
+	// Only a dashboard administrator (or an already-global admin token) may
+	// mint credentials carrying this capability.
+	if permission == permissionAdminProjects || permission == "*" {
+		if actor.Role != "admin" {
+			return false
+		}
+		if actor.credentialKind == "personalAccessToken" && !actor.hasGlobalProjectAccess() {
+			return false
+		}
+	}
 	if actor.credentialKind != "personalAccessToken" {
 		return true
 	}
@@ -117,10 +131,31 @@ func (actor dashboardActor) canGrantAccountPermission(permission string) bool {
 	return actor.hasAccountPermission(permission)
 }
 
+func (actor dashboardActor) hasGlobalProjectAccess() bool {
+	if actor.Role != "admin" {
+		return false
+	}
+	if actor.credentialKind == "adminKey" {
+		return true
+	}
+	if actor.credentialKind != "personalAccessToken" {
+		return false
+	}
+	for _, permission := range actor.tokenPermissions {
+		if permission == permissionAdminProjects || permission == "*" {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) accountActorFromRequest(r *http.Request) (dashboardActor, bool) {
 	token := bearerToken(r)
 	if actor, ok := s.verifyDashboardToken(token); ok {
 		actor.credentialKind = "session"
+		return actor, true
+	}
+	if actor, ok := s.dashboardActorFromNativeSession(r.Context(), token); ok {
 		return actor, true
 	}
 	if s.acceptsAdminKey(token) {
