@@ -6,6 +6,7 @@
 # version and the same gonvex source (via the go.mod replace) for plugin ABI match.
 FROM golang:1.26 AS build
 WORKDIR /src
+ENV GOMAXPROCS=2 GOFLAGS=-p=2
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
@@ -30,6 +31,7 @@ ENV GONVEX_ADDR=0.0.0.0:8080 \
     GONVEX_MODULE_ROOT=/src \
     GONVEX_DATA_DIR=/var/lib/gonvex/data \
     CGO_ENABLED=1 \
-    GOFLAGS=-mod=mod
+    GOMAXPROCS=2 \
+    GOFLAGS="-mod=mod -p=2"
 EXPOSE 8080
 CMD ["gonvex-runtime"]

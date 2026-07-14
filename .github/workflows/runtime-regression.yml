@@ -1,0 +1,40 @@
+name: Runtime regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Enable pinned pnpm
+        run: corepack enable && corepack prepare pnpm@11.1.2 --activate
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+      - name: Validate production Compose contract
+        run: pnpm test:production-compose
+      - name: Test Go runtime
+        run: go test -count=1 -p 1 ./...
+        env:
+          GOMAXPROCS: "2"
+      - name: Test JavaScript workspace
+        run: pnpm -r test
