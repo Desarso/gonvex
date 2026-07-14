@@ -25,6 +25,13 @@ type dashboardActor struct {
 	Email string `json:"email"`
 	Name  string `json:"name"`
 	Role  string `json:"role"`
+
+	// credentialKind and tokenPermissions are request-local authentication
+	// metadata. They are deliberately not serialized into dashboard/user
+	// responses.
+	credentialKind   string
+	tokenID          string
+	tokenPermissions []string
 }
 
 type dashboardSession struct {
@@ -126,9 +133,8 @@ func (s *Server) handleDashboardUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleProjectMembers(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.dashboardActorFromRequest(r)
+	actor, ok := s.authorizeAccountRequest(w, r, permissionProjectsMembersRead)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
 		return
 	}
 	projectID := strings.TrimSpace(r.PathValue("project"))
@@ -150,9 +156,8 @@ func (s *Server) handleProjectMembers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateProjectInvitation(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.dashboardActorFromRequest(r)
+	actor, ok := s.authorizeAccountRequest(w, r, permissionProjectsMembersWrite)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
 		return
 	}
 	projectID := strings.TrimSpace(r.PathValue("project"))
@@ -224,18 +229,16 @@ func (s *Server) dashboardSessionForActor(actor dashboardActor) (dashboardSessio
 }
 
 func (s *Server) dashboardActorFromRequest(r *http.Request) (dashboardActor, bool) {
-	token := strings.TrimSpace(r.Header.Get("authorization"))
-	if strings.HasPrefix(strings.ToLower(token), "bearer ") {
-		token = strings.TrimSpace(token[len("Bearer "):])
-	}
+	token := bearerToken(r)
 	if actor, ok := s.verifyDashboardToken(token); ok {
+		actor.credentialKind = "session"
 		return actor, true
 	}
 	if s.acceptsAdminKey(token) {
-		return dashboardActor{Email: "admin@gonvex.local", Name: "Gonvex Admin", Role: "admin"}, true
+		return dashboardActor{Email: "admin@gonvex.local", Name: "Gonvex Admin", Role: "admin", credentialKind: "adminKey"}, true
 	}
 	if s.dashboardAuthOptional() {
-		return dashboardActor{Email: "local@gonvex.dev", Name: "Local Developer", Role: "admin"}, true
+		return dashboardActor{Email: "local@gonvex.dev", Name: "Local Developer", Role: "admin", credentialKind: "local"}, true
 	}
 	return dashboardActor{}, false
 }

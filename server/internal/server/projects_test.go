@@ -305,6 +305,27 @@ func TestProjectKeyEndpointReturnsConfiguredProjectKey(t *testing.T) {
 	}
 }
 
+func TestProjectKeyEndpointAcceptsAdminKeyHeader(t *testing.T) {
+	server := New(config.Config{
+		AdminKey: "admin-secret",
+		ProjectDatabases: map[string]string{
+			"whagons-5": "postgres://postgres:postgres@127.0.0.1:5432/gonvex_whagons_5?sslmode=disable",
+		},
+		ProjectKeys: map[string]string{
+			"whagons-5": "secret",
+		},
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/dev/projects/whagons-5/key", nil)
+	request.Header.Set("x-gonvex-key", "admin-secret")
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestProjectKeyEndpointRequiresAdminKey(t *testing.T) {
 	server := New(config.Config{
 		AdminKey: "admin-secret",

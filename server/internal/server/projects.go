@@ -45,9 +45,8 @@ type createProjectResponse struct {
 }
 
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.dashboardActorFromRequest(r)
+	actor, ok := s.authorizeAccountRequest(w, r, permissionProjectsRead)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
 		return
 	}
 	s.hydrateProjects()
@@ -164,9 +163,8 @@ func (s *Server) hydrateConfiguredProjects() {
 }
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.dashboardActorFromRequest(r)
+	actor, ok := s.authorizeAccountRequest(w, r, permissionProjectsCreate)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
 		return
 	}
 	defer r.Body.Close()
@@ -265,9 +263,8 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.dashboardActorFromRequest(r)
+	actor, ok := s.authorizeAccountRequest(w, r, permissionProjectsUpdate)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
 		return
 	}
 	defer r.Body.Close()
@@ -336,10 +333,13 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleProjectKey(w http.ResponseWriter, r *http.Request) {
 	adminKey := s.acceptsAdminKey(syncKey(r))
-	actor, signedIn := s.dashboardActorFromRequest(r)
-	if !signedIn && !adminKey {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid Gonvex admin key"})
-		return
+	var actor dashboardActor
+	signedIn := false
+	if !adminKey {
+		actor, signedIn = s.authorizeAccountRequest(w, r, permissionProjectsKeysRead)
+		if !signedIn {
+			return
+		}
 	}
 	s.hydrateProjects()
 	projectID := strings.TrimSpace(r.PathValue("project"))
@@ -385,9 +385,8 @@ func (s *Server) handleProjectKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.dashboardActorFromRequest(r)
+	actor, ok := s.authorizeAccountRequest(w, r, permissionProjectsDelete)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
 		return
 	}
 	projectID := strings.TrimSpace(r.PathValue("project"))
@@ -563,6 +562,24 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_account_access_tokens (
+		id TEXT PRIMARY KEY,
+		owner_email TEXT NOT NULL,
+		name TEXT NOT NULL,
+		token_prefix TEXT NOT NULL,
+		token_hash TEXT NOT NULL UNIQUE,
+		permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
+		expires_at TIMESTAMPTZ,
+		last_used_at TIMESTAMPTZ,
+		revoked_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_account_access_tokens_by_owner
+		ON gonvex_account_access_tokens (owner_email, created_at DESC)`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_project_members (

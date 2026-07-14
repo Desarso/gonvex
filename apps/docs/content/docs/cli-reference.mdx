@@ -11,8 +11,71 @@ Install the CLI as a development dependency:
 npm install --save-dev @gonvex/cli
 ```
 
-The package exposes the `gonvex` binary. The current CLI implements `dev`, `init`,
-`create`, and `env`.
+The package exposes the `gonvex` binary. The current CLI implements account login,
+personal access tokens, project provisioning, local development, initialization,
+application creation, and project environment management.
+
+## Account authentication
+
+Sign in with the same email and password used by the Gonvex dashboard:
+
+```bash
+npx gonvex login --runtime-url https://gonvex.example.com --email you@example.com
+```
+
+The password is prompted without echo. For non-interactive use, provide
+`GONVEX_PASSWORD` or `--password`. You can authenticate with an existing personal
+access token instead:
+
+```bash
+npx gonvex login --runtime-url https://gonvex.example.com --token gvx_pat_...
+```
+
+Use `gonvex whoami` to verify the active identity and permissions, and
+`gonvex logout` to remove the saved credential. Credentials are stored per runtime in
+`$XDG_CONFIG_HOME/gonvex/config.json` (or `~/.config/gonvex/config.json`) with file
+mode `0600`. `GONVEX_CONFIG_PATH` overrides that path, and
+`GONVEX_ACCOUNT_TOKEN` provides an environment-only credential.
+
+## Personal access tokens
+
+An interactive account session can create account-level personal access tokens:
+
+```bash
+# Default CLI provisioning permissions:
+# projects:read, projects:create, projects:keys:read
+npx gonvex token create "Developer CLI"
+
+# Broad project administration without account/token administration
+npx gonvex token create "Project automation" --permission 'projects:*'
+
+# Explicit full account permissions
+npx gonvex token create "Account automation" --full
+```
+
+Repeat `--permission` to grant multiple permissions. Run
+`gonvex token permissions` to list accepted values. The secret is returned only by
+the create response; the runtime stores a hash. List token metadata with
+`gonvex token list` and revoke a token with `gonvex token revoke <token-id>`.
+Tokens remain bound to their owner, so project membership checks still apply.
+
+## `gonvex project`
+
+List account projects or create and connect a new project entirely from the CLI:
+
+```bash
+npx gonvex project list
+npx gonvex project create my-app
+npx gonvex project select <project-id>
+```
+
+`project create` provisions the runtime project, receives its project ID and project
+key, and updates `.env.local` with `GONVEX_PROJECT_ID`, `GONVEX_RUNTIME_URL`,
+`GONVEX_PROJECT_KEY`, and the public Vite connection values. `project select` obtains
+the selected project's key and performs the same local setup. Both commands accept
+`--runtime-url`; use `--project-root` when configuring a directory other than the
+current one. Creating a project also accepts `--database-mode single|multiTenant`.
+Pass `--json` to `project list` or `project create` for the complete API response.
 
 ## `gonvex init`
 
@@ -79,8 +142,8 @@ npx gonvex dev -- vite
 does not succeed, making it suitable for CI checks.
 
 The CLI loads settings in this order: command-line overrides, `.env.local`, `.env`,
-`gonvex.json`, then built-in defaults. A project ID encoded in a valid project key can
-also determine the selected project.
+`gonvex.json`, the current runtime saved by `gonvex login`, then built-in defaults. A
+project ID encoded in a valid project key can also determine the selected project.
 
 ## `gonvex env`
 
@@ -128,9 +191,6 @@ and route `/dev/projects/{project}/env` to the runtime without rewriting the pat
 The current npm CLI does **not** implement these commands:
 
 ```txt
-gonvex login
-gonvex link
-gonvex project ...
 gonvex tenant ...
 gonvex deploy
 gonvex generate
@@ -138,5 +198,4 @@ gonvex doctor
 ```
 
 They are product roadmap concepts, not commands to use in current setup or deployment
-scripts. Today, project selection/creation happens interactively during `gonvex dev`,
-and development manifests are uploaded by that command.
+scripts. Development manifests are uploaded by `gonvex dev`.

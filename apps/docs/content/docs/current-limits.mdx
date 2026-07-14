@@ -33,14 +33,17 @@ The npm CLI currently implements:
 ```bash
 npm create gonvex@latest my-app
 npx gonvex init
+npx gonvex login
+npx gonvex project create my-app
+npx gonvex token create "Developer CLI"
 npx gonvex dev
 npx gonvex env list
 npx gonvex env push .env.production
 ```
 
-`login`, `link`, `project`, `tenant`, `deploy`, `generate`, and `doctor` are roadmap
-commands and are not implemented. See the [CLI Reference](./cli-reference) for the
-current flags.
+`tenant`, `deploy`, `generate`, and `doctor` remain roadmap commands. See the
+[CLI Reference](./cli-reference) for current authentication and project-provisioning
+flags.
 
 ## Multi-Project Operations Are Early
 
@@ -52,7 +55,7 @@ Needed work:
 
 - allowed origins and runtime auth
 - environment/deployment records
-- hardened key lifecycle and project administration
+- dashboard UI for personal-token lifecycle and more granular custom roles
 - production upgrade and rollback workflows
 
 ## Multi-Tenant Runtime Is Roadmap
@@ -98,7 +101,9 @@ Production migrations need:
 
 ## Auth Is Early
 
-Production auth, memberships, roles, and permission checks are part of the intended runtime model but are not complete yet.
+Dashboard sessions, account personal access tokens, project memberships, and scoped
+project/token permissions are implemented. OAuth/device authorization, organization
+roles, recovery flows, and hosted-control-plane hardening are still incomplete.
 
 Do not expose development data-browser endpoints as application APIs.
 

@@ -51,6 +51,24 @@ browser sends auth token
 -> function executes with scoped context
 ```
 
+## CLI Account Authentication
+
+The CLI supports two account authentication modes:
+
+- an expiring dashboard account session obtained with email/password
+- a revocable account personal access token beginning with `gvx_pat_`
+
+Personal access tokens are stored hashed in the landlord database, belong to one
+account email, can expire, and carry an explicit permission list. `projects:*` grants
+broad project lifecycle access while still applying the owner's project membership;
+`*` additionally allows account-token administration. The provisioning-oriented
+default is `projects:read`, `projects:create`, and `projects:keys:read`.
+
+Account credentials authorize control-plane operations such as listing and creating
+projects. Project keys remain separate, project-bound credentials used for code sync
+and project environment operations. The CLI keeps account credentials in its global
+user config and writes only the returned project ID/key into an app's `.env.local`.
+
 ## Tenant Switching
 
 The frontend should be able to switch active tenants inside a project:

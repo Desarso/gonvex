@@ -117,6 +117,7 @@ func TestInternalDataTablesAreHidden(t *testing.T) {
 	}{
 		{name: "files metadata", table: "_gonvex_files", want: true},
 		{name: "dashboard users", table: "gonvex_dashboard_users", want: true},
+		{name: "account access tokens", table: "gonvex_account_access_tokens", want: true},
 		{name: "project members", table: "gonvex_project_members", want: true},
 		{name: "project invitations", table: "gonvex_project_invitations", want: true},
 		{name: "project env", table: "gonvex_project_env", want: true},

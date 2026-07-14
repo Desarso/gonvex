@@ -25,6 +25,26 @@ Most apps run it through a package script:
 
 ## Commands
 
+Authenticate with an account session or an existing personal access token:
+
+```bash
+npx gonvex login --runtime-url https://gonvex.example.com --email you@example.com
+npx gonvex login --runtime-url https://gonvex.example.com --token gvx_pat_...
+```
+
+Create a scoped account token and provision a project without leaving the terminal:
+
+```bash
+npx gonvex token create "Developer CLI"
+npx gonvex project create my-app
+```
+
+The default token permissions are `projects:read`, `projects:create`, and
+`projects:keys:read`. Use repeated `--permission` flags, `--permission 'projects:*'`,
+or `--full` to choose broader access. Account credentials are stored per runtime in a
+user config file with mode `0600`; project credentials stay in the app's
+`.env.local`.
+
 Initialize Gonvex files in an existing app:
 
 ```bash

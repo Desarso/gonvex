@@ -2,9 +2,11 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { mkdir, readFile, readdir, stat, writeFile, copyFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, stat, writeFile, copyFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { createInterface } from "node:readline/promises";
 import { dirname, join, relative, resolve } from "node:path";
+import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 type FunctionKind = "query" | "mutation" | "action" | "http" | "internalMutation" | "liveGrid";
@@ -59,11 +61,56 @@ type RuntimeProject = {
   name: string;
   environment?: string;
   database?: string;
+  databaseMode?: string;
+  storageBucket?: string;
+  status?: string;
+  description?: string;
+  provisioned?: boolean;
+  runtimeCreated?: boolean;
+  ownerEmail?: string;
+  role?: string;
 };
 
 type CreatedRuntimeProject = {
   project: RuntimeProject;
   projectKey: string;
+};
+
+type AccountIdentity = {
+  account: {
+    email: string;
+    name: string;
+    role: string;
+  };
+  authentication: string;
+  permissions: string[];
+};
+
+type AccountProfile = {
+  runtimeURL: string;
+  accessToken: string;
+  email: string;
+  name: string;
+  authentication: string;
+  permissions: string[];
+  expiresAt?: number;
+};
+
+type CLIConfig = {
+  version: 1;
+  currentRuntime?: string;
+  runtimes: Record<string, AccountProfile>;
+};
+
+type AccountAccessToken = {
+  id: string;
+  name: string;
+  prefix: string;
+  permissions: string[];
+  createdAt: string;
+  expiresAt?: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
 };
 
 type RuntimeEnvVariable = {
@@ -111,6 +158,24 @@ const defaultRuntimeURL = "http://localhost:8080";
 const runtimeSyncRetryMs = 5000;
 const runtimeStateCheckMs = 2500;
 const supportsColor = process.env.NO_COLOR === undefined && (process.env.FORCE_COLOR !== undefined || process.stdout.isTTY);
+const defaultAccountTokenPermissions = ["projects:read", "projects:create", "projects:keys:read"];
+const accountTokenPermissions = [
+  "projects:read",
+  "projects:create",
+  "projects:update",
+  "projects:delete",
+  "projects:keys:read",
+  "projects:members:read",
+  "projects:members:write",
+  "projects:env:read",
+  "projects:env:write",
+  "projects:*",
+  "tokens:read",
+  "tokens:create",
+  "tokens:revoke",
+  "tokens:*",
+  "*",
+];
 
 function ansi(code: string, value: string) {
   return supportsColor ? `\x1b[${code}m${value}\x1b[0m` : value;
@@ -147,6 +212,26 @@ export async function main(argv = process.argv.slice(2)) {
     await runEnv(argv.slice(1));
     return;
   }
+  if (command === "login") {
+    await runLogin(argv.slice(1));
+    return;
+  }
+  if (command === "logout") {
+    await runLogout(argv.slice(1));
+    return;
+  }
+  if (command === "whoami") {
+    await runWhoAmI(argv.slice(1));
+    return;
+  }
+  if (command === "token" || command === "tokens") {
+    await runToken(argv.slice(1));
+    return;
+  }
+  if (command === "project") {
+    await runProject(argv.slice(1));
+    return;
+  }
 
   printHelp();
   throw new Error(`unknown command ${command}`);
@@ -174,6 +259,201 @@ async function runInit(argv: string[]) {
   await copyTemplate(template, process.cwd(), { overwrite: false });
   await writeEnvLocal(process.cwd(), project, runtime);
   console.log(`[gonvex] initialized ${project}`);
+}
+
+async function runLogin(argv: string[]) {
+  const runtimeURL = await accountRuntimeForArgs(argv);
+  const suppliedToken = valueFor(argv, "--token") ?? process.env.GONVEX_ACCOUNT_TOKEN;
+  let accessToken: string;
+  let expiresAt: number | undefined;
+
+  if (suppliedToken) {
+    accessToken = suppliedToken.trim();
+    if (!accessToken) throw new Error("--token requires a non-empty personal access token");
+  } else {
+    const positional = positionalArgs(argv, ["--runtime-url", "--runtime", "--email", "--password", "--token"]);
+    let email = valueFor(argv, "--email") ?? positional[0] ?? "";
+    let password = valueFor(argv, "--password") ?? process.env.GONVEX_PASSWORD ?? "";
+    if ((!email || !password) && (!process.stdin.isTTY || !process.stdout.isTTY)) {
+      throw new Error("non-interactive login requires --email and --password (or GONVEX_PASSWORD), or --token");
+    }
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      if (!email) email = (await rl.question("Email: ")).trim();
+    } finally {
+      rl.close();
+    }
+    if (!password) password = await promptHidden("Password: ");
+    if (!email || !password) throw new Error("email and password are required");
+
+    const response = await fetch(`${runtimeURL}/dev/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const payload = await runtimeJSON<{ session?: { accessToken?: string; expiresAt?: number } }>(response);
+    accessToken = payload.session?.accessToken ?? "";
+    expiresAt = payload.session?.expiresAt;
+    if (!accessToken) throw new Error("runtime login did not return an account session");
+  }
+
+  const identity = await fetchAccountIdentity(runtimeURL, accessToken);
+  await saveAccountProfile(runtimeURL, accessToken, identity, expiresAt);
+  console.log(`[gonvex] logged in as ${identity.account.email} to ${runtimeURL}`);
+}
+
+async function runLogout(argv: string[]) {
+  const runtimeURL = await accountRuntimeForArgs(argv);
+  const removed = await removeAccountProfile(runtimeURL);
+  if (removed) console.log(`[gonvex] logged out of ${runtimeURL}`);
+  else console.log(`[gonvex] no saved login for ${runtimeURL}`);
+}
+
+async function runWhoAmI(argv: string[]) {
+  const runtimeURL = await accountRuntimeForArgs(argv);
+  const accessToken = await requireAccountAccessToken(runtimeURL);
+  const identity = await fetchAccountIdentity(runtimeURL, accessToken);
+  if (argv.includes("--json")) {
+    console.log(JSON.stringify({ runtimeURL, ...identity }, null, 2));
+    return;
+  }
+  console.log(`${identity.account.email} (${identity.account.role})`);
+  console.log(`Runtime: ${runtimeURL}`);
+  console.log(`Authentication: ${identity.authentication}`);
+  console.log(`Permissions: ${identity.permissions.join(", ")}`);
+}
+
+async function runToken(argv: string[]) {
+  const commandArgs = positionalArgs(argv, ["--runtime-url", "--runtime", "--permission", "--expires-at"]);
+  const action = commandArgs[0];
+  if (!action || action === "help" || action === "--help") {
+    printTokenHelp();
+    return;
+  }
+  if (action === "permissions") {
+    for (const permission of accountTokenPermissions) console.log(permission);
+    return;
+  }
+
+  const runtimeURL = await accountRuntimeForArgs(argv);
+  const accessToken = await requireAccountAccessToken(runtimeURL);
+  if (action === "list" || action === "ls") {
+    const response = await fetch(`${runtimeURL}/dev/auth/tokens`, { headers: accountHeaders(accessToken) });
+    const payload = await runtimeJSON<{ tokens?: AccountAccessToken[] }>(response);
+    const tokens = payload.tokens ?? [];
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify(tokens, null, 2));
+      return;
+    }
+    if (tokens.length === 0) {
+      console.log("[gonvex] no account tokens");
+      return;
+    }
+    for (const token of tokens) {
+      const state = token.revokedAt ? "revoked" : token.expiresAt && Date.parse(token.expiresAt) <= Date.now() ? "expired" : "active";
+      console.log(`${token.id}\t${token.name}\t${state}\t${token.permissions.join(",")}`);
+    }
+    return;
+  }
+
+  if (action === "create") {
+    const positional = positionalArgs(argv, ["--runtime-url", "--runtime", "--permission", "--expires-at"]);
+    const name = positional[1] ?? "CLI provisioning";
+    let permissions = valuesFor(argv, "--permission").flatMap((value) => value.split(",")).map((value) => value.trim()).filter(Boolean);
+    if (argv.includes("--full")) permissions = ["*"];
+    if (permissions.length === 0) permissions = defaultAccountTokenPermissions;
+    const unknown = permissions.find((permission) => !accountTokenPermissions.includes(permission));
+    if (unknown) throw new Error(`unknown account token permission ${unknown}; run 'gonvex token permissions' to list valid values`);
+    const response = await fetch(`${runtimeURL}/dev/auth/tokens`, {
+      method: "POST",
+      headers: { ...accountHeaders(accessToken), "content-type": "application/json" },
+      body: JSON.stringify({ name, permissions, expiresAt: valueFor(argv, "--expires-at") }),
+    });
+    const payload = await runtimeJSON<{ token: AccountAccessToken; accessToken: string }>(response);
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+    console.error(`[gonvex] created account token ${payload.token.id}; copy it now because it will not be shown again:`);
+    console.log(payload.accessToken);
+    return;
+  }
+
+  if (action === "revoke" || action === "delete" || action === "rm") {
+    const positional = positionalArgs(argv, ["--runtime-url", "--runtime"]);
+    const id = positional[1];
+    if (!id) throw new Error("usage: gonvex token revoke <token-id>");
+    const response = await fetch(`${runtimeURL}/dev/auth/tokens/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: accountHeaders(accessToken),
+    });
+    await runtimeJSON(response);
+    console.log(`[gonvex] revoked account token ${id}`);
+    return;
+  }
+
+  printTokenHelp();
+  throw new Error(`unknown token command ${action}`);
+}
+
+async function runProject(argv: string[]) {
+  const commandArgs = positionalArgs(argv, ["--runtime-url", "--runtime", "--database-mode", "--project-root"]);
+  const action = commandArgs[0];
+  if (!action || action === "help" || action === "--help") {
+    printProjectHelp();
+    return;
+  }
+  const runtimeURL = await accountRuntimeForArgs(argv);
+  const accountToken = await accountAccessTokenForRuntime(runtimeURL);
+
+  if (action === "list" || action === "ls") {
+    const projects = await fetchRuntimeProjects(runtimeURL, accountToken);
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify(projects, null, 2));
+      return;
+    }
+    if (projects.length === 0) {
+      console.log("[gonvex] no projects");
+      return;
+    }
+    for (const project of projects) console.log(`${project.id}\t${project.name}\t${project.environment ?? ""}\t${project.database ?? ""}`);
+    return;
+  }
+
+  if (action === "create") {
+    const positional = positionalArgs(argv, ["--runtime-url", "--runtime", "--database-mode", "--project-root"]);
+    const projectRoot = resolve(valueFor(argv, "--project-root") ?? ".");
+    if (!existsSync(projectRoot)) throw new Error(`project root ${projectRoot} does not exist`);
+    const name = positional[1] ?? basename(projectRoot);
+    const databaseMode = valueFor(argv, "--database-mode") ?? "single";
+    if (databaseMode !== "single" && databaseMode !== "multiTenant") throw new Error("--database-mode must be single or multiTenant");
+    const created = await createRuntimeProject(runtimeURL, name, accountToken, databaseMode);
+    await writeProjectEnv(projectRoot, runtimeURL, created.project.id, created.projectKey, true);
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify(created, null, 2));
+      return;
+    }
+    console.log(`[gonvex] created and configured ${created.project.name} (${created.project.id})`);
+    return;
+  }
+
+  if (action === "select" || action === "link") {
+    const positional = positionalArgs(argv, ["--runtime-url", "--runtime", "--project-root"]);
+    const id = positional[1];
+    if (!id) throw new Error("usage: gonvex project select <project-id>");
+    const projectRoot = resolve(valueFor(argv, "--project-root") ?? ".");
+    if (!existsSync(projectRoot)) throw new Error(`project root ${projectRoot} does not exist`);
+    const projects = await fetchRuntimeProjects(runtimeURL, accountToken);
+    const project = projects.find((candidate) => candidate.id === id);
+    if (!project) throw new Error(`project ${id} was not found or is not accessible`);
+    const projectKey = await fetchRuntimeProjectKey(runtimeURL, id, accountToken);
+    await writeProjectEnv(projectRoot, runtimeURL, id, projectKey, true);
+    console.log(`[gonvex] configured ${project.name} (${id})`);
+    return;
+  }
+
+  printProjectHelp();
+  throw new Error(`unknown project command ${action}`);
 }
 
 async function runDev(argv: string[]) {
@@ -844,11 +1124,18 @@ async function runtimeHasManifest(settings: Settings, manifest: Manifest) {
 async function ensureProjectSettings(root: string, settings: Settings, options: { keyWasExplicit: boolean; runtimeWasExplicit: boolean }): Promise<Settings> {
   if (settings.key) return settings;
   if (options.keyWasExplicit) return settings;
-  const configuredProject = await findRuntimeProject(settings.runtimeURL, settings.projectID).catch(() => null);
+  let accountToken = await accountAccessTokenForRuntime(settings.runtimeURL);
+  const configuredProject = await findRuntimeProject(settings.runtimeURL, settings.projectID, accountToken).catch(() => null);
   if (configuredProject) {
+    if (accountToken) {
+      const projectKey = await fetchRuntimeProjectKey(settings.runtimeURL, configuredProject.id, accountToken);
+      await writeProjectEnv(root, settings.runtimeURL, configuredProject.id, projectKey);
+      console.log(`[gonvex] configured ${configuredProject.id} in .env.local`);
+      return { ...settings, projectID: configuredProject.id, key: projectKey };
+    }
     await writeProjectEnv(root, settings.runtimeURL, configuredProject.id, settings.key);
     console.log(`[gonvex] configured ${configuredProject.id} in .env.local`);
-    console.warn("[gonvex] GONVEX_PROJECT_KEY is not configured; runtime sync will fail if the runtime requires project keys.");
+    console.warn("[gonvex] GONVEX_PROJECT_KEY is not configured; run 'gonvex login' or provide the project key.");
     return { ...settings, projectID: configuredProject.id };
   }
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -861,8 +1148,9 @@ async function ensureProjectSettings(root: string, settings: Settings, options: 
     console.log("[gonvex] No Gonvex project is configured for this app.");
     const runtimeURL = await promptDefault(rl, "Runtime URL", settings.runtimeURL || defaultRuntimeURL);
     settings = { ...settings, runtimeURL };
+    accountToken = await accountAccessTokenForRuntime(runtimeURL);
 
-    const projects = await fetchRuntimeProjects(runtimeURL);
+    const projects = await fetchRuntimeProjects(runtimeURL, accountToken);
     let project: RuntimeProject;
     if (projects.length > 0) {
       console.log("[gonvex] Choose a project:");
@@ -874,14 +1162,16 @@ async function ensureProjectSettings(root: string, settings: Settings, options: 
       const index = Number.parseInt(choice, 10);
       if (Number.isFinite(index) && index >= 1 && index <= projects.length) {
         project = projects[index - 1]!;
-        const projectKey = await promptDefault(rl, "Project key from dashboard", "");
+        const projectKey = accountToken
+          ? await fetchRuntimeProjectKey(runtimeURL, project.id, accountToken)
+          : await promptDefault(rl, "Project key", "");
         if (!projectKey) throw new Error("Gonvex project key is required for existing projects");
         const next = { ...settings, projectID: project.id, key: projectKey };
         await writeProjectEnv(root, runtimeURL, project.id, projectKey);
         console.log(`[gonvex] configured ${project.id} in .env.local`);
         return next;
       } else {
-        const created = await createRuntimeProject(runtimeURL, await promptDefault(rl, "New project name", basename(root)));
+        const created = await createRuntimeProject(runtimeURL, await promptDefault(rl, "New project name", basename(root)), accountToken);
         project = created.project;
         const next = { ...settings, projectID: project.id, key: created.projectKey };
         await writeProjectEnv(root, runtimeURL, project.id, created.projectKey);
@@ -889,7 +1179,7 @@ async function ensureProjectSettings(root: string, settings: Settings, options: 
         return next;
       }
     } else {
-      const created = await createRuntimeProject(runtimeURL, await promptDefault(rl, "New project name", basename(root)));
+      const created = await createRuntimeProject(runtimeURL, await promptDefault(rl, "New project name", basename(root)), accountToken);
       project = created.project;
       const next = { ...settings, projectID: project.id, key: created.projectKey };
       await writeProjectEnv(root, runtimeURL, project.id, created.projectKey);
@@ -901,30 +1191,41 @@ async function ensureProjectSettings(root: string, settings: Settings, options: 
   }
 }
 
-async function findRuntimeProject(runtimeURL: string, projectID: string): Promise<RuntimeProject | null> {
+async function findRuntimeProject(runtimeURL: string, projectID: string, accountToken?: string): Promise<RuntimeProject | null> {
   const wanted = projectID.trim();
   if (!wanted) return null;
-  const projects = await fetchRuntimeProjects(runtimeURL);
+  const projects = await fetchRuntimeProjects(runtimeURL, accountToken);
   return projects.find((project) => project.id === wanted) ?? null;
 }
 
-async function fetchRuntimeProjects(runtimeURL: string): Promise<RuntimeProject[]> {
-  const response = await fetch(`${runtimeURL.replace(/\/$/, "")}/dev/projects`);
-  if (!response.ok) throw new Error(`runtime returned ${response.status} ${response.statusText}: ${await response.text()}`);
-  const payload = await response.json() as { projects?: RuntimeProject[] };
+async function fetchRuntimeProjects(runtimeURL: string, accountToken?: string): Promise<RuntimeProject[]> {
+  const response = await fetch(`${runtimeURL.replace(/\/$/, "")}/dev/projects`, {
+    headers: accountToken ? accountHeaders(accountToken) : undefined,
+  });
+  const payload = await runtimeJSON<{ projects?: RuntimeProject[] }>(response);
   return payload.projects ?? [];
 }
 
-async function createRuntimeProject(runtimeURL: string, name: string): Promise<CreatedRuntimeProject> {
+async function createRuntimeProject(runtimeURL: string, name: string, accountToken?: string, databaseMode = "single"): Promise<CreatedRuntimeProject> {
   const response = await fetch(`${runtimeURL.replace(/\/$/, "")}/dev/projects`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name }),
+    headers: { ...(accountToken ? accountHeaders(accountToken) : {}), "content-type": "application/json" },
+    body: JSON.stringify({ name, databaseMode }),
   });
-  if (!response.ok) throw new Error(`runtime returned ${response.status} ${response.statusText}: ${await response.text()}`);
-  const payload = await response.json() as { project: RuntimeProject; projectKey?: string };
+  const payload = await runtimeJSON<{ project: RuntimeProject; projectKey?: string }>(response);
+  if (!payload.project?.id) throw new Error("runtime did not return project details");
   if (!payload.projectKey) throw new Error("runtime did not return a project key");
   return { project: payload.project, projectKey: payload.projectKey };
+}
+
+async function fetchRuntimeProjectKey(runtimeURL: string, projectID: string, accountToken?: string): Promise<string> {
+  const response = await fetch(`${runtimeURL.replace(/\/$/, "")}/dev/projects/${encodeURIComponent(projectID)}/key`, {
+    method: "POST",
+    headers: accountToken ? accountHeaders(accountToken) : undefined,
+  });
+  const payload = await runtimeJSON<{ projectKey?: string }>(response);
+  if (!payload.projectKey) throw new Error("runtime did not return a project key");
+  return payload.projectKey;
 }
 
 async function promptDefault(rl: ReturnType<typeof createInterface>, label: string, fallback: string) {
@@ -932,7 +1233,7 @@ async function promptDefault(rl: ReturnType<typeof createInterface>, label: stri
   return answer || fallback;
 }
 
-async function writeProjectEnv(root: string, runtimeURL: string, projectID: string, projectKey: string) {
+async function writeProjectEnv(root: string, runtimeURL: string, projectID: string, projectKey: string, overwrite = false) {
   await upsertEnvLocal(root, {
     GONVEX_PROJECT_ID: projectID,
     GONVEX_RUNTIME_URL: runtimeURL,
@@ -940,10 +1241,10 @@ async function writeProjectEnv(root: string, runtimeURL: string, projectID: stri
     VITE_GONVEX_PROJECT_ID: projectID,
     VITE_GONVEX_URL: runtimeURL,
     VITE_GONVEX_WS_URL: webSocketURL(runtimeURL),
-  });
+  }, overwrite);
 }
 
-async function upsertEnvLocal(root: string, values: Record<string, string>) {
+async function upsertEnvLocal(root: string, values: Record<string, string>, overwrite = false) {
   const envPath = join(root, ".env.local");
   const existing = existsSync(envPath) ? await readFile(envPath, "utf8") : "";
   const seen = new Set<string>();
@@ -955,7 +1256,7 @@ async function upsertEnvLocal(root: string, values: Record<string, string>) {
     if (!(key in values)) return [line];
     if (seen.has(key)) return [];
     seen.add(key);
-    if (envLineValue(line) !== "") return [line];
+    if (!overwrite && envLineValue(line) !== "") return [line];
     return [`${key}=${values[key]}`];
   });
   for (const [key, value] of Object.entries(values)) {
@@ -1055,22 +1356,167 @@ function shouldPrintRuntimeLogEntry(entry: RuntimeLogEntry, options: RuntimeLogO
   return Boolean(entry.error) || outcome === "error" || outcome === "warn" || outcome === "warning";
 }
 
+function normalizeRuntimeURL(value: string) {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) return defaultRuntimeURL;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`invalid runtime URL ${value}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("runtime URL must use http or https");
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+function cliConfigPath() {
+  if (process.env.GONVEX_CONFIG_PATH) return resolve(process.env.GONVEX_CONFIG_PATH);
+  const configRoot = process.env.XDG_CONFIG_HOME ? resolve(process.env.XDG_CONFIG_HOME) : join(homedir(), ".config");
+  return join(configRoot, "gonvex", "config.json");
+}
+
+function emptyCLIConfig(): CLIConfig {
+  return { version: 1, runtimes: {} };
+}
+
+async function readCLIConfig(): Promise<CLIConfig> {
+  const path = cliConfigPath();
+  if (!existsSync(path)) return emptyCLIConfig();
+  let parsed: Partial<CLIConfig>;
+  try {
+    parsed = JSON.parse(await readFile(path, "utf8")) as Partial<CLIConfig>;
+  } catch (error) {
+    throw new Error(`could not read Gonvex CLI config ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return {
+    version: 1,
+    currentRuntime: parsed.currentRuntime,
+    runtimes: parsed.runtimes && typeof parsed.runtimes === "object" ? parsed.runtimes : {},
+  };
+}
+
+async function writeCLIConfig(config: CLIConfig) {
+  const path = cliConfigPath();
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await chmod(path, 0o600).catch(() => {});
+}
+
+async function saveAccountProfile(runtimeURL: string, accessToken: string, identity: AccountIdentity, expiresAt?: number) {
+  runtimeURL = normalizeRuntimeURL(runtimeURL);
+  const config = await readCLIConfig();
+  config.currentRuntime = runtimeURL;
+  config.runtimes[runtimeURL] = {
+    runtimeURL,
+    accessToken,
+    email: identity.account.email,
+    name: identity.account.name,
+    authentication: identity.authentication,
+    permissions: identity.permissions,
+    ...(expiresAt ? { expiresAt } : {}),
+  };
+  await writeCLIConfig(config);
+}
+
+async function removeAccountProfile(runtimeURL: string) {
+  runtimeURL = normalizeRuntimeURL(runtimeURL);
+  const config = await readCLIConfig();
+  if (!config.runtimes[runtimeURL]) return false;
+  delete config.runtimes[runtimeURL];
+  if (config.currentRuntime === runtimeURL) config.currentRuntime = Object.keys(config.runtimes)[0];
+  await writeCLIConfig(config);
+  return true;
+}
+
+async function accountRuntimeForArgs(argv: string[]) {
+  const explicit = valueFor(argv, "--runtime-url") ?? valueFor(argv, "--runtime") ?? process.env.GONVEX_RUNTIME_URL;
+  if (explicit) return normalizeRuntimeURL(explicit);
+  const config = await readCLIConfig();
+  return normalizeRuntimeURL(config.currentRuntime ?? defaultRuntimeURL);
+}
+
+async function accountAccessTokenForRuntime(runtimeURL: string): Promise<string | undefined> {
+  if (process.env.GONVEX_ACCOUNT_TOKEN?.trim()) return process.env.GONVEX_ACCOUNT_TOKEN.trim();
+  const config = await readCLIConfig();
+  const profile = config.runtimes[normalizeRuntimeURL(runtimeURL)];
+  if (profile?.expiresAt && profile.expiresAt <= Date.now()) {
+    throw new Error(`saved login for ${normalizeRuntimeURL(runtimeURL)} has expired; run 'gonvex login' again`);
+  }
+  return profile?.accessToken;
+}
+
+async function requireAccountAccessToken(runtimeURL: string) {
+  const token = await accountAccessTokenForRuntime(runtimeURL);
+  if (!token) throw new Error(`not logged in to ${normalizeRuntimeURL(runtimeURL)}; run 'gonvex login --runtime-url ${normalizeRuntimeURL(runtimeURL)}'`);
+  return token;
+}
+
+function accountHeaders(accessToken: string): Record<string, string> {
+  return { authorization: `Bearer ${accessToken}` };
+}
+
+async function runtimeJSON<T = Record<string, unknown>>(response: Response): Promise<T> {
+  const text = await response.text();
+  let payload: unknown = {};
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = { error: text };
+    }
+  }
+  if (!response.ok) {
+    const error = payload && typeof payload === "object" && "error" in payload ? String((payload as { error: unknown }).error) : response.statusText;
+    const permission = payload && typeof payload === "object" && "permission" in payload ? ` (${String((payload as { permission: unknown }).permission)})` : "";
+    throw new Error(`runtime returned ${response.status}: ${error}${permission}`);
+  }
+  return payload as T;
+}
+
+async function fetchAccountIdentity(runtimeURL: string, accessToken: string): Promise<AccountIdentity> {
+  const response = await fetch(`${normalizeRuntimeURL(runtimeURL)}/dev/auth/me`, { headers: accountHeaders(accessToken) });
+  return runtimeJSON<AccountIdentity>(response);
+}
+
+async function promptHidden(label: string): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("password must be provided non-interactively with --password or GONVEX_PASSWORD");
+  let hidden = false;
+  const output = new Writable({
+    write(chunk, encoding, callback) {
+      if (!hidden) process.stdout.write(chunk, encoding as BufferEncoding);
+      callback();
+    },
+  });
+  const rl = createInterface({ input: process.stdin, output, terminal: true });
+  try {
+    const pending = rl.question(label);
+    hidden = true;
+    const answer = await pending;
+    hidden = false;
+    process.stdout.write("\n");
+    return answer;
+  } finally {
+    rl.close();
+  }
+}
+
 async function loadSettings(root: string, overrides: Partial<Settings>): Promise<Settings> {
   loadDotEnv(join(root, ".env.local"));
   loadDotEnv(join(root, ".env"));
   const config = await loadConfig(root);
+  const cliConfig = await readCLIConfig();
   const key = overrides.key ?? process.env.GONVEX_PROJECT_KEY ?? process.env.GONVEX_DEPLOY_KEY ?? process.env.GONVEX_KEY ?? "";
   const explicitProjectID = overrides.projectID ?? process.env.GONVEX_PROJECT_ID ?? process.env.GONVEX_PROJECT ?? config.project;
   return {
     projectID: overrides.projectID ?? projectIDFromKey(key) ?? explicitProjectID ?? basename(root),
-    runtimeURL: overrides.runtimeURL ?? process.env.GONVEX_RUNTIME_URL ?? config.runtime ?? defaultRuntimeURL,
+    runtimeURL: normalizeRuntimeURL(overrides.runtimeURL ?? process.env.GONVEX_RUNTIME_URL ?? config.runtime ?? cliConfig.currentRuntime ?? defaultRuntimeURL),
     key,
   };
 }
 
 function projectIDFromKey(key: string) {
   const trimmed = key.trim();
-  if (!trimmed.startsWith("gvx_")) return undefined;
+  if (!trimmed.startsWith("gvx_") || trimmed.startsWith("gvx_pat_")) return undefined;
   const payload = trimmed.slice("gvx_".length);
   let encodedProject = payload.split(".", 1)[0];
   if (encodedProject === payload) {
@@ -1208,6 +1654,30 @@ function valueFor(args: string[], key: string) {
   return args[index + 1];
 }
 
+function valuesFor(args: string[], key: string) {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === key && args[index + 1] !== undefined) {
+      values.push(args[index + 1]!);
+      index += 1;
+    }
+  }
+  return values;
+}
+
+function positionalArgs(args: string[], optionsWithValues: string[]) {
+  const positional: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (optionsWithValues.includes(arg)) {
+      index += 1;
+      continue;
+    }
+    if (!arg.startsWith("-")) positional.push(arg);
+  }
+  return positional;
+}
+
 function basename(path: string) {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? "app";
@@ -1224,11 +1694,16 @@ function sleep(ms: number, signal?: AbortSignal) {
 }
 
 function printHelp() {
-  console.log("Usage: gonvex <dev|init|create|env> [options]");
+  console.log("Usage: gonvex <dev|init|create|env|login|logout|whoami|project|token> [options]");
   console.log("  gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--verbose-logs] [-- <command>]");
   console.log("  gonvex init [--template vite-react] [--project <id>] [--runtime <url>]");
   console.log("  gonvex create <app-name> [--template vite-react]");
   console.log("  gonvex env <list|get|set|push|remove> [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>]");
+  console.log("  gonvex login [--runtime-url <url>] [--email <email> | --token <personal-access-token>]");
+  console.log("  gonvex logout [--runtime-url <url>]");
+  console.log("  gonvex whoami [--runtime-url <url>] [--json]");
+  console.log("  gonvex project <list|create|select> [options]");
+  console.log("  gonvex token <list|create|revoke|permissions> [options]");
 }
 
 function printEnvHelp() {
@@ -1240,6 +1715,21 @@ function printEnvHelp() {
   console.log("  gonvex env push FILE");
   console.log("  gonvex env push --file FILE");
   console.log("  gonvex env remove NAME");
+}
+
+function printProjectHelp() {
+  console.log("Usage: gonvex project <command> [options]");
+  console.log("  gonvex project list [--runtime-url <url>] [--json]");
+  console.log("  gonvex project create [name] [--runtime-url <url>] [--database-mode single|multiTenant] [--project-root <path>] [--json]");
+  console.log("  gonvex project select <project-id> [--runtime-url <url>] [--project-root <path>]");
+}
+
+function printTokenHelp() {
+  console.log("Usage: gonvex token <command> [options]");
+  console.log("  gonvex token list [--runtime-url <url>] [--json]");
+  console.log("  gonvex token create [name] [--permission <permission>]... [--full] [--expires-at <RFC3339>] [--json]");
+  console.log("  gonvex token revoke <token-id> [--runtime-url <url>]");
+  console.log("  gonvex token permissions");
 }
 
 function isCliEntrypoint() {

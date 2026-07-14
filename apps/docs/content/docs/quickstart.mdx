@@ -125,10 +125,10 @@ For real projects, connect the repo to a Gonvex project:
 ```bash
 npx gonvex login
 npx gonvex project create my-product
-npx gonvex link --project my-product
 ```
 
-This writes project connection data to `gonvex.json` and local environment files.
+Project creation writes the returned project ID, runtime URL, and project key to
+`.env.local`. Use `gonvex project select <project-id>` to connect an existing project.
 
 For production, the browser points at the cloud runtime:
 
