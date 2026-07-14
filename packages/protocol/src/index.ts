@@ -59,7 +59,7 @@ export type GonvexManifest = {
 };
 
 export type ClientMessage =
-  | { type: "auth"; id: string; token?: string; tenant?: string }
+  | { type: "auth"; id: string; token?: string; project?: string; tenant?: string }
   | { type: "query.subscribe"; id: string; path: string; args: JsonValue }
   | { type: "query.unsubscribe"; id: string }
   | { type: "mutation.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }

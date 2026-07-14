@@ -12,8 +12,8 @@ npm install --save-dev @gonvex/cli
 ```
 
 The package exposes the `gonvex` binary. The current CLI implements account login,
-personal access tokens, project provisioning, local development, initialization,
-application creation, and project environment management.
+personal access tokens, project provisioning, native app authentication, local
+development, initialization, application creation, and project environment management.
 
 ## Account authentication
 
@@ -76,6 +76,39 @@ the selected project's key and performs the same local setup. Both commands acce
 `--runtime-url`; use `--project-root` when configuring a directory other than the
 current one. Creating a project also accepts `--database-mode single|multiTenant`.
 Pass `--json` to `project list` or `project create` for the complete API response.
+
+## `gonvex auth`
+
+Enable project-scoped Google login without Firebase or a per-app Google Cloud setup:
+
+```bash
+npx gonvex auth add google --origin http://localhost:5173
+npx gonvex auth add google --origin https://app.example.com
+```
+
+The default callback path is `/auth/callback`; override it with
+`--callback-path`. The command requires the selected project's
+`GONVEX_PROJECT_KEY`, registers the exact callback with the runtime, updates
+`gonvex.json`, and writes `gonvex/auth.tsx` with `GonvexAuthProvider`,
+`GoogleSignInButton`, and `useGonvexAuth` exports.
+
+Inspect the provider or list accounts created by successful sign-ins:
+
+```bash
+npx gonvex auth status
+npx gonvex auth status --json
+npx gonvex auth users
+npx gonvex auth users --json
+```
+
+Disable new Google sign-ins with `gonvex auth remove google`. Existing account and
+session records are retained; disabling the provider prevents new authorization
+flows. The Gonvex runtime operator must configure one central Google OAuth client as
+described in [Self-hosting and Deployment](./deployment#one-time-google-auth-broker-setup).
+
+Native Google login currently applies to `single` database-mode projects. The
+runtime refuses to enable it on `multiTenant` projects until tenant membership can
+be assigned explicitly.
 
 ## `gonvex init`
 

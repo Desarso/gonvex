@@ -63,6 +63,7 @@ type Server struct {
 	queryCacheStartedAtMS int64
 	queryCacheSequence    atomic.Uint64
 	errorTracker          *errorTracker
+	googleKeys            googleKeyCache
 }
 
 func New(cfg config.Config) *Server {
@@ -209,6 +210,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /dev/projects/{project}/env", s.handleSetProjectEnv)
 	mux.HandleFunc("PUT /dev/projects/{project}/env", s.handleBulkProjectEnv)
 	mux.HandleFunc("DELETE /dev/projects/{project}/env", s.handleDeleteProjectEnv)
+	mux.HandleFunc("GET /dev/projects/{project}/auth/google", s.handleProjectGoogleAuth)
+	mux.HandleFunc("PUT /dev/projects/{project}/auth/google", s.handleProjectGoogleAuth)
+	mux.HandleFunc("DELETE /dev/projects/{project}/auth/google", s.handleProjectGoogleAuth)
+	mux.HandleFunc("GET /dev/projects/{project}/auth/users", s.handleProjectAuthUsers)
 	mux.HandleFunc("DELETE /dev/projects/{project}", s.handleDeleteProject)
 	mux.HandleFunc("GET /dev/tenants", s.handleTenants)
 	mux.HandleFunc("POST /dev/tenants", s.handleCreateTenant)
@@ -218,6 +223,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/data/tables/{table}/rows", s.handleDataRows)
 	mux.HandleFunc("POST /dev/data/tables/{table}/rows", s.handleInsertDataRow)
 	mux.HandleFunc("POST /dev/sync", s.handleDevSync)
+	mux.HandleFunc("GET /auth/config", s.handleAuthConfig)
+	mux.HandleFunc("GET /auth/google/authorize", s.handleGoogleAuthorize)
+	mux.HandleFunc("GET /auth/google/callback", s.handleGoogleCallback)
+	mux.HandleFunc("POST /auth/token", s.handleAppAuthToken)
+	mux.HandleFunc("POST /auth/logout", s.handleAppAuthLogout)
 	mux.HandleFunc("POST /errors/register", s.handleErrorRegistration)
 	mux.HandleFunc("POST /errors/envelope", s.handleErrorEnvelope)
 	mux.HandleFunc("GET /dev/errors/status", s.handleErrorStatus)

@@ -7,6 +7,97 @@ description: Users, tenant membership, roles, and permissions in Gonvex applicat
 
 Gonvex needs a runtime-level auth and membership model because users can belong to multiple tenants, and tenants can route to different databases.
 
+## Native Google login
+
+For a single-database project, Google login can be enabled without Firebase, the
+Firebase CLI, or the Google Cloud CLI:
+
+```bash
+npx gonvex auth add google --origin http://localhost:5173
+```
+
+The command performs three project-scoped operations:
+
+- registers the exact app callback URL with the Gonvex runtime;
+- records the provider in `gonvex.json`; and
+- writes `gonvex/auth.tsx`, a configured React provider, hook, and Google button.
+
+Wrap the application once:
+
+```tsx
+import { GonvexAuthProvider } from "../gonvex/auth";
+
+root.render(
+  <GonvexAuthProvider client={gonvex}>
+    <App />
+  </GonvexAuthProvider>,
+);
+```
+
+Then render the button and read the verified account:
+
+```tsx
+import { GoogleSignInButton, useGonvexAuth } from "../gonvex/auth";
+
+function Account() {
+  const { user, error } = useGonvexAuth();
+  return (
+    <>
+      <GoogleSignInButton className="google-button" />
+      {user ? <p>Signed in as {user.email}</p> : null}
+      {error ? <p role="alert">{error}</p> : null}
+    </>
+  );
+}
+```
+
+Vite serves the callback as an SPA route automatically. Frameworks that do not
+fall back to the app entry point must serve `gonvex.json`'s configured callback
+path (by default `/auth/callback`). Register another exact origin by running the
+same command with a different `--origin`, for example the production site.
+
+List the accounts created for a project with:
+
+```bash
+npx gonvex auth status
+npx gonvex auth users
+```
+
+Backend functions receive the account as `ctx.User`. The user ID is generated per
+Gonvex project, so the same Google account is not exposed as one shared identifier
+to unrelated applications.
+
+### Why no app needs a Google Cloud project
+
+Gonvex acts as the OAuth broker, following the same basic design as Shoo. A hosted
+Gonvex installation registers one Google web OAuth client and one callback:
+
+```txt
+app -> Gonvex /auth/google/authorize -> Google
+Google -> Gonvex /auth/google/callback
+Gonvex -> app /auth/callback?code=...
+app -> Gonvex /auth/token (one-time code + PKCE verifier)
+Gonvex -> project-scoped session + account
+```
+
+The app callback never has to be registered with Google. It is registered with
+Gonvex and matched exactly before the flow starts. Authorization codes are
+short-lived, single-use, and bound to the app callback with PKCE S256. Gonvex also
+verifies Google's ID-token signature, issuer, audience, expiry, and nonce before it
+creates an account. Stored session and code values are hashed.
+
+The operator still performs one Google Cloud setup for the Gonvex installation; see
+[Self-hosting and Deployment](./deployment#one-time-google-auth-broker-setup). Apps
+created on that installation do not repeat it.
+
+<div className="docs-callout docs-callout--warning">
+  <span className="docs-callout__icon">!</span>
+  <div>
+    <strong>Current scope</strong>
+    <p>Native Google login currently supports single-database projects. Gonvex rejects enabling it for a multi-tenant project until tenant membership assignment is configured, so a browser-supplied tenant ID can never become authorization by itself.</p>
+  </div>
+</div>
+
 ## Core Model
 
 ```txt
@@ -139,16 +230,18 @@ This separation lets the runtime authenticate and route before opening tenant-sp
 
 ## Auth Providers
 
-Gonvex should support external identity providers rather than owning passwords by default:
+Gonvex supports native brokered Google login and retains the lower-level token path
+for external identity providers. Longer-term provider targets include:
 
 - Clerk
 - Auth0
-- Firebase Auth
 - WorkOS
 - custom JWT
 - local dev auth
 
-Provider identity is mapped to Gonvex users in the landlord DB.
+Provider identity is mapped to a project-scoped Gonvex user in the runtime control
+database. An application can use native Google login without installing any Google
+or Firebase package.
 
 ## Security Rule
 

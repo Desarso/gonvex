@@ -47,6 +47,35 @@ function Tasks() {
 warm load it may receive the last scoped snapshot first, followed by the
 authoritative server result. Its signature and return type do not change.
 
+## Native Google auth
+
+Enable Google for the project and generate a configured auth module:
+
+```bash
+npx gonvex auth add google --origin http://localhost:5173
+```
+
+```tsx
+import { GonvexAuthProvider, GoogleSignInButton, useGonvexAuth } from "./gonvex/auth";
+
+function Root() {
+  return (
+    <GonvexAuthProvider client={client}>
+      <Account />
+    </GonvexAuthProvider>
+  );
+}
+
+function Account() {
+  const { user } = useGonvexAuth();
+  return <>{user?.email}<GoogleSignInButton /></>;
+}
+```
+
+The provider performs Authorization Code + PKCE against the Gonvex runtime and
+attaches the resulting project-scoped session to the realtime client. It does not
+load Firebase or a Google browser SDK.
+
 ## Convex Compatibility
 
 The package also exports Convex-style names for incremental migration:

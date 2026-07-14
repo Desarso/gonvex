@@ -24,6 +24,7 @@ type clientMessage struct {
 	Path               string          `json:"path,omitempty"`
 	Args               json.RawMessage `json:"args,omitempty"`
 	Token              string          `json:"token,omitempty"`
+	Project            string          `json:"project,omitempty"`
 	Tenant             string          `json:"tenant,omitempty"`
 	Trace              *messageTrace   `json:"trace,omitempty"`
 	Kind               string          `json:"kind,omitempty"`
@@ -203,14 +204,18 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 	receivedAt := time.Now()
 	switch message.Type {
 	case "auth":
-		user, permissions, tenant, err := c.server.authenticateSocket(ctx, c.project, c.tenant, message.Token, message.Tenant)
+		requestedProject := strings.TrimSpace(message.Project)
+		if requestedProject == "" {
+			requestedProject = c.project
+		}
+		user, permissions, project, tenant, err := c.server.authenticateSocket(ctx, requestedProject, c.tenant, message.Token, message.Tenant)
 		if err != nil {
 			c.clearAuthentication()
 			c.write(serverMessage{Type: "auth.error", ID: message.ID, Error: err.Error()})
 			return
 		}
 		caller := callerContext{user: user, permissions: permissions}
-		directive := c.server.queryCacheDirective(c.project, tenant, caller)
+		directive := c.server.queryCacheDirective(project, tenant, caller)
 		cacheScope := ""
 		if directive != nil {
 			cacheScope = directive.Scope
@@ -218,6 +223,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.mu.Lock()
 		c.user = user
 		c.perms = permissions
+		c.project = project
 		c.tenant = tenant
 		c.auth = true
 		c.cacheScope = cacheScope
@@ -229,6 +235,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			subCtx, cancel := context.WithCancel(ctx)
 			sub.ctx = subCtx
 			sub.cancel = cancel
+			sub.project = project
 			sub.tenant = tenant
 			sub.caller = caller
 			sub.token = &struct{}{}
@@ -237,7 +244,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			subs = append(subs, sub)
 		}
 		c.mu.Unlock()
-		authResult := map[string]any{"userId": user.ID, "tenantId": tenant}
+		authResult := map[string]any{"userId": user.ID, "projectId": project, "tenantId": tenant}
 		if directive != nil {
 			authResult["queryCache"] = directive
 		}

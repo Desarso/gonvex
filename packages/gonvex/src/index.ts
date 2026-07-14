@@ -56,6 +56,41 @@ type Settings = {
   key: string;
 };
 
+type ProjectConfig = {
+  project?: string;
+  runtime?: string;
+  backendDir?: string;
+  generatedDir?: string;
+  tenantMode?: string;
+  auth?: {
+    providers?: {
+      google?: {
+        enabled?: boolean;
+        callbackPath?: string;
+        redirectUris?: string[];
+      };
+    };
+  };
+  [key: string]: unknown;
+};
+
+type ProjectGoogleAuth = {
+  provider: "google";
+  enabled: boolean;
+  redirectUris?: string[];
+  runtimeConfigured?: boolean;
+  brokerCallbackUrl?: string;
+};
+
+type AppAuthUser = {
+  id: string;
+  email?: string;
+  name?: string;
+  provider: string;
+  createdAt?: string;
+  lastSignedInAt?: string;
+};
+
 type RuntimeProject = {
   id: string;
   name: string;
@@ -210,6 +245,10 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (command === "env") {
     await runEnv(argv.slice(1));
+    return;
+  }
+  if (command === "auth") {
+    await runAuth(argv.slice(1));
     return;
   }
   if (command === "login") {
@@ -592,6 +631,167 @@ async function runEnv(argv: string[]) {
   throw new Error(`unknown env command ${action}`);
 }
 
+export async function runAuth(argv: string[]) {
+  const optionsWithValues = ["--project", "--runtime-url", "--project-id", "--key", "--origin", "--callback-path"];
+  const positional = positionalArgs(argv, optionsWithValues);
+  const action = positional[0];
+  if (!action || action === "help") {
+    printAuthHelp();
+    return;
+  }
+  const projectRoot = resolve(valueFor(argv, "--project") ?? ".");
+  const settings = await loadSettings(projectRoot, {
+    runtimeURL: valueFor(argv, "--runtime-url"),
+    projectID: valueFor(argv, "--project-id"),
+    key: valueFor(argv, "--key"),
+  });
+  if (!settings.key) throw new Error("GONVEX_PROJECT_KEY is required for project auth commands");
+  const endpoint = `${settings.runtimeURL}/dev/projects/${encodeURIComponent(settings.projectID)}/auth/google`;
+
+  if (action === "add" || action === "enable") {
+    const provider = positional[1];
+    if (provider !== "google") throw new Error("usage: gonvex auth add google [--origin URL]");
+    const callbackPath = normalizeAuthCallbackPath(valueFor(argv, "--callback-path") ?? "/auth/callback");
+    const origin = normalizeAppOrigin(
+      valueFor(argv, "--origin")
+      ?? process.env.GONVEX_APP_ORIGIN
+      ?? process.env.VITE_APP_URL
+      ?? "http://localhost:5173",
+    );
+    const redirectUri = new URL(callbackPath, `${origin}/`).toString();
+    const response = await fetch(endpoint, {
+      method: "PUT",
+      headers: { ...projectAuthHeaders(settings), "content-type": "application/json" },
+      body: JSON.stringify({ redirectUri }),
+    });
+    const configured = await runtimeJSON<ProjectGoogleAuth>(response);
+    await saveGoogleAuthProjectConfig(projectRoot, callbackPath, redirectUri);
+    await writeGonvexAuthModule(projectRoot, settings, callbackPath);
+    console.log(`[gonvex] enabled Google auth for ${settings.projectID}`);
+    console.log(`[gonvex] registered callback ${redirectUri}`);
+    console.log(`[gonvex] wrote gonvex/auth.tsx; wrap your app with GonvexAuthProvider and render GoogleSignInButton`);
+    if (!configured.runtimeConfigured) {
+      console.warn("[gonvex] this runtime still needs its one-time GONVEX_GOOGLE_CLIENT_ID and GONVEX_GOOGLE_CLIENT_SECRET operator configuration");
+    }
+    return;
+  }
+
+  if (action === "remove" || action === "disable") {
+    const provider = positional[1];
+    if (provider !== "google") throw new Error("usage: gonvex auth remove google");
+    await runtimeJSON(await fetch(endpoint, { method: "DELETE", headers: projectAuthHeaders(settings) }));
+    await setGoogleAuthProjectEnabled(projectRoot, false);
+    console.log(`[gonvex] disabled Google auth for ${settings.projectID}`);
+    return;
+  }
+
+  if (action === "status") {
+    const configured = await runtimeJSON<ProjectGoogleAuth>(await fetch(endpoint, { headers: projectAuthHeaders(settings) }));
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify(configured, null, 2));
+      return;
+    }
+    console.log(`Google: ${configured.enabled ? "enabled" : "disabled"}`);
+    console.log(`Broker: ${configured.runtimeConfigured ? "configured" : "missing Google credentials"}`);
+    for (const redirectUri of configured.redirectUris ?? []) console.log(`Callback: ${redirectUri}`);
+    if (configured.brokerCallbackUrl) console.log(`Google Cloud redirect URI: ${configured.brokerCallbackUrl}`);
+    return;
+  }
+
+  if (action === "users" || action === "accounts") {
+    const usersEndpoint = `${settings.runtimeURL}/dev/projects/${encodeURIComponent(settings.projectID)}/auth/users`;
+    const payload = await runtimeJSON<{ users?: AppAuthUser[] }>(await fetch(usersEndpoint, { headers: projectAuthHeaders(settings) }));
+    const users = payload.users ?? [];
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify(users, null, 2));
+      return;
+    }
+    if (users.length === 0) {
+      console.log(`[gonvex] no app accounts for ${settings.projectID}`);
+      return;
+    }
+    for (const user of users) {
+      console.log(`${user.id}\t${user.email ?? ""}\t${user.name ?? ""}\t${user.provider}`);
+    }
+    return;
+  }
+
+  printAuthHelp();
+  throw new Error(`unknown auth command ${action}`);
+}
+
+function normalizeAppOrigin(raw: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`invalid app origin ${raw}`);
+  }
+  if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw new Error("--origin must contain only scheme, host, and optional port");
+  }
+  const local = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(parsed.hostname);
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && local)) {
+    throw new Error("--origin must use https (http is allowed only for localhost)");
+  }
+  return parsed.origin;
+}
+
+function normalizeAuthCallbackPath(raw: string) {
+  const value = raw.trim();
+  if (!value.startsWith("/") || value.startsWith("//") || value.includes("?") || value.includes("#")) {
+    throw new Error("--callback-path must be an absolute pathname without a query or fragment");
+  }
+  return value;
+}
+
+async function saveGoogleAuthProjectConfig(root: string, callbackPath: string, redirectUri: string) {
+  const configPath = join(root, "gonvex.json");
+  const config = await loadConfig(root);
+  const existing = config.auth?.providers?.google;
+  const redirectUris = [...new Set([...(existing?.redirectUris ?? []), redirectUri])].sort();
+  config.auth = {
+    ...(config.auth ?? {}),
+    providers: {
+      ...(config.auth?.providers ?? {}),
+      google: { ...(existing ?? {}), enabled: true, callbackPath, redirectUris },
+    },
+  };
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+async function setGoogleAuthProjectEnabled(root: string, enabled: boolean) {
+  const configPath = join(root, "gonvex.json");
+  const config = await loadConfig(root);
+  const existing = config.auth?.providers?.google ?? {};
+  config.auth = {
+    ...(config.auth ?? {}),
+    providers: { ...(config.auth?.providers ?? {}), google: { ...existing, enabled } },
+  };
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+async function writeGonvexAuthModule(root: string, settings: Settings, callbackPath: string) {
+  const source = [
+    "// Generated by `gonvex auth add google`. Re-running the command replaces this file.",
+    'import { createGonvexAuth } from "./_generated/react";',
+    "",
+    "const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};",
+    "",
+    "export const gonvexAuth = createGonvexAuth({",
+    `  runtimeUrl: env.VITE_GONVEX_URL ?? env.VITE_GONVEX_RUNTIME_URL ?? ${JSON.stringify(settings.runtimeURL)},`,
+    `  projectId: env.VITE_GONVEX_PROJECT_ID ?? ${JSON.stringify(settings.projectID)},`,
+    `  callbackPath: ${JSON.stringify(callbackPath)},`,
+    "});",
+    "",
+    "export const GonvexAuthProvider = gonvexAuth.GonvexAuthProvider;",
+    "export const GoogleSignInButton = gonvexAuth.GoogleSignInButton;",
+    "export const useGonvexAuth = gonvexAuth.useGonvexAuth;",
+    "",
+  ].join("\n");
+  await writeFileIfChanged(join(root, "gonvex", "auth.tsx"), source);
+}
+
 async function watchProject(root: string, settings: Settings, once: boolean, signal?: AbortSignal, initialState?: WatchState): Promise<WatchState> {
   const backendDir = join(root, "gonvex");
   await mkdir(backendDir, { recursive: true });
@@ -770,7 +970,7 @@ async function writeBindings(root: string, manifest: Manifest): Promise<BindingW
   const outputs: Record<string, string> = {
     "api.ts": renderAPI(manifest),
     "client.ts": '// Generated by gonvex dev. Do not edit.\nexport { GonvexClient, ConvexReactClient } from "@gonvex/client";\n',
-    "react.ts": '// Generated by gonvex dev. Do not edit.\nexport { ConvexProvider, ConvexProviderWithAuth, ConvexReactClient, GonvexProvider, useAction, useConvex, useConvexAuth, useConvexConnectionState, useMutation, usePaginatedQuery, useQuery } from "@gonvex/react";\n',
+    "react.ts": '// Generated by gonvex dev. Do not edit.\nexport { ConvexProvider, ConvexProviderWithAuth, ConvexReactClient, createGonvexAuth, GonvexAuthProvider, GonvexGoogleAuthButton, GonvexProvider, useAction, useConvex, useConvexAuth, useConvexConnectionState, useGonvexAuth, useMutation, usePaginatedQuery, useQuery } from "@gonvex/react";\nexport type { GonvexAuthConfig, GonvexAuthUser, GonvexAuthValue } from "@gonvex/react";\n',
     "types.ts": "// Generated by gonvex dev. Do not edit.\nexport type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };\n",
     "schema.ts": renderSchemaIndex(manifest),
     "landlord/schema.ts": renderScopedSchemaModule("landlord", manifest.schema.landlordTables),
@@ -1531,7 +1731,7 @@ function projectIDFromKey(key: string) {
   }
 }
 
-async function loadConfig(root: string): Promise<{ project?: string; runtime?: string }> {
+async function loadConfig(root: string): Promise<ProjectConfig> {
   try {
     return JSON.parse(await readFile(join(root, "gonvex.json"), "utf8"));
   } catch {
@@ -1694,16 +1894,25 @@ function sleep(ms: number, signal?: AbortSignal) {
 }
 
 function printHelp() {
-  console.log("Usage: gonvex <dev|init|create|env|login|logout|whoami|project|token> [options]");
+  console.log("Usage: gonvex <dev|init|create|env|auth|login|logout|whoami|project|token> [options]");
   console.log("  gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--verbose-logs] [-- <command>]");
   console.log("  gonvex init [--template vite-react] [--project <id>] [--runtime <url>]");
   console.log("  gonvex create <app-name> [--template vite-react]");
   console.log("  gonvex env <list|get|set|push|remove> [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>]");
+  console.log("  gonvex auth <add|remove|status|users> [google] [options]");
   console.log("  gonvex login [--runtime-url <url>] [--email <email> | --token <personal-access-token>]");
   console.log("  gonvex logout [--runtime-url <url>]");
   console.log("  gonvex whoami [--runtime-url <url>] [--json]");
   console.log("  gonvex project <list|create|select> [options]");
   console.log("  gonvex token <list|create|revoke|permissions> [options]");
+}
+
+function printAuthHelp() {
+  console.log("Usage: gonvex auth <command> [options]");
+  console.log("  gonvex auth add google [--origin https://app.example.com] [--callback-path /auth/callback]");
+  console.log("  gonvex auth remove google");
+  console.log("  gonvex auth status [--json]");
+  console.log("  gonvex auth users [--json]");
 }
 
 function printEnvHelp() {

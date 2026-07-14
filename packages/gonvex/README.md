@@ -81,6 +81,20 @@ npx gonvex env push .env.production
 npx gonvex env remove NAME
 ```
 
+Enable native Google login for an app without Firebase or a per-app Google Cloud
+project:
+
+```bash
+npx gonvex auth add google --origin http://localhost:5173
+npx gonvex auth status
+npx gonvex auth users
+```
+
+The command registers the exact callback with the runtime and writes
+`gonvex/auth.tsx`, which exports a configured provider, hook, and Google sign-in
+button. A Gonvex installation operator configures one central Google OAuth client;
+future app projects reuse it through the runtime.
+
 `env push` resolves the file from the selected project root and atomically
 replaces that project's server-side environment-variable set. Pass a dedicated
 deployment env file; the CLI refuses to upload `GONVEX_PROJECT_KEY` and related

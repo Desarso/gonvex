@@ -99,6 +99,21 @@ func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
 
 During development, `gonvex dev` watches the `gonvex/` folder, regenerates TypeScript bindings, syncs schema/function metadata, and runs your app dev server.
 
+## Native Google Login
+
+Add Google login to a single-database app through Gonvex itself:
+
+```bash
+npx gonvex auth add google --origin http://localhost:5173
+```
+
+This registers the app callback with the runtime and generates `gonvex/auth.tsx`
+with `GonvexAuthProvider`, `GoogleSignInButton`, and `useGonvexAuth`. Apps do not
+install Firebase or create their own Google Cloud project. The Gonvex installation
+owns one centrally configured Google OAuth client, validates Google identity
+server-side, and issues project-scoped accounts and sessions using Authorization
+Code + PKCE.
+
 ## Self-Hosting
 
 Gonvex is designed to be self-hosted. A full deployment has:

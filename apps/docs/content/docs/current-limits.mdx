@@ -36,6 +36,7 @@ npx gonvex init
 npx gonvex login
 npx gonvex project create my-app
 npx gonvex token create "Developer CLI"
+npx gonvex auth add google --origin http://localhost:5173
 npx gonvex dev
 npx gonvex env list
 npx gonvex env push .env.production
@@ -102,8 +103,12 @@ Production migrations need:
 ## Auth Is Early
 
 Dashboard sessions, account personal access tokens, project memberships, and scoped
-project/token permissions are implemented. OAuth/device authorization, organization
-roles, recovery flows, and hosted-control-plane hardening are still incomplete.
+project/token permissions are implemented. Native brokered Google OAuth is
+implemented for single-database app projects with Authorization Code + PKCE,
+server-side Google ID-token validation, hashed sessions, and exact callback
+allowlists. Multi-tenant auth membership, additional providers, device
+authorization, organization roles, recovery flows, and hosted-control-plane
+hardening are still incomplete.
 
 Do not expose development data-browser endpoints as application APIs.
 

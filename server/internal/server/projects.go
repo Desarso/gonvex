@@ -644,6 +644,84 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	if err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_providers (
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		provider TEXT NOT NULL,
+		enabled BOOLEAN NOT NULL DEFAULT TRUE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (project_id, provider)
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_redirect_uris (
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		provider TEXT NOT NULL,
+		redirect_uri TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (project_id, provider, redirect_uri)
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_users (
+		id TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		provider TEXT NOT NULL,
+		provider_subject TEXT NOT NULL,
+		email TEXT NOT NULL DEFAULT '',
+		email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+		name TEXT NOT NULL DEFAULT '',
+		picture TEXT NOT NULL DEFAULT '',
+		last_signed_in_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		UNIQUE (project_id, provider, provider_subject)
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_users_by_project
+		ON gonvex_auth_users (project_id, created_at DESC)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_transactions (
+		token_hash TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		redirect_uri TEXT NOT NULL,
+		app_state TEXT NOT NULL,
+		code_challenge TEXT NOT NULL,
+		nonce TEXT NOT NULL,
+		google_redirect_uri TEXT NOT NULL,
+		expires_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_codes (
+		code_hash TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		user_id TEXT NOT NULL REFERENCES gonvex_auth_users(id) ON DELETE CASCADE,
+		redirect_uri TEXT NOT NULL,
+		code_challenge TEXT NOT NULL,
+		expires_at TIMESTAMPTZ NOT NULL,
+		used_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_sessions (
+		token_hash TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+		user_id TEXT NOT NULL REFERENCES gonvex_auth_users(id) ON DELETE CASCADE,
+		expires_at TIMESTAMPTZ NOT NULL,
+		revoked_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_sessions_by_user
+		ON gonvex_auth_sessions (project_id, user_id, expires_at DESC)`); err != nil {
+		return err
+	}
 	return nil
 }
 

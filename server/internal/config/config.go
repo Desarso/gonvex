@@ -33,6 +33,16 @@ type Config struct {
 	RequireAuth       bool
 	QueryCacheEnabled bool
 	DashboardSecret   string
+	// AuthPublicURL is the browser-facing origin of the Gonvex runtime. Google
+	// redirects to AuthPublicURL + /auth/google/callback. A hosted Gonvex
+	// installation configures one Google OAuth client here; individual projects
+	// only register their own app callback URL with Gonvex.
+	AuthPublicURL      string
+	GoogleClientID     string
+	GoogleClientSecret string
+	GoogleAuthorizeURL string
+	GoogleTokenURL     string
+	GoogleJWKSURL      string
 	// Environment labels projects created/imported on this runtime instance in the
 	// dashboard ("local dev", "production", ...). Deployed runtimes set
 	// GONVEX_ENVIRONMENT so their projects stop claiming to be local dev.
@@ -43,31 +53,37 @@ func FromEnv() Config {
 	loadDotEnv(".env")
 
 	return Config{
-		Addr:              env("GONVEX_ADDR", ":8080"),
-		LandlordURL:       env("GONVEX_LANDLORD_DATABASE_URL", env("LANDLORD_DATABASE_URL", "")),
-		PostgresURL:       env("DATABASE_URL", env("POSTGRES_URL", "")),
-		TenantDatabases:   envStringMap("GONVEX_TENANT_DATABASE_URLS"),
-		ProjectDatabases:  envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
-		ProjectKeys:       envStringMap("GONVEX_PROJECT_KEYS"),
-		GonvexModuleRoot:  env("GONVEX_MODULE_ROOT", ""),
-		PluginCacheDir:    env("GONVEX_PLUGIN_CACHE_DIR", ""),
-		ValkeyURL:         env("VALKEY_URL", env("REDIS_URL", "")),
-		RowsCacheTTL:      envDuration("GONVEX_ROWS_CACHE_TTL", 15*time.Second),
-		TelemetryEnabled:  envBool("GONVEX_TELEMETRY_ENABLED", true),
-		TelemetryLogPath:  env("GONVEX_TELEMETRY_LOG", "tmp/gonvex-telemetry.jsonl"),
-		S3Endpoint:        env("S3_ENDPOINT", ""),
-		S3Region:          env("S3_REGION", "us-east-1"),
-		S3Bucket:          env("S3_BUCKET", ""),
-		S3AccessKeyID:     env("S3_ACCESS_KEY_ID", ""),
-		S3SecretAccessKey: env("S3_SECRET_ACCESS_KEY", ""),
-		S3ForcePathStyle:  envBool("S3_FORCE_PATH_STYLE", true),
-		StoragePublicURL:  env("GONVEX_PUBLIC_URL", ""),
-		DevSyncKey:        env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
-		AdminKey:          env("GONVEX_ADMIN_KEY", ""),
-		RequireAuth:       envBool("GONVEX_REQUIRE_AUTH", false),
-		QueryCacheEnabled: envBool("GONVEX_BROWSER_QUERY_CACHE_ENABLED", true),
-		DashboardSecret:   env("GONVEX_DASHBOARD_SESSION_SECRET", env("DASHBOARD_SESSION_SECRET", "")),
-		Environment:       env("GONVEX_ENVIRONMENT", "local dev"),
+		Addr:               env("GONVEX_ADDR", ":8080"),
+		LandlordURL:        env("GONVEX_LANDLORD_DATABASE_URL", env("LANDLORD_DATABASE_URL", "")),
+		PostgresURL:        env("DATABASE_URL", env("POSTGRES_URL", "")),
+		TenantDatabases:    envStringMap("GONVEX_TENANT_DATABASE_URLS"),
+		ProjectDatabases:   envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
+		ProjectKeys:        envStringMap("GONVEX_PROJECT_KEYS"),
+		GonvexModuleRoot:   env("GONVEX_MODULE_ROOT", ""),
+		PluginCacheDir:     env("GONVEX_PLUGIN_CACHE_DIR", ""),
+		ValkeyURL:          env("VALKEY_URL", env("REDIS_URL", "")),
+		RowsCacheTTL:       envDuration("GONVEX_ROWS_CACHE_TTL", 15*time.Second),
+		TelemetryEnabled:   envBool("GONVEX_TELEMETRY_ENABLED", true),
+		TelemetryLogPath:   env("GONVEX_TELEMETRY_LOG", "tmp/gonvex-telemetry.jsonl"),
+		S3Endpoint:         env("S3_ENDPOINT", ""),
+		S3Region:           env("S3_REGION", "us-east-1"),
+		S3Bucket:           env("S3_BUCKET", ""),
+		S3AccessKeyID:      env("S3_ACCESS_KEY_ID", ""),
+		S3SecretAccessKey:  env("S3_SECRET_ACCESS_KEY", ""),
+		S3ForcePathStyle:   envBool("S3_FORCE_PATH_STYLE", true),
+		StoragePublicURL:   env("GONVEX_PUBLIC_URL", ""),
+		DevSyncKey:         env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
+		AdminKey:           env("GONVEX_ADMIN_KEY", ""),
+		RequireAuth:        envBool("GONVEX_REQUIRE_AUTH", false),
+		QueryCacheEnabled:  envBool("GONVEX_BROWSER_QUERY_CACHE_ENABLED", true),
+		DashboardSecret:    env("GONVEX_DASHBOARD_SESSION_SECRET", env("DASHBOARD_SESSION_SECRET", "")),
+		AuthPublicURL:      env("GONVEX_AUTH_URL", env("GONVEX_PUBLIC_URL", "")),
+		GoogleClientID:     env("GONVEX_GOOGLE_CLIENT_ID", ""),
+		GoogleClientSecret: env("GONVEX_GOOGLE_CLIENT_SECRET", ""),
+		GoogleAuthorizeURL: env("GONVEX_GOOGLE_AUTHORIZE_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
+		GoogleTokenURL:     env("GONVEX_GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token"),
+		GoogleJWKSURL:      env("GONVEX_GOOGLE_JWKS_URL", "https://www.googleapis.com/oauth2/v3/certs"),
+		Environment:        env("GONVEX_ENVIRONMENT", "local dev"),
 	}
 }
 

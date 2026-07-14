@@ -12,35 +12,42 @@ import (
 	"github.com/gonvex/gonvex/server/internal/landlord"
 )
 
-func (s *Server) authenticateSocket(ctx context.Context, projectID string, currentTenantID string, token string, requestedTenantID string) (*gonvex.User, map[string]any, string, error) {
+func (s *Server) authenticateSocket(ctx context.Context, projectID string, currentTenantID string, token string, requestedTenantID string) (*gonvex.User, map[string]any, string, string, error) {
+	if strings.HasPrefix(strings.TrimSpace(token), "gvx_session_") {
+		session, tenantID, err := s.validateAppSession(ctx, projectID, token, requestedTenantID)
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		return &gonvex.User{ID: session.User.ID, Email: session.User.Email}, map[string]any{}, session.ProjectID, tenantID, nil
+	}
 	if s.config.LandlordURL == "" {
 		if s.config.RequireAuth {
-			return nil, nil, "", fmt.Errorf("landlord database URL is not configured")
+			return nil, nil, "", "", fmt.Errorf("landlord database URL is not configured")
 		}
 		tenant := tenantIDFromRequest(projectID, requestedTenantID)
 		if requestedTenantID == "" {
 			tenant = tenantIDFromRequest(projectID, currentTenantID)
 		}
-		return devUserFromJWT(token), map[string]any{}, tenant, nil
+		return devUserFromJWT(token), map[string]any{}, projectID, tenant, nil
 	}
 
 	session, err := landlord.ValidateSession(ctx, s.config.LandlordURL, token, requestedTenantID)
 	if err != nil {
 		if s.config.RequireAuth {
-			return nil, nil, "", err
+			return nil, nil, "", "", err
 		}
 		tenant := tenantIDFromRequest(projectID, requestedTenantID)
 		if requestedTenantID == "" {
 			tenant = tenantIDFromRequest(projectID, currentTenantID)
 		}
-		return devUserFromJWT(token), map[string]any{}, tenant, nil
+		return devUserFromJWT(token), map[string]any{}, projectID, tenant, nil
 	}
 	user := &gonvex.User{ID: session.UserID, Email: session.Email}
 	permissions, err := s.loadTenantPermissions(ctx, projectID, session.ActiveTenantID, session.UserID)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", "", err
 	}
-	return user, permissions, session.ActiveTenantID, nil
+	return user, permissions, projectID, session.ActiveTenantID, nil
 }
 
 func devUserFromJWT(token string) *gonvex.User {

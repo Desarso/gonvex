@@ -119,6 +119,43 @@ project, obtain its key from the dashboard when prompted.
 Keep `GONVEX_PROJECT_KEY` server-side. Only variables prefixed with `VITE_` are meant
 for the browser bundle.
 
+## One-time Google auth broker setup
+
+Individual Gonvex apps do not need Firebase or their own Google Cloud project. The
+operator of a Gonvex installation creates one Google OAuth client for the runtime.
+This is a one-time infrastructure setup, not a per-app step.
+
+1. Create or select the Google Cloud project that represents the Gonvex service.
+2. Configure the Google Auth Platform branding and audience. A public hosted service
+   should use a production External app and complete the applicable brand review.
+3. Create a **Web application** OAuth client.
+4. Add exactly one authorized redirect URI:
+   `https://your-gonvex-runtime.example.com/auth/google/callback`.
+5. Configure the runtime:
+
+```dotenv
+GONVEX_AUTH_URL=https://your-gonvex-runtime.example.com
+GONVEX_GOOGLE_CLIENT_ID=1234567890-example.apps.googleusercontent.com
+GONVEX_GOOGLE_CLIENT_SECRET=...
+```
+
+`GONVEX_AUTH_URL` is browser-facing and must match the origin/path registered with
+Google. Keep the client secret only on the runtime. Gonvex requests `openid email
+profile`, exchanges Google's code server-side, and validates the returned ID token
+against Google's JWKS. See Google's official [web-server OAuth
+guide](https://developers.google.com/identity/protocols/oauth2/web-server) and
+[OpenID Connect validation guide](https://developers.google.com/identity/openid-connect/openid-connect).
+
+After the runtime is configured, every app owner only runs:
+
+```bash
+npx gonvex auth add google --origin https://app.example.com
+```
+
+For local apps, `http://localhost` origins are accepted. Non-local callback origins
+must use HTTPS. The runtime keeps an exact per-project callback allowlist and never
+accepts an arbitrary redirect URL from the browser.
+
 ## What each component does
 
 ```txt
@@ -168,6 +205,7 @@ proxy or load balancer that terminates TLS and supports WebSocket upgrades.
 - Preserve project authentication headers on proxied `/dev/*` requests.
 - Configure TLS and preserve WebSocket upgrades on `/ws`.
 - Set `GONVEX_PUBLIC_URL` to the externally reachable runtime URL.
+- Set `GONVEX_AUTH_URL` and the one Google client ID/secret when native Google login is offered.
 - Monitor `/healthz`, container restarts, database capacity, and runtime logs.
 - Pin and test image versions before upgrading.
 
@@ -182,8 +220,9 @@ proxy or load balancer that terminates TLS and supports WebSocket upgrades.
 ## Current deployment limits
 
 There is no implemented `gonvex deploy` command in the current npm CLI. The commands
-available today are `dev`, `init`, `create`, and `env`; `gonvex dev` performs the
-development manifest upload and schema sync.
+available today include `dev`, `init`, `create`, `project`, `env`, `auth`, account
+login, and personal-token management; `gonvex dev` performs the development manifest
+upload and schema sync.
 
 Before treating Gonvex as production-ready, account for these unfinished areas:
 

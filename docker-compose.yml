@@ -90,6 +90,9 @@ services:
       S3_SECRET_ACCESS_KEY: minioadmin
       S3_FORCE_PATH_STYLE: "true"
       GONVEX_PUBLIC_URL: http://localhost:8080
+      GONVEX_AUTH_URL: ${GONVEX_AUTH_URL:-http://localhost:8080}
+      GONVEX_GOOGLE_CLIENT_ID: ${GONVEX_GOOGLE_CLIENT_ID:-}
+      GONVEX_GOOGLE_CLIENT_SECRET: ${GONVEX_GOOGLE_CLIENT_SECRET:-}
     ports:
       - "8080:8080"
     volumes:
