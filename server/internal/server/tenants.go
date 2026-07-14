@@ -38,7 +38,7 @@ func (s *Server) handleTenants(w http.ResponseWriter, r *http.Request) {
 	s.hydrateProjectTenantDatabases(r.Context(), project)
 
 	s.projectMu.RLock()
-	includeLegacyGlobals := project == "" || !isUUIDv6(project)
+	includeLegacyGlobals := project == "" || !isUUIDProjectID(project)
 	tenants := make([]tenantTarget, 0, len(s.tenants))
 	for _, tenant := range s.tenants {
 		if project == "" || tenant.ProjectID == project || (tenant.ProjectID == "" && includeLegacyGlobals) {
@@ -415,7 +415,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 
 	name := strings.TrimSpace(payload.Name)
 	requestedTenantID := strings.TrimSpace(payload.ID)
-	modernProject := isUUIDv6(project)
+	modernProject := isUUIDProjectID(project)
 	if modernProject && requestedTenantID != "" && !isUUIDv6(requestedTenantID) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tenant id must be a UUID v6"})
 		return
@@ -796,7 +796,7 @@ func (s *Server) ensureRuntimeTenantDatabase(ctx context.Context, project string
 	project = strings.TrimSpace(project)
 	tenantID = strings.TrimSpace(tenantID)
 	tenantDatabaseURL = strings.TrimSpace(tenantDatabaseURL)
-	if isUUIDv6(project) && tenantID != "" && tenantID != project && tenantDatabaseURL == "" {
+	if isUUIDProjectID(project) && tenantID != "" && tenantID != project && tenantDatabaseURL == "" {
 		return "", fmt.Errorf("tenant %q is not related to project %q", tenantID, project)
 	}
 	if project == "" || tenantID == "" || tenantID == project || tenantDatabaseURL == "" {
@@ -809,7 +809,7 @@ func (s *Server) ensureRuntimeTenantDatabase(ctx context.Context, project string
 	projectDatabaseURL := s.config.DatabaseURL(project)
 	postgresURL := strings.TrimSpace(s.config.PostgresURL)
 	s.projectMu.RUnlock()
-	if isUUIDv6(project) && tenantDatabaseURL == projectDatabaseURL {
+	if isUUIDProjectID(project) && tenantDatabaseURL == projectDatabaseURL {
 		return "", fmt.Errorf("tenant %q cannot use project %q's landlord database", tenantID, project)
 	}
 	if !ok || tenant.databaseURL == "" || tenant.databaseURL != tenantDatabaseURL || tenantDatabaseURL == projectDatabaseURL {
@@ -876,12 +876,12 @@ func (s *Server) markTenantDatabaseProvisioned(ctx context.Context, project stri
 
 	registered, err := s.saveTenantRegistry(ctx, tenant)
 	if err != nil {
-		if isUUIDv6(project) {
+		if isUUIDProjectID(project) {
 			return fmt.Errorf("persist tenant relationship: %w", err)
 		}
 		return nil
 	}
-	if isUUIDv6(project) && !registered.registered {
+	if isUUIDProjectID(project) && !registered.registered {
 		return fmt.Errorf("tenant relationship registry is unavailable")
 	}
 	if registered.registered {
@@ -1167,7 +1167,7 @@ func legacyTenantDatabaseAlias(project string, databaseName string) (string, boo
 }
 
 func shouldMigrateLegacyTenantRelationships(project string) bool {
-	return strings.TrimSpace(project) != "" && !isUUIDv6(project)
+	return strings.TrimSpace(project) != "" && !isUUIDProjectID(project)
 }
 
 func (s *Server) existingLocalDatabaseNames(ctx context.Context) map[string]bool {

@@ -1012,6 +1012,11 @@ func isUUIDv6(value string) bool {
 	return err == nil && parsed.Version() == uuid.Version(6)
 }
 
+func isUUIDProjectID(value string) bool {
+	_, err := uuid.Parse(strings.TrimSpace(value))
+	return err == nil
+}
+
 func (s *Server) uniqueRuntimeProjectIDLocked() (string, error) {
 	for attempt := 0; attempt < 8; attempt++ {
 		projectID, err := generateProjectID()

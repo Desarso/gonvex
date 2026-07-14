@@ -275,6 +275,33 @@ func TestUUIDv6ProjectDoesNotInheritLegacyGlobalTenants(t *testing.T) {
 	}
 }
 
+func TestUUIDv4ProjectDoesNotInheritLegacyGlobalTenants(t *testing.T) {
+	const projectID = "016d89ff-8d5c-4a75-950e-a498d32dffec"
+	server := New(config.Config{
+		TenantDatabases: map[string]string{
+			"antigua-whagons5-dev": "postgres://postgres:postgres@127.0.0.1:5432/antigua_whagons5_dev?sslmode=disable",
+			"nca-whagons5-dev":     "postgres://postgres:postgres@127.0.0.1:5432/nca_whagons5_dev?sslmode=disable",
+		},
+	})
+	server.projects[projectID] = projectTarget{ID: projectID, DatabaseMode: "multiTenant", RuntimeCreated: true}
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/tenants?project="+projectID, nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	var payload struct {
+		Tenants []tenantTarget `json:"tenants"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Tenants) != 0 {
+		t.Fatalf("UUIDv4 project inherited unrelated global tenants: %+v", payload.Tenants)
+	}
+}
+
 func TestProjectKeyEndpointReturnsConfiguredProjectKey(t *testing.T) {
 	server := New(config.Config{
 		AdminKey: "admin-secret",
@@ -613,6 +640,9 @@ func TestUUIDv6ProjectsNeverRunLegacyTenantDiscovery(t *testing.T) {
 	}
 	if shouldMigrateLegacyTenantRelationships(project) {
 		t.Fatalf("UUIDv6 project %q must not infer tenant ownership from database names", project)
+	}
+	if shouldMigrateLegacyTenantRelationships("016d89ff-8d5c-4a75-950e-a498d32dffec") {
+		t.Fatal("UUIDv4 projects must not infer tenant ownership from database names")
 	}
 	if !shouldMigrateLegacyTenantRelationships("whagons5-dev") {
 		t.Fatal("legacy project ids must retain exact-suffix migration support")

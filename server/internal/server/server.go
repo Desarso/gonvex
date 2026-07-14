@@ -695,12 +695,12 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 			return tenant.databaseURL
 		}
 	}
-	if !isUUIDv6(projectID) {
+	if !isUUIDProjectID(projectID) {
 		if value := s.configuredTenantDatabaseURLLocked(projectID, tenantTarget{ID: tenantID}); value != "" {
 			return value
 		}
 		// Preserve the historical single-database fallback for existing project
-		// IDs. UUIDv6 projects require an explicit tenant relationship and never
+		// IDs. UUID projects require an explicit tenant relationship and never
 		// route an unknown tenant to the landlord database.
 		return s.config.DatabaseURL(projectID)
 	}
@@ -785,13 +785,13 @@ func (s *Server) configuredTenantDatabaseURLLocked(projectID string, tenant tena
 		if value := s.config.TenantDatabases[tenantStoreKey(projectID, candidate)]; value != "" {
 			return value
 		}
-		if !isUUIDv6(projectID) {
+		if !isUUIDProjectID(projectID) {
 			if value := s.config.TenantDatabases[candidate]; value != "" {
 				return value
 			}
 		}
 	}
-	if !isUUIDv6(projectID) {
+	if !isUUIDProjectID(projectID) {
 		needles := tenantDatabaseNeedles(tenant)
 		for key, value := range s.config.TenantDatabases {
 			configuredProject, _ := splitTenantDatabaseKey(key)

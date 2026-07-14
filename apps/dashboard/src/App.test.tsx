@@ -161,20 +161,20 @@ describe("App", () => {
     expect(screen.queryByRole("heading", { name: /livegrid test surface/i })).not.toBeInTheDocument();
   });
 
-  it("hides error tracking navigation for projects that have not enabled it", async () => {
+  it("shows error tracking navigation before the project reports its first error", async () => {
     await renderProjectApp();
 
-    expect(within(screen.getByLabelText("Primary sections")).queryByRole("button", { name: /^errors$/i })).not.toBeInTheDocument();
+    expect(within(screen.getByLabelText("Primary sections")).getByRole("button", { name: /^errors$/i })).toBeInTheDocument();
   });
 
-  it("redirects an unavailable error tracking deep link to the project overview", async () => {
+  it("keeps an error tracking deep link available before registration", async () => {
     window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({ email: "gabriel@example.com", name: "Gabriel" }));
     window.history.replaceState(null, "", "/projects/app/errors");
 
     render(<App />);
 
-    await waitFor(() => expect(window.location.pathname).toBe("/projects/app/overview"));
-    expect(screen.getByRole("region", { name: /runtime summary/i })).toBeInTheDocument();
+    await waitFor(() => expect(window.location.pathname).toBe("/projects/app/errors"));
+    expect(screen.getByRole("heading", { name: /errors affecting real users/i })).toBeInTheDocument();
   });
 
   it("renders an accessible React Aria button", async () => {

@@ -2452,14 +2452,12 @@ function getPage(id: PageID) {
 function pagesForProject(project: ProjectTarget): Page[] {
   return pages.filter((page) => {
     if (page.id === "test") return project.testTab === true;
-    if (page.id === "errors") return project.errorTrackingEnabled === true;
     return true;
   });
 }
 
 function pageAvailableForProject(project: ProjectTarget, pageID: PageID): boolean {
   if (pageID === "test") return project.testTab === true;
-  if (pageID === "errors") return project.errorTrackingEnabled === true;
   return true;
 }
 
