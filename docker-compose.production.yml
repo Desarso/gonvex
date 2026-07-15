@@ -1,0 +1,270 @@
+name: gonvex-maker
+
+# Production stack for the isolated Moneymaker runtime on southgate. Coolify
+# supplies the SERVICE_* secrets on first import and attaches public domains
+# only to `runtime` and `dashboard`. Postgres, Valkey, MinIO, and backups stay
+# on the resource-private network and publish no host ports.
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gonvex
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_GONVEX_POSTGRES}
+      POSTGRES_DB: gonvex
+    volumes:
+      - gonvex-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gonvex -d gonvex"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 6G
+        reservations:
+          memory: 1G
+
+  valkey:
+    image: valkey/valkey:8-alpine@sha256:b027235326507cfdade9b6684056ec1d0b0c0757412e628245129b5d7b788618
+    restart: unless-stopped
+    command:
+      - valkey-server
+      - --maxmemory
+      - 2gb
+      - --maxmemory-policy
+      - allkeys-lfu
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - "60"
+      - "1000"
+    volumes:
+      - gonvex-valkey-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 3G
+        reservations:
+          memory: 256M
+
+  minio:
+    image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${GONVEX_MINIO_ROOT_USER:-gonvex}
+      MINIO_ROOT_PASSWORD: ${SERVICE_PASSWORD_64_GONVEX_MINIO}
+    volumes:
+      - gonvex-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+        reservations:
+          memory: 512M
+
+  minio-init:
+    image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${GONVEX_MINIO_ROOT_USER:-gonvex}
+      MINIO_ROOT_PASSWORD: ${SERVICE_PASSWORD_64_GONVEX_MINIO}
+      S3_BUCKET: ${GONVEX_S3_BUCKET:-gonvex-production}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "local/$${S3_BUCKET}"
+        mc anonymous set none "local/$${S3_BUCKET}"
+        touch /tmp/bucket-ready
+        exec tail -f /dev/null
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/bucket-ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  runtime:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      minio-init:
+        condition: service_healthy
+    environment:
+      GONVEX_ADDR: 0.0.0.0:8080
+      GONVEX_LANDLORD_DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@postgres:5432/gonvex?sslmode=disable
+      DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@postgres:5432/gonvex?sslmode=disable
+      VALKEY_URL: redis://valkey:6379/0
+      GONVEX_PLUGIN_CACHE_DIR: /var/lib/gonvex/plugins
+      GONVEX_DATA_DIR: /var/lib/gonvex/data
+      GONVEX_TELEMETRY_LOG: /var/lib/gonvex/telemetry.jsonl
+      GONVEX_ROWS_CACHE_TTL: 15s
+      GONVEX_ENVIRONMENT: production
+      GONVEX_REQUIRE_AUTH: "true"
+      GONVEX_PUBLIC_URL: https://gonvex-maker.whagons.com
+      GONVEX_AUTH_URL: https://gonvex-maker.whagons.com
+      GONVEX_TRUSTED_PROXY_CIDRS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+      GONVEX_DASHBOARD_SESSION_SECRET: ${SERVICE_REALBASE64_64_GONVEX_DASHBOARD_SESSION}
+      DASHBOARD_AUTH_USER: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
+      DASHBOARD_AUTH_PASSWORD: ${SERVICE_PASSWORD_64_GONVEX_DASHBOARD}
+      GONVEX_DASHBOARD_AUTH_PROJECT_ID: ${GONVEX_DASHBOARD_AUTH_PROJECT_ID:-}
+      GONVEX_GOOGLE_CLIENT_ID: ${GONVEX_GOOGLE_CLIENT_ID:-}
+      GONVEX_GOOGLE_CLIENT_SECRET: ${GONVEX_GOOGLE_CLIENT_SECRET:-}
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: ${GONVEX_S3_REGION:-us-east-1}
+      S3_BUCKET: ${GONVEX_S3_BUCKET:-gonvex-production}
+      S3_ACCESS_KEY_ID: ${GONVEX_MINIO_ROOT_USER:-gonvex}
+      S3_SECRET_ACCESS_KEY: ${SERVICE_PASSWORD_64_GONVEX_MINIO}
+      S3_FORCE_PATH_STYLE: "true"
+      GOCACHE: /var/lib/gonvex/go-build
+    volumes:
+      - gonvex-runtime-data:/var/lib/gonvex
+    tmpfs:
+      - /tmp:size=2G,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080;
+          printf "GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3;
+          grep -q "200 OK" <&3'
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 10G
+        reservations:
+          memory: 1G
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+      args:
+        VITE_GONVEX_URL: https://gonvex-maker.whagons.com
+        VITE_GONVEX_RUNTIME_URL: https://gonvex-maker.whagons.com
+        VITE_GONVEX_AUTH_ENABLED: "true"
+        VITE_GONVEX_EMAIL_LOGIN_ENABLED: "true"
+        VITE_GONVEX_GOOGLE_LOGIN_ENABLED: ${GONVEX_GOOGLE_LOGIN_ENABLED:-false}
+        VITE_GONVEX_DASHBOARD_AUTH_PROJECT_ID: ${GONVEX_DASHBOARD_AUTH_PROJECT_ID:-}
+        VITE_GONVEX_ALLOWED_EMAILS: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
+        VITE_GONVEX_ALLOW_UNLISTED_EMAILS: "true"
+    restart: unless-stopped
+    depends_on:
+      runtime:
+        condition: service_healthy
+    environment:
+      PORT: "80"
+      DASHBOARD_AUTH_ENABLED: "true"
+      DASHBOARD_COOKIE_SECURE: "true"
+      DASHBOARD_AUTH_USER: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
+      DASHBOARD_AUTH_PASSWORD: ${SERVICE_PASSWORD_64_GONVEX_DASHBOARD}
+      DASHBOARD_SESSION_SECRET: ${SERVICE_REALBASE64_64_GONVEX_DASHBOARD_SESSION}
+      GONVEX_RUNTIME_URL: http://runtime:8080
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz | grep -qx ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          memory: 128M
+
+  postgres-backup:
+    image: postgres:17-alpine@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
+    restart: unless-stopped
+    depends_on:
+      runtime:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: gonvex
+      PGPASSWORD: ${SERVICE_PASSWORD_64_GONVEX_POSTGRES}
+      PGDATABASE: gonvex
+    volumes:
+      - gonvex-postgres-backups:/backups
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        while true; do
+          stamp="$$(date -u +%Y%m%dT%H%M%SZ)"
+          partial="/backups/gonvex-$${stamp}.dump.partial"
+          final="/backups/gonvex-$${stamp}.dump"
+          pg_dump --format=custom --compress=6 --file="$${partial}"
+          mv "$${partial}" "$${final}"
+          find /backups -type f -name 'gonvex-*.dump' -mtime +14 -delete
+          sleep 86400
+        done
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+
+volumes:
+  gonvex-postgres-data:
+    name: ${GONVEX_POSTGRES_VOLUME:-gonvex-maker-postgres-data}
+  gonvex-valkey-data:
+    name: ${GONVEX_VALKEY_VOLUME:-gonvex-maker-valkey-data}
+  gonvex-minio-data:
+    name: ${GONVEX_MINIO_VOLUME:-gonvex-maker-minio-data}
+  gonvex-runtime-data:
+    name: ${GONVEX_RUNTIME_VOLUME:-gonvex-maker-runtime-data}
+  gonvex-postgres-backups:
+    name: ${GONVEX_POSTGRES_BACKUP_VOLUME:-gonvex-maker-postgres-backups}
