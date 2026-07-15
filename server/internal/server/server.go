@@ -137,15 +137,21 @@ func (s *Server) runScheduledJob(ctx context.Context, job scheduledJob) error {
 		// Scheduled work commits outside a client call, so nothing else tells
 		// subscribers about its writes — broadcast like ws.go does for
 		// client-initiated mutation.call/action.call.
-		s.broadcastTenantTableChange(job.ProjectID, job.TenantID, mutationInvalidationTable(job.FunctionPath))
+		if err == nil {
+			s.broadcastMutationInvalidations(job.ProjectID, job.TenantID, job.FunctionPath)
+		}
 		return err
 	case gonvex.FunctionKindMutation:
 		_, err := s.executeTenantMutation(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
-		s.broadcastTenantTableChange(job.ProjectID, job.TenantID, mutationInvalidationTable(job.FunctionPath))
+		if err == nil {
+			s.broadcastMutationInvalidations(job.ProjectID, job.TenantID, job.FunctionPath)
+		}
 		return err
 	case gonvex.FunctionKindInternalMutation:
 		err := s.executeScheduledInternalMutation(ctx, job)
-		s.broadcastTenantTableChange(job.ProjectID, job.TenantID, mutationInvalidationTable(job.FunctionPath))
+		if err == nil {
+			s.broadcastMutationInvalidations(job.ProjectID, job.TenantID, job.FunctionPath)
+		}
 		return err
 	default:
 		return fmt.Errorf("scheduled function %q must be a mutation or action, got %s", job.FunctionPath, function.Kind)
@@ -587,7 +593,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.cache.invalidateRows(r.Context(), next.Project, tenantIDFromRequest(next.Project, ""), "")
-	s.broadcastTableChange(next.Project, "tasks")
+	s.rerunProjectSubscriptions(next.Project)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":              true,
 		"project":         next.Project,

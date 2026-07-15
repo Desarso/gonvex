@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -134,6 +135,7 @@ type tableChange struct {
 	project     string
 	tenant      string
 	table       string
+	tables      map[string]bool
 	broad       bool
 	rowIDs      map[string]bool
 	changedAtMS float64
@@ -302,7 +304,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		trace.ServerBroadcastScheduledAtMS = epochMillis(time.Now())
 		c.write(serverMessage{Type: "mutation.result", ID: message.ID, Path: message.Path, Result: explicitNull(result), Trace: trace})
 		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "mutation", message.Path, "server", "", "ok", "", trace))
-		c.server.broadcastTenantTableChangeAt(c.project, c.tenant, mutationInvalidationTable(message.Path), committedAt)
+		c.server.broadcastMutationInvalidationsAt(c.project, c.tenant, message.Path, committedAt)
 	case "action.call":
 		if !c.requireAuth(ctx, "action.error", message.ID) {
 			return
@@ -324,7 +326,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		// tasks.bulkDelete soft-deletes, ...). Without a broadcast their writes
 		// never invalidate live queries, so clients sit on stale results until a
 		// reload. Mirror the mutation path's completion broadcast.
-		c.server.broadcastTenantTableChangeAt(c.project, c.tenant, mutationInvalidationTable(message.Path), completedAt)
+		c.server.broadcastMutationInvalidationsAt(c.project, c.tenant, message.Path, completedAt)
 	case "telemetry.event":
 		c.server.recordTransactionTelemetry(transactionEntryFromClientTelemetry(c.project, c.tenant, message))
 	default:
@@ -631,6 +633,37 @@ func (s *Server) websocketStats() (int, int) {
 	return len(connections), subscriptions
 }
 
+// rerunProjectSubscriptions refreshes every live query after a project bundle
+// is installed. A client can connect while /dev/sync is still compiling the
+// bundle and receive an initial "not implemented" error; table-specific
+// invalidation is insufficient because reference-data queries do not depend on
+// the tasks table. The new bundle can also change any query's implementation,
+// so all subscriptions for that project must be evaluated again.
+func (s *Server) projectSubscriptions(projectID string) []querySubscription {
+	s.wsMu.RLock()
+	connections := make([]*wsConn, 0, len(s.wsConns))
+	for conn := range s.wsConns {
+		connections = append(connections, conn)
+	}
+	s.wsMu.RUnlock()
+
+	subs := make([]querySubscription, 0)
+	for _, conn := range connections {
+		conn.mu.Lock()
+		for _, sub := range conn.subs {
+			if sub.project == projectID {
+				subs = append(subs, sub)
+			}
+		}
+		conn.mu.Unlock()
+	}
+	return subs
+}
+
+func (s *Server) rerunProjectSubscriptions(projectID string) {
+	s.rerunSubscriptions(s.projectSubscriptions(projectID), "invalidate", epochMillis(time.Now().UTC()))
+}
+
 func (s *Server) broadcastTableChange(projectID string, table string) {
 	s.broadcastTenantTableChange(projectID, tenantIDFromRequest(projectID, ""), table)
 }
@@ -641,6 +674,33 @@ func (s *Server) broadcastTenantTableChange(projectID string, tenantID string, t
 
 func (s *Server) broadcastTenantTableChangeAt(projectID string, tenantID string, table string, changedAt time.Time) {
 	s.scheduleTableChange(tableChange{project: projectID, tenant: tenantIDFromRequest(projectID, tenantID), table: table, broad: true, changedAtMS: epochMillis(changedAt)})
+}
+
+// broadcastMutationInvalidationsAt translates a public function path into the
+// physical tables its handler can change. App modules do not always share a
+// name with their tables (for example chat.sendWorkspaceChat writes
+// workspaceChat), so invalidating only the path prefix leaves both the row
+// cache and live queries stale after a successful mutation.
+func (s *Server) broadcastMutationInvalidationsAt(projectID string, tenantID string, path string, changedAt time.Time) {
+	tables := mutationInvalidationTables(path)
+	if len(tables) == 0 {
+		return
+	}
+	changedTables := make(map[string]bool, len(tables))
+	for _, table := range tables {
+		changedTables[table] = true
+	}
+	s.scheduleTableChange(tableChange{
+		project:     projectID,
+		tenant:      tenantIDFromRequest(projectID, tenantID),
+		tables:      changedTables,
+		broad:       true,
+		changedAtMS: epochMillis(changedAt),
+	})
+}
+
+func (s *Server) broadcastMutationInvalidations(projectID string, tenantID string, path string) {
+	s.broadcastMutationInvalidationsAt(projectID, tenantID, path, time.Now().UTC())
 }
 
 func (s *Server) broadcastRowIDChange(projectID string, table string, rowIDs []string) {
@@ -656,13 +716,23 @@ func (s *Server) broadcastTenantRowIDChange(projectID string, tenantID string, t
 }
 
 func (s *Server) scheduleTableChange(change tableChange) {
-	s.cache.invalidateRows(context.Background(), change.project, change.tenant, change.table)
+	changedTables := tableChangeTables(change)
+	for _, table := range changedTables {
+		s.cache.invalidateRows(context.Background(), change.project, change.tenant, table)
+	}
 	s.tableChangeMu.Lock()
-	key := strings.Join([]string{change.project, change.tenant, change.table}, ":")
+	tableKey := strings.Join(changedTables, "\x1f")
+	key := strings.Join([]string{change.project, change.tenant, tableKey}, ":")
 	pending := s.tableChanges[key]
 	pending.project = change.project
 	pending.tenant = change.tenant
 	pending.table = change.table
+	if pending.tables == nil && len(change.tables) > 0 {
+		pending.tables = map[string]bool{}
+	}
+	for table := range change.tables {
+		pending.tables[table] = true
+	}
 	pending.broad = pending.broad || change.broad
 	if change.changedAtMS > pending.changedAtMS {
 		pending.changedAtMS = change.changedAtMS
@@ -710,7 +780,27 @@ func (s *Server) flushTableChange(key string) {
 }
 
 func tableChangeMatchesSubscription(sub querySubscription, change tableChange) bool {
-	return change.table == "" || subscriptionDependsOnTable(sub.path, change.table)
+	if len(change.tables) == 0 {
+		return change.table == "" || subscriptionDependsOnTable(sub.path, change.table)
+	}
+	for table := range change.tables {
+		if table == "" || subscriptionDependsOnTable(sub.path, table) {
+			return true
+		}
+	}
+	return false
+}
+
+func tableChangeTables(change tableChange) []string {
+	if len(change.tables) == 0 {
+		return []string{change.table}
+	}
+	tables := make([]string, 0, len(change.tables))
+	for table := range change.tables {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	return tables
 }
 
 func (s *Server) rerunSubscriptions(subs []querySubscription, reason string, changeCommittedAtMS float64) {
@@ -955,6 +1045,12 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 		return nil, err
 	}
 	mutationCtx.Tx = tx
+	originalScheduler := mutationCtx.Scheduler
+	deferred := newDeferredScheduler(originalScheduler)
+	mutationCtx.Scheduler = deferred
+	defer func() {
+		mutationCtx.Scheduler = originalScheduler
+	}()
 	result, err := exec(mutationCtx, path, rawArgs)
 	if err != nil {
 		_ = tx.Rollback()
@@ -964,6 +1060,9 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 		return nil, err
 	}
 	mutationCtx.Tx = nil
+	if err := deferred.flush(); err != nil {
+		mutationCtx.Logger.Error("failed to publish committed scheduled work", "path", path, "error", err)
+	}
 	return result, nil
 }
 
@@ -1135,14 +1234,14 @@ func (s *Server) sandboxForCaller(projectID string, tenantID string, caller call
 					}
 					result, err := s.executeTenantActionForCaller(ctx, projectID, tenantID, caller, "assistant.sandboxAction", wrapped)
 					if err == nil {
-						s.broadcastTenantTableChange(projectID, tenantID, mutationInvalidationTable(path))
+						s.broadcastMutationInvalidations(projectID, tenantID, path)
 					}
 					return result, err
 				}
 			}
 			result, err := s.executeTenantActionForCaller(ctx, projectID, tenantID, caller, path, args)
 			if err == nil {
-				s.broadcastTenantTableChange(projectID, tenantID, mutationInvalidationTable(req.Path))
+				s.broadcastMutationInvalidations(projectID, tenantID, req.Path)
 			}
 			return result, err
 		case "mutation":
@@ -1152,7 +1251,7 @@ func (s *Server) sandboxForCaller(projectID string, tenantID string, caller call
 			}
 			result, err := s.executeTenantMutationForCaller(ctx, projectID, tenantID, caller, path, resolvedArgs)
 			if err == nil {
-				s.broadcastTenantTableChange(projectID, tenantID, mutationInvalidationTable(path))
+				s.broadcastMutationInvalidations(projectID, tenantID, path)
 			}
 			return result, err
 		case "data.inspect":
@@ -1264,6 +1363,22 @@ func subscriptionDependsOnTable(path string, table string) bool {
 
 func subscriptionTables(path string) []string {
 	switch path {
+	case "calls.listForUser":
+		return []string{"callSignals"}
+	case "chat.listConversations":
+		return []string{"conversations"}
+	case "chat.listAllParticipants":
+		return []string{"conversationParticipants"}
+	case "chat.listAllMessages":
+		return []string{"directMessages"}
+	case "chat.listAllReactions":
+		return []string{"messageReactions"}
+	case "chat.listAllLinkPreviews":
+		return []string{"linkPreviews"}
+	case "chat.listWorkspaceChat":
+		return []string{"workspaceChat"}
+	case "chat.workspaceChatUnreadSummary":
+		return []string{"notifications"}
 	case "bulk.allReferenceData":
 		return []string{
 			"approvalApprovers",
@@ -1310,14 +1425,28 @@ func subscriptionTables(path string) []string {
 		return []string{"taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances", "tasks"}
 	case "roles.effectivePermissions":
 		return []string{"roles", "rolePermissions", "userTeams", "users"}
+	case "users.myPermissions":
+		return []string{"roles", "rolePermissions", "permissions", "userTeams", "users"}
 	case "users.myTenants":
 		return []string{"tenants", "userTenantMap", "users"}
+	case "taskResources.listTaskNotes", "taskResources.listTaskNotesPaged", "taskResources.noteSummariesByTenant", "taskResources.noteCountsByTenant", "taskResources.attachmentCountsByTenant", "taskResources.listTaskIdsWithAttachments", "taskResources.listWorkspaceAttachments":
+		return []string{"taskNotes", "tasks", "users"}
+	case "taskResources.listTaskViewsByTaskId", "taskResources.listTaskViewsByTaskPgId":
+		return []string{"taskViews", "tasks", "users"}
+	case "taskResources.listTaskHistory", "taskResources.listTaskLogs":
+		return []string{"taskLogs", "tasks", "users"}
+	case "taskResources.listTaskSignatures", "taskResources.listTaskIdsWithSignatures":
+		return []string{"taskSignatures", "tasks", "users"}
+	case "taskResources.listSharedToMe", "taskResources.listTaskShares", "taskResources.sharedWithMeCount":
+		return []string{"taskShares", "taskAcks", "tasks", "users"}
+	case "taskResources.getTaskAcknowledgmentProgressForTask":
+		return []string{"taskAcks", "taskAckReads", "taskShares", "tasks"}
 	}
 	if strings.HasPrefix(path, "tasks.") {
 		return []string{"tasks", "taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances"}
 	}
 	if strings.HasPrefix(path, "taskFindings.") {
-		return []string{"taskFindings", "tasks"}
+		return []string{"taskFindings", "findingNotes", "taskLogs", "taskWorkspaceContexts", "tasks"}
 	}
 	if strings.HasPrefix(path, "settings.") {
 		return []string{"settings", "plugins", "envVars"}
@@ -1329,11 +1458,65 @@ func subscriptionTables(path string) []string {
 }
 
 func mutationInvalidationTable(path string) string {
+	tables := mutationInvalidationTables(path)
+	if len(tables) > 0 {
+		return tables[0]
+	}
+	return ""
+}
+
+func mutationInvalidationTables(path string) []string {
+	switch path {
+	case "calls.sendSignal", "calls.acknowledgeSignals", "calls.acknowledgeRoomSignals":
+		return []string{"callSignals"}
+	case "chat.createConversation":
+		return []string{"conversations", "conversationParticipants"}
+	case "chat.sendMessage":
+		return []string{"directMessages", "conversations", "notifications", "linkPreviews"}
+	case "chat.updateMessage", "chat.deleteMessage", "chat.markMessagesDelivered":
+		return []string{"directMessages"}
+	case "chat.markAsRead":
+		return []string{"conversationParticipants", "directMessages"}
+	case "chat.sendWorkspaceChat":
+		return []string{"workspaceChat", "notifications", "linkPreviews"}
+	case "chat.updateWorkspaceChatMessage", "chat.deleteWorkspaceChatMessage":
+		return []string{"workspaceChat"}
+	case "chat.addReaction", "chat.removeReaction":
+		return []string{"messageReactions"}
+	case "chat.markWorkspaceChatRead":
+		return []string{"notifications"}
+	case "chat.generateUploadUrl":
+		return []string{"files"}
+	case "taskResources.assignUser", "taskResources.unassignUser":
+		return []string{"taskUsers", "tasks", "taskLogs", "notifications"}
+	case "taskResources.createNote", "taskResources.updateNote", "taskResources.removeNote", "taskResources.markVoiceMemoListened", "taskResources.removeNoteAttachment":
+		return []string{"taskNotes", "tasks", "taskLogs"}
+	case "taskResources.createSignature":
+		return []string{"taskSignatures", "tasks", "taskLogs"}
+	case "taskResources.shareTask", "taskResources.revokeShare":
+		return []string{"taskShares", "taskAcks", "tasks", "notifications"}
+	case "taskResources.acknowledgeTaskShare":
+		return []string{"taskShares", "taskAcks", "taskAckReads", "tasks", "notifications"}
+	case "taskResources.recordTaskViewByTaskId", "taskResources.recordTaskViewByTaskPgId":
+		return []string{"taskViews", "tasks"}
+	case "taskResources.addTagByTaskId", "taskResources.addTagByPgId", "taskResources.addTagByTaskPgId", "taskResources.removeTagByTaskId", "taskResources.removeTagByPgId", "taskResources.removeTagByTaskPgId":
+		return []string{"taskTags", "tasks", "taskLogs"}
+	case "taskResources.generateUploadUrl":
+		return []string{"files"}
+	case "scheduling.processWorkspaceChatMessage":
+		return []string{"scheduleAvailabilitySubmissions", "scheduleAvailabilityItems", "scheduleRosterEntries"}
+	}
 	if strings.HasPrefix(path, "techSupport.") {
-		return "supportSessions"
+		return []string{"supportSessions"}
 	}
 	if strings.HasPrefix(path, "taskFindings.") {
-		return "taskFindings"
+		return []string{"taskFindings", "findingNotes", "taskLogs", "taskWorkspaceContexts", "tasks"}
 	}
-	return subscriptionTable(path)
+	if strings.HasPrefix(path, "tasks.") {
+		return []string{"tasks", "taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances"}
+	}
+	if table := subscriptionTable(path); table != "" {
+		return []string{table}
+	}
+	return []string{""}
 }

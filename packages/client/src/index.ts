@@ -25,6 +25,14 @@ type QuerySubscription = {
   lastMessage?: ServerMessage;
   serverSettled: boolean;
   cacheReadGeneration?: number;
+  socketGeneration?: number;
+};
+type OneShotQuery = {
+  id: string;
+  path: string;
+  args: JsonValue;
+  reject: (error: Error) => void;
+  socketGeneration?: number;
 };
 
 export type FunctionReference = {
@@ -62,6 +70,7 @@ export class GonvexClient {
   private socket: WebSocket | undefined;
   private readonly handlers = new Map<string, SubscriptionHandler>();
   private readonly querySubscriptions = new Map<string, QuerySubscription>();
+  private readonly oneShotQueries = new Map<string, OneShotQuery>();
   private readonly telemetryHandlers = new Set<TelemetryHandler>();
   private readonly pendingMessages: ClientMessage[] = [];
   private auth: GonvexClientAuth = {};
@@ -72,6 +81,10 @@ export class GonvexClient {
   private queryCacheGeneration = 0;
   private readonly sessionScopeHandlers = new Set<() => void>();
   private readonly errorReporter: GonvexErrorReporter | undefined;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private reconnectAttempt = 0;
+  private socketGeneration = 0;
+  private manuallyClosed = false;
 
   constructor(private readonly url: string, options: GonvexClientOptions = {}) {
     this.auth = authFromOptions(options);
@@ -103,9 +116,36 @@ export class GonvexClient {
   connect() {
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
 
-    this.socket = new WebSocket(this.url);
-    this.socket.addEventListener("open", () => this.sendAuth(false));
-    this.socket.addEventListener("message", (event) => {
+    const isReconnect = this.socket !== undefined;
+    this.manuallyClosed = false;
+    const generation = ++this.socketGeneration;
+    const socket = new WebSocket(this.url);
+    this.socket = socket;
+    socket.addEventListener("open", () => {
+      if (this.socket !== socket) return;
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = undefined;
+      }
+      this.reconnectAttempt = 0;
+      this.sendAuth(false);
+      if (isReconnect) this.resubscribeQueries(generation);
+    });
+    socket.addEventListener("close", () => {
+      if (this.socket !== socket || this.manuallyClosed) return;
+      this.authInFlight = false;
+      // A subscription queued for the old socket is superseded by the complete
+      // resubscribe below. Keep mutations/actions queued during authentication.
+      for (let index = this.pendingMessages.length - 1; index >= 0; index -= 1) {
+        const type = this.pendingMessages[index]?.type;
+        if (type === "query.subscribe" || type === "query.unsubscribe") {
+          this.pendingMessages.splice(index, 1);
+        }
+      }
+      this.scheduleReconnect();
+    });
+    socket.addEventListener("message", (event) => {
+      if (this.socket !== socket) return;
       let message: ServerMessage;
       try {
         message = JSON.parse(String(event.data)) as ServerMessage;
@@ -137,6 +177,15 @@ export class GonvexClient {
   }
 
   close() {
+    this.manuallyClosed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    for (const query of this.oneShotQueries.values()) {
+      query.reject(new Error("Gonvex client was closed"));
+    }
+    this.oneShotQueries.clear();
     this.handlers.clear();
     this.querySubscriptions.clear();
     this.sessionScopeHandlers.clear();
@@ -144,9 +193,10 @@ export class GonvexClient {
     this.queryCacheDirective = undefined;
     this.queryCache?.close();
     this.errorReporter?.close();
-    if (!this.socket) return;
-    this.socket.close();
+    const socket = this.socket;
     this.socket = undefined;
+    if (!socket) return;
+    socket.close();
   }
 
   onTelemetry(handler: TelemetryHandler) {
@@ -248,7 +298,7 @@ export class GonvexClient {
         this.deleteCachedQuery(subscription);
       }
     });
-    this.send({ type: "query.subscribe", id: subscription.id, path: ref.path, args });
+    this.sendSubscription(subscription);
     this.startQueryCacheRead(subscription);
 
     return () => this.unsubscribeQueryListener(key, onMessage);
@@ -306,8 +356,11 @@ export class GonvexClient {
     this.connect();
     const id = randomID();
     return new Promise<T>((resolve, reject) => {
+      const query: OneShotQuery = { id, path: ref.path, args, reject };
+      this.oneShotQueries.set(id, query);
       this.handlers.set(id, (message) => {
         if (message.type === "query.result") {
+          this.oneShotQueries.delete(id);
           this.handlers.delete(id);
           this.recordTelemetry({
             type: "query",
@@ -322,6 +375,7 @@ export class GonvexClient {
           resolve(message.result as T);
         }
         if (message.type === "query.error") {
+          this.oneShotQueries.delete(id);
           this.handlers.delete(id);
           this.recordTelemetry({
             type: "query",
@@ -335,7 +389,7 @@ export class GonvexClient {
           reject(new Error(message.error));
         }
       });
-      this.send({ type: "query.subscribe", id, path: ref.path, args });
+      this.sendOneShotQuery(query);
     });
   }
 
@@ -391,6 +445,45 @@ export class GonvexClient {
       this.send({ type: "query.unsubscribe", id: latest.id });
       setTimeout(() => this.handlers.delete(latest.id), 500);
     }, 250);
+  }
+
+  private sendSubscription(subscription: QuerySubscription) {
+    if (subscription.socketGeneration === this.socketGeneration) return;
+    subscription.socketGeneration = this.socketGeneration;
+    this.send({
+      type: "query.subscribe",
+      id: subscription.id,
+      path: subscription.path,
+      args: subscription.args,
+    });
+  }
+
+  private sendOneShotQuery(query: OneShotQuery) {
+    if (query.socketGeneration === this.socketGeneration) return;
+    query.socketGeneration = this.socketGeneration;
+    this.send({ type: "query.subscribe", id: query.id, path: query.path, args: query.args });
+  }
+
+  private resubscribeQueries(generation: number) {
+    if (generation !== this.socketGeneration) return;
+    for (const subscription of this.querySubscriptions.values()) {
+      if (subscription.listeners.size === 0) continue;
+      subscription.serverSettled = false;
+      this.sendSubscription(subscription);
+    }
+    for (const query of this.oneShotQueries.values()) {
+      this.sendOneShotQuery(query);
+    }
+  }
+
+  private scheduleReconnect() {
+    if (this.manuallyClosed || this.reconnectTimer) return;
+    const delay = Math.min(250 * (2 ** this.reconnectAttempt), 5_000);
+    this.reconnectAttempt += 1;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (!this.manuallyClosed) this.connect();
+    }, delay);
   }
 
   private installQueryCacheDirective(value: QueryCacheDirective | undefined) {
