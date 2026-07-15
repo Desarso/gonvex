@@ -587,7 +587,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.cache.invalidateRows(r.Context(), next.Project, tenantIDFromRequest(next.Project, ""), "")
-	s.broadcastTableChange(next.Project, "tasks")
+	s.rerunProjectSubscriptions(next.Project)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":              true,
 		"project":         next.Project,

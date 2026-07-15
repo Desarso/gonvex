@@ -631,6 +631,37 @@ func (s *Server) websocketStats() (int, int) {
 	return len(connections), subscriptions
 }
 
+// rerunProjectSubscriptions refreshes every live query after a project bundle
+// is installed. A client can connect while /dev/sync is still compiling the
+// bundle and receive an initial "not implemented" error; table-specific
+// invalidation is insufficient because reference-data queries do not depend on
+// the tasks table. The new bundle can also change any query's implementation,
+// so all subscriptions for that project must be evaluated again.
+func (s *Server) projectSubscriptions(projectID string) []querySubscription {
+	s.wsMu.RLock()
+	connections := make([]*wsConn, 0, len(s.wsConns))
+	for conn := range s.wsConns {
+		connections = append(connections, conn)
+	}
+	s.wsMu.RUnlock()
+
+	subs := make([]querySubscription, 0)
+	for _, conn := range connections {
+		conn.mu.Lock()
+		for _, sub := range conn.subs {
+			if sub.project == projectID {
+				subs = append(subs, sub)
+			}
+		}
+		conn.mu.Unlock()
+	}
+	return subs
+}
+
+func (s *Server) rerunProjectSubscriptions(projectID string) {
+	s.rerunSubscriptions(s.projectSubscriptions(projectID), "invalidate", epochMillis(time.Now().UTC()))
+}
+
 func (s *Server) broadcastTableChange(projectID string, table string) {
 	s.broadcastTenantTableChange(projectID, tenantIDFromRequest(projectID, ""), table)
 }

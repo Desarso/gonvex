@@ -941,3 +941,24 @@ func TestTableChangeMatchesDerivedTaskSubscriptions(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectSubscriptionsIncludeEveryQueryForOnlyThatProject(t *testing.T) {
+	server := New(config.Config{})
+	projectA := &wsConn{subs: map[string]querySubscription{
+		"tasks":      {id: "tasks", project: "project-a", path: "bulk.tasksByWorkspace"},
+		"references": {id: "references", project: "project-a", path: "bulk.allReferenceData"},
+	}}
+	projectB := &wsConn{subs: map[string]querySubscription{
+		"other": {id: "other", project: "project-b", path: "bulk.allReferenceData"},
+	}}
+	server.wsConns[projectA] = true
+	server.wsConns[projectB] = true
+
+	ids := map[string]bool{}
+	for _, sub := range server.projectSubscriptions("project-a") {
+		ids[sub.id] = true
+	}
+	if len(ids) != 2 || !ids["tasks"] || !ids["references"] || ids["other"] {
+		t.Fatalf("unexpected project subscription set: %v", ids)
+	}
+}
