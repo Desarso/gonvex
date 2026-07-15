@@ -56,11 +56,14 @@ func (scheduler *deferredScheduler) RunAt(at time.Time, functionPath string, arg
 }
 
 func (scheduler *deferredScheduler) flush() error {
+	var firstErr error
 	for _, job := range scheduler.jobs {
 		if _, err := scheduler.base.RunAt(job.at, job.functionPath, job.args); err != nil {
-			return err
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	scheduler.jobs = nil
-	return nil
+	return firstErr
 }

@@ -2,12 +2,14 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
 
 type recordingScheduler struct {
-	calls []deferredScheduledJob
+	calls     []deferredScheduledJob
+	failPaths map[string]error
 }
 
 func (scheduler *recordingScheduler) RunAfter(delay time.Duration, functionPath string, args any) (string, error) {
@@ -20,6 +22,9 @@ func (scheduler *recordingScheduler) RunAt(at time.Time, functionPath string, ar
 		return "", err
 	}
 	scheduler.calls = append(scheduler.calls, deferredScheduledJob{at: at, functionPath: functionPath, args: raw})
+	if err := scheduler.failPaths[functionPath]; err != nil {
+		return "", err
+	}
 	return "scheduled", nil
 }
 
@@ -55,5 +60,29 @@ func TestDeferredSchedulerRejectsUnencodableArgsBeforeCommit(t *testing.T) {
 	}
 	if len(scheduler.jobs) != 0 {
 		t.Fatal("invalid job should not be buffered")
+	}
+}
+
+func TestDeferredSchedulerAttemptsEveryJobAfterDispatchError(t *testing.T) {
+	firstErr := errors.New("first dispatch failed")
+	base := &recordingScheduler{failPaths: map[string]error{
+		"chat.first": firstErr,
+		"chat.third": errors.New("third dispatch failed"),
+	}}
+	scheduler := newDeferredScheduler(base)
+	for _, path := range []string{"chat.first", "chat.second", "chat.third"} {
+		if _, err := scheduler.RunAfter(0, path, map[string]any{"path": path}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := scheduler.flush(); !errors.Is(err, firstErr) {
+		t.Fatalf("flush error = %v, want %v", err, firstErr)
+	}
+	if len(base.calls) != 3 {
+		t.Fatalf("dispatch attempts = %d, want 3", len(base.calls))
+	}
+	if len(scheduler.jobs) != 0 {
+		t.Fatalf("flushed jobs retained after dispatch attempts: %d", len(scheduler.jobs))
 	}
 }

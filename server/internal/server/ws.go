@@ -780,7 +780,10 @@ func (s *Server) flushTableChange(key string) {
 }
 
 func tableChangeMatchesSubscription(sub querySubscription, change tableChange) bool {
-	for _, table := range tableChangeTables(change) {
+	if len(change.tables) == 0 {
+		return change.table == "" || subscriptionDependsOnTable(sub.path, change.table)
+	}
+	for table := range change.tables {
 		if table == "" || subscriptionDependsOnTable(sub.path, table) {
 			return true
 		}
