@@ -302,7 +302,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		trace.ServerBroadcastScheduledAtMS = epochMillis(time.Now())
 		c.write(serverMessage{Type: "mutation.result", ID: message.ID, Path: message.Path, Result: explicitNull(result), Trace: trace})
 		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "mutation", message.Path, "server", "", "ok", "", trace))
-		c.server.broadcastTenantTableChangeAt(c.project, c.tenant, mutationInvalidationTable(message.Path), committedAt)
+		c.server.broadcastMutationInvalidationsAt(c.project, c.tenant, message.Path, committedAt)
 	case "action.call":
 		if !c.requireAuth(ctx, "action.error", message.ID) {
 			return
@@ -324,7 +324,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		// tasks.bulkDelete soft-deletes, ...). Without a broadcast their writes
 		// never invalidate live queries, so clients sit on stale results until a
 		// reload. Mirror the mutation path's completion broadcast.
-		c.server.broadcastTenantTableChangeAt(c.project, c.tenant, mutationInvalidationTable(message.Path), completedAt)
+		c.server.broadcastMutationInvalidationsAt(c.project, c.tenant, message.Path, completedAt)
 	case "telemetry.event":
 		c.server.recordTransactionTelemetry(transactionEntryFromClientTelemetry(c.project, c.tenant, message))
 	default:
@@ -641,6 +641,21 @@ func (s *Server) broadcastTenantTableChange(projectID string, tenantID string, t
 
 func (s *Server) broadcastTenantTableChangeAt(projectID string, tenantID string, table string, changedAt time.Time) {
 	s.scheduleTableChange(tableChange{project: projectID, tenant: tenantIDFromRequest(projectID, tenantID), table: table, broad: true, changedAtMS: epochMillis(changedAt)})
+}
+
+// broadcastMutationInvalidationsAt translates a public function path into the
+// physical tables its handler can change. App modules do not always share a
+// name with their tables (for example chat.sendWorkspaceChat writes
+// workspaceChat), so invalidating only the path prefix leaves both the row
+// cache and live queries stale after a successful mutation.
+func (s *Server) broadcastMutationInvalidationsAt(projectID string, tenantID string, path string, changedAt time.Time) {
+	for _, table := range mutationInvalidationTables(path) {
+		s.broadcastTenantTableChangeAt(projectID, tenantID, table, changedAt)
+	}
+}
+
+func (s *Server) broadcastMutationInvalidations(projectID string, tenantID string, path string) {
+	s.broadcastMutationInvalidationsAt(projectID, tenantID, path, time.Now().UTC())
 }
 
 func (s *Server) broadcastRowIDChange(projectID string, table string, rowIDs []string) {
@@ -1135,14 +1150,14 @@ func (s *Server) sandboxForCaller(projectID string, tenantID string, caller call
 					}
 					result, err := s.executeTenantActionForCaller(ctx, projectID, tenantID, caller, "assistant.sandboxAction", wrapped)
 					if err == nil {
-						s.broadcastTenantTableChange(projectID, tenantID, mutationInvalidationTable(path))
+						s.broadcastMutationInvalidations(projectID, tenantID, path)
 					}
 					return result, err
 				}
 			}
 			result, err := s.executeTenantActionForCaller(ctx, projectID, tenantID, caller, path, args)
 			if err == nil {
-				s.broadcastTenantTableChange(projectID, tenantID, mutationInvalidationTable(req.Path))
+				s.broadcastMutationInvalidations(projectID, tenantID, req.Path)
 			}
 			return result, err
 		case "mutation":
@@ -1152,7 +1167,7 @@ func (s *Server) sandboxForCaller(projectID string, tenantID string, caller call
 			}
 			result, err := s.executeTenantMutationForCaller(ctx, projectID, tenantID, caller, path, resolvedArgs)
 			if err == nil {
-				s.broadcastTenantTableChange(projectID, tenantID, mutationInvalidationTable(path))
+				s.broadcastMutationInvalidations(projectID, tenantID, path)
 			}
 			return result, err
 		case "data.inspect":
@@ -1264,6 +1279,22 @@ func subscriptionDependsOnTable(path string, table string) bool {
 
 func subscriptionTables(path string) []string {
 	switch path {
+	case "calls.listForUser":
+		return []string{"callSignals"}
+	case "chat.listConversations":
+		return []string{"conversations"}
+	case "chat.listAllParticipants":
+		return []string{"conversationParticipants"}
+	case "chat.listAllMessages":
+		return []string{"directMessages"}
+	case "chat.listAllReactions":
+		return []string{"messageReactions"}
+	case "chat.listAllLinkPreviews":
+		return []string{"linkPreviews"}
+	case "chat.listWorkspaceChat":
+		return []string{"workspaceChat"}
+	case "chat.workspaceChatUnreadSummary":
+		return []string{"notifications"}
 	case "bulk.allReferenceData":
 		return []string{
 			"approvalApprovers",
@@ -1310,14 +1341,28 @@ func subscriptionTables(path string) []string {
 		return []string{"taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances", "tasks"}
 	case "roles.effectivePermissions":
 		return []string{"roles", "rolePermissions", "userTeams", "users"}
+	case "users.myPermissions":
+		return []string{"roles", "rolePermissions", "permissions", "userTeams", "users"}
 	case "users.myTenants":
 		return []string{"tenants", "userTenantMap", "users"}
+	case "taskResources.listTaskNotes", "taskResources.listTaskNotesPaged", "taskResources.noteSummariesByTenant", "taskResources.noteCountsByTenant", "taskResources.attachmentCountsByTenant", "taskResources.listTaskIdsWithAttachments", "taskResources.listWorkspaceAttachments":
+		return []string{"taskNotes", "tasks", "users"}
+	case "taskResources.listTaskViewsByTaskId", "taskResources.listTaskViewsByTaskPgId":
+		return []string{"taskViews", "tasks", "users"}
+	case "taskResources.listTaskHistory", "taskResources.listTaskLogs":
+		return []string{"taskLogs", "tasks", "users"}
+	case "taskResources.listTaskSignatures", "taskResources.listTaskIdsWithSignatures":
+		return []string{"taskSignatures", "tasks", "users"}
+	case "taskResources.listSharedToMe", "taskResources.listTaskShares", "taskResources.sharedWithMeCount":
+		return []string{"taskShares", "taskAcks", "tasks", "users"}
+	case "taskResources.getTaskAcknowledgmentProgressForTask":
+		return []string{"taskAcks", "taskAckReads", "taskShares", "tasks"}
 	}
 	if strings.HasPrefix(path, "tasks.") {
 		return []string{"tasks", "taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances"}
 	}
 	if strings.HasPrefix(path, "taskFindings.") {
-		return []string{"taskFindings", "tasks"}
+		return []string{"taskFindings", "findingNotes", "taskLogs", "taskWorkspaceContexts", "tasks"}
 	}
 	if strings.HasPrefix(path, "settings.") {
 		return []string{"settings", "plugins", "envVars"}
@@ -1329,11 +1374,61 @@ func subscriptionTables(path string) []string {
 }
 
 func mutationInvalidationTable(path string) string {
+	tables := mutationInvalidationTables(path)
+	if len(tables) > 0 {
+		return tables[0]
+	}
+	return ""
+}
+
+func mutationInvalidationTables(path string) []string {
+	switch path {
+	case "calls.sendSignal", "calls.acknowledgeSignals", "calls.acknowledgeRoomSignals":
+		return []string{"callSignals"}
+	case "chat.createConversation":
+		return []string{"conversations", "conversationParticipants"}
+	case "chat.sendMessage":
+		return []string{"directMessages", "conversations"}
+	case "chat.updateMessage", "chat.deleteMessage", "chat.markMessagesDelivered":
+		return []string{"directMessages"}
+	case "chat.markAsRead":
+		return []string{"conversationParticipants", "directMessages"}
+	case "chat.sendWorkspaceChat", "chat.updateWorkspaceChatMessage", "chat.deleteWorkspaceChatMessage":
+		return []string{"workspaceChat"}
+	case "chat.addReaction", "chat.removeReaction":
+		return []string{"messageReactions"}
+	case "chat.markWorkspaceChatRead":
+		return []string{"notifications"}
+	case "chat.generateUploadUrl":
+		return []string{"files"}
+	case "taskResources.assignUser", "taskResources.unassignUser":
+		return []string{"taskUsers", "tasks", "taskLogs", "notifications"}
+	case "taskResources.createNote", "taskResources.updateNote", "taskResources.removeNote", "taskResources.markVoiceMemoListened", "taskResources.removeNoteAttachment":
+		return []string{"taskNotes", "tasks", "taskLogs"}
+	case "taskResources.createSignature":
+		return []string{"taskSignatures", "tasks", "taskLogs"}
+	case "taskResources.shareTask", "taskResources.revokeShare":
+		return []string{"taskShares", "taskAcks", "tasks", "notifications"}
+	case "taskResources.acknowledgeTaskShare":
+		return []string{"taskShares", "taskAcks", "taskAckReads", "tasks", "notifications"}
+	case "taskResources.recordTaskViewByTaskId", "taskResources.recordTaskViewByTaskPgId":
+		return []string{"taskViews", "tasks"}
+	case "taskResources.addTagByTaskId", "taskResources.addTagByPgId", "taskResources.addTagByTaskPgId", "taskResources.removeTagByTaskId", "taskResources.removeTagByPgId", "taskResources.removeTagByTaskPgId":
+		return []string{"taskTags", "tasks", "taskLogs"}
+	case "taskResources.generateUploadUrl":
+		return []string{"files"}
+	}
 	if strings.HasPrefix(path, "techSupport.") {
-		return "supportSessions"
+		return []string{"supportSessions"}
 	}
 	if strings.HasPrefix(path, "taskFindings.") {
-		return "taskFindings"
+		return []string{"taskFindings", "findingNotes", "taskLogs", "taskWorkspaceContexts", "tasks"}
 	}
-	return subscriptionTable(path)
+	if strings.HasPrefix(path, "tasks.") {
+		return []string{"tasks", "taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances"}
+	}
+	if table := subscriptionTable(path); table != "" {
+		return []string{table}
+	}
+	return []string{""}
 }

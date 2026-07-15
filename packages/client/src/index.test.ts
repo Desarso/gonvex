@@ -41,6 +41,12 @@ class FakeWebSocket {
 
   close() {
     this.readyState = FakeWebSocket.CLOSED;
+    this.emit("close", {});
+  }
+
+  disconnect() {
+    this.readyState = FakeWebSocket.CLOSED;
+    this.emit("close", {});
   }
 
   open() {
@@ -104,6 +110,76 @@ describe("GonvexClient", () => {
 
     client.connect();
     client.connect();
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it("reconnects and restores live query subscriptions after a socket closes", () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const handler = vi.fn();
+
+    client.subscribeQuery(ref, { status: "open" }, handler);
+    const firstSocket = latestSocket();
+    firstSocket.open();
+    const [firstSubscription] = sentMessages(firstSocket);
+    firstSocket.receive({ type: "query.result", id: firstSubscription.id, result: ["before"] });
+
+    firstSocket.disconnect();
+    vi.advanceTimersByTime(249);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    const secondSocket = latestSocket();
+    secondSocket.open();
+    const subscriptions = sentMessages(secondSocket).filter((message) => message.type === "query.subscribe");
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]).toMatchObject({
+      id: firstSubscription.id,
+      path: "tasks.list",
+      args: { status: "open" },
+    });
+
+    secondSocket.receive({ type: "query.result", id: firstSubscription.id, result: ["after"] });
+    expect(handler).toHaveBeenLastCalledWith({
+      type: "query.result",
+      id: firstSubscription.id,
+      result: ["after"],
+    });
+  });
+
+  it("reauthenticates before restoring subscriptions after reconnect", () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { token: "session-token", tenant: "tenant-a" });
+
+    client.subscribeQuery(ref, {}, () => undefined);
+    const firstSocket = latestSocket();
+    firstSocket.open();
+    const [firstAuth] = sentMessages(firstSocket);
+    firstSocket.receive({ type: "auth.result", id: firstAuth.id, result: { userId: "user-a" } });
+
+    firstSocket.disconnect();
+    vi.advanceTimersByTime(250);
+    const secondSocket = latestSocket();
+    secondSocket.open();
+
+    expect(sentMessages(secondSocket)).toHaveLength(1);
+    expect(sentMessages(secondSocket)[0]).toMatchObject({
+      type: "auth",
+      token: "session-token",
+      tenant: "tenant-a",
+    });
+    secondSocket.receive({ type: "auth.result", id: sentMessages(secondSocket)[0].id, result: { userId: "user-a" } });
+    expect(sentMessages(secondSocket).filter((message) => message.type === "query.subscribe")).toHaveLength(1);
+  });
+
+  it("does not reconnect after an explicit close", () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+
+    client.close();
+    vi.advanceTimersByTime(10_000);
 
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
