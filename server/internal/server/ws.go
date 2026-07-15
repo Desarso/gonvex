@@ -852,7 +852,16 @@ func subscriptionCanChangeMembership(sub querySubscription) bool {
 }
 
 func (s *Server) executeSubscription(ctx context.Context, sub querySubscription, reason string, changeCommittedAtMS float64) {
+	// A subscription can be cancelled while a table-change fan-out is already
+	// queued. That stale rerun belongs to the subscription, not the connection,
+	// and must never clear authentication for every other live subscription.
+	if ctx.Err() != nil {
+		return
+	}
 	if err := sub.conn.revalidateAppAuth(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		sub.conn.clearAuthentication()
 		sub.conn.write(serverMessage{Type: "query.error", ID: sub.id, Error: "authentication is required"})
 		return

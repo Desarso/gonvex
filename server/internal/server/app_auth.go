@@ -68,6 +68,19 @@ type appAuthRequirementCacheEntry struct {
 	ExpiresAt time.Time
 }
 
+type appAuthRequirementLookup struct {
+	done       chan struct{}
+	generation uint64
+	enabled    bool
+	err        error
+	retry      bool
+}
+
+const (
+	appAuthRequirementCacheTTL      = 5 * time.Second
+	appAuthRequirementLookupTimeout = 5 * time.Second
+)
+
 type authTransaction struct {
 	ProjectID         string
 	RedirectURI       string
@@ -433,8 +446,13 @@ func (s *Server) disableGoogleAuth(ctx context.Context, projectID string) error 
 }
 
 func (s *Server) invalidateAppAuthRequirement(projectID string) {
+	projectID = strings.TrimSpace(projectID)
 	s.appAuthConfigMu.Lock()
-	delete(s.appAuthRequirements, strings.TrimSpace(projectID))
+	delete(s.appAuthRequirements, projectID)
+	if s.appAuthVersions == nil {
+		s.appAuthVersions = map[string]uint64{}
+	}
+	s.appAuthVersions[projectID]++
 	s.appAuthConfigMu.Unlock()
 }
 
@@ -443,17 +461,69 @@ func (s *Server) nativeAppAuthEnabled(ctx context.Context, projectID string) (bo
 	if projectID == "" {
 		return false, nil
 	}
-	now := time.Now()
-	s.appAuthConfigMu.Lock()
-	cached, ok := s.appAuthRequirements[projectID]
-	if ok && now.Before(cached.ExpiresAt) {
+
+	for {
+		now := time.Now()
+		s.appAuthConfigMu.Lock()
+		cached, ok := s.appAuthRequirements[projectID]
+		if ok && now.Before(cached.ExpiresAt) {
+			s.appAuthConfigMu.Unlock()
+			return cached.Enabled, nil
+		}
+		if lookup := s.appAuthLookups[projectID]; lookup != nil {
+			done := lookup.done
+			s.appAuthConfigMu.Unlock()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+			if lookup.retry {
+				continue
+			}
+			return lookup.enabled, lookup.err
+		}
+		if s.appAuthLookups == nil {
+			s.appAuthLookups = map[string]*appAuthRequirementLookup{}
+		}
+		lookup := &appAuthRequirementLookup{
+			done:       make(chan struct{}),
+			generation: s.appAuthVersions[projectID],
+		}
+		s.appAuthLookups[projectID] = lookup
 		s.appAuthConfigMu.Unlock()
-		return cached.Enabled, nil
+
+		// Subscription contexts may be cancelled while an invalidation fan-out is
+		// already in progress. Auth policy is process-scoped, so one stale caller
+		// must not poison every live connection waiting on the same lookup.
+		lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), appAuthRequirementLookupTimeout)
+		enabled, cacheable, err := s.loadNativeAppAuthRequirement(lookupCtx, projectID)
+		cancel()
+
+		s.appAuthConfigMu.Lock()
+		lookup.enabled = enabled
+		lookup.err = err
+		lookup.retry = lookup.generation != s.appAuthVersions[projectID]
+		if err == nil && cacheable && !lookup.retry {
+			s.appAuthRequirements[projectID] = appAuthRequirementCacheEntry{
+				Enabled:   enabled,
+				ExpiresAt: time.Now().Add(appAuthRequirementCacheTTL),
+			}
+		}
+		delete(s.appAuthLookups, projectID)
+		close(lookup.done)
+		s.appAuthConfigMu.Unlock()
+		if lookup.retry {
+			continue
+		}
+		return enabled, err
 	}
-	s.appAuthConfigMu.Unlock()
+}
+
+func (s *Server) loadNativeAppAuthRequirement(ctx context.Context, projectID string) (bool, bool, error) {
 	db, err := s.pooledProjectRegistry(ctx)
 	if err != nil || db == nil {
-		return false, fmt.Errorf("project auth store is unavailable")
+		return false, false, fmt.Errorf("project auth store is unavailable")
 	}
 	var projectExists, enabled bool
 	err = db.QueryRowContext(ctx, `SELECT
@@ -463,17 +533,27 @@ func (s *Server) nativeAppAuthEnabled(ctx context.Context, projectID string) (bo
 		&projectExists, &enabled,
 	)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	// Never let attacker-controlled project headers grow this process cache.
-	// Real projects are bounded by the registry; unknown IDs stay uncached.
-	if !projectExists {
-		return false, nil
+	// Real projects are bounded by the registry or by a bundle/config already
+	// loaded into this runtime; arbitrary unknown IDs stay uncached.
+	if !projectExists && !s.knownRuntimeProject(projectID) {
+		return false, false, nil
 	}
-	s.appAuthConfigMu.Lock()
-	s.appAuthRequirements[projectID] = appAuthRequirementCacheEntry{Enabled: enabled, ExpiresAt: now.Add(5 * time.Second)}
-	s.appAuthConfigMu.Unlock()
-	return enabled, nil
+	return enabled, true, nil
+}
+
+func (s *Server) knownRuntimeProject(projectID string) bool {
+	s.projectMu.RLock()
+	_, registered := s.projects[projectID]
+	_, databaseConfigured := s.config.ProjectDatabases[projectID]
+	_, keyConfigured := s.config.ProjectKeys[projectID]
+	s.projectMu.RUnlock()
+	if registered || databaseConfigured || keyConfigured {
+		return true
+	}
+	return s.runtime != nil && s.runtime.AppForProject(projectID) != nil
 }
 
 func (s *Server) projectRequiresAuthentication(ctx context.Context, projectID string) bool {
