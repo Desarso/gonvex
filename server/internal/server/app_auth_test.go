@@ -108,6 +108,18 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 	if cachedUnknownProject {
 		t.Fatal("an unknown project ID was retained in the auth requirement cache")
 	}
+	const waitingProjectID = "lookup-already-in-progress"
+	runtime.appAuthConfigMu.Lock()
+	runtime.appAuthLookups[waitingProjectID] = &appAuthRequirementLookup{done: make(chan struct{})}
+	runtime.appAuthConfigMu.Unlock()
+	waiterContext, cancelWaiter := context.WithCancel(context.Background())
+	cancelWaiter()
+	if _, err := runtime.nativeAppAuthEnabled(waiterContext, waitingProjectID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled lookup waiter returned %v instead of context cancellation", err)
+	}
+	runtime.appAuthConfigMu.Lock()
+	delete(runtime.appAuthLookups, waitingProjectID)
+	runtime.appAuthConfigMu.Unlock()
 	// Legacy projects can be deployed by /dev/sync without a row in the newer
 	// control-plane registry. They are still bounded by the runtime's known
 	// project set and must cache the disabled auth policy. A cancelled

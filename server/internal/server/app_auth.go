@@ -473,7 +473,11 @@ func (s *Server) nativeAppAuthEnabled(ctx context.Context, projectID string) (bo
 		if lookup := s.appAuthLookups[projectID]; lookup != nil {
 			done := lookup.done
 			s.appAuthConfigMu.Unlock()
-			<-done
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
 			if lookup.retry {
 				continue
 			}
