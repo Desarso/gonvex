@@ -48,7 +48,18 @@ test("production compose keeps stateful dependencies private and pinned", () => 
     "gonvex-maker-minio-init",
   ]) {
     assert.match(compose.services[name].image, /@sha256:[a-f0-9]{64}$/);
+    assert.deepEqual(
+      Object.keys(compose.services[name].networks ?? {}),
+      ["default"],
+      `${name} must remain isolated from Coolify's shared edge network`,
+    );
   }
+
+  const runtimeNetworks = compose.services["gonvex-maker-runtime"].networks;
+  assert.deepEqual(Object.keys(runtimeNetworks).sort(), ["coolify-edge", "default"]);
+  assert.deepEqual(runtimeNetworks["coolify-edge"].aliases, ["gonvex-maker-runtime-edge"]);
+  assert.equal(compose.networks["coolify-edge"].external, true);
+  assert.equal(compose.networks["coolify-edge"].name, "coolify");
 
   assert.equal(compose.volumes["gonvex-postgres-data"].name, "gonvex-maker-postgres-data");
   assert.equal(compose.volumes["gonvex-runtime-data"].name, "gonvex-maker-runtime-data");

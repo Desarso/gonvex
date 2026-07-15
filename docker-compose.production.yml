@@ -5,7 +5,10 @@ name: gonvex-maker
 # only to `gonvex-maker-runtime` and `gonvex-maker-dashboard`. Every service
 # name is stack-specific so Coolify's shared network cannot resolve a generic
 # alias to an unrelated application's container. Postgres, Valkey, MinIO, and
-# backups stay on the resource-private network and publish no host ports.
+# backups stay on the resource-private network and publish no host ports. The
+# runtime alone also joins Coolify's edge network under a portfolio-specific
+# alias so same-server product containers do not depend on public-IP hairpin
+# routing. Management endpoints still enforce the production auth boundary.
 services:
   gonvex-maker-postgres:
     image: postgres:17-alpine@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
@@ -150,6 +153,11 @@ services:
       GOCACHE: /var/lib/gonvex/go-build
     volumes:
       - gonvex-runtime-data:/var/lib/gonvex
+    networks:
+      default:
+      coolify-edge:
+        aliases:
+          - gonvex-maker-runtime-edge
     tmpfs:
       - /tmp:size=2G,mode=1777
     security_opt:
@@ -288,6 +296,11 @@ services:
         limits:
           cpus: "1"
           memory: 1G
+
+networks:
+  coolify-edge:
+    name: coolify
+    external: true
 
 volumes:
   gonvex-postgres-data:
