@@ -108,6 +108,26 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 	if cachedUnknownProject {
 		t.Fatal("an unknown project ID was retained in the auth requirement cache")
 	}
+	// Legacy projects can be deployed by /dev/sync without a row in the newer
+	// control-plane registry. They are still bounded by the runtime's known
+	// project set and must cache the disabled auth policy. A cancelled
+	// subscription context must not turn that lookup into a connection-wide
+	// authentication failure.
+	const legacyProjectID = "legacy-synced-project"
+	runtime.projectMu.Lock()
+	runtime.projects[legacyProjectID] = projectTarget{ID: legacyProjectID}
+	runtime.projectMu.Unlock()
+	cancelledContext, cancelLookup := context.WithCancel(context.Background())
+	cancelLookup()
+	if enabled, err := runtime.nativeAppAuthEnabled(cancelledContext, legacyProjectID); err != nil || enabled {
+		t.Fatalf("legacy project auth state = %v, %v", enabled, err)
+	}
+	runtime.appAuthConfigMu.Lock()
+	legacyCache, cachedLegacyProject := runtime.appAuthRequirements[legacyProjectID]
+	runtime.appAuthConfigMu.Unlock()
+	if !cachedLegacyProject || legacyCache.Enabled {
+		t.Fatalf("legacy project auth state was not cached: cached=%v value=%#v", cachedLegacyProject, legacyCache)
+	}
 	if !runtime.projectRequiresAuthentication(context.Background(), projectID) {
 		t.Fatal("enabling native Google auth did not make the project require authentication")
 	}
@@ -194,6 +214,19 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 	}
 	if session.ProjectID != projectID || session.User.ID != user.ID || tenantID != projectID {
 		t.Fatalf("unexpected validated session: %#v tenant=%q", session, tenantID)
+	}
+	cancelledSubscriptionContext, cancelSubscription := context.WithCancel(context.Background())
+	cancelSubscription()
+	liveConnection := &wsConn{
+		server: runtime, project: projectID, tenant: projectID, auth: true,
+		authToken: grant.AccessToken, authCheckedAt: time.Now().Add(-10 * time.Second),
+		subs: map[string]querySubscription{},
+	}
+	runtime.executeSubscription(cancelledSubscriptionContext, querySubscription{
+		conn: liveConnection, id: "cancelled-subscription", project: projectID, tenant: projectID,
+	}, "test", 0)
+	if !liveConnection.auth || liveConnection.authToken != grant.AccessToken {
+		t.Fatal("a cancelled subscription rerun cleared authentication for its live connection")
 	}
 	anonymousConnection := &wsConn{server: runtime, project: projectID, tenant: projectID}
 	if err := anonymousConnection.revalidateAppAuth(context.Background()); err == nil {

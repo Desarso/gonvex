@@ -70,6 +70,8 @@ type Server struct {
 	authRateLimiter       appAuthRateLimiter
 	appAuthConfigMu       sync.Mutex
 	appAuthRequirements   map[string]appAuthRequirementCacheEntry
+	appAuthLookups        map[string]*appAuthRequirementLookup
+	appAuthVersions       map[string]uint64
 }
 
 func New(cfg config.Config) *Server {
@@ -109,6 +111,8 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		queryCacheStartedAtMS: time.Now().UTC().UnixMilli(),
 		errorTracker:          newErrorTracker(10000),
 		appAuthRequirements:   map[string]appAuthRequirementCacheEntry{},
+		appAuthLookups:        map[string]*appAuthRequirementLookup{},
+		appAuthVersions:       map[string]uint64{},
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
 	server.scheduler = newScheduler(server.runScheduledJob)
