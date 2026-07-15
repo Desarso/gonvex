@@ -469,6 +469,61 @@ describe("GonvexClient", () => {
     expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.unsubscribe", id });
   });
 
+  it("replays an in-flight one-shot query after reconnect", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const promise = client.query(ref, { status: "open" });
+    const firstSocket = latestSocket();
+    firstSocket.open();
+    const [firstSubscription] = sentMessages(firstSocket);
+
+    firstSocket.disconnect();
+    vi.advanceTimersByTime(250);
+    const secondSocket = latestSocket();
+    secondSocket.open();
+
+    const [secondSubscription] = sentMessages(secondSocket);
+    expect(secondSubscription).toMatchObject({
+      type: "query.subscribe",
+      id: firstSubscription.id,
+      path: "tasks.list",
+      args: { status: "open" },
+    });
+    secondSocket.receive({ type: "query.result", id: firstSubscription.id, result: { count: 3 } });
+    await expect(promise).resolves.toEqual({ count: 3 });
+  });
+
+  it("replays an auth-queued one-shot query only after reconnect authentication", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { token: "session-token", tenant: "tenant-a" });
+    const promise = client.query(ref, { status: "open" });
+    const firstSocket = latestSocket();
+    firstSocket.open();
+    expect(sentMessages(firstSocket)).toHaveLength(1);
+    expect(sentMessages(firstSocket)[0]).toMatchObject({ type: "auth" });
+
+    firstSocket.disconnect();
+    vi.advanceTimersByTime(250);
+    const secondSocket = latestSocket();
+    secondSocket.open();
+    const [secondAuth] = sentMessages(secondSocket);
+    expect(secondAuth).toMatchObject({ type: "auth" });
+    expect(sentMessages(secondSocket).some((message) => message.type === "query.subscribe")).toBe(false);
+
+    secondSocket.receive({ type: "auth.result", id: secondAuth.id, result: { userId: "user-a" } });
+    const subscriptions = sentMessages(secondSocket).filter((message) => message.type === "query.subscribe");
+    expect(subscriptions).toHaveLength(1);
+    secondSocket.receive({ type: "query.result", id: subscriptions[0].id, result: { count: 4 } });
+    await expect(promise).resolves.toEqual({ count: 4 });
+  });
+
+  it("rejects unresolved one-shot queries when explicitly closed", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const promise = client.query(ref);
+
+    client.close();
+
+    await expect(promise).rejects.toThrow("Gonvex client was closed");
+  });
+
   it("resolves mutations and actions from matching response types", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const mutation = client.mutation({ kind: "mutation", path: "tasks.create" }, { title: "Ship" });

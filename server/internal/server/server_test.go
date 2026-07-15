@@ -880,9 +880,9 @@ func TestAppRealtimeMutationInvalidationTables(t *testing.T) {
 		want []string
 	}{
 		{path: "chat.createConversation", want: []string{"conversations", "conversationParticipants"}},
-		{path: "chat.sendMessage", want: []string{"directMessages", "conversations"}},
+		{path: "chat.sendMessage", want: []string{"directMessages", "conversations", "notifications", "linkPreviews"}},
 		{path: "chat.markAsRead", want: []string{"conversationParticipants", "directMessages"}},
-		{path: "chat.sendWorkspaceChat", want: []string{"workspaceChat"}},
+		{path: "chat.sendWorkspaceChat", want: []string{"workspaceChat", "notifications", "linkPreviews"}},
 		{path: "chat.addReaction", want: []string{"messageReactions"}},
 		{path: "calls.sendSignal", want: []string{"callSignals"}},
 		{path: "taskFindings.createNote", want: []string{"taskFindings", "findingNotes", "taskLogs", "taskWorkspaceContexts", "tasks"}},
@@ -891,6 +891,7 @@ func TestAppRealtimeMutationInvalidationTables(t *testing.T) {
 		{path: "taskResources.createSignature", want: []string{"taskSignatures", "tasks", "taskLogs"}},
 		{path: "taskResources.recordTaskViewByTaskId", want: []string{"taskViews", "tasks"}},
 		{path: "taskResources.addTagByTaskId", want: []string{"taskTags", "tasks", "taskLogs"}},
+		{path: "scheduling.processWorkspaceChatMessage", want: []string{"scheduleAvailabilitySubmissions", "scheduleAvailabilityItems", "scheduleRosterEntries"}},
 	}
 	for _, test := range tests {
 		got := mutationInvalidationTables(test.path)
@@ -910,6 +911,19 @@ func TestTableChangeMatchesSubscription(t *testing.T) {
 	}
 	if !tableChangeMatchesSubscription(sub, tableChange{table: ""}) {
 		t.Fatal("expected broad table change to invalidate subscription")
+	}
+	if !tableChangeMatchesSubscription(sub, tableChange{tables: map[string]bool{"tasks": true, "users": true}}) {
+		t.Fatal("expected any matching table in a coalesced mutation change to invalidate subscription")
+	}
+	if tableChangeMatchesSubscription(sub, tableChange{tables: map[string]bool{"tasks": true, "taskTags": true}}) {
+		t.Fatal("expected unrelated coalesced mutation tables not to invalidate reference data")
+	}
+}
+
+func TestTableChangeTablesAreStableAndDeduplicated(t *testing.T) {
+	got := tableChangeTables(tableChange{tables: map[string]bool{"users": true, "tasks": true}})
+	if strings.Join(got, ",") != "tasks,users" {
+		t.Fatalf("tableChangeTables() = %v, want [tasks users]", got)
 	}
 }
 

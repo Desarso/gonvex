@@ -27,6 +27,13 @@ type QuerySubscription = {
   cacheReadGeneration?: number;
   socketGeneration?: number;
 };
+type OneShotQuery = {
+  id: string;
+  path: string;
+  args: JsonValue;
+  reject: (error: Error) => void;
+  socketGeneration?: number;
+};
 
 export type FunctionReference = {
   kind: string;
@@ -63,6 +70,7 @@ export class GonvexClient {
   private socket: WebSocket | undefined;
   private readonly handlers = new Map<string, SubscriptionHandler>();
   private readonly querySubscriptions = new Map<string, QuerySubscription>();
+  private readonly oneShotQueries = new Map<string, OneShotQuery>();
   private readonly telemetryHandlers = new Set<TelemetryHandler>();
   private readonly pendingMessages: ClientMessage[] = [];
   private auth: GonvexClientAuth = {};
@@ -174,6 +182,10 @@ export class GonvexClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
+    for (const query of this.oneShotQueries.values()) {
+      query.reject(new Error("Gonvex client was closed"));
+    }
+    this.oneShotQueries.clear();
     this.handlers.clear();
     this.querySubscriptions.clear();
     this.sessionScopeHandlers.clear();
@@ -344,8 +356,11 @@ export class GonvexClient {
     this.connect();
     const id = randomID();
     return new Promise<T>((resolve, reject) => {
+      const query: OneShotQuery = { id, path: ref.path, args, reject };
+      this.oneShotQueries.set(id, query);
       this.handlers.set(id, (message) => {
         if (message.type === "query.result") {
+          this.oneShotQueries.delete(id);
           this.handlers.delete(id);
           this.recordTelemetry({
             type: "query",
@@ -360,6 +375,7 @@ export class GonvexClient {
           resolve(message.result as T);
         }
         if (message.type === "query.error") {
+          this.oneShotQueries.delete(id);
           this.handlers.delete(id);
           this.recordTelemetry({
             type: "query",
@@ -373,7 +389,7 @@ export class GonvexClient {
           reject(new Error(message.error));
         }
       });
-      this.send({ type: "query.subscribe", id, path: ref.path, args });
+      this.sendOneShotQuery(query);
     });
   }
 
@@ -442,12 +458,21 @@ export class GonvexClient {
     });
   }
 
+  private sendOneShotQuery(query: OneShotQuery) {
+    if (query.socketGeneration === this.socketGeneration) return;
+    query.socketGeneration = this.socketGeneration;
+    this.send({ type: "query.subscribe", id: query.id, path: query.path, args: query.args });
+  }
+
   private resubscribeQueries(generation: number) {
     if (generation !== this.socketGeneration) return;
     for (const subscription of this.querySubscriptions.values()) {
       if (subscription.listeners.size === 0) continue;
       subscription.serverSettled = false;
       this.sendSubscription(subscription);
+    }
+    for (const query of this.oneShotQueries.values()) {
+      this.sendOneShotQuery(query);
     }
   }
 

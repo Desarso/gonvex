@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -134,6 +135,7 @@ type tableChange struct {
 	project     string
 	tenant      string
 	table       string
+	tables      map[string]bool
 	broad       bool
 	rowIDs      map[string]bool
 	changedAtMS float64
@@ -680,9 +682,21 @@ func (s *Server) broadcastTenantTableChangeAt(projectID string, tenantID string,
 // workspaceChat), so invalidating only the path prefix leaves both the row
 // cache and live queries stale after a successful mutation.
 func (s *Server) broadcastMutationInvalidationsAt(projectID string, tenantID string, path string, changedAt time.Time) {
-	for _, table := range mutationInvalidationTables(path) {
-		s.broadcastTenantTableChangeAt(projectID, tenantID, table, changedAt)
+	tables := mutationInvalidationTables(path)
+	if len(tables) == 0 {
+		return
 	}
+	changedTables := make(map[string]bool, len(tables))
+	for _, table := range tables {
+		changedTables[table] = true
+	}
+	s.scheduleTableChange(tableChange{
+		project:     projectID,
+		tenant:      tenantIDFromRequest(projectID, tenantID),
+		tables:      changedTables,
+		broad:       true,
+		changedAtMS: epochMillis(changedAt),
+	})
 }
 
 func (s *Server) broadcastMutationInvalidations(projectID string, tenantID string, path string) {
@@ -702,13 +716,23 @@ func (s *Server) broadcastTenantRowIDChange(projectID string, tenantID string, t
 }
 
 func (s *Server) scheduleTableChange(change tableChange) {
-	s.cache.invalidateRows(context.Background(), change.project, change.tenant, change.table)
+	changedTables := tableChangeTables(change)
+	for _, table := range changedTables {
+		s.cache.invalidateRows(context.Background(), change.project, change.tenant, table)
+	}
 	s.tableChangeMu.Lock()
-	key := strings.Join([]string{change.project, change.tenant, change.table}, ":")
+	tableKey := strings.Join(changedTables, "\x1f")
+	key := strings.Join([]string{change.project, change.tenant, tableKey}, ":")
 	pending := s.tableChanges[key]
 	pending.project = change.project
 	pending.tenant = change.tenant
 	pending.table = change.table
+	if pending.tables == nil && len(change.tables) > 0 {
+		pending.tables = map[string]bool{}
+	}
+	for table := range change.tables {
+		pending.tables[table] = true
+	}
 	pending.broad = pending.broad || change.broad
 	if change.changedAtMS > pending.changedAtMS {
 		pending.changedAtMS = change.changedAtMS
@@ -756,7 +780,24 @@ func (s *Server) flushTableChange(key string) {
 }
 
 func tableChangeMatchesSubscription(sub querySubscription, change tableChange) bool {
-	return change.table == "" || subscriptionDependsOnTable(sub.path, change.table)
+	for _, table := range tableChangeTables(change) {
+		if table == "" || subscriptionDependsOnTable(sub.path, table) {
+			return true
+		}
+	}
+	return false
+}
+
+func tableChangeTables(change tableChange) []string {
+	if len(change.tables) == 0 {
+		return []string{change.table}
+	}
+	tables := make([]string, 0, len(change.tables))
+	for table := range change.tables {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	return tables
 }
 
 func (s *Server) rerunSubscriptions(subs []querySubscription, reason string, changeCommittedAtMS float64) {
@@ -1001,6 +1042,12 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 		return nil, err
 	}
 	mutationCtx.Tx = tx
+	originalScheduler := mutationCtx.Scheduler
+	deferred := newDeferredScheduler(originalScheduler)
+	mutationCtx.Scheduler = deferred
+	defer func() {
+		mutationCtx.Scheduler = originalScheduler
+	}()
 	result, err := exec(mutationCtx, path, rawArgs)
 	if err != nil {
 		_ = tx.Rollback()
@@ -1010,6 +1057,9 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 		return nil, err
 	}
 	mutationCtx.Tx = nil
+	if err := deferred.flush(); err != nil {
+		mutationCtx.Logger.Error("failed to publish committed scheduled work", "path", path, "error", err)
+	}
 	return result, nil
 }
 
@@ -1419,12 +1469,14 @@ func mutationInvalidationTables(path string) []string {
 	case "chat.createConversation":
 		return []string{"conversations", "conversationParticipants"}
 	case "chat.sendMessage":
-		return []string{"directMessages", "conversations"}
+		return []string{"directMessages", "conversations", "notifications", "linkPreviews"}
 	case "chat.updateMessage", "chat.deleteMessage", "chat.markMessagesDelivered":
 		return []string{"directMessages"}
 	case "chat.markAsRead":
 		return []string{"conversationParticipants", "directMessages"}
-	case "chat.sendWorkspaceChat", "chat.updateWorkspaceChatMessage", "chat.deleteWorkspaceChatMessage":
+	case "chat.sendWorkspaceChat":
+		return []string{"workspaceChat", "notifications", "linkPreviews"}
+	case "chat.updateWorkspaceChatMessage", "chat.deleteWorkspaceChatMessage":
 		return []string{"workspaceChat"}
 	case "chat.addReaction", "chat.removeReaction":
 		return []string{"messageReactions"}
@@ -1448,6 +1500,8 @@ func mutationInvalidationTables(path string) []string {
 		return []string{"taskTags", "tasks", "taskLogs"}
 	case "taskResources.generateUploadUrl":
 		return []string{"files"}
+	case "scheduling.processWorkspaceChatMessage":
+		return []string{"scheduleAvailabilitySubmissions", "scheduleAvailabilityItems", "scheduleRosterEntries"}
 	}
 	if strings.HasPrefix(path, "techSupport.") {
 		return []string{"supportSessions"}
