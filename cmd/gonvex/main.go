@@ -281,7 +281,7 @@ func parseRegistrations(root string, file string) (map[string]manifest.FunctionE
 		return nil, err
 	}
 
-	pattern := regexp.MustCompile(`app\.(Query|Mutation|Action|HTTP|InternalMutation|LiveGrid)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)`)
+	pattern := regexp.MustCompile(`app\.(Query|Mutation|Action|HTTP|PublicHTTP|InternalMutation|LiveGrid)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)`)
 	entries := map[string]manifest.FunctionEntry{}
 	for _, match := range pattern.FindAllStringSubmatch(string(source), -1) {
 		rel, err := filepath.Rel(root, file)
@@ -398,7 +398,7 @@ func functionKind(raw string) manifest.FunctionKind {
 		return manifest.FunctionKindMutation
 	case "Action":
 		return manifest.FunctionKindAction
-	case "HTTP":
+	case "HTTP", "PublicHTTP":
 		return manifest.FunctionKindHTTP
 	case "InternalMutation":
 		return manifest.FunctionKindInternalMutation

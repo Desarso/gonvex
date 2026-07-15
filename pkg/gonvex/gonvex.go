@@ -34,6 +34,7 @@ type App struct {
 type Function struct {
 	Path       string
 	Kind       FunctionKind
+	Public     bool
 	Handler    any
 	ArgType    reflect.Type
 	ResultType reflect.Type
@@ -200,6 +201,14 @@ func (a *App) HTTP(path string, handler any) {
 	a.register(FunctionKindHTTP, path, handler)
 }
 
+// PublicHTTP registers an HTTP handler that may execute without a Gonvex user
+// session even when native application authentication is enabled. It is
+// intended for provider-signed callbacks such as payment webhooks. The handler
+// must authenticate the request itself before changing state.
+func (a *App) PublicHTTP(path string, handler any) {
+	a.registerWithVisibility(FunctionKindHTTP, path, handler, true)
+}
+
 func (a *App) InternalMutation(path string, handler any) {
 	a.register(FunctionKindInternalMutation, path, handler)
 }
@@ -273,6 +282,10 @@ func (a *App) ExecuteHTTP(ctx *HTTPContext, path string, request HTTPRequest) (H
 }
 
 func (a *App) register(kind FunctionKind, path string, handler any) {
+	a.registerWithVisibility(kind, path, handler, false)
+}
+
+func (a *App) registerWithVisibility(kind FunctionKind, path string, handler any, public bool) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		panic("gonvex: function path is required")
@@ -291,6 +304,7 @@ func (a *App) register(kind FunctionKind, path string, handler any) {
 	if existing, ok := a.functions[path]; ok {
 		panic(fmt.Sprintf("gonvex: function %q already registered as %s", path, existing.Kind))
 	}
+	function.Public = public
 	a.functions[path] = function
 }
 

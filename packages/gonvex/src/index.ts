@@ -1177,7 +1177,7 @@ function sanitizeProjectID(projectID: string) {
 
 async function parseRegistrations(root: string, file: string) {
   const source = await readFile(file, "utf8");
-  const pattern = /app\.(Query|Mutation|Action|HTTP|InternalMutation|LiveGrid)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)/g;
+  const pattern = /app\.(Query|Mutation|Action|HTTP|PublicHTTP|InternalMutation|LiveGrid)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)/g;
   const entries: Record<string, FunctionEntry> = {};
   for (const match of source.matchAll(pattern)) {
     entries[match[2]!] = {
@@ -2103,6 +2103,7 @@ function templateDir(template: string) {
 function functionKind(raw: string): FunctionKind {
   if (raw === "InternalMutation") return "internalMutation";
   if (raw === "LiveGrid") return "liveGrid";
+  if (raw === "PublicHTTP") return "http";
   return raw.toLowerCase() as FunctionKind;
 }
 
