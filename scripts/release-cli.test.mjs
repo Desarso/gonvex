@@ -1,11 +1,21 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compareVersions, selectReleaseVersion } from "./release-version.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+test("release builds workspace declarations before typechecking consumers", () => {
+  const source = readFileSync(resolve(ROOT, "scripts/release-cli.mjs"), "utf8");
+  const build = source.indexOf('run("pnpm", [...releaseFilters, "build"]);');
+  const typecheck = source.indexOf('run("pnpm", [...releaseFilters, "typecheck"]);');
+
+  assert.ok(build >= 0, "release build step is missing");
+  assert.ok(typecheck > build, "consumer typechecks must run after dependency declarations are built");
+});
 
 test("selects a version above every package when the release tag is stale", () => {
   const selection = selectReleaseVersion({

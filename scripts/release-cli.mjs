@@ -59,9 +59,12 @@ async function releaseCLI() {
     const releaseFilters = RELEASE_PACKAGES
       .map((packageName) => readJSON(packagePath(packageName)).name)
       .flatMap((name) => ["--filter", name]);
+    // A clean release checkout has no generated dist/ declarations. Build the
+    // workspace packages in dependency order before TypeScript resolves their
+    // workspace exports during consumer typechecks.
+    run("pnpm", [...releaseFilters, "build"]);
     run("pnpm", [...releaseFilters, "typecheck"]);
     run("go", ["test", "./..."]);
-    run("pnpm", [...releaseFilters, "build"]);
 
     console.log("=== Step 4: Generate release notes ===");
     const notesFile = dryRun ? `/tmp/gonvex-release-notes-${version}.md` : join(ROOT, "releases", `${tagName}.md`);
