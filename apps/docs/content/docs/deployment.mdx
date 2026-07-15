@@ -240,12 +240,16 @@ Moneymaker installation. Unlike the reference development stack, it publishes no
 database, cache, or object-storage ports; pins third-party images by digest; enables
 durable Valkey persistence; requires dashboard/runtime authentication; persists the
 plugin, database, and object-storage state; and writes daily retained PostgreSQL
-dumps to a separate volume. Coolify attaches domains only to the `runtime` and
-`dashboard` services and generates the `SERVICE_*` credentials referenced by the
-file. Runtime and dashboard image builds also bound Go/Rayon/libuv parallelism so
+dumps to a separate volume. Coolify attaches domains only to the
+`gonvex-maker-runtime` and `gonvex-maker-dashboard` services and generates the
+`SERVICE_*` credentials referenced by the file. Runtime and dashboard image builds also bound Go/Rayon/libuv parallelism so
 an upgrade cannot consume every CPU on a shared host. The backup sidecar waits for
 the runtime health gate before its first dump, ensuring the initial retained backup
 contains the initialized control-plane schema rather than an empty new database.
+Its own healthcheck requires a valid custom-format dump of at least 20 KB. All
+service names are stack-specific because Coolify also joins applications to a
+shared network; generic aliases such as `postgres` or `runtime` could otherwise
+resolve to an unrelated application's container.
 
 The local dump volume protects against an application or database regression, not
 loss of the host. A production operator must additionally copy encrypted database
