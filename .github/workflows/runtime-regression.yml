@@ -35,5 +35,7 @@ jobs:
         run: go test -count=1 -p 1 ./...
         env:
           GOMAXPROCS: "2"
+      - name: Build JavaScript packages
+        run: pnpm build:packages
       - name: Test JavaScript workspace
         run: pnpm -r test
