@@ -249,7 +249,10 @@ contains the initialized control-plane schema rather than an empty new database.
 Its own healthcheck requires a valid custom-format dump of at least 20 KB. All
 service names are stack-specific because Coolify also joins applications to a
 shared network; generic aliases such as `postgres` or `runtime` could otherwise
-resolve to an unrelated application's container.
+resolve to an unrelated application's container. The two public services also
+declare high-priority HTTPS routers that use the Gabriel server's `lehttp`
+HTTP-challenge resolver; Coolify's generated Compose routers otherwise select
+the server's unrelated default resolver.
 
 The local dump volume protects against an application or database regression, not
 loss of the host. A production operator must additionally copy encrypted database
