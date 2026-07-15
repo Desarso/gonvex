@@ -81,6 +81,36 @@ test("production runtime and dashboard require protected durable configuration",
   assert.equal(runtime.depends_on["gonvex-maker-minio-init"].condition, "service_healthy");
 });
 
+test("production public routes use the Gabriel server HTTP challenge resolver", () => {
+  const { services } = resolvedCompose();
+  const runtimeLabels = services["gonvex-maker-runtime"].labels;
+  const dashboardLabels = services["gonvex-maker-dashboard"].labels;
+  assert.equal(
+    runtimeLabels["traefik.http.routers.gonvex-maker-runtime-lehttp.tls.certresolver"],
+    "lehttp",
+  );
+  assert.equal(
+    runtimeLabels["traefik.http.services.gonvex-maker-runtime-lehttp.loadbalancer.server.port"],
+    "8080",
+  );
+  assert.match(
+    runtimeLabels["traefik.http.routers.gonvex-maker-runtime-lehttp.rule"],
+    /gonvex-maker\.whagons\.com/,
+  );
+  assert.equal(
+    dashboardLabels["traefik.http.routers.gonvex-maker-dashboard-lehttp.tls.certresolver"],
+    "lehttp",
+  );
+  assert.equal(
+    dashboardLabels["traefik.http.services.gonvex-maker-dashboard-lehttp.loadbalancer.server.port"],
+    "80",
+  );
+  assert.match(
+    dashboardLabels["traefik.http.routers.gonvex-maker-dashboard-lehttp.rule"],
+    /gonvex-maker-dashboard\.whagons\.com/,
+  );
+});
+
 test("first retained backup waits for runtime and exposes restore-tested health", () => {
   const { services } = resolvedCompose();
   const backup = services["gonvex-maker-postgres-backup"];

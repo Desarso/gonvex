@@ -156,6 +156,15 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    labels:
+      - traefik.enable=true
+      - "traefik.http.routers.gonvex-maker-runtime-lehttp.rule=Host(`gonvex-maker.whagons.com`) && PathPrefix(`/`)"
+      - traefik.http.routers.gonvex-maker-runtime-lehttp.entryPoints=https
+      - traefik.http.routers.gonvex-maker-runtime-lehttp.tls=true
+      - traefik.http.routers.gonvex-maker-runtime-lehttp.tls.certresolver=lehttp
+      - traefik.http.routers.gonvex-maker-runtime-lehttp.priority=1000
+      - traefik.http.routers.gonvex-maker-runtime-lehttp.service=gonvex-maker-runtime-lehttp
+      - traefik.http.services.gonvex-maker-runtime-lehttp.loadbalancer.server.port=8080
     healthcheck:
       test:
         - CMD-SHELL
@@ -207,6 +216,15 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    labels:
+      - traefik.enable=true
+      - "traefik.http.routers.gonvex-maker-dashboard-lehttp.rule=Host(`gonvex-maker-dashboard.whagons.com`) && PathPrefix(`/`)"
+      - traefik.http.routers.gonvex-maker-dashboard-lehttp.entryPoints=https
+      - traefik.http.routers.gonvex-maker-dashboard-lehttp.tls=true
+      - traefik.http.routers.gonvex-maker-dashboard-lehttp.tls.certresolver=lehttp
+      - traefik.http.routers.gonvex-maker-dashboard-lehttp.priority=1000
+      - traefik.http.routers.gonvex-maker-dashboard-lehttp.service=gonvex-maker-dashboard-lehttp
+      - traefik.http.services.gonvex-maker-dashboard-lehttp.loadbalancer.server.port=80
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz | grep -qx ok"]
       interval: 10s
