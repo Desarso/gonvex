@@ -3401,9 +3401,10 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
 
   useEffect(() => {
     if (didAutoDiscoverProjects.current) return;
+    if (loginRequired && !session) return;
     didAutoDiscoverProjects.current = true;
     void refreshRuntimeProjects();
-  }, [refreshRuntimeProjects]);
+  }, [loginRequired, refreshRuntimeProjects, session]);
 
   useEffect(() => {
     if (!actionMessage) return;

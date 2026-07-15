@@ -118,6 +118,88 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/projects");
   });
 
+  it("waits for a native Google session before discovering runtime projects", async () => {
+    const project = {
+      id: "google-owned-app",
+      name: "Google-owned App",
+      environment: "production",
+      runtimeUrl: "https://runtime.example.test",
+      database: "gonvex_google_owned_app",
+      storageBucket: "google-owned-app-production",
+      status: "local",
+      description: "Runtime project",
+      provisioned: true,
+      runtimeCreated: true,
+      databaseMode: "single",
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/dashboard/session")) {
+        return { ok: false, status: 401, statusText: "Unauthorized", json: async () => ({ error: "unauthorized" }) } as Response;
+      }
+      if (url.endsWith("/dev/auth/me")) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({ account: { email: "gabriel@example.com", name: "Gabriel", role: "admin" } }),
+        } as Response;
+      }
+      if (url.endsWith("/dev/projects")) {
+        const authorization = new Headers(init?.headers).get("authorization");
+        if (!authorization) {
+          return {
+            headers: new Headers({ "content-type": "application/json" }),
+            ok: false,
+            status: 401,
+            statusText: "Unauthorized",
+            url,
+            json: async () => ({ error: "unauthorized" }),
+          } as Response;
+        }
+        return {
+          headers: new Headers({ "content-type": "application/json" }),
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          url,
+          json: async () => ({ projects: [project] }),
+        } as Response;
+      }
+      return { ok: true, status: 200, statusText: "OK", json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState(null, "", "/login");
+
+    const fetchAccessToken = vi.fn(async () => "google-dashboard-access-token");
+    const signIn = vi.fn(async () => undefined);
+    const signOut = vi.fn(async () => undefined);
+    const { rerender } = render(<App nativeAuth={{
+      error: "",
+      fetchAccessToken,
+      isAuthenticated: false,
+      isLoading: true,
+      signIn,
+      signOut,
+      user: null,
+    } as never} />);
+
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/dev/projects"))).toBe(false);
+
+    rerender(<App nativeAuth={{
+      error: "",
+      fetchAccessToken,
+      isAuthenticated: true,
+      isLoading: false,
+      signIn,
+      signOut,
+      user: { email: "gabriel@example.com", name: "Gabriel", picture: "https://example.test/avatar.png" },
+    } as never} />);
+
+    expect(await screen.findByText("Google-owned App")).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/projects");
+  });
+
   it("normalizes dashboard email allowlists", () => {
     expect(parseEmailAllowlist(" Gabriel@Example.com, gabriel@example.com ; admin@example.com\n")).toEqual([
       "gabriel@example.com",
