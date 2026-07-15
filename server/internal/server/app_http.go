@@ -38,7 +38,7 @@ func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 	tenant := tenantIDFromRequest(project, tenantID(r))
 	caller := callerContext{}
 	token := bearerToken(r)
-	if s.projectRequiresAuthentication(r.Context(), project) || token != "" {
+	if (s.projectRequiresAuthentication(r.Context(), project) && !function.Public) || token != "" {
 		user, permissions, authenticatedProject, authenticatedTenant, err := s.authenticateSocket(
 			r.Context(), project, tenant, token, tenantID(r),
 		)

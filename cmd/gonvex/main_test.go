@@ -9,6 +9,28 @@ import (
 	"github.com/gonvex/gonvex/pkg/manifest"
 )
 
+func TestParseRegistrationsIncludesPublicHTTPAsHTTP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "register.go")
+	source := `package backend
+
+func Register(app interface{ PublicHTTP(string, any) }) {
+	app.PublicHTTP("/webhooks/provider", ProviderWebhook)
+}
+`
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := parseRegistrations(dir, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := entries["/webhooks/provider"]
+	if !ok || entry.Kind != manifest.FunctionKindHTTP || entry.Handler != "ProviderWebhook" {
+		t.Fatalf("public HTTP registration = %#v", entry)
+	}
+}
+
 func TestParseSchemaScopesTables(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "schema.go")

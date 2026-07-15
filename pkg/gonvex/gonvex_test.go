@@ -38,6 +38,24 @@ func TestAppDispatchesQuery(t *testing.T) {
 	}
 }
 
+func TestPublicHTTPRecordsExplicitAnonymousVisibility(t *testing.T) {
+	app := NewApp()
+	handler := func(_ *HTTPContext, _ HTTPRequest) (HTTPResponse, error) {
+		return HTTPResponse{Status: 202}, nil
+	}
+	app.HTTP("/private", handler)
+	app.PublicHTTP("/provider-signed", handler)
+
+	private, ok := app.Lookup("/private")
+	if !ok || private.Public {
+		t.Fatalf("ordinary HTTP handler visibility = %#v", private)
+	}
+	public, ok := app.Lookup("/provider-signed")
+	if !ok || !public.Public || public.Kind != FunctionKindHTTP {
+		t.Fatalf("public HTTP handler visibility = %#v", public)
+	}
+}
+
 func TestAppDispatchRejectsUnknownArgFields(t *testing.T) {
 	app := NewApp()
 	app.Query("hello.echo", func(ctx *QueryCtx, args echoArgs) (string, error) {

@@ -243,6 +243,12 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 		})
 		return gonvex.HTTPResponse{Status: http.StatusOK, Body: payload}, nil
 	})
+	app.PublicHTTP("/provider-signed-callback", func(ctx *gonvex.HTTPContext, _ gonvex.HTTPRequest) (gonvex.HTTPResponse, error) {
+		if ctx.User != nil {
+			return gonvex.HTTPResponse{Status: http.StatusInternalServerError}, nil
+		}
+		return gonvex.HTTPResponse{Status: http.StatusAccepted}, nil
+	})
 	runtime.app = app
 	anonymousHTTPRequest := httptest.NewRequest(http.MethodGet, "/protected-account", nil)
 	anonymousHTTPRequest.Header.Set("x-gonvex-project-id", projectID)
@@ -258,6 +264,21 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 	runtime.Handler().ServeHTTP(authenticatedHTTPResponse, authenticatedHTTPRequest)
 	if authenticatedHTTPResponse.Code != http.StatusOK || !strings.Contains(authenticatedHTTPResponse.Body.String(), user.ID) || !strings.Contains(authenticatedHTTPResponse.Body.String(), `"role":"member"`) {
 		t.Fatalf("protected HTTP function did not receive the verified caller: %d %s", authenticatedHTTPResponse.Code, authenticatedHTTPResponse.Body.String())
+	}
+	publicHTTPRequest := httptest.NewRequest(http.MethodPost, "/provider-signed-callback", nil)
+	publicHTTPRequest.Header.Set("x-gonvex-project-id", projectID)
+	publicHTTPResponse := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(publicHTTPResponse, publicHTTPRequest)
+	if publicHTTPResponse.Code != http.StatusAccepted {
+		t.Fatalf("public signed callback required a user session: %d %s", publicHTTPResponse.Code, publicHTTPResponse.Body.String())
+	}
+	invalidPublicRequest := httptest.NewRequest(http.MethodPost, "/provider-signed-callback", nil)
+	invalidPublicRequest.Header.Set("x-gonvex-project-id", projectID)
+	invalidPublicRequest.Header.Set("authorization", "Bearer invalid-explicit-token")
+	invalidPublicResponse := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(invalidPublicResponse, invalidPublicRequest)
+	if invalidPublicResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("public callback ignored an explicitly invalid token: %d %s", invalidPublicResponse.Code, invalidPublicResponse.Body.String())
 	}
 	if _, _, err := runtime.exchangeAppAuthCode(context.Background(), projectID, code, verifier, redirectURI); err == nil {
 		t.Fatal("expected an authorization code replay to be rejected")
