@@ -2,10 +2,12 @@ name: gonvex-maker
 
 # Production stack for the isolated Moneymaker runtime on southgate. Coolify
 # supplies the SERVICE_* secrets on first import and attaches public domains
-# only to `runtime` and `dashboard`. Postgres, Valkey, MinIO, and backups stay
-# on the resource-private network and publish no host ports.
+# only to `gonvex-maker-runtime` and `gonvex-maker-dashboard`. Every service
+# name is stack-specific so Coolify's shared network cannot resolve a generic
+# alias to an unrelated application's container. Postgres, Valkey, MinIO, and
+# backups stay on the resource-private network and publish no host ports.
 services:
-  postgres:
+  gonvex-maker-postgres:
     image: postgres:17-alpine@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
     restart: unless-stopped
     environment:
@@ -28,7 +30,7 @@ services:
         reservations:
           memory: 1G
 
-  valkey:
+  gonvex-maker-valkey:
     image: valkey/valkey:8-alpine@sha256:b027235326507cfdade9b6684056ec1d0b0c0757412e628245129b5d7b788618
     restart: unless-stopped
     command:
@@ -59,7 +61,7 @@ services:
         reservations:
           memory: 256M
 
-  minio:
+  gonvex-maker-minio:
     image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -82,10 +84,10 @@ services:
         reservations:
           memory: 512M
 
-  minio-init:
+  gonvex-maker-minio-init:
     image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     depends_on:
-      minio:
+      gonvex-maker-minio:
         condition: service_healthy
     environment:
       MINIO_ROOT_USER: ${GONVEX_MINIO_ROOT_USER:-gonvex}
@@ -95,7 +97,7 @@ services:
       - /bin/sh
       - -ec
       - |
-        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc alias set local http://gonvex-maker-minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
         mc mb --ignore-existing "local/$${S3_BUCKET}"
         mc anonymous set none "local/$${S3_BUCKET}"
         touch /tmp/bucket-ready
@@ -107,23 +109,23 @@ services:
       timeout: 5s
       retries: 12
 
-  runtime:
+  gonvex-maker-runtime:
     build:
       context: .
       dockerfile: Dockerfile.runtime
     restart: unless-stopped
     depends_on:
-      postgres:
+      gonvex-maker-postgres:
         condition: service_healthy
-      valkey:
+      gonvex-maker-valkey:
         condition: service_healthy
-      minio-init:
+      gonvex-maker-minio-init:
         condition: service_healthy
     environment:
       GONVEX_ADDR: 0.0.0.0:8080
-      GONVEX_LANDLORD_DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@postgres:5432/gonvex?sslmode=disable
-      DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@postgres:5432/gonvex?sslmode=disable
-      VALKEY_URL: redis://valkey:6379/0
+      GONVEX_LANDLORD_DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
+      DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
+      VALKEY_URL: redis://gonvex-maker-valkey:6379/0
       GONVEX_PLUGIN_CACHE_DIR: /var/lib/gonvex/plugins
       GONVEX_DATA_DIR: /var/lib/gonvex/data
       GONVEX_TELEMETRY_LOG: /var/lib/gonvex/telemetry.jsonl
@@ -139,7 +141,7 @@ services:
       GONVEX_DASHBOARD_AUTH_PROJECT_ID: ${GONVEX_DASHBOARD_AUTH_PROJECT_ID:-}
       GONVEX_GOOGLE_CLIENT_ID: ${GONVEX_GOOGLE_CLIENT_ID:-}
       GONVEX_GOOGLE_CLIENT_SECRET: ${GONVEX_GOOGLE_CLIENT_SECRET:-}
-      S3_ENDPOINT: http://minio:9000
+      S3_ENDPOINT: http://gonvex-maker-minio:9000
       S3_REGION: ${GONVEX_S3_REGION:-us-east-1}
       S3_BUCKET: ${GONVEX_S3_BUCKET:-gonvex-production}
       S3_ACCESS_KEY_ID: ${GONVEX_MINIO_ROOT_USER:-gonvex}
@@ -173,7 +175,7 @@ services:
         reservations:
           memory: 1G
 
-  dashboard:
+  gonvex-maker-dashboard:
     build:
       context: .
       dockerfile: Dockerfile.dashboard
@@ -188,7 +190,7 @@ services:
         VITE_GONVEX_ALLOW_UNLISTED_EMAILS: "true"
     restart: unless-stopped
     depends_on:
-      runtime:
+      gonvex-maker-runtime:
         condition: service_healthy
     environment:
       PORT: "80"
@@ -197,7 +199,7 @@ services:
       DASHBOARD_AUTH_USER: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
       DASHBOARD_AUTH_PASSWORD: ${SERVICE_PASSWORD_64_GONVEX_DASHBOARD}
       DASHBOARD_SESSION_SECRET: ${SERVICE_REALBASE64_64_GONVEX_DASHBOARD_SESSION}
-      GONVEX_RUNTIME_URL: http://runtime:8080
+      GONVEX_RUNTIME_URL: http://gonvex-maker-runtime:8080
     read_only: true
     tmpfs:
       - /tmp:size=64M,mode=1777
@@ -219,14 +221,14 @@ services:
         reservations:
           memory: 128M
 
-  postgres-backup:
+  gonvex-maker-postgres-backup:
     image: postgres:17-alpine@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
     restart: unless-stopped
     depends_on:
-      runtime:
+      gonvex-maker-runtime:
         condition: service_healthy
     environment:
-      PGHOST: postgres
+      PGHOST: gonvex-maker-postgres
       PGPORT: "5432"
       PGUSER: gonvex
       PGPASSWORD: ${SERVICE_PASSWORD_64_GONVEX_POSTGRES}
@@ -251,6 +253,18 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          latest="$$(ls -1t /backups/gonvex-*.dump 2>/dev/null | head -n 1)" &&
+          test -n "$${latest}" &&
+          test "$$(wc -c < "$${latest}")" -ge 20000 &&
+          pg_restore --list "$${latest}" >/dev/null
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
     deploy:
       resources:
         limits:
