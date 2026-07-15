@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -56,6 +58,14 @@ describe("App", () => {
     vi.unstubAllGlobals();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
+  });
+
+  it("keeps the project chooser vertically scrollable", () => {
+    const css = readFileSync(resolve(process.cwd(), "src/App.css"), "utf8");
+    const projectsShellRule = css.match(/\.projects-shell\s*\{([^}]*)\}/)?.[1] ?? "";
+
+    expect(projectsShellRule).toMatch(/height:\s*100%/);
+    expect(projectsShellRule).toMatch(/overflow-y:\s*auto/);
   });
 
   it("signs in to the project list", async () => {
