@@ -4,11 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
@@ -22,10 +25,16 @@ var safeProjectID = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 const godanticImportPath = "github.com/Desarso/godantic"
 
 type Loader struct {
-	cacheDir   string
-	moduleRoot string
-	apps       map[string]*loadedProject
+	cacheDir           string
+	moduleRoot         string
+	runtimeFingerprint string
+	apps               map[string]*loadedProject
 }
+
+var (
+	runtimeFingerprintOnce  sync.Once
+	runtimeFingerprintValue string
+)
 
 type loadedProject struct {
 	hash string
@@ -37,10 +46,37 @@ func NewLoader(cacheDir string, moduleRoot string) *Loader {
 		cacheDir = filepath.Join(os.TempDir(), "gonvex-project-bundles")
 	}
 	return &Loader{
-		cacheDir:   cacheDir,
-		moduleRoot: strings.TrimSpace(moduleRoot),
-		apps:       map[string]*loadedProject{},
+		cacheDir:           cacheDir,
+		moduleRoot:         strings.TrimSpace(moduleRoot),
+		runtimeFingerprint: currentRuntimeFingerprint(),
+		apps:               map[string]*loadedProject{},
 	}
+}
+
+// currentRuntimeFingerprint scopes compiled Go plugins to the exact host
+// binary they were built against. plugin.Open can poison a process after it
+// attempts to load an incompatible plugin, so cache compatibility must be
+// decided before opening the file rather than by retrying after an error.
+func currentRuntimeFingerprint() string {
+	runtimeFingerprintOnce.Do(func() {
+		executable, err := os.Executable()
+		if err == nil {
+			file, openErr := os.Open(executable)
+			if openErr == nil {
+				hasher := sha256.New()
+				if _, copyErr := io.Copy(hasher, file); copyErr == nil {
+					runtimeFingerprintValue = hex.EncodeToString(hasher.Sum(nil))[:12]
+				}
+				_ = file.Close()
+			}
+		}
+		if runtimeFingerprintValue == "" {
+			fallback := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+			sum := sha256.Sum256([]byte(fallback))
+			runtimeFingerprintValue = hex.EncodeToString(sum[:])[:12]
+		}
+	})
+	return runtimeFingerprintValue
 }
 
 func (l *Loader) AppForProject(projectID string) *gonvex.App {

@@ -4,17 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/pkg/projectbundle"
 	"github.com/gonvex/gonvex/server/internal/config"
 )
+
+var bundleTestSequence atomic.Uint64
 
 func TestDevSyncLoadsProjectBundle(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -30,8 +34,9 @@ func TestDevSyncLoadsProjectBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	projectID := fmt.Sprintf("sync-test-%d", bundleTestSequence.Add(1))
 	bundle := manifest.SourceBundle{
-		ModulePath:  "gonvexapp/sync-test",
+		ModulePath:  "gonvexapp/" + projectID,
 		PackageName: "app",
 		Files: map[string]string{
 			"app/register.go": projectbundle.EncodeFile(source),
@@ -40,7 +45,7 @@ func TestDevSyncLoadsProjectBundle(t *testing.T) {
 	bundle.Hash = projectbundle.HashFiles(bundle.Files)
 
 	payload, err := json.Marshal(map[string]any{
-		"project":     "sync-test",
+		"project":     projectID,
 		"generatedAt": "now",
 		"functions": map[string]any{
 			"sample.echo": map[string]any{"kind": "query", "handler": "SampleEcho", "file": "app/register.go"},
@@ -52,18 +57,21 @@ func TestDevSyncLoadsProjectBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := New(config.Config{GonvexModuleRoot: moduleRoot})
+	server := New(config.Config{
+		GonvexModuleRoot: moduleRoot,
+		PluginCacheDir:   t.TempDir(),
+	})
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", bytes.NewReader(payload)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
 
-	app := server.runtime.AppForProject("sync-test")
+	app := server.runtime.AppForProject(projectID)
 	if app == nil {
 		t.Fatal("expected synced project app")
 	}
-	result, err := server.executeQuery(context.Background(), "sync-test", "sample.echo", json.RawMessage(`{"name":"Ada"}`))
+	result, err := server.executeQuery(context.Background(), projectID, "sample.echo", json.RawMessage(`{"name":"Ada"}`))
 	if err != nil {
 		t.Fatalf("execute synced query: %v", err)
 	}
