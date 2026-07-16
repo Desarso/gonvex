@@ -224,6 +224,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/projects/{project}/members", s.handleProjectMembers)
 	mux.HandleFunc("POST /dev/projects/{project}/invitations", s.handleCreateProjectInvitation)
 	mux.HandleFunc("POST /dev/projects/{project}/key", s.handleProjectKey)
+	mux.HandleFunc("POST /dev/projects/{project}/key/rotate", s.handleRotateProjectKey)
 	mux.HandleFunc("GET /dev/projects/{project}/env", s.handleProjectEnv)
 	mux.HandleFunc("POST /dev/projects/{project}/env", s.handleSetProjectEnv)
 	mux.HandleFunc("PUT /dev/projects/{project}/env", s.handleBulkProjectEnv)
@@ -680,13 +681,17 @@ func (s *Server) acceptsAdminKey(key string) bool {
 // open (local dev only).
 func (s *Server) acceptsSyncKey(projectID, provided string) bool {
 	provided = strings.TrimSpace(provided)
+	s.projectMu.RLock()
+	registered := ""
 	if projectID != "" {
-		if key := strings.TrimSpace(s.config.ProjectKeys[projectID]); key != "" {
-			return provided != "" && provided == key
-		}
+		registered = strings.TrimSpace(s.config.ProjectKeys[projectID])
+	}
+	s.projectMu.RUnlock()
+	if registered != "" {
+		return provided != "" && constantTimeString(provided, registered)
 	}
 	if s.config.DevSyncKey != "" {
-		return provided != "" && provided == s.config.DevSyncKey
+		return provided != "" && constantTimeString(provided, s.config.DevSyncKey)
 	}
 	return true
 }

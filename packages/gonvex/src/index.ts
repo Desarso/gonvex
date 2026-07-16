@@ -208,6 +208,7 @@ const accountTokenPermissions = [
   "projects:update",
   "projects:delete",
   "projects:keys:read",
+  "projects:keys:write",
   "projects:members:read",
   "projects:members:write",
   "projects:env:read",

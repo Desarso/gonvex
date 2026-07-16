@@ -384,6 +384,57 @@ func (s *Server) handleProjectKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"projectKey": projectKey})
 }
 
+// handleRotateProjectKey replaces a project's sync credential in one guarded
+// operation. Persistence happens before either in-memory lookup is changed, and
+// projectMu prevents concurrent key checks from observing a partially applied
+// rotation. The prior key is deliberately never copied into the response or a
+// log field.
+func (s *Server) handleRotateProjectKey(w http.ResponseWriter, r *http.Request) {
+	adminKey := s.acceptsAdminKey(syncKey(r))
+	var actor dashboardActor
+	signedIn := false
+	if !adminKey {
+		actor, signedIn = s.authorizeAccountRequest(w, r, permissionProjectsKeysWrite)
+		if !signedIn {
+			return
+		}
+	}
+	s.hydrateProjects()
+	projectID := strings.TrimSpace(r.PathValue("project"))
+	if projectID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
+		return
+	}
+	if signedIn && !adminKey && !s.canManageProject(r.Context(), actor, projectID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
+		return
+	}
+
+	s.projectMu.Lock()
+	defer s.projectMu.Unlock()
+	project, ok := s.projects[projectID]
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
+	}
+	projectKey, err := generateProjectKey(projectID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project key rotation failed"})
+		return
+	}
+	if err := s.persistProjectKey(r.Context(), projectID, projectKey); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project key rotation could not be persisted"})
+		return
+	}
+	if s.config.ProjectKeys == nil {
+		s.config.ProjectKeys = map[string]string{}
+	}
+	project.syncKey = projectKey
+	s.config.ProjectKeys[projectID] = projectKey
+	s.projects[projectID] = project
+	writeJSON(w, http.StatusOK, map[string]any{"projectKey": projectKey})
+}
+
 func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.authorizeAccountRequest(w, r, permissionProjectsDelete)
 	if !ok {
@@ -975,6 +1026,35 @@ func (s *Server) saveProjectRegistry(ctx context.Context, project projectTarget)
 			project.ID, singleAppAuthTenantRelationshipID(project.ID))
 	}
 	return err
+}
+
+// persistProjectKey updates only the project credential so key rotation cannot
+// partially fail after an unrelated registry side effect. Rotation fails closed
+// when durable registry storage is unavailable so a restart can never revive a
+// retired credential from static process configuration.
+func (s *Server) persistProjectKey(ctx context.Context, projectID string, projectKey string) error {
+	db, err := s.openProjectRegistry(ctx)
+	if err != nil {
+		return err
+	}
+	if db == nil {
+		return fmt.Errorf("project registry is unavailable")
+	}
+	defer db.Close()
+	result, err := db.ExecContext(ctx, `UPDATE gonvex_runtime_projects
+		SET project_key = $2, updated_at = now()
+		WHERE id = $1`, projectID, projectKey)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return fmt.Errorf("project key rotation expected one registry row, updated %d", updated)
+	}
+	return nil
 }
 
 func (s *Server) persistProjectErrorTrackingEnabled(ctx context.Context, projectID string) error {

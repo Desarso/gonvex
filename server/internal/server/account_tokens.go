@@ -19,6 +19,7 @@ const (
 	permissionProjectsUpdate       = "projects:update"
 	permissionProjectsDelete       = "projects:delete"
 	permissionProjectsKeysRead     = "projects:keys:read"
+	permissionProjectsKeysWrite    = "projects:keys:write"
 	permissionProjectsMembersRead  = "projects:members:read"
 	permissionProjectsMembersWrite = "projects:members:write"
 	permissionProjectsEnvRead      = "projects:env:read"
@@ -37,6 +38,7 @@ var accountTokenPermissions = map[string]struct{}{
 	permissionProjectsUpdate:       {},
 	permissionProjectsDelete:       {},
 	permissionProjectsKeysRead:     {},
+	permissionProjectsKeysWrite:    {},
 	permissionProjectsMembersRead:  {},
 	permissionProjectsMembersWrite: {},
 	permissionProjectsEnvRead:      {},

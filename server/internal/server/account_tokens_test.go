@@ -38,7 +38,7 @@ func TestNormalizeAccountTokenPermissions(t *testing.T) {
 
 func TestAccountTokenPermissionWildcards(t *testing.T) {
 	actor := dashboardActor{credentialKind: "personalAccessToken", tokenPermissions: []string{"projects:*"}}
-	if !actor.hasAccountPermission(permissionProjectsCreate) || !actor.hasAccountPermission(permissionProjectsKeysRead) {
+	if !actor.hasAccountPermission(permissionProjectsCreate) || !actor.hasAccountPermission(permissionProjectsKeysRead) || !actor.hasAccountPermission(permissionProjectsKeysWrite) {
 		t.Fatal("projects:* did not grant project permissions")
 	}
 	if actor.hasAccountPermission(permissionTokensCreate) {
@@ -49,6 +49,10 @@ func TestAccountTokenPermissionWildcards(t *testing.T) {
 	}
 	if actor.hasGlobalProjectAccess() {
 		t.Fatal("projects:* unexpectedly granted global project administration")
+	}
+	keyReader := dashboardActor{credentialKind: "personalAccessToken", tokenPermissions: []string{permissionProjectsKeysRead}}
+	if keyReader.hasAccountPermission(permissionProjectsKeysWrite) {
+		t.Fatal("project key read permission unexpectedly granted rotation permission")
 	}
 
 	userSession := dashboardActor{Role: "user", credentialKind: "session"}
