@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gonvex/gonvex/server/internal/config"
 )
@@ -702,23 +701,19 @@ func TestTenantStoreResolverReturnsNoopStoreWithoutDatabaseURL(t *testing.T) {
 	}
 }
 
-func TestTenantStoreResolverReapsIdleStores(t *testing.T) {
-	now := time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC)
+func TestTenantStoreResolverRetainsLogicalStoresWhilePhysicalConnectionsExpire(t *testing.T) {
 	resolver := newTenantStoreResolver(&config.Config{})
-	resolver.now = func() time.Time { return now }
-	resolver.idleTTL = time.Minute
 
 	store, err := resolver.TenantStore(context.Background(), "tenant-a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resolver.stores["tenant-a"] = store
-	now = now.Add(2 * time.Minute)
 
-	if got := resolver.ReapIdle(); got != 1 {
-		t.Fatalf("expected one reaped store, got %d", got)
+	if got := resolver.ReapIdle(); got != 0 {
+		t.Fatalf("expected logical pools to be retained, reaped %d", got)
 	}
-	if len(resolver.stores) != 0 {
-		t.Fatalf("expected empty stores after reap, got %#v", resolver.stores)
+	if len(resolver.stores) != 1 {
+		t.Fatalf("expected logical pool to remain cached, got %#v", resolver.stores)
 	}
 }

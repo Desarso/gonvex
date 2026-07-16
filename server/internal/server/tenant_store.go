@@ -17,12 +17,20 @@ const (
 )
 
 type tenantStoreResolver struct {
-	cfg     *config.Config
-	now     func() time.Time
-	idleTTL time.Duration
+	cfg          *config.Config
+	now          func() time.Time
+	idleTTL      time.Duration
+	openDatabase func(context.Context, string) (*sql.DB, error)
 
-	mu     sync.Mutex
-	stores map[string]*tenantStore
+	mu           sync.Mutex
+	stores       map[string]*tenantStore
+	initializing map[string]*tenantStoreInitialization
+}
+
+type tenantStoreInitialization struct {
+	done  chan struct{}
+	store *tenantStore
+	err   error
 }
 
 type tenantStore struct {
@@ -44,11 +52,26 @@ type databasePoolStats struct {
 
 func newTenantStoreResolver(cfg *config.Config) *tenantStoreResolver {
 	return &tenantStoreResolver{
-		cfg:     cfg,
-		now:     time.Now,
-		idleTTL: defaultTenantStoreIdleTTL,
-		stores:  map[string]*tenantStore{},
+		cfg:          cfg,
+		now:          time.Now,
+		idleTTL:      defaultTenantStoreIdleTTL,
+		openDatabase: openTenantDatabase,
+		stores:       map[string]*tenantStore{},
+		initializing: map[string]*tenantStoreInitialization{},
 	}
+}
+
+func openTenantDatabase(ctx context.Context, databaseURL string) (*sql.DB, error) {
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	dbpool.Configure(db)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
 }
 
 func (r *tenantStoreResolver) StartIdleReaper(ctx context.Context) {
@@ -81,64 +104,69 @@ func (r *tenantStoreResolver) Store(ctx context.Context, tenantID string, databa
 		return &tenantStore{TenantID: tenantID, lastUsed: r.now()}, nil
 	}
 
-	r.mu.Lock()
-	if store := r.stores[tenantID]; store != nil && store.DatabaseURL == databaseURL {
-		store.lastUsed = r.now()
+	for {
+		r.mu.Lock()
+		if store := r.stores[tenantID]; store != nil && store.DatabaseURL == databaseURL {
+			store.lastUsed = r.now()
+			r.mu.Unlock()
+			return store, nil
+		}
+		if pending := r.initializing[tenantID]; pending != nil {
+			done := pending.done
+			r.mu.Unlock()
+			select {
+			case <-done:
+				if pending.err != nil {
+					return nil, pending.err
+				}
+				if pending.store != nil && pending.store.DatabaseURL == databaseURL {
+					return pending.store, nil
+				}
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		pending := &tenantStoreInitialization{done: make(chan struct{})}
+		r.initializing[tenantID] = pending
 		r.mu.Unlock()
-		return store, nil
-	}
-	r.mu.Unlock()
 
-	db, err := sql.Open("pgx", databaseURL)
+		store, err := r.initializeStore(ctx, tenantID, databaseURL)
+		r.mu.Lock()
+		if err == nil {
+			if previous := r.stores[tenantID]; previous != nil && previous.DatabaseURL != databaseURL && previous.DB != nil {
+				_ = previous.DB.Close()
+			}
+			r.stores[tenantID] = store
+		}
+		pending.store = store
+		pending.err = err
+		delete(r.initializing, tenantID)
+		close(pending.done)
+		r.mu.Unlock()
+		return store, err
+	}
+}
+
+func (r *tenantStoreResolver) initializeStore(ctx context.Context, tenantID string, databaseURL string) (*tenantStore, error) {
+	db, err := r.openDatabase(ctx, databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	dbpool.Configure(db)
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 
-	store := &tenantStore{
+	return &tenantStore{
 		TenantID:    tenantID,
 		DatabaseURL: databaseURL,
 		DB:          db,
 		lastUsed:    r.now(),
-	}
-
-	r.mu.Lock()
-	if previous := r.stores[tenantID]; previous != nil && previous.DatabaseURL == databaseURL {
-		previous.lastUsed = r.now()
-		r.mu.Unlock()
-		_ = db.Close()
-		return previous, nil
-	} else if previous != nil {
-		_ = previous.DB.Close()
-	}
-	r.stores[tenantID] = store
-	r.mu.Unlock()
-	return store, nil
+	}, nil
 }
 
 func (r *tenantStoreResolver) ReapIdle() int {
-	cutoff := r.now().Add(-r.idleTTL)
-	var closing []*sql.DB
-
-	r.mu.Lock()
-	for tenantID, store := range r.stores {
-		if store.lastUsed.Before(cutoff) {
-			delete(r.stores, tenantID)
-			closing = append(closing, store.DB)
-		}
-	}
-	r.mu.Unlock()
-
-	for _, db := range closing {
-		if db != nil {
-			_ = db.Close()
-		}
-	}
-	return len(closing)
+	// database/sql retires idle physical connections using the configured
+	// timeout. Retain the logical pool so future requests do not repeat tenant
+	// resolution and pool initialization.
+	return 0
 }
 
 func (r *tenantStoreResolver) Close() {

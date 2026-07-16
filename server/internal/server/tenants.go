@@ -296,12 +296,11 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 	if strings.TrimSpace(projectDatabaseURL) == "" {
 		return
 	}
-	db, err := sql.Open("pgx", projectDatabaseURL)
+	store, err := s.tenantStores.Store(ctx, tenantStoreKey(project, "__landlord__"), projectDatabaseURL)
 	if err != nil {
 		return
 	}
-	defer db.Close()
-	rows, err := db.QueryContext(ctx, `SELECT id, COALESCE(name, ''), COALESCE(database, ''), COALESCE(domain, '') FROM tenants ORDER BY name, id`)
+	rows, err := store.DB.QueryContext(ctx, `SELECT id, COALESCE(name, ''), COALESCE(database, ''), COALESCE(domain, '') FROM tenants ORDER BY name, id`)
 	if err != nil {
 		return
 	}
@@ -960,18 +959,33 @@ func (s *Server) applyTenantSchemasForProject(ctx context.Context, project strin
 }
 
 func (s *Server) hydrateProjectTenantDatabases(ctx context.Context, project string) {
+	s.hydrateProjectTenantDatabasesWith(ctx, project, s.hydrateProjectTenantDatabasesUncached)
+}
+
+func (s *Server) hydrateProjectTenantDatabasesWith(
+	ctx context.Context,
+	project string,
+	hydrate func(context.Context, string),
+) {
 	project = strings.TrimSpace(project)
 	if project == "" {
 		return
 	}
+	_, _, _ = s.tenantHydrations.Do(project, func() (any, error) {
+		if !s.shouldHydrateProjectTenants(project) {
+			return nil, nil
+		}
+		hydrate(ctx, project)
+		return nil, nil
+	})
+}
+
+func (s *Server) hydrateProjectTenantDatabasesUncached(ctx context.Context, project string) {
 
 	// The project's own landlord database is an explicit source of tenant
 	// relationships. Hydrate it before the registry so legacy rows are assigned
 	// a stable relationship UUID and win over old suffix-derived aliases.
 	s.hydrateLandlordTenants(ctx, project)
-	if !s.shouldHydrateProjectTenants(project) {
-		return
-	}
 
 	registered, err := s.loadTenantRegistry(ctx, project)
 	if err != nil {
@@ -1174,12 +1188,15 @@ func (s *Server) existingLocalDatabaseNames(ctx context.Context) map[string]bool
 	if strings.TrimSpace(s.config.PostgresURL) == "" {
 		return nil
 	}
-	db, err := openMaintenanceDB(s.config.PostgresURL)
+	maintenanceURL, err := databaseURL(s.config.PostgresURL, "postgres")
 	if err != nil {
 		return nil
 	}
-	defer db.Close()
-	rows, err := db.QueryContext(ctx, `
+	store, err := s.tenantStores.Store(ctx, "__maintenance__", maintenanceURL)
+	if err != nil {
+		return nil
+	}
+	rows, err := store.DB.QueryContext(ctx, `
 		SELECT datname
 		FROM pg_database
 		WHERE datistemplate = false

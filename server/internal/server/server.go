@@ -25,6 +25,7 @@ import (
 	"github.com/gonvex/gonvex/server/internal/datafiles"
 	"github.com/gonvex/gonvex/server/internal/runtime"
 	"github.com/gonvex/gonvex/server/internal/schema"
+	"golang.org/x/sync/singleflight"
 )
 
 type Server struct {
@@ -47,6 +48,7 @@ type Server struct {
 	authRegistryDB    *sql.DB
 	tenantHydrationMu sync.Mutex
 	tenantHydrationAt map[string]time.Time
+	tenantHydrations  singleflight.Group
 	wsMu              sync.RWMutex
 	wsConns           map[*wsConn]bool
 	tableChangeMu     sync.Mutex
@@ -118,7 +120,6 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	server.scheduler = newScheduler(server.runScheduledJob)
 	server.tenantStores = newTenantStoreResolver(&server.config)
 	server.loadConfiguredTenantDatabases()
-	server.tenantStores.StartIdleReaper(context.Background())
 	server.startLandlordMigrations()
 	server.scheduler.start(context.Background())
 	go server.hydrateRuntimeState(context.Background())
