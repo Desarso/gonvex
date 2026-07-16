@@ -689,6 +689,15 @@ function logEntryText(entry: RuntimeLogEntry): string {
   ].join(" ").toLowerCase();
 }
 
+function runtimeLogKey(entry: RuntimeLogEntry): string {
+  return entry.executionId ?? [entry.time, entry.path, entry.kind, entry.durationMs].join("|");
+}
+
+export function runtimeLogsForCopy(logs: RuntimeLogEntry[], selectedIDs: ReadonlySet<string>): RuntimeLogEntry[] {
+  if (selectedIDs.size === 0) return logs;
+  return logs.filter((entry) => selectedIDs.has(runtimeLogKey(entry)));
+}
+
 function storedLogColumnWidths(): Record<string, number> {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(logsColumnWidthsKey) ?? "{}") as Record<string, number>;
@@ -3019,6 +3028,13 @@ function ManifestGrid(props: {
     props.onSelectionChange?.(empty);
   }, [props.clearSelectionKey]);
 
+  useEffect(() => {
+    if (!props.selectableRows || !props.selectedRows) return;
+    let rows = CompactSelection.empty();
+    for (const row of props.selectedRows) rows = rows.add(row);
+    setGridSelection((current) => current.rows.equals(rows) ? current : { ...current, rows });
+  }, [props.selectableRows, props.selectedRows]);
+
   const theme = props.noGridLines
     ? {
       ...gridThemeFor(props.themeMode),
@@ -3326,7 +3342,14 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
       const runtimeProjects = await fetchRuntimeProjects();
       if (runtimeProjects.length === 0) return;
       const currentActiveProject = activeProjectRef.current;
-      const preferred = preferredRuntimeProject(currentActiveProject, runtimeProjects);
+      const requestedProjectID = projectIDFromPath(window.location.pathname);
+      const requestedProject = requestedProjectID
+        ? runtimeProjects.find((project) => project.id === requestedProjectID) ?? null
+        : null;
+      // On a cold deep-link reload the project list is initially empty, so
+      // activeProjectRef cannot identify the UUID from the URL yet. Honor the
+      // route before falling back to the default/first runtime project.
+      const preferred = requestedProject ?? preferredRuntimeProject(currentActiveProject, runtimeProjects);
       setProjects((current) => mergeRuntimeProjects(current, runtimeProjects));
       if (!isProjectChooserPath(window.location.pathname)
         && preferred
@@ -7326,7 +7349,8 @@ function runtimeLogRequestText(entry: RuntimeLogEntry): string {
 export function LogDetailsSheet(props: { entry: RuntimeLogEntry; onClose: () => void; onAction: ActionHandler }) {
   const [tab, setTab] = useState<"execution" | "request">("execution");
   const requestText = runtimeLogRequestText(props.entry);
-  const executionID = props.entry.executionId ?? "Legacy log entry";
+  const executionID = props.entry.executionId ?? "Not captured by this runtime";
+  const executionHeader = props.entry.executionId ?? "—";
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -7367,7 +7391,7 @@ export function LogDetailsSheet(props: { entry: RuntimeLogEntry; onClose: () => 
           <div className="log-sheet-title">
             <div className="log-sheet-kicker">
               <span className={`log-outcome-dot log-outcome-dot--${props.entry.outcome === "error" ? "error" : "ok"}`} />
-              <code>{executionID}</code>
+              <code>{executionHeader}</code>
               <span>{formatLogDateTime(props.entry.time)}</span>
             </div>
             <h2>{props.entry.path || "Runtime execution"}</h2>
@@ -7417,6 +7441,8 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   const [outcome, setOutcome] = useState("all");
   const [kind, setKind] = useState("all");
   const [selectedLog, setSelectedLog] = useState<RuntimeLogEntry | null>(null);
+  const [selectedLogIDs, setSelectedLogIDs] = useState<Set<string>>(() => new Set());
+  const [selectionClearKey, setSelectionClearKey] = useState(0);
   const [hoveredLogRow, setHoveredLogRow] = useState<number | null>(null);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => storedLogColumnWidths());
   const logs = (metrics?.logs ?? []).filter((entry) => entry.project === props.project.id);
@@ -7429,6 +7455,10 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     if (kind !== "all" && entryKind !== kind) return false;
     return !search.trim() || logEntryText(entry).includes(search.trim().toLowerCase());
   });
+  const selectedVisibleRows = useMemo(() => new Set(visibleLogs.flatMap((entry, index) => (
+    selectedLogIDs.has(runtimeLogKey(entry)) ? [index] : []
+  ))), [selectedLogIDs, visibleLogs]);
+  const selectedLogCount = selectedLogIDs.size;
 
   const logColumnDefs: { title: string; id: string; width: number }[] = [
     { title: "Time", id: "time", width: 168 },
@@ -7445,7 +7475,7 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   }));
   const logRows: GridRow[] = visibleLogs.map((entry) => [
     formatLogDateTime(entry.time),
-    entry.executionId ? entry.executionId.slice(0, 8) : "legacy",
+    entry.executionId ? entry.executionId.slice(0, 8) : "—",
     entry.kind || "unknown",
     entry.outcome || "unknown",
     entry.path || "runtime",
@@ -7490,15 +7520,27 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   };
 
   const copyLogs = async () => {
-    if (visibleLogs.length === 0) {
+    const copySource = selectedLogCount > 0 ? logs : visibleLogs;
+    const logsToCopy = runtimeLogsForCopy(copySource, selectedLogIDs);
+    if (logsToCopy.length === 0) {
       props.onAction("No logs to copy");
       return;
     }
     const header = logColumnDefs.map((column) => column.title).join("\t");
-    const body = logRows.map((row) => row.join("\t")).join("\n");
+    const body = logsToCopy.map((entry) => [
+      formatLogDateTime(entry.time),
+      entry.executionId ? entry.executionId.slice(0, 8) : "—",
+      entry.kind || "unknown",
+      entry.outcome || "unknown",
+      entry.path || "runtime",
+      formatDuration(entry.durationMs),
+      entry.error
+        ? entry.error
+        : [entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || "", entry.cache ? `cache ${entry.cache}` : ""].filter(Boolean).join(" · ") || "—",
+    ].join("\t")).join("\n");
     try {
       await navigator.clipboard.writeText(`${header}\n${body}`);
-      props.onAction(`Copied ${visibleLogs.length} log ${visibleLogs.length === 1 ? "entry" : "entries"}`);
+      props.onAction(`Copied ${logsToCopy.length} log ${logsToCopy.length === 1 ? "entry" : "entries"}`);
     } catch {
       props.onAction("Could not copy logs to clipboard");
     }
@@ -7523,6 +7565,8 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
         logs: current.logs.filter((entry) => entry.project !== props.project.id),
       } : current);
       setSelectedLog(null);
+      setSelectedLogIDs(new Set());
+      setSelectionClearKey((key) => key + 1);
       setStatus(`Showing 0 runtime log entries for ${props.project.name}`);
       props.onAction(`Cleared ${cleared} runtime log ${cleared === 1 ? "entry" : "entries"}`);
     } catch {
@@ -7541,6 +7585,8 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
 
   useEffect(() => {
     setSelectedLog(null);
+    setSelectedLogIDs(new Set());
+    setSelectionClearKey((key) => key + 1);
   }, [props.project.id]);
 
   return (
@@ -7590,8 +7636,13 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
             <h2>{props.project.name} runtime logs</h2>
           </div>
           <div className="logs-panel-actions">
-            <Button size="sm" variant="secondary" onPress={copyLogs} isDisabled={visibleLogs.length === 0}>
-              Copy
+            {selectedLogCount > 0 ? (
+              <Button size="sm" variant="ghost" onPress={() => { setSelectedLogIDs(new Set()); setSelectionClearKey((key) => key + 1); }}>
+                Clear {selectedLogCount} selected
+              </Button>
+            ) : null}
+            <Button size="sm" variant="secondary" onPress={copyLogs} isDisabled={visibleLogs.length === 0 && selectedLogCount === 0}>
+              {selectedLogCount > 0 ? `Copy selected (${selectedLogCount})` : "Copy visible"}
             </Button>
             <Button size="sm" variant="secondary" onPress={clearLogs} isDisabled={logs.length === 0}>
               Clear logs
@@ -7610,13 +7661,18 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
             height="100%"
             rowHeight={32}
             themeMode={props.themeMode}
+            selectableRows
+            clearSelectionKey={selectionClearKey}
+            selectedRows={selectedVisibleRows}
             onColumnResize={(column, newSize) => persistColumnWidth(String(column.id), newSize)}
             onCellClick={([, row]) => setSelectedLog(visibleLogs[row] ?? null)}
+            onSelectionChange={(selection) => setSelectedLogIDs(new Set(selection.rows.toArray().flatMap((row) => {
+              const entry = visibleLogs[row];
+              return entry ? [runtimeLogKey(entry)] : [];
+            })))}
             onItemHovered={(event) => setHoveredLogRow(event.kind === "cell" ? event.location[1] : null)}
             hoveredRow={hoveredLogRow}
-            disableSelection
             zebraRows
-            hideRowMarkers
             overlay={logRows.length === 0 ? (
               <div className="data-empty-state" role="status">
                 <span>{metrics ? "No logs match the current filters." : "No runtime logs are available yet."}</span>

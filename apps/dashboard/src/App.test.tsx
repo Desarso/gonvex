@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, DatabaseHealthSection, LogDetailsSheet, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist } from "./App";
+import { App, DatabaseHealthSection, LogDetailsSheet, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist, runtimeLogsForCopy } from "./App";
 
 async function renderProjectApp() {
   const user = userEvent.setup();
@@ -125,6 +125,28 @@ describe("App", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it("copies only explicitly selected runtime log rows", () => {
+    const logs = [
+      { time: "2026-07-16T19:09:28Z", executionId: "exec-a", path: "tasks.list", kind: "query", outcome: "ok", durationMs: 10 },
+      { time: "2026-07-16T19:09:29Z", executionId: "exec-b", path: "tasks.update", kind: "mutation", outcome: "ok", durationMs: 20 },
+      { time: "2026-07-16T19:09:30Z", executionId: "exec-c", path: "tasks.remove", kind: "mutation", outcome: "error", durationMs: 30 },
+    ];
+
+    expect(runtimeLogsForCopy(logs, new Set(["exec-b", "exec-c"])).map((entry) => entry.executionId)).toEqual(["exec-b", "exec-c"]);
+    expect(runtimeLogsForCopy(logs, new Set())).toEqual(logs);
+  });
+
+  it("explains logs whose runtime did not capture an execution id", () => {
+    render(<LogDetailsSheet
+      entry={{ time: "2026-07-16T19:09:28Z", path: "tasks.list", kind: "query", outcome: "ok", durationMs: 10 }}
+      onClose={vi.fn()}
+      onAction={vi.fn()}
+    />);
+
+    expect(screen.getByText("Not captured by this runtime")).toBeInTheDocument();
+    expect(screen.queryByText(/legacy log/i)).not.toBeInTheDocument();
+  });
+
   it("signs in to the project list", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -183,6 +205,54 @@ describe("App", () => {
     expect(await within(projectsGrid).findByText("Remote App")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /choose a project/i })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/projects");
+  });
+
+  it("preserves a UUID project deep link while runtime projects load", async () => {
+    const requestedProjectID = "3db6f499-421c-42a2-a43d-1daa44ecbc4d";
+    const runtimeProjects = [
+      {
+        id: "skills",
+        name: "Skills",
+        environment: "production",
+        runtimeUrl: "https://runtime.example.test",
+        database: "gonvex_dev",
+        storageBucket: "skills-production",
+        status: "local",
+        description: "Default runtime project",
+        provisioned: true,
+        runtimeCreated: true,
+        databaseMode: "single",
+      },
+      {
+        id: requestedProjectID,
+        name: "Whagons Production",
+        environment: "production",
+        runtimeUrl: "https://runtime.example.test",
+        database: "whagons_production",
+        storageBucket: "whagons-production",
+        status: "local",
+        description: "Requested runtime project",
+        provisioned: true,
+        runtimeCreated: true,
+        databaseMode: "multiTenant",
+      },
+    ];
+    vi.stubGlobal("WebSocket", undefined);
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ projects: runtimeProjects }),
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      url: "/dev/projects",
+    } as Response)));
+    window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({ email: "gabriel@example.com", name: "Gabriel" }));
+    window.history.replaceState(null, "", `/projects/${requestedProjectID}/overview`);
+
+    render(<App />);
+
+    expect(await screen.findByText("Whagons Production", { selector: ".project-card strong" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe(`/projects/${requestedProjectID}/overview`);
   });
 
   it("waits for a native Google session before discovering runtime projects", async () => {
