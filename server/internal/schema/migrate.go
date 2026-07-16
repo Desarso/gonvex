@@ -172,9 +172,19 @@ func existingColumns(ctx context.Context, db *sql.DB, table string) (map[string]
 		if err := rows.Scan(&column, &udtName, &nullable, &primaryKey); err != nil {
 			return nil, err
 		}
-		columns[column] = existingColumn{Type: manifestType(udtName), Nullable: nullable, PrimaryKey: primaryKey}
+		rememberExistingColumn(columns, column, existingColumn{Type: manifestType(udtName), Nullable: nullable, PrimaryKey: primaryKey})
 	}
 	return columns, rows.Err()
+}
+
+// A column can appear more than once when it participates in both a primary key
+// and another key constraint. Preserve the primary-key fact regardless of row
+// order so reconciliation never mistakes an unchanged key for an unsafe change.
+func rememberExistingColumn(columns map[string]existingColumn, name string, candidate existingColumn) {
+	if current, ok := columns[name]; ok {
+		candidate.PrimaryKey = candidate.PrimaryKey || current.PrimaryKey
+	}
+	columns[name] = candidate
 }
 
 func createTableSQL(name string, table manifest.Table) (string, error) {
