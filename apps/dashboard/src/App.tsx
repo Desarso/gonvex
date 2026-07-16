@@ -192,6 +192,24 @@ type RuntimeWebSocketMetrics = {
   subscriptions: number;
 };
 
+export type RuntimeDatabaseMetrics = {
+  pools: number;
+  openConnections: number;
+  inUse: number;
+  idle: number;
+  maxOpenConnections: number;
+  waitCount: number;
+  waitDurationMs: number;
+  series: Array<{
+    time: string;
+    openConnections: number;
+    inUse: number;
+    idle: number;
+    waitCount: number;
+    waitDurationMs: number;
+  }>;
+};
+
 type RuntimeSchedulerCron = {
   name: string;
   project?: string;
@@ -240,6 +258,7 @@ type RuntimeMetricsResponse = {
   cache: RuntimeCacheMetrics;
   running?: RuntimeRunningMetrics;
   websocket?: RuntimeWebSocketMetrics;
+  database?: RuntimeDatabaseMetrics;
   scheduler?: RuntimeSchedulerMetrics | null;
   logs: RuntimeLogEntry[];
 };
@@ -4287,6 +4306,9 @@ const HEALTH_COLORS = {
   lag: "var(--accent)",
   completed: "var(--success)",
   failed: "var(--danger)",
+  databaseInUse: "#4f7cff",
+  databaseIdle: "#8ea8d8",
+  databaseWait: "var(--warning)",
 };
 
 const HEALTH_TOOLTIP_STYLE = {
@@ -4367,6 +4389,79 @@ function HealthChartCard(props: { title: string; value?: string; tone?: "default
       <div className="health-chart">{props.children}</div>
       {props.hint ? <span className="health-card-hint">{props.hint}</span> : null}
     </Card>
+  );
+}
+
+export function DatabaseHealthSection(props: { database: RuntimeDatabaseMetrics }) {
+  const points = props.database.series.map((point) => ({
+    ...point,
+    label: shortClockLabel(point.time),
+    "In use": point.inUse,
+    Idle: point.idle,
+    "Wait time": point.waitDurationMs,
+  }));
+  const hasWaits = props.database.waitCount > 0;
+  const maxOpenLabel = props.database.maxOpenConnections > 0
+    ? `${props.database.maxOpenConnections} max`
+    : "elastic limit";
+
+  return (
+    <section className="health-section database-health" aria-label="Database load">
+      <div className="health-section-head">
+        <h3>Database load</h3>
+        <span data-tone={hasWaits ? "warning" : "success"}>{hasWaits ? `${props.database.waitCount} waits` : "no connection waits"}</span>
+      </div>
+
+      <div className="database-pressure-strip">
+        <div><span>Pools</span><strong>{props.database.pools}</strong></div>
+        <div><span>Open</span><strong>{props.database.openConnections}</strong><small>{maxOpenLabel}</small></div>
+        <div><span>Active</span><strong>{props.database.inUse} in use</strong></div>
+        <div><span>Ready</span><strong>{props.database.idle} idle</strong></div>
+        <div data-tone={hasWaits ? "warning" : undefined}><span>Pressure</span><strong>{props.database.waitCount} waits</strong><small>{formatDuration(props.database.waitDurationMs)} total</small></div>
+      </div>
+
+      {hasWaits ? (
+        <p className="database-pressure-note" data-tone="warning">
+          {props.database.waitCount} connections waited for a database slot. Compare these spikes with execution time to confirm pool contention.
+        </p>
+      ) : (
+        <p className="database-pressure-note">No connection waits recorded. PostgreSQL is accepting work without queueing inside Gonvex.</p>
+      )}
+
+      <div className="health-grid">
+        <HealthChartCard title="Connection occupancy" value={`${props.database.openConnections} open`} hint="physical PostgreSQL connections sampled every 2s">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={points} margin={HEALTH_CHART_MARGIN}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+              <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+              <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={28} allowDecimals={false} />
+              <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} />
+              <Legend wrapperStyle={{ fontSize: 11 }} iconType="plainline" />
+              <Area type="stepAfter" dataKey="In use" stackId="connections" stroke={HEALTH_COLORS.databaseInUse} fill={HEALTH_COLORS.databaseInUse} fillOpacity={0.42} isAnimationActive={false} />
+              <Area type="stepAfter" dataKey="Idle" stackId="connections" stroke={HEALTH_COLORS.databaseIdle} fill={HEALTH_COLORS.databaseIdle} fillOpacity={0.2} isAnimationActive={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </HealthChartCard>
+
+        <HealthChartCard title="Pool wait time" value={formatDuration(props.database.waitDurationMs)} tone={hasWaits ? "warning" : "success"} hint="time spent waiting for a free application connection">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={points} margin={HEALTH_CHART_MARGIN}>
+              <defs>
+                <linearGradient id="databaseWaitFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={HEALTH_COLORS.databaseWait} stopOpacity={0.35} />
+                  <stop offset="100%" stopColor={HEALTH_COLORS.databaseWait} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+              <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+              <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={36} tickFormatter={(value) => `${Math.round(value)}`} />
+              <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => formatDuration(Number(value))} />
+              <Area type="monotone" dataKey="Wait time" stroke={HEALTH_COLORS.databaseWait} strokeWidth={2} fill="url(#databaseWaitFill)" isAnimationActive={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </HealthChartCard>
+      </div>
+    </section>
   );
 }
 
@@ -4520,6 +4615,8 @@ function OverviewPage(props: { project: ProjectTarget }) {
             </HealthChartCard>
           </div>
         </section>
+
+        {metrics?.database ? <DatabaseHealthSection database={metrics.database} /> : null}
 
         <section className="health-section" aria-label="Concurrency and scheduler">
           <div className="health-section-head">

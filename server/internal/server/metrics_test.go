@@ -61,3 +61,27 @@ func TestRuntimeFunctionLogIncludesExecutionContext(t *testing.T) {
 		t.Fatalf("request = %s", entry.Request)
 	}
 }
+
+func TestRuntimeMetricsTracksDatabasePoolPressure(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	metrics.recordDatabase("project-a", databasePoolStats{
+		Pools:              2,
+		OpenConnections:    8,
+		InUse:              3,
+		Idle:               5,
+		MaxOpenConnections: 0,
+		WaitCount:          4,
+		WaitDuration:       125000000,
+	})
+
+	snapshot := metrics.snapshot(manifest.Manifest{}, 0, 0, "project-a")
+	if snapshot.Database.Pools != 2 || snapshot.Database.OpenConnections != 8 || snapshot.Database.InUse != 3 || snapshot.Database.Idle != 5 {
+		t.Fatalf("database snapshot = %+v", snapshot.Database)
+	}
+	if snapshot.Database.WaitCount != 4 || snapshot.Database.WaitDurationMS != 125 {
+		t.Fatalf("database waits = %+v", snapshot.Database)
+	}
+	if len(snapshot.Database.Series) != 1 || snapshot.Database.Series[0].WaitCount != 4 || snapshot.Database.Series[0].WaitDurationMS != 125 {
+		t.Fatalf("database series = %+v", snapshot.Database.Series)
+	}
+}

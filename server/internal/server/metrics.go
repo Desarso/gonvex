@@ -14,10 +14,11 @@ import (
 )
 
 const (
-	metricsBucketWidth       = 30 * time.Second
-	metricsBucketCount       = 24
-	metricsLogLimit          = 1000
-	metricsTelemetryLogLimit = 1000
+	metricsBucketWidth        = 30 * time.Second
+	metricsBucketCount        = 24
+	metricsLogLimit           = 1000
+	metricsTelemetryLogLimit  = 1000
+	metricsDatabasePointLimit = 360
 )
 
 type runtimeMetrics struct {
@@ -27,6 +28,7 @@ type runtimeMetrics struct {
 	cache          cacheMetrics
 	runningByKind  map[string]int64
 	runningBuckets map[int64]map[string]int64
+	database       map[string]*databaseMetricState
 	logs           []runtimeLogEntry
 	telemetryLogs  []transactionTelemetryEntry
 	telemetryPath  string
@@ -66,6 +68,13 @@ type cacheMetricsBucket struct {
 	Hits     int64
 	Misses   int64
 	Bypasses int64
+}
+
+type databaseMetricState struct {
+	Current          databasePoolStats
+	PreviousWaits    int64
+	PreviousWaitTime time.Duration
+	Series           []databaseMetricPoint
 }
 
 type runtimeLogEntry struct {
@@ -175,10 +184,31 @@ type runtimeMetricsSnapshot struct {
 	Cache            cacheMetricSnapshot                  `json:"cache"`
 	Running          runningMetricSnapshot                `json:"running"`
 	WebSocket        websocketMetricSnapshot              `json:"websocket"`
+	Database         databaseMetricSnapshot               `json:"database"`
 	Scheduler        *schedulerSnapshot                   `json:"scheduler,omitempty"`
 	Logs             []runtimeLogEntry                    `json:"logs"`
 	TelemetryLogs    []transactionTelemetryEntry          `json:"telemetryLogs"`
 	TelemetryLogPath string                               `json:"telemetryLogPath,omitempty"`
+}
+
+type databaseMetricSnapshot struct {
+	Pools              int                   `json:"pools"`
+	OpenConnections    int                   `json:"openConnections"`
+	InUse              int                   `json:"inUse"`
+	Idle               int                   `json:"idle"`
+	MaxOpenConnections int                   `json:"maxOpenConnections"`
+	WaitCount          int64                 `json:"waitCount"`
+	WaitDurationMS     float64               `json:"waitDurationMs"`
+	Series             []databaseMetricPoint `json:"series"`
+}
+
+type databaseMetricPoint struct {
+	Time            string  `json:"time"`
+	OpenConnections int     `json:"openConnections"`
+	InUse           int     `json:"inUse"`
+	Idle            int     `json:"idle"`
+	WaitCount       int64   `json:"waitCount"`
+	WaitDurationMS  float64 `json:"waitDurationMs"`
 }
 
 type runningMetricSnapshot struct {
@@ -274,6 +304,7 @@ func newRuntimeMetrics(telemetryPath ...string) *runtimeMetrics {
 		cache:          cacheMetrics{Buckets: map[int64]*cacheMetricsBucket{}},
 		runningByKind:  map[string]int64{},
 		runningBuckets: map[int64]map[string]int64{},
+		database:       map[string]*databaseMetricState{},
 		telemetryPath:  path,
 		logSubscribers: map[int]logSubscriber{},
 	}
@@ -521,6 +552,43 @@ func (m *runtimeMetrics) recordCache(project string, outcome string) {
 	m.cache.trimBuckets(now)
 }
 
+func (m *runtimeMetrics) recordDatabase(project string, stats databasePoolStats) {
+	if m == nil {
+		return
+	}
+	now := time.Now().UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state := m.database[project]
+	if state == nil {
+		state = &databaseMetricState{}
+		m.database[project] = state
+	}
+	waitCount := stats.WaitCount - state.PreviousWaits
+	if waitCount < 0 {
+		waitCount = 0
+	}
+	waitDuration := stats.WaitDuration - state.PreviousWaitTime
+	if waitDuration < 0 {
+		waitDuration = 0
+	}
+	state.Current = stats
+	state.PreviousWaits = stats.WaitCount
+	state.PreviousWaitTime = stats.WaitDuration
+	state.Series = append(state.Series, databaseMetricPoint{
+		Time:            now.Format(time.RFC3339Nano),
+		OpenConnections: stats.OpenConnections,
+		InUse:           stats.InUse,
+		Idle:            stats.Idle,
+		WaitCount:       waitCount,
+		WaitDurationMS:  float64(waitDuration.Microseconds()) / 1000,
+	})
+	if len(state.Series) > metricsDatabasePointLimit {
+		state.Series = state.Series[len(state.Series)-metricsDatabasePointLimit:]
+	}
+}
+
 func (m *runtimeMetrics) recordTransaction(entry transactionTelemetryEntry) {
 	if m == nil || entry.Path == "" || entry.Kind == "" {
 		return
@@ -654,9 +722,29 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 			Connections:   connections,
 			Subscriptions: subscriptions,
 		},
+		Database:         m.databaseSnapshot(projectFilter),
 		Logs:             logs,
 		TelemetryLogs:    telemetryLogs,
 		TelemetryLogPath: m.telemetryPath,
+	}
+}
+
+func (m *runtimeMetrics) databaseSnapshot(project string) databaseMetricSnapshot {
+	state := m.database[project]
+	if state == nil {
+		return databaseMetricSnapshot{Series: []databaseMetricPoint{}}
+	}
+	series := make([]databaseMetricPoint, len(state.Series))
+	copy(series, state.Series)
+	return databaseMetricSnapshot{
+		Pools:              state.Current.Pools,
+		OpenConnections:    state.Current.OpenConnections,
+		InUse:              state.Current.InUse,
+		Idle:               state.Current.Idle,
+		MaxOpenConnections: state.Current.MaxOpenConnections,
+		WaitCount:          state.Current.WaitCount,
+		WaitDurationMS:     float64(state.Current.WaitDuration.Microseconds()) / 1000,
+		Series:             series,
 	}
 }
 

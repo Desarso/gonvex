@@ -4387,6 +4387,74 @@ h1 {
   font-size: 0.72rem;
 }
 
+.database-health .health-section-head span[data-tone="warning"] {
+  color: var(--warning);
+}
+
+.database-health .health-section-head span[data-tone="success"] {
+  color: var(--success);
+}
+
+.database-pressure-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--field-radius) + 2px);
+  background: var(--surface);
+}
+
+.database-pressure-strip > div {
+  display: flex;
+  min-width: 0;
+  min-height: 72px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  border-right: 1px solid var(--separator);
+  padding: 10px 14px;
+}
+
+.database-pressure-strip > div:last-child {
+  border-right: 0;
+}
+
+.database-pressure-strip span,
+.database-pressure-strip small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.database-pressure-strip strong {
+  overflow: hidden;
+  color: var(--foreground);
+  font: 650 1rem/1.25 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.database-pressure-strip > div[data-tone="warning"] {
+  background: color-mix(in oklab, var(--warning) 7%, var(--surface));
+}
+
+.database-pressure-strip > div[data-tone="warning"] strong {
+  color: var(--warning);
+}
+
+.database-pressure-note {
+  margin: -3px 0 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.database-pressure-note[data-tone="warning"] {
+  color: color-mix(in oklab, var(--warning) 80%, var(--foreground));
+}
+
 .health-rail-card {
   display: flex;
   flex-direction: column;
@@ -4471,6 +4539,16 @@ h1 {
 @media (max-width: 1100px) {
   .health-stat-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .health-grid { grid-template-columns: minmax(0, 1fr); }
+  .database-pressure-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .database-pressure-strip > div:nth-child(3) { border-right: 0; }
+  .database-pressure-strip > div:nth-child(-n + 3) { border-bottom: 1px solid var(--separator); }
+}
+
+@media (max-width: 640px) {
+  .database-pressure-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .database-pressure-strip > div { border-right: 1px solid var(--separator); border-bottom: 1px solid var(--separator); }
+  .database-pressure-strip > div:nth-child(2n) { border-right: 0; }
+  .database-pressure-strip > div:last-child { border-bottom: 0; }
 }
 /* Incident command: a dense, technical surface that reads like an operations log. */
 .errors-inbox { display: grid; gap: 16px; }

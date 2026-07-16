@@ -32,6 +32,16 @@ type tenantStore struct {
 	lastUsed    time.Time
 }
 
+type databasePoolStats struct {
+	Pools              int
+	OpenConnections    int
+	InUse              int
+	Idle               int
+	MaxOpenConnections int
+	WaitCount          int64
+	WaitDuration       time.Duration
+}
+
 func newTenantStoreResolver(cfg *config.Config) *tenantStoreResolver {
 	return &tenantStoreResolver{
 		cfg:     cfg,
@@ -144,6 +154,42 @@ func (r *tenantStoreResolver) Close() {
 			_ = store.DB.Close()
 		}
 	}
+}
+
+func (r *tenantStoreResolver) DatabaseStats(projectID string) databasePoolStats {
+	if r == nil {
+		return databasePoolStats{}
+	}
+	prefix := strings.TrimSpace(projectID) + ":"
+	r.mu.Lock()
+	databases := make([]*sql.DB, 0, len(r.stores))
+	for key, store := range r.stores {
+		if store == nil || store.DB == nil || (projectID != "" && !strings.HasPrefix(key, prefix)) {
+			continue
+		}
+		databases = append(databases, store.DB)
+	}
+	r.mu.Unlock()
+
+	result := databasePoolStats{Pools: len(databases)}
+	unlimited := false
+	for _, database := range databases {
+		stats := database.Stats()
+		result.OpenConnections += stats.OpenConnections
+		result.InUse += stats.InUse
+		result.Idle += stats.Idle
+		result.WaitCount += stats.WaitCount
+		result.WaitDuration += stats.WaitDuration
+		if stats.MaxOpenConnections == 0 {
+			unlimited = true
+		} else {
+			result.MaxOpenConnections += stats.MaxOpenConnections
+		}
+	}
+	if unlimited {
+		result.MaxOpenConnections = 0
+	}
+	return result
 }
 
 func normalizeTenantID(tenantID string) string {

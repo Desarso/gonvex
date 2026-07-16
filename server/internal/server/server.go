@@ -303,6 +303,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) metricsSnapshot(ctx context.Context, project string) runtimeMetricsSnapshot {
 	connections, subscriptions := s.websocketStats()
 	s.hydrateRuntimeStateForProject(ctx, project)
+	s.metrics.recordDatabase(project, s.tenantStores.DatabaseStats(project))
 	snapshot := s.metrics.snapshot(s.runtime.ManifestForProject(project), connections, subscriptions, project)
 	if s.scheduler != nil {
 		schedulerSnapshot := s.scheduler.snapshot()

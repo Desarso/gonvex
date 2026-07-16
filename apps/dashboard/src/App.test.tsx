@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, LogDetailsSheet, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist } from "./App";
+import { App, DatabaseHealthSection, LogDetailsSheet, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist } from "./App";
 
 async function renderProjectApp() {
   const user = userEvent.setup();
@@ -58,6 +58,26 @@ describe("App", () => {
     vi.unstubAllGlobals();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
+  });
+
+  it("shows database connection load and pool waits", () => {
+    render(<DatabaseHealthSection database={{
+      pools: 2,
+      openConnections: 6,
+      inUse: 2,
+      idle: 4,
+      maxOpenConnections: 0,
+      waitCount: 3,
+      waitDurationMs: 125,
+      series: [{ time: "2026-07-16T19:09:28Z", openConnections: 6, inUse: 2, idle: 4, waitCount: 3, waitDurationMs: 125 }],
+    }} />);
+
+    const section = screen.getByRole("region", { name: /database load/i });
+    expect(within(section).getByText("2", { selector: "strong" })).toBeInTheDocument();
+    expect(within(section).getByText("2 in use")).toBeInTheDocument();
+    expect(within(section).getByText("4 idle")).toBeInTheDocument();
+    expect(within(section).getAllByText("3 waits")).toHaveLength(2);
+    expect(within(section).getByText(/connections waited for a database slot/i)).toBeInTheDocument();
   });
 
   it("keeps the project chooser vertically scrollable", () => {
