@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const defaultRowsCacheTTL = 10 * time.Minute
+
 type Config struct {
 	Addr              string
 	LandlordURL       string
@@ -68,7 +70,7 @@ func FromEnv() Config {
 		GonvexModuleRoot:       env("GONVEX_MODULE_ROOT", ""),
 		PluginCacheDir:         env("GONVEX_PLUGIN_CACHE_DIR", ""),
 		ValkeyURL:              env("VALKEY_URL", env("REDIS_URL", "")),
-		RowsCacheTTL:           envDuration("GONVEX_ROWS_CACHE_TTL", 15*time.Second),
+		RowsCacheTTL:           envDuration("GONVEX_ROWS_CACHE_TTL", defaultRowsCacheTTL),
 		TelemetryEnabled:       envBool("GONVEX_TELEMETRY_ENABLED", true),
 		TelemetryLogPath:       env("GONVEX_TELEMETRY_LOG", "tmp/gonvex-telemetry.jsonl"),
 		S3Endpoint:             env("S3_ENDPOINT", ""),

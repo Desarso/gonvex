@@ -82,7 +82,7 @@ services:
       VALKEY_URL: redis://valkey:6379/0
       GONVEX_PLUGIN_CACHE_DIR: /var/lib/gonvex/plugins
       GONVEX_TELEMETRY_LOG: /var/lib/gonvex/telemetry.jsonl
-      GONVEX_ROWS_CACHE_TTL: 15s
+      GONVEX_ROWS_CACHE_TTL: 10m
       S3_ENDPOINT: http://minio:9000
       S3_REGION: us-east-1
       S3_BUCKET: gonvex-dev
