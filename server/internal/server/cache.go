@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -45,14 +47,22 @@ func (c *rowsCache) rowsKey(projectID string, tenantID string, table string, que
 }
 
 func (c *rowsCache) get(ctx context.Context, key string) ([]byte, bool) {
+	value, outcome := c.read(ctx, key)
+	return value, outcome == "hit"
+}
+
+func (c *rowsCache) read(ctx context.Context, key string) ([]byte, string) {
 	if !c.enabled() {
-		return nil, false
+		return nil, "bypass"
 	}
 	value, err := c.client.Get(ctx, key).Bytes()
-	if errors.Is(err, redis.Nil) || err != nil {
-		return nil, false
+	if errors.Is(err, redis.Nil) {
+		return nil, "miss"
 	}
-	return value, true
+	if err != nil {
+		return nil, "error"
+	}
+	return value, "hit"
 }
 
 func (c *rowsCache) set(ctx context.Context, key string, value []byte) {
@@ -60,6 +70,36 @@ func (c *rowsCache) set(ctx context.Context, key string, value []byte) {
 		return
 	}
 	_ = c.client.Set(ctx, key, value, c.ttl).Err()
+}
+
+func (c *rowsCache) queryKey(projectID string, tenantID string, generation int64, scope string, path string, args []byte) string {
+	projectID, tenantID = cacheScope(projectID, tenantID)
+	prefix := "gonvex:queries:v1:" + cacheKeyPart(projectID) + ":" + cacheKeyPart(tenantID) + ":" + strconv.FormatInt(generation, 10) + ":"
+	hash := sha256.Sum256([]byte(strings.Join([]string{scope, path, string(args)}, "\x00")))
+	return prefix + hex.EncodeToString(hash[:])
+}
+
+func (c *rowsCache) queryGeneration(ctx context.Context, projectID string, tenantID string) (int64, bool) {
+	if !c.enabled() {
+		return 0, false
+	}
+	value, err := c.client.Get(ctx, c.queryGenerationKey(projectID, tenantID)).Int64()
+	if errors.Is(err, redis.Nil) {
+		return 0, true
+	}
+	return value, err == nil
+}
+
+func (c *rowsCache) invalidateQueries(ctx context.Context, projectID string, tenantID string) {
+	if !c.enabled() {
+		return
+	}
+	_ = c.client.Incr(ctx, c.queryGenerationKey(projectID, tenantID)).Err()
+}
+
+func (c *rowsCache) queryGenerationKey(projectID string, tenantID string) string {
+	projectID, tenantID = cacheScope(projectID, tenantID)
+	return "gonvex:queries:v1:generation:" + cacheKeyPart(projectID) + ":" + cacheKeyPart(tenantID)
 }
 
 func (c *rowsCache) invalidateRows(ctx context.Context, projectID string, tenantID string, table string) {
@@ -71,6 +111,10 @@ func (c *rowsCache) invalidateRows(ctx context.Context, projectID string, tenant
 	if table != "" {
 		pattern = "gonvex:rows:v2:" + projectID + ":" + tenantID + ":" + table + ":*"
 	}
+	c.deletePattern(ctx, pattern)
+}
+
+func (c *rowsCache) deletePattern(ctx context.Context, pattern string) {
 	var cursor uint64
 	for {
 		keys, nextCursor, err := c.client.Scan(ctx, cursor, pattern, 100).Result()
@@ -85,6 +129,11 @@ func (c *rowsCache) invalidateRows(ctx context.Context, projectID string, tenant
 		}
 		cursor = nextCursor
 	}
+}
+
+func cacheKeyPart(value string) string {
+	hash := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(hash[:12])
 }
 
 func cacheScope(projectID string, tenantID string) (string, string) {

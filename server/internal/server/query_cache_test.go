@@ -1,11 +1,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/config"
@@ -14,6 +18,77 @@ import (
 
 type queryCacheTestArgs struct {
 	Value string `json:"value"`
+}
+
+func TestWebSocketQueryLogsRedisAndDatabaseSources(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	var executions atomic.Int32
+	app := gonvex.NewApp()
+	app.Query("cache.source", func(_ *gonvex.QueryCtx, args queryCacheTestArgs) (map[string]string, error) {
+		executions.Add(1)
+		return map[string]string{"value": args.Value}, nil
+	})
+	runtime := NewWithApp(config.Config{
+		QueryCacheEnabled: true,
+		ValkeyURL:         "redis://" + redisServer.Addr(),
+		RowsCacheTTL:      time.Minute,
+	}, app)
+	t.Cleanup(func() { _ = runtime.cache.close() })
+	httpServer := httptest.NewServer(runtime.Handler())
+	defer httpServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws?project=project-a"
+	connection, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	var ready serverMessage
+	if err := connection.ReadJSON(&ready); err != nil {
+		t.Fatal(err)
+	}
+
+	query := func(id string) {
+		t.Helper()
+		if err := connection.WriteJSON(clientMessage{
+			Type: "query.subscribe",
+			ID:   id,
+			Path: "cache.source",
+			Args: json.RawMessage(`{"value":"same"}`),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var result serverMessage
+		if err := connection.ReadJSON(&result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Type != "query.result" {
+			t.Fatalf("unexpected query result: %+v", result)
+		}
+	}
+
+	query("query-db")
+	query("query-redis")
+	if got := executions.Load(); got != 1 {
+		t.Fatalf("expected Redis to avoid the second function execution, got %d executions", got)
+	}
+
+	snapshot := runtime.metrics.snapshot(manifest.Manifest{}, 0, 0, "project-a")
+	sources := map[string]int{}
+	for _, entry := range snapshot.Logs {
+		if entry.Path == "cache.source" {
+			sources[entry.Source+":"+entry.Cache]++
+		}
+	}
+	if sources["database:miss"] != 1 || sources["redis:hit"] != 1 {
+		t.Fatalf("expected one database miss and one Redis hit, got %+v logs=%+v", sources, snapshot.Logs)
+	}
+
+	runtime.cache.invalidateQueries(context.Background(), "project-a", "project-a")
+	query("query-after-invalidate")
+	if got := executions.Load(); got != 2 {
+		t.Fatalf("expected invalidation to force a database execution, got %d executions", got)
+	}
 }
 
 func TestQueryCacheDirectiveIsStableAndScopeSafe(t *testing.T) {

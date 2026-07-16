@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, DatabaseHealthSection, LogDetailsSheet, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist, runtimeLogsForCopy } from "./App";
+import { App, DatabaseHealthSection, LogDetailsSheet, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist, runtimeLogSourceSummary, runtimeLogsForCopy } from "./App";
 
 async function renderProjectApp() {
   const user = userEvent.setup();
@@ -107,6 +107,8 @@ describe("App", () => {
         durationMs: 425,
         request: { workspaceId: "workspace-a", accessToken: "[REDACTED]" },
         requestSizeBytes: 84,
+        cache: "hit",
+        source: "redis",
       }}
       onClose={onClose}
       onAction={vi.fn()}
@@ -116,6 +118,8 @@ describe("App", () => {
     expect(within(sheet).getAllByText("exec-425")).toHaveLength(2);
     expect(within(sheet).getByText("tenant-a")).toBeInTheDocument();
     expect(within(sheet).getByText("425 ms")).toBeInTheDocument();
+    expect(within(sheet).getByText("Redis")).toBeInTheDocument();
+    expect(within(sheet).getByText("Redis hit; database skipped")).toBeInTheDocument();
 
     await user.click(within(sheet).getByRole("button", { name: /^request$/i }));
     expect(within(sheet).getByText(/workspace-a/)).toBeInTheDocument();
@@ -123,6 +127,28 @@ describe("App", () => {
 
     await user.click(within(sheet).getByRole("button", { name: /close execution details/i }));
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("distinguishes Redis hits from database cache misses", () => {
+    expect(runtimeLogSourceSummary({
+      time: "2026-07-16T19:09:28Z",
+      path: "tasks.list",
+      kind: "query",
+      outcome: "ok",
+      durationMs: 10,
+      source: "redis",
+      cache: "hit",
+    })).toMatchObject({ label: "Redis", detail: "Redis hit; database skipped", key: "redis-hit" });
+
+    expect(runtimeLogSourceSummary({
+      time: "2026-07-16T19:09:28Z",
+      path: "tasks.list",
+      kind: "query",
+      outcome: "ok",
+      durationMs: 10,
+      source: "database",
+      cache: "miss",
+    })).toMatchObject({ label: "Database", detail: "Redis miss; database executed", key: "database-miss" });
   });
 
   it("copies only explicitly selected runtime log rows", () => {

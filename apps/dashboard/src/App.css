@@ -2088,7 +2088,7 @@ h1 {
 
 .logs-toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 150px 150px auto;
+  grid-template-columns: minmax(180px, 1fr) repeat(3, 112px) auto;
   align-items: end;
   gap: 10px;
   border: 1px solid var(--border);

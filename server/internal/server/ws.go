@@ -684,6 +684,7 @@ func (s *Server) broadcastTenantTableChangeAt(projectID string, tenantID string,
 func (s *Server) broadcastMutationInvalidationsAt(projectID string, tenantID string, path string, changedAt time.Time) {
 	tables := mutationInvalidationTables(path)
 	if len(tables) == 0 {
+		s.cache.invalidateQueries(context.Background(), projectID, tenantIDFromRequest(projectID, tenantID))
 		return
 	}
 	changedTables := make(map[string]bool, len(tables))
@@ -716,6 +717,7 @@ func (s *Server) broadcastTenantRowIDChange(projectID string, tenantID string, t
 }
 
 func (s *Server) scheduleTableChange(change tableChange) {
+	s.cache.invalidateQueries(context.Background(), change.project, change.tenant)
 	changedTables := tableChangeTables(change)
 	for _, table := range changedTables {
 		s.cache.invalidateRows(context.Background(), change.project, change.tenant, table)
@@ -868,7 +870,7 @@ func (s *Server) executeSubscription(ctx context.Context, sub querySubscription,
 	}
 	startedAt := time.Now().UTC()
 	cacheRevision := s.nextQueryCacheRevision()
-	result, err := s.executeTenantQueryForCaller(ctx, sub.project, sub.tenant, sub.caller, sub.path, sub.args)
+	result, err := s.executeTenantQueryForCallerCached(ctx, sub.project, sub.tenant, sub.caller, sub.path, sub.args, sub.cacheScope, reason)
 	if ctx.Err() != nil {
 		return
 	}
@@ -933,14 +935,67 @@ func (s *Server) executeTenantQuery(ctx context.Context, projectID string, tenan
 }
 
 func (s *Server) executeTenantQueryForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
+	return s.executeTenantQueryForCallerCached(ctx, projectID, tenantID, caller, path, rawArgs, "", "internal")
+}
+
+func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage, cacheScope string, reason string) (result any, err error) {
 	kind := s.functionKind(projectID, path, "query")
 	s.metrics.recordFunctionStart(kind)
 	execution := newRuntimeFunctionLog(projectID, tenantID, path, kind, caller, rawArgs)
+	execution.entry.Cache = "bypass"
+	execution.entry.Source = "database"
+	execution.entry.Reason = reason
 	defer func() {
 		s.metrics.recordFunctionEnd(kind)
 		s.metrics.recordFunctionExecution(execution, err)
 	}()
 
+	cacheKey := ""
+	cacheGeneration := int64(0)
+	if strings.TrimSpace(cacheScope) != "" && s.cache.enabled() {
+		if generation, ok := s.cache.queryGeneration(ctx, projectID, tenantID); ok {
+			cacheGeneration = generation
+			cacheKey = s.cache.queryKey(projectID, tenantID, generation, cacheScope, path, rawArgs)
+		} else {
+			execution.entry.Cache = "error"
+		}
+		if cacheKey != "" {
+			payload, outcome := s.cache.read(ctx, cacheKey)
+			if outcome == "hit" {
+				if decodeErr := json.Unmarshal(payload, &result); decodeErr == nil {
+					execution.entry.Cache = "hit"
+					execution.entry.Source = "redis"
+					s.metrics.recordCache(projectID, "hit")
+					return result, nil
+				}
+				execution.entry.Cache = "error"
+				s.metrics.recordCache(projectID, "bypass")
+			} else {
+				execution.entry.Cache = outcome
+				if outcome == "miss" {
+					s.metrics.recordCache(projectID, "miss")
+				} else {
+					s.metrics.recordCache(projectID, "bypass")
+				}
+			}
+		} else {
+			s.metrics.recordCache(projectID, "bypass")
+		}
+	} else if strings.TrimSpace(cacheScope) != "" {
+		s.metrics.recordCache(projectID, "bypass")
+	}
+
+	result, err = s.executeTenantQueryForCallerUncached(ctx, projectID, tenantID, caller, path, rawArgs)
+	if err == nil && cacheKey != "" {
+		currentGeneration, generationOK := s.cache.queryGeneration(ctx, projectID, tenantID)
+		if payload, encodeErr := json.Marshal(result); encodeErr == nil && generationOK && currentGeneration == cacheGeneration {
+			s.cache.set(ctx, cacheKey, payload)
+		}
+	}
+	return result, err
+}
+
+func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (any, error) {
 	if isLegacyTaskQuery(path) {
 		return s.executeLegacyQuery(ctx, projectID, tenantID, path, rawArgs)
 	}

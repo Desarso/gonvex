@@ -177,6 +177,8 @@ export type RuntimeLogEntry = {
   durationMs: number;
   error?: string;
   cache?: string;
+  source?: string;
+  reason?: string;
   request?: unknown;
   requestSizeBytes?: number;
 };
@@ -673,6 +675,7 @@ function formatLogDateTime(value: string): string {
 }
 
 function logEntryText(entry: RuntimeLogEntry): string {
+  const source = runtimeLogSourceSummary(entry);
   return [
     entry.time,
     entry.executionId ?? "",
@@ -683,10 +686,41 @@ function logEntryText(entry: RuntimeLogEntry): string {
     entry.kind,
     entry.outcome,
     entry.cache ?? "",
+    entry.source ?? "",
+    source.tableLabel,
     entry.error ?? "",
     entry.request ? JSON.stringify(entry.request) : "",
     formatDuration(entry.durationMs),
   ].join(" ").toLowerCase();
+}
+
+type RuntimeLogSourceSummary = {
+  key: string;
+  group: "redis" | "database" | "unknown";
+  label: string;
+  tableLabel: string;
+  detail: string;
+};
+
+export function runtimeLogSourceSummary(entry: RuntimeLogEntry): RuntimeLogSourceSummary {
+  const source = entry.source?.toLowerCase();
+  const cache = entry.cache?.toLowerCase();
+  if (source === "redis" || cache === "hit") {
+    return { key: "redis-hit", group: "redis", label: "Redis", tableLabel: "Redis hit", detail: "Redis hit; database skipped" };
+  }
+  if (source === "database" || cache === "miss" || cache === "bypass" || cache === "error") {
+    if (cache === "miss") return { key: "database-miss", group: "database", label: "Database", tableLabel: "DB miss", detail: "Redis miss; database executed" };
+    if (cache === "error") return { key: "database-error", group: "database", label: "Database", tableLabel: "DB fallback", detail: "Redis error; database fallback" };
+    if (cache === "bypass") return { key: "database-bypass", group: "database", label: "Database", tableLabel: "DB off", detail: "Redis not checked; database executed" };
+    return { key: "database", group: "database", label: "Database", tableLabel: "DB", detail: "Database executed" };
+  }
+  return {
+    key: "unknown",
+    group: "unknown",
+    label: "Not tracked",
+    tableLabel: "—",
+    detail: entry.kind === "query" ? "Source not captured by this runtime" : "Not a cached query",
+  };
 }
 
 function runtimeLogKey(entry: RuntimeLogEntry): string {
@@ -4607,7 +4641,7 @@ function OverviewPage(props: { project: ProjectTarget }) {
               </ResponsiveContainer>
             </HealthChartCard>
 
-            <HealthChartCard title="Cache Hit Rate" value={`${cacheHitRate.toFixed(0)}%`} tone="success" hint="row cache hits ÷ requests">
+            <HealthChartCard title="Cache Hit Rate" value={`${cacheHitRate.toFixed(0)}%`} tone="success" hint="Redis hits ÷ cache lookups">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={derived.cacheSeries} margin={HEALTH_CHART_MARGIN}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
@@ -7351,6 +7385,7 @@ export function LogDetailsSheet(props: { entry: RuntimeLogEntry; onClose: () => 
   const requestText = runtimeLogRequestText(props.entry);
   const executionID = props.entry.executionId ?? "Not captured by this runtime";
   const executionHeader = props.entry.executionId ?? "—";
+  const source = runtimeLogSourceSummary(props.entry);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -7380,7 +7415,9 @@ export function LogDetailsSheet(props: { entry: RuntimeLogEntry; onClose: () => 
     ["Tenant", props.entry.tenant ?? "Not captured"],
     ["User", props.entry.userEmail || props.entry.userId || "Anonymous / not captured"],
     ["Outcome", props.entry.outcome || "unknown"],
-    ["Cache", props.entry.cache ?? "Not applicable"],
+    ["Source", source.label],
+    ["Cache", source.detail],
+    ["Trigger", props.entry.reason || "Not captured"],
     ["Request size", props.entry.requestSizeBytes ? `${props.entry.requestSizeBytes.toLocaleString()} B` : "Not captured"],
   ];
 
@@ -7440,6 +7477,7 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   const [search, setSearch] = useState("");
   const [outcome, setOutcome] = useState("all");
   const [kind, setKind] = useState("all");
+  const [source, setSource] = useState("all");
   const [selectedLog, setSelectedLog] = useState<RuntimeLogEntry | null>(null);
   const [selectedLogIDs, setSelectedLogIDs] = useState<Set<string>>(() => new Set());
   const [selectionClearKey, setSelectionClearKey] = useState(0);
@@ -7448,11 +7486,13 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   const logs = (metrics?.logs ?? []).filter((entry) => entry.project === props.project.id);
   const outcomes = Array.from(new Set(logs.map((entry) => entry.outcome || "unknown"))).sort();
   const kinds = Array.from(new Set(logs.map((entry) => entry.kind || "unknown"))).sort();
+  const sources = Array.from(new Set(logs.map((entry) => runtimeLogSourceSummary(entry).group))).sort();
   const visibleLogs = logs.filter((entry) => {
     const entryOutcome = entry.outcome || "unknown";
     const entryKind = entry.kind || "unknown";
     if (outcome !== "all" && entryOutcome !== outcome) return false;
     if (kind !== "all" && entryKind !== kind) return false;
+    if (source !== "all" && runtimeLogSourceSummary(entry).group !== source) return false;
     return !search.trim() || logEntryText(entry).includes(search.trim().toLowerCase());
   });
   const selectedVisibleRows = useMemo(() => new Set(visibleLogs.flatMap((entry, index) => (
@@ -7465,9 +7505,10 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     { title: "ID", id: "id", width: 92 },
     { title: "Kind", id: "kind", width: 102 },
     { title: "Outcome", id: "outcome", width: 104 },
-    { title: "Function", id: "path", width: 300 },
+    { title: "Source", id: "source", width: 112 },
+    { title: "Function", id: "path", width: 270 },
     { title: "Duration", id: "duration", width: 96 },
-    { title: "Context", id: "detail", width: 340 },
+    { title: "Context", id: "detail", width: 300 },
   ];
   const logColumns: GridColumn[] = logColumnDefs.map((column) => ({
     ...column,
@@ -7478,11 +7519,12 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     entry.executionId ? entry.executionId.slice(0, 8) : "—",
     entry.kind || "unknown",
     entry.outcome || "unknown",
+    runtimeLogSourceSummary(entry).tableLabel,
     entry.path || "runtime",
     formatDuration(entry.durationMs),
     entry.error
       ? entry.error
-      : [entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || "", entry.cache ? `cache ${entry.cache}` : ""].filter(Boolean).join(" · ") || "—",
+      : [entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || ""].filter(Boolean).join(" · ") || "—",
   ]);
 
   const logErrorTextColor = props.themeMode === "dark" ? "#ff6b78" : "#d93f45";
@@ -7497,6 +7539,10 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     }
     if (column === 3) {
       return logBadgeCell(value, isError ? "error" : entry?.outcome === "ok" ? "success" : "neutral");
+    }
+    if (column === 4) {
+      const sourceSummary = entry ? runtimeLogSourceSummary(entry) : null;
+      return logBadgeCell(value, sourceSummary?.group === "redis" ? "success" : sourceSummary?.group === "database" ? "query" : "neutral");
     }
     return {
       kind: GridCellKind.Text,
@@ -7532,11 +7578,12 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       entry.executionId ? entry.executionId.slice(0, 8) : "—",
       entry.kind || "unknown",
       entry.outcome || "unknown",
+      runtimeLogSourceSummary(entry).tableLabel,
       entry.path || "runtime",
       formatDuration(entry.durationMs),
       entry.error
         ? entry.error
-        : [entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || "", entry.cache ? `cache ${entry.cache}` : ""].filter(Boolean).join(" · ") || "—",
+        : [entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || ""].filter(Boolean).join(" · ") || "—",
     ].join("\t")).join("\n");
     try {
       await navigator.clipboard.writeText(`${header}\n${body}`);
@@ -7619,10 +7666,24 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
             ...kinds.map((item) => ({ value: item, label: item })),
           ]}
         />
+        <AppSelect
+          ariaLabel="Log source"
+          label="Source"
+          selectedKey={source}
+          onChange={setSource}
+          options={[
+            { value: "all", label: "All" },
+            ...sources.map((item) => ({
+              value: item,
+              label: item === "redis" ? "Redis" : item === "database" ? "Database" : "Not tracked",
+            })),
+          ]}
+        />
         <Button size="sm" variant="secondary" onPress={() => {
           setSearch("");
           setOutcome("all");
           setKind("all");
+          setSource("all");
           props.onAction("Cleared log filters");
         }}>
           Clear

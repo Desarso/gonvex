@@ -92,6 +92,8 @@ type runtimeLogEntry struct {
 	DurationMS       float64         `json:"durationMs"`
 	Error            string          `json:"error,omitempty"`
 	Cache            string          `json:"cache,omitempty"`
+	Source           string          `json:"source,omitempty"`
+	Reason           string          `json:"reason,omitempty"`
 	Request          json.RawMessage `json:"request,omitempty"`
 	RequestSizeBytes int             `json:"requestSizeBytes,omitempty"`
 }
@@ -457,6 +459,16 @@ func (m *runtimeMetrics) recordFunctionExecution(execution runtimeFunctionLog, e
 	m.recordRuntimeLog(execution.entry, completed)
 }
 
+func runtimeLogSourceForCache(cache string) string {
+	if cache == "hit" {
+		return "redis"
+	}
+	if cache != "" {
+		return "database"
+	}
+	return ""
+}
+
 func (m *runtimeMetrics) recordFunction(project string, path string, kind string, duration time.Duration, err error) {
 	if m == nil || path == "" {
 		return
@@ -489,6 +501,7 @@ func (m *runtimeMetrics) recordRuntimeOperation(project string, path string, kin
 		DurationMS:  durationMS,
 		Error:       errorMessage,
 		Cache:       cache,
+		Source:      runtimeLogSourceForCache(cache),
 	}, now)
 }
 
