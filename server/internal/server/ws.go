@@ -935,10 +935,10 @@ func (s *Server) executeTenantQuery(ctx context.Context, projectID string, tenan
 func (s *Server) executeTenantQueryForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
 	kind := s.functionKind(projectID, path, "query")
 	s.metrics.recordFunctionStart(kind)
-	started := time.Now()
+	execution := newRuntimeFunctionLog(projectID, tenantID, path, kind, caller, rawArgs)
 	defer func() {
 		s.metrics.recordFunctionEnd(kind)
-		s.metrics.recordFunction(projectID, path, kind, time.Since(started), err)
+		s.metrics.recordFunctionExecution(execution, err)
 	}()
 
 	if isLegacyTaskQuery(path) {
@@ -1005,10 +1005,10 @@ func (s *Server) executeTenantMutation(ctx context.Context, projectID string, te
 func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
 	kind := s.functionKind(projectID, path, "mutation")
 	s.metrics.recordFunctionStart(kind)
-	started := time.Now()
+	execution := newRuntimeFunctionLog(projectID, tenantID, path, kind, caller, rawArgs)
 	defer func() {
 		s.metrics.recordFunctionEnd(kind)
-		s.metrics.recordFunction(projectID, path, kind, time.Since(started), err)
+		s.metrics.recordFunctionExecution(execution, err)
 	}()
 
 	if isLegacyTaskMutation(path) {
@@ -1113,10 +1113,10 @@ func (s *Server) executeTenantAction(ctx context.Context, projectID string, tena
 func (s *Server) executeTenantActionForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
 	kind := s.functionKind(projectID, path, "action")
 	s.metrics.recordFunctionStart(kind)
-	started := time.Now()
+	execution := newRuntimeFunctionLog(projectID, tenantID, path, kind, caller, rawArgs)
 	defer func() {
 		s.metrics.recordFunctionEnd(kind)
-		s.metrics.recordFunction(projectID, path, kind, time.Since(started), err)
+		s.metrics.recordFunctionExecution(execution, err)
 	}()
 
 	app := s.appForProject(ctx, projectID)

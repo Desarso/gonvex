@@ -5,10 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/google/uuid"
 )
 
 const (
@@ -67,14 +69,27 @@ type cacheMetricsBucket struct {
 }
 
 type runtimeLogEntry struct {
-	Time       string  `json:"time"`
-	Project    string  `json:"project,omitempty"`
-	Path       string  `json:"path"`
-	Kind       string  `json:"kind"`
-	Outcome    string  `json:"outcome"`
-	DurationMS float64 `json:"durationMs"`
-	Error      string  `json:"error,omitempty"`
-	Cache      string  `json:"cache,omitempty"`
+	Time             string          `json:"time"`
+	ExecutionID      string          `json:"executionId,omitempty"`
+	StartedAt        string          `json:"startedAt,omitempty"`
+	CompletedAt      string          `json:"completedAt,omitempty"`
+	Project          string          `json:"project,omitempty"`
+	Tenant           string          `json:"tenant,omitempty"`
+	UserID           string          `json:"userId,omitempty"`
+	UserEmail        string          `json:"userEmail,omitempty"`
+	Path             string          `json:"path"`
+	Kind             string          `json:"kind"`
+	Outcome          string          `json:"outcome"`
+	DurationMS       float64         `json:"durationMs"`
+	Error            string          `json:"error,omitempty"`
+	Cache            string          `json:"cache,omitempty"`
+	Request          json.RawMessage `json:"request,omitempty"`
+	RequestSizeBytes int             `json:"requestSizeBytes,omitempty"`
+}
+
+type runtimeFunctionLog struct {
+	entry   runtimeLogEntry
+	started time.Time
 }
 
 type transactionTelemetryEntry struct {
@@ -323,6 +338,94 @@ func (m *runtimeMetrics) observeRunningLocked(now time.Time) {
 	}
 }
 
+func sanitizeRuntimeLogRequest(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var value any
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return json.RawMessage(`{"unavailable":"request was not valid JSON"}`)
+	}
+	redactRuntimeLogValue(value)
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return json.RawMessage(`{"unavailable":"request could not be captured"}`)
+	}
+	const maxRequestBytes = 16 * 1024
+	if len(encoded) > maxRequestBytes {
+		encoded, _ = json.Marshal(map[string]any{
+			"sizeBytes": len(raw),
+			"truncated": true,
+		})
+	}
+	return encoded
+}
+
+func redactRuntimeLogValue(value any) {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, child := range current {
+			if runtimeLogKeyIsSensitive(key) {
+				current[key] = "[REDACTED]"
+				continue
+			}
+			redactRuntimeLogValue(child)
+		}
+	case []any:
+		for _, child := range current {
+			redactRuntimeLogValue(child)
+		}
+	}
+}
+
+func runtimeLogKeyIsSensitive(key string) bool {
+	normalized := strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(key))
+	for _, marker := range []string{"password", "passwd", "token", "secret", "authorization", "cookie", "credential", "apikey", "privatekey"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func newRuntimeFunctionLog(project string, tenant string, path string, kind string, caller callerContext, rawArgs json.RawMessage) runtimeFunctionLog {
+	started := time.Now().UTC()
+	entry := runtimeLogEntry{
+		ExecutionID:      uuid.NewString(),
+		StartedAt:        started.Format(time.RFC3339Nano),
+		Project:          project,
+		Tenant:           tenant,
+		Path:             path,
+		Kind:             kind,
+		Request:          sanitizeRuntimeLogRequest(rawArgs),
+		RequestSizeBytes: len(rawArgs),
+	}
+	if caller.user != nil {
+		entry.UserID = caller.user.ID
+		entry.UserEmail = caller.user.Email
+	}
+	return runtimeFunctionLog{entry: entry, started: started}
+}
+
+func (m *runtimeMetrics) recordFunctionExecution(execution runtimeFunctionLog, err error) {
+	if m == nil || execution.entry.Path == "" {
+		return
+	}
+	completed := time.Now().UTC()
+	execution.entry.Time = completed.Format(time.RFC3339Nano)
+	execution.entry.CompletedAt = execution.entry.Time
+	execution.entry.DurationMS = float64(completed.Sub(execution.started).Microseconds()) / 1000
+	if err != nil {
+		execution.entry.Outcome = "error"
+		execution.entry.Error = err.Error()
+	} else {
+		execution.entry.Outcome = "ok"
+	}
+	m.recordRuntimeLog(execution.entry, completed)
+}
+
 func (m *runtimeMetrics) recordFunction(project string, path string, kind string, duration time.Duration, err error) {
 	if m == nil || path == "" {
 		return
@@ -343,47 +446,55 @@ func (m *runtimeMetrics) recordRuntimeOperation(project string, path string, kin
 		errorMessage = err.Error()
 	}
 
+	m.recordRuntimeLog(runtimeLogEntry{
+		Time:        now.Format(time.RFC3339Nano),
+		ExecutionID: uuid.NewString(),
+		StartedAt:   now.Add(-duration).Format(time.RFC3339Nano),
+		CompletedAt: now.Format(time.RFC3339Nano),
+		Project:     project,
+		Path:        path,
+		Kind:        kind,
+		Outcome:     outcome,
+		DurationMS:  durationMS,
+		Error:       errorMessage,
+		Cache:       cache,
+	}, now)
+}
+
+func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	logKind := kind
-	if kind != "runtime" {
-		entry := m.functions[path]
+	logKind := log.Kind
+	if log.Kind != "runtime" {
+		entry := m.functions[log.Path]
 		if entry == nil {
-			entry = &functionMetrics{Kind: kind, Buckets: map[int64]*functionMetricsBucket{}}
-			m.functions[path] = entry
+			entry = &functionMetrics{Kind: log.Kind, Buckets: map[int64]*functionMetricsBucket{}}
+			m.functions[log.Path] = entry
 		}
-		if kind != "" {
-			entry.Kind = kind
+		if log.Kind != "" {
+			entry.Kind = log.Kind
 		}
 		logKind = entry.Kind
 		entry.Calls++
-		entry.TotalDurationMS += durationMS
-		entry.LastDurationMS = durationMS
+		entry.TotalDurationMS += log.DurationMS
+		entry.LastDurationMS = log.DurationMS
 		entry.LastCalledAt = now
-		if err != nil {
+		if log.Outcome == "error" {
 			entry.Errors++
 		}
 
 		bucket := entry.bucket(now)
 		bucket.Calls++
-		bucket.TotalDurationMS += durationMS
-		if err != nil {
+		bucket.TotalDurationMS += log.DurationMS
+		if log.Outcome == "error" {
 			bucket.Errors++
 		}
 		entry.trimBuckets(now)
 	}
 
-	m.appendLog(runtimeLogEntry{
-		Time:       now.Format(time.RFC3339Nano),
-		Project:    project,
-		Path:       path,
-		Kind:       logKind,
-		Outcome:    outcome,
-		DurationMS: durationMS,
-		Error:      errorMessage,
-		Cache:      cache,
-	})
+	log.Kind = logKind
+	m.appendLog(log)
 }
 
 func (m *runtimeMetrics) recordCache(project string, outcome string) {

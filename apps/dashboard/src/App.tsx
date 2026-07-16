@@ -162,15 +162,23 @@ type RuntimeCacheMetrics = {
   series: RuntimeCacheMetricPoint[];
 };
 
-type RuntimeLogEntry = {
+export type RuntimeLogEntry = {
   time: string;
+  executionId?: string;
+  startedAt?: string;
+  completedAt?: string;
   project?: string;
+  tenant?: string;
+  userId?: string;
+  userEmail?: string;
   path: string;
   kind: string;
   outcome: string;
   durationMs: number;
   error?: string;
   cache?: string;
+  request?: unknown;
+  requestSizeBytes?: number;
 };
 
 type RuntimeRunningMetrics = {
@@ -648,11 +656,16 @@ function formatLogDateTime(value: string): string {
 function logEntryText(entry: RuntimeLogEntry): string {
   return [
     entry.time,
+    entry.executionId ?? "",
+    entry.tenant ?? "",
+    entry.userId ?? "",
+    entry.userEmail ?? "",
     entry.path,
     entry.kind,
     entry.outcome,
     entry.cache ?? "",
     entry.error ?? "",
+    entry.request ? JSON.stringify(entry.request) : "",
     formatDuration(entry.durationMs),
   ].join(" ").toLowerCase();
 }
@@ -7151,12 +7164,163 @@ function FilesPage(props: {
   );
 }
 
+type LogBadgeCellData = {
+  kind: "logBadge";
+  label: string;
+  tone: "neutral" | "query" | "mutation" | "action" | "success" | "error";
+};
+
+const logBadgeRenderer: CustomRenderer = {
+  kind: GridCellKind.Custom,
+  isMatch: (cell): cell is CustomCell<LogBadgeCellData> => (cell.data as Partial<LogBadgeCellData> | undefined)?.kind === "logBadge",
+  draw: ({ ctx, rect, theme }, cell) => {
+    const data = cell.data as LogBadgeCellData;
+    const palette: Record<LogBadgeCellData["tone"], { background: string; foreground: string }> = {
+      neutral: { background: "rgba(120, 120, 120, 0.13)", foreground: theme.textMedium },
+      query: { background: "rgba(59, 130, 246, 0.15)", foreground: "#3b82f6" },
+      mutation: { background: "rgba(168, 85, 247, 0.15)", foreground: "#a855f7" },
+      action: { background: "rgba(234, 179, 8, 0.16)", foreground: "#b58100" },
+      success: { background: "rgba(34, 197, 94, 0.15)", foreground: "#219653" },
+      error: { background: "rgba(239, 68, 68, 0.16)", foreground: "#e5484d" },
+    };
+    const colors = palette[data.tone];
+    ctx.save();
+    ctx.font = `600 11px ${theme.fontFamily}`;
+    const label = data.label || "unknown";
+    const width = Math.min(rect.width - 14, Math.max(42, ctx.measureText(label).width + 18));
+    const height = 20;
+    const x = rect.x + 7;
+    const y = rect.y + Math.round((rect.height - height) / 2);
+    drawRoundRect(ctx, x, y, width, height, 10);
+    ctx.fillStyle = colors.background;
+    ctx.fill();
+    ctx.fillStyle = colors.foreground;
+    ctx.textBaseline = "middle";
+    ctx.fillText(canvasEllipsize(ctx, label, width - 14), x + 9, y + height / 2, width - 14);
+    ctx.restore();
+    return true;
+  },
+};
+
+function logBadgeCell(label: string, tone: LogBadgeCellData["tone"]): CustomCell<LogBadgeCellData> {
+  return {
+    kind: GridCellKind.Custom,
+    allowOverlay: false,
+    copyData: label,
+    data: { kind: "logBadge", label, tone },
+  };
+}
+
+function runtimeLogStart(entry: RuntimeLogEntry): string {
+  if (entry.startedAt) return entry.startedAt;
+  const completed = new Date(entry.completedAt ?? entry.time).getTime();
+  return Number.isFinite(completed) ? new Date(completed - entry.durationMs).toISOString() : entry.time;
+}
+
+function runtimeLogRequestText(entry: RuntimeLogEntry): string {
+  if (entry.request === undefined || entry.request === null) return "";
+  try {
+    return JSON.stringify(entry.request, null, 2);
+  } catch {
+    return String(entry.request);
+  }
+}
+
+export function LogDetailsSheet(props: { entry: RuntimeLogEntry; onClose: () => void; onAction: ActionHandler }) {
+  const [tab, setTab] = useState<"execution" | "request">("execution");
+  const requestText = runtimeLogRequestText(props.entry);
+  const executionID = props.entry.executionId ?? "Legacy log entry";
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") props.onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [props.onClose]);
+
+  const copyExecution = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(props.entry, null, 2));
+      props.onAction("Copied execution details");
+    } catch {
+      props.onAction("Could not copy execution details");
+    }
+  };
+
+  const fields: Array<[string, string]> = [
+    ["Execution ID", executionID],
+    ["Function", props.entry.path || "runtime"],
+    ["Type", props.entry.kind || "unknown"],
+    ["Started", formatLogDateTime(runtimeLogStart(props.entry))],
+    ["Completed", formatLogDateTime(props.entry.completedAt ?? props.entry.time)],
+    ["Duration", formatDuration(props.entry.durationMs)],
+    ["Project", props.entry.project ?? "Not captured"],
+    ["Tenant", props.entry.tenant ?? "Not captured"],
+    ["User", props.entry.userEmail || props.entry.userId || "Anonymous / not captured"],
+    ["Outcome", props.entry.outcome || "unknown"],
+    ["Cache", props.entry.cache ?? "Not applicable"],
+    ["Request size", props.entry.requestSizeBytes ? `${props.entry.requestSizeBytes.toLocaleString()} B` : "Not captured"],
+  ];
+
+  return (
+    <div className="log-sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) props.onClose(); }}>
+      <aside className="log-detail-sheet" role="dialog" aria-modal="true" aria-label={`${props.entry.path} execution`}>
+        <header className="log-sheet-header">
+          <div className="log-sheet-title">
+            <div className="log-sheet-kicker">
+              <span className={`log-outcome-dot log-outcome-dot--${props.entry.outcome === "error" ? "error" : "ok"}`} />
+              <code>{executionID}</code>
+              <span>{formatLogDateTime(props.entry.time)}</span>
+            </div>
+            <h2>{props.entry.path || "Runtime execution"}</h2>
+          </div>
+          <div className="log-sheet-actions">
+            <button type="button" onClick={copyExecution}>Copy</button>
+            <button type="button" className="log-sheet-close" aria-label="Close execution details" onClick={props.onClose}>×</button>
+          </div>
+        </header>
+
+        <nav className="log-sheet-tabs" aria-label="Execution detail sections">
+          <button type="button" aria-pressed={tab === "execution"} onClick={() => setTab("execution")}>Execution</button>
+          <button type="button" aria-pressed={tab === "request"} onClick={() => setTab("request")}>Request</button>
+        </nav>
+
+        <div className="log-sheet-body">
+          {tab === "execution" ? (
+            <>
+              <dl className="log-detail-list">
+                {fields.map(([label, value]) => (
+                  <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
+                ))}
+              </dl>
+              {props.entry.error ? (
+                <section className="log-error-detail" aria-label="Execution error">
+                  <h3>Error</h3>
+                  <pre>{props.entry.error}</pre>
+                </section>
+              ) : null}
+            </>
+          ) : (
+            <section className="log-request-detail">
+              <div><h3>Arguments</h3><span>{props.entry.requestSizeBytes ? `${props.entry.requestSizeBytes.toLocaleString()} bytes received` : "Captured arguments"}</span></div>
+              {requestText ? <pre>{requestText}</pre> : <p>No request payload was captured for this execution.</p>}
+            </section>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
 function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onAction: ActionHandler }) {
   const { metrics, reachable, setMetrics } = useRuntimeMetrics(props.project, projectIsProvisioned(props.project));
   const [status, setStatus] = useState("Loading runtime logs...");
   const [search, setSearch] = useState("");
   const [outcome, setOutcome] = useState("all");
   const [kind, setKind] = useState("all");
+  const [selectedLog, setSelectedLog] = useState<RuntimeLogEntry | null>(null);
+  const [hoveredLogRow, setHoveredLogRow] = useState<number | null>(null);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => storedLogColumnWidths());
   const logs = (metrics?.logs ?? []).filter((entry) => entry.project === props.project.id);
   const outcomes = Array.from(new Set(logs.map((entry) => entry.outcome || "unknown"))).sort();
@@ -7170,11 +7334,13 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   });
 
   const logColumnDefs: { title: string; id: string; width: number }[] = [
-    { title: "Time", id: "time", width: 190 },
-    { title: "Kind", id: "kind", width: 120 },
-    { title: "Outcome", id: "outcome", width: 120 },
-    { title: "Path", id: "path", width: 280 },
-    { title: "Detail", id: "detail", width: 360 },
+    { title: "Time", id: "time", width: 168 },
+    { title: "ID", id: "id", width: 92 },
+    { title: "Kind", id: "kind", width: 102 },
+    { title: "Outcome", id: "outcome", width: 104 },
+    { title: "Function", id: "path", width: 300 },
+    { title: "Duration", id: "duration", width: 96 },
+    { title: "Context", id: "detail", width: 340 },
   ];
   const logColumns: GridColumn[] = logColumnDefs.map((column) => ({
     ...column,
@@ -7182,16 +7348,29 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   }));
   const logRows: GridRow[] = visibleLogs.map((entry) => [
     formatLogDateTime(entry.time),
+    entry.executionId ? entry.executionId.slice(0, 8) : "legacy",
     entry.kind || "unknown",
     entry.outcome || "unknown",
     entry.path || "runtime",
-    entry.error ? entry.error : entry.cache ? `cache ${entry.cache}` : formatDuration(entry.durationMs),
+    formatDuration(entry.durationMs),
+    entry.error
+      ? entry.error
+      : [entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || "", entry.cache ? `cache ${entry.cache}` : ""].filter(Boolean).join(" · ") || "—",
   ]);
 
   const logErrorTextColor = props.themeMode === "dark" ? "#ff6b78" : "#d93f45";
   const logCellGetter = ([column, row]: Item): GridCell => {
     const value = logRows[row]?.[column] ?? "";
-    const isError = (visibleLogs[row]?.outcome || "unknown") === "error";
+    const entry = visibleLogs[row];
+    const isError = (entry?.outcome || "unknown") === "error";
+    if (column === 2) {
+      const entryKind = entry?.kind || "unknown";
+      const tone = entryKind === "query" || entryKind === "mutation" || entryKind === "action" ? entryKind : "neutral";
+      return logBadgeCell(value, tone);
+    }
+    if (column === 3) {
+      return logBadgeCell(value, isError ? "error" : entry?.outcome === "ok" ? "success" : "neutral");
+    }
     return {
       kind: GridCellKind.Text,
       allowOverlay: false,
@@ -7246,6 +7425,7 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
         ...current,
         logs: current.logs.filter((entry) => entry.project !== props.project.id),
       } : current);
+      setSelectedLog(null);
       setStatus(`Showing 0 runtime log entries for ${props.project.name}`);
       props.onAction(`Cleared ${cleared} runtime log ${cleared === 1 ? "entry" : "entries"}`);
     } catch {
@@ -7261,6 +7441,10 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     const projectLogCount = logs.length;
     setStatus(`Showing ${projectLogCount} runtime log ${projectLogCount === 1 ? "entry" : "entries"} for ${props.project.name}`);
   }, [logs.length, props.project, reachable]);
+
+  useEffect(() => {
+    setSelectedLog(null);
+  }, [props.project.id]);
 
   return (
     <div className="logs-shell">
@@ -7324,10 +7508,16 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
           <ManifestGrid
             columns={logColumns}
             getCellContent={logCellGetter}
+            customRenderers={[logBadgeRenderer]}
             rowCount={logRows.length}
             height="100%"
+            rowHeight={32}
             themeMode={props.themeMode}
             onColumnResize={(column, newSize) => persistColumnWidth(String(column.id), newSize)}
+            onCellClick={([, row]) => setSelectedLog(visibleLogs[row] ?? null)}
+            onItemHovered={(event) => setHoveredLogRow(event.kind === "cell" ? event.location[1] : null)}
+            hoveredRow={hoveredLogRow}
+            disableSelection
             zebraRows
             hideRowMarkers
             overlay={logRows.length === 0 ? (
@@ -7338,6 +7528,7 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
           />
         </div>
       </section>
+      {selectedLog ? <LogDetailsSheet entry={selectedLog} onClose={() => setSelectedLog(null)} onAction={props.onAction} /> : null}
     </div>
   );
 }

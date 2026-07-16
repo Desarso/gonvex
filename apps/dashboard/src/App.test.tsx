@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist } from "./App";
+import { App, LogDetailsSheet, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist } from "./App";
 
 async function renderProjectApp() {
   const user = userEvent.setup();
@@ -66,6 +66,43 @@ describe("App", () => {
 
     expect(projectsShellRule).toMatch(/height:\s*100%/);
     expect(projectsShellRule).toMatch(/overflow-y:\s*auto/);
+  });
+
+  it("shows contextual runtime log details in an inspectable side sheet", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<LogDetailsSheet
+      entry={{
+        time: "2026-07-16T19:09:28.412Z",
+        startedAt: "2026-07-16T19:09:27.987Z",
+        completedAt: "2026-07-16T19:09:28.412Z",
+        executionId: "exec-425",
+        project: "whagons-production",
+        tenant: "tenant-a",
+        userId: "user-a",
+        userEmail: "user@example.test",
+        kind: "query",
+        path: "bulk.tasksByWorkspace",
+        outcome: "ok",
+        durationMs: 425,
+        request: { workspaceId: "workspace-a", accessToken: "[REDACTED]" },
+        requestSizeBytes: 84,
+      }}
+      onClose={onClose}
+      onAction={vi.fn()}
+    />);
+
+    const sheet = screen.getByRole("dialog", { name: /bulk\.tasksbyworkspace execution/i });
+    expect(within(sheet).getAllByText("exec-425")).toHaveLength(2);
+    expect(within(sheet).getByText("tenant-a")).toBeInTheDocument();
+    expect(within(sheet).getByText("425 ms")).toBeInTheDocument();
+
+    await user.click(within(sheet).getByRole("button", { name: /^request$/i }));
+    expect(within(sheet).getByText(/workspace-a/)).toBeInTheDocument();
+    expect(within(sheet).getByText(/\[REDACTED\]/)).toBeInTheDocument();
+
+    await user.click(within(sheet).getByRole("button", { name: /close execution details/i }));
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("signs in to the project list", async () => {

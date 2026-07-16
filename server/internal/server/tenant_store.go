@@ -9,12 +9,11 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/server/internal/config"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
 
 const (
-	defaultTenantStoreMaxOpenConns = 2
-	defaultTenantStoreMaxIdleConns = 1
-	defaultTenantStoreIdleTTL      = 5 * time.Minute
+	defaultTenantStoreIdleTTL = 5 * time.Minute
 )
 
 type tenantStoreResolver struct {
@@ -84,9 +83,7 @@ func (r *tenantStoreResolver) Store(ctx context.Context, tenantID string, databa
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(defaultTenantStoreMaxOpenConns)
-	db.SetMaxIdleConns(defaultTenantStoreMaxIdleConns)
-	db.SetConnMaxIdleTime(defaultTenantStoreIdleTTL)
+	dbpool.Configure(db)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, err

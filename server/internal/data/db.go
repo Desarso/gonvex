@@ -3,15 +3,9 @@ package data
 import (
 	"database/sql"
 	"sync"
-	"time"
 
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
-)
-
-const (
-	defaultMaxOpenConns = 2
-	defaultMaxIdleConns = 1
-	defaultConnIdleTime = 5 * time.Minute
 )
 
 var dbPools sync.Map
@@ -25,9 +19,7 @@ func openDB(databaseURL string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(defaultMaxOpenConns)
-	db.SetMaxIdleConns(defaultMaxIdleConns)
-	db.SetConnMaxIdleTime(defaultConnIdleTime)
+	dbpool.Configure(db)
 
 	actual, loaded := dbPools.LoadOrStore(databaseURL, db)
 	if loaded {
