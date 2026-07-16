@@ -357,19 +357,31 @@ func createIndexes(ctx context.Context, db *sql.DB, tableName string, table mani
 			columns = append(columns, quoteIdent(column))
 		}
 
-		unique := ""
-		if index.Unique {
-			unique = "UNIQUE "
-		}
 		physicalName := tableName + "_" + indexName
 		if !validIdent(physicalName) {
 			return applied, fmt.Errorf("invalid index name %q", physicalName)
 		}
 
+		// CREATE INDEX IF NOT EXISTS does not reconcile a pre-existing index
+		// whose uniqueness changed. That can leave a declared UniqueIndex backed
+		// by an ordinary index indefinitely, weakening tenant data integrity. Drop
+		// only the same physical index when its uniqueness differs; the normal
+		// creation path below then recreates the declared contract and surfaces
+		// duplicate data as a migration error instead of silently accepting it.
+		reconcileUniqueness := false
+		currentUnique := false
+		if index.Kind == "" || index.Kind == "btree" {
+			exists, currentUnique, err := existingIndexUniqueness(ctx, db, physicalName)
+			if err != nil {
+				return applied, err
+			}
+			reconcileUniqueness = needsIndexUniquenessRebuild(exists, currentUnique, index.Unique)
+		}
+
 		statement := ""
 		switch index.Kind {
 		case "", "btree":
-			statement = fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)", unique, quoteIdent(physicalName), quoteIdent(tableName), strings.Join(columns, ", "))
+			statement = btreeIndexSQL(physicalName, tableName, columns, index.Unique)
 		case "trigram":
 			if index.Unique {
 				return applied, fmt.Errorf("trigram index %s.%s cannot be unique", tableName, indexName)
@@ -384,13 +396,58 @@ func createIndexes(ctx context.Context, db *sql.DB, tableName string, table mani
 		default:
 			return applied, fmt.Errorf("unsupported index kind %q for %s.%s", index.Kind, tableName, indexName)
 		}
-		if _, err := db.ExecContext(ctx, statement); err != nil {
+		if reconcileUniqueness {
+			if _, err := db.ExecContext(ctx, "DROP INDEX "+quoteIdent(physicalName)); err != nil {
+				return applied, err
+			}
+			if _, err := db.ExecContext(ctx, statement); err != nil {
+				// Restore the prior index contract if strengthening uniqueness finds
+				// duplicate data. The migration still fails, but it does not leave the
+				// table without the index it had before the attempt.
+				restore := btreeIndexSQL(physicalName, tableName, columns, currentUnique)
+				if _, restoreErr := db.ExecContext(ctx, restore); restoreErr != nil {
+					return applied, fmt.Errorf("reconcile index %s: %w (restore failed: %v)", physicalName, err, restoreErr)
+				}
+				return applied, err
+			}
+			applied = append(applied, fmt.Sprintf("reconciled index uniqueness %s", physicalName))
+		} else if _, err := db.ExecContext(ctx, statement); err != nil {
 			return applied, err
 		}
 		applied = append(applied, fmt.Sprintf("ensured index %s", physicalName))
 	}
 
 	return applied, nil
+}
+
+func needsIndexUniquenessRebuild(exists bool, currentUnique bool, desiredUnique bool) bool {
+	return exists && currentUnique != desiredUnique
+}
+
+func btreeIndexSQL(physicalName string, tableName string, columns []string, unique bool) string {
+	modifier := ""
+	if unique {
+		modifier = "UNIQUE "
+	}
+	return fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)", modifier, quoteIdent(physicalName), quoteIdent(tableName), strings.Join(columns, ", "))
+}
+
+func existingIndexUniqueness(ctx context.Context, db *sql.DB, physicalName string) (bool, bool, error) {
+	var unique bool
+	err := db.QueryRowContext(ctx, `
+		SELECT idx.indisunique
+		FROM pg_catalog.pg_index AS idx
+		JOIN pg_catalog.pg_class AS relation ON relation.oid = idx.indexrelid
+		JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+		WHERE namespace.nspname = current_schema() AND relation.relname = $1
+	`, physicalName).Scan(&unique)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return true, unique, nil
 }
 
 func trigramIndexSQL(indexName string, tableName string, columns []string) string {

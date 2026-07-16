@@ -16,3 +16,33 @@ func TestRememberExistingColumnPreservesPrimaryKeyAcrossConstraintRows(t *testin
 		}
 	}
 }
+
+func TestNeedsIndexUniquenessRebuild(t *testing.T) {
+	tests := []struct {
+		name                           string
+		exists, current, desired, want bool
+	}{
+		{name: "missing", exists: false, current: false, desired: true, want: false},
+		{name: "matching ordinary", exists: true, current: false, desired: false, want: false},
+		{name: "matching unique", exists: true, current: true, desired: true, want: false},
+		{name: "strengthen", exists: true, current: false, desired: true, want: true},
+		{name: "weaken", exists: true, current: true, desired: false, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := needsIndexUniquenessRebuild(test.exists, test.current, test.desired); got != test.want {
+				t.Fatalf("needsIndexUniquenessRebuild() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestBtreeIndexSQLIncludesDeclaredUniqueness(t *testing.T) {
+	columns := []string{quoteIdent("customer_id")}
+	if got := btreeIndexSQL("accounts_by_customer", "accounts", columns, true); got != `CREATE UNIQUE INDEX IF NOT EXISTS "accounts_by_customer" ON "accounts" ("customer_id")` {
+		t.Fatalf("unexpected unique index SQL: %s", got)
+	}
+	if got := btreeIndexSQL("accounts_by_customer", "accounts", columns, false); got != `CREATE INDEX IF NOT EXISTS "accounts_by_customer" ON "accounts" ("customer_id")` {
+		t.Fatalf("unexpected ordinary index SQL: %s", got)
+	}
+}
