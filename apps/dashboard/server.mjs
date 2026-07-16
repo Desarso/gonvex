@@ -1,7 +1,8 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, request as requestHTTP } from "node:http";
+import { request as requestHTTPS } from "node:https";
 import { basename, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -110,6 +111,54 @@ function writeJSON(response, status, payload, headers = {}) {
 function redirect(response, location) {
   response.writeHead(302, { Location: location, "Cache-Control": "no-store" });
   response.end();
+}
+
+const hopByHopHeaders = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+function proxyHeaders(headers, targetHost) {
+  const next = { ...headers, host: targetHost };
+  for (const header of hopByHopHeaders) delete next[header];
+  delete next.cookie;
+  return next;
+}
+
+function proxyResponseHeaders(headers) {
+  const next = { ...headers };
+  for (const header of hopByHopHeaders) delete next[header];
+  return next;
+}
+
+async function proxyRuntimeRequest(request, response, url) {
+  const target = new URL(`${url.pathname}${url.search}`, `${runtimeURL}/`);
+  const requestRuntime = target.protocol === "https:" ? requestHTTPS : requestHTTP;
+  await new Promise((resolve, reject) => {
+    const upstreamRequest = requestRuntime(target, {
+      headers: proxyHeaders(request.headers, target.host),
+      method: request.method,
+    }, (upstreamResponse) => {
+      response.writeHead(
+        upstreamResponse.statusCode ?? 502,
+        upstreamResponse.statusMessage,
+        proxyResponseHeaders(upstreamResponse.headers),
+      );
+      upstreamResponse.on("error", (error) => response.destroy(error));
+      response.once("close", resolve);
+      response.once("finish", resolve);
+      upstreamResponse.pipe(response);
+    });
+    upstreamRequest.once("error", reject);
+    request.once("aborted", () => upstreamRequest.destroy());
+    request.pipe(upstreamRequest);
+  });
 }
 
 async function readBody(request) {
@@ -223,6 +272,7 @@ async function handleRequest(request, response) {
     return;
   }
   if (url.pathname.startsWith("/api/dashboard/")) return handleAPI(request, response, url);
+  if (url.pathname === "/dev" || url.pathname.startsWith("/dev/")) return proxyRuntimeRequest(request, response, url);
   if (url.pathname.startsWith("/assets/")) return serveFile(response, staticPath(url.pathname), true);
   if (basename(url.pathname).includes(".")) return serveFile(response, staticPath(url.pathname));
 
@@ -241,7 +291,8 @@ export function createDashboardServer() {
   return createServer((request, response) => {
     handleRequest(request, response).catch((error) => {
       console.error(error);
-      writeJSON(response, 500, { error: "internal server error" });
+      if (response.headersSent) response.destroy(error);
+      else writeJSON(response, 500, { error: "internal server error" });
     });
   });
 }
