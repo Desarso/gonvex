@@ -5,8 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
-	"strconv"
+	"sort"
 	"strings"
 	"time"
 
@@ -72,34 +73,70 @@ func (c *rowsCache) set(ctx context.Context, key string, value []byte) {
 	_ = c.client.Set(ctx, key, value, c.ttl).Err()
 }
 
-func (c *rowsCache) queryKey(projectID string, tenantID string, generation int64, scope string, path string, args []byte) string {
+func (c *rowsCache) queryKey(projectID string, tenantID string, generation string, scope string, path string, args []byte) string {
 	projectID, tenantID = cacheScope(projectID, tenantID)
-	prefix := "gonvex:queries:v1:" + cacheKeyPart(projectID) + ":" + cacheKeyPart(tenantID) + ":" + strconv.FormatInt(generation, 10) + ":"
+	prefix := "gonvex:queries:v2:" + cacheKeyPart(projectID) + ":" + cacheKeyPart(tenantID) + ":"
 	hash := sha256.Sum256([]byte(strings.Join([]string{scope, path, string(args)}, "\x00")))
-	return prefix + hex.EncodeToString(hash[:])
+	generationHash := sha256.Sum256([]byte(generation))
+	return prefix + hex.EncodeToString(generationHash[:12]) + ":" + hex.EncodeToString(hash[:])
 }
 
-func (c *rowsCache) queryGeneration(ctx context.Context, projectID string, tenantID string) (int64, bool) {
+func (c *rowsCache) queryGeneration(ctx context.Context, projectID string, tenantID string, tables []string) (string, bool) {
 	if !c.enabled() {
-		return 0, false
+		return "", false
 	}
-	value, err := c.client.Get(ctx, c.queryGenerationKey(projectID, tenantID)).Int64()
-	if errors.Is(err, redis.Nil) {
-		return 0, true
+	tables = queryCacheTables(tables)
+	keys := make([]string, 0, len(tables)+1)
+	keys = append(keys, c.queryGenerationKey(projectID, tenantID, "*"))
+	for _, table := range tables {
+		keys = append(keys, c.queryGenerationKey(projectID, tenantID, table))
 	}
-	return value, err == nil
+	values, err := c.client.MGet(ctx, keys...).Result()
+	if err != nil {
+		return "", false
+	}
+	parts := make([]string, len(keys))
+	for index, value := range values {
+		parts[index] = keys[index] + "=" + strings.TrimSpace(fmt.Sprint(value))
+	}
+	return strings.Join(parts, "\x00"), true
 }
 
-func (c *rowsCache) invalidateQueries(ctx context.Context, projectID string, tenantID string) {
+func (c *rowsCache) invalidateQueries(ctx context.Context, projectID string, tenantID string, tables []string) {
 	if !c.enabled() {
 		return
 	}
-	_ = c.client.Incr(ctx, c.queryGenerationKey(projectID, tenantID)).Err()
+	tables = queryCacheTables(tables)
+	if len(tables) == 0 {
+		tables = []string{"*"}
+	}
+	pipeline := c.client.Pipeline()
+	for _, table := range tables {
+		pipeline.Incr(ctx, c.queryGenerationKey(projectID, tenantID, table))
+	}
+	_, _ = pipeline.Exec(ctx)
 }
 
-func (c *rowsCache) queryGenerationKey(projectID string, tenantID string) string {
+func (c *rowsCache) queryGenerationKey(projectID string, tenantID string, table string) string {
 	projectID, tenantID = cacheScope(projectID, tenantID)
-	return "gonvex:queries:v1:generation:" + cacheKeyPart(projectID) + ":" + cacheKeyPart(tenantID)
+	return "gonvex:queries:v2:generation:" + cacheKeyPart(projectID) + ":" + cacheKeyPart(tenantID) + ":" + cacheKeyPart(table)
+}
+
+func queryCacheTables(tables []string) []string {
+	unique := map[string]bool{}
+	for _, table := range tables {
+		table = strings.TrimSpace(table)
+		if table == "" || table == "*" {
+			continue
+		}
+		unique[table] = true
+	}
+	result := make([]string, 0, len(unique))
+	for table := range unique {
+		result = append(result, table)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (c *rowsCache) invalidateRows(ctx context.Context, projectID string, tenantID string, table string) {

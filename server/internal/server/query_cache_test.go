@@ -24,7 +24,7 @@ func TestWebSocketQueryLogsRedisAndDatabaseSources(t *testing.T) {
 	redisServer := miniredis.RunT(t)
 	var executions atomic.Int32
 	app := gonvex.NewApp()
-	app.Query("cache.source", func(_ *gonvex.QueryCtx, args queryCacheTestArgs) (map[string]string, error) {
+	app.Query("bulk.tasksByWorkspace", func(_ *gonvex.QueryCtx, args queryCacheTestArgs) (map[string]string, error) {
 		executions.Add(1)
 		return map[string]string{"value": args.Value}, nil
 	})
@@ -53,7 +53,7 @@ func TestWebSocketQueryLogsRedisAndDatabaseSources(t *testing.T) {
 		if err := connection.WriteJSON(clientMessage{
 			Type: "query.subscribe",
 			ID:   id,
-			Path: "cache.source",
+			Path: "bulk.tasksByWorkspace",
 			Args: json.RawMessage(`{"value":"same"}`),
 		}); err != nil {
 			t.Fatal(err)
@@ -76,7 +76,7 @@ func TestWebSocketQueryLogsRedisAndDatabaseSources(t *testing.T) {
 	snapshot := runtime.metrics.snapshot(manifest.Manifest{}, 0, 0, "project-a")
 	sources := map[string]int{}
 	for _, entry := range snapshot.Logs {
-		if entry.Path == "cache.source" {
+		if entry.Path == "bulk.tasksByWorkspace" {
 			sources[entry.Source+":"+entry.Cache]++
 		}
 	}
@@ -84,7 +84,13 @@ func TestWebSocketQueryLogsRedisAndDatabaseSources(t *testing.T) {
 		t.Fatalf("expected one database miss and one Redis hit, got %+v logs=%+v", sources, snapshot.Logs)
 	}
 
-	runtime.cache.invalidateQueries(context.Background(), "project-a", "project-a")
+	runtime.cache.invalidateQueries(context.Background(), "project-a", "project-a", []string{"supportSessions"})
+	query("query-after-unrelated-invalidate")
+	if got := executions.Load(); got != 1 {
+		t.Fatalf("expected an unrelated table invalidation to preserve the cached result, got %d executions", got)
+	}
+
+	runtime.cache.invalidateQueries(context.Background(), "project-a", "project-a", []string{"tasks"})
 	query("query-after-invalidate")
 	if got := executions.Load(); got != 2 {
 		t.Fatalf("expected invalidation to force a database execution, got %d executions", got)

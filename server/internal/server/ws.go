@@ -684,7 +684,7 @@ func (s *Server) broadcastTenantTableChangeAt(projectID string, tenantID string,
 func (s *Server) broadcastMutationInvalidationsAt(projectID string, tenantID string, path string, changedAt time.Time) {
 	tables := mutationInvalidationTables(path)
 	if len(tables) == 0 {
-		s.cache.invalidateQueries(context.Background(), projectID, tenantIDFromRequest(projectID, tenantID))
+		s.cache.invalidateQueries(context.Background(), projectID, tenantIDFromRequest(projectID, tenantID), nil)
 		return
 	}
 	changedTables := make(map[string]bool, len(tables))
@@ -717,8 +717,8 @@ func (s *Server) broadcastTenantRowIDChange(projectID string, tenantID string, t
 }
 
 func (s *Server) scheduleTableChange(change tableChange) {
-	s.cache.invalidateQueries(context.Background(), change.project, change.tenant)
 	changedTables := tableChangeTables(change)
+	s.cache.invalidateQueries(context.Background(), change.project, change.tenant, changedTables)
 	for _, table := range changedTables {
 		s.cache.invalidateRows(context.Background(), change.project, change.tenant, table)
 	}
@@ -951,9 +951,10 @@ func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectI
 	}()
 
 	cacheKey := ""
-	cacheGeneration := int64(0)
+	cacheGeneration := ""
+	queryTables := subscriptionTables(path)
 	if strings.TrimSpace(cacheScope) != "" && s.cache.enabled() {
-		if generation, ok := s.cache.queryGeneration(ctx, projectID, tenantID); ok {
+		if generation, ok := s.cache.queryGeneration(ctx, projectID, tenantID, queryTables); ok {
 			cacheGeneration = generation
 			cacheKey = s.cache.queryKey(projectID, tenantID, generation, cacheScope, path, rawArgs)
 		} else {
@@ -987,7 +988,7 @@ func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectI
 
 	result, err = s.executeTenantQueryForCallerUncached(ctx, projectID, tenantID, caller, path, rawArgs)
 	if err == nil && cacheKey != "" {
-		currentGeneration, generationOK := s.cache.queryGeneration(ctx, projectID, tenantID)
+		currentGeneration, generationOK := s.cache.queryGeneration(ctx, projectID, tenantID, queryTables)
 		if payload, encodeErr := json.Marshal(result); encodeErr == nil && generationOK && currentGeneration == cacheGeneration {
 			s.cache.set(ctx, cacheKey, payload)
 		}
