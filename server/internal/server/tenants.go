@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 	"github.com/gonvex/gonvex/server/internal/schema"
 )
 
@@ -618,7 +619,7 @@ func (s *Server) cleanupProjectLandlordTenantReferences(ctx context.Context, pro
 	if strings.TrimSpace(projectDatabaseURL) == "" {
 		return nil
 	}
-	db, err := sql.Open("pgx", projectDatabaseURL)
+	db, err := dbpool.Open(projectDatabaseURL)
 	if err != nil {
 		return err
 	}
@@ -777,7 +778,7 @@ func provisionTenantDatabase(ctx context.Context, databaseURL string, desiredSch
 	if _, err := schema.Apply(ctx, databaseURL, desiredSchema); err != nil {
 		return err
 	}
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := dbpool.Open(databaseURL)
 	if err != nil {
 		return err
 	}

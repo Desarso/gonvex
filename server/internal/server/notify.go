@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 	"github.com/gonvex/gonvex/server/internal/schema"
 	"github.com/jackc/pgx/v5"
 )
@@ -26,38 +27,50 @@ func (s *Server) startPostgresNotifications() {
 
 func (s *Server) listenPostgresNotifications() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	conn, err := pgx.Connect(ctx, s.config.PostgresURL)
+	db, err := dbpool.Open(s.config.PostgresURL)
+	if err != nil {
+		cancel()
+		return
+	}
+	defer db.Close()
+	connection, err := db.Conn(ctx)
 	cancel()
 	if err != nil {
 		return
 	}
-	defer conn.Close(context.Background())
+	defer connection.Close()
 
-	if err := ensureBaseNotifyTriggers(context.Background(), conn); err != nil {
-		return
-	}
-	if _, err := conn.Exec(context.Background(), "LISTEN "+schema.NotifyChannel); err != nil {
-		return
-	}
+	_ = connection.Raw(func(raw any) error {
+		conn, ok := dbpool.PGXConn(raw)
+		if !ok {
+			return nil
+		}
+		if err := ensureBaseNotifyTriggers(context.Background(), conn); err != nil {
+			return err
+		}
+		if _, err := conn.Exec(context.Background(), "LISTEN "+schema.NotifyChannel); err != nil {
+			return err
+		}
 
-	for {
-		notification, err := conn.WaitForNotification(context.Background())
-		if err != nil {
-			return
-		}
-		if notification.Payload != "" && notification.Payload[0] != '{' {
-			s.broadcastTableChange("", notification.Payload)
-			continue
-		}
-		var payload tableNotifyPayload
-		if err := json.Unmarshal([]byte(notification.Payload), &payload); err == nil && payload.Table != "" {
-			if payload.Broad {
-				s.broadcastTableChange("", payload.Table)
-			} else {
-				s.broadcastRowIDChange("", payload.Table, payload.IDs)
+		for {
+			notification, err := conn.WaitForNotification(context.Background())
+			if err != nil {
+				return err
+			}
+			if notification.Payload != "" && notification.Payload[0] != '{' {
+				s.broadcastTableChange("", notification.Payload)
+				continue
+			}
+			var payload tableNotifyPayload
+			if err := json.Unmarshal([]byte(notification.Payload), &payload); err == nil && payload.Table != "" {
+				if payload.Broad {
+					s.broadcastTableChange("", payload.Table)
+				} else {
+					s.broadcastRowIDChange("", payload.Table, payload.IDs)
+				}
 			}
 		}
-	}
+	})
 }
 
 func ensureBaseNotifyTriggers(ctx context.Context, conn *pgx.Conn) error {

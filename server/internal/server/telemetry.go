@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
 
 type telemetrySchemaDB interface {
@@ -119,7 +119,7 @@ func (s *Server) openProjectTelemetryDB(ctx context.Context, projectID string) (
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("pgx", telemetryURL)
+	db, err := dbpool.Open(telemetryURL)
 	if err == nil {
 		if pingErr := db.PingContext(ctx); pingErr == nil {
 			return db, ensureTelemetrySchema(ctx, db)
@@ -130,7 +130,7 @@ func (s *Server) openProjectTelemetryDB(ctx context.Context, projectID string) (
 		// If another connection created it first, the second open below will succeed.
 		slog.Debug("telemetry database create failed", "project", projectID, "database", databaseName, "error", createErr)
 	}
-	db, err = sql.Open("pgx", telemetryURL)
+	db, err = dbpool.Open(telemetryURL)
 	if err != nil {
 		return nil, err
 	}

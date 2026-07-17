@@ -56,6 +56,7 @@ type Server struct {
 	tableChanges      map[string]tableChange
 	projectEnvMu      sync.Mutex
 	projectEnvCache   map[string]projectEnvCacheEntry
+	projectEnvLoads   singleflight.Group
 	// syncLocks serializes /dev/sync work per project so overlapping syncs
 	// (e.g. a failed-then-retried push, or a client that fires twice) can't run
 	// catalog DDL concurrently and trip "tuple concurrently updated".

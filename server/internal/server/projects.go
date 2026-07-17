@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -513,7 +514,7 @@ func (s *Server) openProjectRegistry(ctx context.Context) (*sql.DB, error) {
 	if strings.TrimSpace(registryURL) == "" {
 		return nil, nil
 	}
-	db, err := sql.Open("pgx", registryURL)
+	db, err := dbpool.Open(registryURL)
 	if err != nil {
 		return nil, err
 	}
@@ -1359,7 +1360,7 @@ func openMaintenanceDB(baseURL string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sql.Open("pgx", maintenanceURL)
+	return dbpool.Open(maintenanceURL)
 }
 
 func databaseURL(baseURL string, databaseName string) (string, error) {

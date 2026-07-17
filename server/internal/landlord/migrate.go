@@ -2,9 +2,8 @@ package landlord
 
 import (
 	"context"
-	"database/sql"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
 
 type Result struct {
@@ -16,7 +15,7 @@ func Apply(ctx context.Context, databaseURL string) (Result, error) {
 		return Result{}, nil
 	}
 
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := dbpool.Open(databaseURL)
 	if err != nil {
 		return Result{}, err
 	}

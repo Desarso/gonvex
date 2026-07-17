@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	defaultMaxOpen = 0
-	defaultMaxIdle = 100
+	defaultMaxOpen = 2
+	defaultMaxIdle = 1
 	defaultIdleTTL = 5 * time.Minute
 )
 
@@ -21,18 +21,26 @@ type Limits struct {
 	MaxIdle int
 }
 
-// LimitsFromEnvironment returns a deliberately elastic pool: requests may open
-// more than the warm target under load, while only MaxIdle connections remain
-// ready after traffic subsides.
+// LimitsFromEnvironment returns conservative per-database limits. The runtime
+// maintains a separate pool for each active tenant, so unbounded defaults would
+// allow the aggregate to exhaust PostgreSQL's connection limit.
 func LimitsFromEnvironment() Limits {
 	limits := Limits{
-		MaxOpen: environmentInt("GONVEX_DB_MAX_OPEN_CONNS", defaultMaxOpen),
+		MaxOpen: positiveEnvironmentInt("GONVEX_DB_MAX_OPEN_CONNS", defaultMaxOpen),
 		MaxIdle: environmentInt("GONVEX_DB_MAX_IDLE_CONNS", defaultMaxIdle),
 	}
 	if limits.MaxOpen > 0 && limits.MaxIdle > limits.MaxOpen {
 		limits.MaxIdle = limits.MaxOpen
 	}
 	return limits
+}
+
+func positiveEnvironmentInt(name string, fallback int) int {
+	value := environmentInt(name, fallback)
+	if value == 0 {
+		return fallback
+	}
+	return value
 }
 
 func Configure(db *sql.DB) {

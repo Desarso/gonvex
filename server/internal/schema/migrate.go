@@ -9,9 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
 
 // ErrUnsafeChange marks migrations Apply refuses to perform automatically
@@ -36,7 +35,7 @@ func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Re
 		return Result{}, nil
 	}
 
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := dbpool.Open(databaseURL)
 	if err != nil {
 		return Result{}, err
 	}

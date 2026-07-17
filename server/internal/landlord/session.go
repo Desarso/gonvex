@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
 
 type Session struct {
@@ -24,7 +26,7 @@ func ValidateSession(ctx context.Context, databaseURL string, token string, requ
 		return Session{}, fmt.Errorf("session token is required")
 	}
 
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := dbpool.Open(databaseURL)
 	if err != nil {
 		return Session{}, err
 	}

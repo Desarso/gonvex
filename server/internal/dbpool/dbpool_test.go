@@ -2,16 +2,16 @@ package dbpool
 
 import "testing"
 
-func TestLimitsFromEnvironmentDefaultsToUnlimitedActiveAndOneHundredWarm(t *testing.T) {
+func TestLimitsFromEnvironmentDefaultsToTwoActiveAndOneWarm(t *testing.T) {
 	t.Setenv("GONVEX_DB_MAX_OPEN_CONNS", "")
 	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "")
 
 	limits := LimitsFromEnvironment()
-	if limits.MaxOpen != 0 {
-		t.Fatalf("MaxOpen = %d, want 0 (unlimited)", limits.MaxOpen)
+	if limits.MaxOpen != 2 {
+		t.Fatalf("MaxOpen = %d, want 2", limits.MaxOpen)
 	}
-	if limits.MaxIdle != 100 {
-		t.Fatalf("MaxIdle = %d, want 100", limits.MaxIdle)
+	if limits.MaxIdle != 1 {
+		t.Fatalf("MaxIdle = %d, want 1", limits.MaxIdle)
 	}
 }
 
@@ -32,5 +32,15 @@ func TestLimitsFromEnvironmentClampsIdleToBoundedOpenLimit(t *testing.T) {
 	limits := LimitsFromEnvironment()
 	if limits.MaxOpen != 40 || limits.MaxIdle != 40 {
 		t.Fatalf("LimitsFromEnvironment() = %+v, want MaxOpen=40 MaxIdle=40", limits)
+	}
+}
+
+func TestLimitsFromEnvironmentDoesNotAllowUnlimitedOpenConnections(t *testing.T) {
+	t.Setenv("GONVEX_DB_MAX_OPEN_CONNS", "0")
+	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "100")
+
+	limits := LimitsFromEnvironment()
+	if limits.MaxOpen != 2 || limits.MaxIdle != 2 {
+		t.Fatalf("LimitsFromEnvironment() = %+v, want MaxOpen=2 MaxIdle=2", limits)
 	}
 }

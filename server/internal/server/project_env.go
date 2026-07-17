@@ -42,36 +42,42 @@ func (s *Server) projectEnvValues(ctx context.Context, project string) map[strin
 	if project == "" {
 		return nil
 	}
-	s.projectEnvMu.Lock()
-	entry, ok := s.projectEnvCache[project]
-	s.projectEnvMu.Unlock()
-	if ok && time.Since(entry.fetchedAt) < projectEnvCacheTTL {
-		return entry.values
-	}
-
-	vars, err := s.loadProjectEnv(ctx, project)
-	if err != nil || vars == nil {
-		// vars == nil (with nil err) means the registry handle wasn't available —
-		// distinct from an empty store, which returns an empty non-nil slice.
-		// Never cache that as "project has no env" or functions would silently
-		// lose their keys for a full TTL window.
-		slog.Warn("project env load failed; functions fall back to process env", "project", project, "error", err)
-		if ok {
-			return entry.values
+	value, _, _ := s.projectEnvLoads.Do(project, func() (any, error) {
+		s.projectEnvMu.Lock()
+		entry, ok := s.projectEnvCache[project]
+		s.projectEnvMu.Unlock()
+		if ok && time.Since(entry.fetchedAt) < projectEnvCacheTTL {
+			return entry.values, nil
 		}
+
+		vars, err := s.loadProjectEnv(ctx, project)
+		if err != nil || vars == nil {
+			// vars == nil (with nil err) means the registry handle wasn't available —
+			// distinct from an empty store, which returns an empty non-nil slice.
+			// Never cache that as "project has no env" or functions would silently
+			// lose their keys for a full TTL window.
+			slog.Warn("project env load failed; functions fall back to process env", "project", project, "error", err)
+			if ok {
+				return entry.values, nil
+			}
+			return map[string]string(nil), nil
+		}
+		values := make(map[string]string, len(vars))
+		for _, v := range vars {
+			values[v.Name] = v.Value
+		}
+		s.projectEnvMu.Lock()
+		if s.projectEnvCache == nil {
+			s.projectEnvCache = map[string]projectEnvCacheEntry{}
+		}
+		s.projectEnvCache[project] = projectEnvCacheEntry{values: values, fetchedAt: time.Now()}
+		s.projectEnvMu.Unlock()
+		return values, nil
+	})
+	if value == nil {
 		return nil
 	}
-	values := make(map[string]string, len(vars))
-	for _, v := range vars {
-		values[v.Name] = v.Value
-	}
-	s.projectEnvMu.Lock()
-	if s.projectEnvCache == nil {
-		s.projectEnvCache = map[string]projectEnvCacheEntry{}
-	}
-	s.projectEnvCache[project] = projectEnvCacheEntry{values: values, fetchedAt: time.Now()}
-	s.projectEnvMu.Unlock()
-	return values
+	return value.(map[string]string)
 }
 
 func (s *Server) invalidateProjectEnvCache(project string) {
@@ -81,11 +87,10 @@ func (s *Server) invalidateProjectEnvCache(project string) {
 }
 
 func (s *Server) loadProjectEnv(ctx context.Context, project string) ([]projectEnvVar, error) {
-	db, err := s.openProjectRegistry(ctx)
+	db, err := s.pooledProjectRegistry(ctx)
 	if err != nil || db == nil {
 		return nil, err
 	}
-	defer db.Close()
 
 	rows, err := db.QueryContext(ctx, `SELECT name, value, updated_at FROM gonvex_project_env WHERE project_id = $1 ORDER BY name`, project)
 	if err != nil {

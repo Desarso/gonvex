@@ -62,11 +62,10 @@ func newTenantStoreResolver(cfg *config.Config) *tenantStoreResolver {
 }
 
 func openTenantDatabase(ctx context.Context, databaseURL string) (*sql.DB, error) {
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := dbpool.Open(databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	dbpool.Configure(db)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, err

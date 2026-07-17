@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/gonvex/gonvex/server/internal/dbpool"
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 var dbPools sync.Map
@@ -15,11 +14,10 @@ func openDB(databaseURL string) (*sql.DB, error) {
 		return cached.(*sql.DB), nil
 	}
 
-	db, err := sql.Open("pgx", databaseURL)
+	db, err := dbpool.Open(databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	dbpool.Configure(db)
 
 	actual, loaded := dbPools.LoadOrStore(databaseURL, db)
 	if loaded {
