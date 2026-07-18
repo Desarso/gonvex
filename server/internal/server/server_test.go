@@ -752,6 +752,35 @@ func TestDevSyncKeepsProjectManifestAvailableAfterSync(t *testing.T) {
 	}
 }
 
+func TestDevSyncSkipsSchemaLoadedFromPersistedManifest(t *testing.T) {
+	server := New(config.Config{})
+	persisted := manifest.Manifest{
+		Project:   "persisted-project",
+		Functions: map[string]manifest.FunctionEntry{},
+		Schema:    manifest.EmptySchema(),
+	}
+	if err := server.runtime.SyncManifest(persisted); err != nil {
+		t.Fatal(err)
+	}
+
+	body := bytes.NewBufferString(`{"project":"persisted-project","generatedAt":"now","functions":{},"schema":{"tables":{}}}`)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", body))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		SchemaSkipped bool `json:"schemaSkipped"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.SchemaSkipped {
+		t.Fatal("expected schema loaded from persisted manifest to skip DDL reapply")
+	}
+}
+
 func TestDataRowsRejectsMalformedFilters(t *testing.T) {
 	server := New(config.Config{})
 	recorder := httptest.NewRecorder()

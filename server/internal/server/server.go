@@ -566,7 +566,8 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	// applied. This is the common dev case (editing a handler, not the schema)
 	// and avoids reinstalling every table's trigger against live traffic.
 	fingerprint := schemaFingerprint(next.Schema)
-	if fingerprint != "" && s.schemaFingerprintApplied(next.Project, fingerprint) {
+	loadedFingerprint := schemaFingerprint(s.runtime.ManifestForProject(next.Project).Schema)
+	if fingerprint != "" && (s.schemaFingerprintApplied(next.Project, fingerprint) || loadedFingerprint == fingerprint) {
 		schemaSkipped = true
 	} else {
 		migrationResult, err = schema.Apply(r.Context(), s.databaseURLForProject(next.Project), next.Schema.LandlordSchema())
