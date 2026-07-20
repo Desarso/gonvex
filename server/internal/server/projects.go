@@ -1356,6 +1356,17 @@ func generateRelationshipID() (string, error) {
 	return relationshipID.String(), nil
 }
 
+// generateTenantPhysicalDatabaseName returns a pure UUIDv6 used as the Postgres
+// database identifier. Human-readable org/tenant labels must not be embedded in
+// the physical name — they belong in gonvex_runtime_tenants.
+func generateTenantPhysicalDatabaseName() (string, error) {
+	id, err := uuid.NewV6()
+	if err != nil {
+		return "", fmt.Errorf("generate tenant database name: %w", err)
+	}
+	return id.String(), nil
+}
+
 func isUUIDv6(value string) bool {
 	parsed, err := uuid.Parse(strings.TrimSpace(value))
 	return err == nil && parsed.Version() == uuid.Version(6)

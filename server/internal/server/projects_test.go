@@ -557,26 +557,30 @@ func TestUniqueTenantIDChecksProjectScopedCollisions(t *testing.T) {
 	}
 }
 
-func TestTenantDatabaseNameUsesAliasWithScopedSuffix(t *testing.T) {
+func TestTenantDatabaseNameUsesUUIDv6PhysicalIdentifier(t *testing.T) {
 	projectID := "a7f9f7df-6a7b-45f7-b44d-bde2068dca27"
 	got := tenantDatabaseNameWithAlias(projectID, "west-coast", "testing")
-	want := "testing_a7f9f7df_6a7b_45f7_b44d_bde2068dca27"
-	if got != want {
-		t.Fatalf("expected %q, got %q", want, got)
+	if !isUUIDv6(got) {
+		t.Fatalf("expected UUIDv6 physical database name, got %q", got)
 	}
-	if got == "testing" {
-		t.Fatalf("expected scoped physical database name, got %q", got)
+	if got == "testing" || strings.Contains(got, "west") || strings.Contains(got, "testing") {
+		t.Fatalf("physical database name must not embed org/tenant slugs, got %q", got)
 	}
 	if len(got) > 63 {
 		t.Fatalf("expected Postgres-safe name length, got %d for %q", len(got), got)
 	}
-	otherProject := tenantDatabaseNameWithAlias("Other App", "West Coast", "testing")
-	if otherProject == got {
-		t.Fatalf("expected project-scoped tenant database names, got %q for both projects", got)
+	other := tenantDatabaseNameWithAlias(projectID, "west-coast", "testing")
+	if other == got {
+		t.Fatalf("each new physical database name should be unique, got %q twice", got)
 	}
-	otherTenant := tenantDatabaseNameWithAlias(projectID, "east-coast", "testing")
-	if otherTenant != got {
-		t.Fatalf("expected same project and alias to map to the same physical DB before collision guard, got %q and %q", got, otherTenant)
+}
+
+func TestLegacyTenantDatabaseNameUsesAliasWithScopedSuffix(t *testing.T) {
+	projectID := "a7f9f7df-6a7b-45f7-b44d-bde2068dca27"
+	got := legacyTenantDatabaseNameWithAlias(projectID, "west-coast", "testing")
+	want := "testing_a7f9f7df_6a7b_45f7_b44d_bde2068dca27"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
 	}
 }
 
@@ -594,7 +598,7 @@ func TestPersistedTenantDatabaseNamePrefersExistingDatabaseAlias(t *testing.T) {
 	}
 }
 
-func TestPersistedTenantDatabaseNameFallsBackToProjectScopedName(t *testing.T) {
+func TestPersistedTenantDatabaseNamePrefersLegacyScopedNameWhenPresent(t *testing.T) {
 	got := tenantDatabaseNameForPersistedTenant(
 		"whagons-5",
 		"calaluna",
@@ -602,9 +606,21 @@ func TestPersistedTenantDatabaseNameFallsBackToProjectScopedName(t *testing.T) {
 		"calaluna",
 		map[string]bool{"calaluna_whagons_5": true},
 	)
-
 	if got != "calaluna_whagons_5" {
-		t.Fatalf("expected project-scoped fallback, got %q", got)
+		t.Fatalf("expected existing legacy scoped name, got %q", got)
+	}
+}
+
+func TestPersistedTenantDatabaseNameUsesUUIDv6WhenNothingExists(t *testing.T) {
+	got := tenantDatabaseNameForPersistedTenant(
+		"whagons-5",
+		"calaluna",
+		"calaluna",
+		"calaluna",
+		map[string]bool{},
+	)
+	if !isUUIDv6(got) {
+		t.Fatalf("expected UUIDv6 for brand-new tenant DB, got %q", got)
 	}
 }
 

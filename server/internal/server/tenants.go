@@ -495,7 +495,14 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "tenant database name already exists for this project"})
 		return
 	}
-	databaseName := tenantDatabaseNameWithAlias(project, tenantID, databaseAlias)
+	// Physical DB id is an opaque UUIDv6. database_alias keeps a human slug;
+	// name keeps the display label shown in the Data tab.
+	databaseName, err := generateTenantPhysicalDatabaseName()
+	if err != nil {
+		s.projectMu.Unlock()
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	s.projectMu.Unlock()
 
 	tenantDatabaseURL, err := createProjectDatabase(r.Context(), s.config.PostgresURL, databaseName)
@@ -863,8 +870,16 @@ func (s *Server) markTenantDatabaseProvisioned(ctx context.Context, project stri
 	tenant.ProjectID = project
 	tenant.databaseURL = databaseURL
 	tenant.databaseName = databaseNameFromURL(databaseURL, tenant.databaseName)
+	// Never promote the physical DB id into the human-facing database_alias.
+	// UI and registry alias should stay as name/slug; only database_name is the
+	// opaque Postgres identifier.
 	if tenant.Database == "" {
-		tenant.Database = tenant.databaseName
+		if tenant.Name != "" {
+			tenant.Database = slug(tenant.Name)
+		}
+		if tenant.Database == "" {
+			tenant.Database = tenant.ID
+		}
 	}
 	tenant.Provisioned = true
 	s.tenants[key] = tenant
@@ -1224,11 +1239,20 @@ func (s *Server) existingLocalDatabaseNames(ctx context.Context) map[string]bool
 }
 
 func tenantDatabaseNameForPersistedTenant(project string, tenantID string, databaseAlias string, domain string, existingDatabases map[string]bool) string {
+	// Prefer an already-existing physical database (legacy slug names, prior
+	// provision, or an explicit alias) so hydrate never invents a new UUID for
+	// a tenant that already has data on disk.
 	for _, candidate := range uniqueStrings([]string{databaseAlias, tenantID, domain}) {
 		if existingDatabases[candidate] {
 			return candidate
 		}
+		legacy := legacyTenantDatabaseNameWithAlias(project, tenantID, candidate)
+		if existingDatabases[legacy] {
+			return legacy
+		}
 	}
+	// Brand-new tenant: opaque UUIDv6 physical name. Display name stays in
+	// gonvex_runtime_tenants.name (and database_alias for a human slug).
 	return tenantDatabaseNameWithAlias(project, tenantID, databaseAlias)
 }
 

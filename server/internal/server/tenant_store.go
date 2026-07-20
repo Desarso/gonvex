@@ -242,7 +242,21 @@ func tenantDatabaseName(projectID string, tenantID string) string {
 	return tenantDatabaseNameWithAlias(projectID, tenantID, tenantID)
 }
 
+// tenantDatabaseNameWithAlias returns the physical Postgres database name for a
+// tenant. New databases use a pure UUIDv6 so infinite projects × tenants never
+// collide on org slugs. Human-readable names live in the control-plane registry
+// (gonvex_runtime_tenants.name / database_alias), not in the DB identifier.
 func tenantDatabaseNameWithAlias(projectID string, tenantID string, alias string) string {
+	if name, err := generateTenantPhysicalDatabaseName(); err == nil {
+		return name
+	}
+	return legacyTenantDatabaseNameWithAlias(projectID, tenantID, alias)
+}
+
+// legacyTenantDatabaseNameWithAlias is the historical
+// <alias>_<project_id> convention. Kept for discovering already-provisioned
+// databases and as a fallback if UUID generation fails.
+func legacyTenantDatabaseNameWithAlias(projectID string, tenantID string, alias string) string {
 	base := strings.ReplaceAll(slug(alias), "-", "_")
 	if base == "" {
 		base = strings.ReplaceAll(slug(tenantID), "-", "_")

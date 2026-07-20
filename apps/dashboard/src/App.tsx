@@ -2673,14 +2673,35 @@ function dataStateFromURL(): {
 }
 
 function tenantDatabaseLabel(tenant: TenantTarget | null, fallback: string): string {
+  // Prefer human display name. Physical Postgres DB ids are opaque UUIDv6 and
+  // must not be the primary label in the Data tab dropdown.
+  const name = tenant?.name?.trim();
+  if (name) return name;
   const database = tenant?.database?.trim();
-  return database || fallback;
+  if (database) return database;
+  return fallback;
 }
 
 function tenantDisplayLabel(tenant: TenantTarget | null, fallback: string): string {
-  const database = tenantDatabaseLabel(tenant, fallback);
-  const name = tenant?.name?.trim();
-  return name && name !== database ? `${database} (${name})` : database;
+  return tenantDatabaseLabel(tenant, fallback);
+}
+
+function tenantDropdownOption(tenant: TenantTarget): { value: string; label: string; description?: string } {
+  const label = tenantDatabaseLabel(tenant, tenant.id);
+  const alias = tenant.database?.trim();
+  // Only show a secondary line when the registry alias is a useful human slug
+  // that differs from the display name — never lead with the physical DB id.
+  const description =
+    alias && alias !== label && !looksLikeOpaqueDatabaseId(alias) ? alias : undefined;
+  return { value: tenant.id, label, description };
+}
+
+function looksLikeOpaqueDatabaseId(value: string): boolean {
+  // UUIDs (with or without hyphens) and legacy <slug>_<project> physical names.
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return true;
+  if (/^[0-9a-f]{32}$/i.test(value)) return true;
+  if (/_[0-9a-f]{8}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{12}$/i.test(value)) return true;
+  return false;
 }
 
 function parseDataFiltersParam(value: string): DataFilter[] {
@@ -5509,7 +5530,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
       setRequestedOffset(0);
       setVisibleOffset(0);
       setRefreshKey((key) => key + 1);
-      props.onAction(`Created tenant database ${payload.tenant.database}`);
+      props.onAction(`Created tenant database ${tenantDisplayLabel(payload.tenant, payload.tenant.id)}`);
     } catch (error) {
       const message = error instanceof TypeError
         ? `Cannot reach Gonvex Runtime at ${baseURL}.`
@@ -5633,11 +5654,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
                 }}
                 options={[
                   { value: landlordDataSourceID, label: "Landlord" },
-                  ...visibleTenants.map((tenant) => ({
-                    value: tenant.id,
-                    label: tenant.database || tenant.id,
-                    description: tenant.name && tenant.name !== tenant.database ? tenant.name : undefined,
-                  })),
+                  ...visibleTenants.map((tenant) => tenantDropdownOption(tenant)),
                 ]}
               />
               <Button size="sm" variant="secondary" onPress={createTenantDatabase} isDisabled={creatingTenant || !runtimeAvailable}>
@@ -6922,11 +6939,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
             }}
             options={[
               { value: landlordDataSourceID, label: "Landlord" },
-              ...tenants.map((tenant) => ({
-                value: tenant.id,
-                label: tenant.database || tenant.id,
-                description: tenant.name && tenant.name !== tenant.database ? tenant.name : undefined,
-              })),
+              ...tenants.map((tenant) => tenantDropdownOption(tenant)),
             ]}
           />
           <Button size="sm" variant="secondary" onPress={randomizeVisibleTaskFields} isDisabled={randomizing}>
