@@ -376,6 +376,27 @@ type EnvVariable = {
   updatedAt?: string;
 };
 
+/** Serialize project env rows to a copyable .env body (KEY=VALUE per line). */
+function envVariablesToDotEnv(variables: EnvVariable[]): string {
+  return variables
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((variable) => {
+      let value = variable.value ?? variable.masked ?? "";
+      // Bulk save uses a line-based parser; quote + escape when the value would
+      // break KEY=VALUE on a single line.
+      if (/[\n\r"\\]/.test(value) || value !== value.trim()) {
+        value = `"${value
+          .replace(/\\/g, "\\\\")
+          .replace(/"/g, '\\"')
+          .replace(/\r/g, "\\r")
+          .replace(/\n/g, "\\n")}"`;
+      }
+      return `${variable.name}=${value}`;
+    })
+    .join("\n");
+}
+
 type CreatedProject = {
   project: ProjectTarget;
   databaseMode: DatabaseMode;
@@ -1063,7 +1084,13 @@ export function dashboardEmailAllowed(email: string, allowlist: readonly string[
 }
 
 export function googleLoginEnabled(value: string | undefined, hasNativeAuthConfig: boolean): boolean {
-  return optionalEnvBoolean(value) === true && hasNativeAuthConfig;
+	// Native Google only works when a dashboard auth project is configured.
+	// Default the button on in that case; set VITE_GONVEX_GOOGLE_LOGIN_ENABLED=false
+	// to hide it. Without an auth project id the button never appears.
+	if (!hasNativeAuthConfig) return false;
+	const parsed = optionalEnvBoolean(value);
+	if (parsed === undefined) return true;
+	return parsed;
 }
 
 async function createDashboardPasswordSession(email: string, password: string): Promise<DashboardSession> {
@@ -3374,6 +3401,10 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
     setProjectDiscoveryError("");
     try {
       const runtimeProjects = await fetchRuntimeProjects();
+      // Always apply the runtime list (including empty) so a successful
+      // "no projects yet" response does not leave the chooser stuck on
+      // "Checking runtime" with a stale/empty local seed.
+      setProjects((current) => mergeRuntimeProjects(current, runtimeProjects));
       if (runtimeProjects.length === 0) return;
       const currentActiveProject = activeProjectRef.current;
       const requestedProjectID = projectIDFromPath(window.location.pathname);
@@ -3384,7 +3415,6 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
       // activeProjectRef cannot identify the UUID from the URL yet. Honor the
       // route before falling back to the default/first runtime project.
       const preferred = requestedProject ?? preferredRuntimeProject(currentActiveProject, runtimeProjects);
-      setProjects((current) => mergeRuntimeProjects(current, runtimeProjects));
       if (!isProjectChooserPath(window.location.pathname)
         && preferred
         && currentActiveProject?.id !== preferred.id
@@ -4524,6 +4554,27 @@ export function DatabaseHealthSection(props: { database: RuntimeDatabaseMetrics 
 
 function OverviewPage(props: { project: ProjectTarget }) {
   const { metrics, reachable } = useRuntimeMetrics(props.project);
+  const [clearingCache, setClearingCache] = useState(false);
+  const [cacheNotice, setCacheNotice] = useState("");
+
+  const clearCache = async () => {
+    if (!window.confirm(`Clear cached query and table results for ${props.project.name}? PostgreSQL data will not be changed.`)) return;
+    setClearingCache(true);
+    setCacheNotice("");
+    try {
+      const response = await fetch(`${runtimeURLForProject(props.project)}/dev/cache?project=${encodeURIComponent(props.project.id)}`, {
+        headers: dashboardAuthHeaders(),
+        method: "DELETE",
+      });
+      const payload = await response.json().catch(() => ({} as { cleared?: number; error?: string }));
+      if (!response.ok) throw new Error(payload.error ?? response.statusText);
+      setCacheNotice(`Cleared ${payload.cleared ?? 0} cached entries. Active queries will refill from PostgreSQL.`);
+    } catch (error) {
+      setCacheNotice(error instanceof Error ? error.message : "Could not clear the runtime cache");
+    } finally {
+      setClearingCache(false);
+    }
+  };
 
   const derived = useMemo(() => {
     const functions = metrics?.functions ?? {};
@@ -4594,7 +4645,12 @@ function OverviewPage(props: { project: ProjectTarget }) {
           <span className={`health-pulse ${reachable ? "is-live" : "is-down"}`} aria-hidden="true" />
           <span>{reachable ? "Live · refreshing every 2s" : "Runtime unreachable — retrying"}</span>
           {!hasTraffic && reachable ? <span className="health-status-note">waiting for traffic…</span> : null}
+          <Button size="sm" variant="outline" isDisabled={!reachable || clearingCache} onPress={clearCache}>
+            {clearingCache ? "Clearing cache…" : "Clear cache"}
+          </Button>
         </div>
+
+        {cacheNotice ? <p className="database-pressure-note" role="status">{cacheNotice}</p> : null}
 
         <section className="health-stat-row" aria-label="Runtime summary">
           <HealthStat label="Function calls" value={formatCount(derived.totalCalls)} sub={`${formatCount(derived.totalErrors)} errors`} />
@@ -8111,8 +8167,9 @@ function SettingsPage(props: {
   const [envStatus, setEnvStatus] = useState("");
   const [envLoading, setEnvLoading] = useState(false);
   const [envSaving, setEnvSaving] = useState(false);
-  const [envPasteMode, setEnvPasteMode] = useState(false);
+  const [envPasteMode, setEnvPasteMode] = useState(true);
   const [envPasteText, setEnvPasteText] = useState("");
+  const envPasteDirtyRef = useRef(false);
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [invitations, setInvitations] = useState<ProjectInvitation[]>([]);
   const [memberStatus, setMemberStatus] = useState("");
@@ -8138,6 +8195,9 @@ function SettingsPage(props: {
 
   useEffect(() => {
     setProjectNameStatus("");
+    envPasteDirtyRef.current = false;
+    setEnvPasteText("");
+    setEnvVars([]);
   }, [props.project.id]);
 
   const saveProjectName = async (event: FormEvent<HTMLFormElement>) => {
@@ -8210,7 +8270,13 @@ function SettingsPage(props: {
       const response = await fetch(endpoint, { headers: runtimeHeaders(props.project) });
       const payload = await response.json() as { variables?: EnvVariable[]; error?: string };
       if (!response.ok) throw new Error(payload.error ?? response.statusText);
-      setEnvVars(payload.variables ?? []);
+      const next = payload.variables ?? [];
+      setEnvVars(next);
+      // Keep the .env text editor in sync with the server set when the user
+      // hasn't started a local edit yet (or after save / open of .env mode).
+      if (!envPasteDirtyRef.current) {
+        setEnvPasteText(envVariablesToDotEnv(next));
+      }
     } catch (error) {
       setEnvStatus(error instanceof TypeError ? "Runtime offline" : error instanceof Error ? error.message : "Could not load environment variables");
     } finally {
@@ -8305,9 +8371,8 @@ function SettingsPage(props: {
       });
       const payload = await response.json() as { error?: string; count?: number };
       if (!response.ok) throw new Error(payload.error ?? response.statusText);
-      setEnvStatus(`Saved ${payload.count ?? 0} variable${payload.count === 1 ? "" : "s"} from pasted .env`);
-      setEnvPasteMode(false);
-      setEnvPasteText("");
+      setEnvStatus(`Saved ${payload.count ?? 0} variable${payload.count === 1 ? "" : "s"} from .env text`);
+      envPasteDirtyRef.current = false;
       await loadEnvVars();
     } catch (error) {
       setEnvStatus(error instanceof TypeError ? "Runtime offline" : error instanceof Error ? error.message : "Could not save environment variables");
@@ -8316,7 +8381,24 @@ function SettingsPage(props: {
     }
   };
 
+  const openEnvTextMode = () => {
+    setEnvPasteMode(true);
+    envPasteDirtyRef.current = false;
+    setEnvPasteText(envVariablesToDotEnv(envVars));
+  };
+
+  const copyEnvText = async () => {
+    const text = envPasteText.trim() ? envPasteText : envVariablesToDotEnv(envVars);
+    if (!text) {
+      setEnvStatus("No environment variables to copy");
+      return;
+    }
+    await navigator.clipboard.writeText(text).catch(() => undefined);
+    setEnvStatus("Copied .env text to clipboard");
+  };
+
   const editEnvVar = (variable: EnvVariable) => {
+    setEnvPasteMode(false);
     setEnvName(variable.name);
     setEnvValue(variable.value ?? "");
     setEnvStatus(variable.sensitive ? "Sensitive values stay masked. Paste a new value to replace it." : "");
@@ -8493,36 +8575,54 @@ function SettingsPage(props: {
         {activeSection === "environment" ? (
           <SettingsCard title="Environment Variables" description={`Project environment variables for ${props.project.id}.`}>
             <div className="env-mode-toggle" role="tablist" aria-label="Env editor mode">
+              <Button size="sm" type="button" variant={envPasteMode ? "secondary" : "ghost"} onPress={openEnvTextMode}>
+                .env text
+              </Button>
               <Button size="sm" type="button" variant={envPasteMode ? "ghost" : "secondary"} onPress={() => setEnvPasteMode(false)}>
                 Single variable
-              </Button>
-              <Button size="sm" type="button" variant={envPasteMode ? "secondary" : "ghost"} onPress={() => setEnvPasteMode(true)}>
-                Paste .env
               </Button>
             </div>
             {envPasteMode ? (
               <div className="env-paste">
                 <label className="setting-field env-value-field">
-                  <span>Paste a .env file — one <code>KEY=VALUE</code> per line</span>
+                  <span>Project .env — one <code>KEY=VALUE</code> per line (copy, edit, or paste a full file)</span>
                   <textarea
                     className="env-paste-textarea"
-                    onChange={(event) => setEnvPasteText(event.target.value)}
-                    placeholder={"GOOGLE_MAPS_API_KEY=...\nSTRIPE_SECRET_KEY=sk_live_...\n# comments and blank lines are ignored"}
+                    onChange={(event) => {
+                      envPasteDirtyRef.current = true;
+                      setEnvPasteText(event.target.value);
+                    }}
+                    placeholder={"# Loading… or paste KEY=VALUE lines\nGOOGLE_MAPS_API_KEY=...\nRESEND_KEY=..."}
                     spellCheck={false}
                     value={envPasteText}
                   />
                 </label>
                 <div className="env-actions">
                   <Button isDisabled={envSaving || !envPasteText.trim()} type="button" variant="primary" onPress={saveEnvBulk}>
-                    {envSaving ? "Saving" : "Replace all from .env"}
+                    {envSaving ? "Saving" : "Save .env"}
                   </Button>
-                  <Button type="button" variant="ghost" onPress={() => { setEnvPasteMode(false); setEnvPasteText(""); }}>
-                    Cancel
+                  <Button type="button" variant="secondary" onPress={copyEnvText}>
+                    Copy
+                  </Button>
+                  <Button
+                    isDisabled={envLoading}
+                    type="button"
+                    variant="ghost"
+                    onPress={() => {
+                      envPasteDirtyRef.current = false;
+                      void loadEnvVars();
+                    }}
+                  >
+                    Refresh
                   </Button>
                 </div>
-                <p className="settings-note">Heads up: pasting <strong>replaces</strong> the entire env set for this project.</p>
+                <p className="settings-note">
+                  Saving <strong>replaces</strong> the entire env set for this project with the text above.
+                  Values are scoped to this Gonvex project and available to functions through the runtime context.
+                </p>
               </div>
             ) : (
+              <>
               <form className="env-form" onSubmit={saveEnvVar}>
                 <label className="setting-field">
                   <span>Name</span>
@@ -8551,7 +8651,6 @@ function SettingsPage(props: {
                   </Button>
                 </div>
               </form>
-            )}
             <p className="settings-note">
               These values are scoped to this Gonvex project and are available to functions through the runtime context.
             </p>
@@ -8580,6 +8679,8 @@ function SettingsPage(props: {
                 </div>
               ))}
             </div>
+              </>
+            )}
             {envStatus ? <p className="settings-note">{envStatus}</p> : null}
           </SettingsCard>
         ) : null}

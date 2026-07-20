@@ -120,6 +120,9 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
 	server.scheduler = newScheduler(server.runScheduledJob)
 	server.tenantStores = newTenantStoreResolver(&server.config)
+	if strings.TrimSpace(server.projectRegistryURL()) != "" {
+		server.metrics.startMutationLogPersistence(postgresRuntimeMutationLogStore{server: server})
+	}
 	server.loadConfiguredTenantDatabases()
 	server.startLandlordMigrations()
 	server.scheduler.start(context.Background())
@@ -208,6 +211,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/manifest", s.handleManifest)
 	mux.HandleFunc("GET /dev/metrics", s.handleMetrics)
 	mux.HandleFunc("GET /dev/metrics/stream", s.handleMetricsStream)
+	mux.HandleFunc("DELETE /dev/cache", s.handleClearCache)
 	mux.HandleFunc("DELETE /dev/logs", s.handleClearLogs)
 	mux.HandleFunc("GET /dev/logs/stream", s.handleLogStream)
 	mux.HandleFunc("POST /dev/auth/login", s.handleDashboardLogin)
@@ -318,6 +322,12 @@ func (s *Server) metricsSnapshot(ctx context.Context, project string) runtimeMet
 func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) {
 	cleared := s.metrics.clearLogs(projectID(r))
 	writeJSON(w, http.StatusOK, map[string]int{"cleared": cleared})
+}
+
+func (s *Server) handleClearCache(w http.ResponseWriter, r *http.Request) {
+	project := projectID(r)
+	cleared := s.cache.clearProject(r.Context(), project)
+	writeJSON(w, http.StatusOK, map[string]any{"cleared": cleared, "project": project})
 }
 
 // internalDataTable reports runtime-owned tables that should not be browsed as
@@ -601,6 +611,10 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Surface the synced project in the dashboard chooser / env UI. Dev sync
+	// historically only loaded the in-memory manifest; without a registry row
+	// GET /dev/projects stayed empty even though the app was healthy.
+	s.ensureSyncedProjectListed(r.Context(), next.Project, syncKey(r))
 	s.cache.invalidateRows(r.Context(), next.Project, tenantIDFromRequest(next.Project, ""), "")
 	s.rerunProjectSubscriptions(next.Project)
 	writeJSON(w, http.StatusOK, map[string]any{

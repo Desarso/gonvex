@@ -127,6 +127,11 @@ export function ConvexProviderWithAuth(props: {
  * project-scoped Gonvex session. No Firebase or Google SDK is loaded in the
  * browser.
  */
+// Dedupe callback bootstrap across React StrictMode remounts so the OAuth
+// code+PKCE exchange runs once. Without this, the first effect's finally
+// clears sessionStorage PKCE before the remount can finish verification.
+const authBootstrapPromises = new Map<string, Promise<GonvexAuthSession | null>>();
+
 export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexClient; children: ReactNode }) {
   const runtimeUrl = props.runtimeUrl.replace(/\/+$/, "");
   const callbackPath = normalizeCallbackPath(props.callbackPath ?? "/");
@@ -137,7 +142,6 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   const [error, setError] = useState<string | null>(null);
   const [refreshRetryAt, setRefreshRetryAt] = useState(0);
   const sessionRef = useRef(session);
-  const bootstrapRef = useRef<Promise<GonvexAuthSession | null> | null>(null);
   const refreshRef = useRef<Promise<GonvexAuthSession | null> | null>(null);
 
   const installSession = useCallback((next: GonvexAuthSession | null, persist = true) => {
@@ -154,10 +158,21 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
 
   useEffect(() => {
     let cancelled = false;
-    if (!bootstrapRef.current) {
-      bootstrapRef.current = bootstrapGonvexAuth({ callbackPath, pkceStorageKey, projectId: props.projectId, runtimeUrl, storageKey });
+    let bootstrap = authBootstrapPromises.get(storageKey);
+    if (!bootstrap) {
+      bootstrap = bootstrapGonvexAuth({ callbackPath, pkceStorageKey, projectId: props.projectId, runtimeUrl, storageKey })
+        .finally(() => {
+          // Keep the resolved promise briefly so a StrictMode remount attaches
+          // to the same result instead of re-running a spent OAuth code.
+          window.setTimeout(() => {
+            if (authBootstrapPromises.get(storageKey) === bootstrap) {
+              authBootstrapPromises.delete(storageKey);
+            }
+          }, 0);
+        });
+      authBootstrapPromises.set(storageKey, bootstrap);
     }
-    void bootstrapRef.current.then((next) => {
+    void bootstrap.then((next) => {
       if (!cancelled) installSession(next);
     }).catch((cause) => {
       if (!cancelled) {
@@ -165,7 +180,6 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
         setError(cause instanceof Error ? cause.message : "Google sign-in failed.");
       }
     }).finally(() => {
-      safeSessionStorageRemove(pkceStorageKey);
       if (!cancelled) setIsLoading(false);
     });
     return () => { cancelled = true; };
@@ -459,23 +473,38 @@ async function bootstrapGonvexAuth(options: {
   }
 
   const pkce = readPKCE(options.pkceStorageKey);
-  clearAuthCallbackParams(url, pkce?.returnTo);
-  if (!pkce || !returnedState || returnedState !== pkce.state || Date.now() - pkce.createdAt > 10 * 60 * 1000) {
-    throw new Error("The Google sign-in response could not be verified. Please try again.");
-  }
+  // Prefer surfacing the runtime/Google error when PKCE is missing (e.g. after
+  // a StrictMode remount or a second tab), rather than always saying "verified".
   if (callbackError) {
     const messages: Record<string, string> = {
       access_denied: "Google sign-in was cancelled.",
       invitation_required: "This app is invite-only. Ask an administrator to invite your verified Google email.",
       verified_google_email_required: "Google must provide a verified email address for this app.",
       membership_setup_failed: "Your account was verified, but its workspace could not be prepared. Please try again.",
+      google_exchange_failed: "Google rejected the sign-in code exchange. Check GONVEX_GOOGLE_CLIENT_ID/SECRET and the broker callback URI.",
+      invalid_google_identity: "Google identity verification failed. Please try again.",
+      account_creation_failed: "Your Google account could not be linked. Please try again.",
+      code_creation_failed: "Gonvex could not finish creating a sign-in code. Please try again.",
     };
-    throw new Error(messages[callbackError] ?? "Google sign-in failed. Please try again.");
+    safeSessionStorageRemove(options.pkceStorageKey);
+    clearAuthCallbackParams(url, pkce?.returnTo);
+    throw new Error(messages[callbackError] ?? `Google sign-in failed (${callbackError}). Please try again.`);
   }
-  return requestGonvexAuthToken(options.runtimeUrl, {
+  if (!pkce || !returnedState || returnedState !== pkce.state || Date.now() - pkce.createdAt > 10 * 60 * 1000) {
+    clearAuthCallbackParams(url, pkce?.returnTo);
+    throw new Error("The Google sign-in response could not be verified. Please try again.");
+  }
+  // Consume PKCE only after validation so a concurrent remount still sees it.
+  safeSessionStorageRemove(options.pkceStorageKey);
+  clearAuthCallbackParams(url, pkce.returnTo);
+  const session = await requestGonvexAuthToken(options.runtimeUrl, {
     grantType: "authorization_code", project: options.projectId, code,
     codeVerifier: pkce.verifier, redirectUri: pkce.redirectUri,
   });
+  // Persist before returning so a StrictMode remount can recover the session
+  // even if the first effect was cancelled before installSession.
+  safeLocalStorageSet(options.storageKey, JSON.stringify(session));
+  return session;
 }
 
 async function requestGonvexAuthToken(runtimeUrl: string, body: Record<string, unknown>): Promise<GonvexAuthSession> {

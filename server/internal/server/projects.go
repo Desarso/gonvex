@@ -52,9 +52,18 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	s.hydrateProjects()
 
+	// Copy under the project lock, then authorize outside it. canAccessProject
+	// opens the control-plane DB; holding projectMu across that work can stall
+	// the whole runtime (hydrate/sync wait forever on the same mutex).
 	s.projectMu.RLock()
-	projects := make([]projectTarget, 0, len(s.projects))
+	all := make([]projectTarget, 0, len(s.projects))
 	for _, project := range s.projects {
+		all = append(all, project)
+	}
+	s.projectMu.RUnlock()
+
+	projects := make([]projectTarget, 0, len(all))
+	for _, project := range all {
 		if s.dashboardAuthOptional() || s.canAccessProject(r.Context(), actor, project.ID) {
 			if project.OwnerEmail == "" && s.dashboardAuthOptional() {
 				project.OwnerEmail = actor.Email
@@ -62,7 +71,6 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 			projects = append(projects, project)
 		}
 	}
-	s.projectMu.RUnlock()
 
 	sort.Slice(projects, func(i, j int) bool {
 		return strings.ToLower(projects[i].Name) < strings.ToLower(projects[j].Name)
@@ -720,6 +728,19 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	)`); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_mutation_logs (
+		id BIGSERIAL PRIMARY KEY,
+		project_id TEXT NOT NULL DEFAULT '',
+		kind TEXT NOT NULL CHECK (kind IN ('mutation', 'internalMutation')),
+		entry JSONB NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_runtime_mutation_logs_by_project
+		ON gonvex_runtime_mutation_logs (project_id, id DESC)`); err != nil {
+		return err
+	}
 	// Project environment variables, stored in the runtime registry (not in any
 	// browsable tenant/project database) and hidden from the Data browser.
 	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_project_env (
@@ -937,11 +958,12 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 }
 
 func (s *Server) loadProjectRegistry(ctx context.Context) ([]projectTarget, error) {
-	db, err := s.openProjectRegistry(ctx)
+	// Prefer the shared registry pool so listing projects cannot starve (or be
+	// starved by) per-tenant dbpool budgets during multi-tenant local/prod use.
+	db, err := s.pooledProjectRegistry(ctx)
 	if err != nil || db == nil {
 		return nil, err
 	}
-	defer db.Close()
 
 	rows, err := db.QueryContext(ctx, `SELECT id, name, environment, database_name, database_url, storage_bucket, status, description, project_key, provisioned, runtime_created, COALESCE(test_tab, false), COALESCE(error_tracking_enabled, false), COALESCE(NULLIF(database_mode, ''), 'single'), COALESCE(owner_email, '') FROM gonvex_runtime_projects ORDER BY name`)
 	if err != nil {
@@ -1099,6 +1121,76 @@ func (s *Server) ensureProjectOwnerMember(ctx context.Context, projectID string,
 		role = 'owner'`,
 		projectID, actor.Email, name)
 	return err
+}
+
+// ensureSyncedProjectListed makes a project that arrived via `gonvex dev` sync
+// appear in GET /dev/projects. Local zero-config runtimes accept any project id
+// against the shared POSTGRES_URL without writing gonvex_runtime_projects, so
+// the dashboard previously showed an empty chooser even while the app worked.
+func (s *Server) ensureSyncedProjectListed(ctx context.Context, projectID string, projectKey string) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return
+	}
+	projectKey = strings.TrimSpace(projectKey)
+	s.hydrateProjects()
+
+	s.projectMu.Lock()
+	if existing, ok := s.projects[projectID]; ok {
+		if projectKey != "" && strings.TrimSpace(existing.syncKey) == "" {
+			existing.syncKey = projectKey
+			s.projects[projectID] = existing
+			if s.config.ProjectKeys == nil {
+				s.config.ProjectKeys = map[string]string{}
+			}
+			s.config.ProjectKeys[projectID] = projectKey
+			s.projectMu.Unlock()
+			_ = s.saveProjectRegistry(ctx, existing)
+			return
+		}
+		s.projectMu.Unlock()
+		return
+	}
+
+	databaseURL := ""
+	if s.config.ProjectDatabases != nil {
+		databaseURL = strings.TrimSpace(s.config.ProjectDatabases[projectID])
+	}
+	if databaseURL == "" {
+		databaseURL = strings.TrimSpace(s.config.PostgresURL)
+	}
+	if databaseURL == "" {
+		s.projectMu.Unlock()
+		return
+	}
+	if s.config.ProjectDatabases == nil {
+		s.config.ProjectDatabases = map[string]string{}
+	}
+	if s.config.ProjectKeys == nil {
+		s.config.ProjectKeys = map[string]string{}
+	}
+	s.config.ProjectDatabases[projectID] = databaseURL
+	if projectKey != "" {
+		s.config.ProjectKeys[projectID] = projectKey
+	}
+	project := projectTarget{
+		ID:             projectID,
+		Name:           projectNameFromID(projectID),
+		Environment:    s.config.Environment,
+		Database:       databaseNameFromURL(databaseURL, projectID),
+		DatabaseMode:   "single",
+		StorageBucket:  projectID + "-dev",
+		Status:         "local",
+		Description:    "Registered from gonvex dev sync.",
+		Provisioned:    true,
+		RuntimeCreated: false,
+		databaseURL:    databaseURL,
+		databaseName:   databaseNameFromURL(databaseURL, projectID),
+		syncKey:        projectKey,
+	}
+	s.projects[projectID] = project
+	s.projectMu.Unlock()
+	_ = s.saveProjectRegistry(ctx, project)
 }
 
 func (s *Server) saveRuntimeManifest(ctx context.Context, next manifest.Manifest) error {

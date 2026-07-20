@@ -169,6 +169,53 @@ func TestQueryCacheDirectiveChangesWithRuntimeManifest(t *testing.T) {
 	}
 }
 
+func TestQueryCacheDirectiveChangesWithTenantDatabaseRoute(t *testing.T) {
+	server := New(config.Config{
+		QueryCacheEnabled: true,
+		ProjectDatabases:  map[string]string{"project-a": "postgres://db/project"},
+		TenantDatabases:   map[string]string{"project-a:tenant-a": "postgres://db/tenant-a"},
+	})
+	before := server.queryCacheDirective("project-a", "tenant-a", callerContext{})
+
+	server.projectMu.Lock()
+	server.config.TenantDatabases["project-a:tenant-a"] = "postgres://db/tenant-b"
+	server.projectMu.Unlock()
+	after := server.queryCacheDirective("project-a", "tenant-a", callerContext{})
+
+	if before == nil || after == nil || before.Epoch == after.Epoch || before.Scope == after.Scope {
+		t.Fatalf("expected database route change to invalidate cache scope: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestClearProjectCacheDoesNotClearOtherProjects(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	cache, err := newRowsCache("redis://"+redisServer.Addr(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.close() })
+	ctx := context.Background()
+	projectAQuery := cache.queryKey("project-a", "tenant-a", "generation", "scope", "tasks.list", nil)
+	projectBQuery := cache.queryKey("project-b", "tenant-b", "generation", "scope", "tasks.list", nil)
+	projectARows := cache.rowsKey("project-a", "tenant-a", "tasks", nil)
+	cache.set(ctx, projectAQuery, []byte("a"))
+	cache.set(ctx, projectBQuery, []byte("b"))
+	cache.set(ctx, projectARows, []byte("rows"))
+
+	if cleared := cache.clearProject(ctx, "project-a"); cleared != 2 {
+		t.Fatalf("cleared entries = %d, want 2", cleared)
+	}
+	if _, outcome := cache.read(ctx, projectAQuery); outcome != "miss" {
+		t.Fatalf("project A query outcome = %q, want miss", outcome)
+	}
+	if _, outcome := cache.read(ctx, projectARows); outcome != "miss" {
+		t.Fatalf("project A rows outcome = %q, want miss", outcome)
+	}
+	if _, outcome := cache.read(ctx, projectBQuery); outcome != "hit" {
+		t.Fatalf("project B query outcome = %q, want hit", outcome)
+	}
+}
+
 func TestQueryCacheDirectiveCanBeDisabled(t *testing.T) {
 	server := New(config.Config{})
 	if directive := server.queryCacheDirective("project-a", "tenant-a", callerContext{}); directive != nil {

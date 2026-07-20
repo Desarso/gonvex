@@ -27,8 +27,16 @@ func Open(databaseURL string) (*sql.DB, error) {
 		connector: stdlib.GetConnector(*config),
 		budget:    runtimeBudget,
 	})
-	Configure(db)
+	configureBudgeted(db)
 	return db, nil
+}
+
+func configureBudgeted(db *sql.DB) {
+	Configure(db)
+	// A retained connection still occupies the process-wide budget. Since the
+	// runtime creates pools for many databases, idle connections could consume
+	// every slot and prevent an unrelated pool from making progress.
+	db.SetMaxIdleConns(0)
 }
 
 // PGXConn unwraps a connection obtained through sql.Conn.Raw.

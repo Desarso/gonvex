@@ -185,32 +185,17 @@ func (s *Server) authorizeProjectEnvRequest(w http.ResponseWriter, r *http.Reque
 	return true
 }
 
-// projectEnvDashboardActorFromRequest accepts signed dashboard sessions,
-// permission-scoped personal access tokens, and the explicitly configured
-// runtime admin key. It intentionally does not use the legacy
-// DevSyncKey-as-admin fallback: allowing a runtime-wide sync credential here
-// would bypass project-key scoping.
+// projectEnvDashboardActorFromRequest accepts the same dashboard identities as
+// accountActorFromRequest: HMAC dashboard sessions, native Google sessions
+// (gvx_session_ from GONVEX_DASHBOARD_AUTH_PROJECT_ID), PATs, admin key, and
+// the local-dev optional actor. It intentionally does not treat the global
+// DevSyncKey as env access (that would bypass project-key scoping).
 func (s *Server) projectEnvDashboardActorFromRequest(r *http.Request) (dashboardActor, bool) {
-	token := strings.TrimSpace(r.Header.Get("authorization"))
-	if strings.HasPrefix(strings.ToLower(token), "bearer ") {
-		token = strings.TrimSpace(token[len("Bearer "):])
-	}
-	if actor, ok := s.verifyDashboardToken(token); ok {
-		actor.credentialKind = "session"
-		return actor, true
-	}
-	if adminKey := strings.TrimSpace(s.config.AdminKey); adminKey != "" && constantTimeString(token, adminKey) {
-		return dashboardActor{Email: "admin@gonvex.local", Name: "Gonvex Admin", Role: "admin", credentialKind: "adminKey"}, true
-	}
-	if strings.HasPrefix(token, "gvx_pat_") {
-		if actor, ok := s.verifyAccountAccessToken(r.Context(), token); ok {
-			return actor, true
-		}
-	}
-	if s.dashboardAuthOptional() {
-		return dashboardActor{Email: "local@gonvex.dev", Name: "Local Developer", Role: "admin", credentialKind: "local"}, true
-	}
-	return dashboardActor{}, false
+	// Reuse the account-auth path so Google dashboard login can manage env vars.
+	// Previously this helper omitted native Google sessions, which made the env
+	// page show "dashboard sign-in or project key is required" after a successful
+	// Google sign-in (and looked like an empty variable list).
+	return s.accountActorFromRequest(r)
 }
 
 // GET /dev/projects/{project}/env

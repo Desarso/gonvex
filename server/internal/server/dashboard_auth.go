@@ -406,11 +406,14 @@ func (s *Server) canAccessProject(ctx context.Context, actor dashboardActor, pro
 	if actor.hasGlobalProjectAccess() {
 		return true
 	}
-	db, err := s.openProjectRegistry(ctx)
+	// Use the process-wide registry pool. openProjectRegistry allocates a new
+	// budgeted pool per call; under multi-tenant connection pressure that can
+	// block forever waiting for the global DB budget while the dashboard
+	// chooser hangs on "Checking runtime".
+	db, err := s.pooledProjectRegistry(ctx)
 	if err != nil || db == nil {
 		return false
 	}
-	defer db.Close()
 	var exists bool
 	err = db.QueryRowContext(ctx, `
 		SELECT EXISTS (
@@ -429,11 +432,10 @@ func (s *Server) canManageProject(ctx context.Context, actor dashboardActor, pro
 	if actor.hasGlobalProjectAccess() {
 		return true
 	}
-	db, err := s.openProjectRegistry(ctx)
+	db, err := s.pooledProjectRegistry(ctx)
 	if err != nil || db == nil {
 		return false
 	}
-	defer db.Close()
 	var exists bool
 	err = db.QueryRowContext(ctx, `
 		SELECT EXISTS (

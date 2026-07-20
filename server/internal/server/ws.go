@@ -1084,10 +1084,45 @@ func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID s
 			if err := s.provisionCreatedTenant(ctx, projectID, result); err != nil {
 				return nil, err
 			}
+			// Optional app hook: seed structural defaults into the newly
+			// provisioned tenant database (roles, permissions, etc.). Runs with
+			// the new tenant as active context so TenantTable writes land in the
+			// right DB — not the landlord DB used during tenants.create itself.
+			if err := s.runTenantsOnProvisioned(ctx, projectID, result, caller); err != nil {
+				return nil, err
+			}
 		}
 		return result, nil
 	}
 	return nil, fmt.Errorf("mutation %q is not implemented by the runtime", path)
+}
+
+// runTenantsOnProvisioned invokes the optional internal mutation
+// "tenants.onProvisioned" against the newly created tenant database after
+// provisionCreatedTenant succeeds. Apps that do not register the hook are
+// skipped. Failures surface so create does not silently leave an empty shell.
+func (s *Server) runTenantsOnProvisioned(ctx context.Context, projectID string, result any, caller callerContext) error {
+	tenantID := tenantIDFromMutationResult(result)
+	if tenantID == "" {
+		return nil
+	}
+	app := s.appForProject(ctx, projectID)
+	function, ok := app.Lookup("tenants.onProvisioned")
+	if !ok || function.Kind != gonvex.FunctionKindInternalMutation {
+		return nil
+	}
+	mutationCtx, err := s.mutationContext(ctx, projectID, tenantID, caller)
+	if err != nil {
+		return fmt.Errorf("tenants.onProvisioned: %w", err)
+	}
+	rawArgs, err := json.Marshal(map[string]any{"tenantId": tenantID})
+	if err != nil {
+		return fmt.Errorf("tenants.onProvisioned args: %w", err)
+	}
+	if _, err := s.runMutationInTx(mutationCtx, "tenants.onProvisioned", rawArgs, app.ExecuteInternalMutation); err != nil {
+		return fmt.Errorf("tenants.onProvisioned: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) executeRegisteredMutation(app *gonvex.App, mutationCtx *gonvex.MutationCtx, path string, rawArgs json.RawMessage) (any, error) {

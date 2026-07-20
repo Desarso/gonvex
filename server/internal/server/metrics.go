@@ -34,6 +34,7 @@ type runtimeMetrics struct {
 	telemetryPath  string
 	logSubscribers map[int]logSubscriber
 	nextLogSubID   int
+	mutationWrites chan runtimeLogEntry
 }
 
 type logSubscriber struct {
@@ -507,7 +508,6 @@ func (m *runtimeMetrics) recordRuntimeOperation(project string, path string, kin
 
 func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	logKind := log.Kind
 	if log.Kind != "runtime" {
@@ -539,6 +539,9 @@ func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
 
 	log.Kind = logKind
 	m.appendLog(log)
+	m.mu.Unlock()
+
+	m.persistMutationLog(log)
 }
 
 func (m *runtimeMetrics) recordCache(project string, outcome string) {

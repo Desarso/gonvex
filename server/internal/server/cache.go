@@ -168,6 +168,38 @@ func (c *rowsCache) deletePattern(ctx context.Context, pattern string) {
 	}
 }
 
+func (c *rowsCache) clearProject(ctx context.Context, projectID string) int64 {
+	if !c.enabled() {
+		return 0
+	}
+	projectID, _ = cacheScope(projectID, "")
+	patterns := []string{
+		"gonvex:rows:v2:" + projectID + ":*",
+		"gonvex:queries:v2:" + cacheKeyPart(projectID) + ":*",
+		"gonvex:queries:v2:generation:" + cacheKeyPart(projectID) + ":*",
+	}
+	var cleared int64
+	for _, pattern := range patterns {
+		var cursor uint64
+		for {
+			keys, nextCursor, err := c.client.Scan(ctx, cursor, pattern, 100).Result()
+			if err != nil {
+				break
+			}
+			if len(keys) > 0 {
+				if count, err := c.client.Del(ctx, keys...).Result(); err == nil {
+					cleared += count
+				}
+			}
+			if nextCursor == 0 {
+				break
+			}
+			cursor = nextCursor
+		}
+	}
+	return cleared
+}
+
 func cacheKeyPart(value string) string {
 	hash := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(hash[:12])

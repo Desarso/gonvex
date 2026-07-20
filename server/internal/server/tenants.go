@@ -895,6 +895,11 @@ func (s *Server) provisionCreatedTenant(ctx context.Context, project string, res
 	if tenantID == "" {
 		return nil
 	}
+	// tenants.create just inserted the landlord row. The mutation path already
+	// hydrated this project for the request context, so a TTL-gated hydrate
+	// would skip and leave the new tenant unregistered — which surfaces as
+	// "tenant X is not related to project Y" for UUID multi-tenant projects.
+	s.invalidateProjectTenantHydration(project)
 	s.hydrateProjectTenantDatabases(ctx, project)
 	databaseURL := s.databaseURLForTenant(project, tenantID)
 	_, err := s.ensureRuntimeTenantDatabase(ctx, project, tenantID, databaseURL)

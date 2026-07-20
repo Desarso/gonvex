@@ -33,12 +33,14 @@ func (s *Server) queryCacheDirective(projectID string, tenantID string, caller c
 	epoch := hashQueryCacheValue(struct {
 		ProtocolVersion int    `json:"protocolVersion"`
 		Project         string `json:"project"`
+		Database        string `json:"database"`
 		Functions       any    `json:"functions"`
 		Schema          any    `json:"schema"`
 		BundleHash      string `json:"bundleHash"`
 	}{
 		ProtocolVersion: queryCacheProtocolVersion,
 		Project:         current.Project,
+		Database:        s.databaseURLForTenant(projectID, tenantID),
 		Functions:       current.Functions,
 		Schema:          current.Schema.Normalize(),
 		BundleHash:      bundleHash,
