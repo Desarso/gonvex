@@ -81,6 +81,9 @@ test("production runtime and dashboard require protected durable configuration",
     "postgres://gonvex:compose-contract-postgres@gonvex-maker-postgres:5432/gonvex?sslmode=disable",
   );
   assert.equal(runtime.environment.VALKEY_URL, "redis://gonvex-maker-valkey:6379/0");
+  assert.equal(runtime.environment.GONVEX_DB_MAX_TOTAL_CONNS, "20");
+  assert.equal(runtime.environment.GONVEX_DB_MAX_OPEN_CONNS, "2");
+  assert.equal(runtime.environment.GONVEX_DB_MAX_IDLE_CONNS, "1");
   assert.equal(runtime.environment.S3_ENDPOINT, "http://gonvex-maker-minio:9000");
   assert.deepEqual(runtime.cap_drop, ["ALL"]);
   assert.equal(dashboard.environment.DASHBOARD_AUTH_ENABLED, "true");
