@@ -117,46 +117,27 @@ func inspectDatabaseSchema(ctx context.Context, db *sql.DB) (databaseSchemaSnaps
 		indexes: map[string]bool{},
 	}
 
-	tableRows, err := db.QueryContext(ctx, `
-		SELECT table_name
-		FROM information_schema.tables
-		WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-	`)
-	if err != nil {
-		return snapshot, err
-	}
-	for tableRows.Next() {
-		var tableName string
-		if err := tableRows.Scan(&tableName); err != nil {
-			tableRows.Close()
-			return snapshot, err
-		}
-		snapshot.tables[tableName] = true
-	}
-	if err := tableRows.Close(); err != nil {
-		return snapshot, err
-	}
-	if err := tableRows.Err(); err != nil {
-		return snapshot, err
-	}
-
 	columnRows, err := db.QueryContext(ctx, `
 		SELECT
-			c.table_name,
-			c.column_name,
-			c.udt_name,
-			c.is_nullable = 'YES',
-			COALESCE(tc.constraint_type = 'PRIMARY KEY', false)
-		FROM information_schema.columns c
-		LEFT JOIN information_schema.key_column_usage kcu
-			ON kcu.table_schema = c.table_schema
-			AND kcu.table_name = c.table_name
-			AND kcu.column_name = c.column_name
-		LEFT JOIN information_schema.table_constraints tc
-			ON tc.constraint_schema = kcu.constraint_schema
-			AND tc.constraint_name = kcu.constraint_name
-			AND tc.constraint_type = 'PRIMARY KEY'
-		WHERE c.table_schema = 'public'
+			relation.relname,
+			attribute.attname,
+			type.typname,
+			NOT attribute.attnotnull,
+			EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_index primary_index
+				WHERE primary_index.indrelid = relation.oid
+					AND primary_index.indisprimary
+					AND attribute.attnum = ANY(primary_index.indkey)
+			)
+		FROM pg_catalog.pg_attribute attribute
+		JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+		JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+		JOIN pg_catalog.pg_type type ON type.oid = attribute.atttypid
+		WHERE namespace.nspname = current_schema()
+			AND relation.relkind IN ('r', 'p')
+			AND attribute.attnum > 0
+			AND NOT attribute.attisdropped
 	`)
 	if err != nil {
 		return snapshot, err
@@ -174,6 +155,7 @@ func inspectDatabaseSchema(ctx context.Context, db *sql.DB) (databaseSchemaSnaps
 		if snapshot.columns[tableName] == nil {
 			snapshot.columns[tableName] = map[string]existingColumn{}
 		}
+		snapshot.tables[tableName] = true
 		rememberExistingColumn(snapshot.columns[tableName], columnName, existingColumn{
 			Type:       manifestType(udtName),
 			Nullable:   nullable,
@@ -255,20 +237,25 @@ func tableExists(ctx context.Context, db *sql.DB, table string) (bool, error) {
 func existingColumns(ctx context.Context, db *sql.DB, table string) (map[string]existingColumn, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT
-			c.column_name,
-			c.udt_name,
-			c.is_nullable = 'YES',
-			COALESCE(tc.constraint_type = 'PRIMARY KEY', false)
-		FROM information_schema.columns c
-		LEFT JOIN information_schema.key_column_usage kcu
-			ON kcu.table_schema = c.table_schema
-			AND kcu.table_name = c.table_name
-			AND kcu.column_name = c.column_name
-		LEFT JOIN information_schema.table_constraints tc
-			ON tc.constraint_schema = kcu.constraint_schema
-			AND tc.constraint_name = kcu.constraint_name
-			AND tc.constraint_type = 'PRIMARY KEY'
-		WHERE c.table_schema = 'public' AND c.table_name = $1
+			attribute.attname,
+			type.typname,
+			NOT attribute.attnotnull,
+			EXISTS (
+				SELECT 1
+				FROM pg_catalog.pg_index primary_index
+				WHERE primary_index.indrelid = relation.oid
+					AND primary_index.indisprimary
+					AND attribute.attnum = ANY(primary_index.indkey)
+			)
+		FROM pg_catalog.pg_attribute attribute
+		JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+		JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+		JOIN pg_catalog.pg_type type ON type.oid = attribute.atttypid
+		WHERE namespace.nspname = current_schema()
+			AND relation.relname = $1
+			AND relation.relkind IN ('r', 'p')
+			AND attribute.attnum > 0
+			AND NOT attribute.attisdropped
 	`, table)
 	if err != nil {
 		return nil, err
