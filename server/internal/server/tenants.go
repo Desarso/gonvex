@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
@@ -968,25 +969,70 @@ func (s *Server) applyTenantSchemasForProject(ctx context.Context, project strin
 	}
 	s.projectMu.RUnlock()
 
-	result := schema.Result{}
+	return applyTenantSchemas(ctx, tenants, desiredSchema, schema.Apply)
+}
+
+type tenantSchemaApplyFunc func(context.Context, string, manifest.Schema) (schema.Result, error)
+
+const tenantSchemaApplyConcurrency = 4
+
+type tenantSchemaApplyOutcome struct {
+	result schema.Result
+	err    error
+}
+
+func applyTenantSchemas(
+	ctx context.Context,
+	tenants []tenantTarget,
+	desiredSchema manifest.Schema,
+	apply tenantSchemaApplyFunc,
+) (schema.Result, error) {
+	targets := make([]tenantTarget, 0, len(tenants))
 	seen := map[string]bool{}
 	for _, tenant := range dedupeTenantTargets(tenants) {
 		if tenant.databaseURL == "" || seen[tenant.databaseURL] {
 			continue
 		}
 		seen[tenant.databaseURL] = true
-		applied, err := schema.Apply(ctx, tenant.databaseURL, desiredSchema)
-		if err != nil {
-			if isMissingTenantDatabaseError(err) {
+		targets = append(targets, tenant)
+	}
+	if len(targets) == 0 {
+		return schema.Result{}, nil
+	}
+
+	outcomes := make([]tenantSchemaApplyOutcome, len(targets))
+	jobs := make(chan int)
+	workerCount := min(tenantSchemaApplyConcurrency, len(targets))
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				outcomes[index].result, outcomes[index].err = apply(ctx, targets[index].databaseURL, desiredSchema)
+			}
+		}()
+	}
+	for index := range targets {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
+
+	result := schema.Result{}
+	for index, tenant := range targets {
+		outcome := outcomes[index]
+		if outcome.err != nil {
+			if isMissingTenantDatabaseError(outcome.err) {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("%s: skipped missing tenant database", tenant.ID))
 				continue
 			}
-			return result, fmt.Errorf("tenant %s schema sync failed: %w", tenant.ID, err)
+			return result, fmt.Errorf("tenant %s schema sync failed: %w", tenant.ID, outcome.err)
 		}
-		for _, statement := range applied.Applied {
+		for _, statement := range outcome.result.Applied {
 			result.Applied = append(result.Applied, fmt.Sprintf("%s: %s", tenant.ID, statement))
 		}
-		for _, warning := range applied.Warnings {
+		for _, warning := range outcome.result.Warnings {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("%s: %s", tenant.ID, warning))
 		}
 	}
