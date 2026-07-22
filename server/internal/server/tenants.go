@@ -974,7 +974,10 @@ func (s *Server) applyTenantSchemasForProject(ctx context.Context, project strin
 
 type tenantSchemaApplyFunc func(context.Context, string, manifest.Schema) (schema.Result, error)
 
-const tenantSchemaApplyConcurrency = 4
+// A schema apply uses at most two PostgreSQL connections. Sixteen workers keep
+// a large multi-tenant rollout below the public sync request timeout while
+// leaving ample room under PostgreSQL's default 100-connection limit.
+const tenantSchemaApplyConcurrency = 16
 
 type tenantSchemaApplyOutcome struct {
 	result schema.Result

@@ -11,7 +11,7 @@ import (
 )
 
 func TestApplyTenantSchemasRunsIndependentDatabasesConcurrently(t *testing.T) {
-	tenants := make([]tenantTarget, 6)
+	tenants := make([]tenantTarget, tenantSchemaApplyConcurrency+2)
 	for index := range tenants {
 		tenants[index] = tenantTarget{
 			ID:          string(rune('a' + index)),
