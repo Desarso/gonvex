@@ -80,3 +80,45 @@ func TestCreateIndexesRestoresPriorIndexWhenUniquenessCannotBeStrengthened(t *te
 		t.Fatalf("restored index exists=%v unique=%v err=%v", exists, unique, err)
 	}
 }
+
+func TestInstallNotifyTriggersSkipsCompleteInstall(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	tableName := fmt.Sprintf("schema_notify_%d", time.Now().UnixNano())
+	if _, err := db.Exec(`CREATE TABLE ` + quoteIdent(tableName) + ` (id text primary key)`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DROP TABLE IF EXISTS ` + quoteIdent(tableName))
+		for _, suffix := range []string{"insert", "update", "delete"} {
+			_, _ = db.Exec(`DROP FUNCTION IF EXISTS ` + quoteIdent("gonvex_notify_"+tableName+"_"+suffix) + `()`)
+		}
+	})
+
+	tables := map[string]manifest.Table{
+		tableName: {Columns: map[string]manifest.Column{"id": {Type: "id", PrimaryKey: true}}},
+	}
+	first, err := InstallNotifyTriggers(context.Background(), db, tables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("first trigger install applied %d changes, want 1: %#v", len(first), first)
+	}
+
+	second, err := InstallNotifyTriggers(context.Background(), db, tables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("unchanged trigger install applied %d changes, want 0: %#v", len(second), second)
+	}
+}

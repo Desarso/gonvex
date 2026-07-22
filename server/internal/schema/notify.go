@@ -14,6 +14,13 @@ const NotifyChannel = "gonvex_table_change"
 func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]manifest.Table) ([]string, error) {
 	var applied []string
 	for _, tableName := range sortedTableNames(tables) {
+		installed, err := notifyTriggersInstalled(ctx, db, tableName)
+		if err != nil {
+			return applied, err
+		}
+		if installed {
+			continue
+		}
 		table := tables[tableName]
 		statement, err := notifySQLForTable(tableName, table)
 		if err != nil {
@@ -25,6 +32,48 @@ func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]ma
 		applied = append(applied, fmt.Sprintf("ensured notify triggers for %s", tableName))
 	}
 	return applied, nil
+}
+
+// notifyTriggersInstalled avoids rewriting three functions and three triggers
+// for every table on every schema sync. Those definitions are independent of
+// ordinary column changes; they only need installation for a new table or when
+// an artifact is missing. Rebuilding hundreds of unchanged triggers across
+// every tenant can otherwise exceed reverse-proxy request timeouts before the
+// new manifest is persisted.
+func notifyTriggersInstalled(ctx context.Context, db *sql.DB, tableName string) (bool, error) {
+	triggerPrefix := "gonvex_" + tableName + "_notify_"
+	functionPrefix := "gonvex_notify_" + tableName + "_"
+	var triggerCount int
+	var functionCount int
+	err := db.QueryRowContext(ctx, `
+		SELECT
+			(
+				SELECT count(*)
+				FROM pg_catalog.pg_trigger t
+				JOIN pg_catalog.pg_class relation ON relation.oid = t.tgrelid
+				JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+				WHERE namespace.nspname = current_schema()
+					AND relation.relname = $1
+					AND NOT t.tgisinternal
+					AND t.tgname IN ($2, $3, $4)
+			),
+			(
+				SELECT count(*)
+				FROM pg_catalog.pg_proc p
+				JOIN pg_catalog.pg_namespace namespace ON namespace.oid = p.pronamespace
+				WHERE namespace.nspname = current_schema()
+					AND p.proname IN ($5, $6, $7)
+					AND p.pronargs = 0
+			)
+	`,
+		tableName,
+		triggerPrefix+"insert", triggerPrefix+"update", triggerPrefix+"delete",
+		functionPrefix+"insert", functionPrefix+"update", functionPrefix+"delete",
+	).Scan(&triggerCount, &functionCount)
+	if err != nil {
+		return false, err
+	}
+	return triggerCount == 3 && functionCount == 3, nil
 }
 
 func NotifySQLForTable(tableName string, table manifest.Table) (string, error) {
