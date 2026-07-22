@@ -803,6 +803,20 @@ func (s *Server) ensureRuntimeTenantDatabase(ctx context.Context, project string
 	project = strings.TrimSpace(project)
 	tenantID = strings.TrimSpace(tenantID)
 	tenantDatabaseURL = strings.TrimSpace(tenantDatabaseURL)
+	result, err, _ := s.tenantProvisions.Do(tenantStoreKey(project, tenantID), func() (any, error) {
+		return s.ensureRuntimeTenantDatabaseOnce(ctx, project, tenantID, tenantDatabaseURL)
+	})
+	if err != nil {
+		return "", err
+	}
+	databaseURL, ok := result.(string)
+	if !ok {
+		return "", fmt.Errorf("tenant %q provisioning returned an invalid database URL", tenantID)
+	}
+	return databaseURL, nil
+}
+
+func (s *Server) ensureRuntimeTenantDatabaseOnce(ctx context.Context, project string, tenantID string, tenantDatabaseURL string) (string, error) {
 	if isUUIDProjectID(project) && tenantID != "" && tenantID != project && tenantDatabaseURL == "" {
 		return "", fmt.Errorf("tenant %q is not related to project %q", tenantID, project)
 	}
@@ -827,7 +841,7 @@ func (s *Server) ensureRuntimeTenantDatabase(ctx context.Context, project string
 	}
 
 	desiredSchema := s.runtime.ManifestForProject(project).Schema.TenantSchema()
-	if err := provisionTenantDatabase(ctx, tenantDatabaseURL, desiredSchema); err == nil {
+	if err := s.provisionTenant(ctx, tenantDatabaseURL, desiredSchema); err == nil {
 		if err := s.markTenantDatabaseProvisioned(ctx, project, tenantID, tenantDatabaseURL); err != nil {
 			return "", err
 		}
@@ -853,7 +867,7 @@ func (s *Server) ensureRuntimeTenantDatabase(ctx context.Context, project string
 			return "", err
 		}
 	}
-	if err := provisionTenantDatabase(ctx, createdURL, desiredSchema); err != nil {
+	if err := s.provisionTenant(ctx, createdURL, desiredSchema); err != nil {
 		return "", err
 	}
 	if err := s.markTenantDatabaseProvisioned(ctx, project, tenantID, createdURL); err != nil {

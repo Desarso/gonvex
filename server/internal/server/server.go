@@ -57,6 +57,8 @@ type Server struct {
 	projectEnvMu      sync.Mutex
 	projectEnvCache   map[string]projectEnvCacheEntry
 	projectEnvLoads   singleflight.Group
+	tenantProvisions  singleflight.Group
+	provisionTenant   func(context.Context, string, manifest.Schema) error
 	// syncLocks serializes /dev/sync work per project so overlapping syncs
 	// (e.g. a failed-then-retried push, or a client that fires twice) can't run
 	// catalog DDL concurrently and trip "tuple concurrently updated".
@@ -116,6 +118,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		appAuthRequirements:   map[string]appAuthRequirementCacheEntry{},
 		appAuthLookups:        map[string]*appAuthRequirementLookup{},
 		appAuthVersions:       map[string]uint64{},
+		provisionTenant:       provisionTenantDatabase,
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
 	server.scheduler = newScheduler(server.runScheduledJob)
