@@ -2,13 +2,13 @@ package dbpool
 
 import "testing"
 
-func TestLimitsFromEnvironmentDefaultsToTwoActiveAndOneWarm(t *testing.T) {
+func TestLimitsFromEnvironmentDefaultsToSixteenActiveAndOneWarm(t *testing.T) {
 	t.Setenv("GONVEX_DB_MAX_OPEN_CONNS", "")
 	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "")
 
 	limits := LimitsFromEnvironment()
-	if limits.MaxOpen != 2 {
-		t.Fatalf("MaxOpen = %d, want 2", limits.MaxOpen)
+	if limits.MaxOpen != 16 {
+		t.Fatalf("MaxOpen = %d, want 16", limits.MaxOpen)
 	}
 	if limits.MaxIdle != 1 {
 		t.Fatalf("MaxIdle = %d, want 1", limits.MaxIdle)
@@ -40,7 +40,7 @@ func TestLimitsFromEnvironmentDoesNotAllowUnlimitedOpenConnections(t *testing.T)
 	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "100")
 
 	limits := LimitsFromEnvironment()
-	if limits.MaxOpen != 2 || limits.MaxIdle != 2 {
-		t.Fatalf("LimitsFromEnvironment() = %+v, want MaxOpen=2 MaxIdle=2", limits)
+	if limits.MaxOpen != 16 || limits.MaxIdle != 16 {
+		t.Fatalf("LimitsFromEnvironment() = %+v, want MaxOpen=16 MaxIdle=16", limits)
 	}
 }

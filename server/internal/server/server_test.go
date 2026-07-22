@@ -921,6 +921,7 @@ func TestAppRealtimeMutationInvalidationTables(t *testing.T) {
 		{path: "taskResources.recordTaskViewByTaskId", want: []string{"taskViews", "tasks"}},
 		{path: "taskResources.addTagByTaskId", want: []string{"taskTags", "tasks", "taskLogs"}},
 		{path: "scheduling.processWorkspaceChatMessage", want: []string{"scheduleAvailabilitySubmissions", "scheduleAvailabilityItems", "scheduleRosterEntries"}},
+		{path: "tasks.update", want: []string{"tasks", "taskUsers", "taskTags", "taskLogs", "taskCustomFieldValues", "taskApprovalInstances"}},
 	}
 	for _, test := range tests {
 		got := mutationInvalidationTables(test.path)
@@ -953,6 +954,17 @@ func TestTableChangeTablesAreStableAndDeduplicated(t *testing.T) {
 	got := tableChangeTables(tableChange{tables: map[string]bool{"users": true, "tasks": true}})
 	if strings.Join(got, ",") != "tasks,users" {
 		t.Fatalf("tableChangeTables() = %v, want [tasks users]", got)
+	}
+}
+
+func TestMutationRuntimeContextSuppressesPreCommitInvalidations(t *testing.T) {
+	called := 0
+	runtimeCtx := mutationRuntimeContext(gonvex.RuntimeContext{
+		NotifyTableChange: func(string) { called++ },
+	})
+	runtimeCtx.NotifyTableChanged("tasks", "taskUsers", "taskTags")
+	if called != 0 {
+		t.Fatalf("mutation handler scheduled %d pre-commit invalidations, want 0", called)
 	}
 }
 

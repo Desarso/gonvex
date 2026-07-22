@@ -1447,7 +1447,18 @@ func (s *Server) mutationContext(ctx context.Context, projectID string, tenantID
 	if err != nil {
 		return nil, err
 	}
+	runtimeCtx = mutationRuntimeContext(runtimeCtx)
 	return &gonvex.MutationCtx{RuntimeContext: runtimeCtx}, nil
+}
+
+// mutationRuntimeContext prevents handlers from broadcasting table changes
+// while their transaction is still open. Client and scheduled mutation paths
+// publish one dependency-mapped invalidation batch after a successful commit;
+// allowing handler notifications here causes stale pre-commit reruns and one
+// duplicate rerun per notified table.
+func mutationRuntimeContext(runtimeCtx gonvex.RuntimeContext) gonvex.RuntimeContext {
+	runtimeCtx.NotifyTableChange = nil
+	return runtimeCtx
 }
 
 func (s *Server) actionContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (*gonvex.ActionCtx, error) {
@@ -1843,7 +1854,7 @@ func mutationInvalidationTables(path string) []string {
 		return []string{"taskFindings", "findingNotes", "taskLogs", "taskWorkspaceContexts", "tasks"}
 	}
 	if strings.HasPrefix(path, "tasks.") {
-		return []string{"tasks", "taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances"}
+		return []string{"tasks", "taskUsers", "taskTags", "taskLogs", "taskCustomFieldValues", "taskApprovalInstances"}
 	}
 	if table := subscriptionTable(path); table != "" {
 		return []string{table}

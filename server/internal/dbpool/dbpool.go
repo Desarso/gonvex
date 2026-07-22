@@ -9,7 +9,11 @@ import (
 )
 
 const (
-	defaultMaxOpen = 2
+	// The process-wide connection budget remains the hard safety boundary. A
+	// two-connection per-database default leaves a single hot tenant limited to
+	// four physical connections across its tenant and landlord pools, while most
+	// of the safe process budget sits unused.
+	defaultMaxOpen = 16
 	defaultMaxIdle = 1
 	defaultIdleTTL = 5 * time.Minute
 )
@@ -21,9 +25,9 @@ type Limits struct {
 	MaxIdle int
 }
 
-// LimitsFromEnvironment returns conservative per-database limits. The runtime
-// maintains a separate pool for each active tenant, so unbounded defaults would
-// allow the aggregate to exhaust PostgreSQL's connection limit.
+// LimitsFromEnvironment returns bounded per-database limits. The runtime's
+// process-wide connection budget is the aggregate safety boundary across all
+// active tenant pools.
 func LimitsFromEnvironment() Limits {
 	limits := Limits{
 		MaxOpen: positiveEnvironmentInt("GONVEX_DB_MAX_OPEN_CONNS", defaultMaxOpen),
