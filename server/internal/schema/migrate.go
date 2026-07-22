@@ -30,6 +30,12 @@ type existingColumn struct {
 	PrimaryKey bool
 }
 
+type databaseSchemaSnapshot struct {
+	tables  map[string]bool
+	columns map[string]map[string]existingColumn
+	indexes map[string]bool
+}
+
 func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Result, error) {
 	if databaseURL == "" || len(desired.Tables) == 0 {
 		return Result{}, nil
@@ -59,15 +65,16 @@ func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Re
 		return Result{}, err
 	}
 	defer unlock()
+	snapshot, err := inspectDatabaseSchema(ctx, db)
+	if err != nil {
+		return Result{}, err
+	}
 
 	result := Result{}
 	tableNames := sortedTableNames(desired.Tables)
 	for _, tableName := range tableNames {
 		table := desired.Tables[tableName]
-		exists, err := tableExists(ctx, db, tableName)
-		if err != nil {
-			return result, err
-		}
+		exists := snapshot.tables[tableName]
 
 		if !exists {
 			statement, err := createTableSQL(tableName, table)
@@ -79,7 +86,7 @@ func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Re
 			}
 			result.Applied = append(result.Applied, fmt.Sprintf("created table %s", tableName))
 		} else {
-			applied, warnings, err := reconcileColumns(ctx, db, tableName, table)
+			applied, warnings, err := reconcileColumnsFromExisting(ctx, db, tableName, table, snapshot.columns[tableName])
 			if err != nil {
 				return result, err
 			}
@@ -87,7 +94,7 @@ func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Re
 			result.Warnings = append(result.Warnings, warnings...)
 		}
 
-		applied, err := createIndexes(ctx, db, tableName, table)
+		applied, err := createIndexesFromExisting(ctx, db, tableName, table, snapshot.indexes)
 		if err != nil {
 			return result, err
 		}
@@ -101,6 +108,112 @@ func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Re
 	result.Applied = append(result.Applied, applied...)
 
 	return result, nil
+}
+
+func inspectDatabaseSchema(ctx context.Context, db *sql.DB) (databaseSchemaSnapshot, error) {
+	snapshot := databaseSchemaSnapshot{
+		tables:  map[string]bool{},
+		columns: map[string]map[string]existingColumn{},
+		indexes: map[string]bool{},
+	}
+
+	tableRows, err := db.QueryContext(ctx, `
+		SELECT table_name
+		FROM information_schema.tables
+		WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+	`)
+	if err != nil {
+		return snapshot, err
+	}
+	for tableRows.Next() {
+		var tableName string
+		if err := tableRows.Scan(&tableName); err != nil {
+			tableRows.Close()
+			return snapshot, err
+		}
+		snapshot.tables[tableName] = true
+	}
+	if err := tableRows.Close(); err != nil {
+		return snapshot, err
+	}
+	if err := tableRows.Err(); err != nil {
+		return snapshot, err
+	}
+
+	columnRows, err := db.QueryContext(ctx, `
+		SELECT
+			c.table_name,
+			c.column_name,
+			c.udt_name,
+			c.is_nullable = 'YES',
+			COALESCE(tc.constraint_type = 'PRIMARY KEY', false)
+		FROM information_schema.columns c
+		LEFT JOIN information_schema.key_column_usage kcu
+			ON kcu.table_schema = c.table_schema
+			AND kcu.table_name = c.table_name
+			AND kcu.column_name = c.column_name
+		LEFT JOIN information_schema.table_constraints tc
+			ON tc.constraint_schema = kcu.constraint_schema
+			AND tc.constraint_name = kcu.constraint_name
+			AND tc.constraint_type = 'PRIMARY KEY'
+		WHERE c.table_schema = 'public'
+	`)
+	if err != nil {
+		return snapshot, err
+	}
+	for columnRows.Next() {
+		var tableName string
+		var columnName string
+		var udtName string
+		var nullable bool
+		var primaryKey bool
+		if err := columnRows.Scan(&tableName, &columnName, &udtName, &nullable, &primaryKey); err != nil {
+			columnRows.Close()
+			return snapshot, err
+		}
+		if snapshot.columns[tableName] == nil {
+			snapshot.columns[tableName] = map[string]existingColumn{}
+		}
+		rememberExistingColumn(snapshot.columns[tableName], columnName, existingColumn{
+			Type:       manifestType(udtName),
+			Nullable:   nullable,
+			PrimaryKey: primaryKey,
+		})
+	}
+	if err := columnRows.Close(); err != nil {
+		return snapshot, err
+	}
+	if err := columnRows.Err(); err != nil {
+		return snapshot, err
+	}
+
+	indexRows, err := db.QueryContext(ctx, `
+		SELECT relation.relname, idx.indisunique
+		FROM pg_catalog.pg_index AS idx
+		JOIN pg_catalog.pg_class AS relation ON relation.oid = idx.indexrelid
+		JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+		WHERE namespace.nspname = current_schema()
+	`)
+	if err != nil {
+		return snapshot, err
+	}
+	for indexRows.Next() {
+		var indexName string
+		var unique bool
+		if err := indexRows.Scan(&indexName, &unique); err != nil {
+			indexRows.Close()
+			return snapshot, err
+		}
+		snapshot.indexes[indexName] = unique
+	}
+	if err := indexRows.Close(); err != nil {
+		return snapshot, err
+	}
+	if err := indexRows.Err(); err != nil {
+		return snapshot, err
+	}
+
+	return snapshot, nil
 }
 
 // acquireSchemaLock takes a session-level Postgres advisory lock on a dedicated
@@ -213,7 +326,10 @@ func reconcileColumns(ctx context.Context, db *sql.DB, tableName string, table m
 	if err != nil {
 		return nil, nil, err
 	}
+	return reconcileColumnsFromExisting(ctx, db, tableName, table, existing)
+}
 
+func reconcileColumnsFromExisting(ctx context.Context, db *sql.DB, tableName string, table manifest.Table, existing map[string]existingColumn) ([]string, []string, error) {
 	var applied []string
 	var warnings []string
 	for columnName := range existing {
@@ -340,6 +456,14 @@ func compatibleColumnType(current string, desired string) bool {
 }
 
 func createIndexes(ctx context.Context, db *sql.DB, tableName string, table manifest.Table) ([]string, error) {
+	existing, err := existingIndexes(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	return createIndexesFromExisting(ctx, db, tableName, table, existing)
+}
+
+func createIndexesFromExisting(ctx context.Context, db *sql.DB, tableName string, table manifest.Table, existing map[string]bool) ([]string, error) {
 	var applied []string
 	installedTrigram := false
 	for _, indexName := range sortedIndexNames(table.Indexes) {
@@ -368,13 +492,12 @@ func createIndexes(ctx context.Context, db *sql.DB, tableName string, table mani
 		// creation path below then recreates the declared contract and surfaces
 		// duplicate data as a migration error instead of silently accepting it.
 		reconcileUniqueness := false
-		currentUnique := false
+		currentUnique, exists := existing[physicalName]
 		if index.Kind == "" || index.Kind == "btree" {
-			exists, currentUnique, err := existingIndexUniqueness(ctx, db, physicalName)
-			if err != nil {
-				return applied, err
-			}
 			reconcileUniqueness = needsIndexUniquenessRebuild(exists, currentUnique, index.Unique)
+		}
+		if exists && !reconcileUniqueness {
+			continue
 		}
 
 		statement := ""
@@ -413,10 +536,35 @@ func createIndexes(ctx context.Context, db *sql.DB, tableName string, table mani
 		} else if _, err := db.ExecContext(ctx, statement); err != nil {
 			return applied, err
 		}
-		applied = append(applied, fmt.Sprintf("ensured index %s", physicalName))
+		existing[physicalName] = index.Unique
+		applied = append(applied, fmt.Sprintf("created index %s", physicalName))
 	}
 
 	return applied, nil
+}
+
+func existingIndexes(ctx context.Context, db *sql.DB) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT relation.relname, idx.indisunique
+		FROM pg_catalog.pg_index AS idx
+		JOIN pg_catalog.pg_class AS relation ON relation.oid = idx.indexrelid
+		JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+		WHERE namespace.nspname = current_schema()
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	indexes := map[string]bool{}
+	for rows.Next() {
+		var name string
+		var unique bool
+		if err := rows.Scan(&name, &unique); err != nil {
+			return nil, err
+		}
+		indexes[name] = unique
+	}
+	return indexes, rows.Err()
 }
 
 func needsIndexUniquenessRebuild(exists bool, currentUnique bool, desiredUnique bool) bool {

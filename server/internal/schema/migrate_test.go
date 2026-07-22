@@ -1,6 +1,11 @@
 package schema
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/gonvex/gonvex/pkg/manifest"
+)
 
 func TestRememberExistingColumnPreservesPrimaryKeyAcrossConstraintRows(t *testing.T) {
 	for _, rows := range [][]existingColumn{
@@ -44,5 +49,24 @@ func TestBtreeIndexSQLIncludesDeclaredUniqueness(t *testing.T) {
 	}
 	if got := btreeIndexSQL("accounts_by_customer", "accounts", columns, false); got != `CREATE INDEX IF NOT EXISTS "accounts_by_customer" ON "accounts" ("customer_id")` {
 		t.Fatalf("unexpected ordinary index SQL: %s", got)
+	}
+}
+
+func TestCreateIndexesFromExistingSkipsMatchingIndexWithoutDatabaseCall(t *testing.T) {
+	table := manifest.Table{Indexes: map[string]manifest.Index{
+		"by_customer": {Columns: []string{"customer_id"}},
+	}}
+	applied, err := createIndexesFromExisting(
+		context.Background(),
+		nil,
+		"accounts",
+		table,
+		map[string]bool{"accounts_by_customer": false},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 0 {
+		t.Fatalf("matching index caused database work: %#v", applied)
 	}
 }

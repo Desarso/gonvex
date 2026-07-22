@@ -12,13 +12,13 @@ import (
 const NotifyChannel = "gonvex_table_change"
 
 func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]manifest.Table) ([]string, error) {
+	artifacts, err := loadNotifyArtifacts(ctx, db)
+	if err != nil {
+		return nil, err
+	}
 	var applied []string
 	for _, tableName := range sortedTableNames(tables) {
-		installed, err := notifyTriggersInstalled(ctx, db, tableName)
-		if err != nil {
-			return applied, err
-		}
-		if installed {
+		if artifacts.installed(tableName) {
 			continue
 		}
 		table := tables[tableName]
@@ -34,6 +34,78 @@ func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]ma
 	return applied, nil
 }
 
+type notifyArtifacts struct {
+	triggers  map[string]bool
+	functions map[string]bool
+}
+
+func (artifacts notifyArtifacts) installed(tableName string) bool {
+	triggerPrefix := "gonvex_" + tableName + "_notify_"
+	functionPrefix := "gonvex_notify_" + tableName + "_"
+	return artifacts.triggers[triggerPrefix+"insert"] &&
+		artifacts.triggers[triggerPrefix+"update"] &&
+		artifacts.triggers[triggerPrefix+"delete"] &&
+		artifacts.functions[functionPrefix+"insert"] &&
+		artifacts.functions[functionPrefix+"update"] &&
+		artifacts.functions[functionPrefix+"delete"]
+}
+
+func loadNotifyArtifacts(ctx context.Context, db *sql.DB) (notifyArtifacts, error) {
+	artifacts := notifyArtifacts{
+		triggers:  map[string]bool{},
+		functions: map[string]bool{},
+	}
+	triggerRows, err := db.QueryContext(ctx, `
+		SELECT t.tgname
+		FROM pg_catalog.pg_trigger t
+		JOIN pg_catalog.pg_class relation ON relation.oid = t.tgrelid
+		JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+		WHERE namespace.nspname = current_schema() AND NOT t.tgisinternal
+	`)
+	if err != nil {
+		return artifacts, err
+	}
+	for triggerRows.Next() {
+		var name string
+		if err := triggerRows.Scan(&name); err != nil {
+			triggerRows.Close()
+			return artifacts, err
+		}
+		artifacts.triggers[name] = true
+	}
+	if err := triggerRows.Close(); err != nil {
+		return artifacts, err
+	}
+	if err := triggerRows.Err(); err != nil {
+		return artifacts, err
+	}
+
+	functionRows, err := db.QueryContext(ctx, `
+		SELECT p.proname
+		FROM pg_catalog.pg_proc p
+		JOIN pg_catalog.pg_namespace namespace ON namespace.oid = p.pronamespace
+		WHERE namespace.nspname = current_schema() AND p.pronargs = 0
+	`)
+	if err != nil {
+		return artifacts, err
+	}
+	for functionRows.Next() {
+		var name string
+		if err := functionRows.Scan(&name); err != nil {
+			functionRows.Close()
+			return artifacts, err
+		}
+		artifacts.functions[name] = true
+	}
+	if err := functionRows.Close(); err != nil {
+		return artifacts, err
+	}
+	if err := functionRows.Err(); err != nil {
+		return artifacts, err
+	}
+	return artifacts, nil
+}
+
 // notifyTriggersInstalled avoids rewriting three functions and three triggers
 // for every table on every schema sync. Those definitions are independent of
 // ordinary column changes; they only need installation for a new table or when
@@ -41,39 +113,11 @@ func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]ma
 // every tenant can otherwise exceed reverse-proxy request timeouts before the
 // new manifest is persisted.
 func notifyTriggersInstalled(ctx context.Context, db *sql.DB, tableName string) (bool, error) {
-	triggerPrefix := "gonvex_" + tableName + "_notify_"
-	functionPrefix := "gonvex_notify_" + tableName + "_"
-	var triggerCount int
-	var functionCount int
-	err := db.QueryRowContext(ctx, `
-		SELECT
-			(
-				SELECT count(*)
-				FROM pg_catalog.pg_trigger t
-				JOIN pg_catalog.pg_class relation ON relation.oid = t.tgrelid
-				JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
-				WHERE namespace.nspname = current_schema()
-					AND relation.relname = $1
-					AND NOT t.tgisinternal
-					AND t.tgname IN ($2, $3, $4)
-			),
-			(
-				SELECT count(*)
-				FROM pg_catalog.pg_proc p
-				JOIN pg_catalog.pg_namespace namespace ON namespace.oid = p.pronamespace
-				WHERE namespace.nspname = current_schema()
-					AND p.proname IN ($5, $6, $7)
-					AND p.pronargs = 0
-			)
-	`,
-		tableName,
-		triggerPrefix+"insert", triggerPrefix+"update", triggerPrefix+"delete",
-		functionPrefix+"insert", functionPrefix+"update", functionPrefix+"delete",
-	).Scan(&triggerCount, &functionCount)
+	artifacts, err := loadNotifyArtifacts(ctx, db)
 	if err != nil {
 		return false, err
 	}
-	return triggerCount == 3 && functionCount == 3, nil
+	return artifacts.installed(tableName), nil
 }
 
 func NotifySQLForTable(tableName string, table manifest.Table) (string, error) {

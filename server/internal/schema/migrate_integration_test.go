@@ -122,3 +122,53 @@ func TestInstallNotifyTriggersSkipsCompleteInstall(t *testing.T) {
 		t.Fatalf("unchanged trigger install applied %d changes, want 0: %#v", len(second), second)
 	}
 }
+
+func TestApplySkipsAllDDLForUnchangedSchema(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	tables := map[string]manifest.Table{}
+	for index := range 5 {
+		tableName := fmt.Sprintf("snapshot_%d_%d", time.Now().UnixNano(), index)
+		tables[tableName] = manifest.Table{
+			Columns: map[string]manifest.Column{
+				"id":    {Type: "id", PrimaryKey: true},
+				"value": {Type: "string", Nullable: true},
+			},
+			Indexes: map[string]manifest.Index{
+				"by_value": {Columns: []string{"value"}},
+			},
+		}
+	}
+	t.Cleanup(func() {
+		for tableName := range tables {
+			_, _ = db.Exec(`DROP TABLE IF EXISTS ` + quoteIdent(tableName))
+			for _, suffix := range []string{"insert", "update", "delete"} {
+				_, _ = db.Exec(`DROP FUNCTION IF EXISTS ` + quoteIdent("gonvex_notify_"+tableName+"_"+suffix) + `()`)
+			}
+		}
+	})
+
+	desired := manifest.Schema{Tables: tables}
+	first, err := Apply(context.Background(), databaseURL, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Applied) == 0 {
+		t.Fatal("first schema apply unexpectedly made no changes")
+	}
+	second, err := Apply(context.Background(), databaseURL, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Applied) != 0 {
+		t.Fatalf("unchanged schema still executed DDL: %#v", second.Applied)
+	}
+}
