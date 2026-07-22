@@ -1119,6 +1119,14 @@ async function fetchDashboardSession(): Promise<DashboardSession | null> {
   return payload.session;
 }
 
+export function shouldRestoreDashboardCookieSession(session: DashboardSession | null): boolean {
+  // Native Google auth is stored and refreshed by GonvexAuthProvider, not by
+  // the dashboard server's HttpOnly password-session cookie. Calling the
+  // cookie endpoint for a valid native session produces a misleading 401 on
+  // every page load even though its bearer token is healthy.
+  return session?.provider !== "google";
+}
+
 async function validateNativeDashboardSession(accessToken: string, user: NonNullable<GonvexAuthValue["user"]>): Promise<DashboardSession> {
   const response = await fetch(`${runtimeBaseURL}/dev/auth/me`, {
     headers: { authorization: `Bearer ${accessToken}` },
@@ -3450,10 +3458,21 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
   useEffect(() => {
     if (import.meta.env.MODE === "test") return;
     if (!dashboardAuthEnabled) return;
+    if (!shouldRestoreDashboardCookieSession(session)) return;
     let cancelled = false;
     fetchDashboardSession()
       .then((nextSession) => {
-        if (cancelled || !nextSession) return;
+        if (cancelled) return;
+        if (!nextSession) {
+          // Do not leave an expired localStorage session rendering read-only
+          // streams while every authenticated dashboard action fails with 401.
+          setSignedOut(true);
+          setSession(null);
+          setActiveProjectID(null);
+          window.localStorage.removeItem(dashboardSessionKey);
+          if (window.location.pathname !== "/login") window.history.replaceState(null, "", "/login");
+          return;
+        }
         restoreSession(nextSession);
       })
       .catch(() => undefined);
