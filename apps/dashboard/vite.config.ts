@@ -4,6 +4,12 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // The dashboard consumes @gonvex/react through a workspace symlink. Resolve
+  // its peer imports through the dashboard's React installation so hooks and
+  // the renderer always share one dispatcher in production bundles.
+  resolve: {
+    dedupe: ["react", "react-dom"],
+  },
   // Keep unit tests deterministic even when a developer's ignored .env.local
   // points the dashboard at a real project.
   define: process.env.VITEST
