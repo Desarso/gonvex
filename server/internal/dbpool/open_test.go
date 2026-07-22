@@ -39,6 +39,13 @@ func TestTotalConnectionBudgetDoesNotAllowUnlimitedConfiguration(t *testing.T) {
 	}
 }
 
+func TestTotalConnectionBudgetCannotExceedRuntimeSafetyCeiling(t *testing.T) {
+	t.Setenv("GONVEX_DB_MAX_TOTAL_CONNS", "200")
+	if got := runtimeBudget.limit(); got != defaultMaxTotal {
+		t.Fatalf("total connection limit = %d, want safety ceiling %d", got, defaultMaxTotal)
+	}
+}
+
 func TestBudgetedPoolReleasesConnectionInsteadOfRetainingIdleSlot(t *testing.T) {
 	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "2")
 	budget := &connectionBudget{limit: func() int { return 1 }}

@@ -13,7 +13,15 @@ import (
 const defaultMaxTotal = 20
 
 var runtimeBudget = &connectionBudget{limit: func() int {
-	return positiveEnvironmentInt("GONVEX_DB_MAX_TOTAL_CONNS", defaultMaxTotal)
+	configured := positiveEnvironmentInt("GONVEX_DB_MAX_TOTAL_CONNS", defaultMaxTotal)
+	// The runtime shares PostgreSQL with its control plane, migrations, and
+	// often other services. Treat 20 as a hard per-process safety ceiling, not
+	// merely a default: an accidental environment override must cause bounded
+	// queueing inside Gonvex instead of exhausting PostgreSQL for everyone.
+	if configured > defaultMaxTotal {
+		return defaultMaxTotal
+	}
+	return configured
 }}
 
 // Open creates a PostgreSQL pool whose physical connections count against the
