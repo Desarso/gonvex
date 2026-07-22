@@ -191,6 +191,18 @@ func (s *Server) authorizeProjectEnvRequest(w http.ResponseWriter, r *http.Reque
 // the local-dev optional actor. It intentionally does not treat the global
 // DevSyncKey as env access (that would bypass project-key scoping).
 func (s *Server) projectEnvDashboardActorFromRequest(r *http.Request) (dashboardActor, bool) {
+	// accountActorFromRequest treats DevSyncKey as a local-development admin
+	// fallback when no explicit AdminKey is configured. Environment routes must
+	// not inherit that runtime-wide authority: they contain project-scoped
+	// secrets. A generated DevSyncKey may still pass acceptsProjectEnvKey above
+	// when its encoded project id matches the route.
+	provided := strings.TrimSpace(syncKey(r))
+	devKey := strings.TrimSpace(s.config.DevSyncKey)
+	adminKey := strings.TrimSpace(s.config.AdminKey)
+	if provided != "" && devKey != "" && constantTimeString(provided, devKey) &&
+		(adminKey == "" || !constantTimeString(provided, adminKey)) {
+		return dashboardActor{}, false
+	}
 	// Reuse the account-auth path so Google dashboard login can manage env vars.
 	// Previously this helper omitted native Google sessions, which made the env
 	// page show "dashboard sign-in or project key is required" after a successful
