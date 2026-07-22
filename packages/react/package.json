@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/react",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -15,6 +15,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -25,8 +26,13 @@
     "react": ">=19"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.2",
     "@types/react": "^19.2.14",
-    "typescript": "^6.0.3"
+    "jsdom": "^29.1.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
   },
   "main": "./dist/index.js",
   "files": [

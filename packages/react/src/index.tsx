@@ -1,6 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { ConvexReactClient, type FunctionReference, type GonvexClient } from "@gonvex/client";
+import { ConvexReactClient, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
+
+export { GonvexClientError, type ConnectionState } from "@gonvex/client";
 
 const GonvexContext = createContext<GonvexClient | null>(null);
 const GonvexAuthContext = createContext<AuthState>({ isLoading: false, isAuthenticated: true });
@@ -641,9 +643,186 @@ function bytesToBase64Url(bytes: Uint8Array) {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+export type QueryStatus = "skip" | "loading" | "success" | "error" | "timeout" | "disconnected";
+
+export type UseQueryResultOptions = {
+  /**
+   * Soft "pending too long" signal for the live subscription. When no result
+   * or error has arrived within this window the status becomes `timeout`
+   * (the subscription stays alive; `retry()` re-requests). Default 15s.
+   * `0` disables.
+   */
+  timeoutMs?: number;
+  /**
+   * Keep showing the last successful data (with `isStale: true`) while the
+   * query is erroring, timing out, or disconnected. Default true.
+   */
+  keepPreviousData?: boolean;
+};
+
+export type UseQueryResult<T> = {
+  data: T | undefined;
+  status: QueryStatus;
+  error: Error | null;
+  isLoading: boolean;
+  isError: boolean;
+  isSuccess: boolean;
+  /** True while showing last good data during an error/timeout/reconnect. */
+  isStale: boolean;
+  /** Re-request the query from the server (drops error/timeout state). */
+  retry: () => void;
+};
+
+const DEFAULT_LIVE_QUERY_SLOW_MS = 15_000;
+
+type QueryResultState<T> = {
+  data: T | undefined;
+  status: QueryStatus;
+  error: Error | null;
+  isStale: boolean;
+};
+
+/**
+ * Live query hook with an explicit status surface. Unlike `useQuery`, this
+ * distinguishes loading / success / error / timeout / disconnected, keeps the
+ * last good result while reconnecting, and exposes `retry()`.
+ */
+export function useQueryResult<T = JsonValue>(
+  ref: FunctionReference,
+  args: JsonValue | "skip" = {},
+  options: UseQueryResultOptions = {},
+): UseQueryResult<T> {
+  const client = useGonvexClient();
+  const path = ref.path;
+  const kind = ref.kind;
+  const argsKey = JSON.stringify(args);
+  const keepPreviousData = options.keepPreviousData !== false;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_LIVE_QUERY_SLOW_MS;
+  const [state, setState] = useState<QueryResultState<T>>({
+    data: undefined,
+    status: args === "skip" ? "skip" : "loading",
+    error: null,
+    isStale: false,
+  });
+  const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearSlowTimer = useCallback(() => {
+    if (slowTimerRef.current !== null) {
+      clearTimeout(slowTimerRef.current);
+      slowTimerRef.current = null;
+    }
+  }, []);
+
+  const startSlowTimer = useCallback(() => {
+    clearSlowTimer();
+    if (timeoutMs <= 0) return;
+    slowTimerRef.current = setTimeout(() => {
+      slowTimerRef.current = null;
+      setState((previous) => {
+        if (previous.status !== "loading") return previous;
+        return { ...previous, status: "timeout", isStale: previous.data !== undefined };
+      });
+    }, timeoutMs);
+  }, [clearSlowTimer, timeoutMs]);
+
+  useEffect(() => {
+    if (args === "skip") {
+      setState({ data: undefined, status: "skip", error: null, isStale: false });
+      return;
+    }
+    setState({ data: undefined, status: "loading", error: null, isStale: false });
+    startSlowTimer();
+
+    const unsubscribeScope = client.onSessionScopeChange(() => {
+      setState({ data: undefined, status: "loading", error: null, isStale: false });
+      startSlowTimer();
+    });
+    const unsubscribeQuery = client.subscribeQuery({ kind, path }, args, (message) => {
+      if (message.type === "query.result") {
+        clearSlowTimer();
+        setState({ data: message.result as T, status: "success", error: null, isStale: false });
+      }
+      if (message.type === "query.error") {
+        clearSlowTimer();
+        const error = new GonvexClientError(message.error, { code: "server", path, operation: "query" });
+        setState((previous) => ({
+          data: keepPreviousData ? previous.data : undefined,
+          status: "error",
+          error,
+          isStale: keepPreviousData && previous.data !== undefined,
+        }));
+      }
+    });
+    const applyConnection = (connection: ConnectionState) => {
+      if (!connection.isWebSocketConnected) {
+        clearSlowTimer();
+        setState((previous) => {
+          if (previous.status === "skip") return previous;
+          return {
+            data: keepPreviousData ? previous.data : undefined,
+            status: "disconnected",
+            error: previous.error,
+            isStale: keepPreviousData && previous.data !== undefined,
+          };
+        });
+        return;
+      }
+      // The client resubscribes live queries itself on reconnect; report
+      // loading until the fresh result lands.
+      setState((previous) => {
+        if (previous.status !== "disconnected") return previous;
+        startSlowTimer();
+        return { ...previous, status: "loading" };
+      });
+    };
+    const unsubscribeConnection = typeof client.subscribeToConnectionState === "function"
+      ? (() => {
+        if (typeof client.connectionState === "function") {
+          applyConnection(client.connectionState());
+        }
+        return client.subscribeToConnectionState(applyConnection);
+      })()
+      : undefined;
+    return () => {
+      clearSlowTimer();
+      unsubscribeScope();
+      unsubscribeQuery();
+      unsubscribeConnection?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, kind, path, argsKey, keepPreviousData, startSlowTimer, clearSlowTimer]);
+
+  const retry = useCallback(() => {
+    if (args === "skip") return;
+    setState((previous) => ({
+      data: previous.data,
+      status: "loading",
+      error: null,
+      isStale: previous.data !== undefined,
+    }));
+    startSlowTimer();
+    if (typeof client.retryQuery === "function") {
+      client.retryQuery({ kind, path }, JSON.parse(argsKey) as JsonValue);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, kind, path, argsKey, startSlowTimer]);
+
+  return {
+    data: state.data,
+    status: state.status,
+    error: state.error,
+    isLoading: state.status === "loading",
+    isError: state.status === "error" || state.status === "timeout" || state.status === "disconnected",
+    isSuccess: state.status === "success",
+    isStale: state.isStale,
+    retry,
+  };
+}
+
 export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
   const client = useGonvexClient();
   const [result, setResult] = useState<T>();
+  const [error, setError] = useState<Error | null>(null);
   const path = ref.path;
   const kind = ref.kind;
   const argsKey = JSON.stringify(args);
@@ -651,16 +830,23 @@ export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue 
   useEffect(() => {
     if (args === "skip") {
       setResult(undefined);
+      setError(null);
       return;
     }
     setResult(undefined);
-    const unsubscribeScope = client.onSessionScopeChange(() => setResult(undefined));
+    setError(null);
+    const unsubscribeScope = client.onSessionScopeChange(() => {
+      setResult(undefined);
+      setError(null);
+    });
     const unsubscribeQuery = client.subscribeQuery({ kind, path }, args, (message) => {
       if (message.type === "query.result") {
         setResult(message.result as T);
+        setError(null);
       }
       if (message.type === "query.error") {
         setResult(undefined);
+        setError(new GonvexClientError(message.error, { code: "server", path, operation: "query" }));
       }
     });
     return () => {
@@ -669,17 +855,26 @@ export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue 
     };
   }, [client, kind, path, argsKey]);
 
+  // Convex-compatible: a failed query throws during render so error
+  // boundaries can catch it, instead of being indistinguishable from loading.
+  if (error) throw error;
+
   return result;
 }
 
-export function useMutation(ref: FunctionReference) {
+export type UseMutationOptions = {
+  /** Per-call timeout override forwarded to the client. `0` disables. */
+  timeoutMs?: number;
+};
+
+export function useMutation(ref: FunctionReference, options: UseMutationOptions = {}) {
   const client = useGonvexClient();
-  return (args: JsonValue = {}) => client.mutation(ref, args);
+  return (args: JsonValue = {}) => client.mutation(ref, args, options);
 }
 
-export function useAction(ref: FunctionReference) {
+export function useAction(ref: FunctionReference, options: UseMutationOptions = {}) {
   const client = useGonvexClient();
-  return (args: JsonValue = {}) => client.action(ref, args);
+  return (args: JsonValue = {}) => client.action(ref, args, options);
 }
 
 export function useConvex() {
@@ -690,8 +885,30 @@ export function useConvexAuth() {
   return useContext(GonvexAuthContext);
 }
 
-export function useConvexConnectionState() {
-  return { hasInflightRequests: false, isWebSocketConnected: true };
+const FALLBACK_CONNECTION_STATE: ConnectionState = {
+  isWebSocketConnected: false,
+  hasEverConnected: false,
+  connectionCount: 0,
+  connectionRetries: 0,
+  hasInflightRequests: false,
+  inflightMutations: 0,
+  inflightActions: 0,
+  inflightOneShotQueries: 0,
+};
+
+export function useConvexConnectionState(): ConnectionState {
+  const client = useGonvexClient();
+  const [state, setState] = useState<ConnectionState>(() => (
+    typeof client.connectionState === "function" ? client.connectionState() : FALLBACK_CONNECTION_STATE
+  ));
+
+  useEffect(() => {
+    if (typeof client.subscribeToConnectionState !== "function") return;
+    setState(client.connectionState());
+    return client.subscribeToConnectionState(setState);
+  }, [client]);
+
+  return state;
 }
 
 export function usePaginatedQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}, options: { initialNumItems?: number } = {}) {

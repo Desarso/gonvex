@@ -131,8 +131,8 @@ func (o *OpenRouter_Model) openRouterResponseToModelResponse(response OpenRouter
 		// Handle tool calls
 		for _, toolCall := range choice.Message.ToolCalls {
 			if toolCall.Type == "function" {
-				var args map[string]interface{}
-				if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+				args, err := models.UnmarshalToolCallArguments(toolCall.Function.Arguments)
+				if err != nil {
 					log.Printf("Warning: Failed to unmarshal tool call arguments: %v", err)
 					args = map[string]interface{}{}
 				}
@@ -278,8 +278,8 @@ func (o *OpenRouter_Model) makeStreamRequest(model string, message models.User_M
 					if len(toolCallAccumulator) > 0 {
 						modelResp := models.Model_Response{}
 						for _, tc := range toolCallAccumulator {
-							var args map[string]interface{}
-							if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+							args, err := models.UnmarshalToolCallArguments(tc.Function.Arguments)
+							if err != nil {
 								log.Printf("Warning: Failed to unmarshal final tool call arguments: %v", err)
 								args = map[string]interface{}{}
 							}
@@ -315,8 +315,8 @@ func (o *OpenRouter_Model) makeStreamRequest(model string, message models.User_M
 				if len(toolCallAccumulator) > 0 {
 					modelResp := models.Model_Response{}
 					for _, tc := range toolCallAccumulator {
-						var args map[string]interface{}
-						if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						args, err := models.UnmarshalToolCallArguments(tc.Function.Arguments)
+						if err != nil {
 							log.Printf("Warning: Failed to unmarshal final tool call arguments: %v", err)
 							args = map[string]interface{}{}
 						}
@@ -373,17 +373,28 @@ func (o *OpenRouter_Model) makeStreamRequest(model string, message models.User_M
 					}
 				}
 
-				// Handle tool call deltas (accumulate)
+				// Handle tool call deltas (accumulate by tool_call.index, not choice.index).
 				for _, toolCall := range choice.Delta.ToolCalls {
 					idx := choice.Index
+					if toolCall.Index != nil {
+						idx = *toolCall.Index
+					}
 					if existing, ok := toolCallAccumulator[idx]; ok {
-						// Append to existing tool call arguments
+						if toolCall.ID != "" && existing.ID == "" {
+							existing.ID = toolCall.ID
+						}
+						if toolCall.Type != "" && existing.Type == "" {
+							existing.Type = toolCall.Type
+						}
+						if toolCall.Function.Name != "" && existing.Function.Name == "" {
+							existing.Function.Name = toolCall.Function.Name
+						}
 						existing.Function.Arguments += toolCall.Function.Arguments
 					} else {
-						// New tool call
 						toolCallAccumulator[idx] = &ToolCall{
-							ID:   toolCall.ID,
-							Type: toolCall.Type,
+							Index: toolCall.Index,
+							ID:    toolCall.ID,
+							Type:  toolCall.Type,
 							Function: ToolCallFunction{
 								Name:      toolCall.Function.Name,
 								Arguments: toolCall.Function.Arguments,

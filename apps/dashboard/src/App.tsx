@@ -1084,13 +1084,10 @@ export function dashboardEmailAllowed(email: string, allowlist: readonly string[
 }
 
 export function googleLoginEnabled(value: string | undefined, hasNativeAuthConfig: boolean): boolean {
-	// Native Google only works when a dashboard auth project is configured.
-	// Default the button on in that case; set VITE_GONVEX_GOOGLE_LOGIN_ENABLED=false
-	// to hide it. Without an auth project id the button never appears.
-	if (!hasNativeAuthConfig) return false;
-	const parsed = optionalEnvBoolean(value);
-	if (parsed === undefined) return true;
-	return parsed;
+  // Native Google only works when a dashboard auth project is configured and
+  // the operator explicitly enables it.
+  if (!hasNativeAuthConfig) return false;
+  return optionalEnvBoolean(value) ?? false;
 }
 
 async function createDashboardPasswordSession(email: string, password: string): Promise<DashboardSession> {
@@ -8027,7 +8024,7 @@ function SchedulesPage(props: { project: ProjectTarget }) {
   ];
 
   return (
-    <div className="logs-shell">
+    <div className="logs-shell schedules-shell">
       <section className="schedules-summary" aria-label="Scheduler summary">
         {summary.map((item) => (
           <div className="schedules-stat" key={item.label}>
@@ -8037,7 +8034,7 @@ function SchedulesPage(props: { project: ProjectTarget }) {
         ))}
       </section>
 
-      <section className="logs-panel" aria-label="Registered crons">
+      <section className="logs-panel logs-panel--crons" aria-label="Registered crons">
         <header className="logs-panel-header">
           <div>
             <p className="eyebrow">{status}</p>
@@ -8072,7 +8069,7 @@ function SchedulesPage(props: { project: ProjectTarget }) {
         </div>
       </section>
 
-      <section className="logs-panel" aria-label="Recent scheduled runs">
+      <section className="logs-panel logs-panel--runs" aria-label="Recent scheduled runs">
         <header className="logs-panel-header">
           <div>
             <p className="eyebrow">Most recent first</p>

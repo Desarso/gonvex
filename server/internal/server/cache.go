@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -17,7 +18,16 @@ import (
 type rowsCache struct {
 	client *redis.Client
 	ttl    time.Duration
+	// bootEpoch is unique per process lifetime. It is mixed into every query
+	// generation so a runtime restart never serves pre-restart Valkey entries
+	// (even when Redis generation counters were not incremented).
+	bootEpoch string
 }
+
+// emptyResultTTL is used when we intentionally cache an empty/near-empty
+// payload. Keeping these short limits how long a transient poison result
+// (e.g. empty statuses from a schema-cache race) can stick in Valkey.
+const emptyResultTTL = 15 * time.Second
 
 func newRowsCache(rawURL string, ttl time.Duration) (*rowsCache, error) {
 	if rawURL == "" || ttl <= 0 {
@@ -27,7 +37,11 @@ func newRowsCache(rawURL string, ttl time.Duration) (*rowsCache, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rowsCache{client: redis.NewClient(options), ttl: ttl}, nil
+	return &rowsCache{
+		client:    redis.NewClient(options),
+		ttl:       ttl,
+		bootEpoch: fmt.Sprintf("%d-%d", time.Now().UTC().UnixNano(), os.Getpid()),
+	}, nil
 }
 
 func (c *rowsCache) enabled() bool {
@@ -67,10 +81,17 @@ func (c *rowsCache) read(ctx context.Context, key string) ([]byte, string) {
 }
 
 func (c *rowsCache) set(ctx context.Context, key string, value []byte) {
+	c.setWithTTL(ctx, key, value, c.ttl)
+}
+
+func (c *rowsCache) setWithTTL(ctx context.Context, key string, value []byte, ttl time.Duration) {
 	if !c.enabled() {
 		return
 	}
-	_ = c.client.Set(ctx, key, value, c.ttl).Err()
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
+	_ = c.client.Set(ctx, key, value, ttl).Err()
 }
 
 func (c *rowsCache) queryKey(projectID string, tenantID string, generation string, scope string, path string, args []byte) string {
@@ -95,9 +116,12 @@ func (c *rowsCache) queryGeneration(ctx context.Context, projectID string, tenan
 	if err != nil {
 		return "", false
 	}
-	parts := make([]string, len(keys))
+	// bootEpoch first so a process restart always produces a new generation string
+	// and therefore a different cache key — even when Redis counters are unchanged.
+	parts := make([]string, 0, len(keys)+1)
+	parts = append(parts, "boot="+c.bootEpoch)
 	for index, value := range values {
-		parts[index] = keys[index] + "=" + strings.TrimSpace(fmt.Sprint(value))
+		parts = append(parts, keys[index]+"="+strings.TrimSpace(fmt.Sprint(value)))
 	}
 	return strings.Join(parts, "\x00"), true
 }

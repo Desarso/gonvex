@@ -263,3 +263,79 @@ func TestWebSocketAdvertisesAndReturnsQueryCacheMetadata(t *testing.T) {
 		t.Fatalf("expected scoped query result, got %#v", result)
 	}
 }
+
+func TestQueryCacheWriteDecisionRefusesPoisonedAllReferenceData(t *testing.T) {
+	poison := map[string]any{
+		"statuses":   []map[string]any{},
+		"priorities": []any{},
+		"workspaces": []map[string]any{{"_id": "ws1", "name": "General"}},
+		"teams":      []any{},
+	}
+	decision := queryCacheWriteDecision("bulk.allReferenceData", poison)
+	if decision.store {
+		t.Fatal("expected poisoned allReferenceData (empty statuses+priorities with workspaces) not to be cached")
+	}
+
+	healthy := map[string]any{
+		"statuses":   []map[string]any{{"_id": "s1", "name": "Open"}},
+		"priorities": []map[string]any{{"_id": "p1", "name": "Medium"}},
+		"workspaces": []map[string]any{{"_id": "ws1", "name": "General"}},
+	}
+	decision = queryCacheWriteDecision("bulk.allReferenceData", healthy)
+	if !decision.store || decision.ttl != 0 {
+		t.Fatalf("expected healthy allReferenceData to use default TTL, got %+v", decision)
+	}
+
+	blankTenant := map[string]any{
+		"statuses":   []any{},
+		"priorities": []any{},
+		"workspaces": []any{},
+		"teams":      []any{},
+	}
+	decision = queryCacheWriteDecision("bulk.allReferenceData", blankTenant)
+	if !decision.store || decision.ttl != emptyResultTTL {
+		t.Fatalf("expected blank-tenant allReferenceData short TTL, got %+v", decision)
+	}
+
+	emptyPage := map[string]any{"page": []any{}, "total": 0}
+	decision = queryCacheWriteDecision("bulk.tasksByWorkspace", emptyPage)
+	if !decision.store || decision.ttl != emptyResultTTL {
+		t.Fatalf("expected empty page short TTL, got %+v", decision)
+	}
+
+	decision = queryCacheWriteDecision("tenants.getByDomain", nil)
+	if decision.store {
+		t.Fatal("expected nil existence-lookup results not to be cached")
+	}
+}
+
+func TestQueryGenerationIncludesBootEpoch(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	cacheA, err := newRowsCache("redis://"+redisServer.Addr(), time.Minute)
+	if err != nil || cacheA == nil {
+		t.Fatalf("newRowsCache A: %v", err)
+	}
+	t.Cleanup(func() { _ = cacheA.close() })
+	cacheB, err := newRowsCache("redis://"+redisServer.Addr(), time.Minute)
+	if err != nil || cacheB == nil {
+		t.Fatalf("newRowsCache B: %v", err)
+	}
+	t.Cleanup(func() { _ = cacheB.close() })
+
+	genA, okA := cacheA.queryGeneration(context.Background(), "project-a", "tenant-a", []string{"statuses"})
+	genB, okB := cacheB.queryGeneration(context.Background(), "project-a", "tenant-a", []string{"statuses"})
+	if !okA || !okB {
+		t.Fatal("expected generation ok")
+	}
+	if genA == genB {
+		t.Fatal("expected distinct process boot epochs to produce distinct query generations")
+	}
+	if !strings.HasPrefix(genA, "boot=") || !strings.HasPrefix(genB, "boot=") {
+		t.Fatalf("expected boot= prefix, got %q / %q", genA, genB)
+	}
+	keyA := cacheA.queryKey("project-a", "tenant-a", genA, "scope", "bulk.allReferenceData", []byte(`{"tenantId":"testing3"}`))
+	keyB := cacheB.queryKey("project-a", "tenant-a", genB, "scope", "bulk.allReferenceData", []byte(`{"tenantId":"testing3"}`))
+	if keyA == keyB {
+		t.Fatal("expected distinct cache keys across process restarts (boot epoch)")
+	}
+}

@@ -87,12 +87,63 @@ Use `GonvexErrorReporter` directly when integrating an existing application
 logger. See the Error Tracking guide in the full documentation for privacy,
 grouping, persistence, and dashboard details.
 
+## Connection reliability
+
+The client reconnects automatically after an unexpected socket close (exponential
+backoff from ~250ms to 5s). On reconnect it re-authenticates, then resubscribes
+active live queries and pending one-shot queries. Explicit `close()` disables
+reconnect.
+
+```ts
+client.connectionState();
+// {
+//   isWebSocketConnected, hasEverConnected, connectionCount, connectionRetries,
+//   hasInflightRequests, inflightMutations, inflightActions, inflightOneShotQueries
+// }
+
+const stop = client.subscribeToConnectionState((state) => {
+  // drive banners / health UI
+});
+```
+
+### Timeouts (defaults)
+
+| Operation | Default |
+| --- | --- |
+| One-shot `query()` | 20s |
+| `mutation()` | 20s |
+| `action()` | 60s |
+
+Override per client (`timeouts` option) or per call (`{ timeoutMs }`). Use `0` to disable.
+
+### Typed errors
+
+Rejected operations throw `GonvexClientError` with `code`:
+
+- `server` — runtime executed the function and returned an error
+- `timeout` — no response within the timeout
+- `disconnected` — socket dropped while the operation was pending
+- `closed` — client was explicitly closed
+- `auth` — authentication rejected
+
+### Mutation / action fail-closed policy
+
+Pending mutations and actions are **never** auto-replayed after disconnect.
+They reject with `code: "disconnected"` (or `timeout` / `closed`). Silent
+re-fire of non-idempotent writes is unsafe; offline queues belong in the app
+(or mobile offline layer), not this client.
+
+Live queries keep last-good data at the React layer (`useQueryResult`) and
+resubscribe after reconnect. Call `client.retryQuery(ref, args)` to force a
+re-request after a server error or soft timeout.
+
 ## Exports
 
 The package exports:
 
 - `GonvexClient`
 - `ConvexReactClient` compatibility alias
+- `GonvexClientError`, `ConnectionState`, timeout defaults
 - transparent persistent query caching and lower-level experimental cache helpers
 - browser capability and telemetry helpers
 - `GonvexErrorReporter` and automatic operation error reporting

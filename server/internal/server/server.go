@@ -775,7 +775,10 @@ func (s *Server) requireProjectDatabase(projectID string) error {
 	if exists && databaseURL != "" {
 		return nil
 	}
-	if !exists && count == 0 {
+	// Always re-read the project registry on a miss. Projects can be created in the
+	// dashboard (or seed SQL) while this runtime is already up with other projects
+	// loaded — without this, /dev/sync keeps 409'ing until a full restart.
+	if !exists {
 		s.hydrateProjects()
 		databaseURL, exists, count = configured()
 		if exists && databaseURL != "" {

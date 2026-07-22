@@ -162,10 +162,10 @@ func (r *Runner) RunGo(ctx context.Context, req gonvex.GoSandboxRequest) (gonvex
 		if message == "" {
 			message = err.Error()
 		}
-		return gonvex.GoSandboxResult{OK: false, Error: message, DurationMs: duration}, nil
+		return gonvex.GoSandboxResult{OK: false, Error: annotateSandboxError(message), DurationMs: duration}, nil
 	}
 	if processed.err != nil {
-		return gonvex.GoSandboxResult{OK: false, Error: processed.err.Error(), DurationMs: duration}, nil
+		return gonvex.GoSandboxResult{OK: false, Error: annotateSandboxError(processed.err.Error()), DurationMs: duration}, nil
 	}
 	if processed.truncated {
 		return gonvex.GoSandboxResult{OK: false, Error: fmt.Sprintf("sandbox_run_go output exceeded %d bytes", maxOutput), DurationMs: duration}, nil
@@ -219,7 +219,42 @@ func (r *Runner) handleRPC(ctx context.Context, raw string) string {
 	if r.Host == nil {
 		return rpcError("sandbox host API is not configured")
 	}
+	report, hasReport := gonvex.SandboxProgressFromContext(ctx)
+	started := time.Now()
+	if hasReport {
+		report(gonvex.SandboxProgressEvent{
+			At:    started.UTC().UnixMilli(),
+			Phase: "start",
+			Kind:  strings.TrimSpace(req.Kind),
+			Path:  strings.TrimSpace(req.Path),
+		})
+	}
 	result, err := r.Host.Call(ctx, req)
+	if hasReport {
+		durationMs := time.Since(started).Milliseconds()
+		if err != nil {
+			ok := false
+			report(gonvex.SandboxProgressEvent{
+				At:         time.Now().UTC().UnixMilli(),
+				Phase:      "end",
+				Kind:       strings.TrimSpace(req.Kind),
+				Path:       strings.TrimSpace(req.Path),
+				OK:         &ok,
+				Error:      err.Error(),
+				DurationMs: durationMs,
+			})
+		} else {
+			ok := true
+			report(gonvex.SandboxProgressEvent{
+				At:         time.Now().UTC().UnixMilli(),
+				Phase:      "end",
+				Kind:       strings.TrimSpace(req.Kind),
+				Path:       strings.TrimSpace(req.Path),
+				OK:         &ok,
+				DurationMs: durationMs,
+			})
+		}
+	}
 	if err != nil {
 		return rpcError(err.Error())
 	}
@@ -296,8 +331,42 @@ func whagonsMutation(path string, args any) (map[string]any, error) {
 
 // whdataQuery runs read-only SELECT SQL against an uploaded data file's
 // DuckDB artifact. limit <= 0 uses the server default.
+// Return shape: map with keys "ok", "columns", "rowCount", "rows"
+// where "rows" is []any of map[string]any. Prefer whdataRows when you need
+// to iterate row maps — do not treat the whdataQuery result itself as a slice.
 func whdataQuery(fileKey string, sql string, limit int) (map[string]any, error) {
 	return whagonsCall("data.query", "", map[string]any{"fileKey": fileKey, "sql": sql, "limit": limit})
+}
+
+// whdataRows is the preferred helper for import/analysis loops. It unwraps
+// whdataQuery's {"rows": [...]} envelope into []map[string]any so callers can
+// range without type-probing.
+func whdataRows(fileKey string, sql string, limit int) ([]map[string]any, error) {
+	result, err := whdataQuery(fileKey, sql, limit)
+	if err != nil {
+		return nil, err
+	}
+	raw, ok := result["rows"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("whdataRows: query result missing rows array (got keys %v). Prefer whdataRows over ranging whdataQuery.", mapKeys(result))
+	}
+	rows := make([]map[string]any, 0, len(raw))
+	for i, item := range raw {
+		row, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("whdataRows: row %d is not an object", i)
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+func mapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // whdataInspect inspects an uploaded data file (operation: overview | schema | sample).
@@ -372,7 +441,7 @@ func normalizeResult(decoded map[string]any, duration int64) gonvex.GoSandboxRes
 		result.Summary = text
 	}
 	if text, _ := decoded["error"].(string); text != "" {
-		result.Error = text
+		result.Error = annotateSandboxError(text)
 	}
 	if raw, ok := decoded["result"].(map[string]any); ok {
 		result.Result = raw
@@ -380,6 +449,41 @@ func normalizeResult(decoded map[string]any, duration int64) gonvex.GoSandboxRes
 		result.Result = map[string]any{"value": raw}
 	}
 	return result
+}
+
+// annotateSandboxError appends short, actionable recovery hints for the common
+// mistakes assistants make in sandbox_run_go. Keep hints terse — they are shown
+// in the tool error the model reads on the next turn.
+func annotateSandboxError(message string) string {
+	msg := strings.TrimSpace(message)
+	if msg == "" {
+		return msg
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(msg, "Hint:") || strings.Contains(msg, "hint:") {
+		return msg
+	}
+
+	var hints []string
+	switch {
+	case strings.Contains(lower, "cannot range over") && strings.Contains(lower, "map[string]any"):
+		hints = append(hints, "Hint: whdataQuery returns a result map, not rows. Use rows, err := whdataRows(fileKey, sql, limit) and range over rows.")
+	case strings.Contains(lower, "cannot index") && (strings.Contains(lower, "interface type any") || strings.Contains(lower, "map index")):
+		hints = append(hints, "Hint: prefer whdataRows(fileKey, sql, limit) ([]map[string]any). whdataQuery returns {ok,columns,rowCount,rows}, not a slice.")
+	case strings.Contains(lower, "cannot use") && strings.Contains(lower, "as string value in map index"):
+		hints = append(hints, "Hint: map keys are strings. Prefer whdataRows(...), or read result[\"rows\"].([]any) from whdataQuery.")
+	case strings.Contains(lower, "multiple-value") && (strings.Contains(lower, "whagonsaction") || strings.Contains(lower, "whagonsquery") || strings.Contains(lower, "whagonsmutation") || strings.Contains(lower, "whdataquery") || strings.Contains(lower, "whdatarows")):
+		hints = append(hints, "Hint: helpers return (value, error). Example: res, err := whagonsAction(...); if err != nil { return fail(err.Error()) }; return res, nil")
+	case strings.Contains(lower, "not enough return values") && strings.Contains(lower, "want (any, error)"):
+		hints = append(hints, "Hint: Run() returns (any, error). Use return value, nil or return fail(\"message\").")
+	case strings.Contains(lower, "declared and not used"):
+		hints = append(hints, "Hint: unused locals are compile errors. Remove them or assign to _.")
+	}
+
+	if len(hints) == 0 {
+		return msg
+	}
+	return msg + "\n\n" + strings.Join(hints, "\n")
 }
 
 type limitedBuffer struct {

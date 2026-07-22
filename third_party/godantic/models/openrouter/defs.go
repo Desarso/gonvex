@@ -51,6 +51,9 @@ type ToolFunction struct {
 }
 
 type ToolCall struct {
+	// Index is the parallel tool-call slot in streaming deltas (OpenAI format).
+	// Must be used for accumulation — choice.Index is the choice slot (usually 0).
+	Index    *int             `json:"index,omitempty"`
 	ID       string           `json:"id"`
 	Type     string           `json:"type"` // "function"
 	Function ToolCallFunction `json:"function"`

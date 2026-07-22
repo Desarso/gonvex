@@ -990,10 +990,114 @@ func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectI
 	if err == nil && cacheKey != "" {
 		currentGeneration, generationOK := s.cache.queryGeneration(ctx, projectID, tenantID, queryTables)
 		if payload, encodeErr := json.Marshal(result); encodeErr == nil && generationOK && currentGeneration == cacheGeneration {
-			s.cache.set(ctx, cacheKey, payload)
+			if decision := queryCacheWriteDecision(path, result); decision.store {
+				s.cache.setWithTTL(ctx, cacheKey, payload, decision.ttl)
+			}
 		}
 	}
 	return result, err
+}
+
+// queryCacheWriteDecision decides whether a successful query result should be
+// stored in Valkey and for how long. The goal is "Valkey is never lastingly wrong":
+//   - normal hits keep the configured TTL
+//   - empty / near-empty payloads get a short TTL so a transient poison result
+//     (schema-cache race returning empty statuses while workspaces load) cannot
+//     stick for the full 10m window
+//   - bulk.allReferenceData with empty statuses+priorities while other reference
+//     data is present is refused entirely (known poison shape from this incident)
+type queryCacheWriteChoice struct {
+	store bool
+	ttl   time.Duration
+}
+
+func queryCacheWriteDecision(path string, result any) queryCacheWriteChoice {
+	// Default: store with the cache's configured TTL (caller passes 0 → rowsCache.ttl).
+	defaultChoice := queryCacheWriteChoice{store: true, ttl: 0}
+
+	if path == "bulk.allReferenceData" {
+		if isPoisonedAllReferenceData(result) {
+			return queryCacheWriteChoice{store: false}
+		}
+		if isEmptyAllReferenceData(result) {
+			return queryCacheWriteChoice{store: true, ttl: emptyResultTTL}
+		}
+		return defaultChoice
+	}
+
+	// Never cache nil / missing-row results. Existence lookups like
+	// tenants.getByDomain returning null during a schema/landlord blip would
+	// otherwise stick for emptyResultTTL and bounce clients to missingTenant.
+	if result == nil {
+		return queryCacheWriteChoice{store: false}
+	}
+	if isEmptyQueryResult(result) {
+		return queryCacheWriteChoice{store: true, ttl: emptyResultTTL}
+	}
+	return defaultChoice
+}
+
+func isPoisonedAllReferenceData(result any) bool {
+	m, ok := result.(map[string]any)
+	if !ok || m == nil {
+		return false
+	}
+	// Poison: statuses and priorities both empty, but the tenant clearly has
+	// other reference data (workspaces/teams). A blank new tenant can have empty
+	// statuses — those still get a short TTL via isEmptyAllReferenceData.
+	if !isEmptyList(m["statuses"]) || !isEmptyList(m["priorities"]) {
+		return false
+	}
+	for _, key := range []string{"workspaces", "teams", "categories", "templates", "users"} {
+		if !isEmptyList(m[key]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isEmptyAllReferenceData(result any) bool {
+	m, ok := result.(map[string]any)
+	if !ok || m == nil {
+		return true
+	}
+	// "Empty" for caching purposes: no statuses and no priorities.
+	return isEmptyList(m["statuses"]) && isEmptyList(m["priorities"])
+}
+
+func isEmptyQueryResult(result any) bool {
+	if result == nil {
+		return true
+	}
+	switch v := result.(type) {
+	case []any:
+		return len(v) == 0
+	case []map[string]any:
+		return len(v) == 0
+	case map[string]any:
+		if page, ok := v["page"]; ok {
+			return isEmptyList(page)
+		}
+		// Single-object payloads are never treated as empty just for being a map.
+		return false
+	default:
+		return false
+	}
+}
+
+func isEmptyList(value any) bool {
+	if value == nil {
+		return true
+	}
+	switch v := value.(type) {
+	case []any:
+		return len(v) == 0
+	case []map[string]any:
+		return len(v) == 0
+	default:
+		// Non-list values are not "empty lists".
+		return false
+	}
 }
 
 func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (any, error) {
@@ -1306,52 +1410,79 @@ func (s *Server) sandboxForCaller(projectID string, tenantID string, caller call
 		dataAPI = gonvex.UnavailableData()
 	}
 	runner := sandbox.NewRunner("")
-	runner.Host = sandbox.HostFunc(func(ctx context.Context, req sandbox.HostCallRequest) (any, error) {
-		args := req.Args
-		if len(args) == 0 {
-			args = json.RawMessage(`{}`)
+	// Prefer identity injected into the RunGo context (e.g. assistant loop
+	// rebinding the thread owner after a scheduled empty-caller start). Fall
+	// back to the closed-over caller from RuntimeContext construction (browser
+	// WS sessions already have a real user here).
+	effectiveCaller := func(ctx context.Context) callerContext {
+		if user, permissions, ok := gonvex.SandboxIdentityFromContext(ctx); ok {
+			return callerContext{user: user, permissions: permissions}
 		}
+		return caller
+	}
+	// Same for tenant: scheduled loops / consent re-entry bind the thread
+	// tenant onto the RunGo context. Prefer that over the closed-over value so
+	// host RPCs open the right DB and inject the right tenantId.
+	effectiveTenant := func(ctx context.Context) string {
+		if tid := strings.TrimSpace(gonvex.SandboxTenantFromContext(ctx)); tid != "" {
+			return tid
+		}
+		return tenantID
+	}
+	runner.Host = sandbox.HostFunc(func(ctx context.Context, req sandbox.HostCallRequest) (any, error) {
+		hostCaller := effectiveCaller(ctx)
+		hostTenant := effectiveTenant(ctx)
+		args := injectSandboxHostTenantArgs(req.Args, hostTenant)
 		switch strings.TrimSpace(req.Kind) {
 		case "query":
-			path, resolvedArgs, err := s.resolveSandboxFunction(ctx, projectID, tenantID, caller, "query", strings.TrimSpace(req.Path), args)
+			path, resolvedArgs, err := s.resolveSandboxFunction(ctx, projectID, hostTenant, hostCaller, "query", strings.TrimSpace(req.Path), args)
 			if err != nil {
 				return nil, err
 			}
-			return s.executeTenantQueryForCaller(ctx, projectID, tenantID, caller, path, resolvedArgs)
+			return s.executeTenantQueryForCaller(ctx, projectID, hostTenant, hostCaller, path, resolvedArgs)
 		case "action":
 			path := strings.TrimSpace(req.Path)
-			// Curated-action parity with the browser sandbox: names that are not
-			// registered runtime actions (e.g. "spots.bulkCreate") route through
-			// the app's assistant.sandboxAction dispatcher when one is registered,
-			// so whagonsAction(name, args) supports the same curated surface as
-			// api.whagons.action in the TS sandbox.
+			// Browser parity: api.whagons.action always goes through the curated
+			// SandboxClient surface. Prefer assistant.sandboxAction whenever it
+			// is registered so names like tasks.bulkDelete (which also exist as
+			// raw runtime Actions) get confirm gates + friendly args, not the
+			// bare runtime path that required a manual tenantId.
 			app := s.appForProject(ctx, projectID)
-			if fn, ok := app.Lookup(path); !ok || fn.Kind != gonvex.FunctionKindAction {
+			if path != "assistant.sandboxAction" {
 				if _, ok := app.Lookup("assistant.sandboxAction"); ok {
-					wrapped, wrapErr := json.Marshal(map[string]any{"name": path, "args": json.RawMessage(args)})
+					wrapped, wrapErr := json.Marshal(map[string]any{
+						"name":     path,
+						"args":     json.RawMessage(args),
+						"tenantId": hostTenant,
+					})
 					if wrapErr != nil {
 						return nil, wrapErr
 					}
-					result, err := s.executeTenantActionForCaller(ctx, projectID, tenantID, caller, "assistant.sandboxAction", wrapped)
+					result, err := s.executeTenantActionForCaller(ctx, projectID, hostTenant, hostCaller, "assistant.sandboxAction", wrapped)
 					if err == nil {
-						s.broadcastMutationInvalidations(projectID, tenantID, path)
+						s.broadcastMutationInvalidations(projectID, hostTenant, path)
+						return result, nil
 					}
-					return result, err
+					if !sandboxHostUnknownCuratedAction(err) {
+						return nil, err
+					}
+					// Unknown on the curated surface — fall through to a
+					// registered runtime Action with tenant-injected args.
 				}
 			}
-			result, err := s.executeTenantActionForCaller(ctx, projectID, tenantID, caller, path, args)
+			result, err := s.executeTenantActionForCaller(ctx, projectID, hostTenant, hostCaller, path, args)
 			if err == nil {
-				s.broadcastMutationInvalidations(projectID, tenantID, req.Path)
+				s.broadcastMutationInvalidations(projectID, hostTenant, req.Path)
 			}
 			return result, err
 		case "mutation":
-			path, resolvedArgs, err := s.resolveSandboxFunction(ctx, projectID, tenantID, caller, "mutation", strings.TrimSpace(req.Path), args)
+			path, resolvedArgs, err := s.resolveSandboxFunction(ctx, projectID, hostTenant, hostCaller, "mutation", strings.TrimSpace(req.Path), args)
 			if err != nil {
 				return nil, err
 			}
-			result, err := s.executeTenantMutationForCaller(ctx, projectID, tenantID, caller, path, resolvedArgs)
+			result, err := s.executeTenantMutationForCaller(ctx, projectID, hostTenant, hostCaller, path, resolvedArgs)
 			if err == nil {
-				s.broadcastMutationInvalidations(projectID, tenantID, path)
+				s.broadcastMutationInvalidations(projectID, hostTenant, path)
 			}
 			return result, err
 		case "data.inspect":
@@ -1389,7 +1520,7 @@ func (s *Server) resolveSandboxFunction(ctx context.Context, projectID string, t
 	if _, ok := app.Lookup("assistant.sandboxResolve"); !ok {
 		return path, args, nil
 	}
-	wrapped, err := json.Marshal(map[string]any{"kind": kind, "name": path, "args": args})
+	wrapped, err := json.Marshal(map[string]any{"kind": kind, "name": path, "args": args, "tenantId": tenantID})
 	if err != nil {
 		return "", nil, err
 	}

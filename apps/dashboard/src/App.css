@@ -2129,6 +2129,33 @@ h1 {
 }
 
 /* Schedules page */
+.schedules-shell {
+  overflow: auto;
+}
+
+.schedules-shell > .schedules-summary {
+  flex: 0 0 auto;
+}
+
+/* Keep the cron table content-sized so flex sharing with Recent runs
+   cannot collapse its body to a zero-height strip. */
+.schedules-shell > .logs-panel--crons {
+  flex: 0 0 auto;
+  min-height: auto;
+  overflow: visible;
+}
+
+.schedules-shell > .logs-panel--crons .sched-table {
+  flex: 0 0 auto;
+  min-height: auto;
+  overflow: visible;
+}
+
+.schedules-shell > .logs-panel--runs {
+  flex: 1 1 auto;
+  min-height: 220px;
+}
+
 .schedules-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));

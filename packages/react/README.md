@@ -45,7 +45,36 @@ function Tasks() {
 
 `useQuery` automatically benefits from the browser query-result cache. On a
 warm load it may receive the last scoped snapshot first, followed by the
-authoritative server result. Its signature and return type do not change.
+authoritative server result. Its signature remains `T | undefined`, but a
+server `query.error` now **throws** during render (Convex-compatible) so error
+boundaries can catch it instead of looking like an endless loading state.
+
+### `useQueryResult` (preferred for new UI)
+
+Use when you need loading vs error vs timeout vs disconnected, last-good data,
+or a retry button:
+
+```tsx
+const { data, status, error, isStale, retry } = useQueryResult(api.tasks.list, { status: "open" });
+
+if (status === "loading" && !data) return <Spinner />;
+if (status === "error") {
+  return <button onClick={retry}>Retry: {error?.message}</button>;
+}
+// status success | timeout | disconnected — data may still be last-good (isStale)
+```
+
+Statuses: `skip` | `loading` | `success` | `error` | `timeout` | `disconnected`.
+Soft timeout default is 15s (subscription stays alive; does not reject).
+
+### Connection state
+
+```tsx
+const { isWebSocketConnected, hasEverConnected, connectionRetries } = useConvexConnectionState();
+```
+
+This reflects the real WebSocket lifecycle (not a stub). Mutations/actions
+reject with `GonvexClientError` on timeout or disconnect and never hang forever.
 
 ## Native Google auth
 
@@ -87,7 +116,9 @@ The package also exports Convex-style names for incremental migration:
 - `ConvexReactClient`
 - `useConvex`
 - `useConvexAuth`
+- `useConvexConnectionState`
 - `usePaginatedQuery`
+- `useQueryResult`
 
 ## Related Packages
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConvexReactClient, GonvexClient, type FunctionReference } from "./index";
+import { ConvexReactClient, GonvexClient, GonvexClientError, type FunctionReference } from "./index";
 
 const captureReportedError = vi.hoisted(() => vi.fn());
 vi.mock("./error-reporter.js", () => ({
@@ -616,6 +616,267 @@ describe("GonvexClient", () => {
     expect(captureReportedError).toHaveBeenCalledWith(expect.objectContaining({ message: "permission denied" }), expect.objectContaining({
       gonvexOperation: expect.objectContaining({ type: "mutation", path: "tasks.create" }),
     }));
+  });
+
+  it("rejects one-shot queries that never receive a response with a typed timeout error", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const promise = client.query(ref, { status: "open" });
+    latestSocket().open();
+
+    vi.advanceTimersByTime(20_000);
+
+    await expect(promise).rejects.toMatchObject({
+      name: "GonvexClientError",
+      code: "timeout",
+      operation: "query",
+      path: "tasks.list",
+    });
+  });
+
+  it("honors per-call timeout overrides for one-shot queries", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const promise = client.query(ref, {}, { timeoutMs: 1_000 });
+    latestSocket().open();
+
+    vi.advanceTimersByTime(999);
+    let settled = false;
+    void promise.catch(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    vi.advanceTimersByTime(1);
+    await expect(promise).rejects.toMatchObject({ code: "timeout" });
+  });
+
+  it("rejects mutations that never receive a response with a typed timeout error", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" }, { title: "Ship" });
+    latestSocket().open();
+
+    vi.advanceTimersByTime(20_000);
+
+    await expect(mutation).rejects.toMatchObject({
+      name: "GonvexClientError",
+      code: "timeout",
+      operation: "mutation",
+      path: "tasks.create",
+    });
+  });
+
+  it("gives actions a longer default timeout than mutations", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const action = client.action({ kind: "action", path: "jobs.run" });
+    latestSocket().open();
+
+    vi.advanceTimersByTime(59_999);
+    let settled = false;
+    void action.catch(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    vi.advanceTimersByTime(1);
+    await expect(action).rejects.toMatchObject({ code: "timeout", operation: "action" });
+  });
+
+  it("ignores late responses after an operation timed out", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const socket = latestSocket();
+    socket.open();
+    const [call] = sentMessages(socket);
+
+    vi.advanceTimersByTime(20_000);
+    await expect(mutation).rejects.toMatchObject({ code: "timeout" });
+
+    expect(() => socket.receive({ type: "mutation.result", id: call.id, result: { id: "task_1" } })).not.toThrow();
+  });
+
+  it("fails pending mutations closed when the socket disconnects and never replays them", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" }, { title: "Ship" });
+    const firstSocket = latestSocket();
+    firstSocket.open();
+    expect(sentMessages(firstSocket)[0]).toMatchObject({ type: "mutation.call", path: "tasks.create" });
+
+    firstSocket.disconnect();
+
+    await expect(mutation).rejects.toMatchObject({
+      name: "GonvexClientError",
+      code: "disconnected",
+      operation: "mutation",
+      path: "tasks.create",
+    });
+
+    vi.advanceTimersByTime(250);
+    const secondSocket = latestSocket();
+    secondSocket.open();
+    expect(sentMessages(secondSocket).some((message) => message.type === "mutation.call")).toBe(false);
+  });
+
+  it("fails pending actions closed when the socket disconnects", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const action = client.action({ kind: "action", path: "jobs.run" });
+    const socket = latestSocket();
+    socket.open();
+
+    socket.disconnect();
+
+    await expect(action).rejects.toMatchObject({ code: "disconnected", operation: "action" });
+  });
+
+  it("fails auth-queued mutations closed on disconnect instead of firing them after reconnect", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { token: "session-token" });
+    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const firstSocket = latestSocket();
+    firstSocket.open();
+    // Only auth was sent; the mutation is still queued behind authentication.
+    expect(sentMessages(firstSocket)).toMatchObject([{ type: "auth" }]);
+
+    firstSocket.disconnect();
+    await expect(mutation).rejects.toMatchObject({ code: "disconnected", operation: "mutation" });
+
+    vi.advanceTimersByTime(250);
+    const secondSocket = latestSocket();
+    secondSocket.open();
+    const [secondAuth] = sentMessages(secondSocket);
+    secondSocket.receive({ type: "auth.result", id: secondAuth.id, result: { userId: "user-a" } });
+    expect(sentMessages(secondSocket).some((message) => message.type === "mutation.call")).toBe(false);
+  });
+
+  it("rejects pending mutations with a typed closed error on explicit close", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    latestSocket().open();
+
+    client.close();
+
+    await expect(mutation).rejects.toMatchObject({ code: "closed", operation: "mutation" });
+  });
+
+  it("rejects server mutation errors with a typed server error", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const socket = latestSocket();
+    socket.open();
+    const [call] = sentMessages(socket);
+
+    socket.receive({ type: "mutation.error", id: call.id, error: "permission denied" });
+
+    const error = await mutation.then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (cause: unknown) => cause,
+    );
+    expect(error).toBeInstanceOf(GonvexClientError);
+    expect(error).toMatchObject({ code: "server", operation: "mutation", message: "permission denied" });
+  });
+
+  it("tracks connection state across connect, disconnect, and reconnect", () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    expect(client.connectionState()).toMatchObject({
+      isWebSocketConnected: false,
+      hasEverConnected: false,
+      connectionCount: 0,
+      connectionRetries: 0,
+    });
+
+    client.connect();
+    expect(client.connectionState().isWebSocketConnected).toBe(false);
+
+    const firstSocket = latestSocket();
+    firstSocket.open();
+    expect(client.connectionState()).toMatchObject({
+      isWebSocketConnected: true,
+      hasEverConnected: true,
+      connectionCount: 1,
+      connectionRetries: 0,
+    });
+
+    firstSocket.disconnect();
+    expect(client.connectionState()).toMatchObject({
+      isWebSocketConnected: false,
+      hasEverConnected: true,
+      connectionCount: 1,
+      connectionRetries: 1,
+    });
+
+    vi.advanceTimersByTime(250);
+    latestSocket().open();
+    expect(client.connectionState()).toMatchObject({
+      isWebSocketConnected: true,
+      connectionCount: 2,
+      connectionRetries: 0,
+    });
+  });
+
+  it("notifies connection state subscribers and supports unsubscribing", () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const states: Array<{ isWebSocketConnected: boolean }> = [];
+    const unsubscribe = client.subscribeToConnectionState((state) => states.push(state));
+
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    expect(states.at(-1)).toMatchObject({ isWebSocketConnected: true });
+
+    socket.disconnect();
+    expect(states.at(-1)).toMatchObject({ isWebSocketConnected: false });
+
+    const count = states.length;
+    unsubscribe();
+    vi.advanceTimersByTime(250);
+    latestSocket().open();
+    expect(states).toHaveLength(count);
+  });
+
+  it("reports inflight requests while mutations are pending", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const socket = latestSocket();
+    socket.open();
+
+    expect(client.connectionState()).toMatchObject({ hasInflightRequests: true, inflightMutations: 1 });
+
+    const [call] = sentMessages(socket);
+    socket.receive({ type: "mutation.result", id: call.id, result: { id: "task_1" } });
+    await mutation;
+
+    expect(client.connectionState()).toMatchObject({ hasInflightRequests: false, inflightMutations: 0 });
+  });
+
+  it("re-requests an active live query via retryQuery", () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const handler = vi.fn();
+    client.subscribeQuery(ref, { status: "open" }, handler);
+    const socket = latestSocket();
+    socket.open();
+    const [subscribe] = sentMessages(socket);
+    socket.receive({ type: "query.error", id: subscribe.id, error: "boom" });
+
+    client.retryQuery(ref, { status: "open" });
+
+    const subscribes = sentMessages(socket).filter((message) => message.type === "query.subscribe");
+    expect(subscribes).toHaveLength(2);
+    expect(subscribes[1]).toMatchObject({ id: subscribe.id, path: "tasks.list", args: { status: "open" } });
+
+    socket.receive({ type: "query.result", id: subscribe.id, result: ["recovered"] });
+    expect(handler).toHaveBeenLastCalledWith({ type: "query.result", id: subscribe.id, result: ["recovered"] });
+  });
+
+  it("ignores retryQuery for queries without subscribers", () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+
+    client.retryQuery(ref, { status: "open" });
+
+    expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(false);
   });
 
   it("drops handlers and closes the socket when closed", () => {

@@ -15,6 +15,7 @@ export type { QueryCacheDirective } from "@gonvex/protocol";
 type SubscriptionHandler = (message: ServerMessage) => void;
 type WatchUpdateHandler = () => void;
 type TelemetryHandler = (event: GonvexTelemetryEvent) => void;
+type ConnectionStateHandler = (state: ConnectionState) => void;
 type QuerySubscription = {
   id: string;
   key: string;
@@ -33,11 +34,77 @@ type OneShotQuery = {
   args: JsonValue;
   reject: (error: Error) => void;
   socketGeneration?: number;
+  timeoutTimer?: ReturnType<typeof setTimeout>;
+};
+type PendingCall = {
+  id: string;
+  kind: "mutation" | "action";
+  path: string;
+  reject: (error: Error) => void;
+  timeoutTimer?: ReturnType<typeof setTimeout>;
 };
 
 export type FunctionReference = {
   kind: string;
   path: string;
+};
+
+export type GonvexClientErrorCode = "server" | "timeout" | "disconnected" | "closed" | "auth";
+
+/**
+ * Typed error for every rejected Gonvex operation. `code` distinguishes
+ * server-side failures from transport-level ones so apps can decide whether
+ * a retry is safe:
+ *
+ * - `server`: the runtime executed the function and returned an error.
+ * - `timeout`: no response arrived within the operation timeout. For
+ *   mutations/actions the write may or may not have been applied.
+ * - `disconnected`: the socket dropped while the operation was pending.
+ *   Mutations/actions fail closed and are never replayed automatically.
+ * - `closed`: the client was explicitly closed.
+ * - `auth`: authentication was rejected.
+ */
+export class GonvexClientError extends Error {
+  readonly code: GonvexClientErrorCode;
+  readonly path?: string;
+  readonly operation?: "query" | "mutation" | "action";
+
+  constructor(message: string, options: { code: GonvexClientErrorCode; path?: string; operation?: "query" | "mutation" | "action" }) {
+    super(message);
+    this.name = "GonvexClientError";
+    this.code = options.code;
+    this.path = options.path;
+    this.operation = options.operation;
+  }
+}
+
+export type ConnectionState = {
+  isWebSocketConnected: boolean;
+  hasEverConnected: boolean;
+  connectionCount: number;
+  connectionRetries: number;
+  hasInflightRequests: boolean;
+  inflightMutations: number;
+  inflightActions: number;
+  inflightOneShotQueries: number;
+};
+
+export type GonvexTimeoutOptions = {
+  /** One-shot `client.query()` timeout. Default 20s. `0` disables. */
+  queryTimeoutMs?: number;
+  /** `client.mutation()` timeout. Default 20s. `0` disables. */
+  mutationTimeoutMs?: number;
+  /** `client.action()` timeout. Default 60s. `0` disables. */
+  actionTimeoutMs?: number;
+};
+
+export const DEFAULT_QUERY_TIMEOUT_MS = 20_000;
+export const DEFAULT_MUTATION_TIMEOUT_MS = 20_000;
+export const DEFAULT_ACTION_TIMEOUT_MS = 60_000;
+
+export type CallOptions = {
+  /** Per-call override of the operation timeout. `0` disables. */
+  timeoutMs?: number;
 };
 
 export type GonvexClientAuth = {
@@ -50,6 +117,7 @@ export type GonvexClientAuth = {
 export type GonvexClientOptions = GonvexClientAuth & {
   queryCache?: false | QueryCacheOptions;
   errorReporting?: false | Omit<ErrorReporterOptions, "endpoint" | "project" | "tenant">;
+  timeouts?: GonvexTimeoutOptions;
 };
 
 export type GonvexTelemetryEvent = {
@@ -85,13 +153,55 @@ export class GonvexClient {
   private reconnectAttempt = 0;
   private socketGeneration = 0;
   private manuallyClosed = false;
+  private readonly pendingCalls = new Map<string, PendingCall>();
+  private readonly connectionStateHandlers = new Set<ConnectionStateHandler>();
+  private isWebSocketConnected = false;
+  private hasEverConnected = false;
+  private connectionCount = 0;
+  private readonly timeouts: Required<GonvexTimeoutOptions>;
 
   constructor(private readonly url: string, options: GonvexClientOptions = {}) {
     this.auth = authFromOptions(options);
     this.telemetryEnabled = options.telemetry === true;
     this.queryCache = createQueryCacheStore(options.queryCache);
+    this.timeouts = {
+      queryTimeoutMs: options.timeouts?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
+      mutationTimeoutMs: options.timeouts?.mutationTimeoutMs ?? DEFAULT_MUTATION_TIMEOUT_MS,
+      actionTimeoutMs: options.timeouts?.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS,
+    };
     if (options.errorReporting && options.project) {
       this.errorReporter = new GonvexErrorReporter({ endpoint: url, project: options.project, tenant: options.tenant, ...options.errorReporting });
+    }
+  }
+
+  connectionState(): ConnectionState {
+    const inflightMutations = countPendingCalls(this.pendingCalls, "mutation");
+    const inflightActions = countPendingCalls(this.pendingCalls, "action");
+    const inflightOneShotQueries = this.oneShotQueries.size;
+    return {
+      isWebSocketConnected: this.isWebSocketConnected,
+      hasEverConnected: this.hasEverConnected,
+      connectionCount: this.connectionCount,
+      connectionRetries: this.reconnectAttempt,
+      hasInflightRequests: inflightMutations + inflightActions + inflightOneShotQueries > 0,
+      inflightMutations,
+      inflightActions,
+      inflightOneShotQueries,
+    };
+  }
+
+  subscribeToConnectionState(handler: ConnectionStateHandler): () => void {
+    this.connectionStateHandlers.add(handler);
+    return () => {
+      this.connectionStateHandlers.delete(handler);
+    };
+  }
+
+  private notifyConnectionState() {
+    if (this.connectionStateHandlers.size === 0) return;
+    const state = this.connectionState();
+    for (const handler of Array.from(this.connectionStateHandlers)) {
+      handler(state);
     }
   }
 
@@ -128,21 +238,31 @@ export class GonvexClient {
         this.reconnectTimer = undefined;
       }
       this.reconnectAttempt = 0;
+      this.isWebSocketConnected = true;
+      this.hasEverConnected = true;
+      this.connectionCount += 1;
       this.sendAuth(false);
       if (isReconnect) this.resubscribeQueries(generation);
+      this.notifyConnectionState();
     });
     socket.addEventListener("close", () => {
       if (this.socket !== socket || this.manuallyClosed) return;
+      this.isWebSocketConnected = false;
       this.authInFlight = false;
       // A subscription queued for the old socket is superseded by the complete
-      // resubscribe below. Keep mutations/actions queued during authentication.
-      for (let index = this.pendingMessages.length - 1; index >= 0; index -= 1) {
-        const type = this.pendingMessages[index]?.type;
-        if (type === "query.subscribe" || type === "query.unsubscribe") {
-          this.pendingMessages.splice(index, 1);
-        }
-      }
+      // resubscribe below. Queued mutations/actions are rejected below, so
+      // drop them too — flushing them after reconnect would fire writes whose
+      // callers already saw a rejection.
+      this.pendingMessages.length = 0;
+      // Mutations/actions must fail closed on transport loss: silently
+      // replaying a non-idempotent write after reconnect is unsafe, and
+      // leaving the promise pending hangs the caller forever.
+      this.rejectPendingCalls((call) => new GonvexClientError(
+        `Connection lost while waiting for ${call.kind} ${call.path}. The operation may or may not have been applied.`,
+        { code: "disconnected", path: call.path, operation: call.kind },
+      ));
       this.scheduleReconnect();
+      this.notifyConnectionState();
     });
     socket.addEventListener("message", (event) => {
       if (this.socket !== socket) return;
@@ -183,9 +303,14 @@ export class GonvexClient {
       this.reconnectTimer = undefined;
     }
     for (const query of this.oneShotQueries.values()) {
-      query.reject(new Error("Gonvex client was closed"));
+      if (query.timeoutTimer) clearTimeout(query.timeoutTimer);
+      query.reject(new GonvexClientError("Gonvex client was closed", { code: "closed", path: query.path, operation: "query" }));
     }
     this.oneShotQueries.clear();
+    this.rejectPendingCalls((call) => new GonvexClientError(
+      `Gonvex client was closed while waiting for ${call.kind} ${call.path}`,
+      { code: "closed", path: call.path, operation: call.kind },
+    ));
     this.handlers.clear();
     this.querySubscriptions.clear();
     this.sessionScopeHandlers.clear();
@@ -195,8 +320,22 @@ export class GonvexClient {
     this.errorReporter?.close();
     const socket = this.socket;
     this.socket = undefined;
+    this.isWebSocketConnected = false;
+    this.notifyConnectionState();
+    this.connectionStateHandlers.clear();
     if (!socket) return;
     socket.close();
+  }
+
+  private rejectPendingCalls(makeError: (call: PendingCall) => GonvexClientError) {
+    if (this.pendingCalls.size === 0) return;
+    const calls = Array.from(this.pendingCalls.values());
+    this.pendingCalls.clear();
+    for (const call of calls) {
+      if (call.timeoutTimer) clearTimeout(call.timeoutTimer);
+      this.handlers.delete(call.id);
+      call.reject(makeError(call));
+    }
   }
 
   onTelemetry(handler: TelemetryHandler) {
@@ -344,24 +483,40 @@ export class GonvexClient {
     };
   }
 
-  mutation<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}): Promise<T> {
-    return this.call<T>("mutation", ref, args);
+  mutation<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}, options: CallOptions = {}): Promise<T> {
+    return this.call<T>("mutation", ref, args, options.timeoutMs ?? this.timeouts.mutationTimeoutMs);
   }
 
-  action<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}): Promise<T> {
-    return this.call<T>("action", ref, args);
+  action<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}, options: CallOptions = {}): Promise<T> {
+    return this.call<T>("action", ref, args, options.timeoutMs ?? this.timeouts.actionTimeoutMs);
   }
 
-  query<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}): Promise<T> {
+  query<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}, options: CallOptions = {}): Promise<T> {
     this.connect();
     const id = randomID();
+    const timeoutMs = options.timeoutMs ?? this.timeouts.queryTimeoutMs;
     return new Promise<T>((resolve, reject) => {
       const query: OneShotQuery = { id, path: ref.path, args, reject };
+      const settle = () => {
+        if (query.timeoutTimer) clearTimeout(query.timeoutTimer);
+        this.oneShotQueries.delete(id);
+        this.handlers.delete(id);
+        this.notifyConnectionState();
+      };
+      if (timeoutMs > 0) {
+        query.timeoutTimer = setTimeout(() => {
+          settle();
+          this.send({ type: "query.unsubscribe", id });
+          reject(new GonvexClientError(
+            `Query ${ref.path} timed out after ${timeoutMs}ms`,
+            { code: "timeout", path: ref.path, operation: "query" },
+          ));
+        }, timeoutMs);
+      }
       this.oneShotQueries.set(id, query);
       this.handlers.set(id, (message) => {
         if (message.type === "query.result") {
-          this.oneShotQueries.delete(id);
-          this.handlers.delete(id);
+          settle();
           this.recordTelemetry({
             type: "query",
             id: message.id,
@@ -375,8 +530,7 @@ export class GonvexClient {
           resolve(message.result as T);
         }
         if (message.type === "query.error") {
-          this.oneShotQueries.delete(id);
-          this.handlers.delete(id);
+          settle();
           this.recordTelemetry({
             type: "query",
             id: message.id,
@@ -386,38 +540,70 @@ export class GonvexClient {
             clientReceivedAtMs: nowMs(),
           });
           this.send({ type: "query.unsubscribe", id });
-          reject(new Error(message.error));
+          reject(new GonvexClientError(message.error, { code: "server", path: ref.path, operation: "query" }));
         }
       });
       this.sendOneShotQuery(query);
+      this.notifyConnectionState();
     });
   }
 
-  private call<T>(kind: "mutation" | "action", ref: FunctionReference, args: JsonValue): Promise<T> {
+  /**
+   * Force a live query subscription to re-request its result from the server,
+   * e.g. after a `query.error` or when a subscriber gave up waiting. No-op if
+   * nothing is subscribed to this query.
+   */
+  retryQuery(ref: FunctionReference, args: JsonValue = {}) {
+    const subscription = this.querySubscriptions.get(querySubscriptionKey(ref, args));
+    if (!subscription || subscription.listeners.size === 0) return;
+    subscription.serverSettled = false;
+    subscription.socketGeneration = undefined;
+    this.connect();
+    this.sendSubscription(subscription);
+  }
+
+  private call<T>(kind: "mutation" | "action", ref: FunctionReference, args: JsonValue, timeoutMs: number): Promise<T> {
     this.connect();
     const id = randomID();
     const clientSentAtMs = nowMs();
     return new Promise<T>((resolve, reject) => {
+      const pending: PendingCall = { id, kind, path: ref.path, reject };
+      const settle = () => {
+        if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
+        this.pendingCalls.delete(id);
+        this.handlers.delete(id);
+        this.notifyConnectionState();
+      };
+      if (timeoutMs > 0) {
+        pending.timeoutTimer = setTimeout(() => {
+          settle();
+          reject(new GonvexClientError(
+            `${kind === "mutation" ? "Mutation" : "Action"} ${ref.path} timed out after ${timeoutMs}ms. The operation may or may not have been applied.`,
+            { code: "timeout", path: ref.path, operation: kind },
+          ));
+        }, timeoutMs);
+      }
+      this.pendingCalls.set(id, pending);
       this.handlers.set(id, (message) => {
         if (kind === "mutation" && message.type === "mutation.result") {
-          this.handlers.delete(id);
+          settle();
           this.emitTelemetryFromCall(kind, id, ref.path, "ok", clientSentAtMs, message.trace);
           resolve(message.result as T);
         }
         if (kind === "mutation" && message.type === "mutation.error") {
-          this.handlers.delete(id);
+          settle();
           this.emitTelemetryFromCall(kind, id, ref.path, "error", clientSentAtMs, message.trace, message.error);
-          reject(new Error(message.error));
+          reject(new GonvexClientError(message.error, { code: "server", path: ref.path, operation: kind }));
         }
         if (kind === "action" && message.type === "action.result") {
-          this.handlers.delete(id);
+          settle();
           this.emitTelemetryFromCall(kind, id, ref.path, "ok", clientSentAtMs, message.trace);
           resolve(message.result as T);
         }
         if (kind === "action" && message.type === "action.error") {
-          this.handlers.delete(id);
+          settle();
           this.emitTelemetryFromCall(kind, id, ref.path, "error", clientSentAtMs, message.trace, message.error);
-          reject(new Error(message.error));
+          reject(new GonvexClientError(message.error, { code: "server", path: ref.path, operation: kind }));
         }
       });
       if (kind === "mutation") {
@@ -425,6 +611,7 @@ export class GonvexClient {
       } else {
         this.send({ type: "action.call", id, path: ref.path, args, trace: { clientSentAtMs } });
       }
+      this.notifyConnectionState();
     });
   }
 
@@ -482,7 +669,10 @@ export class GonvexClient {
     this.reconnectAttempt += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
-      if (!this.manuallyClosed) this.connect();
+      if (!this.manuallyClosed) {
+        this.connect();
+        this.notifyConnectionState();
+      }
     }, delay);
   }
 
@@ -689,6 +879,14 @@ export class GonvexClient {
 
 function querySubscriptionKey(ref: FunctionReference, args: JsonValue) {
   return `${ref.path}\u0000${stableStringify(args)}`;
+}
+
+function countPendingCalls(calls: Map<string, PendingCall>, kind: "mutation" | "action") {
+  let count = 0;
+  for (const call of calls.values()) {
+    if (call.kind === kind) count += 1;
+  }
+  return count;
 }
 
 function stableStringify(value: JsonValue): string {
