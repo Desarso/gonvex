@@ -4651,3 +4651,119 @@ h1 {
 .error-triage-actions > div { display: flex; flex-wrap: wrap; gap: 7px; }
 @media (max-width: 1050px) { .error-group-summary { grid-template-columns: 1fr 26px; } .error-impact { grid-column: 1 / -1; grid-row: 2; justify-content: start; } .error-impact > div { text-align: left; } .error-expand-mark { grid-column: 2; grid-row: 1; } .error-group-detail { grid-template-columns: 1fr; } .error-detail-rail { border-top: 1px solid var(--border); border-left: 0; } }
 @media (max-width: 720px) { .errors-command-header, .errors-toolbar { align-items: stretch; flex-direction: column; } .errors-stat-strip { grid-template-columns: repeat(2, 1fr); } .errors-stat-strip > div:nth-child(2) { border-right: 0; } .errors-stat-strip > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); } .error-context-grid { grid-template-columns: 1fr; } }
+
+/* Realtime presence: identity → tenant → watched query paths. */
+.realtime-shell { display: grid; gap: 16px; padding-bottom: 28px; }
+.realtime-command-header { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 4px 2px 2px; }
+.realtime-command-header h2, .realtime-command-header p, .realtime-panel-header h3 { margin: 0; }
+.realtime-command-header h2 { margin: 7px 0 5px; font-size: clamp(1.4rem, 2vw, 1.9rem); letter-spacing: -.04em; }
+.realtime-command-header p { max-width: 660px; color: var(--muted); font-size: .875rem; line-height: 1.5; }
+.realtime-kicker { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: .75rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.realtime-refresh-state { min-width: 174px; display: grid; gap: 2px; padding: 10px 12px; border: 1px solid color-mix(in oklab, var(--success) 30%, var(--border)); border-radius: calc(var(--field-radius) + 2px); background: color-mix(in oklab, var(--success) 7%, var(--surface)); }
+.realtime-refresh-state strong { font-size: .8125rem; }
+.realtime-refresh-state span { color: var(--muted); font-size: .75rem; }
+.realtime-refresh-state[data-state="offline"] { border-color: color-mix(in oklab, var(--danger) 35%, var(--border)); background: color-mix(in oklab, var(--danger) 7%, var(--surface)); }
+.realtime-refresh-state[data-state="offline"] strong { color: var(--danger); }
+.realtime-stat-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--border); border-radius: calc(var(--field-radius) + 3px); background: var(--surface); }
+.realtime-stat-strip > div { display: flex; min-height: 74px; align-items: baseline; justify-content: space-between; gap: 12px; padding: 16px 18px; border-right: 1px solid var(--separator); }
+.realtime-stat-strip > div:last-child { border-right: 0; }
+.realtime-stat-strip span { color: var(--muted); font-size: .75rem; font-weight: 700; letter-spacing: .045em; text-transform: uppercase; }
+.realtime-stat-strip strong { font: 720 1.45rem/1 var(--font-sans); font-variant-numeric: tabular-nums; letter-spacing: -.035em; }
+.realtime-workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); align-items: start; gap: 16px; }
+.realtime-main { min-width: 0; display: grid; gap: 16px; }
+.realtime-panel, .realtime-activity { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: calc(var(--field-radius) + 3px); background: var(--surface); }
+.realtime-activity { position: sticky; top: 70px; max-height: calc(100dvh - 120px); overflow-y: auto; }
+.realtime-panel-header { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 16px; border-bottom: 1px solid var(--separator); }
+.realtime-panel-header > div { display: grid; gap: 3px; }
+.realtime-panel-header > div > span { color: var(--muted); font-size: .6875rem; font-weight: 750; letter-spacing: .075em; text-transform: uppercase; }
+.realtime-panel-header h3 { font-size: 1rem; letter-spacing: -.015em; }
+.realtime-panel-header small { overflow: hidden; color: var(--muted); font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
+.realtime-panel-header--search { align-items: center; }
+.realtime-search { width: min(310px, 46%); }
+.realtime-search input { width: 100%; min-height: 38px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--field-radius); outline: none; background: var(--field-background); color: var(--field-foreground); font: inherit; font-size: .875rem; }
+.realtime-search input:focus { border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in oklab, var(--focus) 14%, transparent); }
+.realtime-user-list { display: grid; }
+.realtime-user { display: grid; grid-template-columns: 38px 9px minmax(170px, 1.3fr) minmax(140px, 1fr) minmax(76px, auto) minmax(86px, auto); align-items: center; gap: 11px; min-height: 72px; padding: 11px 16px; border-bottom: 1px solid var(--separator); }
+.realtime-user:last-child { border-bottom: 0; }
+.realtime-avatar { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid color-mix(in oklab, var(--accent) 35%, var(--border)); border-radius: 50%; background: color-mix(in oklab, var(--accent) 10%, var(--surface)); color: var(--accent); font-size: .75rem; font-weight: 800; }
+.realtime-online-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px color-mix(in oklab, var(--success) 12%, transparent); }
+.realtime-user-name, .realtime-user-destinations, .realtime-user-count { min-width: 0; display: grid; gap: 3px; }
+.realtime-user-name strong, .realtime-user-destinations strong { overflow: hidden; font-size: .875rem; text-overflow: ellipsis; white-space: nowrap; }
+.realtime-user-name code, .realtime-user-destinations span, .realtime-user-count span { overflow: hidden; color: var(--muted); font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
+.realtime-user-count { text-align: right; }
+.realtime-user-count strong { font-size: 1rem; font-variant-numeric: tabular-nums; }
+.realtime-compatibility { margin: 14px 16px 0; padding: 11px 12px; border: 1px solid color-mix(in oklab, var(--warning) 30%, var(--border)); border-radius: var(--field-radius); background: color-mix(in oklab, var(--warning) 8%, var(--surface)); color: color-mix(in oklab, var(--warning) 76%, var(--foreground)); font-size: .8125rem; line-height: 1.5; }
+.realtime-connection-list { display: grid; gap: 10px; padding: 12px; }
+.realtime-connection { overflow: hidden; border: 1px solid var(--separator); border-radius: calc(var(--field-radius) + 1px); background: color-mix(in oklab, var(--surface-secondary) 35%, var(--surface)); }
+.realtime-connection > header { display: grid; grid-template-columns: minmax(130px, .7fr) minmax(180px, 1.3fr) auto; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--separator); color: var(--muted); font-size: .75rem; }
+.realtime-connection > header > div { display: flex; align-items: center; gap: 7px; }
+.realtime-connection > header > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.realtime-connection > header time { white-space: nowrap; }
+.realtime-socket-mark { width: 7px; height: 7px; border-radius: 2px; background: var(--success); box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 12%, transparent); }
+.realtime-route { display: grid; grid-template-columns: minmax(0, 1.25fr) 22px minmax(0, 1fr) 22px minmax(95px, .6fr); align-items: center; gap: 8px; padding: 13px 12px; }
+.realtime-route > div { min-width: 0; display: grid; gap: 4px; }
+.realtime-route span { color: var(--muted); font-size: .6875rem; font-weight: 700; letter-spacing: .055em; text-transform: uppercase; }
+.realtime-route strong { overflow: hidden; font-size: .875rem; text-overflow: ellipsis; white-space: nowrap; }
+.realtime-route b { color: var(--accent); font: 500 1rem/1 ui-monospace, monospace; text-align: center; }
+.realtime-connection-foot { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 16px; padding: 0 12px; border-top: 1px solid var(--separator); }
+.realtime-subscription-disclosure { min-width: 0; }
+.realtime-subscription-disclosure summary { display: grid; min-height: 42px; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; font-size: .8125rem; list-style: none; }
+.realtime-subscription-disclosure summary::-webkit-details-marker { display: none; }
+.realtime-subscription-disclosure summary::after { content: "⌄"; grid-column: 4; color: var(--muted); font: 700 .875rem/1 var(--font-sans); transition: transform 140ms ease; }
+.realtime-subscription-disclosure[open] summary::after { transform: rotate(180deg); }
+.realtime-subscription-disclosure summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 2px; }
+.realtime-subscription-disclosure summary strong { min-width: 24px; color: var(--foreground); font-size: .8125rem; font-variant-numeric: tabular-nums; }
+.realtime-subscription-disclosure summary em { overflow: hidden; font-size: .75rem; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.realtime-subscription-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 22px; padding: 2px 0 12px; }
+.realtime-subscription-list > div { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; border-top: 1px solid color-mix(in oklab, var(--separator) 72%, transparent); }
+.realtime-subscription-list code { overflow: hidden; color: var(--foreground); font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
+.realtime-subscription-list span { flex: 0 0 auto; color: var(--muted); font-size: .75rem; font-variant-numeric: tabular-nums; }
+.realtime-last-activity { overflow: hidden; max-width: 270px; align-self: center; color: var(--muted); font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
+.realtime-activity-list { display: grid; padding: 6px 14px 14px; }
+.realtime-event { position: relative; display: grid; gap: 6px; padding: 13px 0 13px 18px; border-bottom: 1px solid var(--separator); }
+.realtime-event:last-child { border-bottom: 0; }
+.realtime-event-line { position: absolute; left: 1px; top: 19px; width: 8px; height: 8px; border: 2px solid var(--surface); border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 45%, var(--border)); }
+.realtime-event::before { content: ""; position: absolute; left: 4px; top: 27px; bottom: -7px; width: 1px; background: var(--separator); }
+.realtime-event:last-child::before { display: none; }
+.realtime-event[data-outcome="error"] .realtime-event-line { background: var(--danger); box-shadow: 0 0 0 1px color-mix(in oklab, var(--danger) 45%, var(--border)); }
+.realtime-event-top, .realtime-event > div:last-child { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.realtime-event-top strong { overflow: hidden; font-size: .8125rem; text-overflow: ellipsis; white-space: nowrap; }
+.realtime-event time, .realtime-event > div:last-child span { flex: 0 0 auto; color: var(--muted); font-size: .6875rem; }
+.realtime-event p { overflow: hidden; margin: 0; color: var(--muted); font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
+.realtime-event p span { color: var(--foreground); }
+.realtime-event code { overflow: hidden; color: var(--muted); font-size: .6875rem; text-overflow: ellipsis; white-space: nowrap; }
+.realtime-empty { min-height: 170px; display: grid; place-content: center; gap: 6px; padding: 24px; color: var(--muted); text-align: center; }
+.realtime-empty > span { display: grid; width: 34px; height: 34px; margin: 0 auto 4px; place-items: center; border: 1px solid var(--border); border-radius: 50%; background: var(--surface-secondary); color: var(--foreground); }
+.realtime-empty strong { color: var(--foreground); font-size: .875rem; }
+.realtime-empty p { max-width: 390px; margin: 0; font-size: .8125rem; line-height: 1.5; }
+.realtime-empty--activity { min-height: 220px; padding-inline: 10px; }
+
+@media (max-width: 1160px) {
+  .realtime-workspace { grid-template-columns: 1fr; }
+  .realtime-activity { position: static; max-height: none; }
+  .realtime-activity-list { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 20px; }
+}
+
+@media (max-width: 780px) {
+  .realtime-command-header, .realtime-panel-header--search { align-items: stretch; flex-direction: column; }
+  .realtime-refresh-state, .realtime-search { width: 100%; }
+  .realtime-stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .realtime-stat-strip > div:nth-child(2) { border-right: 0; }
+  .realtime-stat-strip > div:nth-child(-n + 2) { border-bottom: 1px solid var(--separator); }
+  .realtime-user { grid-template-columns: 38px 9px minmax(0, 1fr) auto; }
+  .realtime-user-destinations { grid-column: 3 / -1; }
+  .realtime-user-count { grid-row: 1; }
+  .realtime-user-count:last-child { display: none; }
+  .realtime-route { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .realtime-route b { display: none; }
+  .realtime-connection > header { grid-template-columns: 1fr auto; }
+  .realtime-connection > header > span { grid-column: 1 / -1; grid-row: 2; }
+  .realtime-connection-foot { grid-template-columns: 1fr; gap: 0; padding-bottom: 9px; }
+  .realtime-subscription-list { grid-template-columns: 1fr; }
+  .realtime-last-activity { max-width: 100%; padding-bottom: 2px; }
+  .realtime-activity-list { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .realtime-shell .health-pulse { animation: none; }
+}

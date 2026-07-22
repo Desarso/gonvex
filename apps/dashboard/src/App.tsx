@@ -192,6 +192,26 @@ type RuntimeRunningMetrics = {
 type RuntimeWebSocketMetrics = {
   connections: number;
   subscriptions: number;
+  users?: number;
+  details?: RuntimeWebSocketConnection[];
+};
+
+type RuntimeWebSocketConnection = {
+  id: string;
+  project: string;
+  tenant: string;
+  userId?: string;
+  userEmail?: string;
+  authenticated: boolean;
+  connectedAt: string;
+  lastActiveAt: string;
+  lastActivity: string;
+  lastPath?: string;
+  browser?: string;
+  deviceType?: string;
+  platform?: string;
+  connectionType?: string;
+  subscriptions: string[];
 };
 
 export type RuntimeDatabaseMetrics = {
@@ -256,6 +276,7 @@ type RuntimeSchedulerMetrics = {
 };
 
 type RuntimeMetricsResponse = {
+  generatedAt?: string;
   functions: Record<string, RuntimeFunctionMetrics>;
   cache: RuntimeCacheMetrics;
   running?: RuntimeRunningMetrics;
@@ -559,9 +580,9 @@ const pages: Page[] = [
   {
     id: "realtime",
     label: "Realtime",
-    eyebrow: "Subscriptions",
-    title: "Invalidation timeline",
-    description: "The upcoming query dependency and LiveGrid patch stream dashboard.",
+    eyebrow: "Live presence",
+    title: "Connection activity",
+    description: "See who is online, where every connection is pointed, and what the project is doing now.",
   },
   {
     id: "settings",
@@ -3728,7 +3749,7 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
               onAction={reportAction}
             />
           ) : null}
-          {activePage === "realtime" ? <RealtimePage /> : null}
+          {activePage === "realtime" ? <RealtimePage project={activeProject} /> : null}
           {activePage === "settings" ? (
             <SettingsPage
               databaseMode={activeDatabaseMode}
@@ -8124,43 +8145,238 @@ function SchedulesPage(props: { project: ProjectTarget }) {
   );
 }
 
-function RealtimePage() {
+function realtimeRelativeTime(value: string): string {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return "unknown";
+  const elapsedSeconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (elapsedSeconds < 5) return "now";
+  if (elapsedSeconds < 60) return `${elapsedSeconds}s ago`;
+  const elapsedMinutes = Math.round(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+  return `${Math.round(elapsedMinutes / 60)}h ago`;
+}
+
+function realtimeActivityLabel(activity: string): string {
+  const labels: Record<string, string> = {
+    connected: "Connected",
+    auth: "Authenticated",
+    "query.subscribe": "Subscribed",
+    "query.unsubscribe": "Unsubscribed",
+    "mutation.call": "Called mutation",
+    "action.call": "Called action",
+    query: "Received query update",
+    mutation: "Received mutation result",
+    action: "Received action result",
+  };
+  return labels[activity] ?? activity.replaceAll(".", " ");
+}
+
+function realtimeInitials(value: string): string {
+  const name = value.split("@")[0] ?? value;
+  const parts = name.split(/[._\-\s]+/).filter(Boolean);
+  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?";
+}
+
+function realtimeDeviceLabel(connection: RuntimeWebSocketConnection): string {
+  return [connection.browser, connection.platform, connection.deviceType, connection.connectionType].filter(Boolean).join(" · ") || "Client details pending";
+}
+
+type RealtimeUserGroup = {
+  key: string;
+  label: string;
+  secondary: string;
+  connections: RuntimeWebSocketConnection[];
+  subscriptions: number;
+  tenants: string[];
+};
+
+export function RealtimeDashboard(props: {
+  metrics: RuntimeMetricsResponse | null;
+  project: ProjectTarget;
+  reachable: boolean;
+}) {
+  const [search, setSearch] = useState("");
+  const websocket = props.metrics?.websocket;
+  const details = websocket?.details ?? [];
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleConnections = normalizedSearch
+    ? details.filter((connection) => [
+      connection.id,
+      connection.userEmail,
+      connection.userId,
+      connection.tenant,
+      connection.browser,
+      connection.platform,
+      connection.lastPath,
+      ...connection.subscriptions,
+    ].some((value) => String(value ?? "").toLowerCase().includes(normalizedSearch)))
+    : details;
+
+  const users = useMemo(() => {
+    const grouped = new Map<string, RealtimeUserGroup>();
+    for (const connection of visibleConnections) {
+      const key = connection.userId || "anonymous";
+      const current = grouped.get(key) ?? {
+        key,
+        label: connection.userEmail || connection.userId || "Anonymous sessions",
+        secondary: connection.userEmail && connection.userId ? connection.userId : connection.authenticated ? "Authenticated user" : "Not authenticated",
+        connections: [],
+        subscriptions: 0,
+        tenants: [],
+      };
+      current.connections.push(connection);
+      current.subscriptions += connection.subscriptions.length;
+      if (connection.tenant && !current.tenants.includes(connection.tenant)) current.tenants.push(connection.tenant);
+      grouped.set(key, current);
+    }
+    return [...grouped.values()].sort((left, right) => right.connections.length - left.connections.length || left.label.localeCompare(right.label));
+  }, [visibleConnections]);
+
+  const recentActivity = (props.metrics?.logs ?? []).slice(0, 18);
+  const activitySince = Date.now() - 5 * 60 * 1000;
+  const recentEventCount = (props.metrics?.logs ?? []).filter((entry) => new Date(entry.time).getTime() >= activitySince).length;
+  const reportedConnections = websocket?.connections ?? 0;
+  const reportedUsers = websocket?.users ?? users.length;
+  const hasLegacySummaryOnly = reportedConnections > 0 && details.length === 0;
+
   return (
-    <div className="dashboard-layout dashboard-layout--wide">
-      <Card className="timeline-card" variant="default">
-        <Card.Header className="panel-heading">
-          <div>
-            <p className="eyebrow">Dependency graph</p>
-            <Card.Title>Realtime pipeline</Card.Title>
-          </div>
-          <Chip color="warning" size="sm" variant="soft">
-            next MVP
-          </Chip>
-        </Card.Header>
-        <Separator />
-        <Card.Content className="timeline-content">
-          {[
-            "query subscribes from React",
-            "runtime records rows, predicates, and windows",
-            "mutation commits a write set",
-            "affected subscriptions rerun",
-            "Glide receives row patches",
-          ].map((item, index) => (
-            <div className="timeline-step" key={item}>
-              <span>{String(index + 1).padStart(2, "0")}</span>
-              <strong>{item}</strong>
+    <div className="realtime-shell">
+      <header className="realtime-command-header">
+        <div>
+          <div className="realtime-kicker"><span className={`health-pulse ${props.reachable ? "is-live" : "is-down"}`} aria-hidden="true" /> Live presence</div>
+          <h2>Who is connected right now?</h2>
+          <p>Trace each browser session from a user to its tenant and active query subscriptions.</p>
+        </div>
+        <div className="realtime-refresh-state" data-state={props.reachable ? "live" : "offline"}>
+          <strong>{props.reachable ? "Streaming" : "Runtime offline"}</strong>
+          <span>{props.reachable ? "updates every 2 seconds" : "retrying automatically"}</span>
+        </div>
+      </header>
+
+      <section className="realtime-stat-strip" aria-label="Realtime summary">
+        <div><span>Users online</span><strong>{reportedUsers}</strong></div>
+        <div><span>Connections</span><strong>{reportedConnections}</strong></div>
+        <div><span>Subscriptions</span><strong>{websocket?.subscriptions ?? 0}</strong></div>
+        <div><span>Events · 5 min</span><strong>{recentEventCount}</strong></div>
+      </section>
+
+      <div className="realtime-workspace">
+        <main className="realtime-main">
+          <section className="realtime-panel" aria-labelledby="online-users-title">
+            <header className="realtime-panel-header">
+              <div><span>Presence</span><h3 id="online-users-title">Online users</h3></div>
+              <small>{users.length} {users.length === 1 ? "identity" : "identities"}</small>
+            </header>
+            <div className="realtime-user-list">
+              {users.map((user) => (
+                <article className="realtime-user" key={user.key}>
+                  <div className="realtime-avatar" aria-hidden="true">{realtimeInitials(user.label)}</div>
+                  <span className="realtime-online-dot" aria-label="Online" />
+                  <div className="realtime-user-name"><strong>{user.label}</strong><code>{user.secondary}</code></div>
+                  <div className="realtime-user-destinations"><span>Tenants</span><strong>{user.tenants.join(", ") || props.project.id}</strong></div>
+                  <div className="realtime-user-count"><strong>{user.connections.length}</strong><span>{user.connections.length === 1 ? "connection" : "connections"}</span></div>
+                  <div className="realtime-user-count"><strong>{user.subscriptions}</strong><span>subscriptions</span></div>
+                </article>
+              ))}
+              {users.length === 0 ? (
+                <div className="realtime-empty">
+                  <span aria-hidden="true">○</span>
+                  <strong>{normalizedSearch ? "No connections match that search" : "No users online"}</strong>
+                  <p>{normalizedSearch ? "Try a user, tenant, browser, or function name." : "New WebSocket sessions will appear here as soon as a client connects."}</p>
+                </div>
+              ) : null}
             </div>
-          ))}
-        </Card.Content>
-      </Card>
-      <aside className="right-rail" aria-label="Realtime counters">
-        <ListCard
-          title="Counters"
-          rows={[["subscriptions", "0 active"], ["invalidations", "planned"], ["patch stream", "planned"]]}
-        />
-      </aside>
+          </section>
+
+          <section className="realtime-panel" aria-labelledby="connections-title">
+            <header className="realtime-panel-header realtime-panel-header--search">
+              <div><span>Connection paths</span><h3 id="connections-title">Every connection</h3></div>
+              <label className="realtime-search">
+                <input aria-label="Search connections" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search user, tenant, function…" type="search" />
+              </label>
+            </header>
+            {hasLegacySummaryOnly ? (
+              <div className="realtime-compatibility" role="status">
+                This runtime reports {reportedConnections} live {reportedConnections === 1 ? "connection" : "connections"}, but it predates connection-level details. Restart it with this build to inspect destinations and users.
+              </div>
+            ) : null}
+            <div className="realtime-connection-list">
+              {visibleConnections.map((connection) => {
+                const identity = connection.userEmail || connection.userId || "Anonymous";
+                const subscriptionCounts = connection.subscriptions.reduce((counts, subscription) => {
+                  counts.set(subscription, (counts.get(subscription) ?? 0) + 1);
+                  return counts;
+                }, new Map<string, number>());
+                return (
+                  <article className="realtime-connection" key={connection.id}>
+                    <header>
+                      <div><span className="realtime-socket-mark" aria-hidden="true" /><code>{connection.id}</code></div>
+                      <span>{realtimeDeviceLabel(connection)}</span>
+                      <time dateTime={connection.lastActiveAt}>{realtimeRelativeTime(connection.lastActiveAt)}</time>
+                    </header>
+                    <div className="realtime-route" aria-label={`${identity} connects to ${connection.tenant}`}>
+                      <div><span>Identity</span><strong>{identity}</strong></div>
+                      <b aria-hidden="true">→</b>
+                      <div><span>Destination</span><strong>{connection.tenant || connection.project}</strong></div>
+                      <b aria-hidden="true">→</b>
+                      <div><span>Watching</span><strong>{connection.subscriptions.length} {connection.subscriptions.length === 1 ? "query" : "queries"}</strong></div>
+                    </div>
+                    <div className="realtime-connection-foot">
+                      <details className="realtime-subscription-disclosure">
+                        <summary aria-label={`Show ${connection.subscriptions.length} subscriptions for ${connection.id}`}>
+                          <span>Subscriptions</span>
+                          <strong>{connection.subscriptions.length}</strong>
+                          <em>{connection.subscriptions.length === 0 ? "None active" : "View paths"}</em>
+                        </summary>
+                        {connection.subscriptions.length > 0 ? (
+                          <div className="realtime-subscription-list">
+                            {[...subscriptionCounts.entries()].map(([subscription, count]) => (
+                              <div key={subscription}>
+                                <code>{subscription}</code>
+                                {count > 1 ? <span>×{count}</span> : null}
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </details>
+                      <span className="realtime-last-activity">{realtimeActivityLabel(connection.lastActivity)}{connection.lastPath ? ` · ${connection.lastPath}` : ""}</span>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </main>
+
+        <aside className="realtime-activity" aria-labelledby="project-activity-title">
+          <header className="realtime-panel-header">
+            <div><span>Project pulse</span><h3 id="project-activity-title">Recent activity</h3></div>
+            <small>{props.project.name}</small>
+          </header>
+          <div className="realtime-activity-list">
+            {recentActivity.map((entry, index) => (
+              <article className="realtime-event" key={`${entry.time}:${entry.executionId ?? entry.path}:${index}`} data-outcome={entry.outcome}>
+                <span className="realtime-event-line" aria-hidden="true" />
+                <div className="realtime-event-top"><strong>{entry.path}</strong><time dateTime={entry.time}>{realtimeRelativeTime(entry.time)}</time></div>
+                <p><span>{entry.kind}</span>{entry.userEmail || entry.userId ? ` by ${entry.userEmail || entry.userId}` : ""}</p>
+                <div><code>{entry.tenant || props.project.id}</code><span>{formatDuration(entry.durationMs)} · {entry.outcome}</span></div>
+              </article>
+            ))}
+            {recentActivity.length === 0 ? (
+              <div className="realtime-empty realtime-empty--activity">
+                <span aria-hidden="true">↯</span><strong>No project activity yet</strong><p>Queries, mutations, and actions will stream into this timeline.</p>
+              </div>
+            ) : null}
+          </div>
+        </aside>
+      </div>
     </div>
   );
+}
+
+function RealtimePage(props: { project: ProjectTarget }) {
+  const { metrics, reachable } = useRuntimeMetrics(props.project, projectIsProvisioned(props.project));
+  return <RealtimeDashboard metrics={metrics} project={props.project} reachable={reachable} />;
 }
 
 // Dashboard API routes (/api/dashboard/*) are only served by the production

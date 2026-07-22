@@ -144,6 +144,7 @@ type tableChange struct {
 type wsConn struct {
 	server        *Server
 	conn          *websocket.Conn
+	id            string
 	project       string
 	tenant        string
 	user          *gonvex.User
@@ -152,6 +153,11 @@ type wsConn struct {
 	authToken     string
 	authCheckedAt time.Time
 	cacheScope    string
+	connectedAt   time.Time
+	lastActiveAt  time.Time
+	lastActivity  string
+	lastPath      string
+	device        clientDeviceInfo
 	mu            sync.Mutex
 	subs          map[string]querySubscription
 }
@@ -174,7 +180,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.EnableWriteCompression(true)
 	_ = conn.SetCompressionLevel(flate.BestSpeed)
 	project := projectID(r)
-	client := &wsConn{server: s, conn: conn, project: project, tenant: tenantIDFromRequest(project, tenantID(r)), subs: map[string]querySubscription{}}
+	connectedAt := time.Now().UTC()
+	client := &wsConn{
+		server:       s,
+		conn:         conn,
+		id:           fmt.Sprintf("conn-%06d", s.wsConnectionSeq.Add(1)),
+		project:      project,
+		tenant:       tenantIDFromRequest(project, tenantID(r)),
+		connectedAt:  connectedAt,
+		lastActiveAt: connectedAt,
+		lastActivity: "connected",
+		subs:         map[string]querySubscription{},
+	}
 	s.addWSConn(client)
 	defer func() {
 		client.cancelSubscriptions()
@@ -206,6 +223,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 	receivedAt := time.Now()
+	c.observeActivity(message, receivedAt)
 	switch message.Type {
 	case "auth":
 		requestedProject := strings.TrimSpace(message.Project)
@@ -332,6 +350,24 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 	default:
 		c.write(serverMessage{Type: "query.error", ID: message.ID, Error: "unknown websocket message type"})
 	}
+}
+
+func (c *wsConn) observeActivity(message clientMessage, observedAt time.Time) {
+	activity := strings.TrimSpace(message.Type)
+	if activity == "telemetry.event" && strings.TrimSpace(message.Kind) != "" {
+		activity = strings.TrimSpace(message.Kind)
+	}
+	c.mu.Lock()
+	c.lastActiveAt = observedAt.UTC()
+	c.lastActivity = activity
+	c.lastPath = strings.TrimSpace(message.Path)
+	if len(message.Device) > 0 {
+		var device clientDeviceInfo
+		if json.Unmarshal(message.Device, &device) == nil {
+			c.device = device
+		}
+	}
+	c.mu.Unlock()
 }
 
 func traceFromClient(in *messageTrace) *messageTrace {
@@ -616,7 +652,25 @@ func (s *Server) enforceNativeAppAuthConnections(projectID string) {
 	}
 }
 
-func (s *Server) websocketStats() (int, int) {
+type websocketConnectionSnapshot struct {
+	ID             string   `json:"id"`
+	Project        string   `json:"project"`
+	Tenant         string   `json:"tenant"`
+	UserID         string   `json:"userId,omitempty"`
+	UserEmail      string   `json:"userEmail,omitempty"`
+	Authenticated  bool     `json:"authenticated"`
+	ConnectedAt    string   `json:"connectedAt"`
+	LastActiveAt   string   `json:"lastActiveAt"`
+	LastActivity   string   `json:"lastActivity"`
+	LastPath       string   `json:"lastPath,omitempty"`
+	Browser        string   `json:"browser,omitempty"`
+	DeviceType     string   `json:"deviceType,omitempty"`
+	Platform       string   `json:"platform,omitempty"`
+	ConnectionType string   `json:"connectionType,omitempty"`
+	Subscriptions  []string `json:"subscriptions"`
+}
+
+func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot {
 	s.wsMu.RLock()
 	connections := make([]*wsConn, 0, len(s.wsConns))
 	for conn := range s.wsConns {
@@ -624,13 +678,58 @@ func (s *Server) websocketStats() (int, int) {
 	}
 	s.wsMu.RUnlock()
 
-	subscriptions := 0
+	snapshot := websocketMetricSnapshot{Details: []websocketConnectionSnapshot{}}
+	users := map[string]bool{}
 	for _, conn := range connections {
 		conn.mu.Lock()
-		subscriptions += len(conn.subs)
+		if projectFilter != "" && conn.project != projectFilter {
+			conn.mu.Unlock()
+			continue
+		}
+		detail := websocketConnectionSnapshot{
+			ID:             conn.id,
+			Project:        conn.project,
+			Tenant:         conn.tenant,
+			Authenticated:  conn.auth,
+			ConnectedAt:    conn.connectedAt.Format(time.RFC3339Nano),
+			LastActiveAt:   conn.lastActiveAt.Format(time.RFC3339Nano),
+			LastActivity:   conn.lastActivity,
+			LastPath:       conn.lastPath,
+			Browser:        strings.TrimSpace(strings.Join([]string{conn.device.BrowserName, conn.device.BrowserVersion}, " ")),
+			DeviceType:     conn.device.DeviceType,
+			Platform:       conn.device.Platform,
+			ConnectionType: conn.device.EffectiveConnectionType,
+			Subscriptions:  make([]string, 0, len(conn.subs)),
+		}
+		if detail.ID == "" {
+			detail.ID = fmt.Sprintf("conn-%06d", len(snapshot.Details)+1)
+		}
+		if conn.user != nil {
+			detail.UserID = conn.user.ID
+			detail.UserEmail = conn.user.Email
+		}
+		for _, sub := range conn.subs {
+			detail.Subscriptions = append(detail.Subscriptions, sub.path)
+		}
 		conn.mu.Unlock()
+		sort.Strings(detail.Subscriptions)
+		snapshot.Subscriptions += len(detail.Subscriptions)
+		snapshot.Details = append(snapshot.Details, detail)
+		identity := detail.UserID
+		if identity == "" {
+			identity = "anonymous"
+		}
+		users[identity] = true
 	}
-	return len(connections), subscriptions
+	sort.Slice(snapshot.Details, func(left, right int) bool {
+		if snapshot.Details[left].LastActiveAt == snapshot.Details[right].LastActiveAt {
+			return snapshot.Details[left].ID < snapshot.Details[right].ID
+		}
+		return snapshot.Details[left].LastActiveAt > snapshot.Details[right].LastActiveAt
+	})
+	snapshot.Connections = len(snapshot.Details)
+	snapshot.Users = len(users)
+	return snapshot
 }
 
 // rerunProjectSubscriptions refreshes every live query after a project bundle

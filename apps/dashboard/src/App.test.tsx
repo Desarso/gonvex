@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, DatabaseHealthSection, LogDetailsSheet, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist, runtimeLogSourceSummary, runtimeLogsForCopy } from "./App";
+import { App, DatabaseHealthSection, LogDetailsSheet, RealtimeDashboard, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist, runtimeLogSourceSummary, runtimeLogsForCopy } from "./App";
 
 async function renderProjectApp() {
   const user = userEvent.setup();
@@ -78,6 +78,48 @@ describe("App", () => {
     expect(within(section).getByText("4 idle")).toBeInTheDocument();
     expect(within(section).getAllByText("3 waits")).toHaveLength(2);
     expect(within(section).getByText(/connections waited for a database slot/i)).toBeInTheDocument();
+  });
+
+  it("groups realtime connections by user and traces every destination", async () => {
+    const user = userEvent.setup();
+    const now = new Date().toISOString();
+    render(<RealtimeDashboard
+      project={{ ...trackedErrorProject, id: "whagons-5", name: "Whagons 5", databaseMode: "single", status: "local" }}
+      reachable
+      metrics={{
+        functions: {},
+        cache: { hits: 0, misses: 0, bypasses: 0, requests: 0, hitRate: 0, series: [] },
+        logs: [{ time: now, project: "whagons-5", tenant: "tenant-a", userId: "user-a", userEmail: "ada@example.test", path: "tasks.update", kind: "mutation", outcome: "ok", durationMs: 18 }],
+        websocket: {
+          connections: 2,
+          subscriptions: 4,
+          users: 1,
+          details: [
+            { id: "conn-000001", project: "whagons-5", tenant: "tenant-a", userId: "user-a", userEmail: "ada@example.test", authenticated: true, connectedAt: now, lastActiveAt: now, lastActivity: "query.subscribe", lastPath: "bulk.tasksByWorkspace", browser: "Chrome 126", platform: "macOS", deviceType: "desktop", subscriptions: ["bulk.tasksByWorkspace", "tasks.count", "tasks.count"] },
+            { id: "conn-000002", project: "whagons-5", tenant: "tenant-b", userId: "user-a", userEmail: "ada@example.test", authenticated: true, connectedAt: now, lastActiveAt: now, lastActivity: "mutation.call", lastPath: "tasks.update", browser: "Safari 18", platform: "iOS", deviceType: "mobile", subscriptions: ["notifications.list"] },
+          ],
+        },
+      }}
+    />);
+
+    expect(screen.getByText("ada@example.test", { selector: ".realtime-user-name strong" })).toBeInTheDocument();
+    expect(screen.getByText("2", { selector: ".realtime-user-count strong" })).toBeInTheDocument();
+    expect(screen.getByLabelText("ada@example.test connects to tenant-a")).toBeInTheDocument();
+    expect(screen.getByLabelText("ada@example.test connects to tenant-b")).toBeInTheDocument();
+    const firstConnection = screen.getByText("conn-000001").closest(".realtime-connection");
+    expect(firstConnection).not.toBeNull();
+    const firstSubscriptions = firstConnection?.querySelector(".realtime-subscription-disclosure");
+    expect(firstSubscriptions).not.toHaveAttribute("open");
+    await user.click(within(firstConnection as HTMLElement).getByText("View paths"));
+    expect(firstSubscriptions).toHaveAttribute("open");
+    expect(within(firstConnection as HTMLElement).getByText("bulk.tasksByWorkspace")).toBeVisible();
+    expect(within(firstConnection as HTMLElement).getAllByText("tasks.count")).toHaveLength(1);
+    expect(within(firstConnection as HTMLElement).getByText("×2")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Recent activity" })).toBeInTheDocument();
+
+    await user.type(screen.getByRole("searchbox", { name: "Search connections" }), "Safari");
+    expect(screen.queryByText("conn-000001")).not.toBeInTheDocument();
+    expect(screen.getByText("conn-000002")).toBeInTheDocument();
   });
 
   it("keeps the project chooser vertically scrollable", () => {

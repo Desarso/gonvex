@@ -203,3 +203,40 @@ func TestRuntimeMetricsTracksDatabasePoolPressure(t *testing.T) {
 		t.Fatalf("database series = %+v", snapshot.Database.Series)
 	}
 }
+
+func TestWebsocketSnapshotScopesAndDescribesConnections(t *testing.T) {
+	now := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	server := &Server{wsConns: map[*wsConn]bool{}}
+	server.addWSConn(&wsConn{
+		id: "conn-000001", project: "project-a", tenant: "tenant-a", auth: true,
+		user: &gonvex.User{ID: "user-a", Email: "ada@example.test"}, connectedAt: now.Add(-time.Minute),
+		lastActiveAt: now, lastActivity: "query.subscribe", lastPath: "tasks.list",
+		device: clientDeviceInfo{BrowserName: "Chrome", BrowserVersion: "126", DeviceType: "desktop", Platform: "macOS"},
+		subs:   map[string]querySubscription{"one": {path: "tasks.list"}, "two": {path: "notifications.list"}},
+	})
+	server.addWSConn(&wsConn{
+		id: "conn-000002", project: "project-a", tenant: "tenant-b", auth: true,
+		user: &gonvex.User{ID: "user-a", Email: "ada@example.test"}, connectedAt: now.Add(-2 * time.Minute),
+		lastActiveAt: now.Add(-time.Second), lastActivity: "mutation.call", lastPath: "tasks.update",
+		subs: map[string]querySubscription{},
+	})
+	server.addWSConn(&wsConn{
+		id: "conn-000003", project: "project-b", tenant: "tenant-c", connectedAt: now,
+		lastActiveAt: now, lastActivity: "connected", subs: map[string]querySubscription{},
+	})
+
+	snapshot := server.websocketSnapshot("project-a")
+	if snapshot.Connections != 2 || snapshot.Subscriptions != 2 || snapshot.Users != 1 {
+		t.Fatalf("unexpected websocket totals: %+v", snapshot)
+	}
+	if len(snapshot.Details) != 2 || snapshot.Details[0].ID != "conn-000001" {
+		t.Fatalf("unexpected connection details/order: %+v", snapshot.Details)
+	}
+	first := snapshot.Details[0]
+	if first.UserEmail != "ada@example.test" || first.Tenant != "tenant-a" || first.Browser != "Chrome 126" {
+		t.Fatalf("connection identity/destination/device missing: %+v", first)
+	}
+	if strings.Join(first.Subscriptions, ",") != "notifications.list,tasks.list" {
+		t.Fatalf("subscriptions = %v", first.Subscriptions)
+	}
+}

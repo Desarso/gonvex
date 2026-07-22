@@ -51,6 +51,7 @@ type Server struct {
 	tenantHydrations  singleflight.Group
 	wsMu              sync.RWMutex
 	wsConns           map[*wsConn]bool
+	wsConnectionSeq   atomic.Uint64
 	tableChangeMu     sync.Mutex
 	tableChangeWait   map[string]*time.Timer
 	tableChanges      map[string]tableChange
@@ -311,10 +312,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) metricsSnapshot(ctx context.Context, project string) runtimeMetricsSnapshot {
-	connections, subscriptions := s.websocketStats()
+	websocket := s.websocketSnapshot(project)
 	s.hydrateRuntimeStateForProject(ctx, project)
 	s.metrics.recordDatabase(project, s.tenantStores.DatabaseStats(project))
-	snapshot := s.metrics.snapshot(s.runtime.ManifestForProject(project), connections, subscriptions, project)
+	snapshot := s.metrics.snapshot(s.runtime.ManifestForProject(project), websocket.Connections, websocket.Subscriptions, project)
+	snapshot.WebSocket = websocket
 	if s.scheduler != nil {
 		schedulerSnapshot := s.scheduler.snapshot()
 		snapshot.Scheduler = &schedulerSnapshot

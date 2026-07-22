@@ -292,8 +292,10 @@ type transactionMetricPoint struct {
 }
 
 type websocketMetricSnapshot struct {
-	Connections   int `json:"connections"`
-	Subscriptions int `json:"subscriptions"`
+	Connections   int                           `json:"connections"`
+	Subscriptions int                           `json:"subscriptions"`
+	Users         int                           `json:"users"`
+	Details       []websocketConnectionSnapshot `json:"details"`
 }
 
 func newRuntimeMetrics(telemetryPath ...string) *runtimeMetrics {
