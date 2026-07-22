@@ -12,7 +12,16 @@ export type FunctionManifestEntry = {
   kind: FunctionKind;
   handler: string;
   file: string;
+  dependencies?: FunctionDependencies;
 };
+
+export type FunctionDependencies = {
+  reads?: Array<{ table: string; columns?: string[]; filters?: string[]; ordersBy?: string[]; windowed?: boolean; predicate?: string }>;
+  writes?: Array<{ table: string; columns?: string[] }>;
+  shareByPermissions?: boolean;
+};
+
+export type SubscriptionRevision = { epoch: string; sequence: number };
 
 export type MessageTrace = {
   clientSentAtMs?: number;
@@ -69,7 +78,7 @@ export type ClientMessage =
     id: string;
     kind: "query" | "mutation" | "action";
     path: string;
-    reason?: "initial" | "invalidate";
+    reason?: "initial" | "invalidate" | "recover";
     outcome: "ok" | "error";
     error?: string;
     clientSentAtMs?: number;
@@ -89,10 +98,34 @@ export type ServerMessage =
     id: string;
     path?: string;
     result: JsonValue;
-    reason?: "initial" | "invalidate";
+    reason?: "initial" | "invalidate" | "recover";
     trace?: MessageTrace;
     cacheScope?: string;
     cacheRevision?: string;
+    subscriptionRevision?: SubscriptionRevision;
+  }
+  | {
+    type: "query.progress";
+    id: string;
+    path?: string;
+    reason?: "initial" | "invalidate" | "recover";
+    throughRevision: SubscriptionRevision;
+    trace?: MessageTrace;
+  }
+  | {
+    type: "query.patch";
+    id: string;
+    path?: string;
+    reason?: "initial" | "invalidate" | "recover";
+    baseRevision: SubscriptionRevision;
+    subscriptionRevision: SubscriptionRevision;
+    inserted?: JsonValue[];
+    updated?: JsonValue[];
+    deleted?: string[];
+    order?: string[];
+    cacheScope?: string;
+    cacheRevision?: string;
+    trace?: MessageTrace;
   }
   | { type: "query.error"; id: string; path?: string; error: string }
   | { type: "mutation.result"; id: string; path?: string; result: JsonValue; trace?: MessageTrace }

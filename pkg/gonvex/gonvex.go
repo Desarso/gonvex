@@ -32,14 +32,140 @@ type App struct {
 }
 
 type Function struct {
-	Path       string
-	Kind       FunctionKind
-	Public     bool
-	Handler    any
-	ArgType    reflect.Type
-	ResultType reflect.Type
+	Path         string
+	Kind         FunctionKind
+	Public       bool
+	Dependencies FunctionDependencies
+	Handler      any
+	ArgType      reflect.Type
+	ResultType   reflect.Type
 
 	handlerValue reflect.Value
+}
+
+// FunctionDependencies are explicit invalidation and sharing declarations for
+// a registered function. ShareByPermissions is opt-in: without it the runtime
+// includes the user identity in a shared-subscription key, which is the safe
+// default for handlers that inspect ctx.User.
+type FunctionDependencies struct {
+	Reads              []ReadDependency
+	Writes             []WriteDependency
+	ShareByPermissions bool
+}
+
+type ReadDependency struct {
+	Table     string
+	Columns   []string
+	Filters   []string
+	OrdersBy  []string
+	Windowed  bool
+	Predicate string
+}
+
+type WriteDependency struct {
+	Table   string
+	Columns []string
+}
+
+type FunctionOption interface {
+	applyFunctionOption(*FunctionDependencies)
+}
+
+type readOption struct{ dependencies []ReadDependency }
+
+// Reads declares one or more tenant tables read by a query.
+func Reads(tables ...string) *readOption {
+	option := &readOption{}
+	for _, table := range tables {
+		if table = strings.TrimSpace(table); table != "" {
+			option.dependencies = append(option.dependencies, ReadDependency{Table: table})
+		}
+	}
+	return option
+}
+
+func (o *readOption) Columns(columns ...string) *readOption {
+	for index := range o.dependencies {
+		o.dependencies[index].Columns = cleanDependencyNames(columns)
+	}
+	return o
+}
+
+func (o *readOption) Filters(columns ...string) *readOption {
+	for index := range o.dependencies {
+		o.dependencies[index].Filters = cleanDependencyNames(columns)
+	}
+	return o
+}
+
+func (o *readOption) OrdersBy(columns ...string) *readOption {
+	for index := range o.dependencies {
+		o.dependencies[index].OrdersBy = cleanDependencyNames(columns)
+	}
+	return o
+}
+
+func (o *readOption) Windowed() *readOption {
+	for index := range o.dependencies {
+		o.dependencies[index].Windowed = true
+	}
+	return o
+}
+
+func (o *readOption) Predicate(name string) *readOption {
+	for index := range o.dependencies {
+		o.dependencies[index].Predicate = strings.TrimSpace(name)
+	}
+	return o
+}
+
+func (o *readOption) applyFunctionOption(target *FunctionDependencies) {
+	target.Reads = append(target.Reads, o.dependencies...)
+}
+
+type writeOption struct{ dependencies []WriteDependency }
+
+// Writes declares one or more tenant tables changed by a mutation or action.
+func Writes(tables ...string) *writeOption {
+	option := &writeOption{}
+	for _, table := range tables {
+		if table = strings.TrimSpace(table); table != "" {
+			option.dependencies = append(option.dependencies, WriteDependency{Table: table})
+		}
+	}
+	return option
+}
+
+func (o *writeOption) Columns(columns ...string) *writeOption {
+	for index := range o.dependencies {
+		o.dependencies[index].Columns = cleanDependencyNames(columns)
+	}
+	return o
+}
+
+func (o *writeOption) applyFunctionOption(target *FunctionDependencies) {
+	target.Writes = append(target.Writes, o.dependencies...)
+}
+
+type shareByPermissionsOption struct{}
+
+// ShareByPermissions allows callers with the same permission fingerprint to
+// share one server-side subscription execution and result. Only use it when a
+// handler's result does not otherwise depend on ctx.User.
+func ShareByPermissions() FunctionOption { return shareByPermissionsOption{} }
+
+func (shareByPermissionsOption) applyFunctionOption(target *FunctionDependencies) {
+	target.ShareByPermissions = true
+}
+
+func cleanDependencyNames(values []string) []string {
+	clean := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			clean = append(clean, value)
+		}
+	}
+	return clean
 }
 
 type User struct {
@@ -185,36 +311,36 @@ func NewApp() *App {
 	return &App{functions: map[string]Function{}}
 }
 
-func (a *App) Query(path string, handler any) {
-	a.register(FunctionKindQuery, path, handler)
+func (a *App) Query(path string, handler any, options ...FunctionOption) {
+	a.register(FunctionKindQuery, path, handler, options...)
 }
 
-func (a *App) Mutation(path string, handler any) {
-	a.register(FunctionKindMutation, path, handler)
+func (a *App) Mutation(path string, handler any, options ...FunctionOption) {
+	a.register(FunctionKindMutation, path, handler, options...)
 }
 
-func (a *App) Action(path string, handler any) {
-	a.register(FunctionKindAction, path, handler)
+func (a *App) Action(path string, handler any, options ...FunctionOption) {
+	a.register(FunctionKindAction, path, handler, options...)
 }
 
-func (a *App) HTTP(path string, handler any) {
-	a.register(FunctionKindHTTP, path, handler)
+func (a *App) HTTP(path string, handler any, options ...FunctionOption) {
+	a.register(FunctionKindHTTP, path, handler, options...)
 }
 
 // PublicHTTP registers an HTTP handler that may execute without a Gonvex user
 // session even when native application authentication is enabled. It is
 // intended for provider-signed callbacks such as payment webhooks. The handler
 // must authenticate the request itself before changing state.
-func (a *App) PublicHTTP(path string, handler any) {
-	a.registerWithVisibility(FunctionKindHTTP, path, handler, true)
+func (a *App) PublicHTTP(path string, handler any, options ...FunctionOption) {
+	a.registerWithVisibility(FunctionKindHTTP, path, handler, true, options...)
 }
 
-func (a *App) InternalMutation(path string, handler any) {
-	a.register(FunctionKindInternalMutation, path, handler)
+func (a *App) InternalMutation(path string, handler any, options ...FunctionOption) {
+	a.register(FunctionKindInternalMutation, path, handler, options...)
 }
 
-func (a *App) LiveGrid(path string, handler any) {
-	a.register(FunctionKindLiveGrid, path, handler)
+func (a *App) LiveGrid(path string, handler any, options ...FunctionOption) {
+	a.register(FunctionKindLiveGrid, path, handler, options...)
 }
 
 func (a *App) Functions() map[string]Function {
@@ -281,11 +407,11 @@ func (a *App) ExecuteHTTP(ctx *HTTPContext, path string, request HTTPRequest) (H
 	return response, nil
 }
 
-func (a *App) register(kind FunctionKind, path string, handler any) {
-	a.registerWithVisibility(kind, path, handler, false)
+func (a *App) register(kind FunctionKind, path string, handler any, options ...FunctionOption) {
+	a.registerWithVisibility(kind, path, handler, false, options...)
 }
 
-func (a *App) registerWithVisibility(kind FunctionKind, path string, handler any, public bool) {
+func (a *App) registerWithVisibility(kind FunctionKind, path string, handler any, public bool, options ...FunctionOption) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		panic("gonvex: function path is required")
@@ -305,6 +431,11 @@ func (a *App) registerWithVisibility(kind FunctionKind, path string, handler any
 		panic(fmt.Sprintf("gonvex: function %q already registered as %s", path, existing.Kind))
 	}
 	function.Public = public
+	for _, option := range options {
+		if option != nil {
+			option.applyFunctionOption(&function.Dependencies)
+		}
+	}
 	a.functions[path] = function
 }
 

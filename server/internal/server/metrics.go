@@ -29,6 +29,7 @@ type runtimeMetrics struct {
 	runningByKind  map[string]int64
 	runningBuckets map[int64]map[string]int64
 	database       map[string]*databaseMetricState
+	reactive       reactiveMetricState
 	logs           []runtimeLogEntry
 	telemetryLogs  []transactionTelemetryEntry
 	telemetryPath  string
@@ -188,10 +189,99 @@ type runtimeMetricsSnapshot struct {
 	Running          runningMetricSnapshot                `json:"running"`
 	WebSocket        websocketMetricSnapshot              `json:"websocket"`
 	Database         databaseMetricSnapshot               `json:"database"`
+	Reactive         reactiveMetricSnapshot               `json:"reactive"`
 	Scheduler        *schedulerSnapshot                   `json:"scheduler,omitempty"`
 	Logs             []runtimeLogEntry                    `json:"logs"`
 	TelemetryLogs    []transactionTelemetryEntry          `json:"telemetryLogs"`
 	TelemetryLogPath string                               `json:"telemetryLogPath,omitempty"`
+}
+
+type reactiveMetricState struct {
+	ChangeBatchesReceived          uint64
+	SubscriptionsInspected         uint64
+	CandidateSubscriptionsSelected uint64
+	QueriesRerun                   uint64
+	ConcurrentExecutionViolations  uint64
+	RerunsCoalesced                uint64
+	UnchangedResultsSuppressed     uint64
+	FullResults                    uint64
+	Patches                        uint64
+	ProgressMessages               uint64
+	ResultBytesBefore              uint64
+	ResultBytesAfter               uint64
+	DatabaseQueryCount             uint64
+	DatabaseQueryDurationMS        float64
+	ChangeToClientDurationMS       float64
+	ChangeToClientSamples          uint64
+	ActiveTenantListeners          int
+	ListenerReconnects             uint64
+	ListenerFailures               uint64
+	ListenerLimitRefusals          uint64
+	SharedSubscriptions            int
+	SubscriptionListeners          int
+}
+
+type reactiveMetricSnapshot struct {
+	ChangeBatchesReceived          uint64  `json:"changeBatchesReceived"`
+	SubscriptionsInspected         uint64  `json:"subscriptionsInspected"`
+	CandidateSubscriptionsSelected uint64  `json:"candidateSubscriptionsSelected"`
+	QueriesRerun                   uint64  `json:"queriesRerun"`
+	ConcurrentExecutionViolations  uint64  `json:"concurrentExecutionViolations"`
+	RerunsCoalesced                uint64  `json:"rerunsCoalesced"`
+	UnchangedResultsSuppressed     uint64  `json:"unchangedResultsSuppressed"`
+	FullResults                    uint64  `json:"fullResults"`
+	Patches                        uint64  `json:"patches"`
+	ProgressMessages               uint64  `json:"progressMessages"`
+	ResultBytesBefore              uint64  `json:"resultBytesBefore"`
+	ResultBytesAfter               uint64  `json:"resultBytesAfter"`
+	DatabaseQueryCount             uint64  `json:"databaseQueryCount"`
+	DatabaseQueryDurationMS        float64 `json:"databaseQueryDurationMs"`
+	AverageChangeToClientMS        float64 `json:"averageChangeToClientMs"`
+	ActiveTenantListeners          int     `json:"activeTenantListeners"`
+	ListenerReconnects             uint64  `json:"listenerReconnects"`
+	ListenerFailures               uint64  `json:"listenerFailures"`
+	ListenerLimitRefusals          uint64  `json:"listenerLimitRefusals"`
+	SharedSubscriptions            int     `json:"sharedSubscriptions"`
+	SubscriptionListeners          int     `json:"subscriptionListeners"`
+}
+
+func (m *runtimeMetrics) recordReactive(update func(*reactiveMetricState)) {
+	if m == nil || update == nil {
+		return
+	}
+	m.mu.Lock()
+	update(&m.reactive)
+	m.mu.Unlock()
+}
+
+func (state reactiveMetricState) snapshot() reactiveMetricSnapshot {
+	averageChangeToClient := float64(0)
+	if state.ChangeToClientSamples > 0 {
+		averageChangeToClient = state.ChangeToClientDurationMS / float64(state.ChangeToClientSamples)
+	}
+	return reactiveMetricSnapshot{
+		ChangeBatchesReceived:          state.ChangeBatchesReceived,
+		SubscriptionsInspected:         state.SubscriptionsInspected,
+		CandidateSubscriptionsSelected: state.CandidateSubscriptionsSelected,
+		QueriesRerun:                   state.QueriesRerun,
+		ConcurrentExecutionViolations:  state.ConcurrentExecutionViolations,
+		RerunsCoalesced:                state.RerunsCoalesced,
+		UnchangedResultsSuppressed:     state.UnchangedResultsSuppressed,
+		FullResults:                    state.FullResults,
+		Patches:                        state.Patches,
+		ProgressMessages:               state.ProgressMessages,
+		ResultBytesBefore:              state.ResultBytesBefore,
+		ResultBytesAfter:               state.ResultBytesAfter,
+		DatabaseQueryCount:             state.DatabaseQueryCount,
+		DatabaseQueryDurationMS:        state.DatabaseQueryDurationMS,
+		AverageChangeToClientMS:        averageChangeToClient,
+		ActiveTenantListeners:          state.ActiveTenantListeners,
+		ListenerReconnects:             state.ListenerReconnects,
+		ListenerFailures:               state.ListenerFailures,
+		ListenerLimitRefusals:          state.ListenerLimitRefusals,
+		SharedSubscriptions:            state.SharedSubscriptions,
+		SubscriptionListeners:          state.SubscriptionListeners,
+	}
 }
 
 type databaseMetricSnapshot struct {
@@ -292,10 +382,11 @@ type transactionMetricPoint struct {
 }
 
 type websocketMetricSnapshot struct {
-	Connections   int                           `json:"connections"`
-	Subscriptions int                           `json:"subscriptions"`
-	Users         int                           `json:"users"`
-	Details       []websocketConnectionSnapshot `json:"details"`
+	Connections      int                           `json:"connections"`
+	Subscriptions    int                           `json:"subscriptions"`
+	Users            int                           `json:"users"`
+	Details          []websocketConnectionSnapshot `json:"details"`
+	DetailsTruncated bool                          `json:"detailsTruncated,omitempty"`
 }
 
 func newRuntimeMetrics(telemetryPath ...string) *runtimeMetrics {
@@ -741,6 +832,7 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 			Subscriptions: subscriptions,
 		},
 		Database:         m.databaseSnapshot(projectFilter),
+		Reactive:         m.reactive.snapshot(),
 		Logs:             logs,
 		TelemetryLogs:    telemetryLogs,
 		TelemetryLogPath: m.telemetryPath,

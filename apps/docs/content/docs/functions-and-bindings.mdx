@@ -15,13 +15,26 @@ package backend
 import "github.com/gonvex/gonvex/pkg/gonvex"
 
 func Register(app *gonvex.App) {
-  app.Query("tasks.list", ListTasks)
-  app.Mutation("tasks.create", CreateTask)
+  app.Query(
+    "tasks.list",
+    ListTasks,
+    gonvex.Reads("tasks").
+      Columns("id", "title", "status", "updated_at").
+      Filters("status").
+      OrdersBy("updated_at"),
+    gonvex.ShareByPermissions(),
+  )
+  app.Mutation("tasks.create", CreateTask, gonvex.Writes("tasks"))
   app.Action("tasks.import", ImportTasks)
   app.HTTP("/webhooks/stripe", StripeWebhook)
   app.LiveGrid("tasks.grid", TasksGrid)
 }
 ```
+
+Dependency options are backward compatible. Registrations without them use
+conservative compatibility invalidation. `ShareByPermissions` is intentionally
+opt-in: use it only when the result depends on tenant, arguments, and the
+permission set, but not otherwise on `ctx.User`.
 
 ## Function Kinds
 

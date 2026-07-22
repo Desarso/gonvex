@@ -1,4 +1,4 @@
-import type { BrowserTelemetryInfo, ClientMessage, JsonValue, MessageTrace, QueryCacheDirective, ServerMessage } from "@gonvex/protocol";
+import type { BrowserTelemetryInfo, ClientMessage, JsonValue, MessageTrace, QueryCacheDirective, ServerMessage, SubscriptionRevision } from "@gonvex/protocol";
 import { createQueryCacheStore, type QueryCacheOptions, type QueryCacheStatus, type QueryCacheStore } from "./query-cache.js";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
 export * from "./cache.js";
@@ -27,6 +27,8 @@ type QuerySubscription = {
   serverSettled: boolean;
   cacheReadGeneration?: number;
   socketGeneration?: number;
+  lastRevision?: SubscriptionRevision;
+  revisionSocketGeneration?: number;
 };
 type OneShotQuery = {
   id: string;
@@ -124,7 +126,7 @@ export type GonvexTelemetryEvent = {
   type: "mutation" | "action" | "query";
   id: string;
   path: string;
-  reason?: "initial" | "invalidate";
+  reason?: "initial" | "invalidate" | "recover";
   outcome: "ok" | "error";
   error?: string;
   clientSentAtMs?: number;
@@ -411,6 +413,9 @@ export class GonvexClient {
     };
     this.querySubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => {
+      const normalized = this.normalizeSubscriptionMessage(subscription, message);
+      if (!normalized) return;
+      message = normalized;
       if (message.type === "query.result") {
         if (message.cacheScope && message.cacheScope !== this.queryCacheDirective?.scope) {
           return;
@@ -452,6 +457,64 @@ export class GonvexClient {
     this.startQueryCacheRead(subscription);
 
     return () => this.unsubscribeQueryListener(key, onMessage);
+  }
+
+  private normalizeSubscriptionMessage(subscription: QuerySubscription, message: ServerMessage): ServerMessage | undefined {
+    if (message.type === "query.progress") {
+      if (!this.acceptRevision(subscription, message.throughRevision)) return undefined;
+      subscription.lastRevision = message.throughRevision;
+      subscription.revisionSocketGeneration = this.socketGeneration;
+      // Progress advances freshness without waking React/query listeners.
+      return undefined;
+    }
+    if (message.type === "query.patch") {
+      if (!sameRevision(message.baseRevision, subscription.lastRevision)) {
+        // A missing base is never guessed through. Re-subscribing causes the
+        // runtime to replay an authoritative shared snapshot.
+        this.requestSubscriptionSnapshot(subscription);
+        return undefined;
+      }
+      if (!this.acceptRevision(subscription, message.subscriptionRevision)) return undefined;
+      const previous = subscription.lastMessage;
+      if (previous?.type !== "query.result" || !Array.isArray(previous.result)) {
+        this.requestSubscriptionSnapshot(subscription);
+        return undefined;
+      }
+      const result = applyKeyedPatch(previous.result, message);
+      if (!result) {
+        this.requestSubscriptionSnapshot(subscription);
+        return undefined;
+      }
+      subscription.lastRevision = message.subscriptionRevision;
+      subscription.revisionSocketGeneration = this.socketGeneration;
+      return {
+        type: "query.result",
+        id: message.id,
+        path: message.path,
+        result,
+        reason: message.reason,
+        trace: message.trace,
+        cacheScope: message.cacheScope,
+        cacheRevision: message.cacheRevision,
+        subscriptionRevision: message.subscriptionRevision,
+      };
+    }
+    if (message.type === "query.result" && message.subscriptionRevision) {
+      if (!this.acceptRevision(subscription, message.subscriptionRevision)) return undefined;
+      subscription.lastRevision = message.subscriptionRevision;
+      subscription.revisionSocketGeneration = this.socketGeneration;
+    }
+    return message;
+  }
+
+  private acceptRevision(subscription: QuerySubscription, next: SubscriptionRevision) {
+    const previous = subscription.lastRevision;
+    if (!previous) return true;
+    if (next.epoch === previous.epoch) return next.sequence > previous.sequence;
+    // Epochs are opaque runtime-start IDs. A different epoch is accepted only
+    // after the socket generation changes; otherwise a delayed old-epoch frame
+    // could overwrite a result already accepted on the same connection.
+    return subscription.revisionSocketGeneration !== this.socketGeneration;
   }
 
   watchQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}) {
@@ -654,6 +717,11 @@ export class GonvexClient {
       path: subscription.path,
       args: subscription.args,
     });
+  }
+
+  private requestSubscriptionSnapshot(subscription: QuerySubscription) {
+    subscription.socketGeneration = undefined;
+    this.sendSubscription(subscription);
   }
 
   private sendOneShotQuery(query: OneShotQuery) {
@@ -908,6 +976,39 @@ function stableStringify(value: JsonValue): string {
     .sort()
     .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
     .join(",")}}`;
+}
+
+function sameRevision(left: SubscriptionRevision, right: SubscriptionRevision | undefined) {
+  return !!right && left.epoch === right.epoch && left.sequence === right.sequence;
+}
+
+function applyKeyedPatch(
+  previous: JsonValue[],
+  patch: Extract<ServerMessage, { type: "query.patch" }>,
+): JsonValue[] | undefined {
+  const rows = new Map<string, JsonValue>();
+  for (const row of previous) {
+    if (!isJsonRecord(row) || typeof row.id !== "string" || rows.has(row.id)) return undefined;
+    rows.set(row.id, row);
+  }
+  for (const id of patch.deleted ?? []) rows.delete(id);
+  for (const row of [...(patch.inserted ?? []), ...(patch.updated ?? [])]) {
+    if (!isJsonRecord(row) || typeof row.id !== "string") return undefined;
+    rows.set(row.id, row);
+  }
+  if (patch.order) {
+    if (patch.order.length !== rows.size) return undefined;
+    const ordered: JsonValue[] = [];
+    const seen = new Set<string>();
+    for (const id of patch.order) {
+      const row = rows.get(id);
+      if (!row || seen.has(id)) return undefined;
+      seen.add(id);
+      ordered.push(row);
+    }
+    return ordered;
+  }
+  return Array.from(rows.values());
 }
 
 export class ConvexReactClient extends GonvexClient {

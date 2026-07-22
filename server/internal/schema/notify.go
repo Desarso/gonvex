@@ -10,6 +10,8 @@ import (
 )
 
 const NotifyChannel = "gonvex_table_change"
+const NotifySchemaVersion = manifest.NotifySchemaVersion
+const notifySchemaVersionFunction = "gonvex_notify_schema_v2"
 
 func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]manifest.Table) ([]string, error) {
 	artifacts, err := loadNotifyArtifacts(ctx, db)
@@ -31,6 +33,11 @@ func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]ma
 		}
 		applied = append(applied, fmt.Sprintf("ensured notify triggers for %s", tableName))
 	}
+	if !artifacts.functions[notifySchemaVersionFunction] {
+		if _, err := db.ExecContext(ctx, `CREATE OR REPLACE FUNCTION gonvex_notify_schema_v2() RETURNS integer AS $$ BEGIN RETURN 2; END; $$ LANGUAGE plpgsql IMMUTABLE;`); err != nil {
+			return applied, err
+		}
+	}
 	return applied, nil
 }
 
@@ -47,7 +54,8 @@ func (artifacts notifyArtifacts) installed(tableName string) bool {
 		artifacts.triggers[triggerPrefix+"delete"] &&
 		artifacts.functions[functionPrefix+"insert"] &&
 		artifacts.functions[functionPrefix+"update"] &&
-		artifacts.functions[functionPrefix+"delete"]
+		artifacts.functions[functionPrefix+"delete"] &&
+		artifacts.functions[notifySchemaVersionFunction]
 }
 
 func loadNotifyArtifacts(ctx context.Context, db *sql.DB) (notifyArtifacts, error) {
@@ -143,9 +151,9 @@ func notifySQLForTable(tableName string, table manifest.Table) (string, error) {
 	tableIdent := quoteIdent(tableName)
 
 	return strings.Join([]string{
-		notifyFunctionSQL(insertFunction, tableName, "new_rows", hasID, true),
-		notifyFunctionSQL(updateFunction, tableName, "new_rows", hasID, false),
-		notifyFunctionSQL(deleteFunction, tableName, "old_rows", hasID, true),
+		notifyFunctionSQL(insertFunction, tableName, "new_rows", hasID, true, "insert", nil),
+		notifyFunctionSQL(updateFunction, tableName, "new_rows", hasID, false, "update", sortedColumnNames(table.Columns)),
+		notifyFunctionSQL(deleteFunction, tableName, "old_rows", hasID, true, "delete", nil),
 		fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", quoteIdent("gonvex_"+tableName+"_notify"), tableIdent),
 		fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", insertTrigger, tableIdent),
 		fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;", updateTrigger, tableIdent),
@@ -156,7 +164,7 @@ REFERENCING NEW TABLE AS new_rows
 FOR EACH STATEMENT EXECUTE FUNCTION %s();`, insertTrigger, tableIdent, insertFunction),
 		fmt.Sprintf(`CREATE TRIGGER %s
 AFTER UPDATE ON %s
-REFERENCING NEW TABLE AS new_rows
+REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
 FOR EACH STATEMENT EXECUTE FUNCTION %s();`, updateTrigger, tableIdent, updateFunction),
 		fmt.Sprintf(`CREATE TRIGGER %s
 AFTER DELETE ON %s
@@ -165,7 +173,7 @@ FOR EACH STATEMENT EXECUTE FUNCTION %s();`, deleteTrigger, tableIdent, deleteFun
 	}, "\n\n"), nil
 }
 
-func notifyFunctionSQL(functionName string, tableName string, transitionTable string, hasID bool, broad bool) string {
+func notifyFunctionSQL(functionName string, tableName string, transitionTable string, hasID bool, broad bool, operation string, columns []string) string {
 	idRead := fmt.Sprintf(`SELECT count(*), COALESCE(array_agg(id::text), ARRAY[]::text[])
   INTO row_count, ids
   FROM (SELECT id FROM %s WHERE id IS NOT NULL LIMIT 500) limited;`, transitionTable)
@@ -182,24 +190,59 @@ func notifyFunctionSQL(functionName string, tableName string, transitionTable st
 		broadExpression = "true"
 		idsExpression = "ARRAY[]::text[]"
 	}
+	if operation == "update" {
+		broadExpression = "(" + broadExpression + " OR cardinality(changed_columns) > 100)"
+	}
+	changedColumnsSQL := "changed_columns := ARRAY[]::text[];"
+	if operation == "update" {
+		if hasID {
+			// Join the transition tables once and inspect their JSON keys. Running
+			// one OLD/NEW join per schema column makes wide bulk updates needlessly
+			// expensive. The 101-row cap is enough to detect the broad (>100)
+			// fallback without growing the NOTIFY payload.
+			changedColumnsSQL = fmt.Sprintf(`SELECT COALESCE(array_agg(column_name ORDER BY column_name), ARRAY[]::text[])
+  INTO changed_columns
+  FROM (
+    SELECT DISTINCT changed.column_name
+    FROM old_rows old_row
+    FULL OUTER JOIN new_rows new_row USING (%s)
+    CROSS JOIN LATERAL jsonb_object_keys(
+      COALESCE(to_jsonb(old_row), '{}'::jsonb) || COALESCE(to_jsonb(new_row), '{}'::jsonb)
+    ) AS changed(column_name)
+    WHERE to_jsonb(old_row) -> changed.column_name IS DISTINCT FROM to_jsonb(new_row) -> changed.column_name
+    LIMIT 101
+  ) changed_columns_limited;`, quoteIdent("id"))
+		} else {
+			quoted := make([]string, 0, len(columns))
+			for _, column := range columns {
+				quoted = append(quoted, quoteLiteral(column))
+			}
+			changedColumnsSQL = "changed_columns := ARRAY[" + strings.Join(quoted, ", ") + "]::text[];"
+		}
+	}
 
 	return fmt.Sprintf(`CREATE OR REPLACE FUNCTION %s()
 RETURNS trigger AS $$
 DECLARE
   row_count integer;
   ids text[];
+  changed_columns text[];
 BEGIN
+  %s
+
   %s
 
   PERFORM pg_notify(%s, json_build_object(
     'table', %s,
+    'operation', %s,
     'broad', %s,
     'count', row_count,
-    'ids', %s
+    'ids', %s,
+    'changedColumns', CASE WHEN cardinality(changed_columns) <= 100 THEN changed_columns ELSE ARRAY[]::text[] END
   )::text);
   RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;`, functionName, idRead, quoteLiteral(NotifyChannel), quoteLiteral(tableName), broadExpression, idsExpression)
+$$ LANGUAGE plpgsql;`, functionName, idRead, changedColumnsSQL, quoteLiteral(NotifyChannel), quoteLiteral(tableName), quoteLiteral(operation), broadExpression, idsExpression)
 }
 
 func quoteLiteral(value string) string {

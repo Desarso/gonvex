@@ -22,6 +22,11 @@ func TestNotifySQLForTableUsesTableNameAndChannel(t *testing.T) {
 		"AFTER DELETE ON \"messages\"",
 		"pg_notify('gonvex_table_change'",
 		"'table', 'messages'",
+		"'operation', 'update'",
+		"'changedColumns', CASE WHEN cardinality(changed_columns) <= 100",
+		"FULL OUTER JOIN new_rows new_row USING (\"id\")",
+		"jsonb_object_keys(",
+		"LIMIT 101",
 		"CASE WHEN row_count < 500 THEN ids ELSE ARRAY[]::text[] END",
 	} {
 		if !strings.Contains(sql, want) {

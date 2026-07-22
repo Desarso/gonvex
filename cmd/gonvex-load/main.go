@@ -161,6 +161,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		"wire":          report.Wire,
 		"latency":       report.Latency,
 		"samples":       len(report.Samples),
+		"errorSamples":  report.ErrorSamples,
 	}
 	if err := writeJSON(stdout, summary); err != nil {
 		return err

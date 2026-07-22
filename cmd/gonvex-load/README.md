@@ -48,3 +48,8 @@ Run only against an isolated local runtime and disposable tenant database:
 Remote targets are rejected unless `--allow-non-loopback` is explicitly set.
 Do not use that flag for production stress tests without separate approval and
 production-safe traffic controls.
+
+Synthetic authentication uses a distinct user identity per connection by
+default. Add `--var userId=shared-load-user` to model many tabs/devices for one
+identity and exercise shared-subscription fan-out. Keep the default when the
+goal is to model distinct users and user-specific visibility scopes.

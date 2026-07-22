@@ -31,6 +31,35 @@ func Register(app interface{ PublicHTTP(string, any) }) {
 	}
 }
 
+func TestParseRegistrationsIncludesDependencyOptions(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "tasks.go")
+	source := `package app
+import "github.com/gonvex/gonvex/pkg/gonvex"
+func Register(app *gonvex.App) {
+  app.Query("tasks.list", ListTasks,
+    gonvex.Reads("tasks").Columns("id", "title").Filters("status").OrdersBy("updated_at").Windowed(),
+    gonvex.ShareByPermissions(),
+  )
+  app.Mutation("tasks.update", UpdateTask, gonvex.Writes("tasks").Columns("title"))
+}`
+	if err := os.WriteFile(file, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := parseRegistrations(root, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := entries["tasks.list"]
+	if len(query.Dependencies.Reads) != 1 || !query.Dependencies.Reads[0].Windowed || !query.Dependencies.ShareByPermissions {
+		t.Fatalf("query dependencies = %#v", query.Dependencies)
+	}
+	mutation := entries["tasks.update"]
+	if len(mutation.Dependencies.Writes) != 1 || mutation.Dependencies.Writes[0].Table != "tasks" {
+		t.Fatalf("mutation dependencies = %#v", mutation.Dependencies)
+	}
+}
+
 func TestParseSchemaScopesTables(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "schema.go")

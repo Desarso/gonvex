@@ -11,10 +11,36 @@ const (
 	FunctionKindLiveGrid         FunctionKind = "liveGrid"
 )
 
+const NotifySchemaVersion = "2"
+
 type FunctionEntry struct {
-	Kind    FunctionKind `json:"kind"`
-	Handler string       `json:"handler"`
-	File    string       `json:"file"`
+	Kind         FunctionKind         `json:"kind"`
+	Handler      string               `json:"handler"`
+	File         string               `json:"file"`
+	Dependencies FunctionDependencies `json:"dependencies,omitempty"`
+}
+
+// FunctionDependencies describe the database surface a function observes or
+// changes. Older manifests omit this field; the runtime treats that as unknown
+// and falls back to conservative project/tenant-scoped invalidation.
+type FunctionDependencies struct {
+	Reads              []ReadDependency  `json:"reads,omitempty"`
+	Writes             []WriteDependency `json:"writes,omitempty"`
+	ShareByPermissions bool              `json:"shareByPermissions,omitempty"`
+}
+
+type ReadDependency struct {
+	Table     string   `json:"table"`
+	Columns   []string `json:"columns,omitempty"`
+	Filters   []string `json:"filters,omitempty"`
+	OrdersBy  []string `json:"ordersBy,omitempty"`
+	Windowed  bool     `json:"windowed,omitempty"`
+	Predicate string   `json:"predicate,omitempty"`
+}
+
+type WriteDependency struct {
+	Table   string   `json:"table"`
+	Columns []string `json:"columns,omitempty"`
 }
 
 type Schema struct {
@@ -41,11 +67,12 @@ type Index struct {
 }
 
 type Manifest struct {
-	Project     string                   `json:"project"`
-	GeneratedAt string                   `json:"generatedAt"`
-	Functions   map[string]FunctionEntry `json:"functions"`
-	Schema      Schema                   `json:"schema"`
-	Bundle      *SourceBundle            `json:"bundle,omitempty"`
+	Project             string                   `json:"project"`
+	GeneratedAt         string                   `json:"generatedAt"`
+	Functions           map[string]FunctionEntry `json:"functions"`
+	Schema              Schema                   `json:"schema"`
+	Bundle              *SourceBundle            `json:"bundle,omitempty"`
+	NotifySchemaVersion string                   `json:"notifySchemaVersion,omitempty"`
 }
 
 func EmptySchema() Schema {

@@ -43,6 +43,26 @@ Useful dependency metadata includes:
 
 For example, the runtime should treat `workspace_id`, `organization_id`, or `account_id` as ordinary predicates. Those names should not be hardcoded into Gonvex core.
 
+Declare dependencies when registering a function:
+
+```go
+app.Query(
+  "tasks.list",
+  ListTasks,
+  gonvex.Reads("tasks").
+    Columns("id", "title", "status", "updated_at").
+    Filters("status").
+    OrdersBy("updated_at"),
+)
+
+app.Mutation("tasks.update", UpdateTask, gonvex.Writes("tasks"))
+```
+
+The runtime maintains a reverse `(project, tenant, table)` index, so an update
+does not scan unrelated connections or tenants. Undeclared dependencies retain
+the compatibility fallback and broad tenant-scoped behavior when impact is
+unknown.
+
 ## Write Sets
 
 Mutations should produce or imply write metadata:
@@ -90,19 +110,21 @@ Invalidation must respect tenant routing.
 
 Writes in tenant `acme` should not refresh subscriptions in tenant `globex` unless those subscriptions explicitly read shared landlord/project data.
 
-## Future Direction
-
-The long-term invalidation system should capture dependencies while executing registered Go functions.
+## Runtime Behavior
 
 ```txt
-query execution
--> tracked reads: tables, predicates, ranges, returned ids
--> dependency record stored with subscription
-
-mutation execution
--> tracked writes: tables, ids, columns, old/new indexed values
--> compare writes to active dependencies
--> refresh only affected subscriptions
+Postgres statement trigger
+-> bounded table/operation/row-id/changed-column notification
+-> tenant/table reverse index
+-> column and row intersection
+-> mark matching shared runners dirty
+-> serialized rerun and result comparison
 ```
 
-This gives Gonvex Convex-style correctness while preserving the ability to use Postgres as the backing database.
+Insert/delete and large statements remain broad within the relevant table.
+Notifications cap row IDs at 500 and changed columns at 100 to stay within
+PostgreSQL notification limits.
+
+One listener is acquired per active tenant database, subject to a configurable
+cap. It closes after the tenant becomes idle. On first connection or reconnect,
+Gonvex broadly refreshes that tenant because PostgreSQL `NOTIFY` is not durable.

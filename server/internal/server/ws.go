@@ -39,18 +39,25 @@ type clientMessage struct {
 }
 
 type serverMessage struct {
-	Type          string               `json:"type"`
-	ID            string               `json:"id,omitempty"`
-	Path          string               `json:"path,omitempty"`
-	Project       string               `json:"project,omitempty"`
-	Tenant        string               `json:"tenant,omitempty"`
-	Result        any                  `json:"result,omitempty"`
-	Error         string               `json:"error,omitempty"`
-	Reason        string               `json:"reason,omitempty"`
-	Trace         any                  `json:"trace,omitempty"`
-	QueryCache    *queryCacheDirective `json:"queryCache,omitempty"`
-	CacheScope    string               `json:"cacheScope,omitempty"`
-	CacheRevision string               `json:"cacheRevision,omitempty"`
+	Type                 string                `json:"type"`
+	ID                   string                `json:"id,omitempty"`
+	Path                 string                `json:"path,omitempty"`
+	Project              string                `json:"project,omitempty"`
+	Tenant               string                `json:"tenant,omitempty"`
+	Result               any                   `json:"result,omitempty"`
+	Error                string                `json:"error,omitempty"`
+	Reason               string                `json:"reason,omitempty"`
+	Trace                any                   `json:"trace,omitempty"`
+	QueryCache           *queryCacheDirective  `json:"queryCache,omitempty"`
+	CacheScope           string                `json:"cacheScope,omitempty"`
+	CacheRevision        string                `json:"cacheRevision,omitempty"`
+	SubscriptionRevision *subscriptionRevision `json:"subscriptionRevision,omitempty"`
+	BaseRevision         *subscriptionRevision `json:"baseRevision,omitempty"`
+	ThroughRevision      *subscriptionRevision `json:"throughRevision,omitempty"`
+	Inserted             []json.RawMessage     `json:"inserted,omitempty"`
+	Updated              []json.RawMessage     `json:"updated,omitempty"`
+	Deleted              []string              `json:"deleted,omitempty"`
+	Order                []string              `json:"order,omitempty"`
 }
 
 // explicitNull makes a nil handler result serialize as an explicit JSON null
@@ -111,10 +118,18 @@ type randomizeStatusPriorityArgs struct {
 	Count int `json:"count"`
 }
 
-const (
-	tableChangeDebounce    = 75 * time.Millisecond
-	tableChangeFanoutLimit = 16
-)
+const tableChangeDebounce = 75 * time.Millisecond
+
+// subscriptionToken is deliberately non-zero-sized. Go may give separate
+// zero-sized allocations the same address, which would collapse distinct
+// listeners when pointers are used as map keys.
+type subscriptionToken struct {
+	marker byte
+}
+
+func newSubscriptionToken() *subscriptionToken {
+	return &subscriptionToken{marker: 1}
+}
 
 type querySubscription struct {
 	conn       *wsConn
@@ -127,18 +142,20 @@ type querySubscription struct {
 	caller     callerContext
 	ctx        context.Context
 	cancel     context.CancelFunc
-	token      *struct{}
+	token      *subscriptionToken
 	cacheScope string
 }
 
 type tableChange struct {
-	project     string
-	tenant      string
-	table       string
-	tables      map[string]bool
-	broad       bool
-	rowIDs      map[string]bool
-	changedAtMS float64
+	project        string
+	tenant         string
+	table          string
+	tables         map[string]bool
+	broad          bool
+	rowIDs         map[string]bool
+	operation      string
+	changedColumns []string
+	changedAtMS    float64
 }
 
 type wsConn struct {
@@ -243,6 +260,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			cacheScope = directive.Scope
 		}
 		c.mu.Lock()
+		oldSubs := make([]querySubscription, 0, len(c.subs))
 		c.user = user
 		c.perms = permissions
 		c.project = project
@@ -253,6 +271,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.cacheScope = cacheScope
 		subs := make([]querySubscription, 0, len(c.subs))
 		for id, sub := range c.subs {
+			oldSubs = append(oldSubs, sub)
 			if sub.cancel != nil {
 				sub.cancel()
 			}
@@ -262,18 +281,23 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			sub.project = project
 			sub.tenant = tenant
 			sub.caller = caller
-			sub.token = &struct{}{}
+			sub.token = newSubscriptionToken()
 			sub.cacheScope = cacheScope
 			c.subs[id] = sub
 			subs = append(subs, sub)
 		}
 		c.mu.Unlock()
+		for _, sub := range oldSubs {
+			c.server.subscriptions.detach(sub)
+		}
 		authResult := map[string]any{"userId": user.ID, "projectId": project, "tenantId": tenant}
 		if directive != nil {
 			authResult["queryCache"] = directive
 		}
 		c.write(serverMessage{Type: "auth.result", ID: message.ID, Result: authResult})
-		c.server.rerunSubscriptions(subs, "initial", 0)
+		for _, sub := range subs {
+			c.server.subscriptions.attach(sub)
+		}
 	case "query.subscribe":
 		if !c.requireAuth(ctx, "query.error", message.ID) {
 			return
@@ -283,7 +307,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			return
 		}
 		subCtx, cancel := context.WithCancel(ctx)
-		sub := querySubscription{conn: c, id: message.ID, project: c.project, tenant: c.tenant, path: message.Path, args: message.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: &struct{}{}, cacheScope: c.currentCacheScope()}
+		sub := querySubscription{conn: c, id: message.ID, project: c.project, tenant: c.tenant, path: message.Path, args: message.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: newSubscriptionToken(), cacheScope: c.currentCacheScope()}
 		c.mu.Lock()
 		previous, hadPrevious := c.subs[message.ID]
 		c.subs[message.ID] = sub
@@ -291,7 +315,10 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		if hadPrevious && previous.cancel != nil {
 			previous.cancel()
 		}
-		go c.server.executeSubscription(subCtx, sub, "initial", 0)
+		if hadPrevious {
+			c.server.subscriptions.detach(previous)
+		}
+		c.server.subscriptions.attach(sub)
 	case "query.unsubscribe":
 		c.mu.Lock()
 		sub, ok := c.subs[message.ID]
@@ -300,6 +327,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		}
 		c.mu.Unlock()
 		if ok && sub.cancel != nil {
+			c.server.subscriptions.detach(sub)
 			sub.cancel()
 		}
 	case "mutation.call":
@@ -535,7 +563,7 @@ func (c *wsConn) caller() callerContext {
 
 func (c *wsConn) clearAuthentication() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	oldSubs := make([]querySubscription, 0, len(c.subs))
 	c.user = nil
 	c.perms = nil
 	c.auth = false
@@ -543,13 +571,18 @@ func (c *wsConn) clearAuthentication() {
 	c.authCheckedAt = time.Time{}
 	c.cacheScope = ""
 	for id, sub := range c.subs {
+		oldSubs = append(oldSubs, sub)
 		if sub.cancel != nil {
 			sub.cancel()
 		}
 		sub.caller = callerContext{}
 		sub.cacheScope = ""
-		sub.token = &struct{}{}
+		sub.token = newSubscriptionToken()
 		c.subs[id] = sub
+	}
+	c.mu.Unlock()
+	for _, sub := range oldSubs {
+		c.server.subscriptions.detach(sub)
 	}
 }
 
@@ -568,6 +601,7 @@ func (c *wsConn) cancelSubscriptions() {
 	c.subs = map[string]querySubscription{}
 	c.mu.Unlock()
 	for _, sub := range subs {
+		c.server.subscriptions.detach(sub)
 		if sub.cancel != nil {
 			sub.cancel()
 		}
@@ -577,7 +611,10 @@ func (c *wsConn) cancelSubscriptions() {
 func (c *wsConn) write(message serverMessage) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_ = c.conn.WriteJSON(message)
+	if err := c.conn.WriteJSON(message); err != nil {
+		slog.Warn("websocket write failed", "connection", c.id, "project", c.project, "tenant", c.tenant, "type", message.Type, "path", message.Path, "error", err)
+		_ = c.conn.Close()
+	}
 }
 
 func (s *Server) addWSConn(conn *wsConn) {
@@ -671,6 +708,7 @@ type websocketConnectionSnapshot struct {
 }
 
 func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot {
+	const detailLimit = 500
 	s.wsMu.RLock()
 	connections := make([]*wsConn, 0, len(s.wsConns))
 	for conn := range s.wsConns {
@@ -680,6 +718,7 @@ func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot
 
 	snapshot := websocketMetricSnapshot{Details: []websocketConnectionSnapshot{}}
 	users := map[string]bool{}
+	totalConnections := 0
 	for _, conn := range connections {
 		conn.mu.Lock()
 		if projectFilter != "" && conn.project != projectFilter {
@@ -713,8 +752,13 @@ func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot
 		}
 		conn.mu.Unlock()
 		sort.Strings(detail.Subscriptions)
+		totalConnections++
 		snapshot.Subscriptions += len(detail.Subscriptions)
-		snapshot.Details = append(snapshot.Details, detail)
+		if len(snapshot.Details) < detailLimit {
+			snapshot.Details = append(snapshot.Details, detail)
+		} else {
+			snapshot.DetailsTruncated = true
+		}
 		identity := detail.UserID
 		if identity == "" {
 			identity = "anonymous"
@@ -727,7 +771,7 @@ func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot
 		}
 		return snapshot.Details[left].LastActiveAt > snapshot.Details[right].LastActiveAt
 	})
-	snapshot.Connections = len(snapshot.Details)
+	snapshot.Connections = totalConnections
 	snapshot.Users = len(users)
 	return snapshot
 }
@@ -760,7 +804,7 @@ func (s *Server) projectSubscriptions(projectID string) []querySubscription {
 }
 
 func (s *Server) rerunProjectSubscriptions(projectID string) {
-	s.rerunSubscriptions(s.projectSubscriptions(projectID), "invalidate", epochMillis(time.Now().UTC()))
+	s.subscriptions.rebindProject(s.projectSubscriptions(projectID))
 }
 
 func (s *Server) broadcastTableChange(projectID string, table string) {
@@ -781,7 +825,10 @@ func (s *Server) broadcastTenantTableChangeAt(projectID string, tenantID string,
 // workspaceChat), so invalidating only the path prefix leaves both the row
 // cache and live queries stale after a successful mutation.
 func (s *Server) broadcastMutationInvalidationsAt(projectID string, tenantID string, path string, changedAt time.Time) {
-	tables := mutationInvalidationTables(path)
+	tables := s.declaredWriteTables(projectID, path)
+	if len(tables) == 0 {
+		tables = mutationInvalidationTables(path)
+	}
 	if len(tables) == 0 {
 		s.cache.invalidateQueries(context.Background(), projectID, tenantIDFromRequest(projectID, tenantID), nil)
 		return
@@ -835,6 +882,13 @@ func (s *Server) scheduleTableChange(change tableChange) {
 		pending.tables[table] = true
 	}
 	pending.broad = pending.broad || change.broad
+	if pending.operation == "" {
+		pending.operation = change.operation
+	} else if change.operation != "" && pending.operation != change.operation {
+		pending.operation = ""
+		pending.broad = true
+	}
+	pending.changedColumns = appendUniqueStrings(pending.changedColumns, change.changedColumns...)
 	if change.changedAtMS > pending.changedAtMS {
 		pending.changedAtMS = change.changedAtMS
 	}
@@ -861,23 +915,7 @@ func (s *Server) flushTableChange(key string) {
 	delete(s.tableChanges, key)
 	s.tableChangeMu.Unlock()
 
-	s.wsMu.RLock()
-	connections := make([]*wsConn, 0, len(s.wsConns))
-	for conn := range s.wsConns {
-		connections = append(connections, conn)
-	}
-	s.wsMu.RUnlock()
-	subs := []querySubscription{}
-	for _, conn := range connections {
-		conn.mu.Lock()
-		for _, sub := range conn.subs {
-			if sub.project == change.project && sub.tenant == change.tenant && tableChangeMatchesSubscription(sub, change) && subscriptionIntersectsChange(sub, change) {
-				subs = append(subs, sub)
-			}
-		}
-		conn.mu.Unlock()
-	}
-	s.rerunSubscriptions(subs, "invalidate", change.changedAtMS)
+	s.subscriptions.requestChange(change)
 }
 
 func tableChangeMatchesSubscription(sub querySubscription, change tableChange) bool {
@@ -904,27 +942,54 @@ func tableChangeTables(change tableChange) []string {
 	return tables
 }
 
+func appendUniqueStrings(existing []string, values ...string) []string {
+	seen := make(map[string]struct{}, len(existing)+len(values))
+	for _, value := range existing {
+		seen[value] = struct{}{}
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		existing = append(existing, value)
+	}
+	sort.Strings(existing)
+	return existing
+}
+
+func (s *Server) declaredWriteTables(projectID, path string) []string {
+	entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]
+	if !ok || len(entry.Dependencies.Writes) == 0 {
+		return nil
+	}
+	tables := make([]string, 0, len(entry.Dependencies.Writes))
+	for _, write := range entry.Dependencies.Writes {
+		tables = appendUniqueStrings(tables, write.Table)
+	}
+	return tables
+}
+
+func (s *Server) queryDependencyTables(projectID, path string) []string {
+	entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]
+	if !ok || len(entry.Dependencies.Reads) == 0 {
+		return subscriptionTables(path)
+	}
+	tables := make([]string, 0, len(entry.Dependencies.Reads))
+	for _, read := range entry.Dependencies.Reads {
+		tables = appendUniqueStrings(tables, read.Table)
+	}
+	return tables
+}
+
 func (s *Server) rerunSubscriptions(subs []querySubscription, reason string, changeCommittedAtMS float64) {
-	if len(subs) == 0 {
-		return
-	}
-	limit := tableChangeFanoutLimit
-	if len(subs) < limit {
-		limit = len(subs)
-	}
-	sem := make(chan struct{}, limit)
-	var wg sync.WaitGroup
 	for _, sub := range subs {
-		sub := sub
-		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-			s.executeSubscription(sub.ctx, sub, reason, changeCommittedAtMS)
-		}()
+		s.subscriptions.request(sub, reason, changeCommittedAtMS)
 	}
-	wg.Wait()
 }
 
 func subscriptionIntersectsChange(sub querySubscription, change tableChange) bool {
@@ -1012,15 +1077,30 @@ func (s *Server) executeSubscription(ctx context.Context, sub querySubscription,
 }
 
 func resultRowIDs(result any) map[string]bool {
-	rowsResult, ok := result.(data.RowsResult)
-	if !ok {
-		return nil
-	}
 	ids := map[string]bool{}
-	for _, row := range rowsResult.Rows {
+	collect := func(row map[string]any) {
 		if value, ok := row["id"].(string); ok && value != "" {
 			ids[value] = true
 		}
+	}
+	switch rows := result.(type) {
+	case data.RowsResult:
+		for _, row := range rows.Rows {
+			collect(row)
+		}
+	case []map[string]any:
+		for _, row := range rows {
+			collect(row)
+		}
+	case []any:
+		for _, value := range rows {
+			if row, ok := value.(map[string]any); ok {
+				collect(row)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
 	}
 	return ids
 }
@@ -1051,7 +1131,7 @@ func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectI
 
 	cacheKey := ""
 	cacheGeneration := ""
-	queryTables := subscriptionTables(path)
+	queryTables := s.queryDependencyTables(projectID, path)
 	if strings.TrimSpace(cacheScope) != "" && s.cache.enabled() {
 		if generation, ok := s.cache.queryGeneration(ctx, projectID, tenantID, queryTables); ok {
 			cacheGeneration = generation
@@ -1085,7 +1165,12 @@ func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectI
 		s.metrics.recordCache(projectID, "bypass")
 	}
 
+	databaseStartedAt := time.Now()
 	result, err = s.executeTenantQueryForCallerUncached(ctx, projectID, tenantID, caller, path, rawArgs)
+	s.metrics.recordReactive(func(metric *reactiveMetricState) {
+		metric.DatabaseQueryCount++
+		metric.DatabaseQueryDurationMS += float64(time.Since(databaseStartedAt).Microseconds()) / 1000
+	})
 	if err == nil && cacheKey != "" {
 		currentGeneration, generationOK := s.cache.queryGeneration(ctx, projectID, tenantID, queryTables)
 		if payload, encodeErr := json.Marshal(result); encodeErr == nil && generationOK && currentGeneration == cacheGeneration {

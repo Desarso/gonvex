@@ -755,9 +755,10 @@ func TestDevSyncKeepsProjectManifestAvailableAfterSync(t *testing.T) {
 func TestDevSyncSkipsSchemaLoadedFromPersistedManifest(t *testing.T) {
 	server := New(config.Config{})
 	persisted := manifest.Manifest{
-		Project:   "persisted-project",
-		Functions: map[string]manifest.FunctionEntry{},
-		Schema:    manifest.EmptySchema(),
+		Project:             "persisted-project",
+		Functions:           map[string]manifest.FunctionEntry{},
+		Schema:              manifest.EmptySchema(),
+		NotifySchemaVersion: manifest.NotifySchemaVersion,
 	}
 	if err := server.runtime.SyncManifest(persisted); err != nil {
 		t.Fatal(err)

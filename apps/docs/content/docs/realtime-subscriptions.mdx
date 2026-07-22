@@ -87,6 +87,7 @@ The runtime answers:
   "type": "query.result",
   "id": "client-subscription-id",
   "reason": "initial",
+	"subscriptionRevision": { "epoch": "runtime-start-id", "sequence": 42 },
   "result": []
 }
 ```
@@ -101,6 +102,19 @@ After relevant invalidation:
   "result": []
 }
 ```
+
+Only one execution for a shared subscription runs at a time. Changes received
+during an execution mark it dirty and produce at most one immediate catch-up
+execution. Revisions prevent an older frame from overwriting newer state.
+
+When a rerun is unchanged, the runtime sends `query.progress` and the client
+advances its revision without notifying React. Large keyed lists may use an
+adaptive `query.patch`; the client applies it only when `baseRevision` matches,
+otherwise it requests a fresh snapshot.
+
+Identical explicitly shareable queries use one runner and retained snapshot per
+project, tenant, canonical arguments, permission fingerprint, and bundle hash.
+Late listeners receive the authoritative retained snapshot immediately.
 
 Most application code should use generated hooks/client helpers instead of constructing protocol messages manually.
 
@@ -123,6 +137,7 @@ Subscriptions should avoid request storms:
 - use query dependency metadata where available
 - compress WebSocket payloads
 - support large surfaces through LiveGrid windows instead of subscribing to entire tables
+- cap retained shared-result bytes and listener fan-out
 
 ## Tenant Safety
 

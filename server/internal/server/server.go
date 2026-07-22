@@ -52,6 +52,7 @@ type Server struct {
 	wsMu              sync.RWMutex
 	wsConns           map[*wsConn]bool
 	wsConnectionSeq   atomic.Uint64
+	subscriptions     *subscriptionManager
 	tableChangeMu     sync.Mutex
 	tableChangeWait   map[string]*time.Timer
 	tableChanges      map[string]tableChange
@@ -122,6 +123,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		provisionTenant:       provisionTenantDatabase,
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
+	server.subscriptions = newSubscriptionManager(server)
 	server.scheduler = newScheduler(server.runScheduledJob)
 	server.tenantStores = newTenantStoreResolver(&server.config)
 	if strings.TrimSpace(server.projectRegistryURL()) != "" {
@@ -131,7 +133,6 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	server.startLandlordMigrations()
 	server.scheduler.start(context.Background())
 	go server.hydrateRuntimeState(context.Background())
-	server.startPostgresNotifications()
 	return server
 }
 
@@ -562,6 +563,9 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	if next.Schema.Tables == nil {
 		next.Schema = manifest.EmptySchema()
 	}
+	if next.NotifySchemaVersion == "" {
+		next.NotifySchemaVersion = manifest.NotifySchemaVersion
+	}
 
 	// Serialize per project: schema.Apply reinstalls NOTIFY triggers via
 	// DROP/CREATE TRIGGER + CREATE OR REPLACE FUNCTION, which update pg_catalog
@@ -581,8 +585,9 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	// applied. This is the common dev case (editing a handler, not the schema)
 	// and avoids reinstalling every table's trigger against live traffic.
 	fingerprint := schemaFingerprint(next.Schema)
-	loadedFingerprint := schemaFingerprint(s.runtime.ManifestForProject(next.Project).Schema)
-	if fingerprint != "" && (s.schemaFingerprintApplied(next.Project, fingerprint) || loadedFingerprint == fingerprint) {
+	loadedManifest := s.runtime.ManifestForProject(next.Project)
+	loadedFingerprint := schemaFingerprint(loadedManifest.Schema)
+	if fingerprint != "" && (s.schemaFingerprintApplied(next.Project, fingerprint) || (loadedFingerprint == fingerprint && loadedManifest.NotifySchemaVersion == next.NotifySchemaVersion)) {
 		schemaSkipped = true
 	} else {
 		migrationResult, err = schema.Apply(r.Context(), s.databaseURLForProject(next.Project), next.Schema.LandlordSchema())
@@ -648,7 +653,10 @@ func (s *Server) projectSyncLock(projectID string) *sync.Mutex {
 // schemaFingerprint hashes the desired schema so an unchanged sync can skip the
 // DDL reapply. json.Marshal sorts map keys, so the output is deterministic.
 func schemaFingerprint(sc manifest.Schema) string {
-	data, err := json.Marshal(sc.Normalize())
+	data, err := json.Marshal(struct {
+		Schema              manifest.Schema `json:"schema"`
+		NotifySchemaVersion string          `json:"notifySchemaVersion"`
+	}{Schema: sc.Normalize(), NotifySchemaVersion: schema.NotifySchemaVersion})
 	if err != nil {
 		return ""
 	}

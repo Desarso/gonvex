@@ -8,6 +8,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"io/fs"
 	"net/http"
@@ -272,6 +275,7 @@ func buildManifest(root string, files []string, projectID string) (manifest.Mani
 			PackageName: packageName,
 			Files:       bundleFiles,
 		},
+		NotifySchemaVersion: manifest.NotifySchemaVersion,
 	}, nil
 }
 
@@ -280,22 +284,140 @@ func parseRegistrations(root string, file string) (map[string]manifest.FunctionE
 	if err != nil {
 		return nil, err
 	}
-
-	pattern := regexp.MustCompile(`app\.(Query|Mutation|Action|HTTP|PublicHTTP|InternalMutation|LiveGrid)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)`)
-	entries := map[string]manifest.FunctionEntry{}
-	for _, match := range pattern.FindAllStringSubmatch(string(source), -1) {
-		rel, err := filepath.Rel(root, file)
-		if err != nil {
-			return nil, err
-		}
-		entries[match[2]] = manifest.FunctionEntry{
-			Kind:    functionKind(match[1]),
-			Handler: match[3],
-			File:    rel,
-		}
+	parsed, err := parser.ParseFile(token.NewFileSet(), file, source, 0)
+	if err != nil {
+		return nil, err
 	}
+	rel, err := filepath.Rel(root, file)
+	if err != nil {
+		return nil, err
+	}
+	entries := map[string]manifest.FunctionEntry{}
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok || len(call.Args) < 2 {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		receiver, ok := selector.X.(*ast.Ident)
+		if !ok || receiver.Name != "app" || !registrationKind(selector.Sel.Name) {
+			return true
+		}
+		pathValue, ok := stringLiteral(call.Args[0])
+		if !ok {
+			return true
+		}
+		handler, ok := call.Args[1].(*ast.Ident)
+		if !ok {
+			return true
+		}
+		entry := manifest.FunctionEntry{Kind: functionKind(selector.Sel.Name), Handler: handler.Name, File: rel}
+		for _, option := range call.Args[2:] {
+			parseDependencyOption(option, &entry.Dependencies)
+		}
+		entries[pathValue] = entry
+		return true
+	})
 
 	return entries, nil
+}
+
+func registrationKind(name string) bool {
+	switch name {
+	case "Query", "Mutation", "Action", "HTTP", "PublicHTTP", "InternalMutation", "LiveGrid":
+		return true
+	default:
+		return false
+	}
+}
+
+func stringLiteral(expression ast.Expr) (string, bool) {
+	literal, ok := expression.(*ast.BasicLit)
+	if !ok || literal.Kind != token.STRING {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal([]byte(literal.Value), &value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+type dependencyOptionTarget struct {
+	kind  string
+	start int
+}
+
+func parseDependencyOption(expression ast.Expr, dependencies *manifest.FunctionDependencies) dependencyOptionTarget {
+	call, ok := expression.(*ast.CallExpr)
+	if !ok {
+		return dependencyOptionTarget{}
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return dependencyOptionTarget{}
+	}
+	if receiver, ok := selector.X.(*ast.Ident); ok && receiver.Name == "gonvex" {
+		switch selector.Sel.Name {
+		case "Reads":
+			start := len(dependencies.Reads)
+			for _, value := range stringArguments(call.Args) {
+				dependencies.Reads = append(dependencies.Reads, manifest.ReadDependency{Table: value})
+			}
+			return dependencyOptionTarget{kind: "read", start: start}
+		case "Writes":
+			start := len(dependencies.Writes)
+			for _, value := range stringArguments(call.Args) {
+				dependencies.Writes = append(dependencies.Writes, manifest.WriteDependency{Table: value})
+			}
+			return dependencyOptionTarget{kind: "write", start: start}
+		case "ShareByPermissions":
+			dependencies.ShareByPermissions = true
+		}
+		return dependencyOptionTarget{}
+	}
+
+	target := parseDependencyOption(selector.X, dependencies)
+	values := stringArguments(call.Args)
+	switch target.kind {
+	case "read":
+		for index := target.start; index < len(dependencies.Reads); index++ {
+			switch selector.Sel.Name {
+			case "Columns":
+				dependencies.Reads[index].Columns = values
+			case "Filters":
+				dependencies.Reads[index].Filters = values
+			case "OrdersBy":
+				dependencies.Reads[index].OrdersBy = values
+			case "Windowed":
+				dependencies.Reads[index].Windowed = true
+			case "Predicate":
+				if len(values) > 0 {
+					dependencies.Reads[index].Predicate = values[0]
+				}
+			}
+		}
+	case "write":
+		if selector.Sel.Name == "Columns" {
+			for index := target.start; index < len(dependencies.Writes); index++ {
+				dependencies.Writes[index].Columns = values
+			}
+		}
+	}
+	return target
+}
+
+func stringArguments(arguments []ast.Expr) []string {
+	values := make([]string, 0, len(arguments))
+	for _, argument := range arguments {
+		if value, ok := stringLiteral(argument); ok && strings.TrimSpace(value) != "" {
+			values = append(values, strings.TrimSpace(value))
+		}
+	}
+	return values
 }
 
 func parseSchema(file string) (manifest.Schema, error) {

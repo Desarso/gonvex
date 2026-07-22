@@ -91,6 +91,59 @@ function sentMessages(socket = latestSocket()) {
 }
 
 describe("GonvexClient", () => {
+	it("rejects stale revisions and advances progress without notifying listeners", () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		const handler = vi.fn();
+		client.subscribeQuery(ref, {}, handler);
+		const socket = latestSocket();
+		socket.open();
+		const [{ id }] = sentMessages(socket);
+		socket.receive({ type: "query.result", id, result: [{ id: "a", title: "new" }], subscriptionRevision: { epoch: "runtime-a", sequence: 2 } });
+		socket.receive({ type: "query.result", id, result: [{ id: "a", title: "old" }], subscriptionRevision: { epoch: "runtime-a", sequence: 1 } });
+		socket.receive({ type: "query.progress", id, throughRevision: { epoch: "runtime-a", sequence: 3 } });
+		expect(handler).toHaveBeenCalledTimes(1);
+		expect(handler.mock.calls[0][0].result[0].title).toBe("new");
+	});
+
+	it("applies keyed patches only to the matching base revision", () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		const handler = vi.fn();
+		client.subscribeQuery(ref, {}, handler);
+		const socket = latestSocket();
+		socket.open();
+		const [{ id }] = sentMessages(socket);
+		socket.receive({
+			type: "query.result", id,
+			result: [{ id: "a", title: "old" }, { id: "b", title: "keep" }],
+			subscriptionRevision: { epoch: "runtime-a", sequence: 10 },
+		});
+		socket.receive({
+			type: "query.patch", id,
+			baseRevision: { epoch: "runtime-a", sequence: 10 },
+			subscriptionRevision: { epoch: "runtime-a", sequence: 11 },
+			inserted: [{ id: "c", title: "added" }],
+			updated: [{ id: "a", title: "new" }],
+			deleted: ["b"],
+			order: ["c", "a"],
+		});
+		expect(handler).toHaveBeenCalledTimes(2);
+		expect(handler.mock.calls[1][0]).toMatchObject({
+			type: "query.result",
+			result: [{ id: "c", title: "added" }, { id: "a", title: "new" }],
+		});
+
+		const sentBeforeMismatch = sentMessages(socket).length;
+		socket.receive({
+			type: "query.patch", id,
+			baseRevision: { epoch: "runtime-a", sequence: 9 },
+			subscriptionRevision: { epoch: "runtime-a", sequence: 12 },
+			order: ["a"],
+		});
+		expect(handler).toHaveBeenCalledTimes(2);
+		expect(sentMessages(socket).length).toBe(sentBeforeMismatch + 1);
+		expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", id });
+	});
+
   it("converts http runtime URLs to websocket URLs for ConvexReactClient compatibility", () => {
     const client = new ConvexReactClient("https://runtime.example.com/");
     client.connect();

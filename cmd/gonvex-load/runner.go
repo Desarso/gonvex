@@ -64,8 +64,9 @@ type runMetrics struct {
 	initialLatency *latencyHistogram
 	serverLatency  *latencyHistogram
 
-	pathMu sync.Mutex
-	paths  map[string]*pathMetrics
+	pathMu       sync.Mutex
+	paths        map[string]*pathMetrics
+	errorSamples map[string]uint64
 
 	resourceMu  sync.Mutex
 	samples     []ResourceSample
@@ -95,6 +96,13 @@ type RunReport struct {
 	Latency       LatencyReport         `json:"latency"`
 	Paths         map[string]PathReport `json:"paths"`
 	Samples       []ResourceSample      `json:"samples,omitempty"`
+	ErrorSamples  []ErrorSample         `json:"errorSamples,omitempty"`
+}
+
+type ErrorSample struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+	Count   uint64 `json:"count"`
 }
 
 type ConnectionReport struct {
@@ -170,6 +178,7 @@ func newRunMetrics() *runMetrics {
 		initialLatency: newLatencyHistogram(),
 		serverLatency:  newLatencyHistogram(),
 		paths:          map[string]*pathMetrics{},
+		errorSamples:   map[string]uint64{},
 	}
 }
 
@@ -201,11 +210,14 @@ func (m *runMetrics) recordInitial(path string, latency time.Duration, serverDur
 	}
 }
 
-func (m *runMetrics) recordError(path string) {
+func (m *runMetrics) recordError(path string, message string) {
 	m.subscriptionErrors.Add(1)
 	pathMetrics := m.path(path)
 	m.pathMu.Lock()
 	pathMetrics.errors++
+	if len(m.errorSamples) < 20 || m.errorSamples[path+"\x00"+message] > 0 {
+		m.errorSamples[path+"\x00"+message]++
+	}
 	m.pathMu.Unlock()
 }
 
@@ -392,6 +404,9 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 	}
 
 	userID := fmt.Sprintf("gonvex-load-%06d", userIndex+1)
+	if config.AuthMode != authModeNone && strings.TrimSpace(config.Variables["userId"]) != "" {
+		userID = strings.TrimSpace(config.Variables["userId"])
+	}
 	if config.AuthMode != authModeNone {
 		token := config.SharedToken
 		if config.AuthMode == authModeSynthetic {
@@ -414,6 +429,25 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 	}
 
 	pending := make(map[string]*pendingSubscription, config.SubscriptionsPerConnection)
+	type receivedEnvelope struct {
+		message      serverEnvelope
+		payloadBytes int
+		err          error
+	}
+	// Read while subscriptions are being written. A browser's WebSocket event
+	// loop does this concurrently; waiting until every write completes can
+	// deadlock when initial snapshots fill both peers' socket buffers.
+	received := make(chan receivedEnvelope, max(64, config.SubscriptionsPerConnection*2))
+	_ = connection.SetReadDeadline(time.Now().Add(config.InitialTimeout))
+	go func() {
+		for {
+			message, payloadBytes, err := readEnvelope(connection, metrics)
+			received <- receivedEnvelope{message: message, payloadBytes: payloadBytes, err: err}
+			if err != nil {
+				return
+			}
+		}
+	}()
 	variables := cloneStrings(config.Variables)
 	variables["tenant"] = config.Tenant
 	variables["userId"] = userID
@@ -421,16 +455,17 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 		spec := profile.Subscriptions[index]
 		args, err := spec.expandedArgs(variables)
 		if err != nil {
-			metrics.recordError(spec.Path)
+			metrics.recordError(spec.Path, err.Error())
 			continue
 		}
 		id := fmt.Sprintf("u%06d-s%03d", userIndex+1, index+1)
 		sentAt := time.Now()
+		pending[id] = &pendingSubscription{path: spec.Path, sentAt: sentAt}
 		if err := writeEnvelope(connection, metrics, map[string]any{"type": "query.subscribe", "id": id, "path": spec.Path, "args": args}); err != nil {
-			metrics.recordError(spec.Path)
+			delete(pending, id)
+			metrics.recordError(spec.Path, err.Error())
 			continue
 		}
-		pending[id] = &pendingSubscription{path: spec.Path, sentAt: sentAt}
 		metrics.subscriptionsSent.Add(1)
 	}
 	metrics.setupFinished.Add(1)
@@ -438,16 +473,21 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 		<-ctx.Done()
 		return
 	}
-	_ = connection.SetReadDeadline(time.Now().Add(config.InitialTimeout))
 	settled := 0
 	for {
-		message, payloadBytes, err := readEnvelope(connection, metrics)
-		if err != nil {
-			if ctx.Err() == nil && !errors.Is(err, net.ErrClosed) {
+		envelope := <-received
+		if envelope.err != nil {
+			if ctx.Err() == nil && !errors.Is(envelope.err, net.ErrClosed) {
 				metrics.unexpectedCloses.Add(1)
+				for _, subscription := range pending {
+					if !subscription.seen {
+						metrics.recordError(subscription.path, "connection closed before initial result: "+envelope.err.Error())
+					}
+				}
 			}
 			return
 		}
+		message := envelope.message
 		subscription := pending[message.ID]
 		if subscription == nil {
 			continue
@@ -463,14 +503,14 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 			if message.Trace != nil && message.Trace.ServerDurationMS > 0 {
 				serverDuration = time.Duration(message.Trace.ServerDurationMS * float64(time.Millisecond))
 			}
-			metrics.recordInitial(subscription.path, time.Since(subscription.sentAt), serverDuration, payloadBytes)
+			metrics.recordInitial(subscription.path, time.Since(subscription.sentAt), serverDuration, envelope.payloadBytes)
 		case "query.error":
 			if subscription.seen {
 				continue
 			}
 			subscription.seen = true
 			settled++
-			metrics.recordError(subscription.path)
+			metrics.recordError(subscription.path, message.Error)
 		}
 		if settled == len(pending) {
 			_ = connection.SetReadDeadline(time.Time{})
@@ -576,6 +616,7 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 		compressionRatio = float64(logicalRead) / float64(wireRead)
 	}
 	paths := map[string]PathReport{}
+	errorSamples := []ErrorSample{}
 	m.pathMu.Lock()
 	pathNames := make([]string, 0, len(m.paths))
 	for path := range m.paths {
@@ -592,6 +633,16 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 			ServerLatency:  histogramReport(metrics.serverLatency),
 		}
 	}
+	for key, count := range m.errorSamples {
+		path, message, _ := strings.Cut(key, "\x00")
+		errorSamples = append(errorSamples, ErrorSample{Path: path, Message: message, Count: count})
+	}
+	sort.Slice(errorSamples, func(i, j int) bool {
+		if errorSamples[i].Count == errorSamples[j].Count {
+			return errorSamples[i].Path < errorSamples[j].Path
+		}
+		return errorSamples[i].Count > errorSamples[j].Count
+	})
 	m.pathMu.Unlock()
 	m.resourceMu.Lock()
 	samples := append([]ResourceSample(nil), m.samples...)
@@ -635,8 +686,9 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 			InitialResult: histogramReport(m.initialLatency),
 			ServerQuery:   histogramReport(m.serverLatency),
 		},
-		Paths:   paths,
-		Samples: samples,
+		Paths:        paths,
+		Samples:      samples,
+		ErrorSamples: errorSamples,
 	}
 }
 

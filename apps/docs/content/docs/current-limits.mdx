@@ -79,19 +79,20 @@ Remaining operational work is mostly fleet-level:
 - custom named-role editing and audit export in the dashboard
 - quota, billing, and organization policy
 
-## Invalidation Is Conservative
+## Realtime Invalidation
 
-The current invalidation strategy favors visible correctness over minimal refreshes.
+The runtime implements declared table/column dependencies, a tenant/table reverse
+index, serialized/coalesced runners, result revisions, unchanged suppression,
+adaptive keyed-list patches, safe shared subscriptions, and supervised active-
+tenant PostgreSQL listeners.
 
-Future work should track query dependencies generically:
+Current limits:
 
-- tables read
-- predicates
-- ranges
-- sort keys
-- returned row IDs
-- changed columns
-- tenant database route
+- dependencies are explicit declarations; arbitrary raw SQL is not automatically traced
+- permission-level sharing is opt-in because user-dependent handlers cannot safely share
+- nested arbitrary JSON uses full replacements rather than patches
+- PostgreSQL `NOTIFY` is recovered with a fresh snapshot, not durable event replay
+- logical replication is not enabled; Gonvex synchronizes current state rather than every intermediate event
 
 ## Schema Migrations Are Early
 
