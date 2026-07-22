@@ -443,6 +443,27 @@ describe("GonvexClient", () => {
     expect(handler).toHaveBeenCalledTimes(0);
   });
 
+  it("re-subscribes instead of replaying a cached error when a listener remounts during the grace period", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const firstHandler = vi.fn();
+
+    const unsubscribe = client.subscribeQuery(ref, {}, firstHandler);
+    const socket = latestSocket();
+    socket.open();
+    const [{ id }] = sentMessages(socket);
+
+    socket.receive({ type: "query.error", id, error: "query is not implemented" });
+    expect(firstHandler).toHaveBeenCalledTimes(1);
+
+    unsubscribe();
+    const secondHandler = vi.fn();
+    client.subscribeQuery(ref, {}, secondHandler);
+    await Promise.resolve();
+
+    expect(sentMessages(socket).filter((message) => message.type === "query.subscribe")).toHaveLength(2);
+    expect(secondHandler).not.toHaveBeenCalled();
+  });
+
   it("resolves one-shot queries and unsubscribes after the first result", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const promise = client.query(ref, { status: "open" });

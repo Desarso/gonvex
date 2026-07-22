@@ -369,6 +369,7 @@ export class GonvexClient {
     const key = querySubscriptionKey(ref, args);
     const existing = this.querySubscriptions.get(key);
     if (existing) {
+      const wasOrphaned = existing.listeners.size === 0;
       if (existing.unsubscribeTimer) {
         clearTimeout(existing.unsubscribeTimer);
         existing.unsubscribeTimer = undefined;
@@ -382,7 +383,17 @@ export class GonvexClient {
       // until the next server-side invalidation. Replaying here (not via the shared
       // handler) keeps the cached value flowing without emitting extra telemetry/traffic.
       const cached = existing.lastMessage;
-      if (cached) {
+      if (wasOrphaned && cached?.type === "query.error") {
+        // A React error boundary can unmount and remount a failed query while the
+        // unsubscribe grace timer is still active. Replaying that terminal error
+        // traps the boundary even if the runtime was updated in the meantime.
+        // Treat the remount as a fresh attempt while continuing to coalesce active
+        // subscribers normally.
+        existing.lastMessage = undefined;
+        existing.serverSettled = false;
+        existing.socketGeneration = undefined;
+        this.sendSubscription(existing);
+      } else if (cached) {
         queueMicrotask(() => {
           if (existing.listeners.has(onMessage)) onMessage(cached);
         });
