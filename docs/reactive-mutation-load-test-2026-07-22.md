@@ -199,14 +199,61 @@ performing one mutation per second would mean 10,000 mutations/s, while this
 single local PostgreSQL instance already showed multi-second write queueing at
 100 mutations/s.
 
-The next scaling fix is to reduce invalidation amplification. In this workload,
-`userLiveLocations.list` returns a tenant-wide result but is identity-scoped, so
-one tenant mutation can rerun the same logical list for every connected user in
-that tenant. After a handler-by-handler security audit, Whagons queries whose
-results depend only on tenant and permission set should opt into
-permission-safe shared subscriptions. That application manifest change can
-reduce database work by an order of magnitude without weakening the runtime's
-default user isolation.
+The next scaling fix was to reduce invalidation amplification without sharing
+identity-dependent results. That implementation and its verification are
+described below.
+
+## Query-amplification implementation follow-up
+
+Whagons now treats `userLiveLocations.list` as an identity-scoped query with
+explicit read dependencies. It loads the active tenant snapshot once per
+reactive change revision, batches landlord users, loads team memberships only
+for team-scoped viewers, and applies the final permission/user/team filter for
+each caller. It does **not** opt into permission-shared subscriptions, because
+two users with the same permissions can still see different own/team rows.
+
+The location mutations now use indexed per-user reads and deletes, validate
+coordinates, enforce the same maps permission policy as the list query, and
+declare their write dependency. The Whagons schema adds a tenant/update-time
+composite index; the test did not apply that schema change to the shared local
+database, so the measured result does not depend on the new index.
+
+Gonvex now exposes the reactive change revision to Go query handlers so the
+application can safely coalesce common base reads within one invalidation wave.
+It also recognizes both `id` and Convex-compatible `_id` result identifiers.
+The TypeScript CLI now preserves Go `Reads`, `Writes`, columns, filters,
+ordering, windowing, predicates, and `ShareByPermissions` metadata when it
+generates the function manifest.
+
+Two final runs used the production-shaped pool (20 total, 2 open and 1 idle per
+tenant database), 100 distinct users, 5,000 subscriptions, and 10 tenants:
+
+| Measure | 50 mutations/s | 100 mutations/s |
+| --- | ---: | ---: |
+| Subscription results | 5,000 / 5,000 | 5,000 / 5,000 |
+| Mutation completions | 1,000 observed, 0 errors | 2,001 / 2,001, 0 errors |
+| Initial-result average / p95 | 15.93 ms / 50 ms | 14.42 ms / 50 ms |
+| Mutation average / p95 | 16.33 ms / 50 ms | 3.04 s / 10 s |
+| Mutation server average / p95 | 16.05 ms / 50 ms | 1.00 s / 5 s |
+| Change-to-client average / p95 | 90.22 ms / 100 ms | 829.88 ms / 5 s |
+| Invalidation query average / p95 | 4.31 ms / 10 ms | 645.44 ms / 5 s |
+| Runtime peak RSS | 345.35 MiB | 352.07 MiB |
+| Runtime CPU average / peak | 1.30 / 2.73 cores | 0.90 / 2.32 cores |
+| Server-to-client wire bytes | 10.79 MB | 9.53 MB |
+| Peak server-to-client rate | 0.78 MiB/s | 0.78 MiB/s |
+
+At 50 mutations/s, the 1,000 completed mutations produced 9,960 progress
+messages—approximately one delivery to each of the ten subscribed users in the
+affected tenant per mutation. At 100 mutations/s the runtime still completed
+every write, but coalesced queued changes into 3,580 final-state progress
+messages. Reactive delivery remained correct, while per-change latency exposed
+a sharp queueing knee between 50 and 100 mutations/s.
+
+For this exact workload and database allocation, 50 mutations/s is therefore a
+reasonable initial per-replica admission budget; 100 mutations/s is a
+correctness pass but not a latency-safe steady operating point. Production
+should alert on mutation and invalidation queue latency and scale replicas or
+the PostgreSQL allocation before the 50/s band is sustained for long periods.
 
 Additional reports:
 
@@ -216,5 +263,7 @@ Additional reports:
 - `tmp/load-reports/reactive-location-100users-budget64.json`
 - `tmp/load-reports/reactive-location-100users-production-pool.json`
 - `tmp/load-reports/reactive-location-100users-production-final.json`
+- `tmp/load-reports/reactive-location-100users-query-revision-50rps.json`
+- `tmp/load-reports/reactive-location-100users-query-revision-final.json`
 - Rejected limiter experiment:
   `tmp/load-reports/reactive-location-100users-production-limited.json`
