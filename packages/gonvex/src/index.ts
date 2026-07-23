@@ -15,6 +15,27 @@ type FunctionEntry = {
   kind: FunctionKind;
   handler: string;
   file: string;
+  dependencies?: FunctionDependencies;
+};
+
+type ReadDependency = {
+  table: string;
+  columns?: string[];
+  filters?: string[];
+  ordersBy?: string[];
+  windowed?: boolean;
+  predicate?: string;
+};
+
+type WriteDependency = {
+  table: string;
+  columns?: string[];
+};
+
+type FunctionDependencies = {
+  reads?: ReadDependency[];
+  writes?: WriteDependency[];
+  shareByPermissions?: boolean;
 };
 
 type Column = {
@@ -1181,13 +1202,127 @@ async function parseRegistrations(root: string, file: string) {
   const pattern = /app\.(Query|Mutation|Action|HTTP|PublicHTTP|InternalMutation|LiveGrid)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)/g;
   const entries: Record<string, FunctionEntry> = {};
   for (const match of source.matchAll(pattern)) {
-    entries[match[2]!] = {
+    const entry: FunctionEntry = {
       kind: functionKind(match[1]!),
       handler: match[3]!,
       file: relative(root, file),
     };
+    const openParen = source.indexOf("(", match.index);
+    const closeParen = findClosingParen(source, openParen);
+    if (openParen >= 0 && closeParen > openParen) {
+      const dependencies = parseFunctionDependencies(source.slice(openParen + 1, closeParen));
+      if (Object.keys(dependencies).length > 0) entry.dependencies = dependencies;
+    }
+    entries[match[2]!] = entry;
   }
   return entries;
+}
+
+function parseFunctionDependencies(callBody: string): FunctionDependencies {
+  const dependencies: FunctionDependencies = {};
+  const pattern = /(?:gonvex\.)?(Reads|Writes|ShareByPermissions)\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(callBody)) !== null) {
+    const option = match[1]!;
+    const openParen = callBody.indexOf("(", match.index);
+    const closeParen = findClosingParen(callBody, openParen);
+    if (closeParen < 0) break;
+
+    if (option === "ShareByPermissions") {
+      dependencies.shareByPermissions = true;
+      pattern.lastIndex = closeParen + 1;
+      continue;
+    }
+
+    const tables = stringArgs(callBody.slice(openParen + 1, closeParen));
+    const start = option === "Reads"
+      ? (dependencies.reads ??= []).push(...tables.map((table) => ({ table }))) - tables.length
+      : (dependencies.writes ??= []).push(...tables.map((table) => ({ table }))) - tables.length;
+
+    let cursor = closeParen + 1;
+    while (cursor < callBody.length) {
+      const chain = callBody.slice(cursor).match(/^\s*\.\s*(Columns|Filters|OrdersBy|Windowed|Predicate)\s*\(/);
+      if (!chain) break;
+      const chainOpen = cursor + chain[0].lastIndexOf("(");
+      const chainClose = findClosingParen(callBody, chainOpen);
+      if (chainClose < 0) break;
+      const method = chain[1]!;
+      const values = stringArgs(callBody.slice(chainOpen + 1, chainClose));
+
+      if (option === "Reads") {
+        for (const dependency of (dependencies.reads ?? []).slice(start)) {
+          if (method === "Columns" && values.length > 0) dependency.columns = values;
+          if (method === "Filters" && values.length > 0) dependency.filters = values;
+          if (method === "OrdersBy" && values.length > 0) dependency.ordersBy = values;
+          if (method === "Windowed") dependency.windowed = true;
+          if (method === "Predicate" && values[0]) dependency.predicate = values[0];
+        }
+      } else if (method === "Columns") {
+        for (const dependency of (dependencies.writes ?? []).slice(start)) {
+          if (values.length > 0) dependency.columns = values;
+        }
+      }
+      cursor = chainClose + 1;
+    }
+    pattern.lastIndex = cursor;
+  }
+  return dependencies;
+}
+
+function findClosingParen(source: string, openParen: number) {
+  if (openParen < 0 || source[openParen] !== "(") return -1;
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = openParen; index < source.length; index += 1) {
+    const char = source[index]!;
+    const next = source[index + 1] ?? "";
+    if (lineComment) {
+      if (char === "\n") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (quote !== "`" && escaped) {
+        escaped = false;
+        continue;
+      }
+      if (quote !== "`" && char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "(") depth += 1;
+    if (char === ")") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
 }
 
 async function parseSchema(file: string) {
