@@ -29,38 +29,42 @@ import (
 )
 
 type Server struct {
-	config            config.Config
-	runtime           *runtime.Runtime
-	app               *gonvex.App
-	storage           *storage.Factory
-	dataFiles         *datafiles.Manager
-	tenantStores      *tenantStoreResolver
-	cache             *rowsCache
-	metrics           *runtimeMetrics
-	scheduler         *scheduler
-	telemetryWrites   chan struct{}
-	projectMu         sync.RWMutex
-	projects          map[string]projectTarget
-	tenants           map[string]tenantTarget
-	registryMu        sync.Mutex
-	registryReady     bool
-	authRegistryMu    sync.Mutex
-	authRegistryDB    *sql.DB
-	tenantHydrationMu sync.Mutex
-	tenantHydrationAt map[string]time.Time
-	tenantHydrations  singleflight.Group
-	wsMu              sync.RWMutex
-	wsConns           map[*wsConn]bool
-	wsConnectionSeq   atomic.Uint64
-	subscriptions     *subscriptionManager
-	tableChangeMu     sync.Mutex
-	tableChangeWait   map[string]*time.Timer
-	tableChanges      map[string]tableChange
-	projectEnvMu      sync.Mutex
-	projectEnvCache   map[string]projectEnvCacheEntry
-	projectEnvLoads   singleflight.Group
-	tenantProvisions  singleflight.Group
-	provisionTenant   func(context.Context, string, manifest.Schema) error
+	config          config.Config
+	runtime         *runtime.Runtime
+	app             *gonvex.App
+	storage         *storage.Factory
+	dataFiles       *datafiles.Manager
+	tenantStores    *tenantStoreResolver
+	cache           *rowsCache
+	metrics         *runtimeMetrics
+	scheduler       *scheduler
+	telemetryWrites chan struct{}
+	projectMu       sync.RWMutex
+	projects        map[string]projectTarget
+	tenants         map[string]tenantTarget
+	// explicitTenantDatabases is the immutable deployment-level routing map.
+	// Registry hydration may enrich tenant metadata, but must not replace an
+	// operator-provided database endpoint for the same project/tenant key.
+	explicitTenantDatabases map[string]string
+	registryMu              sync.Mutex
+	registryReady           bool
+	authRegistryMu          sync.Mutex
+	authRegistryDB          *sql.DB
+	tenantHydrationMu       sync.Mutex
+	tenantHydrationAt       map[string]time.Time
+	tenantHydrations        singleflight.Group
+	wsMu                    sync.RWMutex
+	wsConns                 map[*wsConn]bool
+	wsConnectionSeq         atomic.Uint64
+	subscriptions           *subscriptionManager
+	tableChangeMu           sync.Mutex
+	tableChangeWait         map[string]*time.Timer
+	tableChanges            map[string]tableChange
+	projectEnvMu            sync.Mutex
+	projectEnvCache         map[string]projectEnvCacheEntry
+	projectEnvLoads         singleflight.Group
+	tenantProvisions        singleflight.Group
+	provisionTenant         func(context.Context, string, manifest.Schema) error
 	// syncLocks serializes /dev/sync work per project so overlapping syncs
 	// (e.g. a failed-then-retried push, or a client that fires twice) can't run
 	// catalog DDL concurrently and trip "tuple concurrently updated".

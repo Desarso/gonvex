@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestAssertLoopbackTarget(t *testing.T) {
 	for _, target := range []string{
@@ -15,6 +18,19 @@ func TestAssertLoopbackTarget(t *testing.T) {
 	}
 	if err := assertLoopbackTarget("https://runtime.example.com"); err == nil {
 		t.Fatal("expected non-loopback target to be rejected")
+	}
+}
+
+func TestParseTenantList(t *testing.T) {
+	got, err := parseTenantList("tenant-a, tenant-b,tenant-c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"tenant-a", "tenant-b", "tenant-c"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tenants = %v, want %v", got, want)
+	}
+	if _, err := parseTenantList("tenant-a,tenant-a"); err == nil {
+		t.Fatal("expected duplicate tenant to fail")
 	}
 }
 

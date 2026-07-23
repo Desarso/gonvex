@@ -38,13 +38,16 @@ type subscriptionManager struct {
 	server *Server
 	epoch  string
 
-	mu        sync.Mutex
-	groups    map[string]*sharedSubscription
-	byTable   map[dependencyKey]map[*sharedSubscription]struct{}
-	broad     map[subscriptionScope]map[*sharedSubscription]struct{}
-	listeners *tenantListenerManager
-	sequence  atomic.Uint64
-	execute   func(context.Context, *sharedSubscription, querySubscription, string) (any, error)
+	mu      sync.Mutex
+	groups  map[string]*sharedSubscription
+	byTable map[dependencyKey]map[*sharedSubscription]struct{}
+	broad   map[subscriptionScope]map[*sharedSubscription]struct{}
+	// listenerCount is maintained while mu is held. Recomputing it by walking
+	// every group makes distinct-user subscription startup O(n²).
+	listenerCount int
+	listeners     *tenantListenerManager
+	sequence      atomic.Uint64
+	execute       func(context.Context, *sharedSubscription, querySubscription, string) (any, error)
 }
 
 type sharedSubscription struct {
@@ -76,6 +79,7 @@ type sharedSubscription struct {
 	lastError          string
 	lastHash           [sha256.Size]byte
 	hasHash            bool
+	lastSingleListener *subscriptionToken
 	rowIDs             map[string]bool
 	idleTimer          *time.Timer
 }
@@ -128,6 +132,9 @@ func (m *subscriptionManager) attach(sub querySubscription) {
 	if group.idleTimer != nil {
 		group.idleTimer.Stop()
 		group.idleTimer = nil
+	}
+	if _, exists := group.listeners[sub.token]; !exists {
+		m.listenerCount++
 	}
 	group.listeners[sub.token] = sub
 	hasSnapshot := len(group.lastResult) > 0
@@ -218,7 +225,10 @@ func (m *subscriptionManager) detach(sub querySubscription) {
 		return
 	}
 	group.mu.Lock()
-	delete(group.listeners, sub.token)
+	if _, exists := group.listeners[sub.token]; exists {
+		delete(group.listeners, sub.token)
+		m.listenerCount--
+	}
 	empty := len(group.listeners) == 0
 	if empty && group.idleTimer == nil {
 		grace := m.server.config.SharedSubscriptionGrace
@@ -262,13 +272,7 @@ func (m *subscriptionManager) expire(group *sharedSubscription) {
 }
 
 func (m *subscriptionManager) countsLocked() (int, int) {
-	listeners := 0
-	for _, group := range m.groups {
-		group.mu.Lock()
-		listeners += len(group.listeners)
-		group.mu.Unlock()
-	}
-	return len(m.groups), listeners
+	return len(m.groups), m.listenerCount
 }
 
 func (m *subscriptionManager) request(sub querySubscription, reason string, changedAtMS float64) {
@@ -579,6 +583,7 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 	hash := sha256.Sum256(payload)
 	group.mu.Lock()
 	previous := append(json.RawMessage(nil), group.lastResult...)
+	previousSingleListener := group.lastSingleListener
 	unchanged := group.hasHash && hash == group.lastHash
 	previousRevision := group.revision
 	revision := group.manager.sequence.Add(1)
@@ -587,16 +592,27 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 	group.hasHash = true
 	group.lastError = ""
 	group.rowIDs = resultRowIDs(result)
-	if len(payload) <= group.manager.server.config.SharedResultMaxBytes {
+	listeners := group.listenerSnapshotLocked()
+	sameSingleListener := len(listeners) == 1 && previousSingleListener != nil && previousSingleListener == listeners[0].token
+	if len(listeners) == 1 {
+		group.lastSingleListener = listeners[0].token
+	} else {
+		group.lastSingleListener = nil
+	}
+	// A one-listener group can rerun if a matching listener arrives later and
+	// only needs the hash for unchanged-result suppression. Retaining the full
+	// payload for every identity-scoped subscription multiplies memory by the
+	// user count without improving correctness. Shared groups keep a snapshot
+	// for immediate replay and keyed patches.
+	if len(listeners) > 1 && len(payload) <= group.manager.server.config.SharedResultMaxBytes {
 		group.lastResult = append(group.lastResult[:0], payload...)
 	} else {
 		group.lastResult = nil
 	}
-	listeners := group.listenerSnapshotLocked()
 	group.mu.Unlock()
 
 	revisionValue := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: revision}
-	if unchanged && len(previous) > 0 {
+	if unchanged && (len(previous) > 0 || sameSingleListener) {
 		message := serverMessage{Type: "query.progress", Path: group.path, Reason: reason, ThroughRevision: revisionValue}
 		group.broadcastTo(listeners, message, changedAtMS, startedAt)
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {

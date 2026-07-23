@@ -91,6 +91,10 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		options.subscriptions = len(profile.Subscriptions)
 	}
 	mode := authMode(options.authMode)
+	tenants, err := parseTenantList(options.tenant)
+	if err != nil {
+		return err
+	}
 	sharedToken := ""
 	if mode == authModeShared {
 		sharedToken = strings.TrimSpace(os.Getenv(options.tokenEnvironment))
@@ -102,6 +106,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		URL:                        options.runtimeURL,
 		Project:                    options.project,
 		Tenant:                     options.tenant,
+		Tenants:                    tenants,
 		Connections:                options.connections,
 		SubscriptionsPerConnection: options.subscriptions,
 		RampDuration:               options.ramp,
@@ -129,6 +134,8 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		"profile":                    profile.Name,
 		"target":                     options.runtimeURL,
 		"connections":                config.Connections,
+		"tenants":                    config.tenantList(),
+		"tenantCount":                len(config.tenantList()),
 		"subscriptionsPerConnection": config.SubscriptionsPerConnection,
 		"totalSubscriptions":         config.Connections * config.SubscriptionsPerConnection,
 		"ramp":                       config.RampDuration.String(),
@@ -162,6 +169,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		"latency":       report.Latency,
 		"samples":       len(report.Samples),
 		"errorSamples":  report.ErrorSamples,
+		"tenants":       report.Tenants,
 	}
 	if err := writeJSON(stdout, summary); err != nil {
 		return err
@@ -203,7 +211,7 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 	flags.StringVar(&options.profilePath, "profile", "", "Whagons/Gonvex subscription profile JSON (required)")
 	flags.StringVar(&options.runtimeURL, "url", options.runtimeURL, "Gonvex runtime URL")
 	flags.StringVar(&options.project, "project", options.project, "Gonvex project id")
-	flags.StringVar(&options.tenant, "tenant", options.tenant, "active tenant")
+	flags.StringVar(&options.tenant, "tenant", options.tenant, "active tenant or comma-separated tenant list")
 	flags.IntVar(&options.connections, "connections", options.connections, "persistent WebSocket connections")
 	flags.IntVar(&options.subscriptions, "subscriptions-per-connection", options.subscriptions, "profile subscriptions per connection; -1 uses all")
 	flags.DurationVar(&options.ramp, "ramp", options.ramp, "connection ramp duration")
@@ -245,6 +253,26 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 		options.maximumTargetRSSMiB = 0
 	}
 	return options, nil
+}
+
+func parseTenantList(raw string) ([]string, error) {
+	seen := map[string]bool{}
+	tenants := []string{}
+	for _, value := range strings.Split(raw, ",") {
+		tenant := strings.TrimSpace(value)
+		if tenant == "" {
+			continue
+		}
+		if seen[tenant] {
+			return nil, fmt.Errorf("tenant %q is listed more than once", tenant)
+		}
+		seen[tenant] = true
+		tenants = append(tenants, tenant)
+	}
+	if len(tenants) == 0 {
+		return nil, errors.New("at least one tenant is required")
+	}
+	return tenants, nil
 }
 
 func assertLoopbackTarget(raw string) error {

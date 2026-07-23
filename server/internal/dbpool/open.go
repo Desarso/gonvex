@@ -5,12 +5,15 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
 const defaultMaxTotal = 20
+
+const budgetedIdleTTL = time.Second
 
 var runtimeBudget = &connectionBudget{limit: func() int {
 	configured := positiveEnvironmentInt("GONVEX_DB_MAX_TOTAL_CONNS", defaultMaxTotal)
@@ -41,10 +44,18 @@ func Open(databaseURL string) (*sql.DB, error) {
 
 func configureBudgeted(db *sql.DB) {
 	Configure(db)
-	// A retained connection still occupies the process-wide budget. Since the
-	// runtime creates pools for many databases, idle connections could consume
-	// every slot and prevent an unrelated pool from making progress.
-	db.SetMaxIdleConns(0)
+	limits := LimitsFromEnvironment()
+	maxIdle := limits.MaxIdle
+	if maxIdle > 1 {
+		maxIdle = 1
+	}
+	// Keep one connection warm for an active database so a query burst does not
+	// create a fresh TCP/TLS PostgreSQL session per operation. A retained
+	// connection still occupies the process-wide budget, so expire it quickly:
+	// when more databases are active than the budget can hold, dormant pools
+	// release their slots instead of blocking another tenant indefinitely.
+	db.SetMaxIdleConns(maxIdle)
+	db.SetConnMaxIdleTime(budgetedIdleTTL)
 }
 
 // PGXConn unwraps a connection obtained through sql.Conn.Raw.

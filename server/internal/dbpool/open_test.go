@@ -46,7 +46,7 @@ func TestTotalConnectionBudgetCannotExceedRuntimeSafetyCeiling(t *testing.T) {
 	}
 }
 
-func TestBudgetedPoolReleasesConnectionInsteadOfRetainingIdleSlot(t *testing.T) {
+func TestBudgetedPoolRetainsAtMostOneWarmConnection(t *testing.T) {
 	t.Setenv("GONVEX_DB_MAX_IDLE_CONNS", "2")
 	budget := &connectionBudget{limit: func() int { return 1 }}
 	db := sql.OpenDB(&limitedConnector{connector: testConnector{}, budget: budget})
@@ -59,8 +59,13 @@ func TestBudgetedPoolReleasesConnectionInsteadOfRetainingIdleSlot(t *testing.T) 
 	budget.mu.Lock()
 	active := budget.active
 	budget.mu.Unlock()
-	if active != 0 {
-		t.Fatalf("active connections after request = %d, want 0", active)
+	if active != 1 {
+		t.Fatalf("retained connections after request = %d, want 1", active)
+	}
+
+	stats := db.Stats()
+	if stats.Idle != 1 {
+		t.Fatalf("idle connections after request = %d, want 1", stats.Idle)
 	}
 }
 

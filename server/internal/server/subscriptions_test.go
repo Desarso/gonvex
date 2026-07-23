@@ -22,6 +22,35 @@ func TestSubscriptionTokensAreDistinctMapKeys(t *testing.T) {
 	}
 }
 
+func TestSubscriptionCountsDoNotTraverseGroups(t *testing.T) {
+	blocked := &sharedSubscription{}
+	manager := &subscriptionManager{
+		groups:        map[string]*sharedSubscription{"blocked": blocked},
+		listenerCount: 42,
+	}
+	blocked.mu.Lock()
+	type counts struct{ groups, listeners int }
+	done := make(chan counts, 1)
+	go func() {
+		manager.mu.Lock()
+		groups, listeners := manager.countsLocked()
+		manager.mu.Unlock()
+		done <- counts{groups: groups, listeners: listeners}
+	}()
+
+	select {
+	case got := <-done:
+		blocked.mu.Unlock()
+		if got.groups != 1 || got.listeners != 42 {
+			t.Fatalf("counts = %+v, want groups=1 listeners=42", got)
+		}
+	case <-time.After(50 * time.Millisecond):
+		blocked.mu.Unlock()
+		<-done
+		t.Fatal("counting subscriptions blocked on an individual group")
+	}
+}
+
 func TestSubscriptionRunnerSerializesAndCoalescesBurst(t *testing.T) {
 	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
 	manager := server.subscriptions
@@ -69,6 +98,39 @@ func TestSubscriptionRunnerSerializesAndCoalescesBurst(t *testing.T) {
 	}
 	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.RerunsCoalesced; got != 20 {
 		t.Fatalf("reruns coalesced = %d, want 20", got)
+	}
+}
+
+func TestSingleListenerGroupKeepsHashWithoutRetainingResultPayload(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	token := newSubscriptionToken()
+	group := &sharedSubscription{
+		manager: server.subscriptions,
+		path:    "tasks.list",
+		ctx:     context.Background(),
+		listeners: map[*subscriptionToken]querySubscription{
+			token: {token: token, ctx: context.Background()},
+		},
+	}
+	result := []map[string]any{{"id": "task-1", "title": "same"}}
+
+	group.completeResult(result, "initial", 0, time.Now())
+	if !group.hasHash {
+		t.Fatal("single-listener group did not retain the result hash")
+	}
+	if len(group.lastResult) != 0 {
+		t.Fatalf("single-listener group retained %d result bytes", len(group.lastResult))
+	}
+
+	group.completeResult(result, "invalidate", 0, time.Now())
+	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.UnchangedResultsSuppressed; got != 1 {
+		t.Fatalf("unchanged results suppressed = %d, want 1", got)
+	}
+
+	group.listeners[newSubscriptionToken()] = querySubscription{ctx: context.Background()}
+	group.completeResult([]map[string]any{{"id": "task-1", "title": "changed"}}, "invalidate", 0, time.Now())
+	if len(group.lastResult) == 0 {
+		t.Fatal("shared group did not retain a replayable result")
 	}
 }
 

@@ -53,3 +53,13 @@ Synthetic authentication uses a distinct user identity per connection by
 default. Add `--var userId=shared-load-user` to model many tabs/devices for one
 identity and exercise shared-subscription fan-out. Keep the default when the
 goal is to model distinct users and user-specific visibility scopes.
+
+Pass a comma-separated tenant list to distribute connections round-robin and
+include a per-tenant breakdown in the report:
+
+```bash
+./tmp/gonvex-load-runner \
+  --profile /path/to/whagons-workspace-50.json \
+  --tenant loadtest-a,loadtest-b,loadtest-c \
+  --connections 10000
+```

@@ -497,6 +497,31 @@ func TestDatabaseURLForTenantPrefersProjectTenantMap(t *testing.T) {
 	}
 }
 
+func TestMergeProjectTenantsPreservesExplicitDatabaseURL(t *testing.T) {
+	const configuredURL = "postgres://example/direct/tenant?sslmode=disable"
+	server := &Server{
+		config: config.Config{TenantDatabases: map[string]string{
+			"project-a:tenant-a": configuredURL,
+		}},
+		tenants: map[string]tenantTarget{},
+	}
+	server.loadConfiguredTenantDatabases()
+
+	server.mergeProjectTenants("project-a", []tenantTarget{{
+		RelationshipID: "relationship-a",
+		ID:             "tenant-a",
+		ProjectID:      "project-a",
+		Database:       "tenant",
+		databaseURL:    "postgres://registry/tenant",
+		databaseName:   "tenant",
+		registered:     true,
+	}})
+
+	if got := server.databaseURLForTenant("project-a", "tenant-a"); got != configuredURL {
+		t.Fatalf("database URL after registry hydration = %q, want explicit %q", got, configuredURL)
+	}
+}
+
 func TestUUIDv6ProjectRequiresExplicitTenantRelationship(t *testing.T) {
 	projectID, err := generateProjectID()
 	if err != nil {

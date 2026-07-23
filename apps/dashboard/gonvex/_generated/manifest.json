@@ -1,51 +1,60 @@
 {
   "project": "dashboard",
-  "generatedAt": "2026-07-22T00:52:39.06631414Z",
+  "generatedAt": "2026-07-22T23:57:13.063830144Z",
   "functions": {
     "files.createUploadUrl": {
       "kind": "mutation",
       "handler": "CreateUploadURL",
-      "file": "gonvex/files.go"
+      "file": "gonvex/files.go",
+      "dependencies": {}
     },
     "files.delete": {
       "kind": "mutation",
       "handler": "DeleteFile",
-      "file": "gonvex/files.go"
+      "file": "gonvex/files.go",
+      "dependencies": {}
     },
     "files.getMetadata": {
       "kind": "query",
       "handler": "GetFileMetadata",
-      "file": "gonvex/files.go"
+      "file": "gonvex/files.go",
+      "dependencies": {}
     },
     "files.getUrl": {
       "kind": "query",
       "handler": "GetFileURL",
-      "file": "gonvex/files.go"
+      "file": "gonvex/files.go",
+      "dependencies": {}
     },
     "system.heartbeat": {
       "kind": "internalMutation",
       "handler": "Heartbeat",
-      "file": "gonvex/system.go"
+      "file": "gonvex/system.go",
+      "dependencies": {}
     },
     "tasks.create": {
       "kind": "mutation",
       "handler": "CreateTask",
-      "file": "gonvex/tasks.go"
+      "file": "gonvex/tasks.go",
+      "dependencies": {}
     },
     "tasks.grid": {
       "kind": "liveGrid",
       "handler": "TasksGrid",
-      "file": "gonvex/tasks.go"
+      "file": "gonvex/tasks.go",
+      "dependencies": {}
     },
     "tasks.list": {
       "kind": "query",
       "handler": "ListTasks",
-      "file": "gonvex/tasks.go"
+      "file": "gonvex/tasks.go",
+      "dependencies": {}
     },
     "tasks.randomizeStatusPriority": {
       "kind": "mutation",
       "handler": "RandomizeStatusPriority",
-      "file": "gonvex/tasks.go"
+      "file": "gonvex/tasks.go",
+      "dependencies": {}
     }
   },
   "schema": {
@@ -1467,5 +1476,6 @@
         }
       }
     }
-  }
+  },
+  "notifySchemaVersion": "2"
 }

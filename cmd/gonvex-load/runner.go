@@ -29,6 +29,7 @@ type runConfig struct {
 	URL                        string
 	Project                    string
 	Tenant                     string
+	Tenants                    []string
 	Connections                int
 	SubscriptionsPerConnection int
 	RampDuration               time.Duration
@@ -63,6 +64,8 @@ type runMetrics struct {
 	authLatency    *latencyHistogram
 	initialLatency *latencyHistogram
 	serverLatency  *latencyHistogram
+	tenantMu       sync.Mutex
+	tenants        map[string]*tenantMetrics
 
 	pathMu       sync.Mutex
 	paths        map[string]*pathMetrics
@@ -71,6 +74,20 @@ type runMetrics struct {
 	resourceMu  sync.Mutex
 	samples     []ResourceSample
 	abortReason string
+}
+
+type tenantMetrics struct {
+	connectionAttempts atomic.Uint64
+	connections        atomic.Uint64
+	setupErrors        atomic.Uint64
+	unexpectedCloses   atomic.Uint64
+	subscriptionsSent  atomic.Uint64
+	initialResults     atomic.Uint64
+	subscriptionErrors atomic.Uint64
+	connectLatency     *latencyHistogram
+	authLatency        *latencyHistogram
+	initialLatency     *latencyHistogram
+	serverLatency      *latencyHistogram
 }
 
 type pathMetrics struct {
@@ -82,21 +99,40 @@ type pathMetrics struct {
 }
 
 type RunReport struct {
-	Profile       string                `json:"profile"`
-	Target        string                `json:"target"`
-	Project       string                `json:"project"`
-	Tenant        string                `json:"tenant"`
-	StartedAt     string                `json:"startedAt"`
-	CompletedAt   string                `json:"completedAt"`
-	DurationMS    int64                 `json:"durationMs"`
-	AbortReason   string                `json:"abortReason,omitempty"`
-	Connections   ConnectionReport      `json:"connections"`
-	Subscriptions SubscriptionReport    `json:"subscriptions"`
-	Wire          WireReport            `json:"wire"`
-	Latency       LatencyReport         `json:"latency"`
-	Paths         map[string]PathReport `json:"paths"`
-	Samples       []ResourceSample      `json:"samples,omitempty"`
-	ErrorSamples  []ErrorSample         `json:"errorSamples,omitempty"`
+	Profile       string                  `json:"profile"`
+	Target        string                  `json:"target"`
+	Project       string                  `json:"project"`
+	Tenant        string                  `json:"tenant"`
+	Tenants       map[string]TenantReport `json:"tenants,omitempty"`
+	Configuration RunConfigurationReport  `json:"configuration"`
+	StartedAt     string                  `json:"startedAt"`
+	CompletedAt   string                  `json:"completedAt"`
+	DurationMS    int64                   `json:"durationMs"`
+	AbortReason   string                  `json:"abortReason,omitempty"`
+	Connections   ConnectionReport        `json:"connections"`
+	Subscriptions SubscriptionReport      `json:"subscriptions"`
+	Wire          WireReport              `json:"wire"`
+	Latency       LatencyReport           `json:"latency"`
+	Paths         map[string]PathReport   `json:"paths"`
+	Samples       []ResourceSample        `json:"samples,omitempty"`
+	ErrorSamples  []ErrorSample           `json:"errorSamples,omitempty"`
+}
+
+type RunConfigurationReport struct {
+	AuthMode                   authMode `json:"authMode"`
+	IdentityMode               string   `json:"identityMode"`
+	Compression                bool     `json:"compression"`
+	TenantCount                int      `json:"tenantCount"`
+	Connections                int      `json:"connections"`
+	SubscriptionsPerConnection int      `json:"subscriptionsPerConnection"`
+	RampMS                     int64    `json:"rampMs"`
+	HoldMS                     int64    `json:"holdMs"`
+}
+
+type TenantReport struct {
+	Connections   ConnectionReport   `json:"connections"`
+	Subscriptions SubscriptionReport `json:"subscriptions"`
+	Latency       LatencyReport      `json:"latency"`
 }
 
 type ErrorSample struct {
@@ -179,7 +215,22 @@ func newRunMetrics() *runMetrics {
 		serverLatency:  newLatencyHistogram(),
 		paths:          map[string]*pathMetrics{},
 		errorSamples:   map[string]uint64{},
+		tenants:        map[string]*tenantMetrics{},
 	}
+}
+
+func (m *runMetrics) tenant(tenant string) *tenantMetrics {
+	m.tenantMu.Lock()
+	defer m.tenantMu.Unlock()
+	metrics := m.tenants[tenant]
+	if metrics == nil {
+		metrics = &tenantMetrics{
+			connectLatency: newLatencyHistogram(), authLatency: newLatencyHistogram(),
+			initialLatency: newLatencyHistogram(), serverLatency: newLatencyHistogram(),
+		}
+		m.tenants[tenant] = metrics
+	}
+	return metrics
 }
 
 func (m *runMetrics) path(path string) *pathMetrics {
@@ -193,7 +244,7 @@ func (m *runMetrics) path(path string) *pathMetrics {
 	return metrics
 }
 
-func (m *runMetrics) recordInitial(path string, latency time.Duration, serverDuration time.Duration, payloadBytes int) {
+func (m *runMetrics) recordInitial(tenant, path string, latency time.Duration, serverDuration time.Duration, payloadBytes int) {
 	m.initialResults.Add(1)
 	m.initialLatency.Observe(latency)
 	if serverDuration > 0 {
@@ -208,10 +259,17 @@ func (m *runMetrics) recordInitial(path string, latency time.Duration, serverDur
 	if serverDuration > 0 {
 		pathMetrics.serverLatency.Observe(serverDuration)
 	}
+	tenantMetrics := m.tenant(tenant)
+	tenantMetrics.initialResults.Add(1)
+	tenantMetrics.initialLatency.Observe(latency)
+	if serverDuration > 0 {
+		tenantMetrics.serverLatency.Observe(serverDuration)
+	}
 }
 
-func (m *runMetrics) recordError(path string, message string) {
+func (m *runMetrics) recordError(tenant, path string, message string) {
 	m.subscriptionErrors.Add(1)
+	m.tenant(tenant).subscriptionErrors.Add(1)
 	pathMetrics := m.path(path)
 	m.pathMu.Lock()
 	pathMetrics.errors++
@@ -221,8 +279,9 @@ func (m *runMetrics) recordError(path string, message string) {
 	m.pathMu.Unlock()
 }
 
-func (m *runMetrics) recordSetupError(path string) {
+func (m *runMetrics) recordSetupError(tenant, path string) {
 	m.setupErrors.Add(1)
+	m.tenant(tenant).setupErrors.Add(1)
 	pathMetrics := m.path(path)
 	m.pathMu.Lock()
 	pathMetrics.errors++
@@ -339,6 +398,9 @@ func validateRunConfig(config runConfig, profile Profile) error {
 	if config.Connections < 1 {
 		return fmt.Errorf("connections must be positive")
 	}
+	if len(config.tenantList()) == 0 {
+		return fmt.Errorf("at least one tenant is required")
+	}
 	if config.SubscriptionsPerConnection < 0 || config.SubscriptionsPerConnection > len(profile.Subscriptions) {
 		return fmt.Errorf("subscriptions per connection must be between 0 and %d", len(profile.Subscriptions))
 	}
@@ -360,8 +422,26 @@ func validateRunConfig(config runConfig, profile Profile) error {
 	return nil
 }
 
+func (config runConfig) tenantList() []string {
+	if len(config.Tenants) > 0 {
+		return config.Tenants
+	}
+	if tenant := strings.TrimSpace(config.Tenant); tenant != "" {
+		return []string{tenant}
+	}
+	return nil
+}
+
+func (config runConfig) tenantForUser(userIndex int) string {
+	tenants := config.tenantList()
+	return tenants[userIndex%len(tenants)]
+}
+
 func runVirtualUser(ctx context.Context, config runConfig, profile Profile, userIndex int, metrics *runMetrics, dialSemaphore chan struct{}) {
+	tenant := config.tenantForUser(userIndex)
+	tenantMetrics := metrics.tenant(tenant)
 	metrics.connectionAttempts.Add(1)
+	tenantMetrics.connectionAttempts.Add(1)
 	select {
 	case dialSemaphore <- struct{}{}:
 	case <-ctx.Done():
@@ -369,15 +449,17 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 		return
 	}
 	connectStarted := time.Now()
-	connection, _, err := dialRuntime(ctx, config, metrics)
+	connection, _, err := dialRuntime(ctx, config, tenant, metrics)
 	<-dialSemaphore
 	if err != nil {
-		metrics.recordSetupError("__connect__")
+		metrics.recordSetupError(tenant, "__connect__")
 		metrics.setupFinished.Add(1)
 		return
 	}
 	metrics.connectLatency.Observe(time.Since(connectStarted))
+	tenantMetrics.connectLatency.Observe(time.Since(connectStarted))
 	metrics.connections.Add(1)
+	tenantMetrics.connections.Add(1)
 	defer connection.Close()
 	connection.SetReadLimit(256 << 20)
 
@@ -392,13 +474,13 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 	}()
 
 	if err := connection.SetReadDeadline(time.Now().Add(config.ConnectTimeout)); err != nil {
-		metrics.recordSetupError("__session__")
+		metrics.recordSetupError(tenant, "__session__")
 		metrics.setupFinished.Add(1)
 		return
 	}
 	message, _, err := readEnvelope(connection, metrics)
 	if err != nil || message.Type != "session.ready" {
-		metrics.recordSetupError("__session__")
+		metrics.recordSetupError(tenant, "__session__")
 		metrics.setupFinished.Add(1)
 		return
 	}
@@ -414,18 +496,19 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 		}
 		authID := fmt.Sprintf("auth-%06d", userIndex+1)
 		authStarted := time.Now()
-		if err := writeEnvelope(connection, metrics, map[string]any{"type": "auth", "id": authID, "token": token, "tenant": config.Tenant, "project": config.Project}); err != nil {
-			metrics.recordSetupError("__auth__")
+		if err := writeEnvelope(connection, metrics, map[string]any{"type": "auth", "id": authID, "token": token, "tenant": tenant, "project": config.Project}); err != nil {
+			metrics.recordSetupError(tenant, "__auth__")
 			metrics.setupFinished.Add(1)
 			return
 		}
 		authResult, _, err := readEnvelope(connection, metrics)
 		if err != nil || authResult.Type != "auth.result" || authResult.ID != authID {
-			metrics.recordSetupError("__auth__")
+			metrics.recordSetupError(tenant, "__auth__")
 			metrics.setupFinished.Add(1)
 			return
 		}
 		metrics.authLatency.Observe(time.Since(authStarted))
+		tenantMetrics.authLatency.Observe(time.Since(authStarted))
 	}
 
 	pending := make(map[string]*pendingSubscription, config.SubscriptionsPerConnection)
@@ -449,13 +532,13 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 		}
 	}()
 	variables := cloneStrings(config.Variables)
-	variables["tenant"] = config.Tenant
+	variables["tenant"] = tenant
 	variables["userId"] = userID
 	for index := 0; index < config.SubscriptionsPerConnection; index++ {
 		spec := profile.Subscriptions[index]
 		args, err := spec.expandedArgs(variables)
 		if err != nil {
-			metrics.recordError(spec.Path, err.Error())
+			metrics.recordError(tenant, spec.Path, err.Error())
 			continue
 		}
 		id := fmt.Sprintf("u%06d-s%03d", userIndex+1, index+1)
@@ -463,10 +546,11 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 		pending[id] = &pendingSubscription{path: spec.Path, sentAt: sentAt}
 		if err := writeEnvelope(connection, metrics, map[string]any{"type": "query.subscribe", "id": id, "path": spec.Path, "args": args}); err != nil {
 			delete(pending, id)
-			metrics.recordError(spec.Path, err.Error())
+			metrics.recordError(tenant, spec.Path, err.Error())
 			continue
 		}
 		metrics.subscriptionsSent.Add(1)
+		tenantMetrics.subscriptionsSent.Add(1)
 	}
 	metrics.setupFinished.Add(1)
 	if len(pending) == 0 {
@@ -479,9 +563,10 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 		if envelope.err != nil {
 			if ctx.Err() == nil && !errors.Is(envelope.err, net.ErrClosed) {
 				metrics.unexpectedCloses.Add(1)
+				tenantMetrics.unexpectedCloses.Add(1)
 				for _, subscription := range pending {
 					if !subscription.seen {
-						metrics.recordError(subscription.path, "connection closed before initial result: "+envelope.err.Error())
+						metrics.recordError(tenant, subscription.path, "connection closed before initial result: "+envelope.err.Error())
 					}
 				}
 			}
@@ -503,14 +588,14 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 			if message.Trace != nil && message.Trace.ServerDurationMS > 0 {
 				serverDuration = time.Duration(message.Trace.ServerDurationMS * float64(time.Millisecond))
 			}
-			metrics.recordInitial(subscription.path, time.Since(subscription.sentAt), serverDuration, envelope.payloadBytes)
+			metrics.recordInitial(tenant, subscription.path, time.Since(subscription.sentAt), serverDuration, envelope.payloadBytes)
 		case "query.error":
 			if subscription.seen {
 				continue
 			}
 			subscription.seen = true
 			settled++
-			metrics.recordError(subscription.path, message.Error)
+			metrics.recordError(tenant, subscription.path, message.Error)
 		}
 		if settled == len(pending) {
 			_ = connection.SetReadDeadline(time.Time{})
@@ -518,8 +603,8 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 	}
 }
 
-func dialRuntime(ctx context.Context, config runConfig, metrics *runMetrics) (*websocket.Conn, *http.Response, error) {
-	target, err := websocketTarget(config.URL, config.Project, config.Tenant)
+func dialRuntime(ctx context.Context, config runConfig, tenant string, metrics *runMetrics) (*websocket.Conn, *http.Response, error) {
+	target, err := websocketTarget(config.URL, config.Project, tenant)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -650,11 +735,58 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 		abortReason = m.abortReason
 	}
 	m.resourceMu.Unlock()
+	tenantReports := map[string]TenantReport{}
+	tenantNames := config.tenantList()
+	for tenantIndex, tenant := range tenantNames {
+		metrics := m.tenant(tenant)
+		targetConnections := config.Connections / len(tenantNames)
+		if tenantIndex < config.Connections%len(tenantNames) {
+			targetConnections++
+		}
+		tenantSent := metrics.subscriptionsSent.Load()
+		tenantErrors := metrics.subscriptionErrors.Load()
+		tenantErrorRate := float64(0)
+		if tenantSent > 0 {
+			tenantErrorRate = float64(tenantErrors) / float64(tenantSent)
+		}
+		tenantReports[tenant] = TenantReport{
+			Connections: ConnectionReport{
+				Target: uint64(targetConnections), Attempted: metrics.connectionAttempts.Load(),
+				Established: metrics.connections.Load(), UnexpectedCloses: metrics.unexpectedCloses.Load(),
+				SetupErrors: metrics.setupErrors.Load(),
+			},
+			Subscriptions: SubscriptionReport{
+				Target: uint64(targetConnections * config.SubscriptionsPerConnection), Sent: tenantSent,
+				InitialResults: metrics.initialResults.Load(), Errors: tenantErrors, ErrorRate: tenantErrorRate,
+			},
+			Latency: LatencyReport{
+				Connect: histogramReport(metrics.connectLatency), Auth: histogramReport(metrics.authLatency),
+				InitialResult: histogramReport(metrics.initialLatency), ServerQuery: histogramReport(metrics.serverLatency),
+			},
+		}
+	}
+	primaryTenant := ""
+	if len(tenantNames) > 0 {
+		primaryTenant = tenantNames[0]
+	}
+	identityMode := "anonymous"
+	if config.AuthMode == authModeShared || strings.TrimSpace(config.Variables["userId"]) != "" {
+		identityMode = "shared"
+	} else if config.AuthMode == authModeSynthetic {
+		identityMode = "distinct"
+	}
 	return RunReport{
-		Profile:     profile.Name,
-		Target:      config.URL,
-		Project:     config.Project,
-		Tenant:      config.Tenant,
+		Profile: profile.Name,
+		Target:  config.URL,
+		Project: config.Project,
+		Tenant:  primaryTenant,
+		Tenants: tenantReports,
+		Configuration: RunConfigurationReport{
+			AuthMode: config.AuthMode, IdentityMode: identityMode, Compression: config.Compression,
+			TenantCount: len(tenantNames), Connections: config.Connections,
+			SubscriptionsPerConnection: config.SubscriptionsPerConnection,
+			RampMS:                     config.RampDuration.Milliseconds(), HoldMS: config.HoldDuration.Milliseconds(),
+		},
 		StartedAt:   startedAt.Format(time.RFC3339Nano),
 		CompletedAt: completedAt.Format(time.RFC3339Nano),
 		DurationMS:  completedAt.Sub(startedAt).Milliseconds(),

@@ -102,6 +102,12 @@ func tenantTargetPriority(tenant tenantTarget) int {
 func (s *Server) loadConfiguredTenantDatabases() {
 	s.projectMu.Lock()
 	defer s.projectMu.Unlock()
+	if s.explicitTenantDatabases == nil {
+		s.explicitTenantDatabases = make(map[string]string, len(s.config.TenantDatabases))
+		for key, databaseURL := range s.config.TenantDatabases {
+			s.explicitTenantDatabases[key] = databaseURL
+		}
+	}
 	for key, databaseURL := range s.config.TenantDatabases {
 		project, tenantID := splitTenantDatabaseKey(key)
 		if tenantID == "" || databaseURL == "" {
@@ -359,7 +365,9 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 			tenant.Provisioned = true
 		}
 		s.tenants[key] = tenant
-		if tenant.databaseURL != "" {
+		if explicitURL := s.explicitTenantDatabases[key]; explicitURL != "" {
+			s.config.TenantDatabases[key] = explicitURL
+		} else if tenant.databaseURL != "" {
 			s.config.TenantDatabases[key] = tenant.databaseURL
 		}
 		if previousURL != "" && previousURL != tenant.databaseURL {
@@ -1151,7 +1159,9 @@ func (s *Server) mergeProjectTenants(project string, tenants []tenantTarget) {
 			continue
 		}
 		s.tenants[key] = tenant
-		if tenant.databaseURL != "" {
+		if explicitURL := s.explicitTenantDatabases[key]; explicitURL != "" {
+			s.config.TenantDatabases[key] = explicitURL
+		} else if tenant.databaseURL != "" {
 			s.config.TenantDatabases[key] = tenant.databaseURL
 		}
 	}

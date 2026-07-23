@@ -83,7 +83,7 @@ func TestRunLoadKeepsPersistentSubscriptionsAndMeasuresWireTraffic(t *testing.T)
 	report, err := runLoad(ctx, runConfig{
 		URL:                        server.URL,
 		Project:                    "test",
-		Tenant:                     "loadtest",
+		Tenants:                    []string{"tenant-a", "tenant-b"},
 		Connections:                3,
 		SubscriptionsPerConnection: 2,
 		RampDuration:               10 * time.Millisecond,
@@ -108,6 +108,12 @@ func TestRunLoadKeepsPersistentSubscriptionsAndMeasuresWireTraffic(t *testing.T)
 	}
 	if report.Subscriptions.Errors != 0 || report.Connections.UnexpectedCloses != 0 {
 		t.Fatalf("unexpected failures: %s", encoded)
+	}
+	if report.Tenants["tenant-a"].Connections.Established != 2 || report.Tenants["tenant-b"].Connections.Established != 1 {
+		t.Fatalf("unexpected tenant distribution: %s", encoded)
+	}
+	if report.Tenants["tenant-a"].Subscriptions.InitialResults != 4 || report.Tenants["tenant-b"].Subscriptions.InitialResults != 2 {
+		t.Fatalf("unexpected per-tenant results: %s", encoded)
 	}
 	if report.Wire.BytesRead == 0 || report.Wire.BytesWritten == 0 {
 		t.Fatalf("wire traffic was not measured: %s", encoded)
