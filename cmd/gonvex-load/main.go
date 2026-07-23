@@ -44,6 +44,9 @@ type cliOptions struct {
 	subscriptions           int
 	ramp                    time.Duration
 	hold                    time.Duration
+	mutationPath            string
+	mutationArgs            string
+	mutationRate            float64
 	connectTimeout          time.Duration
 	initialTimeout          time.Duration
 	authMode                string
@@ -102,6 +105,10 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("shared auth token environment variable %s is empty", options.tokenEnvironment)
 		}
 	}
+	mutationArgs, err := parseJSONObject(options.mutationArgs)
+	if err != nil {
+		return fmt.Errorf("parse mutation args: %w", err)
+	}
 	config := runConfig{
 		URL:                        options.runtimeURL,
 		Project:                    options.project,
@@ -111,6 +118,9 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		SubscriptionsPerConnection: options.subscriptions,
 		RampDuration:               options.ramp,
 		HoldDuration:               options.hold,
+		MutationPath:               strings.TrimSpace(options.mutationPath),
+		MutationArgs:               mutationArgs,
+		MutationRate:               options.mutationRate,
 		ConnectTimeout:             options.connectTimeout,
 		InitialTimeout:             options.initialTimeout,
 		AuthMode:                   mode,
@@ -140,6 +150,8 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		"totalSubscriptions":         config.Connections * config.SubscriptionsPerConnection,
 		"ramp":                       config.RampDuration.String(),
 		"hold":                       config.HoldDuration.String(),
+		"mutationPath":               config.MutationPath,
+		"mutationRatePerSec":         config.MutationRate,
 		"authMode":                   config.AuthMode,
 		"compression":                config.Compression,
 		"report":                     options.reportPath,
@@ -165,6 +177,8 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		"abortReason":   report.AbortReason,
 		"connections":   report.Connections,
 		"subscriptions": report.Subscriptions,
+		"mutations":     report.Mutations,
+		"invalidations": report.Invalidations,
 		"wire":          report.Wire,
 		"latency":       report.Latency,
 		"samples":       len(report.Samples),
@@ -180,6 +194,9 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	if report.Subscriptions.ErrorRate > options.maximumErrorRate {
 		return fmt.Errorf("subscription error rate %.4f exceeded %.4f", report.Subscriptions.ErrorRate, options.maximumErrorRate)
 	}
+	if report.Mutations.ErrorRate > options.maximumErrorRate {
+		return fmt.Errorf("mutation error rate %.4f exceeded %.4f", report.Mutations.ErrorRate, options.maximumErrorRate)
+	}
 	return nil
 }
 
@@ -193,6 +210,7 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 		subscriptions:           -1,
 		ramp:                    10 * time.Second,
 		hold:                    time.Minute,
+		mutationArgs:            "{}",
 		connectTimeout:          10 * time.Second,
 		initialTimeout:          2 * time.Minute,
 		authMode:                string(authModeSynthetic),
@@ -216,6 +234,9 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 	flags.IntVar(&options.subscriptions, "subscriptions-per-connection", options.subscriptions, "profile subscriptions per connection; -1 uses all")
 	flags.DurationVar(&options.ramp, "ramp", options.ramp, "connection ramp duration")
 	flags.DurationVar(&options.hold, "hold", options.hold, "steady-state hold after initial results")
+	flags.StringVar(&options.mutationPath, "mutation-path", "", "mutation function path; requires --mutation-rate")
+	flags.StringVar(&options.mutationArgs, "mutation-args", options.mutationArgs, "mutation args JSON object; supports ${tenant}, ${userId}, and ${sequence}")
+	flags.Float64Var(&options.mutationRate, "mutation-rate", 0, "aggregate mutation calls per second across all connections")
 	flags.DurationVar(&options.connectTimeout, "connect-timeout", options.connectTimeout, "WebSocket/session timeout")
 	flags.DurationVar(&options.initialTimeout, "initial-timeout", options.initialTimeout, "maximum time for initial subscriptions")
 	flags.StringVar(&options.authMode, "auth-mode", options.authMode, "none, shared, or synthetic")
@@ -249,10 +270,29 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 	if options.maximumErrorRate < 0 || options.maximumErrorRate > 1 {
 		return cliOptions{}, fmt.Errorf("max-error-rate must be between 0 and 1")
 	}
+	if options.mutationRate < 0 {
+		return cliOptions{}, fmt.Errorf("mutation-rate cannot be negative")
+	}
 	if options.targetPID == 0 {
 		options.maximumTargetRSSMiB = 0
 	}
 	return options, nil
+}
+
+func parseJSONObject(raw string) (map[string]any, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var value map[string]any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, errors.New("value must be a JSON object")
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, errors.New("value must contain exactly one JSON object")
+	}
+	return value, nil
 }
 
 func parseTenantList(raw string) ([]string, error) {

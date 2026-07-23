@@ -131,3 +131,66 @@ func TestRunLoadKeepsPersistentSubscriptionsAndMeasuresWireTraffic(t *testing.T)
 		t.Fatalf("load clients did not close: %d sockets remain", sockets.Load())
 	}
 }
+
+func TestRunLoadMeasuresMutationsAndSubscriptionInvalidations(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := upgrader.Upgrade(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		_ = connection.WriteJSON(map[string]any{"type": "session.ready"})
+		for {
+			var message map[string]any
+			if err := connection.ReadJSON(&message); err != nil {
+				return
+			}
+			switch message["type"] {
+			case "auth":
+				_ = connection.WriteJSON(map[string]any{"type": "auth.result", "id": message["id"], "result": map[string]any{}})
+			case "query.subscribe":
+				_ = connection.WriteJSON(map[string]any{"type": "query.result", "id": message["id"], "path": message["path"], "reason": "initial", "result": []any{}})
+			case "mutation.call":
+				now := float64(time.Now().UnixNano()) / float64(time.Millisecond)
+				_ = connection.WriteJSON(map[string]any{
+					"type": "mutation.result", "id": message["id"], "path": message["path"], "result": "ok",
+					"trace": map[string]any{"serverDurationMs": 2},
+				})
+				_ = connection.WriteJSON(map[string]any{
+					"type": "query.progress", "id": "u000001-s001", "path": "analytics.listSessionLogs", "reason": "invalidate",
+					"trace": map[string]any{"serverDurationMs": 3, "serverChangeCommittedAtMs": now - 4},
+				})
+			}
+		}
+	}))
+	defer server.Close()
+
+	profile, err := loadProfileReader(strings.NewReader(`{
+		"version":1,"subscriptions":[{"path":"analytics.listSessionLogs","args":{"tenantId":"${tenant}"}}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	report, err := runLoad(ctx, runConfig{
+		URL: server.URL, Project: "test", Tenants: []string{"tenant-a"}, Connections: 1,
+		SubscriptionsPerConnection: 1, HoldDuration: 250 * time.Millisecond,
+		ConnectTimeout: time.Second, InitialTimeout: time.Second, AuthMode: authModeSynthetic,
+		MaximumDialConcurrency: 1, MutationPath: "analytics.createSessionLog",
+		MutationArgs: map[string]any{"tenantId": "${tenant}", "event": "load-${sequence}"}, MutationRate: 20,
+	}, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Mutations.Sent < 3 || report.Mutations.Succeeded != report.Mutations.Sent || report.Mutations.Errors != 0 {
+		t.Fatalf("unexpected mutation report: %#v", report.Mutations)
+	}
+	if report.Invalidations.Progress != report.Mutations.Succeeded || report.Invalidations.Messages != report.Mutations.Succeeded {
+		t.Fatalf("unexpected invalidation report: %#v", report.Invalidations)
+	}
+	if report.Latency.Mutation.Count != report.Mutations.Succeeded || report.Latency.InvalidationChangeToClient.Count != report.Invalidations.Messages {
+		t.Fatalf("missing latency samples: %#v", report.Latency)
+	}
+}

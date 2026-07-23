@@ -18,6 +18,10 @@ type ResourceSample struct {
 	SubscriptionsSent      uint64           `json:"subscriptionsSent"`
 	InitialResults         uint64           `json:"initialResults"`
 	InitialResultsPerSec   float64          `json:"initialResultsPerSec"`
+	MutationsSent          uint64           `json:"mutationsSent"`
+	MutationsPerSec        float64          `json:"mutationsPerSec"`
+	InvalidationMessages   uint64           `json:"invalidationMessages"`
+	InvalidationsPerSec    float64          `json:"invalidationsPerSec"`
 	WireReadBytesPerSec    float64          `json:"wireReadBytesPerSec"`
 	WireWriteBytesPerSec   float64          `json:"wireWriteBytesPerSec"`
 	HostAvailableBytes     uint64           `json:"hostAvailableBytes"`
@@ -242,6 +246,8 @@ func sampleRunResources(ctx context.Context, cancel context.CancelFunc, config r
 	selfTracker := cpuTracker{}
 	targetTracker := cpuTracker{}
 	resultsRate := rateTracker{}
+	mutationRate := rateTracker{}
+	invalidationRate := rateTracker{}
 	wireReadRate := rateTracker{}
 	wireWriteRate := rateTracker{}
 
@@ -257,6 +263,8 @@ func sampleRunResources(ctx context.Context, cancel context.CancelFunc, config r
 			}
 		}
 		results := metrics.initialResults.Load()
+		mutations := metrics.mutationsSent.Load()
+		invalidations := metrics.invalidationResults.Load() + metrics.invalidationPatches.Load() + metrics.invalidationProgress.Load()
 		wireRead := metrics.wireBytesRead.Load()
 		wireWrite := metrics.wireBytesWritten.Load()
 		sample := ResourceSample{
@@ -266,6 +274,10 @@ func sampleRunResources(ctx context.Context, cancel context.CancelFunc, config r
 			SubscriptionsSent:      metrics.subscriptionsSent.Load(),
 			InitialResults:         results,
 			InitialResultsPerSec:   resultsRate.observe(results, now),
+			MutationsSent:          mutations,
+			MutationsPerSec:        mutationRate.observe(mutations, now),
+			InvalidationMessages:   invalidations,
+			InvalidationsPerSec:    invalidationRate.observe(invalidations, now),
 			WireReadBytesPerSec:    wireReadRate.observe(wireRead, now),
 			WireWriteBytesPerSec:   wireWriteRate.observe(wireWrite, now),
 			HostAvailableBytes:     hostAvailable,
@@ -283,8 +295,8 @@ func sampleRunResources(ctx context.Context, cancel context.CancelFunc, config r
 		if reason := evaluateSafety(config.Safety, safetySnapshot{
 			HostAvailableBytes: hostAvailable,
 			TargetRSSBytes:     targetRSS,
-			StartedOperations:  metrics.connectionAttempts.Load() + metrics.subscriptionsSent.Load(),
-			FailedOperations:   metrics.setupErrors.Load() + metrics.subscriptionErrors.Load(),
+			StartedOperations:  metrics.connectionAttempts.Load() + metrics.subscriptionsSent.Load() + metrics.mutationsSent.Load(),
+			FailedOperations:   metrics.setupErrors.Load() + metrics.subscriptionErrors.Load() + metrics.mutationErrors.Load(),
 		}); reason != "" {
 			metrics.setAbort(reason)
 			cancel()
