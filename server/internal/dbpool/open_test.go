@@ -23,6 +23,13 @@ func TestConnectionBudgetBlocksAtLimitAndResumesAfterRelease(t *testing.T) {
 	if err := budget.acquire(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("acquire at limit returned %v, want context deadline exceeded", err)
 	}
+	stats := budget.stats()
+	if stats.Limit != 2 || stats.Active != 2 || stats.Waiters != 0 || stats.WaitCount != 1 {
+		t.Fatalf("budget stats after timeout = %+v", stats)
+	}
+	if stats.WaitDuration < 15*time.Millisecond {
+		t.Fatalf("budget wait duration = %s, want at least 15ms", stats.WaitDuration)
+	}
 
 	budget.release()
 	if err := budget.acquire(context.Background()); err != nil {
@@ -39,10 +46,17 @@ func TestTotalConnectionBudgetDoesNotAllowUnlimitedConfiguration(t *testing.T) {
 	}
 }
 
+func TestTotalConnectionBudgetHonorsBoundedDeploymentConfiguration(t *testing.T) {
+	t.Setenv("GONVEX_DB_MAX_TOTAL_CONNS", "48")
+	if got := runtimeBudget.limit(); got != 48 {
+		t.Fatalf("total connection limit = %d, want configured limit 48", got)
+	}
+}
+
 func TestTotalConnectionBudgetCannotExceedRuntimeSafetyCeiling(t *testing.T) {
 	t.Setenv("GONVEX_DB_MAX_TOTAL_CONNS", "200")
-	if got := runtimeBudget.limit(); got != defaultMaxTotal {
-		t.Fatalf("total connection limit = %d, want safety ceiling %d", got, defaultMaxTotal)
+	if got := runtimeBudget.limit(); got != maxTotalSafetyCeiling {
+		t.Fatalf("total connection limit = %d, want safety ceiling %d", got, maxTotalSafetyCeiling)
 	}
 }
 

@@ -83,7 +83,7 @@ hold. The runner then waits for every mutation result before closing sockets:
   --mutation-rate 100
 ```
 
-Mutation arguments support exact `${tenant}`, `${userId}`, and `${sequence}`
-placeholders. Use a mutation that writes a table read by at least one profile
-subscription; otherwise mutation latency is measured but no reactive update is
-expected.
+Mutation arguments support exact `${tenant}`, `${userId}`, `${sequence}`, and
+`${mutationId}` placeholders. Use a mutation that writes a table read by at
+least one profile subscription; otherwise mutation latency is measured but no
+reactive update is expected.

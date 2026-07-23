@@ -1855,6 +1855,12 @@ func subscriptionTables(path string) []string {
 		return []string{"roles", "rolePermissions", "permissions", "userTeams", "users"}
 	case "users.myTenants":
 		return []string{"tenants", "userTenantMap", "users"}
+	case "settings.getByKey", "settings.getPublicAuthSettings":
+		return []string{"globalSettings"}
+	case "settings.listNotifications":
+		return []string{"notifications"}
+	case "settings.listPlugins", "settings.getPlugin":
+		return []string{"plugins"}
 	case "taskResources.listTaskNotes", "taskResources.listTaskNotesPaged", "taskResources.noteSummariesByTenant", "taskResources.noteCountsByTenant", "taskResources.attachmentCountsByTenant", "taskResources.listTaskIdsWithAttachments", "taskResources.listWorkspaceAttachments":
 		return []string{"taskNotes", "tasks", "users"}
 	case "taskResources.listTaskViewsByTaskId", "taskResources.listTaskViewsByTaskPgId":
@@ -1931,6 +1937,12 @@ func mutationInvalidationTables(path string) []string {
 		return []string{"files"}
 	case "scheduling.processWorkspaceChatMessage":
 		return []string{"scheduleAvailabilitySubmissions", "scheduleAvailabilityItems", "scheduleRosterEntries"}
+	case "settings.set":
+		return []string{"globalSettings"}
+	case "settings.togglePlugin", "settings.upsertPlugin", "settings.ensureDefaultPlugins":
+		return []string{"plugins"}
+	case "settings.markRead", "settings.markAllRead", "settings.clearAllNotifications":
+		return []string{"notifications"}
 	}
 	if strings.HasPrefix(path, "techSupport.") {
 		return []string{"supportSessions"}

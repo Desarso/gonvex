@@ -818,12 +818,13 @@ func runMutationWriter(ctx context.Context, start, stop <-chan struct{}, connect
 		variables["tenant"] = tenant
 		variables["userId"] = userID
 		variables["sequence"] = fmt.Sprintf("%d", sequence)
+		variables["mutationId"] = fmt.Sprintf("u%06d-m%06d", userIndex+1, sequence)
 		args, ok := expandProfileValue(config.MutationArgs, variables).(map[string]any)
 		if !ok {
 			metrics.recordMutationError(tenant)
 			return
 		}
-		id := fmt.Sprintf("u%06d-m%06d", userIndex+1, sequence)
+		id := variables["mutationId"]
 		sentAt := time.Now()
 		pendingMu.Lock()
 		pending[id] = pendingMutation{path: config.MutationPath, sentAt: sentAt}

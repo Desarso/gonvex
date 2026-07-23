@@ -235,7 +235,7 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 	flags.DurationVar(&options.ramp, "ramp", options.ramp, "connection ramp duration")
 	flags.DurationVar(&options.hold, "hold", options.hold, "steady-state hold after initial results")
 	flags.StringVar(&options.mutationPath, "mutation-path", "", "mutation function path; requires --mutation-rate")
-	flags.StringVar(&options.mutationArgs, "mutation-args", options.mutationArgs, "mutation args JSON object; supports ${tenant}, ${userId}, and ${sequence}")
+	flags.StringVar(&options.mutationArgs, "mutation-args", options.mutationArgs, "mutation args JSON object; supports ${tenant}, ${userId}, ${sequence}, and ${mutationId}")
 	flags.Float64Var(&options.mutationRate, "mutation-rate", 0, "aggregate mutation calls per second across all connections")
 	flags.DurationVar(&options.connectTimeout, "connect-timeout", options.connectTimeout, "WebSocket/session timeout")
 	flags.DurationVar(&options.initialTimeout, "initial-timeout", options.initialTimeout, "maximum time for initial subscriptions")

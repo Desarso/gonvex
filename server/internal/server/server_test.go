@@ -891,6 +891,9 @@ func TestAppRealtimeFunctionTables(t *testing.T) {
 		{path: "calls.listForUser", want: []string{"callSignals"}},
 		{path: "taskFindings.listNotes", want: []string{"taskFindings", "findingNotes", "taskLogs", "taskWorkspaceContexts", "tasks"}},
 		{path: "users.myPermissions", want: []string{"roles", "rolePermissions", "permissions", "userTeams", "users"}},
+		{path: "settings.getByKey", want: []string{"globalSettings"}},
+		{path: "settings.listNotifications", want: []string{"notifications"}},
+		{path: "settings.listPlugins", want: []string{"plugins"}},
 		{path: "taskResources.listTaskNotes", want: []string{"taskNotes", "tasks", "users"}},
 		{path: "taskResources.listTaskViewsByTaskId", want: []string{"taskViews", "tasks", "users"}},
 		{path: "taskResources.listTaskSignatures", want: []string{"taskSignatures", "tasks", "users"}},
@@ -922,6 +925,9 @@ func TestAppRealtimeMutationInvalidationTables(t *testing.T) {
 		{path: "taskResources.recordTaskViewByTaskId", want: []string{"taskViews", "tasks"}},
 		{path: "taskResources.addTagByTaskId", want: []string{"taskTags", "tasks", "taskLogs"}},
 		{path: "scheduling.processWorkspaceChatMessage", want: []string{"scheduleAvailabilitySubmissions", "scheduleAvailabilityItems", "scheduleRosterEntries"}},
+		{path: "settings.set", want: []string{"globalSettings"}},
+		{path: "settings.togglePlugin", want: []string{"plugins"}},
+		{path: "settings.markAllRead", want: []string{"notifications"}},
 		{path: "tasks.update", want: []string{"tasks", "taskUsers", "taskTags", "taskLogs", "taskCustomFieldValues", "taskApprovalInstances"}},
 	}
 	for _, test := range tests {
