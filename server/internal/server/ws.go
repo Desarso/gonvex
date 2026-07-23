@@ -1079,8 +1079,11 @@ func (s *Server) executeSubscription(ctx context.Context, sub querySubscription,
 func resultRowIDs(result any) map[string]bool {
 	ids := map[string]bool{}
 	collect := func(row map[string]any) {
-		if value, ok := row["id"].(string); ok && value != "" {
-			ids[value] = true
+		for _, key := range []string{"id", "_id"} {
+			if value, ok := row[key].(string); ok && value != "" {
+				ids[value] = true
+				return
+			}
 		}
 	}
 	switch rows := result.(type) {

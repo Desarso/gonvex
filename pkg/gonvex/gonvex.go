@@ -203,6 +203,33 @@ type RuntimeContext struct {
 	Env map[string]string
 }
 
+type queryChangeContextKey struct{}
+
+type QueryChangeInfo struct {
+	Reason      string
+	ChangedAtMS float64
+}
+
+// WithQueryChange attaches the table-change revision that caused a reactive
+// query execution. Runtime hosts use it to let application handlers safely
+// coalesce common base reads across identity-scoped subscription groups.
+func WithQueryChange(ctx context.Context, reason string, changedAtMS float64) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, queryChangeContextKey{}, QueryChangeInfo{Reason: reason, ChangedAtMS: changedAtMS})
+}
+
+// QueryChange returns the reactive invalidation revision attached by the host.
+// Initial/direct queries normally return an empty reason and a zero timestamp.
+func QueryChange(ctx context.Context) QueryChangeInfo {
+	if ctx == nil {
+		return QueryChangeInfo{}
+	}
+	info, _ := ctx.Value(queryChangeContextKey{}).(QueryChangeInfo)
+	return info
+}
+
 // EnvValue resolves an environment variable for the executing function:
 // project-scoped values (dashboard env store) win, the process environment is
 // the fallback. Nil-safe for tests and offline tools.
