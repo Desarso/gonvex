@@ -492,6 +492,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		s.registerProjectCrons(project)
 		writeJSON(w, http.StatusOK, map[string]any{"tenant": existing})
 		return
 	}
@@ -571,6 +572,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	s.tenants[key] = tenant
 	s.projectMu.Unlock()
 	s.invalidateProjectTenantHydration(project)
+	s.registerProjectCrons(project)
 
 	writeJSON(w, http.StatusCreated, map[string]any{"tenant": tenant})
 }
@@ -627,6 +629,7 @@ func (s *Server) handleDeleteTenant(w http.ResponseWriter, r *http.Request) {
 	s.invalidateProjectTenantHydration(project)
 	s.tenantStores.Close()
 	s.cache.invalidateRows(r.Context(), project, tenantID, "")
+	s.registerProjectCrons(project)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -940,8 +943,11 @@ func (s *Server) provisionCreatedTenant(ctx context.Context, project string, res
 	s.invalidateProjectTenantHydration(project)
 	s.hydrateProjectTenantDatabases(ctx, project)
 	databaseURL := s.databaseURLForTenant(project, tenantID)
-	_, err := s.ensureRuntimeTenantDatabase(ctx, project, tenantID, databaseURL)
-	return err
+	if _, err := s.ensureRuntimeTenantDatabase(ctx, project, tenantID, databaseURL); err != nil {
+		return err
+	}
+	s.registerProjectCrons(project)
+	return nil
 }
 
 func tenantIDFromMutationResult(result any) string {

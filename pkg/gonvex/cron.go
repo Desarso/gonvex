@@ -27,6 +27,7 @@ type CronSpec struct {
 	Interval     time.Duration
 	Expression   string
 	Args         json.RawMessage
+	PerTenant    bool
 }
 
 // Cron registers a recurring job that runs functionPath every interval. The
@@ -36,10 +37,33 @@ func (a *App) Cron(name string, interval time.Duration, functionPath string, arg
 	a.registerCron(CronSpec{Name: name, Interval: interval, FunctionPath: functionPath, Args: encodeCronArgs(name, args)})
 }
 
+// TenantCron registers a recurring job that runs once for every tenant in the
+// project. Each invocation is bound to that tenant's database and TenantID.
+func (a *App) TenantCron(name string, interval time.Duration, functionPath string, args any) {
+	a.registerCron(CronSpec{
+		Name:         name,
+		Interval:     interval,
+		FunctionPath: functionPath,
+		Args:         encodeCronArgs(name, args),
+		PerTenant:    true,
+	})
+}
+
 // CronExpr registers a recurring job driven by a standard 5-field cron
 // expression (minute hour day-of-month month day-of-week).
 func (a *App) CronExpr(name string, expression string, functionPath string, args any) {
 	a.registerCron(CronSpec{Name: name, Expression: expression, FunctionPath: functionPath, Args: encodeCronArgs(name, args)})
+}
+
+// TenantCronExpr is TenantCron driven by a standard 5-field cron expression.
+func (a *App) TenantCronExpr(name string, expression string, functionPath string, args any) {
+	a.registerCron(CronSpec{
+		Name:         name,
+		Expression:   expression,
+		FunctionPath: functionPath,
+		Args:         encodeCronArgs(name, args),
+		PerTenant:    true,
+	})
 }
 
 // Crons returns a copy of every cron registered on the app.

@@ -398,6 +398,7 @@ func (s *Server) createAppAuthTenant(ctx context.Context, projectID string, user
 		role = "owner"
 	}
 	cleanupDatabase = false
+	s.registerProjectCrons(projectID)
 	return appAuthTenant{ID: tenantID, Name: name, Role: role, Permissions: map[string]any{}}, nil
 }
 

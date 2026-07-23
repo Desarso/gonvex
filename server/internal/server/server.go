@@ -208,7 +208,18 @@ func (s *Server) registerProjectCrons(projectID string) {
 	if app == nil {
 		return
 	}
-	s.scheduler.syncCrons(projectID, app.Crons())
+	s.hydrateProjectTenantDatabases(context.Background(), projectID)
+	s.projectMu.RLock()
+	tenantIDs := make([]string, 0)
+	for _, tenant := range s.tenants {
+		if tenant.ProjectID == projectID &&
+			(tenant.Provisioned || strings.TrimSpace(tenant.databaseURL) != "") &&
+			strings.TrimSpace(tenant.ID) != "" {
+			tenantIDs = append(tenantIDs, tenant.ID)
+		}
+	}
+	s.projectMu.RUnlock()
+	s.scheduler.syncCrons(projectID, app.Crons(), tenantIDs...)
 }
 
 func (s *Server) Handler() http.Handler {

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -101,6 +102,53 @@ func TestSchedulerRunsCronAndTracksMetrics(t *testing.T) {
 	}
 	if snapshot.Crons[0].Runs < 1 {
 		t.Fatalf("expected cron run count to advance, got %+v", snapshot.Crons[0])
+	}
+}
+
+func TestSchedulerExpandsTenantCronIntoTenantBoundJobs(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	sc := newScheduler(func(ctx context.Context, job scheduledJob) error {
+		mu.Lock()
+		seen = append(seen, job.TenantID)
+		mu.Unlock()
+		return nil
+	})
+
+	now := time.Date(2026, 7, 23, 18, 0, 0, 0, time.UTC)
+	sc.now = func() time.Time { return now }
+	sc.syncCrons("project-a", []gonvex.CronSpec{{
+		Name:         "generate due workplans",
+		Interval:     time.Minute,
+		FunctionPath: "workplans.generateDueWorkplans",
+		PerTenant:    true,
+	}}, "tenant-b", "tenant-a", "tenant-a")
+
+	sc.mu.Lock()
+	if len(sc.crons) != 2 {
+		sc.mu.Unlock()
+		t.Fatalf("tenant cron registrations = %d, want 2", len(sc.crons))
+	}
+	for _, reg := range sc.crons {
+		reg.NextRun = now.Add(-time.Second)
+	}
+	sc.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sc.start(ctx)
+
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seen) == 2
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	sort.Strings(seen)
+	if seen[0] != "tenant-a" || seen[1] != "tenant-b" {
+		t.Fatalf("tenant cron jobs ran for %#v", seen)
 	}
 }
 

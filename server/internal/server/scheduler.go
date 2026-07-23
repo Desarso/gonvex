@@ -38,6 +38,7 @@ type scheduledJob struct {
 
 type cronRegistration struct {
 	ProjectID  string
+	TenantID   string
 	Spec       gonvex.CronSpec
 	Schedule   cronSchedule
 	NextRun    time.Time
@@ -48,7 +49,7 @@ type cronRegistration struct {
 }
 
 func (c *cronRegistration) key() string {
-	return c.ProjectID + "\x00" + c.Spec.Name
+	return c.ProjectID + "\x00" + c.TenantID + "\x00" + c.Spec.Name
 }
 
 type schedulerBucket struct {
@@ -179,7 +180,7 @@ func (sc *scheduler) signal() {
 // syncCrons replaces the cron registrations for a project with the crons
 // declared by its compiled app. Existing run statistics for unchanged crons are
 // preserved so the dashboard history survives a resync.
-func (sc *scheduler) syncCrons(projectID string, specs []gonvex.CronSpec) {
+func (sc *scheduler) syncCrons(projectID string, specs []gonvex.CronSpec, tenantIDs ...string) {
 	now := sc.now()
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -188,10 +189,22 @@ func (sc *scheduler) syncCrons(projectID string, specs []gonvex.CronSpec) {
 	previous := map[string]*cronRegistration{}
 	for key, reg := range sc.crons {
 		if reg.ProjectID == projectID {
-			previous[reg.Spec.Name] = reg
+			previous[reg.TenantID+"\x00"+reg.Spec.Name] = reg
 			delete(sc.crons, key)
 		}
 	}
+
+	cleanTenantIDs := make([]string, 0, len(tenantIDs))
+	seenTenantIDs := map[string]bool{}
+	for _, tenantID := range tenantIDs {
+		tenantID = strings.TrimSpace(tenantID)
+		if tenantID == "" || seenTenantIDs[tenantID] {
+			continue
+		}
+		seenTenantIDs[tenantID] = true
+		cleanTenantIDs = append(cleanTenantIDs, tenantID)
+	}
+	sort.Strings(cleanTenantIDs)
 
 	for _, spec := range specs {
 		schedule, err := scheduleForSpec(spec)
@@ -199,19 +212,25 @@ func (sc *scheduler) syncCrons(projectID string, specs []gonvex.CronSpec) {
 			sc.logger.Warn("skip cron with invalid schedule", "project", projectID, "cron", spec.Name, "error", err)
 			continue
 		}
-		reg := &cronRegistration{ProjectID: projectID, Spec: spec, Schedule: schedule}
-		reg.NextRun = schedule.Next(now)
-		if prior, ok := previous[spec.Name]; ok {
-			reg.Runs = prior.Runs
-			reg.Failures = prior.Failures
-			reg.LastRun = prior.LastRun
-			reg.LastStatus = prior.LastStatus
+		targetTenants := []string{""}
+		if spec.PerTenant {
+			targetTenants = cleanTenantIDs
 		}
-		if reg.NextRun.IsZero() {
-			sc.logger.Warn("cron has no upcoming run", "project", projectID, "cron", spec.Name)
-			continue
+		for _, tenantID := range targetTenants {
+			reg := &cronRegistration{ProjectID: projectID, TenantID: tenantID, Spec: spec, Schedule: schedule}
+			reg.NextRun = schedule.Next(now)
+			if prior, ok := previous[tenantID+"\x00"+spec.Name]; ok {
+				reg.Runs = prior.Runs
+				reg.Failures = prior.Failures
+				reg.LastRun = prior.LastRun
+				reg.LastStatus = prior.LastStatus
+			}
+			if reg.NextRun.IsZero() {
+				sc.logger.Warn("cron has no upcoming run", "project", projectID, "tenant", tenantID, "cron", spec.Name)
+				continue
+			}
+			sc.crons[reg.key()] = reg
 		}
-		sc.crons[reg.key()] = reg
 	}
 	sc.signal()
 }
@@ -298,6 +317,7 @@ func (sc *scheduler) cronJobLocked(reg *cronRegistration, now time.Time) schedul
 	return scheduledJob{
 		ID:           fmt.Sprintf("cron_%d", sc.idSeq),
 		ProjectID:    reg.ProjectID,
+		TenantID:     reg.TenantID,
 		FunctionPath: reg.Spec.FunctionPath,
 		Args:         reg.Spec.Args,
 		RunAt:        reg.NextRun,
@@ -352,7 +372,7 @@ func (sc *scheduler) finish(job scheduledJob, lag, duration time.Duration, err e
 	}
 
 	if job.CronName != "" {
-		if reg, ok := sc.crons[job.ProjectID+"\x00"+job.CronName]; ok {
+		if reg, ok := sc.crons[job.ProjectID+"\x00"+job.TenantID+"\x00"+job.CronName]; ok {
 			reg.Runs++
 			reg.LastRun = now
 			reg.LastStatus = outcome
@@ -415,6 +435,7 @@ type schedulerSnapshot struct {
 type schedulerCronSnapshot struct {
 	Name     string `json:"name"`
 	Project  string `json:"project,omitempty"`
+	Tenant   string `json:"tenant,omitempty"`
 	Function string `json:"function"`
 	Schedule string `json:"schedule"`
 	NextRun  string `json:"nextRun,omitempty"`
@@ -450,6 +471,7 @@ func (sc *scheduler) snapshot() schedulerSnapshot {
 		crons = append(crons, schedulerCronSnapshot{
 			Name:     reg.Spec.Name,
 			Project:  reg.ProjectID,
+			Tenant:   reg.TenantID,
 			Function: reg.Spec.FunctionPath,
 			Schedule: describeSchedule(reg.Spec),
 			NextRun:  nextRun,
@@ -459,7 +481,12 @@ func (sc *scheduler) snapshot() schedulerSnapshot {
 			Failures: reg.Failures,
 		})
 	}
-	sort.Slice(crons, func(left, right int) bool { return crons[left].Name < crons[right].Name })
+	sort.Slice(crons, func(left, right int) bool {
+		if crons[left].Name == crons[right].Name {
+			return crons[left].Tenant < crons[right].Tenant
+		}
+		return crons[left].Name < crons[right].Name
+	})
 
 	recent := make([]schedulerRun, len(sc.recent))
 	copy(recent, sc.recent)
