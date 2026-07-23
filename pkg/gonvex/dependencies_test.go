@@ -1,6 +1,9 @@
 package gonvex
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestFunctionDependencyOptions(t *testing.T) {
 	app := NewApp()
@@ -15,5 +18,16 @@ func TestFunctionDependencyOptions(t *testing.T) {
 	read := function.Dependencies.Reads[0]
 	if read.Table != "tasks" || len(read.Columns) != 2 || !read.Windowed || !function.Dependencies.ShareByPermissions {
 		t.Fatalf("unexpected dependencies: %#v", function.Dependencies)
+	}
+}
+
+func TestQueryChangeRoundTrip(t *testing.T) {
+	ctx := WithQueryChange(context.Background(), "invalidate", 1234.5)
+	info := QueryChange(ctx)
+	if info.Reason != "invalidate" || info.ChangedAtMS != 1234.5 {
+		t.Fatalf("query change = %#v", info)
+	}
+	if empty := QueryChange(nil); empty != (QueryChangeInfo{}) {
+		t.Fatalf("nil query change = %#v", empty)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 	"github.com/google/uuid"
 )
 
@@ -73,10 +74,13 @@ type cacheMetricsBucket struct {
 }
 
 type databaseMetricState struct {
-	Current          databasePoolStats
-	PreviousWaits    int64
-	PreviousWaitTime time.Duration
-	Series           []databaseMetricPoint
+	Current                databasePoolStats
+	CurrentBudget          dbpool.BudgetStats
+	PreviousWaits          int64
+	PreviousWaitTime       time.Duration
+	PreviousBudgetWaits    uint64
+	PreviousBudgetWaitTime time.Duration
+	Series                 []databaseMetricPoint
 }
 
 type runtimeLogEntry struct {
@@ -285,23 +289,32 @@ func (state reactiveMetricState) snapshot() reactiveMetricSnapshot {
 }
 
 type databaseMetricSnapshot struct {
-	Pools              int                   `json:"pools"`
-	OpenConnections    int                   `json:"openConnections"`
-	InUse              int                   `json:"inUse"`
-	Idle               int                   `json:"idle"`
-	MaxOpenConnections int                   `json:"maxOpenConnections"`
-	WaitCount          int64                 `json:"waitCount"`
-	WaitDurationMS     float64               `json:"waitDurationMs"`
-	Series             []databaseMetricPoint `json:"series"`
+	Pools                      int                   `json:"pools"`
+	OpenConnections            int                   `json:"openConnections"`
+	InUse                      int                   `json:"inUse"`
+	Idle                       int                   `json:"idle"`
+	MaxOpenConnections         int                   `json:"maxOpenConnections"`
+	WaitCount                  int64                 `json:"waitCount"`
+	WaitDurationMS             float64               `json:"waitDurationMs"`
+	GlobalBudgetLimit          int                   `json:"globalBudgetLimit"`
+	GlobalBudgetActive         int                   `json:"globalBudgetActive"`
+	GlobalBudgetWaiters        int                   `json:"globalBudgetWaiters"`
+	GlobalBudgetWaitCount      uint64                `json:"globalBudgetWaitCount"`
+	GlobalBudgetWaitDurationMS float64               `json:"globalBudgetWaitDurationMs"`
+	Series                     []databaseMetricPoint `json:"series"`
 }
 
 type databaseMetricPoint struct {
-	Time            string  `json:"time"`
-	OpenConnections int     `json:"openConnections"`
-	InUse           int     `json:"inUse"`
-	Idle            int     `json:"idle"`
-	WaitCount       int64   `json:"waitCount"`
-	WaitDurationMS  float64 `json:"waitDurationMs"`
+	Time                       string  `json:"time"`
+	OpenConnections            int     `json:"openConnections"`
+	InUse                      int     `json:"inUse"`
+	Idle                       int     `json:"idle"`
+	WaitCount                  int64   `json:"waitCount"`
+	WaitDurationMS             float64 `json:"waitDurationMs"`
+	GlobalBudgetActive         int     `json:"globalBudgetActive"`
+	GlobalBudgetWaiters        int     `json:"globalBudgetWaiters"`
+	GlobalBudgetWaitCount      uint64  `json:"globalBudgetWaitCount"`
+	GlobalBudgetWaitDurationMS float64 `json:"globalBudgetWaitDurationMs"`
 }
 
 type runningMetricSnapshot struct {
@@ -682,16 +695,26 @@ func (m *runtimeMetrics) recordDatabase(project string, stats databasePoolStats)
 	if waitDuration < 0 {
 		waitDuration = 0
 	}
+	budget := dbpool.RuntimeBudgetStats()
+	budgetWaitCount := budget.WaitCount - state.PreviousBudgetWaits
+	budgetWaitDuration := budget.WaitDuration - state.PreviousBudgetWaitTime
 	state.Current = stats
+	state.CurrentBudget = budget
 	state.PreviousWaits = stats.WaitCount
 	state.PreviousWaitTime = stats.WaitDuration
+	state.PreviousBudgetWaits = budget.WaitCount
+	state.PreviousBudgetWaitTime = budget.WaitDuration
 	state.Series = append(state.Series, databaseMetricPoint{
-		Time:            now.Format(time.RFC3339Nano),
-		OpenConnections: stats.OpenConnections,
-		InUse:           stats.InUse,
-		Idle:            stats.Idle,
-		WaitCount:       waitCount,
-		WaitDurationMS:  float64(waitDuration.Microseconds()) / 1000,
+		Time:                       now.Format(time.RFC3339Nano),
+		OpenConnections:            stats.OpenConnections,
+		InUse:                      stats.InUse,
+		Idle:                       stats.Idle,
+		WaitCount:                  waitCount,
+		WaitDurationMS:             float64(waitDuration.Microseconds()) / 1000,
+		GlobalBudgetActive:         budget.Active,
+		GlobalBudgetWaiters:        budget.Waiters,
+		GlobalBudgetWaitCount:      budgetWaitCount,
+		GlobalBudgetWaitDurationMS: float64(budgetWaitDuration.Microseconds()) / 1000,
 	})
 	if len(state.Series) > metricsDatabasePointLimit {
 		state.Series = state.Series[len(state.Series)-metricsDatabasePointLimit:]
@@ -847,14 +870,19 @@ func (m *runtimeMetrics) databaseSnapshot(project string) databaseMetricSnapshot
 	series := make([]databaseMetricPoint, len(state.Series))
 	copy(series, state.Series)
 	return databaseMetricSnapshot{
-		Pools:              state.Current.Pools,
-		OpenConnections:    state.Current.OpenConnections,
-		InUse:              state.Current.InUse,
-		Idle:               state.Current.Idle,
-		MaxOpenConnections: state.Current.MaxOpenConnections,
-		WaitCount:          state.Current.WaitCount,
-		WaitDurationMS:     float64(state.Current.WaitDuration.Microseconds()) / 1000,
-		Series:             series,
+		Pools:                      state.Current.Pools,
+		OpenConnections:            state.Current.OpenConnections,
+		InUse:                      state.Current.InUse,
+		Idle:                       state.Current.Idle,
+		MaxOpenConnections:         state.Current.MaxOpenConnections,
+		WaitCount:                  state.Current.WaitCount,
+		WaitDurationMS:             float64(state.Current.WaitDuration.Microseconds()) / 1000,
+		GlobalBudgetLimit:          state.CurrentBudget.Limit,
+		GlobalBudgetActive:         state.CurrentBudget.Active,
+		GlobalBudgetWaiters:        state.CurrentBudget.Waiters,
+		GlobalBudgetWaitCount:      state.CurrentBudget.WaitCount,
+		GlobalBudgetWaitDurationMS: float64(state.CurrentBudget.WaitDuration.Microseconds()) / 1000,
+		Series:                     series,
 	}
 }
 

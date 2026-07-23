@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 )
 
@@ -47,7 +48,7 @@ type subscriptionManager struct {
 	listenerCount int
 	listeners     *tenantListenerManager
 	sequence      atomic.Uint64
-	execute       func(context.Context, *sharedSubscription, querySubscription, string) (any, error)
+	execute       func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error)
 }
 
 type sharedSubscription struct {
@@ -94,7 +95,8 @@ func newSubscriptionManager(server *Server) *subscriptionManager {
 		broad:   map[subscriptionScope]map[*sharedSubscription]struct{}{},
 	}
 	manager.listeners = newTenantListenerManager(server)
-	manager.execute = func(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string) (any, error) {
+	manager.execute = func(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string, changedAtMS float64) (any, error) {
+		ctx = gonvex.WithQueryChange(ctx, reason, changedAtMS)
 		return server.executeTenantQueryForCallerCached(ctx, group.project, group.tenant, listener.caller, group.path, group.args, group.cacheScope, reason)
 	}
 	return manager
@@ -514,7 +516,7 @@ func (group *sharedSubscription) run() {
 			return
 		}
 		startedAt := time.Now().UTC()
-		result, err := group.manager.execute(group.ctx, group, representative, reason)
+		result, err := group.manager.execute(group.ctx, group, representative, reason, changedAtMS)
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
 			metric.QueriesRerun++
 		})

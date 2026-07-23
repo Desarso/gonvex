@@ -11,18 +11,21 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-const defaultMaxTotal = 20
+const (
+	defaultMaxTotal       = 20
+	maxTotalSafetyCeiling = 64
+)
 
 const budgetedIdleTTL = time.Second
 
 var runtimeBudget = &connectionBudget{limit: func() int {
 	configured := positiveEnvironmentInt("GONVEX_DB_MAX_TOTAL_CONNS", defaultMaxTotal)
 	// The runtime shares PostgreSQL with its control plane, migrations, and
-	// often other services. Treat 20 as a hard per-process safety ceiling, not
-	// merely a default: an accidental environment override must cause bounded
-	// queueing inside Gonvex instead of exhausting PostgreSQL for everyone.
-	if configured > defaultMaxTotal {
-		return defaultMaxTotal
+	// often other services. Keep a conservative default, but allow an operator
+	// to allocate more of a known PostgreSQL connection budget. The absolute
+	// ceiling still prevents a typo from creating an effectively unbounded pool.
+	if configured > maxTotalSafetyCeiling {
+		return maxTotalSafetyCeiling
 	}
 	return configured
 }}
@@ -72,13 +75,18 @@ func PGXConn(raw any) (*pgx.Conn, bool) {
 }
 
 type connectionBudget struct {
-	mu      sync.Mutex
-	active  int
-	changed chan struct{}
-	limit   func() int
+	mu           sync.Mutex
+	active       int
+	waiters      int
+	waitCount    uint64
+	waitDuration time.Duration
+	changed      chan struct{}
+	limit        func() int
 }
 
 func (b *connectionBudget) acquire(ctx context.Context) error {
+	waitStarted := time.Now()
+	waiting := false
 	for {
 		b.mu.Lock()
 		if b.changed == nil {
@@ -86,18 +94,66 @@ func (b *connectionBudget) acquire(ctx context.Context) error {
 		}
 		if b.active < b.limit() {
 			b.active++
+			if waiting {
+				b.finishWaitLocked(waitStarted)
+			}
 			b.mu.Unlock()
 			return nil
+		}
+		if !waiting {
+			b.waiters++
+			waiting = true
 		}
 		changed := b.changed
 		b.mu.Unlock()
 
 		select {
 		case <-ctx.Done():
+			b.mu.Lock()
+			if waiting {
+				b.finishWaitLocked(waitStarted)
+			}
+			b.mu.Unlock()
 			return ctx.Err()
 		case <-changed:
 		}
 	}
+}
+
+func (b *connectionBudget) finishWaitLocked(startedAt time.Time) {
+	if b.waiters > 0 {
+		b.waiters--
+	}
+	b.waitCount++
+	b.waitDuration += time.Since(startedAt)
+}
+
+// BudgetStats reports process-wide physical connection pressure. SQL pool
+// statistics do not include time spent waiting for this cross-pool gate.
+type BudgetStats struct {
+	Limit        int
+	Active       int
+	Waiters      int
+	WaitCount    uint64
+	WaitDuration time.Duration
+}
+
+func (b *connectionBudget) stats() BudgetStats {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return BudgetStats{
+		Limit:        b.limit(),
+		Active:       b.active,
+		Waiters:      b.waiters,
+		WaitCount:    b.waitCount,
+		WaitDuration: b.waitDuration,
+	}
+}
+
+// RuntimeBudgetStats returns the aggregate connection budget for this runtime
+// process, across landlord, registry, telemetry, and tenant database pools.
+func RuntimeBudgetStats() BudgetStats {
+	return runtimeBudget.stats()
 }
 
 func (b *connectionBudget) release() {

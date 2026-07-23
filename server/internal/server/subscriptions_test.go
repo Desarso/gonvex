@@ -22,6 +22,22 @@ func TestSubscriptionTokensAreDistinctMapKeys(t *testing.T) {
 	}
 }
 
+func TestResultRowIDsAcceptsConvexStyleIDs(t *testing.T) {
+	ids := resultRowIDs([]map[string]any{
+		{"id": "postgres-id"},
+		{"_id": "convex-id"},
+		{"id": "preferred-id", "_id": "fallback-id"},
+	})
+	for _, id := range []string{"postgres-id", "convex-id", "preferred-id"} {
+		if !ids[id] {
+			t.Fatalf("missing result row id %q from %#v", id, ids)
+		}
+	}
+	if ids["fallback-id"] {
+		t.Fatalf("used _id even though id was available: %#v", ids)
+	}
+}
+
 func TestSubscriptionCountsDoNotTraverseGroups(t *testing.T) {
 	blocked := &sharedSubscription{}
 	manager := &subscriptionManager{
@@ -59,7 +75,13 @@ func TestSubscriptionRunnerSerializesAndCoalescesBurst(t *testing.T) {
 	var executions atomic.Int32
 	started := make(chan struct{})
 	release := make(chan struct{})
-	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string) (any, error) {
+	type executionChange struct {
+		reason      string
+		changedAtMS float64
+	}
+	changes := make(chan executionChange, 2)
+	manager.execute = func(_ context.Context, _ *sharedSubscription, _ querySubscription, reason string, changedAtMS float64) (any, error) {
+		changes <- executionChange{reason: reason, changedAtMS: changedAtMS}
 		current := running.Add(1)
 		for current > maximum.Load() && !maximum.CompareAndSwap(maximum.Load(), current) {
 		}
@@ -98,6 +120,13 @@ func TestSubscriptionRunnerSerializesAndCoalescesBurst(t *testing.T) {
 	}
 	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.RerunsCoalesced; got != 20 {
 		t.Fatalf("reruns coalesced = %d, want 20", got)
+	}
+	first, second := <-changes, <-changes
+	if first.reason != "initial" || first.changedAtMS != 0 {
+		t.Fatalf("first execution change = %#v", first)
+	}
+	if second.reason != "invalidate" || second.changedAtMS != 20 {
+		t.Fatalf("coalesced execution change = %#v, want latest revision 20", second)
 	}
 }
 

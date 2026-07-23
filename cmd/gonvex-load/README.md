@@ -1,13 +1,16 @@
 # Gonvex persistent-load runner
 
 `gonvex-load` creates virtual users without opening browsers. Each virtual user
-holds one WebSocket connection and keeps a configured set of query
-subscriptions alive.
+holds one WebSocket connection, keeps a configured set of query subscriptions
+alive, and can issue mutations during the steady-state hold.
 
 The runner records:
 
-- connection, authentication, initial-result, and server-query latency;
+- connection, authentication, initial-result, server-query, mutation, and
+  invalidation latency;
 - successful and failed connections/subscriptions, by query path;
+- successful and failed mutations, plus full-result, patch, and unchanged
+  progress messages caused by invalidations;
 - compressed wire bytes and logical WebSocket payload bytes;
 - per-second throughput, process RSS/CPU/threads/file descriptors, and host
   available memory;
@@ -63,3 +66,24 @@ include a per-tenant breakdown in the report:
   --tenant loadtest-a,loadtest-b,loadtest-c \
   --connections 10000
 ```
+
+Add an aggregate mutation rate to measure write acknowledgements and reactive
+change delivery. Mutations begin only after every initial subscription has
+settled, are spread evenly across the virtual users, and stop at the end of the
+hold. The runner then waits for every mutation result before closing sockets:
+
+```bash
+./tmp/gonvex-load-runner \
+  --profile /path/to/whagons-workspace-50.json \
+  --tenant loadtest-a,loadtest-b \
+  --connections 100 \
+  --hold 30s \
+  --mutation-path analytics.createSessionLog \
+  --mutation-args '{"tenantId":"${tenant}","userId":"${userId}","description":"load ${sequence}"}' \
+  --mutation-rate 100
+```
+
+Mutation arguments support exact `${tenant}`, `${userId}`, `${sequence}`, and
+`${mutationId}` placeholders. Use a mutation that writes a table read by at
+least one profile subscription; otherwise mutation latency is measured but no
+reactive update is expected.
