@@ -25,6 +25,11 @@ func TestDurableSyncLogOrdersConcurrentTransactionsAndProjectsColumns(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Keep the stress test inside a production-like bounded pool. The writers
+	// still start concurrently, but queue for a connection instead of turning
+	// the test into a Postgres max_connections check.
+	db.SetMaxOpenConns(32)
+	db.SetMaxIdleConns(8)
 	t.Cleanup(func() { _ = db.Close() })
 
 	tableName := fmt.Sprintf("sync_stress_%d", time.Now().UnixNano())
@@ -62,6 +67,42 @@ func TestDurableSyncLogOrdersConcurrentTransactionsAndProjectsColumns(t *testing
 		_, _ = db.Exec(`DROP FUNCTION IF EXISTS ` + quoteIdent(syncArtifactName(tableName, "stage")) + `()`)
 	})
 
+	// A rolled-back write must leave neither a phantom change nor a consumed
+	// cursor revision. Clients rely on every visible revision being committed.
+	var revisionBeforeRollback int64
+	if err := db.QueryRow(`SELECT revision FROM _gonvex_sync_clock WHERE singleton = true`).Scan(&revisionBeforeRollback); err != nil {
+		t.Fatal(err)
+	}
+	rolledBack, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rolledBack.Exec(
+		`INSERT INTO `+quoteIdent(tableName)+` ("id", "workspaceId", "title", "updatedAt") VALUES ('rolled-back', 'workspace-a', 'never-visible', 0)`,
+	); err != nil {
+		_ = rolledBack.Rollback()
+		t.Fatal(err)
+	}
+	if err := rolledBack.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var rollbackEvents int
+	var revisionAfterRollback int64
+	if err := db.QueryRow(`SELECT count(*) FROM _gonvex_sync_changes WHERE table_name = $1 AND row_id = 'rolled-back'`, tableName).Scan(&rollbackEvents); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT revision FROM _gonvex_sync_clock WHERE singleton = true`).Scan(&revisionAfterRollback); err != nil {
+		t.Fatal(err)
+	}
+	if rollbackEvents != 0 || revisionAfterRollback != revisionBeforeRollback {
+		t.Fatalf(
+			"rollback leaked events or revision: events=%d before=%d after=%d",
+			rollbackEvents,
+			revisionBeforeRollback,
+			revisionAfterRollback,
+		)
+	}
+
 	// One multi-row mutation must remain one atomic cursor revision.
 	tx, err := db.Begin()
 	if err != nil {
@@ -95,9 +136,50 @@ func TestDurableSyncLogOrdersConcurrentTransactionsAndProjectsColumns(t *testing
 		t.Fatalf("batch revisions=%d ordinals=%d leakedSecrets=%d", batchRevisions, batchOrdinals, leakedSecrets)
 	}
 
+	// Multiple operations on the same row in one transaction must preserve
+	// their exact order under one revision so a replay reaches the committed
+	// final state rather than resurrecting an intermediate row.
+	lifecycle, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.Exec(
+		`INSERT INTO `+quoteIdent(tableName)+` ("id", "workspaceId", "title", "updatedAt") VALUES ('lifecycle', 'workspace-a', 'created', 1)`,
+	); err != nil {
+		_ = lifecycle.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.Exec(
+		`UPDATE `+quoteIdent(tableName)+` SET "title" = 'updated', "updatedAt" = 2 WHERE "id" = 'lifecycle'`,
+	); err != nil {
+		_ = lifecycle.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.Exec(
+		`DELETE FROM `+quoteIdent(tableName)+` WHERE "id" = 'lifecycle'`,
+	); err != nil {
+		_ = lifecycle.Rollback()
+		t.Fatal(err)
+	}
+	if err := lifecycle.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var lifecycleRevisions int
+	var lifecycleOperations string
+	if err := db.QueryRow(`
+		SELECT count(DISTINCT revision), string_agg(operation, ',' ORDER BY ordinal)
+		FROM _gonvex_sync_changes
+		WHERE table_name = $1 AND row_id = 'lifecycle'
+	`, tableName).Scan(&lifecycleRevisions, &lifecycleOperations); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycleRevisions != 1 || lifecycleOperations != "insert,update,delete" {
+		t.Fatalf("lifecycle revisions=%d operations=%v", lifecycleRevisions, lifecycleOperations)
+	}
+
 	// Concurrent writers contend on the commit clock. Every committed mutation
 	// must receive a distinct, fully assigned revision with no lost events.
-	const writers = 100
+	const writers = 256
 	var wait sync.WaitGroup
 	errors := make(chan error, writers)
 	for index := range writers {

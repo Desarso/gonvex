@@ -103,6 +103,56 @@ class FakeSyncStore implements SyncStore {
   close() {}
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+class DelayedSyncStore extends FakeSyncStore {
+  readonly replaceGate = deferred();
+  readonly deleteGate = deferred();
+  readonly operationOrder: string[] = [];
+
+  override async replace(
+    scope: string,
+    path: string,
+    args: JsonValue,
+    value: StoredSyncCollection,
+  ) {
+    this.operationOrder.push("replace:start");
+    await this.replaceGate.promise;
+    this.operationOrder.push("replace:finish");
+    await super.replace(scope, path, args, value);
+  }
+
+  override async applyDelta(
+    scope: string,
+    path: string,
+    args: JsonValue,
+    value: {
+      cursor: SyncCursor;
+      keyField: string;
+      upserts: JsonValue[];
+      deleted: string[];
+    },
+  ) {
+    this.operationOrder.push("delta");
+    await super.applyDelta(scope, path, args, value);
+  }
+
+  override async delete(scope: string, path: string, args: JsonValue) {
+    this.operationOrder.push("delete:start");
+    await this.deleteGate.promise;
+    this.operationOrder.push("delete:finish");
+    await super.delete(scope, path, args);
+  }
+}
+
 const ref: FunctionReference = { kind: "sync", path: "tasks.recentSync" };
 const scope = "scope-user-a-0000000000000000000000000000000000000000000000000000";
 const directive = {
@@ -135,8 +185,9 @@ function sentMessages(value = socket()) {
 }
 
 async function flushAsyncWork() {
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 10; index += 1) {
+    await Promise.resolve();
+  }
 }
 
 describe("durable sync integration", () => {
@@ -295,5 +346,84 @@ describe("durable sync integration", () => {
       id: open.id,
     });
     expect(sentMessages(second).at(-1).cursor).toBeUndefined();
+  });
+
+  it("serializes snapshot, delta, and reset persistence under slow IndexedDB writes", async () => {
+    const store = new DelayedSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    client.subscribeSync(ref, { workspaceId: "workspace-a" }, () => undefined);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const open = sentMessages().find((message) => message.type === "sync.open");
+
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: [{ id: "a", title: "old" }],
+      cursor: { epoch: "sync-a", revision: 10 },
+      key: "id",
+    });
+    socket().receive({
+      type: "sync.delta",
+      id: open.id,
+      path: ref.path,
+      upserts: [{ id: "a", title: "new" }],
+      deleted: [],
+      cursor: { epoch: "sync-a", revision: 11 },
+    });
+    socket().receive({
+      type: "sync.reset",
+      id: open.id,
+      path: ref.path,
+      reason: "cursor-expired",
+    });
+    await flushAsyncWork();
+
+    expect(store.operationOrder).toEqual(["replace:start"]);
+
+    store.replaceGate.resolve();
+    await flushAsyncWork();
+    expect(store.operationOrder).toEqual([
+      "replace:start",
+      "replace:finish",
+      "delta",
+      "delete:start",
+    ]);
+
+    store.deleteGate.resolve();
+    await flushAsyncWork();
+    expect(store.operationOrder).toEqual([
+      "replace:start",
+      "replace:finish",
+      "delta",
+      "delete:start",
+      "delete:finish",
+    ]);
+  });
+
+  it("retries a transient sync error without waiting for a socket reconnect", async () => {
+    const store = new FakeSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    client.subscribeSync(ref, { workspaceId: "workspace-a" }, () => undefined);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const firstOpen = sentMessages().find((message) => message.type === "sync.open");
+
+    socket().receive({
+      type: "sync.error",
+      id: firstOpen.id,
+      path: ref.path,
+      error: "temporary database failover",
+    });
+    vi.advanceTimersByTime(250);
+    await flushAsyncWork();
+
+    const opens = sentMessages().filter((message) => message.type === "sync.open");
+    expect(opens).toHaveLength(2);
+    expect(opens[1]).toMatchObject({ id: firstOpen.id });
+    expect(opens[1]).not.toHaveProperty("cursor");
   });
 });

@@ -135,6 +135,11 @@ func (m *tenantListenerManager) run(ctx context.Context, listener *tenantListene
 			}
 			if connectedBefore || needsRecovery {
 				m.server.subscriptions.refreshTenant(listener.key.project, listener.key.tenant)
+				// PostgreSQL notifications are edge-triggered and are lost while
+				// LISTEN is disconnected. Sync cursors are durable, so force one
+				// coalesced delivery pass after reconnect to replay every missed
+				// revision from the change log.
+				m.server.notifySyncRevision(listener.key.project, listener.key.tenant)
 			}
 			connectedBefore = true
 			backoff = 250 * time.Millisecond

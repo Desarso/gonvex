@@ -129,7 +129,10 @@ type randomizeStatusPriorityArgs struct {
 	Count int `json:"count"`
 }
 
-const tableChangeDebounce = 75 * time.Millisecond
+const (
+	tableChangeDebounce   = 75 * time.Millisecond
+	websocketWriteTimeout = 10 * time.Second
+)
 
 // subscriptionToken is deliberately non-zero-sized. Go may give separate
 // zero-sized allocations the same address, which would collapse distinct
@@ -639,6 +642,10 @@ func (c *wsConn) cancelSubscriptions() {
 func (c *wsConn) write(message serverMessage) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.conn == nil {
+		return
+	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(websocketWriteTimeout))
 	if err := c.conn.WriteJSON(message); err != nil {
 		slog.Warn("websocket write failed", "connection", c.id, "project", c.project, "tenant", c.tenant, "type", message.Type, "path", message.Path, "error", err)
 		_ = c.conn.Close()

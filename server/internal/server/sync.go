@@ -49,6 +49,8 @@ type syncSubscription struct {
 	visibleKeys      map[string]bool
 	mu               sync.Mutex
 	closed           bool
+	deliveryRunning  bool
+	deliveryPending  bool
 }
 
 type syncLogChange struct {
@@ -65,6 +67,7 @@ type syncLogChange struct {
 const (
 	defaultSyncRetention = 7 * 24 * time.Hour
 	syncPruneInterval    = time.Hour
+	syncDeliveryTimeout  = 30 * time.Second
 )
 
 var errSyncCursorExpired = errors.New("sync cursor is older than the retained change log")
@@ -349,17 +352,24 @@ func syncCursorAvailable(ctx context.Context, databaseURL string, revision, curr
 }
 
 func (s *Server) deliverSync(subscription *syncSubscription) error {
+	ctx, cancel := context.WithTimeout(context.Background(), syncDeliveryTimeout)
+	defer cancel()
+
+	// Authentication invalidation resets every sync on the connection and takes
+	// each subscription lock. Revalidate before taking this subscription lock
+	// to avoid self-deadlocking on an expired or revoked session.
+	if err := subscription.conn.revalidateAppAuth(ctx); err != nil {
+		subscription.conn.clearAuthentication()
+		return nil
+	}
+
 	subscription.mu.Lock()
 	defer subscription.mu.Unlock()
 	if subscription.closed || !subscriptionCurrent(subscription) {
 		return nil
 	}
-	if err := subscription.conn.revalidateAppAuth(context.Background()); err != nil {
-		subscription.conn.clearAuthentication()
-		return nil
-	}
 	databaseURL := s.databaseURLForTenant(subscription.project, subscription.tenant)
-	latest, err := currentSyncCursor(context.Background(), databaseURL, subscription.definition, subscription.conn.currentCacheScope())
+	latest, err := currentSyncCursor(ctx, databaseURL, subscription.definition, subscription.conn.currentCacheScope())
 	if err != nil {
 		return err
 	}
@@ -371,7 +381,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		subscription.conn.write(serverMessage{Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &latest})
 		return nil
 	}
-	changes, err := readSyncChanges(context.Background(), databaseURL, subscription.cursor.Revision, latest.Revision, subscription.definition.Table)
+	changes, err := readSyncChanges(ctx, databaseURL, subscription.cursor.Revision, latest.Revision, subscription.definition.Table)
 	if err != nil {
 		if errors.Is(err, errSyncCursorExpired) {
 			s.resetSyncWhileLocked(subscription, "cursor-expired")
@@ -382,7 +392,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 	args := map[string]json.RawMessage{}
 	_ = json.Unmarshal(subscription.args, &args)
 	if subscription.definition.Mode == "progressive" && len(changes) > 0 {
-		if err := s.deliverProgressiveSync(subscription, changes, args, latest); err != nil {
+		if err := s.deliverProgressiveSync(ctx, subscription, changes, args, latest); err != nil {
 			return err
 		}
 		subscription.conn.write(serverMessage{Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &subscription.cursor})
@@ -435,13 +445,14 @@ func (s *Server) resetSyncWhileLocked(subscription *syncSubscription, reason str
 }
 
 func (s *Server) deliverProgressiveSync(
+	ctx context.Context,
 	subscription *syncSubscription,
 	changes []syncLogChange,
 	args map[string]json.RawMessage,
 	latest syncCursor,
 ) error {
 	result, err := s.executeTenantQueryForCallerUncached(
-		context.Background(),
+		ctx,
 		subscription.project,
 		subscription.tenant,
 		subscription.conn.caller(),
@@ -728,13 +739,57 @@ func (s *Server) notifySyncRevision(project, tenant string) {
 		}
 		connection.mu.Unlock()
 		for _, subscription := range subscriptions {
-			go func(subscription *syncSubscription) {
-				if err := s.deliverSync(subscription); err != nil && subscriptionCurrent(subscription) {
-					subscription.conn.write(serverMessage{Type: "sync.error", ID: subscription.id, Path: subscription.path, Error: err.Error()})
-				}
-			}(subscription)
+			s.scheduleSyncDelivery(subscription)
 		}
 	}
+}
+
+func beginSyncDelivery(subscription *syncSubscription) bool {
+	subscription.mu.Lock()
+	defer subscription.mu.Unlock()
+	if subscription.closed {
+		return false
+	}
+	if subscription.deliveryRunning {
+		subscription.deliveryPending = true
+		return false
+	}
+	subscription.deliveryRunning = true
+	return true
+}
+
+func finishSyncDelivery(subscription *syncSubscription) bool {
+	subscription.mu.Lock()
+	defer subscription.mu.Unlock()
+	if subscription.closed {
+		subscription.deliveryRunning = false
+		subscription.deliveryPending = false
+		return false
+	}
+	if subscription.deliveryPending {
+		subscription.deliveryPending = false
+		return true
+	}
+	subscription.deliveryRunning = false
+	return false
+}
+
+func (s *Server) scheduleSyncDelivery(subscription *syncSubscription) {
+	if !beginSyncDelivery(subscription) {
+		return
+	}
+	go func() {
+		for {
+			if err := s.deliverSync(subscription); err != nil && subscriptionCurrent(subscription) {
+				subscription.conn.write(serverMessage{
+					Type: "sync.error", ID: subscription.id, Path: subscription.path, Error: err.Error(),
+				})
+			}
+			if !finishSyncDelivery(subscription) {
+				return
+			}
+		}
+	}()
 }
 
 func (s *Server) resetSyncsForVisibilityChange(change tableChange) {

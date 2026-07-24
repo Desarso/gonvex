@@ -49,6 +49,9 @@ type SyncSubscription = {
   cacheReadGeneration?: number;
   socketGeneration?: number;
   opening: boolean;
+  persistence: Promise<void>;
+  retryTimer?: ReturnType<typeof setTimeout>;
+  retryAttempt: number;
 };
 type OneShotQuery = {
   id: string;
@@ -344,6 +347,9 @@ export class GonvexClient {
       `Gonvex client was closed while waiting for ${call.kind} ${call.path}`,
       { code: "closed", path: call.path, operation: call.kind },
     ));
+    for (const subscription of this.syncSubscriptions.values()) {
+      this.clearSyncRetry(subscription);
+    }
     this.handlers.clear();
     this.querySubscriptions.clear();
     this.syncSubscriptions.clear();
@@ -613,6 +619,8 @@ export class GonvexClient {
       rows: [],
       keyField: "id",
       opening: false,
+      persistence: Promise.resolve(),
+      retryAttempt: 0,
     };
     this.syncSubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => this.handleSyncMessage(subscription, message));
@@ -670,6 +678,7 @@ export class GonvexClient {
 
   private handleSyncMessage(subscription: SyncSubscription, message: ServerMessage) {
     if (message.type === "sync.snapshot") {
+      this.clearSyncRetry(subscription, true);
       subscription.opening = false;
       subscription.cursor = message.cursor;
       subscription.keyField = message.key;
@@ -696,6 +705,7 @@ export class GonvexClient {
         message.cursor.epoch !== subscription.cursor.epoch
         || message.cursor.revision <= subscription.cursor.revision
       )) return;
+      this.clearSyncRetry(subscription, true);
       subscription.cursor = message.cursor;
       subscription.rows = applySyncDelta(
         subscription.rows,
@@ -725,27 +735,31 @@ export class GonvexClient {
       return;
     }
     if (message.type === "sync.reset") {
+      this.clearSyncRetry(subscription, true);
       subscription.cursor = undefined;
       subscription.rows = [];
       subscription.lastMessage = undefined;
       subscription.opening = false;
       const directive = this.queryCacheDirective;
-      if (directive) {
-        void this.syncStore?.delete(
+      const store = this.syncStore;
+      if (directive && store) {
+        this.enqueueSyncPersistence(subscription, () => store.delete(
           directive.scope,
           subscription.path,
           subscription.args,
-        ).catch(() => undefined);
+        ));
       }
       queueMicrotask(() => this.sendSyncOpen(subscription));
       return;
     }
     if (message.type === "sync.ready") {
+      this.clearSyncRetry(subscription, true);
       subscription.opening = false;
       subscription.cursor = message.cursor;
     }
     if (message.type === "sync.error") {
       subscription.opening = false;
+      this.scheduleSyncRetry(subscription);
     }
     this.emitSyncMessage(subscription, message);
   }
@@ -817,6 +831,7 @@ export class GonvexClient {
     if (!subscription) return;
     subscription.listeners.delete(listener);
     if (subscription.listeners.size > 0) return;
+    this.clearSyncRetry(subscription);
     this.syncSubscriptions.delete(key);
     this.handlers.delete(subscription.id);
     this.send({ type: "sync.close", id: subscription.id });
@@ -824,8 +839,9 @@ export class GonvexClient {
 
   private persistSyncSnapshot(subscription: SyncSubscription) {
     const directive = this.queryCacheDirective;
-    if (!directive || !this.syncStore || !subscription.cursor) return;
-    void this.syncStore.replace(directive.scope, subscription.path, subscription.args, {
+    const store = this.syncStore;
+    if (!directive || !store || !subscription.cursor) return;
+    const value = {
       rows: subscription.rows,
       cursor: subscription.cursor,
       keyField: subscription.keyField,
@@ -833,13 +849,18 @@ export class GonvexClient {
       orderDirection: subscription.orderDirection,
       maxRows: subscription.maxRows,
       maxBytes: subscription.maxBytes,
-    }).catch(() => undefined);
+    };
+    this.enqueueSyncPersistence(
+      subscription,
+      () => store.replace(directive.scope, subscription.path, subscription.args, value),
+    );
   }
 
   private persistSyncDelta(subscription: SyncSubscription, upserts: JsonValue[], deleted: string[]) {
     const directive = this.queryCacheDirective;
-    if (!directive || !this.syncStore || !subscription.cursor) return;
-    void this.syncStore.applyDelta(directive.scope, subscription.path, subscription.args, {
+    const store = this.syncStore;
+    if (!directive || !store || !subscription.cursor) return;
+    const value = {
       cursor: subscription.cursor,
       keyField: subscription.keyField,
       orderBy: subscription.orderBy,
@@ -848,7 +869,11 @@ export class GonvexClient {
       deleted,
       maxRows: subscription.maxRows,
       maxBytes: subscription.maxBytes,
-    }).catch(() => undefined);
+    };
+    this.enqueueSyncPersistence(
+      subscription,
+      () => store.applyDelta(directive.scope, subscription.path, subscription.args, value),
+    );
   }
 
   mutation<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}, options: CallOptions = {}): Promise<T> {
@@ -1013,6 +1038,46 @@ export class GonvexClient {
     });
   }
 
+  private enqueueSyncPersistence(
+    subscription: SyncSubscription,
+    operation: () => Promise<void>,
+  ) {
+    subscription.persistence = subscription.persistence
+      .catch(() => undefined)
+      .then(operation)
+      .catch(() => undefined);
+  }
+
+  private scheduleSyncRetry(subscription: SyncSubscription) {
+    if (
+      this.manuallyClosed
+      || subscription.retryTimer
+      || subscription.listeners.size === 0
+      || this.syncSubscriptions.get(subscription.key) !== subscription
+    ) return;
+    const delay = Math.min(250 * (2 ** subscription.retryAttempt), 5_000);
+    subscription.retryAttempt += 1;
+    subscription.retryTimer = setTimeout(() => {
+      subscription.retryTimer = undefined;
+      if (
+        this.manuallyClosed
+        || !this.isWebSocketConnected
+        || subscription.listeners.size === 0
+        || this.syncSubscriptions.get(subscription.key) !== subscription
+      ) return;
+      subscription.opening = false;
+      this.sendSyncOpen(subscription);
+    }, delay);
+  }
+
+  private clearSyncRetry(subscription: SyncSubscription, resetAttempt = false) {
+    if (subscription.retryTimer) {
+      clearTimeout(subscription.retryTimer);
+      subscription.retryTimer = undefined;
+    }
+    if (resetAttempt) subscription.retryAttempt = 0;
+  }
+
   private requestSubscriptionSnapshot(subscription: QuerySubscription) {
     subscription.socketGeneration = undefined;
     this.sendSubscription(subscription);
@@ -1036,6 +1101,7 @@ export class GonvexClient {
     }
     for (const subscription of this.syncSubscriptions.values()) {
       if (subscription.listeners.size === 0) continue;
+      this.clearSyncRetry(subscription, true);
       subscription.opening = false;
       subscription.socketGeneration = undefined;
       this.sendSyncOpen(subscription);
@@ -1104,6 +1170,7 @@ export class GonvexClient {
       subscription.cacheReadGeneration = undefined;
     }
     for (const subscription of this.syncSubscriptions.values()) {
+      this.clearSyncRetry(subscription, true);
       subscription.rows = [];
       subscription.cursor = undefined;
       subscription.lastMessage = undefined;

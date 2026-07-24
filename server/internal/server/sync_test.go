@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/server/internal/config"
 )
 
 func TestSyncValueMatchesEqualityArguments(t *testing.T) {
@@ -78,5 +79,71 @@ func TestSyncRetentionUsesLongestDeclaredWindow(t *testing.T) {
 	}
 	if got := syncRetentionForManifest(manifest.Manifest{}); got != defaultSyncRetention {
 		t.Fatalf("expected default retention window, got %s", got)
+	}
+}
+
+func TestSyncDeliveryStormCoalescesToOneRunningAndOnePendingPass(t *testing.T) {
+	subscription := &syncSubscription{}
+	if !beginSyncDelivery(subscription) {
+		t.Fatal("first notification must start delivery")
+	}
+
+	for index := 0; index < 10_000; index++ {
+		if beginSyncDelivery(subscription) {
+			t.Fatalf("notification %d started a duplicate concurrent delivery", index)
+		}
+	}
+
+	if !finishSyncDelivery(subscription) {
+		t.Fatal("coalesced notifications must request exactly one follow-up delivery")
+	}
+	if finishSyncDelivery(subscription) {
+		t.Fatal("follow-up delivery must drain the pending state")
+	}
+
+	subscription.mu.Lock()
+	running := subscription.deliveryRunning
+	pending := subscription.deliveryPending
+	subscription.mu.Unlock()
+	if running || pending {
+		t.Fatalf("delivery state did not drain: running=%t pending=%t", running, pending)
+	}
+}
+
+func TestSyncAuthRevocationCannotDeadlockDelivery(t *testing.T) {
+	runtime := New(config.Config{RequireAuth: true})
+	connection := &wsConn{
+		server:  runtime,
+		project: "project-a",
+		tenant:  "tenant-a",
+		syncs:   map[string]*syncSubscription{},
+		subs:    map[string]querySubscription{},
+	}
+	subscription := &syncSubscription{
+		conn: connection,
+		id:   "sync-a",
+		path: "tasks.sync",
+	}
+	connection.syncs[subscription.id] = subscription
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.deliverSync(subscription)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sync delivery deadlocked while clearing revoked authentication")
+	}
+
+	connection.mu.Lock()
+	remaining := len(connection.syncs)
+	connection.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("revoked authentication left %d sync subscriptions attached", remaining)
 	}
 }
