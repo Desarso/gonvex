@@ -1,4 +1,9 @@
-# Gonvex Local Cache + Shape Sync TODO
+# Gonvex Local SQL Query Planner TODO
+
+> The durable entity-sync protocol described in the original plan is now
+> implemented. See `docs/durable-sync.md`. This document remains the separate,
+> future plan for executing arbitrary compatible queries against a browser SQL
+> database; Dexie-backed sync collections do not require that heavier runtime.
 
 > Future-design note: this document describes a possible row-shape/local-SQL
 > system. It is not the browser cache used by `useQuery`. The implemented cache

@@ -126,6 +126,9 @@ func (m *tenantListenerManager) run(ctx context.Context, listener *tenantListene
 			_, err = connection.Exec(ctx, "LISTEN "+schema.NotifyChannel)
 		}
 		if err == nil {
+			_, err = connection.Exec(ctx, "LISTEN "+schema.SyncNotifyChannel)
+		}
+		if err == nil {
 			needsRecovery := m.markReady(listener)
 			if connectedBefore {
 				m.server.metrics.recordReactive(func(metric *reactiveMetricState) { metric.ListenerReconnects++ })
@@ -170,6 +173,10 @@ func (m *tenantListenerManager) wait(ctx context.Context, connection *pgx.Conn, 
 		notification, err := connection.WaitForNotification(ctx)
 		if err != nil {
 			return err
+		}
+		if notification.Channel == schema.SyncNotifyChannel {
+			m.server.notifySyncRevision(key.project, key.tenant)
+			continue
 		}
 		payload := tableNotifyPayload{}
 		if notification.Payload != "" && notification.Payload[0] != '{' {

@@ -83,6 +83,8 @@ type Server struct {
 	appAuthRequirements   map[string]appAuthRequirementCacheEntry
 	appAuthLookups        map[string]*appAuthRequirementLookup
 	appAuthVersions       map[string]uint64
+	syncPruneMu           sync.Mutex
+	syncPrunedAt          map[string]time.Time
 }
 
 func New(cfg config.Config) *Server {
@@ -124,6 +126,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		appAuthRequirements:   map[string]appAuthRequirementCacheEntry{},
 		appAuthLookups:        map[string]*appAuthRequirementLookup{},
 		appAuthVersions:       map[string]uint64{},
+		syncPrunedAt:          map[string]time.Time{},
 		provisionTenant:       provisionTenantDatabase,
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
@@ -599,19 +602,25 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	// Skip the DDL reapply when the schema is byte-identical to what we last
 	// applied. This is the common dev case (editing a handler, not the schema)
 	// and avoids reinstalling every table's trigger against live traffic.
-	fingerprint := schemaFingerprint(next.Schema)
+	fingerprint := schemaFingerprint(next.Schema, next.Functions)
 	loadedManifest := s.runtime.ManifestForProject(next.Project)
-	loadedFingerprint := schemaFingerprint(loadedManifest.Schema)
+	loadedFingerprint := schemaFingerprint(loadedManifest.Schema, loadedManifest.Functions)
 	if fingerprint != "" && (s.schemaFingerprintApplied(next.Project, fingerprint) || (loadedFingerprint == fingerprint && loadedManifest.NotifySchemaVersion == next.NotifySchemaVersion)) {
 		schemaSkipped = true
 	} else {
-		migrationResult, err = schema.Apply(r.Context(), s.databaseURLForProject(next.Project), next.Schema.LandlordSchema())
+		syncDefinitions := manifestSyncDefinitions(next)
+		migrationResult, err = schema.ApplyWithSync(
+			r.Context(),
+			s.databaseURLForProject(next.Project),
+			next.Schema.LandlordSchema(),
+			syncDefinitionsForSchema(syncDefinitions, next.Schema.LandlordSchema()),
+		)
 		if err != nil {
 			syncErr = err
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
-		tenantMigrationResult, err = s.applyTenantSchemasForProject(r.Context(), next.Project, next.Schema)
+		tenantMigrationResult, err = s.applyTenantSchemasForProject(r.Context(), next.Project, next.Schema, syncDefinitions)
 		if err != nil {
 			syncErr = err
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -667,11 +676,12 @@ func (s *Server) projectSyncLock(projectID string) *sync.Mutex {
 
 // schemaFingerprint hashes the desired schema so an unchanged sync can skip the
 // DDL reapply. json.Marshal sorts map keys, so the output is deterministic.
-func schemaFingerprint(sc manifest.Schema) string {
+func schemaFingerprint(sc manifest.Schema, functions map[string]manifest.FunctionEntry) string {
 	data, err := json.Marshal(struct {
-		Schema              manifest.Schema `json:"schema"`
-		NotifySchemaVersion string          `json:"notifySchemaVersion"`
-	}{Schema: sc.Normalize(), NotifySchemaVersion: schema.NotifySchemaVersion})
+		Schema              manifest.Schema                    `json:"schema"`
+		Sync                map[string]manifest.SyncDefinition `json:"sync,omitempty"`
+		NotifySchemaVersion string                             `json:"notifySchemaVersion"`
+	}{Schema: sc.Normalize(), Sync: manifestSyncDefinitions(manifest.Manifest{Functions: functions}), NotifySchemaVersion: schema.NotifySchemaVersion})
 	if err != nil {
 		return ""
 	}
@@ -864,7 +874,7 @@ func (s *Server) hydrateRuntimeState(ctx context.Context) {
 		// The persisted manifest's schema was already applied before this
 		// restart, so seed its fingerprint to skip the DDL reapply on the first
 		// identical sync (air restarts the runtime often in dev).
-		s.markSchemaFingerprint(next.Project, schemaFingerprint(next.Schema))
+		s.markSchemaFingerprint(next.Project, schemaFingerprint(next.Schema, next.Functions))
 		s.registerProjectCrons(next.Project)
 	}
 }
@@ -901,7 +911,7 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 		slog.Warn("load persisted Gonvex project runtime manifest", "project", projectID, "error", err)
 		return
 	}
-	s.markSchemaFingerprint(projectID, schemaFingerprint(next.Schema))
+	s.markSchemaFingerprint(projectID, schemaFingerprint(next.Schema, next.Functions))
 	s.registerProjectCrons(projectID)
 }
 

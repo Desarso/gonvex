@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { ConvexReactClient, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
@@ -860,6 +860,84 @@ export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue 
   if (error) throw error;
 
   return result;
+}
+
+export function useSync<T extends JsonValue = JsonValue>(
+  ref: FunctionReference,
+  args: JsonValue | "skip" = {},
+): T[] | undefined {
+  const client = useGonvexClient();
+  const path = ref.path;
+  const kind = ref.kind;
+  const argsKey = JSON.stringify(args);
+  const watch = useMemo(
+    () => args === "skip" ? undefined : client.watchSync<T>({ kind, path }, args),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, kind, path, argsKey],
+  );
+  return useSyncExternalStore(
+    useCallback((onStoreChange) => watch?.onUpdate(onStoreChange) ?? (() => undefined), [watch]),
+    useCallback(() => watch?.localSyncResult(), [watch]),
+    () => undefined,
+  );
+}
+
+export function useSyncSelector<T extends JsonValue = JsonValue, Selected = unknown>(
+  ref: FunctionReference,
+  args: JsonValue | "skip",
+  selector: (rows: T[]) => Selected,
+  isEqual: (left: Selected, right: Selected) => boolean = Object.is,
+): Selected | undefined {
+  const client = useGonvexClient();
+  const path = ref.path;
+  const kind = ref.kind;
+  const argsKey = JSON.stringify(args);
+  const selectorRef = useRef(selector);
+  const equalityRef = useRef(isEqual);
+  selectorRef.current = selector;
+  equalityRef.current = isEqual;
+  const watch = useMemo(
+    () => args === "skip" ? undefined : client.watchSync<T>({ kind, path }, args),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, kind, path, argsKey],
+  );
+  const selectedRef = useRef<{ initialized: boolean; value: Selected | undefined }>({
+    initialized: false,
+    value: undefined,
+  });
+  useEffect(() => {
+    selectedRef.current = { initialized: false, value: undefined };
+  }, [watch]);
+  const getSnapshot = useCallback(() => {
+    const rows = watch?.localSyncResult();
+    const next = rows === undefined ? undefined : selectorRef.current(rows);
+    if (
+      !selectedRef.current.initialized
+      || next === undefined
+      || selectedRef.current.value === undefined
+      || !equalityRef.current(selectedRef.current.value, next)
+    ) {
+      selectedRef.current = { initialized: true, value: next };
+    }
+    return selectedRef.current.value;
+  }, [watch]);
+  const subscribe = useCallback((onStoreChange: () => void) => {
+    if (!watch) return () => undefined;
+    return watch.onUpdate(() => {
+      const previous = selectedRef.current.value;
+      const rows = watch.localSyncResult();
+      const next = rows === undefined ? undefined : selectorRef.current(rows);
+      if (
+        selectedRef.current.initialized
+        && previous !== undefined
+        && next !== undefined
+        && equalityRef.current(previous, next)
+      ) return;
+      selectedRef.current = { initialized: true, value: next };
+      onStoreChange();
+    });
+  }, [watch]);
+  return useSyncExternalStore(subscribe, getSnapshot, () => undefined);
 }
 
 export type UseMutationOptions = {

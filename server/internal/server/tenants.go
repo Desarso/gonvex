@@ -854,6 +854,9 @@ func (s *Server) ensureRuntimeTenantDatabaseOnce(ctx context.Context, project st
 
 	desiredSchema := s.runtime.ManifestForProject(project).Schema.TenantSchema()
 	if err := s.provisionTenant(ctx, tenantDatabaseURL, desiredSchema); err == nil {
+		if err := s.installTenantSyncLog(ctx, project, tenantDatabaseURL, desiredSchema); err != nil {
+			return "", err
+		}
 		if err := s.markTenantDatabaseProvisioned(ctx, project, tenantID, tenantDatabaseURL); err != nil {
 			return "", err
 		}
@@ -880,6 +883,9 @@ func (s *Server) ensureRuntimeTenantDatabaseOnce(ctx context.Context, project st
 		}
 	}
 	if err := s.provisionTenant(ctx, createdURL, desiredSchema); err != nil {
+		return "", err
+	}
+	if err := s.installTenantSyncLog(ctx, project, createdURL, desiredSchema); err != nil {
 		return "", err
 	}
 	if err := s.markTenantDatabaseProvisioned(ctx, project, tenantID, createdURL); err != nil {
@@ -970,7 +976,12 @@ func tenantIDFromMutationResult(result any) string {
 	return ""
 }
 
-func (s *Server) applyTenantSchemasForProject(ctx context.Context, project string, desiredSchema manifest.Schema) (schema.Result, error) {
+func (s *Server) applyTenantSchemasForProject(
+	ctx context.Context,
+	project string,
+	desiredSchema manifest.Schema,
+	syncDefinitions map[string]manifest.SyncDefinition,
+) (schema.Result, error) {
 	s.hydrateProjectTenantDatabases(ctx, project)
 	desiredSchema = desiredSchema.TenantSchema()
 
@@ -983,7 +994,10 @@ func (s *Server) applyTenantSchemasForProject(ctx context.Context, project strin
 	}
 	s.projectMu.RUnlock()
 
-	return applyTenantSchemas(ctx, tenants, desiredSchema, schema.Apply)
+	tenantSyncDefinitions := syncDefinitionsForSchema(syncDefinitions, desiredSchema)
+	return applyTenantSchemas(ctx, tenants, desiredSchema, func(ctx context.Context, databaseURL string, desired manifest.Schema) (schema.Result, error) {
+		return schema.ApplyWithSync(ctx, databaseURL, desired, tenantSyncDefinitions)
+	})
 }
 
 type tenantSchemaApplyFunc func(context.Context, string, manifest.Schema) (schema.Result, error)

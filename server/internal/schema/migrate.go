@@ -37,6 +37,10 @@ type databaseSchemaSnapshot struct {
 }
 
 func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Result, error) {
+	return ApplyWithSync(ctx, databaseURL, desired, nil)
+}
+
+func ApplyWithSync(ctx context.Context, databaseURL string, desired manifest.Schema, syncDefinitions map[string]manifest.SyncDefinition) (Result, error) {
 	if databaseURL == "" || len(desired.Tables) == 0 {
 		return Result{}, nil
 	}
@@ -102,6 +106,12 @@ func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Re
 	}
 
 	applied, err := InstallNotifyTriggers(ctx, db, desired.Tables)
+	if err != nil {
+		return result, err
+	}
+	result.Applied = append(result.Applied, applied...)
+
+	applied, err = InstallSyncLog(ctx, db, desired, syncDefinitions)
 	if err != nil {
 		return result, err
 	}

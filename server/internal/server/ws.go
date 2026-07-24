@@ -36,6 +36,8 @@ type clientMessage struct {
 	ClientReceivedAtMS float64         `json:"clientReceivedAtMs,omitempty"`
 	ClientDurationMS   float64         `json:"clientDurationMs,omitempty"`
 	Device             json.RawMessage `json:"device,omitempty"`
+	Cursor             *syncCursor     `json:"cursor,omitempty"`
+	Keys               []string        `json:"keys,omitempty"`
 }
 
 type serverMessage struct {
@@ -58,6 +60,15 @@ type serverMessage struct {
 	Updated              []json.RawMessage     `json:"updated,omitempty"`
 	Deleted              []string              `json:"deleted,omitempty"`
 	Order                []string              `json:"order,omitempty"`
+	Cursor               *syncCursor           `json:"cursor,omitempty"`
+	Key                  string                `json:"key,omitempty"`
+	OrderBy              string                `json:"orderBy,omitempty"`
+	OrderDirection       string                `json:"orderDirection,omitempty"`
+	Mode                 string                `json:"mode,omitempty"`
+	MaxRows              int                   `json:"maxRows,omitempty"`
+	MaxBytes             int64                 `json:"maxBytes,omitempty"`
+	Upserts              []json.RawMessage     `json:"upserts,omitempty"`
+	MutationIDs          []string              `json:"mutationIds,omitempty"`
 }
 
 // explicitNull makes a nil handler result serialize as an explicit JSON null
@@ -177,6 +188,7 @@ type wsConn struct {
 	device        clientDeviceInfo
 	mu            sync.Mutex
 	subs          map[string]querySubscription
+	syncs         map[string]*syncSubscription
 }
 
 type callerContext struct {
@@ -208,6 +220,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		lastActiveAt: connectedAt,
 		lastActivity: "connected",
 		subs:         map[string]querySubscription{},
+		syncs:        map[string]*syncSubscription{},
 	}
 	s.addWSConn(client)
 	defer func() {
@@ -260,6 +273,9 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			cacheScope = directive.Scope
 		}
 		c.mu.Lock()
+		oldProject := c.project
+		oldTenant := c.tenant
+		oldCacheScope := c.cacheScope
 		oldSubs := make([]querySubscription, 0, len(c.subs))
 		c.user = user
 		c.perms = permissions
@@ -298,6 +314,9 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		for _, sub := range subs {
 			c.server.subscriptions.attach(sub)
 		}
+		if oldProject != project || oldTenant != tenant || (oldCacheScope != "" && oldCacheScope != cacheScope) {
+			c.resetSyncSubscriptions("visibility-changed")
+		}
 	case "query.subscribe":
 		if !c.requireAuth(ctx, "query.error", message.ID) {
 			return
@@ -330,6 +349,13 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			c.server.subscriptions.detach(sub)
 			sub.cancel()
 		}
+	case "sync.open":
+		if !c.requireAuth(ctx, "sync.error", message.ID) {
+			return
+		}
+		c.openSync(ctx, message)
+	case "sync.close":
+		c.closeSync(message.ID)
 	case "mutation.call":
 		if !c.requireAuth(ctx, "mutation.error", message.ID) {
 			return
@@ -337,7 +363,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		trace := traceFromClient(message.Trace)
 		trace.ServerReceivedAtMS = epochMillis(receivedAt)
 		trace.ServerMutationStartedAtMS = epochMillis(time.Now())
-		result, err := c.server.executeTenantMutationForCaller(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
+		result, err := c.server.executeTenantMutationForCaller(withMutationID(ctx, message.ID), c.project, c.tenant, c.caller(), message.Path, message.Args)
 		committedAt := time.Now().UTC()
 		trace.ServerMutationCommittedAtMS = epochMillis(committedAt)
 		trace.ServerCompletedAtMS = epochMillis(committedAt)
@@ -584,6 +610,7 @@ func (c *wsConn) clearAuthentication() {
 	for _, sub := range oldSubs {
 		c.server.subscriptions.detach(sub)
 	}
+	c.resetSyncSubscriptions("visibility-changed")
 }
 
 func (c *wsConn) currentCacheScope() string {
@@ -606,6 +633,7 @@ func (c *wsConn) cancelSubscriptions() {
 			sub.cancel()
 		}
 	}
+	c.closeAllSyncs()
 }
 
 func (c *wsConn) write(message serverMessage) {
@@ -916,6 +944,7 @@ func (s *Server) flushTableChange(key string) {
 	s.tableChangeMu.Unlock()
 
 	s.subscriptions.requestChange(change)
+	s.resetSyncsForVisibilityChange(change)
 }
 
 func tableChangeMatchesSubscription(sub querySubscription, change tableChange) bool {
@@ -1436,6 +1465,12 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 		return nil, err
 	}
 	mutationCtx.Tx = tx
+	if mutationID := mutationIDFromContext(mutationCtx.Context); mutationID != "" {
+		if _, err := tx.ExecContext(mutationCtx.Context, `SELECT set_config('gonvex.mutation_id', $1, true)`, mutationID); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+	}
 	originalScheduler := mutationCtx.Scheduler
 	deferred := newDeferredScheduler(originalScheduler)
 	mutationCtx.Scheduler = deferred

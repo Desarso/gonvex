@@ -9,15 +9,35 @@ const (
 	FunctionKindHTTP             FunctionKind = "http"
 	FunctionKindInternalMutation FunctionKind = "internalMutation"
 	FunctionKindLiveGrid         FunctionKind = "liveGrid"
+	FunctionKindSync             FunctionKind = "sync"
 )
 
-const NotifySchemaVersion = "2"
+const NotifySchemaVersion = "3"
 
 type FunctionEntry struct {
 	Kind         FunctionKind         `json:"kind"`
 	Handler      string               `json:"handler"`
 	File         string               `json:"file"`
 	Dependencies FunctionDependencies `json:"dependencies,omitempty"`
+	Sync         *SyncDefinition      `json:"sync,omitempty"`
+}
+
+// SyncDefinition describes an entity-shaped, locally materialized collection.
+// V1 intentionally supports a single source table and equality filters. More
+// complex joins and aggregates remain ordinary live queries.
+type SyncDefinition struct {
+	Table                 string            `json:"table"`
+	Key                   string            `json:"key"`
+	Columns               []string          `json:"columns"`
+	EqualFilters          map[string]string `json:"equalFilters,omitempty"`
+	ExcludeWhenSet        []string          `json:"excludeWhenSet,omitempty"`
+	VisibilityTables      []string          `json:"visibilityTables,omitempty"`
+	OrderBy               string            `json:"orderBy,omitempty"`
+	OrderDirection        string            `json:"orderDirection,omitempty"`
+	Mode                  string            `json:"mode,omitempty"`
+	MaxRows               int               `json:"maxRows,omitempty"`
+	MaxBytes              int64             `json:"maxBytes,omitempty"`
+	RetentionMilliseconds int64             `json:"retentionMs,omitempty"`
 }
 
 // FunctionDependencies describe the database surface a function observes or

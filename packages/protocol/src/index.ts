@@ -4,7 +4,8 @@ export type FunctionKind =
   | "action"
   | "http"
   | "internalMutation"
-  | "liveGrid";
+  | "liveGrid"
+  | "sync";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -13,6 +14,27 @@ export type FunctionManifestEntry = {
   handler: string;
   file: string;
   dependencies?: FunctionDependencies;
+  sync?: SyncDefinition;
+};
+
+export type SyncDefinition = {
+  table: string;
+  key: string;
+  columns: string[];
+  equalFilters?: Record<string, string>;
+  excludeWhenSet?: string[];
+  visibilityTables?: string[];
+  orderBy?: string;
+  orderDirection?: "asc" | "desc";
+  mode?: "eager" | "progressive";
+  maxRows?: number;
+  maxBytes?: number;
+  retentionMs?: number;
+};
+
+export type SyncCursor = {
+  epoch: string;
+  revision: number;
 };
 
 export type FunctionDependencies = {
@@ -71,6 +93,8 @@ export type ClientMessage =
   | { type: "auth"; id: string; token?: string; project?: string; tenant?: string }
   | { type: "query.subscribe"; id: string; path: string; args: JsonValue }
   | { type: "query.unsubscribe"; id: string }
+  | { type: "sync.open"; id: string; path: string; args: JsonValue; cursor?: SyncCursor; keys?: string[] }
+  | { type: "sync.close"; id: string }
   | { type: "mutation.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }
   | { type: "action.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }
   | {
@@ -127,6 +151,31 @@ export type ServerMessage =
     cacheRevision?: string;
     trace?: MessageTrace;
   }
+  | {
+    type: "sync.snapshot";
+    id: string;
+    path?: string;
+    result: JsonValue[];
+    cursor: SyncCursor;
+    key: string;
+    orderBy?: string;
+    orderDirection?: "asc" | "desc";
+    mode?: "eager" | "progressive";
+    maxRows?: number;
+    maxBytes?: number;
+  }
+  | {
+    type: "sync.delta";
+    id: string;
+    path?: string;
+    cursor: SyncCursor;
+    upserts?: JsonValue[];
+    deleted?: string[];
+    mutationIds?: string[];
+  }
+  | { type: "sync.ready"; id: string; path?: string; cursor: SyncCursor }
+  | { type: "sync.reset"; id: string; path?: string; reason: "cursor-expired" | "definition-changed" | "visibility-changed" | "recover" }
+  | { type: "sync.error"; id: string; path?: string; error: string }
   | { type: "query.error"; id: string; path?: string; error: string }
   | { type: "mutation.result"; id: string; path?: string; result: JsonValue; trace?: MessageTrace }
   | { type: "mutation.error"; id: string; path?: string; error: string; trace?: MessageTrace }

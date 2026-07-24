@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 )
 
 type FunctionKind string
@@ -23,6 +24,7 @@ const (
 	FunctionKindHTTP             FunctionKind = "http"
 	FunctionKindInternalMutation FunctionKind = "internalMutation"
 	FunctionKindLiveGrid         FunctionKind = "liveGrid"
+	FunctionKindSync             FunctionKind = "sync"
 )
 
 type App struct {
@@ -39,8 +41,110 @@ type Function struct {
 	Handler      any
 	ArgType      reflect.Type
 	ResultType   reflect.Type
+	Sync         *SyncDefinition
 
 	handlerValue reflect.Value
+}
+
+// SyncDefinition describes a durable entity collection. Sync handlers return
+// the initial authorized snapshot; subsequent inserts, updates, and deletes are
+// delivered from Gonvex's transactional change log.
+type SyncDefinition struct {
+	Table            string
+	Key              string
+	Columns          []string
+	EqualFilters     map[string]string
+	ExcludeWhenSet   []string
+	VisibilityTables []string
+	OrderBy          string
+	OrderDirection   string
+	Mode             string
+	MaxRows          int
+	MaxBytes         int64
+	Retention        time.Duration
+}
+
+type SyncTableOption struct {
+	definition SyncDefinition
+}
+
+// SyncTable begins a single-table sync definition. Key defaults to "id".
+func SyncTable(table string) *SyncTableOption {
+	return &SyncTableOption{definition: SyncDefinition{
+		Table:        strings.TrimSpace(table),
+		Key:          "id",
+		Mode:         "eager",
+		EqualFilters: map[string]string{},
+	}}
+}
+
+func (o *SyncTableOption) Key(column string) *SyncTableOption {
+	o.definition.Key = strings.TrimSpace(column)
+	return o
+}
+
+func (o *SyncTableOption) Columns(columns ...string) *SyncTableOption {
+	o.definition.Columns = cleanDependencyNames(columns)
+	return o
+}
+
+// EqualArg binds a table column to a same-named or explicit sync argument.
+func (o *SyncTableOption) EqualArg(column string, argument ...string) *SyncTableOption {
+	if o.definition.EqualFilters == nil {
+		o.definition.EqualFilters = map[string]string{}
+	}
+	column = strings.TrimSpace(column)
+	arg := column
+	if len(argument) > 0 && strings.TrimSpace(argument[0]) != "" {
+		arg = strings.TrimSpace(argument[0])
+	}
+	if column != "" && arg != "" {
+		o.definition.EqualFilters[column] = arg
+	}
+	return o
+}
+
+// ExcludeWhenSet removes rows whose named column is non-null. It is intended
+// for soft-delete and archive markers that the snapshot handler excludes too.
+func (o *SyncTableOption) ExcludeWhenSet(columns ...string) *SyncTableOption {
+	o.definition.ExcludeWhenSet = cleanDependencyNames(columns)
+	return o
+}
+
+func (o *SyncTableOption) VisibilityDependsOn(tables ...string) *SyncTableOption {
+	o.definition.VisibilityTables = cleanDependencyNames(tables)
+	return o
+}
+
+func (o *SyncTableOption) OrderBy(column, direction string) *SyncTableOption {
+	o.definition.OrderBy = strings.TrimSpace(column)
+	direction = strings.ToLower(strings.TrimSpace(direction))
+	if direction != "asc" {
+		direction = "desc"
+	}
+	o.definition.OrderDirection = direction
+	return o
+}
+
+func (o *SyncTableOption) Eager() *SyncTableOption {
+	o.definition.Mode = "eager"
+	return o
+}
+
+func (o *SyncTableOption) Progressive() *SyncTableOption {
+	o.definition.Mode = "progressive"
+	return o
+}
+
+func (o *SyncTableOption) Budget(maxRows int, maxBytes int64) *SyncTableOption {
+	o.definition.MaxRows = maxRows
+	o.definition.MaxBytes = maxBytes
+	return o
+}
+
+func (o *SyncTableOption) RetainFor(duration time.Duration) *SyncTableOption {
+	o.definition.Retention = duration
+	return o
 }
 
 // FunctionDependencies are explicit invalidation and sharing declarations for
@@ -370,6 +474,26 @@ func (a *App) LiveGrid(path string, handler any, options ...FunctionOption) {
 	a.register(FunctionKindLiveGrid, path, handler, options...)
 }
 
+func (a *App) Sync(path string, handler any, sync *SyncTableOption, options ...FunctionOption) {
+	if sync == nil || strings.TrimSpace(sync.definition.Table) == "" {
+		panic("gonvex: sync table is required")
+	}
+	if strings.TrimSpace(sync.definition.Key) == "" {
+		panic("gonvex: sync key is required")
+	}
+	if len(sync.definition.Columns) == 0 {
+		panic("gonvex: sync columns are required")
+	}
+	a.register(FunctionKindSync, path, handler, options...)
+	a.mu.Lock()
+	function := a.functions[path]
+	definition := sync.definition
+	definition.Columns = cleanDependencyNames(append(definition.Columns, definition.Key))
+	function.Sync = &definition
+	a.functions[path] = function
+	a.mu.Unlock()
+}
+
 func (a *App) Functions() map[string]Function {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -391,7 +515,14 @@ func (a *App) ExecuteQuery(ctx *QueryCtx, path string, rawArgs json.RawMessage) 
 	if ctx == nil {
 		ctx = &QueryCtx{}
 	}
-	return a.execute(path, rawArgs, ctx, FunctionKindQuery, FunctionKindLiveGrid)
+	return a.execute(path, rawArgs, ctx, FunctionKindQuery, FunctionKindLiveGrid, FunctionKindSync)
+}
+
+func (a *App) ExecuteSync(ctx *QueryCtx, path string, rawArgs json.RawMessage) (any, error) {
+	if ctx == nil {
+		ctx = &QueryCtx{}
+	}
+	return a.execute(path, rawArgs, ctx, FunctionKindSync)
 }
 
 func (a *App) ExecuteMutation(ctx *MutationCtx, path string, rawArgs json.RawMessage) (any, error) {
