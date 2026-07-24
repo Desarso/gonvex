@@ -1,4 +1,15 @@
-import type { BrowserTelemetryInfo, ClientMessage, JsonValue, MessageTrace, QueryCacheDirective, ServerMessage, SubscriptionRevision, SyncCursor } from "@gonvex/protocol";
+import type {
+  BrowserTelemetryInfo,
+  ClientMessage,
+  JsonValue,
+  MessageTrace,
+  QueryCacheDirective,
+  ServerCapabilities,
+  ServerMessage,
+  SubscriptionRevision,
+  SyncCursor,
+  SyncOpenRequest,
+} from "@gonvex/protocol";
 import { createQueryCacheStore, type QueryCacheOptions, type QueryCacheStatus, type QueryCacheStore } from "./query-cache.js";
 import { createSyncStore, type SyncStore, type SyncStoreOptions } from "./sync-store.js";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
@@ -28,6 +39,9 @@ type QuerySubscription = {
   lastMessage?: ServerMessage;
   serverSettled: boolean;
   cacheReadGeneration?: number;
+  cacheReadPromise?: Promise<void>;
+  cacheReadFallbackTimer?: ReturnType<typeof setTimeout>;
+  cachedRevision?: string;
   socketGeneration?: number;
   lastRevision?: SubscriptionRevision;
   revisionSocketGeneration?: number;
@@ -41,6 +55,7 @@ type SyncSubscription = {
   rows: JsonValue[];
   cursor?: SyncCursor;
   keyField: string;
+  mode?: "eager" | "progressive";
   orderBy?: string;
   orderDirection?: "asc" | "desc";
   maxRows?: number;
@@ -168,13 +183,18 @@ export class GonvexClient {
   private readonly oneShotQueries = new Map<string, OneShotQuery>();
   private readonly telemetryHandlers = new Set<TelemetryHandler>();
   private readonly pendingMessages: ClientMessage[] = [];
+  private readonly pendingSyncOpens = new Set<SyncSubscription>();
+  private syncOpenFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  private serverCapabilities: ServerCapabilities = {};
   private auth: GonvexClientAuth = {};
   private authInFlight = false;
   private telemetryEnabled = false;
   private readonly queryCache: QueryCacheStore | undefined;
+  private readonly queryCacheWaitForScope: boolean;
   private readonly syncStore: SyncStore | undefined;
   private queryCacheDirective: QueryCacheDirective | undefined;
   private queryCacheGeneration = 0;
+  private queryCacheNegotiatedSocketGeneration: number | undefined;
   private syncIdentityGeneration = 0;
   private readonly sessionScopeHandlers = new Set<() => void>();
   private readonly errorReporter: GonvexErrorReporter | undefined;
@@ -193,6 +213,7 @@ export class GonvexClient {
     this.auth = authFromOptions(options);
     this.telemetryEnabled = options.telemetry === true;
     this.queryCache = createQueryCacheStore(options.queryCache);
+    this.queryCacheWaitForScope = options.queryCache !== undefined && options.queryCache !== false;
     this.syncStore = createSyncStore(options.sync);
     this.timeouts = {
       queryTimeoutMs: options.timeouts?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
@@ -309,23 +330,36 @@ export class GonvexClient {
         return;
       }
       if (message.type === "session.ready") {
+        this.serverCapabilities = message.capabilities ?? {};
         if (!this.auth.token && !this.auth.tenant) {
           this.installQueryCacheDirective(message.queryCache);
+          this.queryCacheNegotiatedSocketGeneration = this.socketGeneration;
+          this.resumeQuerySubscriptions();
         }
         return;
       }
       if (message.type === "session.scope") {
         this.installQueryCacheDirective(message.queryCache);
+        this.queryCacheNegotiatedSocketGeneration = this.socketGeneration;
+        this.resumeQuerySubscriptions();
         return;
       }
       if (message.type === "auth.result" || message.type === "auth.error") {
         this.authInFlight = false;
         if (message.type === "auth.result") {
           this.installQueryCacheDirective(queryCacheDirectiveFromAuthResult(message.result));
+          this.queryCacheNegotiatedSocketGeneration = this.socketGeneration;
+          this.resumeQuerySubscriptions();
         } else {
           this.resetQueryCacheScope();
         }
         this.flushPendingMessages();
+      }
+      if (message.type === "sync.readyMany") {
+        for (const ready of message.ready) {
+          this.handlers.get(ready.id)?.({ type: "sync.ready", ...ready });
+        }
+        return;
       }
       const id = "id" in message ? message.id : "system";
       this.handlers.get(id)?.(message);
@@ -349,6 +383,14 @@ export class GonvexClient {
     ));
     for (const subscription of this.syncSubscriptions.values()) {
       this.clearSyncRetry(subscription);
+    }
+    if (this.syncOpenFlushTimer) {
+      clearTimeout(this.syncOpenFlushTimer);
+      this.syncOpenFlushTimer = undefined;
+    }
+    this.pendingSyncOpens.clear();
+    for (const subscription of this.querySubscriptions.values()) {
+      if (subscription.cacheReadFallbackTimer) clearTimeout(subscription.cacheReadFallbackTimer);
     }
     this.handlers.clear();
     this.querySubscriptions.clear();
@@ -503,6 +545,7 @@ export class GonvexClient {
       if (!this.acceptRevision(subscription, message.throughRevision)) return undefined;
       subscription.lastRevision = message.throughRevision;
       subscription.revisionSocketGeneration = this.socketGeneration;
+      subscription.serverSettled = true;
       // Progress advances freshness without waking React/query listeners.
       return undefined;
     }
@@ -682,6 +725,7 @@ export class GonvexClient {
       subscription.opening = false;
       subscription.cursor = message.cursor;
       subscription.keyField = message.key;
+      subscription.mode = message.mode;
       subscription.orderBy = message.orderBy;
       subscription.orderDirection = message.orderDirection;
       subscription.maxRows = message.maxRows;
@@ -724,6 +768,7 @@ export class GonvexClient {
         result: subscription.rows,
         cursor: message.cursor,
         key: subscription.keyField,
+        mode: subscription.mode,
         orderBy: subscription.orderBy,
         orderDirection: subscription.orderDirection,
         maxRows: subscription.maxRows,
@@ -756,6 +801,8 @@ export class GonvexClient {
       this.clearSyncRetry(subscription, true);
       subscription.opening = false;
       subscription.cursor = message.cursor;
+      subscription.mode = message.mode ?? subscription.mode;
+      this.persistSyncSnapshot(subscription);
     }
     if (message.type === "sync.error") {
       subscription.opening = false;
@@ -789,6 +836,7 @@ export class GonvexClient {
         subscription.rows = cached.rows;
         subscription.cursor = cached.cursor;
         subscription.keyField = cached.keyField;
+        subscription.mode = cached.mode;
         subscription.orderBy = cached.orderBy;
         subscription.orderDirection = cached.orderDirection;
         subscription.maxRows = cached.maxRows;
@@ -800,6 +848,7 @@ export class GonvexClient {
           result: cached.rows,
           cursor: cached.cursor,
           key: cached.keyField,
+          mode: cached.mode,
           orderBy: cached.orderBy,
           orderDirection: cached.orderDirection,
           maxRows: cached.maxRows,
@@ -816,14 +865,43 @@ export class GonvexClient {
     if (subscription.listeners.size === 0 || subscription.opening) return;
     subscription.opening = true;
     subscription.socketGeneration = this.socketGeneration;
-    this.send({
-      type: "sync.open",
+    const open = this.syncOpenRequest(subscription);
+    if (this.serverCapabilities.syncBatch === 1) {
+      this.pendingSyncOpens.add(subscription);
+      if (!this.syncOpenFlushTimer) {
+        this.syncOpenFlushTimer = setTimeout(() => this.flushSyncOpens(), 0);
+      }
+      return;
+    }
+    this.send({ type: "sync.open", ...open });
+  }
+
+  private syncOpenRequest(subscription: SyncSubscription): SyncOpenRequest {
+    const keys = subscription.mode === "eager"
+      ? undefined
+      : subscription.rows.map((row) => syncRowKey(row, subscription.keyField)).filter(Boolean);
+    return {
       id: subscription.id,
       path: subscription.path,
       args: subscription.args,
       cursor: subscription.cursor,
-      keys: subscription.rows.map((row) => syncRowKey(row, subscription.keyField)).filter(Boolean),
-    });
+      keys,
+    };
+  }
+
+  private flushSyncOpens() {
+    this.syncOpenFlushTimer = undefined;
+    const subscriptions = Array.from(this.pendingSyncOpens);
+    this.pendingSyncOpens.clear();
+    const opens = subscriptions
+      .filter((subscription) => (
+        subscription.opening
+        && subscription.listeners.size > 0
+        && this.syncSubscriptions.get(subscription.key) === subscription
+      ))
+      .map((subscription) => this.syncOpenRequest(subscription));
+    if (opens.length === 0) return;
+    this.send({ type: "sync.openMany", opens });
   }
 
   private unsubscribeSyncListener(key: string, listener: SubscriptionHandler) {
@@ -832,6 +910,7 @@ export class GonvexClient {
     subscription.listeners.delete(listener);
     if (subscription.listeners.size > 0) return;
     this.clearSyncRetry(subscription);
+    this.pendingSyncOpens.delete(subscription);
     this.syncSubscriptions.delete(key);
     this.handlers.delete(subscription.id);
     this.send({ type: "sync.close", id: subscription.id });
@@ -845,6 +924,7 @@ export class GonvexClient {
       rows: subscription.rows,
       cursor: subscription.cursor,
       keyField: subscription.keyField,
+      mode: subscription.mode,
       orderBy: subscription.orderBy,
       orderDirection: subscription.orderDirection,
       maxRows: subscription.maxRows,
@@ -863,6 +943,7 @@ export class GonvexClient {
     const value = {
       cursor: subscription.cursor,
       keyField: subscription.keyField,
+      mode: subscription.mode,
       orderBy: subscription.orderBy,
       orderDirection: subscription.orderDirection,
       upserts,
@@ -1028,14 +1109,33 @@ export class GonvexClient {
   }
 
   private sendSubscription(subscription: QuerySubscription) {
+    if (subscription.listeners.size === 0) return;
     if (subscription.socketGeneration === this.socketGeneration) return;
+    if (this.queryCache && this.queryCacheWaitForScope) {
+      if (!this.queryCacheDirective) {
+        if (this.queryCacheNegotiatedSocketGeneration !== this.socketGeneration) return;
+      } else if (subscription.cacheReadGeneration !== this.queryCacheGeneration) {
+        this.startQueryCacheRead(subscription);
+        return;
+      } else if (subscription.cacheReadPromise) {
+        return;
+      }
+    }
     subscription.socketGeneration = this.socketGeneration;
     this.send({
       type: "query.subscribe",
       id: subscription.id,
       path: subscription.path,
       args: subscription.args,
+      cacheRevision: subscription.cachedRevision,
     });
+  }
+
+  private resumeQuerySubscriptions() {
+    for (const subscription of this.querySubscriptions.values()) {
+      if (subscription.listeners.size === 0) continue;
+      this.sendSubscription(subscription);
+    }
   }
 
   private enqueueSyncPersistence(
@@ -1164,10 +1264,15 @@ export class GonvexClient {
     const hadScope = this.queryCacheDirective !== undefined;
     this.queryCacheGeneration += 1;
     this.queryCacheDirective = undefined;
+    this.queryCacheNegotiatedSocketGeneration = undefined;
     for (const subscription of this.querySubscriptions.values()) {
       subscription.lastMessage = undefined;
       subscription.serverSettled = false;
       subscription.cacheReadGeneration = undefined;
+      subscription.cacheReadPromise = undefined;
+      if (subscription.cacheReadFallbackTimer) clearTimeout(subscription.cacheReadFallbackTimer);
+      subscription.cacheReadFallbackTimer = undefined;
+      subscription.cachedRevision = undefined;
     }
     for (const subscription of this.syncSubscriptions.values()) {
       this.clearSyncRetry(subscription, true);
@@ -1189,11 +1294,10 @@ export class GonvexClient {
     const generation = this.queryCacheGeneration;
     if (subscription.cacheReadGeneration === generation) return;
     subscription.cacheReadGeneration = generation;
-    void store.read(directive.scope, subscription.path, subscription.args, directive.maxAgeMs).then((cached) => {
+    const read = store.read(directive.scope, subscription.path, subscription.args, directive.maxAgeMs).then((cached) => {
       const current = this.querySubscriptions.get(subscription.key);
       if (
-        !cached
-        || current !== subscription
+        current !== subscription
         || subscription.serverSettled
         || subscription.listeners.size === 0
         || this.queryCacheGeneration !== generation
@@ -1201,6 +1305,8 @@ export class GonvexClient {
       ) {
         return;
       }
+      subscription.cachedRevision = cached?.revision;
+      if (!cached) return;
       const message: ServerMessage = {
         type: "query.result",
         id: subscription.id,
@@ -1216,7 +1322,26 @@ export class GonvexClient {
       }
     }).catch(() => {
       // Persistent cache failures never affect the server query path.
+    }).finally(() => {
+      if (subscription.cacheReadFallbackTimer) clearTimeout(subscription.cacheReadFallbackTimer);
+      subscription.cacheReadFallbackTimer = undefined;
+      if (subscription.cacheReadPromise === read) subscription.cacheReadPromise = undefined;
+      if (
+        this.querySubscriptions.get(subscription.key) === subscription
+        && subscription.listeners.size > 0
+        && this.queryCacheGeneration === generation
+        && this.queryCacheDirective?.scope === directive.scope
+      ) {
+        this.sendSubscription(subscription);
+      }
     });
+    subscription.cacheReadPromise = read;
+    subscription.cacheReadFallbackTimer = setTimeout(() => {
+      if (subscription.cacheReadPromise !== read) return;
+      subscription.cacheReadPromise = undefined;
+      subscription.cacheReadFallbackTimer = undefined;
+      this.sendSubscription(subscription);
+    }, 50);
   }
 
   private persistQueryResult(subscription: QuerySubscription, message: Extract<ServerMessage, { type: "query.result" }>) {
@@ -1242,6 +1367,7 @@ export class GonvexClient {
         maxAgeMs: directive.maxAgeMs,
       }).catch(() => undefined);
     });
+    subscription.cachedRevision = message.cacheRevision;
   }
 
   private deleteCachedQuery(subscription: QuerySubscription) {

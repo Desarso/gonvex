@@ -635,7 +635,7 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 		return
 	}
 
-	cacheRevision := group.manager.server.nextQueryCacheRevision()
+	cacheRevision := group.manager.server.nextQueryCacheRevision(hash)
 	message := serverMessage{Type: "query.result", Path: group.path, Result: json.RawMessage(payload), Reason: reason, CacheScope: group.cacheScope, CacheRevision: cacheRevision, SubscriptionRevision: revisionValue}
 	encodedSize := len(payload)
 	patched := false
@@ -690,6 +690,15 @@ func (group *sharedSubscription) broadcastTo(listeners []querySubscription, mess
 		}
 		copy := message
 		copy.ID = listener.id
+		if copy.Type == "query.result" && copy.SubscriptionRevision != nil && queryCacheRevisionMatchesHash(listener.cacheRevision, group.lastHash) {
+			copy = serverMessage{
+				Type:            "query.progress",
+				ID:              listener.id,
+				Path:            group.path,
+				Reason:          message.Reason,
+				ThroughRevision: copy.SubscriptionRevision,
+			}
+		}
 		sentAt := time.Now().UTC()
 		copy.Trace = &messageTrace{
 			ServerChangeCommittedAtMS:     changedAtMS,
@@ -727,10 +736,19 @@ func (group *sharedSubscription) sendFullTo(listener querySubscription, payload 
 	if !listenerCurrent(listener) {
 		return
 	}
+	revisionValue := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: revision}
+	hash := sha256.Sum256(payload)
+	if queryCacheRevisionMatchesHash(listener.cacheRevision, hash) {
+		listener.conn.write(serverMessage{
+			Type: "query.progress", ID: listener.id, Path: listener.path, Reason: reason,
+			ThroughRevision: revisionValue,
+		})
+		return
+	}
 	listener.conn.write(serverMessage{
 		Type: "query.result", ID: listener.id, Path: listener.path, Result: payload, Reason: reason,
-		CacheScope: listener.cacheScope, CacheRevision: group.manager.server.nextQueryCacheRevision(),
-		SubscriptionRevision: &subscriptionRevision{Epoch: group.manager.epoch, Sequence: revision},
+		CacheScope: listener.cacheScope, CacheRevision: group.manager.server.nextQueryCacheRevision(hash),
+		SubscriptionRevision: revisionValue,
 	})
 }
 

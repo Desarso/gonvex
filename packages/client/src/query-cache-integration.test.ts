@@ -145,6 +145,7 @@ describe("persistent query cache integration", () => {
       type: "query.subscribe",
       path: "tasks.list",
       args: { status: "open" },
+      cacheRevision: "0000000000001:00000000000000000001",
     }));
 
     const subscribe = sentMessages().find((message) => message.type === "query.subscribe");
@@ -169,6 +170,45 @@ describe("persistent query cache integration", () => {
     }));
   });
 
+  it("settles a warm cached query from a progress frame without replacing the cached value", async () => {
+    const store = new FakeQueryCacheStore();
+    store.lookup = {
+      result: [{ id: "cached" }],
+      revision: "0000000000001:00000000000000000001:content-hash",
+      writtenAt: Date.now() - 500,
+      ageMs: 500,
+    };
+    const client = new GonvexClient("ws://runtime.test/ws", { queryCache: { store } });
+    const handler = vi.fn();
+
+    client.subscribeQuery(ref, {}, handler);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+
+    const subscribe = sentMessages().find((message) => message.type === "query.subscribe");
+    expect(subscribe).toEqual(expect.objectContaining({
+      cacheRevision: store.lookup.revision,
+    }));
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: "query.result",
+      result: [{ id: "cached" }],
+    }));
+
+    socket().receive({
+      type: "query.progress",
+      id: subscribe.id,
+      path: "tasks.list",
+      reason: "initial",
+      throughRevision: { epoch: "runtime-a", sequence: 1 },
+    });
+    await flushAsyncWork();
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(store.writes).toHaveLength(0);
+  });
+
   it("does not emit a late cache read after the server has already won", async () => {
     let releaseRead!: () => void;
     const store = new FakeQueryCacheStore();
@@ -187,7 +227,7 @@ describe("persistent query cache integration", () => {
     client.subscribeQuery(ref, {}, handler);
     socket().open();
     socket().receive({ type: "session.ready", queryCache: directive });
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 60));
     const subscribe = sentMessages().find((message) => message.type === "query.subscribe");
     socket().receive({
       type: "query.result",
@@ -215,6 +255,7 @@ describe("persistent query cache integration", () => {
 
     client.subscribeQuery(ref, {}, () => undefined);
     socket().open();
+    socket().receive({ type: "session.ready" });
     await flushAsyncWork();
 
     expect(store.reads).toHaveLength(0);

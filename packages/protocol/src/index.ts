@@ -82,6 +82,25 @@ export type QueryCacheDirective = {
   maxAgeMs: number;
 };
 
+export type ServerCapabilities = {
+  syncBatch?: 1;
+};
+
+export type SyncOpenRequest = {
+  id: string;
+  path: string;
+  args: JsonValue;
+  cursor?: SyncCursor;
+  keys?: string[];
+};
+
+export type SyncReady = {
+  id: string;
+  path?: string;
+  cursor: SyncCursor;
+  mode?: "eager" | "progressive";
+};
+
 export type GonvexManifest = {
   project: string;
   generatedAt: string;
@@ -91,9 +110,10 @@ export type GonvexManifest = {
 
 export type ClientMessage =
   | { type: "auth"; id: string; token?: string; project?: string; tenant?: string }
-  | { type: "query.subscribe"; id: string; path: string; args: JsonValue }
+  | { type: "query.subscribe"; id: string; path: string; args: JsonValue; cacheRevision?: string }
   | { type: "query.unsubscribe"; id: string }
   | { type: "sync.open"; id: string; path: string; args: JsonValue; cursor?: SyncCursor; keys?: string[] }
+  | { type: "sync.openMany"; opens: SyncOpenRequest[] }
   | { type: "sync.close"; id: string }
   | { type: "mutation.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }
   | { type: "action.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }
@@ -113,7 +133,13 @@ export type ClientMessage =
   };
 
 export type ServerMessage =
-  | { type: "session.ready"; project?: string; tenant?: string; queryCache?: QueryCacheDirective }
+  | {
+    type: "session.ready";
+    project?: string;
+    tenant?: string;
+    queryCache?: QueryCacheDirective;
+    capabilities?: ServerCapabilities;
+  }
   | { type: "session.scope"; queryCache?: QueryCacheDirective }
   | { type: "auth.result"; id: string; result: JsonValue }
   | { type: "auth.error"; id: string; error: string }
@@ -173,7 +199,8 @@ export type ServerMessage =
     deleted?: string[];
     mutationIds?: string[];
   }
-  | { type: "sync.ready"; id: string; path?: string; cursor: SyncCursor }
+  | ({ type: "sync.ready" } & SyncReady)
+  | { type: "sync.readyMany"; ready: SyncReady[] }
   | { type: "sync.reset"; id: string; path?: string; reason: "cursor-expired" | "definition-changed" | "visibility-changed" | "recover" }
   | { type: "sync.error"; id: string; path?: string; error: string }
   | { type: "query.error"; id: string; path?: string; error: string }

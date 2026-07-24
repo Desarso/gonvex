@@ -25,6 +25,12 @@ type syncCursor struct {
 	Revision uint64 `json:"revision"`
 }
 
+type syncClock struct {
+	DatabaseEpoch    string
+	Revision         uint64
+	RetainedRevision uint64
+}
+
 type mutationIDContextKey struct{}
 
 func withMutationID(ctx context.Context, mutationID string) context.Context {
@@ -133,24 +139,93 @@ func (s *Server) installTenantSyncLog(ctx context.Context, project, databaseURL 
 }
 
 func (c *wsConn) openSync(ctx context.Context, message clientMessage) {
+	databaseURL := c.server.databaseURLForTenant(c.project, c.tenant)
+	c.server.scheduleSyncLogPrune(c.project, c.tenant, databaseURL)
+	clock, err := currentSyncClock(ctx, databaseURL)
+	if err != nil {
+		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
+		return
+	}
+	c.openSyncWithClock(ctx, message, databaseURL, clock, false)
+}
+
+func (c *wsConn) openSyncMany(ctx context.Context, opens []syncOpenRequest) {
+	if len(opens) == 0 {
+		return
+	}
+	if len(opens) > 256 {
+		c.write(serverMessage{Type: "sync.error", Error: "sync batch cannot contain more than 256 opens"})
+		return
+	}
+	databaseURL := c.server.databaseURLForTenant(c.project, c.tenant)
+	c.server.scheduleSyncLogPrune(c.project, c.tenant, databaseURL)
+	start, err := currentSyncClock(ctx, databaseURL)
+	if err != nil {
+		c.write(serverMessage{Type: "sync.error", Error: err.Error()})
+		return
+	}
+
+	ready := make([]*syncSubscription, 0, len(opens))
+	for _, open := range opens {
+		subscription := c.openSyncWithClock(ctx, clientMessage{
+			ID: open.ID, Path: open.Path, Args: open.Args, Cursor: open.Cursor, Keys: open.Keys,
+		}, databaseURL, start, true)
+		if subscription != nil {
+			ready = append(ready, subscription)
+		}
+	}
+	if len(ready) == 0 {
+		return
+	}
+
+	// Every candidate is attached before this second clock read. If the clock
+	// did not advance, one ready frame safely settles the whole warm batch. If
+	// it did advance, normal delivery closes the race for each affected sync.
+	end, err := currentSyncClock(ctx, databaseURL)
+	if err != nil {
+		for _, subscription := range ready {
+			c.write(serverMessage{Type: "sync.error", ID: subscription.id, Path: subscription.path, Error: err.Error()})
+		}
+		return
+	}
+	if start.DatabaseEpoch == end.DatabaseEpoch && start.Revision == end.Revision {
+		messages := make([]syncReadyMessage, 0, len(ready))
+		for _, subscription := range ready {
+			cursor := syncCursorForClock(end, subscription.definition, c.currentCacheScope())
+			subscription.cursor = cursor
+			messages = append(messages, syncReadyMessage{
+				ID: subscription.id, Path: subscription.path, Cursor: &cursor, Mode: subscription.definition.Mode,
+			})
+		}
+		c.write(serverMessage{Type: "sync.readyMany", Ready: messages})
+		return
+	}
+	for _, subscription := range ready {
+		if err := c.server.deliverSync(subscription); err != nil {
+			c.write(serverMessage{Type: "sync.error", ID: subscription.id, Path: subscription.path, Error: err.Error()})
+		}
+	}
+}
+
+func (c *wsConn) openSyncWithClock(
+	ctx context.Context,
+	message clientMessage,
+	databaseURL string,
+	clock syncClock,
+	deferCurrentReady bool,
+) *syncSubscription {
 	if strings.TrimSpace(message.ID) == "" || strings.TrimSpace(message.Path) == "" {
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: "sync id and path are required"})
-		return
+		return nil
 	}
 	current := c.server.runtime.ManifestForProject(c.project)
 	entry, ok := current.Functions[message.Path]
 	if !ok || entry.Kind != manifest.FunctionKindSync || entry.Sync == nil {
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: "sync function is not registered"})
-		return
+		return nil
 	}
 	definition := *entry.Sync
-	databaseURL := c.server.databaseURLForTenant(c.project, c.tenant)
-	c.server.scheduleSyncLogPrune(c.project, c.tenant, databaseURL)
-	base, err := currentSyncCursor(ctx, databaseURL, definition, c.currentCacheScope())
-	if err != nil {
-		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
-		return
-	}
+	base := syncCursorForClock(clock, definition, c.currentCacheScope())
 
 	subscription := &syncSubscription{
 		conn: c, id: message.ID, path: message.Path, project: c.project, tenant: c.tenant,
@@ -160,30 +235,29 @@ func (c *wsConn) openSync(ctx context.Context, message clientMessage) {
 	c.closeSync(message.ID)
 
 	if message.Cursor != nil && message.Cursor.Epoch == base.Epoch && message.Cursor.Revision <= base.Revision {
-		resumable, resumeErr := syncCursorAvailable(ctx, databaseURL, message.Cursor.Revision, base.Revision)
-		if resumeErr != nil {
-			c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: resumeErr.Error()})
-			return
-		}
+		resumable := message.Cursor.Revision >= clock.RetainedRevision
 		if resumable {
 			subscription.cursor = *message.Cursor
 			c.attachSync(subscription)
+			if deferCurrentReady && message.Cursor.Revision == base.Revision {
+				return subscription
+			}
 			if err := c.server.deliverSync(subscription); err != nil {
 				c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 			}
-			return
+			return nil
 		}
 	}
 
 	result, err := c.server.executeTenantQueryForCallerUncached(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
 	if err != nil {
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
-		return
+		return nil
 	}
 	rows, err := syncSnapshotRows(result, definition)
 	if err != nil {
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
-		return
+		return nil
 	}
 	subscription.visibleKeys = syncRowsKeySet(rows, definition.Key)
 	c.attachSync(subscription)
@@ -195,6 +269,7 @@ func (c *wsConn) openSync(ctx context.Context, message clientMessage) {
 	if err := c.server.deliverSync(subscription); err != nil {
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 	}
+	return nil
 }
 
 func (s *Server) scheduleSyncLogPrune(project, tenant, databaseURL string) {
@@ -315,40 +390,38 @@ func syncRowKey(row json.RawMessage, key string) string {
 	return ""
 }
 
-func currentSyncCursor(ctx context.Context, databaseURL string, definition manifest.SyncDefinition, cacheScope string) (syncCursor, error) {
+func currentSyncClock(ctx context.Context, databaseURL string) (syncClock, error) {
 	db, err := dbpool.Open(databaseURL)
 	if err != nil {
-		return syncCursor{}, err
+		return syncClock{}, err
 	}
 	defer db.Close()
-	var databaseEpoch string
-	var revision uint64
-	if err := db.QueryRowContext(ctx, `SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = true`).Scan(&databaseEpoch, &revision); err != nil {
-		return syncCursor{}, fmt.Errorf("sync storage is not installed: %w", err)
+	var clock syncClock
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT epoch, revision, retained_revision FROM _gonvex_sync_clock WHERE singleton = true`,
+	).Scan(&clock.DatabaseEpoch, &clock.Revision, &clock.RetainedRevision); err != nil {
+		return syncClock{}, fmt.Errorf("sync storage is not installed: %w", err)
 	}
+	return clock, nil
+}
+
+func syncCursorForClock(clock syncClock, definition manifest.SyncDefinition, cacheScope string) syncCursor {
 	payload, _ := json.Marshal(struct {
 		DatabaseEpoch string                  `json:"databaseEpoch"`
 		Definition    manifest.SyncDefinition `json:"definition"`
 		Scope         string                  `json:"scope"`
-	}{databaseEpoch, definition, cacheScope})
+	}{clock.DatabaseEpoch, definition, cacheScope})
 	hash := sha256.Sum256(payload)
-	return syncCursor{Epoch: hex.EncodeToString(hash[:16]), Revision: revision}, nil
+	return syncCursor{Epoch: hex.EncodeToString(hash[:16]), Revision: clock.Revision}
 }
 
-func syncCursorAvailable(ctx context.Context, databaseURL string, revision, current uint64) (bool, error) {
-	if revision == current {
-		return true, nil
-	}
-	db, err := dbpool.Open(databaseURL)
+func currentSyncCursor(ctx context.Context, databaseURL string, definition manifest.SyncDefinition, cacheScope string) (syncCursor, error) {
+	clock, err := currentSyncClock(ctx, databaseURL)
 	if err != nil {
-		return false, err
+		return syncCursor{}, err
 	}
-	defer db.Close()
-	var retained uint64
-	if err := db.QueryRowContext(ctx, `SELECT retained_revision FROM _gonvex_sync_clock WHERE singleton = true`).Scan(&retained); err != nil {
-		return false, err
-	}
-	return revision >= retained, nil
+	return syncCursorForClock(clock, definition, cacheScope), nil
 }
 
 func (s *Server) deliverSync(subscription *syncSubscription) error {
@@ -378,7 +451,10 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		return nil
 	}
 	if latest.Revision <= subscription.cursor.Revision {
-		subscription.conn.write(serverMessage{Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &latest})
+		subscription.conn.write(serverMessage{
+			Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &latest,
+			Mode: subscription.definition.Mode,
+		})
 		return nil
 	}
 	changes, err := readSyncChanges(ctx, databaseURL, subscription.cursor.Revision, latest.Revision, subscription.definition.Table)
@@ -395,7 +471,10 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		if err := s.deliverProgressiveSync(ctx, subscription, changes, args, latest); err != nil {
 			return err
 		}
-		subscription.conn.write(serverMessage{Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &subscription.cursor})
+		subscription.conn.write(serverMessage{
+			Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &subscription.cursor,
+			Mode: subscription.definition.Mode,
+		})
 		return nil
 	}
 	for _, batch := range groupSyncChanges(changes) {
@@ -427,7 +506,10 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 	if subscription.cursor.Revision < latest.Revision {
 		subscription.cursor.Revision = latest.Revision
 	}
-	subscription.conn.write(serverMessage{Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &subscription.cursor})
+	subscription.conn.write(serverMessage{
+		Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &subscription.cursor,
+		Mode: subscription.definition.Mode,
+	})
 	return nil
 }
 

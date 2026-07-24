@@ -255,6 +255,144 @@ describe("durable sync integration", () => {
     }));
   });
 
+  it("batches warm sync resumes and omits eager collection keys when supported", async () => {
+    const store = new FakeSyncStore();
+    store.stored = {
+      rows: [{ id: "cached", title: "cached" }],
+      cursor: { epoch: "sync-a", revision: 41 },
+      keyField: "id",
+      mode: "eager",
+    } as StoredSyncCollection & { mode: "eager" };
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+
+    client.subscribeSync(ref, { workspaceId: "workspace-a" }, () => undefined);
+    client.subscribeSync(
+      { kind: "sync", path: "statuses.sync" },
+      { workspaceId: "workspace-a" },
+      () => undefined,
+    );
+    socket().open();
+    socket().receive({
+      type: "session.ready",
+      queryCache: directive,
+      capabilities: { syncBatch: 1 },
+    });
+    await flushAsyncWork();
+    await vi.runOnlyPendingTimersAsync();
+    await flushAsyncWork();
+
+    const messages = sentMessages();
+    expect(messages.some((message) => message.type === "sync.open")).toBe(false);
+    const batch = messages.find((message) => message.type === "sync.openMany");
+    expect(batch?.opens).toHaveLength(2);
+    expect(batch?.opens).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: "tasks.recentSync",
+        cursor: { epoch: "sync-a", revision: 41 },
+      }),
+      expect.objectContaining({
+        path: "statuses.sync",
+        cursor: { epoch: "sync-a", revision: 41 },
+      }),
+    ]));
+    expect(batch?.opens.every((open: { keys?: string[] }) => open.keys === undefined)).toBe(true);
+  });
+
+  it("resumes the maximum supported warm batch in one frame without dropping a collection", async () => {
+    const store = new FakeSyncStore();
+    store.stored = {
+      rows: [{ id: "cached" }],
+      cursor: { epoch: "sync-a", revision: 41 },
+      keyField: "id",
+      mode: "eager",
+    };
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const handlers = Array.from({ length: 256 }, () => vi.fn());
+
+    handlers.forEach((handler, index) => {
+      client.subscribeSync(
+        { kind: "sync", path: `references.collection${index}` },
+        { tenantId: "tenant-a" },
+        handler,
+      );
+    });
+    socket().open();
+    socket().receive({
+      type: "session.ready",
+      queryCache: directive,
+      capabilities: { syncBatch: 1 },
+    });
+    await flushAsyncWork();
+    await vi.runOnlyPendingTimersAsync();
+    await flushAsyncWork();
+
+    const batches = sentMessages().filter((message) => message.type === "sync.openMany");
+    expect(batches).toHaveLength(1);
+    expect(batches[0].opens).toHaveLength(256);
+    expect(new Set(batches[0].opens.map((open: { id: string }) => open.id))).toHaveProperty("size", 256);
+
+    socket().receive({
+      type: "sync.readyMany",
+      ready: batches[0].opens.map((open: { id: string; path: string }) => ({
+        id: open.id,
+        path: open.path,
+        cursor: { epoch: "sync-a", revision: 41 },
+        mode: "eager",
+      })),
+    });
+    await flushAsyncWork();
+
+    expect(handlers.every((handler) => handler.mock.calls.at(-1)?.[0]?.type === "sync.ready")).toBe(true);
+  });
+
+  it("keeps progressive visibility keys and persists modes learned from batched ready messages", async () => {
+    const store = new FakeSyncStore();
+    store.stored = {
+      rows: [{ id: "cached", title: "cached" }],
+      cursor: { epoch: "sync-a", revision: 41 },
+      keyField: "id",
+      mode: "progressive",
+    };
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const handler = vi.fn();
+
+    client.subscribeSync(ref, { workspaceId: "workspace-a" }, handler);
+    socket().open();
+    socket().receive({
+      type: "session.ready",
+      queryCache: directive,
+      capabilities: { syncBatch: 1 },
+    });
+    await flushAsyncWork();
+    await vi.runOnlyPendingTimersAsync();
+    await flushAsyncWork();
+
+    const batch = sentMessages().find((message) => message.type === "sync.openMany");
+    expect(batch?.opens).toEqual([
+      expect.objectContaining({ keys: ["cached"] }),
+    ]);
+
+    socket().receive({
+      type: "sync.readyMany",
+      ready: [{
+        id: batch.opens[0].id,
+        path: ref.path,
+        cursor: { epoch: "sync-a", revision: 41 },
+        mode: "progressive",
+      }],
+    });
+    await flushAsyncWork();
+
+    expect(handler).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: "sync.ready",
+      mode: "progressive",
+    }));
+    expect(store.replacements.at(-1)).toEqual(expect.objectContaining({
+      mode: "progressive",
+      rows: [{ id: "cached", title: "cached" }],
+    }));
+  });
+
   it("materializes only changed rows and persists the delta cursor", async () => {
     const store = new FakeSyncStore();
     const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });

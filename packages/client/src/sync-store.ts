@@ -16,6 +16,7 @@ export type StoredSyncCollection = {
   rows: JsonValue[];
   cursor: SyncCursor;
   keyField: string;
+  mode?: "eager" | "progressive";
   orderBy?: string;
   orderDirection?: "asc" | "desc";
   maxRows?: number;
@@ -59,6 +60,7 @@ type CollectionRecord = {
   argsHash: string;
   cursor: SyncCursor;
   keyField: string;
+  mode?: "eager" | "progressive";
   orderBy?: string;
   orderDirection?: "asc" | "desc";
   maxRows?: number;
@@ -120,6 +122,7 @@ export class DexieSyncStore implements SyncStore {
         rows: rows.map((row) => row.value),
         cursor: collection.cursor,
         keyField: collection.keyField,
+        mode: collection.mode,
         orderBy: collection.orderBy,
         orderDirection: collection.orderDirection,
         maxRows: collection.maxRows,
@@ -163,6 +166,7 @@ export class DexieSyncStore implements SyncStore {
           argsHash,
           cursor: value.cursor,
           keyField: value.keyField,
+          mode: value.mode,
           orderBy: value.orderBy,
           orderDirection: value.orderDirection,
           maxRows: value.maxRows,
@@ -185,6 +189,7 @@ export class DexieSyncStore implements SyncStore {
     value: {
       cursor: SyncCursor;
       keyField: string;
+      mode?: "eager" | "progressive";
       orderBy?: string;
       orderDirection?: "asc" | "desc";
       upserts: JsonValue[];
@@ -239,6 +244,7 @@ export class DexieSyncStore implements SyncStore {
           ...collection,
           cursor: value.cursor,
           keyField: value.keyField,
+          mode: value.mode ?? collection.mode,
           orderBy: value.orderBy ?? collection.orderBy,
           orderDirection: value.orderDirection ?? collection.orderDirection,
           maxRows,

@@ -82,6 +82,48 @@ func TestSyncRetentionUsesLongestDeclaredWindow(t *testing.T) {
 	}
 }
 
+func TestSyncCursorForClockSharesRevisionButIsolatesDefinitionsAndScopes(t *testing.T) {
+	clock := syncClock{DatabaseEpoch: "database-a", Revision: 42, RetainedRevision: 7}
+	tasks := manifest.SyncDefinition{Table: "tasks", Key: "id", Columns: []string{"id", "title"}}
+	statuses := manifest.SyncDefinition{Table: "statuses", Key: "id", Columns: []string{"id", "name"}}
+
+	taskCursor := syncCursorForClock(clock, tasks, "scope-a")
+	statusCursor := syncCursorForClock(clock, statuses, "scope-a")
+	otherScopeCursor := syncCursorForClock(clock, tasks, "scope-b")
+
+	if taskCursor.Revision != clock.Revision || statusCursor.Revision != clock.Revision {
+		t.Fatalf("expected every definition in a batch to share revision %d", clock.Revision)
+	}
+	if taskCursor.Epoch == statusCursor.Epoch {
+		t.Fatal("different sync definitions must not share an epoch")
+	}
+	if taskCursor.Epoch == otherScopeCursor.Epoch {
+		t.Fatal("different visibility scopes must not share an epoch")
+	}
+}
+
+func TestSyncBatchProtocolPreservesIndependentResumeState(t *testing.T) {
+	var message clientMessage
+	if err := json.Unmarshal([]byte(`{
+		"type":"sync.openMany",
+		"opens":[
+			{"id":"one","path":"sync.tasks","args":{"workspaceId":"a"},"cursor":{"epoch":"e1","revision":7}},
+			{"id":"two","path":"sync.statuses","args":{},"cursor":{"epoch":"e2","revision":9},"keys":["s1","s2"]}
+		]
+	}`), &message); err != nil {
+		t.Fatal(err)
+	}
+	if len(message.Opens) != 2 {
+		t.Fatalf("expected two independent opens, got %d", len(message.Opens))
+	}
+	if message.Opens[0].Cursor == nil || message.Opens[0].Cursor.Revision != 7 {
+		t.Fatalf("first cursor was not preserved: %#v", message.Opens[0].Cursor)
+	}
+	if got := len(message.Opens[1].Keys); got != 2 {
+		t.Fatalf("expected progressive keys to survive batching, got %d", got)
+	}
+}
+
 func TestSyncDeliveryStormCoalescesToOneRunningAndOnePendingPass(t *testing.T) {
 	subscription := &syncSubscription{}
 	if !beginSyncDelivery(subscription) {

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -84,7 +85,19 @@ func hashQueryCacheValue(value any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *Server) nextQueryCacheRevision() string {
+func (s *Server) nextQueryCacheRevision(contentHash ...[sha256.Size]byte) string {
 	sequence := s.queryCacheSequence.Add(1)
-	return fmt.Sprintf("%013d:%020d", s.queryCacheStartedAtMS, sequence)
+	revision := fmt.Sprintf("%013d:%020d", s.queryCacheStartedAtMS, sequence)
+	if len(contentHash) > 0 {
+		revision += ":" + hex.EncodeToString(contentHash[0][:])
+	}
+	return revision
+}
+
+func queryCacheRevisionMatchesHash(revision string, contentHash [sha256.Size]byte) bool {
+	lastColon := strings.LastIndexByte(revision, ':')
+	if lastColon < 0 || lastColon == len(revision)-1 {
+		return false
+	}
+	return revision[lastColon+1:] == hex.EncodeToString(contentHash[:])
 }

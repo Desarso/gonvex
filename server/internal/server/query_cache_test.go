@@ -246,6 +246,9 @@ func TestWebSocketAdvertisesAndReturnsQueryCacheMetadata(t *testing.T) {
 	if ready.Type != "session.ready" || ready.QueryCache == nil || ready.QueryCache.Scope == "" {
 		t.Fatalf("expected cache-capable session.ready, got %#v", ready)
 	}
+	if ready.Capabilities == nil || ready.Capabilities.SyncBatch != 1 {
+		t.Fatalf("expected session.ready to advertise batched sync support, got %#v", ready.Capabilities)
+	}
 
 	if err := connection.WriteJSON(clientMessage{
 		Type: "query.subscribe",
@@ -261,6 +264,26 @@ func TestWebSocketAdvertisesAndReturnsQueryCacheMetadata(t *testing.T) {
 	}
 	if result.Type != "query.result" || result.CacheScope != ready.QueryCache.Scope || result.CacheRevision == "" {
 		t.Fatalf("expected scoped query result, got %#v", result)
+	}
+	if err := connection.WriteJSON(clientMessage{Type: "query.unsubscribe", ID: "query-1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := connection.WriteJSON(clientMessage{
+		Type:          "query.subscribe",
+		ID:            "query-2",
+		Path:          "cache.echo",
+		Args:          json.RawMessage(`{"value":"fresh"}`),
+		CacheRevision: result.CacheRevision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var unchanged serverMessage
+	if err := connection.ReadJSON(&unchanged); err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Type != "query.progress" || unchanged.ThroughRevision == nil {
+		t.Fatalf("expected cached query to revalidate with progress only, got %#v", unchanged)
 	}
 }
 

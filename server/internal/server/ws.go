@@ -3,6 +3,7 @@ package server
 import (
 	"compress/flate"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -20,24 +21,45 @@ import (
 )
 
 type clientMessage struct {
-	Type               string          `json:"type"`
-	ID                 string          `json:"id"`
-	Path               string          `json:"path,omitempty"`
-	Args               json.RawMessage `json:"args,omitempty"`
-	Token              string          `json:"token,omitempty"`
-	Project            string          `json:"project,omitempty"`
-	Tenant             string          `json:"tenant,omitempty"`
-	Trace              *messageTrace   `json:"trace,omitempty"`
-	Kind               string          `json:"kind,omitempty"`
-	Reason             string          `json:"reason,omitempty"`
-	Outcome            string          `json:"outcome,omitempty"`
-	Error              string          `json:"error,omitempty"`
-	ClientSentAtMS     float64         `json:"clientSentAtMs,omitempty"`
-	ClientReceivedAtMS float64         `json:"clientReceivedAtMs,omitempty"`
-	ClientDurationMS   float64         `json:"clientDurationMs,omitempty"`
-	Device             json.RawMessage `json:"device,omitempty"`
-	Cursor             *syncCursor     `json:"cursor,omitempty"`
-	Keys               []string        `json:"keys,omitempty"`
+	Type               string            `json:"type"`
+	ID                 string            `json:"id"`
+	Path               string            `json:"path,omitempty"`
+	Args               json.RawMessage   `json:"args,omitempty"`
+	Token              string            `json:"token,omitempty"`
+	Project            string            `json:"project,omitempty"`
+	Tenant             string            `json:"tenant,omitempty"`
+	Trace              *messageTrace     `json:"trace,omitempty"`
+	Kind               string            `json:"kind,omitempty"`
+	Reason             string            `json:"reason,omitempty"`
+	Outcome            string            `json:"outcome,omitempty"`
+	Error              string            `json:"error,omitempty"`
+	ClientSentAtMS     float64           `json:"clientSentAtMs,omitempty"`
+	ClientReceivedAtMS float64           `json:"clientReceivedAtMs,omitempty"`
+	ClientDurationMS   float64           `json:"clientDurationMs,omitempty"`
+	Device             json.RawMessage   `json:"device,omitempty"`
+	Cursor             *syncCursor       `json:"cursor,omitempty"`
+	Keys               []string          `json:"keys,omitempty"`
+	Opens              []syncOpenRequest `json:"opens,omitempty"`
+	CacheRevision      string            `json:"cacheRevision,omitempty"`
+}
+
+type syncOpenRequest struct {
+	ID     string          `json:"id"`
+	Path   string          `json:"path"`
+	Args   json.RawMessage `json:"args,omitempty"`
+	Cursor *syncCursor     `json:"cursor,omitempty"`
+	Keys   []string        `json:"keys,omitempty"`
+}
+
+type serverCapabilities struct {
+	SyncBatch int `json:"syncBatch,omitempty"`
+}
+
+type syncReadyMessage struct {
+	ID     string      `json:"id"`
+	Path   string      `json:"path,omitempty"`
+	Cursor *syncCursor `json:"cursor"`
+	Mode   string      `json:"mode,omitempty"`
 }
 
 type serverMessage struct {
@@ -51,6 +73,7 @@ type serverMessage struct {
 	Reason               string                `json:"reason,omitempty"`
 	Trace                any                   `json:"trace,omitempty"`
 	QueryCache           *queryCacheDirective  `json:"queryCache,omitempty"`
+	Capabilities         *serverCapabilities   `json:"capabilities,omitempty"`
 	CacheScope           string                `json:"cacheScope,omitempty"`
 	CacheRevision        string                `json:"cacheRevision,omitempty"`
 	SubscriptionRevision *subscriptionRevision `json:"subscriptionRevision,omitempty"`
@@ -69,6 +92,7 @@ type serverMessage struct {
 	MaxBytes             int64                 `json:"maxBytes,omitempty"`
 	Upserts              []json.RawMessage     `json:"upserts,omitempty"`
 	MutationIDs          []string              `json:"mutationIds,omitempty"`
+	Ready                []syncReadyMessage    `json:"ready,omitempty"`
 }
 
 // explicitNull makes a nil handler result serialize as an explicit JSON null
@@ -146,18 +170,19 @@ func newSubscriptionToken() *subscriptionToken {
 }
 
 type querySubscription struct {
-	conn       *wsConn
-	id         string
-	project    string
-	tenant     string
-	path       string
-	args       json.RawMessage
-	rowIDs     map[string]bool
-	caller     callerContext
-	ctx        context.Context
-	cancel     context.CancelFunc
-	token      *subscriptionToken
-	cacheScope string
+	conn          *wsConn
+	id            string
+	project       string
+	tenant        string
+	path          string
+	args          json.RawMessage
+	rowIDs        map[string]bool
+	caller        callerContext
+	ctx           context.Context
+	cancel        context.CancelFunc
+	token         *subscriptionToken
+	cacheScope    string
+	cacheRevision string
 }
 
 type tableChange struct {
@@ -243,6 +268,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		Project:    client.project,
 		Tenant:     client.tenant,
 		QueryCache: initialCache,
+		Capabilities: &serverCapabilities{
+			SyncBatch: 1,
+		},
 	})
 
 	for {
@@ -329,7 +357,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			return
 		}
 		subCtx, cancel := context.WithCancel(ctx)
-		sub := querySubscription{conn: c, id: message.ID, project: c.project, tenant: c.tenant, path: message.Path, args: message.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: newSubscriptionToken(), cacheScope: c.currentCacheScope()}
+		sub := querySubscription{conn: c, id: message.ID, project: c.project, tenant: c.tenant, path: message.Path, args: message.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: newSubscriptionToken(), cacheScope: c.currentCacheScope(), cacheRevision: message.CacheRevision}
 		c.mu.Lock()
 		previous, hadPrevious := c.subs[message.ID]
 		c.subs[message.ID] = sub
@@ -357,6 +385,11 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			return
 		}
 		c.openSync(ctx, message)
+	case "sync.openMany":
+		if !c.requireAuth(ctx, "sync.error", "") {
+			return
+		}
+		c.openSyncMany(ctx, message.Opens)
 	case "sync.close":
 		c.closeSync(message.ID)
 	case "mutation.call":
@@ -1069,7 +1102,6 @@ func (s *Server) executeSubscription(ctx context.Context, sub querySubscription,
 		return
 	}
 	startedAt := time.Now().UTC()
-	cacheRevision := s.nextQueryCacheRevision()
 	result, err := s.executeTenantQueryForCallerCached(ctx, sub.project, sub.tenant, sub.caller, sub.path, sub.args, sub.cacheScope, reason)
 	if ctx.Err() != nil {
 		return
@@ -1108,7 +1140,21 @@ func (s *Server) executeSubscription(ctx context.Context, sub querySubscription,
 		ServerSubscriptionSentAtMS:    epochMillis(sentAt),
 		ServerDurationMS:              float64(sentAt.Sub(startedAt).Microseconds()) / 1000,
 	}
-	sub.conn.write(serverMessage{Type: "query.result", ID: sub.id, Path: sub.path, Result: explicitNull(result), Reason: reason, Trace: trace, CacheScope: sub.cacheScope, CacheRevision: cacheRevision})
+	payload, marshalErr := json.Marshal(explicitNull(result))
+	if marshalErr != nil {
+		sub.conn.write(serverMessage{Type: "query.error", ID: sub.id, Path: sub.path, Error: marshalErr.Error()})
+		return
+	}
+	hash := sha256.Sum256(payload)
+	cacheRevision := s.nextQueryCacheRevision(hash)
+	if queryCacheRevisionMatchesHash(sub.cacheRevision, hash) {
+		sub.conn.write(serverMessage{
+			Type: "query.progress", ID: sub.id, Path: sub.path, Reason: reason, Trace: trace,
+			ThroughRevision: &subscriptionRevision{Epoch: s.subscriptions.epoch, Sequence: s.subscriptions.sequence.Add(1)},
+		})
+	} else {
+		sub.conn.write(serverMessage{Type: "query.result", ID: sub.id, Path: sub.path, Result: json.RawMessage(payload), Reason: reason, Trace: trace, CacheScope: sub.cacheScope, CacheRevision: cacheRevision})
+	}
 	s.recordTransactionTelemetry(transactionEntryFromTrace(sub.project, sub.tenant, sub.id, "query", sub.path, "server", reason, "ok", "", trace))
 }
 
