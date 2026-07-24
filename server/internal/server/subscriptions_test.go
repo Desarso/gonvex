@@ -237,6 +237,43 @@ func TestSharedKeySeparatesUsersAndBundleVersionsByDefault(t *testing.T) {
 	}
 }
 
+func TestSharedKeySeparatesQueryCacheScopes(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0})
+	if err := server.runtime.SyncManifest(manifest.Manifest{
+		Project: "p",
+		Functions: map[string]manifest.FunctionEntry{
+			"tasks.list": {
+				Kind: manifest.FunctionKindQuery,
+				Dependencies: manifest.FunctionDependencies{
+					Reads: []manifest.ReadDependency{{Table: "tasks"}},
+				},
+			},
+		},
+		Schema: manifest.EmptySchema(),
+		Bundle: &manifest.SourceBundle{Hash: "same-bundle"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first := querySubscription{
+		project: "p", tenant: "a", path: "tasks.list",
+		args: json.RawMessage(`{"status":"open"}`),
+		caller: callerContext{
+			user:        &gonvex.User{ID: "one"},
+			permissions: map[string]any{"role": "member"},
+		},
+		cacheScope: "scope-before-manifest-change",
+	}
+	second := first
+	second.cacheScope = "scope-after-manifest-change"
+
+	firstKey, _, _ := server.subscriptions.groupKeyAndDependencies(first)
+	secondKey, _, _ := server.subscriptions.groupKeyAndDependencies(second)
+	if firstKey == secondKey {
+		t.Fatal("different query cache scopes must not share a subscription group")
+	}
+}
+
 func TestKeyedResultPatch(t *testing.T) {
 	patch, ok := keyedResultPatch(
 		json.RawMessage(`[{"id":"a","title":"old"},{"id":"b","title":"keep"}]`),

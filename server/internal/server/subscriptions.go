@@ -378,7 +378,17 @@ func (m *subscriptionManager) groupKeyAndDependencies(sub querySubscription) (st
 		Permissions string          `json:"permissions"`
 		User        string          `json:"user"`
 		Bundle      string          `json:"bundle"`
-	}{sub.project, sub.tenant, sub.path, canonicalArgs, hashQueryCacheValue(sub.caller.permissions), userFingerprint, bundleHash})
+		CacheScope  string          `json:"cacheScope"`
+	}{
+		sub.project,
+		sub.tenant,
+		sub.path,
+		canonicalArgs,
+		hashQueryCacheValue(sub.caller.permissions),
+		userFingerprint,
+		bundleHash,
+		sub.cacheScope,
+	})
 	sum := sha256.Sum256(keyPayload)
 	return hex.EncodeToString(sum[:]), reads, unknown
 }
