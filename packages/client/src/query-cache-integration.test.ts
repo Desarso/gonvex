@@ -221,7 +221,9 @@ describe("persistent query cache integration", () => {
     store.readGate = new Promise<void>((resolve) => {
       releaseRead = resolve;
     });
-    const client = new GonvexClient("ws://runtime.test/ws", { queryCache: { store } });
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      queryCache: { store, readTimeoutMs: 50 },
+    });
     const handler = vi.fn();
 
     client.subscribeQuery(ref, {}, handler);
@@ -241,6 +243,38 @@ describe("persistent query cache integration", () => {
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({ result: [{ id: "fresh" }] }));
+  });
+
+  it("keeps a warm reload delta-only while IndexedDB is briefly contended", async () => {
+    let releaseRead!: () => void;
+    const store = new FakeQueryCacheStore();
+    store.lookup = {
+      result: [{ id: "cached" }],
+      revision: "0000000000001:00000000000000000001:content-hash",
+      writtenAt: Date.now() - 500,
+      ageMs: 500,
+    };
+    store.readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const client = new GonvexClient("ws://runtime.test/ws", { queryCache: { store } });
+    const handler = vi.fn();
+
+    client.subscribeQuery(ref, {}, handler);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await new Promise((resolve) => setTimeout(resolve, 75));
+
+    expect(sentMessages()).not.toContainEqual(expect.objectContaining({ type: "query.subscribe" }));
+
+    releaseRead();
+    await flushAsyncWork();
+
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ result: [{ id: "cached" }] }));
+    expect(sentMessages()).toContainEqual(expect.objectContaining({
+      type: "query.subscribe",
+      cacheRevision: store.lookup.revision,
+    }));
   });
 
   it("stays server-only when the runtime does not advertise cache support", async () => {

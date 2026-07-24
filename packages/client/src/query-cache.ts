@@ -6,6 +6,7 @@ export const defaultQueryCacheMaxEntryBytes = 2 * 1024 * 1024;
 export const defaultQueryCacheMaxEntriesPerScope = 100;
 export const defaultQueryCacheMaxBytesPerScope = 20 * 1024 * 1024;
 export const defaultQueryCacheMaxBytes = 50 * 1024 * 1024;
+export const defaultQueryCacheReadTimeoutMs = 250;
 
 export type QueryCacheLookup = {
   result: JsonValue;
@@ -43,6 +44,13 @@ export type QueryCacheStore = {
 
 export type QueryCacheOptions = {
   enabled?: boolean;
+  /**
+   * Maximum time to wait for a persisted warm result before subscribing
+   * without its revision. Defaults to 250ms. This is intentionally longer
+   * than a typical IndexedDB read so startup contention does not turn a warm
+   * reload into a full server payload.
+   */
+  readTimeoutMs?: number;
   maxAgeMs?: number;
   maxEntryBytes?: number;
   maxEntriesPerScope?: number;

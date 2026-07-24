@@ -10,7 +10,13 @@ import type {
   SyncCursor,
   SyncOpenRequest,
 } from "@gonvex/protocol";
-import { createQueryCacheStore, type QueryCacheOptions, type QueryCacheStatus, type QueryCacheStore } from "./query-cache.js";
+import {
+  createQueryCacheStore,
+  defaultQueryCacheReadTimeoutMs,
+  type QueryCacheOptions,
+  type QueryCacheStatus,
+  type QueryCacheStore,
+} from "./query-cache.js";
 import { createSyncStore, type SyncStore, type SyncStoreOptions } from "./sync-store.js";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
 export * from "./cache.js";
@@ -191,6 +197,7 @@ export class GonvexClient {
   private telemetryEnabled = false;
   private readonly queryCache: QueryCacheStore | undefined;
   private readonly queryCacheWaitForScope: boolean;
+  private readonly queryCacheReadTimeoutMs: number;
   private readonly syncStore: SyncStore | undefined;
   private queryCacheDirective: QueryCacheDirective | undefined;
   private queryCacheGeneration = 0;
@@ -214,6 +221,9 @@ export class GonvexClient {
     this.telemetryEnabled = options.telemetry === true;
     this.queryCache = createQueryCacheStore(options.queryCache);
     this.queryCacheWaitForScope = options.queryCache !== undefined && options.queryCache !== false;
+    this.queryCacheReadTimeoutMs = queryCacheReadTimeout(
+      options.queryCache === false ? undefined : options.queryCache?.readTimeoutMs,
+    );
     this.syncStore = createSyncStore(options.sync);
     this.timeouts = {
       queryTimeoutMs: options.timeouts?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
@@ -1341,7 +1351,7 @@ export class GonvexClient {
       subscription.cacheReadPromise = undefined;
       subscription.cacheReadFallbackTimer = undefined;
       this.sendSubscription(subscription);
-    }, 50);
+    }, this.queryCacheReadTimeoutMs);
   }
 
   private persistQueryResult(subscription: QuerySubscription, message: Extract<ServerMessage, { type: "query.result" }>) {
@@ -1707,6 +1717,13 @@ function nowMs() {
     return performanceValue.timeOrigin + performanceValue.now();
   }
   return Date.now();
+}
+
+function queryCacheReadTimeout(value: number | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return defaultQueryCacheReadTimeoutMs;
+  }
+  return value;
 }
 
 function browserTelemetryInfo(): BrowserTelemetryInfo | undefined {
