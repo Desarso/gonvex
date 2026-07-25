@@ -162,6 +162,12 @@ export type GonvexClientAuth = {
 
 export type GonvexClientOptions = GonvexClientAuth & {
   queryCache?: false | QueryCacheOptions;
+  /**
+   * Keep listenerless live queries subscribed for this long so route
+   * backtracking can reuse their current result without WebSocket churn.
+   * Defaults to 250ms; set a longer bounded window for local-first apps.
+   */
+  querySubscriptionRetentionMs?: number;
   sync?: false | SyncStoreOptions;
   errorReporting?: false | Omit<ErrorReporterOptions, "endpoint" | "project" | "tenant">;
   timeouts?: GonvexTimeoutOptions;
@@ -198,6 +204,7 @@ export class GonvexClient {
   private readonly queryCache: QueryCacheStore | undefined;
   private readonly queryCacheWaitForScope: boolean;
   private readonly queryCacheReadTimeoutMs: number;
+  private readonly querySubscriptionRetentionMs: number;
   private readonly syncStore: SyncStore | undefined;
   private queryCacheDirective: QueryCacheDirective | undefined;
   private queryCacheGeneration = 0;
@@ -223,6 +230,9 @@ export class GonvexClient {
     this.queryCacheWaitForScope = options.queryCache !== undefined && options.queryCache !== false;
     this.queryCacheReadTimeoutMs = queryCacheReadTimeout(
       options.queryCache === false ? undefined : options.queryCache?.readTimeoutMs,
+    );
+    this.querySubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
+      options.querySubscriptionRetentionMs,
     );
     this.syncStore = createSyncStore(options.sync);
     this.timeouts = {
@@ -1115,7 +1125,7 @@ export class GonvexClient {
       this.querySubscriptions.delete(key);
       this.send({ type: "query.unsubscribe", id: latest.id });
       setTimeout(() => this.handlers.delete(latest.id), 500);
-    }, 250);
+    }, this.querySubscriptionRetentionMs);
   }
 
   private sendSubscription(subscription: QuerySubscription) {
@@ -1638,6 +1648,12 @@ function authFromOptions(options: GonvexClientOptions): GonvexClientAuth {
     tenant: options.tenant,
     telemetry: options.telemetry,
   };
+}
+
+function normalizeQuerySubscriptionRetentionMs(value: number | undefined): number {
+  if (value === undefined) return 250;
+  if (!Number.isFinite(value)) return 250;
+  return Math.max(0, Math.min(5 * 60_000, Math.floor(value)));
 }
 
 function authIdentityKey(auth: GonvexClientAuth) {

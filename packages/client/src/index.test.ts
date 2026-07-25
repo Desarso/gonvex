@@ -496,6 +496,46 @@ describe("GonvexClient", () => {
     expect(handler).toHaveBeenCalledTimes(0);
   });
 
+  it("reuses an orphaned live query within a configured warm retention window", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      querySubscriptionRetentionMs: 30_000,
+    });
+    const first = vi.fn();
+    const second = vi.fn();
+
+    const unsubscribe = client.subscribeQuery(ref, { workspaceId: "workspace-a" }, first);
+    const socket = latestSocket();
+    socket.open();
+    const [{ id }] = sentMessages(socket);
+    socket.receive({ type: "query.result", id, result: { count: 4 } });
+
+    unsubscribe();
+    vi.advanceTimersByTime(10_000);
+    expect(sentMessages(socket).filter((message) => message.type === "query.unsubscribe")).toHaveLength(0);
+
+    client.subscribeQuery(ref, { workspaceId: "workspace-a" }, second);
+    await Promise.resolve();
+
+    expect(sentMessages(socket).filter((message) => message.type === "query.subscribe")).toHaveLength(1);
+    expect(second).toHaveBeenCalledWith({ type: "query.result", id, result: { count: 4 } });
+  });
+
+  it("eventually releases a configured warm query that is not revisited", () => {
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      querySubscriptionRetentionMs: 30_000,
+    });
+    const unsubscribe = client.subscribeQuery(ref, { workspaceId: "workspace-a" }, vi.fn());
+    const socket = latestSocket();
+    socket.open();
+    const [{ id }] = sentMessages(socket);
+
+    unsubscribe();
+    vi.advanceTimersByTime(29_999);
+    expect(sentMessages(socket).at(-1)).not.toMatchObject({ type: "query.unsubscribe", id });
+    vi.advanceTimersByTime(1);
+    expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.unsubscribe", id });
+  });
+
   it("re-subscribes instead of replaying a cached error when a listener remounts during the grace period", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const firstHandler = vi.fn();
