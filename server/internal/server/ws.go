@@ -198,11 +198,16 @@ type tableChange struct {
 }
 
 type wsConn struct {
-	server        *Server
-	conn          *websocket.Conn
-	id            string
-	project       string
-	tenant        string
+	server  *Server
+	conn    *websocket.Conn
+	id      string
+	project string
+	tenant  string
+	// tenantPinned records that the tenant came from the connect request rather
+	// than from defaulting. An unpinned tenant must not survive an auth message
+	// that finally names the project: it was derived before the project was
+	// known, so it is "default" rather than the project's own tenant.
+	tenantPinned  bool
 	user          *gonvex.User
 	perms         map[string]any
 	auth          bool
@@ -237,13 +242,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.EnableWriteCompression(true)
 	_ = conn.SetCompressionLevel(flate.BestSpeed)
 	project := projectID(r)
+	requestedTenant := tenantID(r)
 	connectedAt := time.Now().UTC()
 	client := &wsConn{
 		server:       s,
 		conn:         conn,
 		id:           fmt.Sprintf("conn-%06d", s.wsConnectionSeq.Add(1)),
 		project:      project,
-		tenant:       tenantIDFromRequest(project, tenantID(r)),
+		tenant:       tenantIDFromRequest(project, requestedTenant),
+		tenantPinned: strings.TrimSpace(requestedTenant) != "",
 		connectedAt:  connectedAt,
 		lastActiveAt: connectedAt,
 		lastActivity: "connected",
@@ -291,7 +298,15 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		if requestedProject == "" {
 			requestedProject = c.project
 		}
-		user, permissions, project, tenant, err := c.server.authenticateSocket(ctx, requestedProject, c.tenant, message.Token, message.Tenant)
+		// Only a tenant the client actually asked for may act as the fallback.
+		// A defaulted one was computed at connect time, before this message
+		// named the project, so reusing it would pin the socket to "default"
+		// and fail every read with "tenant is not related to project".
+		currentTenant := ""
+		if c.tenantPinned {
+			currentTenant = c.tenant
+		}
+		user, permissions, project, tenant, err := c.server.authenticateSocket(ctx, requestedProject, currentTenant, message.Token, message.Tenant)
 		if err != nil {
 			c.clearAuthentication()
 			c.write(serverMessage{Type: "auth.error", ID: message.ID, Error: err.Error()})

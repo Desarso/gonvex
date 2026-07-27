@@ -1063,7 +1063,7 @@ async function wireViteReactGoogleAuth(root: string) {
   if (main.includes('from "../gonvex/auth"') && app.includes("GoogleSignInButton")) return true;
   const providerImport = 'import { GonvexProvider } from "../gonvex/_generated/react";';
   const reactImport = 'import { useMutation, useQuery } from "../gonvex/_generated/react";';
-  const appStart = 'export default function App(props: { runtimeURL: string }) {\n  const messages = useQuery<Message[]>(api["messages.list"], {}) ?? [];';
+  const appStart = 'export default function App(props: { runtimeURL: string }) {\n  const messages = useQuery<Message[]>(api.messages.list, {}) ?? [];';
   if (!main.includes(providerImport) || !main.includes("<GonvexProvider client={gonvex}>") || !app.includes(reactImport) || !app.includes(appStart)) {
     return false;
   }
@@ -1084,7 +1084,7 @@ async function wireViteReactGoogleAuth(root: string) {
       "",
       "function AuthenticatedApp(props: { runtimeURL: string }) {",
       "  const auth = useGonvexAuth();",
-      '  const messages = useQuery<Message[]>(api["messages.list"], {}) ?? [];',
+      '  const messages = useQuery<Message[]>(api.messages.list, {}) ?? [];',
     ].join("\n"))
     .replace('<div className="status">Connected to {props.runtimeURL}</div>', '<div className="status"><span>Connected to {props.runtimeURL} as {auth.user?.email}</span><GoogleSignInButton /></div>');
   await writeFile(mainPath, main);

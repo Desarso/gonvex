@@ -10,8 +10,8 @@ type Message = {
 };
 
 export default function App(props: { runtimeURL: string }) {
-  const messages = useQuery<Message[]>(api["messages.list"], {}) ?? [];
-  const sendMessage = useMutation(api["messages.send"]);
+  const messages = useQuery<Message[]>(api.messages.list, {}) ?? [];
+  const sendMessage = useMutation(api.messages.send);
   const [body, setBody] = useState("");
 
   async function submit() {

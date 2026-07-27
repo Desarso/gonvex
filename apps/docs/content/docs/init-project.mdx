@@ -256,8 +256,8 @@ import { api } from "./gonvex/_generated/api";
 import { useMutation, useQuery } from "./gonvex/_generated/react";
 
 export function Messages() {
-  const messages = useQuery(api["messages.list"], {});
-  const send = useMutation(api["messages.send"]);
+  const messages = useQuery(api.messages.list, {});
+  const send = useMutation(api.messages.send);
 
   return (
     <button onClick={() => send({ body: "Hello from Gonvex" })}>
@@ -268,8 +268,8 @@ export function Messages() {
 ```
 
 Do not edit anything in `gonvex/_generated/` by hand; `gonvex dev` owns those files.
-The generated API currently uses quoted path keys, so functions are accessed with
-bracket notation such as `api["messages.list"]`.
+The generated API nests each function under its path segments, so `messages.list`
+is accessed as `api.messages.list`.
 
 ## Troubleshooting
 

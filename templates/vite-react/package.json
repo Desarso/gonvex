@@ -16,15 +16,15 @@
   "dependencies": {
     "@gonvex/client": "latest",
     "@gonvex/react": "latest",
-    "@vitejs/plugin-react-swc": "latest",
-    "vite": "latest",
-    "typescript": "latest",
     "react": "latest",
     "react-dom": "latest"
   },
   "devDependencies": {
+    "@gonvex/cli": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "gonvex": "latest"
+    "@vitejs/plugin-react-swc": "latest",
+    "typescript": "latest",
+    "vite": "latest"
   }
 }
