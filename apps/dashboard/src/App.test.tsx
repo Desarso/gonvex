@@ -405,6 +405,84 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/projects");
   });
 
+  it("does not discover projects with a stale cached Google token during native session restore", async () => {
+    const project = {
+      id: "restored-google-app",
+      name: "Restored Google App",
+      environment: "production",
+      runtimeUrl: "https://runtime.example.test",
+      database: "gonvex_restored_google_app",
+      storageBucket: "restored-google-app-production",
+      status: "local",
+      description: "Runtime project",
+      provisioned: true,
+      runtimeCreated: true,
+      databaseMode: "single",
+    };
+    let resolveAccessToken: ((token: string) => void) | undefined;
+    const accessTokenPromise = new Promise<string>((resolve) => {
+      resolveAccessToken = resolve;
+    });
+    const projectAuthorizations: Array<string | null> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/dev/auth/me")) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({ account: { email: "gabriel@example.com", name: "Gabriel", role: "admin" } }),
+        } as Response;
+      }
+      if (url.endsWith("/dev/projects")) {
+        const authorization = new Headers(init?.headers).get("authorization");
+        projectAuthorizations.push(authorization);
+        return {
+          headers: new Headers({ "content-type": "application/json" }),
+          ok: authorization === "Bearer fresh-google-token",
+          status: authorization === "Bearer fresh-google-token" ? 200 : 401,
+          statusText: authorization === "Bearer fresh-google-token" ? "OK" : "Unauthorized",
+          url,
+          json: async () => authorization === "Bearer fresh-google-token"
+            ? { projects: [project] }
+            : { error: "account sign-in or personal access token is required" },
+        } as Response;
+      }
+      return { ok: true, status: 200, statusText: "OK", json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    window.localStorage.setItem("gonvex-dashboard-session", JSON.stringify({
+      accessToken: "stale-google-token",
+      email: "gabriel@example.com",
+      name: "Gabriel",
+      provider: "google",
+      role: "admin",
+    }));
+    window.history.replaceState(null, "", "/projects");
+
+    const fetchAccessToken = vi.fn(() => accessTokenPromise);
+    const nativeAuth = {
+      error: "",
+      fetchAccessToken,
+      isAuthenticated: true,
+      isLoading: false,
+      signIn: vi.fn(async () => undefined),
+      signOut: vi.fn(async () => undefined),
+      user: { email: "gabriel@example.com", name: "Gabriel", picture: "https://example.test/avatar.png" },
+    } as never;
+
+    render(<App nativeAuth={nativeAuth} />);
+
+    await waitFor(() => expect(fetchAccessToken).toHaveBeenCalledOnce());
+    expect(projectAuthorizations).toEqual([]);
+
+    resolveAccessToken?.("fresh-google-token");
+
+    expect(await screen.findByText("Restored Google App")).toBeInTheDocument();
+    expect(projectAuthorizations).toEqual(["Bearer fresh-google-token"]);
+    expect(screen.queryByText(/runtime projects unavailable/i)).not.toBeInTheDocument();
+  });
+
   it("normalizes dashboard email allowlists", () => {
     expect(parseEmailAllowlist(" Gabriel@Example.com, gabriel@example.com ; admin@example.com\n")).toEqual([
       "gabriel@example.com",

@@ -3243,6 +3243,7 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
   const [hideTestTenants, setHideTestTenants] = useState<Record<string, boolean>>(() => storedHideTestTenants());
   const [actionMessage, setActionMessage] = useState("");
   const [nativeLoginError, setNativeLoginError] = useState("");
+  const [validatedNativeAccessToken, setValidatedNativeAccessToken] = useState("");
   const [projectDiscoveryError, setProjectDiscoveryError] = useState("");
   const [projectDiscoveryLoading, setProjectDiscoveryLoading] = useState(false);
   const currentSession = session ?? localDeveloperSession;
@@ -3260,6 +3261,9 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
   const reportAction: ActionHandler = (message) => setActionMessage(message);
   const loginRequired = dashboardAuthEnabled || signedOut;
   const canSignOut = dashboardAuthEnabled || dashboardPasswordLoginEnabled || Boolean(session?.accessToken) || session?.provider === "gonvex" || nativeAuth?.isAuthenticated === true;
+  const nativeGoogleSessionReady = session?.provider !== "google"
+    || !nativeAuth
+    || (Boolean(session.accessToken) && session.accessToken === validatedNativeAccessToken);
 
   const login = (nextSession: DashboardSession) => {
     setSignedOut(false);
@@ -3506,6 +3510,7 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
     if (!nativeAuth || nativeAuth.isLoading || !nativeAuth.isAuthenticated || !nativeAuth.user) return;
     let cancelled = false;
     const user = nativeAuth.user;
+    setValidatedNativeAccessToken("");
     void nativeAuth.fetchAccessToken?.({ forceRefreshToken: false })
       .then(async (accessToken) => {
         if (!accessToken) throw new Error("The Gonvex Google session did not provide an access token.");
@@ -3513,6 +3518,7 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
         if (cancelled) return;
         setNativeLoginError("");
         restoreSession(nextSession);
+        setValidatedNativeAccessToken(accessToken);
       })
       .catch((error) => {
         if (cancelled) return;
@@ -3579,9 +3585,14 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
   useEffect(() => {
     if (didAutoDiscoverProjects.current) return;
     if (loginRequired && !session) return;
+    // A cached Google display session can contain an expired access token while
+    // GonvexAuthProvider restores and refreshes the real native session. Wait
+    // for /dev/auth/me to validate that fresh token before requesting projects,
+    // otherwise the first navigation gets a one-shot 401 and only reload works.
+    if (!nativeGoogleSessionReady) return;
     didAutoDiscoverProjects.current = true;
     void refreshRuntimeProjects();
-  }, [loginRequired, refreshRuntimeProjects, session]);
+  }, [loginRequired, nativeGoogleSessionReady, refreshRuntimeProjects, session]);
 
   useEffect(() => {
     if (!actionMessage) return;
