@@ -401,6 +401,18 @@ func (s *Server) resolveTenantDatabaseURLLocked(project string, tenant tenantTar
 	return tenant
 }
 
+// createTenantSlugIDAllowed reports whether this caller may register a
+// slug-addressed tenant under a modern (UUID) project. Ownership rows for
+// modern projects normally use opaque UUID v6 ids so dashboard/public creation
+// can't squat slugs or mint duplicate relationships. Two deliberate
+// exceptions: the runtime admin key (CI provisions subdomain-addressed
+// tenants like "e2e-parallel", whose wire id must equal the slug — the shape
+// adopted legacy rows already use), and the auth-optional "local" developer
+// credential so bare local runtimes keep their DX.
+func createTenantSlugIDAllowed(actor dashboardActor, ok bool) bool {
+	return ok && (actor.credentialKind == "adminKey" || actor.credentialKind == "local")
+}
+
 func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var payload struct {
@@ -426,8 +438,10 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	requestedTenantID := strings.TrimSpace(payload.ID)
 	modernProject := isUUIDProjectID(project)
 	if modernProject && requestedTenantID != "" && !isUUIDv6(requestedTenantID) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tenant id must be a UUID v6"})
-		return
+		if actor, ok := s.dashboardActorFromRequest(r); !createTenantSlugIDAllowed(actor, ok) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tenant id must be a UUID v6"})
+			return
+		}
 	}
 	if !modernProject {
 		requestedTenantID = slug(requestedTenantID)
@@ -530,7 +544,10 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	relationshipID := tenantID
-	if !modernProject {
+	if !modernProject || !isUUIDv6(tenantID) {
+		// Slug-addressed tenants (legacy projects, or admin-created modern
+		// tenants) still get an opaque relationship id; only UUID tenant ids
+		// double as their own relationship id.
 		relationshipID, err = generateRelationshipID()
 		if err != nil {
 			_ = dropProjectDatabase(context.Background(), s.config.PostgresURL, databaseName)
