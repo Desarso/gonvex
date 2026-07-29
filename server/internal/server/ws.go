@@ -1239,7 +1239,15 @@ func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectI
 		} else {
 			execution.entry.Cache = "error"
 		}
-		if cacheKey != "" {
+		// An invalidation-triggered rerun exists because a mutation just
+		// changed one of this query's tables. Serving it from the cache can
+		// replay the pre-mutation payload (observed: a delete's rerun answered
+		// "unchanged" and the subscribed grid never dropped the row). Always
+		// recompute for invalidations; the fresh result is still stored below.
+		if cacheKey != "" && reason == "invalidate" {
+			execution.entry.Cache = "bypass"
+			s.metrics.recordCache(projectID, "bypass")
+		} else if cacheKey != "" {
 			payload, outcome := s.cache.read(ctx, cacheKey)
 			if outcome == "hit" {
 				if decodeErr := json.Unmarshal(payload, &result); decodeErr == nil {
