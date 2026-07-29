@@ -200,6 +200,7 @@ export class GonvexClient {
   private serverCapabilities: ServerCapabilities = {};
   private auth: GonvexClientAuth = {};
   private authInFlight = false;
+  private authWatchdogTimer: ReturnType<typeof setTimeout> | undefined;
   private telemetryEnabled = false;
   private readonly queryCache: QueryCacheStore | undefined;
   private readonly queryCacheWaitForScope: boolean;
@@ -326,6 +327,10 @@ export class GonvexClient {
       if (this.socket !== socket || this.manuallyClosed) return;
       this.isWebSocketConnected = false;
       this.authInFlight = false;
+      if (this.authWatchdogTimer) {
+        clearTimeout(this.authWatchdogTimer);
+        this.authWatchdogTimer = undefined;
+      }
       // A subscription queued for the old socket is superseded by the complete
       // resubscribe below. Queued mutations/actions are rejected below, so
       // drop them too — flushing them after reconnect would fire writes whose
@@ -366,6 +371,10 @@ export class GonvexClient {
       }
       if (message.type === "auth.result" || message.type === "auth.error") {
         this.authInFlight = false;
+        if (this.authWatchdogTimer) {
+          clearTimeout(this.authWatchdogTimer);
+          this.authWatchdogTimer = undefined;
+        }
         if (message.type === "auth.result") {
           this.installQueryCacheDirective(queryCacheDirectiveFromAuthResult(message.result));
           this.queryCacheNegotiatedSocketGeneration = this.socketGeneration;
@@ -1459,7 +1468,26 @@ export class GonvexClient {
   private sendAuth(force: boolean) {
     if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project) return;
     this.authInFlight = true;
+    this.armAuthWatchdog();
     this.sendNow({ type: "auth", id: randomID(), token: this.auth.token, project: this.auth.project, tenant: this.auth.tenant });
+  }
+
+  // A lost auth reply (e.g. the server swapped its app plugin and dropped
+  // in-flight responses while the socket stayed up) used to leave
+  // authInFlight stuck true forever: every later mutation/subscription
+  // queued into pendingMessages and was never sent — no error, no timeout,
+  // and the server never saw the call. Re-issue auth if no reply arrives.
+  private armAuthWatchdog() {
+    if (this.authWatchdogTimer) clearTimeout(this.authWatchdogTimer);
+    this.authWatchdogTimer = setTimeout(() => {
+      this.authWatchdogTimer = undefined;
+      if (!this.authInFlight) return;
+      if (this.socket?.readyState === WebSocket.OPEN) {
+        this.sendAuth(true);
+      } else {
+        this.connect();
+      }
+    }, 10_000);
   }
 
   private send(message: ClientMessage) {
@@ -1472,8 +1500,21 @@ export class GonvexClient {
 
   private sendNow(message: ClientMessage) {
     const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      socket?.addEventListener(
+    if (!socket || socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+      // Never drop silently. A missing socket swallowed the message outright,
+      // and an "open" listener on a closing/closed socket never fires — either
+      // way the caller hung forever with the server never seeing the call.
+      // Queue it (auth excepted: reconnect sends a fresh auth itself) and
+      // reconnect; pendingMessages flush once auth settles, and the close
+      // handler rejects pending calls so failures stay loud.
+      if (message.type !== "auth") {
+        this.pendingMessages.push(message);
+      }
+      this.connect();
+      return;
+    }
+    if (socket.readyState === WebSocket.CONNECTING) {
+      socket.addEventListener(
         "open",
         () => {
           if (message.type === "auth") {
