@@ -58,12 +58,22 @@ func TestWebSocketQueryLogsRedisAndDatabaseSources(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		var result serverMessage
-		if err := connection.ReadJSON(&result); err != nil {
-			t.Fatal(err)
-		}
-		if result.Type != "query.result" {
-			t.Fatalf("unexpected query result: %+v", result)
+		// The first subscription's group can legitimately run more than once
+		// (initial + listener-ready re-request); duplicate deliveries for other
+		// subscription ids now arrive as query.progress. Read until THIS
+		// subscription's frame arrives and assert it is a full result.
+		for {
+			var result serverMessage
+			if err := connection.ReadJSON(&result); err != nil {
+				t.Fatal(err)
+			}
+			if result.ID != id {
+				continue
+			}
+			if result.Type != "query.result" {
+				t.Fatalf("unexpected query result: %+v", result)
+			}
+			break
 		}
 	}
 
