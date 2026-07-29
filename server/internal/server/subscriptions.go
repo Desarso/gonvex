@@ -690,7 +690,14 @@ func (group *sharedSubscription) broadcastTo(listeners []querySubscription, mess
 		}
 		copy := message
 		copy.ID = listener.id
-		if copy.Type == "query.result" && copy.SubscriptionRevision != nil && queryCacheRevisionMatchesHash(listener.cacheRevision, group.lastHash) {
+		// Compare against the listener's LIVE revision, not the subscribe-time
+		// snapshot. The snapshot goes stale the moment the server pushes any
+		// newer result: a subscribe-time revision that happens to equal a later
+		// payload (seed → delete returns a list to its pre-seed contents, the
+		// shape of every CRUD spec) converted the fresh result into a
+		// "progress" while the client was rendering the intermediate state —
+		// the grid then stayed stale forever.
+		if copy.Type == "query.result" && copy.SubscriptionRevision != nil && queryCacheRevisionMatchesHash(currentListenerCacheRevision(listener), group.lastHash) {
 			copy = serverMessage{
 				Type:            "query.progress",
 				ID:              listener.id,
@@ -707,6 +714,9 @@ func (group *sharedSubscription) broadcastTo(listeners []querySubscription, mess
 			ServerDurationMS:              float64(sentAt.Sub(startedAt).Microseconds()) / 1000,
 		}
 		listener.conn.write(copy)
+		if (copy.Type == "query.result" || copy.Type == "query.patch") && copy.CacheRevision != "" {
+			storeListenerCacheRevision(listener, copy.CacheRevision)
+		}
 		if changedAtMS > 0 {
 			latency := epochMillis(sentAt) - changedAtMS
 			group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
@@ -738,18 +748,54 @@ func (group *sharedSubscription) sendFullTo(listener querySubscription, payload 
 	}
 	revisionValue := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: revision}
 	hash := sha256.Sum256(payload)
-	if queryCacheRevisionMatchesHash(listener.cacheRevision, hash) {
+	if queryCacheRevisionMatchesHash(currentListenerCacheRevision(listener), hash) {
 		listener.conn.write(serverMessage{
 			Type: "query.progress", ID: listener.id, Path: listener.path, Reason: reason,
 			ThroughRevision: revisionValue,
 		})
 		return
 	}
+	cacheRevision := group.manager.server.nextQueryCacheRevision(hash)
 	listener.conn.write(serverMessage{
 		Type: "query.result", ID: listener.id, Path: listener.path, Result: payload, Reason: reason,
-		CacheScope: listener.cacheScope, CacheRevision: group.manager.server.nextQueryCacheRevision(hash),
+		CacheScope: listener.cacheScope, CacheRevision: cacheRevision,
 		SubscriptionRevision: revisionValue,
 	})
+	storeListenerCacheRevision(listener, cacheRevision)
+}
+
+// currentListenerCacheRevision reads the listener's LIVE cache revision from
+// the connection's subscription map. Group snapshots copy the revision at
+// subscribe time; every delivered result advances the client's cache, so the
+// snapshot value must never be used for "does the client already have this
+// payload" decisions.
+func currentListenerCacheRevision(listener querySubscription) string {
+	if listener.conn == nil {
+		return listener.cacheRevision
+	}
+	listener.conn.mu.Lock()
+	current, ok := listener.conn.subs[listener.id]
+	listener.conn.mu.Unlock()
+	if ok && current.token == listener.token {
+		return current.cacheRevision
+	}
+	return listener.cacheRevision
+}
+
+// storeListenerCacheRevision records the revision most recently DELIVERED to
+// this listener so later unchanged-payload checks compare against what the
+// client actually holds.
+func storeListenerCacheRevision(listener querySubscription, revision string) {
+	if revision == "" || listener.conn == nil {
+		return
+	}
+	listener.conn.mu.Lock()
+	current, ok := listener.conn.subs[listener.id]
+	if ok && current.token == listener.token {
+		current.cacheRevision = revision
+		listener.conn.subs[listener.id] = current
+	}
+	listener.conn.mu.Unlock()
 }
 
 func listenerCurrent(listener querySubscription) bool {

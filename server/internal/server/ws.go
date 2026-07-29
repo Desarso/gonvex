@@ -1162,13 +1162,16 @@ func (s *Server) executeSubscription(ctx context.Context, sub querySubscription,
 	}
 	hash := sha256.Sum256(payload)
 	cacheRevision := s.nextQueryCacheRevision(hash)
-	if queryCacheRevisionMatchesHash(sub.cacheRevision, hash) {
+	if queryCacheRevisionMatchesHash(currentListenerCacheRevision(sub), hash) {
 		sub.conn.write(serverMessage{
 			Type: "query.progress", ID: sub.id, Path: sub.path, Reason: reason, Trace: trace,
 			ThroughRevision: &subscriptionRevision{Epoch: s.subscriptions.epoch, Sequence: s.subscriptions.sequence.Add(1)},
 		})
 	} else {
 		sub.conn.write(serverMessage{Type: "query.result", ID: sub.id, Path: sub.path, Result: json.RawMessage(payload), Reason: reason, Trace: trace, CacheScope: sub.cacheScope, CacheRevision: cacheRevision})
+		// Later unchanged-payload checks must compare against what was
+		// actually delivered, not the subscribe-time revision.
+		storeListenerCacheRevision(sub, cacheRevision)
 	}
 	s.recordTransactionTelemetry(transactionEntryFromTrace(sub.project, sub.tenant, sub.id, "query", sub.path, "server", reason, "ok", "", trace))
 }
