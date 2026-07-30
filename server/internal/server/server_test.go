@@ -203,6 +203,36 @@ func TestReplaceDataReferencesRejectsEmptyReplacementMap(t *testing.T) {
 	}
 }
 
+func TestUpdateDataRowRejectsEmptyPatch(t *testing.T) {
+	server := New(config.Config{AdminKey: "admin-secret"})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/dev/data/tables/tasks/rows/task-1", bytes.NewBufferString(`{}`))
+	request.Header.Set("x-gonvex-key", "admin-secret")
+	request.Header.Set("x-gonvex-project-id", "project")
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "at least one value is required") {
+		t.Fatalf("expected empty patch validation error, got %s", recorder.Body.String())
+	}
+}
+
+func TestDeleteDataRowRequiresRuntimeAdminKey(t *testing.T) {
+	server := New(config.Config{AdminKey: "admin-secret"})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodDelete, "/dev/data/tables/tasks/rows/task-1", nil)
+	request.Header.Set("x-gonvex-project-id", "project")
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized && recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected admin auth rejection, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestDevSyncStoresManifest(t *testing.T) {
 	server := New(config.Config{})
 	body := bytes.NewBufferString(`{"project":"test","generatedAt":"now","functions":{"tasks.list":{"kind":"query","handler":"List","file":"gonvex/tasks.go"}},"schema":{}}`)

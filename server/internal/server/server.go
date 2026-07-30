@@ -276,6 +276,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/data/tables", s.handleDataTables)
 	mux.HandleFunc("GET /dev/data/tables/{table}/rows", s.handleDataRows)
 	mux.HandleFunc("POST /dev/data/tables/{table}/rows", s.handleInsertDataRow)
+	mux.HandleFunc("PATCH /dev/data/tables/{table}/rows/{row}", s.handleUpdateDataRow)
+	mux.HandleFunc("DELETE /dev/data/tables/{table}/rows/{row}", s.handleDeleteDataRow)
 	mux.HandleFunc("POST /dev/data/references/replace", s.handleReplaceDataReferences)
 	mux.HandleFunc("POST /dev/sync", s.handleDevSync)
 	mux.HandleFunc("GET /auth/config", s.handleAuthConfig)
@@ -522,6 +524,66 @@ func (s *Server) handleInsertDataRow(w http.ResponseWriter, r *http.Request) {
 	}
 	s.broadcastTenantTableChange(projectID(r), tenantIDFromRequest(projectID(r), tenantID(r)), r.PathValue("table"))
 	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) handleUpdateDataRow(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	if !s.acceptsAdminKey(syncKey(r)) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "runtime admin key is required"})
+		return
+	}
+	table := r.PathValue("table")
+	if internalDataTable(table) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "table not found"})
+		return
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if len(payload) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "at least one value is required"})
+		return
+	}
+	databaseURL, err := s.dataRequestDatabaseURL(r)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	result, err := data.UpdateRow(r.Context(), databaseURL, table, r.PathValue("row"), payload)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	project := projectID(r)
+	s.broadcastTenantTableChange(project, tenantIDFromRequest(project, tenantID(r)), table)
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleDeleteDataRow(w http.ResponseWriter, r *http.Request) {
+	if !s.acceptsAdminKey(syncKey(r)) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "runtime admin key is required"})
+		return
+	}
+	table := r.PathValue("table")
+	if internalDataTable(table) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "table not found"})
+		return
+	}
+	databaseURL, err := s.dataRequestDatabaseURL(r)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	result, err := data.DeleteRow(r.Context(), databaseURL, table, r.PathValue("row"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	project := projectID(r)
+	s.broadcastTenantTableChange(project, tenantIDFromRequest(project, tenantID(r)), table)
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleReplaceDataReferences(w http.ResponseWriter, r *http.Request) {

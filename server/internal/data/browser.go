@@ -617,6 +617,169 @@ func InsertRow(ctx context.Context, databaseURL string, table string, values map
 	return InsertResult{Table: table, Row: row}, rows.Err()
 }
 
+func UpdateRow(
+	ctx context.Context,
+	databaseURL string,
+	table string,
+	rowID string,
+	values map[string]any,
+) (InsertResult, error) {
+	if !validIdent(table) {
+		return InsertResult{}, fmt.Errorf("invalid table name %q", table)
+	}
+	if databaseURL == "" {
+		return InsertResult{}, fmt.Errorf("database URL is not configured")
+	}
+	rowID = strings.TrimSpace(rowID)
+	if rowID == "" {
+		return InsertResult{}, fmt.Errorf("row id is required")
+	}
+	if len(values) == 0 {
+		return InsertResult{}, fmt.Errorf("at least one value is required")
+	}
+	for _, column := range []string{"_id", "id", "tenantId", "tenant_id"} {
+		if _, ok := values[column]; ok {
+			return InsertResult{}, fmt.Errorf("column %q cannot be changed", column)
+		}
+	}
+
+	db, err := openDB(databaseURL)
+	if err != nil {
+		return InsertResult{}, err
+	}
+	columns, err := tableColumns(ctx, db, table)
+	if err != nil {
+		return InsertResult{}, err
+	}
+	if len(columns) == 0 {
+		return InsertResult{}, fmt.Errorf("table %q does not exist", table)
+	}
+	allowed := make(map[string]bool, len(columns))
+	for _, column := range columns {
+		allowed[column] = true
+	}
+	for column := range values {
+		if !allowed[column] || !validIdent(column) {
+			return InsertResult{}, fmt.Errorf("invalid column name %q", column)
+		}
+	}
+	idColumn := ""
+	if allowed["_id"] {
+		idColumn = "_id"
+	} else if allowed["id"] {
+		idColumn = "id"
+	}
+	if idColumn == "" {
+		return InsertResult{}, fmt.Errorf("table %q has no supported identity column", table)
+	}
+
+	assignments := make([]string, 0, len(values))
+	args := make([]any, 0, len(values)+1)
+	for _, column := range columns {
+		value, ok := values[column]
+		if !ok {
+			continue
+		}
+		args = append(args, value)
+		assignments = append(
+			assignments,
+			fmt.Sprintf("%s = $%d", quoteIdent(column), len(args)),
+		)
+	}
+	if len(assignments) == 0 {
+		return InsertResult{}, fmt.Errorf("at least one value is required")
+	}
+	args = append(args, rowID)
+	query := fmt.Sprintf(
+		"UPDATE %s SET %s WHERE %s::text = $%d RETURNING *",
+		quoteIdent(table),
+		strings.Join(assignments, ", "),
+		quoteIdent(idColumn),
+		len(args),
+	)
+	return scanChangedRow(ctx, db, query, args, table, "update")
+}
+
+func DeleteRow(
+	ctx context.Context,
+	databaseURL string,
+	table string,
+	rowID string,
+) (InsertResult, error) {
+	if !validIdent(table) {
+		return InsertResult{}, fmt.Errorf("invalid table name %q", table)
+	}
+	if databaseURL == "" {
+		return InsertResult{}, fmt.Errorf("database URL is not configured")
+	}
+	rowID = strings.TrimSpace(rowID)
+	if rowID == "" {
+		return InsertResult{}, fmt.Errorf("row id is required")
+	}
+	db, err := openDB(databaseURL)
+	if err != nil {
+		return InsertResult{}, err
+	}
+	columns, err := tableColumns(ctx, db, table)
+	if err != nil {
+		return InsertResult{}, err
+	}
+	allowed := make(map[string]bool, len(columns))
+	for _, column := range columns {
+		allowed[column] = true
+	}
+	idColumn := ""
+	if allowed["_id"] {
+		idColumn = "_id"
+	} else if allowed["id"] {
+		idColumn = "id"
+	}
+	if idColumn == "" {
+		return InsertResult{}, fmt.Errorf("table %q has no supported identity column", table)
+	}
+	query := fmt.Sprintf(
+		"DELETE FROM %s WHERE %s::text = $1 RETURNING *",
+		quoteIdent(table),
+		quoteIdent(idColumn),
+	)
+	return scanChangedRow(ctx, db, query, []any{rowID}, table, "delete")
+}
+
+func scanChangedRow(
+	ctx context.Context,
+	db *sql.DB,
+	query string,
+	args []any,
+	table string,
+	action string,
+) (InsertResult, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return InsertResult{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return InsertResult{}, fmt.Errorf("%s did not find a row", action)
+	}
+	returnedColumns, err := rows.Columns()
+	if err != nil {
+		return InsertResult{}, err
+	}
+	returnedValues := make([]any, len(returnedColumns))
+	pointers := make([]any, len(returnedColumns))
+	for index := range returnedValues {
+		pointers[index] = &returnedValues[index]
+	}
+	if err := rows.Scan(pointers...); err != nil {
+		return InsertResult{}, err
+	}
+	row := map[string]any{}
+	for index, column := range returnedColumns {
+		row[column] = normalizeValue(returnedValues[index])
+	}
+	return InsertResult{Table: table, Row: row}, rows.Err()
+}
+
 // ReplaceReferences repairs exact string references in project-owned text and
 // JSON columns. Identity and tenant-routing columns are deliberately excluded:
 // callers may repair foreign references, but cannot rewrite row identities or
