@@ -649,6 +649,21 @@ func TestPersistedTenantDatabaseNameUsesUUIDv6WhenNothingExists(t *testing.T) {
 	}
 }
 
+func TestPersistedTenantRelationshipIDPrefersDomainOverOpaqueDocumentID(t *testing.T) {
+	got := persistedTenantRelationshipID(
+		"0123456789abcdefghijklmnopqrstuv",
+		"arenal-paraiso",
+		"arenal-paraiso",
+	)
+	if got != "arenal-paraiso" {
+		t.Fatalf("expected tenant domain, got %q", got)
+	}
+
+	if fallback := persistedTenantRelationshipID("tenant-id", "tenant-db", "tenant.example"); fallback != "tenant-id" {
+		t.Fatalf("expected document id fallback, got %q", fallback)
+	}
+}
+
 func TestLegacyTenantDatabaseMigrationRequiresExactProjectSuffix(t *testing.T) {
 	tests := []struct {
 		name      string

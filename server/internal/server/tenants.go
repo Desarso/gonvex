@@ -324,10 +324,7 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 		if err := rows.Scan(&tenantID, &name, &databaseAlias, &domain); err != nil {
 			return
 		}
-		tenantID = strings.TrimSpace(tenantID)
-		if tenantID == "" {
-			tenantID = strings.TrimSpace(domain)
-		}
+		tenantID = persistedTenantRelationshipID(tenantID, databaseAlias, domain)
 		if tenantID == "" {
 			continue
 		}
@@ -1346,6 +1343,31 @@ func (s *Server) existingLocalDatabaseNames(ctx context.Context) map[string]bool
 		names[name] = true
 	}
 	return names
+}
+
+func persistedTenantRelationshipID(documentID string, databaseAlias string, domain string) string {
+	documentID = strings.TrimSpace(documentID)
+	databaseAlias = strings.TrimSpace(databaseAlias)
+	domain = strings.TrimSpace(domain)
+	if domain != "" && databaseAlias == domain && isLegacyConvexDocumentID(documentID) {
+		return domain
+	}
+	if documentID != "" {
+		return documentID
+	}
+	return domain
+}
+
+func isLegacyConvexDocumentID(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 func tenantDatabaseNameForPersistedTenant(project string, tenantID string, databaseAlias string, domain string, existingDatabases map[string]bool) string {
