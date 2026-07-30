@@ -276,6 +276,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/data/tables", s.handleDataTables)
 	mux.HandleFunc("GET /dev/data/tables/{table}/rows", s.handleDataRows)
 	mux.HandleFunc("POST /dev/data/tables/{table}/rows", s.handleInsertDataRow)
+	mux.HandleFunc("POST /dev/data/references/replace", s.handleReplaceDataReferences)
 	mux.HandleFunc("POST /dev/sync", s.handleDevSync)
 	mux.HandleFunc("GET /auth/config", s.handleAuthConfig)
 	mux.HandleFunc("GET /auth/google/authorize", s.handleGoogleAuthorize)
@@ -521,6 +522,58 @@ func (s *Server) handleInsertDataRow(w http.ResponseWriter, r *http.Request) {
 	}
 	s.broadcastTenantTableChange(projectID(r), tenantIDFromRequest(projectID(r), tenantID(r)), r.PathValue("table"))
 	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) handleReplaceDataReferences(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	if !s.acceptsAdminKey(syncKey(r)) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "runtime admin key is required"})
+		return
+	}
+	var payload struct {
+		Replacements map[string]string `json:"replacements"`
+		DryRun       bool              `json:"dryRun"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if len(payload.Replacements) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "at least one replacement is required"})
+		return
+	}
+	if len(payload.Replacements) > 10_000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "too many replacements"})
+		return
+	}
+	databaseURL, err := s.dataRequestDatabaseURL(r)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	result, err := data.ReplaceReferences(
+		r.Context(),
+		databaseURL,
+		payload.Replacements,
+		payload.DryRun,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if !payload.DryRun {
+		project := projectID(r)
+		tenant := tenantIDFromRequest(project, tenantID(r))
+		changedTables := map[string]bool{}
+		for _, column := range result.Columns {
+			if changedTables[column.Table] {
+				continue
+			}
+			changedTables[column.Table] = true
+			s.broadcastTenantTableChange(project, tenant, column.Table)
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {

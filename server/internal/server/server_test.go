@@ -185,6 +185,24 @@ func TestInsertDataRowsRejectsInvalidTableName(t *testing.T) {
 	}
 }
 
+func TestReplaceDataReferencesRejectsEmptyReplacementMap(t *testing.T) {
+	server := New(config.Config{AdminKey: "admin-secret"})
+	recorder := httptest.NewRecorder()
+	body := bytes.NewBufferString(`{"replacements":{}}`)
+	request := httptest.NewRequest(http.MethodPost, "/dev/data/references/replace", body)
+	request.Header.Set("x-gonvex-key", "admin-secret")
+	request.Header.Set("x-gonvex-project-id", "project")
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "at least one replacement is required") {
+		t.Fatalf("expected replacement validation error, got %s", recorder.Body.String())
+	}
+}
+
 func TestDevSyncStoresManifest(t *testing.T) {
 	server := New(config.Config{})
 	body := bytes.NewBufferString(`{"project":"test","generatedAt":"now","functions":{"tasks.list":{"kind":"query","handler":"List","file":"gonvex/tasks.go"}},"schema":{}}`)

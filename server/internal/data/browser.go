@@ -54,6 +54,20 @@ type InsertResult struct {
 	Row   map[string]any `json:"row"`
 }
 
+type ReferenceReplacementColumn struct {
+	Table    string `json:"table"`
+	Column   string `json:"column"`
+	DataType string `json:"dataType"`
+	Rows     int64  `json:"rows"`
+}
+
+type ReferenceReplacementResult struct {
+	TextRows int64                        `json:"textRows"`
+	JSONRows int64                        `json:"jsonRows"`
+	Columns  []ReferenceReplacementColumn `json:"columns"`
+	DryRun   bool                         `json:"dryRun"`
+}
+
 func ListTables(ctx context.Context, databaseURL string) ([]TableInfo, error) {
 	if databaseURL == "" {
 		return []TableInfo{}, nil
@@ -601,6 +615,242 @@ func InsertRow(ctx context.Context, databaseURL string, table string, values map
 		row[column] = normalizeValue(returnedValues[index])
 	}
 	return InsertResult{Table: table, Row: row}, rows.Err()
+}
+
+// ReplaceReferences repairs exact string references in project-owned text and
+// JSON columns. Identity and tenant-routing columns are deliberately excluded:
+// callers may repair foreign references, but cannot rewrite row identities or
+// move data between tenants through this maintenance operation.
+func ReplaceReferences(
+	ctx context.Context,
+	databaseURL string,
+	replacements map[string]string,
+	dryRun bool,
+) (ReferenceReplacementResult, error) {
+	result := ReferenceReplacementResult{
+		Columns: []ReferenceReplacementColumn{},
+		DryRun:  dryRun,
+	}
+	if databaseURL == "" {
+		return result, fmt.Errorf("database URL is not configured")
+	}
+	cleaned := map[string]string{}
+	for source, replacement := range replacements {
+		source = strings.TrimSpace(source)
+		replacement = strings.TrimSpace(replacement)
+		if source == "" || replacement == "" {
+			return result, fmt.Errorf("replacement ids cannot be empty")
+		}
+		if source != replacement {
+			cleaned[source] = replacement
+		}
+	}
+	if len(cleaned) == 0 {
+		return result, fmt.Errorf("at least one replacement is required")
+	}
+
+	db, err := openDB(databaseURL)
+	if err != nil {
+		return result, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TEMP TABLE "_gonvex_reference_replacements" (
+			source_id text PRIMARY KEY,
+			replacement_id text NOT NULL
+		) ON COMMIT DROP
+	`); err != nil {
+		return result, err
+	}
+	sources := make([]string, 0, len(cleaned))
+	for source := range cleaned {
+		sources = append(sources, source)
+	}
+	sort.Strings(sources)
+	for _, source := range sources {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO "_gonvex_reference_replacements" (source_id, replacement_id) VALUES ($1, $2)`,
+			source,
+			cleaned[source],
+		); err != nil {
+			return result, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		CREATE OR REPLACE FUNCTION pg_temp.gonvex_replace_references(value jsonb)
+		RETURNS jsonb
+		LANGUAGE plpgsql
+		STABLE
+		AS $$
+		DECLARE
+			kind text;
+			scalar text;
+			mapped text;
+			next_value jsonb;
+		BEGIN
+			IF value IS NULL THEN RETURN NULL; END IF;
+			kind := jsonb_typeof(value);
+			IF kind = 'string' THEN
+				scalar := value #>> '{}';
+				SELECT replacement_id INTO mapped
+				  FROM "_gonvex_reference_replacements"
+				 WHERE source_id = scalar;
+				RETURN CASE WHEN mapped IS NULL THEN value ELSE to_jsonb(mapped) END;
+			ELSIF kind = 'array' THEN
+				SELECT COALESCE(
+					jsonb_agg(pg_temp.gonvex_replace_references(item.value) ORDER BY item.ordinality),
+					'[]'::jsonb
+				)
+				  INTO next_value
+				  FROM jsonb_array_elements(value) WITH ORDINALITY AS item(value, ordinality);
+				RETURN next_value;
+			ELSIF kind = 'object' THEN
+				SELECT COALESCE(
+					jsonb_object_agg(item.key, pg_temp.gonvex_replace_references(item.value)),
+					'{}'::jsonb
+				)
+				  INTO next_value
+				  FROM jsonb_each(value) AS item(key, value);
+				RETURN next_value;
+			END IF;
+			RETURN value;
+		END
+		$$
+	`); err != nil {
+		return result, err
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT table_name, column_name, data_type
+		  FROM information_schema.columns
+		 WHERE table_schema = 'public'
+		   AND table_name NOT LIKE '\_gonvex\_%' ESCAPE '\'
+		   AND table_name NOT LIKE 'gonvex\_%' ESCAPE '\'
+		   AND table_name <> '_gonvex_reference_replacements'
+		   AND is_generated = 'NEVER'
+		   AND data_type IN (
+			 'text',
+			 'character varying',
+			 'character',
+			 'json',
+			 'jsonb'
+		   )
+		 ORDER BY table_name, ordinal_position
+	`)
+	if err != nil {
+		return result, err
+	}
+	type referenceColumn struct {
+		table    string
+		column   string
+		dataType string
+	}
+	var columns []referenceColumn
+	for rows.Next() {
+		var column referenceColumn
+		if err := rows.Scan(&column.table, &column.column, &column.dataType); err != nil {
+			rows.Close()
+			return result, err
+		}
+		if column.column == "_id" || column.column == "id" ||
+			column.column == "tenantId" || column.column == "tenant_id" {
+			continue
+		}
+		columns = append(columns, column)
+	}
+	if err := rows.Close(); err != nil {
+		return result, err
+	}
+
+	for _, column := range columns {
+		tableName := quoteIdent(column.table)
+		columnName := quoteIdent(column.column)
+		var affected int64
+		switch column.dataType {
+		case "json", "jsonb":
+			condition := fmt.Sprintf(`
+				%s IS NOT NULL
+				AND EXISTS (
+					SELECT 1
+					  FROM "_gonvex_reference_replacements" replacements
+					 WHERE %s::text LIKE '%%' || to_jsonb(replacements.source_id)::text || '%%'
+				)
+			`, columnName, columnName)
+			if dryRun {
+				query := fmt.Sprintf("SELECT count(*) FROM %s WHERE %s", tableName, condition)
+				if err := tx.QueryRowContext(ctx, query).Scan(&affected); err != nil {
+					return result, err
+				}
+			} else {
+				value := fmt.Sprintf("pg_temp.gonvex_replace_references(%s::jsonb)", columnName)
+				if column.dataType == "json" {
+					value += "::json"
+				}
+				query := fmt.Sprintf(
+					"UPDATE %s SET %s = %s WHERE %s",
+					tableName,
+					columnName,
+					value,
+					condition,
+				)
+				update, err := tx.ExecContext(ctx, query)
+				if err != nil {
+					return result, err
+				}
+				affected, err = update.RowsAffected()
+				if err != nil {
+					return result, err
+				}
+			}
+			result.JSONRows += affected
+		default:
+			if dryRun {
+				query := fmt.Sprintf(`
+					SELECT count(*)
+					  FROM %s target
+					  JOIN "_gonvex_reference_replacements" replacements
+					    ON target.%s = replacements.source_id
+				`, tableName, columnName)
+				if err := tx.QueryRowContext(ctx, query).Scan(&affected); err != nil {
+					return result, err
+				}
+			} else {
+				query := fmt.Sprintf(`
+					UPDATE %s target
+					   SET %s = replacements.replacement_id
+					  FROM "_gonvex_reference_replacements" replacements
+					 WHERE target.%s = replacements.source_id
+				`, tableName, columnName, columnName)
+				update, err := tx.ExecContext(ctx, query)
+				if err != nil {
+					return result, err
+				}
+				affected, err = update.RowsAffected()
+				if err != nil {
+					return result, err
+				}
+			}
+			result.TextRows += affected
+		}
+		if affected > 0 {
+			result.Columns = append(result.Columns, ReferenceReplacementColumn{
+				Table:    column.table,
+				Column:   column.column,
+				DataType: column.dataType,
+				Rows:     affected,
+			})
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func blankValue(value any) bool {
