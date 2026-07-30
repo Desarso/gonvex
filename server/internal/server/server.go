@@ -858,11 +858,11 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 
 func tenantForDatabaseRouting(tenants map[string]tenantTarget, projectID string, tenantID string) (tenantTarget, bool) {
 	exact, foundExact := tenants[tenantStoreKey(projectID, tenantID)]
-	if foundExact && exact.registered {
-		return exact, true
-	}
 	if registered, foundRegistered := registeredTenantForAlias(tenants, projectID, tenantID); foundRegistered {
 		return registered, true
+	}
+	if foundExact && exact.registered {
+		return exact, true
 	}
 	return exact, foundExact
 }
@@ -872,8 +872,7 @@ func registeredTenantForAlias(tenants map[string]tenantTarget, projectID string,
 	if alias == "" {
 		return tenantTarget{}, false
 	}
-	var match tenantTarget
-	found := false
+	matches := []tenantTarget{}
 	for _, tenant := range tenants {
 		if tenant.ProjectID != projectID || !tenant.registered {
 			continue
@@ -883,13 +882,23 @@ func registeredTenantForAlias(tenants map[string]tenantTarget, projectID string,
 		if !aliasMatches {
 			continue
 		}
-		if found && match.RelationshipID != tenant.RelationshipID {
-			return tenantTarget{}, false
-		}
-		match = tenant
-		found = true
+		matches = append(matches, tenant)
 	}
-	return match, found
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	var legacy tenantTarget
+	legacyCount := 0
+	for _, tenant := range matches {
+		if isLegacyConvexDocumentID(tenant.ID) {
+			legacy = tenant
+			legacyCount++
+		}
+	}
+	if legacyCount == 1 {
+		return legacy, true
+	}
+	return tenantTarget{}, false
 }
 
 func (s *Server) hydrateRuntimeState(ctx context.Context) {

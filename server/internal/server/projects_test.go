@@ -682,6 +682,7 @@ func TestMatchingRegisteredTenantReusesMigratedDatabaseForLandlordDomain(t *test
 		ProjectID:    project,
 		Database:     "whagons",
 		databaseName: "empty-database",
+		registered:   true,
 	}
 
 	got, ok := matchingRegisteredTenant(
@@ -735,6 +736,7 @@ func TestTenantForDatabaseRoutingPrefersRegisteredAliasOverUnregisteredExactID(t
 		ProjectID:    project,
 		Database:     "whagons",
 		databaseName: "empty-database",
+		registered:   true,
 	}
 
 	got, ok := tenantForDatabaseRouting(
