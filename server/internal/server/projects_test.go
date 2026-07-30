@@ -699,6 +699,48 @@ func TestMatchingRegisteredTenantReusesMigratedDatabaseForLandlordDomain(t *test
 	}
 }
 
+func TestRegisteredTenantForAliasRoutesToMigratedRelationship(t *testing.T) {
+	project := "01f18c3a-3f57-657e-a2ad-e277f004b781"
+	migrated := tenantTarget{
+		RelationshipID: "01f18c48-3695-6bae-aa2a-da2cb3ad268c",
+		ID:             "yx75qjh3t7mkvx25y1gjgkmfch82qwq9",
+		ProjectID:      project,
+		Database:       "whagons",
+		databaseName:   "migrated-database",
+		registered:     true,
+	}
+
+	got, ok := registeredTenantForAlias(
+		map[string]tenantTarget{"migrated": migrated},
+		project,
+		"whagons",
+	)
+	if !ok || got.RelationshipID != migrated.RelationshipID {
+		t.Fatalf("expected migrated alias relationship, got %#v, %v", got, ok)
+	}
+}
+
+func TestRegisteredTenantForAliasRejectsAmbiguousRelationships(t *testing.T) {
+	project := "01f18c3a-3f57-657e-a2ad-e277f004b781"
+	tenants := map[string]tenantTarget{
+		"one": {
+			RelationshipID: "one",
+			ProjectID:      project,
+			Database:       "whagons",
+			registered:     true,
+		},
+		"two": {
+			RelationshipID: "two",
+			ProjectID:      project,
+			Database:       "whagons",
+			registered:     true,
+		},
+	}
+	if _, ok := registeredTenantForAlias(tenants, project, "whagons"); ok {
+		t.Fatal("expected ambiguous alias to be rejected")
+	}
+}
+
 func TestLegacyTenantDatabaseMigrationRequiresExactProjectSuffix(t *testing.T) {
 	tests := []struct {
 		name      string

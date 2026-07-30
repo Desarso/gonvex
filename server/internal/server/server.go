@@ -844,6 +844,14 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 			return tenant.databaseURL
 		}
 	}
+	if tenant, ok := registeredTenantForAlias(s.tenants, projectID, tenantID); ok {
+		if value := s.configuredTenantDatabaseURLLocked(projectID, tenant); value != "" {
+			return value
+		}
+		if tenant.databaseURL != "" {
+			return tenant.databaseURL
+		}
+	}
 	if !isUUIDProjectID(projectID) {
 		if value := s.configuredTenantDatabaseURLLocked(projectID, tenantTarget{ID: tenantID}); value != "" {
 			return value
@@ -854,6 +862,31 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 		return s.config.DatabaseURL(projectID)
 	}
 	return ""
+}
+
+func registeredTenantForAlias(tenants map[string]tenantTarget, projectID string, alias string) (tenantTarget, bool) {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return tenantTarget{}, false
+	}
+	var match tenantTarget
+	found := false
+	for _, tenant := range tenants {
+		if tenant.ProjectID != projectID || !tenant.registered {
+			continue
+		}
+		aliasMatches := strings.EqualFold(strings.TrimSpace(tenant.Database), alias) ||
+			strings.EqualFold(strings.TrimSpace(tenant.domain), alias)
+		if !aliasMatches {
+			continue
+		}
+		if found && match.RelationshipID != tenant.RelationshipID {
+			return tenantTarget{}, false
+		}
+		match = tenant
+		found = true
+	}
+	return match, found
 }
 
 func (s *Server) hydrateRuntimeState(ctx context.Context) {
