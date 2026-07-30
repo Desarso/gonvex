@@ -836,15 +836,7 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 	if tenantID == "" || tenantID == projectID {
 		return s.config.DatabaseURL(projectID)
 	}
-	if tenant, ok := s.tenants[tenantStoreKey(projectID, tenantID)]; ok {
-		if value := s.configuredTenantDatabaseURLLocked(projectID, tenant); value != "" {
-			return value
-		}
-		if tenant.databaseURL != "" {
-			return tenant.databaseURL
-		}
-	}
-	if tenant, ok := registeredTenantForAlias(s.tenants, projectID, tenantID); ok {
+	if tenant, ok := tenantForDatabaseRouting(s.tenants, projectID, tenantID); ok {
 		if value := s.configuredTenantDatabaseURLLocked(projectID, tenant); value != "" {
 			return value
 		}
@@ -862,6 +854,17 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 		return s.config.DatabaseURL(projectID)
 	}
 	return ""
+}
+
+func tenantForDatabaseRouting(tenants map[string]tenantTarget, projectID string, tenantID string) (tenantTarget, bool) {
+	exact, foundExact := tenants[tenantStoreKey(projectID, tenantID)]
+	if foundExact && exact.registered {
+		return exact, true
+	}
+	if registered, foundRegistered := registeredTenantForAlias(tenants, projectID, tenantID); foundRegistered {
+		return registered, true
+	}
+	return exact, foundExact
 }
 
 func registeredTenantForAlias(tenants map[string]tenantTarget, projectID string, alias string) (tenantTarget, bool) {

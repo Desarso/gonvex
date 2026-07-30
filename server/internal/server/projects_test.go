@@ -720,6 +720,36 @@ func TestRegisteredTenantForAliasRoutesToMigratedRelationship(t *testing.T) {
 	}
 }
 
+func TestTenantForDatabaseRoutingPrefersRegisteredAliasOverUnregisteredExactID(t *testing.T) {
+	project := "01f18c3a-3f57-657e-a2ad-e277f004b781"
+	migrated := tenantTarget{
+		RelationshipID: "01f18c48-3695-6bae-aa2a-da2cb3ad268c",
+		ID:             "yx75qjh3t7mkvx25y1gjgkmfch82qwq9",
+		ProjectID:      project,
+		Database:       "whagons",
+		databaseName:   "migrated-database",
+		registered:     true,
+	}
+	empty := tenantTarget{
+		ID:           "whagons",
+		ProjectID:    project,
+		Database:     "whagons",
+		databaseName: "empty-database",
+	}
+
+	got, ok := tenantForDatabaseRouting(
+		map[string]tenantTarget{
+			tenantStoreKey(project, migrated.ID): migrated,
+			tenantStoreKey(project, empty.ID):    empty,
+		},
+		project,
+		"whagons",
+	)
+	if !ok || got.RelationshipID != migrated.RelationshipID {
+		t.Fatalf("expected migrated alias to win, got %#v, %v", got, ok)
+	}
+}
+
 func TestRegisteredTenantForAliasRejectsAmbiguousRelationships(t *testing.T) {
 	project := "01f18c3a-3f57-657e-a2ad-e277f004b781"
 	tenants := map[string]tenantTarget{
