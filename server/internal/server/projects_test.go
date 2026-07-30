@@ -664,6 +664,41 @@ func TestPersistedTenantRelationshipIDPrefersDomainOverOpaqueDocumentID(t *testi
 	}
 }
 
+func TestMatchingRegisteredTenantReusesMigratedDatabaseForLandlordDomain(t *testing.T) {
+	project := "01f18c3a-3f57-657e-a2ad-e277f004b781"
+	documentID := "yx75qjh3t7mkvx25y1gjgkmfch82qwq9"
+	migrated := tenantTarget{
+		RelationshipID: "01f18c48-3695-6bae-aa2a-da2cb3ad268c",
+		ID:             documentID,
+		ProjectID:      project,
+		Database:       "whagons",
+		databaseName:   "migrated-database",
+		databaseURL:    "postgres://example/migrated-database",
+		Provisioned:    true,
+		registered:     true,
+	}
+	empty := tenantTarget{
+		ID:           "whagons",
+		ProjectID:    project,
+		Database:     "whagons",
+		databaseName: "empty-database",
+	}
+
+	got, ok := matchingRegisteredTenant(
+		map[string]tenantTarget{"migrated": migrated, "empty": empty},
+		project,
+		documentID,
+		"whagons",
+		"whagons",
+	)
+	if !ok {
+		t.Fatal("expected migrated tenant match")
+	}
+	if got.RelationshipID != migrated.RelationshipID || got.databaseName != migrated.databaseName {
+		t.Fatalf("matched wrong tenant: %#v", got)
+	}
+}
+
 func TestLegacyTenantDatabaseMigrationRequiresExactProjectSuffix(t *testing.T) {
 	tests := []struct {
 		name      string

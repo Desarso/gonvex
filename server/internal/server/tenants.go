@@ -99,6 +99,38 @@ func tenantTargetPriority(tenant tenantTarget) int {
 	return 0
 }
 
+func matchingRegisteredTenant(
+	tenants map[string]tenantTarget,
+	project string,
+	documentID string,
+	databaseAlias string,
+	domain string,
+) (tenantTarget, bool) {
+	documentID = strings.TrimSpace(documentID)
+	databaseAlias = strings.TrimSpace(databaseAlias)
+	domain = strings.TrimSpace(domain)
+	var fallback tenantTarget
+	foundFallback := false
+	for _, tenant := range tenants {
+		if tenant.ProjectID != project || !tenant.registered {
+			continue
+		}
+		if documentID != "" && tenant.ID == documentID {
+			return tenant, true
+		}
+		if databaseAlias != "" && normalizeDatabaseAlias(tenant.Database) == normalizeDatabaseAlias(databaseAlias) {
+			fallback = tenant
+			foundFallback = true
+			continue
+		}
+		if !foundFallback && domain != "" && strings.EqualFold(strings.TrimSpace(tenant.domain), domain) {
+			fallback = tenant
+			foundFallback = true
+		}
+	}
+	return fallback, foundFallback
+}
+
 func (s *Server) loadConfiguredTenantDatabases() {
 	s.projectMu.Lock()
 	defer s.projectMu.Unlock()
@@ -317,14 +349,14 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 	existingDatabases := s.existingLocalDatabaseNames(ctx)
 	imported := map[string]tenantTarget{}
 	for rows.Next() {
-		var tenantID string
+		var documentID string
 		var name string
 		var databaseAlias string
 		var domain string
-		if err := rows.Scan(&tenantID, &name, &databaseAlias, &domain); err != nil {
+		if err := rows.Scan(&documentID, &name, &databaseAlias, &domain); err != nil {
 			return
 		}
-		tenantID = persistedTenantRelationshipID(tenantID, databaseAlias, domain)
+		tenantID := persistedTenantRelationshipID(documentID, databaseAlias, domain)
 		if tenantID == "" {
 			continue
 		}
@@ -341,6 +373,22 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 			Provisioned:  false,
 			databaseName: tenantDatabaseNameForPersistedTenant(project, tenantID, databaseAlias, domain, existingDatabases),
 			domain:       domain,
+		}
+		s.projectMu.RLock()
+		existing, found := matchingRegisteredTenant(
+			s.tenants,
+			project,
+			documentID,
+			databaseAlias,
+			domain,
+		)
+		s.projectMu.RUnlock()
+		if found {
+			tenant.RelationshipID = existing.RelationshipID
+			tenant.databaseName = existing.databaseName
+			tenant.databaseURL = existing.databaseURL
+			tenant.Provisioned = existing.Provisioned
+			tenant.RuntimeCreated = existing.RuntimeCreated
 		}
 		imported[tenantStoreKey(project, tenantID)] = tenant
 	}
@@ -1107,18 +1155,19 @@ func (s *Server) hydrateProjectTenantDatabasesWith(
 }
 
 func (s *Server) hydrateProjectTenantDatabasesUncached(ctx context.Context, project string) {
-
-	// The project's own landlord database is an explicit source of tenant
-	// relationships. Hydrate it before the registry so legacy rows are assigned
-	// a stable relationship UUID and win over old suffix-derived aliases.
-	s.hydrateLandlordTenants(ctx, project)
-
+	// Load the durable registry first so landlord rows can adopt the already
+	// migrated physical database instead of generating an empty replacement.
 	registered, err := s.loadTenantRegistry(ctx, project)
 	if err != nil {
 		slog.Debug("load tenant relationship registry", "project", project, "error", err)
 	} else {
 		s.mergeProjectTenants(project, registered)
 	}
+
+	// The project's own landlord database is the source of public tenant ids.
+	// Its legacy Convex document ids are replaced by domains while preserving
+	// any registered database relationship loaded above.
+	s.hydrateLandlordTenants(ctx, project)
 
 	// Project-scoped environment configuration predates the registry. Preserve
 	// those explicit mappings and backfill them without exposing global entries
