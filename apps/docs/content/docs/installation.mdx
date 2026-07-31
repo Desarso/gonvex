@@ -5,7 +5,8 @@ description: Install the Gonvex CLI and add Gonvex to an existing frontend proje
 
 # Installation
 
-Gonvex should be installed like a normal JavaScript tool even though the CLI/runtime are written in Go.
+Install the Gonvex CLI and browser SDKs through npm. The self-hosted Go runtime
+is a separate process or container.
 
 ## New Project
 
@@ -21,28 +22,24 @@ yarn create gonvex my-app
 bun create gonvex my-app
 ```
 
-The initializer should ask:
-
-- framework: Vite, Next.js, Remix, TanStack Start, existing app
-- package manager
-- TypeScript yes/no
-- local runtime or remote runtime
-- single-tenant or multi-tenant project
-- Postgres connection strategy
+The current initializer ships one TypeScript template: `vite-react`. It creates
+the app locally; pass `--runtime-url` to provision and connect it to a running
+runtime in the same command.
 
 ## Existing Project
 
 ```bash
-npm install gonvex
+npm install @gonvex/client @gonvex/react
+npm install --save-dev @gonvex/cli
 npx gonvex init
 ```
 
-`gonvex init` should add:
+`gonvex init` copies missing starter files without overwriting existing files:
 
 ```txt
 gonvex/
   schema.go
-  index.go or main.go
+  messages.go
   _generated/
 gonvex.json
 .env.local entries
@@ -56,28 +53,18 @@ Recommended scripts:
   "scripts": {
     "dev": "gonvex dev -- vite",
     "gonvex:dev": "gonvex dev",
-    "gonvex:deploy": "gonvex deploy"
-  }
-}
-```
-
-Vite React projects should use:
-
-```json
-{
-  "scripts": {
-    "dev": "gonvex dev -- vite",
-    "gonvex:dev": "gonvex dev",
-    "gonvex:deploy": "gonvex deploy --env production"
+    "gonvex:once": "gonvex dev --once"
   }
 }
 ```
 
 ## CLI Distribution
 
-The npm package should expose a `gonvex` binary. Internally it can ship or download prebuilt Go binaries for the current OS/architecture.
-
-Users should not need Go installed to use Gonvex in a normal frontend app.
+`@gonvex/cli` exposes the `gonvex` binary. It scans app-local Go declarations,
+generates bindings, bundles the backend source, and syncs it to the runtime.
+The runtime compiles and loads the uploaded Go bundle, so application
+workstations do not need a local Go toolchain when using a remote or
+containerized runtime.
 
 ## Runtime Options
 
@@ -91,7 +78,7 @@ Self-hosted runtime
   You run Gonvex runtime, landlord database, tenant databases, and optional object storage.
 
 Hosted runtime
-  Gonvex Cloud manages runtime/project/tenant routing for you.
+  A future managed service. There is no generally available public Gonvex Cloud today.
 ```
 
 ## Environment Variables
@@ -99,11 +86,12 @@ Hosted runtime
 A local project typically needs:
 
 ```txt
-GONVEX_PROJECT=my-product
 GONVEX_PROJECT_ID=prj_2x7k9...
 GONVEX_RUNTIME_URL=http://localhost:8080
 GONVEX_PROJECT_KEY=gvx_dev_...
-GONVEX_DEPLOYMENT=local
+VITE_GONVEX_PROJECT_ID=prj_2x7k9...
+VITE_GONVEX_URL=http://localhost:8080
+VITE_GONVEX_WS_URL=ws://localhost:8080/ws
 ```
 
 The runtime needs landlord database configuration and tenant database connections. Application code should not hardcode tenant database URLs directly.
@@ -126,10 +114,10 @@ Vite also needs a public WebSocket URL for the browser bundle:
 VITE_GONVEX_WS_URL=ws://localhost:8080/ws
 ```
 
-In production this should point to the cloud runtime:
+For a remote self-hosted runtime:
 
 ```txt
-VITE_GONVEX_WS_URL=wss://my-product.gonvex.cloud/ws
+VITE_GONVEX_WS_URL=wss://gonvex.example.com/ws
 ```
 
 ## Generated Files

@@ -1,0 +1,163 @@
+# Coolify custom service stack for a self-contained Gonvex environment.
+#
+# Coolify generates the SERVICE_* values, isolated network, public URLs, and
+# volume names when this file is imported as a Docker Compose service.
+services:
+  gonvex-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gonvex
+      POSTGRES_PASSWORD: ${GONVEX_POSTGRES_PASSWORD:?}
+      POSTGRES_DB: gonvex
+    volumes:
+      - gonvex-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gonvex -d gonvex"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  gonvex-valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command:
+      - valkey-server
+      - --maxmemory
+      - ${GONVEX_VALKEY_MAXMEMORY:-2gb}
+      - --maxmemory-policy
+      - allkeys-lfu
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - gonvex-valkey-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  gonvex-runtime:
+    build:
+      context: https://github.com/Desarso/gonvex.git#main
+      dockerfile: Dockerfile.runtime
+    restart: unless-stopped
+    depends_on:
+      gonvex-postgres:
+        condition: service_healthy
+      gonvex-valkey:
+        condition: service_healthy
+    environment:
+      GONVEX_ADDR: 0.0.0.0:8080
+      GONVEX_LANDLORD_DATABASE_URL: postgres://gonvex:${GONVEX_POSTGRES_PASSWORD:?}@gonvex-postgres:5432/gonvex?sslmode=disable
+      DATABASE_URL: postgres://gonvex:${GONVEX_POSTGRES_PASSWORD:?}@gonvex-postgres:5432/gonvex?sslmode=disable
+      POSTGRES_URL: postgres://gonvex:${GONVEX_POSTGRES_PASSWORD:?}@gonvex-postgres:5432/gonvex?sslmode=disable
+      VALKEY_URL: redis://gonvex-valkey:6379/0
+      GONVEX_PLUGIN_CACHE_DIR: /var/lib/gonvex/plugins
+      GONVEX_DATA_DIR: /var/lib/gonvex/data
+      GONVEX_TELEMETRY_LOG: /var/lib/gonvex/telemetry.jsonl
+      GONVEX_ROWS_CACHE_TTL: ${GONVEX_ROWS_CACHE_TTL:-10m}
+      GONVEX_DB_MAX_TOTAL_CONNS: ${GONVEX_DB_MAX_TOTAL_CONNS:-20}
+      GONVEX_DB_MAX_OPEN_CONNS: ${GONVEX_DB_MAX_OPEN_CONNS:-2}
+      GONVEX_DB_MAX_IDLE_CONNS: ${GONVEX_DB_MAX_IDLE_CONNS:-1}
+      GONVEX_ENVIRONMENT: production
+      GONVEX_REQUIRE_AUTH: "true"
+      SERVICE_FQDN_GONVEXRUNTIME_8080: ${SERVICE_FQDN_GONVEXRUNTIME_8080}
+      GONVEX_PUBLIC_URL: ${GONVEX_EXTERNAL_URL:?}
+      GONVEX_AUTH_URL: ${GONVEX_EXTERNAL_URL:?}
+      GONVEX_TRUSTED_PROXY_CIDRS: ${GONVEX_TRUSTED_PROXY_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+      GONVEX_DASHBOARD_SESSION_SECRET: ${GONVEX_DASHBOARD_SESSION_SECRET:?}
+      DASHBOARD_AUTH_USER: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
+      DASHBOARD_AUTH_PASSWORD: ${GONVEX_DASHBOARD_PASSWORD:?}
+      GONVEX_DASHBOARD_AUTH_PROJECT_ID: ${GONVEX_DASHBOARD_AUTH_PROJECT_ID:-}
+      GONVEX_ADMIN_KEY: ${GONVEX_ADMIN_KEY:-}
+      GONVEX_DEV_SYNC_KEY: ${GONVEX_DEV_SYNC_KEY:-}
+      GONVEX_PROJECT_DATABASE_URLS: ${GONVEX_PROJECT_DATABASE_URLS:-}
+      GONVEX_TENANT_DATABASE_URLS: ${GONVEX_TENANT_DATABASE_URLS:-}
+      GONVEX_GOOGLE_CLIENT_ID: ${GONVEX_GOOGLE_CLIENT_ID:-}
+      GONVEX_GOOGLE_CLIENT_SECRET: ${GONVEX_GOOGLE_CLIENT_SECRET:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+      SKILLS_ALLOWED_EMAILS: ${SKILLS_ALLOWED_EMAILS:-}
+      SKILLS_GOOGLE_CLIENT_ID: ${SKILLS_GOOGLE_CLIENT_ID:-}
+      SKILLS_LEGACY_OWNER_EMAIL: ${SKILLS_LEGACY_OWNER_EMAIL:-}
+      WHAGONS_APP_BASE_URL: ${WHAGONS_APP_BASE_URL:-}
+      WHAGONS_AUTH_BASE_URL: ${WHAGONS_AUTH_BASE_URL:-}
+      WHAGONS_ENABLE_TEST_FUNCTIONS: ${WHAGONS_ENABLE_TEST_FUNCTIONS:-false}
+    volumes:
+      - gonvex-runtime-data:/var/lib/gonvex
+    tmpfs:
+      - /tmp:size=2G,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080;
+          printf "GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3;
+          grep -q "200 OK" <&3'
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  gonvex-dashboard:
+    build:
+      context: https://github.com/Desarso/gonvex.git#main
+      dockerfile: Dockerfile.dashboard
+      args:
+        VITE_GONVEX_URL: ${GONVEX_EXTERNAL_URL:?}
+        VITE_GONVEX_RUNTIME_URL: ${GONVEX_EXTERNAL_URL:?}
+        VITE_GONVEX_AUTH_ENABLED: "true"
+        VITE_GONVEX_EMAIL_LOGIN_ENABLED: "true"
+        VITE_GONVEX_GOOGLE_LOGIN_ENABLED: ${GONVEX_GOOGLE_LOGIN_ENABLED:-false}
+        VITE_GONVEX_DASHBOARD_AUTH_PROJECT_ID: ${GONVEX_DASHBOARD_AUTH_PROJECT_ID:-}
+        VITE_GONVEX_ALLOWED_EMAILS: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
+        VITE_GONVEX_ALLOW_UNLISTED_EMAILS: "true"
+    restart: unless-stopped
+    depends_on:
+      gonvex-runtime:
+        condition: service_healthy
+    environment:
+      SERVICE_FQDN_GONVEXDASHBOARD_80: ${SERVICE_FQDN_GONVEXDASHBOARD_80}
+      PORT: "80"
+      # Keep the dashboard session API protected. Native Google auth is handled
+      # by the SPA, while an unauthenticated cookie lookup must return 401
+      # instead of manufacturing the server's Local Developer fallback.
+      DASHBOARD_AUTH_ENABLED: "true"
+      DASHBOARD_COOKIE_SECURE: "true"
+      DASHBOARD_AUTH_USER: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
+      DASHBOARD_AUTH_PASSWORD: ${GONVEX_DASHBOARD_PASSWORD:?}
+      DASHBOARD_SESSION_SECRET: ${GONVEX_DASHBOARD_SESSION_SECRET:?}
+      GONVEX_RUNTIME_URL: http://gonvex-runtime:8080
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz | grep -qx ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+volumes:
+  gonvex-postgres-data:
+  gonvex-valkey-data:
+  gonvex-runtime-data:

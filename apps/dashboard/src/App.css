@@ -4601,6 +4601,7 @@ h1 {
 .errors-stat-strip [data-alert="true"] strong { color: var(--danger); }
 .errors-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .errors-toolbar-actions { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; }
+.errors-release-filter { width: 190px; }
 .errors-search { width: min(520px, 100%); min-height: 38px; padding: 0 13px; border: 1px solid var(--border); border-radius: var(--field-radius); outline: 0; background: var(--field-background); color: var(--field-foreground); font: inherit; font-size: .8rem; transition: border-color 140ms ease, box-shadow 140ms ease; }
 .errors-search:focus { border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in oklab, var(--focus) 15%, transparent); }
 .errors-empty { min-height: 240px; display: grid; place-content: center; gap: 7px; text-align: center; border: 1px dashed color-mix(in oklab, var(--success) 30%, var(--border)); border-radius: calc(var(--field-radius) + 4px); color: var(--muted); background: repeating-linear-gradient(-45deg, transparent 0 12px, color-mix(in oklab, var(--surface-secondary) 42%, transparent) 12px 13px); }
@@ -4650,7 +4651,7 @@ h1 {
 .error-triage-actions { display: grid; gap: 8px; margin-top: auto; padding-top: 13px; border-top: 1px solid var(--border); }
 .error-triage-actions > div { display: flex; flex-wrap: wrap; gap: 7px; }
 @media (max-width: 1050px) { .error-group-summary { grid-template-columns: 1fr 26px; } .error-impact { grid-column: 1 / -1; grid-row: 2; justify-content: start; } .error-impact > div { text-align: left; } .error-expand-mark { grid-column: 2; grid-row: 1; } .error-group-detail { grid-template-columns: 1fr; } .error-detail-rail { border-top: 1px solid var(--border); border-left: 0; } }
-@media (max-width: 720px) { .errors-command-header, .errors-toolbar { align-items: stretch; flex-direction: column; } .errors-stat-strip { grid-template-columns: repeat(2, 1fr); } .errors-stat-strip > div:nth-child(2) { border-right: 0; } .errors-stat-strip > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); } .error-context-grid { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .errors-command-header, .errors-toolbar { align-items: stretch; flex-direction: column; } .errors-toolbar-actions { flex-wrap: wrap; } .errors-release-filter { width: min(100%, 240px); } .errors-stat-strip { grid-template-columns: repeat(2, 1fr); } .errors-stat-strip > div:nth-child(2) { border-right: 0; } .errors-stat-strip > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); } .error-context-grid { grid-template-columns: 1fr; } }
 
 /* Realtime presence: identity → tenant → watched query paths. */
 .realtime-shell { display: grid; gap: 16px; padding-bottom: 28px; }

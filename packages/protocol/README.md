@@ -29,6 +29,8 @@ The package includes:
 - JSON-safe value types
 - function manifest types
 - WebSocket client and server message unions
+- live-query result, progress, patch, and revision frames
+- durable sync open/batch-open, snapshot, delta, reset, ready, and cursor types
 - browser telemetry and message trace types
 
 ## Related Packages

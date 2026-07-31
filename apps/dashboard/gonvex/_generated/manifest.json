@@ -1,6 +1,6 @@
 {
   "project": "dashboard",
-  "generatedAt": "2026-07-23T05:59:51.779622497Z",
+  "generatedAt": "2026-07-31T20:25:06.484139336Z",
   "functions": {
     "files.createUploadUrl": {
       "kind": "mutation",
@@ -1477,5 +1477,5 @@
       }
     }
   },
-  "notifySchemaVersion": "2"
+  "notifySchemaVersion": "3"
 }

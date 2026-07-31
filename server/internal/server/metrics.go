@@ -37,6 +37,9 @@ type runtimeMetrics struct {
 	logSubscribers map[int]logSubscriber
 	nextLogSubID   int
 	mutationWrites chan runtimeLogEntry
+	// onFunctionError forwards failed calls to the error store (see
+	// runtime_errors.go). Set once at server construction; nil in tests.
+	onFunctionError func(runtimeLogEntry)
 }
 
 type logSubscriber struct {
@@ -645,9 +648,13 @@ func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
 
 	log.Kind = logKind
 	m.appendLog(log)
+	onFunctionError := m.onFunctionError
 	m.mu.Unlock()
 
 	m.persistMutationLog(log)
+	if log.Outcome == "error" && log.Kind != "runtime" && onFunctionError != nil {
+		onFunctionError(log)
+	}
 }
 
 func (m *runtimeMetrics) recordCache(project string, outcome string) {

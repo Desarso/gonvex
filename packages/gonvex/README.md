@@ -60,6 +60,13 @@ frontend dev server:
 npx gonvex dev -- vite
 ```
 
+The manifest supports queries, mutations, actions, authenticated and public HTTP
+handlers, internal mutations, LiveGrid functions, declared read/write
+dependencies, and durable sync definitions. The uploaded source bundle is
+compiled and cached by the runtime. Registered `app.Cron`, `app.CronExpr`,
+`app.TenantCron`, and `app.TenantCronExpr` schedules are loaded from that
+compiled app.
+
 Run a one-shot sync for CI or Docker builds:
 
 ```bash
@@ -140,6 +147,10 @@ VITE_GONVEX_PROJECT_ID=my-project
 VITE_GONVEX_URL=http://localhost:8080
 VITE_GONVEX_WS_URL=ws://localhost:8080/ws
 ```
+
+The CLI does not start the runtime. For local development, start the repository
+reference stack with `make stack`; for a remote runtime, set these values to its
+public HTTPS/WSS origin.
 
 ## Related Packages
 

@@ -10,8 +10,13 @@ Use it to scaffold a new Gonvex app with a frontend template, app-local
 ```bash
 npm create gonvex@latest my-app
 cd my-app
+npm install
 npm run dev
 ```
+
+The generated app expects a running Gonvex runtime. `npm run dev` watches and
+syncs the backend and starts Vite; it does not start Postgres, Valkey, or the Go
+runtime.
 
 With pnpm:
 
@@ -24,6 +29,29 @@ Choose the Vite React template explicitly:
 ```bash
 npm create gonvex@latest my-app -- --template vite-react
 ```
+
+Provision the project on an existing runtime:
+
+```bash
+npm create gonvex@latest my-app -- \
+  --runtime-url https://gonvex.example.com \
+  --database-mode multiTenant
+```
+
+Add native Google login in the same operation:
+
+```bash
+npm create gonvex@latest my-app -- \
+  --runtime-url https://gonvex.example.com \
+  --google-auth \
+  --origin https://app.example.com \
+  --signup-mode inviteOnly \
+  --owner owner@example.com
+```
+
+`--google-auth` implies project provisioning. Production origins require HTTPS,
+and invite-only creation requires the verified owner email used to bootstrap
+the first workspace invitation.
 
 ## What It Creates
 

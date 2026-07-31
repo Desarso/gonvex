@@ -68,6 +68,7 @@ type errorTracker struct {
 	mu                sync.RWMutex
 	groups            map[string]*errorGroup
 	eventIDs          map[string]struct{}
+	eventLog          []capturedError
 	maxEvents, events int
 	rateWindows       map[string]errorRateWindow
 }
@@ -97,17 +98,97 @@ func (t *errorTracker) capture(event capturedError) (string, bool) {
 	now := event.Timestamp
 	if now == "" {
 		now = time.Now().UTC().Format(time.RFC3339Nano)
+		event.Timestamp = now
 	}
 	group := t.groups[fp]
 	when := eventTime(now)
+	event.Timestamp = when.Format(time.RFC3339Nano)
 	if group == nil {
 		group = newErrorGroup(event, fp, when)
 		t.groups[fp] = group
 	} else {
 		applyErrorToGroup(group, event, when)
 	}
+	t.eventLog = append(t.eventLog, event)
 	t.events++
 	return fp, true
+}
+
+func (t *errorTracker) listGroups(project, status, release string) ([]*errorGroup, []string) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	releases := orderedErrorReleases(t.eventLog, project)
+	if release == "" {
+		groups := make([]*errorGroup, 0, len(t.groups))
+		for _, group := range t.groups {
+			if project != "" && group.Project != project {
+				continue
+			}
+			if status != "" && group.Status != status {
+				continue
+			}
+			clone := *group
+			groups = append(groups, &clone)
+		}
+		sort.Slice(groups, func(i, j int) bool { return groups[i].LastSeen > groups[j].LastSeen })
+		return groups, releases
+	}
+
+	eventsByFingerprint := map[string][]capturedError{}
+	for _, event := range t.eventLog {
+		if event.Project == project && event.Release == release {
+			fp := fingerprint(event)
+			if base := t.groups[fp]; base != nil && (status == "" || base.Status == status) {
+				eventsByFingerprint[fp] = append(eventsByFingerprint[fp], event)
+			}
+		}
+	}
+	groups := make([]*errorGroup, 0, len(eventsByFingerprint))
+	for fp, events := range eventsByFingerprint {
+		groups = append(groups, errorGroupForEvents(t.groups[fp], events))
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].LastSeen > groups[j].LastSeen })
+	return groups, releases
+}
+
+func orderedErrorReleases(events []capturedError, project string) []string {
+	latest := map[string]time.Time{}
+	for _, event := range events {
+		if event.Project != project || event.Release == "" {
+			continue
+		}
+		when := eventTime(event.Timestamp)
+		if previous, exists := latest[event.Release]; !exists || when.After(previous) {
+			latest[event.Release] = when
+		}
+	}
+	releases := make([]string, 0, len(latest))
+	for release := range latest {
+		releases = append(releases, release)
+	}
+	sort.Slice(releases, func(i, j int) bool {
+		if latest[releases[i]].Equal(latest[releases[j]]) {
+			return releases[i] > releases[j]
+		}
+		return latest[releases[i]].After(latest[releases[j]])
+	})
+	return releases
+}
+
+func errorGroupForEvents(base *errorGroup, events []capturedError) *errorGroup {
+	sort.Slice(events, func(i, j int) bool {
+		return eventTime(events[i].Timestamp).Before(eventTime(events[j].Timestamp))
+	})
+	group := newErrorGroup(events[0], base.Fingerprint, eventTime(events[0].Timestamp))
+	for _, event := range events[1:] {
+		applyErrorToGroup(group, event, eventTime(event.Timestamp))
+	}
+	group.Status = base.Status
+	group.Priority = base.Priority
+	group.Assignee = base.Assignee
+	group.Regression = base.Regression
+	return group
 }
 
 func newErrorGroup(event capturedError, fp string, when time.Time) *errorGroup {
@@ -436,29 +517,16 @@ func (s *Server) handleErrorEnvelope(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleErrorGroups(w http.ResponseWriter, r *http.Request) {
-	project, status := projectID(r), r.URL.Query().Get("status")
-	if groups, available, err := s.persistentErrorGroups(r.Context(), project, status); err != nil {
+	project, status, release := projectID(r), r.URL.Query().Get("status"), r.URL.Query().Get("release")
+	if groups, releases, available, err := s.persistentErrorGroups(r.Context(), project, status, release); err != nil {
 		writeJSON(w, 503, map[string]any{"error": "error store unavailable"})
 		return
 	} else if available {
-		writeJSON(w, 200, map[string]any{"groups": groups})
+		writeJSON(w, 200, map[string]any{"groups": groups, "releases": releases})
 		return
 	}
-	s.errorTracker.mu.RLock()
-	defer s.errorTracker.mu.RUnlock()
-	groups := make([]*errorGroup, 0, len(s.errorTracker.groups))
-	for _, group := range s.errorTracker.groups {
-		if project != "" && group.Project != project {
-			continue
-		}
-		if status != "" && group.Status != status {
-			continue
-		}
-		clone := *group
-		groups = append(groups, &clone)
-	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i].LastSeen > groups[j].LastSeen })
-	writeJSON(w, http.StatusOK, map[string]any{"groups": groups})
+	groups, releases := s.errorTracker.listGroups(project, status, release)
+	writeJSON(w, http.StatusOK, map[string]any{"groups": groups, "releases": releases})
 }
 
 func (s *Server) handleErrorGroup(w http.ResponseWriter, r *http.Request) {

@@ -5,13 +5,25 @@ description: Create a new Gonvex app and run it locally.
 
 # Quickstart
 
-This page describes the intended user workflow for starting a Gonvex-backed app.
+This page creates a Vite React app against the local self-hosted runtime.
+
+Before creating the app, start the reference stack in a separate terminal:
+
+```bash
+git clone https://github.com/Desarso/gonvex.git
+cd gonvex
+make stack
+```
+
+The runtime is then available at `http://localhost:8080` and the dashboard at
+`http://localhost:3000`.
 
 ## Create An App
 
 ```bash
 npm create gonvex@latest my-app
 cd my-app
+npm install
 ```
 
 Explicit Vite React template:
@@ -19,16 +31,17 @@ Explicit Vite React template:
 ```bash
 npm create gonvex@latest my-app -- --template vite-react
 cd my-app
+npm install
 ```
 
-The initializer should create:
+The initializer creates:
 
 ```txt
 my-app/
-  app/ or src/
+  src/
   gonvex/
     schema.go
-    tasks.go
+    messages.go
     _generated/
   package.json
   gonvex.json
@@ -53,13 +66,14 @@ which runs:
 gonvex dev -- vite
 ```
 
-`gonvex dev` should:
+`gonvex dev`:
 
-- start or connect to the local Gonvex runtime
+- connects to the configured Gonvex runtime
 - watch the `gonvex/` folder
 - generate TypeScript bindings
-- sync schema and function metadata to the runtime
-- run your app dev server if configured
+- upload the Go source bundle and manifest
+- apply safe schema changes
+- run the child app dev server after `--`
 
 ## Define Schema
 
@@ -130,22 +144,28 @@ npx gonvex project create my-product
 Project creation writes the returned project ID, runtime URL, and project key to
 `.env.local`. Use `gonvex project select <project-id>` to connect an existing project.
 
-For production, the browser points at the cloud runtime:
+For a self-hosted production runtime, use its public HTTPS origin:
 
 ```txt
-VITE_GONVEX_WS_URL=wss://my-product.gonvex.cloud/ws
+VITE_GONVEX_WS_URL=wss://gonvex.example.com/ws
 ```
 
 ## Add Tenants
 
-If your app is multi-tenant:
+Create a multi-tenant project and manage workspaces through the implemented auth
+commands:
 
 ```bash
-npx gonvex tenant create acme --project my-product
-npx gonvex tenant create globex --project my-product
+npx gonvex project create my-product --database-mode multiTenant
+npx gonvex auth tenants create "Acme" --owner owner@acme.example
+npx gonvex auth memberships add \
+  --tenant <tenant-id> \
+  --email teammate@acme.example \
+  --role member
 ```
 
-Each tenant can route to its own database connection while sharing the same project code and generated bindings.
+Runtime-created tenants receive isolated PostgreSQL databases while sharing the
+project's code and generated bindings.
 
 ## Next Steps
 
@@ -153,3 +173,5 @@ Each tenant can route to its own database connection while sharing the same proj
 - [Initialize a Project](./init-project)
 - [Projects and Tenants](./projects-and-tenants)
 - [Auth and Membership](./auth-and-membership)
+- [Durable Sync Collections](./durable-sync)
+- [Scheduling and Background Jobs](./scheduling)

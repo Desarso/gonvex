@@ -20,7 +20,7 @@ What changes is the active tenant attached to the Gonvex client session.
 
 ## Runtime Context
 
-Every frontend call should resolve to this runtime context:
+Every frontend call resolves to this runtime context:
 
 ```txt
 runtime URL
@@ -79,44 +79,33 @@ If you do not have auth wired yet in local development, you can still set only t
 gonvex.setAuth({ tenant: "acme" });
 ```
 
-For production apps, always send a real auth token too. The runtime should reject tenant access unless the user is a member of that tenant.
+For production apps, always send a real auth token too. The runtime rejects
+tenant access unless the authenticated user is a member of that tenant.
 
 ## Safe Tenant Switching Pattern
 
 When the active tenant changes, do not keep showing data from the previous tenant as if it belongs to the new tenant.
 
-The safe current pattern is to key the provider or tenant-scoped app subtree by tenant id:
-
-```tsx
-function TenantShell(props: { token: string; tenantId: string }) {
-  const client = useMemo(() => {
-    const next = new ConvexReactClient(import.meta.env.VITE_GONVEX_WS_URL, {
-      project: import.meta.env.VITE_GONVEX_PROJECT_ID,
-      token: props.token,
-      tenant: props.tenantId,
-    });
-    return next;
-  }, [props.token, props.tenantId]);
-
-  useEffect(() => () => client.close(), [client]);
-
-  return (
-    <GonvexProvider key={props.tenantId} client={client}>
-      <TenantApp tenantId={props.tenantId} />
-    </GonvexProvider>
-  );
-}
-```
-
-This forces tenant-scoped subscriptions and local query results to start fresh for the selected tenant.
-
-The lighter pattern is:
+Update the existing client:
 
 ```ts
 gonvex.setAuth({ token, tenant: nextTenantId });
 ```
 
-Use that only when the surrounding UI also clears tenant-scoped local state and remounts active subscriptions. Existing subscriptions are not automatically resubscribed under the new tenant yet.
+The open socket reauthenticates. The runtime detaches and reattaches active live
+queries with the new verified tenant, resets durable sync collections when the
+visibility scope changes, and issues a new cache scope. React query/sync hooks
+clear their previous scoped result until the new scope produces local or server
+data.
+
+With native Gonvex auth, use the provider helper:
+
+```ts
+await auth.setActiveTenant(nextTenantId);
+```
+
+Remount or clear any additional tenant-specific state owned by your application;
+the Gonvex client can only clear the query/sync state it manages.
 
 ## Landlord Data vs Tenant Data
 
@@ -171,19 +160,22 @@ The rows in a `tenants` table are just rows in the currently selected database. 
 
 ## Backend Function Context
 
-Backend functions should read tenant context from Gonvex, not from user-provided args:
+Backend functions read tenant context from Gonvex, not from user-provided args:
 
 ```go
 func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
-  tenantID := ctx.TenantID()
+  tenantID := ctx.TenantID
 
-  if !ctx.Can("tasks:read") {
-    return nil, gonvex.Forbidden()
+  if ctx.User == nil || !can(ctx.Permissions, "tasks:read") {
+    return nil, errors.New("permission denied")
   }
 
-  return ctx.DB().QueryTasks(tenantID, args)
+  return queryTasks(ctx.Context, ctx.DB, tenantID, args)
 }
 ```
+
+`can` is an application-defined helper over the membership-derived
+`ctx.Permissions` JSON object.
 
 For database-per-tenant projects, the database route already scopes the data. For shared-table projects, functions and generated DB helpers must also enforce tenant predicates such as `WHERE tenant_id = $1`.
 

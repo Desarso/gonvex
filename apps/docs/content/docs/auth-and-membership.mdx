@@ -268,17 +268,25 @@ After switching tenants:
 
 ## Function Authorization
 
-Functions should check permissions through context helpers:
+Functions receive the verified user and permission payload in their runtime
+context. Apply the project's permission policy before accessing data:
 
 ```go
 func CreateTask(ctx *gonvex.MutationCtx, args CreateTaskArgs) (Task, error) {
-  if !ctx.Can("tasks:write") {
-    return Task{}, gonvex.Forbidden()
+  if ctx.User == nil {
+    return Task{}, errors.New("authentication required")
   }
 
-  return ctx.DB().InsertTask(ctx.TenantID(), args)
+  if !can(ctx.Permissions, "tasks:write") {
+    return Task{}, errors.New("permission denied")
+  }
+
+  return insertTask(ctx.Context, ctx.Tx, ctx.TenantID, args)
 }
 ```
+
+`can` is application policy code; Gonvex exposes `ctx.Permissions` as the
+membership-derived JSON object rather than prescribing one permission schema.
 
 ## Control-plane operations
 
@@ -295,7 +303,7 @@ The runtime and CLI expose:
 
 ## Data Placement
 
-Landlord DB should store:
+The landlord database stores:
 
 ```txt
 users
@@ -308,7 +316,7 @@ tenant database routes
 auth provider links
 ```
 
-Tenant DB should store application data:
+Tenant databases store application data:
 
 ```txt
 tasks

@@ -42,7 +42,7 @@ func Schema(s *gonvex.Schema) {
 
 ## Column Types
 
-The schema API should cover common Postgres-backed application data:
+The schema API covers common Postgres-backed application data:
 
 ```go
 t.ID("id")
@@ -83,7 +83,9 @@ Shared tables
   Application tables need tenant_id and all queries must be scoped by tenant.
 ```
 
-The runtime should resolve the active tenant before executing functions. Application code should still use context helpers instead of trusting tenant IDs sent by the browser.
+The runtime resolves and verifies the active tenant before executing functions.
+Application code should read `ctx.TenantID` and `ctx.DB` instead of trusting a
+tenant ID sent in function arguments.
 
 ## Schema Sync
 
@@ -93,7 +95,9 @@ During development:
 npx gonvex dev
 ```
 
-Gonvex should read `gonvex/schema.go`, compare it to the selected project/tenant database, and apply safe changes.
+Gonvex reads `gonvex/schema.go`, compares it to the project or tenant database,
+and applies safe changes. Multi-tenant schema sync runs in parallel with bounded
+concurrency and skips unchanged persisted schemas.
 
 Safe automatic changes include:
 
@@ -117,19 +121,21 @@ The rule is Convex-like: apply changes that preserve existing data automatically
 
 ## Generated Schema Types
 
-The CLI should generate TypeScript types from schema declarations:
+The CLI generates scoped schema metadata:
 
 ```ts
-import type { Doc } from "./gonvex/_generated/schema";
+import { landlord, tenant } from "./gonvex/_generated/schema";
 
-type Task = Doc<"tasks">;
+tenant.tables.tasks;
+landlord.tables.projects;
 ```
 
-This keeps frontend code aligned with the Go schema.
+Generated schema modules currently expose table/column/index metadata and table
+name types. Full document-row type inference from Go structs is not implemented.
 
 ## Production Direction
 
-For production, schema sync should become environment-aware and migration-safe:
+Production migration tooling still needs:
 
 - preview migrations before applying
 - track migration versions

@@ -1,0 +1,140 @@
+---
+title: Scheduling and Background Jobs
+description: Register recurring jobs and enqueue mutations or actions for later execution.
+---
+
+# Scheduling and Background Jobs
+
+Gonvex can run recurring project jobs and enqueue one-shot work from a backend
+function. Scheduled calls use the same mutation/action execution paths,
+project/tenant routing, metrics, and realtime invalidation as client calls.
+
+## Recurring jobs
+
+Register a mutation or action by interval:
+
+```go
+package backend
+
+import (
+  "time"
+
+  "github.com/gonvex/gonvex/pkg/gonvex"
+)
+
+func Register(app *gonvex.App) {
+  app.Action("reports.refresh", RefreshReports)
+  app.Cron(
+    "refresh reports",
+    15*time.Minute,
+    "reports.refresh",
+    RefreshReportsArgs{},
+  )
+}
+```
+
+Or use a standard five-field cron expression:
+
+```go
+app.CronExpr(
+  "nightly cleanup",
+  "0 3 * * *",
+  "maintenance.cleanup",
+  CleanupArgs{},
+)
+```
+
+The five fields are minute, hour, day of month, month, and day of week. The
+referenced function must be a mutation, internal mutation, or action, and the
+arguments must be JSON-encodable.
+
+Cron names must be unique within an app. Manifest sync replaces the project's
+registered schedules while preserving run statistics for unchanged jobs.
+
+## Per-tenant cron jobs
+
+Use a tenant cron when each provisioned tenant should receive its own invocation:
+
+```go
+app.TenantCron(
+  "expire stale sessions",
+  time.Hour,
+  "sessions.expire",
+  ExpireSessionsArgs{},
+)
+
+app.TenantCronExpr(
+  "tenant daily summary",
+  "30 6 * * *",
+  "summaries.create",
+  CreateSummaryArgs{},
+)
+```
+
+Each invocation has that tenant's `ctx.TenantID` and database route. A normal
+`Cron`/`CronExpr` is project-scoped and has no tenant ID.
+
+## One-shot jobs
+
+Every runtime context exposes `ctx.Scheduler`. Enqueue work after a delay:
+
+```go
+func CreateTask(
+  ctx *gonvex.MutationCtx,
+  args CreateTaskArgs,
+) (Task, error) {
+  task, err := insertTask(ctx, args)
+  if err != nil {
+    return Task{}, err
+  }
+
+  _, err = ctx.Scheduler.RunAfter(
+    10*time.Minute,
+    "tasks.sendReminder",
+    SendReminderArgs{TaskID: task.ID},
+  )
+  return task, err
+}
+```
+
+Or run at an exact time:
+
+```go
+jobID, err := ctx.Scheduler.RunAt(
+  args.PublishAt,
+  "posts.publish",
+  PublishPostArgs{PostID: args.PostID},
+)
+```
+
+Jobs scheduled inside a mutation are held until that mutation commits. A failed
+or rolled-back mutation does not expose its queued work. The new call inherits
+the current project and tenant scope.
+
+## Realtime and observability
+
+Successful scheduled mutations and actions invalidate live queries using their
+declared `gonvex.Writes(...)` dependencies. A long-running action that commits
+work before returning can notify subscribers immediately:
+
+```go
+ctx.NotifyTableChanged("tasks", "task_events")
+```
+
+The dashboard Health view reports registered cron schedules, recent runs,
+failures, scheduler lag, execution duration, queued work, and concurrency.
+Scheduled function calls also appear in normal function metrics.
+
+## Current durability boundary
+
+The scheduler is in-process:
+
+- recurring schedules are rebuilt from the compiled app after runtime startup
+  or manifest sync;
+- one-shot `RunAfter` and `RunAt` jobs are held in memory and do not survive a
+  runtime restart;
+- one runtime process executes up to 16 scheduled calls concurrently;
+- multi-replica leader election and a durable job queue are not implemented.
+
+Use an external durable queue or scheduler for work that must survive runtime
+replacement until Gonvex adds persisted scheduled jobs.

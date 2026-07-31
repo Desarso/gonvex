@@ -1,5 +1,9 @@
 # Durable Sync Collections
 
+The public guide lives in
+[`apps/docs/content/docs/durable-sync.mdx`](../apps/docs/content/docs/durable-sync.mdx).
+This file records the lower-level delivery model for runtime contributors.
+
 Gonvex syncs are explicit, authorized, single-table collections that render
 from IndexedDB and resume from a durable Postgres cursor. They complement live
 queries; they do not replace computed queries, search, aggregates, or arbitrary
@@ -20,7 +24,7 @@ app.Sync(
         VisibilityDependsOn("userTeams", "workspaces").
         OrderBy("updatedAt", "desc").
         Progressive().
-        Budget(100, 4_194_304),
+        Budget(100, 4194304),
 )
 ```
 
@@ -46,7 +50,9 @@ the browser.
    only later deltas; otherwise it sends a fresh authorized snapshot.
 
 The runtime prunes the log no more than hourly. Default retention is seven
-days; a sync may request a longer window with `RetainFor`.
+days. The Go declaration API includes `RetainFor`, but the npm CLI does not yet
+emit custom retention into the uploaded manifest, so applications currently use
+the default.
 
 ## Auth and visibility
 

@@ -19,7 +19,7 @@ unknown impact -> refresh
 
 Realtime apps become expensive if every write refreshes every query. They become incorrect if a write changes visible data but the frontend never gets a fresh result.
 
-Gonvex should balance those concerns with a safe-first rule:
+Gonvex uses a safe-first rule:
 
 ```txt
 Refreshing too much is a performance issue.
@@ -28,7 +28,7 @@ Missing a required refresh is a correctness issue.
 
 ## Generic Dependencies
 
-Invalidation should be based on generic query metadata, not app-specific concepts.
+Invalidation is based on generic query metadata, not app-specific concepts.
 
 Useful dependency metadata includes:
 
@@ -41,7 +41,9 @@ Useful dependency metadata includes:
 - returned primary row IDs
 - tenant database route
 
-For example, the runtime should treat `workspace_id`, `organization_id`, or `account_id` as ordinary predicates. Those names should not be hardcoded into Gonvex core.
+For example, the runtime treats `workspace_id`, `organization_id`, or
+`account_id` as ordinary predicates. Those names are not hardcoded into Gonvex
+core.
 
 Declare dependencies when registering a function:
 
@@ -65,7 +67,7 @@ unknown.
 
 ## Write Sets
 
-Mutations should produce or imply write metadata:
+Mutations declare write metadata:
 
 - table changed
 - operation type: insert, update, delete
@@ -87,7 +89,8 @@ Some writes require broad refreshes because result membership may change:
 - large write where changed IDs are too expensive to enumerate
 - query with dependencies the runtime did not capture precisely
 
-Broad refresh should only affect active subscriptions in the relevant project/tenant/database scope.
+Broad refresh only affects active subscriptions in the relevant
+project/tenant/database scope.
 
 ## Row-Aware Cases
 
@@ -108,7 +111,8 @@ If a changed row could enter or leave the result because of filters, sorting, or
 
 Invalidation must respect tenant routing.
 
-Writes in tenant `acme` should not refresh subscriptions in tenant `globex` unless those subscriptions explicitly read shared landlord/project data.
+Writes in tenant `acme` do not refresh subscriptions in tenant `globex`.
+Landlord/project data uses a separate scope.
 
 ## Runtime Behavior
 
@@ -128,3 +132,6 @@ PostgreSQL notification limits.
 One listener is acquired per active tenant database, subject to a configurable
 cap. It closes after the tenant becomes idle. On first connection or reconnect,
 Gonvex broadly refreshes that tenant because PostgreSQL `NOTIFY` is not durable.
+
+Durable sync collections use their own transactional change log rather than this
+snapshot-only recovery path. See [Durable Sync Collections](./durable-sync).

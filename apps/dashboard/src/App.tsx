@@ -7920,6 +7920,8 @@ async function readErrorTrackingResponse<T>(
 
 function ErrorsPage(props: { project: ProjectTarget }) {
   const [groups, setGroups] = useState<DashboardErrorGroup[]>([]);
+  const [releases, setReleases] = useState<string[]>([]);
+  const [release, setRelease] = useState("all");
   const [status, setStatus] = useState("unresolved");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -7933,14 +7935,19 @@ function ErrorsPage(props: { project: ProjectTarget }) {
     setRuntimeState("checking");
     const runtimeURL = runtimeURLForProject(props.project);
     try {
-      const statusQuery = status === "all" ? "" : `?status=${encodeURIComponent(status)}`;
-      const response = await fetch(`${runtimeURL}/dev/errors/groups${statusQuery}`, { headers: runtimeHeaders(props.project) });
-      const payload = await readErrorTrackingResponse<{ groups?: DashboardErrorGroup[] }>(response, {
+      const params = new URLSearchParams();
+      if (status !== "all") params.set("status", status);
+      if (release !== "all") params.set("release", release);
+      const response = await fetch(`${runtimeURL}/dev/errors/groups${params.size ? `?${params.toString()}` : ""}`, { headers: runtimeHeaders(props.project) });
+      const payload = await readErrorTrackingResponse<{ groups?: DashboardErrorGroup[]; releases?: string[] }>(response, {
         action: "Loading error groups",
         routeRequired: true,
         runtimeURL,
       });
+      const nextReleases = payload.releases ?? [];
       setGroups(payload.groups ?? []);
+      setReleases(nextReleases);
+      if (release !== "all" && !nextReleases.includes(release)) setRelease("all");
       setError("");
       setRuntimeState("capturing");
     } catch (reason) {
@@ -7948,7 +7955,7 @@ function ErrorsPage(props: { project: ProjectTarget }) {
       setRuntimeState("unavailable");
     }
     finally { setLoading(false); }
-  }, [props.project, status]);
+  }, [props.project, release, status]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -7982,6 +7989,14 @@ function ErrorsPage(props: { project: ProjectTarget }) {
   const impactedTenants = new Set(groups.flatMap((group) => Object.keys(group.tenants))).size;
   const occurrences = groups.reduce((total, group) => total + group.count, 0);
   const regressions = groups.filter((group) => group.regression).length;
+  const releaseOptions: SelectOption[] = [
+    { value: "all", label: "All releases", description: "Errors from every release" },
+    ...releases.map((value, index) => ({
+      value,
+      label: value,
+      description: index === 0 ? "Latest release" : undefined,
+    })),
+  ];
   const runtimeStatus = runtimeState === "capturing"
     ? { label: "Capturing", detail: "Gonvex runtime" }
     : runtimeState === "checking"
@@ -8002,6 +8017,13 @@ function ErrorsPage(props: { project: ProjectTarget }) {
     <div className="errors-toolbar">
       <input className="errors-search" aria-label="Search error groups" placeholder="Search message, tenant, release, fingerprint…" value={search} onChange={(event) => setSearch(event.target.value)} />
       <div className="errors-toolbar-actions">
+        <AppSelect
+          ariaLabel="Error release"
+          className="errors-release-filter"
+          onChange={setRelease}
+          options={releaseOptions}
+          selectedKey={release}
+        />
         <Select aria-label="Error status" selectedKey={status} onSelectionChange={(key) => setStatus(String(key))}>
           <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
           <Select.Popover><ListBox><ListBox.Item id="unresolved">Unresolved</ListBox.Item><ListBox.Item id="resolved">Resolved</ListBox.Item><ListBox.Item id="ignored">Ignored</ListBox.Item><ListBox.Item id="all">All groups</ListBox.Item></ListBox></Select.Popover>
@@ -8011,7 +8033,7 @@ function ErrorsPage(props: { project: ProjectTarget }) {
     </div>
     {error ? <p className="form-error" role="alert">{error}</p> : null}
     {loading ? <p>Loading error groups…</p> : null}
-    {!loading && !error && visibleGroups.length === 0 ? <div className="errors-empty"><span className="errors-empty-mark">✓</span><strong>{groups.length ? "No matching groups" : `No ${status === "all" ? "captured" : status} errors`}</strong><span>{groups.length ? "Try a tenant, release, or part of the error message." : "Captured browser and Gonvex operation failures will appear here automatically."}</span></div> : null}
+    {!loading && !error && visibleGroups.length === 0 ? <div className="errors-empty"><span className="errors-empty-mark">✓</span><strong>{groups.length ? "No matching groups" : release === "all" ? `No ${status === "all" ? "captured" : status} errors` : `No errors in ${release}`}</strong><span>{groups.length ? "Try a tenant, release, or part of the error message." : release === "all" ? "Captured browser and Gonvex operation failures will appear here automatically." : "Choose another release or refresh after new errors are captured."}</span></div> : null}
     <div className="error-group-list">
       {visibleGroups.map((group) => {
         const expanded = selected === group.fingerprint;

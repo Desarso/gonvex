@@ -1,8 +1,11 @@
 # Gonvex
 
-Gonvex is an open source Convex-style backend for teams that want the same fast app-building loop with Go, Postgres, TypeScript, React, and realtime subscriptions.
+Gonvex is an open source Convex-style backend for teams that want the same fast
+app-building loop with Go, Postgres, TypeScript, React, and realtime data.
 
-You write backend functions next to your app, Gonvex generates type-safe frontend bindings, and your React UI calls queries and mutations over a realtime runtime.
+You write backend functions next to your app, Gonvex generates frontend API
+references, and your React UI calls queries and mutations over a realtime
+runtime.
 
 ```tsx
 import { api } from "./gonvex/_generated/api";
@@ -18,31 +21,48 @@ export function Tasks() {
 
 Gonvex is for developers who like Convex's product shape but want infrastructure they can inspect, extend, and self-host.
 
-> Status: beta. Gonvex is usable for local development and experimentation, but the production hosting, self-hosting, auth, migrations, and multi-tenant operations story is still stabilizing before 1.0.
+> **Status: beta.** The runtime, self-hosted stack, generic Go function
+> execution, native Google auth, multi-tenant routing, realtime subscriptions,
+> durable sync collections, scheduling, and dashboard are implemented. Migration
+> rollouts, fleet backup/restore, deployment automation, and a public hosted
+> service are still stabilizing before 1.0.
 
 ## Why Gonvex
 
 - **Go backend functions**: define queries, mutations, actions, HTTP handlers, schema, and LiveGrid-style data views in Go.
-- **TypeScript client bindings**: generate frontend-safe API references and React hooks from your backend.
+- **TypeScript client bindings**: generate stable API references, schema metadata, and React hook exports from your backend.
 - **Realtime by default**: subscribe to query results over WebSockets and refresh UI when data changes.
+- **Durable sync collections**: render authorized table collections from IndexedDB and resume from a Postgres change cursor.
 - **Postgres underneath**: keep your data in a database you already know how to run, back up, inspect, and tune.
+- **Projects, tenants, and auth**: route isolated tenant databases, verify memberships, and add native Google OAuth without a per-app identity SDK.
+- **Background work**: register interval or cron jobs and schedule mutations/actions after a transaction commits.
+- **Operational tooling**: inspect functions, data, files, errors, metrics, connections, and scheduler health in the dashboard.
 - **Self-hostable runtime**: run Gonvex with Postgres, Valkey/Redis, and optional S3-compatible object storage.
 - **Open source core**: the runtime, CLI, client packages, dashboard, docs, and starter templates live in this repo.
 
 ## Quickstart
 
-Create a new app:
+First, start the local reference runtime in a separate checkout:
+
+```bash
+git clone https://github.com/Desarso/gonvex.git
+cd gonvex
+make stack
+```
+
+Then create a new app:
 
 ```bash
 npm create gonvex@latest my-app
 cd my-app
+npm install
 npm run dev
 ```
 
 Or start Gonvex in an existing app:
 
 ```bash
-npm install -D @gonvex/cli
+npm install --save-dev @gonvex/cli
 npm install @gonvex/client @gonvex/react
 npx gonvex init
 npx gonvex dev -- vite
@@ -88,8 +108,12 @@ type ListTasksArgs struct {
 }
 
 func Register(app *gonvex.App) {
-  app.Query("tasks.list", ListTasks)
-  app.Mutation("tasks.create", CreateTask)
+  app.Query(
+    "tasks.list",
+    ListTasks,
+    gonvex.Reads("tasks").Filters("status").OrdersBy("created_at"),
+  )
+  app.Mutation("tasks.create", CreateTask, gonvex.Writes("tasks"))
 }
 
 func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
@@ -97,7 +121,47 @@ func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
 }
 ```
 
-During development, `gonvex dev` watches the `gonvex/` folder, regenerates TypeScript bindings, syncs schema/function metadata, and runs your app dev server.
+During development, `gonvex dev` watches the `gonvex/` folder, regenerates
+TypeScript bindings, uploads the Go source bundle and manifest, applies safe
+schema changes, and optionally runs your app dev server.
+
+## Realtime Queries and Durable Sync
+
+Use a live query for computed results, joins, search, aggregates, and dynamic
+windows. Gonvex coalesces matching subscriptions, uses declared read/write
+dependencies to avoid unrelated reruns, suppresses unchanged results, and can
+send keyed-list patches.
+
+Use a sync collection when the browser should keep a bounded, authorized
+single-table collection locally:
+
+```go
+app.Sync(
+  "tasks.recent",
+  RecentTasks,
+  gonvex.SyncTable("tasks").
+    Columns("id", "title", "status", "updated_at", "deleted_at").
+    ExcludeWhenSet("deleted_at").
+    OrderBy("updated_at", "desc").
+    Progressive().
+    Budget(500, 8388608),
+)
+```
+
+```tsx
+import { useSync, useSyncSelector } from "./gonvex/_generated/react";
+
+const tasks = useSync<Task>(api.tasks.recent, {});
+const openCount = useSyncSelector<Task, number>(
+  api.tasks.recent,
+  {},
+  (rows) => rows.filter((task) => task.status === "open").length,
+);
+```
+
+Sync collections render from a scope-isolated IndexedDB store, then resume with
+delta-only delivery when the retained Postgres cursor is still valid. They are
+not an offline mutation queue; writes still go through mutations.
 
 ## Native Google Login
 
@@ -167,25 +231,33 @@ For production self-hosting, put the runtime behind TLS, provide managed Postgre
 
 Gonvex currently includes:
 
-- local runtime server
-- app-local Go schema/function declarations
-- generated TypeScript API references
-- React provider and hooks
-- browser WebSocket client
-- Postgres-backed data paths
-- realtime subscriptions and invalidation
-- dashboard for local inspection
-- Vite React starter template
-- docs site and package workspace
+- generic uploaded Go function execution for queries, mutations, actions, HTTP
+  handlers, internal mutations, LiveGrid functions, and sync collections
+- safe Postgres schema sync with project and tenant scopes
+- generated TypeScript API and schema references
+- React hooks for queries, mutations, actions, auth, connection state, and sync
+- reconnecting WebSocket client with typed failures and operation timeouts
+- dependency-aware realtime invalidation, shared subscription runners, result
+  revisions, unchanged suppression, and adaptive list patches
+- transparent, scope-isolated browser query cache
+- durable delta sync backed by Postgres and IndexedDB
+- multi-project and database-per-tenant routing
+- native Google OAuth with PKCE, memberships, invitations, roles, and live
+  session revocation
+- recurring and one-shot scheduled work
+- optional S3-compatible files, browser error reporting, and uploaded data-file
+  analysis
+- dashboard views for projects, tenants, data, functions, files, logs, errors,
+  metrics, realtime connections, and scheduler health
 
 Still in progress before a stable production release:
 
-- generic production function dispatch across arbitrary apps
-- hosted control plane
-- hardened self-hosting deployment workflow
-- production auth, membership, roles, and tenant routing
-- migration previews and safe rollout controls
-- versioned runtime/dashboard distribution
+- migration previews, explicit destructive changes, rollback, and staged tenant
+  rollout controls
+- automated tenant database backup/restore, moves, and fleet operations
+- deployment records, zero-downtime upgrade automation, and rollback tooling
+- enterprise identity providers, organization policy, SSO, and audit export
+- a generally available hosted control plane
 
 ## Documentation
 
@@ -194,6 +266,8 @@ Still in progress before a stable production release:
 - Installation: https://desarso.github.io/gonvex/docs/installation/
 - Deployment model: https://desarso.github.io/gonvex/docs/deployment/
 - Current limits: https://desarso.github.io/gonvex/docs/current-limits/
+- Durable sync: https://desarso.github.io/gonvex/docs/durable-sync/
+- Scheduling: https://desarso.github.io/gonvex/docs/scheduling/
 
 Run the docs locally:
 
@@ -207,15 +281,20 @@ pnpm dev:docs
 ```txt
 apps/dashboard/          Dashboard and local integration harness
 apps/docs/               Documentation site
+apps/query-cache-test/    Browser cache integration harness
 packages/client/         Browser WebSocket client
 packages/react/          React provider and hooks
 packages/protocol/       Shared TypeScript protocol types
 packages/gonvex/         CLI package
 packages/create-gonvex/  App initializer
+pkg/gonvex/              Public Go function SDK
+pkg/manifest/            Runtime manifest model
 templates/vite-react/    Default starter template
-cmd/gonvex/              Local Go CLI prototype
+cmd/gonvex/              Go manifest/code-generation CLI
+cmd/gonvex-load/         Persistent WebSocket and mutation load runner
 server/                  Go runtime server
 infra/                   Local infrastructure helpers
+releases/                Versioned release notes
 ```
 
 ## Contributing

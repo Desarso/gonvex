@@ -3,8 +3,8 @@
 React bindings for Gonvex.
 
 This package provides the provider and hooks used by generated Gonvex bindings:
-`useQuery`, `useMutation`, `useAction`, auth-aware providers, and Convex-style
-compatibility exports.
+`useQuery`, `useQueryResult`, `useMutation`, `useAction`, `useSync`,
+`useSyncSelector`, auth-aware providers, and Convex-style compatibility exports.
 
 ## Install
 
@@ -76,6 +76,30 @@ const { isWebSocketConnected, hasEverConnected, connectionRetries } = useConvexC
 This reflects the real WebSocket lifecycle (not a stub). Mutations/actions
 reject with `GonvexClientError` on timeout or disconnect and never hang forever.
 
+## Durable sync collections
+
+`useSync` reads a bounded entity collection from the client's normalized
+IndexedDB store, then updates it as the server resumes or snapshots the durable
+Postgres cursor:
+
+```tsx
+const tasks = useSync<Task>(api.tasks.recent, { workspaceId });
+```
+
+Use `useSyncSelector` when a component needs only derived state:
+
+```tsx
+const openCount = useSyncSelector<Task, number>(
+  api.tasks.recent,
+  { workspaceId },
+  (tasks) => tasks.filter((task) => task.status === "open").length,
+);
+```
+
+Both hooks return `undefined` before any local/server snapshot is available and
+accept `"skip"` as the args value. Selectors use `Object.is` by default and
+accept a custom equality function as the fourth argument.
+
 ## Native Google auth
 
 Enable Google for the project and generate a configured auth module:
@@ -119,6 +143,8 @@ The package also exports Convex-style names for incremental migration:
 - `useConvexConnectionState`
 - `usePaginatedQuery`
 - `useQueryResult`
+- `useSync`
+- `useSyncSelector`
 
 ## Related Packages
 

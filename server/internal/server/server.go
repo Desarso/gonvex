@@ -77,6 +77,7 @@ type Server struct {
 	queryCacheStartedAtMS int64
 	queryCacheSequence    atomic.Uint64
 	errorTracker          *errorTracker
+	runtimeErrors         chan runtimeLogEntry
 	googleKeys            googleKeyCache
 	authRateLimiter       appAuthRateLimiter
 	appAuthConfigMu       sync.Mutex
@@ -136,6 +137,8 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	if strings.TrimSpace(server.projectRegistryURL()) != "" {
 		server.metrics.startMutationLogPersistence(postgresRuntimeMutationLogStore{server: server})
 	}
+	server.startRuntimeErrorCapture()
+	server.metrics.onFunctionError = server.queueRuntimeFunctionError
 	server.loadConfiguredTenantDatabases()
 	server.startLandlordMigrations()
 	server.scheduler.start(context.Background())

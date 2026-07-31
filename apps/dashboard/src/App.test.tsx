@@ -29,13 +29,13 @@ const trackedErrorProject = {
   errorTrackingEnabled: true,
 };
 
-async function renderTrackedErrorProject(groupsResponse: () => Promise<Response>) {
+async function renderTrackedErrorProject(groupsResponse: (input: RequestInfo | URL) => Promise<Response>) {
   vi.stubGlobal("WebSocket", undefined);
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     if (String(input).includes("/dev/projects") && init?.method === "POST") {
       return { ok: true, status: 200, statusText: "OK", json: async () => ({ project: trackedErrorProject, projectKey: "test-project-key" }) } as Response;
     }
-    if (String(input).includes("/dev/errors/groups")) return groupsResponse();
+    if (String(input).includes("/dev/errors/groups")) return groupsResponse(input);
     return { ok: true, status: 200, statusText: "OK", json: async () => ({}) } as Response;
   }));
   const user = userEvent.setup();
@@ -703,6 +703,46 @@ describe("App", () => {
     expect(screen.getByText(/latest exception/i)).toBeInTheDocument();
     expect(screen.getByText("5.1.0", { selector: ".error-detail-heading strong" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /copy agent brief/i })).toBeInTheDocument();
+  });
+
+  it("filters error groups to the latest release", async () => {
+    const requestedURLs: string[] = [];
+    const user = await renderTrackedErrorProject(async (input) => {
+      const url = String(input);
+      requestedURLs.push(url);
+      const selectedRelease = new URL(url).searchParams.get("release");
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          releases: ["5.2.0", "5.1.0"],
+          groups: [{
+            fingerprint: selectedRelease ? "latest-group" : "all-group",
+            title: selectedRelease ? "Latest release failure" : "All release failure",
+            culprit: "at submitOrder (src/checkout.ts:40:3)",
+            status: "unresolved",
+            priority: "high",
+            count: 1,
+            firstSeen: "2026-07-12T10:00:00Z",
+            lastSeen: "2026-07-12T10:00:00Z",
+            tenants: { acme: 1 },
+            users: { ada: 1 },
+            devices: { laptop: 1 },
+            releases: { [selectedRelease || "5.1.0"]: 1 },
+            environments: { production: 1 },
+            latest: { timestamp: "2026-07-12T10:00:00Z", release: selectedRelease || "5.1.0" },
+          }],
+        }),
+      } as Response;
+    });
+
+    expect(await screen.findByText("All release failure")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("Error release"));
+    await user.click(await screen.findByRole("option", { name: /5\.2\.0.*latest/i }));
+
+    expect(await screen.findByText("Latest release failure")).toBeInTheDocument();
+    expect(requestedURLs.some((url) => new URL(url).searchParams.get("release") === "5.2.0")).toBe(true);
   });
 
   it("explains when the connected runtime predates error tracking", async () => {

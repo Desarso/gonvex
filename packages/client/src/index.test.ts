@@ -105,6 +105,32 @@ describe("GonvexClient", () => {
 		expect(handler.mock.calls[0][0].result[0].title).toBe("new");
 	});
 
+	it("requests an authoritative snapshot when progress arrives without a local result", () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		const handler = vi.fn();
+		client.subscribeQuery(ref, {}, handler);
+		const socket = latestSocket();
+		socket.open();
+		const [{ id }] = sentMessages(socket);
+
+		socket.receive({
+			type: "query.progress",
+			id,
+			path: ref.path,
+			reason: "initial",
+			throughRevision: { epoch: "runtime-a", sequence: 1 },
+		});
+
+		expect(handler).not.toHaveBeenCalled();
+		expect(sentMessages(socket)).toHaveLength(2);
+		expect(sentMessages(socket).at(-1)).toEqual({
+			type: "query.subscribe",
+			id,
+			path: ref.path,
+			args: {},
+		});
+	});
+
 	it("applies keyed patches only to the matching base revision", () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const handler = vi.fn();

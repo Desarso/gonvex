@@ -66,6 +66,42 @@ await client.clearQueryCache({ allScopes: true });
 Dexie is loaded asynchronously only after a cache-capable session is confirmed,
 so IndexedDB setup does not delay the WebSocket query path.
 
+## Durable Sync Collections
+
+Sync functions materialize bounded, authorized single-table collections in a
+normalized IndexedDB store and resume them from a durable Postgres cursor:
+
+```ts
+const watch = client.watchSync<Task>(
+  { kind: "sync", path: "tasks.recent" },
+  { workspaceId: "workspace-a" },
+);
+
+const stop = watch.onUpdate(() => {
+  render(watch.localSyncResult() ?? []);
+  console.log(watch.status()); // { isLoading, isUpToDate }
+});
+```
+
+Configure or disable the sync store when constructing the client:
+
+```ts
+const client = new GonvexClient(url, {
+  sync: {
+    databaseName: "my-product-sync",
+    maxBytes: 150 * 1024 * 1024,
+  },
+});
+
+const memoryOnly = new GonvexClient(url, { sync: false });
+```
+
+The default global IndexedDB budget is 100 MiB. Server-declared per-collection
+row/byte budgets still apply, and least-recently-used collections are evicted
+first. Storage is isolated by runtime, project, tenant, authenticated identity,
+and permissions. Sync is not an offline write queue; mutations and actions
+retain the fail-closed policy below.
+
 ## Lightweight Error Tracking
 
 Capture global browser failures and failed Gonvex operations with the same
@@ -145,6 +181,7 @@ The package exports:
 - `ConvexReactClient` compatibility alias
 - `GonvexClientError`, `ConnectionState`, timeout defaults
 - transparent persistent query caching and lower-level experimental cache helpers
+- `subscribeSync`, `watchSync`, and normalized persistent sync storage
 - browser capability and telemetry helpers
 - `GonvexErrorReporter` and automatic operation error reporting
 

@@ -5,14 +5,18 @@ description: Build realtime Go + Postgres backends with generated TypeScript bin
 
 # Gonvex
 
-Gonvex is a Convex-style backend for teams that want to write backend logic in Go while keeping the frontend developer experience tight: generated TypeScript bindings, realtime subscriptions, schema sync, and a hosted/self-hosted runtime that knows about projects, tenants, users, and roles.
+Gonvex is a Convex-style backend for teams that want to write backend logic in
+Go while keeping the frontend developer experience tight: generated TypeScript
+bindings, realtime subscriptions, durable local sync, schema sync, and a
+self-hosted runtime that knows about projects, tenants, users, and roles.
 
-The intended workflow is:
+The application workflow is:
 
 ```bash
 npm create gonvex@latest my-app
 cd my-app
-npx gonvex dev
+npm install
+npm run dev
 ```
 
 Then define backend code next to your app:
@@ -39,14 +43,17 @@ const createTask = useMutation(api.tasks.create);
 
 ## What Gonvex Provides
 
-- **Go backend functions**: queries, mutations, actions, HTTP handlers, and LiveGrid definitions.
+- **Go backend functions**: queries, mutations, actions, HTTP handlers, internal mutations, LiveGrid functions, and sync collections.
 - **Generated TypeScript bindings**: frontend-safe references to your app backend functions.
 - **Postgres schema management**: define tables and indexes in Go.
-- **Realtime subscriptions**: query results refresh when relevant database changes commit.
+- **Realtime subscriptions**: declared dependencies refresh only relevant query results when writes commit.
+- **Durable sync collections**: keep authorized, bounded table data in IndexedDB and resume from a Postgres change cursor.
+- **Browser query cache**: replay safe scoped snapshots while the server revalidates them.
 - **Multi-project runtime**: one runtime can host many projects.
-- **Multi-tenant projects**: projects can route users to tenant-scoped databases or schemas.
+- **Multi-tenant projects**: route verified members to isolated tenant databases.
 - **User and membership model**: users can belong to multiple tenants with roles and permissions.
-- **Dashboard**: create projects, inspect schemas/functions, switch tenants, and watch live data.
+- **Scheduling**: register interval, cron-expression, per-tenant, and one-shot background work.
+- **Dashboard**: inspect projects, schemas, functions, tenants, files, errors, logs, metrics, realtime connections, and scheduler health.
 
 ## Core Concepts
 
@@ -81,7 +88,12 @@ Generated bindings
 7. [Schema](./schema)
 8. [Functions and Bindings](./functions-and-bindings)
 9. [Realtime Subscriptions](./realtime-subscriptions)
+10. [Durable Sync Collections](./durable-sync)
+11. [Scheduling and Background Jobs](./scheduling)
 
 ## Current Status
 
-Gonvex is in beta. The docs describe the current working local development model and the intended product shape. Features that are still evolving are called out in [Current Limits](./current-limits).
+Gonvex is in beta. These docs distinguish implemented behavior from roadmap
+work. Migration rollouts, durable scheduled jobs, tenant fleet operations,
+deployment automation, and a public hosted service are the largest remaining
+platform boundaries; see [Current Limits](./current-limits).

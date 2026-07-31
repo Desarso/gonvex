@@ -118,16 +118,43 @@ func (m *runtimeMetrics) restoreMutationLogs(entries []runtimeLogEntry) {
 	}
 }
 
+// runtimeLogIsDurable decides what outlives the in-memory ring.
+//
+// Mutations are the durable audit trail. FAILURES of every kind are durable too:
+// the ring holds metricsLogLimit entries shared by all projects and tenants, which
+// at production traffic is a matter of minutes — so the single log line explaining
+// a failed query or action was routinely gone before anyone went looking for it.
+// Successful queries/actions stay memory-only; they are the high-volume, low-value
+// half of the stream.
+func runtimeLogIsDurable(entry runtimeLogEntry) bool {
+	if entry.Outcome == "error" {
+		return true
+	}
+	return entry.Kind == "mutation" || entry.Kind == "internalMutation"
+}
+
 func (m *runtimeMetrics) persistMutationLog(entry runtimeLogEntry) {
-	if entry.Kind != "mutation" && entry.Kind != "internalMutation" {
+	if !runtimeLogIsDurable(entry) {
 		return
 	}
 	m.mu.Lock()
 	writes := m.mutationWrites
 	m.mu.Unlock()
-	if writes != nil {
-		// Backpressure is preferable to silently losing durable history when the
-		// database is slower than the mutation rate.
-		writes <- entry
+	if writes == nil {
+		return
 	}
+	if entry.Kind != "mutation" && entry.Kind != "internalMutation" {
+		// Failure diagnostics are best-effort: a queue this far behind means the
+		// registry database is struggling, and stalling live request handlers to
+		// record a log line would turn a slow database into an outage.
+		select {
+		case writes <- entry:
+		default:
+			slog.Warn("dropped runtime error log", "project", entry.Project, "path", entry.Path, "kind", entry.Kind)
+		}
+		return
+	}
+	// Backpressure is preferable to silently losing durable history when the
+	// database is slower than the mutation rate.
+	writes <- entry
 }

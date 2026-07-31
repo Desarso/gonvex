@@ -171,3 +171,51 @@ func TestErrorHTTPFlowGroupsTenantUserDeviceAndReleaseImpact(t *testing.T) {
 		t.Fatalf("incorrect grouped impact: %#v", group)
 	}
 }
+
+func TestErrorHTTPFlowFiltersGroupsAndImpactByRelease(t *testing.T) {
+	server := New(config.Config{})
+	body := bytes.NewBufferString(`{"events":[
+		{"eventId":"old-one","timestamp":"2026-07-11T10:00:00Z","message":"task 123456 save failed","name":"Error","culprit":"at saveTask (src/tasks.ts:40:3)","tenant":"legacy","release":"5.1.0","deviceId":"old-phone","user":{"id":"grace"}},
+		{"eventId":"new-one","timestamp":"2026-07-12T10:00:00Z","message":"task 987654 save failed","name":"Error","culprit":"at saveTask (src/tasks.ts:99:8)","tenant":"acme","release":"5.2.0","deviceId":"laptop","user":{"id":"ada"}},
+		{"eventId":"new-two","timestamp":"2026-07-12T11:00:00Z","message":"checkout failed","name":"Error","culprit":"at checkout (src/checkout.ts:20:3)","tenant":"beta","release":"5.2.0","deviceId":"phone","user":{"id":"lin"}}
+	]}`)
+	request := httptest.NewRequest(http.MethodPost, "/errors/envelope", body)
+	request.Header.Set("x-gonvex-project-id", "whagons-5")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("ingestion failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/dev/errors/groups?status=unresolved&release=5.2.0", nil)
+	request.Header.Set("x-gonvex-project-id", "whagons-5")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("release group listing failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Groups   []*errorGroup `json:"groups"`
+		Releases []string      `json:"releases"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Releases) != 2 || payload.Releases[0] != "5.2.0" || payload.Releases[1] != "5.1.0" {
+		t.Fatalf("releases are not newest-first: %#v", payload.Releases)
+	}
+	if len(payload.Groups) != 2 {
+		t.Fatalf("expected two latest-release groups, got %d: %s", len(payload.Groups), recorder.Body.String())
+	}
+	for _, group := range payload.Groups {
+		if group.Count != 1 || len(group.Releases) != 1 || group.Releases["5.2.0"] != 1 {
+			t.Fatalf("group impact was not scoped to 5.2.0: %#v", group)
+		}
+		if _, leaked := group.Tenants["legacy"]; leaked {
+			t.Fatalf("older-release tenant leaked into filtered impact: %#v", group.Tenants)
+		}
+		if group.Latest.Release != "5.2.0" {
+			t.Fatalf("latest event was not scoped to 5.2.0: %#v", group.Latest)
+		}
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -25,6 +27,7 @@ func ensureErrorSchema(ctx context.Context, db telemetrySchemaDB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS gonvex_error_events_group ON gonvex_error_events (project_id, fingerprint, occurred_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS gonvex_error_events_tenant ON gonvex_error_events (project_id, tenant_id, occurred_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS gonvex_error_events_release ON gonvex_error_events (project_id, release, fingerprint, occurred_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS gonvex_error_groups (
 			project_id TEXT NOT NULL,
 			fingerprint TEXT NOT NULL,
@@ -146,33 +149,116 @@ func scanErrorGroup(row rowScanner) (*errorGroup, error) {
 	return group, nil
 }
 
-func (s *Server) persistentErrorGroups(ctx context.Context, project, status string) ([]*errorGroup, bool, error) {
+func (s *Server) persistentErrorGroups(ctx context.Context, project, status, release string) ([]*errorGroup, []string, bool, error) {
 	db, err := s.openErrorDB(ctx, project)
 	if err != nil || db == nil {
-		return nil, db != nil, err
+		return nil, nil, db != nil, err
 	}
 	defer db.Close()
+
+	releaseRows, err := db.QueryContext(ctx, `SELECT release
+		FROM gonvex_error_events
+		WHERE project_id=$1 AND release <> ''
+		GROUP BY release
+		ORDER BY MAX(occurred_at) DESC, release DESC`, project)
+	if err != nil {
+		return nil, nil, true, err
+	}
+	releases := []string{}
+	for releaseRows.Next() {
+		var value string
+		if err := releaseRows.Scan(&value); err != nil {
+			releaseRows.Close()
+			return nil, nil, true, err
+		}
+		releases = append(releases, value)
+	}
+	if err := releaseRows.Err(); err != nil {
+		releaseRows.Close()
+		return nil, nil, true, err
+	}
+	releaseRows.Close()
+
 	query := errorGroupSelect + ` WHERE project_id=$1`
 	args := []any{project}
 	if status != "" {
-		query += ` AND status=$2`
+		query += fmt.Sprintf(` AND status=$%d`, len(args)+1)
 		args = append(args, status)
+	}
+	if release != "" {
+		query += fmt.Sprintf(` AND releases ? $%d`, len(args)+1)
+		args = append(args, release)
 	}
 	query += ` ORDER BY last_seen DESC LIMIT 500`
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, true, err
+		return nil, nil, true, err
 	}
-	defer rows.Close()
 	groups := []*errorGroup{}
 	for rows.Next() {
 		group, err := scanErrorGroup(rows)
 		if err != nil {
-			return nil, true, err
+			rows.Close()
+			return nil, nil, true, err
 		}
 		groups = append(groups, group)
 	}
-	return groups, true, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, true, err
+	}
+	rows.Close()
+	if release == "" || len(groups) == 0 {
+		return groups, releases, true, nil
+	}
+
+	eventQuery := `SELECT payload
+		FROM gonvex_error_events
+		WHERE project_id=$1 AND release=$2`
+	eventArgs := []any{project, release}
+	fingerprintPlaceholders := make([]string, 0, len(groups))
+	for _, group := range groups {
+		fingerprintPlaceholders = append(fingerprintPlaceholders, fmt.Sprintf("$%d", len(eventArgs)+1))
+		eventArgs = append(eventArgs, group.Fingerprint)
+	}
+	eventQuery += ` AND fingerprint IN (` + strings.Join(fingerprintPlaceholders, ",") + `) ORDER BY occurred_at ASC`
+	eventRows, err := db.QueryContext(ctx, eventQuery, eventArgs...)
+	if err != nil {
+		return nil, nil, true, err
+	}
+	eventsByFingerprint := map[string][]capturedError{}
+	for eventRows.Next() {
+		var raw []byte
+		if err := eventRows.Scan(&raw); err != nil {
+			eventRows.Close()
+			return nil, nil, true, err
+		}
+		var event capturedError
+		if err := json.Unmarshal(raw, &event); err != nil {
+			eventRows.Close()
+			return nil, nil, true, err
+		}
+		fp := fingerprint(event)
+		eventsByFingerprint[fp] = append(eventsByFingerprint[fp], event)
+	}
+	if err := eventRows.Err(); err != nil {
+		eventRows.Close()
+		return nil, nil, true, err
+	}
+	eventRows.Close()
+
+	baseByFingerprint := map[string]*errorGroup{}
+	for _, group := range groups {
+		baseByFingerprint[group.Fingerprint] = group
+	}
+	filtered := make([]*errorGroup, 0, len(eventsByFingerprint))
+	for fp, events := range eventsByFingerprint {
+		if base := baseByFingerprint[fp]; base != nil && len(events) > 0 {
+			filtered = append(filtered, errorGroupForEvents(base, events))
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].LastSeen > filtered[j].LastSeen })
+	return filtered, releases, true, nil
 }
 
 func (s *Server) persistentErrorGroup(ctx context.Context, project, fp string) (*errorGroup, bool, error) {

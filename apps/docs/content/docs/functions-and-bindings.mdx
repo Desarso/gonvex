@@ -27,7 +27,18 @@ func Register(app *gonvex.App) {
   app.Mutation("tasks.create", CreateTask, gonvex.Writes("tasks"))
   app.Action("tasks.import", ImportTasks)
   app.HTTP("/webhooks/stripe", StripeWebhook)
+  app.PublicHTTP("/health/public", PublicHealth)
+  app.InternalMutation("tasks.expire", ExpireTasks, gonvex.Writes("tasks"))
   app.LiveGrid("tasks.grid", TasksGrid)
+  app.Sync(
+    "tasks.recent",
+    RecentTasks,
+    gonvex.SyncTable("tasks").
+      Columns("id", "title", "status", "updated_at").
+      OrderBy("updated_at", "desc").
+      Progressive().
+      Budget(500, 8388608),
+  )
 }
 ```
 
@@ -49,10 +60,20 @@ Action
   External side effects or long-running work.
 
 HTTP
-  Public HTTP route, often webhooks.
+  HTTP route using the project's normal authentication boundary.
+
+PublicHTTP
+  Explicit anonymous HTTP route, often a webhook or public callback.
+
+InternalMutation
+  Transactional write callable by trusted runtime work such as the scheduler,
+  but not by browser mutation calls.
 
 LiveGrid
   Structured realtime table/grid query for large interactive data surfaces.
+
+Sync
+  Authorized single-table snapshot plus durable change delivery to IndexedDB.
 ```
 
 ## Args and Results
@@ -77,7 +98,7 @@ func CreateTask(ctx *gonvex.MutationCtx, args CreateTaskArgs) (Task, error) {
 
 ## Generated Bindings
 
-The generated API should expose stable function references:
+The generated API exposes stable nested function references:
 
 ```ts
 import { api } from "./gonvex/_generated/api";
@@ -85,6 +106,7 @@ import { api } from "./gonvex/_generated/api";
 api.tasks.list
 api.tasks.create
 api.tasks.grid
+api.tasks.recent
 ```
 
 Path-safe object references are preferred over stringly-typed calls.
@@ -126,34 +148,69 @@ const unsubscribe = gonvexClient.subscribeQuery(
 
 ## Context
 
-Functions should receive runtime context:
+Functions receive runtime context as fields on `QueryCtx`, `MutationCtx`,
+`ActionCtx`, and `HTTPContext`:
 
 ```go
-func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
-  projectID := ctx.ProjectID()
-  tenantID := ctx.TenantID()
-  userID := ctx.UserID()
+import "errors"
 
-  if !ctx.Can("tasks:read") {
-    return nil, gonvex.Forbidden()
+func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
+  if ctx.User == nil {
+    return nil, errors.New("authentication required")
   }
 
-  return ctx.DB().Tasks().List(tenantID, args)
+  rows, err := ctx.DB.QueryContext(
+    ctx.Context,
+    `SELECT id, title, status FROM tasks WHERE status = $1`,
+    args.Status,
+  )
+  if err != nil {
+    return nil, err
+  }
+  defer rows.Close()
+
+  var tasks []Task
+  for rows.Next() {
+    var task Task
+    if err := rows.Scan(&task.ID, &task.Title, &task.Status); err != nil {
+      return nil, err
+    }
+    tasks = append(tasks, task)
+  }
+  return tasks, rows.Err()
 }
 ```
 
-This is the model Gonvex should expose as the runtime becomes generic.
+Available context includes:
+
+```txt
+ProjectID, TenantID, User, Permissions
+DB, LandlordDB, TenantDB, Tx
+Storage, Data, Sandbox, Scheduler
+Logger, Env, Context
+```
+
+Use `ctx.EnvValue("NAME")` for project-scoped environment variables with process
+environment fallback. Mutations run with `ctx.Tx`; jobs they enqueue through
+`ctx.Scheduler` are published only after the mutation commits. Long-running
+actions can call `ctx.NotifyTableChanged(...)` after committing intermediate
+writes.
 
 ## Generated Types
 
-The desired generated output is fully typed:
+Generated function references preserve function kind and path:
 
 ```ts
-const tasks = useQuery(api.tasks.list, {
-  status: "open", // checked against Go arg type
-});
-
-tasks?.[0].title; // checked against Go result type
+api.tasks.list;   // { kind: "query", path: "tasks.list" }
+api.tasks.create; // { kind: "mutation", path: "tasks.create" }
 ```
 
-Current generated references are simpler while the runtime is being built out. Full type inference from Go structs is a planned improvement.
+Use an explicit result type at the hook boundary today:
+
+```ts
+const tasks = useQuery<Task[]>(api.tasks.list, { status: "open" });
+```
+
+Full argument/result inference from Go structs is not implemented yet. The CLI
+does generate project API references plus landlord/tenant schema metadata and
+table-name types.

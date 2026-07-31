@@ -5,26 +5,33 @@ description: What is implemented today and what still needs product/runtime work
 
 # Current Limits
 
-Gonvex is under active development. These docs describe the intended product shape and the local prototype that is being built toward it.
+Gonvex is beta software. The current runtime executes arbitrary registered app
+functions from uploaded Go bundles and includes the major local/self-hosted
+product surfaces. The remaining limits are primarily migration safety, durable
+operations, fleet management, and managed hosting.
 
-## Implemented Direction
+## Implemented Today
 
-The current codebase proves these pieces locally:
+The current codebase includes:
 
-- app-local `gonvex/` folder
-- Go schema declarations
-- generated TypeScript API references
-- local runtime process
-- WebSocket subscriptions
-- mutation calls
-- Postgres-backed task data
-- LiveGrid-style visible-window subscriptions
-- HTTP gzip and WebSocket compression
-- local package build/watch workflow
-
-## Not Fully Generic Yet
-
-Function execution is still becoming generic. The runtime needs a general dispatcher that can execute arbitrary registered app functions without project-specific paths.
+- app-local Go queries, mutations, actions, HTTP handlers, internal mutations,
+  LiveGrid functions, and sync collections;
+- uploaded source bundles compiled and cached per project;
+- generated TypeScript API references and scoped schema metadata;
+- safe Postgres schema sync for project and tenant databases;
+- realtime queries with declared dependency filtering, serialized/coalesced
+  reruns, shared runners, revisions, unchanged suppression, and adaptive list
+  patches;
+- durable sync collections with Postgres cursors and normalized IndexedDB
+  storage;
+- multi-project and database-per-tenant routing;
+- native Google OAuth, memberships, invitations, roles, account controls, and
+  live WebSocket session revocation;
+- browser query caching and lightweight error reporting;
+- recurring, per-tenant, and one-shot scheduled work;
+- optional S3-compatible files and uploaded CSV/XLS/XLSX analysis;
+- dashboard inspection for projects, tenants, schemas, functions, data, files,
+  errors, logs, metrics, realtime connections, and scheduling.
 
 ## Current CLI Boundary
 
@@ -45,22 +52,23 @@ npx gonvex env push .env.production
 ```
 
 Top-level `tenant`, `deploy`, `generate`, and general runtime `doctor` remain
-roadmap commands; project authentication has its own implemented `auth doctor`.
-See the
+roadmap commands. Tenant/membership operations live under `gonvex auth`, and
+project authentication has its own implemented `auth doctor`. See the
 [CLI Reference](./cli-reference) for current authentication and project-provisioning
 flags.
 
 ## Multi-Project Operations Are Early
 
-The runtime and dashboard have development project registry endpoints, project keys,
-environment variables, and per-project manifests. The operational model is not yet a
-hardened hosted control plane.
+The runtime and dashboard have project registry endpoints, rotatable project
+keys, account personal access tokens, project environment variables,
+per-project manifests, and database routing. There is no generally available
+hosted control plane.
 
 Needed work:
 
-- environment/deployment records
+- deployment records and immutable release artifacts
 - dashboard UI for personal-token lifecycle and more granular custom roles
-- production upgrade and rollback workflows
+- automated zero-downtime upgrade and rollback workflows
 
 ## Multi-Tenant Auth and Routing
 
@@ -86,17 +94,28 @@ index, serialized/coalesced runners, result revisions, unchanged suppression,
 adaptive keyed-list patches, safe shared subscriptions, and supervised active-
 tenant PostgreSQL listeners.
 
-Current limits:
+Current live-query limits:
 
 - dependencies are explicit declarations; arbitrary raw SQL is not automatically traced
 - permission-level sharing is opt-in because user-dependent handlers cannot safely share
 - nested arbitrary JSON uses full replacements rather than patches
-- PostgreSQL `NOTIFY` is recovered with a fresh snapshot, not durable event replay
-- logical replication is not enabled; Gonvex synchronizes current state rather than every intermediate event
+- live queries recover a PostgreSQL `NOTIFY` gap with a fresh snapshot rather
+  than replaying every intermediate event
+
+Durable sync collections add a transactional Postgres change log and resume
+cursor for declared single-table collections. Their v1 limits are equality
+filters, null/non-null exclusions, bounded eager/progressive collections, and
+handler-defined authorization. They do not support joins, aggregates, search,
+or offline mutation queues. The public Go API includes `RetainFor`, but the npm
+CLI does not yet emit custom retention into the uploaded manifest; the effective
+retention is currently the seven-day runtime default.
 
 ## Schema Migrations Are Early
 
-Schema sync is appropriate for local development and safe data-preserving changes. The runtime should reject schema changes that would break existing rows and print the error in the CLI.
+Schema sync applies safe, data-preserving changes and rejects changes that would
+break existing rows. Runtime startup persists schema state, batches catalog
+inspection, bounds tenant rollout concurrency, and skips unchanged trigger/index
+work.
 
 Production migrations need:
 
@@ -107,7 +126,7 @@ Production migrations need:
 - per-tenant rollout control
 - large-table backfill strategy
 
-## Auth Is Early
+## Auth and Identity Boundaries
 
 Dashboard sessions, account personal access tokens, project memberships, and scoped
 project/token permissions are implemented. Native brokered Google OAuth is
@@ -119,18 +138,35 @@ WebSocket revocation. Additional providers, device authorization, enterprise
 organization policy, recovery flows, audit export, and hosted-control-plane
 hardening are still incomplete.
 
-Do not expose development data-browser endpoints as application APIs.
+The runtime does not yet provide additional social providers, enterprise SSO,
+SCIM, recovery flows, organization policy, or complete audit export. Do not
+expose dashboard/data-browser management endpoints as application APIs.
 
-## Storage Is Early
+## Storage and Data Files
 
-File storage is optional. Apps that need files should attach an S3-compatible provider; the local MinIO service in this repo is only an example for development. Upload URL flows, tenant scoping, and storage authorization policy still need design.
+File storage is optional. The runtime supports upload targets, signed/proxied
+downloads, metadata, deletion, direct storage, project buckets, and S3-compatible
+providers. The local MinIO service is a development example.
+
+Production operators still need bucket lifecycle policy, off-host backup,
+malware/content scanning when their product requires it, and tested restore
+procedures. Uploaded data-file analysis currently supports CSV, XLSX, and XLS
+through runtime-managed DuckDB artifacts; it is not a general warehouse.
+
+## Scheduler Durability
+
+Registered cron schedules are reconstructed from the app bundle, but one-shot
+`ctx.Scheduler.RunAfter`/`RunAt` jobs live in runtime memory. They do not survive
+a restart. Multi-replica leader election, durable job persistence, retries, and
+dead-letter handling are not implemented.
 
 ## Production Guidance
 
-Treat Gonvex as an active prototype until these areas are complete:
+Treat Gonvex as beta and plan explicitly for:
 
-- generic function execution
 - production migrations
-- deployment/versioning
+- deployment/versioning and rollback
 - tenant fleet backup/restore
-- operational dashboard workflows
+- durable scheduled jobs
+- identity-provider and audit requirements beyond native Google auth
+- operating the self-hosted runtime, because no public managed service is available

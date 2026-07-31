@@ -731,10 +731,18 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_mutation_logs (
 		id BIGSERIAL PRIMARY KEY,
 		project_id TEXT NOT NULL DEFAULT '',
-		kind TEXT NOT NULL CHECK (kind IN ('mutation', 'internalMutation')),
+		kind TEXT NOT NULL,
 		entry JSONB NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`); err != nil {
+		return err
+	}
+	// The table now also stores FAILED queries/actions/http calls, which the
+	// in-memory ring drops within minutes (see runtimeLogIsDurable). Existing
+	// deployments carry a kind CHECK that only allowed the two mutation kinds and
+	// silently rejected every one of those inserts.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_mutation_logs
+		DROP CONSTRAINT IF EXISTS gonvex_runtime_mutation_logs_kind_check`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_runtime_mutation_logs_by_project

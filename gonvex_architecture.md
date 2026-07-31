@@ -1,5 +1,14 @@
 # Gonvex Architecture
 
+> **Design reference:** this document captures Gonvex's long-form architecture
+> and product direction, including future-looking sections. For the implemented
+> public surface and current operational limits, use the
+> [README](./README.md), the [documentation site](./apps/docs/content/docs/index.mdx),
+> and [Current Limits](./apps/docs/content/docs/current-limits.mdx). Durable sync,
+> dependency-aware shared subscriptions, native auth, scheduling, and generic
+> uploaded Go function execution now exist even where older sections below still
+> use design-language such as “should.”
+
 ## 0. Core Idea
 
 **Gonvex** is a Convex-like fullstack backend framework, but built around:
