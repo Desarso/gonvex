@@ -269,3 +269,99 @@ func TestPostgresLegacyProjectTenantBackfillSurvivesRestart(t *testing.T) {
 		t.Fatalf("legacy relationship did not survive restart: %+v", loaded)
 	}
 }
+
+func TestPostgresLandlordHydrationPreservesRegisteredPhysicalTenantDatabase(t *testing.T) {
+	baseURL := tenantRegistryTestPostgresURL(t)
+	suffix := tenantRegistryTestSuffix(t)
+	controlName := "gonvex_preserve_control_" + suffix
+	projectName := "gonvex_preserve_project_" + suffix
+	originalTenantName, err := generateTenantPhysicalDatabaseName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlURL := createTenantRegistryTestDatabase(t, baseURL, controlName)
+	projectURL := createTenantRegistryTestDatabase(t, baseURL, projectName)
+	originalTenantURL := createTenantRegistryTestDatabase(t, baseURL, originalTenantName)
+	projectID, err := generateProjectID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	projectDB, err := sql.Open("pgx", projectURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projectDB.ExecContext(context.Background(), `
+		CREATE TABLE tenants (
+			id TEXT PRIMARY KEY,
+			name TEXT,
+			database TEXT,
+			domain TEXT
+		);
+		INSERT INTO tenants (id, name, database, domain)
+		VALUES ('toasting', 'Toasting', 'toasting', 'toasting')
+	`); err != nil {
+		_ = projectDB.Close()
+		t.Fatalf("seed landlord tenant: %v", err)
+	}
+	_ = projectDB.Close()
+
+	cfg := config.Config{
+		LandlordURL: controlURL,
+		PostgresURL: baseURL,
+		ProjectDatabases: map[string]string{
+			projectID: projectURL,
+		},
+		ProjectKeys: map[string]string{},
+	}
+	server := New(cfg)
+	project := projectTarget{
+		ID:             projectID,
+		Name:           "Preserve Tenant Relationship Test",
+		Environment:    "test",
+		Database:       projectName,
+		DatabaseMode:   "multiTenant",
+		Status:         "local",
+		Description:    "Tenant hydration regression test.",
+		Provisioned:    true,
+		RuntimeCreated: true,
+		databaseURL:    projectURL,
+		databaseName:   projectName,
+	}
+	server.projects[projectID] = project
+	if err := server.saveProjectRegistry(context.Background(), project); err != nil {
+		t.Fatalf("save project relationship: %v", err)
+	}
+	registered, err := server.saveTenantRegistry(context.Background(), tenantTarget{
+		ID:             "toasting",
+		ProjectID:      projectID,
+		Name:           "Toasting",
+		Database:       "toasting",
+		databaseName:   originalTenantName,
+		databaseURL:    originalTenantURL,
+		domain:         "toasting",
+		Status:         "active",
+		Description:    "Persisted tenant from landlord database.",
+		Provisioned:    true,
+		RuntimeCreated: false,
+	})
+	if err != nil {
+		t.Fatalf("save tenant relationship: %v", err)
+	}
+
+	restarted := New(cfg)
+	restarted.hydrateProjectTenantDatabasesUncached(context.Background(), projectID)
+	loaded, err := restarted.loadTenantRegistry(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("load tenant relationship after hydration: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected one tenant relationship, got %+v", loaded)
+	}
+	if loaded[0].RelationshipID != registered.RelationshipID {
+		t.Fatalf("hydration replaced relationship id: before=%q after=%q", registered.RelationshipID, loaded[0].RelationshipID)
+	}
+	if loaded[0].databaseName != originalTenantName || loaded[0].databaseURL != originalTenantURL {
+		t.Fatalf("hydration orphaned the registered tenant database: before=%q after=%q", originalTenantName, loaded[0].databaseName)
+	}
+}
