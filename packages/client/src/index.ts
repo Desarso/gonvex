@@ -17,7 +17,13 @@ import {
   type QueryCacheStatus,
   type QueryCacheStore,
 } from "./query-cache.js";
-import { createSyncStore, syncHashesDigest, type SyncStore, type SyncStoreOptions } from "./sync-store.js";
+import {
+  createSyncStore,
+  syncHashesDigest,
+  syncRowsHashes,
+  type SyncStore,
+  type SyncStoreOptions,
+} from "./sync-store.js";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
 export * from "./cache.js";
 export * from "./cache-coordinator.js";
@@ -75,6 +81,9 @@ type SyncSubscription = {
   retryAttempt: number;
   isUpToDate: boolean;
   hashes: Record<string, string>;
+  integrityDigest?: string;
+  integrityRows?: JsonValue[];
+  forceFullIntegrity: boolean;
   verificationGeneration: number;
 };
 type OneShotQuery = {
@@ -190,6 +199,11 @@ export type GonvexTelemetryEvent = {
   device?: BrowserTelemetryInfo;
 };
 
+// Small collections can send their row hashes immediately and repair in one
+// round trip. Larger collections resume with one 64-byte digest and only send
+// the hash map when the server proves that something actually differs.
+const compactSyncIntegrityThreshold = 256;
+
 export class GonvexClient {
   private socket: WebSocket | undefined;
   private readonly handlers = new Map<string, SubscriptionHandler>();
@@ -199,6 +213,7 @@ export class GonvexClient {
   private readonly telemetryHandlers = new Set<TelemetryHandler>();
   private readonly pendingMessages: ClientMessage[] = [];
   private readonly pendingSyncOpens = new Set<SyncSubscription>();
+  private readonly syncPersistence = new Map<string, Promise<void>>();
   private syncOpenFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private serverCapabilities: ServerCapabilities = {};
   private auth: GonvexClientAuth = {};
@@ -706,6 +721,7 @@ export class GonvexClient {
       retryAttempt: 0,
       isUpToDate: false,
       hashes: {},
+      forceFullIntegrity: false,
       verificationGeneration: 0,
     };
     this.syncSubscriptions.set(key, subscription);
@@ -729,6 +745,7 @@ export class GonvexClient {
         latestError = undefined;
         notify();
       } else if (message.type === "sync.ready") {
+        latestError = undefined;
         notify();
       } else if (message.type === "sync.syncing" || message.type === "sync.reset") {
         notify();
@@ -788,6 +805,8 @@ export class GonvexClient {
         message.orderDirection,
       );
       subscription.hashes = { ...(message.hashes ?? {}) };
+      subscription.integrityDigest = undefined;
+      subscription.integrityRows = undefined;
       const snapshot: ServerMessage = { ...message, result: subscription.rows };
       subscription.lastMessage = snapshot;
       this.emitSyncMessage(subscription, snapshot);
@@ -800,7 +819,7 @@ export class GonvexClient {
         || message.cursor.revision < subscription.cursor.revision
         || (
           message.cursor.revision === subscription.cursor.revision
-          && !(subscription.mode === "progressive" && message.digest)
+          && !message.digest
         )
       )) return;
       this.clearSyncRetry(subscription, true);
@@ -819,6 +838,8 @@ export class GonvexClient {
       );
       for (const key of message.deleted ?? []) delete subscription.hashes[key];
       Object.assign(subscription.hashes, message.hashes ?? {});
+      subscription.integrityDigest = undefined;
+      subscription.integrityRows = undefined;
       const snapshot: ServerMessage = {
         type: "sync.snapshot",
         id: subscription.id,
@@ -844,12 +865,15 @@ export class GonvexClient {
       subscription.cursor = undefined;
       subscription.rows = [];
       subscription.hashes = {};
+      subscription.integrityDigest = undefined;
+      subscription.integrityRows = undefined;
+      subscription.forceFullIntegrity = false;
       subscription.lastMessage = undefined;
       subscription.opening = false;
       const directive = this.queryCacheDirective;
       const store = this.syncStore;
       if (directive && store) {
-        this.enqueueSyncPersistence(subscription, () => store.delete(
+        this.enqueueSyncPersistence(subscription, directive.scope, () => store.delete(
           directive.scope,
           subscription.path,
           subscription.args,
@@ -859,10 +883,40 @@ export class GonvexClient {
       queueMicrotask(() => this.sendSyncOpen(subscription));
       return;
     }
+    if (message.type === "sync.syncing") {
+      subscription.verificationGeneration += 1;
+      subscription.isUpToDate = false;
+      this.emitSyncMessage(subscription, message);
+      return;
+    }
+    if (message.type === "sync.needHashes") {
+      subscription.verificationGeneration += 1;
+      subscription.isUpToDate = false;
+      subscription.opening = false;
+      subscription.forceFullIntegrity = true;
+      this.emitSyncMessage(subscription, {
+        type: "sync.syncing",
+        id: subscription.id,
+        path: subscription.path,
+        reason: "integrity-reconciling",
+      });
+      queueMicrotask(() => this.sendSyncOpen(subscription));
+      return;
+    }
     if (message.type === "sync.ready") {
-      if (message.digest && subscription.mode === "progressive") {
-        const generation = ++subscription.verificationGeneration;
-        void syncHashesDigest(subscription.hashes).then((digest) => {
+      const generation = ++subscription.verificationGeneration;
+      if (!message.digest) {
+        this.handleSyncMessage(subscription, {
+          type: "sync.reset",
+          id: subscription.id,
+          path: subscription.path,
+          reason: "integrity-missing",
+        });
+        return;
+      }
+      void syncRowsHashes(subscription.rows, subscription.keyField).then((hashes) => (
+        syncHashesDigest(hashes).then((digest) => ({ digest, hashes }))
+      )).then(({ digest, hashes }) => {
           if (
             generation !== subscription.verificationGeneration
             || this.syncSubscriptions.get(subscription.key) !== subscription
@@ -876,6 +930,9 @@ export class GonvexClient {
             });
             return;
           }
+          subscription.hashes = hashes;
+          subscription.integrityDigest = digest;
+          subscription.integrityRows = subscription.rows;
           this.acceptSyncReady(subscription, message);
         }).catch(() => {
           if (generation !== subscription.verificationGeneration) return;
@@ -886,9 +943,6 @@ export class GonvexClient {
             reason: "integrity-mismatch",
           });
         });
-        return;
-      }
-      this.acceptSyncReady(subscription, message);
       return;
     }
     if (message.type === "sync.error") {
@@ -909,6 +963,9 @@ export class GonvexClient {
     subscription.opening = false;
     subscription.cursor = message.cursor;
     subscription.mode = message.mode ?? subscription.mode;
+    subscription.integrityDigest = message.digest;
+    subscription.integrityRows = subscription.rows;
+    subscription.forceFullIntegrity = false;
     this.persistSyncSnapshot(subscription);
     this.emitSyncMessage(subscription, message);
   }
@@ -959,7 +1016,12 @@ export class GonvexClient {
         subscription.orderDirection = cached.orderDirection;
         subscription.maxRows = cached.maxRows;
         subscription.maxBytes = cached.maxBytes;
-        subscription.hashes = { ...(cached.hashes ?? {}) };
+        // Stored hash metadata is never trusted. sendSyncOpen hashes these
+        // actual materialized rows before advertising a cursor, which allows a
+        // corrupt row to be repaired by delta without a full cache reset.
+        subscription.hashes = {};
+        subscription.integrityDigest = undefined;
+        subscription.integrityRows = undefined;
         const message: ServerMessage = {
           type: "sync.snapshot",
           id: subscription.id,
@@ -982,6 +1044,42 @@ export class GonvexClient {
 
   private sendSyncOpen(subscription: SyncSubscription) {
     if (subscription.listeners.size === 0 || subscription.opening) return;
+    if (subscription.cursor && subscription.integrityRows !== subscription.rows) {
+      subscription.opening = true;
+      const rows = subscription.rows;
+      const keyField = subscription.keyField;
+      const socketGeneration = this.socketGeneration;
+      void syncRowsHashes(rows, keyField).then((hashes) => (
+        syncHashesDigest(hashes).then((digest) => ({ hashes, digest }))
+      )).then(({ hashes, digest }) => {
+        if (
+          this.socketGeneration !== socketGeneration
+          || this.syncSubscriptions.get(subscription.key) !== subscription
+          || subscription.listeners.size === 0
+          || subscription.rows !== rows
+          || subscription.keyField !== keyField
+        ) return;
+        subscription.hashes = hashes;
+        subscription.integrityDigest = digest;
+        subscription.integrityRows = rows;
+        subscription.opening = false;
+        this.sendSyncOpen(subscription);
+      }).catch(() => {
+        if (
+          this.socketGeneration !== socketGeneration
+          || this.syncSubscriptions.get(subscription.key) !== subscription
+          || subscription.rows !== rows
+        ) return;
+        subscription.opening = false;
+        this.handleSyncMessage(subscription, {
+          type: "sync.reset",
+          id: subscription.id,
+          path: subscription.path,
+          reason: "integrity-mismatch",
+        });
+      });
+      return;
+    }
     subscription.opening = true;
     subscription.socketGeneration = this.socketGeneration;
     const open = this.syncOpenRequest(subscription);
@@ -996,18 +1094,25 @@ export class GonvexClient {
   }
 
   private syncOpenRequest(subscription: SyncSubscription): SyncOpenRequest {
-    const keys = subscription.mode === "eager"
-      ? undefined
-      : subscription.rows.map((row) => syncRowKey(row, subscription.keyField)).filter(Boolean);
+    const fullIntegrity = subscription.cursor !== undefined && (
+      subscription.forceFullIntegrity
+      || !subscription.integrityDigest
+      || subscription.rows.length <= compactSyncIntegrityThreshold
+    );
+    const keys = fullIntegrity
+      ? subscription.rows.map((row) => syncRowKey(row, subscription.keyField)).filter(Boolean)
+      : undefined;
     return {
       id: subscription.id,
       path: subscription.path,
       args: subscription.args,
       cursor: subscription.cursor,
       keys,
-      hashes: subscription.mode === "progressive" && Object.keys(subscription.hashes).length > 0
+      hashes: fullIntegrity && Object.keys(subscription.hashes).length > 0
         ? subscription.hashes
         : undefined,
+      digest: subscription.cursor ? subscription.integrityDigest : undefined,
+      fullIntegrity: fullIntegrity || undefined,
     };
   }
 
@@ -1051,10 +1156,11 @@ export class GonvexClient {
       orderDirection: subscription.orderDirection,
       maxRows: subscription.maxRows,
       maxBytes: subscription.maxBytes,
-      hashes: subscription.hashes,
+      hashes: { ...subscription.hashes },
     };
     this.enqueueSyncPersistence(
       subscription,
+      directive.scope,
       () => store.replace(directive.scope, subscription.path, subscription.args, value),
     );
   }
@@ -1073,10 +1179,11 @@ export class GonvexClient {
       deleted,
       maxRows: subscription.maxRows,
       maxBytes: subscription.maxBytes,
-      hashes: subscription.hashes,
+      hashes: { ...subscription.hashes },
     };
     this.enqueueSyncPersistence(
       subscription,
+      directive.scope,
       () => store.applyDelta(directive.scope, subscription.path, subscription.args, value),
     );
   }
@@ -1265,12 +1372,20 @@ export class GonvexClient {
 
   private enqueueSyncPersistence(
     subscription: SyncSubscription,
+    scope: string,
     operation: () => Promise<void>,
   ) {
-    subscription.persistence = subscription.persistence
+    const key = `${scope}\u0000${subscription.key}`;
+    const previous = this.syncPersistence.get(key) ?? Promise.resolve();
+    const pending = previous
       .catch(() => undefined)
       .then(operation)
       .catch(() => undefined);
+    this.syncPersistence.set(key, pending);
+    subscription.persistence = pending;
+    void pending.finally(() => {
+      if (this.syncPersistence.get(key) === pending) this.syncPersistence.delete(key);
+    });
   }
 
   private scheduleSyncRetry(subscription: SyncSubscription) {
@@ -1408,6 +1523,9 @@ export class GonvexClient {
       subscription.isUpToDate = false;
       subscription.rows = [];
       subscription.hashes = {};
+      subscription.integrityDigest = undefined;
+      subscription.integrityRows = undefined;
+      subscription.forceFullIntegrity = false;
       subscription.cursor = undefined;
       subscription.lastMessage = undefined;
       subscription.cacheReadGeneration = undefined;
@@ -1654,13 +1772,28 @@ function countPendingCalls(calls: Map<string, PendingCall>, kind: "mutation" | "
 }
 
 function stableStringify(value: JsonValue): string {
+  if (typeof value === "string") {
+    return JSON.stringify(value)
+      .replace(/\u2028/g, "\\u2028")
+      .replace(/\u2029/g, "\\u2029");
+  }
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
   const record = value as Record<string, JsonValue>;
   return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .sort(utf8KeyCompare)
+    .map((key) => `${stableStringify(key)}:${stableStringify(record[key])}`)
     .join(",")}}`;
+}
+
+function utf8KeyCompare(left: string, right: string) {
+  const leftBytes = new TextEncoder().encode(left);
+  const rightBytes = new TextEncoder().encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index]! - rightBytes[index]!;
+  }
+  return leftBytes.length - rightBytes.length;
 }
 
 function sameRevision(left: SubscriptionRevision, right: SubscriptionRevision | undefined) {
@@ -1747,7 +1880,7 @@ function syncRowKey(value: JsonValue, keyField: string) {
 }
 
 function syncJSONSize(value: JsonValue) {
-  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  return new TextEncoder().encode(stableStringify(value)).byteLength;
 }
 
 function applyKeyedPatch(

@@ -2,6 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
+	"math/rand"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +62,30 @@ func TestSyncSnapshotHonorsRowAndByteBudgets(t *testing.T) {
 	}
 	if len(rows) != 1 {
 		t.Fatalf("expected byte budget to keep one row, got %d", len(rows))
+	}
+}
+
+func TestSyncSnapshotRejectsDuplicateKeys(t *testing.T) {
+	_, err := syncSnapshotRows([]map[string]any{
+		{"id": "duplicate", "title": "first"},
+		{"id": "duplicate", "title": "second"},
+	}, manifest.SyncDefinition{Key: "id"})
+	if err == nil {
+		t.Fatal("duplicate keys would make the collection digest ambiguous")
+	}
+}
+
+func TestSyncRowKeyMatchesJavaScriptScalarStringification(t *testing.T) {
+	tests := map[string]string{
+		`{"id":100000000000000000000}`: "100000000000000000000",
+		`{"id":1e-7}`:                  "1e-7",
+		`{"id":-0}`:                    "0",
+		`{"id":true}`:                  "true",
+	}
+	for raw, want := range tests {
+		if got := syncRowKey(json.RawMessage(raw), "id"); got != want {
+			t.Fatalf("syncRowKey(%s) = %q, want %q", raw, got, want)
+		}
 	}
 }
 
@@ -135,6 +162,23 @@ func TestSyncDefinitionsForSchemaDurablyLogsVisibilityDependencies(t *testing.T)
 	}
 }
 
+func TestSyncReadDependenciesAutomaticallyBecomeVisibilityDependencies(t *testing.T) {
+	definition := effectiveSyncDefinition(manifest.FunctionEntry{
+		Kind: manifest.FunctionKindSync,
+		Sync: &manifest.SyncDefinition{
+			Table: "tasks", Key: "id", VisibilityTables: []string{"taskAcks"},
+		},
+		Dependencies: manifest.FunctionDependencies{Reads: []manifest.ReadDependency{
+			{Table: "tasks"},
+			{Table: "taskApprovalInstances"},
+			{Table: "taskAcks"},
+		}},
+	})
+	if got, want := strings.Join(definition.VisibilityTables, ","), "taskAcks,taskApprovalInstances"; got != want {
+		t.Fatalf("effective visibility dependencies = %q, want %q", got, want)
+	}
+}
+
 func TestSyncVisibilityChangesAreIncludedInReconnectReconciliation(t *testing.T) {
 	changes := []syncLogChange{
 		{revision: 41, table: "tasks", rowID: "task-a"},
@@ -145,6 +189,30 @@ func TestSyncVisibilityChangesAreIncludedInReconnectReconciliation(t *testing.T)
 	}
 	if syncVisibilityChanged(changes[:1], "tasks") {
 		t.Fatal("source-table changes must remain delta-replayable")
+	}
+}
+
+func TestBoundedEagerSyncReconcilesItsAuthoritativeWindow(t *testing.T) {
+	changes := []syncLogChange{{revision: 42, table: "statuses", rowID: "status-new"}}
+	if !syncNeedsAuthoritativeReconcile(manifest.SyncDefinition{
+		Table: "statuses", Mode: "eager", MaxRows: 100,
+	}, changes) {
+		t.Fatal("direct replay cannot determine which row follows a full bounded window")
+	}
+	if syncNeedsAuthoritativeReconcile(manifest.SyncDefinition{
+		Table: "statuses", Mode: "eager",
+	}, changes) {
+		t.Fatal("an unbounded source-shaped eager collection should retain direct delta replay")
+	}
+}
+
+func TestSyncValueMatchesAppliesExclusionsWithoutEqualityFilters(t *testing.T) {
+	definition := manifest.SyncDefinition{ExcludeWhenSet: []string{"deletedAt"}}
+	if syncValueMatches(json.RawMessage(`{"id":"deleted","deletedAt":123}`), definition, nil) {
+		t.Fatal("a soft-deleted row must not reappear merely because the sync has no equality filters")
+	}
+	if !syncValueMatches(json.RawMessage(`{"id":"active","deletedAt":null}`), definition, nil) {
+		t.Fatal("an active row should remain visible")
 	}
 }
 
@@ -195,6 +263,60 @@ func TestProgressiveSyncSendsOnlyRowsWhoseAuthoritativeHashChanged(t *testing.T)
 	}
 }
 
+func TestAuthoritativeSyncDiffConvergesAcrossRandomCorruption(t *testing.T) {
+	random := rand.New(rand.NewSource(0x5eed))
+	for iteration := 0; iteration < 2_000; iteration++ {
+		currentRows := map[string]json.RawMessage{}
+		currentHashes := map[string]string{}
+		visibleKeys := map[string]bool{}
+		visibleHashes := map[string]string{}
+		for index := 0; index < 40; index++ {
+			key := fmt.Sprintf("row-%d", index)
+			if random.Intn(3) != 0 {
+				row := json.RawMessage(fmt.Sprintf(`{"id":%q,"value":%d}`, key, random.Intn(20)))
+				currentRows[key] = row
+				currentHashes[key] = syncRowHash(row)
+			}
+			if random.Intn(3) != 0 {
+				visibleKeys[key] = true
+				switch random.Intn(4) {
+				case 0:
+					// Missing metadata is a valid corruption case.
+				case 1:
+					visibleHashes[key] = "corrupted"
+				default:
+					visibleHashes[key] = currentHashes[key]
+				}
+			}
+		}
+
+		upserts, deleted, _ := progressiveSyncDiff(
+			currentRows,
+			currentHashes,
+			visibleKeys,
+			visibleHashes,
+			nil,
+		)
+		for key := range deleted {
+			delete(visibleKeys, key)
+			delete(visibleHashes, key)
+		}
+		for key := range upserts {
+			visibleKeys[key] = true
+			visibleHashes[key] = currentHashes[key]
+		}
+
+		if len(visibleKeys) != len(currentRows) || len(visibleHashes) != len(currentHashes) {
+			t.Fatalf("iteration %d did not converge collection cardinality", iteration)
+		}
+		for key, hash := range currentHashes {
+			if !visibleKeys[key] || visibleHashes[key] != hash {
+				t.Fatalf("iteration %d left %q stale", iteration, key)
+			}
+		}
+	}
+}
+
 func TestSyncHashesDigestMatchesClientCanonicalEncoding(t *testing.T) {
 	const want = "db8992cf941b185a1c5bbcfbdc3f43204fe09d42b1a57ff584f6ad2e5e6dfdbd"
 	if got := syncHashesDigest(map[string]string{"a": "b"}); got != want {
@@ -203,6 +325,23 @@ func TestSyncHashesDigestMatchesClientCanonicalEncoding(t *testing.T) {
 	if got := syncHashesDigest(map[string]string{}); got != "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" {
 		t.Fatalf("empty digest = %q", got)
 	}
+	const unicodeWant = "829a3fd7e2d0b8a181fc05f90729311dee80aa61e3a94723a1cc4553dd4dd7c9"
+	if got := syncHashesDigest(map[string]string{"< ": "one", "": "two", "𐀀": "three"}); got != unicodeWant {
+		t.Fatalf("unicode-key digest = %q, want %q", got, unicodeWant)
+	}
+}
+
+func TestSyncRowHashMatchesClientCanonicalEncoding(t *testing.T) {
+	row := json.RawMessage(`{
+		"nested":{"z":1,"a":" ","key ":"value","":"bmp","𐀀":"supplementary"},
+		"minusZero":-0,
+		"id":"row-a",
+		"amp":"<&>"
+	}`)
+	const want = "ba54453d2ecfb596b1cedeb64d8753675128ae801cf18da01a6cdb1005c5d71b"
+	if got := syncRowHash(row); got != want {
+		t.Fatalf("canonical row %s hash = %q, want %q", canonicalSyncJSON(row), got, want)
+	}
 }
 
 func TestSyncBatchProtocolPreservesIndependentResumeState(t *testing.T) {
@@ -210,8 +349,8 @@ func TestSyncBatchProtocolPreservesIndependentResumeState(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{
 		"type":"sync.openMany",
 		"opens":[
-			{"id":"one","path":"sync.tasks","args":{"workspaceId":"a"},"cursor":{"epoch":"e1","revision":7}},
-			{"id":"two","path":"sync.statuses","args":{},"cursor":{"epoch":"e2","revision":9},"keys":["s1","s2"]}
+			{"id":"one","path":"sync.tasks","args":{"workspaceId":"a"},"cursor":{"epoch":"e1","revision":7},"digest":"digest-one"},
+			{"id":"two","path":"sync.statuses","args":{},"cursor":{"epoch":"e2","revision":9},"keys":["s1","s2"],"fullIntegrity":true}
 		]
 	}`), &message); err != nil {
 		t.Fatal(err)
@@ -224,6 +363,9 @@ func TestSyncBatchProtocolPreservesIndependentResumeState(t *testing.T) {
 	}
 	if got := len(message.Opens[1].Keys); got != 2 {
 		t.Fatalf("expected progressive keys to survive batching, got %d", got)
+	}
+	if message.Opens[0].Digest != "digest-one" || !message.Opens[1].FullIntegrity {
+		t.Fatal("compact and expanded integrity resume metadata must survive batching")
 	}
 }
 

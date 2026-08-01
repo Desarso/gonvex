@@ -1247,12 +1247,16 @@ function parseSyncDefinition(callBody: string): SyncDefinition | undefined {
   const definition: SyncDefinition = { table, key: "id", columns: [], mode: "eager" };
   let cursor = closeParen + 1;
   while (cursor < callBody.length) {
-    const chain = callBody.slice(cursor).match(/^\s*\.\s*(Key|Columns|EqualArg|ExcludeWhenSet|VisibilityDependsOn|OrderBy|Eager|Progressive|Budget)\s*\(/);
+    const chain = chainedGoMethod(
+      callBody,
+      cursor,
+      "Key|Columns|EqualArg|ExcludeWhenSet|VisibilityDependsOn|OrderBy|Eager|Progressive|Budget",
+    );
     if (!chain) break;
-    const chainOpen = cursor + chain[0].lastIndexOf("(");
+    const chainOpen = chain.openParen;
     const chainClose = findClosingParen(callBody, chainOpen);
     if (chainClose < 0) break;
-    const method = chain[1]!;
+    const method = chain.method;
     const body = callBody.slice(chainOpen + 1, chainClose);
     const values = stringArgs(body);
     if (method === "Key" && values[0]) definition.key = values[0];
@@ -1302,12 +1306,16 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
 
     let cursor = closeParen + 1;
     while (cursor < callBody.length) {
-      const chain = callBody.slice(cursor).match(/^\s*\.\s*(Columns|Filters|OrdersBy|Windowed|Predicate)\s*\(/);
+      const chain = chainedGoMethod(
+        callBody,
+        cursor,
+        "Columns|Filters|OrdersBy|Windowed|Predicate",
+      );
       if (!chain) break;
-      const chainOpen = cursor + chain[0].lastIndexOf("(");
+      const chainOpen = chain.openParen;
       const chainClose = findClosingParen(callBody, chainOpen);
       if (chainClose < 0) break;
-      const method = chain[1]!;
+      const method = chain.method;
       const values = stringArgs(callBody.slice(chainOpen + 1, chainClose));
 
       if (option === "Reads") {
@@ -1328,6 +1336,40 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
     pattern.lastIndex = cursor;
   }
   return dependencies;
+}
+
+function chainedGoMethod(source: string, start: number, methods: string) {
+  let cursor = skipGoTrivia(source, start);
+  if (source[cursor] !== ".") return undefined;
+  cursor = skipGoTrivia(source, cursor + 1);
+  const match = new RegExp(`^(${methods})\\b`).exec(source.slice(cursor));
+  if (!match) return undefined;
+  const method = match[1]!;
+  cursor = skipGoTrivia(source, cursor + match[0].length);
+  if (source[cursor] !== "(") return undefined;
+  return { method, openParen: cursor };
+}
+
+function skipGoTrivia(source: string, start: number): number {
+  let cursor = start;
+  while (cursor < source.length) {
+    const char = source[cursor]!;
+    const next = source[cursor + 1] ?? "";
+    if (/\s/.test(char)) {
+      cursor += 1;
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      const newline = source.indexOf("\n", cursor + 2);
+      return newline < 0 ? source.length : skipGoTrivia(source, newline + 1);
+    }
+    if (char === "/" && next === "*") {
+      const close = source.indexOf("*/", cursor + 2);
+      return close < 0 ? source.length : skipGoTrivia(source, close + 2);
+    }
+    break;
+  }
+  return cursor;
 }
 
 function findClosingParen(source: string, openParen: number) {

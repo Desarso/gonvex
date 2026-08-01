@@ -40,17 +40,21 @@ type clientMessage struct {
 	Cursor             *syncCursor       `json:"cursor,omitempty"`
 	Keys               []string          `json:"keys,omitempty"`
 	Hashes             map[string]string `json:"hashes,omitempty"`
+	Digest             string            `json:"digest,omitempty"`
+	FullIntegrity      bool              `json:"fullIntegrity,omitempty"`
 	Opens              []syncOpenRequest `json:"opens,omitempty"`
 	CacheRevision      string            `json:"cacheRevision,omitempty"`
 }
 
 type syncOpenRequest struct {
-	ID     string            `json:"id"`
-	Path   string            `json:"path"`
-	Args   json.RawMessage   `json:"args,omitempty"`
-	Cursor *syncCursor       `json:"cursor,omitempty"`
-	Keys   []string          `json:"keys,omitempty"`
-	Hashes map[string]string `json:"hashes,omitempty"`
+	ID            string            `json:"id"`
+	Path          string            `json:"path"`
+	Args          json.RawMessage   `json:"args,omitempty"`
+	Cursor        *syncCursor       `json:"cursor,omitempty"`
+	Keys          []string          `json:"keys,omitempty"`
+	Hashes        map[string]string `json:"hashes,omitempty"`
+	Digest        string            `json:"digest,omitempty"`
+	FullIntegrity bool              `json:"fullIntegrity,omitempty"`
 }
 
 type serverCapabilities struct {

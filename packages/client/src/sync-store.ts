@@ -117,9 +117,15 @@ export class DexieSyncStore implements SyncStore {
     try {
       const key = await collectionKey(scope, path, args);
       const database = await this.open();
-      const collection = await database.collections.get(key);
+      let collection: CollectionRecord | undefined;
+      let storedRows: RowRecord[] = [];
+      await database.transaction("r", database.collections, database.rows, async () => {
+        collection = await database.collections.get(key);
+        if (collection) {
+          storedRows = await database.rows.where("collectionKey").equals(key).sortBy("rank");
+        }
+      });
       if (!collection) return undefined;
-      const storedRows = await database.rows.where("collectionKey").equals(key).sortBy("rank");
       const rows = sortSyncRows(storedRows, collection.orderBy, collection.orderDirection);
       void database.collections.update(key, { lastAccessedAt: Date.now() }).catch(() => undefined);
       return {
@@ -162,6 +168,11 @@ export class DexieSyncStore implements SyncStore {
       const sizeBytes = rows.reduce((sum, row) => sum + row.sizeBytes, 0);
       const database = await this.open();
       await database.transaction("rw", database.collections, database.rows, async () => {
+        const existing = await database.collections.get(key);
+        if (
+          existing?.cursor.epoch === value.cursor.epoch
+          && existing.cursor.revision > value.cursor.revision
+        ) return;
         await database.rows.where("collectionKey").equals(key).delete();
         if (rows.length > 0) await database.rows.bulkPut(rows);
         await database.collections.put({
@@ -212,6 +223,10 @@ export class DexieSyncStore implements SyncStore {
       await database.transaction("rw", database.collections, database.rows, async () => {
         const collection = await database.collections.get(key);
         if (!collection) return;
+        if (
+          collection.cursor.epoch !== value.cursor.epoch
+          || collection.cursor.revision > value.cursor.revision
+        ) return;
         const deleted = new Set(value.deleted);
         for (const row of value.upserts) deleted.delete(rowKey(row, value.keyField));
         if (deleted.size > 0) {
@@ -508,21 +523,59 @@ async function hashValue(value: string) {
 }
 
 export async function syncHashesDigest(hashes: Record<string, string>): Promise<string> {
-  const pairs = Object.keys(hashes).sort().map((key) => [key, hashes[key]]);
-  return hashValue(JSON.stringify(pairs));
+  const pairs = Object.keys(hashes).sort(utf8KeyCompare).map((key) => [key, hashes[key]]);
+  return hashValue(stableStringify(pairs as JsonValue));
+}
+
+/**
+ * Hash the rows the client actually materialized. Persisted server-provided
+ * hashes are only a resume optimization; they are not integrity evidence until
+ * they have been recomputed from the IndexedDB values that the UI will read.
+ */
+export async function syncRowsHashes(
+  rows: JsonValue[],
+  keyField: string,
+): Promise<Record<string, string>> {
+  const seen = new Set<string>();
+  const entries = await Promise.all(rows.map(async (row) => {
+    const key = rowKey(row, keyField);
+    if (!key) throw new Error(`sync row is missing key ${JSON.stringify(keyField)}`);
+    if (seen.has(key)) throw new Error(`sync collection contains duplicate key ${JSON.stringify(key)}`);
+    seen.add(key);
+    return [key, await hashValue(stableStringify(row))] as const;
+  }));
+  return Object.fromEntries(entries);
 }
 
 function stableStringify(value: JsonValue): string {
+  if (typeof value === "string") {
+    // Go's JSON encoder always escapes the two JavaScript line-separator code
+    // points. Make the cross-language row hash canonical even after a row has
+    // made an IndexedDB structured-clone round trip.
+    return JSON.stringify(value)
+      .replace(/\u2028/g, "\\u2028")
+      .replace(/\u2029/g, "\\u2029");
+  }
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
   return `{${Object.keys(value)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key]!)}`)
+    .sort(utf8KeyCompare)
+    .map((key) => `${stableStringify(key)}:${stableStringify(value[key]!)}`)
     .join(",")}}`;
 }
 
+function utf8KeyCompare(left: string, right: string) {
+  const leftBytes = new TextEncoder().encode(left);
+  const rightBytes = new TextEncoder().encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index]! - rightBytes[index]!;
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
 function jsonSize(value: JsonValue) {
-  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  return new TextEncoder().encode(stableStringify(value)).byteLength;
 }
 
 function positive(value: number | undefined, fallback: number) {

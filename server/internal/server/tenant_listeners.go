@@ -22,7 +22,7 @@ type tenantListener struct {
 	cancel        context.CancelFunc
 	idle          *time.Timer
 	ready         chan struct{}
-	readyOnce     sync.Once
+	connected     bool
 	needsRecovery bool
 }
 
@@ -77,11 +77,56 @@ func (m *tenantListenerManager) markNeedsRecovery(project, tenant string) {
 
 func (m *tenantListenerManager) markReady(listener *tenantListener) bool {
 	m.mu.Lock()
+	if current := m.active[listener.key]; current != listener {
+		m.mu.Unlock()
+		return false
+	}
 	needsRecovery := listener.needsRecovery
 	listener.needsRecovery = false
+	if !listener.connected {
+		listener.connected = true
+		close(listener.ready)
+	}
 	m.mu.Unlock()
-	listener.readyOnce.Do(func() { close(listener.ready) })
 	return needsRecovery
+}
+
+func (m *tenantListenerManager) markDisconnected(listener *tenantListener) {
+	m.mu.Lock()
+	if current := m.active[listener.key]; current != listener || !listener.connected {
+		m.mu.Unlock()
+		return
+	}
+	listener.connected = false
+	listener.needsRecovery = true
+	listener.ready = make(chan struct{})
+	m.mu.Unlock()
+	m.server.markTenantSyncsOutOfDate(listener.key.project, listener.key.tenant, "listener-reconnecting")
+}
+
+// whileConnected serializes a freshness-sensitive action with listener
+// disconnect detection. In particular, a sync subscription must be published
+// before a concurrent disconnect enumerates subscriptions, and sync.ready must
+// be written before the corresponding sync.syncing frame. Returning the current
+// readiness barrier lets callers retry safely when they observed an older,
+// already-closed barrier just as the listener disconnected.
+func (m *tenantListenerManager) whileConnected(
+	project string,
+	tenant string,
+	action func(),
+) (<-chan struct{}, bool) {
+	key := tenantListenerKey{project: project, tenant: tenant}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	listener := m.active[key]
+	if listener == nil {
+		return nil, false
+	}
+	if !listener.connected {
+		return listener.ready, false
+	}
+	action()
+	return listener.ready, true
 }
 
 func (m *tenantListenerManager) release(project, tenant string) {
@@ -144,6 +189,9 @@ func (m *tenantListenerManager) run(ctx context.Context, listener *tenantListene
 			connectedBefore = true
 			backoff = 250 * time.Millisecond
 			err = m.wait(ctx, connection, listener.key)
+			if err != nil && ctx.Err() == nil {
+				m.markDisconnected(listener)
+			}
 		}
 		if connection != nil {
 			_ = connection.Close(context.Background())

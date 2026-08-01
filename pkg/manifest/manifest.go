@@ -12,7 +12,7 @@ const (
 	FunctionKindSync             FunctionKind = "sync"
 )
 
-const NotifySchemaVersion = "3"
+const NotifySchemaVersion = "4"
 
 type FunctionEntry struct {
 	Kind         FunctionKind         `json:"kind"`

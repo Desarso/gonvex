@@ -46,8 +46,19 @@ the browser.
 3. `NOTIFY` is only a wake-up hint. The durable `_gonvex_sync_changes` table is
    the source of truth.
 4. The browser persists normalized collections plus `{epoch, revision}`.
-5. Reload sends the cursor and cached keys. If retained, the runtime returns
-   only later deltas; otherwise it sends a fresh authorized snapshot.
+5. Reload hashes the actual persisted rows and sends the cursor plus a
+   collection digest. If retained, the runtime returns only later deltas;
+   otherwise it sends a fresh authorized snapshot.
+6. Every `sync.ready` carries the runtime's digest. The client recomputes the
+   digest from its materialized rows and only then marks the collection
+   up-to-date. A mismatch is repaired or reset; it is never accepted as ready.
+
+Small collections (up to 256 rows) include their row keys and hashes in the
+first resume request. Large collections normally send only the fixed-size
+digest. If that digest differs, the runtime requests keys and hashes once and
+sends only the differing rows. The unchanged path therefore stays constant
+size regardless of collection size, while corruption is still repairable by a
+delta rather than a full download.
 
 The runtime prunes the log no more than hourly. Default retention is seven
 days. The Go declaration API includes `RetainFor`, but the npm CLI does not yet
@@ -61,9 +72,12 @@ also remembers the last scope by project, tenant, JWT issuer, and JWT subject,
 which allows a warm snapshot to render while server auth is revalidated.
 Server auth, definition, or visibility changes reset the collection.
 
-`VisibilityDependsOn` must name every table that can change which rows the
-handler returns without changing the source row. A change to one of those
-tables resets and reauthorizes the collection.
+Every table declared through `Reads(...)` is automatically an effective sync
+dependency. `VisibilityDependsOn(...)` remains available for dependencies that
+are not already declared as reads. A change to any dependency triggers an
+authoritative handler reconciliation, so computed membership (for example a
+task appearing in an approver workspace) cannot be maintained by replaying the
+physical source row alone.
 
 Only declared columns are captured. Soft-delete markers must be declared with
 `ExcludeWhenSet`, matching the snapshot handler.
@@ -83,7 +97,15 @@ new ConvexReactClient(url, {
 
 Each collection enforces its own server-declared row/byte budget. The global
 budget evicts least-recently-used collections. Deltas update only affected
-IndexedDB rows.
+IndexedDB rows. Collection metadata and rows load in one IndexedDB transaction,
+and writes are serialized across unsubscribe/resubscribe incarnations so an old
+async write cannot overwrite a newer cursor.
+
+`sync.ready` means all of the following are true: the listener was installed
+before the runtime sampled the cursor, all durable changes through that cursor
+were processed, handler-derived membership was reconciled when required, and
+the browser verified the resulting digest. A disconnect immediately revokes
+that state and emits `sync.syncing`; reconnect replays from the durable cursor.
 
 React exposes `useSync` and `useSyncSelector`. Prefer selectors for consumers
 that only need a derived subset so unrelated row changes do not rerender them.

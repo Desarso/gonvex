@@ -800,6 +800,20 @@ func TestDevSyncKeepsProjectManifestAvailableAfterSync(t *testing.T) {
 	}
 }
 
+func TestDevSyncAlwaysStampsRuntimeDatabaseArtifactVersion(t *testing.T) {
+	server := New(config.Config{})
+	body := bytes.NewBufferString(`{"project":"artifact-version-project","generatedAt":"now","functions":{},"schema":{"tables":{}},"notifySchemaVersion":"1"}`)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", body))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	if got := server.runtime.ManifestForProject("artifact-version-project").NotifySchemaVersion; got != manifest.NotifySchemaVersion {
+		t.Fatalf("runtime stored database artifact version %q, want %q", got, manifest.NotifySchemaVersion)
+	}
+}
+
 func TestDevSyncSkipsSchemaLoadedFromPersistedManifest(t *testing.T) {
 	server := New(config.Config{})
 	persisted := manifest.Manifest{

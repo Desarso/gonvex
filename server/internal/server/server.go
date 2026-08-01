@@ -699,9 +699,11 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	if next.Schema.Tables == nil {
 		next.Schema = manifest.EmptySchema()
 	}
-	if next.NotifySchemaVersion == "" {
-		next.NotifySchemaVersion = manifest.NotifySchemaVersion
-	}
+	// Database artifact compatibility is owned by this runtime, not by the CLI
+	// that happened to generate the incoming manifest. Always stamp the current
+	// version so an older client cannot accidentally suppress a required trigger
+	// upgrade.
+	next.NotifySchemaVersion = manifest.NotifySchemaVersion
 
 	// Serialize per project: schema.Apply reinstalls NOTIFY triggers via
 	// DROP/CREATE TRIGGER + CREATE OR REPLACE FUNCTION, which update pg_catalog

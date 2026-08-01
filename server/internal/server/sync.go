@@ -54,10 +54,16 @@ type syncSubscription struct {
 	listenerAcquired bool
 	visibleKeys      map[string]bool
 	visibleHashes    map[string]string
-	mu               sync.Mutex
-	closed           bool
-	deliveryRunning  bool
-	deliveryPending  bool
+	clientDigest     string
+	fullIntegrity    bool
+	// verified means visibleKeys/visibleHashes were derived from an
+	// authoritative handler result on this server connection, rather than
+	// accepted from an untrusted persisted client cache.
+	verified        bool
+	mu              sync.Mutex
+	closed          bool
+	deliveryRunning bool
+	deliveryPending bool
 }
 
 type syncLogChange struct {
@@ -78,7 +84,7 @@ const (
 	// Included in every cursor epoch. Bump whenever the meaning of a resumable
 	// cursor becomes stricter so persisted clients are forced through a fresh
 	// snapshot instead of inheriting an older, weaker freshness guarantee.
-	syncCursorSemanticsVersion = 2
+	syncCursorSemanticsVersion = 3
 )
 
 var errSyncCursorExpired = errors.New("sync cursor is older than the retained change log")
@@ -89,7 +95,7 @@ func manifestSyncDefinitions(current manifest.Manifest) map[string]manifest.Sync
 		if entry.Kind != manifest.FunctionKindSync || entry.Sync == nil {
 			continue
 		}
-		definition := *entry.Sync
+		definition := effectiveSyncDefinition(entry)
 		table := strings.TrimSpace(definition.Table)
 		if table == "" {
 			continue
@@ -114,6 +120,19 @@ func manifestSyncDefinitions(current manifest.Manifest) map[string]manifest.Sync
 		definitions[table] = definition
 	}
 	return definitions
+}
+
+func effectiveSyncDefinition(entry manifest.FunctionEntry) manifest.SyncDefinition {
+	definition := *entry.Sync
+	definition.VisibilityTables = appendUniqueStrings(nil, definition.VisibilityTables...)
+	for _, read := range entry.Dependencies.Reads {
+		table := strings.TrimSpace(read.Table)
+		if table == "" || table == definition.Table {
+			continue
+		}
+		definition.VisibilityTables = appendUniqueStrings(definition.VisibilityTables, table)
+	}
+	return definition
 }
 
 func syncDefinitionsForSchema(definitions map[string]manifest.SyncDefinition, current manifest.Schema) (map[string]manifest.SyncDefinition, error) {
@@ -187,7 +206,7 @@ func (c *wsConn) openSync(ctx context.Context, message clientMessage) {
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 		return
 	}
-	c.openSyncWithClock(ctx, message, databaseURL, clock, false)
+	c.openSyncWithClock(ctx, message, databaseURL, clock)
 }
 
 func (c *wsConn) openSyncMany(ctx context.Context, opens []syncOpenRequest) {
@@ -206,45 +225,11 @@ func (c *wsConn) openSyncMany(ctx context.Context, opens []syncOpenRequest) {
 		return
 	}
 
-	ready := make([]*syncSubscription, 0, len(opens))
 	for _, open := range opens {
-		subscription := c.openSyncWithClock(ctx, clientMessage{
+		c.openSyncWithClock(ctx, clientMessage{
 			ID: open.ID, Path: open.Path, Args: open.Args, Cursor: open.Cursor, Keys: open.Keys, Hashes: open.Hashes,
-		}, databaseURL, start, true)
-		if subscription != nil {
-			ready = append(ready, subscription)
-		}
-	}
-	if len(ready) == 0 {
-		return
-	}
-
-	// Every candidate is attached before this second clock read. If the clock
-	// did not advance, one ready frame safely settles the whole warm batch. If
-	// it did advance, normal delivery closes the race for each affected sync.
-	end, err := currentSyncClock(ctx, databaseURL)
-	if err != nil {
-		for _, subscription := range ready {
-			c.write(serverMessage{Type: "sync.error", ID: subscription.id, Path: subscription.path, Error: err.Error()})
-		}
-		return
-	}
-	if start.DatabaseEpoch == end.DatabaseEpoch && start.Revision == end.Revision {
-		messages := make([]syncReadyMessage, 0, len(ready))
-		for _, subscription := range ready {
-			cursor := syncCursorForClock(end, subscription.definition, c.currentCacheScope())
-			subscription.cursor = cursor
-			messages = append(messages, syncReadyMessage{
-				ID: subscription.id, Path: subscription.path, Cursor: &cursor, Mode: subscription.definition.Mode,
-			})
-		}
-		c.write(serverMessage{Type: "sync.readyMany", Ready: messages})
-		return
-	}
-	for _, subscription := range ready {
-		if err := c.server.deliverSync(subscription); err != nil {
-			c.write(serverMessage{Type: "sync.error", ID: subscription.id, Path: subscription.path, Error: err.Error()})
-		}
+			Digest: open.Digest, FullIntegrity: open.FullIntegrity,
+		}, databaseURL, start)
 	}
 }
 
@@ -253,25 +238,25 @@ func (c *wsConn) openSyncWithClock(
 	message clientMessage,
 	databaseURL string,
 	clock syncClock,
-	deferCurrentReady bool,
-) *syncSubscription {
+) {
 	if strings.TrimSpace(message.ID) == "" || strings.TrimSpace(message.Path) == "" {
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: "sync id and path are required"})
-		return nil
+		return
 	}
 	current := c.server.runtime.ManifestForProject(c.project)
 	entry, ok := current.Functions[message.Path]
 	if !ok || entry.Kind != manifest.FunctionKindSync || entry.Sync == nil {
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: "sync function is not registered"})
-		return nil
+		return
 	}
-	definition := *entry.Sync
+	definition := effectiveSyncDefinition(entry)
 	base := syncCursorForClock(clock, definition, c.currentCacheScope())
 
 	subscription := &syncSubscription{
 		conn: c, id: message.ID, path: message.Path, project: c.project, tenant: c.tenant,
 		args: append(json.RawMessage(nil), message.Args...), definition: definition, cursor: base,
 		visibleKeys: syncKeySet(message.Keys), visibleHashes: cloneStringMap(message.Hashes),
+		clientDigest: strings.TrimSpace(message.Digest), fullIntegrity: message.FullIntegrity,
 	}
 	c.closeSync(message.ID)
 
@@ -279,40 +264,43 @@ func (c *wsConn) openSyncWithClock(
 		resumable := message.Cursor.Revision >= clock.RetainedRevision
 		if resumable {
 			subscription.cursor = *message.Cursor
-			c.attachSync(subscription)
-			if deferCurrentReady && message.Cursor.Revision == base.Revision && definition.Mode != "progressive" {
-				return subscription
+			if err := c.attachSync(ctx, subscription); err != nil {
+				c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
+				return
 			}
 			if err := c.server.deliverSync(subscription); err != nil {
 				c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 			}
-			return nil
+			return
 		}
 	}
 
 	result, err := c.server.executeTenantQueryForCallerUncached(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
 	if err != nil {
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
-		return nil
+		return
 	}
 	rows, err := syncSnapshotRows(result, definition)
 	if err != nil {
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
-		return nil
+		return
 	}
 	subscription.visibleKeys = syncRowsKeySet(rows, definition.Key)
 	subscription.visibleHashes = syncRowsHashes(rows, definition.Key)
-	c.attachSync(subscription)
+	subscription.verified = true
+	if err := c.attachSync(ctx, subscription); err != nil {
+		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
+		return
+	}
 	c.write(serverMessage{
 		Type: "sync.snapshot", ID: message.ID, Path: message.Path, Result: rows, Cursor: &base,
 		Key: definition.Key, OrderBy: definition.OrderBy, OrderDirection: definition.OrderDirection,
 		Mode: definition.Mode, MaxRows: definition.MaxRows, MaxBytes: definition.MaxBytes,
-		Hashes: subscription.visibleHashes,
 	})
 	if err := c.server.deliverSync(subscription); err != nil {
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 	}
-	return nil
+	return
 }
 
 func (s *Server) scheduleSyncLogPrune(project, tenant, databaseURL string) {
@@ -401,17 +389,24 @@ func syncSnapshotRows(result any, definition manifest.SyncDefinition) ([]json.Ra
 	maxBytes := definition.MaxBytes
 	totalBytes := int64(0)
 	kept := make([]json.RawMessage, 0, len(rows))
+	seen := map[string]bool{}
 	for _, row := range rows {
-		if syncRowKey(row, definition.Key) == "" {
+		key := syncRowKey(row, definition.Key)
+		if key == "" {
 			return nil, fmt.Errorf("sync row is missing key %q", definition.Key)
 		}
+		if seen[key] {
+			return nil, fmt.Errorf("sync handler returned duplicate key %q", key)
+		}
+		seen[key] = true
 		if maxRows > 0 && len(kept) >= maxRows {
 			break
 		}
-		if maxBytes > 0 && totalBytes+int64(len(row)) > maxBytes {
+		canonical := canonicalSyncJSON(row)
+		if maxBytes > 0 && totalBytes+int64(len(canonical)) > maxBytes {
 			break
 		}
-		totalBytes += int64(len(row))
+		totalBytes += int64(len(canonical))
 		kept = append(kept, row)
 	}
 	return kept, nil
@@ -428,7 +423,13 @@ func syncRowKey(row json.RawMessage, key string) string {
 	}
 	var scalar any
 	if json.Unmarshal(object[key], &scalar) == nil && scalar != nil {
-		return fmt.Sprint(scalar)
+		switch scalar.(type) {
+		case float64, bool:
+			// JSON number formatting intentionally matches JavaScript's
+			// String(number) boundaries (not fmt.Sprint's scientific-notation
+			// threshold), and normalizeSyncJSON makes -0 become "0".
+			return string(canonicalSyncJSON(object[key]))
+		}
 	}
 	return ""
 }
@@ -495,12 +496,16 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		return nil
 	}
 	if latest.Revision <= subscription.cursor.Revision {
-		if subscription.definition.Mode == "progressive" {
-			if err := s.deliverProgressiveSync(ctx, subscription, nil, latest); err != nil {
+		if !subscription.verified {
+			settled, err := s.deliverAuthoritativeSync(ctx, subscription, nil, latest)
+			if err != nil {
 				return err
 			}
+			if !settled {
+				return nil
+			}
 		}
-		subscription.conn.write(serverMessage{
+		s.writeSyncReady(subscription, serverMessage{
 			Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &latest,
 			Mode: subscription.definition.Mode, Digest: syncHashesDigest(subscription.visibleHashes),
 		})
@@ -522,18 +527,46 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 	}
 	args := map[string]json.RawMessage{}
 	_ = json.Unmarshal(subscription.args, &args)
-	if subscription.definition.Mode == "progressive" {
-		if err := s.deliverProgressiveSync(ctx, subscription, changes, latest); err != nil {
+	if len(changes) == 0 && subscription.verified {
+		subscription.cursor = latest
+		s.writeSyncReady(subscription, serverMessage{
+			Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &latest,
+			Mode: subscription.definition.Mode, Digest: syncHashesDigest(subscription.visibleHashes),
+		})
+		return nil
+	}
+	authoritativeReconcile := syncNeedsAuthoritativeReconcile(subscription.definition, changes)
+	if subscription.verified && authoritativeReconcile {
+		subscription.conn.write(serverMessage{
+			Type: "sync.syncing", ID: subscription.id, Path: subscription.path, Reason: "reconciling",
+		})
+	}
+	if !subscription.verified {
+		settled, err := s.deliverAuthoritativeSync(ctx, subscription, changes, latest)
+		if err != nil {
 			return err
 		}
-		subscription.conn.write(serverMessage{
+		if !settled {
+			return nil
+		}
+		s.writeSyncReady(subscription, serverMessage{
 			Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &subscription.cursor,
 			Mode: subscription.definition.Mode, Digest: syncHashesDigest(subscription.visibleHashes),
 		})
 		return nil
 	}
-	if syncVisibilityChanged(changes, subscription.definition.Table) {
-		s.resetSyncWhileLocked(subscription, "visibility-changed")
+	if authoritativeReconcile {
+		settled, err := s.deliverAuthoritativeSync(ctx, subscription, changes, latest)
+		if err != nil {
+			return err
+		}
+		if !settled {
+			return nil
+		}
+		s.writeSyncReady(subscription, serverMessage{
+			Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &subscription.cursor,
+			Mode: subscription.definition.Mode, Digest: syncHashesDigest(subscription.visibleHashes),
+		})
 		return nil
 	}
 	for _, batch := range groupSyncChanges(changes) {
@@ -541,15 +574,18 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		deleted := map[string]bool{}
 		mutationIDs := map[string]bool{}
 		for _, change := range batch.changes {
-			oldMatches := syncValueMatches(change.oldValue, subscription.definition, args)
 			newMatches := syncValueMatches(change.newValue, subscription.definition, args)
 			switch {
 			case newMatches:
 				upserts[change.rowID] = change.newValue
 				delete(deleted, change.rowID)
-			case oldMatches:
+				subscription.visibleKeys[change.rowID] = true
+				subscription.visibleHashes[change.rowID] = syncRowHash(change.newValue)
+			case subscription.visibleKeys[change.rowID]:
 				delete(upserts, change.rowID)
 				deleted[change.rowID] = true
+				delete(subscription.visibleKeys, change.rowID)
+				delete(subscription.visibleHashes, change.rowID)
 			}
 			if change.mutationID != "" {
 				mutationIDs[change.mutationID] = true
@@ -559,17 +595,27 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		subscription.conn.write(serverMessage{
 			Type: "sync.delta", ID: subscription.id, Path: subscription.path, Cursor: &cursor,
 			Upserts: sortedSyncRows(upserts), Deleted: sortedSyncKeys(deleted), MutationIDs: sortedSyncKeys(mutationIDs),
+			Digest: syncHashesDigest(subscription.visibleHashes),
 		})
 		subscription.cursor = cursor
 	}
 	if subscription.cursor.Revision < latest.Revision {
 		subscription.cursor.Revision = latest.Revision
 	}
-	subscription.conn.write(serverMessage{
+	s.writeSyncReady(subscription, serverMessage{
 		Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &subscription.cursor,
 		Mode: subscription.definition.Mode, Digest: syncHashesDigest(subscription.visibleHashes),
 	})
 	return nil
+}
+
+func (s *Server) writeSyncReady(subscription *syncSubscription, message serverMessage) bool {
+	_, ready := s.subscriptions.listeners.whileConnected(
+		subscription.project,
+		subscription.tenant,
+		func() { subscription.conn.write(message) },
+	)
+	return ready
 }
 
 func (s *Server) resetSyncWhileLocked(subscription *syncSubscription, reason string) {
@@ -585,12 +631,12 @@ func (s *Server) resetSyncWhileLocked(subscription *syncSubscription, reason str
 	})
 }
 
-func (s *Server) deliverProgressiveSync(
+func (s *Server) deliverAuthoritativeSync(
 	ctx context.Context,
 	subscription *syncSubscription,
 	changes []syncLogChange,
 	latest syncCursor,
-) error {
+) (bool, error) {
 	result, err := s.executeTenantQueryForCallerUncached(
 		ctx,
 		subscription.project,
@@ -600,11 +646,11 @@ func (s *Server) deliverProgressiveSync(
 		subscription.args,
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 	rows, err := syncSnapshotRows(result, subscription.definition)
 	if err != nil {
-		return err
+		return false, err
 	}
 	currentRows := map[string]json.RawMessage{}
 	currentKeys := map[string]bool{}
@@ -617,6 +663,20 @@ func (s *Server) deliverProgressiveSync(
 		currentKeys[key] = true
 	}
 	currentHashes := syncRowsHashes(rows, subscription.definition.Key)
+	currentDigest := syncHashesDigest(currentHashes)
+	if !subscription.verified && subscription.clientDigest != "" && !subscription.fullIntegrity {
+		if subscription.clientDigest != currentDigest {
+			s.pauseSyncForIntegrityWhileLocked(subscription)
+			return false, nil
+		}
+		// The compact resume proof matched. No row identifiers or hashes need
+		// to cross the wire on the overwhelmingly common unchanged path.
+		subscription.visibleKeys = currentKeys
+		subscription.visibleHashes = currentHashes
+		subscription.verified = true
+		subscription.cursor = latest
+		return true, nil
+	}
 
 	upserts, deleted, mutationIDs := progressiveSyncDiff(
 		currentRows,
@@ -625,20 +685,31 @@ func (s *Server) deliverProgressiveSync(
 		subscription.visibleHashes,
 		changes,
 	)
-	upsertHashes := map[string]string{}
-	for key := range upserts {
-		upsertHashes[key] = currentHashes[key]
-	}
-
 	subscription.visibleKeys = currentKeys
 	subscription.visibleHashes = currentHashes
+	subscription.verified = true
 	subscription.cursor = latest
+	if len(upserts) > 0 || len(deleted) > 0 || len(mutationIDs) > 0 {
+		subscription.conn.write(serverMessage{
+			Type: "sync.delta", ID: subscription.id, Path: subscription.path, Cursor: &latest,
+			Upserts: sortedSyncRows(upserts), Deleted: sortedSyncKeys(deleted), MutationIDs: sortedSyncKeys(mutationIDs),
+			Digest: currentDigest,
+		})
+	}
+	return true, nil
+}
+
+func (s *Server) pauseSyncForIntegrityWhileLocked(subscription *syncSubscription) {
+	subscription.conn.removeSync(subscription.id)
+	subscription.closed = true
+	acquired := subscription.listenerAcquired
+	subscription.listenerAcquired = false
+	if acquired {
+		s.subscriptions.listeners.release(subscription.project, subscription.tenant)
+	}
 	subscription.conn.write(serverMessage{
-		Type: "sync.delta", ID: subscription.id, Path: subscription.path, Cursor: &latest,
-		Upserts: sortedSyncRows(upserts), Deleted: sortedSyncKeys(deleted), MutationIDs: sortedSyncKeys(mutationIDs),
-		Hashes: upsertHashes, Digest: syncHashesDigest(currentHashes),
+		Type: "sync.needHashes", ID: subscription.id, Path: subscription.path,
 	})
-	return nil
 }
 
 func progressiveSyncDiff(
@@ -676,10 +747,56 @@ func syncRowsHashes(rows []json.RawMessage, keyField string) map[string]string {
 		if key == "" {
 			continue
 		}
-		sum := sha256.Sum256(row)
-		hashes[key] = hex.EncodeToString(sum[:])
+		hashes[key] = syncRowHash(row)
 	}
 	return hashes
+}
+
+func syncRowHash(row json.RawMessage) string {
+	sum := sha256.Sum256(canonicalSyncJSON(row))
+	return hex.EncodeToString(sum[:])
+}
+
+// canonicalSyncJSON matches the client's stable JSON encoder: recursively
+// sorted object keys, JavaScript-compatible JSON numbers, no HTML escaping,
+// and escaped U+2028/U+2029. Decoding through float64 intentionally mirrors
+// the JsonValue representation a browser obtains from JSON.parse.
+func canonicalSyncJSON(value json.RawMessage) []byte {
+	var decoded any
+	if err := json.Unmarshal(value, &decoded); err != nil {
+		return value
+	}
+	decoded = normalizeSyncJSON(decoded)
+	var output bytes.Buffer
+	encoder := json.NewEncoder(&output)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(decoded); err != nil {
+		return value
+	}
+	return bytes.TrimSpace(output.Bytes())
+}
+
+func normalizeSyncJSON(value any) any {
+	switch current := value.(type) {
+	case float64:
+		// JSON.stringify(-0) is "0" while encoding/json preserves "-0".
+		if current == 0 {
+			return float64(0)
+		}
+		return current
+	case []any:
+		for index := range current {
+			current[index] = normalizeSyncJSON(current[index])
+		}
+		return current
+	case map[string]any:
+		for key, nested := range current {
+			current[key] = normalizeSyncJSON(nested)
+		}
+		return current
+	default:
+		return current
+	}
 }
 
 func syncHashesDigest(hashes map[string]string) string {
@@ -692,8 +809,11 @@ func syncHashesDigest(hashes map[string]string) string {
 	for _, key := range keys {
 		pairs = append(pairs, [2]string{key, hashes[key]})
 	}
-	payload, _ := json.Marshal(pairs)
-	sum := sha256.Sum256(payload)
+	var payload bytes.Buffer
+	encoder := json.NewEncoder(&payload)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(pairs)
+	sum := sha256.Sum256(bytes.TrimSpace(payload.Bytes()))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -814,11 +934,18 @@ func syncVisibilityChanged(changes []syncLogChange, sourceTable string) bool {
 	return false
 }
 
+func syncNeedsAuthoritativeReconcile(definition manifest.SyncDefinition, changes []syncLogChange) bool {
+	return definition.Mode == "progressive" ||
+		definition.MaxRows > 0 ||
+		definition.MaxBytes > 0 ||
+		syncVisibilityChanged(changes, definition.Table)
+}
+
 func syncValueMatches(value json.RawMessage, definition manifest.SyncDefinition, args map[string]json.RawMessage) bool {
 	if len(value) == 0 || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 		return false
 	}
-	if len(definition.EqualFilters) == 0 {
+	if len(definition.EqualFilters) == 0 && len(definition.ExcludeWhenSet) == 0 {
 		return true
 	}
 	row := map[string]json.RawMessage{}
@@ -899,14 +1026,45 @@ func (c *wsConn) removeSync(id string) {
 	c.mu.Unlock()
 }
 
-func (c *wsConn) attachSync(subscription *syncSubscription) {
-	c.server.subscriptions.listeners.acquire(subscription.project, subscription.tenant)
-	subscription.mu.Lock()
-	subscription.listenerAcquired = true
-	subscription.mu.Unlock()
-	c.mu.Lock()
-	c.syncs[subscription.id] = subscription
-	c.mu.Unlock()
+func (c *wsConn) attachSync(ctx context.Context, subscription *syncSubscription) error {
+	ready := c.server.subscriptions.listeners.acquire(subscription.project, subscription.tenant)
+	if ready == nil {
+		return errors.New("sync listener unavailable; freshness cannot be proven")
+	}
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			c.server.subscriptions.listeners.release(subscription.project, subscription.tenant)
+			return ctx.Err()
+		case <-timer.C:
+			c.server.subscriptions.listeners.markNeedsRecovery(subscription.project, subscription.tenant)
+			c.server.subscriptions.listeners.release(subscription.project, subscription.tenant)
+			return errors.New("sync listener did not become ready; freshness cannot be proven")
+		}
+		next, attached := c.server.subscriptions.listeners.whileConnected(
+			subscription.project,
+			subscription.tenant,
+			func() {
+				// The subscription is not published yet, so these writes are
+				// private to this goroutine and need no subscription lock.
+				subscription.listenerAcquired = true
+				c.mu.Lock()
+				c.syncs[subscription.id] = subscription
+				c.mu.Unlock()
+			},
+		)
+		if attached {
+			return nil
+		}
+		if next == nil {
+			c.server.subscriptions.listeners.release(subscription.project, subscription.tenant)
+			return errors.New("sync listener disappeared; freshness cannot be proven")
+		}
+		ready = next
+	}
 }
 
 func (c *wsConn) closeAllSyncs() {
@@ -954,6 +1112,30 @@ func (s *Server) notifySyncRevision(project, tenant string) {
 		connection.mu.Unlock()
 		for _, subscription := range subscriptions {
 			s.scheduleSyncDelivery(subscription)
+		}
+	}
+}
+
+func (s *Server) markTenantSyncsOutOfDate(project, tenant, reason string) {
+	s.wsMu.RLock()
+	connections := make([]*wsConn, 0)
+	for connection := range s.wsConns {
+		if connection.project == project && connection.tenant == tenant {
+			connections = append(connections, connection)
+		}
+	}
+	s.wsMu.RUnlock()
+	for _, connection := range connections {
+		connection.mu.Lock()
+		subscriptions := make([]*syncSubscription, 0, len(connection.syncs))
+		for _, subscription := range connection.syncs {
+			subscriptions = append(subscriptions, subscription)
+		}
+		connection.mu.Unlock()
+		for _, subscription := range subscriptions {
+			connection.write(serverMessage{
+				Type: "sync.syncing", ID: subscription.id, Path: subscription.path, Reason: reason,
+			})
 		}
 	}
 }

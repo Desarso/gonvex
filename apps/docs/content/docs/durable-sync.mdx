@@ -71,7 +71,7 @@ log.
 | `Columns(...)` | Columns captured for snapshots and deltas. |
 | `EqualArg(column, argument?)` | Keep rows where a column equals a sync argument. The argument defaults to the column name. |
 | `ExcludeWhenSet(...)` | Exclude rows whose named column is non-null, typically soft-deleted or archived rows. |
-| `VisibilityDependsOn(...)` | Reset and reauthorize when another table can change row visibility. |
+| `VisibilityDependsOn(...)` | Add a dependency that can change handler-derived membership. Tables already declared with `Reads(...)` are included automatically. |
 | `OrderBy(column, direction)` | Stable client order; direction is `asc` or `desc`. |
 | `Eager()` | Keep the complete collection within its declared budgets. This is the default. |
 | `Progressive()` | Keep a bounded ordered top-N window and reconcile membership after changes. |
@@ -167,6 +167,8 @@ works, but reloads require a fresh snapshot.
 Storage is isolated by the server-issued cache scope, which includes the runtime
 deployment, project, tenant, authenticated identity, and current permissions.
 Auth, definition, or visibility changes reset and reauthorize the collection.
+Metadata and normalized rows are read in one IndexedDB transaction, and writes
+are serialized even across unsubscribe/resubscribe cycles.
 
 ## Delivery and recovery
 
@@ -177,12 +179,31 @@ Postgres transaction commits
 -> NOTIFY wakes connected runtimes
 -> runtime authorizes and sends matching deltas
 -> browser updates memory and IndexedDB
+-> browser verifies the runtime digest before accepting sync.ready
 ```
 
 `NOTIFY` is only a wake-up hint. The Postgres change table is the source of
-truth. On reconnect, the client sends its `{epoch, revision}` cursor and cached
-keys. The runtime sends later deltas when possible, or a fresh snapshot when the
-cursor is too old or the collection must be reauthorized.
+truth. The runtime installs its database listener before it samples a ready
+cursor, and a listener failure revokes `isUpToDate` until durable replay has
+completed after reconnect.
+
+On reconnect, the client hashes the actual persisted rows and sends its
+`{epoch, revision}` cursor plus a collection digest. The runtime sends later
+deltas when possible, or a fresh snapshot when the cursor is too old or the
+collection must be reauthorized. Every `sync.ready` includes the authoritative
+digest; the client recomputes it over its final materialized rows and only then
+sets `isUpToDate`.
+
+For collections up to 256 rows, resume also includes keys and row hashes. Larger
+collections use one fixed-size digest on the normal unchanged path. Only when
+that digest differs does the runtime request row hashes and return the differing
+rows. This detects missing, extra, or corrupted rows without turning routine
+reloads into full snapshots.
+
+Bounded, progressive, or dependency-driven syncs rerun the authorized handler
+after relevant transactions and diff its current output against the browser's
+materialized view. This keeps computed membership and top-N window boundaries
+correct while still transmitting only upserts and deletes.
 
 The runtime retains changes for seven days by default and prunes at most once
 per hour.
