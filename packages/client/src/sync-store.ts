@@ -7,6 +7,7 @@ export type SyncStoreOptions = {
   enabled?: boolean;
   databaseName?: string;
   maxBytes?: number;
+  hashes?: Record<string, string>;
   indexedDB?: IDBFactory;
   IDBKeyRange?: typeof IDBKeyRange;
   store?: SyncStore;
@@ -21,6 +22,7 @@ export type StoredSyncCollection = {
   orderDirection?: "asc" | "desc";
   maxRows?: number;
   maxBytes?: number;
+  hashes?: Record<string, string>;
 };
 
 export type SyncStore = {
@@ -44,6 +46,7 @@ export type SyncStore = {
       deleted: string[];
       maxRows?: number;
       maxBytes?: number;
+      hashes?: Record<string, string>;
     },
   ): Promise<void>;
   delete(scope: string, path: string, args: JsonValue): Promise<void>;
@@ -65,6 +68,7 @@ type CollectionRecord = {
   orderDirection?: "asc" | "desc";
   maxRows?: number;
   maxBytes?: number;
+  hashes?: Record<string, string>;
   rowCount: number;
   sizeBytes: number;
   lastAccessedAt: number;
@@ -127,6 +131,7 @@ export class DexieSyncStore implements SyncStore {
         orderDirection: collection.orderDirection,
         maxRows: collection.maxRows,
         maxBytes: collection.maxBytes,
+        hashes: collection.hashes,
       };
     } catch {
       this.disabled = true;
@@ -171,6 +176,7 @@ export class DexieSyncStore implements SyncStore {
           orderDirection: value.orderDirection,
           maxRows: value.maxRows,
           maxBytes: value.maxBytes,
+          hashes: value.hashes,
           rowCount: rows.length,
           sizeBytes,
           lastAccessedAt: Date.now(),
@@ -196,6 +202,7 @@ export class DexieSyncStore implements SyncStore {
       deleted: string[];
       maxRows?: number;
       maxBytes?: number;
+      hashes?: Record<string, string>;
     },
   ): Promise<void> {
     if (this.disabled || !scope) return;
@@ -240,6 +247,10 @@ export class DexieSyncStore implements SyncStore {
         if (evicted.length > 0) {
           await database.rows.bulkDelete(evicted.map((row) => [key, row.rowId] as [string, string]));
         }
+        const hashes = { ...(collection.hashes ?? {}) };
+        for (const rowId of deleted) delete hashes[rowId];
+        for (const rowId of evicted.map((row) => row.rowId)) delete hashes[rowId];
+        for (const [rowId, hash] of Object.entries(value.hashes ?? {})) hashes[rowId] = hash;
         await database.collections.put({
           ...collection,
           cursor: value.cursor,
@@ -249,6 +260,7 @@ export class DexieSyncStore implements SyncStore {
           orderDirection: value.orderDirection ?? collection.orderDirection,
           maxRows,
           maxBytes,
+          hashes,
           rowCount: kept.length,
           sizeBytes: kept.reduce((sum, row) => sum + row.sizeBytes, 0),
           lastAccessedAt: Date.now(),
@@ -493,6 +505,11 @@ async function hashValue(value: string) {
   if (!subtle) throw new Error("web-crypto-unavailable");
   const digest = await subtle.digest("SHA-256", new TextEncoder().encode(value));
   return Array.from(new Uint8Array(digest), (part) => part.toString(16).padStart(2, "0")).join("");
+}
+
+export async function syncHashesDigest(hashes: Record<string, string>): Promise<string> {
+  const pairs = Object.keys(hashes).sort().map((key) => [key, hashes[key]]);
+  return hashValue(JSON.stringify(pairs));
 }
 
 function stableStringify(value: JsonValue): string {

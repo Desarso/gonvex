@@ -1056,7 +1056,10 @@ func (s *Server) applyTenantSchemasForProject(
 	}
 	s.projectMu.RUnlock()
 
-	tenantSyncDefinitions := syncDefinitionsForSchema(syncDefinitions, desiredSchema)
+	tenantSyncDefinitions, err := syncDefinitionsForSchema(syncDefinitions, desiredSchema)
+	if err != nil {
+		return schema.Result{}, err
+	}
 	return applyTenantSchemas(ctx, tenants, desiredSchema, func(ctx context.Context, databaseURL string, desired manifest.Schema) (schema.Result, error) {
 		return schema.ApplyWithSync(ctx, databaseURL, desired, tenantSyncDefinitions)
 	})

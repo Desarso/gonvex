@@ -17,7 +17,7 @@ import {
   type QueryCacheStatus,
   type QueryCacheStore,
 } from "./query-cache.js";
-import { createSyncStore, type SyncStore, type SyncStoreOptions } from "./sync-store.js";
+import { createSyncStore, syncHashesDigest, type SyncStore, type SyncStoreOptions } from "./sync-store.js";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
 export * from "./cache.js";
 export * from "./cache-coordinator.js";
@@ -73,6 +73,9 @@ type SyncSubscription = {
   persistence: Promise<void>;
   retryTimer?: ReturnType<typeof setTimeout>;
   retryAttempt: number;
+  isUpToDate: boolean;
+  hashes: Record<string, string>;
+  verificationGeneration: number;
 };
 type OneShotQuery = {
   id: string;
@@ -326,6 +329,7 @@ export class GonvexClient {
     socket.addEventListener("close", () => {
       if (this.socket !== socket || this.manuallyClosed) return;
       this.isWebSocketConnected = false;
+      this.markSyncSubscriptionsOutOfDate();
       this.authInFlight = false;
       if (this.authWatchdogTimer) {
         clearTimeout(this.authWatchdogTimer);
@@ -700,6 +704,9 @@ export class GonvexClient {
       opening: false,
       persistence: Promise.resolve(),
       retryAttempt: 0,
+      isUpToDate: false,
+      hashes: {},
+      verificationGeneration: 0,
     };
     this.syncSubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => this.handleSyncMessage(subscription, message));
@@ -710,7 +717,8 @@ export class GonvexClient {
   watchSync<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue = {}) {
     let latest: T[] | undefined;
     let latestError: Error | undefined;
-    let isUpToDate = false;
+    const thisClient = this;
+    const key = querySubscriptionKey(ref, args);
     const updateHandlers = new Set<WatchUpdateHandler>();
     const notify = () => {
       for (const handler of updateHandlers) handler();
@@ -721,7 +729,8 @@ export class GonvexClient {
         latestError = undefined;
         notify();
       } else if (message.type === "sync.ready") {
-        isUpToDate = true;
+        notify();
+      } else if (message.type === "sync.syncing" || message.type === "sync.reset") {
         notify();
       } else if (message.type === "sync.error") {
         latestError = new Error(message.error);
@@ -731,7 +740,6 @@ export class GonvexClient {
     const unsubscribeScope = this.onSessionScopeChange(() => {
       latest = undefined;
       latestError = undefined;
-      isUpToDate = false;
       notify();
     });
     return {
@@ -740,7 +748,10 @@ export class GonvexClient {
         return latest;
       },
       status() {
-        return { isLoading: latest === undefined, isUpToDate };
+        return {
+          isLoading: latest === undefined,
+          isUpToDate: thisClient.syncSubscriptions.get(key)?.isUpToDate === true,
+        };
       },
       onUpdate(handler: WatchUpdateHandler) {
         updateHandlers.add(handler);
@@ -758,6 +769,8 @@ export class GonvexClient {
   private handleSyncMessage(subscription: SyncSubscription, message: ServerMessage) {
     if (message.type === "sync.snapshot") {
       this.clearSyncRetry(subscription, true);
+      subscription.verificationGeneration += 1;
+      subscription.isUpToDate = false;
       subscription.opening = false;
       subscription.cursor = message.cursor;
       subscription.keyField = message.key;
@@ -774,6 +787,7 @@ export class GonvexClient {
         message.orderBy,
         message.orderDirection,
       );
+      subscription.hashes = { ...(message.hashes ?? {}) };
       const snapshot: ServerMessage = { ...message, result: subscription.rows };
       subscription.lastMessage = snapshot;
       this.emitSyncMessage(subscription, snapshot);
@@ -783,9 +797,15 @@ export class GonvexClient {
     if (message.type === "sync.delta") {
       if (subscription.cursor && (
         message.cursor.epoch !== subscription.cursor.epoch
-        || message.cursor.revision <= subscription.cursor.revision
+        || message.cursor.revision < subscription.cursor.revision
+        || (
+          message.cursor.revision === subscription.cursor.revision
+          && !(subscription.mode === "progressive" && message.digest)
+        )
       )) return;
       this.clearSyncRetry(subscription, true);
+      subscription.verificationGeneration += 1;
+      subscription.isUpToDate = false;
       subscription.cursor = message.cursor;
       subscription.rows = applySyncDelta(
         subscription.rows,
@@ -797,6 +817,8 @@ export class GonvexClient {
         subscription.orderBy,
         subscription.orderDirection,
       );
+      for (const key of message.deleted ?? []) delete subscription.hashes[key];
+      Object.assign(subscription.hashes, message.hashes ?? {});
       const snapshot: ServerMessage = {
         type: "sync.snapshot",
         id: subscription.id,
@@ -817,8 +839,11 @@ export class GonvexClient {
     }
     if (message.type === "sync.reset") {
       this.clearSyncRetry(subscription, true);
+      subscription.verificationGeneration += 1;
+      subscription.isUpToDate = false;
       subscription.cursor = undefined;
       subscription.rows = [];
+      subscription.hashes = {};
       subscription.lastMessage = undefined;
       subscription.opening = false;
       const directive = this.queryCacheDirective;
@@ -830,25 +855,81 @@ export class GonvexClient {
           subscription.args,
         ));
       }
+      this.emitSyncMessage(subscription, message);
       queueMicrotask(() => this.sendSyncOpen(subscription));
       return;
     }
     if (message.type === "sync.ready") {
-      this.clearSyncRetry(subscription, true);
-      subscription.opening = false;
-      subscription.cursor = message.cursor;
-      subscription.mode = message.mode ?? subscription.mode;
-      this.persistSyncSnapshot(subscription);
+      if (message.digest && subscription.mode === "progressive") {
+        const generation = ++subscription.verificationGeneration;
+        void syncHashesDigest(subscription.hashes).then((digest) => {
+          if (
+            generation !== subscription.verificationGeneration
+            || this.syncSubscriptions.get(subscription.key) !== subscription
+          ) return;
+          if (digest !== message.digest) {
+            this.handleSyncMessage(subscription, {
+              type: "sync.reset",
+              id: subscription.id,
+              path: subscription.path,
+              reason: "integrity-mismatch",
+            });
+            return;
+          }
+          this.acceptSyncReady(subscription, message);
+        }).catch(() => {
+          if (generation !== subscription.verificationGeneration) return;
+          this.handleSyncMessage(subscription, {
+            type: "sync.reset",
+            id: subscription.id,
+            path: subscription.path,
+            reason: "integrity-mismatch",
+          });
+        });
+        return;
+      }
+      this.acceptSyncReady(subscription, message);
+      return;
     }
     if (message.type === "sync.error") {
+      subscription.verificationGeneration += 1;
+      subscription.isUpToDate = false;
       subscription.opening = false;
       this.scheduleSyncRetry(subscription);
     }
     this.emitSyncMessage(subscription, message);
   }
 
+  private acceptSyncReady(
+    subscription: SyncSubscription,
+    message: Extract<ServerMessage, { type: "sync.ready" }>,
+  ) {
+    this.clearSyncRetry(subscription, true);
+    subscription.isUpToDate = true;
+    subscription.opening = false;
+    subscription.cursor = message.cursor;
+    subscription.mode = message.mode ?? subscription.mode;
+    this.persistSyncSnapshot(subscription);
+    this.emitSyncMessage(subscription, message);
+  }
+
   private emitSyncMessage(subscription: SyncSubscription, message: ServerMessage) {
     for (const listener of Array.from(subscription.listeners)) listener(message);
+  }
+
+  private markSyncSubscriptionsOutOfDate() {
+    for (const subscription of this.syncSubscriptions.values()) {
+      const wasUpToDate = subscription.isUpToDate;
+      subscription.verificationGeneration += 1;
+      subscription.isUpToDate = false;
+      if (!wasUpToDate) continue;
+      this.emitSyncMessage(subscription, {
+        type: "sync.syncing",
+        id: subscription.id,
+        path: subscription.path,
+        reason: "disconnected",
+      });
+    }
   }
 
   private startSync(subscription: SyncSubscription) {
@@ -869,6 +950,7 @@ export class GonvexClient {
         || this.queryCacheDirective?.scope !== directive.scope
       ) return;
       if (cached) {
+        subscription.isUpToDate = false;
         subscription.rows = cached.rows;
         subscription.cursor = cached.cursor;
         subscription.keyField = cached.keyField;
@@ -877,6 +959,7 @@ export class GonvexClient {
         subscription.orderDirection = cached.orderDirection;
         subscription.maxRows = cached.maxRows;
         subscription.maxBytes = cached.maxBytes;
+        subscription.hashes = { ...(cached.hashes ?? {}) };
         const message: ServerMessage = {
           type: "sync.snapshot",
           id: subscription.id,
@@ -922,6 +1005,9 @@ export class GonvexClient {
       args: subscription.args,
       cursor: subscription.cursor,
       keys,
+      hashes: subscription.mode === "progressive" && Object.keys(subscription.hashes).length > 0
+        ? subscription.hashes
+        : undefined,
     };
   }
 
@@ -965,6 +1051,7 @@ export class GonvexClient {
       orderDirection: subscription.orderDirection,
       maxRows: subscription.maxRows,
       maxBytes: subscription.maxBytes,
+      hashes: subscription.hashes,
     };
     this.enqueueSyncPersistence(
       subscription,
@@ -986,6 +1073,7 @@ export class GonvexClient {
       deleted,
       maxRows: subscription.maxRows,
       maxBytes: subscription.maxBytes,
+      hashes: subscription.hashes,
     };
     this.enqueueSyncPersistence(
       subscription,
@@ -1317,11 +1405,14 @@ export class GonvexClient {
     }
     for (const subscription of this.syncSubscriptions.values()) {
       this.clearSyncRetry(subscription, true);
+      subscription.isUpToDate = false;
       subscription.rows = [];
+      subscription.hashes = {};
       subscription.cursor = undefined;
       subscription.lastMessage = undefined;
       subscription.cacheReadGeneration = undefined;
       subscription.opening = false;
+      subscription.verificationGeneration += 1;
     }
     if (hadScope || this.querySubscriptions.size > 0 || this.syncSubscriptions.size > 0) {
       for (const handler of this.sessionScopeHandlers) handler();

@@ -60,6 +60,45 @@ func Register(app *gonvex.App) {
 	}
 }
 
+func TestParseRegistrationsIncludesCompleteProgressiveSyncDefinition(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "sync.go")
+	source := `package app
+import "github.com/gonvex/gonvex/pkg/gonvex"
+func Register(app *gonvex.App) {
+  app.Sync("sync.tasks", ListTasks,
+    gonvex.SyncTable("tasks").
+      Key("_id").
+      EqualArg("tenantId").
+      VisibilityDependsOn("taskAcks", "taskApprovalInstances", "taskWorkspaceContexts").
+      OrderBy("id", "desc").
+      Progressive().
+      Budget(100, 4194304),
+    gonvex.Reads("tasks", "taskAcks"),
+  )
+}`
+	if err := os.WriteFile(file, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := parseRegistrations(root, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := entries["sync.tasks"]
+	if entry.Sync == nil {
+		t.Fatal("sync definition was not parsed")
+	}
+	if entry.Sync.Mode != "progressive" || entry.Sync.MaxRows != 100 || entry.Sync.MaxBytes != 4194304 {
+		t.Fatalf("progressive sync budget = %#v", entry.Sync)
+	}
+	if got := strings.Join(entry.Sync.VisibilityTables, ","); got != "taskAcks,taskApprovalInstances,taskWorkspaceContexts" {
+		t.Fatalf("visibility dependencies = %q", got)
+	}
+	if len(entry.Dependencies.Reads) != 2 {
+		t.Fatalf("sync reads = %#v", entry.Dependencies.Reads)
+	}
+}
+
 func TestParseSchemaScopesTables(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "schema.go")

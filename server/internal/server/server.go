@@ -727,11 +727,17 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		schemaSkipped = true
 	} else {
 		syncDefinitions := manifestSyncDefinitions(next)
+		landlordSyncDefinitions, definitionErr := syncDefinitionsForSchema(syncDefinitions, next.Schema.LandlordSchema())
+		if definitionErr != nil {
+			syncErr = definitionErr
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": definitionErr.Error()})
+			return
+		}
 		migrationResult, err = schema.ApplyWithSync(
 			r.Context(),
 			s.databaseURLForProject(next.Project),
 			next.Schema.LandlordSchema(),
-			syncDefinitionsForSchema(syncDefinitions, next.Schema.LandlordSchema()),
+			landlordSyncDefinitions,
 		)
 		if err != nil {
 			syncErr = err

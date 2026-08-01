@@ -39,16 +39,18 @@ type clientMessage struct {
 	Device             json.RawMessage   `json:"device,omitempty"`
 	Cursor             *syncCursor       `json:"cursor,omitempty"`
 	Keys               []string          `json:"keys,omitempty"`
+	Hashes             map[string]string `json:"hashes,omitempty"`
 	Opens              []syncOpenRequest `json:"opens,omitempty"`
 	CacheRevision      string            `json:"cacheRevision,omitempty"`
 }
 
 type syncOpenRequest struct {
-	ID     string          `json:"id"`
-	Path   string          `json:"path"`
-	Args   json.RawMessage `json:"args,omitempty"`
-	Cursor *syncCursor     `json:"cursor,omitempty"`
-	Keys   []string        `json:"keys,omitempty"`
+	ID     string            `json:"id"`
+	Path   string            `json:"path"`
+	Args   json.RawMessage   `json:"args,omitempty"`
+	Cursor *syncCursor       `json:"cursor,omitempty"`
+	Keys   []string          `json:"keys,omitempty"`
+	Hashes map[string]string `json:"hashes,omitempty"`
 }
 
 type serverCapabilities struct {
@@ -60,6 +62,7 @@ type syncReadyMessage struct {
 	Path   string      `json:"path,omitempty"`
 	Cursor *syncCursor `json:"cursor"`
 	Mode   string      `json:"mode,omitempty"`
+	Digest string      `json:"digest,omitempty"`
 }
 
 type serverMessage struct {
@@ -92,6 +95,8 @@ type serverMessage struct {
 	MaxBytes             int64                 `json:"maxBytes,omitempty"`
 	Upserts              []json.RawMessage     `json:"upserts,omitempty"`
 	MutationIDs          []string              `json:"mutationIds,omitempty"`
+	Hashes               map[string]string     `json:"hashes,omitempty"`
+	Digest               string                `json:"digest,omitempty"`
 	Ready                []syncReadyMessage    `json:"ready,omitempty"`
 }
 

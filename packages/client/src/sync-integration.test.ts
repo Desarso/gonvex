@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   GonvexClient,
+  syncHashesDigest,
   type FunctionReference,
   type StoredSyncCollection,
   type SyncStore,
@@ -484,6 +485,169 @@ describe("durable sync integration", () => {
       id: open.id,
     });
     expect(sentMessages(second).at(-1).cursor).toBeUndefined();
+  });
+
+  it("never reports a cached sync as current while its WebSocket is reconciling", async () => {
+    const store = new FakeSyncStore();
+    store.stored = {
+      rows: [{ id: "cached", title: "old" }],
+      cursor: { epoch: "sync-a", revision: 20 },
+      keyField: "id",
+    };
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const watch = client.watchSync<{ id: string; title: string }>(ref, { workspaceId: "workspace-a" });
+    const updates: Array<{ rows: unknown; isUpToDate: boolean }> = [];
+    watch.onUpdate(() => {
+      updates.push({
+        rows: watch.localSyncResult(),
+        isUpToDate: watch.status().isUpToDate,
+      });
+    });
+
+    const first = socket();
+    first.open();
+    first.receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const open = sentMessages(first).find((message) => message.type === "sync.open");
+
+    expect(watch.localSyncResult()).toEqual([{ id: "cached", title: "old" }]);
+    expect(watch.status().isUpToDate).toBe(false);
+
+    first.receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 20 },
+    });
+    expect(watch.status().isUpToDate).toBe(true);
+
+    first.disconnect();
+    expect(watch.status().isUpToDate).toBe(false);
+
+    vi.advanceTimersByTime(250);
+    const second = socket();
+    second.open();
+    second.receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    expect(watch.status().isUpToDate).toBe(false);
+
+    second.receive({
+      type: "sync.reset",
+      id: open.id,
+      path: ref.path,
+      reason: "visibility-changed",
+    });
+    await flushAsyncWork();
+    expect(watch.status().isUpToDate).toBe(false);
+
+    const reopened = sentMessages(second).at(-1);
+    second.receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: [{ id: "cached", title: "current" }],
+      cursor: { epoch: "sync-a", revision: 21 },
+      key: "id",
+    });
+    expect(watch.status().isUpToDate).toBe(false);
+
+    second.receive({
+      type: "sync.ready",
+      id: reopened.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 21 },
+    });
+    expect(watch.localSyncResult()).toEqual([{ id: "cached", title: "current" }]);
+    expect(watch.status().isUpToDate).toBe(true);
+    expect(updates.some((update) => update.isUpToDate === false)).toBe(true);
+  });
+
+  it("fails closed and rebuilds when the authoritative collection digest disagrees", async () => {
+    const store = new FakeSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const watch = client.watchSync<{ id: string; title: string }>(ref, { workspaceId: "workspace-a" });
+    watch.onUpdate(() => undefined);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const open = sentMessages().find((message) => message.type === "sync.open");
+
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: [{ id: "task-a", title: "stale" }],
+      cursor: { epoch: "sync-a", revision: 20 },
+      key: "id",
+      mode: "progressive",
+      hashes: { "task-a": "server-row-hash" },
+    });
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 20 },
+      mode: "progressive",
+      digest: await syncHashesDigest({ "task-a": "different-row-hash" }),
+    });
+    // WebCrypto resolves outside Vitest's fake-timer microtask queue.
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(store.deletes).toHaveLength(1));
+
+    expect(watch.status().isUpToDate).toBe(false);
+    expect(store.deletes).toEqual([{
+      scope,
+      path: ref.path,
+      args: { workspaceId: "workspace-a" },
+    }]);
+    expect(sentMessages().at(-1)).toMatchObject({ type: "sync.open", id: open.id });
+    expect(sentMessages().at(-1).cursor).toBeUndefined();
+  });
+
+  it("repairs a legacy or corrupted progressive cache at the same cursor without a full snapshot", async () => {
+    const store = new FakeSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const watch = client.watchSync<{ id: string; title: string }>(ref, { workspaceId: "workspace-a" });
+    watch.onUpdate(() => undefined);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const open = sentMessages().find((message) => message.type === "sync.open");
+    const currentHashes = { "task-a": "current-row-hash" };
+
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: [{ id: "task-a", title: "stale" }],
+      cursor: { epoch: "sync-a", revision: 20 },
+      key: "id",
+      mode: "progressive",
+      hashes: { "task-a": "stale-row-hash" },
+    });
+    socket().receive({
+      type: "sync.delta",
+      id: open.id,
+      path: ref.path,
+      upserts: [{ id: "task-a", title: "current" }],
+      deleted: [],
+      cursor: { epoch: "sync-a", revision: 20 },
+      hashes: currentHashes,
+      digest: await syncHashesDigest(currentHashes),
+    });
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 20 },
+      mode: "progressive",
+      digest: await syncHashesDigest(currentHashes),
+    });
+
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(watch.status().isUpToDate).toBe(true));
+    expect(watch.localSyncResult()).toEqual([{ id: "task-a", title: "current" }]);
+    expect(store.deletes).toEqual([]);
   });
 
   it("serializes snapshot, delta, and reset persistence under slow IndexedDB writes", async () => {

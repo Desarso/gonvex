@@ -92,6 +92,7 @@ export type SyncOpenRequest = {
   args: JsonValue;
   cursor?: SyncCursor;
   keys?: string[];
+  hashes?: Record<string, string>;
 };
 
 export type SyncReady = {
@@ -99,6 +100,7 @@ export type SyncReady = {
   path?: string;
   cursor: SyncCursor;
   mode?: "eager" | "progressive";
+  digest?: string;
 };
 
 export type GonvexManifest = {
@@ -112,7 +114,7 @@ export type ClientMessage =
   | { type: "auth"; id: string; token?: string; project?: string; tenant?: string }
   | { type: "query.subscribe"; id: string; path: string; args: JsonValue; cacheRevision?: string }
   | { type: "query.unsubscribe"; id: string }
-  | { type: "sync.open"; id: string; path: string; args: JsonValue; cursor?: SyncCursor; keys?: string[] }
+  | { type: "sync.open"; id: string; path: string; args: JsonValue; cursor?: SyncCursor; keys?: string[]; hashes?: Record<string, string> }
   | { type: "sync.openMany"; opens: SyncOpenRequest[] }
   | { type: "sync.close"; id: string }
   | { type: "mutation.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }
@@ -189,6 +191,7 @@ export type ServerMessage =
     mode?: "eager" | "progressive";
     maxRows?: number;
     maxBytes?: number;
+    hashes?: Record<string, string>;
   }
   | {
     type: "sync.delta";
@@ -198,10 +201,15 @@ export type ServerMessage =
     upserts?: JsonValue[];
     deleted?: string[];
     mutationIds?: string[];
+    hashes?: Record<string, string>;
+    digest?: string;
   }
-  | ({ type: "sync.ready" } & SyncReady)
+  | ({ type: "sync.ready"; digest?: string } & SyncReady)
   | { type: "sync.readyMany"; ready: SyncReady[] }
-  | { type: "sync.reset"; id: string; path?: string; reason: "cursor-expired" | "definition-changed" | "visibility-changed" | "recover" }
+  // Client-local status frame emitted when a formerly authoritative materialized
+  // collection must be reconciled before it can be trusted again.
+  | { type: "sync.syncing"; id: string; path?: string; reason: "disconnected" }
+  | { type: "sync.reset"; id: string; path?: string; reason: "cursor-expired" | "definition-changed" | "visibility-changed" | "integrity-mismatch" | "recover" }
   | { type: "sync.error"; id: string; path?: string; error: string }
   | { type: "query.error"; id: string; path?: string; error: string }
   | { type: "mutation.result"; id: string; path?: string; result: JsonValue; trace?: MessageTrace }

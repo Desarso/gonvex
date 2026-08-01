@@ -102,6 +102,109 @@ func TestSyncCursorForClockSharesRevisionButIsolatesDefinitionsAndScopes(t *test
 	}
 }
 
+func TestSyncDefinitionsForSchemaDurablyLogsVisibilityDependencies(t *testing.T) {
+	definitions := map[string]manifest.SyncDefinition{
+		"tasks": {
+			Table:            "tasks",
+			Key:              "id",
+			Columns:          []string{"id", "title"},
+			VisibilityTables: []string{"taskAcks"},
+		},
+	}
+	schema := manifest.Schema{Tables: map[string]manifest.Table{
+		"tasks": {Columns: map[string]manifest.Column{
+			"id":    {Type: "id", PrimaryKey: true},
+			"title": {Type: "string"},
+		}},
+		"taskAcks": {Columns: map[string]manifest.Column{
+			"_id":    {Type: "id", PrimaryKey: true},
+			"status": {Type: "string"},
+		}},
+	}}
+
+	got, err := syncDefinitionsForSchema(definitions, schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependency, ok := got["taskAcks"]
+	if !ok {
+		t.Fatal("visibility dependency must have a durable sync-log trigger for offline reconnects")
+	}
+	if dependency.Key != "_id" || len(dependency.Columns) != 1 || dependency.Columns[0] != "_id" {
+		t.Fatalf("unexpected visibility dependency definition: %#v", dependency)
+	}
+}
+
+func TestSyncVisibilityChangesAreIncludedInReconnectReconciliation(t *testing.T) {
+	changes := []syncLogChange{
+		{revision: 41, table: "tasks", rowID: "task-a"},
+		{revision: 42, table: "taskAckReads", rowID: "read-a"},
+	}
+	if !syncVisibilityChanged(changes, "tasks") {
+		t.Fatal("a dependency-table change must be reconciled before sync.ready")
+	}
+	if syncVisibilityChanged(changes[:1], "tasks") {
+		t.Fatal("source-table changes must remain delta-replayable")
+	}
+}
+
+func TestProgressiveSyncKeepsContextRoutedRowsInBothCollections(t *testing.T) {
+	current := map[string]json.RawMessage{
+		"task-a": json.RawMessage(`{"id":"task-a","workspaceId":"approval-workspace"}`),
+	}
+	visible := map[string]bool{"task-a": true}
+	currentHashes := syncRowsHashes([]json.RawMessage{current["task-a"]}, "id")
+	visibleHashes := map[string]string{"task-a": "stale-hash"}
+	changes := []syncLogChange{{
+		revision: 42,
+		table:    "tasks",
+		rowID:    "task-a",
+		// The physical source task remains in its default workspace. The computed
+		// handler includes it in the approval/acknowledgment workspace as well.
+		newValue: json.RawMessage(`{"id":"task-a","workspaceId":"default-workspace"}`),
+	}}
+
+	upserts, deleted, _ := progressiveSyncDiff(current, currentHashes, visible, visibleHashes, changes)
+	if _, ok := upserts["task-a"]; !ok {
+		t.Fatal("handler-authorized context row must be updated in the action workspace")
+	}
+	if deleted["task-a"] {
+		t.Fatal("context-routed task must not be removed merely because its physical workspace differs")
+	}
+}
+
+func TestProgressiveSyncSendsOnlyRowsWhoseAuthoritativeHashChanged(t *testing.T) {
+	rows := map[string]json.RawMessage{
+		"same":    json.RawMessage(`{"id":"same","value":1}`),
+		"changed": json.RawMessage(`{"id":"changed","value":2}`),
+	}
+	hashes := syncRowsHashes([]json.RawMessage{rows["same"], rows["changed"]}, "id")
+	visible := map[string]bool{"same": true, "changed": true, "deleted": true}
+	visibleHashes := map[string]string{
+		"same":    hashes["same"],
+		"changed": "old-hash",
+		"deleted": "deleted-hash",
+	}
+
+	upserts, deleted, _ := progressiveSyncDiff(rows, hashes, visible, visibleHashes, nil)
+	if len(upserts) != 1 || upserts["changed"] == nil {
+		t.Fatalf("expected only changed row delta, got %#v", upserts)
+	}
+	if len(deleted) != 1 || !deleted["deleted"] {
+		t.Fatalf("expected only missing row deletion, got %#v", deleted)
+	}
+}
+
+func TestSyncHashesDigestMatchesClientCanonicalEncoding(t *testing.T) {
+	const want = "db8992cf941b185a1c5bbcfbdc3f43204fe09d42b1a57ff584f6ad2e5e6dfdbd"
+	if got := syncHashesDigest(map[string]string{"a": "b"}); got != want {
+		t.Fatalf("digest = %q, want %q", got, want)
+	}
+	if got := syncHashesDigest(map[string]string{}); got != "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" {
+		t.Fatalf("empty digest = %q", got)
+	}
+}
+
 func TestSyncBatchProtocolPreservesIndependentResumeState(t *testing.T) {
 	var message clientMessage
 	if err := json.Unmarshal([]byte(`{
