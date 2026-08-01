@@ -203,6 +203,28 @@ async function digestRows(rows: JsonValue[], keyField = "id") {
   return syncHashesDigest(await syncRowsHashes(rows, keyField));
 }
 
+function seededRandom(seed: number) {
+  let state = seed >>> 0;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return state >>> 0;
+  };
+}
+
+function orderedRows(rows: Map<string, { id: string; value: number }>) {
+  return [...rows.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function normalizedRows(rows: JsonValue[] | undefined) {
+  return [...(rows ?? [])].sort((left, right) => {
+    const leftID = String((left as { id?: unknown }).id ?? "");
+    const rightID = String((right as { id?: unknown }).id ?? "");
+    return leftID.localeCompare(rightID);
+  });
+}
+
 describe("durable sync integration", () => {
   it("replays the prior identity scope before background server auth completes", async () => {
     const store = new FakeSyncStore();
@@ -405,6 +427,40 @@ describe("durable sync integration", () => {
     ).toBe(true));
   });
 
+  it("splits oversized warm resumes into bounded frames without stranding a collection", async () => {
+    const store = new FakeSyncStore();
+    store.stored = {
+      rows: [{ id: "cached" }],
+      cursor: { epoch: "sync-a", revision: 41 },
+      keyField: "id",
+      mode: "eager",
+    };
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+
+    for (let index = 0; index < 513; index += 1) {
+      client.subscribeSync(
+        { kind: "sync", path: `references.oversizedCollection${index}` },
+        { tenantId: "tenant-a" },
+        () => undefined,
+      );
+    }
+    socket().open();
+    socket().receive({
+      type: "session.ready",
+      queryCache: directive,
+      capabilities: { syncBatch: 1 },
+    });
+    await flushAsyncWork();
+    await vi.runOnlyPendingTimersAsync();
+    await flushAsyncWork();
+
+    const batches = sentMessages().filter((message) => message.type === "sync.openMany");
+    expect(batches.map((batch) => batch.opens.length)).toEqual([256, 256, 1]);
+    const opens = batches.flatMap((batch) => batch.opens);
+    expect(opens).toHaveLength(513);
+    expect(new Set(opens.map((open: { id: string }) => open.id)).size).toBe(513);
+  });
+
   it("keeps progressive visibility keys and persists modes learned from batched ready messages", async () => {
     const store = new FakeSyncStore();
     store.stored = {
@@ -499,6 +555,238 @@ describe("durable sync integration", () => {
       deleted: ["b"],
     })]);
   });
+
+  it("never lets delayed snapshot or ready frames regress an authoritative cursor", async () => {
+    const store = new FakeSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const watch = client.watchSync<{ id: string; title: string }>(ref, { workspaceId: "workspace-a" });
+    watch.onUpdate(() => undefined);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const open = sentMessages().find((message) => message.type === "sync.open");
+    const currentRows = [{ id: "task-a", title: "current" }];
+    const currentDigest = await digestRows(currentRows);
+
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: currentRows,
+      cursor: { epoch: "sync-a", revision: 20 },
+      key: "id",
+      mode: "eager",
+    });
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 20 },
+      mode: "eager",
+      digest: currentDigest,
+    });
+    await flushAsyncWork();
+    expect(watch.status().isUpToDate).toBe(true);
+
+    const delayedRows = [{ id: "task-a", title: "delayed-old-value" }];
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: delayedRows,
+      cursor: { epoch: "sync-a", revision: 19 },
+      key: "id",
+      mode: "eager",
+    });
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 19 },
+      mode: "eager",
+      digest: await digestRows(delayedRows),
+    });
+    await flushAsyncWork();
+
+    expect(watch.status().isUpToDate).toBe(true);
+    expect(watch.localSyncResult()).toEqual(currentRows);
+    expect(store.replacements.at(-1)?.cursor).toEqual({ epoch: "sync-a", revision: 20 });
+  });
+
+  it("never reports stale rows as current during bounded randomized protocol chaos", async () => {
+    const requestedMultiplier = Number.parseInt(process.env.GONVEX_SYNC_CHAOS_MULTIPLIER ?? "1", 10);
+    const multiplier = Math.min(4, Math.max(1, Number.isFinite(requestedMultiplier) ? requestedMultiplier : 1));
+    const seeds = Array.from({ length: 12 * multiplier }, (_, index) => 0x51a7e + index * 7919);
+
+    for (const seed of seeds) {
+      const random = seededRandom(seed);
+      const store = new FakeSyncStore();
+      const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+      const watch = client.watchSync<{ id: string; value: number }>(
+        ref,
+        { workspaceId: `workspace-${seed}` },
+      );
+      watch.onUpdate(() => undefined);
+      let activeSocket = socket();
+      activeSocket.open();
+      activeSocket.receive({ type: "session.ready", queryCache: directive });
+      await flushAsyncWork();
+      const syncID = sentMessages(activeSocket).find((message) => message.type === "sync.open")?.id;
+      expect(syncID).toBeTypeOf("string");
+
+      const authoritative = new Map<string, { id: string; value: number }>([
+        ["row-0", { id: "row-0", value: seed }],
+        ["row-1", { id: "row-1", value: seed + 1 }],
+      ]);
+      let revision = 1;
+      const sendReady = async () => {
+        const rows = orderedRows(authoritative);
+        activeSocket.receive({
+          type: "sync.ready",
+          id: syncID,
+          path: ref.path,
+          cursor: { epoch: "sync-chaos", revision },
+          mode: "eager",
+          digest: await digestRows(rows),
+        });
+        await flushAsyncWork();
+      };
+      const sendFreshSnapshot = async () => {
+        const rows = orderedRows(authoritative);
+        activeSocket.receive({
+          type: "sync.snapshot",
+          id: syncID,
+          path: ref.path,
+          result: rows,
+          cursor: { epoch: "sync-chaos", revision },
+          key: "id",
+          mode: "eager",
+        });
+        await sendReady();
+      };
+      const assertInvariant = (step: number) => {
+        if (!watch.status().isUpToDate) return;
+        expect(
+          normalizedRows(watch.localSyncResult()),
+          `seed=${seed} step=${step} exposed stale rows while current`,
+        ).toEqual(orderedRows(authoritative));
+      };
+
+      await sendFreshSnapshot();
+      assertInvariant(-1);
+
+      for (let step = 0; step < 80 * multiplier; step += 1) {
+        const operation = random() % 7;
+        if (operation <= 1) {
+          activeSocket.receive({
+            type: "sync.syncing",
+            id: syncID,
+            path: ref.path,
+            reason: "chaos-mutation",
+          });
+          const id = `row-${random() % 12}`;
+          const deleted = authoritative.has(id) && random() % 4 === 0;
+          revision += 1;
+          let upserts: Array<{ id: string; value: number }> = [];
+          let deletedIDs: string[] = [];
+          if (deleted) {
+            authoritative.delete(id);
+            deletedIDs = [id];
+          } else {
+            const row = { id, value: random() % 1_000_000 };
+            authoritative.set(id, row);
+            upserts = [row];
+          }
+          activeSocket.receive({
+            type: "sync.delta",
+            id: syncID,
+            path: ref.path,
+            upserts,
+            deleted: deletedIDs,
+            cursor: { epoch: "sync-chaos", revision },
+            digest: await digestRows(orderedRows(authoritative)),
+          });
+          await sendReady();
+        } else if (operation === 2) {
+          activeSocket.receive({
+            type: "sync.syncing",
+            id: syncID,
+            path: ref.path,
+            reason: "chaos-dependency-change",
+          });
+          revision += 1;
+          activeSocket.receive({
+            type: "sync.delta",
+            id: syncID,
+            path: ref.path,
+            upserts: [],
+            deleted: [],
+            cursor: { epoch: "sync-chaos", revision },
+            digest: await digestRows(orderedRows(authoritative)),
+          });
+          await sendReady();
+        } else if (operation === 3) {
+          const delayedRows = [{ id: "delayed-corruption", value: seed + step }];
+          const delayedRevision = Math.max(0, revision - 1);
+          activeSocket.receive({
+            type: "sync.snapshot",
+            id: syncID,
+            path: ref.path,
+            result: delayedRows,
+            cursor: { epoch: "sync-chaos", revision: delayedRevision },
+            key: "id",
+            mode: "eager",
+          });
+          activeSocket.receive({
+            type: "sync.ready",
+            id: syncID,
+            path: ref.path,
+            cursor: { epoch: "sync-chaos", revision: delayedRevision },
+            mode: "eager",
+            digest: await digestRows(delayedRows),
+          });
+          await flushAsyncWork();
+        } else if (operation === 4) {
+          activeSocket.receive({
+            type: "sync.syncing",
+            id: syncID,
+            path: ref.path,
+            reason: "chaos-corruption",
+          });
+          revision += 1;
+          activeSocket.receive({
+            type: "sync.delta",
+            id: syncID,
+            path: ref.path,
+            upserts: [{ id: "injected-corruption", value: step }],
+            deleted: [],
+            cursor: { epoch: "sync-chaos", revision },
+            digest: "intentionally-wrong",
+          });
+          await sendReady();
+          expect(watch.status().isUpToDate, `seed=${seed} step=${step} trusted corrupt delta`).toBe(false);
+          await flushAsyncWork();
+          await sendFreshSnapshot();
+        } else if (operation === 5) {
+          activeSocket.disconnect();
+          expect(watch.status().isUpToDate).toBe(false);
+          await vi.advanceTimersByTimeAsync(250);
+          activeSocket = socket();
+          activeSocket.open();
+          activeSocket.receive({ type: "session.ready", queryCache: directive });
+          await flushAsyncWork();
+          await sendReady();
+        } else {
+          activeSocket.receive({ type: "sync.needHashes", id: syncID, path: ref.path });
+          expect(watch.status().isUpToDate).toBe(false);
+          await flushAsyncWork();
+          await sendReady();
+        }
+        assertInvariant(step);
+      }
+      client.close();
+    }
+  }, 30_000);
 
   it("resumes the latest cursor after reconnect and clears only a reset collection", async () => {
     const store = new FakeSyncStore();

@@ -203,6 +203,10 @@ export type GonvexTelemetryEvent = {
 // round trip. Larger collections resume with one 64-byte digest and only send
 // the hash map when the server proves that something actually differs.
 const compactSyncIntegrityThreshold = 256;
+// Must match the runtime's per-frame sync.openMany admission limit. Keeping
+// this client-side prevents one oversized page from stranding every sync in a
+// batch behind a frame-level rejection.
+const maxSyncBatchOpens = 256;
 
 export class GonvexClient {
   private socket: WebSocket | undefined;
@@ -785,6 +789,10 @@ export class GonvexClient {
 
   private handleSyncMessage(subscription: SyncSubscription, message: ServerMessage) {
     if (message.type === "sync.snapshot") {
+      // Snapshots are only valid responses to an outstanding sync.open. Live
+      // subscriptions advance through deltas; accepting an unsolicited or
+      // delayed snapshot could roll a verified collection back to old rows.
+      if (!subscription.opening) return;
       this.clearSyncRetry(subscription, true);
       subscription.verificationGeneration += 1;
       subscription.isUpToDate = false;
@@ -904,6 +912,10 @@ export class GonvexClient {
       return;
     }
     if (message.type === "sync.ready") {
+      if (!subscription.cursor || (
+        message.cursor.epoch !== subscription.cursor.epoch
+        || message.cursor.revision < subscription.cursor.revision
+      )) return;
       const generation = ++subscription.verificationGeneration;
       if (!message.digest) {
         this.handleSyncMessage(subscription, {
@@ -1127,8 +1139,9 @@ export class GonvexClient {
         && this.syncSubscriptions.get(subscription.key) === subscription
       ))
       .map((subscription) => this.syncOpenRequest(subscription));
-    if (opens.length === 0) return;
-    this.send({ type: "sync.openMany", opens });
+    for (let offset = 0; offset < opens.length; offset += maxSyncBatchOpens) {
+      this.send({ type: "sync.openMany", opens: opens.slice(offset, offset + maxSyncBatchOpens) });
+    }
   }
 
   private unsubscribeSyncListener(key: string, listener: SubscriptionHandler) {
