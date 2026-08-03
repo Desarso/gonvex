@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { stampRuntimeCompose } from "./deploy-coolify.mjs";
+import { stampRuntimeCompose, verifyRuntimeCompose } from "./deploy-coolify.mjs";
 
 const oldSha = "a".repeat(40);
 const newSha = "b".repeat(40);
@@ -43,4 +43,14 @@ test("rejects an unexpected Compose shape instead of deploying partially", () =>
     () => stampRuntimeCompose(compose.replace(/  gonvex-dashboard:[\s\S]*/, ""), newSha),
     /exactly 2 Gonvex Git build contexts/,
   );
+});
+
+test("verifies Coolify's quote-normalized Compose semantically", () => {
+  const normalized = stampRuntimeCompose(compose, newSha).replace(
+    `GONVEX_RUNTIME_VERSION: '${newSha}'`,
+    `GONVEX_RUNTIME_VERSION: ${newSha}`,
+  );
+
+  assert.doesNotThrow(() => verifyRuntimeCompose(normalized, newSha));
+  assert.throws(() => verifyRuntimeCompose(normalized, oldSha), /does not contain exactly 2/);
 });

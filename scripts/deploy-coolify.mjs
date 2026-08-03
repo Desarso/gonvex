@@ -26,6 +26,21 @@ export function stampRuntimeCompose(compose, sha) {
   return stamped;
 }
 
+export function verifyRuntimeCompose(compose, sha) {
+  const context = `https://github.com/Desarso/gonvex.git#${sha}`;
+  const contextCount = compose.split(context).length - 1;
+  if (contextCount !== 2) {
+    throw new Error(`saved Compose does not contain exactly 2 build contexts for ${sha}`);
+  }
+  const runtimeVersion = new RegExp(
+    `^\\s{6}GONVEX_RUNTIME_VERSION:\\s*["']?${sha}["']?\\s*$`,
+    "m",
+  );
+  if (!runtimeVersion.test(compose)) {
+    throw new Error(`saved Compose does not identify runtime ${sha}`);
+  }
+}
+
 function requiredEnvironment(name) {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -74,10 +89,7 @@ export async function deployCoolifyServices({ base, token, serviceUUIDs, sha }) 
 
   for (const { uuid } of updates) {
     const service = await coolifyRequest(base, token, `/services/${encodeURIComponent(uuid)}`);
-    const expected = stampRuntimeCompose(service.docker_compose_raw, sha);
-    if (expected !== service.docker_compose_raw) {
-      throw new Error(`Coolify service ${uuid} did not retain the requested runtime pin`);
-    }
+    verifyRuntimeCompose(service.docker_compose_raw, sha);
   }
 
   for (const { uuid } of updates) {
