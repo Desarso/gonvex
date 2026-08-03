@@ -46,6 +46,31 @@ func TestRuntimeMetricsPersistsFailuresOfEveryKind(t *testing.T) {
 	}
 }
 
+func TestRuntimeMetricsRestoresPersistedFailuresIntoErrorCapture(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	captured := make(chan runtimeLogEntry, 2)
+	metrics.onFunctionError = func(entry runtimeLogEntry) { captured <- entry }
+
+	metrics.restoreMutationLogs([]runtimeLogEntry{
+		{Project: "project-a", Path: "tasks.update", Kind: "mutation", Outcome: "ok"},
+		{Project: "project-a", Path: "dev.sync", Kind: "runtime", Outcome: "error", Error: "schema apply failed"},
+	})
+
+	select {
+	case entry := <-captured:
+		if entry.Path != "dev.sync" {
+			t.Fatalf("restored %q, want the persisted failure", entry.Path)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("persisted failure was not restored into error capture")
+	}
+	select {
+	case entry := <-captured:
+		t.Fatalf("successful persisted log was restored into error capture: %#v", entry)
+	default:
+	}
+}
+
 func TestRuntimeMetricsForwardsFailedCallsToErrorCapture(t *testing.T) {
 	metrics := newRuntimeMetrics()
 	captured := make(chan runtimeLogEntry, 4)
@@ -54,14 +79,17 @@ func TestRuntimeMetricsForwardsFailedCallsToErrorCapture(t *testing.T) {
 
 	metrics.recordRuntimeLog(runtimeLogEntry{Project: "project-a", Path: "tasks.list", Kind: "query", Outcome: "ok"}, now)
 	metrics.recordRuntimeLog(runtimeLogEntry{Project: "project-a", Path: "teams.create", Kind: "mutation", Outcome: "error", Error: "boom"}, now)
+	metrics.recordRuntimeLog(runtimeLogEntry{Project: "project-a", Path: "dev.sync", Kind: "runtime", Outcome: "error", Error: "schema apply failed"}, now)
 
-	select {
-	case entry := <-captured:
-		if entry.Path != "teams.create" {
-			t.Fatalf("captured %q, want the failed call only", entry.Path)
+	for _, want := range []string{"teams.create", "dev.sync"} {
+		select {
+		case entry := <-captured:
+			if entry.Path != want {
+				t.Fatalf("captured %q, want failed log %q", entry.Path, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("failed log %q was never forwarded to error capture", want)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("failed call was never forwarded to error capture")
 	}
 	select {
 	case entry := <-captured:
@@ -72,16 +100,20 @@ func TestRuntimeMetricsForwardsFailedCallsToErrorCapture(t *testing.T) {
 
 func TestRuntimeErrorEventCarriesTenantUserAndCulprit(t *testing.T) {
 	event, ok := runtimeErrorEvent(runtimeLogEntry{
-		Time:        "2026-07-27T22:25:38.940Z",
-		ExecutionID: "ba97d237-c189-4f2c-b4e9-6cb503f93b63",
-		Project:     "project-a",
-		Tenant:      "el-rey-2",
-		UserID:      "user-1",
-		UserEmail:   "person@example.com",
-		Path:        "assistant.processThread",
-		Kind:        "action",
-		Outcome:     "error",
-		Error:       "assistant loop: thread owner is not a member of this tenant",
+		Time:             "2026-07-27T22:25:38.940Z",
+		ExecutionID:      "ba97d237-c189-4f2c-b4e9-6cb503f93b63",
+		Project:          "project-a",
+		Tenant:           "el-rey-2",
+		UserID:           "user-1",
+		UserEmail:        "person@example.com",
+		Path:             "assistant.processThread",
+		Kind:             "action",
+		Outcome:          "error",
+		Error:            "assistant loop: thread owner is not a member of this tenant",
+		CompletedAt:      "2026-07-27T22:25:39.040Z",
+		DurationMS:       100,
+		Request:          []byte(`{"threadId":"thread-1","token":"hidden"}`),
+		RequestSizeBytes: 40,
 	})
 	if !ok {
 		t.Fatal("failed action did not produce an error event")
@@ -97,6 +129,13 @@ func TestRuntimeErrorEventCarriesTenantUserAndCulprit(t *testing.T) {
 	}
 	if event.Level != "error" || event.Message == "" || event.Tags["source"] != "runtime" {
 		t.Fatalf("event is not a tagged runtime error: %#v", event)
+	}
+	request, ok := event.Context["request"].(map[string]any)
+	if !ok || request["threadId"] != "thread-1" || request["token"] != filteredErrorValue {
+		t.Fatalf("event lost or failed to sanitize request context: %#v", event.Context)
+	}
+	if event.Context["completedAt"] != "2026-07-27T22:25:39.040Z" || event.Context["requestSizeBytes"] != "40" {
+		t.Fatalf("event lost execution timing context: %#v", event.Context)
 	}
 
 	// Distinct functions must not collapse into one group.

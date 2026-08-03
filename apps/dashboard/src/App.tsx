@@ -7871,7 +7871,7 @@ type DashboardErrorGroup = {
   environments: Record<string, number>; regression?: boolean; assignee?: string;
   latest: {
     timestamp: string; stack?: string; url?: string; userAgent?: string; release?: string; tenant?: string; environment?: string;
-    user?: Record<string, unknown>; context?: Record<string, unknown>; breadcrumbs?: Array<Record<string, unknown>>;
+    user?: Record<string, unknown>; tags?: Record<string, string>; context?: Record<string, unknown>; breadcrumbs?: Array<Record<string, unknown>>;
   };
 };
 
@@ -8037,6 +8037,10 @@ function ErrorsPage(props: { project: ProjectTarget }) {
     <div className="error-group-list">
       {visibleGroups.map((group) => {
         const expanded = selected === group.fingerprint;
+        const errorContext = group.latest.context && Object.keys(group.latest.context).length > 0
+          ? JSON.stringify(group.latest.context, null, 2)
+          : "";
+        const errorContextLabel = group.latest.tags?.source === "runtime" ? "Execution context" : "Captured context";
         return <article className="error-group-card" data-expanded={expanded ? "true" : undefined} data-priority={group.priority} key={group.fingerprint}>
           <button className="error-group-summary" type="button" aria-expanded={expanded} onClick={() => setSelected(expanded ? null : group.fingerprint)}>
             <div className="error-group-main"><div className="error-group-title"><span className="error-priority">{group.priority}</span>{group.regression ? <span className="error-regression">regression</span> : null}<strong>{group.title}</strong></div><code>{group.culprit || group.fingerprint}</code><span>Last seen {new Date(group.lastSeen).toLocaleString()} · first seen {new Date(group.firstSeen).toLocaleDateString()}</span></div>
@@ -8051,6 +8055,7 @@ function ErrorsPage(props: { project: ProjectTarget }) {
                 <div><dt>Tenant</dt><dd>{group.latest.tenant || "—"}</dd></div><div><dt>Environment</dt><dd>{group.latest.environment || "—"}</dd></div>
                 <div><dt>URL</dt><dd title={group.latest.url}>{group.latest.url || "—"}</dd></div><div><dt>User agent</dt><dd title={group.latest.userAgent}>{group.latest.userAgent || "—"}</dd></div>
               </dl>
+              {errorContext ? <div className="error-event-context"><span>{errorContextLabel}</span><pre>{errorContext}</pre></div> : null}
               {group.latest.breadcrumbs?.length ? <div className="error-breadcrumbs"><span>Recent breadcrumbs</span>{group.latest.breadcrumbs.slice(-5).map((crumb, index) => <code key={index}>{String(crumb.category ?? "event")} · {String(crumb.message ?? "")}</code>)}</div> : null}
             </div>
             <aside className="error-detail-rail">

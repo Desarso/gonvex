@@ -691,7 +691,17 @@ describe("App", () => {
       json: async () => ({ groups: [{
           fingerprint: "group-1", title: "Checkout failed", culprit: "at submitOrder (src/checkout.ts:40:3)", status: "unresolved", priority: "high",
           count: 8, firstSeen: "2026-07-11T10:00:00Z", lastSeen: "2026-07-12T10:00:00Z", tenants: { acme: 5, beta: 3 }, users: { ada: 4 }, devices: { laptop: 5, phone: 3 }, releases: { "5.1.0": 8 }, environments: { production: 8 },
-          latest: { timestamp: "2026-07-12T10:00:00Z", stack: "TypeError: Checkout failed\n at submitOrder (src/checkout.ts:40:3)", tenant: "acme", release: "5.1.0", environment: "production", url: "https://acme.example.com/checkout", userAgent: "Chrome" },
+          latest: {
+            timestamp: "2026-07-12T10:00:00Z",
+            stack: "TypeError: Checkout failed\n at submitOrder (src/checkout.ts:40:3)",
+            tenant: "acme",
+            release: "5.1.0",
+            environment: "production",
+            url: "https://acme.example.com/checkout",
+            userAgent: "Chrome",
+            tags: { source: "runtime" },
+            context: { executionId: "exec-123", durationMs: 42, request: { orderId: "order-7" } },
+          },
         }] }),
     }) as Response);
 
@@ -702,6 +712,9 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: /checkout failed/i }));
     expect(screen.getByText(/latest exception/i)).toBeInTheDocument();
     expect(screen.getByText("5.1.0", { selector: ".error-detail-heading strong" })).toBeInTheDocument();
+    expect(screen.getByText(/execution context/i)).toBeInTheDocument();
+    expect(screen.getByText(/exec-123/i)).toBeInTheDocument();
+    expect(screen.getByText(/order-7/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /copy agent brief/i })).toBeInTheDocument();
   });
 

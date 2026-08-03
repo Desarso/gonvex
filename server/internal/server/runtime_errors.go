@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"time"
@@ -18,7 +19,10 @@ import (
 // backend failure shows up beside the frontend ones with its own first/last
 // seen, tenant, and user breakdown.
 
-const runtimeErrorQueueSize = 256
+// The durable log restore is capped at metricsLogLimit, so this capacity lets a
+// restart replay every visible failed log without dropping the tail of the
+// batch before the worker can persist it.
+const runtimeErrorQueueSize = metricsLogLimit
 
 // runtimeErrorCapture is the fan-in point wired from recordRuntimeLog. It is
 // deliberately non-blocking: telemetry must never hold up request handling.
@@ -45,11 +49,6 @@ func (s *Server) startRuntimeErrorCapture() {
 func (s *Server) captureRuntimeFunctionError(entry runtimeLogEntry) {
 	event, ok := runtimeErrorEvent(entry)
 	if !ok {
-		return
-	}
-	// Same per-minute ceiling the HTTP ingest path applies, keyed to the runtime
-	// itself so one hot failing function cannot drown the store.
-	if !s.errorTracker.allow(event.Project+":runtime", time.Now()) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -100,11 +99,7 @@ func runtimeErrorEvent(entry runtimeLogEntry) (capturedError, bool) {
 			"kind":   kind,
 			"path":   strings.TrimSpace(entry.Path),
 		},
-		Context: map[string]any{
-			"durationMs":  entry.DurationMS,
-			"executionId": strings.TrimSpace(entry.ExecutionID),
-			"startedAt":   strings.TrimSpace(entry.StartedAt),
-		},
+		Context: runtimeErrorContext(entry),
 	}
 	if strings.TrimSpace(entry.ExecutionID) == "" {
 		event.EventID = generatedEventID(event)
@@ -116,4 +111,32 @@ func runtimeErrorEvent(entry runtimeLogEntry) (capturedError, bool) {
 		}
 	}
 	return sanitizeCapturedError(event), true
+}
+
+func runtimeErrorContext(entry runtimeLogEntry) map[string]any {
+	context := map[string]any{"durationMs": entry.DurationMS}
+	for key, value := range map[string]string{
+		"executionId": entry.ExecutionID,
+		"startedAt":   entry.StartedAt,
+		"completedAt": entry.CompletedAt,
+		"cache":       entry.Cache,
+		"source":      entry.Source,
+		"trigger":     entry.Reason,
+	} {
+		if value = strings.TrimSpace(value); value != "" {
+			context[key] = value
+		}
+	}
+	if entry.RequestSizeBytes > 0 {
+		context["requestSizeBytes"] = entry.RequestSizeBytes
+	}
+	if len(entry.Request) > 0 {
+		var request any
+		if json.Unmarshal(entry.Request, &request) == nil {
+			context["request"] = request
+		} else {
+			context["request"] = map[string]any{"unavailable": "request was not valid JSON"}
+		}
+	}
+	return context
 }

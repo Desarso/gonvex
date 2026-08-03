@@ -4632,7 +4632,7 @@ h1 {
 .error-detail-primary { min-width: 0; display: grid; gap: 13px; padding: 18px 20px; }
 .error-detail-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
 .error-detail-heading > div { display: grid; gap: 3px; }
-.error-detail-heading span, .error-breakdown > span, .error-triage-actions > span, .error-breadcrumbs > span { color: var(--muted); font-size: .62rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.error-detail-heading span, .error-breakdown > span, .error-triage-actions > span, .error-breadcrumbs > span, .error-event-context > span { color: var(--muted); font-size: .62rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .error-detail-heading strong { font-size: .78rem; }
 .error-detail-heading code { color: var(--muted); font-size: .67rem; }
 .error-detail-primary pre { max-height: 230px; overflow: auto; margin: 0; padding: 14px; border: 1px solid color-mix(in oklab, var(--danger) 18%, var(--border)); border-radius: var(--field-radius); background: color-mix(in oklab, var(--background) 72%, var(--surface)); color: var(--surface-foreground); font: .71rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
@@ -4640,6 +4640,8 @@ h1 {
 .error-context-grid > div { min-width: 0; display: grid; gap: 4px; padding: 9px 11px; background: var(--surface); }
 .error-context-grid dt { color: var(--muted); font-size: .61rem; font-weight: 700; text-transform: uppercase; }
 .error-context-grid dd { overflow: hidden; margin: 0; text-overflow: ellipsis; white-space: nowrap; font-size: .7rem; }
+.error-event-context { display: grid; gap: 6px; }
+.error-event-context pre { max-height: 280px; border-color: var(--border); }
 .error-breadcrumbs { display: grid; gap: 5px; }
 .error-breadcrumbs code { padding: 6px 8px; border-left: 2px solid var(--border); color: var(--muted); font-size: .67rem; }
 .error-detail-rail { display: flex; flex-direction: column; gap: 14px; padding: 18px; border-left: 1px solid var(--border); background: color-mix(in oklab, var(--surface) 78%, transparent); }

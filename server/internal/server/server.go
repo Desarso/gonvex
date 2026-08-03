@@ -134,11 +134,11 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	server.subscriptions = newSubscriptionManager(server)
 	server.scheduler = newScheduler(server.runScheduledJob)
 	server.tenantStores = newTenantStoreResolver(&server.config)
+	server.startRuntimeErrorCapture()
+	server.metrics.onFunctionError = server.queueRuntimeFunctionError
 	if strings.TrimSpace(server.projectRegistryURL()) != "" {
 		server.metrics.startMutationLogPersistence(postgresRuntimeMutationLogStore{server: server})
 	}
-	server.startRuntimeErrorCapture()
-	server.metrics.onFunctionError = server.queueRuntimeFunctionError
 	server.loadConfiguredTenantDatabases()
 	server.startLandlordMigrations()
 	server.scheduler.start(context.Background())

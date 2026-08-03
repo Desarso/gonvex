@@ -111,10 +111,22 @@ func (m *runtimeMetrics) runMutationLogPersistence(store runtimeMutationLogStore
 
 func (m *runtimeMetrics) restoreMutationLogs(entries []runtimeLogEntry) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.logs = append(entries, m.logs...)
 	if len(m.logs) > metricsLogLimit {
 		m.logs = m.logs[len(m.logs)-metricsLogLimit:]
+	}
+	onFunctionError := m.onFunctionError
+	m.mu.Unlock()
+
+	// Rehydrate the Errors inbox from the same durable failures visible in
+	// Logs. Event IDs make this replay idempotent when the error event was
+	// already captured before the runtime restarted.
+	if onFunctionError != nil {
+		for _, entry := range entries {
+			if entry.Outcome == "error" {
+				onFunctionError(entry)
+			}
+		}
 	}
 }
 
