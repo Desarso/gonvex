@@ -17,8 +17,13 @@ const (
 type queryCacheDirective struct {
 	ProtocolVersion int    `json:"protocolVersion"`
 	Scope           string `json:"scope"`
-	Epoch           string `json:"epoch"`
-	MaxAgeMS        int64  `json:"maxAgeMs"`
+	// SyncScope identifies (project, tenant, user, permissions) without the
+	// code epoch. Sync collections are persisted and resumed under this scope
+	// so a deploy does not invalidate them; correctness across code changes is
+	// guaranteed by the authoritative reconcile that every resume performs.
+	SyncScope string `json:"syncScope"`
+	Epoch     string `json:"epoch"`
+	MaxAgeMS  int64  `json:"maxAgeMs"`
 }
 
 func (s *Server) queryCacheDirective(projectID string, tenantID string, caller callerContext) *queryCacheDirective {
@@ -71,9 +76,38 @@ func (s *Server) queryCacheDirective(projectID string, tenantID string, caller c
 	return &queryCacheDirective{
 		ProtocolVersion: queryCacheProtocolVersion,
 		Scope:           scope,
+		SyncScope:       syncVisibilityScope(projectID, tenantID, caller),
 		Epoch:           epoch,
 		MaxAgeMS:        queryCacheMaxAge.Milliseconds(),
 	}
+}
+
+// syncVisibilityScope keys sync-collection persistence and cursors by who can
+// see the rows — not by which code bundle produced them. Query results must be
+// invalidated when code changes (the same query can compute a different
+// answer), but sync collections are row projections whose staleness is always
+// repaired by the authoritative reconcile on resume, so tying them to the
+// bundle epoch only forces needless full re-hydrations after every deploy.
+func syncVisibilityScope(projectID string, tenantID string, caller callerContext) string {
+	userID := "anonymous"
+	if caller.user != nil && caller.user.ID != "" {
+		userID = caller.user.ID
+	}
+	return hashQueryCacheValue(struct {
+		ProtocolVersion int    `json:"protocolVersion"`
+		Kind            string `json:"kind"`
+		ProjectID       string `json:"projectId"`
+		TenantID        string `json:"tenantId"`
+		UserID          string `json:"userId"`
+		PermissionsHash string `json:"permissionsHash"`
+	}{
+		ProtocolVersion: queryCacheProtocolVersion,
+		Kind:            "sync-visibility",
+		ProjectID:       projectID,
+		TenantID:        tenantID,
+		UserID:          userID,
+		PermissionsHash: hashQueryCacheValue(caller.permissions),
+	})
 }
 
 func hashQueryCacheValue(value any) string {

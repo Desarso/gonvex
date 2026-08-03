@@ -269,7 +269,7 @@ func (c *wsConn) openSyncWithClock(
 		return
 	}
 	definition := effectiveSyncDefinition(entry)
-	base := syncCursorForClock(clock, definition, c.currentCacheScope())
+	base := syncCursorForClock(clock, definition, c.currentSyncScope())
 
 	subscription := &syncSubscription{
 		conn: c, id: message.ID, path: message.Path, project: c.project, tenant: c.tenant,
@@ -512,23 +512,28 @@ func currentSyncClock(ctx context.Context, databaseURL string) (syncClock, error
 	return clock, nil
 }
 
-func syncCursorForClock(clock syncClock, definition manifest.SyncDefinition, cacheScope string) syncCursor {
+// syncCursorForClock derives the cursor epoch from the database epoch, the
+// sync definition, and the caller's visibility scope (project/tenant/user/
+// permissions). The code-bundle epoch is deliberately excluded: a resumed
+// cursor is never trusted blindly — deliverAuthoritativeSync re-runs the query
+// and repairs drift via deltas — so cursors may safely survive deploys.
+func syncCursorForClock(clock syncClock, definition manifest.SyncDefinition, visibilityScope string) syncCursor {
 	payload, _ := json.Marshal(struct {
 		Semantics     int                     `json:"semantics"`
 		DatabaseEpoch string                  `json:"databaseEpoch"`
 		Definition    manifest.SyncDefinition `json:"definition"`
 		Scope         string                  `json:"scope"`
-	}{syncCursorSemanticsVersion, clock.DatabaseEpoch, definition, cacheScope})
+	}{syncCursorSemanticsVersion, clock.DatabaseEpoch, definition, visibilityScope})
 	hash := sha256.Sum256(payload)
 	return syncCursor{Epoch: hex.EncodeToString(hash[:16]), Revision: clock.Revision}
 }
 
-func currentSyncCursor(ctx context.Context, databaseURL string, definition manifest.SyncDefinition, cacheScope string) (syncCursor, error) {
+func currentSyncCursor(ctx context.Context, databaseURL string, definition manifest.SyncDefinition, visibilityScope string) (syncCursor, error) {
 	clock, err := currentSyncClock(ctx, databaseURL)
 	if err != nil {
 		return syncCursor{}, err
 	}
-	return syncCursorForClock(clock, definition, cacheScope), nil
+	return syncCursorForClock(clock, definition, visibilityScope), nil
 }
 
 func (s *Server) deliverSync(subscription *syncSubscription) error {
@@ -549,7 +554,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		return nil
 	}
 	databaseURL := s.databaseURLForTenant(subscription.project, subscription.tenant)
-	latest, err := currentSyncCursor(ctx, databaseURL, subscription.definition, subscription.conn.currentCacheScope())
+	latest, err := currentSyncCursor(ctx, databaseURL, subscription.definition, subscription.conn.currentSyncScope())
 	if err != nil {
 		return err
 	}

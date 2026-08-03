@@ -177,6 +177,63 @@ func TestQueryCacheDirectiveChangesWithRuntimeManifest(t *testing.T) {
 	if before == nil || after == nil || before.Epoch == after.Epoch || before.Scope == after.Scope {
 		t.Fatalf("expected manifest change to invalidate cache scope: before=%#v after=%#v", before, after)
 	}
+	// Sync collections are row projections whose resume is always verified by
+	// the authoritative reconcile, so a deploy must NOT rotate their scope —
+	// otherwise every client full-snapshots every collection after each deploy.
+	if before.SyncScope == "" || before.SyncScope != after.SyncScope {
+		t.Fatalf("expected sync scope to survive a bundle change: before=%q after=%q", before.SyncScope, after.SyncScope)
+	}
+}
+
+func TestSyncScopeTracksVisibilityNotBundle(t *testing.T) {
+	server := New(config.Config{QueryCacheEnabled: true})
+	if err := server.runtime.SyncManifest(manifest.Manifest{
+		Project:   "project-a",
+		Functions: map[string]manifest.FunctionEntry{},
+		Schema:    manifest.EmptySchema(),
+		Bundle:    &manifest.SourceBundle{Hash: "bundle-a", Files: map[string]string{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	caller := callerContext{
+		user:        &gonvex.User{ID: "user-a"},
+		permissions: map[string]any{"role": "member"},
+	}
+	base := server.queryCacheDirective("project-a", "tenant-a", caller)
+	if base == nil || base.SyncScope == "" {
+		t.Fatalf("expected a sync scope, got %#v", base)
+	}
+	for name, other := range map[string]*queryCacheDirective{
+		"tenant": server.queryCacheDirective("project-a", "tenant-b", caller),
+		"user": server.queryCacheDirective("project-a", "tenant-a", callerContext{
+			user:        &gonvex.User{ID: "user-b"},
+			permissions: caller.permissions,
+		}),
+		"permissions": server.queryCacheDirective("project-a", "tenant-a", callerContext{
+			user:        caller.user,
+			permissions: map[string]any{"role": "viewer"},
+		}),
+	} {
+		if other == nil || other.SyncScope == base.SyncScope {
+			t.Fatalf("expected %s change to produce a distinct sync scope", name)
+		}
+	}
+	// The sync cursor epoch is derived from the visibility scope: same
+	// visibility must yield the same epoch across bundles, different
+	// visibility must not resume another user's cursor.
+	clock := syncClock{DatabaseEpoch: "db-epoch", Revision: 7}
+	definition := manifest.SyncDefinition{Table: "tasks", Key: "id"}
+	sameVisibility := syncCursorForClock(clock, definition, base.SyncScope)
+	if again := syncCursorForClock(clock, definition, base.SyncScope); again != sameVisibility {
+		t.Fatalf("expected deterministic cursor epoch, got %#v and %#v", sameVisibility, again)
+	}
+	otherUser := server.queryCacheDirective("project-a", "tenant-a", callerContext{
+		user:        &gonvex.User{ID: "user-b"},
+		permissions: caller.permissions,
+	})
+	if crossUser := syncCursorForClock(clock, definition, otherUser.SyncScope); crossUser.Epoch == sameVisibility.Epoch {
+		t.Fatal("expected a different user's cursor epoch to differ")
+	}
 }
 
 func TestQueryCacheDirectiveChangesWithTenantDatabaseRoute(t *testing.T) {

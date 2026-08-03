@@ -236,6 +236,7 @@ type wsConn struct {
 	authToken     string
 	authCheckedAt time.Time
 	cacheScope    string
+	syncScope     string
 	connectedAt   time.Time
 	lastActiveAt  time.Time
 	lastActivity  string
@@ -290,6 +291,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		initialCache = s.queryCacheDirective(client.project, client.tenant, callerContext{})
 		if initialCache != nil {
 			client.cacheScope = initialCache.Scope
+			client.syncScope = initialCache.SyncScope
 		}
 	}
 	client.write(serverMessage{
@@ -340,13 +342,15 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		caller := callerContext{user: user, permissions: permissions}
 		directive := c.server.queryCacheDirective(project, tenant, caller)
 		cacheScope := ""
+		connSyncScope := ""
 		if directive != nil {
 			cacheScope = directive.Scope
+			connSyncScope = directive.SyncScope
 		}
 		c.mu.Lock()
 		oldProject := c.project
 		oldTenant := c.tenant
-		oldCacheScope := c.cacheScope
+		oldSyncScope := c.syncScope
 		oldSubs := make([]querySubscription, 0, len(c.subs))
 		c.user = user
 		c.perms = permissions
@@ -356,6 +360,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.authToken = message.Token
 		c.authCheckedAt = time.Now()
 		c.cacheScope = cacheScope
+		c.syncScope = connSyncScope
 		subs := make([]querySubscription, 0, len(c.subs))
 		for id, sub := range c.subs {
 			oldSubs = append(oldSubs, sub)
@@ -385,7 +390,11 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		for _, sub := range subs {
 			c.server.subscriptions.attach(sub)
 		}
-		if oldProject != project || oldTenant != tenant || (oldCacheScope != "" && oldCacheScope != cacheScope) {
+		// Sync subscriptions are keyed by visibility (project/tenant/user/
+		// permissions), not by the code-bundle cache scope. A re-auth after a
+		// deploy keeps the same visibility and must not force every collection
+		// back through a full snapshot.
+		if oldProject != project || oldTenant != tenant || (oldSyncScope != "" && oldSyncScope != connSyncScope) {
 			c.resetSyncSubscriptions("visibility-changed")
 		}
 	case "query.subscribe":
@@ -682,6 +691,7 @@ func (c *wsConn) clearAuthentication() {
 	c.authToken = ""
 	c.authCheckedAt = time.Time{}
 	c.cacheScope = ""
+	c.syncScope = ""
 	for id, sub := range c.subs {
 		oldSubs = append(oldSubs, sub)
 		if sub.cancel != nil {
@@ -703,6 +713,12 @@ func (c *wsConn) currentCacheScope() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.cacheScope
+}
+
+func (c *wsConn) currentSyncScope() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.syncScope
 }
 
 func (c *wsConn) cancelSubscriptions() {

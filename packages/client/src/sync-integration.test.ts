@@ -293,6 +293,68 @@ describe("durable sync integration", () => {
     expect(sentMessages().some((message) => message.type === "sync.open")).toBe(false);
   });
 
+  it("keeps live sync state when a deploy rotates the query scope but not the sync scope", async () => {
+    const syncScope = "visibility-scope-a-0000000000000000000000000000000000000000";
+    const store = new FakeSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const handler = vi.fn();
+
+    client.subscribeSync(ref, { workspaceId: "workspace-a" }, handler);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: { ...directive, syncScope } });
+    await flushAsyncWork();
+
+    // Warm reads and persistence key by the visibility scope, not the
+    // bundle-epoch query scope.
+    expect(store.loads).toHaveLength(1);
+    expect(store.loads[0]!.scope).toBe(syncScope);
+
+    const open = sentMessages().find((message) => message.type === "sync.open");
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: [{ id: "task-a", title: "live" }],
+      cursor: { epoch: "sync-a", revision: 5 },
+      key: "id",
+    });
+    await flushAsyncWork();
+    const opensBefore = sentMessages().filter((message) => message.type === "sync.open").length;
+    handler.mockClear();
+
+    // A deploy: new bundle epoch and query scope, same visibility.
+    socket().receive({
+      type: "session.scope",
+      queryCache: {
+        ...directive,
+        scope: "scope-after-deploy-000000000000000000000000000000000000000000",
+        epoch: "epoch-b-00000000000000000000000000000000000000000000000000000",
+        syncScope,
+      },
+    });
+    await flushAsyncWork();
+
+    expect(store.loads).toHaveLength(1);
+    expect(sentMessages().filter((message) => message.type === "sync.open")).toHaveLength(opensBefore);
+    expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ type: "sync.reset" }));
+    expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ result: [] }));
+
+    // A real visibility change (different user/permissions) still resets.
+    socket().receive({
+      type: "session.scope",
+      queryCache: {
+        ...directive,
+        scope: "scope-other-user-00000000000000000000000000000000000000000000",
+        syncScope: "visibility-scope-b-0000000000000000000000000000000000000000",
+      },
+    });
+    await flushAsyncWork();
+
+    expect(store.loads).toHaveLength(2);
+    expect(store.loads[1]!.scope).toBe("visibility-scope-b-0000000000000000000000000000000000000000");
+    expect(sentMessages().filter((message) => message.type === "sync.open").length).toBeGreaterThan(opensBefore);
+  });
+
   it("renders the IndexedDB snapshot first and resumes from its cursor", async () => {
     const store = new FakeSyncStore();
     store.stored = {

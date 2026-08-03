@@ -238,6 +238,9 @@ export class GonvexClient {
   private readonly syncStore: SyncStore | undefined;
   private queryCacheDirective: QueryCacheDirective | undefined;
   private queryCacheGeneration = 0;
+  // Sync collections live under a visibility-only scope that survives query
+  // cache rotations (deploys); their warm reads are guarded separately.
+  private syncScopeGeneration = 0;
   private queryCacheNegotiatedSocketGeneration: number | undefined;
   private syncIdentityGeneration = 0;
   private readonly sessionScopeHandlers = new Set<() => void>();
@@ -904,8 +907,9 @@ export class GonvexClient {
       const directive = this.queryCacheDirective;
       const store = this.syncStore;
       if (directive && store) {
-        this.enqueueSyncPersistence(subscription, directive.scope, () => store.delete(
-          directive.scope,
+        const scope = syncPersistenceScope(directive);
+        this.enqueueSyncPersistence(subscription, scope, () => store.delete(
+          scope,
           subscription.path,
           subscription.args,
         ));
@@ -1033,14 +1037,17 @@ export class GonvexClient {
       this.sendSyncOpen(subscription);
       return;
     }
-    const generation = this.queryCacheGeneration;
+    const scope = syncPersistenceScope(directive);
+    const generation = this.syncScopeGeneration;
     if (subscription.cacheReadGeneration === generation) return;
     subscription.cacheReadGeneration = generation;
-    void store.load(directive.scope, subscription.path, subscription.args).then((cached) => {
+    void store.load(scope, subscription.path, subscription.args).then((cached) => {
+      const currentDirective = this.queryCacheDirective;
       if (
         this.syncSubscriptions.get(subscription.key) !== subscription
-        || this.queryCacheGeneration !== generation
-        || this.queryCacheDirective?.scope !== directive.scope
+        || this.syncScopeGeneration !== generation
+        || !currentDirective
+        || syncPersistenceScope(currentDirective) !== scope
       ) return;
       if (cached) {
         subscription.isUpToDate = false;
@@ -1189,6 +1196,7 @@ export class GonvexClient {
     const directive = this.queryCacheDirective;
     const store = this.syncStore;
     if (!directive || !store || !subscription.cursor) return;
+    const scope = syncPersistenceScope(directive);
     const value = {
       rows: subscription.rows,
       cursor: subscription.cursor,
@@ -1202,8 +1210,8 @@ export class GonvexClient {
     };
     this.enqueueSyncPersistence(
       subscription,
-      directive.scope,
-      () => store.replace(directive.scope, subscription.path, subscription.args, value),
+      scope,
+      () => store.replace(scope, subscription.path, subscription.args, value),
     );
   }
 
@@ -1211,6 +1219,7 @@ export class GonvexClient {
     const directive = this.queryCacheDirective;
     const store = this.syncStore;
     if (!directive || !store || !subscription.cursor) return;
+    const scope = syncPersistenceScope(directive);
     const value = {
       cursor: subscription.cursor,
       keyField: subscription.keyField,
@@ -1225,8 +1234,8 @@ export class GonvexClient {
     };
     this.enqueueSyncPersistence(
       subscription,
-      directive.scope,
-      () => store.applyDelta(directive.scope, subscription.path, subscription.args, value),
+      scope,
+      () => store.applyDelta(scope, subscription.path, subscription.args, value),
     );
   }
 
@@ -1512,12 +1521,20 @@ export class GonvexClient {
       if (this.queryCacheDirective) this.resetQueryCacheScope();
       return;
     }
-    if (this.queryCacheDirective?.scope === value.scope) {
+    const previous = this.queryCacheDirective;
+    const syncScopeChanged = previous !== undefined
+      && syncPersistenceScope(previous) !== syncPersistenceScope(value);
+    if (previous?.scope === value.scope && !syncScopeChanged) {
       this.queryCacheDirective = value;
       return;
     }
-    if (this.queryCacheDirective) {
-      this.resetQueryCacheScope();
+    if (previous) {
+      // A deploy rotates the query-result scope (results depend on code), but
+      // sync collections are keyed by visibility and survive it: their rows,
+      // cursors, and in-flight warm reads stay valid and are verified by the
+      // server's reconcile on the next open.
+      this.resetQueryResultCacheState();
+      if (syncScopeChanged) this.resetSyncCacheState();
     }
     this.queryCacheDirective = value;
     const identity = authIdentityKey(this.auth);
@@ -1548,8 +1565,16 @@ export class GonvexClient {
 
   private resetQueryCacheScope() {
     const hadScope = this.queryCacheDirective !== undefined;
-    this.queryCacheGeneration += 1;
     this.queryCacheDirective = undefined;
+    this.resetQueryResultCacheState();
+    this.resetSyncCacheState();
+    if (hadScope || this.querySubscriptions.size > 0 || this.syncSubscriptions.size > 0) {
+      for (const handler of this.sessionScopeHandlers) handler();
+    }
+  }
+
+  private resetQueryResultCacheState() {
+    this.queryCacheGeneration += 1;
     this.queryCacheNegotiatedSocketGeneration = undefined;
     for (const subscription of this.querySubscriptions.values()) {
       subscription.lastMessage = undefined;
@@ -1560,6 +1585,10 @@ export class GonvexClient {
       subscription.cacheReadFallbackTimer = undefined;
       subscription.cachedRevision = undefined;
     }
+  }
+
+  private resetSyncCacheState() {
+    this.syncScopeGeneration += 1;
     for (const subscription of this.syncSubscriptions.values()) {
       this.clearSyncRetry(subscription, true);
       subscription.isUpToDate = false;
@@ -1573,9 +1602,6 @@ export class GonvexClient {
       subscription.cacheReadGeneration = undefined;
       subscription.opening = false;
       subscription.verificationGeneration += 1;
-    }
-    if (hadScope || this.querySubscriptions.size > 0 || this.syncSubscriptions.size > 0) {
-      for (const handler of this.sessionScopeHandlers) handler();
     }
   }
 
@@ -2018,11 +2044,25 @@ function validQueryCacheDirective(value: unknown): value is QueryCacheDirective 
   return value.protocolVersion === 1
     && typeof value.scope === "string"
     && value.scope.length >= 16
+    && (value.syncScope === undefined
+      || (typeof value.syncScope === "string" && value.syncScope.length >= 16))
     && typeof value.epoch === "string"
     && value.epoch.length >= 16
     && typeof value.maxAgeMs === "number"
     && Number.isFinite(value.maxAgeMs)
     && value.maxAgeMs > 0;
+}
+
+/**
+ * The scope under which sync collections are persisted and resumed. Newer
+ * runtimes send a visibility-only `syncScope` that survives deploys (the
+ * authoritative reconcile on resume guarantees correctness across code
+ * changes); older runtimes only send the bundle-epoch `scope`.
+ */
+function syncPersistenceScope(directive: QueryCacheDirective): string {
+  return typeof directive.syncScope === "string" && directive.syncScope.length >= 16
+    ? directive.syncScope
+    : directive.scope;
 }
 
 function isJsonRecord(value: unknown): value is Record<string, JsonValue> {

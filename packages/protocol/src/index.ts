@@ -78,6 +78,13 @@ export type BrowserTelemetryInfo = {
 export type QueryCacheDirective = {
   protocolVersion: 1;
   scope: string;
+  /**
+   * Visibility-only scope (project/tenant/user/permissions, no code epoch)
+   * under which sync collections are persisted and resumed. Unlike `scope`,
+   * it survives deploys; resume safety comes from the server's authoritative
+   * reconcile. Absent on runtimes that predate deploy-stable sync scopes.
+   */
+  syncScope?: string;
   epoch: string;
   maxAgeMs: number;
 };
