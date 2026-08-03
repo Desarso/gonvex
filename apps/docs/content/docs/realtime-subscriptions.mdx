@@ -8,6 +8,14 @@ description: Subscribe to query results and receive fresh data when relevant wri
 Gonvex subscriptions keep query results current over a reconnecting WebSocket
 connection.
 
+The runtime identifies itself in the first `session.ready` frame. Its
+`capabilities` include `protocolVersion`, `runtimeVersion`, and supported protocol
+features such as `syncBatch` and `syncIntegrity`. `runtimeVersion` should be the
+deployed Git commit SHA in managed environments. Clients use feature flags, rather
+than protocol-field presence alone, when deciding whether a missing field is a
+compatibility case or a corrupt response. Applications can inspect the latest
+advertisement with `client.serverInfo()`.
+
 The application model is:
 
 ```txt

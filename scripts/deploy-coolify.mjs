@@ -1,0 +1,110 @@
+import { pathToFileURL } from "node:url";
+
+const gonvexContextPattern = /https:\/\/github\.com\/Desarso\/gonvex\.git#(?:[0-9a-f]{40}|main)/g;
+const runtimeVersionPattern = /^(\s{6}GONVEX_RUNTIME_VERSION:)\s*.*$/m;
+
+export function stampRuntimeCompose(compose, sha) {
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    throw new Error("GONVEX_DEPLOY_SHA must be a full lowercase Git commit SHA");
+  }
+
+  const contexts = compose.match(gonvexContextPattern) ?? [];
+  if (contexts.length !== 2) {
+    throw new Error(`expected exactly 2 Gonvex Git build contexts, found ${contexts.length}`);
+  }
+
+  let stamped = compose.replace(gonvexContextPattern, `https://github.com/Desarso/gonvex.git#${sha}`);
+  if (runtimeVersionPattern.test(stamped)) {
+    stamped = stamped.replace(runtimeVersionPattern, `$1 '${sha}'`);
+  } else {
+    const runtimeEnvironment = /(^  gonvex-runtime:\n[\s\S]*?^    environment:\n)/m;
+    if (!runtimeEnvironment.test(stamped)) {
+      throw new Error("could not find the gonvex-runtime environment block");
+    }
+    stamped = stamped.replace(runtimeEnvironment, `$1      GONVEX_RUNTIME_VERSION: '${sha}'\n`);
+  }
+  return stamped;
+}
+
+function requiredEnvironment(name) {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}
+
+function apiBase(value) {
+  const base = value.replace(/\/$/, "");
+  return base.endsWith("/api/v1") ? base : `${base}/api/v1`;
+}
+
+async function coolifyRequest(base, token, path, init = {}) {
+  const response = await fetch(`${base}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...init.headers,
+    },
+  });
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 500);
+    throw new Error(`Coolify ${init.method ?? "GET"} ${path} failed (${response.status}): ${detail}`);
+  }
+  const text = await response.text();
+  return text ? JSON.parse(text) : undefined;
+}
+
+export async function deployCoolifyServices({ base, token, serviceUUIDs, sha }) {
+  const updates = [];
+  for (const uuid of serviceUUIDs) {
+    const service = await coolifyRequest(base, token, `/services/${encodeURIComponent(uuid)}`);
+    if (typeof service?.docker_compose_raw !== "string") {
+      throw new Error(`Coolify service ${uuid} did not return docker_compose_raw`);
+    }
+    updates.push({ uuid, compose: stampRuntimeCompose(service.docker_compose_raw, sha) });
+  }
+
+  for (const { uuid, compose } of updates) {
+    await coolifyRequest(base, token, `/services/${encodeURIComponent(uuid)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ docker_compose_raw: Buffer.from(compose).toString("base64") }),
+    });
+  }
+
+  for (const { uuid } of updates) {
+    const service = await coolifyRequest(base, token, `/services/${encodeURIComponent(uuid)}`);
+    const expected = stampRuntimeCompose(service.docker_compose_raw, sha);
+    if (expected !== service.docker_compose_raw) {
+      throw new Error(`Coolify service ${uuid} did not retain the requested runtime pin`);
+    }
+  }
+
+  for (const { uuid } of updates) {
+    await coolifyRequest(
+      base,
+      token,
+      `/deploy?uuid=${encodeURIComponent(uuid)}&force=true`,
+    );
+    console.log(`Queued Coolify service ${uuid} at ${sha}`);
+  }
+}
+
+async function main() {
+  const base = apiBase(requiredEnvironment("COOLIFY_API_URL"));
+  const token = requiredEnvironment("COOLIFY_API_TOKEN");
+  const sha = requiredEnvironment("GONVEX_DEPLOY_SHA");
+  const serviceUUIDs = requiredEnvironment("COOLIFY_SERVICE_UUIDS")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (serviceUUIDs.length === 0) throw new Error("COOLIFY_SERVICE_UUIDS is empty");
+  await deployCoolifyServices({ base, token, serviceUUIDs, sha });
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });
+}

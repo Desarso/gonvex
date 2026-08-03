@@ -10,6 +10,7 @@
     "test": "pnpm -r test",
     "test:go": "go test ./...",
     "test:production-compose": "node --test scripts/production-compose.test.mjs",
+    "test:coolify-deploy": "node --test scripts/deploy-coolify.test.mjs",
     "test:release": "node --test scripts/release-cli.test.mjs",
     "release:cli": "node scripts/release-cli.mjs",
     "release:cli:dry-run": "node scripts/release-cli.mjs --dry-run",

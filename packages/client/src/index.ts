@@ -285,6 +285,11 @@ export class GonvexClient {
     };
   }
 
+  /** Metadata advertised by the runtime in its latest session.ready frame. */
+  serverInfo(): Readonly<ServerCapabilities> {
+    return { ...this.serverCapabilities };
+  }
+
   subscribeToConnectionState(handler: ConnectionStateHandler): () => void {
     this.connectionStateHandlers.add(handler);
     return () => {
@@ -917,7 +922,7 @@ export class GonvexClient {
         || message.cursor.revision < subscription.cursor.revision
       )) return;
       const generation = ++subscription.verificationGeneration;
-      if (!message.digest) {
+      if (!message.digest && this.serverCapabilities.syncIntegrity === 1) {
         this.handleSyncMessage(subscription, {
           type: "sync.reset",
           id: subscription.id,
@@ -933,7 +938,7 @@ export class GonvexClient {
             generation !== subscription.verificationGeneration
             || this.syncSubscriptions.get(subscription.key) !== subscription
           ) return;
-          if (digest !== message.digest) {
+          if (message.digest && digest !== message.digest) {
             this.handleSyncMessage(subscription, {
               type: "sync.reset",
               id: subscription.id,
@@ -945,7 +950,7 @@ export class GonvexClient {
           subscription.hashes = hashes;
           subscription.integrityDigest = digest;
           subscription.integrityRows = subscription.rows;
-          this.acceptSyncReady(subscription, message);
+          this.acceptSyncReady(subscription, message, digest);
         }).catch(() => {
           if (generation !== subscription.verificationGeneration) return;
           this.handleSyncMessage(subscription, {
@@ -969,13 +974,14 @@ export class GonvexClient {
   private acceptSyncReady(
     subscription: SyncSubscription,
     message: Extract<ServerMessage, { type: "sync.ready" }>,
+    verifiedDigest = message.digest,
   ) {
     this.clearSyncRetry(subscription, true);
     subscription.isUpToDate = true;
     subscription.opening = false;
     subscription.cursor = message.cursor;
     subscription.mode = message.mode ?? subscription.mode;
-    subscription.integrityDigest = message.digest;
+    subscription.integrityDigest = verifiedDigest;
     subscription.integrityRows = subscription.rows;
     subscription.forceFullIntegrity = false;
     this.persistSyncSnapshot(subscription);

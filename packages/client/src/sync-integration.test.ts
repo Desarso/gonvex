@@ -1009,7 +1009,48 @@ describe("durable sync integration", () => {
     expect(sentMessages().at(-1).cursor).toBeUndefined();
   });
 
-  it("never accepts a ready frame that lacks integrity evidence", async () => {
+  it("rejects a digest-less ready frame when the runtime advertises sync integrity", async () => {
+    const store = new FakeSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const watch = client.watchSync(ref, { workspaceId: "workspace-a" });
+    watch.onUpdate(() => undefined);
+    socket().open();
+    socket().receive({
+      type: "session.ready",
+      queryCache: directive,
+      capabilities: { protocolVersion: 2, runtimeVersion: "test-sha", syncIntegrity: 1 },
+    });
+    expect(client.serverInfo()).toEqual({
+      protocolVersion: 2,
+      runtimeVersion: "test-sha",
+      syncIntegrity: 1,
+    });
+    await flushAsyncWork();
+    const open = sentMessages().find((message) => message.type === "sync.open");
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: [],
+      cursor: { epoch: "sync-a", revision: 1 },
+      key: "id",
+      mode: "eager",
+    });
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 1 },
+      mode: "eager",
+    });
+    await flushAsyncWork();
+
+    expect(watch.status().isUpToDate).toBe(false);
+    expect(store.deletes).toHaveLength(1);
+    expect(sentMessages().at(-1).cursor).toBeUndefined();
+  });
+
+  it("accepts a digest-less ready frame from a legacy runtime without reopening", async () => {
     const store = new FakeSyncStore();
     const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
     const watch = client.watchSync(ref, { workspaceId: "workspace-a" });
@@ -1034,11 +1075,11 @@ describe("durable sync integration", () => {
       cursor: { epoch: "sync-a", revision: 1 },
       mode: "eager",
     });
-    await flushAsyncWork();
 
-    expect(watch.status().isUpToDate).toBe(false);
-    expect(store.deletes).toHaveLength(1);
-    expect(sentMessages().at(-1).cursor).toBeUndefined();
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(watch.status().isUpToDate).toBe(true));
+    expect(store.deletes).toEqual([]);
+    expect(sentMessages().filter((message) => message.type === "sync.open")).toHaveLength(1);
   });
 
   it("repairs a legacy or corrupted progressive cache at the same cursor without a full snapshot", async () => {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -58,7 +59,10 @@ type syncOpenRequest struct {
 }
 
 type serverCapabilities struct {
-	SyncBatch int `json:"syncBatch,omitempty"`
+	ProtocolVersion int    `json:"protocolVersion,omitempty"`
+	RuntimeVersion  string `json:"runtimeVersion,omitempty"`
+	SyncBatch       int    `json:"syncBatch,omitempty"`
+	SyncIntegrity   int    `json:"syncIntegrity,omitempty"`
 }
 
 type syncReadyMessage struct {
@@ -163,9 +167,18 @@ type randomizeStatusPriorityArgs struct {
 }
 
 const (
-	tableChangeDebounce   = 75 * time.Millisecond
-	websocketWriteTimeout = 10 * time.Second
+	tableChangeDebounce       = 75 * time.Millisecond
+	websocketWriteTimeout     = 10 * time.Second
+	websocketProtocolVersion  = 2
+	developmentRuntimeVersion = "development"
 )
+
+func runtimeBuildVersion() string {
+	if version := strings.TrimSpace(os.Getenv("GONVEX_RUNTIME_VERSION")); version != "" {
+		return version
+	}
+	return developmentRuntimeVersion
+}
 
 // subscriptionToken is deliberately non-zero-sized. Go may give separate
 // zero-sized allocations the same address, which would collapse distinct
@@ -285,7 +298,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		Tenant:     client.tenant,
 		QueryCache: initialCache,
 		Capabilities: &serverCapabilities{
-			SyncBatch: 1,
+			ProtocolVersion: websocketProtocolVersion,
+			RuntimeVersion:  runtimeBuildVersion(),
+			SyncBatch:       1,
+			SyncIntegrity:   1,
 		},
 	})
 

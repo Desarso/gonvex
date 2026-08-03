@@ -39,3 +39,25 @@ jobs:
         run: pnpm build:packages
       - name: Test JavaScript workspace
         run: pnpm -r test
+
+  deploy-runtime:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: gonvex-runtime
+    concurrency:
+      group: gonvex-runtime-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Deploy exact runtime commit to Coolify
+        run: node scripts/deploy-coolify.mjs
+        env:
+          COOLIFY_API_URL: ${{ vars.COOLIFY_API_URL }}
+          COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+          COOLIFY_SERVICE_UUIDS: ftfmdopfb3j0e88s0crl6iny,v6q0sg18te1xqa5jzhdhplry
+          GONVEX_DEPLOY_SHA: ${{ github.sha }}

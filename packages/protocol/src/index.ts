@@ -83,7 +83,13 @@ export type QueryCacheDirective = {
 };
 
 export type ServerCapabilities = {
+  /** WebSocket protocol generation implemented by this runtime. */
+  protocolVersion?: number;
+  /** Exact runtime build identifier, normally the deployed Git commit SHA. */
+  runtimeVersion?: string;
   syncBatch?: 1;
+  /** sync.ready frames always carry a collection integrity digest. */
+  syncIntegrity?: 1;
 };
 
 export type SyncOpenRequest = {

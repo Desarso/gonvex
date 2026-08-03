@@ -78,6 +78,19 @@ migration is required for project environment variables; the runtime creates or
 updates its control-plane tables during startup. Do not use `docker compose down -v`
 as part of this upgrade.
 
+### Whagons Coolify deployments
+
+The `Runtime regression` GitHub workflow deploys every successful push to `main`
+to the Whagons development and production Coolify service stacks. It updates both
+remote Git build contexts to the exact commit SHA, writes that SHA to
+`GONVEX_RUNTIME_VERSION`, verifies the saved Compose definition, and then queues
+the deployments. Pull requests run the same regression suite but never deploy.
+
+The workflow reads `COOLIFY_API_URL` and `COOLIFY_API_TOKEN` from the protected
+`gonvex-runtime` GitHub environment. Keep the token there rather than in the
+repository. The exact SHA pin makes the running source auditable and avoids a
+moving-branch race during a rebuild.
+
 Project-key authentication for project environment variables first shipped in
 runtime v0.1.9 (source commit `c49ef6a`). The exact response
 `{"error":"dashboard sign-in is required"}` from
