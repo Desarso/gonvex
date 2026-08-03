@@ -22,29 +22,49 @@ import (
 )
 
 type clientMessage struct {
-	Type               string            `json:"type"`
-	ID                 string            `json:"id"`
-	Path               string            `json:"path,omitempty"`
-	Args               json.RawMessage   `json:"args,omitempty"`
-	Token              string            `json:"token,omitempty"`
-	Project            string            `json:"project,omitempty"`
-	Tenant             string            `json:"tenant,omitempty"`
-	Trace              *messageTrace     `json:"trace,omitempty"`
-	Kind               string            `json:"kind,omitempty"`
-	Reason             string            `json:"reason,omitempty"`
-	Outcome            string            `json:"outcome,omitempty"`
-	Error              string            `json:"error,omitempty"`
-	ClientSentAtMS     float64           `json:"clientSentAtMs,omitempty"`
-	ClientReceivedAtMS float64           `json:"clientReceivedAtMs,omitempty"`
-	ClientDurationMS   float64           `json:"clientDurationMs,omitempty"`
-	Device             json.RawMessage   `json:"device,omitempty"`
-	Cursor             *syncCursor       `json:"cursor,omitempty"`
-	Keys               []string          `json:"keys,omitempty"`
-	Hashes             map[string]string `json:"hashes,omitempty"`
-	Digest             string            `json:"digest,omitempty"`
-	FullIntegrity      bool              `json:"fullIntegrity,omitempty"`
-	Opens              []syncOpenRequest `json:"opens,omitempty"`
-	CacheRevision      string            `json:"cacheRevision,omitempty"`
+	Type               string                  `json:"type"`
+	ID                 string                  `json:"id"`
+	Path               string                  `json:"path,omitempty"`
+	Args               json.RawMessage         `json:"args,omitempty"`
+	Token              string                  `json:"token,omitempty"`
+	Project            string                  `json:"project,omitempty"`
+	Tenant             string                  `json:"tenant,omitempty"`
+	Trace              *messageTrace           `json:"trace,omitempty"`
+	Kind               string                  `json:"kind,omitempty"`
+	Reason             string                  `json:"reason,omitempty"`
+	Outcome            string                  `json:"outcome,omitempty"`
+	Error              string                  `json:"error,omitempty"`
+	ClientSentAtMS     float64                 `json:"clientSentAtMs,omitempty"`
+	ClientReceivedAtMS float64                 `json:"clientReceivedAtMs,omitempty"`
+	ClientDurationMS   float64                 `json:"clientDurationMs,omitempty"`
+	Device             json.RawMessage         `json:"device,omitempty"`
+	Cursor             *syncCursor             `json:"cursor,omitempty"`
+	Keys               []string                `json:"keys,omitempty"`
+	Hashes             map[string]string       `json:"hashes,omitempty"`
+	Digest             string                  `json:"digest,omitempty"`
+	FullIntegrity      bool                    `json:"fullIntegrity,omitempty"`
+	Opens              []syncOpenRequest       `json:"opens,omitempty"`
+	CacheRevision      string                  `json:"cacheRevision,omitempty"`
+	Subscribes         []querySubscribeRequest `json:"subscribes,omitempty"`
+	Calls              []mutationCallRequest   `json:"calls,omitempty"`
+}
+
+// maxBatchedClientRequests bounds every batched client frame (sync.openMany,
+// query.subscribeMany, mutation.callMany).
+const maxBatchedClientRequests = 256
+
+type querySubscribeRequest struct {
+	ID            string          `json:"id"`
+	Path          string          `json:"path"`
+	Args          json.RawMessage `json:"args,omitempty"`
+	CacheRevision string          `json:"cacheRevision,omitempty"`
+}
+
+type mutationCallRequest struct {
+	ID    string          `json:"id"`
+	Path  string          `json:"path"`
+	Args  json.RawMessage `json:"args,omitempty"`
+	Trace *messageTrace   `json:"trace,omitempty"`
 }
 
 type syncOpenRequest struct {
@@ -63,6 +83,8 @@ type serverCapabilities struct {
 	RuntimeVersion  string `json:"runtimeVersion,omitempty"`
 	SyncBatch       int    `json:"syncBatch,omitempty"`
 	SyncIntegrity   int    `json:"syncIntegrity,omitempty"`
+	QueryBatch      int    `json:"queryBatch,omitempty"`
+	MutationBatch   int    `json:"mutationBatch,omitempty"`
 }
 
 type syncReadyMessage struct {
@@ -304,6 +326,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			RuntimeVersion:  runtimeBuildVersion(),
 			SyncBatch:       1,
 			SyncIntegrity:   1,
+			QueryBatch:      1,
+			MutationBatch:   1,
 		},
 	})
 
@@ -401,23 +425,20 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		if !c.requireAuth(ctx, "query.error", message.ID) {
 			return
 		}
-		if message.ID == "" || message.Path == "" {
-			c.write(serverMessage{Type: "query.error", ID: message.ID, Error: "query id and path are required"})
+		c.subscribeQuery(ctx, querySubscribeRequest{
+			ID: message.ID, Path: message.Path, Args: message.Args, CacheRevision: message.CacheRevision,
+		})
+	case "query.subscribeMany":
+		if !c.requireAuth(ctx, "query.error", "") {
 			return
 		}
-		subCtx, cancel := context.WithCancel(ctx)
-		sub := querySubscription{conn: c, id: message.ID, project: c.project, tenant: c.tenant, path: message.Path, args: message.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: newSubscriptionToken(), cacheScope: c.currentCacheScope(), cacheRevision: message.CacheRevision}
-		c.mu.Lock()
-		previous, hadPrevious := c.subs[message.ID]
-		c.subs[message.ID] = sub
-		c.mu.Unlock()
-		if hadPrevious && previous.cancel != nil {
-			previous.cancel()
+		if len(message.Subscribes) > maxBatchedClientRequests {
+			c.write(serverMessage{Type: "query.error", Error: "query batch cannot contain more than 256 subscribes"})
+			return
 		}
-		if hadPrevious {
-			c.server.subscriptions.detach(previous)
+		for _, subscribe := range message.Subscribes {
+			c.subscribeQuery(ctx, subscribe)
 		}
-		c.server.subscriptions.attach(sub)
 	case "query.unsubscribe":
 		c.mu.Lock()
 		sub, ok := c.subs[message.ID]
@@ -445,23 +466,24 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		if !c.requireAuth(ctx, "mutation.error", message.ID) {
 			return
 		}
-		trace := traceFromClient(message.Trace)
-		trace.ServerReceivedAtMS = epochMillis(receivedAt)
-		trace.ServerMutationStartedAtMS = epochMillis(time.Now())
-		result, err := c.server.executeTenantMutationForCaller(withMutationID(ctx, message.ID), c.project, c.tenant, c.caller(), message.Path, message.Args)
-		committedAt := time.Now().UTC()
-		trace.ServerMutationCommittedAtMS = epochMillis(committedAt)
-		trace.ServerCompletedAtMS = epochMillis(committedAt)
-		trace.ServerDurationMS = float64(committedAt.Sub(receivedAt).Microseconds()) / 1000
-		if err != nil {
-			c.write(serverMessage{Type: "mutation.error", ID: message.ID, Path: message.Path, Error: err.Error(), Trace: trace})
-			c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "mutation", message.Path, "server", "", "error", err.Error(), trace))
+		c.callMutation(ctx, receivedAt, mutationCallRequest{
+			ID: message.ID, Path: message.Path, Args: message.Args, Trace: message.Trace,
+		})
+	case "mutation.callMany":
+		// Offline queues flush their backlog in one frame on reconnect. Calls
+		// execute sequentially in queue order; each gets its own result/error
+		// frame so the client settles them individually, and one failure does
+		// not abandon the writes queued after it.
+		if !c.requireAuth(ctx, "mutation.error", "") {
 			return
 		}
-		trace.ServerBroadcastScheduledAtMS = epochMillis(time.Now())
-		c.write(serverMessage{Type: "mutation.result", ID: message.ID, Path: message.Path, Result: explicitNull(result), Trace: trace})
-		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "mutation", message.Path, "server", "", "ok", "", trace))
-		c.server.broadcastMutationInvalidationsAt(c.project, c.tenant, message.Path, committedAt)
+		if len(message.Calls) > maxBatchedClientRequests {
+			c.write(serverMessage{Type: "mutation.error", Error: "mutation batch cannot contain more than 256 calls"})
+			return
+		}
+		for _, call := range message.Calls {
+			c.callMutation(ctx, receivedAt, call)
+		}
 	case "action.call":
 		if !c.requireAuth(ctx, "action.error", message.ID) {
 			return
@@ -707,6 +729,46 @@ func (c *wsConn) clearAuthentication() {
 		c.server.subscriptions.detach(sub)
 	}
 	c.resetSyncSubscriptions("visibility-changed")
+}
+
+func (c *wsConn) subscribeQuery(ctx context.Context, request querySubscribeRequest) {
+	if request.ID == "" || request.Path == "" {
+		c.write(serverMessage{Type: "query.error", ID: request.ID, Error: "query id and path are required"})
+		return
+	}
+	subCtx, cancel := context.WithCancel(ctx)
+	sub := querySubscription{conn: c, id: request.ID, project: c.project, tenant: c.tenant, path: request.Path, args: request.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: newSubscriptionToken(), cacheScope: c.currentCacheScope(), cacheRevision: request.CacheRevision}
+	c.mu.Lock()
+	previous, hadPrevious := c.subs[request.ID]
+	c.subs[request.ID] = sub
+	c.mu.Unlock()
+	if hadPrevious && previous.cancel != nil {
+		previous.cancel()
+	}
+	if hadPrevious {
+		c.server.subscriptions.detach(previous)
+	}
+	c.server.subscriptions.attach(sub)
+}
+
+func (c *wsConn) callMutation(ctx context.Context, receivedAt time.Time, request mutationCallRequest) {
+	trace := traceFromClient(request.Trace)
+	trace.ServerReceivedAtMS = epochMillis(receivedAt)
+	trace.ServerMutationStartedAtMS = epochMillis(time.Now())
+	result, err := c.server.executeTenantMutationForCaller(withMutationID(ctx, request.ID), c.project, c.tenant, c.caller(), request.Path, request.Args)
+	committedAt := time.Now().UTC()
+	trace.ServerMutationCommittedAtMS = epochMillis(committedAt)
+	trace.ServerCompletedAtMS = epochMillis(committedAt)
+	trace.ServerDurationMS = float64(committedAt.Sub(receivedAt).Microseconds()) / 1000
+	if err != nil {
+		c.write(serverMessage{Type: "mutation.error", ID: request.ID, Path: request.Path, Error: err.Error(), Trace: trace})
+		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, request.ID, "mutation", request.Path, "server", "", "error", err.Error(), trace))
+		return
+	}
+	trace.ServerBroadcastScheduledAtMS = epochMillis(time.Now())
+	c.write(serverMessage{Type: "mutation.result", ID: request.ID, Path: request.Path, Result: explicitNull(result), Trace: trace})
+	c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, request.ID, "mutation", request.Path, "server", "", "ok", "", trace))
+	c.server.broadcastMutationInvalidationsAt(c.project, c.tenant, request.Path, committedAt)
 }
 
 func (c *wsConn) currentCacheScope() string {

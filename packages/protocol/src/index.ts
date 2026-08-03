@@ -97,6 +97,24 @@ export type ServerCapabilities = {
   syncBatch?: 1;
   /** sync.ready frames always carry a collection integrity digest. */
   syncIntegrity?: 1;
+  /** Server accepts `query.subscribeMany` batched subscription frames. */
+  queryBatch?: 1;
+  /** Server accepts `mutation.callMany` batched offline-queue flushes. */
+  mutationBatch?: 1;
+};
+
+export type QuerySubscribeRequest = {
+  id: string;
+  path: string;
+  args: JsonValue;
+  cacheRevision?: string;
+};
+
+export type MutationCallRequest = {
+  id: string;
+  path: string;
+  args: JsonValue;
+  trace?: MessageTrace;
 };
 
 export type SyncOpenRequest = {
@@ -141,8 +159,10 @@ export type ClientMessage =
     fullIntegrity?: boolean;
   }
   | { type: "sync.openMany"; opens: SyncOpenRequest[] }
+  | { type: "query.subscribeMany"; subscribes: QuerySubscribeRequest[] }
   | { type: "sync.close"; id: string }
   | { type: "mutation.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }
+  | { type: "mutation.callMany"; calls: MutationCallRequest[] }
   | { type: "action.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }
   | {
     type: "telemetry.event";

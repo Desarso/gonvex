@@ -223,8 +223,10 @@ export class GonvexClient {
   private readonly telemetryHandlers = new Set<TelemetryHandler>();
   private readonly pendingMessages: ClientMessage[] = [];
   private readonly pendingSyncOpens = new Set<SyncSubscription>();
+  private readonly pendingQuerySubscribes = new Set<QuerySubscription>();
   private readonly syncPersistence = new Map<string, Promise<void>>();
   private syncOpenFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  private querySubscribeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private serverCapabilities: ServerCapabilities = {};
   private auth: GonvexClientAuth = {};
   private authInFlight = false;
@@ -460,6 +462,11 @@ export class GonvexClient {
       this.syncOpenFlushTimer = undefined;
     }
     this.pendingSyncOpens.clear();
+    if (this.querySubscribeFlushTimer) {
+      clearTimeout(this.querySubscribeFlushTimer);
+      this.querySubscribeFlushTimer = undefined;
+    }
+    this.pendingQuerySubscribes.clear();
     for (const subscription of this.querySubscriptions.values()) {
       if (subscription.cacheReadFallbackTimer) clearTimeout(subscription.cacheReadFallbackTimer);
     }
@@ -1318,11 +1325,71 @@ export class GonvexClient {
     this.sendSubscription(subscription);
   }
 
+  /**
+   * Flush a queue of mutations in one `mutation.callMany` frame (queue order,
+   * one websocket round trip). Each entry settles independently — a failed
+   * call does not reject the batch — so offline queues can apply per-row
+   * outcomes. Falls back to sequential `mutation` calls on runtimes that do
+   * not advertise the `mutationBatch` capability.
+   */
+  async mutationMany<T = JsonValue>(
+    calls: Array<{ ref: FunctionReference; args?: JsonValue }>,
+    options: CallOptions = {},
+  ): Promise<Array<{ status: "ok"; result: T } | { status: "error"; error: GonvexClientError }>> {
+    if (calls.length === 0) return [];
+    this.connect();
+    const timeoutMs = options.timeoutMs ?? this.timeouts.mutationTimeoutMs;
+    const settle = (promise: Promise<T>, path: string) => promise
+      .then((result) => ({ status: "ok" as const, result }))
+      .catch((error: unknown) => ({
+        status: "error" as const,
+        error: error instanceof GonvexClientError
+          ? error
+          : new GonvexClientError(String(error), { code: "server", path, operation: "mutation" }),
+      }));
+    if (this.serverCapabilities.mutationBatch !== 1) {
+      const outcomes: Array<{ status: "ok"; result: T } | { status: "error"; error: GonvexClientError }> = [];
+      for (const call of calls) {
+        outcomes.push(await settle(this.mutation<T>(call.ref, call.args ?? {}, options), call.ref.path));
+      }
+      return outcomes;
+    }
+    const registered = calls.map((call) => {
+      const entry = this.registerCall<T>("mutation", call.ref, call.args ?? {}, timeoutMs);
+      return { ...entry, path: call.ref.path, args: call.args ?? {} };
+    });
+    for (let offset = 0; offset < registered.length; offset += maxSyncBatchOpens) {
+      this.send({
+        type: "mutation.callMany",
+        calls: registered.slice(offset, offset + maxSyncBatchOpens).map((entry) => ({
+          id: entry.id,
+          path: entry.path,
+          args: entry.args,
+          trace: { clientSentAtMs: entry.clientSentAtMs },
+        })),
+      });
+    }
+    this.notifyConnectionState();
+    return Promise.all(registered.map((entry) => settle(entry.promise, entry.path)));
+  }
+
   private call<T>(kind: "mutation" | "action", ref: FunctionReference, args: JsonValue, timeoutMs: number): Promise<T> {
     this.connect();
+    const entry = this.registerCall<T>(kind, ref, args, timeoutMs);
+    if (kind === "mutation") {
+      try { const w=(globalThis as any); if (w && w.__wsTapLog) w.__wsTapLog.push({ dir:"mut-args", type:"mutation.call", path: ref.path, argTenant: ((args as any)&&(args as any).tenantId)||null, authTenant: (this as any).auth?.tenant||null, authProject:(this as any).auth?.project||null, href: (w.location&&w.location.href)||null }); } catch(e){}
+      this.send({ type: "mutation.call", id: entry.id, path: ref.path, args, trace: { clientSentAtMs: entry.clientSentAtMs } });
+    } else {
+      this.send({ type: "action.call", id: entry.id, path: ref.path, args, trace: { clientSentAtMs: entry.clientSentAtMs } });
+    }
+    this.notifyConnectionState();
+    return entry.promise;
+  }
+
+  private registerCall<T>(kind: "mutation" | "action", ref: FunctionReference, args: JsonValue, timeoutMs: number): { id: string; clientSentAtMs: number; promise: Promise<T> } {
     const id = randomID();
     const clientSentAtMs = nowMs();
-    return new Promise<T>((resolve, reject) => {
+    const promise = new Promise<T>((resolve, reject) => {
       const pending: PendingCall = { id, kind, path: ref.path, reject };
       const settle = () => {
         if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
@@ -1362,14 +1429,8 @@ export class GonvexClient {
           reject(new GonvexClientError(message.error, { code: "server", path: ref.path, operation: kind }));
         }
       });
-      if (kind === "mutation") {
-        try { const w=(globalThis as any); if (w && w.__wsTapLog) w.__wsTapLog.push({ dir:"mut-args", type:"mutation.call", path: ref.path, argTenant: ((args as any)&&(args as any).tenantId)||null, authTenant: (this as any).auth?.tenant||null, authProject:(this as any).auth?.project||null, href: (w.location&&w.location.href)||null }); } catch(e){}
-        this.send({ type: "mutation.call", id, path: ref.path, args, trace: { clientSentAtMs } });
-      } else {
-        this.send({ type: "action.call", id, path: ref.path, args, trace: { clientSentAtMs } });
-      }
-      this.notifyConnectionState();
     });
+    return { id, clientSentAtMs, promise };
   }
 
   private unsubscribeQueryListener(key: string, listener: SubscriptionHandler) {
@@ -1405,6 +1466,15 @@ export class GonvexClient {
       }
     }
     subscription.socketGeneration = this.socketGeneration;
+    // Route reloads register dozens of live queries at once. Collapse the
+    // burst into one batched frame per tick instead of one frame per query.
+    if (this.serverCapabilities.queryBatch === 1) {
+      this.pendingQuerySubscribes.add(subscription);
+      if (!this.querySubscribeFlushTimer) {
+        this.querySubscribeFlushTimer = setTimeout(() => this.flushQuerySubscribes(), 0);
+      }
+      return;
+    }
     this.send({
       type: "query.subscribe",
       id: subscription.id,
@@ -1412,6 +1482,27 @@ export class GonvexClient {
       args: subscription.args,
       cacheRevision: subscription.cachedRevision,
     });
+  }
+
+  private flushQuerySubscribes() {
+    this.querySubscribeFlushTimer = undefined;
+    const subscriptions = Array.from(this.pendingQuerySubscribes);
+    this.pendingQuerySubscribes.clear();
+    const subscribes = subscriptions
+      .filter((subscription) => (
+        subscription.listeners.size > 0
+        && subscription.socketGeneration === this.socketGeneration
+        && this.querySubscriptions.get(subscription.key) === subscription
+      ))
+      .map((subscription) => ({
+        id: subscription.id,
+        path: subscription.path,
+        args: subscription.args,
+        cacheRevision: subscription.cachedRevision,
+      }));
+    for (let offset = 0; offset < subscribes.length; offset += maxSyncBatchOpens) {
+      this.send({ type: "query.subscribeMany", subscribes: subscribes.slice(offset, offset + maxSyncBatchOpens) });
+    }
   }
 
   private resumeQuerySubscriptions() {

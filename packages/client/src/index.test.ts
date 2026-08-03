@@ -91,6 +91,79 @@ function sentMessages(socket = latestSocket()) {
 }
 
 describe("GonvexClient", () => {
+	it("batches query subscribes into one frame when the server advertises queryBatch", async () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		const socket = (client.connect(), latestSocket());
+		socket.open();
+		socket.receive({ type: "session.ready", capabilities: { queryBatch: 1 } });
+
+		client.subscribeQuery(ref, {}, vi.fn());
+		client.subscribeQuery({ kind: "query", path: "teams.list" }, {}, vi.fn());
+		await vi.advanceTimersByTimeAsync(0);
+
+		const frames = sentMessages(socket);
+		expect(frames.filter((frame) => frame.type === "query.subscribe")).toHaveLength(0);
+		const batches = frames.filter((frame) => frame.type === "query.subscribeMany");
+		expect(batches).toHaveLength(1);
+		expect(batches[0].subscribes.map((subscribe: { path: string }) => subscribe.path))
+			.toEqual(["tasks.list", "teams.list"]);
+	});
+
+	it("flushes mutationMany as one frame and settles entries independently", async () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		client.connect();
+		const socket = latestSocket();
+		socket.open();
+		socket.receive({ type: "session.ready", capabilities: { mutationBatch: 1 } });
+
+		const outcome = client.mutationMany([
+			{ ref: { kind: "mutation", path: "tasks.create" }, args: { name: "a" } },
+			{ ref: { kind: "mutation", path: "tasks.create" }, args: { name: "b" } },
+		]);
+		await vi.advanceTimersByTimeAsync(0);
+
+		const batches = sentMessages(socket).filter((frame) => frame.type === "mutation.callMany");
+		expect(batches).toHaveLength(1);
+		expect(batches[0].calls).toHaveLength(2);
+		const [first, second] = batches[0].calls;
+		socket.receive({ type: "mutation.result", id: first.id, path: first.path, result: "id-a" });
+		socket.receive({ type: "mutation.error", id: second.id, path: second.path, error: "boom" });
+
+		const results = await outcome;
+		expect(results[0]).toEqual({ status: "ok", result: "id-a" });
+		expect(results[1]).toMatchObject({ status: "error" });
+		expect((results[1] as { error: GonvexClientError }).error.message).toBe("boom");
+	});
+
+	it("falls back to sequential mutations when mutationBatch is not advertised", async () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		client.connect();
+		const socket = latestSocket();
+		socket.open();
+		socket.receive({ type: "session.ready", capabilities: {} });
+
+		const outcome = client.mutationMany([
+			{ ref: { kind: "mutation", path: "tasks.create" }, args: { name: "a" } },
+			{ ref: { kind: "mutation", path: "tasks.create" }, args: { name: "b" } },
+		]);
+		await vi.advanceTimersByTimeAsync(0);
+
+		let calls = sentMessages(socket).filter((frame) => frame.type === "mutation.call");
+		expect(calls).toHaveLength(1);
+		socket.receive({ type: "mutation.result", id: calls[0].id, path: calls[0].path, result: "id-a" });
+		await vi.advanceTimersByTimeAsync(0);
+
+		calls = sentMessages(socket).filter((frame) => frame.type === "mutation.call");
+		expect(calls).toHaveLength(2);
+		socket.receive({ type: "mutation.result", id: calls[1].id, path: calls[1].path, result: "id-b" });
+
+		const results = await outcome;
+		expect(results).toEqual([
+			{ status: "ok", result: "id-a" },
+			{ status: "ok", result: "id-b" },
+		]);
+	});
+
 	it("rejects stale revisions and advances progress without notifying listeners", () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const handler = vi.fn();
