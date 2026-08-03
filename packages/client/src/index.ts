@@ -64,6 +64,7 @@ type SyncSubscription = {
   path: string;
   args: JsonValue;
   listeners: Set<SubscriptionHandler>;
+  unsubscribeTimer?: ReturnType<typeof setTimeout>;
   rows: JsonValue[];
   cursor?: SyncCursor;
   keyField: string;
@@ -180,6 +181,11 @@ export type GonvexClientOptions = GonvexClientAuth & {
    * Defaults to 250ms; set a longer bounded window for local-first apps.
    */
   querySubscriptionRetentionMs?: number;
+  /**
+   * Keep listenerless durable syncs open briefly across React remounts.
+   * Defaults to 250ms, preventing close/open/snapshot churn in StrictMode.
+   */
+  syncSubscriptionRetentionMs?: number;
   sync?: false | SyncStoreOptions;
   errorReporting?: false | Omit<ErrorReporterOptions, "endpoint" | "project" | "tenant">;
   timeouts?: GonvexTimeoutOptions;
@@ -228,6 +234,7 @@ export class GonvexClient {
   private readonly queryCacheWaitForScope: boolean;
   private readonly queryCacheReadTimeoutMs: number;
   private readonly querySubscriptionRetentionMs: number;
+  private readonly syncSubscriptionRetentionMs: number;
   private readonly syncStore: SyncStore | undefined;
   private queryCacheDirective: QueryCacheDirective | undefined;
   private queryCacheGeneration = 0;
@@ -256,6 +263,9 @@ export class GonvexClient {
     );
     this.querySubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
       options.querySubscriptionRetentionMs,
+    );
+    this.syncSubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
+      options.syncSubscriptionRetentionMs,
     );
     this.syncStore = createSyncStore(options.sync);
     this.timeouts = {
@@ -440,6 +450,7 @@ export class GonvexClient {
     ));
     for (const subscription of this.syncSubscriptions.values()) {
       this.clearSyncRetry(subscription);
+      if (subscription.unsubscribeTimer) clearTimeout(subscription.unsubscribeTimer);
     }
     if (this.syncOpenFlushTimer) {
       clearTimeout(this.syncOpenFlushTimer);
@@ -708,6 +719,10 @@ export class GonvexClient {
     const key = querySubscriptionKey(ref, args);
     const existing = this.syncSubscriptions.get(key);
     if (existing) {
+      if (existing.unsubscribeTimer) {
+        clearTimeout(existing.unsubscribeTimer);
+        existing.unsubscribeTimer = undefined;
+      }
       existing.listeners.add(onMessage);
       if (existing.lastMessage) {
         queueMicrotask(() => {
@@ -798,6 +813,9 @@ export class GonvexClient {
       // subscriptions advance through deltas; accepting an unsolicited or
       // delayed snapshot could roll a verified collection back to old rows.
       if (!subscription.opening) return;
+      if (subscription.cursor
+        && message.cursor.epoch === subscription.cursor.epoch
+        && message.cursor.revision < subscription.cursor.revision) return;
       this.clearSyncRetry(subscription, true);
       subscription.verificationGeneration += 1;
       subscription.isUpToDate = false;
@@ -1154,12 +1172,17 @@ export class GonvexClient {
     const subscription = this.syncSubscriptions.get(key);
     if (!subscription) return;
     subscription.listeners.delete(listener);
-    if (subscription.listeners.size > 0) return;
-    this.clearSyncRetry(subscription);
-    this.pendingSyncOpens.delete(subscription);
-    this.syncSubscriptions.delete(key);
-    this.handlers.delete(subscription.id);
-    this.send({ type: "sync.close", id: subscription.id });
+    if (subscription.listeners.size > 0 || subscription.unsubscribeTimer) return;
+    subscription.unsubscribeTimer = setTimeout(() => {
+      const latest = this.syncSubscriptions.get(key);
+      if (!latest || latest.listeners.size > 0) return;
+      latest.unsubscribeTimer = undefined;
+      this.clearSyncRetry(latest);
+      this.pendingSyncOpens.delete(latest);
+      this.syncSubscriptions.delete(key);
+      this.handlers.delete(latest.id);
+      this.send({ type: "sync.close", id: latest.id });
+    }, this.syncSubscriptionRetentionMs);
   }
 
   private persistSyncSnapshot(subscription: SyncSubscription) {
@@ -1709,7 +1732,14 @@ export class GonvexClient {
     if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project) return;
     this.authInFlight = true;
     this.armAuthWatchdog();
-    this.sendNow({ type: "auth", id: randomID(), token: this.auth.token, project: this.auth.project, tenant: this.auth.tenant });
+    this.sendNow({
+      type: "auth",
+      id: randomID(),
+      token: this.auth.token,
+      project: this.auth.project,
+      tenant: this.auth.tenant,
+      device: browserTelemetryInfo(),
+    });
   }
 
   // A lost auth reply (e.g. the server swapped its app plugin and dropped

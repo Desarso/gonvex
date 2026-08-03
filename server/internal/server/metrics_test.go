@@ -213,6 +213,7 @@ func TestWebsocketSnapshotScopesAndDescribesConnections(t *testing.T) {
 		lastActiveAt: now, lastActivity: "query.subscribe", lastPath: "tasks.list",
 		device: clientDeviceInfo{BrowserName: "Chrome", BrowserVersion: "126", DeviceType: "desktop", Platform: "macOS"},
 		subs:   map[string]querySubscription{"one": {path: "tasks.list"}, "two": {path: "notifications.list"}},
+		syncs:  map[string]*syncSubscription{"sync-one": {path: "tasks.recentSync"}},
 	})
 	server.addWSConn(&wsConn{
 		id: "conn-000002", project: "project-a", tenant: "tenant-b", auth: true,
@@ -226,7 +227,7 @@ func TestWebsocketSnapshotScopesAndDescribesConnections(t *testing.T) {
 	})
 
 	snapshot := server.websocketSnapshot("project-a")
-	if snapshot.Connections != 2 || snapshot.Subscriptions != 2 || snapshot.Users != 1 {
+	if snapshot.Connections != 2 || snapshot.Subscriptions != 3 || snapshot.Users != 1 {
 		t.Fatalf("unexpected websocket totals: %+v", snapshot)
 	}
 	if len(snapshot.Details) != 2 || snapshot.Details[0].ID != "conn-000001" {
@@ -236,7 +237,7 @@ func TestWebsocketSnapshotScopesAndDescribesConnections(t *testing.T) {
 	if first.UserEmail != "ada@example.test" || first.Tenant != "tenant-a" || first.Browser != "Chrome 126" {
 		t.Fatalf("connection identity/destination/device missing: %+v", first)
 	}
-	if strings.Join(first.Subscriptions, ",") != "notifications.list,tasks.list" {
+	if strings.Join(first.Subscriptions, ",") != "notifications.list,tasks.list,tasks.recentSync" {
 		t.Fatalf("subscriptions = %v", first.Subscriptions)
 	}
 }

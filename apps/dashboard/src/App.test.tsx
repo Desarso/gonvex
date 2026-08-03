@@ -191,6 +191,43 @@ describe("App", () => {
       source: "database",
       cache: "miss",
     })).toMatchObject({ label: "Database", detail: "Redis miss; database executed", key: "database-miss" });
+
+    expect(runtimeLogSourceSummary({
+      time: "2026-07-16T19:09:30Z",
+      path: "tasks.recentSync",
+      kind: "sync",
+      outcome: "ok",
+      durationMs: 12,
+      source: "websocket",
+      reason: "snapshot",
+    })).toMatchObject({ label: "WebSocket", detail: "Durable sync protocol", key: "websocket" });
+  });
+
+  it("shows the frontend responsible for a durable sync snapshot", () => {
+    render(<LogDetailsSheet
+      entry={{
+        time: "2026-07-16T19:09:28Z",
+        executionId: "sync-1",
+        path: "tasks.recentSync",
+        kind: "sync",
+        outcome: "ok",
+        durationMs: 12,
+        source: "websocket",
+        reason: "snapshot",
+        connectionId: "conn-000042",
+        browser: "Chrome 140",
+        platform: "Linux",
+        deviceType: "desktop",
+        resultCount: 18,
+      }}
+      onClose={vi.fn()}
+      onAction={vi.fn()}
+    />);
+
+    expect(screen.getByText("conn-000042")).toBeInTheDocument();
+    expect(screen.getByText("Chrome 140 · Linux · desktop")).toBeInTheDocument();
+    expect(screen.getByText("snapshot")).toBeInTheDocument();
+    expect(screen.getByText("18")).toBeInTheDocument();
   });
 
   it("copies only explicitly selected runtime log rows", () => {

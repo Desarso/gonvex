@@ -18,6 +18,7 @@ import (
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/dbpool"
 	schemasync "github.com/gonvex/gonvex/server/internal/schema"
+	"github.com/google/uuid"
 )
 
 type syncCursor struct {
@@ -199,10 +200,12 @@ func (s *Server) installTenantSyncLog(ctx context.Context, project, databaseURL 
 }
 
 func (c *wsConn) openSync(ctx context.Context, message clientMessage) {
+	started := time.Now()
 	databaseURL := c.server.databaseURLForTenant(c.project, c.tenant)
 	c.server.scheduleSyncLogPrune(c.project, c.tenant, databaseURL)
 	clock, err := currentSyncClock(ctx, databaseURL)
 	if err != nil {
+		c.server.metrics.recordOperationalLog(c.syncProtocolLog(message, "open", 0, time.Since(started), err), time.Now().UTC())
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 		return
 	}
@@ -221,6 +224,10 @@ func (c *wsConn) openSyncMany(ctx context.Context, opens []syncOpenRequest) {
 	c.server.scheduleSyncLogPrune(c.project, c.tenant, databaseURL)
 	start, err := currentSyncClock(ctx, databaseURL)
 	if err != nil {
+		for _, open := range opens {
+			message := clientMessage{ID: open.ID, Path: open.Path, Args: open.Args}
+			c.server.metrics.recordOperationalLog(c.syncProtocolLog(message, "open", 0, 0, err), time.Now().UTC())
+		}
 		c.write(serverMessage{Type: "sync.error", Error: err.Error()})
 		return
 	}
@@ -239,14 +246,26 @@ func (c *wsConn) openSyncWithClock(
 	databaseURL string,
 	clock syncClock,
 ) {
+	started := time.Now()
+	phase := "open"
+	resultCount := 0
+	var protocolErr error
+	defer func() {
+		c.server.metrics.recordOperationalLog(
+			c.syncProtocolLog(message, phase, resultCount, time.Since(started), protocolErr),
+			time.Now().UTC(),
+		)
+	}()
 	if strings.TrimSpace(message.ID) == "" || strings.TrimSpace(message.Path) == "" {
-		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: "sync id and path are required"})
+		protocolErr = errors.New("sync id and path are required")
+		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: protocolErr.Error()})
 		return
 	}
 	current := c.server.runtime.ManifestForProject(c.project)
 	entry, ok := current.Functions[message.Path]
 	if !ok || entry.Kind != manifest.FunctionKindSync || entry.Sync == nil {
-		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: "sync function is not registered"})
+		protocolErr = errors.New("sync function is not registered")
+		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: protocolErr.Error()})
 		return
 	}
 	definition := effectiveSyncDefinition(entry)
@@ -263,32 +282,40 @@ func (c *wsConn) openSyncWithClock(
 	if message.Cursor != nil && message.Cursor.Epoch == base.Epoch && message.Cursor.Revision <= base.Revision {
 		resumable := message.Cursor.Revision >= clock.RetainedRevision
 		if resumable {
+			phase = "resume"
 			subscription.cursor = *message.Cursor
 			if err := c.attachSync(ctx, subscription); err != nil {
+				protocolErr = err
 				c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 				return
 			}
 			if err := c.server.deliverSync(subscription); err != nil {
+				protocolErr = err
 				c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 			}
 			return
 		}
 	}
 
+	phase = "snapshot"
 	result, err := c.server.executeTenantQueryForCallerUncached(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
 	if err != nil {
+		protocolErr = err
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 		return
 	}
 	rows, err := syncSnapshotRows(result, definition)
 	if err != nil {
+		protocolErr = err
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 		return
 	}
+	resultCount = len(rows)
 	subscription.visibleKeys = syncRowsKeySet(rows, definition.Key)
 	subscription.visibleHashes = syncRowsHashes(rows, definition.Key)
 	subscription.verified = true
 	if err := c.attachSync(ctx, subscription); err != nil {
+		protocolErr = err
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 		return
 	}
@@ -298,9 +325,44 @@ func (c *wsConn) openSyncWithClock(
 		Mode: definition.Mode, MaxRows: definition.MaxRows, MaxBytes: definition.MaxBytes,
 	})
 	if err := c.server.deliverSync(subscription); err != nil {
+		protocolErr = err
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 	}
 	return
+}
+
+func (c *wsConn) syncProtocolLog(message clientMessage, phase string, resultCount int, duration time.Duration, protocolErr error) runtimeLogEntry {
+	completed := time.Now().UTC()
+	c.mu.Lock()
+	project, tenant, connectionID, device := c.project, c.tenant, c.id, c.device
+	userID, userEmail := "", ""
+	if c.user != nil {
+		userID, userEmail = c.user.ID, c.user.Email
+	}
+	c.mu.Unlock()
+	outcome, errorMessage := "ok", ""
+	if protocolErr != nil {
+		outcome, errorMessage = "error", protocolErr.Error()
+	}
+	var resultCountValue *int
+	if phase == "snapshot" && protocolErr == nil {
+		resultCountValue = &resultCount
+	}
+	path := strings.TrimSpace(message.Path)
+	if path == "" {
+		path = "sync.open"
+	}
+	return runtimeLogEntry{
+		Time: completed.Format(time.RFC3339Nano), CompletedAt: completed.Format(time.RFC3339Nano),
+		StartedAt: completed.Add(-duration).Format(time.RFC3339Nano), ExecutionID: uuid.NewString(), OperationID: message.ID,
+		Project: project, Tenant: tenant, UserID: userID, UserEmail: userEmail,
+		ConnectionID: connectionID,
+		Browser:      strings.TrimSpace(strings.Join([]string{device.BrowserName, device.BrowserVersion}, " ")),
+		DeviceType:   device.DeviceType, Platform: device.Platform,
+		Path: path, Kind: "sync", Outcome: outcome, DurationMS: float64(duration.Microseconds()) / 1000,
+		Error: errorMessage, Source: "websocket", Reason: phase,
+		Request: sanitizeRuntimeLogRequest(message.Args), RequestSizeBytes: len(message.Args), ResultCount: resultCountValue,
+	}
 }
 
 func (s *Server) scheduleSyncLogPrune(project, tenant, databaseURL string) {

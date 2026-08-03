@@ -89,12 +89,17 @@ type databaseMetricState struct {
 type runtimeLogEntry struct {
 	Time             string          `json:"time"`
 	ExecutionID      string          `json:"executionId,omitempty"`
+	OperationID      string          `json:"operationId,omitempty"`
 	StartedAt        string          `json:"startedAt,omitempty"`
 	CompletedAt      string          `json:"completedAt,omitempty"`
 	Project          string          `json:"project,omitempty"`
 	Tenant           string          `json:"tenant,omitempty"`
 	UserID           string          `json:"userId,omitempty"`
 	UserEmail        string          `json:"userEmail,omitempty"`
+	ConnectionID     string          `json:"connectionId,omitempty"`
+	Browser          string          `json:"browser,omitempty"`
+	DeviceType       string          `json:"deviceType,omitempty"`
+	Platform         string          `json:"platform,omitempty"`
 	Path             string          `json:"path"`
 	Kind             string          `json:"kind"`
 	Outcome          string          `json:"outcome"`
@@ -105,6 +110,7 @@ type runtimeLogEntry struct {
 	Reason           string          `json:"reason,omitempty"`
 	Request          json.RawMessage `json:"request,omitempty"`
 	RequestSizeBytes int             `json:"requestSizeBytes,omitempty"`
+	ResultCount      *int            `json:"resultCount,omitempty"`
 }
 
 type runtimeFunctionLog struct {
@@ -647,6 +653,21 @@ func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
 	}
 
 	log.Kind = logKind
+	m.appendLog(log)
+	onFunctionError := m.onFunctionError
+	m.mu.Unlock()
+
+	m.persistMutationLog(log)
+	if log.Outcome == "error" && onFunctionError != nil {
+		onFunctionError(log)
+	}
+}
+
+// recordOperationalLog publishes protocol and control-plane work without
+// inflating function-call metrics. Failed entries still flow into durable logs
+// and the grouped Errors inbox through the normal error callback.
+func (m *runtimeMetrics) recordOperationalLog(log runtimeLogEntry, now time.Time) {
+	m.mu.Lock()
 	m.appendLog(log)
 	onFunctionError := m.onFunctionError
 	m.mu.Unlock()

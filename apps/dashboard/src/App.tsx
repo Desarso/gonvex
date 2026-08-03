@@ -165,12 +165,17 @@ type RuntimeCacheMetrics = {
 export type RuntimeLogEntry = {
   time: string;
   executionId?: string;
+  operationId?: string;
   startedAt?: string;
   completedAt?: string;
   project?: string;
   tenant?: string;
   userId?: string;
   userEmail?: string;
+  connectionId?: string;
+  browser?: string;
+  deviceType?: string;
+  platform?: string;
   path: string;
   kind: string;
   outcome: string;
@@ -181,6 +186,7 @@ export type RuntimeLogEntry = {
   reason?: string;
   request?: unknown;
   requestSizeBytes?: number;
+  resultCount?: number;
 };
 
 type RuntimeRunningMetrics = {
@@ -721,14 +727,18 @@ function logEntryText(entry: RuntimeLogEntry): string {
   return [
     entry.time,
     entry.executionId ?? "",
+    entry.operationId ?? "",
     entry.tenant ?? "",
     entry.userId ?? "",
     entry.userEmail ?? "",
+    entry.connectionId ?? "",
+    entry.browser ?? "",
     entry.path,
     entry.kind,
     entry.outcome,
     entry.cache ?? "",
     entry.source ?? "",
+    entry.reason ?? "",
     source.tableLabel,
     entry.error ?? "",
     entry.request ? JSON.stringify(entry.request) : "",
@@ -738,7 +748,7 @@ function logEntryText(entry: RuntimeLogEntry): string {
 
 type RuntimeLogSourceSummary = {
   key: string;
-  group: "redis" | "database" | "unknown";
+  group: "redis" | "database" | "websocket" | "unknown";
   label: string;
   tableLabel: string;
   detail: string;
@@ -755,6 +765,9 @@ export function runtimeLogSourceSummary(entry: RuntimeLogEntry): RuntimeLogSourc
     if (cache === "error") return { key: "database-error", group: "database", label: "Database", tableLabel: "DB fallback", detail: "Redis error; database fallback" };
     if (cache === "bypass") return { key: "database-bypass", group: "database", label: "Database", tableLabel: "DB off", detail: "Redis not checked; database executed" };
     return { key: "database", group: "database", label: "Database", tableLabel: "DB", detail: "Database executed" };
+  }
+  if (source === "websocket") {
+    return { key: "websocket", group: "websocket", label: "WebSocket", tableLabel: "WebSocket", detail: "Durable sync protocol" };
   }
   return {
     key: "unknown",
@@ -7523,6 +7536,7 @@ export function LogDetailsSheet(props: { entry: RuntimeLogEntry; onClose: () => 
 
   const fields: Array<[string, string]> = [
     ["Execution ID", executionID],
+    ["Sync subscription ID", props.entry.operationId || "Not captured"],
     ["Function", props.entry.path || "runtime"],
     ["Type", props.entry.kind || "unknown"],
     ["Started", formatLogDateTime(runtimeLogStart(props.entry))],
@@ -7531,10 +7545,13 @@ export function LogDetailsSheet(props: { entry: RuntimeLogEntry; onClose: () => 
     ["Project", props.entry.project ?? "Not captured"],
     ["Tenant", props.entry.tenant ?? "Not captured"],
     ["User", props.entry.userEmail || props.entry.userId || "Anonymous / not captured"],
+    ["Connection", props.entry.connectionId || "Not captured"],
+    ["Client", [props.entry.browser, props.entry.platform, props.entry.deviceType].filter(Boolean).join(" · ") || "Not captured"],
     ["Outcome", props.entry.outcome || "unknown"],
     ["Source", source.label],
-    ["Cache", source.detail],
+    [source.group === "websocket" ? "Protocol" : "Cache", source.detail],
     ["Trigger", props.entry.reason || "Not captured"],
+    ["Result rows", props.entry.resultCount === undefined ? "Not captured" : props.entry.resultCount.toLocaleString()],
     ["Request size", props.entry.requestSizeBytes ? `${props.entry.requestSizeBytes.toLocaleString()} B` : "Not captured"],
   ];
 
@@ -7641,7 +7658,7 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     formatDuration(entry.durationMs),
     entry.error
       ? entry.error
-      : [entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || ""].filter(Boolean).join(" · ") || "—",
+      : [entry.reason, entry.connectionId, entry.browser, entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || ""].filter(Boolean).join(" · ") || "—",
   ]);
 
   const logErrorTextColor = props.themeMode === "dark" ? "#ff6b78" : "#d93f45";
@@ -7700,7 +7717,7 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       formatDuration(entry.durationMs),
       entry.error
         ? entry.error
-        : [entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || ""].filter(Boolean).join(" · ") || "—",
+        : [entry.reason, entry.connectionId, entry.browser, entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || ""].filter(Boolean).join(" · ") || "—",
     ].join("\t")).join("\n");
     try {
       await navigator.clipboard.writeText(`${header}\n${body}`);
@@ -7792,7 +7809,7 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
             { value: "all", label: "All" },
             ...sources.map((item) => ({
               value: item,
-              label: item === "redis" ? "Redis" : item === "database" ? "Database" : "Not tracked",
+              label: item === "redis" ? "Redis" : item === "database" ? "Database" : item === "websocket" ? "WebSocket" : "Not tracked",
             })),
           ]}
         />

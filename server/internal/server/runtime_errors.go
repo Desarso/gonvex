@@ -116,12 +116,17 @@ func runtimeErrorEvent(entry runtimeLogEntry) (capturedError, bool) {
 func runtimeErrorContext(entry runtimeLogEntry) map[string]any {
 	context := map[string]any{"durationMs": entry.DurationMS}
 	for key, value := range map[string]string{
-		"executionId": entry.ExecutionID,
-		"startedAt":   entry.StartedAt,
-		"completedAt": entry.CompletedAt,
-		"cache":       entry.Cache,
-		"source":      entry.Source,
-		"trigger":     entry.Reason,
+		"executionId":  entry.ExecutionID,
+		"operationId":  entry.OperationID,
+		"connectionId": entry.ConnectionID,
+		"browser":      entry.Browser,
+		"deviceType":   entry.DeviceType,
+		"platform":     entry.Platform,
+		"startedAt":    entry.StartedAt,
+		"completedAt":  entry.CompletedAt,
+		"cache":        entry.Cache,
+		"source":       entry.Source,
+		"trigger":      entry.Reason,
 	} {
 		if value = strings.TrimSpace(value); value != "" {
 			context[key] = value
@@ -129,6 +134,9 @@ func runtimeErrorContext(entry runtimeLogEntry) map[string]any {
 	}
 	if entry.RequestSizeBytes > 0 {
 		context["requestSizeBytes"] = entry.RequestSizeBytes
+	}
+	if entry.ResultCount != nil {
+		context["resultCount"] = *entry.ResultCount
 	}
 	if len(entry.Request) > 0 {
 		var request any

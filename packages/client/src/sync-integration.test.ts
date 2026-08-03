@@ -226,6 +226,39 @@ function normalizedRows(rows: JsonValue[] | undefined) {
 }
 
 describe("durable sync integration", () => {
+  it("retains a listenerless sync across a transient React remount", async () => {
+    const store = new FakeSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const first = vi.fn();
+    const second = vi.fn();
+
+    const unsubscribe = client.subscribeSync(ref, { workspaceId: "workspace-a" }, first);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const open = sentMessages().find((message) => message.type === "sync.open");
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: [{ id: "task-a", title: "kept warm" }],
+      cursor: { epoch: "sync-a", revision: 1 },
+      key: "id",
+    });
+
+    unsubscribe();
+    expect(sentMessages().filter((message) => message.type === "sync.close")).toHaveLength(0);
+    client.subscribeSync(ref, { workspaceId: "workspace-a" }, second);
+    await flushAsyncWork();
+
+    expect(sentMessages().filter((message) => message.type === "sync.open")).toHaveLength(1);
+    expect(sentMessages().filter((message) => message.type === "sync.close")).toHaveLength(0);
+    expect(second).toHaveBeenCalledWith(expect.objectContaining({
+      type: "sync.snapshot",
+      result: [{ id: "task-a", title: "kept warm" }],
+    }));
+  });
+
   it("replays the prior identity scope before background server auth completes", async () => {
     const store = new FakeSyncStore();
     store.directive = directive;
@@ -1204,6 +1237,7 @@ describe("durable sync integration", () => {
     expect(store.operationOrder).toEqual(["replace:start"]);
 
     unsubscribe();
+    vi.advanceTimersByTime(250);
     client.subscribeSync(ref, { workspaceId: "workspace-a" }, () => undefined);
     await flushAsyncWork();
     const opens = sentMessages().filter((message) => message.type === "sync.open");

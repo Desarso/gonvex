@@ -490,7 +490,17 @@ func (c *wsConn) observeActivity(message clientMessage, observedAt time.Time) {
 	c.mu.Lock()
 	c.lastActiveAt = observedAt.UTC()
 	c.lastActivity = activity
-	c.lastPath = strings.TrimSpace(message.Path)
+	lastPath := strings.TrimSpace(message.Path)
+	if message.Type == "sync.openMany" && len(message.Opens) > 0 {
+		paths := make([]string, 0, min(len(message.Opens), 3))
+		for _, open := range message.Opens {
+			if path := strings.TrimSpace(open.Path); path != "" && len(paths) < 3 {
+				paths = append(paths, path)
+			}
+		}
+		lastPath = strings.Join(paths, ", ")
+	}
+	c.lastPath = lastPath
 	if len(message.Device) > 0 {
 		var device clientDeviceInfo
 		if json.Unmarshal(message.Device, &device) == nil {
@@ -846,7 +856,7 @@ func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot
 			DeviceType:     conn.device.DeviceType,
 			Platform:       conn.device.Platform,
 			ConnectionType: conn.device.EffectiveConnectionType,
-			Subscriptions:  make([]string, 0, len(conn.subs)),
+			Subscriptions:  make([]string, 0, len(conn.subs)+len(conn.syncs)),
 		}
 		if detail.ID == "" {
 			detail.ID = fmt.Sprintf("conn-%06d", len(snapshot.Details)+1)
@@ -857,6 +867,9 @@ func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot
 		}
 		for _, sub := range conn.subs {
 			detail.Subscriptions = append(detail.Subscriptions, sub.path)
+		}
+		for _, syncSubscription := range conn.syncs {
+			detail.Subscriptions = append(detail.Subscriptions, syncSubscription.path)
 		}
 		conn.mu.Unlock()
 		sort.Strings(detail.Subscriptions)

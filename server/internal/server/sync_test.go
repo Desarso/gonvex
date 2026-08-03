@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/config"
 )
@@ -62,6 +63,37 @@ func TestSyncSnapshotHonorsRowAndByteBudgets(t *testing.T) {
 	}
 	if len(rows) != 1 {
 		t.Fatalf("expected byte budget to keep one row, got %d", len(rows))
+	}
+}
+
+func TestSyncProtocolLogCarriesSnapshotAndClientContext(t *testing.T) {
+	connection := &wsConn{
+		id:      "conn-000042",
+		project: "project-a",
+		tenant:  "tenant-a",
+		user:    &gonvex.User{ID: "user-a", Email: "ada@example.test"},
+		device: clientDeviceInfo{
+			BrowserName: "Chrome", BrowserVersion: "140", DeviceType: "desktop", Platform: "Linux",
+		},
+	}
+	entry := connection.syncProtocolLog(clientMessage{
+		ID: "sync-1", Path: "tasks.recentSync", Args: json.RawMessage(`{"workspaceId":"workspace-a"}`),
+	}, "snapshot", 18, 25*time.Millisecond, nil)
+
+	if entry.Kind != "sync" || entry.Path != "tasks.recentSync" || entry.Reason != "snapshot" || entry.Outcome != "ok" {
+		t.Fatalf("unexpected sync log identity: %#v", entry)
+	}
+	if entry.ExecutionID == "" || entry.OperationID != "sync-1" {
+		t.Fatalf("sync log did not separate the unique attempt from the subscription id: %#v", entry)
+	}
+	if entry.ConnectionID != "conn-000042" || entry.Browser != "Chrome 140" || entry.DeviceType != "desktop" || entry.Platform != "Linux" {
+		t.Fatalf("sync log lost client attribution: %#v", entry)
+	}
+	if entry.UserID != "user-a" || entry.UserEmail != "ada@example.test" || entry.Tenant != "tenant-a" {
+		t.Fatalf("sync log lost caller attribution: %#v", entry)
+	}
+	if string(entry.Request) != `{"workspaceId":"workspace-a"}` || entry.ResultCount == nil || *entry.ResultCount != 18 {
+		t.Fatalf("sync log lost snapshot context: %#v", entry)
 	}
 }
 

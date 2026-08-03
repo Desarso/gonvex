@@ -119,7 +119,7 @@ export type GonvexManifest = {
 };
 
 export type ClientMessage =
-  | { type: "auth"; id: string; token?: string; project?: string; tenant?: string }
+  | { type: "auth"; id: string; token?: string; project?: string; tenant?: string; device?: BrowserTelemetryInfo }
   | { type: "query.subscribe"; id: string; path: string; args: JsonValue; cacheRevision?: string }
   | { type: "query.unsubscribe"; id: string }
   | {
