@@ -206,9 +206,11 @@ export type GonvexTelemetryEvent = {
 };
 
 // Small collections can send their row hashes immediately and repair in one
-// round trip. Larger collections resume with one 64-byte digest and only send
-// the hash map when the server proves that something actually differs.
-const compactSyncIntegrityThreshold = 256;
+// round trip. Everything else resumes with one 64-byte digest and only sends
+// the hash map when the server proves that something actually differs
+// (sync.needHashes) — the server verifies digest-only resumes with zero row
+// data on the unchanged path, so a reload uploads bytes, not hash maps.
+const compactSyncIntegrityThreshold = 16;
 // Must match the runtime's per-frame sync.openMany admission limit. Keeping
 // this client-side prevents one oversized page from stranding every sync in a
 // batch behind a frame-level rejection.

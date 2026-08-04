@@ -255,6 +255,12 @@ func (c *wsConn) openSyncWithClock(
 			c.syncProtocolLog(message, phase, resultCount, time.Since(started), protocolErr),
 			time.Now().UTC(),
 		)
+		// Opens are the sync equivalent of a call: without this, sync.*
+		// functions show zero traffic in the dashboard's metrics view even
+		// while serving every reload.
+		if path := strings.TrimSpace(message.Path); path != "" {
+			c.server.metrics.recordFunction(c.project, path, "sync", time.Since(started), protocolErr)
+		}
 	}()
 	if strings.TrimSpace(message.ID) == "" || strings.TrimSpace(message.Path) == "" {
 		protocolErr = errors.New("sync id and path are required")
