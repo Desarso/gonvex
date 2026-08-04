@@ -293,6 +293,66 @@ describe("durable sync integration", () => {
     expect(sentMessages().some((message) => message.type === "sync.open")).toBe(false);
   });
 
+  it("recovers the warm scope from an identity hint when no token is available", async () => {
+    // A cold offline start may have no usable JWT at all (the identity
+    // provider needs the network to mint one). The app supplies the non-secret
+    // claims of the last token instead; the derived identity key must be
+    // byte-identical to the token path's or the saved directive is unreachable.
+    const identities: unknown[] = [];
+    const store = new (class extends FakeSyncStore {
+      override async loadDirective(...args: unknown[]) {
+        identities.push(args[0]);
+        return this.directive;
+      }
+    })();
+    store.directive = directive;
+    store.stored = {
+      rows: [{ id: "cached", title: "offline" }],
+      cursor: { epoch: "sync-a", revision: 7 },
+      keyField: "id",
+    };
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      project: "project-a",
+      tenant: "tenant-a",
+      identity: { sub: "user-a", iss: "issuer-a" },
+      sync: { store },
+    });
+    const handler = vi.fn();
+
+    client.subscribeSync(ref, { workspaceId: "workspace-a" }, handler);
+    await flushAsyncWork();
+
+    const NUL = String.fromCharCode(0);
+    expect(identities).toContain(["project-a", "tenant-a", "issuer-a", "user-a"].join(NUL));
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({
+      type: "sync.snapshot",
+      result: [{ id: "cached", title: "offline" }],
+    }));
+  });
+
+  it("recovers the warm scope when the identity hint arrives via setAuth", async () => {
+    const store = new FakeSyncStore();
+    store.directive = directive;
+    store.stored = {
+      rows: [{ id: "cached", title: "late hint" }],
+      cursor: { epoch: "sync-a", revision: 7 },
+      keyField: "id",
+    };
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const handler = vi.fn();
+    client.subscribeSync(ref, { workspaceId: "workspace-a" }, handler);
+    await flushAsyncWork();
+    expect(handler).not.toHaveBeenCalled();
+
+    client.setAuth({ project: "project-a", tenant: "tenant-a", identity: { sub: "user-a", iss: "issuer-a" } });
+    await flushAsyncWork();
+
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({
+      type: "sync.snapshot",
+      result: [{ id: "cached", title: "late hint" }],
+    }));
+  });
+
   it("advances the cursor without rewriting unchanged rows on a quiet reload", async () => {
     // Every sync.ready used to trigger a full delete+reinsert of every row of
     // every collection. Superseded IndexedDB versions live until LevelDB

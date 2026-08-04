@@ -1,9 +1,9 @@
-import { act, render, renderHook } from "@testing-library/react";
+import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionState, FunctionReference, GonvexClient } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { GonvexProvider, useConvexConnectionState, useMutation, useQuery, useQueryResult } from "./index";
+import { ConvexProviderWithAuth, GonvexProvider, useConvexConnectionState, useMutation, useQuery, useQueryResult } from "./index";
 
 const ref: FunctionReference = { kind: "query", path: "tasks.list" };
 
@@ -14,6 +14,7 @@ class FakeGonvexClient {
   readonly retryQuery = vi.fn();
   readonly mutation = vi.fn(() => Promise.resolve(null));
   readonly action = vi.fn(() => Promise.resolve(null));
+  readonly setAuth = vi.fn();
   subscribedArgs: unknown[] = [];
   state: ConnectionState = {
     isWebSocketConnected: true,
@@ -267,5 +268,62 @@ describe("useMutation", () => {
     });
 
     expect(client.mutation).toHaveBeenCalledWith({ kind: "mutation", path: "tasks.create" }, { title: "Ship" }, { timeoutMs: 5_000 });
+  });
+});
+
+describe("ConvexProviderWithAuth", () => {
+  // This file has no global auto-cleanup (vitest globals are off), and these are
+  // its only full `render` calls — unmount them so `queryByTestId` in the next
+  // test doesn't find the previous test's DOM in the shared document.body.
+  afterEach(cleanup);
+
+  function authState(fetchAccessToken: (args: { forceRefreshToken: boolean }) => Promise<string | null>) {
+    return { isLoading: false, isAuthenticated: true, fetchAccessToken };
+  }
+
+  it("installs the token and renders children when the fetch succeeds", async () => {
+    const client = new FakeGonvexClient();
+    let resolveToken!: (token: string | null) => void;
+    const fetchAccessToken = vi.fn(() => new Promise<string | null>((resolve) => { resolveToken = resolve; }));
+
+    const { queryByTestId } = render(
+      <ConvexProviderWithAuth client={client as unknown as GonvexClient} useAuth={() => authState(fetchAccessToken)}>
+        <div data-testid="app" />
+      </ConvexProviderWithAuth>,
+    );
+
+    expect(queryByTestId("app")).toBeNull();
+
+    await act(async () => resolveToken("jwt-token"));
+
+    expect(client.setAuth).toHaveBeenCalledWith({ token: "jwt-token" });
+    expect(queryByTestId("app")).not.toBeNull();
+  });
+
+  it("releases children without touching client auth when the fetch rejects", async () => {
+    const client = new FakeGonvexClient();
+    let rejectToken!: (error: Error) => void;
+    const fetchAccessToken = vi.fn(() => new Promise<string | null>((_resolve, reject) => { rejectToken = reject; }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const { queryByTestId } = render(
+        <ConvexProviderWithAuth client={client as unknown as GonvexClient} useAuth={() => authState(fetchAccessToken)}>
+          <div data-testid="app" />
+        </ConvexProviderWithAuth>,
+      );
+
+      expect(queryByTestId("app")).toBeNull();
+
+      // The canonical failure: an offline load whose identity provider needs
+      // the network. The app must render on whatever auth the client already
+      // holds instead of staying blank forever.
+      await act(async () => rejectToken(new Error("network unavailable")));
+
+      expect(queryByTestId("app")).not.toBeNull();
+      expect(client.setAuth).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

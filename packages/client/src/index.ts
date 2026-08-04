@@ -177,6 +177,16 @@ export type GonvexClientAuth = {
   token?: string;
   tenant?: string;
   telemetry?: boolean;
+  /**
+   * Non-secret identity hint ({@link https://datatracker.ietf.org/doc/html/rfc7519 JWT}
+   * `sub` and `iss` claims) that stands in for a token when deriving the local
+   * cache identity. Lets a cold start with no usable token — e.g. an offline
+   * tab whose identity provider cannot refresh — recover the warm query-cache
+   * directive and serve cached reads. Never sent to the server; a parseable
+   * token always takes precedence, and both must derive the same key for the
+   * same user (persist the claims of the last token you installed).
+   */
+  identity?: { sub: string; iss?: string };
 };
 
 export type GonvexClientOptions = GonvexClientAuth & {
@@ -340,7 +350,11 @@ export class GonvexClient {
       && !sameAuthTokenIdentity(this.auth, nextAuth);
     const scopeMayChange = tokenScopeChanged
       || (hasOwn(auth, "tenant") && auth.tenant !== this.auth.tenant)
-      || (hasOwn(auth, "project") && auth.project !== this.auth.project);
+      || (hasOwn(auth, "project") && auth.project !== this.auth.project)
+      // An identity hint that changes the derived key must recover (or drop)
+      // the warm directive just like a token change would. Same-key updates —
+      // e.g. installing the hint after its token is already live — are inert.
+      || (hasOwn(auth, "identity") && !sameAuthTokenIdentity(this.auth, nextAuth));
     if (scopeMayChange) {
       this.resetQueryCacheScope();
     }
@@ -2155,6 +2169,7 @@ function authFromOptions(options: GonvexClientOptions): GonvexClientAuth {
     token: options.token,
     tenant: options.tenant,
     telemetry: options.telemetry,
+    identity: options.identity,
   };
 }
 
@@ -2165,6 +2180,18 @@ function normalizeQuerySubscriptionRetentionMs(value: number | undefined): numbe
 }
 
 function authIdentityKey(auth: GonvexClientAuth) {
+  if (!auth.tenant) return "";
+  if (auth.token) return authIdentityKeyFromToken(auth);
+  // Token-free fallback: an explicit identity hint carries the same claims a
+  // token would supply, so both paths derive the same key for the same user.
+  const hint = auth.identity;
+  if (hint && typeof hint.sub === "string" && hint.sub.trim()) {
+    return [auth.project ?? "", auth.tenant, hint.iss ?? "", hint.sub].join("\u0000");
+  }
+  return "";
+}
+
+function authIdentityKeyFromToken(auth: GonvexClientAuth) {
   if (!auth.token || !auth.tenant) return "";
   const parts = auth.token.split(".");
   if (parts.length < 2) return "";

@@ -94,12 +94,26 @@ export function ConvexProviderWithAuth(props: {
     setTokenReady(false);
     if (auth.isLoading || !auth.isAuthenticated || !auth.fetchAccessToken) return;
     let cancelled = false;
-    void auth.fetchAccessToken({ forceRefreshToken: false }).then((token) => {
-      if (!cancelled) {
-        props.client.setAuth({ token: token ?? undefined });
-        setTokenReady(Boolean(token));
-      }
-    });
+    void auth.fetchAccessToken({ forceRefreshToken: false }).then(
+      (token) => {
+        if (!cancelled) {
+          props.client.setAuth({ token: token ?? undefined });
+          setTokenReady(Boolean(token));
+        }
+      },
+      (error) => {
+        // A rejected token fetch must not hold the app at `null` forever. The
+        // canonical case is an offline load whose identity provider needs the
+        // network to refresh: the client may already hold a locally cached
+        // token installed before mount, and local-first reads work without a
+        // fresh one. Release the children and leave the client's existing auth
+        // untouched; the next auth state change re-runs this effect.
+        if (!cancelled) {
+          console.warn("[gonvex] fetchAccessToken failed; continuing with existing client auth", error);
+          setTokenReady(true);
+        }
+      },
+    );
     return () => {
       cancelled = true;
     };
