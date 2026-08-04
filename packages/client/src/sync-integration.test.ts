@@ -293,6 +293,44 @@ describe("durable sync integration", () => {
     expect(sentMessages().some((message) => message.type === "sync.open")).toBe(false);
   });
 
+  it("opens cold when the IndexedDB store hangs instead of leaving collections empty forever", async () => {
+    // A wedged Chrome origin store emits no event at all: load() neither
+    // resolves nor rejects. Reproduced live on 2026-08-04 — every sync
+    // collection stayed empty while plain queries (which have their own read
+    // timeout) kept working.
+    const store = new FakeSyncStore();
+    store.load = () => new Promise(() => undefined);
+    store.loadDirective = () => new Promise(() => undefined);
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const handler = vi.fn();
+
+    client.subscribeSync(ref, { workspaceId: "workspace-a" }, handler);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    expect(sentMessages().filter((message) => message.type === "sync.open")).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    await flushAsyncWork();
+
+    const opens = sentMessages().filter((message) => message.type === "sync.open");
+    expect(opens).toHaveLength(1);
+    expect(opens[0].cursor).toBeUndefined();
+
+    socket().receive({
+      type: "sync.snapshot",
+      id: opens[0].id,
+      path: ref.path,
+      result: [{ id: "task-a", title: "cold but alive" }],
+      cursor: { epoch: "sync-a", revision: 1 },
+      key: "id",
+    });
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({
+      type: "sync.snapshot",
+      result: [{ id: "task-a", title: "cold but alive" }],
+    }));
+  });
+
   it("keeps live sync state when a deploy rotates the query scope but not the sync scope", async () => {
     const syncScope = "visibility-scope-a-0000000000000000000000000000000000000000";
     const store = new FakeSyncStore();

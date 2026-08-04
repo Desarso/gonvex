@@ -215,6 +215,11 @@ const compactSyncIntegrityThreshold = 16;
 // this client-side prevents one oversized page from stranding every sync in a
 // batch behind a frame-level rejection.
 const maxSyncBatchOpens = 256;
+// A wedged IndexedDB (observed in Chrome: open() never fires any event, so no
+// rejection ever reaches the store's error handling) must degrade the warm
+// start into a cold open — never into a permanently empty screen. Reads
+// normally settle in a few milliseconds.
+const syncStoreReadTimeoutMs = 1_000;
 
 export class GonvexClient {
   private socket: WebSocket | undefined;
@@ -1056,7 +1061,24 @@ export class GonvexClient {
     const generation = this.syncScopeGeneration;
     if (subscription.cacheReadGeneration === generation) return;
     subscription.cacheReadGeneration = generation;
+    // The warm read is an optimization with a deadline. If IndexedDB never
+    // answers (a wedged Chrome origin store emits no event at all, so no
+    // rejection ever fires), open cold after the timeout: a full snapshot
+    // beats a permanently empty screen, and a late read result is discarded.
+    let cacheReadSettled = false;
+    const cacheReadTimer = setTimeout(() => {
+      if (cacheReadSettled) return;
+      cacheReadSettled = true;
+      if (
+        this.syncSubscriptions.get(subscription.key) !== subscription
+        || this.syncScopeGeneration !== generation
+      ) return;
+      this.sendSyncOpen(subscription);
+    }, syncStoreReadTimeoutMs);
     void store.load(scope, subscription.path, subscription.args).then((cached) => {
+      clearTimeout(cacheReadTimer);
+      if (cacheReadSettled) return;
+      cacheReadSettled = true;
       const currentDirective = this.queryCacheDirective;
       if (
         this.syncSubscriptions.get(subscription.key) !== subscription
@@ -1097,7 +1119,12 @@ export class GonvexClient {
         this.emitSyncMessage(subscription, message);
       }
       this.sendSyncOpen(subscription);
-    }).catch(() => this.sendSyncOpen(subscription));
+    }).catch(() => {
+      clearTimeout(cacheReadTimer);
+      if (cacheReadSettled) return;
+      cacheReadSettled = true;
+      this.sendSyncOpen(subscription);
+    });
   }
 
   private sendSyncOpen(subscription: SyncSubscription) {
@@ -1651,7 +1678,15 @@ export class GonvexClient {
     const identity = authIdentityKey(this.auth);
     const generation = ++this.syncIdentityGeneration;
     if (!store || !identity) return;
+    // Same deadline as the warm collection reads: a hung IndexedDB must not
+    // stall directive recovery — the server's auth.result supplies it anyway.
+    const abandonTimer = setTimeout(() => {
+      // Only invalidate this recovery — a newer setAuth may already own the
+      // current generation.
+      if (generation === this.syncIdentityGeneration) this.syncIdentityGeneration += 1;
+    }, syncStoreReadTimeoutMs);
     void store.loadDirective(identity).then((directive) => {
+      clearTimeout(abandonTimer);
       if (
         generation !== this.syncIdentityGeneration
         || authIdentityKey(this.auth) !== identity
@@ -1659,7 +1694,9 @@ export class GonvexClient {
         || !validQueryCacheDirective(directive)
       ) return;
       this.installQueryCacheDirective(directive);
-    }).catch(() => undefined);
+    }).catch(() => {
+      clearTimeout(abandonTimer);
+    });
   }
 
   private resetQueryCacheScope() {
