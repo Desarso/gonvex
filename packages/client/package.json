@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/client",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "type": "module",
   "publishConfig": {
     "access": "public"
