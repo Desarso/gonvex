@@ -1014,7 +1014,13 @@ export class GonvexClient {
     subscription.integrityRows = subscription.rows;
     subscription.forceFullIntegrity = false;
     this.persistSyncSnapshot(subscription);
-    this.emitSyncMessage(subscription, message);
+    // Every emitted ready frame is self-describing: when a legacy runtime
+    // omitted the digest, the locally verified one is stamped in so consumers
+    // observe one contract regardless of the peer's protocol generation.
+    this.emitSyncMessage(
+      subscription,
+      message.digest === verifiedDigest ? message : { ...message, digest: verifiedDigest },
+    );
   }
 
   private emitSyncMessage(subscription: SyncSubscription, message: ServerMessage) {
