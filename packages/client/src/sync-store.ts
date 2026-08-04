@@ -23,6 +23,13 @@ export type StoredSyncCollection = {
   maxRows?: number;
   maxBytes?: number;
   hashes?: Record<string, string>;
+  /**
+   * The caller proved these rows are byte-identical to what is already
+   * stored, so only the collection's cursor/metadata needs to advance.
+   * Rewriting unchanged rows is what turns a quiet reload into a full
+   * delete+insert of every row of every collection.
+   */
+  rowsUnchanged?: boolean;
 };
 
 export type SyncStore = {
@@ -150,6 +157,41 @@ export class DexieSyncStore implements SyncStore {
     try {
       const key = await collectionKey(scope, path, args);
       const argsHash = await hashValue(stableStringify(args));
+      const database = await this.open();
+      // A quiet reload re-advertises every collection at a new revision with
+      // byte-identical rows. Rewriting them would delete and re-insert every
+      // row of every collection on every load; IndexedDB keeps the superseded
+      // versions until LevelDB compacts, so that churn is what grows the
+      // origin's store into the gigabytes. Advance the cursor only.
+      if (value.rowsUnchanged) {
+        let metadataOnly = false;
+        await database.transaction("rw", database.collections, async () => {
+          const existing = await database.collections.get(key);
+          if (!existing) return;
+          if (
+            existing.cursor.epoch === value.cursor.epoch
+            && existing.cursor.revision > value.cursor.revision
+          ) {
+            metadataOnly = true;
+            return;
+          }
+          await database.collections.put({
+            ...existing,
+            cursor: value.cursor,
+            keyField: value.keyField,
+            mode: value.mode,
+            orderBy: value.orderBy,
+            orderDirection: value.orderDirection,
+            maxRows: value.maxRows,
+            maxBytes: value.maxBytes,
+            hashes: value.hashes,
+            lastAccessedAt: Date.now(),
+          });
+          metadataOnly = true;
+        });
+        // Only a missing collection record falls through to a full write.
+        if (metadataOnly) return;
+      }
       const rows = boundedRows(
         value.rows,
         value.keyField,
@@ -166,7 +208,6 @@ export class DexieSyncStore implements SyncStore {
           sizeBytes: jsonSize(row),
         }));
       const sizeBytes = rows.reduce((sum, row) => sum + row.sizeBytes, 0);
-      const database = await this.open();
       await database.transaction("rw", database.collections, database.rows, async () => {
         const existing = await database.collections.get(key);
         if (

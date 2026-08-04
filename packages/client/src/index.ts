@@ -86,6 +86,12 @@ type SyncSubscription = {
   integrityRows?: JsonValue[];
   forceFullIntegrity: boolean;
   verificationGeneration: number;
+  /**
+   * The exact rows array last written to (or read from) the sync store. When
+   * a later persist carries the same array, only the cursor has moved and the
+   * stored rows can be left untouched.
+   */
+  persistedRows?: JsonValue[];
 };
 type OneShotQuery = {
   id: string;
@@ -912,6 +918,7 @@ export class GonvexClient {
       subscription.isUpToDate = false;
       subscription.cursor = undefined;
       subscription.rows = [];
+      subscription.persistedRows = undefined;
       subscription.hashes = {};
       subscription.integrityDigest = undefined;
       subscription.integrityRows = undefined;
@@ -1089,6 +1096,9 @@ export class GonvexClient {
       if (cached) {
         subscription.isUpToDate = false;
         subscription.rows = cached.rows;
+        // These rows came out of the store, so the store already holds them:
+        // the ready that follows this resume must not rewrite them.
+        subscription.persistedRows = cached.rows;
         subscription.cursor = cached.cursor;
         subscription.keyField = cached.keyField;
         subscription.mode = cached.mode;
@@ -1239,6 +1249,10 @@ export class GonvexClient {
     const store = this.syncStore;
     if (!directive || !store || !subscription.cursor) return;
     const scope = syncPersistenceScope(directive);
+    // sync.ready arrives for every collection on every reload, almost always
+    // with the rows the store already holds. Persist the advancing cursor but
+    // leave the rows alone unless they actually changed.
+    const rowsUnchanged = subscription.persistedRows === subscription.rows;
     const value = {
       rows: subscription.rows,
       cursor: subscription.cursor,
@@ -1249,7 +1263,9 @@ export class GonvexClient {
       maxRows: subscription.maxRows,
       maxBytes: subscription.maxBytes,
       hashes: { ...subscription.hashes },
+      rowsUnchanged,
     };
+    subscription.persistedRows = subscription.rows;
     this.enqueueSyncPersistence(
       subscription,
       scope,
@@ -1274,6 +1290,9 @@ export class GonvexClient {
       maxBytes: subscription.maxBytes,
       hashes: { ...subscription.hashes },
     };
+    // The delta brings the stored rows to exactly these in-memory rows, so the
+    // sync.ready that closes this batch must not rewrite the whole collection.
+    subscription.persistedRows = subscription.rows;
     this.enqueueSyncPersistence(
       subscription,
       scope,
@@ -1729,6 +1748,7 @@ export class GonvexClient {
       this.clearSyncRetry(subscription, true);
       subscription.isUpToDate = false;
       subscription.rows = [];
+      subscription.persistedRows = undefined;
       subscription.hashes = {};
       subscription.integrityDigest = undefined;
       subscription.integrityRows = undefined;

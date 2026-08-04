@@ -293,6 +293,68 @@ describe("durable sync integration", () => {
     expect(sentMessages().some((message) => message.type === "sync.open")).toBe(false);
   });
 
+  it("advances the cursor without rewriting unchanged rows on a quiet reload", async () => {
+    // Every sync.ready used to trigger a full delete+reinsert of every row of
+    // every collection. Superseded IndexedDB versions live until LevelDB
+    // compacts, so that churn grew one origin's store to 1.5 GB across 673 SST
+    // files — which is what eventually wedged the database open() itself.
+    const store = new FakeSyncStore();
+    store.stored = {
+      rows: [{ id: "cached", title: "unchanged" }],
+      cursor: { epoch: "sync-a", revision: 41 },
+      keyField: "id",
+    };
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+
+    client.subscribeSync(ref, { workspaceId: "workspace-a" }, vi.fn());
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+
+    const open = sentMessages().find((message) => message.type === "sync.open");
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 55 },
+      digest: await digestRows(store.stored.rows),
+    });
+    await flushAsyncWork();
+
+    // The resume is persisted (the cursor moved to 55) but the rows the store
+    // already holds are left untouched.
+    expect(store.replacements).toHaveLength(1);
+    expect(store.replacements[0].cursor).toEqual({ epoch: "sync-a", revision: 55 });
+    expect((store.replacements[0] as { rowsUnchanged?: boolean }).rowsUnchanged).toBe(true);
+  });
+
+  it("rewrites rows when a delta actually changes them", async () => {
+    const store = new FakeSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+
+    client.subscribeSync(ref, { workspaceId: "workspace-a" }, vi.fn());
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+
+    const open = sentMessages().find((message) => message.type === "sync.open");
+    const rows = [{ id: "task-a", title: "first" }];
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: rows,
+      cursor: { epoch: "sync-a", revision: 1 },
+      key: "id",
+    });
+    await flushAsyncWork();
+
+    // A snapshot is new content and must be written in full.
+    const snapshotWrite = store.replacements.at(-1) as { rowsUnchanged?: boolean };
+    expect(snapshotWrite.rowsUnchanged).not.toBe(true);
+    expect(snapshotWrite.rows).toEqual(rows);
+  });
+
   it("opens cold when the IndexedDB store hangs instead of leaving collections empty forever", async () => {
     // A wedged Chrome origin store emits no event at all: load() neither
     // resolves nor rejects. Reproduced live on 2026-08-04 — every sync
