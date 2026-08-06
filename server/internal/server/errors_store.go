@@ -20,11 +20,15 @@ func ensureErrorSchema(ctx context.Context, db telemetrySchemaDB) error {
 			occurred_at TIMESTAMPTZ NOT NULL,
 			tenant_id TEXT NOT NULL DEFAULT '',
 			release TEXT NOT NULL DEFAULT '',
+			level TEXT NOT NULL DEFAULT 'error',
 			user_id TEXT NOT NULL DEFAULT '',
 			device_id TEXT NOT NULL DEFAULT '',
 			payload JSONB NOT NULL,
 			PRIMARY KEY (project_id, event_id)
 		)`,
+		// Deployed tables predate the column. Everything recorded before
+		// levels existed was an error, so the default backfills correctly.
+		`ALTER TABLE gonvex_error_events ADD COLUMN IF NOT EXISTS level TEXT NOT NULL DEFAULT 'error'`,
 		`CREATE INDEX IF NOT EXISTS gonvex_error_events_group ON gonvex_error_events (project_id, fingerprint, occurred_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS gonvex_error_events_tenant ON gonvex_error_events (project_id, tenant_id, occurred_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS gonvex_error_events_release ON gonvex_error_events (project_id, release, fingerprint, occurred_at DESC)`,
@@ -33,6 +37,7 @@ func ensureErrorSchema(ctx context.Context, db telemetrySchemaDB) error {
 			fingerprint TEXT NOT NULL,
 			title TEXT NOT NULL,
 			culprit TEXT NOT NULL DEFAULT '',
+			level TEXT NOT NULL DEFAULT 'error',
 			status TEXT NOT NULL DEFAULT 'unresolved',
 			priority TEXT NOT NULL DEFAULT 'medium',
 			assignee TEXT NOT NULL DEFAULT '',
@@ -48,7 +53,11 @@ func ensureErrorSchema(ctx context.Context, db telemetrySchemaDB) error {
 			regression BOOLEAN NOT NULL DEFAULT false,
 			PRIMARY KEY (project_id, fingerprint)
 		)`,
+		`ALTER TABLE gonvex_error_groups ADD COLUMN IF NOT EXISTS level TEXT NOT NULL DEFAULT 'error'`,
 		`CREATE INDEX IF NOT EXISTS gonvex_error_groups_inbox ON gonvex_error_groups (project_id, status, last_seen DESC)`,
+		// A separate name: redefining an existing index is a no-op under
+		// IF NOT EXISTS, so the level-aware inbox needs its own.
+		`CREATE INDEX IF NOT EXISTS gonvex_error_groups_inbox_level ON gonvex_error_groups (project_id, status, level, last_seen DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -90,9 +99,9 @@ func (s *Server) persistError(ctx context.Context, event capturedError) (availab
 	}
 	when := eventTime(event.Timestamp)
 	result, err := tx.ExecContext(ctx, `INSERT INTO gonvex_error_events
-		(project_id, event_id, fingerprint, occurred_at, tenant_id, release, user_id, device_id, payload)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
-		ON CONFLICT (project_id, event_id) DO NOTHING`, event.Project, event.EventID, fingerprint(event), when, event.Tenant, event.Release, errorUserID(event), event.DeviceID, payload)
+		(project_id, event_id, fingerprint, occurred_at, tenant_id, release, user_id, device_id, payload, level)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
+		ON CONFLICT (project_id, event_id) DO NOTHING`, event.Project, event.EventID, fingerprint(event), when, event.Tenant, event.Release, errorUserID(event), event.DeviceID, payload, normalizeErrorLevel(event.Level))
 	if err != nil {
 		return true, false, err
 	}
@@ -122,7 +131,7 @@ func (s *Server) persistError(ctx context.Context, event capturedError) (availab
 	return true, true, nil
 }
 
-const errorGroupSelect = `SELECT fingerprint, project_id, title, culprit, status, priority, assignee,
+const errorGroupSelect = `SELECT fingerprint, project_id, title, culprit, level, status, priority, assignee,
 	first_seen, last_seen, event_count, tenants, releases, environments, users, devices, latest_event, regression
 	FROM gonvex_error_groups`
 
@@ -131,11 +140,13 @@ type rowScanner interface{ Scan(...any) error }
 func scanErrorGroup(row rowScanner) (*errorGroup, error) {
 	group := &errorGroup{}
 	var firstSeen, lastSeen time.Time
+	var level string
 	var tenants, releases, environments, users, devices, latest []byte
-	if err := row.Scan(&group.Fingerprint, &group.Project, &group.Title, &group.Culprit, &group.Status, &group.Priority, &group.Assignee,
+	if err := row.Scan(&group.Fingerprint, &group.Project, &group.Title, &group.Culprit, &level, &group.Status, &group.Priority, &group.Assignee,
 		&firstSeen, &lastSeen, &group.Count, &tenants, &releases, &environments, &users, &devices, &latest, &group.Regression); err != nil {
 		return nil, err
 	}
+	group.Level = normalizeErrorLevel(level)
 	group.FirstSeen = firstSeen.UTC().Format(time.RFC3339Nano)
 	group.LastSeen = lastSeen.UTC().Format(time.RFC3339Nano)
 	group.Tenants = decodeCountMap(tenants)
@@ -149,7 +160,7 @@ func scanErrorGroup(row rowScanner) (*errorGroup, error) {
 	return group, nil
 }
 
-func (s *Server) persistentErrorGroups(ctx context.Context, project, status, release string) ([]*errorGroup, []string, bool, error) {
+func (s *Server) persistentErrorGroups(ctx context.Context, project, status, release, level string) ([]*errorGroup, []string, bool, error) {
 	db, err := s.openErrorDB(ctx, project)
 	if err != nil || db == nil {
 		return nil, nil, db != nil, err
@@ -184,6 +195,10 @@ func (s *Server) persistentErrorGroups(ctx context.Context, project, status, rel
 	if status != "" {
 		query += fmt.Sprintf(` AND status=$%d`, len(args)+1)
 		args = append(args, status)
+	}
+	if level != "" {
+		query += fmt.Sprintf(` AND level=$%d`, len(args)+1)
+		args = append(args, level)
 	}
 	if release != "" {
 		query += fmt.Sprintf(` AND releases ? $%d`, len(args)+1)
@@ -297,14 +312,14 @@ func (s *Server) updatePersistentErrorGroup(ctx context.Context, project, fp str
 func upsertErrorGroup(ctx context.Context, tx *sql.Tx, group *errorGroup) error {
 	latest, _ := json.Marshal(group.Latest)
 	_, err := tx.ExecContext(ctx, `INSERT INTO gonvex_error_groups
-		(project_id,fingerprint,title,culprit,status,priority,assignee,first_seen,last_seen,event_count,tenants,releases,environments,users,devices,latest_event,regression)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17)
+		(project_id,fingerprint,title,culprit,status,priority,assignee,first_seen,last_seen,event_count,tenants,releases,environments,users,devices,latest_event,regression,level)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17,$18)
 		ON CONFLICT (project_id,fingerprint) DO UPDATE SET title=EXCLUDED.title,culprit=EXCLUDED.culprit,status=EXCLUDED.status,
 		priority=EXCLUDED.priority,assignee=EXCLUDED.assignee,last_seen=EXCLUDED.last_seen,event_count=EXCLUDED.event_count,
 		tenants=EXCLUDED.tenants,releases=EXCLUDED.releases,environments=EXCLUDED.environments,users=EXCLUDED.users,devices=EXCLUDED.devices,
-		latest_event=EXCLUDED.latest_event,regression=EXCLUDED.regression`, group.Project, group.Fingerprint, group.Title, group.Culprit,
+		latest_event=EXCLUDED.latest_event,regression=EXCLUDED.regression,level=EXCLUDED.level`, group.Project, group.Fingerprint, group.Title, group.Culprit,
 		group.Status, group.Priority, group.Assignee, group.FirstSeen, group.LastSeen, group.Count, encodeJSON(group.Tenants), encodeJSON(group.Releases),
-		encodeJSON(group.Environments), encodeJSON(group.Users), encodeJSON(group.Devices), latest, group.Regression)
+		encodeJSON(group.Environments), encodeJSON(group.Users), encodeJSON(group.Devices), latest, group.Regression, groupLevel(group))
 	return err
 }
 

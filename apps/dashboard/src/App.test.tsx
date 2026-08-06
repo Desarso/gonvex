@@ -795,6 +795,51 @@ describe("App", () => {
     expect(requestedURLs.some((url) => new URL(url).searchParams.get("release") === "5.2.0")).toBe(true);
   });
 
+  it("filters error groups by level and marks warnings", async () => {
+    const requestedURLs: string[] = [];
+    const user = await renderTrackedErrorProject(async (input) => {
+      const url = String(input);
+      requestedURLs.push(url);
+      const selectedLevel = new URL(url).searchParams.get("level");
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          releases: ["5.2.0"],
+          groups: [{
+            fingerprint: selectedLevel === "warning" ? "warning-group" : "error-group",
+            title: selectedLevel === "warning" ? "Sign-in rejected" : "Checkout failure",
+            level: selectedLevel === "warning" ? "warning" : "error",
+            culprit: "at submitOrder (src/checkout.ts:40:3)",
+            status: "unresolved",
+            priority: "high",
+            count: 1,
+            firstSeen: "2026-07-12T10:00:00Z",
+            lastSeen: "2026-07-12T10:00:00Z",
+            tenants: { acme: 1 },
+            users: { ada: 1 },
+            devices: { laptop: 1 },
+            releases: { "5.2.0": 1 },
+            environments: { production: 1 },
+            latest: { timestamp: "2026-07-12T10:00:00Z", release: "5.2.0" },
+          }],
+        }),
+      } as Response;
+    });
+
+    expect(await screen.findByText("Checkout failure")).toBeInTheDocument();
+    // Unfiltered by default, so an older runtime that cannot filter still lists everything.
+    expect(requestedURLs.every((url) => new URL(url).searchParams.get("level") === null)).toBe(true);
+
+    await user.click(screen.getByLabelText("Error level"));
+    await user.click(await screen.findByRole("option", { name: /warnings.*worth knowing/i }));
+
+    expect(await screen.findByText("Sign-in rejected")).toBeInTheDocument();
+    expect(requestedURLs.some((url) => new URL(url).searchParams.get("level") === "warning")).toBe(true);
+    expect(screen.getByText("warning", { selector: ".error-level" })).toBeInTheDocument();
+  });
+
   it("explains when the connected runtime predates error tracking", async () => {
     await renderTrackedErrorProject(async () => ({
       ok: false,

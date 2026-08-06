@@ -65,6 +65,13 @@ type Config struct {
 	GoogleAuthorizeURL string
 	GoogleTokenURL     string
 	GoogleJWKSURL      string
+	// FirebaseProjectID turns on verification of Firebase ID tokens presented as
+	// app credentials. Empty keeps the legacy behavior: the token's claims are
+	// decoded without any signature or expiry check, so any forged JWT
+	// authenticates as whatever "sub" it names. Set it in every deployment that
+	// authenticates browsers with Firebase.
+	FirebaseProjectID string
+	FirebaseJWKSURL   string
 	// Environment labels projects created/imported on this runtime instance in the
 	// dashboard ("local dev", "production", ...). Deployed runtimes set
 	// GONVEX_ENVIRONMENT so their projects stop claiming to be local dev.
@@ -112,6 +119,8 @@ func FromEnv() Config {
 		GoogleAuthorizeURL:          env("GONVEX_GOOGLE_AUTHORIZE_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
 		GoogleTokenURL:              env("GONVEX_GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token"),
 		GoogleJWKSURL:               env("GONVEX_GOOGLE_JWKS_URL", "https://www.googleapis.com/oauth2/v3/certs"),
+		FirebaseProjectID:           strings.TrimSpace(env("GONVEX_FIREBASE_PROJECT_ID", "")),
+		FirebaseJWKSURL:             env("GONVEX_FIREBASE_JWKS_URL", "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"),
 		Environment:                 env("GONVEX_ENVIRONMENT", "local dev"),
 	}
 }

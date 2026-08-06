@@ -79,6 +79,7 @@ type Server struct {
 	errorTracker          *errorTracker
 	runtimeErrors         chan runtimeLogEntry
 	googleKeys            googleKeyCache
+	firebaseKeys          googleKeyCache
 	authRateLimiter       appAuthRateLimiter
 	appAuthConfigMu       sync.Mutex
 	appAuthRequirements   map[string]appAuthRequirementCacheEntry

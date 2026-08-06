@@ -7884,6 +7884,8 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
 type DashboardErrorGroup = {
   fingerprint: string; title: string; culprit?: string; status: string; priority: string;
   count: number; firstSeen: string; lastSeen: string; tenants: Record<string, number>;
+  // Optional: runtimes older than levels omit it, and those groups are errors.
+  level?: "error" | "warning";
   users: Record<string, number>; devices: Record<string, number>; releases: Record<string, number>;
   environments: Record<string, number>; regression?: boolean; assignee?: string;
   latest: {
@@ -7940,6 +7942,7 @@ function ErrorsPage(props: { project: ProjectTarget }) {
   const [releases, setReleases] = useState<string[]>([]);
   const [release, setRelease] = useState("all");
   const [status, setStatus] = useState("unresolved");
+  const [level, setLevel] = useState("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -7955,6 +7958,7 @@ function ErrorsPage(props: { project: ProjectTarget }) {
       const params = new URLSearchParams();
       if (status !== "all") params.set("status", status);
       if (release !== "all") params.set("release", release);
+      if (level !== "all") params.set("level", level);
       const response = await fetch(`${runtimeURL}/dev/errors/groups${params.size ? `?${params.toString()}` : ""}`, { headers: runtimeHeaders(props.project) });
       const payload = await readErrorTrackingResponse<{ groups?: DashboardErrorGroup[]; releases?: string[] }>(response, {
         action: "Loading error groups",
@@ -7972,7 +7976,7 @@ function ErrorsPage(props: { project: ProjectTarget }) {
       setRuntimeState("unavailable");
     }
     finally { setLoading(false); }
-  }, [props.project, release, status]);
+  }, [props.project, release, status, level]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -8014,6 +8018,11 @@ function ErrorsPage(props: { project: ProjectTarget }) {
       description: index === 0 ? "Latest release" : undefined,
     })),
   ];
+  const levelOptions: SelectOption[] = [
+    { value: "all", label: "All levels", description: "Errors and warnings" },
+    { value: "error", label: "Errors", description: "Something broke" },
+    { value: "warning", label: "Warnings", description: "Handled, but worth knowing" },
+  ];
   const runtimeStatus = runtimeState === "capturing"
     ? { label: "Capturing", detail: "Gonvex runtime" }
     : runtimeState === "checking"
@@ -8041,6 +8050,13 @@ function ErrorsPage(props: { project: ProjectTarget }) {
           options={releaseOptions}
           selectedKey={release}
         />
+        <AppSelect
+          ariaLabel="Error level"
+          className="errors-level-filter"
+          onChange={setLevel}
+          options={levelOptions}
+          selectedKey={level}
+        />
         <Select aria-label="Error status" selectedKey={status} onSelectionChange={(key) => setStatus(String(key))}>
           <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
           <Select.Popover><ListBox><ListBox.Item id="unresolved">Unresolved</ListBox.Item><ListBox.Item id="resolved">Resolved</ListBox.Item><ListBox.Item id="ignored">Ignored</ListBox.Item><ListBox.Item id="all">All groups</ListBox.Item></ListBox></Select.Popover>
@@ -8058,9 +8074,9 @@ function ErrorsPage(props: { project: ProjectTarget }) {
           ? JSON.stringify(group.latest.context, null, 2)
           : "";
         const errorContextLabel = group.latest.tags?.source === "runtime" ? "Execution context" : "Captured context";
-        return <article className="error-group-card" data-expanded={expanded ? "true" : undefined} data-priority={group.priority} key={group.fingerprint}>
+        return <article className="error-group-card" data-expanded={expanded ? "true" : undefined} data-level={group.level ?? "error"} data-priority={group.priority} key={group.fingerprint}>
           <button className="error-group-summary" type="button" aria-expanded={expanded} onClick={() => setSelected(expanded ? null : group.fingerprint)}>
-            <div className="error-group-main"><div className="error-group-title"><span className="error-priority">{group.priority}</span>{group.regression ? <span className="error-regression">regression</span> : null}<strong>{group.title}</strong></div><code>{group.culprit || group.fingerprint}</code><span>Last seen {new Date(group.lastSeen).toLocaleString()} · first seen {new Date(group.firstSeen).toLocaleDateString()}</span></div>
+            <div className="error-group-main"><div className="error-group-title"><span className="error-priority">{group.priority}</span>{group.level === "warning" ? <span className="error-level">warning</span> : null}{group.regression ? <span className="error-regression">regression</span> : null}<strong>{group.title}</strong></div><code>{group.culprit || group.fingerprint}</code><span>Last seen {new Date(group.lastSeen).toLocaleString()} · first seen {new Date(group.firstSeen).toLocaleDateString()}</span></div>
             <div className="error-impact"><div><strong>{group.count}</strong><span>events</span></div><div><strong>{Object.keys(group.tenants).length}</strong><span>tenants</span></div><div><strong>{Object.keys(group.users).length}</strong><span>users</span></div><div><strong>{Object.keys(group.devices).length}</strong><span>machines</span></div></div>
             <span className="error-expand-mark" aria-hidden="true">{expanded ? "−" : "+"}</span>
           </button>

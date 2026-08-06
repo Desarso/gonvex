@@ -41,6 +41,7 @@ type errorGroup struct {
 	Fingerprint  string         `json:"fingerprint"`
 	Project      string         `json:"project"`
 	Title        string         `json:"title"`
+	Level        string         `json:"level"`
 	Culprit      string         `json:"culprit,omitempty"`
 	Status       string         `json:"status"`
 	Priority     string         `json:"priority"`
@@ -114,7 +115,7 @@ func (t *errorTracker) capture(event capturedError) (string, bool) {
 	return fp, true
 }
 
-func (t *errorTracker) listGroups(project, status, release string) ([]*errorGroup, []string) {
+func (t *errorTracker) listGroups(project, status, release, level string) ([]*errorGroup, []string) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -128,6 +129,9 @@ func (t *errorTracker) listGroups(project, status, release string) ([]*errorGrou
 			if status != "" && group.Status != status {
 				continue
 			}
+			if level != "" && groupLevel(group) != level {
+				continue
+			}
 			clone := *group
 			groups = append(groups, &clone)
 		}
@@ -139,7 +143,11 @@ func (t *errorTracker) listGroups(project, status, release string) ([]*errorGrou
 	for _, event := range t.eventLog {
 		if event.Project == project && event.Release == release {
 			fp := fingerprint(event)
-			if base := t.groups[fp]; base != nil && (status == "" || base.Status == status) {
+			base := t.groups[fp]
+			matches := base != nil &&
+				(status == "" || base.Status == status) &&
+				(level == "" || groupLevel(base) == level)
+			if matches {
 				eventsByFingerprint[fp] = append(eventsByFingerprint[fp], event)
 			}
 		}
@@ -188,11 +196,14 @@ func errorGroupForEvents(base *errorGroup, events []capturedError) *errorGroup {
 	group.Priority = base.Priority
 	group.Assignee = base.Assignee
 	group.Regression = base.Regression
+	// Rebuilt from stored payloads, which carry no level before this feature.
+	// The persisted group knows better than the replayed events do.
+	group.Level = base.Level
 	return group
 }
 
 func newErrorGroup(event capturedError, fp string, when time.Time) *errorGroup {
-	group := &errorGroup{Fingerprint: fp, Project: event.Project, Title: event.Message, Culprit: event.Culprit, Status: "unresolved", Priority: "medium", FirstSeen: when.Format(time.RFC3339Nano), Tenants: map[string]int{}, Releases: map[string]int{}, Environments: map[string]int{}, Users: map[string]int{}, Devices: map[string]int{}}
+	group := &errorGroup{Fingerprint: fp, Project: event.Project, Title: event.Message, Level: normalizeErrorLevel(event.Level), Culprit: event.Culprit, Status: "unresolved", Priority: "medium", FirstSeen: when.Format(time.RFC3339Nano), Tenants: map[string]int{}, Releases: map[string]int{}, Environments: map[string]int{}, Users: map[string]int{}, Devices: map[string]int{}}
 	applyErrorToGroup(group, event, when)
 	return group
 }
@@ -206,6 +217,11 @@ func applyErrorToGroup(group *errorGroup, event capturedError, when time.Time) {
 	group.Count++
 	group.LastSeen = when.Format(time.RFC3339Nano)
 	group.Latest = event
+	// Groups are fingerprinted per level, so this only fills in groups that
+	// were persisted before levels existed.
+	if group.Level == "" {
+		group.Level = normalizeErrorLevel(event.Level)
+	}
 	if event.Tenant != "" {
 		group.Tenants[event.Tenant]++
 	}
@@ -228,6 +244,46 @@ func applyErrorToGroup(group *errorGroup, event capturedError, when time.Time) {
 	}
 }
 
+// Levels are a closed set so the dashboard can rely on them for filtering and
+// colour. Anything unrecognized — including events from clients that predate
+// levels — counts as an error, which is the safer default to surface.
+const (
+	errorLevelError   = "error"
+	errorLevelWarning = "warning"
+)
+
+// groupLevel reads a group's level tolerantly: rows persisted before levels
+// existed have none, and every one of those was an error.
+func groupLevel(group *errorGroup) string {
+	if group == nil {
+		return errorLevelError
+	}
+	return normalizeErrorLevel(group.Level)
+}
+
+// requestedErrorLevel maps a ?level= query value to a filter. Unlike
+// normalizeErrorLevel, an empty or unrecognized value means "no filter" — an
+// older dashboard build sends no level and must keep seeing everything.
+func requestedErrorLevel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case errorLevelWarning, "warn":
+		return errorLevelWarning
+	case errorLevelError:
+		return errorLevelError
+	default:
+		return ""
+	}
+}
+
+func normalizeErrorLevel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case errorLevelWarning, "warn":
+		return errorLevelWarning
+	default:
+		return errorLevelError
+	}
+}
+
 func fingerprint(e capturedError) string {
 	stack := e.Culprit
 	if stack == "" {
@@ -239,6 +295,15 @@ func fingerprint(e capturedError) string {
 		}
 	}
 	normalized := strings.ToLower(strings.TrimSpace(e.Name + "|" + normalizeErrorMessage(e.Message) + "|" + normalizeStackFrame(stack) + "|" + e.Project))
+	// Level splits groups so a warning and an error sharing a message stay
+	// separate signals. Only non-error levels extend the hash: every group
+	// recorded before levels existed was an error, and rehashing those would
+	// strand their triage state (status, assignee) on an unreachable
+	// fingerprint and hide them from release-filtered views, which rebuild
+	// fingerprints from stored payloads.
+	if level := normalizeErrorLevel(e.Level); level != errorLevelError {
+		normalized += "|" + level
+	}
 	sum := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(sum[:8])
 }
@@ -291,7 +356,7 @@ var jwtErrorTextPattern = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]
 func sanitizeCapturedError(event capturedError) capturedError {
 	event.EventID = truncateErrorString(event.EventID, 160)
 	event.Timestamp = truncateErrorString(event.Timestamp, 64)
-	event.Level = truncateErrorString(event.Level, 24)
+	event.Level = normalizeErrorLevel(event.Level)
 	event.Message = scrubSensitiveErrorText(truncateErrorString(event.Message, 4000))
 	event.Name = truncateErrorString(event.Name, 200)
 	event.Stack = scrubSensitiveErrorText(truncateErrorString(event.Stack, 32000))
@@ -518,14 +583,15 @@ func (s *Server) handleErrorEnvelope(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleErrorGroups(w http.ResponseWriter, r *http.Request) {
 	project, status, release := projectID(r), r.URL.Query().Get("status"), r.URL.Query().Get("release")
-	if groups, releases, available, err := s.persistentErrorGroups(r.Context(), project, status, release); err != nil {
+	level := requestedErrorLevel(r.URL.Query().Get("level"))
+	if groups, releases, available, err := s.persistentErrorGroups(r.Context(), project, status, release, level); err != nil {
 		writeJSON(w, 503, map[string]any{"error": "error store unavailable"})
 		return
 	} else if available {
 		writeJSON(w, 200, map[string]any{"groups": groups, "releases": releases})
 		return
 	}
-	groups, releases := s.errorTracker.listGroups(project, status, release)
+	groups, releases := s.errorTracker.listGroups(project, status, release, level)
 	writeJSON(w, http.StatusOK, map[string]any{"groups": groups, "releases": releases})
 }
 

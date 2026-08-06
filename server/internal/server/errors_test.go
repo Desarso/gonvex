@@ -120,6 +120,11 @@ func TestErrorSchemaPersistsGroupsAndEvents(t *testing.T) {
 		if !strings.Contains(joined, "CREATE TABLE IF NOT EXISTS "+table) {
 			t.Fatalf("missing persistent %s schema in:\n%s", table, joined)
 		}
+		// Tables deployed before levels existed only gain the column via ALTER;
+		// without it every read of level fails on an existing installation.
+		if !strings.Contains(joined, "ALTER TABLE "+table+" ADD COLUMN IF NOT EXISTS level") {
+			t.Fatalf("missing level migration for %s in:\n%s", table, joined)
+		}
 	}
 }
 
@@ -217,5 +222,106 @@ func TestErrorHTTPFlowFiltersGroupsAndImpactByRelease(t *testing.T) {
 		if group.Latest.Release != "5.2.0" {
 			t.Fatalf("latest event was not scoped to 5.2.0: %#v", group.Latest)
 		}
+	}
+}
+
+func TestWarningsAndErrorsGroupSeparately(t *testing.T) {
+	tracker := newErrorTracker(100)
+	shared := capturedError{Project: "shop", Message: "sign-in rejected", Name: "Error", Culprit: "at signIn (src/auth.ts:12)"}
+	failure := shared
+	failure.EventID, failure.Level = "one", "error"
+	warning := shared
+	warning.EventID, warning.Level = "two", "warning"
+
+	errorFP, _ := tracker.capture(failure)
+	warningFP, _ := tracker.capture(warning)
+
+	if errorFP == warningFP {
+		t.Fatal("a warning and an error sharing a message must not merge into one group")
+	}
+	if level := tracker.groups[warningFP].Level; level != "warning" {
+		t.Fatalf("expected the warning group to carry its level, got %q", level)
+	}
+	if level := tracker.groups[errorFP].Level; level != "error" {
+		t.Fatalf("expected the error group to carry its level, got %q", level)
+	}
+}
+
+// Groups recorded before levels existed must keep their fingerprints: rehashing
+// them would strand triage state on an unreachable id and hide them from
+// release-filtered views, which rebuild fingerprints from stored payloads.
+func TestExistingErrorFingerprintsAreUnchangedByLevels(t *testing.T) {
+	legacy := capturedError{Project: "shop", Name: "Error", Message: "checkout failed", Culprit: "at checkout (src/cart.ts:20)"}
+	explicit := legacy
+	explicit.Level = "error"
+	uppercase := legacy
+	uppercase.Level = "ERROR"
+
+	if fingerprint(legacy) != fingerprint(explicit) {
+		t.Fatal("an explicit error level changed the fingerprint of an existing group")
+	}
+	if fingerprint(legacy) != fingerprint(uppercase) {
+		t.Fatal("level casing changed the fingerprint")
+	}
+}
+
+func TestErrorLevelNormalization(t *testing.T) {
+	for _, testCase := range []struct{ raw, want string }{
+		{"", "error"},
+		{"warn", "warning"},
+		{"WARNING", "warning"},
+		{" Warning ", "warning"},
+		{"fatal", "error"},
+		{"nonsense", "error"},
+	} {
+		if got := sanitizeCapturedError(capturedError{Level: testCase.raw}).Level; got != testCase.want {
+			t.Fatalf("level %q normalized to %q, want %q", testCase.raw, got, testCase.want)
+		}
+	}
+}
+
+// An older dashboard build sends no level and must keep seeing everything.
+func TestErrorGroupsLevelFilterDefaultsToEverything(t *testing.T) {
+	server := New(config.Config{})
+	body := bytes.NewBufferString(`{"events":[
+		{"eventId":"err","timestamp":"2026-07-12T10:00:00Z","message":"task save failed","name":"Error","culprit":"at saveTask (src/tasks.ts:99:8)","tenant":"acme"},
+		{"eventId":"warn","timestamp":"2026-07-12T11:00:00Z","level":"warning","message":"sign-in rejected","name":"Error","culprit":"at signIn (src/auth.ts:12:3)","tenant":"acme"}
+	]}`)
+	request := httptest.NewRequest(http.MethodPost, "/errors/envelope", body)
+	request.Header.Set("x-gonvex-project-id", "whagons-5")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("ingestion failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	listGroups := func(query string) []*errorGroup {
+		request := httptest.NewRequest(http.MethodGet, "/dev/errors/groups"+query, nil)
+		request.Header.Set("x-gonvex-project-id", "whagons-5")
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("group listing failed: %d %s", recorder.Code, recorder.Body.String())
+		}
+		var payload struct {
+			Groups []*errorGroup `json:"groups"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload.Groups
+	}
+
+	if groups := listGroups(""); len(groups) != 2 {
+		t.Fatalf("expected both levels without a filter, got %d", len(groups))
+	}
+	if groups := listGroups("?level=warning"); len(groups) != 1 || groups[0].Level != "warning" {
+		t.Fatalf("expected only the warning, got %#v", groups)
+	}
+	if groups := listGroups("?level=error"); len(groups) != 1 || groups[0].Level != "error" {
+		t.Fatalf("expected only the error, got %#v", groups)
+	}
+	if groups := listGroups("?level=nonsense"); len(groups) != 2 {
+		t.Fatalf("an unrecognized level must not hide groups, got %d", len(groups))
 	}
 }

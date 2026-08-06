@@ -32,15 +32,31 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 			return nil, nil, "", "", fmt.Errorf("a Gonvex app session is required")
 		}
 	}
-	if s.config.LandlordURL == "" {
-		if s.config.RequireAuth {
-			return nil, nil, "", "", fmt.Errorf("landlord database URL is not configured")
+	// Both fallbacks below hand the app an identity taken from the presented
+	// token rather than a Gonvex session. That identity is only trustworthy
+	// when the token's signature was checked, which firebaseIdentityFromToken
+	// does whenever GONVEX_FIREBASE_PROJECT_ID is configured.
+	appIdentity := func() (*gonvex.User, string, error) {
+		user, err := s.firebaseIdentityFromToken(ctx, token)
+		if err != nil {
+			return nil, "", err
 		}
 		tenant := tenantIDFromRequest(projectID, requestedTenantID)
 		if requestedTenantID == "" {
 			tenant = tenantIDFromRequest(projectID, currentTenantID)
 		}
-		return devUserFromJWT(token), map[string]any{}, projectID, tenant, nil
+		return user, tenant, nil
+	}
+
+	if s.config.LandlordURL == "" {
+		if s.config.RequireAuth {
+			return nil, nil, "", "", fmt.Errorf("landlord database URL is not configured")
+		}
+		user, tenant, err := appIdentity()
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		return user, map[string]any{}, projectID, tenant, nil
 	}
 
 	session, err := landlord.ValidateSession(ctx, s.config.LandlordURL, token, requestedTenantID)
@@ -48,11 +64,11 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 		if s.config.RequireAuth {
 			return nil, nil, "", "", err
 		}
-		tenant := tenantIDFromRequest(projectID, requestedTenantID)
-		if requestedTenantID == "" {
-			tenant = tenantIDFromRequest(projectID, currentTenantID)
+		user, tenant, identityErr := appIdentity()
+		if identityErr != nil {
+			return nil, nil, "", "", identityErr
 		}
-		return devUserFromJWT(token), map[string]any{}, projectID, tenant, nil
+		return user, map[string]any{}, projectID, tenant, nil
 	}
 	user := &gonvex.User{ID: session.UserID, Email: session.Email}
 	permissions, err := s.loadTenantPermissions(ctx, projectID, session.ActiveTenantID, session.UserID)
