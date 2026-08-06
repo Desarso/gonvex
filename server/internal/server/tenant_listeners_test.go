@@ -3,9 +3,50 @@ package server
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/gonvex/gonvex/server/internal/config"
 )
+
+func TestTenantListenerReconnectsWhenDatabaseRouteChanges(t *testing.T) {
+	runtime := New(config.Config{
+		TenantListenerLimit:       8,
+		TenantListenerIdleTimeout: time.Minute,
+		TenantDatabases: map[string]string{
+			"project-a:tenant-a": "postgres://listener.test/old-database",
+		},
+	})
+	manager := runtime.subscriptions.listeners
+	key := tenantListenerKey{project: "project-a", tenant: "tenant-a"}
+	oldContext, oldCancel := context.WithCancel(context.Background())
+	oldListener := &tenantListener{
+		key: key, databaseURL: "postgres://listener.test/old-database",
+		refs: 2, cancel: oldCancel, ready: make(chan struct{}), connected: true,
+	}
+	close(oldListener.ready)
+	manager.active[key] = oldListener
+
+	runtime.projectMu.Lock()
+	runtime.config.TenantDatabases["project-a:tenant-a"] = "postgres://listener.test/new-database"
+	runtime.projectMu.Unlock()
+
+	ready := manager.acquire(key.project, key.tenant)
+	manager.mu.Lock()
+	current := manager.active[key]
+	manager.mu.Unlock()
+	if current == oldListener {
+		t.Fatal("database route change reused a listener connected to the old tenant database")
+	}
+	select {
+	case <-oldContext.Done():
+	default:
+		t.Fatal("database route change did not stop the old PostgreSQL listener")
+	}
+	if ready == nil || current == nil || ready != current.ready {
+		t.Fatal("database route change did not publish the replacement readiness barrier")
+	}
+	current.cancel()
+}
 
 func TestTenantListenerReadinessResetsAcrossDisconnect(t *testing.T) {
 	runtime := New(config.Config{
@@ -16,7 +57,9 @@ func TestTenantListenerReadinessResetsAcrossDisconnect(t *testing.T) {
 	})
 	manager := runtime.subscriptions.listeners
 	key := tenantListenerKey{project: "project-a", tenant: "tenant-a"}
-	listener := &tenantListener{key: key, ready: make(chan struct{})}
+	listener := &tenantListener{
+		key: key, databaseURL: "postgres://listener.test/database", ready: make(chan struct{}),
+	}
 	manager.active[key] = listener
 
 	first := manager.acquire(key.project, key.tenant)

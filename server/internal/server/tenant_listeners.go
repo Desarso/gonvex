@@ -18,6 +18,7 @@ type tenantListenerKey struct {
 
 type tenantListener struct {
 	key           tenantListenerKey
+	databaseURL   string
 	refs          int
 	cancel        context.CancelFunc
 	idle          *time.Timer
@@ -44,6 +45,28 @@ func (m *tenantListenerManager) acquire(project, tenant string) <-chan struct{} 
 	key := tenantListenerKey{project: project, tenant: tenant}
 	m.mu.Lock()
 	if listener := m.active[key]; listener != nil {
+		if listener.databaseURL != databaseURL {
+			// Tenant routing can be hydrated after the first subscription opens.
+			// A listener connected before that hydration points at the project /
+			// landlord database forever, so sync/query invalidations from the real
+			// tenant database are never observed. Carry the existing references to
+			// a replacement listener; their eventual release calls are key-based.
+			if listener.idle != nil {
+				listener.idle.Stop()
+				listener.idle = nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			replacement := &tenantListener{
+				key: key, databaseURL: databaseURL, refs: listener.refs + 1,
+				cancel: cancel, ready: make(chan struct{}), needsRecovery: true,
+			}
+			m.active[key] = replacement
+			m.mu.Unlock()
+			listener.cancel()
+			m.server.markTenantSyncsOutOfDate(project, tenant, "listener-route-changed")
+			go m.run(ctx, replacement, databaseURL)
+			return replacement.ready
+		}
 		listener.refs++
 		if listener.idle != nil {
 			listener.idle.Stop()
@@ -58,7 +81,9 @@ func (m *tenantListenerManager) acquire(project, tenant string) <-chan struct{} 
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	listener := &tenantListener{key: key, refs: 1, cancel: cancel, ready: make(chan struct{})}
+	listener := &tenantListener{
+		key: key, databaseURL: databaseURL, refs: 1, cancel: cancel, ready: make(chan struct{}),
+	}
 	m.active[key] = listener
 	active := len(m.active)
 	m.mu.Unlock()
