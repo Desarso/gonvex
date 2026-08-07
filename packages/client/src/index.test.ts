@@ -418,6 +418,172 @@ describe("GonvexClient", () => {
     expect(sentMessages(socket).at(-1)).toMatchObject({ type: "auth", token: "next-token", tenant: "tenant-b" });
   });
 
+  it("fetches a token through the installed fetcher before sending auth", async () => {
+    const fetchToken = vi.fn(async () => "fresh-token");
+    const client = new GonvexClient("ws://runtime.test/ws", { tenant: "tenant-a", fetchToken });
+
+    client.subscribeQuery(ref, {}, vi.fn());
+    const socket = latestSocket();
+    socket.open();
+
+    // Nothing goes out until the fetch resolves; subscriptions queue behind it.
+    expect(socket.sent).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fetchToken).toHaveBeenCalledWith({ forceRefreshToken: false });
+    expect(sentMessages(socket)).toMatchObject([
+      { type: "auth", token: "fresh-token", tenant: "tenant-a" },
+    ]);
+
+    const [{ id: authID }] = sentMessages(socket);
+    socket.receive({ type: "auth.result", id: authID, result: { userId: "user-a" } });
+    expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", path: "tasks.list" });
+  });
+
+  it("re-fetches the token on reconnect instead of replaying the original", async () => {
+    const tokens = ["token-1", "token-2"];
+    const fetchToken = vi.fn(async () => tokens.shift() ?? null);
+    const client = new GonvexClient("ws://runtime.test/ws", { tenant: "tenant-a", fetchToken });
+
+    client.connect();
+    const firstSocket = latestSocket();
+    firstSocket.open();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sentMessages(firstSocket)[0]).toMatchObject({ type: "auth", token: "token-1" });
+
+    firstSocket.disconnect();
+    await vi.advanceTimersByTimeAsync(250);
+    const secondSocket = latestSocket();
+    secondSocket.open();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fetchToken).toHaveBeenCalledTimes(2);
+    expect(sentMessages(secondSocket)[0]).toMatchObject({ type: "auth", token: "token-2" });
+  });
+
+  it("force-refreshes the token and re-sends auth when the server rejects it", async () => {
+    let current = "expired-token";
+    const fetchToken = vi.fn(async ({ forceRefreshToken }: { forceRefreshToken: boolean }) => {
+      if (forceRefreshToken) current = "fresh-token";
+      return current;
+    });
+    const client = new GonvexClient("ws://runtime.test/ws", { tenant: "tenant-a", fetchToken });
+
+    client.subscribeQuery(ref, {}, vi.fn());
+    const socket = latestSocket();
+    socket.open();
+    await vi.advanceTimersByTimeAsync(0);
+    const [firstAuth] = sentMessages(socket);
+    expect(firstAuth).toMatchObject({ type: "auth", token: "expired-token" });
+
+    socket.receive({ type: "auth.error", id: firstAuth.id, error: "token expired" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fetchToken).toHaveBeenLastCalledWith({ forceRefreshToken: true });
+    const auths = sentMessages(socket).filter((message) => message.type === "auth");
+    expect(auths).toHaveLength(2);
+    expect(auths[1]).toMatchObject({ token: "fresh-token" });
+
+    // Subscriptions stay queued through the retry and flush once auth settles.
+    expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(false);
+    socket.receive({ type: "auth.result", id: auths[1].id, result: { userId: "user-a" } });
+    expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", path: "tasks.list" });
+  });
+
+  it("gives up and notifies onAuthError when the forced refresh returns the rejected token", async () => {
+    const fetchToken = vi.fn(async () => "always-bad");
+    const client = new GonvexClient("ws://runtime.test/ws", { tenant: "tenant-a", fetchToken });
+    const onAuthError = vi.fn();
+    client.onAuthError(onAuthError);
+
+    client.subscribeQuery(ref, {}, vi.fn());
+    const socket = latestSocket();
+    socket.open();
+    await vi.advanceTimersByTimeAsync(0);
+    const [firstAuth] = sentMessages(socket);
+
+    socket.receive({ type: "auth.error", id: firstAuth.id, error: "token expired" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Re-sending the very token the server just refused would loop forever.
+    expect(sentMessages(socket).filter((message) => message.type === "auth")).toHaveLength(1);
+    expect(onAuthError).toHaveBeenCalledWith("token expired");
+    // The session degrades to the unauthenticated flow: queued messages flush.
+    expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", path: "tasks.list" });
+  });
+
+  it("retries a rejected token only once per rejection cycle", async () => {
+    let count = 0;
+    const fetchToken = vi.fn(async () => `bad-token-${++count}`);
+    const client = new GonvexClient("ws://runtime.test/ws", { tenant: "tenant-a", fetchToken });
+    const onAuthError = vi.fn();
+    client.onAuthError(onAuthError);
+
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    await vi.advanceTimersByTimeAsync(0);
+    const [firstAuth] = sentMessages(socket);
+    socket.receive({ type: "auth.error", id: firstAuth.id, error: "bad token" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const auths = sentMessages(socket).filter((message) => message.type === "auth");
+    expect(auths).toHaveLength(2);
+    socket.receive({ type: "auth.error", id: auths[1].id, error: "still bad" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sentMessages(socket).filter((message) => message.type === "auth")).toHaveLength(2);
+    expect(fetchToken).toHaveBeenCalledTimes(2);
+    expect(onAuthError).toHaveBeenCalledWith("still bad");
+  });
+
+  it("sends a token provided to setAuth as-is and keeps the fetcher for reconnects", async () => {
+    const fetchToken = vi.fn(async () => "fetched-token");
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.connect();
+    const firstSocket = latestSocket();
+    firstSocket.open();
+
+    client.setAuth({ token: "provided-token", tenant: "tenant-a", fetchToken });
+    expect(fetchToken).not.toHaveBeenCalled();
+    expect(sentMessages(firstSocket).at(-1)).toMatchObject({ type: "auth", token: "provided-token" });
+
+    firstSocket.disconnect();
+    await vi.advanceTimersByTimeAsync(250);
+    const secondSocket = latestSocket();
+    secondSocket.open();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fetchToken).toHaveBeenCalledWith({ forceRefreshToken: false });
+    expect(sentMessages(secondSocket)[0]).toMatchObject({ type: "auth", token: "fetched-token" });
+  });
+
+  it("treats a null fetch result as signed out", async () => {
+    const fetchToken = vi.fn(async () => null);
+    const client = new GonvexClient("ws://runtime.test/ws", { token: "stale-token", tenant: "tenant-a", fetchToken });
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const [auth] = sentMessages(socket);
+    expect(auth).toMatchObject({ type: "auth", tenant: "tenant-a" });
+    expect(auth.token).toBeUndefined();
+  });
+
+  it("keeps the installed token when the fetcher rejects", async () => {
+    const fetchToken = vi.fn(async () => {
+      throw new Error("identity provider unreachable");
+    });
+    const client = new GonvexClient("ws://runtime.test/ws", { token: "cached-token", tenant: "tenant-a", fetchToken });
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sentMessages(socket)[0]).toMatchObject({ type: "auth", token: "cached-token", tenant: "tenant-a" });
+  });
+
   it("routes query subscription results to the matching handler", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const handler = vi.fn();

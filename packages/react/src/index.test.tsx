@@ -296,8 +296,24 @@ describe("ConvexProviderWithAuth", () => {
 
     await act(async () => resolveToken("jwt-token"));
 
-    expect(client.setAuth).toHaveBeenCalledWith({ token: "jwt-token" });
+    expect(client.setAuth).toHaveBeenCalledWith({ token: "jwt-token", fetchToken: fetchAccessToken });
     expect(queryByTestId("app")).not.toBeNull();
+  });
+
+  it("passes the live fetcher through so the client can refresh tokens itself", async () => {
+    const client = new FakeGonvexClient();
+    const fetchAccessToken = vi.fn((_args: { forceRefreshToken: boolean }) => Promise.resolve("jwt-token"));
+
+    render(
+      <ConvexProviderWithAuth client={client as unknown as GonvexClient} useAuth={() => authState(fetchAccessToken)}>
+        <div data-testid="app" />
+      </ConvexProviderWithAuth>,
+    );
+    await act(async () => {});
+
+    const installed = client.setAuth.mock.calls[0][0] as { fetchToken: (args: { forceRefreshToken: boolean }) => Promise<string | null> };
+    await installed.fetchToken({ forceRefreshToken: true });
+    expect(fetchAccessToken).toHaveBeenLastCalledWith({ forceRefreshToken: true });
   });
 
   it("releases children without touching client auth when the fetch rejects", async () => {

@@ -93,11 +93,15 @@ export function ConvexProviderWithAuth(props: {
   useEffect(() => {
     setTokenReady(false);
     if (auth.isLoading || !auth.isAuthenticated || !auth.fetchAccessToken) return;
+    const fetchAccessToken = auth.fetchAccessToken;
     let cancelled = false;
-    void auth.fetchAccessToken({ forceRefreshToken: false }).then(
+    void fetchAccessToken({ forceRefreshToken: false }).then(
       (token) => {
         if (!cancelled) {
-          props.client.setAuth({ token: token ?? undefined });
+          // Install the fetcher alongside the token so the client re-fetches
+          // on reconnect and force-refreshes on auth.error itself, instead of
+          // replaying this token verbatim after it expires.
+          props.client.setAuth({ token: token ?? undefined, fetchToken: fetchAccessToken });
           setTokenReady(Boolean(token));
         }
       },
@@ -1024,3 +1028,5 @@ function useGonvexClient() {
 function isRecord(value: JsonValue): value is { [key: string]: JsonValue } {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
+
+export { useSignalValue } from "./useSignal.js";
