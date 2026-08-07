@@ -88,11 +88,12 @@ type serverCapabilities struct {
 }
 
 type syncReadyMessage struct {
-	ID     string      `json:"id"`
-	Path   string      `json:"path,omitempty"`
-	Cursor *syncCursor `json:"cursor"`
-	Mode   string      `json:"mode,omitempty"`
-	Digest string      `json:"digest,omitempty"`
+	ID        string      `json:"id"`
+	Path      string      `json:"path,omitempty"`
+	Cursor    *syncCursor `json:"cursor"`
+	Mode      string      `json:"mode,omitempty"`
+	Digest    string      `json:"digest,omitempty"`
+	Truncated bool        `json:"truncated"`
 }
 
 type serverMessage struct {
@@ -127,6 +128,7 @@ type serverMessage struct {
 	MutationIDs          []string              `json:"mutationIds,omitempty"`
 	Hashes               map[string]string     `json:"hashes,omitempty"`
 	Digest               string                `json:"digest,omitempty"`
+	Truncated            *bool                 `json:"truncated,omitempty"`
 	Ready                []syncReadyMessage    `json:"ready,omitempty"`
 }
 

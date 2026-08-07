@@ -18,6 +18,8 @@ export type StoredSyncCollection = {
   cursor: SyncCursor;
   keyField: string;
   mode?: "eager" | "progressive";
+  /** Whether the server budget-cut the materialized collection. */
+  truncated?: boolean;
   orderBy?: string;
   orderDirection?: "asc" | "desc";
   maxRows?: number;
@@ -47,6 +49,8 @@ export type SyncStore = {
     value: {
       cursor: SyncCursor;
       keyField: string;
+      mode?: "eager" | "progressive";
+      truncated?: boolean;
       orderBy?: string;
       orderDirection?: "asc" | "desc";
       upserts: JsonValue[];
@@ -71,6 +75,7 @@ type CollectionRecord = {
   cursor: SyncCursor;
   keyField: string;
   mode?: "eager" | "progressive";
+  truncated?: boolean;
   orderBy?: string;
   orderDirection?: "asc" | "desc";
   maxRows?: number;
@@ -140,6 +145,7 @@ export class DexieSyncStore implements SyncStore {
         cursor: collection.cursor,
         keyField: collection.keyField,
         mode: collection.mode,
+        truncated: collection.truncated,
         orderBy: collection.orderBy,
         orderDirection: collection.orderDirection,
         maxRows: collection.maxRows,
@@ -180,6 +186,7 @@ export class DexieSyncStore implements SyncStore {
             cursor: value.cursor,
             keyField: value.keyField,
             mode: value.mode,
+            truncated: value.truncated,
             orderBy: value.orderBy,
             orderDirection: value.orderDirection,
             maxRows: value.maxRows,
@@ -224,6 +231,7 @@ export class DexieSyncStore implements SyncStore {
           cursor: value.cursor,
           keyField: value.keyField,
           mode: value.mode,
+          truncated: value.truncated,
           orderBy: value.orderBy,
           orderDirection: value.orderDirection,
           maxRows: value.maxRows,
@@ -248,6 +256,7 @@ export class DexieSyncStore implements SyncStore {
       cursor: SyncCursor;
       keyField: string;
       mode?: "eager" | "progressive";
+      truncated?: boolean;
       orderBy?: string;
       orderDirection?: "asc" | "desc";
       upserts: JsonValue[];
@@ -312,6 +321,7 @@ export class DexieSyncStore implements SyncStore {
           cursor: value.cursor,
           keyField: value.keyField,
           mode: value.mode ?? collection.mode,
+          truncated: value.truncated ?? collection.truncated,
           orderBy: value.orderBy ?? collection.orderBy,
           orderDirection: value.orderDirection ?? collection.orderDirection,
           maxRows,

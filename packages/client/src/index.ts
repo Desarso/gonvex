@@ -25,6 +25,11 @@ import {
   type SyncStoreOptions,
 } from "./sync-store.js";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
+import { OptimisticOverlay, type OptimisticPatch, type Row } from "./optimistic.js";
+import {
+  createMutationOutbox,
+  type MutationOutbox,
+} from "./outbox.js";
 export * from "./cache.js";
 export * from "./cache-coordinator.js";
 export * from "./browser-cache.js";
@@ -35,9 +40,28 @@ export * from "./persistent-cache.js";
 export * from "./query-cache.js";
 export * from "./sync-store.js";
 export * from "./error-reporter.js";
+export * from "./optimistic.js";
+export * from "./outbox.js";
+export * from "./signals.js";
 export type { QueryCacheDirective } from "@gonvex/protocol";
 
 type SubscriptionHandler = (message: ServerMessage) => void;
+export type SyncReadyMessage = Extract<ServerMessage, { type: "sync.ready" }> & {
+  /** True when the server cut this collection at its row or byte budget. */
+  truncated?: boolean;
+};
+export type SyncMessage =
+  | Extract<ServerMessage, {
+    type:
+      | "sync.snapshot"
+      | "sync.delta"
+      | "sync.needHashes"
+      | "sync.syncing"
+      | "sync.reset"
+      | "sync.error";
+  }>
+  | SyncReadyMessage;
+export type SyncSubscriptionHandler = (message: SyncMessage) => void;
 type WatchUpdateHandler = () => void;
 type TelemetryHandler = (event: GonvexTelemetryEvent) => void;
 type ConnectionStateHandler = (state: ConnectionState) => void;
@@ -63,17 +87,18 @@ type SyncSubscription = {
   key: string;
   path: string;
   args: JsonValue;
-  listeners: Set<SubscriptionHandler>;
+  listeners: Set<SyncSubscriptionHandler>;
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
   rows: JsonValue[];
   cursor?: SyncCursor;
   keyField: string;
   mode?: "eager" | "progressive";
+  truncated?: boolean;
   orderBy?: string;
   orderDirection?: "asc" | "desc";
   maxRows?: number;
   maxBytes?: number;
-  lastMessage?: ServerMessage;
+  lastMessage?: SyncMessage;
   cacheReadGeneration?: number;
   socketGeneration?: number;
   opening: boolean;
@@ -125,7 +150,7 @@ export type GonvexClientErrorCode = "server" | "timeout" | "disconnected" | "clo
  * - `timeout`: no response arrived within the operation timeout. For
  *   mutations/actions the write may or may not have been applied.
  * - `disconnected`: the socket dropped while the operation was pending.
- *   Mutations/actions fail closed and are never replayed automatically.
+ *   Mutations/actions fail closed unless a mutation opted into the outbox.
  * - `closed`: the client was explicitly closed.
  * - `auth`: authentication was rejected.
  */
@@ -170,13 +195,40 @@ export const DEFAULT_ACTION_TIMEOUT_MS = 60_000;
 export type CallOptions = {
   /** Per-call override of the operation timeout. `0` disables. */
   timeoutMs?: number;
+  /** Ordered row changes to expose until the mutation settles. */
+  optimistic?: OptimisticPatch[];
+  /** Queue transport failures durably instead of rejecting. Default `reject`. */
+  offline?: "queue" | "reject";
 };
+
+/** Returned when an offline mutation has been accepted by the local outbox. */
+export type QueuedMutationOutcome = {
+  status: "queued";
+  mutationId: string;
+};
+
+export type GonvexAuthTokenFetcher = (args: {
+  /** True when the server just rejected the current token — bypass any cache. */
+  forceRefreshToken: boolean;
+}) => Promise<string | null | undefined>;
 
 export type GonvexClientAuth = {
   project?: string;
   token?: string;
   tenant?: string;
   telemetry?: boolean;
+  /**
+   * Async source of the auth token, mirroring Convex's `fetchToken` contract.
+   * When installed, the client re-fetches before every auth send — on first
+   * connect, on every reconnect, and once more with `forceRefreshToken: true`
+   * when the server rejects the current token — so a socket that outlives a
+   * short-lived JWT (e.g. an ~1h Firebase ID token) reauthenticates with a
+   * live credential instead of replaying the expired one. A `token` passed in
+   * the same `setAuth` call is trusted and sent as-is; resolving `null` signs
+   * the session out; a rejected fetch keeps the currently installed token so
+   * an offline start is not signed out.
+   */
+  fetchToken?: GonvexAuthTokenFetcher;
   /**
    * Non-secret identity hint ({@link https://datatracker.ietf.org/doc/html/rfc7519 JWT}
    * `sub` and `iss` claims) that stands in for a token when deriving the local
@@ -203,6 +255,11 @@ export type GonvexClientOptions = GonvexClientAuth & {
    */
   syncSubscriptionRetentionMs?: number;
   sync?: false | SyncStoreOptions;
+  /**
+   * Durable mutation queue settings. Every replay keeps its original
+   * idempotency key, making an accidental cross-tab double-send server-safe.
+   */
+  outbox?: { databaseName?: string; enabled?: boolean };
   errorReporting?: false | Omit<ErrorReporterOptions, "endpoint" | "project" | "tenant">;
   timeouts?: GonvexTimeoutOptions;
 };
@@ -254,6 +311,14 @@ export class GonvexClient {
   private auth: GonvexClientAuth = {};
   private authInFlight = false;
   private authWatchdogTimer: ReturnType<typeof setTimeout> | undefined;
+  // Monotonic guard for async token fetches: a resolve whose generation is no
+  // longer current was superseded (newer setAuth, watchdog re-issue, or a
+  // reconnect's own fetch) and must be discarded.
+  private authFetchGeneration = 0;
+  // At most one forced refresh per rejection cycle; cleared when auth settles
+  // or a fresh send cycle starts, so a bad token can't refresh-loop forever.
+  private authRetriedAfterError = false;
+  private readonly authErrorHandlers = new Set<(error: string) => void>();
   private telemetryEnabled = false;
   private readonly queryCache: QueryCacheStore | undefined;
   private readonly queryCacheWaitForScope: boolean;
@@ -261,6 +326,14 @@ export class GonvexClient {
   private readonly querySubscriptionRetentionMs: number;
   private readonly syncSubscriptionRetentionMs: number;
   private readonly syncStore: SyncStore | undefined;
+  private readonly mutationOutbox: MutationOutbox;
+  private readonly overlay = new OptimisticOverlay();
+  private readonly optimisticMutationIds = new Set<string>();
+  private readonly outboxReady: Promise<void>;
+  private readonly unsubscribeOutbox: () => void;
+  private readonly unsubscribeOverlay: () => void;
+  private drainingOutbox = false;
+  private outboxDrainTimer: ReturnType<typeof setTimeout> | undefined;
   private queryCacheDirective: QueryCacheDirective | undefined;
   private queryCacheGeneration = 0;
   // Sync collections live under a visibility-only scope that survives query
@@ -296,6 +369,14 @@ export class GonvexClient {
       options.syncSubscriptionRetentionMs,
     );
     this.syncStore = createSyncStore(options.sync);
+    this.mutationOutbox = createMutationOutbox(options.outbox);
+    this.unsubscribeOutbox = this.mutationOutbox.subscribe(() => {
+      void this.drainOutbox();
+    });
+    this.unsubscribeOverlay = this.overlay.subscribe((collection) => {
+      this.emitOptimisticCollection(collection);
+    });
+    this.outboxReady = this.restoreOutbox();
     this.timeouts = {
       queryTimeoutMs: options.timeouts?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
       mutationTimeoutMs: options.timeouts?.mutationTimeoutMs ?? DEFAULT_MUTATION_TIMEOUT_MS,
@@ -305,6 +386,17 @@ export class GonvexClient {
       this.errorReporter = new GonvexErrorReporter({ endpoint: url, project: options.project, tenant: options.tenant, ...options.errorReporting });
     }
     this.recoverWarmSyncDirective();
+  }
+
+  /** The client's materialized optimistic state for pending-row indicators. */
+  get optimisticOverlay(): OptimisticOverlay {
+    return this.overlay;
+  }
+
+  /** Number of mutations waiting for a definitive server result. */
+  async outboxCount(): Promise<number> {
+    await this.outboxReady;
+    return this.mutationOutbox.count();
   }
 
   connectionState(): ConnectionState {
@@ -344,6 +436,31 @@ export class GonvexClient {
   }
 
   setAuth(auth: GonvexClientAuth) {
+    this.applyAuth(auth);
+    // The caller owns auth now: a token fetch still in flight from the
+    // previous installation must not clobber this one when it resolves.
+    this.authFetchGeneration += 1;
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      // A token supplied in this very call was just minted by the caller —
+      // send it as-is instead of paying another fetch round trip.
+      this.sendAuth(true, { useFetcher: !hasOwn(auth, "token") });
+    }
+  }
+
+  /**
+   * Subscribe to unrecoverable auth rejections: the server refused the
+   * credentials and, when a token fetcher is installed, a force-refreshed
+   * token did not fix it. Lets apps route to sign-in instead of silently
+   * degrading to an unauthenticated session.
+   */
+  onAuthError(handler: (error: string) => void): () => void {
+    this.authErrorHandlers.add(handler);
+    return () => {
+      this.authErrorHandlers.delete(handler);
+    };
+  }
+
+  private applyAuth(auth: GonvexClientAuth) {
     const nextAuth = { ...this.auth, ...auth };
     const tokenScopeChanged = hasOwn(auth, "token")
       && auth.token !== this.auth.token
@@ -364,9 +481,6 @@ export class GonvexClient {
     if (auth.project !== undefined) this.errorReporter?.setProject(auth.project);
     if (auth.telemetry !== undefined) {
       this.telemetryEnabled = auth.telemetry === true;
-    }
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      this.sendAuth(true);
     }
   }
 
@@ -390,6 +504,7 @@ export class GonvexClient {
       this.connectionCount += 1;
       this.sendAuth(false);
       if (isReconnect) this.resubscribeQueries(generation);
+      void this.drainOutbox();
       this.notifyConnectionState();
     });
     socket.addEventListener("close", () => {
@@ -446,17 +561,32 @@ export class GonvexClient {
           this.authWatchdogTimer = undefined;
         }
         if (message.type === "auth.result") {
+          this.authRetriedAfterError = false;
           this.installQueryCacheDirective(queryCacheDirectiveFromAuthResult(message.result));
           this.queryCacheNegotiatedSocketGeneration = this.socketGeneration;
           this.resumeQuerySubscriptions();
         } else {
+          const fetcher = this.auth.fetchToken;
+          if (fetcher && !this.authRetriedAfterError) {
+            // The installed token was rejected — typically expired while the
+            // socket was down. Force-refresh through the fetcher and retry
+            // once before treating the rejection as final.
+            this.authRetriedAfterError = true;
+            this.authInFlight = true;
+            this.armAuthWatchdog();
+            void this.refreshRejectedAuth(fetcher, this.auth.token, message.error);
+            return;
+          }
+          this.authRetriedAfterError = false;
           this.resetQueryCacheScope();
+          this.notifyAuthError(message.error);
         }
         this.flushPendingMessages();
       }
       if (message.type === "sync.readyMany") {
         for (const ready of message.ready) {
-          this.handlers.get(ready.id)?.({ type: "sync.ready", ...ready });
+          const readyMessage = { type: "sync.ready", ...ready } as SyncReadyMessage;
+          this.handlers.get(ready.id)?.(readyMessage);
         }
         return;
       }
@@ -494,6 +624,12 @@ export class GonvexClient {
       this.querySubscribeFlushTimer = undefined;
     }
     this.pendingQuerySubscribes.clear();
+    if (this.outboxDrainTimer) {
+      clearTimeout(this.outboxDrainTimer);
+      this.outboxDrainTimer = undefined;
+    }
+    this.unsubscribeOutbox();
+    this.unsubscribeOverlay();
     for (const subscription of this.querySubscriptions.values()) {
       if (subscription.cacheReadFallbackTimer) clearTimeout(subscription.cacheReadFallbackTimer);
     }
@@ -501,6 +637,10 @@ export class GonvexClient {
     this.querySubscriptions.clear();
     this.syncSubscriptions.clear();
     this.sessionScopeHandlers.clear();
+    this.authErrorHandlers.clear();
+    // Invalidate any token fetch still in flight so its resolve can't touch
+    // the closed client's caches.
+    this.authFetchGeneration += 1;
     this.queryCacheGeneration += 1;
     this.queryCacheDirective = undefined;
     this.queryCache?.close();
@@ -751,7 +891,7 @@ export class GonvexClient {
     };
   }
 
-  subscribeSync(ref: FunctionReference, args: JsonValue = {}, onMessage: SubscriptionHandler) {
+  subscribeSync(ref: FunctionReference, args: JsonValue = {}, onMessage: SyncSubscriptionHandler) {
     this.connect();
     const key = querySubscriptionKey(ref, args);
     const existing = this.syncSubscriptions.get(key);
@@ -763,7 +903,9 @@ export class GonvexClient {
       existing.listeners.add(onMessage);
       if (existing.lastMessage) {
         queueMicrotask(() => {
-          if (existing.listeners.has(onMessage) && existing.lastMessage) onMessage(existing.lastMessage);
+          if (existing.listeners.has(onMessage) && existing.lastMessage) {
+            onMessage(this.materializeSyncMessage(existing, existing.lastMessage));
+          }
         });
       }
       return () => this.unsubscribeSyncListener(key, onMessage);
@@ -786,7 +928,7 @@ export class GonvexClient {
       verificationGeneration: 0,
     };
     this.syncSubscriptions.set(key, subscription);
-    this.handlers.set(subscription.id, (message) => this.handleSyncMessage(subscription, message));
+    this.handlers.set(subscription.id, (message) => this.handleSyncMessage(subscription, message as SyncMessage));
     this.startSync(subscription);
     return () => this.unsubscribeSyncListener(key, onMessage);
   }
@@ -844,7 +986,7 @@ export class GonvexClient {
     };
   }
 
-  private handleSyncMessage(subscription: SyncSubscription, message: ServerMessage) {
+  private handleSyncMessage(subscription: SyncSubscription, message: SyncMessage) {
     if (message.type === "sync.snapshot") {
       // Snapshots are only valid responses to an outstanding sync.open. Live
       // subscriptions advance through deltas; accepting an unsolicited or
@@ -860,6 +1002,7 @@ export class GonvexClient {
       subscription.cursor = message.cursor;
       subscription.keyField = message.key;
       subscription.mode = message.mode;
+      subscription.truncated = undefined;
       subscription.orderBy = message.orderBy;
       subscription.orderDirection = message.orderDirection;
       subscription.maxRows = message.maxRows;
@@ -875,7 +1018,7 @@ export class GonvexClient {
       subscription.hashes = { ...(message.hashes ?? {}) };
       subscription.integrityDigest = undefined;
       subscription.integrityRows = undefined;
-      const snapshot: ServerMessage = { ...message, result: subscription.rows };
+      const snapshot: SyncMessage = { ...message, result: subscription.rows };
       subscription.lastMessage = snapshot;
       this.emitSyncMessage(subscription, snapshot);
       this.persistSyncSnapshot(subscription);
@@ -908,7 +1051,7 @@ export class GonvexClient {
       Object.assign(subscription.hashes, message.hashes ?? {});
       subscription.integrityDigest = undefined;
       subscription.integrityRows = undefined;
-      const snapshot: ServerMessage = {
+      const snapshot: SyncMessage = {
         type: "sync.snapshot",
         id: subscription.id,
         path: subscription.path,
@@ -931,6 +1074,7 @@ export class GonvexClient {
       subscription.verificationGeneration += 1;
       subscription.isUpToDate = false;
       subscription.cursor = undefined;
+      subscription.truncated = undefined;
       subscription.rows = [];
       subscription.persistedRows = undefined;
       subscription.hashes = {};
@@ -1030,7 +1174,7 @@ export class GonvexClient {
 
   private acceptSyncReady(
     subscription: SyncSubscription,
-    message: Extract<ServerMessage, { type: "sync.ready" }>,
+    message: SyncReadyMessage,
     verifiedDigest = message.digest,
   ) {
     this.clearSyncRetry(subscription, true);
@@ -1038,6 +1182,7 @@ export class GonvexClient {
     subscription.opening = false;
     subscription.cursor = message.cursor;
     subscription.mode = message.mode ?? subscription.mode;
+    subscription.truncated = message.truncated;
     subscription.integrityDigest = verifiedDigest;
     subscription.integrityRows = subscription.rows;
     subscription.forceFullIntegrity = false;
@@ -1051,8 +1196,28 @@ export class GonvexClient {
     );
   }
 
-  private emitSyncMessage(subscription: SyncSubscription, message: ServerMessage) {
-    for (const listener of Array.from(subscription.listeners)) listener(message);
+  private emitSyncMessage(subscription: SyncSubscription, message: SyncMessage) {
+    const outgoing = this.materializeSyncMessage(subscription, message);
+    for (const listener of Array.from(subscription.listeners)) listener(outgoing);
+  }
+
+  private materializeSyncMessage(subscription: SyncSubscription, message: SyncMessage): SyncMessage {
+    if (message.type !== "sync.snapshot") return message;
+    return {
+      ...message,
+      result: this.overlay.apply(
+        subscription.path,
+        message.result as unknown as readonly Row[],
+        message.key,
+      ) as unknown as JsonValue[],
+    };
+  }
+
+  private emitOptimisticCollection(collection: string) {
+    for (const subscription of this.syncSubscriptions.values()) {
+      if (subscription.path !== collection || subscription.lastMessage?.type !== "sync.snapshot") continue;
+      this.emitSyncMessage(subscription, subscription.lastMessage);
+    }
   }
 
   private markSyncSubscriptionsOutOfDate() {
@@ -1116,6 +1281,7 @@ export class GonvexClient {
         subscription.cursor = cached.cursor;
         subscription.keyField = cached.keyField;
         subscription.mode = cached.mode;
+        subscription.truncated = cached.truncated;
         subscription.orderBy = cached.orderBy;
         subscription.orderDirection = cached.orderDirection;
         subscription.maxRows = cached.maxRows;
@@ -1126,7 +1292,7 @@ export class GonvexClient {
         subscription.hashes = {};
         subscription.integrityDigest = undefined;
         subscription.integrityRows = undefined;
-        const message: ServerMessage = {
+        const message: SyncMessage = {
           type: "sync.snapshot",
           id: subscription.id,
           path: subscription.path,
@@ -1241,7 +1407,7 @@ export class GonvexClient {
     }
   }
 
-  private unsubscribeSyncListener(key: string, listener: SubscriptionHandler) {
+  private unsubscribeSyncListener(key: string, listener: SyncSubscriptionHandler) {
     const subscription = this.syncSubscriptions.get(key);
     if (!subscription) return;
     subscription.listeners.delete(listener);
@@ -1272,6 +1438,7 @@ export class GonvexClient {
       cursor: subscription.cursor,
       keyField: subscription.keyField,
       mode: subscription.mode,
+      truncated: subscription.truncated,
       orderBy: subscription.orderBy,
       orderDirection: subscription.orderDirection,
       maxRows: subscription.maxRows,
@@ -1296,6 +1463,7 @@ export class GonvexClient {
       cursor: subscription.cursor,
       keyField: subscription.keyField,
       mode: subscription.mode,
+      truncated: subscription.truncated,
       orderBy: subscription.orderBy,
       orderDirection: subscription.orderDirection,
       upserts,
@@ -1314,8 +1482,124 @@ export class GonvexClient {
     );
   }
 
-  mutation<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}, options: CallOptions = {}): Promise<T> {
-    return this.call<T>("mutation", ref, args, options.timeoutMs ?? this.timeouts.mutationTimeoutMs);
+  private async restoreOutbox() {
+    const entries = await this.mutationOutbox.loadAll();
+    if (this.manuallyClosed) return;
+    for (const entry of entries) {
+      this.addOptimisticMutation(entry.idempotencyKey, entry.patches ?? []);
+    }
+    const nextAttemptAt = Math.min(
+      ...entries
+        .filter((entry) => entry.state === "pending")
+        .map((entry) => entry.nextAttemptAt),
+    );
+    if (Number.isFinite(nextAttemptAt) && nextAttemptAt > Date.now()) {
+      this.scheduleOutboxDrain(nextAttemptAt - Date.now());
+    }
+  }
+
+  private addOptimisticMutation(mutationId: string, patches: OptimisticPatch[]) {
+    if (patches.length === 0 || this.optimisticMutationIds.has(mutationId)) return;
+    this.optimisticMutationIds.add(mutationId);
+    this.overlay.add(mutationId, patches);
+  }
+
+  private settleOptimisticMutation(mutationId: string) {
+    this.optimisticMutationIds.delete(mutationId);
+    this.overlay.settle(mutationId);
+  }
+
+  private rejectOptimisticMutation(mutationId: string) {
+    this.optimisticMutationIds.delete(mutationId);
+    this.overlay.reject(mutationId);
+  }
+
+  private async drainOutbox() {
+    await this.outboxReady;
+    if (
+      this.drainingOutbox
+      || this.manuallyClosed
+      || !this.socket
+      || this.socket.readyState !== WebSocket.OPEN
+    ) return;
+    this.drainingOutbox = true;
+    try {
+      while (!this.manuallyClosed && this.socket?.readyState === WebSocket.OPEN) {
+        const entry = await this.mutationOutbox.nextReady(Date.now());
+        if (!entry) return;
+        await this.mutationOutbox.markInflight(entry.id);
+        try {
+          await this.call(
+            "mutation",
+            { kind: "mutation", path: entry.path },
+            entry.args as JsonValue,
+            this.timeouts.mutationTimeoutMs,
+            entry.idempotencyKey,
+          );
+          await this.mutationOutbox.ack(entry.id);
+          this.settleOptimisticMutation(entry.idempotencyKey);
+        } catch (error) {
+          if (error instanceof GonvexClientError && error.code === "server") {
+            await this.mutationOutbox.ack(entry.id);
+            this.rejectOptimisticMutation(entry.idempotencyKey);
+            continue;
+          }
+          await this.mutationOutbox.fail(entry.id, mutationErrorMessage(error));
+          this.scheduleOutboxDrain(Math.min(30_000, 1_000 * (2 ** (entry.attempts + 1))));
+          return;
+        }
+      }
+    } finally {
+      this.drainingOutbox = false;
+    }
+  }
+
+  private scheduleOutboxDrain(delay: number) {
+    if (this.manuallyClosed) return;
+    if (this.outboxDrainTimer) clearTimeout(this.outboxDrainTimer);
+    this.outboxDrainTimer = setTimeout(() => {
+      this.outboxDrainTimer = undefined;
+      void this.drainOutbox();
+    }, delay);
+  }
+
+  mutation<T = JsonValue>(
+    ref: FunctionReference,
+    args: JsonValue,
+    options: CallOptions & { offline: "queue" },
+  ): Promise<T | QueuedMutationOutcome>;
+  mutation<T = JsonValue>(ref: FunctionReference, args?: JsonValue, options?: CallOptions): Promise<T>;
+  mutation<T = JsonValue>(
+    ref: FunctionReference,
+    args: JsonValue = {},
+    options: CallOptions = {},
+  ): Promise<T | QueuedMutationOutcome> {
+    const mutationId = randomID();
+    const patches = options.optimistic ?? [];
+    this.addOptimisticMutation(mutationId, patches);
+    return this.call<T>(
+      "mutation",
+      ref,
+      args,
+      options.timeoutMs ?? this.timeouts.mutationTimeoutMs,
+      mutationId,
+    ).then((result) => {
+      this.settleOptimisticMutation(mutationId);
+      return result;
+    }).catch(async (error: unknown) => {
+      if (isQueueableMutationError(error) && options.offline === "queue") {
+        await this.mutationOutbox.enqueue({
+          path: ref.path,
+          args,
+          idempotencyKey: mutationId,
+          entityKeys: patches.map((patch) => patch.rowId),
+          patches,
+        });
+        return { status: "queued", mutationId };
+      }
+      this.rejectOptimisticMutation(mutationId);
+      throw error;
+    });
   }
 
   action<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}, options: CallOptions = {}): Promise<T> {
@@ -1441,9 +1725,15 @@ export class GonvexClient {
     return Promise.all(registered.map((entry) => settle(entry.promise, entry.path)));
   }
 
-  private call<T>(kind: "mutation" | "action", ref: FunctionReference, args: JsonValue, timeoutMs: number): Promise<T> {
+  private call<T>(
+    kind: "mutation" | "action",
+    ref: FunctionReference,
+    args: JsonValue,
+    timeoutMs: number,
+    id?: string,
+  ): Promise<T> {
     this.connect();
-    const entry = this.registerCall<T>(kind, ref, args, timeoutMs);
+    const entry = this.registerCall<T>(kind, ref, args, timeoutMs, id);
     if (kind === "mutation") {
       try { const w=(globalThis as any); if (w && w.__wsTapLog) w.__wsTapLog.push({ dir:"mut-args", type:"mutation.call", path: ref.path, argTenant: ((args as any)&&(args as any).tenantId)||null, authTenant: (this as any).auth?.tenant||null, authProject:(this as any).auth?.project||null, href: (w.location&&w.location.href)||null }); } catch(e){}
       this.send({ type: "mutation.call", id: entry.id, path: ref.path, args, trace: { clientSentAtMs: entry.clientSentAtMs } });
@@ -1454,8 +1744,8 @@ export class GonvexClient {
     return entry.promise;
   }
 
-  private registerCall<T>(kind: "mutation" | "action", ref: FunctionReference, args: JsonValue, timeoutMs: number): { id: string; clientSentAtMs: number; promise: Promise<T> } {
-    const id = randomID();
+  private registerCall<T>(kind: "mutation" | "action", ref: FunctionReference, args: JsonValue, timeoutMs: number, callId = randomID()): { id: string; clientSentAtMs: number; promise: Promise<T> } {
+    const id = callId;
     const clientSentAtMs = nowMs();
     const promise = new Promise<T>((resolve, reject) => {
       const pending: PendingCall = { id, kind, path: ref.path, reject };
@@ -1924,10 +2214,20 @@ export class GonvexClient {
     });
   }
 
-  private sendAuth(force: boolean) {
-    if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project) return;
+  private sendAuth(force: boolean, options: { useFetcher?: boolean } = {}) {
+    if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project && !this.auth.fetchToken) return;
     this.authInFlight = true;
+    this.authRetriedAfterError = false;
     this.armAuthWatchdog();
+    const fetcher = this.auth.fetchToken;
+    if (fetcher && options.useFetcher !== false) {
+      void this.fetchAndSendAuth(fetcher);
+      return;
+    }
+    this.sendAuthFrame();
+  }
+
+  private sendAuthFrame() {
     this.sendNow({
       type: "auth",
       id: randomID(),
@@ -1936,6 +2236,71 @@ export class GonvexClient {
       tenant: this.auth.tenant,
       device: browserTelemetryInfo(),
     });
+  }
+
+  // Tokens from a fetcher are typically short-lived while the socket (and any
+  // disconnect gap) can span hours: replaying the token that was current at
+  // setAuth time guarantees an auth.error after a long sleep. authInFlight is
+  // already true here, so everything else queues behind the fetch exactly as
+  // it queues behind the server's auth reply.
+  private async fetchAndSendAuth(fetcher: GonvexAuthTokenFetcher) {
+    const generation = ++this.authFetchGeneration;
+    const socket = this.socket;
+    let token: string | null | undefined;
+    try {
+      token = await fetcher({ forceRefreshToken: false });
+    } catch {
+      // A fetcher that cannot reach its identity provider (offline start)
+      // must not sign the session out — fall back to the installed token.
+      token = undefined;
+    }
+    if (generation !== this.authFetchGeneration || this.auth.fetchToken !== fetcher) return;
+    if (typeof token === "string" && token) {
+      this.applyAuth({ token });
+    } else if (token === null) {
+      // The fetcher is authoritative about sign-out.
+      this.applyAuth({ token: undefined });
+    }
+    // A dead socket's close handler already reset authInFlight; the next
+    // reconnect runs its own sendAuth, so this resolve has nothing to send.
+    if (this.socket !== socket || socket?.readyState !== WebSocket.OPEN) return;
+    this.sendAuthFrame();
+  }
+
+  private async refreshRejectedAuth(fetcher: GonvexAuthTokenFetcher, rejectedToken: string | undefined, error: string) {
+    const generation = ++this.authFetchGeneration;
+    const socket = this.socket;
+    let token: string | null | undefined;
+    try {
+      token = await fetcher({ forceRefreshToken: true });
+    } catch {
+      token = undefined;
+    }
+    if (generation !== this.authFetchGeneration || this.auth.fetchToken !== fetcher) return;
+    if (typeof token === "string" && token && token !== rejectedToken) {
+      this.applyAuth({ token });
+      if (this.socket === socket && socket?.readyState === WebSocket.OPEN) {
+        this.sendAuthFrame();
+      }
+      return;
+    }
+    // No fresher credential exists (fetch failed, signed out, or the refresh
+    // returned the very token the server just refused): surface the rejection
+    // and degrade to the unauthenticated flow exactly like the no-fetcher path.
+    this.authInFlight = false;
+    if (this.authWatchdogTimer) {
+      clearTimeout(this.authWatchdogTimer);
+      this.authWatchdogTimer = undefined;
+    }
+    this.resetQueryCacheScope();
+    this.notifyAuthError(error);
+    this.flushPendingMessages();
+  }
+
+  private notifyAuthError(error: string) {
+    for (const handler of Array.from(this.authErrorHandlers)) {
+      handler(error);
+    }
   }
 
   // A lost auth reply (e.g. the server swapped its app plugin and dropped
@@ -2014,6 +2379,15 @@ function countPendingCalls(calls: Map<string, PendingCall>, kind: "mutation" | "
     if (call.kind === kind) count += 1;
   }
   return count;
+}
+
+function isQueueableMutationError(error: unknown) {
+  return error instanceof GonvexClientError
+    && (error.code === "disconnected" || error.code === "timeout");
+}
+
+function mutationErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function stableStringify(value: JsonValue): string {
@@ -2170,6 +2544,7 @@ function authFromOptions(options: GonvexClientOptions): GonvexClientAuth {
     tenant: options.tenant,
     telemetry: options.telemetry,
     identity: options.identity,
+    fetchToken: options.fetchToken,
   };
 }
 

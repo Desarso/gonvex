@@ -42,7 +42,7 @@ func TestSyncSnapshotHonorsRowAndByteBudgets(t *testing.T) {
 		{"id": "b", "title": "also-small"},
 		{"id": "c", "title": "third"},
 	}
-	rows, err := syncSnapshotRows(result, manifest.SyncDefinition{
+	rows, truncated, err := syncSnapshotRows(result, manifest.SyncDefinition{
 		Key:      "id",
 		MaxRows:  2,
 		MaxBytes: 1_000,
@@ -53,8 +53,11 @@ func TestSyncSnapshotHonorsRowAndByteBudgets(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("expected row budget to keep two rows, got %d", len(rows))
 	}
+	if !truncated {
+		t.Fatal("expected row budget to report remaining rows as truncated")
+	}
 
-	rows, err = syncSnapshotRows(result, manifest.SyncDefinition{
+	rows, truncated, err = syncSnapshotRows(result, manifest.SyncDefinition{
 		Key:      "id",
 		MaxBytes: int64(len(rows[0])),
 	})
@@ -63,6 +66,92 @@ func TestSyncSnapshotHonorsRowAndByteBudgets(t *testing.T) {
 	}
 	if len(rows) != 1 {
 		t.Fatalf("expected byte budget to keep one row, got %d", len(rows))
+	}
+	if !truncated {
+		t.Fatal("expected byte budget to report remaining rows as truncated")
+	}
+
+	rows, truncated, err = syncSnapshotRows(result[:2], manifest.SyncDefinition{
+		Key:     "id",
+		MaxRows: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || truncated {
+		t.Fatalf("collection exactly at its row budget must be complete: rows=%d truncated=%t", len(rows), truncated)
+	}
+
+	rows, truncated, err = syncSnapshotRows(result[:1], manifest.SyncDefinition{
+		Key:     "id",
+		MaxRows: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || truncated {
+		t.Fatalf("collection below its row budget must be complete: rows=%d truncated=%t", len(rows), truncated)
+	}
+}
+
+func TestSyncReadyReportsTruncationAndClearsAfterBoundedDelta(t *testing.T) {
+	definition := manifest.SyncDefinition{Table: "tasks", Key: "id", MaxRows: 2}
+	subscription := &syncSubscription{
+		id:         "sync-a",
+		path:       "tasks.sync",
+		definition: definition,
+	}
+	cursor := syncCursor{Epoch: "epoch-a", Revision: 41}
+
+	_, truncated, err := syncSnapshotRows([]map[string]any{
+		{"id": "a"},
+		{"id": "b"},
+		{"id": "c"},
+	}, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription.truncated = truncated
+	assertSyncReadyTruncated(t, syncReadyServerMessage(subscription, cursor), true)
+
+	changes := []syncLogChange{
+		{revision: 42, ordinal: 1, table: "tasks", rowID: "b", operation: "delete"},
+		{revision: 42, ordinal: 2, table: "tasks", rowID: "c", operation: "delete"},
+	}
+	if !syncNeedsAuthoritativeReconcile(definition, changes) {
+		t.Fatal("a bounded delta must recompute the authoritative collection and its truncation state")
+	}
+	cursor.Revision = 42
+	_, truncated, err = syncSnapshotRows([]map[string]any{
+		{"id": "a"},
+	}, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription.truncated = truncated
+	assertSyncReadyTruncated(t, syncReadyServerMessage(subscription, cursor), false)
+}
+
+func assertSyncReadyTruncated(t *testing.T, message serverMessage, want bool) {
+	t.Helper()
+	payload, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var frame map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &frame); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := frame["truncated"]
+	if !ok {
+		t.Fatalf("sync.ready frame omitted truncated: %s", payload)
+	}
+	var got bool
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("sync.ready truncated=%t, want %t: %s", got, want, payload)
 	}
 }
 
@@ -98,7 +187,7 @@ func TestSyncProtocolLogCarriesSnapshotAndClientContext(t *testing.T) {
 }
 
 func TestSyncSnapshotRejectsDuplicateKeys(t *testing.T) {
-	_, err := syncSnapshotRows([]map[string]any{
+	_, _, err := syncSnapshotRows([]map[string]any{
 		{"id": "duplicate", "title": "first"},
 		{"id": "duplicate", "title": "second"},
 	}, manifest.SyncDefinition{Key: "id"})

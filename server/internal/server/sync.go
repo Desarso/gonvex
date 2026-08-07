@@ -57,6 +57,7 @@ type syncSubscription struct {
 	visibleHashes    map[string]string
 	clientDigest     string
 	fullIntegrity    bool
+	truncated        bool
 	// verified means visibleKeys/visibleHashes were derived from an
 	// authoritative handler result on this server connection, rather than
 	// accepted from an untrusted persisted client cache.
@@ -310,7 +311,7 @@ func (c *wsConn) openSyncWithClock(
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
 		return
 	}
-	rows, err := syncSnapshotRows(result, definition)
+	rows, truncated, err := syncSnapshotRows(result, definition)
 	if err != nil {
 		protocolErr = err
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
@@ -319,6 +320,7 @@ func (c *wsConn) openSyncWithClock(
 	resultCount = len(rows)
 	subscription.visibleKeys = syncRowsKeySet(rows, definition.Key)
 	subscription.visibleHashes = syncRowsHashes(rows, definition.Key)
+	subscription.truncated = truncated
 	subscription.verified = true
 	if err := c.attachSync(ctx, subscription); err != nil {
 		protocolErr = err
@@ -329,6 +331,7 @@ func (c *wsConn) openSyncWithClock(
 		Type: "sync.snapshot", ID: message.ID, Path: message.Path, Result: rows, Cursor: &base,
 		Key: definition.Key, OrderBy: definition.OrderBy, OrderDirection: definition.OrderDirection,
 		Mode: definition.Mode, MaxRows: definition.MaxRows, MaxBytes: definition.MaxBytes,
+		Truncated: syncTruncatedField(truncated),
 	})
 	if err := c.server.deliverSync(subscription); err != nil {
 		protocolErr = err
@@ -444,14 +447,14 @@ func pruneSyncLog(ctx context.Context, databaseURL string, retention time.Durati
 	return tx.Commit()
 }
 
-func syncSnapshotRows(result any, definition manifest.SyncDefinition) ([]json.RawMessage, error) {
+func syncSnapshotRows(result any, definition manifest.SyncDefinition) ([]json.RawMessage, bool, error) {
 	payload, err := json.Marshal(explicitNull(result))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var rows []json.RawMessage
 	if err := json.Unmarshal(payload, &rows); err != nil {
-		return nil, fmt.Errorf("sync handler must return an array of keyed rows")
+		return nil, false, fmt.Errorf("sync handler must return an array of keyed rows")
 	}
 	maxRows := definition.MaxRows
 	maxBytes := definition.MaxBytes
@@ -461,23 +464,27 @@ func syncSnapshotRows(result any, definition manifest.SyncDefinition) ([]json.Ra
 	for _, row := range rows {
 		key := syncRowKey(row, definition.Key)
 		if key == "" {
-			return nil, fmt.Errorf("sync row is missing key %q", definition.Key)
+			return nil, false, fmt.Errorf("sync row is missing key %q", definition.Key)
 		}
 		if seen[key] {
-			return nil, fmt.Errorf("sync handler returned duplicate key %q", key)
+			return nil, false, fmt.Errorf("sync handler returned duplicate key %q", key)
 		}
 		seen[key] = true
 		if maxRows > 0 && len(kept) >= maxRows {
-			break
+			return kept, true, nil
 		}
 		canonical := canonicalSyncJSON(row)
 		if maxBytes > 0 && totalBytes+int64(len(canonical)) > maxBytes {
-			break
+			return kept, true, nil
 		}
 		totalBytes += int64(len(canonical))
 		kept = append(kept, row)
 	}
-	return kept, nil
+	return kept, false, nil
+}
+
+func syncTruncatedField(truncated bool) *bool {
+	return &truncated
 }
 
 func syncRowKey(row json.RawMessage, key string) string {
@@ -578,10 +585,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 				return nil
 			}
 		}
-		s.writeSyncReady(subscription, serverMessage{
-			Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &latest,
-			Mode: subscription.definition.Mode, Digest: syncHashesDigest(subscription.visibleHashes),
-		})
+		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, latest))
 		return nil
 	}
 	changes, err := readSyncChanges(
@@ -602,10 +606,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 	_ = json.Unmarshal(subscription.args, &args)
 	if len(changes) == 0 && subscription.verified {
 		subscription.cursor = latest
-		s.writeSyncReady(subscription, serverMessage{
-			Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &latest,
-			Mode: subscription.definition.Mode, Digest: syncHashesDigest(subscription.visibleHashes),
-		})
+		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, latest))
 		return nil
 	}
 	authoritativeReconcile := syncNeedsAuthoritativeReconcile(subscription.definition, changes)
@@ -622,10 +623,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		if !settled {
 			return nil
 		}
-		s.writeSyncReady(subscription, serverMessage{
-			Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &subscription.cursor,
-			Mode: subscription.definition.Mode, Digest: syncHashesDigest(subscription.visibleHashes),
-		})
+		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, subscription.cursor))
 		return nil
 	}
 	if authoritativeReconcile {
@@ -636,10 +634,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		if !settled {
 			return nil
 		}
-		s.writeSyncReady(subscription, serverMessage{
-			Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &subscription.cursor,
-			Mode: subscription.definition.Mode, Digest: syncHashesDigest(subscription.visibleHashes),
-		})
+		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, subscription.cursor))
 		return nil
 	}
 	for _, batch := range groupSyncChanges(changes) {
@@ -675,11 +670,16 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 	if subscription.cursor.Revision < latest.Revision {
 		subscription.cursor.Revision = latest.Revision
 	}
-	s.writeSyncReady(subscription, serverMessage{
-		Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &subscription.cursor,
-		Mode: subscription.definition.Mode, Digest: syncHashesDigest(subscription.visibleHashes),
-	})
+	s.writeSyncReady(subscription, syncReadyServerMessage(subscription, subscription.cursor))
 	return nil
+}
+
+func syncReadyServerMessage(subscription *syncSubscription, cursor syncCursor) serverMessage {
+	return serverMessage{
+		Type: "sync.ready", ID: subscription.id, Path: subscription.path, Cursor: &cursor,
+		Mode: subscription.definition.Mode, Digest: syncHashesDigest(subscription.visibleHashes),
+		Truncated: syncTruncatedField(subscription.truncated),
+	}
 }
 
 func (s *Server) writeSyncReady(subscription *syncSubscription, message serverMessage) bool {
@@ -721,10 +721,11 @@ func (s *Server) deliverAuthoritativeSync(
 	if err != nil {
 		return false, err
 	}
-	rows, err := syncSnapshotRows(result, subscription.definition)
+	rows, truncated, err := syncSnapshotRows(result, subscription.definition)
 	if err != nil {
 		return false, err
 	}
+	subscription.truncated = truncated
 	currentRows := map[string]json.RawMessage{}
 	currentKeys := map[string]bool{}
 	for _, row := range rows {
