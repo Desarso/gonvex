@@ -686,7 +686,7 @@ func (s *Server) writeSyncReady(subscription *syncSubscription, message serverMe
 	_, ready := s.subscriptions.listeners.whileConnected(
 		subscription.project,
 		subscription.tenant,
-		func() { subscription.conn.write(message) },
+		func() { subscription.conn.writeSyncReady(message) },
 	)
 	return ready
 }
@@ -1085,6 +1085,7 @@ func (c *wsConn) closeSync(id string) {
 	c.mu.Lock()
 	subscription := c.syncs[id]
 	delete(c.syncs, id)
+	c.resolvePendingWatermarksLocked(id, ^uint64(0))
 	c.mu.Unlock()
 	if subscription != nil {
 		subscription.mu.Lock()
@@ -1168,7 +1169,13 @@ func (c *wsConn) resetSyncSubscriptions(reason string) {
 	}
 }
 
-func (s *Server) notifySyncRevision(project, tenant string) {
+func (s *Server) notifySyncRevision(
+	project string,
+	tenant string,
+	changedTables []string,
+	notifiedDatabaseEpoch string,
+	notifiedRevision uint64,
+) {
 	s.wsMu.RLock()
 	connections := make([]*wsConn, 0)
 	for connection := range s.wsConns {
@@ -1177,6 +1184,60 @@ func (s *Server) notifySyncRevision(project, tenant string) {
 		}
 	}
 	s.wsMu.RUnlock()
+	if len(changedTables) == 0 || strings.TrimSpace(notifiedDatabaseEpoch) == "" || notifiedRevision == 0 {
+		s.scheduleAllSyncDeliveries(connections)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), syncDeliveryTimeout)
+	clock, err := currentSyncClock(ctx, s.databaseURLForTenant(project, tenant))
+	cancel()
+	if err != nil || clock.DatabaseEpoch != notifiedDatabaseEpoch || clock.Revision < notifiedRevision {
+		// Filtering is only an optimization. If the shared clock cannot prove the
+		// notification belongs to the current database epoch, replay every sync.
+		s.scheduleAllSyncDeliveries(connections)
+		return
+	}
+	clock.Revision = notifiedRevision
+
+	for _, connection := range connections {
+		connection.mu.Lock()
+		subscriptions := make([]*syncSubscription, 0, len(connection.syncs))
+		for _, subscription := range connection.syncs {
+			subscriptions = append(subscriptions, subscription)
+		}
+		useWatermark := connection.syncWatermark
+		connection.mu.Unlock()
+		waiting := make([]string, 0, len(subscriptions))
+		deliveries := make([]*syncSubscription, 0, len(subscriptions))
+		advanced := false
+		for _, subscription := range subscriptions {
+			if syncDefinitionIntersectsTables(subscription.definition, changedTables) {
+				if useWatermark {
+					waiting = append(waiting, subscription.id)
+				}
+				deliveries = append(deliveries, subscription)
+				continue
+			}
+			handled, cursorAdvanced := s.advanceUnchangedSync(subscription, clock, !useWatermark)
+			advanced = advanced || cursorAdvanced
+			if !handled {
+				if useWatermark {
+					waiting = append(waiting, subscription.id)
+				}
+				deliveries = append(deliveries, subscription)
+			}
+		}
+		if useWatermark && advanced {
+			s.writeSyncWatermark(connection, clock.Revision, waiting)
+		}
+		for _, subscription := range deliveries {
+			s.scheduleSyncDelivery(subscription)
+		}
+	}
+}
+
+func (s *Server) scheduleAllSyncDeliveries(connections []*wsConn) {
 	for _, connection := range connections {
 		connection.mu.Lock()
 		subscriptions := make([]*syncSubscription, 0, len(connection.syncs))
@@ -1188,6 +1249,57 @@ func (s *Server) notifySyncRevision(project, tenant string) {
 			s.scheduleSyncDelivery(subscription)
 		}
 	}
+}
+
+func syncDefinitionIntersectsTables(definition manifest.SyncDefinition, changedTables []string) bool {
+	return intersectsStrings(
+		append([]string{definition.Table}, definition.VisibilityTables...),
+		changedTables,
+	)
+}
+
+func (s *Server) advanceUnchangedSync(
+	subscription *syncSubscription,
+	clock syncClock,
+	emitReady bool,
+) (handled bool, advanced bool) {
+	subscription.mu.Lock()
+	defer subscription.mu.Unlock()
+	if subscription.closed || !subscriptionCurrent(subscription) {
+		return true, false
+	}
+	// A running delivery may cover an earlier relevant revision. Advancing past
+	// it here would acknowledge unseen rows, so let the delivery coalescer replay
+	// the full range instead.
+	if !subscription.verified || subscription.deliveryRunning || subscription.deliveryPending {
+		return false, false
+	}
+	latest := syncCursorForClock(clock, subscription.definition, subscription.conn.currentSyncScope())
+	if latest.Epoch != subscription.cursor.Epoch {
+		return false, false
+	}
+	if subscription.cursor.Revision >= latest.Revision {
+		return true, false
+	}
+	// The table set describes exactly one transaction revision. A lagging cursor
+	// has a wider, unknown table range and must use the durable change log.
+	if subscription.cursor.Revision+1 != latest.Revision {
+		return false, false
+	}
+	subscription.cursor = latest
+	if emitReady {
+		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, latest))
+	}
+	return true, true
+}
+
+func (s *Server) writeSyncWatermark(connection *wsConn, revision uint64, waiting []string) bool {
+	_, ready := s.subscriptions.listeners.whileConnected(
+		connection.project,
+		connection.tenant,
+		func() { connection.writeSyncWatermark(revision, waiting) },
+	)
+	return ready
 }
 
 func (s *Server) markTenantSyncsOutOfDate(project, tenant, reason string) {

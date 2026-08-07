@@ -1043,10 +1043,12 @@ func (s *Server) hydrateRuntimeState(ctx context.Context) {
 			slog.Warn("load persisted Gonvex runtime manifest", "project", next.Project, "error", err)
 			continue
 		}
-		// The persisted manifest's schema was already applied before this
-		// restart, so seed its fingerprint to skip the DDL reapply on the first
-		// identical sync (air restarts the runtime often in dev).
-		s.markSchemaFingerprint(next.Project, schemaFingerprint(next.Schema, next.Functions))
+		// Only seed the skip cache when the persisted manifest proves the current
+		// database-artifact version was installed. A runtime upgrade may need to
+		// redefine sync infrastructure even when schema and functions are unchanged.
+		if next.NotifySchemaVersion == manifest.NotifySchemaVersion {
+			s.markSchemaFingerprint(next.Project, schemaFingerprint(next.Schema, next.Functions))
+		}
 		s.registerProjectCrons(next.Project)
 	}
 }
@@ -1083,7 +1085,9 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 		slog.Warn("load persisted Gonvex project runtime manifest", "project", projectID, "error", err)
 		return
 	}
-	s.markSchemaFingerprint(projectID, schemaFingerprint(next.Schema, next.Functions))
+	if next.NotifySchemaVersion == manifest.NotifySchemaVersion {
+		s.markSchemaFingerprint(projectID, schemaFingerprint(next.Schema, next.Functions))
+	}
 	s.registerProjectCrons(projectID)
 }
 

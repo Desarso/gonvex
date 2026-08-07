@@ -101,6 +101,8 @@ export type ServerCapabilities = {
   queryBatch?: 1;
   /** Server accepts `mutation.callMany` batched offline-queue flushes. */
   mutationBatch?: 1;
+  /** Server emits connection-level sync revision watermarks. */
+  syncWatermark?: 1;
 };
 
 export type QuerySubscribeRequest = {
@@ -134,6 +136,14 @@ export type SyncReady = {
   cursor: SyncCursor;
   mode?: "eager" | "progressive";
   digest?: string;
+  truncated?: boolean;
+};
+
+export type ClientCapabilities = {
+  /** Client accepts coalesced `sync.readyMany` server frames. */
+  syncReadyMany?: 1;
+  /** Client accepts connection-level `sync.watermark` server frames. */
+  syncWatermark?: 1;
 };
 
 export type GonvexManifest = {
@@ -144,7 +154,7 @@ export type GonvexManifest = {
 };
 
 export type ClientMessage =
-  | { type: "auth"; id: string; token?: string; project?: string; tenant?: string; device?: BrowserTelemetryInfo }
+  | { type: "auth"; id: string; token?: string; project?: string; tenant?: string; device?: BrowserTelemetryInfo; capabilities?: ClientCapabilities }
   | { type: "query.subscribe"; id: string; path: string; args: JsonValue; cacheRevision?: string }
   | { type: "query.unsubscribe"; id: string }
   | {
@@ -251,6 +261,7 @@ export type ServerMessage =
   }
   | ({ type: "sync.ready"; digest?: string } & SyncReady)
   | { type: "sync.readyMany"; ready: SyncReady[] }
+  | { type: "sync.watermark"; revision: number }
   | { type: "sync.needHashes"; id: string; path?: string }
   // Client-local status frame emitted when a formerly authoritative materialized
   // collection must be reconciled before it can be trusted again.

@@ -214,6 +214,8 @@ DECLARE
   revision_text text;
   next_revision bigint;
   current_epoch text;
+  changed_tables text[];
+  notify_payload jsonb;
 BEGIN
   revision_text := current_setting('gonvex.sync_revision', true);
   IF revision_text IS NULL OR revision_text = '' THEN
@@ -236,9 +238,27 @@ BEGIN
     FROM ranked
     WHERE changes.event_id = ranked.event_id;
 
+    SELECT array_agg(DISTINCT table_name ORDER BY table_name)
+    INTO changed_tables
+    FROM _gonvex_sync_changes
+    WHERE transaction_id = txid_current()::bigint
+      AND revision = next_revision;
+
+    notify_payload := jsonb_build_object(
+      'epoch', current_epoch,
+      'revision', next_revision,
+      'tables', changed_tables
+    );
+    IF octet_length(notify_payload::text) > 7000 THEN
+      notify_payload := jsonb_build_object(
+        'epoch', current_epoch,
+        'revision', next_revision
+      );
+    END IF;
+
     PERFORM pg_notify(
       'gonvex_sync_change',
-      json_build_object('epoch', current_epoch, 'revision', next_revision)::text
+      notify_payload::text
     );
   END IF;
   RETURN NULL;

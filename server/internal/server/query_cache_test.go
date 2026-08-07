@@ -319,6 +319,9 @@ func TestWebSocketAdvertisesAndReturnsQueryCacheMetadata(t *testing.T) {
 	if ready.Capabilities.ProtocolVersion != websocketProtocolVersion || ready.Capabilities.SyncIntegrity != 1 {
 		t.Fatalf("expected session.ready to advertise protocol and sync-integrity support, got %#v", ready.Capabilities)
 	}
+	if ready.Capabilities.SyncWatermark != 1 {
+		t.Fatalf("expected session.ready to advertise sync-watermark support, got %#v", ready.Capabilities)
+	}
 	if ready.Capabilities.RuntimeVersion == "" {
 		t.Fatalf("expected session.ready to identify the runtime build, got %#v", ready.Capabilities)
 	}

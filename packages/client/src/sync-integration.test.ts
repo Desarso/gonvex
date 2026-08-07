@@ -172,6 +172,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -754,10 +755,13 @@ describe("durable sync integration", () => {
       }],
     });
     vi.useRealTimers();
-    await vi.waitFor(() => expect(handler).toHaveBeenLastCalledWith(expect.objectContaining({
-      type: "sync.ready",
-      mode: "progressive",
-    })));
+    await vi.waitFor(() => {
+      expect(handler).toHaveBeenLastCalledWith(expect.objectContaining({
+        type: "sync.ready",
+        mode: "progressive",
+      }));
+      expect(store.replacements).toHaveLength(1);
+    });
     expect(store.replacements.at(-1)).toEqual(expect.objectContaining({
       mode: "progressive",
       rows: [{ id: "cached", title: "cached" }],
@@ -866,6 +870,145 @@ describe("durable sync integration", () => {
     expect(watch.status().isUpToDate).toBe(true);
     expect(watch.localSyncResult()).toEqual(currentRows);
     expect(store.replacements.at(-1)?.cursor).toEqual({ epoch: "sync-a", revision: 20 });
+  });
+
+  it("reuses a verified digest for consecutive ready frames with unchanged rows", async () => {
+    const store = new FakeSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const watch = client.watchSync(ref, { workspaceId: "workspace-a" });
+    watch.onUpdate(() => undefined);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const open = sentMessages().find((message) => message.type === "sync.open");
+    const digest = await digestRows([]);
+    const digestSpy = vi.spyOn(globalThis.crypto.subtle, "digest");
+
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: [],
+      cursor: { epoch: "sync-a", revision: 1 },
+      key: "id",
+    });
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 1 },
+      digest,
+    });
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(watch.status().isUpToDate).toBe(true));
+    expect(digestSpy).toHaveBeenCalledTimes(1);
+
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 2 },
+      digest,
+    });
+
+    expect(watch.status().isUpToDate).toBe(true);
+    expect(digestSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-hashes a fast-path digest mismatch before resetting", async () => {
+    const store = new FakeSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const watch = client.watchSync(ref, { workspaceId: "workspace-a" });
+    watch.onUpdate(() => undefined);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const open = sentMessages().find((message) => message.type === "sync.open");
+    const digest = await digestRows([]);
+    const digestSpy = vi.spyOn(globalThis.crypto.subtle, "digest");
+
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: [],
+      cursor: { epoch: "sync-a", revision: 1 },
+      key: "id",
+    });
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 1 },
+      digest,
+    });
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(watch.status().isUpToDate).toBe(true));
+    expect(digestSpy).toHaveBeenCalledTimes(1);
+
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 2 },
+      digest: "server-digest-mismatch",
+    });
+
+    await vi.waitFor(() => expect(store.deletes).toHaveLength(1));
+    expect(digestSpy).toHaveBeenCalledTimes(2);
+    expect(watch.status().isUpToDate).toBe(false);
+    expect(sentMessages().at(-1)).toMatchObject({ type: "sync.open", id: open.id });
+    expect(sentMessages().at(-1).cursor).toBeUndefined();
+  });
+
+  it("re-hashes ready rows when full integrity was forced", async () => {
+    const store = new FakeSyncStore();
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
+    const watch = client.watchSync(ref, { workspaceId: "workspace-a" });
+    watch.onUpdate(() => undefined);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const firstOpen = sentMessages().find((message) => message.type === "sync.open");
+    const digest = await digestRows([]);
+    const digestSpy = vi.spyOn(globalThis.crypto.subtle, "digest");
+
+    socket().receive({
+      type: "sync.snapshot",
+      id: firstOpen.id,
+      path: ref.path,
+      result: [],
+      cursor: { epoch: "sync-a", revision: 1 },
+      key: "id",
+    });
+    socket().receive({
+      type: "sync.ready",
+      id: firstOpen.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 1 },
+      digest,
+    });
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(watch.status().isUpToDate).toBe(true));
+    expect(digestSpy).toHaveBeenCalledTimes(1);
+
+    socket().receive({ type: "sync.needHashes", id: firstOpen.id, path: ref.path });
+    await vi.waitFor(() => expect(
+      sentMessages().filter((message) => message.type === "sync.open"),
+    ).toHaveLength(2));
+    const forcedOpen = sentMessages().filter((message) => message.type === "sync.open").at(-1);
+    expect(forcedOpen).toMatchObject({ id: firstOpen.id, fullIntegrity: true });
+    socket().receive({
+      type: "sync.ready",
+      id: firstOpen.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 2 },
+      digest,
+    });
+    await vi.waitFor(() => expect(watch.status().isUpToDate).toBe(true));
+
+    expect(watch.status().isUpToDate).toBe(true);
+    expect(digestSpy).toHaveBeenCalledTimes(2);
   });
 
   it("never reports stale rows as current during bounded randomized protocol chaos", async () => {

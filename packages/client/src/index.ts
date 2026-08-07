@@ -109,8 +109,10 @@ type SyncSubscription = {
   hashes: Record<string, string>;
   integrityDigest?: string;
   integrityRows?: JsonValue[];
+  integrityEpoch?: string;
   forceFullIntegrity: boolean;
   verificationGeneration: number;
+  watermarkPersistTimer?: ReturnType<typeof setTimeout>;
   /**
    * The exact rows array last written to (or read from) the sync store. When
    * a later persist carries the same array, only the cursor has moved and the
@@ -293,6 +295,9 @@ const maxSyncBatchOpens = 256;
 // start into a cold open — never into a permanently empty screen. Reads
 // normally settle in a few milliseconds.
 const syncStoreReadTimeoutMs = 1_000;
+// Watermarks can arrive for every tenant revision. Bound cursor-only IndexedDB
+// writes per collection while keeping the in-memory resume cursor immediate.
+const syncWatermarkPersistDelayMs = 1_000;
 
 export class GonvexClient {
   private socket: WebSocket | undefined;
@@ -590,6 +595,12 @@ export class GonvexClient {
         }
         return;
       }
+      if (message.type === "sync.watermark") {
+        if (this.serverCapabilities.syncWatermark === 1) {
+          this.handleSyncWatermark(message.revision);
+        }
+        return;
+      }
       const id = "id" in message ? message.id : "system";
       this.handlers.get(id)?.(message);
     });
@@ -613,6 +624,11 @@ export class GonvexClient {
     for (const subscription of this.syncSubscriptions.values()) {
       this.clearSyncRetry(subscription);
       if (subscription.unsubscribeTimer) clearTimeout(subscription.unsubscribeTimer);
+      if (subscription.watermarkPersistTimer) {
+        clearTimeout(subscription.watermarkPersistTimer);
+        subscription.watermarkPersistTimer = undefined;
+        this.persistSyncSnapshot(subscription, true);
+      }
     }
     if (this.syncOpenFlushTimer) {
       clearTimeout(this.syncOpenFlushTimer);
@@ -1018,6 +1034,7 @@ export class GonvexClient {
       subscription.hashes = { ...(message.hashes ?? {}) };
       subscription.integrityDigest = undefined;
       subscription.integrityRows = undefined;
+      subscription.integrityEpoch = undefined;
       const snapshot: SyncMessage = { ...message, result: subscription.rows };
       subscription.lastMessage = snapshot;
       this.emitSyncMessage(subscription, snapshot);
@@ -1051,6 +1068,7 @@ export class GonvexClient {
       Object.assign(subscription.hashes, message.hashes ?? {});
       subscription.integrityDigest = undefined;
       subscription.integrityRows = undefined;
+      subscription.integrityEpoch = undefined;
       const snapshot: SyncMessage = {
         type: "sync.snapshot",
         id: subscription.id,
@@ -1071,6 +1089,10 @@ export class GonvexClient {
     }
     if (message.type === "sync.reset") {
       this.clearSyncRetry(subscription, true);
+      if (subscription.watermarkPersistTimer) {
+        clearTimeout(subscription.watermarkPersistTimer);
+        subscription.watermarkPersistTimer = undefined;
+      }
       subscription.verificationGeneration += 1;
       subscription.isUpToDate = false;
       subscription.cursor = undefined;
@@ -1080,6 +1102,7 @@ export class GonvexClient {
       subscription.hashes = {};
       subscription.integrityDigest = undefined;
       subscription.integrityRows = undefined;
+      subscription.integrityEpoch = undefined;
       subscription.forceFullIntegrity = false;
       subscription.lastMessage = undefined;
       subscription.opening = false;
@@ -1131,6 +1154,21 @@ export class GonvexClient {
           reason: "integrity-missing",
         });
         return;
+      }
+      if (
+        !subscription.forceFullIntegrity
+        && subscription.integrityRows === subscription.rows
+        && subscription.integrityDigest
+        && subscription.integrityEpoch === subscription.cursor.epoch
+      ) {
+        if (message.digest && subscription.integrityDigest !== message.digest) {
+          // Re-hash once before treating the server/memo disagreement as an
+          // integrity failure. The memo may be stale even though row identity
+          // says the collection has not changed.
+        } else {
+          this.acceptSyncReady(subscription, message, subscription.integrityDigest);
+          return;
+        }
       }
       void syncRowsHashes(subscription.rows, subscription.keyField).then((hashes) => (
         syncHashesDigest(hashes).then((digest) => ({ digest, hashes }))
@@ -1185,6 +1223,7 @@ export class GonvexClient {
     subscription.truncated = message.truncated;
     subscription.integrityDigest = verifiedDigest;
     subscription.integrityRows = subscription.rows;
+    subscription.integrityEpoch = message.cursor.epoch;
     subscription.forceFullIntegrity = false;
     this.persistSyncSnapshot(subscription);
     // Every emitted ready frame is self-describing: when a legacy runtime
@@ -1194,6 +1233,34 @@ export class GonvexClient {
       subscription,
       message.digest === verifiedDigest ? message : { ...message, digest: verifiedDigest },
     );
+  }
+
+  private handleSyncWatermark(revision: number) {
+    if (!Number.isSafeInteger(revision) || revision < 0) return;
+    for (const subscription of this.syncSubscriptions.values()) {
+      const cursor = subscription.cursor;
+      if (
+        !cursor
+        || cursor.revision >= revision
+        || !subscription.isUpToDate
+        || subscription.opening
+        || subscription.forceFullIntegrity
+        || subscription.integrityRows !== subscription.rows
+        || !subscription.integrityDigest
+        || subscription.integrityEpoch !== cursor.epoch
+      ) continue;
+      subscription.cursor = { ...cursor, revision };
+      this.scheduleSyncWatermarkPersistence(subscription);
+    }
+  }
+
+  private scheduleSyncWatermarkPersistence(subscription: SyncSubscription) {
+    if (subscription.watermarkPersistTimer) return;
+    subscription.watermarkPersistTimer = setTimeout(() => {
+      subscription.watermarkPersistTimer = undefined;
+      if (this.syncSubscriptions.get(subscription.key) !== subscription) return;
+      this.persistSyncSnapshot(subscription, true);
+    }, syncWatermarkPersistDelayMs);
   }
 
   private emitSyncMessage(subscription: SyncSubscription, message: SyncMessage) {
@@ -1292,6 +1359,7 @@ export class GonvexClient {
         subscription.hashes = {};
         subscription.integrityDigest = undefined;
         subscription.integrityRows = undefined;
+        subscription.integrityEpoch = undefined;
         const message: SyncMessage = {
           type: "sync.snapshot",
           id: subscription.id,
@@ -1337,6 +1405,7 @@ export class GonvexClient {
         subscription.hashes = hashes;
         subscription.integrityDigest = digest;
         subscription.integrityRows = rows;
+        subscription.integrityEpoch = subscription.cursor?.epoch;
         subscription.opening = false;
         this.sendSyncOpen(subscription);
       }).catch(() => {
@@ -1424,7 +1493,11 @@ export class GonvexClient {
     }, this.syncSubscriptionRetentionMs);
   }
 
-  private persistSyncSnapshot(subscription: SyncSubscription) {
+  private persistSyncSnapshot(subscription: SyncSubscription, fromWatermark = false) {
+    if (!fromWatermark && subscription.watermarkPersistTimer) {
+      clearTimeout(subscription.watermarkPersistTimer);
+      subscription.watermarkPersistTimer = undefined;
+    }
     const directive = this.queryCacheDirective;
     const store = this.syncStore;
     if (!directive || !store || !subscription.cursor) return;
@@ -1455,6 +1528,10 @@ export class GonvexClient {
   }
 
   private persistSyncDelta(subscription: SyncSubscription, upserts: JsonValue[], deleted: string[]) {
+    if (subscription.watermarkPersistTimer) {
+      clearTimeout(subscription.watermarkPersistTimer);
+      subscription.watermarkPersistTimer = undefined;
+    }
     const directive = this.queryCacheDirective;
     const store = this.syncStore;
     if (!directive || !store || !subscription.cursor) return;
@@ -2050,12 +2127,17 @@ export class GonvexClient {
     this.syncScopeGeneration += 1;
     for (const subscription of this.syncSubscriptions.values()) {
       this.clearSyncRetry(subscription, true);
+      if (subscription.watermarkPersistTimer) {
+        clearTimeout(subscription.watermarkPersistTimer);
+        subscription.watermarkPersistTimer = undefined;
+      }
       subscription.isUpToDate = false;
       subscription.rows = [];
       subscription.persistedRows = undefined;
       subscription.hashes = {};
       subscription.integrityDigest = undefined;
       subscription.integrityRows = undefined;
+      subscription.integrityEpoch = undefined;
       subscription.forceFullIntegrity = false;
       subscription.cursor = undefined;
       subscription.lastMessage = undefined;
@@ -2235,6 +2317,7 @@ export class GonvexClient {
       project: this.auth.project,
       tenant: this.auth.tenant,
       device: browserTelemetryInfo(),
+      capabilities: { syncReadyMany: 1, syncWatermark: 1 },
     });
   }
 

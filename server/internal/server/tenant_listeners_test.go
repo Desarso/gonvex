@@ -2,11 +2,33 @@ package server
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/gonvex/gonvex/server/internal/config"
 )
+
+func TestParseSyncNotifyPayloadUsesTablesOnlyWithRevisionIdentity(t *testing.T) {
+	parsed := parseSyncNotifyPayload(`{"revision":42,"epoch":"epoch-a","tables":["tasks","statuses","tasks"]}`)
+	if parsed.Epoch != "epoch-a" || parsed.Revision != 42 || !reflect.DeepEqual(parsed.Tables, []string{"statuses", "tasks"}) {
+		t.Fatalf("unexpected parsed sync notification: %#v", parsed)
+	}
+
+	for name, raw := range map[string]string{
+		"legacy":      `{"revision":42,"epoch":"epoch-a"}`,
+		"empty":       `{"revision":42,"epoch":"epoch-a","tables":[]}`,
+		"no epoch":    `{"revision":42,"tables":["tasks"]}`,
+		"no revision": `{"epoch":"epoch-a","tables":["tasks"]}`,
+		"malformed":   `{`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := parseSyncNotifyPayload(raw); len(got.Tables) != 0 {
+				t.Fatalf("fallback payload retained filterable tables: %#v", got)
+			}
+		})
+	}
+}
 
 func TestTenantListenerReconnectsWhenDatabaseRouteChanges(t *testing.T) {
 	runtime := New(config.Config{

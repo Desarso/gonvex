@@ -1,9 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/config"
+	"github.com/gorilla/websocket"
 )
 
 func TestSyncValueMatchesEqualityArguments(t *testing.T) {
@@ -247,6 +251,21 @@ func TestSyncCursorForClockSharesRevisionButIsolatesDefinitionsAndScopes(t *test
 	}
 	if taskCursor.Epoch == otherScopeCursor.Epoch {
 		t.Fatal("different visibility scopes must not share an epoch")
+	}
+}
+
+func TestSyncDefinitionTableIntersectionIncludesVisibilityDependencies(t *testing.T) {
+	definition := manifest.SyncDefinition{
+		Table:            "tasks",
+		VisibilityTables: []string{"taskAcks", "memberships"},
+	}
+	for _, table := range []string{"tasks", "taskAcks", "memberships"} {
+		if !syncDefinitionIntersectsTables(definition, []string{table}) {
+			t.Fatalf("definition did not intersect relevant table %q", table)
+		}
+	}
+	if syncDefinitionIntersectsTables(definition, []string{"statuses"}) {
+		t.Fatal("definition intersected an unrelated table")
 	}
 }
 
@@ -488,6 +507,216 @@ func TestSyncBatchProtocolPreservesIndependentResumeState(t *testing.T) {
 	if message.Opens[0].Digest != "digest-one" || !message.Opens[1].FullIntegrity {
 		t.Fatal("compact and expanded integrity resume metadata must survive batching")
 	}
+}
+
+func TestSyncSubscriptionReadyFanoutIsCapabilityGated(t *testing.T) {
+	const subscriptionCount = 5
+	for _, test := range []struct {
+		name              string
+		syncReadyMany     bool
+		wantReadyFrames   int
+		wantReadyManySize int
+	}{
+		{name: "capability-on", syncReadyMany: true, wantReadyFrames: 0, wantReadyManySize: subscriptionCount},
+		{name: "capability-off", syncReadyMany: false, wantReadyFrames: subscriptionCount},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			connection, peer := newSyncReadyTestConnection(t, test.syncReadyMany)
+			runtime := New(config.Config{})
+			connection.server = runtime
+			listenerKey := tenantListenerKey{project: connection.project, tenant: connection.tenant}
+			runtime.subscriptions.listeners.active[listenerKey] = &tenantListener{
+				key: listenerKey, connected: true,
+			}
+			connection.write(serverMessage{
+				Type: "sync.delta", ID: "sync-0", Path: "sync.tasks",
+				Cursor: &syncCursor{Epoch: "epoch-a", Revision: 2},
+			})
+			for index := 0; index < subscriptionCount; index++ {
+				subscription := &syncSubscription{
+					conn: connection, id: fmt.Sprintf("sync-%d", index), path: fmt.Sprintf("sync.table%d", index),
+					project: connection.project, tenant: connection.tenant,
+				}
+				connection.syncs[subscription.id] = subscription
+				if !runtime.writeSyncReady(subscription, syncReadyTestMessage(index)) {
+					t.Fatalf("subscription %q lost listener freshness while writing ready", subscription.id)
+				}
+			}
+
+			frames := readSyncTestFrames(t, peer, 1+max(test.wantReadyFrames, 1))
+			if frames[0].Type != "sync.delta" {
+				t.Fatalf("first frame = %q, want sync.delta", frames[0].Type)
+			}
+			readyFrames := 0
+			readyManyFrames := 0
+			covered := map[string]bool{}
+			for _, frame := range frames[1:] {
+				switch frame.Type {
+				case "sync.ready":
+					readyFrames++
+					covered[frame.ID] = true
+				case "sync.readyMany":
+					readyManyFrames++
+					if len(frame.Ready) != test.wantReadyManySize {
+						t.Fatalf("sync.readyMany covered %d subscriptions, want %d", len(frame.Ready), test.wantReadyManySize)
+					}
+					for _, ready := range frame.Ready {
+						covered[ready.ID] = true
+						if ready.Path == "" || ready.Cursor == nil || ready.Mode == "" || ready.Digest == "" {
+							t.Fatalf("sync.readyMany entry lost ready metadata: %#v", ready)
+						}
+					}
+				default:
+					t.Fatalf("unexpected frame after delta: %#v", frame)
+				}
+			}
+			if readyFrames != test.wantReadyFrames {
+				t.Fatalf("plain sync.ready frames = %d, want %d", readyFrames, test.wantReadyFrames)
+			}
+			if test.syncReadyMany && readyManyFrames != 1 {
+				t.Fatalf("sync.readyMany frames = %d, want 1", readyManyFrames)
+			}
+			if len(covered) != subscriptionCount {
+				t.Fatalf("ready coverage = %d subscriptions, want %d", len(covered), subscriptionCount)
+			}
+		})
+	}
+}
+
+func TestAuthStoresSyncCapabilities(t *testing.T) {
+	connection, peer := newSyncReadyTestConnection(t, false)
+	connection.server = New(config.Config{})
+	connection.handle(context.Background(), clientMessage{
+		Type: "auth", ID: "auth-1", Project: connection.project,
+		Capabilities: &clientCapabilities{SyncReadyMany: 1, SyncWatermark: 1},
+	})
+
+	frames := readSyncTestFrames(t, peer, 1)
+	if frames[0].Type != "auth.result" {
+		t.Fatalf("auth response = %q, want auth.result", frames[0].Type)
+	}
+	connection.mu.Lock()
+	readyMany := connection.syncReadyMany
+	watermark := connection.syncWatermark
+	connection.mu.Unlock()
+	if !readyMany || !watermark {
+		t.Fatalf("auth stored syncReadyMany=%t syncWatermark=%t, want both", readyMany, watermark)
+	}
+}
+
+func TestSyncWatermarkWaitsForChangedSubscriptionReady(t *testing.T) {
+	connection, peer := newSyncReadyTestConnection(t, true)
+	connection.syncWatermark = true
+	connection.syncs["sync-1"] = &syncSubscription{id: "sync-1", conn: connection}
+	connection.writeSyncWatermark(5, []string{"sync-1"})
+	connection.write(serverMessage{
+		Type: "sync.delta", ID: "sync-1", Path: "sync.tasks",
+		Cursor: &syncCursor{Epoch: "epoch-a", Revision: 5},
+	})
+	ready := syncReadyTestMessage(1)
+	ready.Cursor.Revision = 5
+	connection.writeSyncReady(ready)
+
+	frames := readSyncTestFrames(t, peer, 3)
+	if frames[0].Type != "sync.delta" || frames[1].Type != "sync.ready" || frames[2].Type != "sync.watermark" {
+		t.Fatalf("frame order = [%s, %s, %s], want delta, ready, watermark", frames[0].Type, frames[1].Type, frames[2].Type)
+	}
+	if frames[2].Revision != 5 {
+		t.Fatalf("watermark revision = %d, want 5", frames[2].Revision)
+	}
+}
+
+func TestSyncReadyCoalescerFlushesBeforeOtherFrames(t *testing.T) {
+	connection, peer := newSyncReadyTestConnection(t, true)
+	connection.writeSyncReady(syncReadyTestMessage(1))
+	connection.write(serverMessage{Type: "sync.delta", ID: "sync-1", Path: "sync.tasks"})
+
+	frames := readSyncTestFrames(t, peer, 2)
+	if frames[0].Type != "sync.ready" || frames[1].Type != "sync.delta" {
+		t.Fatalf("frame order = [%s, %s], want [sync.ready, sync.delta]", frames[0].Type, frames[1].Type)
+	}
+}
+
+func TestSyncReadyCoalescerFlushesOnClose(t *testing.T) {
+	connection, peer := newSyncReadyTestConnection(t, true)
+	connection.writeSyncReady(syncReadyTestMessage(1))
+	connection.close()
+
+	frames := readSyncTestFrames(t, peer, 1)
+	if frames[0].Type != "sync.ready" {
+		t.Fatalf("close flushed %q, want sync.ready", frames[0].Type)
+	}
+}
+
+func syncReadyTestMessage(index int) serverMessage {
+	truncated := index%2 == 0
+	return serverMessage{
+		Type: "sync.ready", ID: fmt.Sprintf("sync-%d", index), Path: fmt.Sprintf("sync.table%d", index),
+		Cursor: &syncCursor{Epoch: "epoch-a", Revision: uint64(index + 2)}, Mode: "eager",
+		Digest: fmt.Sprintf("digest-%d", index), Truncated: &truncated,
+	}
+}
+
+func newSyncReadyTestConnection(t *testing.T, syncReadyMany bool) (*wsConn, *websocket.Conn) {
+	t.Helper()
+	serverConn := make(chan *websocket.Conn, 1)
+	release := make(chan struct{})
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConn <- connection
+		<-release
+		_ = connection.Close()
+	}))
+	peer, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	if err != nil {
+		httpServer.Close()
+		t.Fatal(err)
+	}
+	connection := &wsConn{
+		conn: peerConnection(t, serverConn), id: "conn-ready-test", project: "project-a", tenant: "tenant-a",
+		syncReadyMany: syncReadyMany, subs: map[string]querySubscription{}, syncs: map[string]*syncSubscription{},
+	}
+	t.Cleanup(func() {
+		if connection.server != nil {
+			connection.cancelSubscriptions()
+		}
+		connection.close()
+		_ = peer.Close()
+		close(release)
+		httpServer.Close()
+	})
+	return connection, peer
+}
+
+func peerConnection(t *testing.T, connections <-chan *websocket.Conn) *websocket.Conn {
+	t.Helper()
+	select {
+	case connection := <-connections:
+		return connection
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for server websocket")
+		return nil
+	}
+}
+
+func readSyncTestFrames(t *testing.T, connection *websocket.Conn, count int) []serverMessage {
+	t.Helper()
+	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	frames := make([]serverMessage, 0, count)
+	for len(frames) < count {
+		var frame serverMessage
+		if err := connection.ReadJSON(&frame); err != nil {
+			t.Fatal(err)
+		}
+		frames = append(frames, frame)
+	}
+	return frames
 }
 
 func TestSyncDeliveryStormCoalescesToOneRunningAndOnePendingPass(t *testing.T) {

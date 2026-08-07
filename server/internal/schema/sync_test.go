@@ -1,10 +1,18 @@
 package schema
 
 import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/jackc/pgx/v5"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestSyncTriggerProjectsOnlyDeclaredColumnsAndFinalizesAtCommit(t *testing.T) {
@@ -71,9 +79,96 @@ func TestSyncInfrastructureAssignsOneRevisionPerTransaction(t *testing.T) {
 		`current_setting('gonvex.mutation_id', true)`,
 		`pg_notify(`,
 		`'gonvex_sync_change'`,
+		`array_agg(DISTINCT table_name ORDER BY table_name)`,
+		`'tables', changed_tables`,
+		`octet_length(notify_payload::text) > 7000`,
 	} {
 		if !strings.Contains(syncInfrastructureSQL, want) {
 			t.Fatalf("expected sync infrastructure SQL to contain %q", want)
+		}
+	}
+}
+
+func TestSyncTriggerNotificationIncludesAllTransactionTables(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	suffix := time.Now().UnixNano()
+	tableX := fmt.Sprintf("sync_payload_x_%d", suffix)
+	tableY := fmt.Sprintf("sync_payload_y_%d", suffix)
+	tables := map[string]manifest.Table{
+		tableX: {Columns: map[string]manifest.Column{"id": {Type: "id", PrimaryKey: true}}},
+		tableY: {Columns: map[string]manifest.Column{"id": {Type: "id", PrimaryKey: true}}},
+	}
+	definitions := map[string]manifest.SyncDefinition{
+		tableX: {Table: tableX, Key: "id", Columns: []string{"id"}},
+		tableY: {Table: tableY, Key: "id", Columns: []string{"id"}},
+	}
+	if _, err := ApplyWithSync(ctx, databaseURL, manifest.Schema{Tables: tables}, definitions); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DROP TABLE IF EXISTS ` + quoteIdent(tableX))
+		_, _ = db.Exec(`DROP TABLE IF EXISTS ` + quoteIdent(tableY))
+		_, _ = db.Exec(`DROP FUNCTION IF EXISTS ` + quoteIdent(syncArtifactName(tableX, "stage")) + `()`)
+		_, _ = db.Exec(`DROP FUNCTION IF EXISTS ` + quoteIdent(syncArtifactName(tableY, "stage")) + `()`)
+	})
+
+	listener, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close(context.Background()) })
+	if _, err := listener.Exec(ctx, `LISTEN `+SyncNotifyChannel); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO `+quoteIdent(tableX)+` ("id") VALUES ('x-1'), ('x-2')`); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO `+quoteIdent(tableY)+` ("id") VALUES ('y-1')`); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for {
+		notification, err := listener.WaitForNotification(waitCtx)
+		if err != nil {
+			t.Fatalf("wait for sync notification: %v", err)
+		}
+		var payload struct {
+			Tables []string `json:"tables"`
+		}
+		if json.Unmarshal([]byte(notification.Payload), &payload) != nil {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, table := range payload.Tables {
+			seen[table] = true
+		}
+		if seen[tableX] && seen[tableY] {
+			if len(payload.Tables) != 2 {
+				t.Fatalf("transaction notification tables = %#v, want only %q and %q", payload.Tables, tableX, tableY)
+			}
+			return
 		}
 	}
 }

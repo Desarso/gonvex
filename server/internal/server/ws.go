@@ -47,6 +47,7 @@ type clientMessage struct {
 	CacheRevision      string                  `json:"cacheRevision,omitempty"`
 	Subscribes         []querySubscribeRequest `json:"subscribes,omitempty"`
 	Calls              []mutationCallRequest   `json:"calls,omitempty"`
+	Capabilities       *clientCapabilities     `json:"capabilities,omitempty"`
 }
 
 // maxBatchedClientRequests bounds every batched client frame (sync.openMany,
@@ -85,6 +86,12 @@ type serverCapabilities struct {
 	SyncIntegrity   int    `json:"syncIntegrity,omitempty"`
 	QueryBatch      int    `json:"queryBatch,omitempty"`
 	MutationBatch   int    `json:"mutationBatch,omitempty"`
+	SyncWatermark   int    `json:"syncWatermark,omitempty"`
+}
+
+type clientCapabilities struct {
+	SyncReadyMany int `json:"syncReadyMany,omitempty"`
+	SyncWatermark int `json:"syncWatermark,omitempty"`
 }
 
 type syncReadyMessage struct {
@@ -130,6 +137,7 @@ type serverMessage struct {
 	Digest               string                `json:"digest,omitempty"`
 	Truncated            *bool                 `json:"truncated,omitempty"`
 	Ready                []syncReadyMessage    `json:"ready,omitempty"`
+	Revision             uint64                `json:"revision,omitempty"`
 }
 
 // explicitNull makes a nil handler result serialize as an explicit JSON null
@@ -253,23 +261,35 @@ type wsConn struct {
 	// than from defaulting. An unpinned tenant must not survive an auth message
 	// that finally names the project: it was derived before the project was
 	// known, so it is "default" rather than the project's own tenant.
-	tenantPinned  bool
-	user          *gonvex.User
-	perms         map[string]any
-	auth          bool
-	authToken     string
-	authCheckedAt time.Time
-	cacheScope    string
-	syncScope     string
-	connectedAt   time.Time
-	lastActiveAt  time.Time
-	lastActivity  string
-	lastPath      string
-	device        clientDeviceInfo
-	mu            sync.Mutex
-	subs          map[string]querySubscription
-	syncs         map[string]*syncSubscription
+	tenantPinned      bool
+	user              *gonvex.User
+	perms             map[string]any
+	auth              bool
+	authToken         string
+	authCheckedAt     time.Time
+	cacheScope        string
+	syncScope         string
+	connectedAt       time.Time
+	lastActiveAt      time.Time
+	lastActivity      string
+	lastPath          string
+	device            clientDeviceInfo
+	mu                sync.Mutex
+	subs              map[string]querySubscription
+	syncs             map[string]*syncSubscription
+	syncReadyMany     bool
+	syncWatermark     bool
+	pendingReady      []serverMessage
+	pendingWatermarks []pendingSyncWatermark
+	readyTimer        *time.Timer
 }
+
+type pendingSyncWatermark struct {
+	revision uint64
+	waiting  map[string]struct{}
+}
+
+const syncReadyFlushDelay = 15 * time.Millisecond
 
 type callerContext struct {
 	user        *gonvex.User
@@ -304,11 +324,21 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		subs:         map[string]querySubscription{},
 		syncs:        map[string]*syncSubscription{},
 	}
+	pingHandler := conn.PingHandler()
+	conn.SetPingHandler(func(message string) error {
+		client.flushPendingReadies()
+		return pingHandler(message)
+	})
+	closeHandler := conn.CloseHandler()
+	conn.SetCloseHandler(func(code int, text string) error {
+		client.flushPendingReadies()
+		return closeHandler(code, text)
+	})
 	s.addWSConn(client)
 	defer func() {
 		client.cancelSubscriptions()
 		s.removeWSConn(client)
-		_ = conn.Close()
+		client.close()
 	}()
 	var initialCache *queryCacheDirective
 	if !s.projectRequiresAuthentication(r.Context(), client.project) {
@@ -330,6 +360,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			SyncIntegrity:   1,
 			QueryBatch:      1,
 			MutationBatch:   1,
+			SyncWatermark:   1,
 		},
 	})
 
@@ -387,6 +418,8 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.authCheckedAt = time.Now()
 		c.cacheScope = cacheScope
 		c.syncScope = connSyncScope
+		c.syncReadyMany = message.Capabilities != nil && message.Capabilities.SyncReadyMany == 1
+		c.syncWatermark = message.Capabilities != nil && message.Capabilities.SyncWatermark == 1
 		subs := make([]querySubscription, 0, len(c.subs))
 		for id, sub := range c.subs {
 			oldSubs = append(oldSubs, sub)
@@ -805,6 +838,122 @@ func (c *wsConn) cancelSubscriptions() {
 func (c *wsConn) write(message serverMessage) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.flushPendingReadiesLocked()
+	c.writeLocked(message)
+	if message.Type == "sync.reset" || message.Type == "sync.error" {
+		c.resolvePendingWatermarksLocked(message.ID, ^uint64(0))
+	}
+}
+
+func (c *wsConn) writeSyncReady(message serverMessage) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.syncReadyMany {
+		c.writeLocked(message)
+	} else if c.conn != nil {
+		c.pendingReady = append(c.pendingReady, message)
+		c.armReadyTimerLocked()
+	}
+	if message.Cursor != nil {
+		c.resolvePendingWatermarksLocked(message.ID, message.Cursor.Revision)
+	}
+}
+
+func (c *wsConn) writeSyncWatermark(revision uint64, waiting []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.syncWatermark || c.conn == nil || revision == 0 {
+		return
+	}
+	pending := pendingSyncWatermark{revision: revision, waiting: make(map[string]struct{}, len(waiting))}
+	for _, id := range waiting {
+		if _, current := c.syncs[id]; id != "" && current {
+			pending.waiting[id] = struct{}{}
+		}
+	}
+	c.pendingWatermarks = append(c.pendingWatermarks, pending)
+	c.releasePendingWatermarksLocked()
+}
+
+func (c *wsConn) armReadyTimerLocked() {
+	if c.readyTimer == nil {
+		c.readyTimer = time.AfterFunc(syncReadyFlushDelay, c.flushPendingReadies)
+	}
+}
+
+func (c *wsConn) resolvePendingWatermarksLocked(id string, throughRevision uint64) {
+	if id == "" {
+		return
+	}
+	for index := range c.pendingWatermarks {
+		pending := &c.pendingWatermarks[index]
+		if pending.revision <= throughRevision {
+			delete(pending.waiting, id)
+		}
+	}
+	c.releasePendingWatermarksLocked()
+}
+
+func (c *wsConn) releasePendingWatermarksLocked() {
+	for len(c.pendingWatermarks) > 0 && len(c.pendingWatermarks[0].waiting) == 0 {
+		pending := c.pendingWatermarks[0]
+		c.pendingWatermarks = c.pendingWatermarks[1:]
+		c.pendingReady = append(c.pendingReady, serverMessage{Type: "sync.watermark", Revision: pending.revision})
+		c.armReadyTimerLocked()
+	}
+}
+
+func (c *wsConn) flushPendingReadies() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.flushPendingReadiesLocked()
+}
+
+func (c *wsConn) flushPendingReadiesLocked() {
+	if c.readyTimer != nil {
+		c.readyTimer.Stop()
+		c.readyTimer = nil
+	}
+	if len(c.pendingReady) == 0 {
+		return
+	}
+	pending := c.pendingReady
+	c.pendingReady = nil
+	for len(pending) > 0 {
+		if pending[0].Type != "sync.ready" {
+			c.writeLocked(pending[0])
+			pending = pending[1:]
+			continue
+		}
+		end := 1
+		for end < len(pending) && pending[end].Type == "sync.ready" {
+			end++
+		}
+		c.writePendingReadyGroupLocked(pending[:end])
+		pending = pending[end:]
+	}
+}
+
+func (c *wsConn) writePendingReadyGroupLocked(pending []serverMessage) {
+	if len(pending) == 1 {
+		c.writeLocked(pending[0])
+		return
+	}
+	ready := make([]syncReadyMessage, 0, len(pending))
+	for _, message := range pending {
+		truncated := false
+		if message.Truncated != nil {
+			truncated = *message.Truncated
+		}
+		ready = append(ready, syncReadyMessage{
+			ID: message.ID, Path: message.Path, Cursor: message.Cursor, Mode: message.Mode,
+			Digest: message.Digest, Truncated: truncated,
+		})
+	}
+	c.writeLocked(serverMessage{Type: "sync.readyMany", Ready: ready})
+}
+
+func (c *wsConn) writeLocked(message serverMessage) {
 	if c.conn == nil {
 		return
 	}
@@ -812,6 +961,17 @@ func (c *wsConn) write(message serverMessage) {
 	if err := c.conn.WriteJSON(message); err != nil {
 		slog.Warn("websocket write failed", "connection", c.id, "project", c.project, "tenant", c.tenant, "type", message.Type, "path", message.Path, "error", err)
 		_ = c.conn.Close()
+		c.conn = nil
+	}
+}
+
+func (c *wsConn) close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.flushPendingReadiesLocked()
+	if c.conn != nil {
+		_ = c.conn.Close()
+		c.conn = nil
 	}
 }
 

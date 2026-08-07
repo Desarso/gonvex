@@ -16,6 +16,12 @@ type tenantListenerKey struct {
 	tenant  string
 }
 
+type syncNotifyPayload struct {
+	Epoch    string   `json:"epoch"`
+	Revision uint64   `json:"revision"`
+	Tables   []string `json:"tables"`
+}
+
 type tenantListener struct {
 	key           tenantListenerKey
 	databaseURL   string
@@ -209,7 +215,7 @@ func (m *tenantListenerManager) run(ctx context.Context, listener *tenantListene
 				// LISTEN is disconnected. Sync cursors are durable, so force one
 				// coalesced delivery pass after reconnect to replay every missed
 				// revision from the change log.
-				m.server.notifySyncRevision(listener.key.project, listener.key.tenant)
+				m.server.notifySyncRevision(listener.key.project, listener.key.tenant, nil, "", 0)
 			}
 			connectedBefore = true
 			backoff = 250 * time.Millisecond
@@ -253,7 +259,8 @@ func (m *tenantListenerManager) wait(ctx context.Context, connection *pgx.Conn, 
 			return err
 		}
 		if notification.Channel == schema.SyncNotifyChannel {
-			m.server.notifySyncRevision(key.project, key.tenant)
+			payload := parseSyncNotifyPayload(notification.Payload)
+			m.server.notifySyncRevision(key.project, key.tenant, payload.Tables, payload.Epoch, payload.Revision)
 			continue
 		}
 		payload := tableNotifyPayload{}
@@ -273,4 +280,19 @@ func (m *tenantListenerManager) wait(ctx context.Context, connection *pgx.Conn, 
 			changedColumns: normalizedColumns(payload.ChangedColumns), changedAtMS: epochMillis(time.Now().UTC()),
 		})
 	}
+}
+
+func parseSyncNotifyPayload(raw string) syncNotifyPayload {
+	payload := syncNotifyPayload{}
+	if json.Unmarshal([]byte(raw), &payload) != nil || strings.TrimSpace(payload.Epoch) == "" || payload.Revision == 0 {
+		return syncNotifyPayload{}
+	}
+	payload.Tables = appendUniqueStrings(nil, payload.Tables...)
+	if len(payload.Tables) == 0 {
+		// Legacy notifications and the trigger's oversized-payload fallback omit
+		// tables. An explicit empty list is equally non-actionable, so all three
+		// cases retain the full-delivery correctness backstop.
+		payload.Tables = nil
+	}
+	return payload
 }

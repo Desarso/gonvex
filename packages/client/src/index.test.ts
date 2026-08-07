@@ -358,7 +358,12 @@ describe("GonvexClient", () => {
     socket.open();
 
     expect(sentMessages(socket)).toMatchObject([
-      { type: "auth", token: "session-token", tenant: "tenant-a" },
+      {
+        type: "auth",
+        token: "session-token",
+        tenant: "tenant-a",
+        capabilities: { syncReadyMany: 1, syncWatermark: 1 },
+      },
     ]);
 
     const [{ id: authID }] = sentMessages(socket);
