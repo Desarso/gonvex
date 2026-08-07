@@ -20,12 +20,15 @@ const (
 )
 
 type Config struct {
-	Addr                        string
-	LandlordURL                 string
-	PostgresURL                 string
-	TenantDatabases             map[string]string
-	ProjectDatabases            map[string]string
-	ProjectKeys                 map[string]string
+	Addr             string
+	LandlordURL      string
+	PostgresURL      string
+	TenantDatabases  map[string]string
+	ProjectDatabases map[string]string
+	ProjectKeys      map[string]string
+	// ProjectHosts maps browser-facing hostnames to project IDs for anonymous
+	// registered HTTP functions (for example universal-link and webhook hosts).
+	ProjectHosts                map[string]string
 	GonvexModuleRoot            string
 	PluginCacheDir              string
 	ValkeyURL                   string
@@ -88,6 +91,7 @@ func FromEnv() Config {
 		TenantDatabases:             envStringMap("GONVEX_TENANT_DATABASE_URLS"),
 		ProjectDatabases:            envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
 		ProjectKeys:                 envStringMap("GONVEX_PROJECT_KEYS"),
+		ProjectHosts:                envStringMap("GONVEX_PROJECT_HOSTS"),
 		GonvexModuleRoot:            env("GONVEX_MODULE_ROOT", ""),
 		PluginCacheDir:              env("GONVEX_PLUGIN_CACHE_DIR", ""),
 		ValkeyURL:                   env("VALKEY_URL", env("REDIS_URL", "")),
