@@ -27,28 +27,31 @@ func (s *Server) handleStorageProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.storage.FetchObject(r.Context(), objectKey)
+	resp, err := s.storage.FetchObject(r.Context(), objectKey, r.Header.Get("Range"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer drainClose(resp.Body)
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		http.Error(w, "object not found", http.StatusNotFound)
 		return
 	}
 
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
-	if cl := resp.Header.Get("Content-Length"); cl != "" {
-		w.Header().Set("Content-Length", cl)
-	}
-	if et := resp.Header.Get("ETag"); et != "" {
-		w.Header().Set("ETag", et)
+	for _, header := range []string{
+		"Accept-Ranges",
+		"Content-Length",
+		"Content-Range",
+		"Content-Type",
+		"ETag",
+		"Last-Modified",
+	} {
+		if value := resp.Header.Get(header); value != "" {
+			w.Header().Set(header, value)
+		}
 	}
 	w.Header().Set("Cache-Control", "private, max-age=300")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
 

@@ -94,10 +94,13 @@ func (c *Client) PresignPut(key string, expires time.Duration) (string, error) {
 
 // GetObject performs a SigV4-signed GET against the (internal) endpoint and
 // returns the response for streaming. The caller must close resp.Body.
-func (c *Client) GetObject(ctx context.Context, key string) (*http.Response, error) {
+func (c *Client) GetObject(ctx context.Context, key string, byteRange ...string) (*http.Response, error) {
 	req, err := c.signedRequest(ctx, http.MethodGet, key, nil, emptyPayloadHash, "")
 	if err != nil {
 		return nil, err
+	}
+	if len(byteRange) > 0 && strings.TrimSpace(byteRange[0]) != "" {
+		req.Header.Set("Range", byteRange[0])
 	}
 	return c.httpClient.Do(req)
 }

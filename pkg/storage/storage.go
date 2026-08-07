@@ -118,11 +118,11 @@ func (f *Factory) ensureTable(ctx context.Context, db *sql.DB) error {
 
 // FetchObject streams a stored object from the (internal) S3 endpoint, for the
 // runtime's storage proxy handler. The caller must close the response body.
-func (f *Factory) FetchObject(ctx context.Context, objectKey string) (*http.Response, error) {
+func (f *Factory) FetchObject(ctx context.Context, objectKey string, byteRange ...string) (*http.Response, error) {
 	if f == nil {
 		return nil, gonvex.ErrStorageNotConfigured
 	}
-	return f.client.GetObject(ctx, objectKey)
+	return f.client.GetObject(ctx, objectKey, byteRange...)
 }
 
 // VerifyProxyGet validates a storage-proxy URL signature + expiry for objectKey.
