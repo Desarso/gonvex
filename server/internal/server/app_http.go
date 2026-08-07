@@ -106,6 +106,13 @@ func (s *Server) projectIDForRegisteredHTTP(r *http.Request) string {
 	if project := projectID(r); project != "" {
 		return project
 	}
+	host := strings.ToLower(strings.TrimSpace(r.Host))
+	if name, _, found := strings.Cut(host, ":"); found {
+		host = name
+	}
+	if project := strings.TrimSpace(s.config.ProjectHosts[host]); project != "" {
+		return project
+	}
 	projects := s.runtime.ProjectIDs()
 	if len(projects) == 1 {
 		return projects[0]
