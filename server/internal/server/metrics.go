@@ -202,11 +202,22 @@ type runtimeMetricsSnapshot struct {
 	Running          runningMetricSnapshot                `json:"running"`
 	WebSocket        websocketMetricSnapshot              `json:"websocket"`
 	Database         databaseMetricSnapshot               `json:"database"`
+	Resources        runtimeResourceSnapshot              `json:"resources"`
 	Reactive         reactiveMetricSnapshot               `json:"reactive"`
 	Scheduler        *schedulerSnapshot                   `json:"scheduler,omitempty"`
 	Logs             []runtimeLogEntry                    `json:"logs"`
 	TelemetryLogs    []transactionTelemetryEntry          `json:"telemetryLogs"`
 	TelemetryLogPath string                               `json:"telemetryLogPath,omitempty"`
+}
+
+type runtimeResourceSnapshot struct {
+	MemoryBytes          uint64  `json:"memoryBytes"`
+	MemoryPerClientBytes uint64  `json:"memoryPerClientBytes"`
+	CPUPercent           float64 `json:"cpuPercent"`
+	CPUPerClientPercent  float64 `json:"cpuPerClientPercent"`
+	BytesReceived        uint64  `json:"bytesReceived"`
+	BytesSent            uint64  `json:"bytesSent"`
+	BytesPerClient       uint64  `json:"bytesPerClient"`
 }
 
 type reactiveMetricState struct {
@@ -407,6 +418,8 @@ type websocketMetricSnapshot struct {
 	Connections      int                           `json:"connections"`
 	Subscriptions    int                           `json:"subscriptions"`
 	Users            int                           `json:"users"`
+	BytesReceived    uint64                        `json:"bytesReceived"`
+	BytesSent        uint64                        `json:"bytesSent"`
 	Details          []websocketConnectionSnapshot `json:"details"`
 	DetailsTruncated bool                          `json:"detailsTruncated,omitempty"`
 }

@@ -288,6 +288,15 @@ type RuntimeMetricsResponse = {
   running?: RuntimeRunningMetrics;
   websocket?: RuntimeWebSocketMetrics;
   database?: RuntimeDatabaseMetrics;
+  resources?: {
+    memoryBytes: number;
+    memoryPerClientBytes: number;
+    cpuPercent: number;
+    cpuPerClientPercent: number;
+    bytesReceived: number;
+    bytesSent: number;
+    bytesPerClient: number;
+  };
   scheduler?: RuntimeSchedulerMetrics | null;
   logs: RuntimeLogEntry[];
 };
@@ -4713,6 +4722,7 @@ function OverviewPage(props: { project: ProjectTarget }) {
   const crons = scheduler?.crons ?? [];
   const recentJobs = scheduler?.recent ?? [];
   const hasTraffic = derived.totalCalls > 0;
+  const resources = metrics?.resources;
 
   const projectRows = [
     ["Runtime URL", runtimeURLForProject(props.project) || "not configured"],
@@ -4812,6 +4822,20 @@ function OverviewPage(props: { project: ProjectTarget }) {
         </section>
 
         {metrics?.database ? <DatabaseHealthSection database={metrics.database} /> : null}
+
+        <section className="health-section" aria-label="Client resource usage">
+          <div className="health-section-head">
+            <h3>Resource usage per client</h3>
+            <span>{connections > 0 ? `average across ${connections} active ${connections === 1 ? "client" : "clients"}` : "waiting for active clients"}</span>
+          </div>
+          <div className="client-resource-strip">
+            <div><span>Memory / client</span><strong>{connections > 0 && resources ? formatBytes(resources.memoryPerClientBytes) : "—"}</strong><small>{resources ? `${formatBytes(resources.memoryBytes)} runtime RSS` : "runtime sample unavailable"}</small></div>
+            <div><span>CPU / client</span><strong>{connections > 0 && resources ? `${resources.cpuPerClientPercent.toFixed(1)}%` : "—"}</strong><small>{resources ? `${resources.cpuPercent.toFixed(1)}% runtime process` : "runtime sample unavailable"}</small></div>
+            <div><span>Bandwidth / client</span><strong>{connections > 0 && resources ? formatBytes(resources.bytesPerClient) : "—"}</strong><small>since each active connection opened</small></div>
+            <div><span>Network traffic</span><strong>{resources ? formatBytes(resources.bytesReceived + resources.bytesSent) : "—"}</strong><small>{resources ? `↓ ${formatBytes(resources.bytesReceived)} · ↑ ${formatBytes(resources.bytesSent)}` : "runtime sample unavailable"}</small></div>
+          </div>
+          <p className="resource-usage-note">CPU and memory are runtime-process averages divided by active clients. Use them for capacity trends, not per-client billing attribution.</p>
+        </section>
 
         <section className="health-section" aria-label="Concurrency and scheduler">
           <div className="health-section-head">

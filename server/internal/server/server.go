@@ -56,6 +56,10 @@ type Server struct {
 	wsMu                    sync.RWMutex
 	wsConns                 map[*wsConn]bool
 	wsConnectionSeq         atomic.Uint64
+	resourceMu              sync.Mutex
+	resourceSampleAt        time.Time
+	resourceCPUSeconds      float64
+	resourceCPUPercent      float64
 	subscriptions           *subscriptionManager
 	tableChangeMu           sync.Mutex
 	tableChangeWait         map[string]*time.Timer
@@ -343,6 +347,7 @@ func (s *Server) metricsSnapshot(ctx context.Context, project string) runtimeMet
 	s.metrics.recordDatabase(project, s.tenantStores.DatabaseStats(project))
 	snapshot := s.metrics.snapshot(s.runtime.ManifestForProject(project), websocket.Connections, websocket.Subscriptions, project)
 	snapshot.WebSocket = websocket
+	snapshot.Resources = s.resourceSnapshot(websocket)
 	if s.scheduler != nil {
 		schedulerSnapshot := s.scheduler.snapshot()
 		snapshot.Scheduler = &schedulerSnapshot

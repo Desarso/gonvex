@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
@@ -282,6 +283,8 @@ type wsConn struct {
 	pendingReady      []serverMessage
 	pendingWatermarks []pendingSyncWatermark
 	readyTimer        *time.Timer
+	bytesReceived     atomic.Uint64
+	bytesSent         atomic.Uint64
 }
 
 type pendingSyncWatermark struct {
@@ -365,8 +368,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	})
 
 	for {
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		client.bytesReceived.Add(uint64(len(payload)))
 		var message clientMessage
-		if err := conn.ReadJSON(&message); err != nil {
+		if err := json.Unmarshal(payload, &message); err != nil {
 			return
 		}
 		client.handle(r.Context(), message)
@@ -958,10 +966,16 @@ func (c *wsConn) writeLocked(message serverMessage) {
 		return
 	}
 	_ = c.conn.SetWriteDeadline(time.Now().Add(websocketWriteTimeout))
-	if err := c.conn.WriteJSON(message); err != nil {
+	payload, err := json.Marshal(message)
+	if err != nil {
+		return
+	}
+	if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 		slog.Warn("websocket write failed", "connection", c.id, "project", c.project, "tenant", c.tenant, "type", message.Type, "path", message.Path, "error", err)
 		_ = c.conn.Close()
 		c.conn = nil
+	} else {
+		c.bytesSent.Add(uint64(len(payload)))
 	}
 }
 
@@ -1114,6 +1128,8 @@ func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot
 		conn.mu.Unlock()
 		sort.Strings(detail.Subscriptions)
 		totalConnections++
+		snapshot.BytesReceived += conn.bytesReceived.Load()
+		snapshot.BytesSent += conn.bytesSent.Load()
 		snapshot.Subscriptions += len(detail.Subscriptions)
 		if len(snapshot.Details) < detailLimit {
 			snapshot.Details = append(snapshot.Details, detail)
