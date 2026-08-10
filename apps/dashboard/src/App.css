@@ -2203,7 +2203,76 @@ h1 {
 }
 
 .sched-table--crons .sched-row {
-  grid-template-columns: minmax(120px, 1fr) minmax(150px, 1.4fr) minmax(110px, 1fr) minmax(140px, 1fr) 64px 78px;
+  grid-template-columns: minmax(150px, 1.2fr) minmax(170px, 1.35fr) minmax(110px, 0.75fr) minmax(100px, 0.75fr) minmax(140px, 1fr) 64px 78px;
+}
+
+.sched-scope-cell {
+  min-width: 0;
+}
+
+.sched-scope-disclosure {
+  position: relative;
+  width: max-content;
+  max-width: 100%;
+}
+
+.sched-scope-disclosure summary,
+.sched-project-scope {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.75rem;
+}
+
+.sched-scope-disclosure summary {
+  cursor: pointer;
+  list-style-position: inside;
+  white-space: nowrap;
+}
+
+.sched-scope-disclosure summary:hover,
+.sched-scope-disclosure summary:focus-visible {
+  color: var(--foreground);
+}
+
+.sched-scope-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  display: flex;
+  min-width: 240px;
+  max-height: 220px;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--field-radius);
+  background: var(--surface);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 24%);
+  padding: 10px;
+}
+
+.sched-scope-list code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sched-scope-instance {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.sched-scope-instance small {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sched-scope-instance small[data-failures="true"] {
+  color: var(--danger);
 }
 
 .sched-table--runs .sched-row {

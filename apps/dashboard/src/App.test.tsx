@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, DatabaseHealthSection, LogDetailsSheet, RealtimeDashboard, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist, runtimeLogSourceSummary, runtimeLogsForCopy } from "./App";
+import { App, DatabaseHealthSection, LogDetailsSheet, RealtimeDashboard, SchedulesPage, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist, runtimeLogSourceSummary, runtimeLogsForCopy } from "./App";
 
 async function renderProjectApp() {
   const user = userEvent.setup();
@@ -58,6 +58,61 @@ describe("App", () => {
     vi.unstubAllGlobals();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
+  });
+
+  it("groups tenant cron instances and makes their scope visible", async () => {
+    class MetricsSocket {
+      static current: MetricsSocket | null = null;
+      private listeners = new Map<string, Array<(event: { data?: string }) => void>>();
+
+      constructor() {
+        MetricsSocket.current = this;
+      }
+
+      addEventListener(type: string, listener: (event: { data?: string }) => void) {
+        this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+      }
+
+      close() {}
+
+      emit(type: string, event: { data?: string }) {
+        for (const listener of this.listeners.get(type) ?? []) listener(event);
+      }
+    }
+
+    vi.stubGlobal("WebSocket", MetricsSocket);
+    render(<SchedulesPage project={{ ...trackedErrorProject, databaseMode: "single", provisioned: true, status: "local" }} />);
+
+    act(() => MetricsSocket.current?.emit("message", {
+      data: JSON.stringify({
+        type: "metrics",
+        metrics: {
+          functions: {},
+          cache: { hits: 0, misses: 0, bypasses: 0, requests: 0, hitRate: 0, series: [] },
+          logs: [],
+          scheduler: {
+            running: 0,
+            queued: 0,
+            scheduled: 2,
+            completed: 6,
+            failed: 0,
+            lagMs: 0,
+            crons: [
+              { name: "check overdue tool checkouts", project: "error-app", tenant: "tenant-a", function: "tools.checkOverdueItems", schedule: "0 8 * * *", nextRun: "2026-08-11T08:00:00Z", runs: 3, failures: 0 },
+              { name: "check overdue tool checkouts", project: "error-app", tenant: "tenant-b", function: "tools.checkOverdueItems", schedule: "0 8 * * *", nextRun: "2026-08-11T08:00:00Z", runs: 3, failures: 0 },
+            ],
+            recent: [],
+            series: [],
+          },
+        },
+      }),
+    }));
+
+    const table = await screen.findByRole("table", { name: "Cron jobs" });
+    expect(within(table).getByRole("columnheader", { name: "Scope" })).toBeInTheDocument();
+    expect(within(table).getByText("2 tenants")).toBeInTheDocument();
+    expect(within(table).getAllByText("check overdue tool checkouts")).toHaveLength(1);
+    expect(within(table).getAllByText("3 runs")).toHaveLength(2);
   });
 
   it("shows database connection load and pool waits", () => {

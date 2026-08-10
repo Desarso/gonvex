@@ -241,6 +241,7 @@ export type RuntimeDatabaseMetrics = {
 type RuntimeSchedulerCron = {
   name: string;
   project?: string;
+  tenant?: string;
   function: string;
   schedule: string;
   nextRun?: string;
@@ -248,6 +249,11 @@ type RuntimeSchedulerCron = {
   status?: string;
   runs: number;
   failures: number;
+};
+
+type RuntimeSchedulerCronGroup = RuntimeSchedulerCron & {
+  key: string;
+  registrations: RuntimeSchedulerCron[];
 };
 
 type RuntimeSchedulerRun = {
@@ -8133,7 +8139,37 @@ function ErrorBreakdown(props: { title: string; values: Record<string, number>; 
   return <div className="error-breakdown"><span>{props.title}</span>{entries.length ? entries.map(([key, count]) => <div key={key}><code title={key}>{props.maskKeys ? `${key.slice(0, 8)}…` : key}</code><strong>{count}</strong></div>) : <small>No data</small>}</div>;
 }
 
-function SchedulesPage(props: { project: ProjectTarget }) {
+export function groupRuntimeSchedulerCrons(crons: RuntimeSchedulerCron[]): RuntimeSchedulerCronGroup[] {
+  const groups = new Map<string, RuntimeSchedulerCronGroup>();
+  for (const cron of crons) {
+    const scope = cron.tenant ? "tenant" : "project";
+    const key = JSON.stringify([cron.project ?? "", cron.name, cron.function, cron.schedule, scope]);
+    const current = groups.get(key);
+    if (!current) {
+      groups.set(key, {
+        ...cron,
+        key,
+        registrations: [cron],
+      });
+      continue;
+    }
+    current.registrations.push(cron);
+    current.runs += cron.runs;
+    current.failures += cron.failures;
+    if (cron.nextRun && (!current.nextRun || new Date(cron.nextRun).getTime() < new Date(current.nextRun).getTime())) {
+      current.nextRun = cron.nextRun;
+    }
+    if (cron.lastRun && (!current.lastRun || new Date(cron.lastRun).getTime() > new Date(current.lastRun).getTime())) {
+      current.lastRun = cron.lastRun;
+    }
+  }
+  return [...groups.values()].map((group) => ({
+    ...group,
+    registrations: [...group.registrations].sort((left, right) => (left.tenant ?? "").localeCompare(right.tenant ?? "")),
+  }));
+}
+
+export function SchedulesPage(props: { project: ProjectTarget }) {
   const { metrics, reachable } = useRuntimeMetrics(props.project, projectIsProvisioned(props.project));
   const [status, setStatus] = useState("Loading scheduler...");
 
@@ -8142,14 +8178,18 @@ function SchedulesPage(props: { project: ProjectTarget }) {
       setStatus("Runtime offline");
       return;
     }
-    setStatus(metrics?.scheduler ? `${metrics.scheduler.crons.length} cron${metrics.scheduler.crons.length === 1 ? "" : "s"} registered` : "No scheduler data");
+    const nextGroups = groupRuntimeSchedulerCrons(metrics?.scheduler?.crons ?? []);
+    const instanceCount = metrics?.scheduler?.crons.length ?? 0;
+    setStatus(metrics?.scheduler ? `${nextGroups.length} cron definition${nextGroups.length === 1 ? "" : "s"} · ${instanceCount} registered instance${instanceCount === 1 ? "" : "s"}` : "No scheduler data");
   }, [metrics, props.project, reachable]);
 
   const scheduler = metrics?.scheduler ?? null;
   const crons = scheduler?.crons ?? [];
+  const groupedCrons = groupRuntimeSchedulerCrons(crons);
   const recent = scheduler?.recent ?? [];
   const summary = [
-    { label: "Registered", value: String(crons.length) },
+    { label: "Definitions", value: String(groupedCrons.length) },
+    { label: "Instances", value: String(crons.length) },
     { label: "Scheduled", value: String(scheduler?.scheduled ?? 0) },
     { label: "Running", value: String(scheduler?.running ?? 0) },
     { label: "Queued", value: String(scheduler?.queued ?? 0) },
@@ -8175,21 +8215,42 @@ function SchedulesPage(props: { project: ProjectTarget }) {
             <p className="eyebrow">{status}</p>
             <h2>Registered crons</h2>
           </div>
-          <Chip color={metrics ? "success" : "warning"} size="sm" variant="soft">{metrics ? `${crons.length}` : "offline"}</Chip>
+          <Chip color={metrics ? "success" : "warning"} size="sm" variant="soft">{metrics ? `${groupedCrons.length}` : "offline"}</Chip>
         </header>
         <div className="sched-table sched-table--crons" role="table" aria-label="Cron jobs">
           <div className="sched-row sched-row--head" role="row">
             <span role="columnheader">Name</span>
             <span role="columnheader">Function</span>
+            <span role="columnheader">Scope</span>
             <span role="columnheader">Schedule</span>
             <span role="columnheader">Next run</span>
             <span role="columnheader">Runs</span>
             <span role="columnheader">Failures</span>
           </div>
-          {crons.map((cron) => (
-            <div className="sched-row" role="row" key={`${cron.project ?? ""}:${cron.name}`} data-status={cron.failures > 0 ? "warn" : "ok"}>
+          {groupedCrons.map((cron) => (
+            <div className="sched-row" role="row" key={cron.key} data-status={cron.failures > 0 ? "warn" : "ok"}>
               <strong role="cell">{cron.name}</strong>
               <code role="cell">{cron.function}</code>
+              <span className="sched-scope-cell" role="cell">
+                {cron.tenant ? (
+                  <details className="sched-scope-disclosure">
+                    <summary title="One isolated registration runs for each tenant">
+                      {cron.registrations.length} tenant{cron.registrations.length === 1 ? "" : "s"}
+                    </summary>
+                    <span className="sched-scope-list">
+                      {cron.registrations.map((registration) => (
+                        <span className="sched-scope-instance" key={registration.tenant}>
+                          <code title={registration.tenant}>{registration.tenant}</code>
+                          <small data-failures={registration.failures > 0 ? "true" : undefined}>
+                            {registration.runs} run{registration.runs === 1 ? "" : "s"}
+                            {registration.failures > 0 ? ` · ${registration.failures} failed` : ""}
+                          </small>
+                        </span>
+                      ))}
+                    </span>
+                  </details>
+                ) : <span className="sched-project-scope">Project-wide</span>}
+              </span>
               <code role="cell">{cron.schedule}</code>
               <span role="cell">{cron.nextRun ? formatLogDateTime(cron.nextRun) : "—"}</span>
               <span role="cell">{cron.runs}</span>
