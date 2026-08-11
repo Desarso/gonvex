@@ -546,7 +546,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 			s.mergeProjectTenants(project, []tenantTarget{registered})
 		}
 		if existing.databaseURL != "" {
-			if err := provisionTenantDatabase(r.Context(), existing.databaseURL, s.runtime.ManifestForProject(project).Schema.TenantSchema()); err != nil {
+			if err := s.provisionTenantDatabaseWithSync(r.Context(), project, existing.databaseURL); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
@@ -583,7 +583,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if err := provisionTenantDatabase(r.Context(), tenantDatabaseURL, s.runtime.ManifestForProject(project).Schema.TenantSchema()); err != nil {
+	if err := s.provisionTenantDatabaseWithSync(r.Context(), project, tenantDatabaseURL); err != nil {
 		_ = dropProjectDatabase(context.Background(), s.config.PostgresURL, databaseName)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -857,6 +857,34 @@ func provisionTenantDatabase(ctx context.Context, databaseURL string, desiredSch
 		return fmt.Errorf("tenant database URL is not configured")
 	}
 	if _, err := schema.Apply(ctx, databaseURL, desiredSchema); err != nil {
+		return err
+	}
+	db, err := dbpool.Open(databaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		return err
+	}
+	return ensureTenantLocalTables(ctx, db)
+}
+
+func (s *Server) provisionTenantDatabaseWithSync(ctx context.Context, project string, databaseURL string) error {
+	if databaseURL == "" {
+		return fmt.Errorf("tenant database URL is not configured")
+	}
+	current := s.runtime.ManifestForProject(project)
+	desiredSchema := current.Schema.TenantSchema()
+	syncDefinitions, err := syncDefinitionsForSchema(manifestSyncDefinitions(current), desiredSchema)
+	if err != nil {
+		return err
+	}
+	// Existing tenant databases may predate durable sync. Re-applying the
+	// ordinary application schema alone leaves them without _gonvex_sync_clock,
+	// causing every sync.openMany subscription to stall. ApplyWithSync is
+	// idempotent and repairs both old and newly created tenant databases.
+	if _, err := schema.ApplyWithSync(ctx, databaseURL, desiredSchema, syncDefinitions); err != nil {
 		return err
 	}
 	db, err := dbpool.Open(databaseURL)

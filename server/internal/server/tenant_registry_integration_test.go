@@ -11,8 +11,57 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/config"
+	schemasync "github.com/gonvex/gonvex/server/internal/schema"
 )
+
+func TestProvisionExistingTenantRepairsDurableSyncStorage(t *testing.T) {
+	baseURL := tenantRegistryTestPostgresURL(t)
+	databaseURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_sync_repair_"+tenantRegistryTestSuffix(t))
+	const project = "sync-repair-project"
+	desired := manifest.Schema{Tables: map[string]manifest.Table{
+		"priorities": {Columns: map[string]manifest.Column{
+			"id":       {Type: "string", PrimaryKey: true},
+			"tenantId": {Type: "string"},
+		}},
+	}}
+	// Reproduce a tenant created before durable sync: its application schema
+	// exists, but the runtime clock/change-log tables do not.
+	if _, err := schemasync.Apply(context.Background(), databaseURL, desired); err != nil {
+		t.Fatal(err)
+	}
+	server := New(config.Config{})
+	if err := server.runtime.SyncManifest(manifest.Manifest{
+		Project: project,
+		Schema:  desired,
+		Functions: map[string]manifest.FunctionEntry{
+			"sync.priorities": {
+				Kind: manifest.FunctionKindSync,
+				Sync: &manifest.SyncDefinition{
+					Table: "priorities", Key: "id", Columns: []string{"id", "tenantId"},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.provisionTenantDatabaseWithSync(context.Background(), project, databaseURL); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var clockExists bool
+	if err := db.QueryRow(`SELECT to_regclass('_gonvex_sync_clock') IS NOT NULL`).Scan(&clockExists); err != nil {
+		t.Fatal(err)
+	}
+	if !clockExists {
+		t.Fatal("existing tenant provisioning did not install durable sync storage")
+	}
+}
 
 func tenantRegistryTestPostgresURL(t *testing.T) string {
 	t.Helper()
