@@ -116,3 +116,51 @@ func TestProjectEndpointAcceptsRuntimeAdminKeyWithoutMembership(t *testing.T) {
 		t.Fatalf("expected runtime admin key to bypass dashboard project membership, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestMetricsStreamRequiresDashboardAuthentication(t *testing.T) {
+	server := New(config.Config{RequireAuth: true, AdminKey: "admin-secret"})
+
+	unauthenticated := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/dev/metrics/stream?project=whagons5-dev", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("expected anonymous metrics stream to return 401, got %d", unauthenticated.Code)
+	}
+
+	queryCredential := httptest.NewRecorder()
+	server.Handler().ServeHTTP(queryCredential, httptest.NewRequest(http.MethodGet, "/dev/metrics/stream?project=whagons5-dev&access_token=admin-secret", nil))
+	if queryCredential.Code != http.StatusUnauthorized {
+		t.Fatalf("expected URL credentials to be rejected, got %d", queryCredential.Code)
+	}
+
+	wrongProtocolRequest := httptest.NewRequest(http.MethodGet, "/dev/metrics/stream?project=whagons5-dev", nil)
+	wrongProtocolRequest.Header.Set("Sec-WebSocket-Protocol", dashboardWebSocketAuthProtocolPrefix+"wrong-secret")
+	wrongProtocol := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wrongProtocol, wrongProtocolRequest)
+	if wrongProtocol.Code != http.StatusUnauthorized {
+		t.Fatalf("expected invalid WebSocket credentials to return 401, got %d", wrongProtocol.Code)
+	}
+
+	validProtocolRequest := httptest.NewRequest(http.MethodGet, "/dev/metrics/stream?project=whagons5-dev", nil)
+	validProtocolRequest.Header.Set("Sec-WebSocket-Protocol", dashboardWebSocketAuthProtocolPrefix+"admin-secret")
+	validProtocol := httptest.NewRecorder()
+	server.Handler().ServeHTTP(validProtocol, validProtocolRequest)
+	if validProtocol.Code == http.StatusUnauthorized || validProtocol.Code == http.StatusForbidden {
+		t.Fatalf("expected valid WebSocket credentials to pass authentication, got %d", validProtocol.Code)
+	}
+}
+
+func TestWebSocketCredentialConversionDoesNotMutateURLOrOriginalRequest(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/dev/metrics/stream?project=whagons5-dev", nil)
+	request.Header.Set("Sec-WebSocket-Protocol", "metrics-v1, "+dashboardWebSocketAuthProtocolPrefix+"signed-token")
+
+	authenticated := requestWithDashboardWebSocketCredential(request)
+	if got := bearerToken(authenticated); got != "signed-token" {
+		t.Fatalf("converted bearer token = %q, want signed-token", got)
+	}
+	if bearerToken(request) != "" {
+		t.Fatal("original request was mutated")
+	}
+	if authenticated.URL.RawQuery != "project=whagons5-dev" {
+		t.Fatalf("credential leaked into URL query: %q", authenticated.URL.RawQuery)
+	}
+}

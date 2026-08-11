@@ -2,7 +2,6 @@ package main
 
 import (
 	"log/slog"
-	"net/http"
 	"os"
 
 	"github.com/gonvex/gonvex/server/internal/config"
@@ -14,7 +13,7 @@ func main() {
 	runtime := gonvexruntime.New(cfg)
 
 	slog.Info("starting gonvex runtime", "addr", cfg.Addr)
-	if err := http.ListenAndServe(cfg.Addr, runtime.Handler()); err != nil {
+	if err := gonvexruntime.NewHTTPServer(cfg.Addr, runtime.Handler()).ListenAndServe(); err != nil {
 		slog.Error("gonvex runtime stopped", "error", err)
 		os.Exit(1)
 	}

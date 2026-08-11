@@ -195,19 +195,18 @@ type transactionMetricsBucket struct {
 }
 
 type runtimeMetricsSnapshot struct {
-	GeneratedAt      string                               `json:"generatedAt"`
-	Functions        map[string]functionMetricSnapshot    `json:"functions"`
-	Transactions     map[string]transactionMetricSnapshot `json:"transactions"`
-	Cache            cacheMetricSnapshot                  `json:"cache"`
-	Running          runningMetricSnapshot                `json:"running"`
-	WebSocket        websocketMetricSnapshot              `json:"websocket"`
-	Database         databaseMetricSnapshot               `json:"database"`
-	Resources        runtimeResourceSnapshot              `json:"resources"`
-	Reactive         reactiveMetricSnapshot               `json:"reactive"`
-	Scheduler        *schedulerSnapshot                   `json:"scheduler,omitempty"`
-	Logs             []runtimeLogEntry                    `json:"logs"`
-	TelemetryLogs    []transactionTelemetryEntry          `json:"telemetryLogs"`
-	TelemetryLogPath string                               `json:"telemetryLogPath,omitempty"`
+	GeneratedAt   string                               `json:"generatedAt"`
+	Functions     map[string]functionMetricSnapshot    `json:"functions"`
+	Transactions  map[string]transactionMetricSnapshot `json:"transactions"`
+	Cache         cacheMetricSnapshot                  `json:"cache"`
+	Running       runningMetricSnapshot                `json:"running"`
+	WebSocket     websocketMetricSnapshot              `json:"websocket"`
+	Database      databaseMetricSnapshot               `json:"database"`
+	Resources     runtimeResourceSnapshot              `json:"resources"`
+	Reactive      reactiveMetricSnapshot               `json:"reactive"`
+	Scheduler     *schedulerSnapshot                   `json:"scheduler,omitempty"`
+	Logs          []runtimeLogEntry                    `json:"logs"`
+	TelemetryLogs []transactionTelemetryEntry          `json:"telemetryLogs"`
 }
 
 type runtimeResourceSnapshot struct {
@@ -895,11 +894,10 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 			Connections:   connections,
 			Subscriptions: subscriptions,
 		},
-		Database:         m.databaseSnapshot(projectFilter),
-		Reactive:         m.reactive.snapshot(),
-		Logs:             logs,
-		TelemetryLogs:    telemetryLogs,
-		TelemetryLogPath: m.telemetryPath,
+		Database:      m.databaseSnapshot(projectFilter),
+		Reactive:      m.reactive.snapshot(),
+		Logs:          logs,
+		TelemetryLogs: telemetryLogs,
 	}
 }
 
@@ -1025,13 +1023,21 @@ func (m *runtimeMetrics) appendTelemetryFileLocked(entry transactionTelemetryEnt
 		return
 	}
 	if dir := filepath.Dir(m.telemetryPath); dir != "." && dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return
+		}
 	}
-	file, err := os.OpenFile(m.telemetryPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(m.telemetryPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}
 	defer file.Close()
+	if err := file.Chmod(0o600); err != nil {
+		return
+	}
 	encoder := json.NewEncoder(file)
 	_ = encoder.Encode(entry)
 }

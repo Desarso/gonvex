@@ -539,7 +539,8 @@ func TestMetricsExposesRunningAndScheduler(t *testing.T) {
 }
 
 func TestMetricsTracksTransactionTelemetry(t *testing.T) {
-	telemetryPath := filepath.Join(t.TempDir(), "telemetry.jsonl")
+	telemetryDir := filepath.Join(t.TempDir(), "telemetry")
+	telemetryPath := filepath.Join(telemetryDir, "runtime.jsonl")
 	server := New(config.Config{TelemetryLogPath: telemetryPath})
 
 	server.metrics.recordTransaction(transactionTelemetryEntry{
@@ -585,7 +586,8 @@ func TestMetricsTracksTransactionTelemetry(t *testing.T) {
 			AverageServerToBrowserMS float64 `json:"averageServerToBrowserMs"`
 			AverageChangeToBrowserMS float64 `json:"averageChangeToBrowserMs"`
 		} `json:"transactions"`
-		TelemetryLogs []transactionTelemetryEntry `json:"telemetryLogs"`
+		TelemetryLogs    []transactionTelemetryEntry `json:"telemetryLogs"`
+		TelemetryLogPath *json.RawMessage            `json:"telemetryLogPath"`
 	}
 	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -608,12 +610,29 @@ func TestMetricsTracksTransactionTelemetry(t *testing.T) {
 	if len(payload.TelemetryLogs) != 2 {
 		t.Fatalf("expected telemetry logs in snapshot, got %d", len(payload.TelemetryLogs))
 	}
+	if payload.TelemetryLogPath != nil {
+		t.Fatal("metrics response exposed the server telemetry filesystem path")
+	}
 	ledger, err := os.ReadFile(telemetryPath)
 	if err != nil {
 		t.Fatalf("read telemetry ledger: %v", err)
 	}
 	if !strings.Contains(string(ledger), `"path":"tasks.create"`) || !strings.Contains(string(ledger), `"path":"tasks.grid"`) {
 		t.Fatalf("expected telemetry ledger to contain both events, got %s", string(ledger))
+	}
+	directoryInfo, err := os.Stat(telemetryDir)
+	if err != nil {
+		t.Fatalf("stat telemetry directory: %v", err)
+	}
+	if got := directoryInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("telemetry directory mode = %o, want 700", got)
+	}
+	fileInfo, err := os.Stat(telemetryPath)
+	if err != nil {
+		t.Fatalf("stat telemetry file: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("telemetry file mode = %o, want 600", got)
 	}
 }
 

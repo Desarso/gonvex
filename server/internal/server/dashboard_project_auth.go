@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+const dashboardWebSocketAuthProtocolPrefix = "gonvex-dashboard-auth."
+
 func (s *Server) withDashboardProjectAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.needsDashboardProjectAuth(r) {
@@ -24,6 +26,7 @@ func (s *Server) withDashboardProjectAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
+		r = requestWithDashboardWebSocketCredential(r)
 		// The runtime admin key is the machine credential used by trusted
 		// automation such as the release monitor. It is intentionally global,
 		// so it must not be constrained by dashboard project membership.
@@ -66,9 +69,33 @@ func (s *Server) needsDashboardProjectAuth(r *http.Request) bool {
 		return false
 	case path == "/dev/logs/stream":
 		return false
-	case path == "/dev/metrics/stream":
-		return false
 	default:
 		return true
 	}
+}
+
+// Browsers cannot set an Authorization header during the WebSocket handshake.
+// Carry dashboard credentials in a dedicated Sec-WebSocket-Protocol value so
+// they do not appear in URLs, reverse-proxy access logs, or browser history.
+// The cloned request is only used by authentication middleware; the original
+// WebSocket protocol list remains available to the upgrader.
+func requestWithDashboardWebSocketCredential(r *http.Request) *http.Request {
+	if r.URL.Path != "/dev/metrics/stream" || bearerToken(r) != "" {
+		return r
+	}
+	for _, offered := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		protocol := strings.TrimSpace(offered)
+		if !strings.HasPrefix(protocol, dashboardWebSocketAuthProtocolPrefix) {
+			continue
+		}
+		token := strings.TrimPrefix(protocol, dashboardWebSocketAuthProtocolPrefix)
+		if token == "" {
+			continue
+		}
+		clone := r.Clone(r.Context())
+		clone.Header = r.Header.Clone()
+		clone.Header.Set("Authorization", "Bearer "+token)
+		return clone
+	}
+	return r
 }

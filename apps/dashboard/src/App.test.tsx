@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, DatabaseHealthSection, LogDetailsSheet, RealtimeDashboard, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist, runtimeLogSourceSummary, runtimeLogsForCopy } from "./App";
+import { App, DatabaseHealthSection, LogDetailsSheet, RealtimeDashboard, dashboardEmailAllowed, dashboardMetricsWebSocketProtocols, googleLoginEnabled, parseEmailAllowlist, runtimeLogSourceSummary, runtimeLogsForCopy } from "./App";
 
 async function renderProjectApp() {
   const user = userEvent.setup();
@@ -58,6 +58,13 @@ describe("App", () => {
     vi.unstubAllGlobals();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
+  });
+
+  it("carries metrics WebSocket credentials outside the URL", () => {
+    expect(dashboardMetricsWebSocketProtocols(" signed-token ")).toEqual([
+      "gonvex-dashboard-auth.signed-token",
+    ]);
+    expect(dashboardMetricsWebSocketProtocols(" ")).toEqual([]);
   });
 
   it("shows database connection load and pool waits", () => {

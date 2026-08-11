@@ -17,5 +17,5 @@ func ListenAndServe(app *gonvex.App) error {
 	cfg := config.FromEnv()
 	runtime := server.NewWithApp(cfg, app)
 	slog.Info("starting gonvex runtime", "addr", cfg.Addr)
-	return http.ListenAndServe(cfg.Addr, runtime.Handler())
+	return server.NewHTTPServer(cfg.Addr, runtime.Handler()).ListenAndServe()
 }
