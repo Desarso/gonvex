@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -30,7 +31,7 @@ func TestLoadProfileExpandsRuntimeVariablesWithoutMutatingSource(t *testing.T) {
 		t.Fatalf("unexpected profile: %#v", profile)
 	}
 
-	args, err := profile.Subscriptions[0].expandedArgs(map[string]string{
+	args, err := profile.Subscriptions[0].expandedArgs(map[string]any{
 		"tenant":      "loadtest",
 		"userId":      "user-42",
 		"workspaceId": "workspace-b",
@@ -58,16 +59,90 @@ func TestLoadProfileExpandsRuntimeVariablesWithoutMutatingSource(t *testing.T) {
 
 func TestLoadProfileRejectsInvalidSubscription(t *testing.T) {
 	for name, raw := range map[string]string{
-		"unsupported version": `{"version":2,"subscriptions":[{"path":"users.me","args":{}}]}`,
+		"unsupported version": `{"version":3,"subscriptions":[{"path":"users.me","args":{}}]}`,
 		"missing path":        `{"version":1,"subscriptions":[{"args":{}}]}`,
 		"invalid path":        `{"version":1,"subscriptions":[{"path":"users/me","args":{}}]}`,
-		"missing args":        `{"version":1,"subscriptions":[{"path":"users.me"}]}`,
+		"non-object args":     `{"version":1,"subscriptions":[{"path":"users.me","args":[]}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := loadProfileReader(strings.NewReader(raw)); err == nil {
 				t.Fatal("expected profile validation error")
 			}
 		})
+	}
+}
+
+func TestBundledWhagonsProfilesValidate(t *testing.T) {
+	for _, path := range []string{
+		"profiles/whagons-prod-2026-08-11.json",
+		"profiles/whagons-1000-users.json",
+	} {
+		t.Run(path, func(t *testing.T) {
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			profile, err := loadProfileReader(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(profile.expandedSubscriptions()) < 99 {
+				t.Fatalf("profile has only %d subscription slots", len(profile.expandedSubscriptions()))
+			}
+			if profile.Name == "whagons-1000-users" && (profile.Users != 1000 || profile.connectionCount(0) != 1700) {
+				t.Fatalf("unexpected scaled profile: users=%d connections=%d", profile.Users, profile.connectionCount(0))
+			}
+		})
+	}
+}
+
+func TestVersionTwoProfilePlansUsersPoolsAndMutationTemplates(t *testing.T) {
+	profile, err := loadProfileReader(strings.NewReader(`{
+		"version":2,
+		"name":"sessions",
+		"users":10,
+		"connectionsPerUser":1.7,
+		"pools":{"workspace":["w-a","w-b"],"limit":[10,20]},
+		"subscriptionsPerConnection":[1,2],
+		"subscriptions":[
+			{"path":"tasks.list","args":{"workspaceId":"$workspace","limit":"${limit}"}},
+			{"path":"users.me","args":{}}
+		],
+		"mutations":[{"path":"tasks.create","args":{"workspaceId":"$workspace","owner":"$userId"},"ratePerUserPerMinute":0.2,"activeUsers":0.2}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := profile.connectionCount(0); got != 17 {
+		t.Fatalf("connectionCount = %d, want 17", got)
+	}
+	variables := profile.sessionVariables(3, map[string]string{"userId": "user-3"})
+	args, err := profile.Subscriptions[0].expandedArgs(variables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expanded := args.(map[string]any)
+	if expanded["workspaceId"] == nil || expanded["limit"] == nil {
+		t.Fatalf("pool placeholders were not expanded: %#v", expanded)
+	}
+	if _, ok := expanded["limit"].(json.Number); !ok {
+		t.Fatalf("numeric pool value lost its JSON type: %#v", expanded["limit"])
+	}
+	second := profile.sessionVariables(3, map[string]string{"userId": "user-3"})
+	if variables["workspace"] != second["workspace"] {
+		t.Fatalf("the same user must get stable session pool choices: %#v vs %#v", variables, second)
+	}
+	mutationArgs, err := profile.Mutations[0].expandedArgs(variables)
+	if err != nil || mutationArgs["owner"] != "user-3" {
+		t.Fatalf("mutation template expansion failed: args=%#v err=%v", mutationArgs, err)
+	}
+}
+
+func TestProfileTemplateReportsMissingPool(t *testing.T) {
+	_, err := expandProfileValue(map[string]any{"workspaceId": "$workspace"}, map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), "$workspace") {
+		t.Fatalf("expected a useful missing-pool error, got %v", err)
 	}
 }
 
