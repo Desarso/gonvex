@@ -56,6 +56,7 @@ import {
   Legend,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -302,6 +303,33 @@ type RuntimeMetricsResponse = {
     bytesReceived: number;
     bytesSent: number;
     bytesPerClient: number;
+  };
+  propagation?: {
+    targetMs: number;
+    samples: number;
+    averageMs: number;
+    maxMs: number;
+    series: Array<{
+      time: string;
+      samples: number;
+      averageMs: number;
+      p95Ms: number;
+      maxMs: number;
+      serverSamples: number;
+      serverAverageMs: number;
+      serverMaxMs: number;
+    }>;
+  };
+  load?: {
+    sampleIntervalSeconds: number;
+    series: Array<{
+      time: string;
+      connections: number;
+      users: number;
+      subscriptions: number;
+      cpuPercent: number;
+      memoryBytes: number;
+    }>;
   };
   scheduler?: RuntimeSchedulerMetrics | null;
   logs: RuntimeLogEntry[];
@@ -4763,6 +4791,23 @@ function OverviewPage(props: { project: ProjectTarget }) {
       Completed: point.completed,
       Failed: point.failed,
     }));
+    const loadSeries = (metrics?.load?.series ?? []).map((point) => ({
+      label: shortClockLabel(point.time),
+      Connections: point.connections,
+      Users: point.users,
+      Subscriptions: point.subscriptions,
+      cpu: point.cpuPercent,
+      memory: point.memoryBytes,
+    }));
+    const propagationSeries = (metrics?.propagation?.series ?? []).map((point) => ({
+      label: shortClockLabel(point.time),
+      "Last user": point.maxMs,
+      p95: point.p95Ms,
+      Average: point.averageMs,
+      "Server max": point.serverMaxMs,
+    }));
+    const propagationRecent = (metrics?.propagation?.series ?? []).filter((point) => point.samples > 0 || point.serverSamples > 0);
+    const propagationNow = propagationRecent.length > 0 ? propagationRecent[propagationRecent.length - 1] : null;
     const topFunctions = Object.entries(functions)
       .map(([name, fn]) => ({ name, calls: fn.calls, errors: fn.errors }))
       .filter((fn) => fn.calls > 0)
@@ -4773,6 +4818,9 @@ function OverviewPage(props: { project: ProjectTarget }) {
       cacheSeries,
       runningSeries,
       schedulerSeries,
+      loadSeries,
+      propagationSeries,
+      propagationNow,
       topFunctions,
       totalCalls,
       totalErrors,
@@ -4904,6 +4952,109 @@ function OverviewPage(props: { project: ProjectTarget }) {
             <div><span>Network traffic</span><strong>{resources ? formatBytes(resources.bytesReceived + resources.bytesSent) : "—"}</strong><small>{resources ? `↓ ${formatBytes(resources.bytesReceived)} · ↑ ${formatBytes(resources.bytesSent)}` : "runtime sample unavailable"}</small></div>
           </div>
           <p className="resource-usage-note">CPU and memory are runtime-process averages divided by active clients. Use them for capacity trends, not per-client billing attribution.</p>
+        </section>
+
+        <section className="health-section" aria-label="Update propagation">
+          <div className="health-section-head">
+            <h3>Update propagation</h3>
+            <span>change committed → reflected in every subscribed browser · target {metrics?.propagation?.targetMs ?? 200}ms</span>
+          </div>
+          <div className="health-grid">
+            <HealthChartCard
+              title="Time to last user"
+              value={derived.propagationNow ? formatDuration(derived.propagationNow.maxMs || derived.propagationNow.serverMaxMs) : "—"}
+              tone={derived.propagationNow && (derived.propagationNow.maxMs || derived.propagationNow.serverMaxMs) > (metrics?.propagation?.targetMs ?? 200) ? "danger" : "success"}
+              hint="max commit→browser-ack delay, measured on the server clock (skew-free upper bound); 'Server max' isolates backend fan-out from network/browser time"
+            >
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={derived.propagationSeries} margin={HEALTH_CHART_MARGIN}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={44} tickFormatter={(value) => formatDuration(Number(value))} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => formatDuration(Number(value))} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} iconType="plainline" />
+                  <ReferenceLine y={metrics?.propagation?.targetMs ?? 200} stroke="var(--success)" strokeDasharray="4 4" label={{ value: "target", fontSize: 10, fill: "var(--muted)", position: "insideTopRight" }} />
+                  <Line type="monotone" dataKey="Last user" stroke={HEALTH_COLORS.errors} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="p95" stroke={HEALTH_COLORS.latency} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Average" stroke={HEALTH_COLORS.query} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Server max" stroke={HEALTH_COLORS.mutation} strokeWidth={1.5} strokeDasharray="5 3" dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+          </div>
+          {metrics?.propagation && metrics.propagation.samples === 0 ? (
+            <p className="resource-usage-note">No browser samples yet — clients must connect with <code>telemetry: true</code> to report when updates reach their GUI. The dashed server line still shows backend fan-out delay.</p>
+          ) : null}
+        </section>
+
+        <section className="health-section" aria-label="Connected load">
+          <div className="health-section-head">
+            <h3>Connected load</h3>
+            <span>last 3 h · 30s samples · all projects</span>
+          </div>
+          <div className="health-grid">
+            <HealthChartCard title="Connections & Users" value={String(connections)} hint="live sockets and distinct users, sampled every 30s">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={derived.loadSeries} margin={HEALTH_CHART_MARGIN}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={30} allowDecimals={false} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} iconType="plainline" />
+                  <Line type="monotone" dataKey="Connections" stroke={HEALTH_COLORS.query} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Users" stroke={HEALTH_COLORS.mutation} strokeWidth={2} dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+
+            <HealthChartCard title="Subscriptions" value={String(subscriptions)} hint="open query + sync subscriptions across all connections">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={derived.loadSeries} margin={HEALTH_CHART_MARGIN}>
+                  <defs>
+                    <linearGradient id="healthSubsFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={HEALTH_COLORS.calls} stopOpacity={0.35} />
+                      <stop offset="100%" stopColor={HEALTH_COLORS.calls} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={40} allowDecimals={false} tickFormatter={(value) => healthCompactNumber.format(Number(value))} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} />
+                  <Area type="monotone" dataKey="Subscriptions" stroke={HEALTH_COLORS.calls} strokeWidth={2} fill="url(#healthSubsFill)" isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+
+            <HealthChartCard title="CPU" value={resources ? `${resources.cpuPercent.toFixed(0)}%` : "—"} tone={resources && resources.cpuPercent > 100 ? "warning" : "default"} hint="runtime process CPU (100% = one core)">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={derived.loadSeries} margin={HEALTH_CHART_MARGIN}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={38} tickFormatter={(value) => `${Math.round(Number(value))}%`} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => `${Number(value).toFixed(1)}%`} />
+                  <Line type="monotone" dataKey="cpu" name="CPU" stroke={HEALTH_COLORS.latency} strokeWidth={2} dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+
+            <HealthChartCard title="Memory" value={resources ? formatBytes(resources.memoryBytes) : "—"} hint="runtime resident set size">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={derived.loadSeries} margin={HEALTH_CHART_MARGIN}>
+                  <defs>
+                    <linearGradient id="healthMemoryFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={HEALTH_COLORS.action} stopOpacity={0.3} />
+                      <stop offset="100%" stopColor={HEALTH_COLORS.action} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={48} tickFormatter={(value) => formatBytes(Number(value))} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => formatBytes(Number(value))} />
+                  <Area type="monotone" dataKey="memory" name="Memory" stroke={HEALTH_COLORS.action} strokeWidth={2} fill="url(#healthMemoryFill)" isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+          </div>
         </section>
 
         <section className="health-section" aria-label="Concurrency and scheduler">

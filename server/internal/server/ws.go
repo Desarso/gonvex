@@ -681,6 +681,18 @@ func transactionEntryFromClientTelemetry(project string, tenant string, message 
 			entry.ChangeToBrowserMS = float64(message.ClientReceivedAtMS - trace.ServerChangeCommittedAtMS)
 		}
 	}
+	// Commit → this telemetry ack arriving back at the server, measured
+	// entirely on the server clock. The client reports synchronously after
+	// applying an update, so this is a skew-free upper bound on when the
+	// user's GUI reflected the change (it adds only the upstream network
+	// hop). ChangeToBrowserMS above mixes server and browser clocks and is
+	// kept as the informational point estimate.
+	if trace.ServerChangeCommittedAtMS > 0 {
+		ackAtMS := float64(time.Now().UTC().UnixMilli())
+		if ackAtMS > trace.ServerChangeCommittedAtMS {
+			entry.ChangeToAckMS = ackAtMS - trace.ServerChangeCommittedAtMS
+		}
+	}
 	if entry.Outcome == "" {
 		entry.Outcome = "ok"
 	}
@@ -1083,6 +1095,32 @@ type websocketConnectionSnapshot struct {
 	Platform       string   `json:"platform,omitempty"`
 	ConnectionType string   `json:"connectionType,omitempty"`
 	Subscriptions  []string `json:"subscriptions"`
+}
+
+// websocketCounts is the cheap sibling of websocketSnapshot for the background
+// load sampler: connection/user/subscription totals across all projects,
+// without building per-connection detail records.
+func (s *Server) websocketCounts() (connections int, users int, subscriptions int) {
+	s.wsMu.RLock()
+	conns := make([]*wsConn, 0, len(s.wsConns))
+	for conn := range s.wsConns {
+		conns = append(conns, conn)
+	}
+	s.wsMu.RUnlock()
+
+	seen := map[string]bool{}
+	for _, conn := range conns {
+		conn.mu.Lock()
+		subscriptions += len(conn.subs) + len(conn.syncs)
+		identity := "anonymous"
+		if conn.user != nil && conn.user.ID != "" {
+			identity = conn.user.ID
+		}
+		conn.mu.Unlock()
+		connections++
+		seen[identity] = true
+	}
+	return connections, len(seen), subscriptions
 }
 
 func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot {

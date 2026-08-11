@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +21,17 @@ const (
 	metricsLogLimit           = 1000
 	metricsTelemetryLogLimit  = 1000
 	metricsDatabasePointLimit = 360
+	// metricsLoadPointLimit bounds the background load samples (connections,
+	// users, CPU, memory). 360 points at loadSampleInterval (30s) ≈ 3 hours —
+	// long enough to correlate server load with the daily connection ramp.
+	metricsLoadPointLimit = 360
+	// propagationTargetMS is the product goal for update propagation: a
+	// committed change should be reflected in every subscribed browser within
+	// this budget. Surfaced in the snapshot so dashboards chart against it.
+	propagationTargetMS = 200
+	// propagationBucketSampleLimit caps the per-bucket raw samples kept for
+	// the p95 estimate; avg/max use every sample regardless.
+	propagationBucketSampleLimit = 512
 )
 
 type runtimeMetrics struct {
@@ -33,6 +45,9 @@ type runtimeMetrics struct {
 	reactive             reactiveMetricState
 	commitExecutions     map[string]uint64
 	commitExecutionOrder []string
+	load                 []loadMetricPoint
+	propagationBuckets   map[int64]*propagationMetricsBucket
+	propagationTotals    propagationTotals
 	logs                 []runtimeLogEntry
 	telemetryLogs        []transactionTelemetryEntry
 	telemetryPath        string
@@ -145,6 +160,7 @@ type transactionTelemetryEntry struct {
 	ClientRoundTripMS      float64 `json:"clientRoundTripMs,omitempty"`
 	ServerToBrowserMS      float64 `json:"serverToBrowserMs,omitempty"`
 	ChangeToBrowserMS      float64 `json:"changeToBrowserMs,omitempty"`
+	ChangeToAckMS          float64 `json:"changeToAckMs,omitempty"`
 	SubscriptionDurationMS float64 `json:"subscriptionDurationMs,omitempty"`
 	BrowserName            string  `json:"browserName,omitempty"`
 	BrowserVersion         string  `json:"browserVersion,omitempty"`
@@ -205,6 +221,8 @@ type runtimeMetricsSnapshot struct {
 	WebSocket        websocketMetricSnapshot              `json:"websocket"`
 	Database         databaseMetricSnapshot               `json:"database"`
 	Resources        runtimeResourceSnapshot              `json:"resources"`
+	Load             loadMetricSnapshot                   `json:"load"`
+	Propagation      propagationMetricSnapshot            `json:"propagation"`
 	Reactive         reactiveMetricSnapshot               `json:"reactive"`
 	Scheduler        *schedulerSnapshot                   `json:"scheduler,omitempty"`
 	Logs             []runtimeLogEntry                    `json:"logs"`
@@ -468,6 +486,197 @@ type transactionMetricPoint struct {
 	AverageClientRoundTripMS float64 `json:"averageClientRoundTripMs"`
 	AverageServerToBrowserMS float64 `json:"averageServerToBrowserMs"`
 	AverageChangeToBrowserMS float64 `json:"averageChangeToBrowserMs"`
+}
+
+// Propagation measures the delay the product actually cares about: a user
+// commits a change (e.g. clicks "change status") and every other subscribed
+// user's GUI must reflect it. The end-to-end leg prefers ChangeToAckMS
+// (commit → the receiving client's telemetry ack arriving back at the
+// server), which uses ONLY the server clock: it is objective under client
+// clock skew and a strict upper bound on the real user-visible delay (it adds
+// one upstream network hop). Its per-bucket max is "when did the LAST user
+// see it". ChangeToBrowserMS (browser-clock receive time) is the fallback for
+// entries without an ack measurement. The server leg (commit → result sent)
+// isolates backend fan-out delay from network/browser time. Only kind=query,
+// reason=invalidate events count: initial loads and the mutator's own round
+// trip are not propagation. Caveat: an ack delayed by reconnect buffering
+// inflates its sample; p95 is robust to those outliers, max is not.
+type propagationMetricsBucket struct {
+	BrowserSamples int64
+	BrowserTotalMS float64
+	BrowserMaxMS   float64
+	BrowserValues  []float64
+	ServerSamples  int64
+	ServerTotalMS  float64
+	ServerMaxMS    float64
+}
+
+type propagationTotals struct {
+	Samples int64
+	TotalMS float64
+	MaxMS   float64
+}
+
+type propagationMetricSnapshot struct {
+	TargetMS  float64                  `json:"targetMs"`
+	Samples   int64                    `json:"samples"`
+	AverageMS float64                  `json:"averageMs"`
+	MaxMS     float64                  `json:"maxMs"`
+	Series    []propagationMetricPoint `json:"series"`
+}
+
+type propagationMetricPoint struct {
+	Time            string  `json:"time"`
+	Samples         int64   `json:"samples"`
+	AverageMS       float64 `json:"averageMs"`
+	P95MS           float64 `json:"p95Ms"`
+	MaxMS           float64 `json:"maxMs"`
+	ServerSamples   int64   `json:"serverSamples"`
+	ServerAverageMS float64 `json:"serverAverageMs"`
+	ServerMaxMS     float64 `json:"serverMaxMs"`
+}
+
+func (m *runtimeMetrics) recordPropagationLocked(entry transactionTelemetryEntry, now time.Time) {
+	if entry.Kind != "query" || entry.Reason != "invalidate" {
+		return
+	}
+	browserMS := float64(0)
+	if entry.Phase == "browser" {
+		if entry.ChangeToAckMS > 0 {
+			browserMS = entry.ChangeToAckMS
+		} else if entry.ChangeToBrowserMS > 0 {
+			browserMS = entry.ChangeToBrowserMS
+		}
+	}
+	serverMS := float64(0)
+	if entry.Phase != "browser" && entry.ServerSentAtMS > 0 && entry.ChangeCommittedAtMS > 0 && entry.ServerSentAtMS > entry.ChangeCommittedAtMS {
+		serverMS = entry.ServerSentAtMS - entry.ChangeCommittedAtMS
+	}
+	if browserMS == 0 && serverMS == 0 {
+		return
+	}
+	if m.propagationBuckets == nil {
+		m.propagationBuckets = map[int64]*propagationMetricsBucket{}
+	}
+	key := bucketKey(now)
+	bucket := m.propagationBuckets[key]
+	if bucket == nil {
+		bucket = &propagationMetricsBucket{}
+		m.propagationBuckets[key] = bucket
+	}
+	if browserMS > 0 {
+		bucket.BrowserSamples++
+		bucket.BrowserTotalMS += browserMS
+		if browserMS > bucket.BrowserMaxMS {
+			bucket.BrowserMaxMS = browserMS
+		}
+		if len(bucket.BrowserValues) < propagationBucketSampleLimit {
+			bucket.BrowserValues = append(bucket.BrowserValues, browserMS)
+		}
+		m.propagationTotals.Samples++
+		m.propagationTotals.TotalMS += browserMS
+		if browserMS > m.propagationTotals.MaxMS {
+			m.propagationTotals.MaxMS = browserMS
+		}
+	}
+	if serverMS > 0 {
+		bucket.ServerSamples++
+		bucket.ServerTotalMS += serverMS
+		if serverMS > bucket.ServerMaxMS {
+			bucket.ServerMaxMS = serverMS
+		}
+	}
+	oldest := bucketKey(now.Add(-metricsBucketWidth * metricsBucketCount))
+	for existing := range m.propagationBuckets {
+		if existing < oldest {
+			delete(m.propagationBuckets, existing)
+		}
+	}
+}
+
+func (m *runtimeMetrics) propagationSnapshotLocked(now time.Time) propagationMetricSnapshot {
+	points := make([]propagationMetricPoint, 0, metricsBucketCount)
+	start := now.Truncate(metricsBucketWidth).Add(-metricsBucketWidth * (metricsBucketCount - 1))
+	for index := 0; index < metricsBucketCount; index++ {
+		bucketStart := start.Add(metricsBucketWidth * time.Duration(index))
+		point := propagationMetricPoint{Time: bucketStart.Format(time.RFC3339Nano)}
+		if bucket := m.propagationBuckets[bucketStart.UnixMilli()]; bucket != nil {
+			point.Samples = bucket.BrowserSamples
+			point.MaxMS = bucket.BrowserMaxMS
+			if bucket.BrowserSamples > 0 {
+				point.AverageMS = bucket.BrowserTotalMS / float64(bucket.BrowserSamples)
+			}
+			point.P95MS = percentile(bucket.BrowserValues, 0.95)
+			point.ServerSamples = bucket.ServerSamples
+			point.ServerMaxMS = bucket.ServerMaxMS
+			if bucket.ServerSamples > 0 {
+				point.ServerAverageMS = bucket.ServerTotalMS / float64(bucket.ServerSamples)
+			}
+		}
+		points = append(points, point)
+	}
+	snapshot := propagationMetricSnapshot{
+		TargetMS: propagationTargetMS,
+		Samples:  m.propagationTotals.Samples,
+		MaxMS:    m.propagationTotals.MaxMS,
+		Series:   points,
+	}
+	if m.propagationTotals.Samples > 0 {
+		snapshot.AverageMS = m.propagationTotals.TotalMS / float64(m.propagationTotals.Samples)
+	}
+	return snapshot
+}
+
+func percentile(values []float64, fraction float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := make([]float64, len(values))
+	copy(sorted, values)
+	sort.Float64s(sorted)
+	// Round the rank up: for latency percentiles the conservative (higher)
+	// neighbor is the honest answer when the rank falls between samples.
+	index := int(math.Ceil(float64(len(sorted)-1) * fraction))
+	return sorted[index]
+}
+
+// loadMetricPoint is one background sample of connected-client load next to
+// process resources, so the dashboard can chart "how does server load move
+// with the number of connected users". Samples are process-global (all
+// projects), like the running/cache series.
+type loadMetricPoint struct {
+	Time          string  `json:"time"`
+	Connections   int     `json:"connections"`
+	Users         int     `json:"users"`
+	Subscriptions int     `json:"subscriptions"`
+	CPUPercent    float64 `json:"cpuPercent"`
+	MemoryBytes   uint64  `json:"memoryBytes"`
+}
+
+type loadMetricSnapshot struct {
+	SampleIntervalSeconds int               `json:"sampleIntervalSeconds"`
+	Series                []loadMetricPoint `json:"series"`
+}
+
+func (m *runtimeMetrics) recordLoad(point loadMetricPoint) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.load = append(m.load, point)
+	if len(m.load) > metricsLoadPointLimit {
+		m.load = m.load[len(m.load)-metricsLoadPointLimit:]
+	}
+}
+
+func (m *runtimeMetrics) loadSnapshotLocked() loadMetricSnapshot {
+	series := make([]loadMetricPoint, len(m.load))
+	copy(series, m.load)
+	return loadMetricSnapshot{
+		SampleIntervalSeconds: int(loadSampleInterval / time.Second),
+		Series:                series,
+	}
 }
 
 type websocketMetricSnapshot struct {
@@ -898,6 +1107,7 @@ func (m *runtimeMetrics) recordTransaction(entry transactionTelemetryEntry) {
 		metrics.SubscriptionDurationSamples++
 	}
 	metrics.trimBuckets(now)
+	m.recordPropagationLocked(entry, now)
 	m.appendTelemetryLog(entry)
 	m.appendTelemetryFileLocked(entry)
 }
@@ -953,6 +1163,8 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 			Subscriptions: subscriptions,
 		},
 		Database:         m.databaseSnapshot(projectFilter),
+		Load:             m.loadSnapshotLocked(),
+		Propagation:      m.propagationSnapshotLocked(now),
 		Reactive:         m.reactive.snapshot(),
 		Logs:             logs,
 		TelemetryLogs:    telemetryLogs,

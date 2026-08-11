@@ -247,3 +247,108 @@ func TestWebsocketSnapshotScopesAndDescribesConnections(t *testing.T) {
 		t.Fatalf("subscriptions = %v", first.Subscriptions)
 	}
 }
+
+func TestLoadSamplerRecordsConnectionsAndTrimsHistory(t *testing.T) {
+	now := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	server := &Server{wsConns: map[*wsConn]bool{}, metrics: newRuntimeMetrics()}
+	server.addWSConn(&wsConn{
+		id: "conn-000001", project: "project-a", auth: true,
+		user: &gonvex.User{ID: "user-a"}, connectedAt: now, lastActiveAt: now,
+		subs:  map[string]querySubscription{"one": {path: "tasks.list"}},
+		syncs: map[string]*syncSubscription{"sync-one": {path: "tasks.recentSync"}},
+	})
+	server.addWSConn(&wsConn{
+		id: "conn-000002", project: "project-b", auth: true,
+		user: &gonvex.User{ID: "user-a"}, connectedAt: now, lastActiveAt: now,
+		subs: map[string]querySubscription{"two": {path: "boards.list"}},
+	})
+	server.addWSConn(&wsConn{
+		id: "conn-000003", project: "project-b", connectedAt: now, lastActiveAt: now,
+		subs: map[string]querySubscription{},
+	})
+
+	server.sampleLoad(now)
+
+	snapshot := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "project-a")
+	if snapshot.Load.SampleIntervalSeconds != int(loadSampleInterval/time.Second) {
+		t.Fatalf("sample interval = %d", snapshot.Load.SampleIntervalSeconds)
+	}
+	if len(snapshot.Load.Series) != 1 {
+		t.Fatalf("load series = %+v", snapshot.Load.Series)
+	}
+	point := snapshot.Load.Series[0]
+	// Load samples are process-global: 3 connections across both projects,
+	// user-a counted once plus the anonymous connection.
+	if point.Connections != 3 || point.Users != 2 || point.Subscriptions != 3 {
+		t.Fatalf("load point = %+v", point)
+	}
+	if point.Time != now.Format(time.RFC3339Nano) {
+		t.Fatalf("load point time = %q", point.Time)
+	}
+	if point.MemoryBytes == 0 {
+		t.Fatalf("expected a resident-memory sample, got %+v", point)
+	}
+
+	for index := 0; index < metricsLoadPointLimit+5; index++ {
+		server.sampleLoad(now.Add(time.Duration(index+1) * loadSampleInterval))
+	}
+	trimmed := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "project-a")
+	if len(trimmed.Load.Series) != metricsLoadPointLimit {
+		t.Fatalf("load series length = %d, want %d", len(trimmed.Load.Series), metricsLoadPointLimit)
+	}
+	oldest := trimmed.Load.Series[0].Time
+	if oldest != now.Add(6*loadSampleInterval).Format(time.RFC3339Nano) {
+		t.Fatalf("oldest retained sample = %q", oldest)
+	}
+}
+
+func TestPropagationTracksInvalidateFanoutOnly(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	// Server leg: commit -> result sent, invalidation rerun.
+	metrics.recordTransaction(transactionTelemetryEntry{
+		Time: now, Kind: "query", Path: "tasks.list", Phase: "server", Reason: "invalidate",
+		ChangeCommittedAtMS: 1000, ServerSentAtMS: 1450,
+	})
+	// Browser leg: two receiving clients applied the update. The server-clock
+	// ack measurement wins over the skew-prone browser-clock estimate.
+	metrics.recordTransaction(transactionTelemetryEntry{
+		Time: now, Kind: "query", Path: "tasks.list", Phase: "browser", Reason: "invalidate",
+		ChangeToAckMS: 120, ChangeToBrowserMS: 40,
+	})
+	metrics.recordTransaction(transactionTelemetryEntry{
+		Time: now, Kind: "query", Path: "tasks.list", Phase: "browser", Reason: "invalidate",
+		ChangeToBrowserMS: 900,
+	})
+	// Excluded: initial load and the mutator's own round trip.
+	metrics.recordTransaction(transactionTelemetryEntry{
+		Time: now, Kind: "query", Path: "tasks.list", Phase: "browser", Reason: "initial",
+		ChangeToBrowserMS: 9999,
+	})
+	metrics.recordTransaction(transactionTelemetryEntry{
+		Time: now, Kind: "mutation", Path: "tasks.update", Phase: "browser", Reason: "invalidate",
+		ChangeToBrowserMS: 8888,
+	})
+
+	snapshot := metrics.snapshot(manifest.Manifest{}, 0, 0, "")
+	propagation := snapshot.Propagation
+	if propagation.TargetMS != propagationTargetMS {
+		t.Fatalf("target = %v", propagation.TargetMS)
+	}
+	if propagation.Samples != 2 || propagation.MaxMS != 900 || propagation.AverageMS != 510 {
+		t.Fatalf("browser totals = %+v", propagation)
+	}
+	var current propagationMetricPoint
+	for _, point := range propagation.Series {
+		if point.Samples > 0 || point.ServerSamples > 0 {
+			current = point
+		}
+	}
+	if current.Samples != 2 || current.MaxMS != 900 || current.AverageMS != 510 || current.P95MS != 900 {
+		t.Fatalf("browser bucket = %+v", current)
+	}
+	if current.ServerSamples != 1 || current.ServerMaxMS != 450 || current.ServerAverageMS != 450 {
+		t.Fatalf("server bucket = %+v", current)
+	}
+}

@@ -182,6 +182,7 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 	server.loadConfiguredTenantDatabases()
 	server.startLandlordMigrations()
 	server.scheduler.start(context.Background())
+	server.startLoadSampler(context.Background())
 	go server.hydrateRuntimeState(context.Background())
 	return server
 }
