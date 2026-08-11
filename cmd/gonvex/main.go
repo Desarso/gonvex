@@ -460,6 +460,10 @@ func parseDependencyOption(expression ast.Expr, dependencies *manifest.FunctionD
 				dependencies.Writes = append(dependencies.Writes, manifest.WriteDependency{Table: value})
 			}
 			return dependencyOptionTarget{kind: "write", start: start}
+		case "ReadsEphemeral":
+			dependencies.ReadsEphemeral = true
+		case "WritesEphemeral":
+			dependencies.WritesEphemeral = true
 		case "ShareByPermissions":
 			dependencies.ShareByPermissions = true
 		}

@@ -200,7 +200,7 @@ Gonvex is designed to be self-hosted. A full deployment has:
 ```txt
 Gonvex runtime       Executes functions, serves HTTP/WebSocket traffic, routes projects and tenants
 Postgres            Stores app data and Gonvex control-plane data
-Valkey or Redis     Coordinates cache, realtime invalidation, and runtime state
+Valkey or Redis     Required for cache, realtime coordination, and ephemeral app state
 Object storage      Optional S3-compatible storage for apps that use file APIs
 Dashboard           Optional web UI for inspecting projects, tables, functions, logs, and metrics
 ```
@@ -226,6 +226,10 @@ MinIO UI:  http://localhost:9001
 ```
 
 For production self-hosting, put the runtime behind TLS, provide managed Postgres and Valkey/Redis, configure backups, set allowed origins, and use S3-compatible storage only if your app needs files. Production deployment automation is still early, so treat the Docker stack as the best current reference implementation rather than a finished operations guide.
+
+`VALKEY_URL` (or the legacy alias `REDIS_URL`) is mandatory. The runtime pings
+it during startup and exits with an actionable error if it is unset, invalid,
+or unreachable; there is no in-memory fallback.
 
 ## Current Scope
 

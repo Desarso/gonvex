@@ -278,6 +278,7 @@ func (m *tenantListenerManager) wait(ctx context.Context, connection *pgx.Conn, 
 			project: key.project, tenant: key.tenant, table: payload.Table,
 			broad: payload.Broad, rowIDs: rowIDs, operation: payload.Operation,
 			changedColumns: normalizedColumns(payload.ChangedColumns), changedAtMS: epochMillis(time.Now().UTC()),
+			commitID: strings.TrimSpace(payload.MutationID),
 		})
 	}
 }

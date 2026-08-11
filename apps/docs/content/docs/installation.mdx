@@ -94,7 +94,11 @@ VITE_GONVEX_URL=http://localhost:8080
 VITE_GONVEX_WS_URL=ws://localhost:8080/ws
 ```
 
-The runtime needs landlord database configuration and tenant database connections. Application code should not hardcode tenant database URLs directly.
+The runtime needs landlord database configuration, tenant database connections,
+and a reachable `VALKEY_URL` (or `REDIS_URL`). Valkey is mandatory: startup
+fails before serving traffic when the variable is unset or the connection
+cannot be established. Application code should not hardcode tenant database
+URLs directly.
 
 Local development services can be started from the monorepo with:
 

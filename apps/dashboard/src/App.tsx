@@ -46,7 +46,7 @@ import type { GonvexAuthValue } from "@gonvex/react";
 import { Avatar, Button, Calendar, Card, Checkbox, Chip, DateField, DatePicker, ListBox, NumberField, SearchField, Select, Separator } from "@heroui/react";
 import { parseDate, type DateValue } from "@internationalized/date";
 import { Background, Controls, MarkerType, MiniMap, ReactFlow, applyNodeChanges, type Edge, type Node, type NodeChange } from "@xyflow/react";
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type MutableRefObject, type ReactNode, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type Dispatch, type FormEvent, type MutableRefObject, type ReactNode, type SetStateAction } from "react";
 import type { JsonValue } from "@gonvex/protocol";
 import { api } from "../gonvex/_generated/api";
 import {
@@ -529,6 +529,11 @@ type DeleteRowsResponse = {
   table: string;
   ids: string[];
   deleted: number;
+};
+
+type UpdateRowResponse = {
+  table: string;
+  row: Record<string, unknown>;
 };
 
 type CreateTenantResponse = {
@@ -2493,11 +2498,67 @@ function formatCellValue(value: unknown): string {
   return String(value);
 }
 
+const immutableDataColumns = new Set(["_id", "id", "tenantId", "tenant_id"]);
+
+export function dataRowIdentity(row: Record<string, unknown> | undefined): string {
+  if (!row) return "";
+  return formatCellValue(row._id ?? row.id).trim();
+}
+
+export function dataEditorInputValue(value: unknown): string {
+  if (value === undefined) return "";
+  if (typeof value === "string") return value;
+  const encoded = JSON.stringify(value);
+  return encoded === undefined ? String(value) : encoded;
+}
+
+export function parseDataEditorValue(raw: string, original: unknown): unknown {
+  if (typeof original === "string" || original === undefined) return raw;
+  if (typeof original === "number") {
+    const value = Number(raw.trim());
+    if (!raw.trim() || !Number.isFinite(value)) throw new Error("Enter a valid number.");
+    return value;
+  }
+  if (typeof original === "boolean") {
+    const value = raw.trim().toLowerCase();
+    if (value !== "true" && value !== "false") throw new Error('Enter either "true" or "false".');
+    return value === "true";
+  }
+  if (original !== null && typeof original === "object") {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new Error("Enter valid JSON.");
+    }
+  }
+  if (!raw.trim() || raw.trim() === "null") return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function dataValueTypeLabel(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function dataValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
 function selectedRowIDs(selectedRows: ReadonlySet<number>, rowCache: Record<number, Record<string, unknown>>): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();
   Array.from(selectedRows).sort((left, right) => left - right).forEach((index) => {
-    const id = formatCellValue(rowCache[index]?.id).trim();
+    const id = dataRowIdentity(rowCache[index]);
     if (!id || seen.has(id)) return;
     seen.add(id);
     ids.push(id);
@@ -3087,6 +3148,7 @@ function ManifestGrid(props: {
   activeFilterColumnIds?: readonly string[];
   onHeaderClick?: (column: number) => void;
   onHeaderMenuClick?: (column: number, bounds: Rectangle) => void;
+  onCellActivated?: (cell: Item) => void;
   onCellEdited?: (cell: Item, newValue: EditableGridCell) => void;
   onCellClick?: (cell: Item, event: CellClickedEventArgs) => void;
   onItemHovered?: (event: GridMouseEventArgs) => void;
@@ -3217,6 +3279,7 @@ function ManifestGrid(props: {
         rangeSelect={props.disableSelection ? "none" : "rect"}
         rowSelect={props.disableSelection ? "none" : "multi"}
         onCellClicked={props.onCellClick}
+        onCellActivated={props.onCellActivated}
         onColumnResize={props.onColumnResize}
         onCellEdited={props.onCellEdited}
         onGridSelectionChange={props.disableSelection ? () => {
@@ -5163,6 +5226,10 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   const [addValues, setAddValues] = useState<Record<string, string>>({});
   const [addError, setAddError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [editingRowIndex, setEditingRowIndex] = useState<number | null>(null);
+  const [editValues, setEditValues] = useState<Record<string, string>>({});
+  const [editError, setEditError] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [creatingTenant, setCreatingTenant] = useState(false);
   const [deletingTenant, setDeletingTenant] = useState(false);
@@ -5370,6 +5437,9 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
     setRequestedOffset(0);
     setVisibleOffset(0);
     setRowCache({});
+    setEditingRowIndex(null);
+    setEditValues({});
+    setEditError("");
     setSelectedDataRows(new Set());
     setSelectionClearKey((key) => key + 1);
   }, [currentTenantID, filtersKey, props.project.id, rowSearch, rowSort, selectedTable]);
@@ -5462,6 +5532,11 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   const gridRowCount = activeTable ? (runtimeAvailable ? matchingRows : Object.keys(rowCache).length) : 0;
   const dataCellGetter = createCachedCellGetter(activeColumns, rowCache);
   const rowsSelectedForDelete = selectedRowIDs(selectedDataRows, rowCache);
+  const selectedDataRowIndex = selectedDataRows.size === 1 ? selectedDataRows.values().next().value as number : null;
+  const selectedDataRow = selectedDataRowIndex === null ? undefined : rowCache[selectedDataRowIndex];
+  const selectedDataRowID = dataRowIdentity(selectedDataRow);
+  const editingRow = editingRowIndex === null ? undefined : rowCache[editingRowIndex];
+  const editingRowID = dataRowIdentity(editingRow);
   const erdGraph = useMemo(() => createERDGraph(tables), [tables]);
   const erdLayoutKey = `${erdLayoutStoragePrefix}:${props.project.id}:${currentTenantID || "landlord"}`;
   const selectedERDTableInfo = tables.find((table) => table.name === selectedERDTable) ?? null;
@@ -5495,6 +5570,78 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
     setAddValues(Object.fromEntries(activeColumns.map((column) => [column, defaultValueForColumn(column)])));
     setAddError("");
     setAddOpen(true);
+  };
+  const openEditDocument = (rowIndex: number | null) => {
+    if (rowIndex === null) {
+      props.onAction("Select one loaded row to edit");
+      return;
+    }
+    const row = rowCache[rowIndex];
+    const rowID = dataRowIdentity(row);
+    if (!row || !rowID) {
+      props.onAction("This row has no supported _id or id value, so it cannot be edited");
+      return;
+    }
+    setEditingRowIndex(rowIndex);
+    setEditValues(Object.fromEntries(activeColumns.map((column) => [column, dataEditorInputValue(row[column])])));
+    setEditError("");
+  };
+  const updateDocument = async () => {
+    if (!activeTable || editingRowIndex === null || !editingRow || !editingRowID) {
+      setEditError("The selected row is no longer loaded. Close this editor and select it again.");
+      return;
+    }
+    if (!runtimeAvailable) {
+      setEditError("Gonvex Runtime is offline. Refresh the page after it is available again.");
+      return;
+    }
+
+    const patch: Record<string, unknown> = {};
+    for (const column of activeColumns) {
+      if (immutableDataColumns.has(column)) continue;
+      try {
+        const value = parseDataEditorValue(editValues[column] ?? "", editingRow[column]);
+        if (!dataValuesEqual(value, editingRow[column])) patch[column] = value;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Enter a valid value.";
+        setEditError(`${column}: ${message}`);
+        return;
+      }
+    }
+    if (Object.keys(patch).length === 0) {
+      setEditError("Change at least one editable value before saving.");
+      return;
+    }
+
+    setSavingEdit(true);
+    setEditError("");
+    try {
+      const params = new URLSearchParams();
+      if (currentTenantID) params.set("tenant", currentTenantID);
+      const query = params.toString();
+      const response = await fetch(`${runtimeURLForProject(props.project)}/dev/data/tables/${encodeURIComponent(selectedTable)}/rows/${encodeURIComponent(editingRowID)}${query ? `?${query}` : ""}`, {
+        method: "PATCH",
+        headers: runtimeHeaders(props.project, { "content-type": "application/json" }, currentTenantID),
+        body: JSON.stringify(patch),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({ error: response.statusText }));
+        throw new Error(payload.error ?? response.statusText);
+      }
+      const payload = await response.json() as UpdateRowResponse;
+      setRowCache((current) => ({ ...current, [editingRowIndex]: payload.row }));
+      setEditingRowIndex(null);
+      setEditValues({});
+      setFetchNonce((key) => key + 1);
+      props.onAction(`Updated ${activeTable.name} row ${editingRowID}`);
+    } catch (error) {
+      const message = error instanceof TypeError
+        ? `Cannot reach Gonvex Runtime at ${runtimeURLForProject(props.project) || "the configured URL"}.`
+        : error instanceof Error ? error.message : "Update failed";
+      setEditError(message);
+    } finally {
+      setSavingEdit(false);
+    }
   };
   const addFilter = () => {
     if (!activeTable) return;
@@ -5809,6 +5956,16 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
               {rowsSelectedForDelete.length} row{rowsSelectedForDelete.length === 1 ? "" : "s"} selected
             </span>
             <div className="data-selection-actions">
+              {selectedDataRows.size === 1 ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onPress={() => openEditDocument(selectedDataRowIndex)}
+                  isDisabled={!selectedDataRowID || !runtimeAvailable || !activeTable}
+                >
+                  Edit row
+                </Button>
+              ) : null}
               <Button size="sm" variant="ghost" onPress={() => { setSelectedDataRows(new Set()); setSelectionClearKey((key) => key + 1); }}>
                 Clear
               </Button>
@@ -5834,6 +5991,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
             themeMode={props.themeMode}
             selectableRows
             clearSelectionKey={selectionClearKey}
+            onCellActivated={([, row]) => openEditDocument(row)}
             onHeaderClick={(columnIndex) => {
               const column = activeColumns[columnIndex];
               if (column && activeTable) {
@@ -5997,6 +6155,52 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
               <Button size="sm" variant="secondary" onPress={() => setAddOpen(false)}>Cancel</Button>
               <Button size="sm" variant="primary" onPress={insertDocument} isDisabled={submitting}>
                 {submitting ? "Inserting..." : "Insert Document"}
+              </Button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+      {editingRowIndex !== null && activeTable && editingRow && editingRowID ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => !savingEdit && setEditingRowIndex(null)}>
+          <section className="document-modal edit-document-modal" role="dialog" aria-modal="true" aria-labelledby="edit-document-title" onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <p className="eyebrow">{activeTable.name} · {editingRowID}</p>
+                <h2 id="edit-document-title">Edit document</h2>
+              </div>
+              <Button size="sm" variant="ghost" onPress={() => setEditingRowIndex(null)} isDisabled={savingEdit}>Close</Button>
+            </header>
+            <p className="edit-document-note">
+              Values keep their current data type. Objects and arrays must be valid JSON.
+            </p>
+            <div className="document-form edit-document-form">
+              {activeColumns.map((column, index) => {
+                const original = editingRow[column];
+                const immutable = immutableDataColumns.has(column);
+                const complex = original !== null && typeof original === "object";
+                const inputProps = {
+                  "aria-label": `Edit ${column}`,
+                  autoFocus: !immutable && activeColumns.slice(0, index).every((item) => immutableDataColumns.has(item)),
+                  disabled: immutable,
+                  onChange: (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setEditValues((current) => ({ ...current, [column]: event.target.value })),
+                  value: editValues[column] ?? "",
+                };
+                return (
+                  <label className={complex ? "edit-document-field edit-document-field--wide" : "edit-document-field"} key={column}>
+                    <span className="edit-document-label">
+                      <strong>{column}</strong>
+                      <small>{immutable ? "identity · read only" : dataValueTypeLabel(original)}</small>
+                    </span>
+                    {complex ? <textarea {...inputProps} rows={5} /> : <input {...inputProps} />}
+                  </label>
+                );
+              })}
+            </div>
+            {editError ? <div className="form-error" role="alert">{editError}</div> : null}
+            <footer>
+              <Button size="sm" variant="secondary" onPress={() => setEditingRowIndex(null)} isDisabled={savingEdit}>Cancel</Button>
+              <Button size="sm" variant="primary" onPress={updateDocument} isDisabled={savingEdit}>
+                {savingEdit ? "Saving changes…" : "Save changes"}
               </Button>
             </footer>
           </section>

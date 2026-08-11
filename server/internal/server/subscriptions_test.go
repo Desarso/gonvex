@@ -130,6 +130,141 @@ func TestSubscriptionRunnerSerializesAndCoalescesBurst(t *testing.T) {
 	}
 }
 
+func TestDeclaredAndPhysicalInvalidationsForCommitExecuteSubscriptionOnce(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	manager := server.subscriptions
+	var executions atomic.Int32
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		return []map[string]any{{"id": "task-1", "title": "latest"}}, nil
+	}
+	groupCtx, groupCancel := context.WithCancel(context.Background())
+	token := newSubscriptionToken()
+	group := &sharedSubscription{
+		manager: manager, key: "tasks-group", project: "project-a", tenant: "tenant-a", path: "tasks.list",
+		ctx: groupCtx, cancel: groupCancel, reads: []manifest.ReadDependency{{Table: "tasks"}},
+		listeners: map[*subscriptionToken]querySubscription{
+			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.User{ID: "user-a"}}},
+		},
+	}
+	manager.mu.Lock()
+	manager.groups[group.key] = group
+	manager.indexGroupLocked(group)
+	manager.mu.Unlock()
+
+	const commitID = "mutation-one"
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", tables: map[string]bool{"tasks": true, "taskLogs": true},
+		broad: true, changedAtMS: 10, commitID: commitID,
+	})
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", table: "tasks", operation: "update",
+		changedColumns: []string{"title"}, rowIDs: map[string]bool{"task-1": true}, changedAtMS: 11, commitID: commitID,
+	})
+	eventually(t, time.Second, func() bool {
+		group.mu.Lock()
+		defer group.mu.Unlock()
+		return !group.running && executions.Load() == 1
+	})
+
+	// A delayed physical notification for an already executed commit is still
+	// harmless: commit-aware subscription deduplication prevents a second run.
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", table: "tasks", operation: "update",
+		changedColumns: []string{"title"}, changedAtMS: 12, commitID: commitID,
+	})
+	time.Sleep(tableChangeDebounce + subscriptionInvalidationCoalesce + 25*time.Millisecond)
+	if got := executions.Load(); got != 1 {
+		t.Fatalf("subscription executions for one declared+physical commit = %d, want 1", got)
+	}
+	reactive := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive
+	if reactive.SubscriptionCommitsObserved != 1 || reactive.CommitQueryExecutions != 1 ||
+		reactive.ExecutionsPerSubscriptionCommit != 1 || reactive.MaxExecutionsPerSubscriptionCommit != 1 ||
+		reactive.DuplicateCommitQueryExecutions != 0 {
+		t.Fatalf("commit execution telemetry = %+v, want exactly one execution for one subscription/commit", reactive)
+	}
+}
+
+func TestRapidCommitsCoalesceToLatestResultAndAdvanceRevision(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	connection, peer := newSyncReadyTestConnection(t, false)
+	connection.server = server
+	connection.project = "project-a"
+	connection.tenant = "tenant-a"
+
+	manager := server.subscriptions
+	var state atomic.Int32
+	var executions atomic.Int32
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		return map[string]any{"value": state.Load()}, nil
+	}
+	groupCtx, groupCancel := context.WithCancel(context.Background())
+	token := newSubscriptionToken()
+	sub := querySubscription{
+		conn: connection, id: "query-1", project: "project-a", tenant: "tenant-a", path: "tasks.latest",
+		token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.User{ID: "user-a"}},
+	}
+	connection.mu.Lock()
+	connection.subs[sub.id] = sub
+	connection.mu.Unlock()
+	group := &sharedSubscription{
+		manager: manager, key: "latest-group", project: sub.project, tenant: sub.tenant, path: sub.path,
+		ctx: groupCtx, cancel: groupCancel, reads: []manifest.ReadDependency{{Table: "tasks"}},
+		listeners: map[*subscriptionToken]querySubscription{token: sub},
+	}
+	manager.mu.Lock()
+	manager.groups[group.key] = group
+	manager.indexGroupLocked(group)
+	manager.mu.Unlock()
+
+	group.request("initial", 0)
+	initial := readSyncTestFrames(t, peer, 1)[0]
+	if initial.Type != "query.result" || initial.SubscriptionRevision == nil || initial.SubscriptionRevision.Sequence != 1 {
+		t.Fatalf("initial query frame = %+v, want result at revision 1", initial)
+	}
+
+	state.Store(1)
+	manager.requestChange(tableChange{project: "project-a", tenant: "tenant-a", table: "tasks", broad: true, changedAtMS: 20, commitID: "commit-one"})
+	state.Store(2)
+	manager.requestChange(tableChange{project: "project-a", tenant: "tenant-a", table: "tasks", broad: true, changedAtMS: 21, commitID: "commit-two"})
+	eventually(t, time.Second, func() bool {
+		group.mu.Lock()
+		defer group.mu.Unlock()
+		return !group.running && executions.Load() == 2
+	})
+
+	latest := readSyncTestFrames(t, peer, 1)[0]
+	if latest.Type != "query.result" || latest.SubscriptionRevision == nil || latest.SubscriptionRevision.Sequence != 2 {
+		t.Fatalf("coalesced query frame = %+v, want result at revision 2", latest)
+	}
+	var payload struct {
+		Value int32 `json:"value"`
+	}
+	encodedResult, err := json.Marshal(latest.Result)
+	if err != nil {
+		t.Fatalf("encode latest result: %v", err)
+	}
+	if err := json.Unmarshal(encodedResult, &payload); err != nil {
+		t.Fatalf("decode latest result: %v", err)
+	}
+	if payload.Value != 2 {
+		t.Fatalf("coalesced query result value = %d, want final state 2", payload.Value)
+	}
+	group.mu.Lock()
+	revision := group.revision
+	group.mu.Unlock()
+	if revision != 2 {
+		t.Fatalf("subscription revision = %d, want initial + one coalesced rerun = 2", revision)
+	}
+	reactive := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive
+	if reactive.SubscriptionCommitsObserved != 2 || reactive.CommitQueryExecutions != 1 ||
+		reactive.ExecutionsPerSubscriptionCommit != 0.5 || reactive.MaxExecutionsPerSubscriptionCommit != 1 ||
+		reactive.DuplicateCommitQueryExecutions != 0 {
+		t.Fatalf("rapid-commit execution telemetry = %+v, want both commits covered by one latest-state execution", reactive)
+	}
+}
+
 func TestSingleListenerGroupKeepsHashWithoutRetainingResultPayload(t *testing.T) {
 	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
 	token := newSubscriptionToken()
@@ -160,6 +295,43 @@ func TestSingleListenerGroupKeepsHashWithoutRetainingResultPayload(t *testing.T)
 	group.completeResult([]map[string]any{{"id": "task-1", "title": "changed"}}, "invalidate", 0, time.Now())
 	if len(group.lastResult) == 0 {
 		t.Fatal("shared group did not retain a replayable result")
+	}
+}
+
+func TestSubscriptionResultSuppressionIgnoresTopLevelPerformanceMetadata(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	token := newSubscriptionToken()
+	group := &sharedSubscription{
+		manager: server.subscriptions,
+		path:    "bulk.tasksByWorkspace",
+		ctx:     context.Background(),
+		listeners: map[*subscriptionToken]querySubscription{
+			token: {token: token, ctx: context.Background()},
+		},
+	}
+	result := func(title string, durationMS float64) map[string]any {
+		return map[string]any{
+			"page":  []map[string]any{{"id": "task-1", "title": title}},
+			"total": 1,
+			"perf": map[string]any{
+				"source":                   "tasksSQL",
+				"serverFunctionDurationMs": durationMS,
+			},
+		}
+	}
+
+	group.completeResult(result("same", 1.25), "initial", 0, time.Now())
+	group.completeResult(result("same", 8.75), "invalidate", 0, time.Now())
+
+	reactive := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive
+	if reactive.FullResults != 1 || reactive.UnchangedResultsSuppressed != 1 || reactive.ProgressMessages != 1 {
+		t.Fatalf("volatile-only rerun metrics = %+v, want one full result followed by one progress suppression", reactive)
+	}
+
+	group.completeResult(result("changed", 3.5), "invalidate", 0, time.Now())
+	reactive = server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive
+	if reactive.FullResults != 2 || reactive.UnchangedResultsSuppressed != 1 {
+		t.Fatalf("semantic-change metrics = %+v, want a second full result", reactive)
 	}
 }
 

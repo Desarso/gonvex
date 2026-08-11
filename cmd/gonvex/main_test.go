@@ -39,9 +39,11 @@ import "github.com/gonvex/gonvex/pkg/gonvex"
 func Register(app *gonvex.App) {
   app.Query("tasks.list", ListTasks,
     gonvex.Reads("tasks").Columns("id", "title").Filters("status").OrdersBy("updated_at").Windowed(),
+    gonvex.ReadsEphemeral(),
     gonvex.ShareByPermissions(),
   )
   app.Mutation("tasks.update", UpdateTask, gonvex.Writes("tasks").Columns("title"))
+  app.Mutation("presence.beat", Beat, gonvex.WritesEphemeral())
 }`
 	if err := os.WriteFile(file, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
@@ -51,12 +53,15 @@ func Register(app *gonvex.App) {
 		t.Fatal(err)
 	}
 	query := entries["tasks.list"]
-	if len(query.Dependencies.Reads) != 1 || !query.Dependencies.Reads[0].Windowed || !query.Dependencies.ShareByPermissions {
+	if len(query.Dependencies.Reads) != 1 || !query.Dependencies.Reads[0].Windowed || !query.Dependencies.ReadsEphemeral || !query.Dependencies.ShareByPermissions {
 		t.Fatalf("query dependencies = %#v", query.Dependencies)
 	}
 	mutation := entries["tasks.update"]
 	if len(mutation.Dependencies.Writes) != 1 || mutation.Dependencies.Writes[0].Table != "tasks" {
 		t.Fatalf("mutation dependencies = %#v", mutation.Dependencies)
+	}
+	if beat := entries["presence.beat"]; !beat.Dependencies.WritesEphemeral {
+		t.Fatalf("ephemeral mutation dependencies = %#v", beat.Dependencies)
 	}
 }
 

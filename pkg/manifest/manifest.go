@@ -12,7 +12,7 @@ const (
 	FunctionKindSync             FunctionKind = "sync"
 )
 
-const NotifySchemaVersion = "5"
+const NotifySchemaVersion = "6"
 
 type FunctionEntry struct {
 	Kind         FunctionKind         `json:"kind"`
@@ -46,6 +46,8 @@ type SyncDefinition struct {
 type FunctionDependencies struct {
 	Reads              []ReadDependency  `json:"reads,omitempty"`
 	Writes             []WriteDependency `json:"writes,omitempty"`
+	ReadsEphemeral     bool              `json:"readsEphemeral,omitempty"`
+	WritesEphemeral    bool              `json:"writesEphemeral,omitempty"`
 	ShareByPermissions bool              `json:"shareByPermissions,omitempty"`
 }
 

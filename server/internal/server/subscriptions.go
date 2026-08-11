@@ -69,6 +69,7 @@ type sharedSubscription struct {
 	mu                 sync.Mutex
 	listeners          map[*subscriptionToken]querySubscription
 	running            bool
+	coalescing         bool
 	awaitingListener   bool
 	dirty              bool
 	requested          uint64
@@ -76,6 +77,10 @@ type sharedSubscription struct {
 	revision           uint64
 	pendingReason      string
 	pendingChangedAtMS float64
+	pendingCommitIDs   map[string]struct{}
+	activeCommitIDs    map[string]struct{}
+	completedCommitIDs map[string]struct{}
+	completedCommits   []string
 	lastResult         json.RawMessage
 	lastError          string
 	lastHash           [sha256.Size]byte
@@ -324,7 +329,7 @@ func (m *subscriptionManager) requestChange(change tableChange) {
 		metric.CandidateSubscriptionsSelected += uint64(len(selected))
 	})
 	for _, group := range selected {
-		group.request("invalidate", change.changedAtMS)
+		group.requestForCommit("invalidate", change.changedAtMS, change.commitID)
 	}
 }
 
@@ -489,19 +494,49 @@ func intersectsStrings(left, right []string) bool {
 }
 
 func (group *sharedSubscription) request(reason string, changedAtMS float64) {
+	group.requestForCommit(reason, changedAtMS, "")
+}
+
+func (group *sharedSubscription) requestForCommit(reason string, changedAtMS float64, commitID string) {
+	commitID = strings.TrimSpace(commitID)
 	group.mu.Lock()
+	if commitID != "" && group.commitAlreadyRequestedLocked(commitID) {
+		if changedAtMS > group.pendingChangedAtMS {
+			group.pendingChangedAtMS = changedAtMS
+		}
+		group.mu.Unlock()
+		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) { metric.RerunsCoalesced++ })
+		return
+	}
 	group.requested++
 	group.pendingReason = reason
+	if commitID != "" {
+		if group.pendingCommitIDs == nil {
+			group.pendingCommitIDs = map[string]struct{}{}
+		}
+		group.pendingCommitIDs[commitID] = struct{}{}
+	}
 	if changedAtMS > group.pendingChangedAtMS {
 		group.pendingChangedAtMS = changedAtMS
 	}
 	if group.running {
-		group.dirty = true
+		// Requests arriving during the pre-run window are part of the execution
+		// that is already scheduled. Requests arriving during an active query
+		// need one serialized trailing execution unless they name the same commit.
+		if !group.coalescing {
+			group.dirty = true
+		}
 		group.mu.Unlock()
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) { metric.RerunsCoalesced++ })
 		return
 	}
 	group.running = true
+	if reason == "invalidate" {
+		group.coalescing = true
+		group.mu.Unlock()
+		time.AfterFunc(subscriptionInvalidationCoalesce, group.run)
+		return
+	}
 	group.mu.Unlock()
 	go group.run()
 }
@@ -509,9 +544,13 @@ func (group *sharedSubscription) request(reason string, changedAtMS float64) {
 func (group *sharedSubscription) run() {
 	for {
 		group.mu.Lock()
+		group.coalescing = false
 		requested := group.requested
 		reason := group.pendingReason
 		changedAtMS := group.pendingChangedAtMS
+		commitIDs := group.pendingCommitIDs
+		group.pendingCommitIDs = nil
+		group.activeCommitIDs = commitIDs
 		listeners := group.listenerSnapshotLocked()
 		group.dirty = false
 		group.mu.Unlock()
@@ -526,6 +565,7 @@ func (group *sharedSubscription) run() {
 			return
 		}
 		startedAt := time.Now().UTC()
+		group.manager.server.metrics.recordQueryCommitExecution(group.project, group.tenant, group.key, commitIDs)
 		result, err := group.manager.execute(group.ctx, group, representative, reason, changedAtMS)
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
 			metric.QueriesRerun++
@@ -541,6 +581,8 @@ func (group *sharedSubscription) run() {
 		}
 
 		group.mu.Lock()
+		group.rememberCompletedCommitsLocked(commitIDs)
+		group.activeCommitIDs = nil
 		group.completed = requested
 		if group.dirty || group.requested > requested {
 			group.mu.Unlock()
@@ -552,8 +594,43 @@ func (group *sharedSubscription) run() {
 	}
 }
 
+func (group *sharedSubscription) commitAlreadyRequestedLocked(commitID string) bool {
+	if _, ok := group.pendingCommitIDs[commitID]; ok {
+		return true
+	}
+	if _, ok := group.activeCommitIDs[commitID]; ok {
+		return true
+	}
+	_, ok := group.completedCommitIDs[commitID]
+	return ok
+}
+
+func (group *sharedSubscription) rememberCompletedCommitsLocked(commitIDs map[string]struct{}) {
+	const retainedCommitIDs = 256
+	if len(commitIDs) == 0 {
+		return
+	}
+	if group.completedCommitIDs == nil {
+		group.completedCommitIDs = map[string]struct{}{}
+	}
+	for commitID := range commitIDs {
+		if _, exists := group.completedCommitIDs[commitID]; exists {
+			continue
+		}
+		group.completedCommitIDs[commitID] = struct{}{}
+		group.completedCommits = append(group.completedCommits, commitID)
+	}
+	for len(group.completedCommits) > retainedCommitIDs {
+		oldest := group.completedCommits[0]
+		group.completedCommits = group.completedCommits[1:]
+		delete(group.completedCommitIDs, oldest)
+	}
+}
+
 func (group *sharedSubscription) finishRun(requested uint64) {
 	group.mu.Lock()
+	group.rememberCompletedCommitsLocked(group.activeCommitIDs)
+	group.activeCommitIDs = nil
 	group.completed = requested
 	group.running = false
 	group.mu.Unlock()
@@ -592,7 +669,7 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 		group.broadcastError(err.Error())
 		return
 	}
-	hash := sha256.Sum256(payload)
+	hash, queryPerf := queryResultSemantics(payload)
 	group.mu.Lock()
 	previous := append(json.RawMessage(nil), group.lastResult...)
 	previousSingleListener := group.lastSingleListener
@@ -625,7 +702,7 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 
 	revisionValue := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: revision}
 	if unchanged && (len(previous) > 0 || sameSingleListener) {
-		message := serverMessage{Type: "query.progress", Path: group.path, Reason: reason, ThroughRevision: revisionValue}
+		message := serverMessage{Type: "query.progress", Path: group.path, Reason: reason, ThroughRevision: revisionValue, QueryPerf: queryPerf}
 		group.broadcastTo(listeners, message, changedAtMS, startedAt)
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
 			metric.UnchangedResultsSuppressed++
@@ -636,7 +713,7 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 	}
 
 	cacheRevision := group.manager.server.nextQueryCacheRevision(hash)
-	message := serverMessage{Type: "query.result", Path: group.path, Result: json.RawMessage(payload), Reason: reason, CacheScope: group.cacheScope, CacheRevision: cacheRevision, SubscriptionRevision: revisionValue}
+	message := serverMessage{Type: "query.result", Path: group.path, Result: json.RawMessage(payload), Reason: reason, CacheScope: group.cacheScope, CacheRevision: cacheRevision, SubscriptionRevision: revisionValue, QueryPerf: queryPerf}
 	encodedSize := len(payload)
 	patched := false
 	if len(previous) >= minimumPatchResultBytes {
@@ -704,6 +781,7 @@ func (group *sharedSubscription) broadcastTo(listeners []querySubscription, mess
 				Path:            group.path,
 				Reason:          message.Reason,
 				ThroughRevision: copy.SubscriptionRevision,
+				QueryPerf:       message.QueryPerf,
 			}
 		}
 		sentAt := time.Now().UTC()
@@ -712,6 +790,7 @@ func (group *sharedSubscription) broadcastTo(listeners []querySubscription, mess
 			ServerSubscriptionStartedAtMS: epochMillis(startedAt),
 			ServerSubscriptionSentAtMS:    epochMillis(sentAt),
 			ServerDurationMS:              float64(sentAt.Sub(startedAt).Microseconds()) / 1000,
+			QueryPerf:                     copy.QueryPerf,
 		}
 		listener.conn.write(copy)
 		if (copy.Type == "query.result" || copy.Type == "query.patch") && copy.CacheRevision != "" {
@@ -747,11 +826,15 @@ func (group *sharedSubscription) sendFullTo(listener querySubscription, payload 
 		return
 	}
 	revisionValue := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: revision}
-	hash := sha256.Sum256(payload)
+	hash, queryPerf := queryResultSemantics(payload)
+	var trace *messageTrace
+	if len(queryPerf) > 0 {
+		trace = &messageTrace{QueryPerf: queryPerf}
+	}
 	if queryCacheRevisionMatchesHash(currentListenerCacheRevision(listener), hash) {
 		listener.conn.write(serverMessage{
 			Type: "query.progress", ID: listener.id, Path: listener.path, Reason: reason,
-			ThroughRevision: revisionValue,
+			ThroughRevision: revisionValue, Trace: trace,
 		})
 		return
 	}
@@ -759,7 +842,7 @@ func (group *sharedSubscription) sendFullTo(listener querySubscription, payload 
 	listener.conn.write(serverMessage{
 		Type: "query.result", ID: listener.id, Path: listener.path, Result: payload, Reason: reason,
 		CacheScope: listener.cacheScope, CacheRevision: cacheRevision,
-		SubscriptionRevision: revisionValue,
+		SubscriptionRevision: revisionValue, Trace: trace,
 	})
 	storeListenerCacheRevision(listener, cacheRevision)
 }

@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, DatabaseHealthSection, LogDetailsSheet, RealtimeDashboard, SchedulesPage, dashboardEmailAllowed, googleLoginEnabled, parseEmailAllowlist, runtimeLogSourceSummary, runtimeLogsForCopy } from "./App";
+import { App, DatabaseHealthSection, LogDetailsSheet, RealtimeDashboard, SchedulesPage, dashboardEmailAllowed, dataEditorInputValue, dataRowIdentity, googleLoginEnabled, parseDataEditorValue, parseEmailAllowlist, runtimeLogSourceSummary, runtimeLogsForCopy } from "./App";
 
 async function renderProjectApp() {
   const user = userEvent.setup();
@@ -58,6 +58,17 @@ describe("App", () => {
     vi.unstubAllGlobals();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
+  });
+
+  it("preserves row value types while preparing dashboard edits", () => {
+    expect(dataRowIdentity({ _id: "internal-7", id: "public-3" })).toBe("internal-7");
+    expect(dataRowIdentity({ id: 42 })).toBe("42");
+    expect(dataEditorInputValue({ enabled: true })).toBe('{"enabled":true}');
+    expect(parseDataEditorValue("12.5", 2)).toBe(12.5);
+    expect(parseDataEditorValue("false", true)).toBe(false);
+    expect(parseDataEditorValue('{"enabled":false}', { enabled: true })).toEqual({ enabled: false });
+    expect(parseDataEditorValue("0012", "2")).toBe("0012");
+    expect(() => parseDataEditorValue("not-json", { enabled: true })).toThrow(/valid JSON/i);
   });
 
   it("groups tenant cron instances and makes their scope visible", async () => {

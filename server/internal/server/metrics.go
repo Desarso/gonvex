@@ -23,20 +23,22 @@ const (
 )
 
 type runtimeMetrics struct {
-	mu             sync.Mutex
-	functions      map[string]*functionMetrics
-	transactions   map[string]*transactionMetrics
-	cache          cacheMetrics
-	runningByKind  map[string]int64
-	runningBuckets map[int64]map[string]int64
-	database       map[string]*databaseMetricState
-	reactive       reactiveMetricState
-	logs           []runtimeLogEntry
-	telemetryLogs  []transactionTelemetryEntry
-	telemetryPath  string
-	logSubscribers map[int]logSubscriber
-	nextLogSubID   int
-	mutationWrites chan runtimeLogEntry
+	mu                   sync.Mutex
+	functions            map[string]*functionMetrics
+	transactions         map[string]*transactionMetrics
+	cache                cacheMetrics
+	runningByKind        map[string]int64
+	runningBuckets       map[int64]map[string]int64
+	database             map[string]*databaseMetricState
+	reactive             reactiveMetricState
+	commitExecutions     map[string]uint64
+	commitExecutionOrder []string
+	logs                 []runtimeLogEntry
+	telemetryLogs        []transactionTelemetryEntry
+	telemetryPath        string
+	logSubscribers       map[int]logSubscriber
+	nextLogSubID         int
+	mutationWrites       chan runtimeLogEntry
 	// onFunctionError forwards failed log entries to the error store (see
 	// runtime_errors.go). Set once at server construction; nil in tests.
 	onFunctionError func(runtimeLogEntry)
@@ -221,52 +223,61 @@ type runtimeResourceSnapshot struct {
 }
 
 type reactiveMetricState struct {
-	ChangeBatchesReceived          uint64
-	SubscriptionsInspected         uint64
-	CandidateSubscriptionsSelected uint64
-	QueriesRerun                   uint64
-	ConcurrentExecutionViolations  uint64
-	RerunsCoalesced                uint64
-	UnchangedResultsSuppressed     uint64
-	FullResults                    uint64
-	Patches                        uint64
-	ProgressMessages               uint64
-	ResultBytesBefore              uint64
-	ResultBytesAfter               uint64
-	DatabaseQueryCount             uint64
-	DatabaseQueryDurationMS        float64
-	ChangeToClientDurationMS       float64
-	ChangeToClientSamples          uint64
-	ActiveTenantListeners          int
-	ListenerReconnects             uint64
-	ListenerFailures               uint64
-	ListenerLimitRefusals          uint64
-	SharedSubscriptions            int
-	SubscriptionListeners          int
+	ChangeBatchesReceived              uint64
+	SubscriptionsInspected             uint64
+	CandidateSubscriptionsSelected     uint64
+	QueriesRerun                       uint64
+	SubscriptionCommitsObserved        uint64
+	CommitQueryExecutions              uint64
+	MaxExecutionsPerSubscriptionCommit uint64
+	DuplicateCommitQueryExecutions     uint64
+	ConcurrentExecutionViolations      uint64
+	RerunsCoalesced                    uint64
+	UnchangedResultsSuppressed         uint64
+	FullResults                        uint64
+	Patches                            uint64
+	ProgressMessages                   uint64
+	ResultBytesBefore                  uint64
+	ResultBytesAfter                   uint64
+	DatabaseQueryCount                 uint64
+	DatabaseQueryDurationMS            float64
+	ChangeToClientDurationMS           float64
+	ChangeToClientSamples              uint64
+	ActiveTenantListeners              int
+	ListenerReconnects                 uint64
+	ListenerFailures                   uint64
+	ListenerLimitRefusals              uint64
+	SharedSubscriptions                int
+	SubscriptionListeners              int
 }
 
 type reactiveMetricSnapshot struct {
-	ChangeBatchesReceived          uint64  `json:"changeBatchesReceived"`
-	SubscriptionsInspected         uint64  `json:"subscriptionsInspected"`
-	CandidateSubscriptionsSelected uint64  `json:"candidateSubscriptionsSelected"`
-	QueriesRerun                   uint64  `json:"queriesRerun"`
-	ConcurrentExecutionViolations  uint64  `json:"concurrentExecutionViolations"`
-	RerunsCoalesced                uint64  `json:"rerunsCoalesced"`
-	UnchangedResultsSuppressed     uint64  `json:"unchangedResultsSuppressed"`
-	FullResults                    uint64  `json:"fullResults"`
-	Patches                        uint64  `json:"patches"`
-	ProgressMessages               uint64  `json:"progressMessages"`
-	ResultBytesBefore              uint64  `json:"resultBytesBefore"`
-	ResultBytesAfter               uint64  `json:"resultBytesAfter"`
-	DatabaseQueryCount             uint64  `json:"databaseQueryCount"`
-	DatabaseQueryDurationMS        float64 `json:"databaseQueryDurationMs"`
-	AverageChangeToClientMS        float64 `json:"averageChangeToClientMs"`
-	ActiveTenantListeners          int     `json:"activeTenantListeners"`
-	ListenerReconnects             uint64  `json:"listenerReconnects"`
-	ListenerFailures               uint64  `json:"listenerFailures"`
-	ListenerLimitRefusals          uint64  `json:"listenerLimitRefusals"`
-	SharedSubscriptions            int     `json:"sharedSubscriptions"`
-	SubscriptionListeners          int     `json:"subscriptionListeners"`
+	ChangeBatchesReceived              uint64  `json:"changeBatchesReceived"`
+	SubscriptionsInspected             uint64  `json:"subscriptionsInspected"`
+	CandidateSubscriptionsSelected     uint64  `json:"candidateSubscriptionsSelected"`
+	QueriesRerun                       uint64  `json:"queriesRerun"`
+	SubscriptionCommitsObserved        uint64  `json:"subscriptionCommitsObserved"`
+	CommitQueryExecutions              uint64  `json:"commitQueryExecutions"`
+	ExecutionsPerSubscriptionCommit    float64 `json:"executionsPerSubscriptionCommit"`
+	MaxExecutionsPerSubscriptionCommit uint64  `json:"maxExecutionsPerSubscriptionCommit"`
+	DuplicateCommitQueryExecutions     uint64  `json:"duplicateCommitQueryExecutions"`
+	ConcurrentExecutionViolations      uint64  `json:"concurrentExecutionViolations"`
+	RerunsCoalesced                    uint64  `json:"rerunsCoalesced"`
+	UnchangedResultsSuppressed         uint64  `json:"unchangedResultsSuppressed"`
+	FullResults                        uint64  `json:"fullResults"`
+	Patches                            uint64  `json:"patches"`
+	ProgressMessages                   uint64  `json:"progressMessages"`
+	ResultBytesBefore                  uint64  `json:"resultBytesBefore"`
+	ResultBytesAfter                   uint64  `json:"resultBytesAfter"`
+	DatabaseQueryCount                 uint64  `json:"databaseQueryCount"`
+	DatabaseQueryDurationMS            float64 `json:"databaseQueryDurationMs"`
+	AverageChangeToClientMS            float64 `json:"averageChangeToClientMs"`
+	ActiveTenantListeners              int     `json:"activeTenantListeners"`
+	ListenerReconnects                 uint64  `json:"listenerReconnects"`
+	ListenerFailures                   uint64  `json:"listenerFailures"`
+	ListenerLimitRefusals              uint64  `json:"listenerLimitRefusals"`
+	SharedSubscriptions                int     `json:"sharedSubscriptions"`
+	SubscriptionListeners              int     `json:"subscriptionListeners"`
 }
 
 func (m *runtimeMetrics) recordReactive(update func(*reactiveMetricState)) {
@@ -278,33 +289,78 @@ func (m *runtimeMetrics) recordReactive(update func(*reactiveMetricState)) {
 	m.mu.Unlock()
 }
 
+func (m *runtimeMetrics) recordQueryCommitExecution(project, tenant, groupKey string, commitIDs map[string]struct{}) {
+	if m == nil || len(commitIDs) == 0 {
+		return
+	}
+	const retainedSubscriptionCommits = 10_000
+	m.mu.Lock()
+	if m.commitExecutions == nil {
+		m.commitExecutions = map[string]uint64{}
+	}
+	m.reactive.CommitQueryExecutions++
+	for commitID := range commitIDs {
+		if strings.TrimSpace(commitID) == "" {
+			continue
+		}
+		key := strings.Join([]string{project, tenant, groupKey, commitID}, "\x00")
+		if m.commitExecutions[key] == 0 {
+			m.reactive.SubscriptionCommitsObserved++
+			m.commitExecutionOrder = append(m.commitExecutionOrder, key)
+		}
+		m.commitExecutions[key]++
+		executions := m.commitExecutions[key]
+		if executions > m.reactive.MaxExecutionsPerSubscriptionCommit {
+			m.reactive.MaxExecutionsPerSubscriptionCommit = executions
+		}
+		if executions > 1 {
+			m.reactive.DuplicateCommitQueryExecutions++
+		}
+	}
+	for len(m.commitExecutionOrder) > retainedSubscriptionCommits {
+		oldest := m.commitExecutionOrder[0]
+		m.commitExecutionOrder = m.commitExecutionOrder[1:]
+		delete(m.commitExecutions, oldest)
+	}
+	m.mu.Unlock()
+}
+
 func (state reactiveMetricState) snapshot() reactiveMetricSnapshot {
 	averageChangeToClient := float64(0)
 	if state.ChangeToClientSamples > 0 {
 		averageChangeToClient = state.ChangeToClientDurationMS / float64(state.ChangeToClientSamples)
 	}
+	executionsPerCommit := float64(0)
+	if state.SubscriptionCommitsObserved > 0 {
+		executionsPerCommit = float64(state.CommitQueryExecutions) / float64(state.SubscriptionCommitsObserved)
+	}
 	return reactiveMetricSnapshot{
-		ChangeBatchesReceived:          state.ChangeBatchesReceived,
-		SubscriptionsInspected:         state.SubscriptionsInspected,
-		CandidateSubscriptionsSelected: state.CandidateSubscriptionsSelected,
-		QueriesRerun:                   state.QueriesRerun,
-		ConcurrentExecutionViolations:  state.ConcurrentExecutionViolations,
-		RerunsCoalesced:                state.RerunsCoalesced,
-		UnchangedResultsSuppressed:     state.UnchangedResultsSuppressed,
-		FullResults:                    state.FullResults,
-		Patches:                        state.Patches,
-		ProgressMessages:               state.ProgressMessages,
-		ResultBytesBefore:              state.ResultBytesBefore,
-		ResultBytesAfter:               state.ResultBytesAfter,
-		DatabaseQueryCount:             state.DatabaseQueryCount,
-		DatabaseQueryDurationMS:        state.DatabaseQueryDurationMS,
-		AverageChangeToClientMS:        averageChangeToClient,
-		ActiveTenantListeners:          state.ActiveTenantListeners,
-		ListenerReconnects:             state.ListenerReconnects,
-		ListenerFailures:               state.ListenerFailures,
-		ListenerLimitRefusals:          state.ListenerLimitRefusals,
-		SharedSubscriptions:            state.SharedSubscriptions,
-		SubscriptionListeners:          state.SubscriptionListeners,
+		ChangeBatchesReceived:              state.ChangeBatchesReceived,
+		SubscriptionsInspected:             state.SubscriptionsInspected,
+		CandidateSubscriptionsSelected:     state.CandidateSubscriptionsSelected,
+		QueriesRerun:                       state.QueriesRerun,
+		SubscriptionCommitsObserved:        state.SubscriptionCommitsObserved,
+		CommitQueryExecutions:              state.CommitQueryExecutions,
+		ExecutionsPerSubscriptionCommit:    executionsPerCommit,
+		MaxExecutionsPerSubscriptionCommit: state.MaxExecutionsPerSubscriptionCommit,
+		DuplicateCommitQueryExecutions:     state.DuplicateCommitQueryExecutions,
+		ConcurrentExecutionViolations:      state.ConcurrentExecutionViolations,
+		RerunsCoalesced:                    state.RerunsCoalesced,
+		UnchangedResultsSuppressed:         state.UnchangedResultsSuppressed,
+		FullResults:                        state.FullResults,
+		Patches:                            state.Patches,
+		ProgressMessages:                   state.ProgressMessages,
+		ResultBytesBefore:                  state.ResultBytesBefore,
+		ResultBytesAfter:                   state.ResultBytesAfter,
+		DatabaseQueryCount:                 state.DatabaseQueryCount,
+		DatabaseQueryDurationMS:            state.DatabaseQueryDurationMS,
+		AverageChangeToClientMS:            averageChangeToClient,
+		ActiveTenantListeners:              state.ActiveTenantListeners,
+		ListenerReconnects:                 state.ListenerReconnects,
+		ListenerFailures:                   state.ListenerFailures,
+		ListenerLimitRefusals:              state.ListenerLimitRefusals,
+		SharedSubscriptions:                state.SharedSubscriptions,
+		SubscriptionListeners:              state.SubscriptionListeners,
 	}
 }
 
@@ -430,14 +486,15 @@ func newRuntimeMetrics(telemetryPath ...string) *runtimeMetrics {
 		path = telemetryPath[0]
 	}
 	return &runtimeMetrics{
-		functions:      map[string]*functionMetrics{},
-		transactions:   map[string]*transactionMetrics{},
-		cache:          cacheMetrics{Buckets: map[int64]*cacheMetricsBucket{}},
-		runningByKind:  map[string]int64{},
-		runningBuckets: map[int64]map[string]int64{},
-		database:       map[string]*databaseMetricState{},
-		telemetryPath:  path,
-		logSubscribers: map[int]logSubscriber{},
+		functions:        map[string]*functionMetrics{},
+		transactions:     map[string]*transactionMetrics{},
+		cache:            cacheMetrics{Buckets: map[int64]*cacheMetricsBucket{}},
+		runningByKind:    map[string]int64{},
+		runningBuckets:   map[int64]map[string]int64{},
+		database:         map[string]*databaseMetricState{},
+		commitExecutions: map[string]uint64{},
+		telemetryPath:    path,
+		logSubscribers:   map[int]logSubscriber{},
 	}
 }
 

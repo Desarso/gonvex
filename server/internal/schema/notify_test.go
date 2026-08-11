@@ -23,6 +23,7 @@ func TestNotifySQLForTableUsesTableNameAndChannel(t *testing.T) {
 		"pg_notify('gonvex_table_change'",
 		"'table', 'messages'",
 		"'operation', 'update'",
+		"'mutationId', NULLIF(current_setting('gonvex.mutation_id', true), '')",
 		"'changedColumns', CASE WHEN cardinality(changed_columns) <= 100",
 		"FULL OUTER JOIN new_rows new_row USING (\"id\")",
 		"jsonb_object_keys(",

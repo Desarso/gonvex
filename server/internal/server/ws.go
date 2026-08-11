@@ -3,7 +3,6 @@ package server
 import (
 	"compress/flate"
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -114,6 +113,7 @@ type serverMessage struct {
 	Error                string                `json:"error,omitempty"`
 	Reason               string                `json:"reason,omitempty"`
 	Trace                any                   `json:"trace,omitempty"`
+	QueryPerf            json.RawMessage       `json:"-"`
 	QueryCache           *queryCacheDirective  `json:"queryCache,omitempty"`
 	Capabilities         *serverCapabilities   `json:"capabilities,omitempty"`
 	CacheScope           string                `json:"cacheScope,omitempty"`
@@ -153,16 +153,17 @@ func explicitNull(result any) any {
 }
 
 type messageTrace struct {
-	ClientSentAtMS                float64 `json:"clientSentAtMs,omitempty"`
-	ServerReceivedAtMS            float64 `json:"serverReceivedAtMs,omitempty"`
-	ServerMutationStartedAtMS     float64 `json:"serverMutationStartedAtMs,omitempty"`
-	ServerMutationCommittedAtMS   float64 `json:"serverMutationCommittedAtMs,omitempty"`
-	ServerCompletedAtMS           float64 `json:"serverCompletedAtMs,omitempty"`
-	ServerBroadcastScheduledAtMS  float64 `json:"serverBroadcastScheduledAtMs,omitempty"`
-	ServerChangeCommittedAtMS     float64 `json:"serverChangeCommittedAtMs,omitempty"`
-	ServerSubscriptionStartedAtMS float64 `json:"serverSubscriptionStartedAtMs,omitempty"`
-	ServerSubscriptionSentAtMS    float64 `json:"serverSubscriptionSentAtMs,omitempty"`
-	ServerDurationMS              float64 `json:"serverDurationMs,omitempty"`
+	ClientSentAtMS                float64         `json:"clientSentAtMs,omitempty"`
+	ServerReceivedAtMS            float64         `json:"serverReceivedAtMs,omitempty"`
+	ServerMutationStartedAtMS     float64         `json:"serverMutationStartedAtMs,omitempty"`
+	ServerMutationCommittedAtMS   float64         `json:"serverMutationCommittedAtMs,omitempty"`
+	ServerCompletedAtMS           float64         `json:"serverCompletedAtMs,omitempty"`
+	ServerBroadcastScheduledAtMS  float64         `json:"serverBroadcastScheduledAtMs,omitempty"`
+	ServerChangeCommittedAtMS     float64         `json:"serverChangeCommittedAtMs,omitempty"`
+	ServerSubscriptionStartedAtMS float64         `json:"serverSubscriptionStartedAtMs,omitempty"`
+	ServerSubscriptionSentAtMS    float64         `json:"serverSubscriptionSentAtMs,omitempty"`
+	ServerDurationMS              float64         `json:"serverDurationMs,omitempty"`
+	QueryPerf                     json.RawMessage `json:"queryPerf,omitempty"`
 }
 
 type clientDeviceInfo struct {
@@ -200,10 +201,11 @@ type randomizeStatusPriorityArgs struct {
 }
 
 const (
-	tableChangeDebounce       = 75 * time.Millisecond
-	websocketWriteTimeout     = 10 * time.Second
-	websocketProtocolVersion  = 2
-	developmentRuntimeVersion = "development"
+	tableChangeDebounce              = 75 * time.Millisecond
+	subscriptionInvalidationCoalesce = 50 * time.Millisecond
+	websocketWriteTimeout            = 10 * time.Second
+	websocketProtocolVersion         = 2
+	developmentRuntimeVersion        = "development"
 )
 
 func runtimeBuildVersion() string {
@@ -250,6 +252,10 @@ type tableChange struct {
 	operation      string
 	changedColumns []string
 	changedAtMS    float64
+	// commitID joins the broad declared-write invalidation emitted by the
+	// mutation caller with the precise PostgreSQL notifications emitted by the
+	// same transaction. It is the mutation ID stored in gonvex.mutation_id.
+	commitID string
 }
 
 type wsConn struct {
@@ -548,7 +554,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		// tasks.bulkDelete soft-deletes, ...). Without a broadcast their writes
 		// never invalidate live queries, so clients sit on stale results until a
 		// reload. Mirror the mutation path's completion broadcast.
-		c.server.broadcastMutationInvalidationsAt(c.project, c.tenant, message.Path, completedAt)
+		c.server.broadcastMutationInvalidationsForCommitAt(c.project, c.tenant, message.Path, message.ID, completedAt)
 	case "telemetry.event":
 		c.server.recordTransactionTelemetry(transactionEntryFromClientTelemetry(c.project, c.tenant, message))
 	default:
@@ -811,7 +817,7 @@ func (c *wsConn) callMutation(ctx context.Context, receivedAt time.Time, request
 	trace.ServerBroadcastScheduledAtMS = epochMillis(time.Now())
 	c.write(serverMessage{Type: "mutation.result", ID: request.ID, Path: request.Path, Result: explicitNull(result), Trace: trace})
 	c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, request.ID, "mutation", request.Path, "server", "", "ok", "", trace))
-	c.server.broadcastMutationInvalidationsAt(c.project, c.tenant, request.Path, committedAt)
+	c.server.broadcastMutationInvalidationsForCommitAt(c.project, c.tenant, request.Path, request.ID, committedAt)
 }
 
 func (c *wsConn) currentCacheScope() string {
@@ -1202,6 +1208,13 @@ func (s *Server) broadcastTenantTableChangeAt(projectID string, tenantID string,
 // workspaceChat), so invalidating only the path prefix leaves both the row
 // cache and live queries stale after a successful mutation.
 func (s *Server) broadcastMutationInvalidationsAt(projectID string, tenantID string, path string, changedAt time.Time) {
+	s.broadcastMutationInvalidationsForCommitAt(projectID, tenantID, path, "", changedAt)
+}
+
+func (s *Server) broadcastMutationInvalidationsForCommitAt(projectID string, tenantID string, path string, commitID string, changedAt time.Time) {
+	if s.functionWritesEphemeral(projectID, path) {
+		return
+	}
 	tables := s.declaredWriteTables(projectID, path)
 	if len(tables) == 0 {
 		tables = mutationInvalidationTables(path)
@@ -1220,6 +1233,7 @@ func (s *Server) broadcastMutationInvalidationsAt(projectID string, tenantID str
 		tables:      changedTables,
 		broad:       true,
 		changedAtMS: epochMillis(changedAt),
+		commitID:    strings.TrimSpace(commitID),
 	})
 }
 
@@ -1247,16 +1261,32 @@ func (s *Server) scheduleTableChange(change tableChange) {
 	}
 	s.tableChangeMu.Lock()
 	tableKey := strings.Join(changedTables, "\x1f")
+	if commitID := strings.TrimSpace(change.commitID); commitID != "" {
+		tableKey = "commit\x1f" + commitID
+	}
 	key := strings.Join([]string{change.project, change.tenant, tableKey}, ":")
 	pending := s.tableChanges[key]
 	pending.project = change.project
 	pending.tenant = change.tenant
-	pending.table = change.table
-	if pending.tables == nil && len(change.tables) > 0 {
+	pending.commitID = strings.TrimSpace(change.commitID)
+	if pending.tables == nil {
 		pending.tables = map[string]bool{}
 	}
-	for table := range change.tables {
+	for _, table := range changedTables {
+		if strings.TrimSpace(table) == "" {
+			continue
+		}
 		pending.tables[table] = true
+	}
+	if len(pending.tables) == 1 {
+		for table := range pending.tables {
+			pending.table = table
+		}
+	} else {
+		pending.table = ""
+		// Column and row-id precision is table-specific. Once several physical
+		// notifications share a commit key, keep the merged batch conservative.
+		pending.broad = true
 	}
 	pending.broad = pending.broad || change.broad
 	if pending.operation == "" {
@@ -1364,6 +1394,26 @@ func (s *Server) queryDependencyTables(projectID, path string) []string {
 	return tables
 }
 
+func (s *Server) queryReadsEphemeral(projectID, path string) bool {
+	if entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]; ok {
+		return entry.Dependencies.ReadsEphemeral
+	}
+	if function, ok := s.app.Lookup(path); ok {
+		return function.Dependencies.ReadsEphemeral
+	}
+	return false
+}
+
+func (s *Server) functionWritesEphemeral(projectID, path string) bool {
+	if entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]; ok {
+		return entry.Dependencies.WritesEphemeral
+	}
+	if function, ok := s.app.Lookup(path); ok {
+		return function.Dependencies.WritesEphemeral
+	}
+	return false
+}
+
 func (s *Server) rerunSubscriptions(subs []querySubscription, reason string, changeCommittedAtMS float64) {
 	for _, sub := range subs {
 		s.subscriptions.request(sub, reason, changeCommittedAtMS)
@@ -1454,7 +1504,8 @@ func (s *Server) executeSubscription(ctx context.Context, sub querySubscription,
 		sub.conn.write(serverMessage{Type: "query.error", ID: sub.id, Path: sub.path, Error: marshalErr.Error()})
 		return
 	}
-	hash := sha256.Sum256(payload)
+	hash, queryPerf := queryResultSemantics(payload)
+	trace.QueryPerf = queryPerf
 	cacheRevision := s.nextQueryCacheRevision(hash)
 	if queryCacheRevisionMatchesHash(currentListenerCacheRevision(sub), hash) {
 		sub.conn.write(serverMessage{
@@ -1529,7 +1580,7 @@ func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectI
 	cacheKey := ""
 	cacheGeneration := ""
 	queryTables := s.queryDependencyTables(projectID, path)
-	if strings.TrimSpace(cacheScope) != "" && s.cache.enabled() {
+	if strings.TrimSpace(cacheScope) != "" && s.cache.enabled() && !s.queryReadsEphemeral(projectID, path) {
 		if generation, ok := s.cache.queryGeneration(ctx, projectID, tenantID, queryTables); ok {
 			cacheGeneration = generation
 			cacheKey = s.cache.queryKey(projectID, tenantID, generation, cacheScope, path, rawArgs)
@@ -1819,6 +1870,9 @@ func (s *Server) runTenantsOnProvisioned(ctx context.Context, projectID string, 
 }
 
 func (s *Server) executeRegisteredMutation(app *gonvex.App, mutationCtx *gonvex.MutationCtx, path string, rawArgs json.RawMessage) (any, error) {
+	if function, ok := app.Lookup(path); ok && function.Dependencies.WritesEphemeral {
+		return app.ExecuteMutation(mutationCtx, path, rawArgs)
+	}
 	return s.runMutationInTx(mutationCtx, path, rawArgs, app.ExecuteMutation)
 }
 
@@ -2000,6 +2054,7 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		Storage:     storageAPI,
 		Sandbox:     s.sandboxForCaller(projectID, activeTenant, caller, dataAPI),
 		Data:        dataAPI,
+		Ephemeral:   newScopedEphemeralAPI(ctx, s.ephemeral, projectID, activeTenant),
 		Scheduler:   s.scheduler.For(projectID, activeTenant),
 		User:        caller.user,
 		Permissions: caller.permissions,

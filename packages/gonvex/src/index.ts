@@ -50,6 +50,8 @@ type WriteDependency = {
 type FunctionDependencies = {
   reads?: ReadDependency[];
   writes?: WriteDependency[];
+  readsEphemeral?: boolean;
+  writesEphemeral?: boolean;
   shareByPermissions?: boolean;
 };
 
@@ -279,6 +281,10 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (command === "dev") {
     await runDev(argv.slice(1));
+    return;
+  }
+  if (command === "codegen") {
+    await runCodegen(argv.slice(1));
     return;
   }
   if (command === "init") {
@@ -651,6 +657,19 @@ async function runDev(argv: string[]) {
     console.error("[gonvex] one-shot sync did not succeed; exiting non-zero");
     process.exitCode = 1;
   }
+}
+
+async function runCodegen(argv: string[]) {
+  const projectRoot = resolve(valueFor(argv, "--project") ?? ".");
+  const settings = await loadSettings(projectRoot, {
+    projectID: valueFor(argv, "--project-id"),
+  });
+  const backendDir = join(projectRoot, "gonvex");
+  await mkdir(backendDir, { recursive: true });
+  const files = await goFiles(backendDir);
+  const manifest = await buildManifest(projectRoot, files, settings.projectID);
+  await writeBindings(projectRoot, manifest);
+  console.log(`[gonvex] generated ${Object.keys(manifest.functions).length} function binding(s) without runtime sync`);
 }
 
 async function runEnv(argv: string[]) {
@@ -1132,7 +1151,11 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
         console.log(`[gonvex] synced project ${settings.projectID || "(key-inferred)"} to ${settings.runtimeURL}`);
       } catch (error) {
         lastSyncSucceeded = false;
-        console.error(`[gonvex] runtime sync failed: ${error instanceof Error ? error.message : String(error)}`);
+        const detail = error instanceof Error ? error.message : String(error);
+        const valkeyHint = isLocalRuntimeURL(settings.runtimeURL)
+          ? " Local runtimes require a reachable VALKEY_URL (or REDIS_URL), for example VALKEY_URL=redis://127.0.0.1:6380/0."
+          : "";
+        console.error(`[gonvex] runtime sync failed: ${detail}.${valkeyHint}`);
       }
     } else if (shouldVerifyRuntimeState) {
       const manifest = lastManifest;
@@ -1285,13 +1308,25 @@ function parseSyncDefinition(callBody: string): SyncDefinition | undefined {
 
 function parseFunctionDependencies(callBody: string): FunctionDependencies {
   const dependencies: FunctionDependencies = {};
-  const pattern = /(?:gonvex\.)?(Reads|Writes|ShareByPermissions)\s*\(/g;
+  const pattern = /(?:gonvex\.)?(Reads|Writes|ReadsEphemeral|WritesEphemeral|ShareByPermissions)\s*\(/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(callBody)) !== null) {
     const option = match[1]!;
     const openParen = callBody.indexOf("(", match.index);
     const closeParen = findClosingParen(callBody, openParen);
     if (closeParen < 0) break;
+
+    if (option === "ReadsEphemeral") {
+      dependencies.readsEphemeral = true;
+      pattern.lastIndex = closeParen + 1;
+      continue;
+    }
+
+    if (option === "WritesEphemeral") {
+      dependencies.writesEphemeral = true;
+      pattern.lastIndex = closeParen + 1;
+      continue;
+    }
 
     if (option === "ShareByPermissions") {
       dependencies.shareByPermissions = true;
@@ -1971,6 +2006,7 @@ async function writeProjectEnv(root: string, runtimeURL: string, projectID: stri
     VITE_GONVEX_PROJECT_ID: projectID,
     VITE_GONVEX_URL: runtimeURL,
     VITE_GONVEX_WS_URL: webSocketURL(runtimeURL),
+    ...(isLocalRuntimeURL(runtimeURL) ? { VALKEY_URL: "redis://127.0.0.1:6380/0" } : {}),
   }, overwrite);
 }
 
@@ -2358,7 +2394,17 @@ async function writeEnvLocal(root: string, project: string, runtime: string) {
   const envPath = join(root, ".env.local");
   if (existsSync(envPath)) return;
   const wsURL = runtime.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/$/, "") + "/ws";
-  await writeFile(envPath, `GONVEX_PROJECT_ID=${project}\nGONVEX_RUNTIME_URL=${runtime}\nGONVEX_PROJECT_KEY=\nVITE_GONVEX_PROJECT_ID=${project}\nVITE_GONVEX_URL=${runtime}\nVITE_GONVEX_WS_URL=${wsURL}\n`);
+  const valkey = isLocalRuntimeURL(runtime) ? "VALKEY_URL=redis://127.0.0.1:6380/0\n" : "";
+  await writeFile(envPath, `GONVEX_PROJECT_ID=${project}\nGONVEX_RUNTIME_URL=${runtime}\nGONVEX_PROJECT_KEY=\n${valkey}VITE_GONVEX_PROJECT_ID=${project}\nVITE_GONVEX_URL=${runtime}\nVITE_GONVEX_WS_URL=${wsURL}\n`);
+}
+
+function isLocalRuntimeURL(runtime: string) {
+  try {
+    const hostname = new URL(runtime).hostname;
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
 }
 
 function templateDir(template: string) {
@@ -2432,8 +2478,9 @@ function sleep(ms: number, signal?: AbortSignal) {
 }
 
 function printHelp() {
-  console.log("Usage: gonvex <dev|init|create|env|auth|login|logout|whoami|project|token> [options]");
+  console.log("Usage: gonvex <dev|codegen|init|create|env|auth|login|logout|whoami|project|token> [options]");
   console.log("  gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--verbose-logs] [-- <command>]");
+  console.log("  gonvex codegen [--project <path>] [--project-id <id>]");
   console.log("  gonvex init [--template vite-react] [--project <id>] [--runtime <url>]");
   console.log("  gonvex create <app-name> [--runtime-url <url>] [--provision] [--database-mode single|multiTenant] [--google-auth] [--origin <url>]... [--signup-mode personal|inviteOnly] [--owner <email>]");
   console.log("  gonvex env <list|get|set|push|remove> [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>]");

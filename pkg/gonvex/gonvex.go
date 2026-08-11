@@ -154,6 +154,8 @@ func (o *SyncTableOption) RetainFor(duration time.Duration) *SyncTableOption {
 type FunctionDependencies struct {
 	Reads              []ReadDependency
 	Writes             []WriteDependency
+	ReadsEphemeral     bool
+	WritesEphemeral    bool
 	ShareByPermissions bool
 }
 
@@ -253,6 +255,29 @@ func (o *writeOption) applyFunctionOption(target *FunctionDependencies) {
 
 type shareByPermissionsOption struct{}
 
+type readsEphemeralOption struct{}
+
+type writesEphemeralOption struct{}
+
+// ReadsEphemeral declares that a query result observes ctx.Ephemeral. The
+// runtime uses this to bypass its durable query-result cache: ephemeral values
+// expire independently of Postgres table generations.
+func ReadsEphemeral() FunctionOption { return readsEphemeralOption{} }
+
+func (readsEphemeralOption) applyFunctionOption(target *FunctionDependencies) {
+	target.ReadsEphemeral = true
+}
+
+// WritesEphemeral declares that a mutation or action writes only
+// ctx.Ephemeral and performs no durable database writes. The runtime therefore
+// does not open a Postgres transaction or invalidate reactive query caches
+// after the function returns.
+func WritesEphemeral() FunctionOption { return writesEphemeralOption{} }
+
+func (writesEphemeralOption) applyFunctionOption(target *FunctionDependencies) {
+	target.WritesEphemeral = true
+}
+
 // ShareByPermissions allows callers with the same permission fingerprint to
 // share one server-side subscription execution and result. Only use it when a
 // handler's result does not otherwise depend on ctx.User.
@@ -292,6 +317,7 @@ type RuntimeContext struct {
 	Storage     StorageAPI
 	Sandbox     SandboxAPI
 	Data        DataAPI
+	Ephemeral   EphemeralAPI
 	Scheduler   Scheduler
 	Logger      *slog.Logger
 
@@ -742,6 +768,9 @@ func (c *RuntimeContext) normalize() {
 	}
 	if c.Scheduler == nil {
 		c.Scheduler = schedulerUnavailable{}
+	}
+	if c.Ephemeral == nil {
+		c.Ephemeral = ephemeralUnavailable{}
 	}
 }
 

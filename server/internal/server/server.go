@@ -35,6 +35,7 @@ type Server struct {
 	storage         *storage.Factory
 	dataFiles       *datafiles.Manager
 	tenantStores    *tenantStoreResolver
+	ephemeral       ephemeralBackend
 	cache           *rowsCache
 	metrics         *runtimeMetrics
 	scheduler       *scheduler
@@ -97,11 +98,44 @@ func New(cfg config.Config) *Server {
 	return NewWithApp(cfg, nil)
 }
 
+// NewRequired constructs a production runtime and verifies its mandatory
+// Valkey dependency before any server background work starts.
+func NewRequired(cfg config.Config) (*Server, error) {
+	return NewRequiredWithApp(cfg, nil)
+}
+
+// NewRequiredWithApp is the app-aware production constructor. New and
+// NewWithApp remain lightweight constructors for isolated package tests; all
+// executable/runtime entry points use this fail-fast constructor.
+func NewRequiredWithApp(cfg config.Config, app *gonvex.App) (*Server, error) {
+	client, err := openRequiredValkey(cfg.ValkeyURL)
+	if err != nil {
+		return nil, err
+	}
+	ephemeral := &valkeyEphemeralBackend{client: client}
+	cache := newRowsCacheWithClient(client, cfg.RowsCacheTTL)
+	return newServer(cfg, app, ephemeral, cache), nil
+}
+
 func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
+	var cache *rowsCache
+	var ephemeral ephemeralBackend
+	if strings.TrimSpace(cfg.ValkeyURL) != "" {
+		client, err := newValkeyClient(cfg.ValkeyURL)
+		if err != nil {
+			slog.Warn("ephemeral store unavailable in lightweight constructor", "error", err)
+		} else {
+			cache = newRowsCacheWithClient(client, cfg.RowsCacheTTL)
+			ephemeral = &valkeyEphemeralBackend{client: client}
+		}
+	}
+	return newServer(cfg, app, ephemeral, cache)
+}
+
+func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, cache *rowsCache) *Server {
 	if app == nil {
 		app = gonvex.NewApp()
 	}
-	cache, _ := newRowsCache(cfg.ValkeyURL, cfg.RowsCacheTTL)
 	server := &Server{
 		config:  cfg,
 		runtime: runtime.NewWithLoader(projectbundle.NewLoader(cfg.PluginCacheDir, cfg.GonvexModuleRoot)),
@@ -116,6 +150,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 			PublicBaseURL:   cfg.StoragePublicURL,
 			URLSigningKey:   cfg.S3SecretAccessKey,
 		}),
+		ephemeral:             ephemeral,
 		cache:                 cache,
 		metrics:               newRuntimeMetrics(cfg.TelemetryLogPath),
 		telemetryWrites:       make(chan struct{}, 4),
@@ -155,6 +190,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 // the same mutation/action execution path as client-triggered calls, so
 // scheduled work shows up in the function and concurrency metrics too.
 func (s *Server) runScheduledJob(ctx context.Context, job scheduledJob) error {
+	ctx = withMutationID(ctx, job.ID)
 	app := s.appForProject(ctx, job.ProjectID)
 	function, ok := app.Lookup(job.FunctionPath)
 	if !ok {
@@ -167,19 +203,19 @@ func (s *Server) runScheduledJob(ctx context.Context, job scheduledJob) error {
 		// subscribers about its writes — broadcast like ws.go does for
 		// client-initiated mutation.call/action.call.
 		if err == nil {
-			s.broadcastMutationInvalidations(job.ProjectID, job.TenantID, job.FunctionPath)
+			s.broadcastMutationInvalidationsForCommitAt(job.ProjectID, job.TenantID, job.FunctionPath, job.ID, time.Now().UTC())
 		}
 		return err
 	case gonvex.FunctionKindMutation:
 		_, err := s.executeTenantMutation(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
 		if err == nil {
-			s.broadcastMutationInvalidations(job.ProjectID, job.TenantID, job.FunctionPath)
+			s.broadcastMutationInvalidationsForCommitAt(job.ProjectID, job.TenantID, job.FunctionPath, job.ID, time.Now().UTC())
 		}
 		return err
 	case gonvex.FunctionKindInternalMutation:
 		err := s.executeScheduledInternalMutation(ctx, job)
 		if err == nil {
-			s.broadcastMutationInvalidations(job.ProjectID, job.TenantID, job.FunctionPath)
+			s.broadcastMutationInvalidationsForCommitAt(job.ProjectID, job.TenantID, job.FunctionPath, job.ID, time.Now().UTC())
 		}
 		return err
 	default:
@@ -537,8 +573,7 @@ func (s *Server) handleInsertDataRow(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateDataRow(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
-	if !s.acceptsAdminKey(syncKey(r)) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "runtime admin key is required"})
+	if !s.authorizeDashboardDataWrite(w, r) {
 		return
 	}
 	table := r.PathValue("table")
@@ -568,6 +603,31 @@ func (s *Server) handleUpdateDataRow(w http.ResponseWriter, r *http.Request) {
 	project := projectID(r)
 	s.broadcastTenantTableChange(project, tenantIDFromRequest(project, tenantID(r)), table)
 	writeJSON(w, http.StatusOK, result)
+}
+
+// authorizeDashboardDataWrite accepts the runtime admin key used by trusted
+// automation and the project owner/admin dashboard sessions used by the Data
+// editor. Read-only project members must not be able to change application
+// rows just because they can inspect the project dashboard.
+func (s *Server) authorizeDashboardDataWrite(w http.ResponseWriter, r *http.Request) bool {
+	if s.acceptsAdminKey(syncKey(r)) {
+		return true
+	}
+	actor, ok := s.dashboardActorFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
+		return false
+	}
+	project := projectID(r)
+	if project == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
+		return false
+	}
+	if !s.canManageProject(r.Context(), actor, project) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "project owner or admin access is required"})
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleDeleteDataRow(w http.ResponseWriter, r *http.Request) {

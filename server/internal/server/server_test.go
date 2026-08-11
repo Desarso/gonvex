@@ -220,6 +220,19 @@ func TestUpdateDataRowRejectsEmptyPatch(t *testing.T) {
 	}
 }
 
+func TestUpdateDataRowAcceptsLocalDashboardOwner(t *testing.T) {
+	server := New(config.Config{})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/dev/data/tables/tasks/rows/task-1", bytes.NewBufferString(`{"name":"Updated"}`))
+	request.Header.Set("x-gonvex-project-id", "project")
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code == http.StatusForbidden || recorder.Code == http.StatusUnauthorized {
+		t.Fatalf("expected local dashboard owner to pass data-write authorization, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestDeleteDataRowRequiresRuntimeAdminKey(t *testing.T) {
 	server := New(config.Config{AdminKey: "admin-secret"})
 	recorder := httptest.NewRecorder()

@@ -40,6 +40,8 @@ export type SyncCursor = {
 export type FunctionDependencies = {
   reads?: Array<{ table: string; columns?: string[]; filters?: string[]; ordersBy?: string[]; windowed?: boolean; predicate?: string }>;
   writes?: Array<{ table: string; columns?: string[] }>;
+  readsEphemeral?: boolean;
+  writesEphemeral?: boolean;
   shareByPermissions?: boolean;
 };
 
@@ -56,6 +58,8 @@ export type MessageTrace = {
   serverSubscriptionStartedAtMs?: number;
   serverSubscriptionSentAtMs?: number;
   serverDurationMs?: number;
+  /** Non-semantic top-level query performance metadata from result.perf. */
+  queryPerf?: JsonValue;
 };
 
 export type BrowserTelemetryInfo = {
