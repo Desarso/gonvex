@@ -40,14 +40,14 @@ jobs:
       - name: Test JavaScript workspace
         run: pnpm -r test
 
-  deploy-runtime:
+  deploy-dev-runtime:
     if: github.event_name == 'push'
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: gonvex-runtime
     concurrency:
-      group: gonvex-runtime-deploy
+      group: gonvex-dev-runtime-deploy
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
@@ -59,5 +59,7 @@ jobs:
         env:
           COOLIFY_API_URL: ${{ vars.COOLIFY_API_URL }}
           COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
-          COOLIFY_SERVICE_UUIDS: ftfmdopfb3j0e88s0crl6iny,v6q0sg18te1xqa5jzhdhplry
+          # Main is the development release lane. Production is promoted only
+          # after the corresponding Monitor verification passes.
+          COOLIFY_SERVICE_UUIDS: ftfmdopfb3j0e88s0crl6iny
           GONVEX_DEPLOY_SHA: ${{ github.sha }}
