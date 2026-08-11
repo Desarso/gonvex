@@ -48,6 +48,7 @@ type subscriptionManager struct {
 	listenerCount int
 	listeners     *tenantListenerManager
 	sequence      atomic.Uint64
+	rerunSlots    chan struct{}
 	execute       func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error)
 }
 
@@ -79,6 +80,8 @@ type sharedSubscription struct {
 	pendingChangedAtMS float64
 	pendingCommitIDs   map[string]struct{}
 	activeCommitIDs    map[string]struct{}
+	pendingRequestIDs  map[string]struct{}
+	activeRequestIDs   map[string]struct{}
 	completedCommitIDs map[string]struct{}
 	completedCommits   []string
 	lastResult         json.RawMessage
@@ -88,6 +91,7 @@ type sharedSubscription struct {
 	lastSingleListener *subscriptionToken
 	rowIDs             map[string]bool
 	idleTimer          *time.Timer
+	cooldownUntil      time.Time
 }
 
 func newSubscriptionManager(server *Server) *subscriptionManager {
@@ -100,6 +104,9 @@ func newSubscriptionManager(server *Server) *subscriptionManager {
 		broad:   map[subscriptionScope]map[*sharedSubscription]struct{}{},
 	}
 	manager.listeners = newTenantListenerManager(server)
+	if server.config.SubscriptionRerunConcurrency > 0 {
+		manager.rerunSlots = make(chan struct{}, server.config.SubscriptionRerunConcurrency)
+	}
 	manager.execute = func(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string, changedAtMS float64) (any, error) {
 		ctx = gonvex.WithQueryChange(ctx, reason, changedAtMS)
 		return server.executeTenantQueryForCallerCached(ctx, group.project, group.tenant, listener.caller, group.path, group.args, group.cacheScope, reason)
@@ -310,16 +317,28 @@ func (m *subscriptionManager) requestChange(change tableChange) {
 	for group := range m.broad[scope] {
 		candidates[group] = struct{}{}
 	}
-	for _, table := range tableChangeTables(change) {
+	candidateTables := append(tableChangeTables(change), tableMapKeys(change.declaredTables)...)
+	if change.broad && effectiveTableCount(change) == 0 {
+		for _, group := range m.groups {
+			if group.project == change.project && group.tenant == change.tenant {
+				candidates[group] = struct{}{}
+			}
+		}
+	}
+	for _, table := range appendUniqueStrings(nil, candidateTables...) {
 		for group := range m.byTable[dependencyKey{project: change.project, tenant: change.tenant, table: table}] {
 			candidates[group] = struct{}{}
 		}
 	}
 	inspected := len(candidates)
 	selected := make([]*sharedSubscription, 0, inspected)
+	skippedByTable := 0
 	for group := range candidates {
-		if group.matches(change) {
+		matches, tableMiss := group.matchResult(change)
+		if matches {
 			selected = append(selected, group)
+		} else if tableMiss {
+			skippedByTable++
 		}
 	}
 	m.mu.Unlock()
@@ -327,9 +346,14 @@ func (m *subscriptionManager) requestChange(change tableChange) {
 		metric.ChangeBatchesReceived++
 		metric.SubscriptionsInspected += uint64(inspected)
 		metric.CandidateSubscriptionsSelected += uint64(len(selected))
+		metric.SubscriptionsSkippedByTable += uint64(skippedByTable)
 	})
+	dedupID := strings.TrimSpace(change.commitID)
+	if dedupID != "" {
+		dedupID += "\x00" + strings.Join(tableChangeTables(change), "\x1f")
+	}
 	for _, group := range selected {
-		group.requestForCommit("invalidate", change.changedAtMS, change.commitID)
+		group.requestForCommitBatch("invalidate", change.changedAtMS, change.commitID, dedupID)
 	}
 }
 
@@ -443,34 +467,56 @@ func (m *subscriptionManager) unindexGroupLocked(group *sharedSubscription) {
 }
 
 func (group *sharedSubscription) matches(change tableChange) bool {
+	matches, _ := group.matchResult(change)
+	return matches
+}
+
+func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
+	if group.unknownDependencies {
+		return true, false
+	}
+	if change.broad && effectiveTableCount(change) == 0 {
+		return true, false
+	}
 	group.mu.Lock()
 	rowIDs := group.rowIDs
 	group.mu.Unlock()
-	if !change.broad && change.operation == "update" && len(change.changedColumns) > 0 {
-		relevant := false
-		for _, read := range group.reads {
-			if !changeContainsTable(change, read.Table) {
+	intersected := false
+	for _, read := range group.reads {
+		if !changeContainsTable(change, read.Table) {
+			continue
+		}
+		intersected = true
+		detail := tableDetail(change, read.Table)
+		if !detail.precise || detail.broad || detail.operation == "insert" || detail.operation == "delete" {
+			return true, false
+		}
+		if detail.operation == "update" && len(detail.changedColumns) > 0 {
+			columns := append(append(append([]string{}, read.Columns...), read.Filters...), read.OrdersBy...)
+			if len(columns) > 0 && !intersectsStrings(columns, detail.changedColumns) {
 				continue
 			}
-			columns := append(append(append([]string{}, read.Columns...), read.Filters...), read.OrdersBy...)
-			if len(columns) == 0 || intersectsStrings(columns, change.changedColumns) {
-				relevant = true
-				break
+		}
+		if len(detail.rowIDs) == 0 || len(rowIDs) == 0 {
+			return true, false
+		}
+		for id := range detail.rowIDs {
+			if rowIDs[id] {
+				return true, false
 			}
 		}
-		if !relevant {
-			return false
-		}
 	}
-	if change.broad || change.operation == "insert" || change.operation == "delete" || len(change.rowIDs) == 0 || len(rowIDs) == 0 {
-		return true
+	return false, !intersected
+}
+
+func tableDetail(change tableChange, table string) tableChangeDetail {
+	if detail, ok := change.details[table]; ok {
+		return detail
 	}
-	for id := range change.rowIDs {
-		if rowIDs[id] {
-			return true
-		}
+	return tableChangeDetail{
+		operation: change.operation, changedColumns: change.changedColumns, rowIDs: change.rowIDs,
+		precise: !change.broad, broad: change.broad,
 	}
-	return false
 }
 
 func changeContainsTable(change tableChange, table string) bool {
@@ -498,9 +544,14 @@ func (group *sharedSubscription) request(reason string, changedAtMS float64) {
 }
 
 func (group *sharedSubscription) requestForCommit(reason string, changedAtMS float64, commitID string) {
+	group.requestForCommitBatch(reason, changedAtMS, commitID, commitID)
+}
+
+func (group *sharedSubscription) requestForCommitBatch(reason string, changedAtMS float64, commitID, requestID string) {
 	commitID = strings.TrimSpace(commitID)
+	requestID = strings.TrimSpace(requestID)
 	group.mu.Lock()
-	if commitID != "" && group.commitAlreadyRequestedLocked(commitID) {
+	if requestID != "" && group.commitAlreadyRequestedLocked(requestID) {
 		if changedAtMS > group.pendingChangedAtMS {
 			group.pendingChangedAtMS = changedAtMS
 		}
@@ -515,6 +566,12 @@ func (group *sharedSubscription) requestForCommit(reason string, changedAtMS flo
 			group.pendingCommitIDs = map[string]struct{}{}
 		}
 		group.pendingCommitIDs[commitID] = struct{}{}
+	}
+	if requestID != "" {
+		if group.pendingRequestIDs == nil {
+			group.pendingRequestIDs = map[string]struct{}{}
+		}
+		group.pendingRequestIDs[requestID] = struct{}{}
 	}
 	if changedAtMS > group.pendingChangedAtMS {
 		group.pendingChangedAtMS = changedAtMS
@@ -531,10 +588,17 @@ func (group *sharedSubscription) requestForCommit(reason string, changedAtMS flo
 		return
 	}
 	group.running = true
+	delay := time.Duration(0)
 	if reason == "invalidate" {
+		delay = subscriptionInvalidationCoalesce
+	}
+	if (reason == "invalidate" || reason == "recover") && time.Until(group.cooldownUntil) > delay {
+		delay = time.Until(group.cooldownUntil)
+	}
+	if delay > 0 {
 		group.coalescing = true
 		group.mu.Unlock()
-		time.AfterFunc(subscriptionInvalidationCoalesce, group.run)
+		time.AfterFunc(delay, group.run)
 		return
 	}
 	group.mu.Unlock()
@@ -551,6 +615,9 @@ func (group *sharedSubscription) run() {
 		commitIDs := group.pendingCommitIDs
 		group.pendingCommitIDs = nil
 		group.activeCommitIDs = commitIDs
+		requestIDs := group.pendingRequestIDs
+		group.pendingRequestIDs = nil
+		group.activeRequestIDs = requestIDs
 		listeners := group.listenerSnapshotLocked()
 		group.dirty = false
 		group.mu.Unlock()
@@ -564,9 +631,15 @@ func (group *sharedSubscription) run() {
 			group.finishRun(requested)
 			return
 		}
+		releaseSlot, acquired := group.manager.acquireRerunSlot(group.ctx, reason)
+		if !acquired {
+			group.finishRun(requested)
+			return
+		}
 		startedAt := time.Now().UTC()
 		group.manager.server.metrics.recordQueryCommitExecution(group.project, group.tenant, group.key, commitIDs)
 		result, err := group.manager.execute(group.ctx, group, representative, reason, changedAtMS)
+		releaseSlot()
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
 			metric.QueriesRerun++
 		})
@@ -581,12 +654,16 @@ func (group *sharedSubscription) run() {
 		}
 
 		group.mu.Lock()
-		group.rememberCompletedCommitsLocked(commitIDs)
+		group.rememberCompletedCommitsLocked(requestIDs)
 		group.activeCommitIDs = nil
+		group.activeRequestIDs = nil
 		group.completed = requested
+		group.cooldownUntil = time.Now().Add(subscriptionRerunCooldown)
 		if group.dirty || group.requested > requested {
+			group.coalescing = true
 			group.mu.Unlock()
-			continue
+			time.AfterFunc(subscriptionRerunCooldown, group.run)
+			return
 		}
 		group.running = false
 		group.mu.Unlock()
@@ -594,15 +671,80 @@ func (group *sharedSubscription) run() {
 	}
 }
 
+func (m *subscriptionManager) acquireRerunSlot(ctx context.Context, reason string) (func(), bool) {
+	if m.rerunSlots == nil || (reason != "invalidate" && reason != "recover") {
+		return func() {}, true
+	}
+	select {
+	case m.rerunSlots <- struct{}{}:
+		return func() { <-m.rerunSlots }, true
+	default:
+	}
+	queuedAt := time.Now()
+	m.server.metrics.recordReactive(func(metric *reactiveMetricState) { metric.SubscriptionRerunQueueDepth++ })
+	select {
+	case m.rerunSlots <- struct{}{}:
+		waitMS := float64(time.Since(queuedAt).Microseconds()) / 1000
+		m.server.metrics.recordReactive(func(metric *reactiveMetricState) {
+			metric.SubscriptionRerunQueueDepth--
+			metric.SubscriptionRerunQueueWaitMS += waitMS
+		})
+		return func() { <-m.rerunSlots }, true
+	case <-ctx.Done():
+		waitMS := float64(time.Since(queuedAt).Microseconds()) / 1000
+		m.server.metrics.recordReactive(func(metric *reactiveMetricState) {
+			metric.SubscriptionRerunQueueDepth--
+			metric.SubscriptionRerunQueueWaitMS += waitMS
+		})
+		return nil, false
+	}
+}
+
 func (group *sharedSubscription) commitAlreadyRequestedLocked(commitID string) bool {
-	if _, ok := group.pendingCommitIDs[commitID]; ok {
+	return requestCoveredBy(group.pendingRequestIDs, commitID) ||
+		requestCoveredBy(group.activeRequestIDs, commitID) ||
+		requestCoveredBy(group.completedCommitIDs, commitID)
+}
+
+func requestCoveredBy(existing map[string]struct{}, requestID string) bool {
+	if _, ok := existing[requestID]; ok {
 		return true
 	}
-	if _, ok := group.activeCommitIDs[commitID]; ok {
-		return true
+	commitID, tables, ok := splitCommitTableRequest(requestID)
+	if !ok {
+		return false
 	}
-	_, ok := group.completedCommitIDs[commitID]
-	return ok
+	for candidate := range existing {
+		candidateCommit, candidateTables, candidateOK := splitCommitTableRequest(candidate)
+		if !candidateOK || candidateCommit != commitID {
+			continue
+		}
+		covered := true
+		for table := range tables {
+			if _, exists := candidateTables[table]; !exists {
+				covered = false
+				break
+			}
+		}
+		if covered {
+			return true
+		}
+	}
+	return false
+}
+
+func splitCommitTableRequest(requestID string) (string, map[string]struct{}, bool) {
+	parts := strings.SplitN(requestID, "\x00", 2)
+	if len(parts) != 2 || parts[0] == "" {
+		return "", nil, false
+	}
+	tables := map[string]struct{}{}
+	for _, table := range strings.Split(parts[1], "\x1f") {
+		if table != "" {
+			tables[table] = struct{}{}
+		}
+	}
+	return parts[0], tables, true
 }
 
 func (group *sharedSubscription) rememberCompletedCommitsLocked(commitIDs map[string]struct{}) {
@@ -629,8 +771,9 @@ func (group *sharedSubscription) rememberCompletedCommitsLocked(commitIDs map[st
 
 func (group *sharedSubscription) finishRun(requested uint64) {
 	group.mu.Lock()
-	group.rememberCompletedCommitsLocked(group.activeCommitIDs)
+	group.rememberCompletedCommitsLocked(group.activeRequestIDs)
 	group.activeCommitIDs = nil
+	group.activeRequestIDs = nil
 	group.completed = requested
 	group.running = false
 	group.mu.Unlock()

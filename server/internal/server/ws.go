@@ -208,6 +208,8 @@ const (
 	developmentRuntimeVersion        = "development"
 )
 
+var subscriptionRerunCooldown = 150 * time.Millisecond
+
 func runtimeBuildVersion() string {
 	if version := strings.TrimSpace(os.Getenv("GONVEX_RUNTIME_VERSION")); version != "" {
 		return version
@@ -252,10 +254,41 @@ type tableChange struct {
 	operation      string
 	changedColumns []string
 	changedAtMS    float64
+	// details retains filtering precision independently for every physical
+	// table in a merged commit batch. Legacy producers may leave it nil and use
+	// the singular fields above.
+	details map[string]tableChangeDetail
+	// declaredTables is the mutation manifest's conservative write superset.
+	// It is retained for candidate/metric accounting even when a healthy
+	// listener makes details authoritative for subscription delivery.
+	declaredTables map[string]bool
+	// triggerObserved identifies a table event received from PostgreSQL LISTEN.
+	// It is only meaningful while accumulating a pending commit.
+	triggerObserved bool
 	// commitID joins the broad declared-write invalidation emitted by the
 	// mutation caller with the precise PostgreSQL notifications emitted by the
 	// same transaction. It is the mutation ID stored in gonvex.mutation_id.
 	commitID string
+}
+
+type tableChangeDetail struct {
+	operation      string
+	changedColumns []string
+	rowIDs         map[string]bool
+	// precise means the table was observed by the trigger (or another precise
+	// source). broad only disables column/row pruning for this table.
+	precise bool
+	broad   bool
+}
+
+type pendingTableChange struct {
+	project         string
+	tenant          string
+	commitID        string
+	declaredTables  map[string]bool
+	observedDetails map[string]tableChangeDetail
+	otherDetails    map[string]tableChangeDetail
+	changedAtMS     float64
 }
 
 type wsConn struct {
@@ -1307,41 +1340,32 @@ func (s *Server) scheduleTableChange(change tableChange) {
 	pending.project = change.project
 	pending.tenant = change.tenant
 	pending.commitID = strings.TrimSpace(change.commitID)
-	if pending.tables == nil {
-		pending.tables = map[string]bool{}
-	}
-	for _, table := range changedTables {
-		if strings.TrimSpace(table) == "" {
-			continue
-		}
-		pending.tables[table] = true
-	}
-	if len(pending.tables) == 1 {
-		for table := range pending.tables {
-			pending.table = table
-		}
-	} else {
-		pending.table = ""
-		// Column and row-id precision is table-specific. Once several physical
-		// notifications share a commit key, keep the merged batch conservative.
-		pending.broad = true
-	}
-	pending.broad = pending.broad || change.broad
-	if pending.operation == "" {
-		pending.operation = change.operation
-	} else if change.operation != "" && pending.operation != change.operation {
-		pending.operation = ""
-		pending.broad = true
-	}
-	pending.changedColumns = appendUniqueStrings(pending.changedColumns, change.changedColumns...)
 	if change.changedAtMS > pending.changedAtMS {
 		pending.changedAtMS = change.changedAtMS
 	}
-	if pending.rowIDs == nil {
-		pending.rowIDs = map[string]bool{}
-	}
-	for id := range change.rowIDs {
-		pending.rowIDs[id] = true
+	for _, table := range changedTables {
+		table = strings.TrimSpace(table)
+		if table == "" {
+			continue
+		}
+		if change.triggerObserved {
+			if pending.observedDetails == nil {
+				pending.observedDetails = map[string]tableChangeDetail{}
+			}
+			pending.observedDetails[table] = mergeTableChangeDetail(pending.observedDetails[table], detailForTable(change, table, true))
+			continue
+		}
+		if pending.commitID != "" && change.broad {
+			if pending.declaredTables == nil {
+				pending.declaredTables = map[string]bool{}
+			}
+			pending.declaredTables[table] = true
+			continue
+		}
+		if pending.otherDetails == nil {
+			pending.otherDetails = map[string]tableChangeDetail{}
+		}
+		pending.otherDetails[table] = mergeTableChangeDetail(pending.otherDetails[table], detailForTable(change, table, !change.broad))
 	}
 	s.tableChanges[key] = pending
 	if timer := s.tableChangeWait[key]; timer != nil {
@@ -1360,8 +1384,105 @@ func (s *Server) flushTableChange(key string) {
 	delete(s.tableChanges, key)
 	s.tableChangeMu.Unlock()
 
-	s.subscriptions.requestChange(change)
-	s.resetSyncsForVisibilityChange(change)
+	delivery := pendingChangeForDelivery(change, s.subscriptions.listeners.healthy(change.project, change.tenant))
+	if len(tableChangeTables(delivery)) == 0 || (len(delivery.tables) == 0 && strings.TrimSpace(delivery.table) == "") {
+		// An empty table set is never authoritative. Preserve the legacy
+		// tenant-wide correctness backstop for malformed/unknown changes.
+		delivery.broad = true
+	}
+	s.subscriptions.requestChange(delivery)
+	s.resetSyncsForVisibilityChange(delivery)
+}
+
+func detailForTable(change tableChange, table string, precise bool) tableChangeDetail {
+	if detail, ok := change.details[table]; ok {
+		detail.precise = detail.precise || precise
+		return detail
+	}
+	return tableChangeDetail{
+		operation: change.operation, changedColumns: append([]string(nil), change.changedColumns...),
+		rowIDs: cloneBoolMap(change.rowIDs), precise: precise, broad: change.broad,
+	}
+}
+
+func mergeTableChangeDetail(current, next tableChangeDetail) tableChangeDetail {
+	current.precise = current.precise || next.precise
+	current.broad = current.broad || next.broad
+	if current.operation == "" {
+		current.operation = next.operation
+	} else if next.operation != "" && current.operation != next.operation {
+		current.operation = ""
+		current.broad = true
+	}
+	current.changedColumns = appendUniqueStrings(current.changedColumns, next.changedColumns...)
+	if current.rowIDs == nil && len(next.rowIDs) > 0 {
+		current.rowIDs = map[string]bool{}
+	}
+	for id := range next.rowIDs {
+		current.rowIDs[id] = true
+	}
+	return current
+}
+
+func pendingChangeForDelivery(pending pendingTableChange, listenerHealthy bool) tableChange {
+	change := tableChange{
+		project: pending.project, tenant: pending.tenant, commitID: pending.commitID,
+		changedAtMS: pending.changedAtMS, declaredTables: cloneBoolMap(pending.declaredTables),
+		tables: map[string]bool{}, details: map[string]tableChangeDetail{},
+	}
+	authoritative := len(pending.observedDetails) > 0 && (pending.commitID == "" || listenerHealthy)
+	if authoritative {
+		for table, detail := range pending.observedDetails {
+			change.tables[table] = true
+			change.details[table] = detail
+		}
+	} else {
+		// If listener authority is unavailable, every table mentioned by either
+		// source is delivered broadly. The declared manifest set remains the
+		// primary superset; observed/other tables are unioned in case no manifest
+		// declaration exists.
+		for table := range pending.declaredTables {
+			change.tables[table] = true
+		}
+		for table := range pending.observedDetails {
+			change.tables[table] = true
+		}
+		for table := range pending.otherDetails {
+			change.tables[table] = true
+		}
+		for table := range change.tables {
+			change.details[table] = tableChangeDetail{broad: true}
+		}
+		change.broad = true
+	}
+	if pending.commitID == "" {
+		for table, detail := range pending.otherDetails {
+			change.tables[table] = true
+			change.details[table] = detail
+		}
+	}
+	if len(change.tables) == 1 {
+		for table := range change.tables {
+			change.table = table
+			detail := change.details[table]
+			change.operation = detail.operation
+			change.changedColumns = append([]string(nil), detail.changedColumns...)
+			change.rowIDs = cloneBoolMap(detail.rowIDs)
+			change.broad = detail.broad
+		}
+	}
+	return change
+}
+
+func cloneBoolMap(source map[string]bool) map[string]bool {
+	if len(source) == 0 {
+		return nil
+	}
+	copy := make(map[string]bool, len(source))
+	for key, value := range source {
+		copy[key] = value
+	}
+	return copy
 }
 
 func tableChangeMatchesSubscription(sub querySubscription, change tableChange) bool {
@@ -1386,6 +1507,27 @@ func tableChangeTables(change tableChange) []string {
 	}
 	sort.Strings(tables)
 	return tables
+}
+
+func tableMapKeys(tables map[string]bool) []string {
+	result := make([]string, 0, len(tables))
+	for table := range tables {
+		if strings.TrimSpace(table) != "" {
+			result = append(result, table)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func effectiveTableCount(change tableChange) int {
+	if len(change.tables) > 0 {
+		return len(change.tables)
+	}
+	if strings.TrimSpace(change.table) != "" {
+		return 1
+	}
+	return 0
 }
 
 func appendUniqueStrings(existing []string, values ...string) []string {
@@ -1582,6 +1724,21 @@ func resultRowIDs(result any) map[string]bool {
 		for _, value := range rows {
 			if row, ok := value.(map[string]any); ok {
 				collect(row)
+			}
+		}
+	case map[string]any:
+		for _, field := range []string{"rows", "items"} {
+			switch pageRows := rows[field].(type) {
+			case []map[string]any:
+				for _, row := range pageRows {
+					collect(row)
+				}
+			case []any:
+				for _, value := range pageRows {
+					if row, ok := value.(map[string]any); ok {
+						collect(row)
+					}
+				}
 			}
 		}
 	}

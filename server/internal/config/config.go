@@ -12,11 +12,12 @@ import (
 const defaultRowsCacheTTL = 10 * time.Minute
 
 const (
-	defaultTenantListenerLimit       = 64
-	defaultTenantListenerIdleTimeout = time.Minute
-	defaultSharedResultMaxBytes      = 8 << 20
-	defaultSharedSubscriptionGrace   = 15 * time.Second
-	defaultSharedSubscriptionFanout  = 10000
+	defaultTenantListenerLimit          = 64
+	defaultTenantListenerIdleTimeout    = time.Minute
+	defaultSharedResultMaxBytes         = 8 << 20
+	defaultSharedSubscriptionGrace      = 15 * time.Second
+	defaultSharedSubscriptionFanout     = 10000
+	defaultSubscriptionRerunConcurrency = 32
 )
 
 type Config struct {
@@ -51,8 +52,11 @@ type Config struct {
 	SharedResultMaxBytes        int
 	SharedSubscriptionGrace     time.Duration
 	SharedSubscriptionMaxFanout int
-	DashboardSecret             string
-	TrustedProxyCIDRs           []string
+	// SubscriptionRerunConcurrency bounds invalidate/recover executions. Zero
+	// preserves unlimited behavior for lightweight tests and embedded callers.
+	SubscriptionRerunConcurrency int
+	DashboardSecret              string
+	TrustedProxyCIDRs            []string
 	// DashboardAuthProjectID is the one Gonvex application whose native Google
 	// sessions may authenticate to the control-plane dashboard. Keeping this
 	// explicit prevents a session minted for an arbitrary customer project from
@@ -85,47 +89,48 @@ func FromEnv() Config {
 	loadDotEnv(".env")
 
 	return Config{
-		Addr:                        env("GONVEX_ADDR", ":8080"),
-		LandlordURL:                 env("GONVEX_LANDLORD_DATABASE_URL", env("LANDLORD_DATABASE_URL", "")),
-		PostgresURL:                 env("DATABASE_URL", env("POSTGRES_URL", "")),
-		TenantDatabases:             envStringMap("GONVEX_TENANT_DATABASE_URLS"),
-		ProjectDatabases:            envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
-		ProjectKeys:                 envStringMap("GONVEX_PROJECT_KEYS"),
-		ProjectHosts:                envStringMap("GONVEX_PROJECT_HOSTS"),
-		GonvexModuleRoot:            env("GONVEX_MODULE_ROOT", ""),
-		PluginCacheDir:              env("GONVEX_PLUGIN_CACHE_DIR", ""),
-		ValkeyURL:                   env("VALKEY_URL", env("REDIS_URL", "")),
-		RowsCacheTTL:                envDuration("GONVEX_ROWS_CACHE_TTL", defaultRowsCacheTTL),
-		TelemetryEnabled:            envBool("GONVEX_TELEMETRY_ENABLED", true),
-		TelemetryLogPath:            env("GONVEX_TELEMETRY_LOG", "tmp/gonvex-telemetry.jsonl"),
-		S3Endpoint:                  env("S3_ENDPOINT", ""),
-		S3Region:                    env("S3_REGION", "us-east-1"),
-		S3Bucket:                    env("S3_BUCKET", ""),
-		S3AccessKeyID:               env("S3_ACCESS_KEY_ID", ""),
-		S3SecretAccessKey:           env("S3_SECRET_ACCESS_KEY", ""),
-		S3ForcePathStyle:            envBool("S3_FORCE_PATH_STYLE", true),
-		StoragePublicURL:            env("GONVEX_PUBLIC_URL", ""),
-		DevSyncKey:                  env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
-		AdminKey:                    env("GONVEX_ADMIN_KEY", ""),
-		RequireAuth:                 envBool("GONVEX_REQUIRE_AUTH", false),
-		QueryCacheEnabled:           envBool("GONVEX_BROWSER_QUERY_CACHE_ENABLED", true),
-		TenantListenerLimit:         envInt("GONVEX_TENANT_LISTENER_LIMIT", defaultTenantListenerLimit),
-		TenantListenerIdleTimeout:   envDuration("GONVEX_TENANT_LISTENER_IDLE_TIMEOUT", defaultTenantListenerIdleTimeout),
-		SharedResultMaxBytes:        envInt("GONVEX_SHARED_RESULT_MAX_BYTES", defaultSharedResultMaxBytes),
-		SharedSubscriptionGrace:     envDuration("GONVEX_SHARED_SUBSCRIPTION_GRACE", defaultSharedSubscriptionGrace),
-		SharedSubscriptionMaxFanout: envInt("GONVEX_SHARED_SUBSCRIPTION_MAX_FANOUT", defaultSharedSubscriptionFanout),
-		DashboardSecret:             env("GONVEX_DASHBOARD_SESSION_SECRET", env("DASHBOARD_SESSION_SECRET", "")),
-		TrustedProxyCIDRs:           envList("GONVEX_TRUSTED_PROXY_CIDRS"),
-		DashboardAuthProjectID:      strings.TrimSpace(env("GONVEX_DASHBOARD_AUTH_PROJECT_ID", "")),
-		AuthPublicURL:               env("GONVEX_AUTH_URL", env("GONVEX_PUBLIC_URL", "")),
-		GoogleClientID:              env("GONVEX_GOOGLE_CLIENT_ID", ""),
-		GoogleClientSecret:          env("GONVEX_GOOGLE_CLIENT_SECRET", ""),
-		GoogleAuthorizeURL:          env("GONVEX_GOOGLE_AUTHORIZE_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
-		GoogleTokenURL:              env("GONVEX_GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token"),
-		GoogleJWKSURL:               env("GONVEX_GOOGLE_JWKS_URL", "https://www.googleapis.com/oauth2/v3/certs"),
-		FirebaseProjectID:           strings.TrimSpace(env("GONVEX_FIREBASE_PROJECT_ID", "")),
-		FirebaseJWKSURL:             env("GONVEX_FIREBASE_JWKS_URL", "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"),
-		Environment:                 env("GONVEX_ENVIRONMENT", "local dev"),
+		Addr:                         env("GONVEX_ADDR", ":8080"),
+		LandlordURL:                  env("GONVEX_LANDLORD_DATABASE_URL", env("LANDLORD_DATABASE_URL", "")),
+		PostgresURL:                  env("DATABASE_URL", env("POSTGRES_URL", "")),
+		TenantDatabases:              envStringMap("GONVEX_TENANT_DATABASE_URLS"),
+		ProjectDatabases:             envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
+		ProjectKeys:                  envStringMap("GONVEX_PROJECT_KEYS"),
+		ProjectHosts:                 envStringMap("GONVEX_PROJECT_HOSTS"),
+		GonvexModuleRoot:             env("GONVEX_MODULE_ROOT", ""),
+		PluginCacheDir:               env("GONVEX_PLUGIN_CACHE_DIR", ""),
+		ValkeyURL:                    env("VALKEY_URL", env("REDIS_URL", "")),
+		RowsCacheTTL:                 envDuration("GONVEX_ROWS_CACHE_TTL", defaultRowsCacheTTL),
+		TelemetryEnabled:             envBool("GONVEX_TELEMETRY_ENABLED", true),
+		TelemetryLogPath:             env("GONVEX_TELEMETRY_LOG", "tmp/gonvex-telemetry.jsonl"),
+		S3Endpoint:                   env("S3_ENDPOINT", ""),
+		S3Region:                     env("S3_REGION", "us-east-1"),
+		S3Bucket:                     env("S3_BUCKET", ""),
+		S3AccessKeyID:                env("S3_ACCESS_KEY_ID", ""),
+		S3SecretAccessKey:            env("S3_SECRET_ACCESS_KEY", ""),
+		S3ForcePathStyle:             envBool("S3_FORCE_PATH_STYLE", true),
+		StoragePublicURL:             env("GONVEX_PUBLIC_URL", ""),
+		DevSyncKey:                   env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
+		AdminKey:                     env("GONVEX_ADMIN_KEY", ""),
+		RequireAuth:                  envBool("GONVEX_REQUIRE_AUTH", false),
+		QueryCacheEnabled:            envBool("GONVEX_BROWSER_QUERY_CACHE_ENABLED", true),
+		TenantListenerLimit:          envInt("GONVEX_TENANT_LISTENER_LIMIT", defaultTenantListenerLimit),
+		TenantListenerIdleTimeout:    envDuration("GONVEX_TENANT_LISTENER_IDLE_TIMEOUT", defaultTenantListenerIdleTimeout),
+		SharedResultMaxBytes:         envInt("GONVEX_SHARED_RESULT_MAX_BYTES", defaultSharedResultMaxBytes),
+		SharedSubscriptionGrace:      envDuration("GONVEX_SHARED_SUBSCRIPTION_GRACE", defaultSharedSubscriptionGrace),
+		SharedSubscriptionMaxFanout:  envInt("GONVEX_SHARED_SUBSCRIPTION_MAX_FANOUT", defaultSharedSubscriptionFanout),
+		SubscriptionRerunConcurrency: envInt("GONVEX_SUBSCRIPTION_RERUN_CONCURRENCY", defaultSubscriptionRerunConcurrency),
+		DashboardSecret:              env("GONVEX_DASHBOARD_SESSION_SECRET", env("DASHBOARD_SESSION_SECRET", "")),
+		TrustedProxyCIDRs:            envList("GONVEX_TRUSTED_PROXY_CIDRS"),
+		DashboardAuthProjectID:       strings.TrimSpace(env("GONVEX_DASHBOARD_AUTH_PROJECT_ID", "")),
+		AuthPublicURL:                env("GONVEX_AUTH_URL", env("GONVEX_PUBLIC_URL", "")),
+		GoogleClientID:               env("GONVEX_GOOGLE_CLIENT_ID", ""),
+		GoogleClientSecret:           env("GONVEX_GOOGLE_CLIENT_SECRET", ""),
+		GoogleAuthorizeURL:           env("GONVEX_GOOGLE_AUTHORIZE_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
+		GoogleTokenURL:               env("GONVEX_GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token"),
+		GoogleJWKSURL:                env("GONVEX_GOOGLE_JWKS_URL", "https://www.googleapis.com/oauth2/v3/certs"),
+		FirebaseProjectID:            strings.TrimSpace(env("GONVEX_FIREBASE_PROJECT_ID", "")),
+		FirebaseJWKSURL:              env("GONVEX_FIREBASE_JWKS_URL", "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"),
+		Environment:                  env("GONVEX_ENVIRONMENT", "local dev"),
 	}
 }
 

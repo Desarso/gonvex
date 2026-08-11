@@ -11,6 +11,13 @@ func TestDefaultRowsCacheTTLAllowsInvalidationToDriveFreshness(t *testing.T) {
 	}
 }
 
+func TestDefaultSubscriptionRerunConcurrency(t *testing.T) {
+	t.Setenv("GONVEX_SUBSCRIPTION_RERUN_CONCURRENCY", "")
+	if got := FromEnv().SubscriptionRerunConcurrency; got != 32 {
+		t.Fatalf("SubscriptionRerunConcurrency = %d, want 32", got)
+	}
+}
+
 func TestValkeyURLAcceptsRedisURLAlias(t *testing.T) {
 	t.Setenv("VALKEY_URL", "")
 	t.Setenv("REDIS_URL", "redis://redis.example:6379/4")

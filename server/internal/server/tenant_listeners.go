@@ -268,6 +268,11 @@ func (m *tenantListenerManager) wait(ctx context.Context, connection *pgx.Conn, 
 			payload.Table = notification.Payload
 			payload.Broad = true
 		} else if json.Unmarshal([]byte(notification.Payload), &payload) != nil || payload.Table == "" {
+			// A malformed/empty table notification means this LISTEN stream can no
+			// longer prove that its observed table set is complete. Keep declared
+			// write invalidations authoritative until a reconnect recovery clears
+			// this uncertainty.
+			m.markNeedsRecovery(key.project, key.tenant)
 			continue
 		}
 		rowIDs := map[string]bool{}
@@ -278,9 +283,16 @@ func (m *tenantListenerManager) wait(ctx context.Context, connection *pgx.Conn, 
 			project: key.project, tenant: key.tenant, table: payload.Table,
 			broad: payload.Broad, rowIDs: rowIDs, operation: payload.Operation,
 			changedColumns: normalizedColumns(payload.ChangedColumns), changedAtMS: epochMillis(time.Now().UTC()),
-			commitID: strings.TrimSpace(payload.MutationID),
+			commitID: strings.TrimSpace(payload.MutationID), triggerObserved: true,
 		})
 	}
+}
+
+func (m *tenantListenerManager) healthy(project, tenant string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	listener := m.active[tenantListenerKey{project: project, tenant: tenant}]
+	return listener != nil && listener.connected && !listener.needsRecovery
 }
 
 func parseSyncNotifyPayload(raw string) syncNotifyPayload {

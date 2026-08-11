@@ -64,7 +64,7 @@ type Server struct {
 	subscriptions           *subscriptionManager
 	tableChangeMu           sync.Mutex
 	tableChangeWait         map[string]*time.Timer
-	tableChanges            map[string]tableChange
+	tableChanges            map[string]pendingTableChange
 	projectEnvMu            sync.Mutex
 	projectEnvCache         map[string]projectEnvCacheEntry
 	projectEnvLoads         singleflight.Group
@@ -159,7 +159,7 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		tenantHydrationAt:     map[string]time.Time{},
 		wsConns:               map[*wsConn]bool{},
 		tableChangeWait:       map[string]*time.Timer{},
-		tableChanges:          map[string]tableChange{},
+		tableChanges:          map[string]pendingTableChange{},
 		syncLocks:             map[string]*sync.Mutex{},
 		schemaHash:            map[string]string{},
 		queryCacheStartedAtMS: time.Now().UTC().UnixMilli(),

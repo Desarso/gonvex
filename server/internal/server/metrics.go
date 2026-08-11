@@ -244,7 +244,10 @@ type reactiveMetricState struct {
 	ChangeBatchesReceived              uint64
 	SubscriptionsInspected             uint64
 	CandidateSubscriptionsSelected     uint64
+	SubscriptionsSkippedByTable        uint64
 	QueriesRerun                       uint64
+	SubscriptionRerunQueueDepth        int
+	SubscriptionRerunQueueWaitMS       float64
 	SubscriptionCommitsObserved        uint64
 	CommitQueryExecutions              uint64
 	MaxExecutionsPerSubscriptionCommit uint64
@@ -273,7 +276,10 @@ type reactiveMetricSnapshot struct {
 	ChangeBatchesReceived              uint64  `json:"changeBatchesReceived"`
 	SubscriptionsInspected             uint64  `json:"subscriptionsInspected"`
 	CandidateSubscriptionsSelected     uint64  `json:"candidateSubscriptionsSelected"`
+	SubscriptionsSkippedByTable        uint64  `json:"subscriptionsSkippedByTable"`
 	QueriesRerun                       uint64  `json:"queriesRerun"`
+	SubscriptionRerunQueueDepth        int     `json:"subscriptionRerunQueueDepth"`
+	SubscriptionRerunQueueWaitMS       float64 `json:"subscriptionRerunQueueWaitMs"`
 	SubscriptionCommitsObserved        uint64  `json:"subscriptionCommitsObserved"`
 	CommitQueryExecutions              uint64  `json:"commitQueryExecutions"`
 	ExecutionsPerSubscriptionCommit    float64 `json:"executionsPerSubscriptionCommit"`
@@ -356,7 +362,10 @@ func (state reactiveMetricState) snapshot() reactiveMetricSnapshot {
 		ChangeBatchesReceived:              state.ChangeBatchesReceived,
 		SubscriptionsInspected:             state.SubscriptionsInspected,
 		CandidateSubscriptionsSelected:     state.CandidateSubscriptionsSelected,
+		SubscriptionsSkippedByTable:        state.SubscriptionsSkippedByTable,
 		QueriesRerun:                       state.QueriesRerun,
+		SubscriptionRerunQueueDepth:        state.SubscriptionRerunQueueDepth,
+		SubscriptionRerunQueueWaitMS:       state.SubscriptionRerunQueueWaitMS,
 		SubscriptionCommitsObserved:        state.SubscriptionCommitsObserved,
 		CommitQueryExecutions:              state.CommitQueryExecutions,
 		ExecutionsPerSubscriptionCommit:    executionsPerCommit,

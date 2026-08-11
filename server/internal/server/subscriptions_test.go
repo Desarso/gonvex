@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +37,149 @@ func TestResultRowIDsAcceptsConvexStyleIDs(t *testing.T) {
 	if ids["fallback-id"] {
 		t.Fatalf("used _id even though id was available: %#v", ids)
 	}
+}
+
+func TestResultRowIDsAcceptsPageEnvelopes(t *testing.T) {
+	ids := resultRowIDs(map[string]any{
+		"rows": []any{
+			map[string]any{"id": "task-1"},
+			map[string]any{"_id": "task-2"},
+		},
+	})
+	for _, id := range []string{"task-1", "task-2"} {
+		if !ids[id] {
+			t.Fatalf("missing page result row id %q from %#v", id, ids)
+		}
+	}
+	itemIDs := resultRowIDs(map[string]any{"items": []map[string]any{{"id": "item-1"}}})
+	if !itemIDs["item-1"] {
+		t.Fatalf("missing items envelope id from %#v", itemIDs)
+	}
+}
+
+func installTestTenantListener(manager *tenantListenerManager, project, tenant string, connected bool) {
+	manager.mu.Lock()
+	manager.active[tenantListenerKey{project: project, tenant: tenant}] = &tenantListener{
+		key: tenantListenerKey{project: project, tenant: tenant}, connected: connected,
+	}
+	manager.mu.Unlock()
+}
+
+func indexedTestGroup(manager *subscriptionManager, key, table string, executions *atomic.Int32) *sharedSubscription {
+	token := newSubscriptionToken()
+	group := &sharedSubscription{
+		manager: manager, key: key, project: "project-a", tenant: "tenant-a", path: key,
+		ctx: context.Background(), reads: []manifest.ReadDependency{{Table: table}},
+		listeners: map[*subscriptionToken]querySubscription{
+			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.User{ID: "user-a"}}},
+		},
+	}
+	manager.mu.Lock()
+	manager.groups[key] = group
+	manager.indexGroupLocked(group)
+	manager.mu.Unlock()
+	return group
+}
+
+func TestPreciseTriggerTablesOverrideDeclaredWritesForSubscriptions(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
+	var taskExecutions atomic.Int32
+	var logExecutions atomic.Int32
+	manager.execute = func(_ context.Context, group *sharedSubscription, _ querySubscription, _ string, _ float64) (any, error) {
+		if group.key == "tasks.list" {
+			taskExecutions.Add(1)
+		} else {
+			logExecutions.Add(1)
+		}
+		return []map[string]any{{"id": "task-1"}}, nil
+	}
+	indexedTestGroup(manager, "tasks.list", "tasks", &taskExecutions)
+	indexedTestGroup(manager, "taskLogs.list", "task_logs", &logExecutions)
+
+	const commitID = "precise-commit"
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: commitID, broad: true,
+		tables: map[string]bool{"tasks": true, "task_logs": true}, changedAtMS: 10,
+	})
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "tasks",
+		operation: "update", changedColumns: []string{"title"}, rowIDs: map[string]bool{"task-1": true},
+		triggerObserved: true, changedAtMS: 11,
+	})
+
+	eventually(t, time.Second, func() bool { return taskExecutions.Load() == 1 })
+	time.Sleep(subscriptionRerunCooldown + 25*time.Millisecond)
+	if got := logExecutions.Load(); got != 0 {
+		t.Fatalf("task_logs executions = %d, want 0 for tasks-only observed commit", got)
+	}
+	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.SubscriptionsSkippedByTable; got == 0 {
+		t.Fatal("subscriptions skipped by table = 0, want the declared-only task_logs dependency counted")
+	}
+}
+
+func TestUnhealthyListenerFallsBackToDeclaredWrites(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", false)
+	var executions atomic.Int32
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		return []map[string]any{{"id": "task-1"}}, nil
+	}
+	indexedTestGroup(manager, "tasks.list", "tasks", &executions)
+	indexedTestGroup(manager, "taskLogs.list", "task_logs", &executions)
+
+	const commitID = "fallback-commit"
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: commitID, broad: true,
+		tables: map[string]bool{"tasks": true, "task_logs": true}, changedAtMS: 10,
+	})
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "tasks",
+		operation: "update", triggerObserved: true, changedAtMS: 11,
+	})
+
+	eventually(t, time.Second, func() bool { return executions.Load() == 2 })
+}
+
+func TestLateAdditionalTableForPreciseCommitIsNotDeduplicated(t *testing.T) {
+	oldCooldown := subscriptionRerunCooldown
+	subscriptionRerunCooldown = 10 * time.Millisecond
+	t.Cleanup(func() { subscriptionRerunCooldown = oldCooldown })
+
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	manager := server.subscriptions
+	var executions atomic.Int32
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		return []map[string]any{{"id": "task-1"}}, nil
+	}
+	token := newSubscriptionToken()
+	group := &sharedSubscription{
+		manager: manager, key: "combined.list", project: "project-a", tenant: "tenant-a", path: "combined.list",
+		ctx: context.Background(), reads: []manifest.ReadDependency{{Table: "tasks"}, {Table: "task_logs"}},
+		listeners: map[*subscriptionToken]querySubscription{
+			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.User{ID: "user-a"}}},
+		},
+	}
+	manager.mu.Lock()
+	manager.groups[group.key] = group
+	manager.indexGroupLocked(group)
+	manager.mu.Unlock()
+
+	const commitID = "late-table-commit"
+	manager.requestChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "tasks",
+		tables: map[string]bool{"tasks": true}, details: map[string]tableChangeDetail{"tasks": {precise: true, broad: true}},
+	})
+	eventually(t, time.Second, func() bool { return executions.Load() == 1 })
+	manager.requestChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "task_logs",
+		tables: map[string]bool{"task_logs": true}, details: map[string]tableChangeDetail{"task_logs": {precise: true, broad: true}},
+	})
+	eventually(t, time.Second, func() bool { return executions.Load() == 2 })
 }
 
 func TestSubscriptionCountsDoNotTraverseGroups(t *testing.T) {
@@ -127,6 +271,100 @@ func TestSubscriptionRunnerSerializesAndCoalescesBurst(t *testing.T) {
 	}
 	if second.reason != "invalidate" || second.changedAtMS != 20 {
 		t.Fatalf("coalesced execution change = %#v, want latest revision 20", second)
+	}
+}
+
+func TestSubscriptionCooldownBoundsDistinctCommitBurstAndDeliversFinalState(t *testing.T) {
+	oldCooldown := subscriptionRerunCooldown
+	subscriptionRerunCooldown = 25 * time.Millisecond
+	t.Cleanup(func() { subscriptionRerunCooldown = oldCooldown })
+
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	manager := server.subscriptions
+	var state atomic.Int32
+	var executions atomic.Int32
+	var delivered atomic.Int32
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		value := state.Load()
+		delivered.Store(value)
+		return map[string]any{"value": value}, nil
+	}
+	token := newSubscriptionToken()
+	group := &sharedSubscription{
+		manager: manager, key: "tasks.latest", project: "project-a", tenant: "tenant-a", path: "tasks.latest",
+		ctx: context.Background(), reads: []manifest.ReadDependency{{Table: "tasks"}},
+		listeners: map[*subscriptionToken]querySubscription{
+			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.User{ID: "user-a"}}},
+		},
+	}
+	group.request("initial", 0)
+	eventually(t, time.Second, func() bool {
+		group.mu.Lock()
+		defer group.mu.Unlock()
+		return !group.running && executions.Load() == 1
+	})
+
+	for index := 1; index <= 20; index++ {
+		state.Store(int32(index))
+		group.requestForCommit("invalidate", float64(index), "commit-"+strconv.Itoa(index))
+	}
+	eventually(t, time.Second, func() bool {
+		group.mu.Lock()
+		defer group.mu.Unlock()
+		return !group.running && delivered.Load() == 20
+	})
+	if reruns := executions.Load() - 1; reruns > 3 {
+		t.Fatalf("executions for 20-commit cooldown burst = %d, want at most 3", reruns)
+	}
+}
+
+func TestSubscriptionRerunDispatcherBoundsConcurrency(t *testing.T) {
+	server := New(config.Config{
+		TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20, SubscriptionRerunConcurrency: 2,
+	})
+	manager := server.subscriptions
+	var running atomic.Int32
+	var maximum atomic.Int32
+	var executions atomic.Int32
+	release := make(chan struct{})
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		current := running.Add(1)
+		for current > maximum.Load() && !maximum.CompareAndSwap(maximum.Load(), current) {
+		}
+		<-release
+		running.Add(-1)
+		executions.Add(1)
+		return []map[string]any{{"id": "task-1"}}, nil
+	}
+	groups := make([]*sharedSubscription, 0, 10)
+	for index := 0; index < 10; index++ {
+		group := indexedTestGroup(manager, "tasks."+strconv.Itoa(index), "tasks", &executions)
+		groups = append(groups, group)
+		group.request("recover", 1)
+	}
+	eventually(t, time.Second, func() bool { return running.Load() == 2 })
+	eventually(t, time.Second, func() bool {
+		return server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.SubscriptionRerunQueueDepth == 8
+	})
+	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.SubscriptionRerunQueueDepth; got != 8 {
+		t.Fatalf("rerun queue depth = %d, want 8", got)
+	}
+	close(release)
+	eventually(t, time.Second, func() bool { return executions.Load() == 10 })
+	if got := maximum.Load(); got != 2 {
+		t.Fatalf("maximum concurrent reruns = %d, want 2", got)
+	}
+	for _, group := range groups {
+		group.mu.Lock()
+		running := group.running
+		group.mu.Unlock()
+		if running {
+			t.Fatal("rerun group remained active after dispatcher drained")
+		}
+	}
+	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.SubscriptionRerunQueueDepth; got != 0 {
+		t.Fatalf("final rerun queue depth = %d, want 0", got)
 	}
 }
 
