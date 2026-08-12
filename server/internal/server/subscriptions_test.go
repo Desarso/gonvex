@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,6 +14,10 @@ import (
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/config"
 )
+
+type testResultRowIDProvider []string
+
+func (ids testResultRowIDProvider) GonvexResultRowIDs() []string { return ids }
 
 func TestSubscriptionTokensAreDistinctMapKeys(t *testing.T) {
 	tokens := make(map[*subscriptionToken]struct{}, 10_000)
@@ -54,6 +60,60 @@ func TestResultRowIDsAcceptsPageEnvelopes(t *testing.T) {
 	itemIDs := resultRowIDs(map[string]any{"items": []map[string]any{{"id": "item-1"}}})
 	if !itemIDs["item-1"] {
 		t.Fatalf("missing items envelope id from %#v", itemIDs)
+	}
+}
+
+func TestResultRowIDsAcceptsStructuralProvider(t *testing.T) {
+	ids := resultRowIDs(testResultRowIDProvider{"task-1", " task-2 ", ""})
+	if !ids["task-1"] || !ids["task-2"] || len(ids) != 2 {
+		t.Fatalf("structural result row ids = %#v, want task-1 and task-2", ids)
+	}
+}
+
+func TestWindowedDependencyDoesNotUseOldRowsAfterOrderingChange(t *testing.T) {
+	group := &sharedSubscription{
+		reads:  []manifest.ReadDependency{{Table: "tasks", Columns: []string{"title"}, OrdersBy: []string{"updatedAt"}, Windowed: true}},
+		rowIDs: map[string]bool{"task-visible": true},
+	}
+	change := tableChange{
+		table: "tasks", operation: "update", changedColumns: []string{"updatedAt"}, rowIDs: map[string]bool{"task-outside-window": true},
+		details: map[string]tableChangeDetail{"tasks": {
+			operation: "update", changedColumns: []string{"updatedAt"}, rowIDs: map[string]bool{"task-outside-window": true}, precise: true,
+		}},
+	}
+	if !group.matches(change) {
+		t.Fatal("ordering change outside the old window must rerun because it can enter the result")
+	}
+}
+
+func TestCallerIDPredicateSelectsOnlyAffectedUser(t *testing.T) {
+	detail := tableChangeDetail{precise: true, userIDs: map[string]bool{"user-a": true}}
+	callerA := callerContext{user: &gonvex.User{ID: "user-a"}}
+	callerB := callerContext{user: &gonvex.User{ID: "user-b"}}
+	if !readPredicateMatches("callerIdColumn:userId", nil, callerA, detail) {
+		t.Fatal("affected caller did not match committed userId")
+	}
+	if readPredicateMatches("callerIdColumn:userId", nil, callerB, detail) {
+		t.Fatal("unaffected caller matched committed userId")
+	}
+	if !readPredicateMatches("callerIdColumn:userId", nil, callerB, tableChangeDetail{precise: true}) {
+		t.Fatal("missing userId metadata must fail open")
+	}
+}
+
+func TestColumnArgumentPredicateSelectsOldAndNewWorkspace(t *testing.T) {
+	detail := tableChangeDetail{precise: true, workspaceIDs: map[string]bool{"ws-old": true, "ws-new": true}}
+	for _, workspace := range []string{"ws-old", "ws-new"} {
+		args := json.RawMessage(fmt.Sprintf(`{"workspaceId":%q}`, workspace))
+		if !readPredicateMatches("columnArg:workspaceId", args, callerContext{}, detail) {
+			t.Fatalf("affected workspace %q did not match", workspace)
+		}
+	}
+	if readPredicateMatches("columnArg:workspaceId", json.RawMessage(`{"workspaceId":"ws-other"}`), callerContext{}, detail) {
+		t.Fatal("unaffected workspace matched committed workspace IDs")
+	}
+	if !readPredicateMatches("columnArg:workspaceId", json.RawMessage(`{"workspaceId":"all"}`), callerContext{}, detail) {
+		t.Fatal("all-workspaces query must fail open")
 	}
 }
 
@@ -119,6 +179,60 @@ func TestPreciseTriggerTablesOverrideDeclaredWritesForSubscriptions(t *testing.T
 	}
 }
 
+func TestCommitBatchKeepsMutationCommitTimestamp(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	installTestTenantListener(server.subscriptions.listeners, "project-a", "tenant-a", true)
+	observed := make(chan float64, 1)
+	group := indexedTestGroup(server.subscriptions, "tasks.list", "tasks", nil)
+	server.subscriptions.execute = func(_ context.Context, _ *sharedSubscription, _ querySubscription, _ string, changedAtMS float64) (any, error) {
+		observed <- changedAtMS
+		return []map[string]any{}, nil
+	}
+	_ = group
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: "commit-a", broad: true,
+		tables: map[string]bool{"tasks": true}, changedAtMS: 100,
+	})
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: "commit-a", table: "tasks",
+		triggerObserved: true, changedAtMS: 125,
+	})
+	select {
+	case got := <-observed:
+		if got != 100 {
+			t.Fatalf("rerun changedAtMS = %v, want mutation commit timestamp 100", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("subscription rerun did not execute")
+	}
+}
+
+func TestAdjacentTriggerNotificationsForCommitBatchAcrossTables(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	installTestTenantListener(server.subscriptions.listeners, "project-a", "tenant-a", true)
+	var executions atomic.Int32
+	group := indexedTestGroup(server.subscriptions, "tasks.list", "tasks", nil)
+	group.reads = append(group.reads, manifest.ReadDependency{Table: "taskUsers"})
+	server.subscriptions.mu.Lock()
+	server.subscriptions.indexGroupLocked(group)
+	server.subscriptions.mu.Unlock()
+	server.subscriptions.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		return []map[string]any{{"id": "task-1"}}, nil
+	}
+	for _, table := range []string{"tasks", "taskUsers"} {
+		server.scheduleTableChange(tableChange{
+			project: "project-a", tenant: "tenant-a", commitID: "commit-batch", table: table,
+			triggerObserved: true, changedAtMS: 100,
+		})
+	}
+	eventually(t, time.Second, func() bool { return executions.Load() == 1 })
+	time.Sleep(subscriptionRerunCooldown + 20*time.Millisecond)
+	if got := executions.Load(); got != 1 {
+		t.Fatalf("executions = %d, want one rerun for adjacent committed notifications", got)
+	}
+}
+
 func TestUnhealthyListenerFallsBackToDeclaredWrites(t *testing.T) {
 	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
 	manager := server.subscriptions
@@ -144,7 +258,37 @@ func TestUnhealthyListenerFallsBackToDeclaredWrites(t *testing.T) {
 	eventually(t, time.Second, func() bool { return executions.Load() == 2 })
 }
 
-func TestLateAdditionalTableForPreciseCommitIsNotDeduplicated(t *testing.T) {
+func TestHealthyListenerSuppressesDeclaredOnlyNoOpCommit(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
+	var executions atomic.Int32
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		return []map[string]any{{"id": "task-1"}}, nil
+	}
+	indexedTestGroup(manager, "tasks.list", "tasks", &executions)
+
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: "no-op-commit",
+		broad: true, tables: map[string]bool{"tasks": true}, changedAtMS: 10,
+	})
+	time.Sleep(tableChangeDebounce + 25*time.Millisecond)
+	if got := executions.Load(); got != 0 {
+		t.Fatalf("declared-only healthy commit executions = %d, want 0", got)
+	}
+
+	// A notification delayed beyond the declared-write debounce still starts a
+	// precise run, so suppressing the no-op candidate cannot lose a real write.
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: "no-op-commit", table: "tasks",
+		operation: "update", changedColumns: []string{"title"}, rowIDs: map[string]bool{"task-1": true},
+		triggerObserved: true, changedAtMS: 11,
+	})
+	eventually(t, time.Second, func() bool { return executions.Load() == 1 })
+}
+
+func TestLateAdditionalTableForPreciseCommitUsesCommittedSnapshot(t *testing.T) {
 	oldCooldown := subscriptionRerunCooldown
 	subscriptionRerunCooldown = 10 * time.Millisecond
 	t.Cleanup(func() { subscriptionRerunCooldown = oldCooldown })
@@ -179,7 +323,10 @@ func TestLateAdditionalTableForPreciseCommitIsNotDeduplicated(t *testing.T) {
 		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "task_logs",
 		tables: map[string]bool{"task_logs": true}, details: map[string]tableChangeDetail{"task_logs": {precise: true, broad: true}},
 	})
-	eventually(t, time.Second, func() bool { return executions.Load() == 2 })
+	time.Sleep(subscriptionRerunCooldown + 25*time.Millisecond)
+	if got := executions.Load(); got != 1 {
+		t.Fatalf("executions = %d, want 1 because the first post-commit query observes every table in the transaction", got)
+	}
 }
 
 func TestSubscriptionCountsDoNotTraverseGroups(t *testing.T) {
@@ -411,7 +558,7 @@ func TestDeclaredAndPhysicalInvalidationsForCommitExecuteSubscriptionOnce(t *tes
 		project: "project-a", tenant: "tenant-a", table: "tasks", operation: "update",
 		changedColumns: []string{"title"}, changedAtMS: 12, commitID: commitID,
 	})
-	time.Sleep(tableChangeDebounce + subscriptionInvalidationCoalesce + 25*time.Millisecond)
+	time.Sleep(tableChangeDebounce + 25*time.Millisecond)
 	if got := executions.Load(); got != 1 {
 		t.Fatalf("subscription executions for one declared+physical commit = %d, want 1", got)
 	}
@@ -476,6 +623,9 @@ func TestRapidCommitsCoalesceToLatestResultAndAdvanceRevision(t *testing.T) {
 	if latest.Type != "query.result" || latest.SubscriptionRevision == nil || latest.SubscriptionRevision.Sequence != 2 {
 		t.Fatalf("coalesced query frame = %+v, want result at revision 2", latest)
 	}
+	if len(latest.MutationIDs) != 2 || latest.MutationIDs[0] != "commit-one" || latest.MutationIDs[1] != "commit-two" {
+		t.Fatalf("coalesced query mutation IDs = %v, want both commits", latest.MutationIDs)
+	}
 	var payload struct {
 		Value int32 `json:"value"`
 	}
@@ -528,11 +678,85 @@ func TestSingleListenerGroupKeepsHashWithoutRetainingResultPayload(t *testing.T)
 	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.UnchangedResultsSuppressed; got != 1 {
 		t.Fatalf("unchanged results suppressed = %d, want 1", got)
 	}
+	if group.revision != 1 {
+		t.Fatalf("unchanged invalidation advanced revision to %d, want acknowledged revision 1", group.revision)
+	}
 
 	group.listeners[newSubscriptionToken()] = querySubscription{ctx: context.Background()}
 	group.completeResult([]map[string]any{{"id": "task-1", "title": "changed"}}, "invalidate", 0, time.Now())
 	if len(group.lastResult) == 0 {
 		t.Fatal("shared group did not retain a replayable result")
+	}
+}
+
+func TestWindowedSingleListenerRetainsSnapshotForKeyedPatches(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	token := newSubscriptionToken()
+	group := &sharedSubscription{
+		manager: server.subscriptions, path: "tasks.window", ctx: context.Background(), retainSnapshot: true,
+		listeners: map[*subscriptionToken]querySubscription{
+			token: {token: token, ctx: context.Background()},
+		},
+	}
+	before := make([]map[string]any, 10)
+	for index := range before {
+		before[index] = map[string]any{"id": fmt.Sprintf("task-%d", index), "title": "before", "body": strings.Repeat("x", minimumPatchResultBytes)}
+	}
+	group.completeResult(before, "initial", 0, time.Now())
+	if len(group.lastResult) == 0 {
+		t.Fatal("windowed single-listener group did not retain its patch baseline")
+	}
+	after := append([]map[string]any(nil), before...)
+	after[0] = map[string]any{"id": "task-0", "title": "after", "body": strings.Repeat("x", minimumPatchResultBytes)}
+	group.completeResult(after, "invalidate", 0, time.Now())
+	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.Patches; got != 1 {
+		t.Fatalf("patches = %d, want 1", got)
+	}
+}
+
+func TestVisibilityReconvergencePatchesFromEachPartitionBaseline(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	firstToken, secondToken := newSubscriptionToken(), newSubscriptionToken()
+	first := querySubscription{token: firstToken, ctx: context.Background()}
+	second := querySubscription{token: secondToken, ctx: context.Background()}
+	group := &sharedSubscription{
+		manager: server.subscriptions, path: "tasks.window", ctx: context.Background(), retainSnapshot: true,
+		listeners: map[*subscriptionToken]querySubscription{firstToken: first, secondToken: second},
+	}
+	result := func(title string) *visibilitySharedResult {
+		rows := make([]map[string]any, 10)
+		for index := range rows {
+			rowTitle := "stable"
+			if index == 0 {
+				rowTitle = title
+			}
+			rows[index] = map[string]any{"id": fmt.Sprintf("task-%d", index), "title": rowTitle, "body": strings.Repeat("x", minimumPatchResultBytes)}
+		}
+		payload, err := json.Marshal(rows)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash, perf := queryResultSemantics(payload)
+		return &visibilitySharedResult{payload: payload, hash: hash, queryPerf: perf}
+	}
+
+	group.completeResult(result("shared"), "initial", 0, time.Now())
+	group.completePartitionedResult(&visibilityPartitionedResult{partitions: []visibilityResultPartition{
+		{key: "scope-a", listeners: []querySubscription{first}, result: result("first")},
+		{key: "scope-b", listeners: []querySubscription{second}, result: result("second")},
+	}}, "invalidate", 1, time.Now())
+	afterSplit := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive
+	if afterSplit.Patches != 2 || afterSplit.FullResults != 1 {
+		t.Fatalf("split metrics = %+v, want two patches after initial full result", afterSplit)
+	}
+
+	group.completeResult(result("shared-again"), "invalidate", 2, time.Now())
+	afterConvergence := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive
+	if afterConvergence.Patches != 4 || afterConvergence.FullResults != 1 {
+		t.Fatalf("reconvergence metrics = %+v, want one patch per prior partition and no recovery full result", afterConvergence)
+	}
+	if len(group.partitionBaselines) != 0 || !group.hasHash || len(group.lastResult) == 0 {
+		t.Fatal("reconvergence did not restore the shared baseline")
 	}
 }
 
@@ -562,8 +786,8 @@ func TestSubscriptionResultSuppressionIgnoresTopLevelPerformanceMetadata(t *test
 	group.completeResult(result("same", 8.75), "invalidate", 0, time.Now())
 
 	reactive := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive
-	if reactive.FullResults != 1 || reactive.UnchangedResultsSuppressed != 1 || reactive.ProgressMessages != 1 {
-		t.Fatalf("volatile-only rerun metrics = %+v, want one full result followed by one progress suppression", reactive)
+	if reactive.FullResults != 1 || reactive.UnchangedResultsSuppressed != 1 || reactive.ProgressMessages != 0 {
+		t.Fatalf("volatile-only rerun metrics = %+v, want one full result followed by a delivery-free suppression", reactive)
 	}
 
 	group.completeResult(result("changed", 3.5), "invalidate", 0, time.Now())
@@ -595,6 +819,26 @@ func TestDependencyIndexSelectsOnlyMatchingTenantTableAndColumns(t *testing.T) {
 	}
 }
 
+func TestSubscriptionDependencyIDArgumentSkipsUnrelatedRow(t *testing.T) {
+	group := &sharedSubscription{
+		args:  json.RawMessage(`{"taskId":"task-1"}`),
+		reads: []manifest.ReadDependency{{Table: "tasks", Predicate: "idArg:taskId"}},
+	}
+	unrelated := tableChange{
+		table: "tasks", operation: "insert", rowIDs: map[string]bool{"task-2": true},
+		details: map[string]tableChangeDetail{"tasks": {operation: "insert", rowIDs: map[string]bool{"task-2": true}, precise: true}},
+	}
+	if group.matches(unrelated) {
+		t.Fatal("unrelated inserted task matched an idArg dependency")
+	}
+	related := unrelated
+	related.rowIDs = map[string]bool{"task-1": true}
+	related.details = map[string]tableChangeDetail{"tasks": {operation: "insert", rowIDs: map[string]bool{"task-1": true}, precise: true}}
+	if !group.matches(related) {
+		t.Fatal("matching inserted task did not match an idArg dependency")
+	}
+}
+
 func TestSharedKeyRequiresExplicitPermissionSharing(t *testing.T) {
 	server := New(config.Config{TenantListenerLimit: 0})
 	server.runtime.SyncManifest(manifest.Manifest{Project: "p", Functions: map[string]manifest.FunctionEntry{
@@ -603,6 +847,8 @@ func TestSharedKeyRequiresExplicitPermissionSharing(t *testing.T) {
 	base := querySubscription{project: "p", tenant: "a", path: "tasks.list", args: json.RawMessage(`{"status":"open"}`), caller: callerContext{user: &gonvex.User{ID: "one"}, permissions: map[string]any{"role": "member"}}}
 	other := base
 	other.caller.user = &gonvex.User{ID: "two"}
+	base.cacheScope = "browser-user-one"
+	other.cacheScope = "browser-user-two"
 	firstKey, _, _ := server.subscriptions.groupKeyAndDependencies(base)
 	secondKey, _, _ := server.subscriptions.groupKeyAndDependencies(other)
 	if firstKey != secondKey {
@@ -694,6 +940,67 @@ func TestKeyedResultPatch(t *testing.T) {
 	}
 	if got := patch.Order; len(got) != 3 || got[0] != "b" || got[2] != "c" {
 		t.Fatalf("unexpected order: %v", got)
+	}
+}
+
+func TestKeyedResultPatchSupportsPageEnvelope(t *testing.T) {
+	patch, ok := keyedResultPatch(
+		json.RawMessage(`{"page":[{"_id":"a","name":"before"}],"total":1,"perf":{"duration":1}}`),
+		json.RawMessage(`{"page":[{"_id":"a","name":"after"},{"_id":"b","name":"new"}],"total":2,"perf":{"duration":2}}`),
+	)
+	if !ok || patch.Type != "query.pagePatch" || len(patch.Inserted) != 1 || len(patch.Updated) != 1 {
+		t.Fatalf("unexpected page patch: %#v", patch)
+	}
+	metadata, ok := patch.Result.(map[string]json.RawMessage)
+	if !ok || metadata["page"] != nil || string(metadata["total"]) != "2" {
+		t.Fatalf("unexpected page metadata: %#v", patch.Result)
+	}
+}
+
+func TestKeyedResultPatchOmitsUnchangedOrder(t *testing.T) {
+	patch, ok := keyedResultPatch(
+		json.RawMessage(`[{"id":"a","title":"before"},{"id":"b","title":"keep"}]`),
+		json.RawMessage(`[{"id":"a","title":"after"},{"id":"b","title":"keep"}]`),
+	)
+	if !ok || len(patch.Updated) != 1 {
+		t.Fatalf("unexpected patch: %#v", patch)
+	}
+	if patch.Order != nil {
+		t.Fatalf("unchanged order should be omitted, got %v", patch.Order)
+	}
+}
+
+func TestKeyedResultPatchCompactsPrependOrder(t *testing.T) {
+	patch, ok := keyedResultPatch(
+		json.RawMessage(`[{"id":"b"},{"id":"a"}]`),
+		json.RawMessage(`[{"id":"c"},{"id":"b"},{"id":"a"}]`),
+	)
+	if !ok || len(patch.Prepend) != 1 || patch.Prepend[0] != "c" || patch.Order != nil {
+		t.Fatalf("unexpected prepend patch: %#v", patch)
+	}
+}
+
+func TestKeyedResultPatchSupportsObjectCollections(t *testing.T) {
+	patch, ok := keyedResultPatch(
+		json.RawMessage(`{"taskUsers":[{"id":"u1","taskId":"a"}],"taskTags":[],"taskCustomFieldValues":[]}`),
+		json.RawMessage(`{"taskUsers":[{"id":"u1","taskId":"b"},{"id":"u2","taskId":"c"}],"taskTags":[],"taskCustomFieldValues":[]}`),
+	)
+	if !ok || patch.Type != "query.objectPatch" || len(patch.Collections) != 1 {
+		t.Fatalf("unexpected object patch: %#v", patch)
+	}
+	users := patch.Collections["taskUsers"]
+	if len(users.Inserted) != 1 || len(users.Updated) != 1 || len(users.Append) != 1 || users.Append[0] != "u2" {
+		t.Fatalf("unexpected taskUsers patch: %#v", users)
+	}
+}
+
+func TestKeyedResultPatchRejectsChangedObjectMetadata(t *testing.T) {
+	_, ok := keyedResultPatch(
+		json.RawMessage(`{"rows":[],"total":1}`),
+		json.RawMessage(`{"rows":[],"total":2}`),
+	)
+	if ok {
+		t.Fatal("changed scalar metadata must fall back to a full result")
 	}
 }
 

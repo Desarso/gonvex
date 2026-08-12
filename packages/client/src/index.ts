@@ -601,6 +601,29 @@ export class GonvexClient {
         }
         return;
       }
+			if (message.type === "query.fanout") {
+				const { ids, queryType, ...shared } = message;
+				for (const id of ids) {
+					this.handlers.get(id)?.({ ...shared, type: queryType, id } as ServerMessage);
+				}
+				return;
+			}
+			if (message.type === "query.batch") {
+				for (const nested of message.messages) {
+					if (nested.type === "query.fanout") {
+						const { ids, queryType, ...shared } = nested;
+						for (const id of ids) {
+							this.handlers.get(id)?.({ ...shared, type: queryType, id } as ServerMessage);
+						}
+						continue;
+					}
+					if (nested.type !== "query.batch") {
+						const nestedID = "id" in nested ? nested.id : "system";
+						this.handlers.get(nestedID)?.(nested);
+					}
+				}
+				return;
+			}
       const id = "id" in message ? message.id : "system";
       this.handlers.get(id)?.(message);
     });
@@ -849,6 +872,56 @@ export class GonvexClient {
         subscriptionRevision: message.subscriptionRevision,
       };
     }
+		if (message.type === "query.pagePatch") {
+			if (!sameRevision(message.baseRevision, subscription.lastRevision)) {
+				this.requestSubscriptionSnapshot(subscription);
+				return undefined;
+			}
+			if (!this.acceptRevision(subscription, message.subscriptionRevision)) return undefined;
+			const previous = subscription.lastMessage;
+			if (previous?.type !== "query.result" || !isJsonRecord(previous.result) || !Array.isArray(previous.result.page)) {
+				this.requestSubscriptionSnapshot(subscription);
+				return undefined;
+			}
+			const page = applyKeyedPatch(previous.result.page, message);
+			if (!page) {
+				this.requestSubscriptionSnapshot(subscription);
+				return undefined;
+			}
+			const metadata = isJsonRecord(message.result) ? message.result : {};
+			subscription.lastRevision = message.subscriptionRevision;
+			subscription.revisionSocketGeneration = this.socketGeneration;
+			return { ...message, type: "query.result", result: { ...previous.result, ...metadata, page } };
+		}
+		if (message.type === "query.objectPatch") {
+			if (!sameRevision(message.baseRevision, subscription.lastRevision)) {
+				this.requestSubscriptionSnapshot(subscription);
+				return undefined;
+			}
+			if (!this.acceptRevision(subscription, message.subscriptionRevision)) return undefined;
+			const previous = subscription.lastMessage;
+			if (previous?.type !== "query.result" || !isJsonRecord(previous.result)) {
+				this.requestSubscriptionSnapshot(subscription);
+				return undefined;
+			}
+			const result: Record<string, JsonValue> = { ...previous.result };
+			for (const [key, patch] of Object.entries(message.collections)) {
+				const collection = result[key];
+				if (!Array.isArray(collection)) {
+					this.requestSubscriptionSnapshot(subscription);
+					return undefined;
+				}
+				const patched = applyKeyedPatch(collection, patch);
+				if (!patched) {
+					this.requestSubscriptionSnapshot(subscription);
+					return undefined;
+				}
+				result[key] = patched;
+			}
+			subscription.lastRevision = message.subscriptionRevision;
+			subscription.revisionSocketGeneration = this.socketGeneration;
+			return { ...message, type: "query.result", result };
+		}
     if (message.type === "query.result" && message.subscriptionRevision) {
       if (!this.acceptRevision(subscription, message.subscriptionRevision)) return undefined;
       subscription.lastRevision = message.subscriptionRevision;
@@ -2317,7 +2390,7 @@ export class GonvexClient {
       project: this.auth.project,
       tenant: this.auth.tenant,
       device: browserTelemetryInfo(),
-      capabilities: { syncReadyMany: 1, syncWatermark: 1 },
+		capabilities: { syncReadyMany: 1, syncWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1 },
     });
   }
 
@@ -2587,17 +2660,19 @@ function syncJSONSize(value: JsonValue) {
 
 function applyKeyedPatch(
   previous: JsonValue[],
-  patch: Extract<ServerMessage, { type: "query.patch" }>,
+	patch: { inserted?: JsonValue[]; updated?: JsonValue[]; deleted?: string[]; order?: string[]; prepend?: string[]; append?: string[] },
 ): JsonValue[] | undefined {
   const rows = new Map<string, JsonValue>();
   for (const row of previous) {
-    if (!isJsonRecord(row) || typeof row.id !== "string" || rows.has(row.id)) return undefined;
-    rows.set(row.id, row);
+	const id = queryPatchRowKey(row);
+	if (!id || rows.has(id)) return undefined;
+	rows.set(id, row);
   }
   for (const id of patch.deleted ?? []) rows.delete(id);
   for (const row of [...(patch.inserted ?? []), ...(patch.updated ?? [])]) {
-    if (!isJsonRecord(row) || typeof row.id !== "string") return undefined;
-    rows.set(row.id, row);
+	const id = queryPatchRowKey(row);
+	if (!id) return undefined;
+	rows.set(id, row);
   }
   if (patch.order) {
     if (patch.order.length !== rows.size) return undefined;
@@ -2611,7 +2686,35 @@ function applyKeyedPatch(
     }
     return ordered;
   }
+	if (patch.prepend || patch.append) {
+		const prefix = patch.prepend ?? [];
+		const suffix = patch.append ?? [];
+		const moved = new Set([...prefix, ...suffix]);
+		if (moved.size !== prefix.length + suffix.length) return undefined;
+		const ordered: JsonValue[] = [];
+		for (const id of prefix) {
+			const row = rows.get(id);
+			if (!row) return undefined;
+			ordered.push(row);
+		}
+		for (const [id, row] of rows) {
+			if (!moved.has(id)) ordered.push(row);
+		}
+		for (const id of suffix) {
+			const row = rows.get(id);
+			if (!row) return undefined;
+			ordered.push(row);
+		}
+		if (ordered.length !== rows.size) return undefined;
+		return ordered;
+	}
   return Array.from(rows.values());
+}
+
+function queryPatchRowKey(value: JsonValue): string {
+  if (!isJsonRecord(value)) return "";
+  const candidate = value._id ?? value.id;
+  return typeof candidate === "string" || typeof candidate === "number" ? String(candidate) : "";
 }
 
 export class ConvexReactClient extends GonvexClient {

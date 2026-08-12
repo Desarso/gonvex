@@ -172,6 +172,7 @@ type transactionTelemetryEntry struct {
 	ViewportWidth          int     `json:"viewportWidth,omitempty"`
 	ViewportHeight         int     `json:"viewportHeight,omitempty"`
 	DeviceJSON             string  `json:"device,omitempty"`
+	LogicalCount           int64   `json:"logicalCount,omitempty"`
 }
 
 type transactionMetrics struct {
@@ -262,6 +263,17 @@ type reactiveMetricState struct {
 	ResultBytesAfter                   uint64
 	DatabaseQueryCount                 uint64
 	DatabaseQueryDurationMS            float64
+	VisibilityResolverExecutions       uint64
+	VisibilityResolverDurationMS       float64
+	VisibilitySharedExecutions         uint64
+	VisibilitySharedDurationMS         float64
+	ReactiveExecutionPasses            uint64
+	ReactiveExecutionDurationMS        float64
+	ResultCompletionPasses             uint64
+	ResultCompletionDurationMS         float64
+	DeliveryPasses                     uint64
+	DeliveryPrepareDurationMS          float64
+	DeliveryWriteDurationMS            float64
 	ChangeToClientDurationMS           float64
 	ChangeToClientSamples              uint64
 	ActiveTenantListeners              int
@@ -295,6 +307,17 @@ type reactiveMetricSnapshot struct {
 	ResultBytesAfter                   uint64  `json:"resultBytesAfter"`
 	DatabaseQueryCount                 uint64  `json:"databaseQueryCount"`
 	DatabaseQueryDurationMS            float64 `json:"databaseQueryDurationMs"`
+	VisibilityResolverExecutions       uint64  `json:"visibilityResolverExecutions"`
+	VisibilityResolverDurationMS       float64 `json:"visibilityResolverDurationMs"`
+	VisibilitySharedExecutions         uint64  `json:"visibilitySharedExecutions"`
+	VisibilitySharedDurationMS         float64 `json:"visibilitySharedDurationMs"`
+	ReactiveExecutionPasses            uint64  `json:"reactiveExecutionPasses"`
+	ReactiveExecutionDurationMS        float64 `json:"reactiveExecutionDurationMs"`
+	ResultCompletionPasses             uint64  `json:"resultCompletionPasses"`
+	ResultCompletionDurationMS         float64 `json:"resultCompletionDurationMs"`
+	DeliveryPasses                     uint64  `json:"deliveryPasses"`
+	DeliveryPrepareDurationMS          float64 `json:"deliveryPrepareDurationMs"`
+	DeliveryWriteDurationMS            float64 `json:"deliveryWriteDurationMs"`
 	AverageChangeToClientMS            float64 `json:"averageChangeToClientMs"`
 	ActiveTenantListeners              int     `json:"activeTenantListeners"`
 	ListenerReconnects                 uint64  `json:"listenerReconnects"`
@@ -381,6 +404,17 @@ func (state reactiveMetricState) snapshot() reactiveMetricSnapshot {
 		ResultBytesAfter:                   state.ResultBytesAfter,
 		DatabaseQueryCount:                 state.DatabaseQueryCount,
 		DatabaseQueryDurationMS:            state.DatabaseQueryDurationMS,
+		VisibilityResolverExecutions:       state.VisibilityResolverExecutions,
+		VisibilityResolverDurationMS:       state.VisibilityResolverDurationMS,
+		VisibilitySharedExecutions:         state.VisibilitySharedExecutions,
+		VisibilitySharedDurationMS:         state.VisibilitySharedDurationMS,
+		ReactiveExecutionPasses:            state.ReactiveExecutionPasses,
+		ReactiveExecutionDurationMS:        state.ReactiveExecutionDurationMS,
+		ResultCompletionPasses:             state.ResultCompletionPasses,
+		ResultCompletionDurationMS:         state.ResultCompletionDurationMS,
+		DeliveryPasses:                     state.DeliveryPasses,
+		DeliveryPrepareDurationMS:          state.DeliveryPrepareDurationMS,
+		DeliveryWriteDurationMS:            state.DeliveryWriteDurationMS,
 		AverageChangeToClientMS:            averageChangeToClient,
 		ActiveTenantListeners:              state.ActiveTenantListeners,
 		ListenerReconnects:                 state.ListenerReconnects,
@@ -564,6 +598,10 @@ func (m *runtimeMetrics) recordPropagationLocked(entry transactionTelemetryEntry
 	if browserMS == 0 && serverMS == 0 {
 		return
 	}
+	count := entry.LogicalCount
+	if count < 1 {
+		count = 1
+	}
 	if m.propagationBuckets == nil {
 		m.propagationBuckets = map[int64]*propagationMetricsBucket{}
 	}
@@ -574,23 +612,23 @@ func (m *runtimeMetrics) recordPropagationLocked(entry transactionTelemetryEntry
 		m.propagationBuckets[key] = bucket
 	}
 	if browserMS > 0 {
-		bucket.BrowserSamples++
-		bucket.BrowserTotalMS += browserMS
+		bucket.BrowserSamples += count
+		bucket.BrowserTotalMS += browserMS * float64(count)
 		if browserMS > bucket.BrowserMaxMS {
 			bucket.BrowserMaxMS = browserMS
 		}
 		if len(bucket.BrowserValues) < propagationBucketSampleLimit {
 			bucket.BrowserValues = append(bucket.BrowserValues, browserMS)
 		}
-		m.propagationTotals.Samples++
-		m.propagationTotals.TotalMS += browserMS
+		m.propagationTotals.Samples += count
+		m.propagationTotals.TotalMS += browserMS * float64(count)
 		if browserMS > m.propagationTotals.MaxMS {
 			m.propagationTotals.MaxMS = browserMS
 		}
 	}
 	if serverMS > 0 {
-		bucket.ServerSamples++
-		bucket.ServerTotalMS += serverMS
+		bucket.ServerSamples += count
+		bucket.ServerTotalMS += serverMS * float64(count)
 		if serverMS > bucket.ServerMaxMS {
 			bucket.ServerMaxMS = serverMS
 		}
@@ -1038,24 +1076,54 @@ func (m *runtimeMetrics) recordDatabase(project string, stats databasePoolStats)
 }
 
 func (m *runtimeMetrics) recordTransaction(entry transactionTelemetryEntry) {
-	if m == nil || entry.Path == "" || entry.Kind == "" {
+	m.recordTransactions([]transactionTelemetryEntry{entry})
+}
+
+func (m *runtimeMetrics) recordTransactions(entries []transactionTelemetryEntry) {
+	if m == nil || len(entries) == 0 {
 		return
 	}
-	if entry.Time == "" {
-		entry.Time = time.Now().UTC().Format(time.RFC3339Nano)
-	}
-	if entry.Outcome == "" {
-		entry.Outcome = "ok"
-	}
-	now, err := time.Parse(time.RFC3339Nano, entry.Time)
-	if err != nil {
-		now = time.Now().UTC()
-		entry.Time = now.Format(time.RFC3339Nano)
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var encoder *json.Encoder
+	var file *os.File
+	if m.telemetryPath != "" {
+		if dir := filepath.Dir(m.telemetryPath); dir != "." && dir != "" {
+			_ = os.MkdirAll(dir, 0o755)
+		}
+		if opened, err := os.OpenFile(m.telemetryPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+			file = opened
+			encoder = json.NewEncoder(file)
+			defer file.Close()
+		}
+	}
+	for _, entry := range entries {
+		if entry.Path == "" || entry.Kind == "" {
+			continue
+		}
+		if entry.Time == "" {
+			entry.Time = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		if entry.Outcome == "" {
+			entry.Outcome = "ok"
+		}
+		now, err := time.Parse(time.RFC3339Nano, entry.Time)
+		if err != nil {
+			now = time.Now().UTC()
+			entry.Time = now.Format(time.RFC3339Nano)
+		}
+		m.recordTransactionLocked(entry, now)
+		if encoder != nil {
+			_ = encoder.Encode(entry)
+		}
+	}
+}
 
+func (m *runtimeMetrics) recordTransactionLocked(entry transactionTelemetryEntry, now time.Time) {
+	count := entry.LogicalCount
+	if count < 1 {
+		count = 1
+	}
 	key := entry.Kind + ":" + entry.Path
 	metrics := m.transactions[key]
 	if metrics == nil {
@@ -1065,23 +1133,23 @@ func (m *runtimeMetrics) recordTransaction(entry transactionTelemetryEntry) {
 	metrics.Kind = entry.Kind
 	metrics.Path = entry.Path
 	if entry.Outcome == "error" {
-		metrics.Errors++
+		metrics.Errors += count
 	}
 	metrics.LastEventAt = now
 	bucket := metrics.bucket(now)
 	if entry.Outcome == "error" {
-		bucket.Errors++
+		bucket.Errors += count
 	}
 	if entry.Phase == "browser" {
-		metrics.BrowserEvents++
-		bucket.BrowserEvents++
+		metrics.BrowserEvents += count
+		bucket.BrowserEvents += count
 	} else {
-		metrics.ServerEvents++
-		bucket.ServerEvents++
+		metrics.ServerEvents += count
+		bucket.ServerEvents += count
 	}
 	if entry.ServerDurationMS > 0 {
-		metrics.TotalServerDurationMS += entry.ServerDurationMS
-		bucket.TotalServerDurationMS += entry.ServerDurationMS
+		metrics.TotalServerDurationMS += entry.ServerDurationMS * float64(count)
+		bucket.TotalServerDurationMS += entry.ServerDurationMS * float64(count)
 	}
 	if entry.ServerCommitMS > 0 {
 		metrics.TotalServerCommitMS += entry.ServerCommitMS
@@ -1112,13 +1180,12 @@ func (m *runtimeMetrics) recordTransaction(entry transactionTelemetryEntry) {
 		bucket.ChangeToBrowserSamples++
 	}
 	if entry.SubscriptionDurationMS > 0 {
-		metrics.TotalSubscriptionDurationMS += entry.SubscriptionDurationMS
-		metrics.SubscriptionDurationSamples++
+		metrics.TotalSubscriptionDurationMS += entry.SubscriptionDurationMS * float64(count)
+		metrics.SubscriptionDurationSamples += count
 	}
 	metrics.trimBuckets(now)
 	m.recordPropagationLocked(entry, now)
 	m.appendTelemetryLog(entry)
-	m.appendTelemetryFileLocked(entry)
 }
 
 func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, subscriptions int, projectFilter string) runtimeMetricsSnapshot {

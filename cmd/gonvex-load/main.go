@@ -54,6 +54,7 @@ type cliOptions struct {
 	authMode                string
 	tokenEnvironment        string
 	compression             bool
+	queryResultBatch        bool
 	maximumDialConcurrency  int
 	sampleInterval          time.Duration
 	targetPID               int
@@ -140,6 +141,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		AuthMode:                   mode,
 		SharedToken:                sharedToken,
 		Compression:                options.compression,
+		QueryResultBatch:           options.queryResultBatch,
 		MaximumDialConcurrency:     options.maximumDialConcurrency,
 		Variables:                  map[string]string(options.variables),
 		SampleInterval:             options.sampleInterval,
@@ -177,6 +179,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		"mutationPaths":      requestedMutationRates(config, profile),
 		"authMode":           config.AuthMode,
 		"compression":        config.Compression,
+		"queryResultBatch":   config.QueryResultBatch,
 		"report":             options.reportPath,
 	}
 	if options.dryRun {
@@ -259,6 +262,7 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 		authMode:                string(authModeSynthetic),
 		tokenEnvironment:        "GONVEX_LOAD_TOKEN",
 		compression:             true,
+		queryResultBatch:        true,
 		maximumDialConcurrency:  64,
 		sampleInterval:          time.Second,
 		minimumHostAvailableMiB: 4096,
@@ -286,6 +290,7 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 	flags.StringVar(&options.authMode, "auth-mode", options.authMode, "none, shared, or synthetic")
 	flags.StringVar(&options.tokenEnvironment, "token-env", options.tokenEnvironment, "environment variable containing shared token")
 	flags.BoolVar(&options.compression, "compression", options.compression, "negotiate WebSocket compression")
+	flags.BoolVar(&options.queryResultBatch, "query-result-batch", options.queryResultBatch, "negotiate batched query-result frames")
 	flags.IntVar(&options.maximumDialConcurrency, "max-dial-concurrency", options.maximumDialConcurrency, "maximum concurrent WebSocket handshakes")
 	flags.DurationVar(&options.sampleInterval, "sample-interval", options.sampleInterval, "resource and throughput sample interval; 0 disables")
 	flags.IntVar(&options.targetPID, "target-pid", 0, "runtime process id to sample")

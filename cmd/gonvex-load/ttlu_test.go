@@ -37,3 +37,23 @@ func TestPropagationAggregatorComputesTimeToLastUserByMutationPath(t *testing.T)
 		t.Fatalf("unexpected tasks.update TTLU: %#v", update)
 	}
 }
+
+func TestPropagationAggregatorCorrelatesMutationIDsAcrossTimestampSkewAndCoalescing(t *testing.T) {
+	aggregator := newPropagationAggregator()
+	// A delivery may race ahead of the mutation response on another socket.
+	aggregator.RecordDeliveryIDs([]string{"mutation-a", "mutation-b"}, "client-a", 1050)
+	aggregator.RecordCommitID("mutation-a", 1000, "tasks.create")
+	aggregator.RecordCommitID("mutation-b", 1020, "tasks.update")
+	aggregator.RecordDeliveryIDs([]string{"mutation-a", "mutation-b"}, "client-b", 1080)
+
+	report := aggregator.Report()
+	if report.CommittedMutations != 2 || report.CommitsWithPropagation != 2 || report.PropagationSamples != 4 {
+		t.Fatalf("unexpected ID-correlated commit counts: %#v", report)
+	}
+	if got := report.ByMutationPath["tasks.create"].TTLU.MaxMS; got != 80 {
+		t.Fatalf("tasks.create TTLU = %v, want 80", got)
+	}
+	if got := report.ByMutationPath["tasks.update"].TTLU.MaxMS; got != 60 {
+		t.Fatalf("tasks.update TTLU = %v, want 60", got)
+	}
+}

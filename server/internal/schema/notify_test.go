@@ -36,6 +36,58 @@ func TestNotifySQLForTableUsesTableNameAndChannel(t *testing.T) {
 	}
 }
 
+func TestNotifySQLForTableUsesConvexIDAndSuppressesEmptyStatements(t *testing.T) {
+	sql, err := NotifySQLForTable("tasks", manifest.Table{Columns: map[string]manifest.Column{
+		"_id":    {Type: "id"},
+		"taskId": {Type: "id"},
+		"name":   {Type: "text"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`SELECT "_id" FROM new_rows WHERE "_id" IS NOT NULL`,
+		`FULL OUTER JOIN new_rows new_row USING ("_id")`,
+		"IF row_count = 0 THEN",
+		"'broad', row_count >= 500",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected notify SQL to contain %q:\n%s", want, sql)
+		}
+	}
+}
+
+func TestNotifySQLIncludesCommittedUserIDsWhenColumnExists(t *testing.T) {
+	sql, err := NotifySQLForTable("notifications", manifest.Table{Columns: map[string]manifest.Column{
+		"_id": {Type: "id"}, "userId": {Type: "id"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`SELECT "userId" FROM new_rows`, `'userIds', CASE WHEN row_count < 500 THEN user_ids`} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected notify SQL to contain %q:\n%s", want, sql)
+		}
+	}
+}
+
+func TestNotifySQLIncludesOldAndNewWorkspaceIDsForUpdates(t *testing.T) {
+	sql, err := NotifySQLForTable("tasks", manifest.Table{Columns: map[string]manifest.Column{
+		"_id": {Type: "id"}, "workspaceId": {Type: "id"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`SELECT "workspaceId" FROM old_rows UNION SELECT "workspaceId" FROM new_rows`,
+		`'workspaceIds', CASE WHEN row_count < 500 THEN workspace_ids`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected notify SQL to contain %q:\n%s", want, sql)
+		}
+	}
+}
+
 func TestNotifySQLForTableWithoutIDUsesBroadInvalidation(t *testing.T) {
 	sql, err := NotifySQLForTable("events", manifest.Table{Columns: map[string]manifest.Column{
 		"name": {Type: "text"},

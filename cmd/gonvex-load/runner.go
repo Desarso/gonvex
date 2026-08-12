@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,13 @@ const (
 	authModeShared    authMode = "shared"
 	authModeSynthetic authMode = "synthetic"
 )
+
+func boolCapability(enabled bool) int {
+	if enabled {
+		return 1
+	}
+	return 0
+}
 
 type runConfig struct {
 	URL                        string
@@ -44,11 +52,13 @@ type runConfig struct {
 	AuthMode                   authMode
 	SharedToken                string
 	Compression                bool
+	QueryResultBatch           bool
 	MaximumDialConcurrency     int
 	Variables                  map[string]string
 	SampleInterval             time.Duration
 	TargetPID                  int
 	Safety                     safetyLimits
+	RunID                      string
 }
 
 type runMetrics struct {
@@ -128,11 +138,15 @@ type tenantMetrics struct {
 }
 
 type pathMetrics struct {
-	initialResults uint64
-	errors         uint64
-	payloadBytes   uint64
-	initialLatency *latencyHistogram
-	serverLatency  *latencyHistogram
+	initialResults            uint64
+	errors                    uint64
+	payloadBytes              uint64
+	invalidations             InvalidationReport
+	initialLatency            *latencyHistogram
+	serverLatency             *latencyHistogram
+	invalidationLatency       *latencyHistogram
+	invalidationServerLatency *latencyHistogram
+	functionLatency           *latencyHistogram
 }
 
 type RunReport struct {
@@ -162,6 +176,7 @@ type RunConfigurationReport struct {
 	AuthMode                   authMode `json:"authMode"`
 	IdentityMode               string   `json:"identityMode"`
 	Compression                bool     `json:"compression"`
+	QueryResultBatch           bool     `json:"queryResultBatch"`
 	TenantCount                int      `json:"tenantCount"`
 	Users                      int      `json:"users"`
 	Connections                int      `json:"connections"`
@@ -260,24 +275,33 @@ type HistogramReport struct {
 }
 
 type PathReport struct {
-	InitialResults uint64          `json:"initialResults"`
-	Errors         uint64          `json:"errors"`
-	PayloadBytes   uint64          `json:"payloadBytes"`
-	InitialLatency HistogramReport `json:"initialLatency"`
-	ServerLatency  HistogramReport `json:"serverLatency"`
+	InitialResults             uint64             `json:"initialResults"`
+	Errors                     uint64             `json:"errors"`
+	PayloadBytes               uint64             `json:"payloadBytes"`
+	InitialLatency             HistogramReport    `json:"initialLatency"`
+	ServerLatency              HistogramReport    `json:"serverLatency"`
+	Invalidations              InvalidationReport `json:"invalidations"`
+	InvalidationChangeToClient HistogramReport    `json:"invalidationChangeToClient"`
+	InvalidationServerQuery    HistogramReport    `json:"invalidationServerQuery"`
+	FunctionLatency            HistogramReport    `json:"functionLatency"`
 }
 
 type serverEnvelope struct {
-	Type   string          `json:"type"`
-	ID     string          `json:"id"`
-	Path   string          `json:"path"`
-	Reason string          `json:"reason"`
-	Error  string          `json:"error"`
-	Result json.RawMessage `json:"result"`
-	Trace  *struct {
-		ServerDurationMS            float64 `json:"serverDurationMs"`
-		ServerMutationCommittedAtMS float64 `json:"serverMutationCommittedAtMs"`
-		ServerChangeCommittedAtMS   float64 `json:"serverChangeCommittedAtMs"`
+	Type        string           `json:"type"`
+	ID          string           `json:"id"`
+	IDs         []string         `json:"ids"`
+	QueryType   string           `json:"queryType"`
+	Path        string           `json:"path"`
+	Reason      string           `json:"reason"`
+	Error       string           `json:"error"`
+	Result      json.RawMessage  `json:"result"`
+	MutationIDs []string         `json:"mutationIds"`
+	Messages    []serverEnvelope `json:"messages"`
+	Trace       *struct {
+		ServerDurationMS            float64         `json:"serverDurationMs"`
+		ServerMutationCommittedAtMS float64         `json:"serverMutationCommittedAtMs"`
+		ServerChangeCommittedAtMS   float64         `json:"serverChangeCommittedAtMs"`
+		QueryPerf                   json.RawMessage `json:"queryPerf"`
 	} `json:"trace"`
 }
 
@@ -367,28 +391,54 @@ func (m *runMetrics) mutationPath(path string) *mutationPathMetrics {
 	return metrics
 }
 
-func (m *runMetrics) recordInvalidation(tenant, kind string, latency, serverDuration time.Duration, payloadBytes int) {
+func (m *runMetrics) recordInvalidation(tenant, path, kind string, latency, serverDuration, functionDuration time.Duration, payloadBytes int) {
+	m.recordInvalidationN(tenant, path, kind, latency, serverDuration, functionDuration, payloadBytes, 1)
+}
+
+func (m *runMetrics) recordInvalidationN(tenant, path, kind string, latency, serverDuration, functionDuration time.Duration, payloadBytes int, count uint64) {
 	tenantMetrics := m.tenant(tenant)
 	switch kind {
 	case "query.result":
-		m.invalidationResults.Add(1)
-		tenantMetrics.invalidationResults.Add(1)
-	case "query.patch":
-		m.invalidationPatches.Add(1)
-		tenantMetrics.invalidationPatches.Add(1)
+		m.invalidationResults.Add(count)
+		tenantMetrics.invalidationResults.Add(count)
+	case "query.patch", "query.pagePatch", "query.objectPatch":
+		m.invalidationPatches.Add(count)
+		tenantMetrics.invalidationPatches.Add(count)
 	case "query.progress":
-		m.invalidationProgress.Add(1)
-		tenantMetrics.invalidationProgress.Add(1)
+		m.invalidationProgress.Add(count)
+		tenantMetrics.invalidationProgress.Add(count)
 	}
 	m.invalidationBytes.Add(uint64(payloadBytes))
 	tenantMetrics.invalidationBytes.Add(uint64(payloadBytes))
 	if latency >= 0 {
-		m.invalidationLatency.Observe(latency)
-		tenantMetrics.invalidationLatency.Observe(latency)
+		m.invalidationLatency.ObserveN(latency, count)
+		tenantMetrics.invalidationLatency.ObserveN(latency, count)
 	}
 	if serverDuration > 0 {
-		m.invalidationServerLatency.Observe(serverDuration)
-		tenantMetrics.invalidationServerLatency.Observe(serverDuration)
+		m.invalidationServerLatency.ObserveN(serverDuration, count)
+		tenantMetrics.invalidationServerLatency.ObserveN(serverDuration, count)
+	}
+	pathMetrics := m.path(path)
+	m.pathMu.Lock()
+	pathMetrics.invalidations.Messages += count
+	pathMetrics.invalidations.PayloadBytes += uint64(payloadBytes)
+	switch kind {
+	case "query.result":
+		pathMetrics.invalidations.FullResults += count
+	case "query.patch", "query.pagePatch", "query.objectPatch":
+		pathMetrics.invalidations.Patches += count
+	case "query.progress":
+		pathMetrics.invalidations.Progress += count
+	}
+	m.pathMu.Unlock()
+	if latency >= 0 {
+		pathMetrics.invalidationLatency.ObserveN(latency, count)
+	}
+	if serverDuration > 0 {
+		pathMetrics.invalidationServerLatency.ObserveN(serverDuration, count)
+	}
+	if functionDuration > 0 {
+		pathMetrics.functionLatency.ObserveN(functionDuration, count)
 	}
 }
 
@@ -397,7 +447,7 @@ func (m *runMetrics) path(path string) *pathMetrics {
 	defer m.pathMu.Unlock()
 	metrics := m.paths[path]
 	if metrics == nil {
-		metrics = &pathMetrics{initialLatency: newLatencyHistogram(), serverLatency: newLatencyHistogram()}
+		metrics = &pathMetrics{initialLatency: newLatencyHistogram(), serverLatency: newLatencyHistogram(), invalidationLatency: newLatencyHistogram(), invalidationServerLatency: newLatencyHistogram(), functionLatency: newLatencyHistogram()}
 		m.paths[path] = metrics
 	}
 	return metrics
@@ -482,6 +532,9 @@ func runLoad(ctx context.Context, config runConfig, profile Profile) (RunReport,
 	}
 	plans := makeSessionPlans(config, profile)
 	startedAt := time.Now().UTC()
+	if config.RunID == "" {
+		config.RunID = "r" + strconv.FormatInt(startedAt.UnixNano(), 36)
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	metrics := newRunMetrics()
@@ -761,7 +814,10 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, plan
 		}
 		authID := fmt.Sprintf("auth-%06d-%02d", userIndex+1, plan.connectionIndex+1)
 		authStarted := time.Now()
-		if err := writeEnvelope(connection, metrics, map[string]any{"type": "auth", "id": authID, "token": token, "tenant": tenant, "project": config.Project}); err != nil {
+		if err := writeEnvelope(connection, metrics, map[string]any{
+			"type": "auth", "id": authID, "token": token, "tenant": tenant, "project": config.Project,
+			"capabilities": map[string]any{"queryPagePatch": 1, "queryObjectPatch": 1, "queryOrderDelta": 1, "queryFanout": 1, "queryResultBatch": boolCapability(config.QueryResultBatch)},
+		}); err != nil {
 			metrics.recordSetupError(tenant, "__auth__")
 			metrics.setupFinished.Add(1)
 			return
@@ -782,19 +838,54 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, plan
 	type receivedEnvelope struct {
 		message      serverEnvelope
 		payloadBytes int
+		receivedAt   time.Time
 		err          error
 	}
 	// Read while subscriptions are being written. A browser's WebSocket event
 	// loop does this concurrently; waiting until every write completes can
 	// deadlock when initial snapshots fill both peers' socket buffers.
 	received := make(chan receivedEnvelope, max(64, plan.subscriptionCount*2))
+	var setupSettled atomic.Bool
 	_ = connection.SetReadDeadline(time.Now().Add(config.InitialTimeout))
 	go func() {
 		for {
 			message, payloadBytes, err := readEnvelope(connection, metrics)
-			received <- receivedEnvelope{message: message, payloadBytes: payloadBytes, err: err}
+			receivedAt := time.Now()
 			if err != nil {
+				received <- receivedEnvelope{message: message, payloadBytes: payloadBytes, receivedAt: receivedAt, err: err}
 				return
+			}
+			queue := []serverEnvelope{message}
+			if message.Type == "query.batch" {
+				queue = message.Messages
+			}
+			first := true
+			for _, nested := range queue {
+				if nested.Type == "query.fanout" && len(nested.IDs) > 0 {
+					if setupSettled.Load() && nested.Reason == "invalidate" {
+						copyBytes := 0
+						if first {
+							copyBytes, first = payloadBytes, false
+						}
+						received <- receivedEnvelope{message: nested, payloadBytes: copyBytes, receivedAt: receivedAt}
+						continue
+					}
+					for _, id := range nested.IDs {
+						copy := nested
+						copy.Type, copy.ID, copy.IDs, copy.QueryType = nested.QueryType, id, nil, ""
+						copyBytes := 0
+						if first {
+							copyBytes, first = payloadBytes, false
+						}
+						received <- receivedEnvelope{message: copy, payloadBytes: copyBytes, receivedAt: receivedAt}
+					}
+					continue
+				}
+				copyBytes := 0
+				if first {
+					copyBytes, first = payloadBytes, false
+				}
+				received <- receivedEnvelope{message: nested, payloadBytes: copyBytes, receivedAt: receivedAt}
 			}
 		}
 	}()
@@ -845,6 +936,23 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, plan
 			return
 		}
 		message := envelope.message
+		if message.Type == "query.fanout" && message.Reason == "invalidate" && len(message.IDs) > 0 {
+			receivedAt := envelope.receivedAt
+			if receivedAt.IsZero() {
+				receivedAt = time.Now()
+			}
+			delay := changeToClientDuration(message, receivedAt)
+			metrics.recordInvalidationN(tenant, message.Path, message.QueryType, delay, traceDuration(message), traceFunctionDuration(message), envelope.payloadBytes, uint64(len(message.IDs)))
+			if message.Trace != nil {
+				clientID := fmt.Sprintf("u%06d-c%02d", userIndex+1, plan.connectionIndex+1)
+				if len(message.MutationIDs) > 0 {
+					metrics.propagation.RecordDeliveryIDs(message.MutationIDs, clientID, float64(receivedAt.UnixNano())/float64(time.Millisecond))
+				} else {
+					metrics.propagation.RecordDelivery(message.Trace.ServerChangeCommittedAtMS, clientID, delay)
+				}
+			}
+			continue
+		}
 		pendingMutationMu.Lock()
 		mutation, isMutation := pendingMutations[message.ID]
 		if isMutation && (message.Type == "mutation.result" || message.Type == "mutation.error") {
@@ -856,7 +964,7 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, plan
 				serverDuration := traceDuration(message)
 				metrics.recordMutation(tenant, mutation.path, time.Since(mutation.sentAt), serverDuration)
 				if message.Trace != nil {
-					metrics.propagation.RecordCommit(message.Trace.ServerMutationCommittedAtMS, mutation.path)
+					metrics.propagation.RecordCommitID(message.ID, message.Trace.ServerMutationCommittedAtMS, mutation.path)
 				}
 			} else if message.Type == "mutation.error" {
 				metrics.recordMutationError(tenant, mutation.path)
@@ -868,13 +976,20 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, plan
 		if subscription == nil {
 			continue
 		}
-		if message.Reason == "invalidate" && (message.Type == "query.result" || message.Type == "query.patch" || message.Type == "query.progress") {
-			receivedAt := time.Now()
+		if message.Reason == "invalidate" && (message.Type == "query.result" || message.Type == "query.patch" || message.Type == "query.pagePatch" || message.Type == "query.objectPatch" || message.Type == "query.progress") {
+			receivedAt := envelope.receivedAt
+			if receivedAt.IsZero() {
+				receivedAt = time.Now()
+			}
 			delay := changeToClientDuration(message, receivedAt)
-			metrics.recordInvalidation(tenant, message.Type, delay, traceDuration(message), envelope.payloadBytes)
+			metrics.recordInvalidation(tenant, subscription.path, message.Type, delay, traceDuration(message), traceFunctionDuration(message), envelope.payloadBytes)
 			if message.Trace != nil {
 				clientID := fmt.Sprintf("u%06d-c%02d", userIndex+1, plan.connectionIndex+1)
-				metrics.propagation.RecordDelivery(message.Trace.ServerChangeCommittedAtMS, clientID, delay)
+				if len(message.MutationIDs) > 0 {
+					metrics.propagation.RecordDeliveryIDs(message.MutationIDs, clientID, float64(receivedAt.UnixNano())/float64(time.Millisecond))
+				} else {
+					metrics.propagation.RecordDelivery(message.Trace.ServerChangeCommittedAtMS, clientID, delay)
+				}
 			}
 			continue
 		}
@@ -899,6 +1014,7 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, plan
 			metrics.recordError(tenant, subscription.path, message.Error)
 		}
 		if settled == len(pending) {
+			setupSettled.Store(true)
 			_ = connection.SetReadDeadline(time.Time{})
 		}
 	}
@@ -1001,7 +1117,7 @@ func runMutationWriter(ctx context.Context, start, stop <-chan struct{}, connect
 		variables["tenant"] = tenant
 		variables["userId"] = userID
 		variables["sequence"] = fmt.Sprintf("%d", sequence)
-		variables["mutationId"] = fmt.Sprintf("u%06d-c%02d-m%06d", plan.userIndex+1, plan.connectionIndex+1, sequence)
+		variables["mutationId"] = fmt.Sprintf("%s-u%06d-c%02d-m%06d", config.RunID, plan.userIndex+1, plan.connectionIndex+1, sequence)
 		schedule := &schedules[nextIndex]
 		args, err := schedule.spec.expandedArgs(variables)
 		if err != nil {
@@ -1041,6 +1157,19 @@ func traceDuration(message serverEnvelope) time.Duration {
 		return 0
 	}
 	return time.Duration(message.Trace.ServerDurationMS * float64(time.Millisecond))
+}
+
+func traceFunctionDuration(message serverEnvelope) time.Duration {
+	if message.Trace == nil || len(message.Trace.QueryPerf) == 0 {
+		return 0
+	}
+	var perf struct {
+		ServerFunctionDurationMS float64 `json:"serverFunctionDurationMs"`
+	}
+	if json.Unmarshal(message.Trace.QueryPerf, &perf) != nil || perf.ServerFunctionDurationMS <= 0 {
+		return 0
+	}
+	return time.Duration(perf.ServerFunctionDurationMS * float64(time.Millisecond))
 }
 
 func changeToClientDuration(message serverEnvelope, receivedAt time.Time) time.Duration {
@@ -1194,11 +1323,15 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 	for _, path := range pathNames {
 		metrics := m.paths[path]
 		paths[path] = PathReport{
-			InitialResults: metrics.initialResults,
-			Errors:         metrics.errors,
-			PayloadBytes:   metrics.payloadBytes,
-			InitialLatency: histogramReport(metrics.initialLatency),
-			ServerLatency:  histogramReport(metrics.serverLatency),
+			InitialResults:             metrics.initialResults,
+			Errors:                     metrics.errors,
+			PayloadBytes:               metrics.payloadBytes,
+			InitialLatency:             histogramReport(metrics.initialLatency),
+			ServerLatency:              histogramReport(metrics.serverLatency),
+			Invalidations:              metrics.invalidations,
+			InvalidationChangeToClient: histogramReport(metrics.invalidationLatency),
+			InvalidationServerQuery:    histogramReport(metrics.invalidationServerLatency),
+			FunctionLatency:            histogramReport(metrics.functionLatency),
 		}
 	}
 	for key, count := range m.errorSamples {
@@ -1289,7 +1422,7 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 		Tenant:  primaryTenant,
 		Tenants: tenantReports,
 		Configuration: RunConfigurationReport{
-			AuthMode: config.AuthMode, IdentityMode: identityMode, Compression: config.Compression,
+			AuthMode: config.AuthMode, IdentityMode: identityMode, Compression: config.Compression, QueryResultBatch: config.QueryResultBatch,
 			TenantCount: len(tenantNames), Users: config.Users, Connections: config.Connections,
 			ConnectionsPerUser:         float64(config.Connections) / float64(config.Users),
 			SubscriptionsPerConnection: config.SubscriptionsPerConnection,

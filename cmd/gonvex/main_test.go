@@ -37,11 +37,13 @@ func TestParseRegistrationsIncludesDependencyOptions(t *testing.T) {
 	source := `package app
 import "github.com/gonvex/gonvex/pkg/gonvex"
 func Register(app *gonvex.App) {
-  app.Query("tasks.list", ListTasks,
-    gonvex.Reads("tasks").Columns("id", "title").Filters("status").OrdersBy("updated_at").Windowed(),
-    gonvex.ReadsEphemeral(),
-    gonvex.ShareByPermissions(),
-  )
+	  app.Query("tasks.list", ListTasks,
+	    gonvex.Reads("tasks").Columns("id", "title").Filters("status").OrdersBy("updated_at").Windowed(),
+	    gonvex.ReadsEphemeral(),
+	    gonvex.ShareByPermissions(),
+	    gonvex.ShareByVisibility("internal.taskVisibility"),
+	    gonvex.ShareResultFrom("internal.tasksShared", "query"),
+	  )
   app.Mutation("tasks.update", UpdateTask, gonvex.Writes("tasks").Columns("title"))
   app.Mutation("presence.beat", Beat, gonvex.WritesEphemeral())
 }`
@@ -55,6 +57,9 @@ func Register(app *gonvex.App) {
 	query := entries["tasks.list"]
 	if len(query.Dependencies.Reads) != 1 || !query.Dependencies.Reads[0].Windowed || !query.Dependencies.ReadsEphemeral || !query.Dependencies.ShareByPermissions {
 		t.Fatalf("query dependencies = %#v", query.Dependencies)
+	}
+	if query.Dependencies.ShareByVisibility != "internal.taskVisibility" || query.Dependencies.ShareResultFrom != "internal.tasksShared" || query.Dependencies.ShareResultField != "query" {
+		t.Fatalf("query sharing dependencies = %#v", query.Dependencies)
 	}
 	mutation := entries["tasks.update"]
 	if len(mutation.Dependencies.Writes) != 1 || mutation.Dependencies.Writes[0].Table != "tasks" {

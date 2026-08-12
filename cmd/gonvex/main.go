@@ -466,6 +466,19 @@ func parseDependencyOption(expression ast.Expr, dependencies *manifest.FunctionD
 			dependencies.WritesEphemeral = true
 		case "ShareByPermissions":
 			dependencies.ShareByPermissions = true
+		case "ShareByVisibility":
+			values := stringArguments(call.Args)
+			if len(values) > 0 {
+				dependencies.ShareByVisibility = values[0]
+			}
+		case "ShareResultFrom":
+			values := stringArguments(call.Args)
+			if len(values) > 0 {
+				dependencies.ShareResultFrom = values[0]
+			}
+			if len(values) > 1 {
+				dependencies.ShareResultField = values[1]
+			}
 		}
 		return dependencyOptionTarget{}
 	}

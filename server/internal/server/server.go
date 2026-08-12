@@ -29,20 +29,23 @@ import (
 )
 
 type Server struct {
-	config          config.Config
-	runtime         *runtime.Runtime
-	app             *gonvex.App
-	storage         *storage.Factory
-	dataFiles       *datafiles.Manager
-	tenantStores    *tenantStoreResolver
-	ephemeral       ephemeralBackend
-	cache           *rowsCache
-	metrics         *runtimeMetrics
-	scheduler       *scheduler
-	telemetryWrites chan struct{}
-	projectMu       sync.RWMutex
-	projects        map[string]projectTarget
-	tenants         map[string]tenantTarget
+	config                config.Config
+	runtime               *runtime.Runtime
+	app                   *gonvex.App
+	storage               *storage.Factory
+	dataFiles             *datafiles.Manager
+	tenantStores          *tenantStoreResolver
+	ephemeral             ephemeralBackend
+	cache                 *rowsCache
+	metrics               *runtimeMetrics
+	scheduler             *scheduler
+	telemetryWrites       chan struct{}
+	telemetryDBMu         sync.Mutex
+	telemetryDBs          map[string]*sql.DB
+	subscriptionTelemetry chan []transactionTelemetryEntry
+	projectMu             sync.RWMutex
+	projects              map[string]projectTarget
+	tenants               map[string]tenantTarget
 	// explicitTenantDatabases is the immutable deployment-level routing map.
 	// Registry hydration may enrich tenant metadata, but must not replace an
 	// operator-provided database endpoint for the same project/tenant key.
@@ -57,6 +60,9 @@ type Server struct {
 	wsMu                    sync.RWMutex
 	wsConns                 map[*wsConn]bool
 	wsConnectionSeq         atomic.Uint64
+	queryBatchMu            sync.Mutex
+	queryBatchTimer         *time.Timer
+	queryBatchConns         map[*wsConn]struct{}
 	resourceMu              sync.Mutex
 	resourceSampleAt        time.Time
 	resourceCPUSeconds      float64
@@ -154,6 +160,8 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		cache:                 cache,
 		metrics:               newRuntimeMetrics(cfg.TelemetryLogPath),
 		telemetryWrites:       make(chan struct{}, 4),
+		telemetryDBs:          map[string]*sql.DB{},
+		subscriptionTelemetry: make(chan []transactionTelemetryEntry, 8192),
 		projects:              map[string]projectTarget{},
 		tenants:               map[string]tenantTarget{},
 		tenantHydrationAt:     map[string]time.Time{},
@@ -175,6 +183,7 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 	server.scheduler = newScheduler(server.runScheduledJob)
 	server.tenantStores = newTenantStoreResolver(&server.config)
 	server.startRuntimeErrorCapture()
+	go server.runSubscriptionTelemetry()
 	server.metrics.onFunctionError = server.queueRuntimeFunctionError
 	if strings.TrimSpace(server.projectRegistryURL()) != "" {
 		server.metrics.startMutationLogPersistence(postgresRuntimeMutationLogStore{server: server})

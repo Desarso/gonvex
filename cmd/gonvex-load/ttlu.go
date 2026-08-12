@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"sync"
@@ -26,17 +27,40 @@ type TTLUPathReport struct {
 }
 
 type propagationCommit struct {
-	path    string
-	clients map[string]time.Duration
+	path          string
+	committedAtMS float64
+	clients       map[string]time.Duration
+	receivedAtMS  map[string]float64
 }
 
 type propagationAggregator struct {
-	mu      sync.Mutex
-	commits map[int64]*propagationCommit
+	mu       sync.Mutex
+	commits  map[string]*propagationCommit
+	receipts [64]struct {
+		sync.Mutex
+		byCommit map[string]map[string]float64
+	}
 }
 
 func newPropagationAggregator() *propagationAggregator {
-	return &propagationAggregator{commits: map[int64]*propagationCommit{}}
+	a := &propagationAggregator{commits: map[string]*propagationCommit{}}
+	for index := range a.receipts {
+		a.receipts[index].byCommit = map[string]map[string]float64{}
+	}
+	return a
+}
+
+func propagationReceiptShard(clientID string) uint64 {
+	// FNV-1a is sufficient here: this is only a stable distribution function for
+	// runner-local mutexes, not an authorization or integrity boundary.
+	const offset64 = uint64(14695981039346656037)
+	const prime64 = uint64(1099511628211)
+	hash := offset64
+	for index := 0; index < len(clientID); index++ {
+		hash ^= uint64(clientID[index])
+		hash *= prime64
+	}
+	return hash % 64
 }
 
 func propagationCommitKey(epochMilliseconds float64) int64 {
@@ -49,8 +73,9 @@ func (a *propagationAggregator) RecordCommit(epochMilliseconds float64, mutation
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	commit := a.commit(epochMilliseconds)
+	commit := a.commit(timestampCommitKey(epochMilliseconds))
 	commit.path = mutationPath
+	commit.committedAtMS = epochMilliseconds
 }
 
 func (a *propagationAggregator) RecordDelivery(epochMilliseconds float64, clientID string, delay time.Duration) {
@@ -59,7 +84,19 @@ func (a *propagationAggregator) RecordDelivery(epochMilliseconds float64, client
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	commit := a.commit(epochMilliseconds)
+	key := timestampCommitKey(epochMilliseconds)
+	commit := a.commits[key]
+	if commit == nil {
+		for _, candidate := range a.commits {
+			if propagationCommitKey(candidate.committedAtMS) == propagationCommitKey(epochMilliseconds) {
+				commit = candidate
+				break
+			}
+		}
+	}
+	if commit == nil {
+		commit = a.commit(key)
+	}
 	// One commit may invalidate several subscriptions on a client. Treat the
 	// client's propagation as complete when its last affected subscription is
 	// delivered, so the commit maximum is truly time-to-last-user.
@@ -68,11 +105,66 @@ func (a *propagationAggregator) RecordDelivery(epochMilliseconds float64, client
 	}
 }
 
-func (a *propagationAggregator) commit(epochMilliseconds float64) *propagationCommit {
-	key := propagationCommitKey(epochMilliseconds)
+func timestampCommitKey(epochMilliseconds float64) string {
+	return fmt.Sprintf("time:%d", propagationCommitKey(epochMilliseconds))
+}
+
+// RecordCommitID correlates a mutation result using its protocol request ID.
+// Unlike independently sampled timestamps, that identifier survives LISTEN
+// delivery and commit coalescing without precision or scheduling ambiguity.
+func (a *propagationAggregator) RecordCommitID(id string, epochMilliseconds float64, mutationPath string) {
+	if id == "" || epochMilliseconds <= 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	commit := a.commit("id:" + id)
+	commit.path = mutationPath
+	commit.committedAtMS = epochMilliseconds
+	for clientID, receivedAtMS := range commit.receivedAtMS {
+		a.recordReceiptLocked(commit, clientID, receivedAtMS)
+	}
+	commit.receivedAtMS = map[string]float64{}
+}
+
+func (a *propagationAggregator) RecordDeliveryIDs(ids []string, clientID string, receivedAtMS float64) {
+	if clientID == "" || receivedAtMS <= 0 {
+		return
+	}
+	shard := &a.receipts[propagationReceiptShard(clientID)]
+	shard.Lock()
+	defer shard.Unlock()
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		key := "id:" + id
+		clients := shard.byCommit[key]
+		if clients == nil {
+			clients = map[string]float64{}
+			shard.byCommit[key] = clients
+		}
+		if previous := clients[clientID]; receivedAtMS > previous {
+			clients[clientID] = receivedAtMS
+		}
+	}
+}
+
+func (a *propagationAggregator) recordReceiptLocked(commit *propagationCommit, clientID string, receivedAtMS float64) {
+	delayMS := receivedAtMS - commit.committedAtMS
+	if delayMS < 0 {
+		return
+	}
+	delay := time.Duration(delayMS * float64(time.Millisecond))
+	if previous, ok := commit.clients[clientID]; !ok || delay > previous {
+		commit.clients[clientID] = delay
+	}
+}
+
+func (a *propagationAggregator) commit(key string) *propagationCommit {
 	commit := a.commits[key]
 	if commit == nil {
-		commit = &propagationCommit{clients: map[string]time.Duration{}}
+		commit = &propagationCommit{clients: map[string]time.Duration{}, receivedAtMS: map[string]float64{}}
 		a.commits[key] = commit
 	}
 	return commit
@@ -81,6 +173,23 @@ func (a *propagationAggregator) commit(epochMilliseconds float64) *propagationCo
 func (a *propagationAggregator) Report() TTLUReport {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// Fold sharded receipt maxima into their commit records only when producing
+	// the report. Each connection writes to exactly one shard, eliminating the
+	// all-client mutex convoy from the measured delivery path.
+	for index := range a.receipts {
+		shard := &a.receipts[index]
+		shard.Lock()
+		for key, clients := range shard.byCommit {
+			commit := a.commits[key]
+			if commit == nil || commit.committedAtMS <= 0 {
+				continue
+			}
+			for clientID, receivedAtMS := range clients {
+				a.recordReceiptLocked(commit, clientID, receivedAtMS)
+			}
+		}
+		shard.Unlock()
+	}
 	report := TTLUReport{ByMutationPath: map[string]TTLUPathReport{}}
 	perClient := []time.Duration{}
 	allCommitMaxima := []time.Duration{}

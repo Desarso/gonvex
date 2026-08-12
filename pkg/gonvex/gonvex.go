@@ -157,6 +157,9 @@ type FunctionDependencies struct {
 	ReadsEphemeral     bool
 	WritesEphemeral    bool
 	ShareByPermissions bool
+	ShareByVisibility  string
+	ShareResultFrom    string
+	ShareResultField   string
 }
 
 type ReadDependency struct {
@@ -287,6 +290,31 @@ func (shareByPermissionsOption) applyFunctionOption(target *FunctionDependencies
 	target.ShareByPermissions = true
 }
 
+type shareByVisibilityOption struct{ resolver string }
+
+// ShareByVisibility shares invalidation execution only when resolver returns
+// the same non-empty result for both callers. The resolver contract is strict:
+// equal keys must imply equal query results for the committed state.
+func ShareByVisibility(resolver string) FunctionOption {
+	return shareByVisibilityOption{resolver: strings.TrimSpace(resolver)}
+}
+
+func (option shareByVisibilityOption) applyFunctionOption(target *FunctionDependencies) {
+	target.ShareByVisibility = option.resolver
+}
+
+type shareResultFromOption struct{ source, field string }
+
+// ShareResultFrom executes one canonical query and returns the named field of
+// its object result. Functions using it must accept args compatible with source.
+func ShareResultFrom(source, field string) FunctionOption {
+	return shareResultFromOption{source: strings.TrimSpace(source), field: strings.TrimSpace(field)}
+}
+
+func (option shareResultFromOption) applyFunctionOption(target *FunctionDependencies) {
+	target.ShareResultFrom, target.ShareResultField = option.source, option.field
+}
+
 func cleanDependencyNames(values []string) []string {
 	clean := make([]string, 0, len(values))
 	for _, value := range values {
@@ -338,16 +366,46 @@ type queryChangeContextKey struct{}
 type QueryChangeInfo struct {
 	Reason      string
 	ChangedAtMS float64
+	Details     *QueryChangeDetails
+}
+
+type QueryChangeDetails struct {
+	Tables        []string
+	TaskIDs       []string
+	VisibilityKey string
 }
 
 // WithQueryChange attaches the table-change revision that caused a reactive
 // query execution. Runtime hosts use it to let application handlers safely
 // coalesce common base reads across identity-scoped subscription groups.
 func WithQueryChange(ctx context.Context, reason string, changedAtMS float64) context.Context {
+	return WithQueryChangeDetails(ctx, reason, changedAtMS, nil, nil)
+}
+
+// WithQueryChangeDetails attaches the committed table/task keys that selected
+// a reactive query. Applications may use these only as an optimization hint;
+// an empty set means precision was unavailable and requires a full refresh.
+func WithQueryChangeDetails(ctx context.Context, reason string, changedAtMS float64, tables, taskIDs []string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, queryChangeContextKey{}, QueryChangeInfo{Reason: reason, ChangedAtMS: changedAtMS})
+	var details *QueryChangeDetails
+	if len(tables) > 0 || len(taskIDs) > 0 {
+		details = &QueryChangeDetails{Tables: append([]string(nil), tables...), TaskIDs: append([]string(nil), taskIDs...)}
+	}
+	return context.WithValue(ctx, queryChangeContextKey{}, QueryChangeInfo{Reason: reason, ChangedAtMS: changedAtMS, Details: details})
+}
+
+func WithQueryVisibilityKey(ctx context.Context, key string) context.Context {
+	info := QueryChange(ctx)
+	if info.Details == nil {
+		info.Details = &QueryChangeDetails{}
+	} else {
+		copy := *info.Details
+		info.Details = &copy
+	}
+	info.Details.VisibilityKey = key
+	return context.WithValue(ctx, queryChangeContextKey{}, info)
 }
 
 // QueryChange returns the reactive invalidation revision attached by the host.

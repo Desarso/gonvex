@@ -665,6 +665,23 @@ func TestTransactionTelemetryCanBeDisabled(t *testing.T) {
 	}
 }
 
+func TestSuccessfulServerSubscriptionTelemetryIsNotDurable(t *testing.T) {
+	for _, kind := range []string{"query", "sync"} {
+		if transactionTelemetryIsDurable(transactionTelemetryEntry{Kind: kind, Phase: "server", Outcome: "ok"}) {
+			t.Fatalf("successful server %s telemetry must stay aggregate-only", kind)
+		}
+		if !transactionTelemetryIsDurable(transactionTelemetryEntry{Kind: kind, Phase: "server", Outcome: "error"}) {
+			t.Fatalf("server %s errors must remain durable", kind)
+		}
+	}
+	if !transactionTelemetryIsDurable(transactionTelemetryEntry{Kind: "mutation", Phase: "server", Outcome: "ok"}) {
+		t.Fatal("successful mutations must remain durable")
+	}
+	if !transactionTelemetryIsDurable(transactionTelemetryEntry{Kind: "query", Phase: "browser", Outcome: "ok"}) {
+		t.Fatal("browser telemetry must remain durable")
+	}
+}
+
 func TestClientTelemetryEntryIncludesBrowserDeviceInfo(t *testing.T) {
 	entry := transactionEntryFromClientTelemetry("project-a", "tenant-a", clientMessage{
 		Type:               "telemetry.event",

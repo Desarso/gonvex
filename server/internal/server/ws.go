@@ -90,8 +90,22 @@ type serverCapabilities struct {
 }
 
 type clientCapabilities struct {
-	SyncReadyMany int `json:"syncReadyMany,omitempty"`
-	SyncWatermark int `json:"syncWatermark,omitempty"`
+	SyncReadyMany    int `json:"syncReadyMany,omitempty"`
+	SyncWatermark    int `json:"syncWatermark,omitempty"`
+	QueryPagePatch   int `json:"queryPagePatch,omitempty"`
+	QueryObjectPatch int `json:"queryObjectPatch,omitempty"`
+	QueryOrderDelta  int `json:"queryOrderDelta,omitempty"`
+	QueryFanout      int `json:"queryFanout,omitempty"`
+	QueryResultBatch int `json:"queryResultBatch,omitempty"`
+}
+
+type keyedCollectionPatch struct {
+	Inserted []json.RawMessage `json:"inserted,omitempty"`
+	Updated  []json.RawMessage `json:"updated,omitempty"`
+	Deleted  []string          `json:"deleted,omitempty"`
+	Order    []string          `json:"order,omitempty"`
+	Prepend  []string          `json:"prepend,omitempty"`
+	Append   []string          `json:"append,omitempty"`
 }
 
 type syncReadyMessage struct {
@@ -104,41 +118,48 @@ type syncReadyMessage struct {
 }
 
 type serverMessage struct {
-	Type                 string                `json:"type"`
-	ID                   string                `json:"id,omitempty"`
-	Path                 string                `json:"path,omitempty"`
-	Project              string                `json:"project,omitempty"`
-	Tenant               string                `json:"tenant,omitempty"`
-	Result               any                   `json:"result,omitempty"`
-	Error                string                `json:"error,omitempty"`
-	Reason               string                `json:"reason,omitempty"`
-	Trace                any                   `json:"trace,omitempty"`
-	QueryPerf            json.RawMessage       `json:"-"`
-	QueryCache           *queryCacheDirective  `json:"queryCache,omitempty"`
-	Capabilities         *serverCapabilities   `json:"capabilities,omitempty"`
-	CacheScope           string                `json:"cacheScope,omitempty"`
-	CacheRevision        string                `json:"cacheRevision,omitempty"`
-	SubscriptionRevision *subscriptionRevision `json:"subscriptionRevision,omitempty"`
-	BaseRevision         *subscriptionRevision `json:"baseRevision,omitempty"`
-	ThroughRevision      *subscriptionRevision `json:"throughRevision,omitempty"`
-	Inserted             []json.RawMessage     `json:"inserted,omitempty"`
-	Updated              []json.RawMessage     `json:"updated,omitempty"`
-	Deleted              []string              `json:"deleted,omitempty"`
-	Order                []string              `json:"order,omitempty"`
-	Cursor               *syncCursor           `json:"cursor,omitempty"`
-	Key                  string                `json:"key,omitempty"`
-	OrderBy              string                `json:"orderBy,omitempty"`
-	OrderDirection       string                `json:"orderDirection,omitempty"`
-	Mode                 string                `json:"mode,omitempty"`
-	MaxRows              int                   `json:"maxRows,omitempty"`
-	MaxBytes             int64                 `json:"maxBytes,omitempty"`
-	Upserts              []json.RawMessage     `json:"upserts,omitempty"`
-	MutationIDs          []string              `json:"mutationIds,omitempty"`
-	Hashes               map[string]string     `json:"hashes,omitempty"`
-	Digest               string                `json:"digest,omitempty"`
-	Truncated            *bool                 `json:"truncated,omitempty"`
-	Ready                []syncReadyMessage    `json:"ready,omitempty"`
-	Revision             uint64                `json:"revision,omitempty"`
+	Type                 string                          `json:"type"`
+	ID                   string                          `json:"id,omitempty"`
+	IDs                  []string                        `json:"ids,omitempty"`
+	QueryType            string                          `json:"queryType,omitempty"`
+	Path                 string                          `json:"path,omitempty"`
+	Project              string                          `json:"project,omitempty"`
+	Tenant               string                          `json:"tenant,omitempty"`
+	Result               any                             `json:"result,omitempty"`
+	Error                string                          `json:"error,omitempty"`
+	Reason               string                          `json:"reason,omitempty"`
+	Trace                any                             `json:"trace,omitempty"`
+	QueryPerf            json.RawMessage                 `json:"-"`
+	QueryCache           *queryCacheDirective            `json:"queryCache,omitempty"`
+	Capabilities         *serverCapabilities             `json:"capabilities,omitempty"`
+	CacheScope           string                          `json:"cacheScope,omitempty"`
+	CacheRevision        string                          `json:"cacheRevision,omitempty"`
+	SubscriptionRevision *subscriptionRevision           `json:"subscriptionRevision,omitempty"`
+	BaseRevision         *subscriptionRevision           `json:"baseRevision,omitempty"`
+	ThroughRevision      *subscriptionRevision           `json:"throughRevision,omitempty"`
+	Inserted             []json.RawMessage               `json:"inserted,omitempty"`
+	Updated              []json.RawMessage               `json:"updated,omitempty"`
+	Deleted              []string                        `json:"deleted,omitempty"`
+	Order                []string                        `json:"order,omitempty"`
+	Prepend              []string                        `json:"prepend,omitempty"`
+	Append               []string                        `json:"append,omitempty"`
+	Collections          map[string]keyedCollectionPatch `json:"collections,omitempty"`
+	FullResult           json.RawMessage                 `json:"-"`
+	Cursor               *syncCursor                     `json:"cursor,omitempty"`
+	Key                  string                          `json:"key,omitempty"`
+	OrderBy              string                          `json:"orderBy,omitempty"`
+	OrderDirection       string                          `json:"orderDirection,omitempty"`
+	Mode                 string                          `json:"mode,omitempty"`
+	MaxRows              int                             `json:"maxRows,omitempty"`
+	MaxBytes             int64                           `json:"maxBytes,omitempty"`
+	Upserts              []json.RawMessage               `json:"upserts,omitempty"`
+	MutationIDs          []string                        `json:"mutationIds,omitempty"`
+	Hashes               map[string]string               `json:"hashes,omitempty"`
+	Digest               string                          `json:"digest,omitempty"`
+	Truncated            *bool                           `json:"truncated,omitempty"`
+	Ready                []syncReadyMessage              `json:"ready,omitempty"`
+	Messages             []serverMessage                 `json:"messages,omitempty"`
+	Revision             uint64                          `json:"revision,omitempty"`
 }
 
 // explicitNull makes a nil handler result serialize as an explicit JSON null
@@ -201,14 +222,16 @@ type randomizeStatusPriorityArgs struct {
 }
 
 const (
-	tableChangeDebounce              = 75 * time.Millisecond
-	subscriptionInvalidationCoalesce = 50 * time.Millisecond
-	websocketWriteTimeout            = 10 * time.Second
-	websocketProtocolVersion         = 2
-	developmentRuntimeVersion        = "development"
+	tableChangeDebounce       = 75 * time.Millisecond
+	tableChangeTriggerBatch   = time.Millisecond
+	websocketWriteTimeout     = 10 * time.Second
+	websocketProtocolVersion  = 2
+	developmentRuntimeVersion = "development"
 )
 
-var subscriptionRerunCooldown = 150 * time.Millisecond
+// Only requests that arrive while a query is already running pay this small
+// trailing-edge window. An idle subscription reruns immediately.
+var subscriptionRerunCooldown time.Duration
 
 func runtimeBuildVersion() string {
 	if version := strings.TrimSpace(os.Getenv("GONVEX_RUNTIME_VERSION")); version != "" {
@@ -221,11 +244,20 @@ func runtimeBuildVersion() string {
 // zero-sized allocations the same address, which would collapse distinct
 // listeners when pointers are used as map keys.
 type subscriptionToken struct {
-	marker byte
+	marker        byte
+	active        atomic.Bool
+	cacheRevision atomic.Value
 }
 
-func newSubscriptionToken() *subscriptionToken {
-	return &subscriptionToken{marker: 1}
+func newSubscriptionToken(cacheRevisions ...string) *subscriptionToken {
+	cacheRevision := ""
+	if len(cacheRevisions) > 0 {
+		cacheRevision = cacheRevisions[0]
+	}
+	token := &subscriptionToken{marker: 1}
+	token.active.Store(true)
+	token.cacheRevision.Store(cacheRevision)
+	return token
 }
 
 type querySubscription struct {
@@ -242,6 +274,7 @@ type querySubscription struct {
 	token         *subscriptionToken
 	cacheScope    string
 	cacheRevision string
+	visibilityKey string
 }
 
 type tableChange struct {
@@ -251,6 +284,9 @@ type tableChange struct {
 	tables         map[string]bool
 	broad          bool
 	rowIDs         map[string]bool
+	taskIDs        map[string]bool
+	userIDs        map[string]bool
+	workspaceIDs   map[string]bool
 	operation      string
 	changedColumns []string
 	changedAtMS    float64
@@ -275,6 +311,9 @@ type tableChangeDetail struct {
 	operation      string
 	changedColumns []string
 	rowIDs         map[string]bool
+	taskIDs        map[string]bool
+	userIDs        map[string]bool
+	workspaceIDs   map[string]bool
 	// precise means the table was observed by the trigger (or another precise
 	// source). broad only disables column/row pruning for this table.
 	precise bool
@@ -319,6 +358,13 @@ type wsConn struct {
 	syncs             map[string]*syncSubscription
 	syncReadyMany     bool
 	syncWatermark     bool
+	queryPagePatch    bool
+	queryObjectPatch  bool
+	queryOrderDelta   bool
+	queryFanout       bool
+	queryResultBatch  bool
+	pendingQueries    []serverMessage
+	queryBatchStarted time.Time
 	pendingReady      []serverMessage
 	pendingWatermarks []pendingSyncWatermark
 	readyTimer        *time.Timer
@@ -332,6 +378,8 @@ type pendingSyncWatermark struct {
 }
 
 const syncReadyFlushDelay = 15 * time.Millisecond
+const queryResultFlushDelay = 2 * time.Millisecond
+const queryResultMaxBatchDelay = 50 * time.Millisecond
 
 type callerContext struct {
 	user        *gonvex.User
@@ -467,6 +515,14 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.syncScope = connSyncScope
 		c.syncReadyMany = message.Capabilities != nil && message.Capabilities.SyncReadyMany == 1
 		c.syncWatermark = message.Capabilities != nil && message.Capabilities.SyncWatermark == 1
+		c.queryPagePatch = message.Capabilities != nil && message.Capabilities.QueryPagePatch == 1
+		c.queryObjectPatch = message.Capabilities != nil && message.Capabilities.QueryObjectPatch == 1
+		c.queryOrderDelta = message.Capabilities != nil && message.Capabilities.QueryOrderDelta == 1
+		c.queryFanout = message.Capabilities != nil && message.Capabilities.QueryFanout == 1
+		// Immediate writes have lower time-to-last-user at large fanout. Keep the
+		// advertised capability wire-compatible, but do not introduce a batching
+		// delay until a coordinator can beat direct delivery under load.
+		c.queryResultBatch = false
 		subs := make([]querySubscription, 0, len(c.subs))
 		for id, sub := range c.subs {
 			oldSubs = append(oldSubs, sub)
@@ -479,7 +535,8 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			sub.project = project
 			sub.tenant = tenant
 			sub.caller = caller
-			sub.token = newSubscriptionToken()
+			sub.token.active.Store(false)
+			sub.token = newSubscriptionToken("")
 			sub.cacheScope = cacheScope
 			c.subs[id] = sub
 			subs = append(subs, sub)
@@ -526,6 +583,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		sub, ok := c.subs[message.ID]
 		if ok {
 			delete(c.subs, message.ID)
+			sub.token.active.Store(false)
 		}
 		c.mu.Unlock()
 		if ok && sub.cancel != nil {
@@ -815,7 +873,8 @@ func (c *wsConn) clearAuthentication() {
 		}
 		sub.caller = callerContext{}
 		sub.cacheScope = ""
-		sub.token = newSubscriptionToken()
+		sub.token.active.Store(false)
+		sub.token = newSubscriptionToken("")
 		c.subs[id] = sub
 	}
 	c.mu.Unlock()
@@ -831,10 +890,13 @@ func (c *wsConn) subscribeQuery(ctx context.Context, request querySubscribeReque
 		return
 	}
 	subCtx, cancel := context.WithCancel(ctx)
-	sub := querySubscription{conn: c, id: request.ID, project: c.project, tenant: c.tenant, path: request.Path, args: request.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: newSubscriptionToken(), cacheScope: c.currentCacheScope(), cacheRevision: request.CacheRevision}
+	sub := querySubscription{conn: c, id: request.ID, project: c.project, tenant: c.tenant, path: request.Path, args: request.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: newSubscriptionToken(request.CacheRevision), cacheScope: c.currentCacheScope(), cacheRevision: request.CacheRevision}
 	c.mu.Lock()
 	previous, hadPrevious := c.subs[request.ID]
 	c.subs[request.ID] = sub
+	if hadPrevious {
+		previous.token.active.Store(false)
+	}
 	c.mu.Unlock()
 	if hadPrevious && previous.cancel != nil {
 		previous.cancel()
@@ -881,6 +943,7 @@ func (c *wsConn) cancelSubscriptions() {
 	c.mu.Lock()
 	subs := make([]querySubscription, 0, len(c.subs))
 	for _, sub := range c.subs {
+		sub.token.active.Store(false)
 		subs = append(subs, sub)
 	}
 	c.subs = map[string]querySubscription{}
@@ -898,10 +961,91 @@ func (c *wsConn) write(message serverMessage) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.flushPendingReadiesLocked()
+	if c.queryResultBatch && isBatchableQueryMessage(message.Type) && c.conn != nil {
+		now := time.Now()
+		if len(c.pendingQueries) == 0 {
+			c.queryBatchStarted = now
+		}
+		c.pendingQueries = append(c.pendingQueries, message)
+		c.server.scheduleQueryBatch(c)
+		return
+	}
+	c.flushPendingQueriesLocked()
 	c.writeLocked(message)
 	if message.Type == "sync.reset" || message.Type == "sync.error" {
 		c.resolvePendingWatermarksLocked(message.ID, ^uint64(0))
 	}
+}
+
+func isBatchableQueryMessage(messageType string) bool {
+	switch messageType {
+	case "query.result", "query.progress", "query.patch", "query.pagePatch", "query.objectPatch", "query.fanout":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *wsConn) flushPendingQueries() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.flushPendingQueriesLocked()
+}
+
+func (c *wsConn) flushPendingQueriesLocked() {
+	if len(c.pendingQueries) == 0 {
+		return
+	}
+	pending := c.pendingQueries
+	c.pendingQueries = nil
+	c.queryBatchStarted = time.Time{}
+	if len(pending) == 1 {
+		c.writeLocked(pending[0])
+		return
+	}
+	c.writeLocked(serverMessage{Type: "query.batch", Messages: pending})
+}
+
+// scheduleQueryBatch uses one short leading-edge timer for the entire runtime
+// rather than one trailing-edge timer per socket. Independent query paths from
+// the same commit still coalesce on each connection, while a steady mutation
+// stream cannot postpone a flush beyond this fixed window.
+func (s *Server) scheduleQueryBatch(connection *wsConn) {
+	if s == nil || connection == nil {
+		return
+	}
+	s.queryBatchMu.Lock()
+	if s.queryBatchConns == nil {
+		s.queryBatchConns = map[*wsConn]struct{}{}
+	}
+	s.queryBatchConns[connection] = struct{}{}
+	if s.queryBatchTimer == nil {
+		s.queryBatchTimer = time.AfterFunc(queryResultFlushDelay, s.flushQueryBatches)
+	}
+	s.queryBatchMu.Unlock()
+}
+
+func (s *Server) flushQueryBatches() {
+	s.queryBatchMu.Lock()
+	connections := make([]*wsConn, 0, len(s.queryBatchConns))
+	for connection := range s.queryBatchConns {
+		connections = append(connections, connection)
+	}
+	s.queryBatchConns = nil
+	s.queryBatchTimer = nil
+	s.queryBatchMu.Unlock()
+	workerCount := min(32, len(connections))
+	var workers sync.WaitGroup
+	for worker := range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := worker; index < len(connections); index += workerCount {
+				connections[index].flushPendingQueries()
+			}
+		}()
+	}
+	workers.Wait()
 }
 
 func (c *wsConn) writeSyncReady(message serverMessage) {
@@ -1340,7 +1484,15 @@ func (s *Server) scheduleTableChange(change tableChange) {
 	pending.project = change.project
 	pending.tenant = change.tenant
 	pending.commitID = strings.TrimSpace(change.commitID)
-	if change.changedAtMS > pending.changedAtMS {
+	if pending.commitID != "" {
+		// The declared mutation event carries the actual commit timestamp; the
+		// LISTEN event is observed slightly later. Keep the earliest positive
+		// timestamp so client TTLU frames correlate with the mutation result and
+		// measure from commit, regardless of which event reaches this merger first.
+		if pending.changedAtMS == 0 || (change.changedAtMS > 0 && change.changedAtMS < pending.changedAtMS) {
+			pending.changedAtMS = change.changedAtMS
+		}
+	} else if change.changedAtMS > pending.changedAtMS {
 		pending.changedAtMS = change.changedAtMS
 	}
 	for _, table := range changedTables {
@@ -1371,7 +1523,15 @@ func (s *Server) scheduleTableChange(change tableChange) {
 	if timer := s.tableChangeWait[key]; timer != nil {
 		timer.Stop()
 	}
-	s.tableChangeWait[key] = time.AfterFunc(tableChangeDebounce, func() {
+	delay := tableChangeDebounce
+	// PostgreSQL notifications are emitted only after commit and contain the
+	// authoritative physical table/row details. Deliver the first observed
+	// change immediately; retain the debounce only while waiting for that
+	// notification to refine a mutation's declared write superset.
+	if change.triggerObserved || pending.commitID == "" {
+		delay = tableChangeTriggerBatch
+	}
+	s.tableChangeWait[key] = time.AfterFunc(delay, func() {
 		s.flushTableChange(key)
 	})
 	s.tableChangeMu.Unlock()
@@ -1379,12 +1539,27 @@ func (s *Server) scheduleTableChange(change tableChange) {
 
 func (s *Server) flushTableChange(key string) {
 	s.tableChangeMu.Lock()
-	change := s.tableChanges[key]
+	change, exists := s.tableChanges[key]
 	delete(s.tableChangeWait, key)
 	delete(s.tableChanges, key)
 	s.tableChangeMu.Unlock()
+	if !exists {
+		// A stopped timer can already be waiting on tableChangeMu. The newer
+		// timer owns the merged batch; never turn the stale callback into a
+		// tenant-wide invalidation.
+		return
+	}
 
-	delivery := pendingChangeForDelivery(change, s.subscriptions.listeners.healthy(change.project, change.tenant))
+	listenerHealthy := s.subscriptions.listeners.healthy(change.project, change.tenant)
+	if change.commitID != "" && listenerHealthy && len(change.observedDetails) == 0 {
+		// A successful handler may be a no-op. With a healthy LISTEN connection,
+		// the absence of a trigger notification means there is no committed row
+		// change to propagate. A delayed notification remains safe: it creates a
+		// new immediate precise batch. Listener failure uses the declared broad
+		// fallback below, and recovery refreshes every tenant subscription.
+		return
+	}
+	delivery := pendingChangeForDelivery(change, listenerHealthy)
 	if len(tableChangeTables(delivery)) == 0 || (len(delivery.tables) == 0 && strings.TrimSpace(delivery.table) == "") {
 		// An empty table set is never authoritative. Preserve the legacy
 		// tenant-wide correctness backstop for malformed/unknown changes.
@@ -1401,7 +1576,7 @@ func detailForTable(change tableChange, table string, precise bool) tableChangeD
 	}
 	return tableChangeDetail{
 		operation: change.operation, changedColumns: append([]string(nil), change.changedColumns...),
-		rowIDs: cloneBoolMap(change.rowIDs), precise: precise, broad: change.broad,
+		rowIDs: cloneBoolMap(change.rowIDs), taskIDs: cloneBoolMap(change.taskIDs), userIDs: cloneBoolMap(change.userIDs), workspaceIDs: cloneBoolMap(change.workspaceIDs), precise: precise, broad: change.broad,
 	}
 }
 
@@ -1420,6 +1595,24 @@ func mergeTableChangeDetail(current, next tableChangeDetail) tableChangeDetail {
 	}
 	for id := range next.rowIDs {
 		current.rowIDs[id] = true
+	}
+	if current.taskIDs == nil && len(next.taskIDs) > 0 {
+		current.taskIDs = map[string]bool{}
+	}
+	for id := range next.taskIDs {
+		current.taskIDs[id] = true
+	}
+	if current.userIDs == nil && len(next.userIDs) > 0 {
+		current.userIDs = map[string]bool{}
+	}
+	for id := range next.userIDs {
+		current.userIDs[id] = true
+	}
+	if current.workspaceIDs == nil && len(next.workspaceIDs) > 0 {
+		current.workspaceIDs = map[string]bool{}
+	}
+	for id := range next.workspaceIDs {
+		current.workspaceIDs[id] = true
 	}
 	return current
 }
@@ -1468,6 +1661,9 @@ func pendingChangeForDelivery(pending pendingTableChange, listenerHealthy bool) 
 			change.operation = detail.operation
 			change.changedColumns = append([]string(nil), detail.changedColumns...)
 			change.rowIDs = cloneBoolMap(detail.rowIDs)
+			change.taskIDs = cloneBoolMap(detail.taskIDs)
+			change.userIDs = cloneBoolMap(detail.userIDs)
+			change.workspaceIDs = cloneBoolMap(detail.workspaceIDs)
 			change.broad = detail.broad
 		}
 	}
@@ -1712,6 +1908,12 @@ func resultRowIDs(result any) map[string]bool {
 		}
 	}
 	switch rows := result.(type) {
+	case interface{ GonvexResultRowIDs() []string }:
+		for _, id := range rows.GonvexResultRowIDs() {
+			if id = strings.TrimSpace(id); id != "" {
+				ids[id] = true
+			}
+		}
 	case data.RowsResult:
 		for _, row := range rows.Rows {
 			collect(row)
@@ -1822,7 +2024,11 @@ func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectI
 		metric.DatabaseQueryCount++
 		metric.DatabaseQueryDurationMS += float64(time.Since(databaseStartedAt).Microseconds()) / 1000
 	})
-	if err == nil && cacheKey != "" {
+	// Reactive invalidations already publish and retain the committed result in
+	// the subscription manager. Encoding and synchronously writing the same large
+	// value to Valkey delays every subscriber without improving correctness; a
+	// later initial/one-shot query may refill the cache through the normal path.
+	if err == nil && cacheKey != "" && reason != "invalidate" {
 		currentGeneration, generationOK := s.cache.queryGeneration(ctx, projectID, tenantID, queryTables)
 		if payload, encodeErr := json.Marshal(result); encodeErr == nil && generationOK && currentGeneration == cacheGeneration {
 			if decision := queryCacheWriteDecision(path, result); decision.store {

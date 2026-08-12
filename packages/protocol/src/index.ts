@@ -43,6 +43,9 @@ export type FunctionDependencies = {
   readsEphemeral?: boolean;
   writesEphemeral?: boolean;
   shareByPermissions?: boolean;
+	shareByVisibility?: string;
+	shareResultFrom?: string;
+	shareResultField?: string;
 };
 
 export type SubscriptionRevision = { epoch: string; sequence: number };
@@ -103,6 +106,8 @@ export type ServerCapabilities = {
   syncIntegrity?: 1;
   /** Server accepts `query.subscribeMany` batched subscription frames. */
   queryBatch?: 1;
+	/** Server emits several independent query updates in one WebSocket frame. */
+	queryResultBatch?: 1;
   /** Server accepts `mutation.callMany` batched offline-queue flushes. */
   mutationBatch?: 1;
   /** Server emits connection-level sync revision watermarks. */
@@ -148,6 +153,25 @@ export type ClientCapabilities = {
   syncReadyMany?: 1;
   /** Client accepts connection-level `sync.watermark` server frames. */
   syncWatermark?: 1;
+	/** Client accepts keyed patches for object results with a `page` row array. */
+	queryPagePatch?: 1;
+	/** Client atomically applies keyed patches to named arrays in object results. */
+	queryObjectPatch?: 1;
+	/** Client applies compact front/back order deltas on keyed patches. */
+	queryOrderDelta?: 1;
+	/** Client accepts one query payload fanned out to multiple subscription IDs. */
+	queryFanout?: 1;
+	/** Client accepts several independent query updates in one WebSocket frame. */
+	queryResultBatch?: 1;
+};
+
+export type KeyedCollectionPatch = {
+	inserted?: JsonValue[];
+	updated?: JsonValue[];
+	deleted?: string[];
+	order?: string[];
+	prepend?: string[];
+	append?: string[];
 };
 
 export type GonvexManifest = {
@@ -194,6 +218,32 @@ export type ClientMessage =
   };
 
 export type ServerMessage =
+	| {
+		type: "query.batch";
+		messages: ServerMessage[];
+	}
+	| {
+		type: "query.fanout";
+		queryType: "query.result" | "query.progress" | "query.patch" | "query.pagePatch" | "query.objectPatch";
+		ids: string[];
+		path?: string;
+		result?: JsonValue;
+		reason?: "initial" | "invalidate" | "recover";
+		trace?: MessageTrace;
+		cacheScope?: string;
+		cacheRevision?: string;
+		subscriptionRevision?: SubscriptionRevision;
+		baseRevision?: SubscriptionRevision;
+		throughRevision?: SubscriptionRevision;
+		inserted?: JsonValue[];
+		updated?: JsonValue[];
+		deleted?: string[];
+		order?: string[];
+		prepend?: string[];
+		append?: string[];
+		collections?: Record<string, KeyedCollectionPatch>;
+		mutationIds?: string[];
+	}
   | {
     type: "session.ready";
     project?: string;
@@ -234,10 +284,42 @@ export type ServerMessage =
     updated?: JsonValue[];
     deleted?: string[];
     order?: string[];
+		prepend?: string[];
+		append?: string[];
     cacheScope?: string;
     cacheRevision?: string;
     trace?: MessageTrace;
   }
+	| {
+		type: "query.pagePatch";
+		id: string;
+		path?: string;
+		reason?: "initial" | "invalidate" | "recover";
+		baseRevision: SubscriptionRevision;
+		subscriptionRevision: SubscriptionRevision;
+		result?: JsonValue;
+		inserted?: JsonValue[];
+		updated?: JsonValue[];
+		deleted?: string[];
+		order?: string[];
+		prepend?: string[];
+		append?: string[];
+		cacheScope?: string;
+		cacheRevision?: string;
+		trace?: MessageTrace;
+	}
+	| {
+		type: "query.objectPatch";
+		id: string;
+		path?: string;
+		reason?: "initial" | "invalidate" | "recover";
+		baseRevision: SubscriptionRevision;
+		subscriptionRevision: SubscriptionRevision;
+		collections: Record<string, KeyedCollectionPatch>;
+		cacheScope?: string;
+		cacheRevision?: string;
+		trace?: MessageTrace;
+	}
   | {
     type: "sync.snapshot";
     id: string;

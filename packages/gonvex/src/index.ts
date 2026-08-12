@@ -53,6 +53,9 @@ type FunctionDependencies = {
   readsEphemeral?: boolean;
   writesEphemeral?: boolean;
   shareByPermissions?: boolean;
+	shareByVisibility?: string;
+	shareResultFrom?: string;
+	shareResultField?: string;
 };
 
 type Column = {
@@ -1308,7 +1311,7 @@ function parseSyncDefinition(callBody: string): SyncDefinition | undefined {
 
 function parseFunctionDependencies(callBody: string): FunctionDependencies {
   const dependencies: FunctionDependencies = {};
-  const pattern = /(?:gonvex\.)?(Reads|Writes|ReadsEphemeral|WritesEphemeral|ShareByPermissions)\s*\(/g;
+  const pattern = /(?:gonvex\.)?(Reads|Writes|ReadsEphemeral|WritesEphemeral|ShareByPermissions|ShareByVisibility|ShareResultFrom)\s*\(/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(callBody)) !== null) {
     const option = match[1]!;
@@ -1333,6 +1336,20 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
       pattern.lastIndex = closeParen + 1;
       continue;
     }
+
+		if (option === "ShareByVisibility") {
+			dependencies.shareByVisibility = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
+			pattern.lastIndex = closeParen + 1;
+			continue;
+		}
+
+		if (option === "ShareResultFrom") {
+			const values = stringArgs(callBody.slice(openParen + 1, closeParen));
+			dependencies.shareResultFrom = values[0];
+			dependencies.shareResultField = values[1];
+			pattern.lastIndex = closeParen + 1;
+			continue;
+		}
 
     const tables = stringArgs(callBody.slice(openParen + 1, closeParen));
     const start = option === "Reads"

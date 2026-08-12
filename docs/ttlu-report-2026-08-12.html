@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gonvex TTLU · 1,000-user certification</title>
+  <style>
+    :root{--ink:#17202a;--muted:#607080;--paper:#f7f5ef;--panel:#fff;--line:#d9dedb;--red:#c64035;--amber:#c4821d;--green:#18794e;--blue:#276a87;--navy:#183a4a;--soft:#edf3f1}
+    *{box-sizing:border-box} html{scroll-behavior:smooth} body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    main{width:min(1180px,calc(100% - 32px));margin:auto;padding:38px 0 72px}
+    header{display:grid;grid-template-columns:1.55fr .9fr;gap:28px;align-items:end;border-bottom:1px solid var(--line);padding-bottom:28px}
+    .eyebrow{font:700 12px/1.2 ui-monospace,SFMono-Regular,monospace;letter-spacing:.13em;text-transform:uppercase;color:var(--blue)}
+    h1{font:700 clamp(34px,5vw,68px)/.98 Georgia,serif;letter-spacing:-.045em;margin:10px 0 16px;max-width:850px}
+    h2{font:700 27px/1.15 Georgia,serif;letter-spacing:-.02em;margin:0 0 16px} h3{font-size:16px;margin:0 0 7px}
+    p{margin:0 0 12px}.lede{font-size:18px;max-width:760px;color:#344550}.meta{font:12px/1.65 ui-monospace,SFMono-Regular,monospace;color:var(--muted)}
+    .verdict{background:var(--navy);color:#fff;padding:22px;border-radius:3px;box-shadow:10px 10px 0 #dce7e3}.verdict strong{display:block;font:700 39px/1 Georgia,serif;margin:8px 0}.verdict span{color:#cfe3dc}
+    section{margin-top:42px}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:26px}.card{background:var(--panel);border:1px solid var(--line);padding:18px;min-height:126px}.card .n{font:700 31px/1.05 Georgia,serif;letter-spacing:-.025em}.card .label{margin-top:8px;color:var(--muted)}.card.fail{border-top:4px solid var(--amber)}.card.pass{border-top:4px solid var(--green)}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:24px}.panel{background:var(--panel);border:1px solid var(--line);padding:22px;overflow:hidden}.caption{font-size:13px;color:var(--muted);margin-top:10px}.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:10px 0}.swatch{display:inline-block;width:10px;height:10px;margin-right:5px}.threshold{color:var(--green)}
+    table{width:100%;border-collapse:collapse;background:var(--panel);font-variant-numeric:tabular-nums}th,td{padding:10px 11px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}th:first-child,td:first-child{text-align:left}thead th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);background:var(--soft)}tbody tr:last-child td{border-bottom:0}.bad{color:var(--red);font-weight:700}.good{color:var(--green);font-weight:700}.scroll{overflow-x:auto;border:1px solid var(--line)}
+    .gates{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.gate{display:flex;justify-content:space-between;gap:14px;padding:13px 14px;background:#fff;border:1px solid var(--line)}.gate b{color:var(--green)}
+    .callout{border-left:5px solid var(--amber);padding:18px 20px;background:#fff8e9}.flow{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;align-items:stretch}.flow div{background:var(--panel);border:1px solid var(--line);padding:15px;position:relative}.flow div:not(:last-child):after{content:"→";position:absolute;right:-15px;top:38%;z-index:2;background:var(--paper);padding:2px;color:var(--blue)}
+    .changes{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}.changes article{padding:18px;background:var(--panel);border:1px solid var(--line)}.changes p{color:#40515c;font-size:14px}.tag{display:inline-block;font:700 10px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.08em;padding:5px 7px;background:var(--soft);color:var(--blue);margin-bottom:11px}
+    details{background:#fff;border:1px solid var(--line);padding:13px 16px;margin:8px 0}summary{cursor:pointer;font-weight:700}.mono{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px}.footer{margin-top:46px;border-top:1px solid var(--line);padding-top:18px;color:var(--muted);font-size:13px}
+    svg{width:100%;height:auto;display:block}.axis{stroke:#aeb9b5;stroke-width:1}.grid{stroke:#e1e6e3;stroke-width:1}.axistext{font:11px ui-monospace,monospace;fill:#607080}.labeltext{font:12px ui-sans-serif,system-ui;fill:#273640}.point{stroke:#fff;stroke-width:2}.goal-line{stroke:var(--green);stroke-width:2;stroke-dasharray:6 5}.product-line{stroke:var(--amber);stroke-width:2;stroke-dasharray:6 5}
+    @media(max-width:800px){header,.two{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}.gates,.flow,.changes{grid-template-columns:1fr}.flow div:not(:last-child):after{content:"↓";right:50%;top:auto;bottom:-18px}.verdict{box-shadow:6px 6px 0 #dce7e3}}
+    @media print{body{background:#fff}main{width:100%;padding:0}.panel,.card,.changes article{break-inside:avoid}.verdict{box-shadow:none}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <div class="eyebrow">Gonvex · performance certification · 12 Aug 2026</div>
+      <h1>Fast enough for product. Not yet below 100ms.</h1>
+      <p class="lede">A full 1,000-user Whagons simulation established a stable, correctness-preserving time-to-last-user p95 of <strong>182.48ms</strong>. Every operational gate passed; the 100ms stretch target did not.</p>
+      <p class="meta">PROFILE whagons-1000-users-local.json · 1,700 SOCKETS · 148,958 SUBSCRIPTIONS · RAMP 2M · HOLD 10M</p>
+    </div>
+    <aside class="verdict" aria-label="Certification verdict">
+      <div class="eyebrow" style="color:#9fd0c0">CERTIFIED FLOOR</div>
+      <strong>182.48 ms</strong>
+      <span>across-commit p95 · product ceiling &lt;200ms passed · stretch &lt;100ms missed</span>
+    </aside>
+  </header>
+
+  <div class="kpis">
+    <div class="card fail"><div class="n">182.68ms</div><div class="label">Per-client p95</div></div>
+    <div class="card fail"><div class="n">182.48ms</div><div class="label">Last-user p95</div></div>
+    <div class="card pass"><div class="n">99.06%</div><div class="label">Requested mutation throughput</div></div>
+    <div class="card pass"><div class="n">0</div><div class="label">Setup, subscription, mutation errors</div></div>
+  </div>
+
+  <section>
+    <h2>Latency distribution</h2>
+    <div class="two">
+      <div class="panel">
+        <svg viewBox="0 0 560 310" role="img" aria-label="Final TTLU percentiles">
+          <desc>Horizontal bars compare p50, p95, p99, and maximum for per-client, across-commit, create, and update TTLU.</desc>
+          <g transform="translate(120 25)">
+            <line class="goal-line" x1="66" y1="0" x2="66" y2="245"/><text class="axistext" x="71" y="10">100ms stretch</text>
+            <line class="product-line" x1="132" y1="0" x2="132" y2="245"/><text class="axistext" x="137" y="25">200ms product</text>
+            <g class="grid"><line x1="0" y1="245" x2="400" y2="245"/><line x1="66" y1="0" x2="66" y2="245"/><line x1="132" y1="0" x2="132" y2="245"/><line x1="264" y1="0" x2="264" y2="245"/><line x1="396" y1="0" x2="396" y2="245"/></g>
+            <g><text class="labeltext" x="-12" y="58" text-anchor="end">Per-client</text><rect x="0" y="42" width="57" height="8" fill="#9eb7c2"/><rect x="0" y="53" width="121" height="8" fill="#276a87"/><rect x="0" y="64" width="156" height="8" fill="#c4821d"/><rect x="0" y="75" width="414" height="8" fill="#c64035"/></g>
+            <g><text class="labeltext" x="-12" y="116" text-anchor="end">Last user</text><rect x="0" y="100" width="55" height="8" fill="#9eb7c2"/><rect x="0" y="111" width="120" height="8" fill="#276a87"/><rect x="0" y="122" width="155" height="8" fill="#c4821d"/><rect x="0" y="133" width="414" height="8" fill="#c64035"/></g>
+            <g><text class="labeltext" x="-12" y="174" text-anchor="end">Create</text><rect x="0" y="158" width="65" height="8" fill="#9eb7c2"/><rect x="0" y="169" width="124" height="8" fill="#276a87"/><rect x="0" y="180" width="153" height="8" fill="#c4821d"/><rect x="0" y="191" width="321" height="8" fill="#c64035"/></g>
+            <g><text class="labeltext" x="-12" y="232" text-anchor="end">Update</text><rect x="0" y="216" width="48" height="8" fill="#9eb7c2"/><rect x="0" y="227" width="118" height="8" fill="#276a87"/><rect x="0" y="238" width="158" height="8" fill="#c4821d"/><rect x="0" y="249" width="414" height="8" fill="#c64035"/></g>
+            <g class="axistext"><text x="0" y="277">0</text><text x="66" y="277">100</text><text x="132" y="277">200</text><text x="264" y="277">400</text><text x="396" y="277">600ms</text></g>
+          </g>
+        </svg>
+        <div class="legend"><span><span class="swatch" style="background:#9eb7c2" aria-hidden="true">&nbsp;</span>p50</span><span><span class="swatch" style="background:#276a87" aria-hidden="true">&nbsp;</span>p95</span><span><span class="swatch" style="background:#c4821d" aria-hidden="true">&nbsp;</span>p99</span><span><span class="swatch" style="background:#c64035" aria-hidden="true">&nbsp;</span>max</span></div>
+        <p class="caption">Bars are capped at 627.97ms. Exact values appear below.</p>
+      </div>
+      <div class="panel">
+        <svg viewBox="0 0 560 310" role="img" aria-label="Selected iteration p95 progression">
+          <desc>Across-commit p95 fell from 284.92ms at iteration 20. Short probes reached 63.02ms, but full runs ended at a stable 182.48ms.</desc>
+          <g transform="translate(48 24)">
+            <g class="grid"><line x1="0" y1="240" x2="472" y2="240"/><line x1="0" y1="160" x2="472" y2="160"/><line x1="0" y1="80" x2="472" y2="80"/><line x1="0" y1="0" x2="472" y2="0"/></g>
+            <line class="goal-line" x1="0" y1="160" x2="472" y2="160"/><line class="product-line" x1="0" y1="80" x2="472" y2="80"/>
+            <polyline fill="none" stroke="#276a87" stroke-width="3" points="0,12 31,132 63,144 94,160 126,89 157,136 189,137 220,190 252,77 283,92 315,101 346,126 378,143 409,129 441,114 472,94"/>
+            <g fill="#276a87">
+              <circle class="point" cx="0" cy="12" r="5"/><circle class="point" cx="31" cy="132" r="4"/><circle class="point" cx="63" cy="144" r="4"/><circle class="point" cx="94" cy="160" r="4"/><circle class="point" cx="126" cy="89" r="5"/><circle class="point" cx="157" cy="136" r="4"/><circle class="point" cx="189" cy="137" r="4"/><circle class="point" cx="220" cy="190" r="5" fill="#18794e"/><circle class="point" cx="252" cy="77" r="5"/><circle class="point" cx="283" cy="92" r="4"/><circle class="point" cx="315" cy="101" r="4"/><circle class="point" cx="346" cy="126" r="4"/><circle class="point" cx="378" cy="143" r="4"/><circle class="point" cx="409" cy="129" r="4"/><circle class="point" cx="441" cy="114" r="4"/><circle class="point" cx="472" cy="94" r="6" fill="#c64035"/>
+            </g>
+            <g class="axistext"><text x="-9" y="244" text-anchor="end">0</text><text x="-9" y="164" text-anchor="end">100</text><text x="-9" y="84" text-anchor="end">200</text><text x="-9" y="4" text-anchor="end">300ms</text><text x="0" y="264">I20</text><text x="220" y="264" text-anchor="middle">I30 short</text><text x="252" y="279" text-anchor="middle">I30 full</text><text x="472" y="264" text-anchor="end">I38 final</text></g>
+          </g>
+        </svg>
+        <div class="legend"><span><span class="swatch" style="background:#276a87" aria-hidden="true">&nbsp;</span>across-commit p95</span><span class="threshold">— 100ms stretch</span><span style="color:#c4821d">— 200ms product</span></div>
+        <p class="caption">Short probes isolated wins quickly; only full runs include the complete audience and task growth from 200 to 600 rows.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Exact certification numbers</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Scope</th><th>Count</th><th>Average</th><th>p50</th><th>p95</th><th>p99</th><th>Max</th></tr></thead>
+      <tbody>
+        <tr><td>Per-client overall</td><td>474,313</td><td>97.83</td><td>86.18</td><td class="bad">182.68</td><td>236.26</td><td>627.97</td></tr>
+        <tr><td>Across commits</td><td>1,050</td><td>88.59</td><td>84.05</td><td class="bad">182.48</td><td>234.48</td><td>627.97</td></tr>
+        <tr><td>tasks.create</td><td>400</td><td>108.34</td><td>98.25</td><td class="bad">187.23</td><td>231.35</td><td>487.08</td></tr>
+        <tr><td>tasks.update</td><td>650</td><td>76.44</td><td>72.10</td><td class="bad">178.32</td><td>238.87</td><td>627.97</td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">Milliseconds. Path distributions are time-to-last-user across each path's propagating commits; the runner emits per-client distribution overall.</p>
+  </section>
+
+  <section>
+    <h2>Contract-correct baseline → final</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Scope</th><th>Run</th><th>Average</th><th>p50</th><th>p95</th><th>p99</th><th>Max</th></tr></thead>
+      <tbody>
+        <tr><td>Per-client</td><td>Resume baseline</td><td>86.84</td><td>82.59</td><td>177.18</td><td>220.96</td><td>300.09</td></tr>
+        <tr><td>Per-client</td><td>Final</td><td>97.83</td><td>86.18</td><td>182.68</td><td>236.26</td><td>627.97</td></tr>
+        <tr><td>Across commits</td><td>Resume baseline</td><td>105.82</td><td>92.98</td><td>188.26</td><td>230.42</td><td>300.09</td></tr>
+        <tr><td>Across commits</td><td>Final</td><td>88.59</td><td>84.05</td><td class="good">182.48</td><td>234.48</td><td>627.97</td></tr>
+        <tr><td>Create</td><td>Resume baseline</td><td>101.22</td><td>86.94</td><td>181.71</td><td>220.22</td><td>254.52</td></tr>
+        <tr><td>Create</td><td>Final</td><td>108.34</td><td>98.25</td><td>187.23</td><td>231.35</td><td>487.08</td></tr>
+        <tr><td>Update</td><td>Resume baseline</td><td>108.65</td><td>97.27</td><td>194.62</td><td>235.85</td><td>300.09</td></tr>
+        <tr><td>Update</td><td>Final</td><td>76.44</td><td>72.10</td><td class="good">178.32</td><td>238.87</td><td>627.97</td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">Milliseconds. Overall last-user p95 improved 5.78ms from the corrected resume baseline and 102.44ms (35.96%) from the earlier iteration-20 full baseline of 284.92ms.</p>
+  </section>
+
+  <section>
+    <h2>All operational gates passed</h2>
+    <div class="gates">
+      <div class="gate"><span>Connections</span><b>1,700 / 1,700</b></div><div class="gate"><span>Initial results</span><b>148,958 / 148,958</b></div><div class="gate"><span>Setup errors</span><b>0</b></div>
+      <div class="gate"><span>Subscription errors</span><b>0%</b></div><div class="gate"><span>Mutation success</span><b>1,684 / 1,684</b></div><div class="gate"><span>Throughput</span><b>99.06%</b></div>
+      <div class="gate"><span>Unexpected closes</span><b>0</b></div><div class="gate"><span>Runner abort</span><b>None</b></div><div class="gate"><span>Product ceiling</span><b>Pass, all paths</b></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Why 182ms is the evidenced floor</h2>
+    <div class="flow" aria-label="Remaining latency evidence flow">
+      <div><h3>Fixed delays removed</h3><p>Idle invalidations begin immediately after authoritative committed triggers.</p></div>
+      <div><h3>Queue stays empty</h3><p>Rerun wait and peak depth remained zero throughout certification.</p></div>
+      <div><h3>GC + runner cleared</h3><p>STW &lt;2ms in the controlled gate; generator peak 0.807 cores.</p></div>
+      <div><h3>Work scales with rows</h3><p>Tail rises as tasks grow; DB/result construction and fanout dominate.</p></div>
+    </div>
+    <div class="callout" style="margin-top:18px"><strong>Safety boundary:</strong> no optimization is accepted if it can miss a visible row change, reuse another identity's result, weaken digest/revision checks, or propagate uncommitted state. The remaining gap is not permission to cross that boundary.</div>
+  </section>
+
+  <section>
+    <h2>Work retained</h2>
+    <div class="changes">
+      <article><span class="tag">Trigger path</span><h3>Immediate committed invalidation</h3><p>The first PostgreSQL trigger observation gets a 1ms micro-batch; only in-flight storms coalesce. Commit and trigger ordering remain authoritative.</p></article>
+      <article><span class="tag">Execution</span><h3>Exact visibility sharing</h3><p>Identical executions share only across complete visibility fingerprints. Resolver doubt and audience mismatch fail closed to identity-specific work.</p></article>
+      <article><span class="tag">Protocol</span><h3>Capability-gated patches</h3><p>Keyed rows, order deltas, object collections, and per-connection fanout reduce bytes. Legacy, stale, or unsupported clients receive full results.</p></article>
+      <article><span class="tag">Application</span><h3>Indexed task-log queries</h3><p>Task logs use indexed taskId reads and the exact task-visibility resolver; server average fell from roughly 80ms to 12–16ms.</p></article>
+      <article><span class="tag">No-op</span><h3>No delivery, no revision drift</h3><p>A semantically unchanged invalidation emits no progress and advances no revision, preserving the client's exact next patch base. The final suite also restored the empty <span class="mono">slaPolicies</span> fallback key.</p></article>
+      <article><span class="tag">Fanout</span><h3>Measured physical delivery</h3><p>Immediate, uncompressed, 32-worker delivery with 5k groups won. 64 workers, compression, 10ms batching, and a commit barrier regressed or coupled paths and were removed.</p></article>
+    </div>
+  </section>
+
+  <section class="two">
+    <div>
+      <h2>Runtime evidence</h2>
+      <div class="scroll"><table><tbody>
+        <tr><td>DB queries</td><td>29,225</td></tr><tr><td>DB pool waits</td><td>63,024 / 89.62s</td></tr><tr><td>Global DB waits</td><td>4,605 / 9.81s</td></tr>
+        <tr><td>Reactive reruns</td><td>36,404 · 34.67/commit</td></tr><tr><td>Shared executions</td><td>6,635 · 6.32/commit</td></tr><tr><td>Table skips</td><td>95,739 · 91.18/commit</td></tr>
+        <tr><td>Rerun queue</td><td>0ms / depth 0</td></tr><tr><td>Result bytes before → after</td><td>983.55 → 316.43MB</td></tr><tr><td>Wire read</td><td>7.059GB</td></tr>
+      </tbody></table></div>
+    </div>
+    <div>
+      <h2>Certified stack</h2>
+      <div class="scroll"><table><tbody>
+        <tr><td>GOGC</td><td>100</td></tr><tr><td>DB admission</td><td>12 total / 8 per pool</td></tr><tr><td>Rerun concurrency</td><td>64</td></tr>
+        <tr><td>Group fanout bound</td><td>5,000</td></tr><tr><td>Delivery</td><td>Immediate · 32 workers</td></tr><tr><td>Compression / batching</td><td>Off / off</td></tr>
+        <tr><td>Runtime RSS</td><td>~993MB peak · 781.8MB final</td></tr><tr><td>Generator</td><td>389MB · 0.807 cores max</td></tr><tr><td>Host memory available</td><td>15.42GB minimum</td></tr>
+      </tbody></table></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Correctness and verification</h2>
+    <details open><summary>Non-negotiable invariants</summary><p>Visible changes always rerun through declared dependencies and semantic hashes; identity-sensitive results share only under exact visibility keys; all patch types preserve digest/base-revision verification and full fallback; propagation follows PostgreSQL post-commit notifications only.</p></details>
+    <details><summary>Test suites</summary><p class="mono">GOFLAGS=-buildvcs=false GOCACHE=/home/gabriel/.cache/gonvex-goal-gocache go test ./server/... ./cmd/... — PASS<br>pnpm test:gonvex — PASS (ok whagons.local/gonvex-tests 0.774s)</p></details>
+    <details><summary>Artifacts</summary><p class="mono">docs/ttlu-goal-2026-08-11.md<br>tmp/load-reports/whagons-1000-final.json<br>tmp/load-reports/whagons-1000-final-metrics-before.json<br>tmp/load-reports/whagons-1000-final-metrics-after.json<br>tmp/goal-iterations.md</p></details>
+  </section>
+
+  <section>
+    <h2>Rollout position</h2>
+    <p>Keep GOGC=100, 12/8 DB admission, 5k groups, 32 workers, immediate delivery, and compression disabled as the certified baseline. Capability-gate new frames and canary legacy fallbacks. Alert on p95, p99, result bytes, DB wait, and per-query delivery. A future &lt;100ms effort should redesign task projections/client windows or shard the audience at process level.</p>
+  </section>
+
+  <footer class="footer">Raw source of truth: <span class="mono">tmp/load-reports/whagons-1000-final.json</span> · Run 2026-08-12T16:34:32Z → 16:47:33Z · No external assets or scripts.</footer>
+</main>
+</body>
+</html>

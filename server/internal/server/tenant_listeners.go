@@ -279,9 +279,21 @@ func (m *tenantListenerManager) wait(ctx context.Context, connection *pgx.Conn, 
 		for _, id := range payload.IDs {
 			rowIDs[id] = true
 		}
+		taskIDs := map[string]bool{}
+		for _, id := range payload.TaskIDs {
+			taskIDs[id] = true
+		}
+		userIDs := map[string]bool{}
+		for _, id := range payload.UserIDs {
+			userIDs[id] = true
+		}
+		workspaceIDs := map[string]bool{}
+		for _, id := range payload.WorkspaceIDs {
+			workspaceIDs[id] = true
+		}
 		m.server.scheduleTableChange(tableChange{
 			project: key.project, tenant: key.tenant, table: payload.Table,
-			broad: payload.Broad, rowIDs: rowIDs, operation: payload.Operation,
+			broad: payload.Broad, rowIDs: rowIDs, taskIDs: taskIDs, userIDs: userIDs, workspaceIDs: workspaceIDs, operation: payload.Operation,
 			changedColumns: normalizedColumns(payload.ChangedColumns), changedAtMS: epochMillis(time.Now().UTC()),
 			commitID: strings.TrimSpace(payload.MutationID), triggerObserved: true,
 		})
