@@ -13,6 +13,7 @@ import (
 	"go/token"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
@@ -106,7 +108,13 @@ func runDev(args []string) error {
 }
 
 func runDevWithCommand(root string, settings projectSettings, childCommand []string) error {
-	if err := watchProject(context.Background(), root, settings, true); err != nil {
+	// The first sync commonly races the runtime's own startup: `make dev`
+	// launches the runtime and this command together, and the runtime needs a
+	// few seconds to compile and bind. Failing on the first refused connection
+	// takes the whole dev session down, so wait for the runtime to accept the
+	// sync before starting the child process. Only connection-level failures
+	// are retried — a rejected sync (bad key, invalid schema) fails fast.
+	if err := syncWithStartupRetry(root, settings); err != nil {
 		return err
 	}
 
@@ -141,6 +149,40 @@ func runDevWithCommand(root string, settings projectSettings, childCommand []str
 	}
 
 	return commandErr
+}
+
+// devStartupSyncTimeout bounds how long the first sync waits for a runtime that
+// is still starting. Long enough for a cold `go build` of the runtime binary,
+// short enough that a genuinely absent runtime still fails the session.
+var devStartupSyncTimeout = 60 * time.Second
+
+func syncWithStartupRetry(root string, settings projectSettings) error {
+	deadline := time.Now().Add(devStartupSyncTimeout)
+	announced := false
+	for attempt := 0; ; attempt++ {
+		err := watchProject(context.Background(), root, settings, true)
+		if err == nil || !runtimeUnreachable(err) || time.Now().After(deadline) {
+			return err
+		}
+		if !announced {
+			fmt.Printf("[gonvex] waiting for runtime at %s ...\n", settings.RuntimeURL)
+			announced = true
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// runtimeUnreachable reports whether the sync failed because nothing is
+// listening yet, as opposed to the runtime rejecting the request.
+func runtimeUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return errors.Is(err, syscall.ECONNREFUSED)
 }
 
 func watchProject(ctx context.Context, root string, settings projectSettings, once bool) error {
