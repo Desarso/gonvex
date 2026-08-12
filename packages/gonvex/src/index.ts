@@ -1125,7 +1125,9 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
 
   while (!signal?.aborted) {
     const files = await goFiles(backendDir);
-    const fingerprint = await filesFingerprint(files);
+    // Watch migrations too: editing or adding one must trigger a re-sync,
+    // otherwise a new migration sits unapplied until an unrelated .go edit.
+    const fingerprint = await filesFingerprint([...files, ...await migrationFiles(join(root, "migrations"))]);
     const now = Date.now();
     const shouldBuild = fingerprint !== lastFingerprint;
     const shouldRetryRuntimeSync = !once && !lastSyncSucceeded && lastManifest !== null && now - lastSyncAttempt > runtimeSyncRetryMs;
@@ -1213,6 +1215,14 @@ async function buildSourceBundle(root: string, files: string[], projectID: strin
     const source = await readFile(file);
     const rel = relative(backendDir, file).replace(/\\/g, "/");
     encodedFiles[`app/${rel}`] = Buffer.from(source).toString("base64");
+  }
+  // Versioned SQL migrations ship in the bundle under migrations/, which is
+  // where the runtime looks for them. Without this the runtime sees no
+  // migrations at all and silently applies only the declarative schema.
+  for (const file of await migrationFiles(join(root, "migrations"))) {
+    const source = await readFile(file);
+    const rel = relative(join(root, "migrations"), file).replace(/\\/g, "/");
+    encodedFiles[`migrations/${rel}`] = Buffer.from(source).toString("base64");
   }
   const hash = createHash("sha256");
   for (const path of Object.keys(encodedFiles).sort()) {
@@ -2356,6 +2366,21 @@ async function goFiles(root: string): Promise<string[]> {
       if (entry.name === "_generated") continue;
       files.push(...await goFiles(path));
     } else if (entry.isFile() && entry.name.endsWith(".go")) {
+      files.push(path);
+    }
+  }
+  return files.sort();
+}
+
+async function migrationFiles(root: string): Promise<string[]> {
+  if (!existsSync(root)) return [];
+  const entries = await readdir(root, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await migrationFiles(path));
+    } else if (entry.isFile() && entry.name.endsWith(".sql")) {
       files.push(path);
     }
   }
