@@ -172,3 +172,48 @@ func TestApplySkipsAllDDLForUnchangedSchema(t *testing.T) {
 		t.Fatalf("unchanged schema still executed DDL: %#v", second.Applied)
 	}
 }
+
+func TestApplyDropsOnlyEmptyApprovedUndeclaredColumns(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tableName := fmt.Sprintf("schema_drop_%d", time.Now().UnixNano())
+	if _, err := db.Exec(`CREATE TABLE ` + quoteIdent(tableName) + ` (id text primary key, empty_value text, kept_value text); INSERT INTO ` + quoteIdent(tableName) + ` (id, kept_value) VALUES ('1', 'constant')`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(`DROP TABLE IF EXISTS ` + quoteIdent(tableName)) })
+	desired := manifest.Schema{Tables: map[string]manifest.Table{tableName: {Columns: map[string]manifest.Column{"id": {Type: "id", PrimaryKey: true}}}}}
+	candidates, err := EmptyUndeclaredColumns(context.Background(), databaseURL, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !candidates[tableName+".empty_value"] || candidates[tableName+".kept_value"] {
+		t.Fatalf("wrong candidates: %#v", candidates)
+	}
+	result, err := ApplyWithOptions(context.Background(), databaseURL, desired, nil, ApplyOptions{DropEmptyUndeclaredColumns: candidates})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Applied) == 0 {
+		t.Fatal("empty column was not dropped")
+	}
+	columns, err := existingColumns(context.Background(), db, tableName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := columns["empty_value"]; exists {
+		t.Fatal("empty undeclared column remains")
+	}
+	if _, exists := columns["kept_value"]; !exists {
+		t.Fatal("non-empty undeclared column was dropped")
+	}
+	if _, exists := columns["id"]; !exists {
+		t.Fatal("declared column was dropped")
+	}
+}

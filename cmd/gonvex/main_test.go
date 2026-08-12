@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/pkg/projectbundle"
 )
 
 func TestParseRegistrationsIncludesPublicHTTPAsHTTP(t *testing.T) {
@@ -28,6 +29,32 @@ func Register(app interface{ PublicHTTP(string, any) }) {
 	entry, ok := entries["/webhooks/provider"]
 	if !ok || entry.Kind != manifest.FunctionKindHTTP || entry.Handler != "ProviderWebhook" {
 		t.Fatalf("public HTTP registration = %#v", entry)
+	}
+}
+
+func TestBuildManifestShipsRootMigrationFiles(t *testing.T) {
+	root := t.TempDir()
+	backend := filepath.Join(root, "gonvex")
+	if err := os.MkdirAll(filepath.Join(root, "migrations"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	goFile := filepath.Join(backend, "register.go")
+	if err := os.MkdirAll(backend, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(goFile, []byte("package app\nfunc Register(any) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sql := []byte("-- gonvex:scope tenant\nSELECT 1;\n")
+	if err := os.WriteFile(filepath.Join(root, "migrations", "0001_start.sql"), sql, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := buildManifest(root, []string{goFile}, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bundle.Bundle.Files["migrations/0001_start.sql"]; got != projectbundle.EncodeFile(sql) {
+		t.Fatalf("migration was not bundled: %q", got)
 	}
 }
 

@@ -70,3 +70,28 @@ func TestCreateIndexesFromExistingSkipsMatchingIndexWithoutDatabaseCall(t *testi
 		t.Fatalf("matching index caused database work: %#v", applied)
 	}
 }
+
+func TestDeclaredColumnIsNeverConsideredForDrop(t *testing.T) {
+	table := manifest.Table{Columns: map[string]manifest.Column{"value": {Type: "string", Nullable: true}}}
+	applied, warnings, err := reconcileColumnsFromExisting(context.Background(), nil, "items", table,
+		map[string]existingColumn{"value": {Type: "string", Nullable: true}},
+		ApplyOptions{DropEmptyUndeclaredColumns: map[string]bool{"items.value": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 0 || len(warnings) != 0 {
+		t.Fatalf("declared column changed: applied=%v warnings=%v", applied, warnings)
+	}
+}
+
+func TestUndeclaredColumnIsPreservedWhenDropIsNotApproved(t *testing.T) {
+	table := manifest.Table{Columns: map[string]manifest.Column{}}
+	applied, warnings, err := reconcileColumnsFromExisting(context.Background(), nil, "items", table,
+		map[string]existingColumn{"legacy": {Type: "string", Nullable: true}}, ApplyOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 0 || len(warnings) != 1 {
+		t.Fatalf("undeclared column was not safely preserved: applied=%v warnings=%v", applied, warnings)
+	}
+}

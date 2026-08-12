@@ -789,11 +789,29 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	lock.Lock()
 	defer lock.Unlock()
 
+	sqlMigrations, err := migrationsFromBundle(next.Bundle)
+	if err != nil {
+		syncErr = err
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	dryRun := r.URL.Query().Get("dryRun") == "true"
+	var sqlMigrationResult projectMigrationResult
+	if dryRun {
+		sqlMigrationResult, err = s.applyProjectSQLMigrations(r.Context(), next.Project, sqlMigrations, true)
+		if err != nil {
+			syncErr = err
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error(), "migrations": sqlMigrationResult})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "dryRun": true, "project": next.Project, "migrations": sqlMigrationResult})
+		return
+	}
+
 	var (
 		migrationResult       schema.Result
 		tenantMigrationResult schema.Result
 		schemaSkipped         bool
-		err                   error
 	)
 	// Skip the DDL reapply when the schema is byte-identical to what we last
 	// applied. This is the common dev case (editing a handler, not the schema)
@@ -801,34 +819,47 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	fingerprint := schemaFingerprint(next.Schema, next.Functions)
 	loadedManifest := s.runtime.ManifestForProject(next.Project)
 	loadedFingerprint := schemaFingerprint(loadedManifest.Schema, loadedManifest.Functions)
-	if fingerprint != "" && (s.schemaFingerprintApplied(next.Project, fingerprint) || (loadedFingerprint == fingerprint && loadedManifest.NotifySchemaVersion == next.NotifySchemaVersion)) {
+	if !s.config.DropEmptyUndeclaredColumns && fingerprint != "" && (s.schemaFingerprintApplied(next.Project, fingerprint) || (loadedFingerprint == fingerprint && loadedManifest.NotifySchemaVersion == next.NotifySchemaVersion)) {
 		schemaSkipped = true
 	} else {
 		syncDefinitions := manifestSyncDefinitions(next)
+		landlordApplyOptions, tenantApplyOptions, optionErr := s.emptyColumnDropOptions(r.Context(), next.Project, next.Schema)
+		if optionErr != nil {
+			syncErr = optionErr
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": optionErr.Error()})
+			return
+		}
 		landlordSyncDefinitions, definitionErr := syncDefinitionsForSchema(syncDefinitions, next.Schema.LandlordSchema())
 		if definitionErr != nil {
 			syncErr = definitionErr
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": definitionErr.Error()})
 			return
 		}
-		migrationResult, err = schema.ApplyWithSync(
+		migrationResult, err = schema.ApplyWithOptions(
 			r.Context(),
 			s.databaseURLForProject(next.Project),
 			next.Schema.LandlordSchema(),
 			landlordSyncDefinitions,
+			landlordApplyOptions,
 		)
 		if err != nil {
 			syncErr = err
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
-		tenantMigrationResult, err = s.applyTenantSchemasForProject(r.Context(), next.Project, next.Schema, syncDefinitions)
+		tenantMigrationResult, err = s.applyTenantSchemasForProject(r.Context(), next.Project, next.Schema, syncDefinitions, tenantApplyOptions)
 		if err != nil {
 			syncErr = err
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		s.markSchemaFingerprint(next.Project, fingerprint)
+	}
+	sqlMigrationResult, err = s.applyProjectSQLMigrations(r.Context(), next.Project, sqlMigrations, false)
+	if err != nil {
+		syncErr = err
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error(), "migrations": sqlMigrationResult})
+		return
 	}
 
 	bundleHash := ""
@@ -859,6 +890,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		"functionCount":   len(next.Functions),
 		"schema":          migrationResult,
 		"tenantSchema":    tenantMigrationResult,
+		"migrations":      sqlMigrationResult,
 		"schemaSkipped":   schemaSkipped,
 		"runtimeReloaded": true,
 	})

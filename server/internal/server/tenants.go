@@ -15,6 +15,7 @@ import (
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/dbpool"
 	"github.com/gonvex/gonvex/server/internal/schema"
+	"github.com/gonvex/gonvex/server/internal/sqlmigration"
 )
 
 const projectTenantHydrationTTL = 5 * time.Second
@@ -887,6 +888,13 @@ func (s *Server) provisionTenantDatabaseWithSync(ctx context.Context, project st
 	if _, err := schema.ApplyWithSync(ctx, databaseURL, desiredSchema, syncDefinitions); err != nil {
 		return err
 	}
+	migrations, err := migrationsFromBundle(current.Bundle)
+	if err != nil {
+		return err
+	}
+	if _, err := sqlmigration.Apply(ctx, databaseURL, sqlmigration.Filter(migrations, sqlmigration.ScopeTenant), false); err != nil {
+		return fmt.Errorf("apply tenant SQL migrations: %w", err)
+	}
 	db, err := dbpool.Open(databaseURL)
 	if err != nil {
 		return err
@@ -1071,6 +1079,7 @@ func (s *Server) applyTenantSchemasForProject(
 	project string,
 	desiredSchema manifest.Schema,
 	syncDefinitions map[string]manifest.SyncDefinition,
+	options schema.ApplyOptions,
 ) (schema.Result, error) {
 	s.hydrateProjectTenantDatabases(ctx, project)
 	desiredSchema = desiredSchema.TenantSchema()
@@ -1089,7 +1098,7 @@ func (s *Server) applyTenantSchemasForProject(
 		return schema.Result{}, err
 	}
 	return applyTenantSchemas(ctx, tenants, desiredSchema, func(ctx context.Context, databaseURL string, desired manifest.Schema) (schema.Result, error) {
-		return schema.ApplyWithSync(ctx, databaseURL, desired, tenantSyncDefinitions)
+		return schema.ApplyWithOptions(ctx, databaseURL, desired, tenantSyncDefinitions, options)
 	})
 }
 

@@ -83,6 +83,9 @@ type Config struct {
 	// dashboard ("local dev", "production", ...). Deployed runtimes set
 	// GONVEX_ENVIRONMENT so their projects stop claiming to be local dev.
 	Environment string
+	// DropEmptyUndeclaredColumns enables conservative declarative cleanup. It is
+	// off by default so deploying an older bundle cannot erase newer columns.
+	DropEmptyUndeclaredColumns bool
 }
 
 func FromEnv() Config {
@@ -131,6 +134,7 @@ func FromEnv() Config {
 		FirebaseProjectID:            strings.TrimSpace(env("GONVEX_FIREBASE_PROJECT_ID", "")),
 		FirebaseJWKSURL:              env("GONVEX_FIREBASE_JWKS_URL", "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"),
 		Environment:                  env("GONVEX_ENVIRONMENT", "local dev"),
+		DropEmptyUndeclaredColumns:   envBool("GONVEX_DROP_EMPTY_UNDECLARED_COLUMNS", false),
 	}
 }
 

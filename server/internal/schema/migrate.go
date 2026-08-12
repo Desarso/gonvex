@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
@@ -24,6 +25,12 @@ type Result struct {
 	Warnings []string `json:"warnings"`
 }
 
+type ApplyOptions struct {
+	// DropEmptyUndeclaredColumns contains exact table.column names approved by a
+	// caller that has performed any required cross-database safety check.
+	DropEmptyUndeclaredColumns map[string]bool
+}
+
 type existingColumn struct {
 	Type       string
 	Nullable   bool
@@ -41,6 +48,10 @@ func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Re
 }
 
 func ApplyWithSync(ctx context.Context, databaseURL string, desired manifest.Schema, syncDefinitions map[string]manifest.SyncDefinition) (Result, error) {
+	return ApplyWithOptions(ctx, databaseURL, desired, syncDefinitions, ApplyOptions{})
+}
+
+func ApplyWithOptions(ctx context.Context, databaseURL string, desired manifest.Schema, syncDefinitions map[string]manifest.SyncDefinition, options ApplyOptions) (Result, error) {
 	if databaseURL == "" || len(desired.Tables) == 0 {
 		return Result{}, nil
 	}
@@ -90,7 +101,7 @@ func ApplyWithSync(ctx context.Context, databaseURL string, desired manifest.Sch
 			}
 			result.Applied = append(result.Applied, fmt.Sprintf("created table %s", tableName))
 		} else {
-			applied, warnings, err := reconcileColumnsFromExisting(ctx, db, tableName, table, snapshot.columns[tableName])
+			applied, warnings, err := reconcileColumnsFromExisting(ctx, db, tableName, table, snapshot.columns[tableName], options)
 			if err != nil {
 				return result, err
 			}
@@ -323,14 +334,30 @@ func reconcileColumns(ctx context.Context, db *sql.DB, tableName string, table m
 	if err != nil {
 		return nil, nil, err
 	}
-	return reconcileColumnsFromExisting(ctx, db, tableName, table, existing)
+	return reconcileColumnsFromExisting(ctx, db, tableName, table, existing, ApplyOptions{})
 }
 
-func reconcileColumnsFromExisting(ctx context.Context, db *sql.DB, tableName string, table manifest.Table, existing map[string]existingColumn) ([]string, []string, error) {
+func reconcileColumnsFromExisting(ctx context.Context, db *sql.DB, tableName string, table manifest.Table, existing map[string]existingColumn, options ApplyOptions) ([]string, []string, error) {
 	var applied []string
 	var warnings []string
 	for columnName := range existing {
 		if _, ok := table.Columns[columnName]; !ok {
+			key := tableName + "." + columnName
+			if options.DropEmptyUndeclaredColumns[key] {
+				empty, err := columnEmpty(ctx, db, tableName, columnName)
+				if err != nil {
+					return applied, warnings, err
+				}
+				if empty {
+					statement := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", quoteIdent(tableName), quoteIdent(columnName))
+					if _, err := db.ExecContext(ctx, statement); err != nil {
+						return applied, warnings, err
+					}
+					slog.Info("dropped empty undeclared column", "table", tableName, "column", columnName)
+					applied = append(applied, fmt.Sprintf("dropped empty undeclared column %s", key))
+					continue
+				}
+			}
 			warnings = append(warnings, fmt.Sprintf("kept existing column %s.%s not declared in schema", tableName, columnName))
 		}
 	}
@@ -394,6 +421,47 @@ func reconcileColumnsFromExisting(ctx context.Context, db *sql.DB, tableName str
 	}
 
 	return applied, warnings, nil
+}
+
+func columnEmpty(ctx context.Context, db *sql.DB, tableName, columnName string) (bool, error) {
+	var exists bool
+	statement := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s WHERE %s IS NOT NULL LIMIT 1)", quoteIdent(tableName), quoteIdent(columnName))
+	if err := db.QueryRowContext(ctx, statement).Scan(&exists); err != nil {
+		return false, err
+	}
+	return !exists, nil
+}
+
+// EmptyUndeclaredColumns reports every existing undeclared table.column and
+// whether it contains no non-NULL value. An absent key means the column does
+// not exist in this database and is therefore safe for a fleet-wide decision.
+func EmptyUndeclaredColumns(ctx context.Context, databaseURL string, desired manifest.Schema) (map[string]bool, error) {
+	result := map[string]bool{}
+	if databaseURL == "" || len(desired.Tables) == 0 {
+		return result, nil
+	}
+	db, err := dbpool.Open(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	snapshot, err := inspectDatabaseSchema(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	for tableName, table := range desired.Tables {
+		for columnName := range snapshot.columns[tableName] {
+			if _, declared := table.Columns[columnName]; declared {
+				continue
+			}
+			empty, err := columnEmpty(ctx, db, tableName, columnName)
+			if err != nil {
+				return nil, err
+			}
+			result[tableName+"."+columnName] = empty
+		}
+	}
+	return result, nil
 }
 
 func tableEmpty(ctx context.Context, db *sql.DB, tableName string) (bool, error) {
