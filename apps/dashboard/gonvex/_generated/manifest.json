@@ -1,6 +1,6 @@
 {
   "project": "dashboard",
-  "generatedAt": "2026-08-12T19:13:15.134129529Z",
+  "generatedAt": "2026-08-12T19:32:34.240223135Z",
   "functions": {
     "files.createUploadUrl": {
       "kind": "mutation",
@@ -59,7 +59,7 @@
   },
   "schema": {
     "tables": {
-      "files": {
+      "dashboard_demo_files": {
         "columns": {
           "content_type": {
             "type": "string",
@@ -96,7 +96,7 @@
           }
         }
       },
-      "tasks": {
+      "dashboard_demo_tasks": {
         "columns": {
           "all_user_avatar_urls": {
             "type": "string",
@@ -768,7 +768,7 @@
       }
     },
     "tenantTables": {
-      "files": {
+      "dashboard_demo_files": {
         "columns": {
           "content_type": {
             "type": "string",
@@ -805,7 +805,7 @@
           }
         }
       },
-      "tasks": {
+      "dashboard_demo_tasks": {
         "columns": {
           "all_user_avatar_urls": {
             "type": "string",

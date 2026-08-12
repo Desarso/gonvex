@@ -3,7 +3,7 @@ package gonvextest
 import "github.com/gonvex/gonvex/pkg/gonvex"
 
 func Schema(s *gonvex.Schema) {
-	s.Table("tasks", func(t *gonvex.Table) {
+	s.Table("dashboard_demo_tasks", func(t *gonvex.Table) {
 		t.ID("id")
 		t.String("tenant_id", gonvex.Nullable)
 		t.Int("pg_id", gonvex.Nullable)
@@ -122,7 +122,7 @@ func Schema(s *gonvex.Schema) {
 		t.TrigramIndex("search_text_trgm", "name", "title", "description", "status", "priority", "assignee", "project", "label", "flag_color")
 	})
 
-	s.Table("files", func(t *gonvex.Table) {
+	s.Table("dashboard_demo_files", func(t *gonvex.Table) {
 		t.ID("id")
 		t.String("key")
 		t.String("content_type", gonvex.Nullable)
