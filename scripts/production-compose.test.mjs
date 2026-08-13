@@ -101,8 +101,12 @@ test("production runtime and dashboard require protected durable configuration",
   );
   assert.equal(permissions.user, "0:0");
   assert.deepEqual(permissions.cap_drop, ["ALL"]);
-  assert.deepEqual(permissions.cap_add, ["CHOWN"]);
-  assert.deepEqual(permissions.command, ["chown", "-R", "10001:10001", "/var/lib/gonvex"]);
+  assert.deepEqual(permissions.cap_add, ["CHOWN", "FOWNER"]);
+  assert.deepEqual(permissions.command, [
+    "sh",
+    "-ec",
+    "chown -R 10001:10001 /var/lib/gonvex && chmod -R u+rwX /var/lib/gonvex",
+  ]);
   assert.equal(permissions.read_only, true);
 });
 
