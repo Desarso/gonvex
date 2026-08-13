@@ -54,15 +54,19 @@ func (l *Loader) compileAndRegister(projectDir string, packageName string, _ str
 func gonvexHostSymbols() map[string]map[string]reflect.Value {
 	return map[string]map[string]reflect.Value{
 		"github.com/gonvex/gonvex/pkg/gonvex/gonvex": {
-			"NewApp":      reflect.ValueOf(gonvex.NewApp),
-			"App":         reflect.ValueOf((*gonvex.App)(nil)),
-			"QueryCtx":    reflect.ValueOf((*gonvex.QueryCtx)(nil)),
-			"MutationCtx": reflect.ValueOf((*gonvex.MutationCtx)(nil)),
-			"ActionCtx":   reflect.ValueOf((*gonvex.ActionCtx)(nil)),
-			"User":        reflect.ValueOf((*gonvex.User)(nil)),
-			"Schema":      reflect.ValueOf(gonvex.Schema{}),
-			"Table":       reflect.ValueOf(gonvex.Table{}),
-			"Nullable":    reflect.ValueOf(gonvex.Nullable),
+			"NewApp":          reflect.ValueOf(gonvex.NewApp),
+			"App":             reflect.ValueOf((*gonvex.App)(nil)),
+			"QueryCtx":        reflect.ValueOf((*gonvex.QueryCtx)(nil)),
+			"MutationCtx":     reflect.ValueOf((*gonvex.MutationCtx)(nil)),
+			"ActionCtx":       reflect.ValueOf((*gonvex.ActionCtx)(nil)),
+			"User":            reflect.ValueOf((*gonvex.User)(nil)),
+			"Schema":          reflect.ValueOf(gonvex.Schema{}),
+			"Table":           reflect.ValueOf(gonvex.Table{}),
+			"Nullable":        reflect.ValueOf(gonvex.Nullable),
+			"ReadsEphemeral":  reflect.ValueOf(gonvex.ReadsEphemeral),
+			"WritesEphemeral": reflect.ValueOf(gonvex.WritesEphemeral),
+			"EphemeralAPI":    reflect.ValueOf((*gonvex.EphemeralAPI)(nil)),
+			"EphemeralEntry":  reflect.ValueOf((*gonvex.EphemeralEntry)(nil)),
 
 			// Storage API surface, available to app code as ctx.Storage.
 			"StorageAPI":              reflect.ValueOf((*gonvex.StorageAPI)(nil)),

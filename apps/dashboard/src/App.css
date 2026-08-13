@@ -2203,7 +2203,76 @@ h1 {
 }
 
 .sched-table--crons .sched-row {
-  grid-template-columns: minmax(120px, 1fr) minmax(150px, 1.4fr) minmax(110px, 1fr) minmax(140px, 1fr) 64px 78px;
+  grid-template-columns: minmax(150px, 1.2fr) minmax(170px, 1.35fr) minmax(110px, 0.75fr) minmax(100px, 0.75fr) minmax(140px, 1fr) 64px 78px;
+}
+
+.sched-scope-cell {
+  min-width: 0;
+}
+
+.sched-scope-disclosure {
+  position: relative;
+  width: max-content;
+  max-width: 100%;
+}
+
+.sched-scope-disclosure summary,
+.sched-project-scope {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.75rem;
+}
+
+.sched-scope-disclosure summary {
+  cursor: pointer;
+  list-style-position: inside;
+  white-space: nowrap;
+}
+
+.sched-scope-disclosure summary:hover,
+.sched-scope-disclosure summary:focus-visible {
+  color: var(--foreground);
+}
+
+.sched-scope-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  display: flex;
+  min-width: 240px;
+  max-height: 220px;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--field-radius);
+  background: var(--surface);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 24%);
+  padding: 10px;
+}
+
+.sched-scope-list code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sched-scope-instance {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.sched-scope-instance small {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sched-scope-instance small[data-failures="true"] {
+  color: var(--danger);
 }
 
 .sched-table--runs .sched-row {
@@ -3893,6 +3962,72 @@ h1 {
 .filter-row input:focus,
 .document-form input:focus {
   border-color: var(--focus);
+}
+
+.edit-document-modal {
+  width: min(760px, 100%);
+}
+
+.edit-document-note {
+  margin: -6px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.edit-document-field--wide {
+  grid-column: 1 / -1;
+}
+
+.edit-document-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.edit-document-label strong {
+  color: var(--foreground);
+  font-size: 0.9rem;
+}
+
+.edit-document-label small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.edit-document-form input,
+.edit-document-form textarea {
+  width: 100%;
+  border: 1px solid var(--separator);
+  border-radius: var(--field-radius);
+  background: var(--surface);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1.4;
+  outline: none;
+  padding: 9px 10px;
+}
+
+.edit-document-form textarea {
+  min-height: 116px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9rem;
+}
+
+.edit-document-form input:focus,
+.edit-document-form textarea:focus {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--focus) 18%, transparent);
+}
+
+.edit-document-form input:disabled {
+  cursor: not-allowed;
+  background: color-mix(in oklab, var(--surface-secondary) 72%, var(--surface));
+  color: var(--muted);
 }
 
 .sort-controls .app-select-field {

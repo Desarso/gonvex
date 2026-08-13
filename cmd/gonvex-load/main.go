@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,6 +41,7 @@ type cliOptions struct {
 	runtimeURL              string
 	project                 string
 	tenant                  string
+	users                   int
 	connections             int
 	subscriptions           int
 	ramp                    time.Duration
@@ -52,6 +54,7 @@ type cliOptions struct {
 	authMode                string
 	tokenEnvironment        string
 	compression             bool
+	queryResultBatch        bool
 	maximumDialConcurrency  int
 	sampleInterval          time.Duration
 	targetPID               int
@@ -90,8 +93,16 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if options.subscriptions < 0 {
-		options.subscriptions = len(profile.Subscriptions)
+	users := options.users
+	if users == 0 {
+		users = profile.Users
+	}
+	connections := options.connections
+	if connections == 0 {
+		connections = profile.connectionCount(users)
+	}
+	if profile.Version == 1 && options.users == 0 {
+		users = connections
 	}
 	mode := authMode(options.authMode)
 	tenants, err := parseTenantList(options.tenant)
@@ -101,8 +112,11 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	sharedToken := ""
 	if mode == authModeShared {
 		sharedToken = strings.TrimSpace(os.Getenv(options.tokenEnvironment))
-		if sharedToken == "" {
+		if sharedToken == "" && !options.dryRun {
 			return fmt.Errorf("shared auth token environment variable %s is empty", options.tokenEnvironment)
+		}
+		if sharedToken == "" {
+			sharedToken = "dry-run-token"
 		}
 	}
 	mutationArgs, err := parseJSONObject(options.mutationArgs)
@@ -114,7 +128,8 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		Project:                    options.project,
 		Tenant:                     options.tenant,
 		Tenants:                    tenants,
-		Connections:                options.connections,
+		Users:                      users,
+		Connections:                connections,
 		SubscriptionsPerConnection: options.subscriptions,
 		RampDuration:               options.ramp,
 		HoldDuration:               options.hold,
@@ -126,6 +141,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		AuthMode:                   mode,
 		SharedToken:                sharedToken,
 		Compression:                options.compression,
+		QueryResultBatch:           options.queryResultBatch,
 		MaximumDialConcurrency:     options.maximumDialConcurrency,
 		Variables:                  map[string]string(options.variables),
 		SampleInterval:             options.sampleInterval,
@@ -144,17 +160,27 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		"profile":                    profile.Name,
 		"target":                     options.runtimeURL,
 		"connections":                config.Connections,
+		"users":                      config.Users,
+		"connectionsPerUser":         float64(config.Connections) / float64(config.Users),
 		"tenants":                    config.tenantList(),
 		"tenantCount":                len(config.tenantList()),
 		"subscriptionsPerConnection": config.SubscriptionsPerConnection,
-		"totalSubscriptions":         config.Connections * config.SubscriptionsPerConnection,
-		"ramp":                       config.RampDuration.String(),
-		"hold":                       config.HoldDuration.String(),
-		"mutationPath":               config.MutationPath,
-		"mutationRatePerSec":         config.MutationRate,
-		"authMode":                   config.AuthMode,
-		"compression":                config.Compression,
-		"report":                     options.reportPath,
+		"totalSubscriptions": func() int {
+			total := 0
+			for _, session := range makeSessionPlans(config, profile) {
+				total += session.subscriptionCount
+			}
+			return total
+		}(),
+		"ramp":               config.RampDuration.String(),
+		"hold":               config.HoldDuration.String(),
+		"mutationPath":       config.MutationPath,
+		"mutationRatePerSec": requestedMutationRate(config, profile),
+		"mutationPaths":      requestedMutationRates(config, profile),
+		"authMode":           config.AuthMode,
+		"compression":        config.Compression,
+		"queryResultBatch":   config.QueryResultBatch,
+		"report":             options.reportPath,
 	}
 	if options.dryRun {
 		return writeJSON(stdout, plan)
@@ -172,20 +198,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	if err := writeReport(options.reportPath, report); err != nil {
 		return err
 	}
-	summary := map[string]any{
-		"report":        options.reportPath,
-		"abortReason":   report.AbortReason,
-		"connections":   report.Connections,
-		"subscriptions": report.Subscriptions,
-		"mutations":     report.Mutations,
-		"invalidations": report.Invalidations,
-		"wire":          report.Wire,
-		"latency":       report.Latency,
-		"samples":       len(report.Samples),
-		"errorSamples":  report.ErrorSamples,
-		"tenants":       report.Tenants,
-	}
-	if err := writeJSON(stdout, summary); err != nil {
+	if err := writeHumanSummary(stdout, report, options.reportPath); err != nil {
 		return err
 	}
 	if report.AbortReason != "" {
@@ -200,13 +213,46 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
+func writeHumanSummary(writer io.Writer, report RunReport, reportPath string) error {
+	if _, err := fmt.Fprintf(writer,
+		"Gonvex load run complete (%d users, %d connections)\n"+
+			"Subscriptions: %d opened, %d initial results, %d errors\n"+
+			"Mutations: %.2f/s achieved vs %.2f/s requested (%d succeeded, %d errors)\n"+
+			"TTLU: %d commits, p50 %.2fms, p95 %.2fms, max %.2fms; %d per-client samples\n",
+		report.Configuration.Users, report.Connections.Established,
+		report.Subscriptions.Sent, report.Subscriptions.InitialResults, report.Subscriptions.Errors,
+		report.Mutations.AchievedRatePerSec, report.Mutations.RequestedRatePerSec,
+		report.Mutations.Succeeded, report.Mutations.Errors,
+		report.TTLU.CommitsWithPropagation, report.TTLU.AcrossCommits.P50MS,
+		report.TTLU.AcrossCommits.P95MS, report.TTLU.AcrossCommits.MaxMS,
+		report.TTLU.PropagationSamples,
+	); err != nil {
+		return err
+	}
+	paths := make([]string, 0, len(report.TTLU.ByMutationPath))
+	for path := range report.TTLU.ByMutationPath {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		pathReport := report.TTLU.ByMutationPath[path]
+		if _, err := fmt.Fprintf(writer, "  %s TTLU: %d commits, p50 %.2fms, p95 %.2fms, max %.2fms\n",
+			path, pathReport.Commits, pathReport.TTLU.P50MS, pathReport.TTLU.P95MS, pathReport.TTLU.MaxMS); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintf(writer, "Invalidations: %d messages; resource samples: %d; report: %s\n",
+		report.Invalidations.Messages, len(report.Samples), reportPath)
+	return err
+}
+
 func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 	timestamp := time.Now().UTC().Format("20060102T150405Z")
 	options := cliOptions{
 		runtimeURL:              "http://127.0.0.1:18080",
 		project:                 "whagons-5",
 		tenant:                  "loadtest",
-		connections:             1,
+		connections:             0,
 		subscriptions:           -1,
 		ramp:                    10 * time.Second,
 		hold:                    time.Minute,
@@ -216,6 +262,7 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 		authMode:                string(authModeSynthetic),
 		tokenEnvironment:        "GONVEX_LOAD_TOKEN",
 		compression:             true,
+		queryResultBatch:        true,
 		maximumDialConcurrency:  64,
 		sampleInterval:          time.Second,
 		minimumHostAvailableMiB: 4096,
@@ -230,7 +277,8 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 	flags.StringVar(&options.runtimeURL, "url", options.runtimeURL, "Gonvex runtime URL")
 	flags.StringVar(&options.project, "project", options.project, "Gonvex project id")
 	flags.StringVar(&options.tenant, "tenant", options.tenant, "active tenant or comma-separated tenant list")
-	flags.IntVar(&options.connections, "connections", options.connections, "persistent WebSocket connections")
+	flags.IntVar(&options.users, "users", 0, "override simulated users from the profile")
+	flags.IntVar(&options.connections, "connections", options.connections, "override total persistent WebSocket connections (default: profile users × connectionsPerUser)")
 	flags.IntVar(&options.subscriptions, "subscriptions-per-connection", options.subscriptions, "profile subscriptions per connection; -1 uses all")
 	flags.DurationVar(&options.ramp, "ramp", options.ramp, "connection ramp duration")
 	flags.DurationVar(&options.hold, "hold", options.hold, "steady-state hold after initial results")
@@ -242,6 +290,7 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 	flags.StringVar(&options.authMode, "auth-mode", options.authMode, "none, shared, or synthetic")
 	flags.StringVar(&options.tokenEnvironment, "token-env", options.tokenEnvironment, "environment variable containing shared token")
 	flags.BoolVar(&options.compression, "compression", options.compression, "negotiate WebSocket compression")
+	flags.BoolVar(&options.queryResultBatch, "query-result-batch", options.queryResultBatch, "negotiate batched query-result frames")
 	flags.IntVar(&options.maximumDialConcurrency, "max-dial-concurrency", options.maximumDialConcurrency, "maximum concurrent WebSocket handshakes")
 	flags.DurationVar(&options.sampleInterval, "sample-interval", options.sampleInterval, "resource and throughput sample interval; 0 disables")
 	flags.IntVar(&options.targetPID, "target-pid", 0, "runtime process id to sample")
@@ -261,8 +310,8 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 	if flags.NArg() != 0 {
 		return cliOptions{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	if options.connections < 1 || options.maximumDialConcurrency < 1 {
-		return cliOptions{}, fmt.Errorf("connections and max-dial-concurrency must be positive")
+	if options.connections < 0 || options.users < 0 || options.maximumDialConcurrency < 1 {
+		return cliOptions{}, fmt.Errorf("users and connections cannot be negative; max-dial-concurrency must be positive")
 	}
 	if options.subscriptions < -1 {
 		return cliOptions{}, fmt.Errorf("subscriptions-per-connection must be -1 or greater")

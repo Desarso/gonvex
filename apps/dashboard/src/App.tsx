@@ -46,7 +46,7 @@ import type { GonvexAuthValue } from "@gonvex/react";
 import { Avatar, Button, Calendar, Card, Checkbox, Chip, DateField, DatePicker, ListBox, NumberField, SearchField, Select, Separator } from "@heroui/react";
 import { parseDate, type DateValue } from "@internationalized/date";
 import { Background, Controls, MarkerType, MiniMap, ReactFlow, applyNodeChanges, type Edge, type Node, type NodeChange } from "@xyflow/react";
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type MutableRefObject, type ReactNode, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type Dispatch, type FormEvent, type MutableRefObject, type ReactNode, type SetStateAction } from "react";
 import type { JsonValue } from "@gonvex/protocol";
 import { api } from "../gonvex/_generated/api";
 import {
@@ -56,6 +56,7 @@ import {
   Legend,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -241,6 +242,7 @@ export type RuntimeDatabaseMetrics = {
 type RuntimeSchedulerCron = {
   name: string;
   project?: string;
+  tenant?: string;
   function: string;
   schedule: string;
   nextRun?: string;
@@ -248,6 +250,11 @@ type RuntimeSchedulerCron = {
   status?: string;
   runs: number;
   failures: number;
+};
+
+type RuntimeSchedulerCronGroup = RuntimeSchedulerCron & {
+  key: string;
+  registrations: RuntimeSchedulerCron[];
 };
 
 type RuntimeSchedulerRun = {
@@ -296,6 +303,33 @@ type RuntimeMetricsResponse = {
     bytesReceived: number;
     bytesSent: number;
     bytesPerClient: number;
+  };
+  propagation?: {
+    targetMs: number;
+    samples: number;
+    averageMs: number;
+    maxMs: number;
+    series: Array<{
+      time: string;
+      samples: number;
+      averageMs: number;
+      p95Ms: number;
+      maxMs: number;
+      serverSamples: number;
+      serverAverageMs: number;
+      serverMaxMs: number;
+    }>;
+  };
+  load?: {
+    sampleIntervalSeconds: number;
+    series: Array<{
+      time: string;
+      connections: number;
+      users: number;
+      subscriptions: number;
+      cpuPercent: number;
+      memoryBytes: number;
+    }>;
   };
   scheduler?: RuntimeSchedulerMetrics | null;
   logs: RuntimeLogEntry[];
@@ -523,6 +557,11 @@ type DeleteRowsResponse = {
   table: string;
   ids: string[];
   deleted: number;
+};
+
+type UpdateRowResponse = {
+  table: string;
+  row: Record<string, unknown>;
 };
 
 type CreateTenantResponse = {
@@ -2496,11 +2535,67 @@ function formatCellValue(value: unknown): string {
   return String(value);
 }
 
+const immutableDataColumns = new Set(["_id", "id", "tenantId", "tenant_id"]);
+
+export function dataRowIdentity(row: Record<string, unknown> | undefined): string {
+  if (!row) return "";
+  return formatCellValue(row._id ?? row.id).trim();
+}
+
+export function dataEditorInputValue(value: unknown): string {
+  if (value === undefined) return "";
+  if (typeof value === "string") return value;
+  const encoded = JSON.stringify(value);
+  return encoded === undefined ? String(value) : encoded;
+}
+
+export function parseDataEditorValue(raw: string, original: unknown): unknown {
+  if (typeof original === "string" || original === undefined) return raw;
+  if (typeof original === "number") {
+    const value = Number(raw.trim());
+    if (!raw.trim() || !Number.isFinite(value)) throw new Error("Enter a valid number.");
+    return value;
+  }
+  if (typeof original === "boolean") {
+    const value = raw.trim().toLowerCase();
+    if (value !== "true" && value !== "false") throw new Error('Enter either "true" or "false".');
+    return value === "true";
+  }
+  if (original !== null && typeof original === "object") {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new Error("Enter valid JSON.");
+    }
+  }
+  if (!raw.trim() || raw.trim() === "null") return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function dataValueTypeLabel(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function dataValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
 function selectedRowIDs(selectedRows: ReadonlySet<number>, rowCache: Record<number, Record<string, unknown>>): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();
   Array.from(selectedRows).sort((left, right) => left - right).forEach((index) => {
-    const id = formatCellValue(rowCache[index]?.id).trim();
+    const id = dataRowIdentity(rowCache[index]);
     if (!id || seen.has(id)) return;
     seen.add(id);
     ids.push(id);
@@ -3090,6 +3185,7 @@ function ManifestGrid(props: {
   activeFilterColumnIds?: readonly string[];
   onHeaderClick?: (column: number) => void;
   onHeaderMenuClick?: (column: number, bounds: Rectangle) => void;
+  onCellActivated?: (cell: Item) => void;
   onCellEdited?: (cell: Item, newValue: EditableGridCell) => void;
   onCellClick?: (cell: Item, event: CellClickedEventArgs) => void;
   onItemHovered?: (event: GridMouseEventArgs) => void;
@@ -3220,6 +3316,7 @@ function ManifestGrid(props: {
         rangeSelect={props.disableSelection ? "none" : "rect"}
         rowSelect={props.disableSelection ? "none" : "multi"}
         onCellClicked={props.onCellClick}
+        onCellActivated={props.onCellActivated}
         onColumnResize={props.onColumnResize}
         onCellEdited={props.onCellEdited}
         onGridSelectionChange={props.disableSelection ? () => {
@@ -4703,6 +4800,23 @@ function OverviewPage(props: { project: ProjectTarget }) {
       Completed: point.completed,
       Failed: point.failed,
     }));
+    const loadSeries = (metrics?.load?.series ?? []).map((point) => ({
+      label: shortClockLabel(point.time),
+      Connections: point.connections,
+      Users: point.users,
+      Subscriptions: point.subscriptions,
+      cpu: point.cpuPercent,
+      memory: point.memoryBytes,
+    }));
+    const propagationSeries = (metrics?.propagation?.series ?? []).map((point) => ({
+      label: shortClockLabel(point.time),
+      "Last user": point.maxMs,
+      p95: point.p95Ms,
+      Average: point.averageMs,
+      "Server max": point.serverMaxMs,
+    }));
+    const propagationRecent = (metrics?.propagation?.series ?? []).filter((point) => point.samples > 0 || point.serverSamples > 0);
+    const propagationNow = propagationRecent.length > 0 ? propagationRecent[propagationRecent.length - 1] : null;
     const topFunctions = Object.entries(functions)
       .map(([name, fn]) => ({ name, calls: fn.calls, errors: fn.errors }))
       .filter((fn) => fn.calls > 0)
@@ -4713,6 +4827,9 @@ function OverviewPage(props: { project: ProjectTarget }) {
       cacheSeries,
       runningSeries,
       schedulerSeries,
+      loadSeries,
+      propagationSeries,
+      propagationNow,
       topFunctions,
       totalCalls,
       totalErrors,
@@ -4844,6 +4961,109 @@ function OverviewPage(props: { project: ProjectTarget }) {
             <div><span>Network traffic</span><strong>{resources ? formatBytes(resources.bytesReceived + resources.bytesSent) : "—"}</strong><small>{resources ? `↓ ${formatBytes(resources.bytesReceived)} · ↑ ${formatBytes(resources.bytesSent)}` : "runtime sample unavailable"}</small></div>
           </div>
           <p className="resource-usage-note">CPU and memory are runtime-process averages divided by active clients. Use them for capacity trends, not per-client billing attribution.</p>
+        </section>
+
+        <section className="health-section" aria-label="Update propagation">
+          <div className="health-section-head">
+            <h3>Update propagation</h3>
+            <span>change committed → reflected in every subscribed browser · target {metrics?.propagation?.targetMs ?? 200}ms</span>
+          </div>
+          <div className="health-grid">
+            <HealthChartCard
+              title="Time to last user"
+              value={derived.propagationNow ? formatDuration(derived.propagationNow.maxMs || derived.propagationNow.serverMaxMs) : "—"}
+              tone={derived.propagationNow && (derived.propagationNow.maxMs || derived.propagationNow.serverMaxMs) > (metrics?.propagation?.targetMs ?? 200) ? "danger" : "success"}
+              hint="max commit→browser-ack delay, measured on the server clock (skew-free upper bound); 'Server max' isolates backend fan-out from network/browser time"
+            >
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={derived.propagationSeries} margin={HEALTH_CHART_MARGIN}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={44} tickFormatter={(value) => formatDuration(Number(value))} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => formatDuration(Number(value))} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} iconType="plainline" />
+                  <ReferenceLine y={metrics?.propagation?.targetMs ?? 200} stroke="var(--success)" strokeDasharray="4 4" label={{ value: "target", fontSize: 10, fill: "var(--muted)", position: "insideTopRight" }} />
+                  <Line type="monotone" dataKey="Last user" stroke={HEALTH_COLORS.errors} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="p95" stroke={HEALTH_COLORS.latency} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Average" stroke={HEALTH_COLORS.query} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Server max" stroke={HEALTH_COLORS.mutation} strokeWidth={1.5} strokeDasharray="5 3" dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+          </div>
+          {metrics?.propagation && metrics.propagation.samples === 0 ? (
+            <p className="resource-usage-note">No browser samples yet — clients must connect with <code>telemetry: true</code> to report when updates reach their GUI. The dashed server line still shows backend fan-out delay.</p>
+          ) : null}
+        </section>
+
+        <section className="health-section" aria-label="Connected load">
+          <div className="health-section-head">
+            <h3>Connected load</h3>
+            <span>last 3 h · 30s samples · all projects</span>
+          </div>
+          <div className="health-grid">
+            <HealthChartCard title="Connections & Users" value={String(connections)} hint="live sockets and distinct users, sampled every 30s">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={derived.loadSeries} margin={HEALTH_CHART_MARGIN}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={30} allowDecimals={false} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} iconType="plainline" />
+                  <Line type="monotone" dataKey="Connections" stroke={HEALTH_COLORS.query} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Users" stroke={HEALTH_COLORS.mutation} strokeWidth={2} dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+
+            <HealthChartCard title="Subscriptions" value={String(subscriptions)} hint="open query + sync subscriptions across all connections">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={derived.loadSeries} margin={HEALTH_CHART_MARGIN}>
+                  <defs>
+                    <linearGradient id="healthSubsFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={HEALTH_COLORS.calls} stopOpacity={0.35} />
+                      <stop offset="100%" stopColor={HEALTH_COLORS.calls} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={40} allowDecimals={false} tickFormatter={(value) => healthCompactNumber.format(Number(value))} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} />
+                  <Area type="monotone" dataKey="Subscriptions" stroke={HEALTH_COLORS.calls} strokeWidth={2} fill="url(#healthSubsFill)" isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+
+            <HealthChartCard title="CPU" value={resources ? `${resources.cpuPercent.toFixed(0)}%` : "—"} tone={resources && resources.cpuPercent > 100 ? "warning" : "default"} hint="runtime process CPU (100% = one core)">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={derived.loadSeries} margin={HEALTH_CHART_MARGIN}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={38} tickFormatter={(value) => `${Math.round(Number(value))}%`} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => `${Number(value).toFixed(1)}%`} />
+                  <Line type="monotone" dataKey="cpu" name="CPU" stroke={HEALTH_COLORS.latency} strokeWidth={2} dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+
+            <HealthChartCard title="Memory" value={resources ? formatBytes(resources.memoryBytes) : "—"} hint="runtime resident set size">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={derived.loadSeries} margin={HEALTH_CHART_MARGIN}>
+                  <defs>
+                    <linearGradient id="healthMemoryFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={HEALTH_COLORS.action} stopOpacity={0.3} />
+                      <stop offset="100%" stopColor={HEALTH_COLORS.action} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="label" tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} minTickGap={32} />
+                  <YAxis tick={HEALTH_AXIS_TICK} tickLine={false} axisLine={false} width={48} tickFormatter={(value) => formatBytes(Number(value))} />
+                  <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => formatBytes(Number(value))} />
+                  <Area type="monotone" dataKey="memory" name="Memory" stroke={HEALTH_COLORS.action} strokeWidth={2} fill="url(#healthMemoryFill)" isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </HealthChartCard>
+          </div>
         </section>
 
         <section className="health-section" aria-label="Concurrency and scheduler">
@@ -5166,6 +5386,10 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   const [addValues, setAddValues] = useState<Record<string, string>>({});
   const [addError, setAddError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [editingRowIndex, setEditingRowIndex] = useState<number | null>(null);
+  const [editValues, setEditValues] = useState<Record<string, string>>({});
+  const [editError, setEditError] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [creatingTenant, setCreatingTenant] = useState(false);
   const [deletingTenant, setDeletingTenant] = useState(false);
@@ -5373,6 +5597,9 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
     setRequestedOffset(0);
     setVisibleOffset(0);
     setRowCache({});
+    setEditingRowIndex(null);
+    setEditValues({});
+    setEditError("");
     setSelectedDataRows(new Set());
     setSelectionClearKey((key) => key + 1);
   }, [currentTenantID, filtersKey, props.project.id, rowSearch, rowSort, selectedTable]);
@@ -5465,6 +5692,11 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   const gridRowCount = activeTable ? (runtimeAvailable ? matchingRows : Object.keys(rowCache).length) : 0;
   const dataCellGetter = createCachedCellGetter(activeColumns, rowCache);
   const rowsSelectedForDelete = selectedRowIDs(selectedDataRows, rowCache);
+  const selectedDataRowIndex = selectedDataRows.size === 1 ? selectedDataRows.values().next().value as number : null;
+  const selectedDataRow = selectedDataRowIndex === null ? undefined : rowCache[selectedDataRowIndex];
+  const selectedDataRowID = dataRowIdentity(selectedDataRow);
+  const editingRow = editingRowIndex === null ? undefined : rowCache[editingRowIndex];
+  const editingRowID = dataRowIdentity(editingRow);
   const erdGraph = useMemo(() => createERDGraph(tables), [tables]);
   const erdLayoutKey = `${erdLayoutStoragePrefix}:${props.project.id}:${currentTenantID || "landlord"}`;
   const selectedERDTableInfo = tables.find((table) => table.name === selectedERDTable) ?? null;
@@ -5498,6 +5730,78 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
     setAddValues(Object.fromEntries(activeColumns.map((column) => [column, defaultValueForColumn(column)])));
     setAddError("");
     setAddOpen(true);
+  };
+  const openEditDocument = (rowIndex: number | null) => {
+    if (rowIndex === null) {
+      props.onAction("Select one loaded row to edit");
+      return;
+    }
+    const row = rowCache[rowIndex];
+    const rowID = dataRowIdentity(row);
+    if (!row || !rowID) {
+      props.onAction("This row has no supported _id or id value, so it cannot be edited");
+      return;
+    }
+    setEditingRowIndex(rowIndex);
+    setEditValues(Object.fromEntries(activeColumns.map((column) => [column, dataEditorInputValue(row[column])])));
+    setEditError("");
+  };
+  const updateDocument = async () => {
+    if (!activeTable || editingRowIndex === null || !editingRow || !editingRowID) {
+      setEditError("The selected row is no longer loaded. Close this editor and select it again.");
+      return;
+    }
+    if (!runtimeAvailable) {
+      setEditError("Gonvex Runtime is offline. Refresh the page after it is available again.");
+      return;
+    }
+
+    const patch: Record<string, unknown> = {};
+    for (const column of activeColumns) {
+      if (immutableDataColumns.has(column)) continue;
+      try {
+        const value = parseDataEditorValue(editValues[column] ?? "", editingRow[column]);
+        if (!dataValuesEqual(value, editingRow[column])) patch[column] = value;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Enter a valid value.";
+        setEditError(`${column}: ${message}`);
+        return;
+      }
+    }
+    if (Object.keys(patch).length === 0) {
+      setEditError("Change at least one editable value before saving.");
+      return;
+    }
+
+    setSavingEdit(true);
+    setEditError("");
+    try {
+      const params = new URLSearchParams();
+      if (currentTenantID) params.set("tenant", currentTenantID);
+      const query = params.toString();
+      const response = await fetch(`${runtimeURLForProject(props.project)}/dev/data/tables/${encodeURIComponent(selectedTable)}/rows/${encodeURIComponent(editingRowID)}${query ? `?${query}` : ""}`, {
+        method: "PATCH",
+        headers: runtimeHeaders(props.project, { "content-type": "application/json" }, currentTenantID),
+        body: JSON.stringify(patch),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({ error: response.statusText }));
+        throw new Error(payload.error ?? response.statusText);
+      }
+      const payload = await response.json() as UpdateRowResponse;
+      setRowCache((current) => ({ ...current, [editingRowIndex]: payload.row }));
+      setEditingRowIndex(null);
+      setEditValues({});
+      setFetchNonce((key) => key + 1);
+      props.onAction(`Updated ${activeTable.name} row ${editingRowID}`);
+    } catch (error) {
+      const message = error instanceof TypeError
+        ? `Cannot reach Gonvex Runtime at ${runtimeURLForProject(props.project) || "the configured URL"}.`
+        : error instanceof Error ? error.message : "Update failed";
+      setEditError(message);
+    } finally {
+      setSavingEdit(false);
+    }
   };
   const addFilter = () => {
     if (!activeTable) return;
@@ -5812,6 +6116,16 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
               {rowsSelectedForDelete.length} row{rowsSelectedForDelete.length === 1 ? "" : "s"} selected
             </span>
             <div className="data-selection-actions">
+              {selectedDataRows.size === 1 ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onPress={() => openEditDocument(selectedDataRowIndex)}
+                  isDisabled={!selectedDataRowID || !runtimeAvailable || !activeTable}
+                >
+                  Edit row
+                </Button>
+              ) : null}
               <Button size="sm" variant="ghost" onPress={() => { setSelectedDataRows(new Set()); setSelectionClearKey((key) => key + 1); }}>
                 Clear
               </Button>
@@ -5837,6 +6151,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
             themeMode={props.themeMode}
             selectableRows
             clearSelectionKey={selectionClearKey}
+            onCellActivated={([, row]) => openEditDocument(row)}
             onHeaderClick={(columnIndex) => {
               const column = activeColumns[columnIndex];
               if (column && activeTable) {
@@ -6000,6 +6315,52 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
               <Button size="sm" variant="secondary" onPress={() => setAddOpen(false)}>Cancel</Button>
               <Button size="sm" variant="primary" onPress={insertDocument} isDisabled={submitting}>
                 {submitting ? "Inserting..." : "Insert Document"}
+              </Button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+      {editingRowIndex !== null && activeTable && editingRow && editingRowID ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => !savingEdit && setEditingRowIndex(null)}>
+          <section className="document-modal edit-document-modal" role="dialog" aria-modal="true" aria-labelledby="edit-document-title" onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <p className="eyebrow">{activeTable.name} · {editingRowID}</p>
+                <h2 id="edit-document-title">Edit document</h2>
+              </div>
+              <Button size="sm" variant="ghost" onPress={() => setEditingRowIndex(null)} isDisabled={savingEdit}>Close</Button>
+            </header>
+            <p className="edit-document-note">
+              Values keep their current data type. Objects and arrays must be valid JSON.
+            </p>
+            <div className="document-form edit-document-form">
+              {activeColumns.map((column, index) => {
+                const original = editingRow[column];
+                const immutable = immutableDataColumns.has(column);
+                const complex = original !== null && typeof original === "object";
+                const inputProps = {
+                  "aria-label": `Edit ${column}`,
+                  autoFocus: !immutable && activeColumns.slice(0, index).every((item) => immutableDataColumns.has(item)),
+                  disabled: immutable,
+                  onChange: (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setEditValues((current) => ({ ...current, [column]: event.target.value })),
+                  value: editValues[column] ?? "",
+                };
+                return (
+                  <label className={complex ? "edit-document-field edit-document-field--wide" : "edit-document-field"} key={column}>
+                    <span className="edit-document-label">
+                      <strong>{column}</strong>
+                      <small>{immutable ? "identity · read only" : dataValueTypeLabel(original)}</small>
+                    </span>
+                    {complex ? <textarea {...inputProps} rows={5} /> : <input {...inputProps} />}
+                  </label>
+                );
+              })}
+            </div>
+            {editError ? <div className="form-error" role="alert">{editError}</div> : null}
+            <footer>
+              <Button size="sm" variant="secondary" onPress={() => setEditingRowIndex(null)} isDisabled={savingEdit}>Cancel</Button>
+              <Button size="sm" variant="primary" onPress={updateDocument} isDisabled={savingEdit}>
+                {savingEdit ? "Saving changes…" : "Save changes"}
               </Button>
             </footer>
           </section>
@@ -8142,7 +8503,37 @@ function ErrorBreakdown(props: { title: string; values: Record<string, number>; 
   return <div className="error-breakdown"><span>{props.title}</span>{entries.length ? entries.map(([key, count]) => <div key={key}><code title={key}>{props.maskKeys ? `${key.slice(0, 8)}…` : key}</code><strong>{count}</strong></div>) : <small>No data</small>}</div>;
 }
 
-function SchedulesPage(props: { project: ProjectTarget }) {
+export function groupRuntimeSchedulerCrons(crons: RuntimeSchedulerCron[]): RuntimeSchedulerCronGroup[] {
+  const groups = new Map<string, RuntimeSchedulerCronGroup>();
+  for (const cron of crons) {
+    const scope = cron.tenant ? "tenant" : "project";
+    const key = JSON.stringify([cron.project ?? "", cron.name, cron.function, cron.schedule, scope]);
+    const current = groups.get(key);
+    if (!current) {
+      groups.set(key, {
+        ...cron,
+        key,
+        registrations: [cron],
+      });
+      continue;
+    }
+    current.registrations.push(cron);
+    current.runs += cron.runs;
+    current.failures += cron.failures;
+    if (cron.nextRun && (!current.nextRun || new Date(cron.nextRun).getTime() < new Date(current.nextRun).getTime())) {
+      current.nextRun = cron.nextRun;
+    }
+    if (cron.lastRun && (!current.lastRun || new Date(cron.lastRun).getTime() > new Date(current.lastRun).getTime())) {
+      current.lastRun = cron.lastRun;
+    }
+  }
+  return [...groups.values()].map((group) => ({
+    ...group,
+    registrations: [...group.registrations].sort((left, right) => (left.tenant ?? "").localeCompare(right.tenant ?? "")),
+  }));
+}
+
+export function SchedulesPage(props: { project: ProjectTarget }) {
   const { metrics, reachable } = useRuntimeMetrics(props.project, projectIsProvisioned(props.project));
   const [status, setStatus] = useState("Loading scheduler...");
 
@@ -8151,14 +8542,18 @@ function SchedulesPage(props: { project: ProjectTarget }) {
       setStatus("Runtime offline");
       return;
     }
-    setStatus(metrics?.scheduler ? `${metrics.scheduler.crons.length} cron${metrics.scheduler.crons.length === 1 ? "" : "s"} registered` : "No scheduler data");
+    const nextGroups = groupRuntimeSchedulerCrons(metrics?.scheduler?.crons ?? []);
+    const instanceCount = metrics?.scheduler?.crons.length ?? 0;
+    setStatus(metrics?.scheduler ? `${nextGroups.length} cron definition${nextGroups.length === 1 ? "" : "s"} · ${instanceCount} registered instance${instanceCount === 1 ? "" : "s"}` : "No scheduler data");
   }, [metrics, props.project, reachable]);
 
   const scheduler = metrics?.scheduler ?? null;
   const crons = scheduler?.crons ?? [];
+  const groupedCrons = groupRuntimeSchedulerCrons(crons);
   const recent = scheduler?.recent ?? [];
   const summary = [
-    { label: "Registered", value: String(crons.length) },
+    { label: "Definitions", value: String(groupedCrons.length) },
+    { label: "Instances", value: String(crons.length) },
     { label: "Scheduled", value: String(scheduler?.scheduled ?? 0) },
     { label: "Running", value: String(scheduler?.running ?? 0) },
     { label: "Queued", value: String(scheduler?.queued ?? 0) },
@@ -8184,21 +8579,42 @@ function SchedulesPage(props: { project: ProjectTarget }) {
             <p className="eyebrow">{status}</p>
             <h2>Registered crons</h2>
           </div>
-          <Chip color={metrics ? "success" : "warning"} size="sm" variant="soft">{metrics ? `${crons.length}` : "offline"}</Chip>
+          <Chip color={metrics ? "success" : "warning"} size="sm" variant="soft">{metrics ? `${groupedCrons.length}` : "offline"}</Chip>
         </header>
         <div className="sched-table sched-table--crons" role="table" aria-label="Cron jobs">
           <div className="sched-row sched-row--head" role="row">
             <span role="columnheader">Name</span>
             <span role="columnheader">Function</span>
+            <span role="columnheader">Scope</span>
             <span role="columnheader">Schedule</span>
             <span role="columnheader">Next run</span>
             <span role="columnheader">Runs</span>
             <span role="columnheader">Failures</span>
           </div>
-          {crons.map((cron) => (
-            <div className="sched-row" role="row" key={`${cron.project ?? ""}:${cron.name}`} data-status={cron.failures > 0 ? "warn" : "ok"}>
+          {groupedCrons.map((cron) => (
+            <div className="sched-row" role="row" key={cron.key} data-status={cron.failures > 0 ? "warn" : "ok"}>
               <strong role="cell">{cron.name}</strong>
               <code role="cell">{cron.function}</code>
+              <span className="sched-scope-cell" role="cell">
+                {cron.tenant ? (
+                  <details className="sched-scope-disclosure">
+                    <summary title="One isolated registration runs for each tenant">
+                      {cron.registrations.length} tenant{cron.registrations.length === 1 ? "" : "s"}
+                    </summary>
+                    <span className="sched-scope-list">
+                      {cron.registrations.map((registration) => (
+                        <span className="sched-scope-instance" key={registration.tenant}>
+                          <code title={registration.tenant}>{registration.tenant}</code>
+                          <small data-failures={registration.failures > 0 ? "true" : undefined}>
+                            {registration.runs} run{registration.runs === 1 ? "" : "s"}
+                            {registration.failures > 0 ? ` · ${registration.failures} failed` : ""}
+                          </small>
+                        </span>
+                      ))}
+                    </span>
+                  </details>
+                ) : <span className="sched-project-scope">Project-wide</span>}
+              </span>
               <code role="cell">{cron.schedule}</code>
               <span role="cell">{cron.nextRun ? formatLogDateTime(cron.nextRun) : "—"}</span>
               <span role="cell">{cron.runs}</span>

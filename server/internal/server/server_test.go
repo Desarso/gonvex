@@ -17,6 +17,7 @@ import (
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/config"
+	"github.com/gorilla/websocket"
 )
 
 type recordingDB struct {
@@ -217,6 +218,19 @@ func TestUpdateDataRowRejectsEmptyPatch(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "at least one value is required") {
 		t.Fatalf("expected empty patch validation error, got %s", recorder.Body.String())
+	}
+}
+
+func TestUpdateDataRowAcceptsLocalDashboardOwner(t *testing.T) {
+	server := New(config.Config{})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/dev/data/tables/tasks/rows/task-1", bytes.NewBufferString(`{"name":"Updated"}`))
+	request.Header.Set("x-gonvex-project-id", "project")
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code == http.StatusForbidden || recorder.Code == http.StatusUnauthorized {
+		t.Fatalf("expected local dashboard owner to pass data-write authorization, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -486,6 +500,34 @@ func TestMetricsStreamsProjectLogs(t *testing.T) {
 	}
 }
 
+func TestMetricsWebSocketOmitsTelemetryLogPath(t *testing.T) {
+	runtime := httptest.NewServer(New(config.Config{TelemetryLogPath: filepath.Join(t.TempDir(), "runtime.jsonl")}).Handler())
+	defer runtime.Close()
+
+	connection, _, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(runtime.URL, "http")+"/dev/metrics/stream?project=project-a",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("dial metrics stream: %v", err)
+	}
+	defer connection.Close()
+
+	var message struct {
+		Type    string                     `json:"type"`
+		Metrics map[string]json.RawMessage `json:"metrics"`
+	}
+	if err := connection.ReadJSON(&message); err != nil {
+		t.Fatalf("read metrics stream: %v", err)
+	}
+	if message.Type != "metrics" {
+		t.Fatalf("stream message type = %q, want metrics", message.Type)
+	}
+	if _, exposed := message.Metrics["telemetryLogPath"]; exposed {
+		t.Fatal("metrics stream exposed the server telemetry filesystem path")
+	}
+}
+
 func TestLogStreamReplayFlag(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/dev/logs/stream", nil)
 	if !logStreamReplay(request) {
@@ -636,6 +678,34 @@ func TestMetricsTracksTransactionTelemetry(t *testing.T) {
 	}
 }
 
+func TestTelemetryPermissionsHardenedDuringInitialization(t *testing.T) {
+	telemetryDir := filepath.Join(t.TempDir(), "telemetry")
+	if err := os.Mkdir(telemetryDir, 0o755); err != nil {
+		t.Fatalf("create telemetry directory: %v", err)
+	}
+	telemetryPath := filepath.Join(telemetryDir, "runtime.jsonl")
+	if err := os.WriteFile(telemetryPath, []byte("existing\n"), 0o644); err != nil {
+		t.Fatalf("create telemetry file: %v", err)
+	}
+
+	_ = New(config.Config{TelemetryLogPath: telemetryPath})
+
+	directoryInfo, err := os.Stat(telemetryDir)
+	if err != nil {
+		t.Fatalf("stat telemetry directory: %v", err)
+	}
+	if got := directoryInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("telemetry directory mode after initialization = %o, want 700", got)
+	}
+	fileInfo, err := os.Stat(telemetryPath)
+	if err != nil {
+		t.Fatalf("stat telemetry file: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("telemetry file mode after initialization = %o, want 600", got)
+	}
+}
+
 func TestTransactionTelemetryCanBeDisabled(t *testing.T) {
 	telemetryPath := filepath.Join(t.TempDir(), "telemetry.jsonl")
 	server := New(config.Config{TelemetryEnabled: false, TelemetryLogPath: telemetryPath})
@@ -668,6 +738,23 @@ func TestTransactionTelemetryCanBeDisabled(t *testing.T) {
 	}
 	if _, err := os.Stat(telemetryPath); !os.IsNotExist(err) {
 		t.Fatalf("expected telemetry file to be absent when disabled, got err=%v", err)
+	}
+}
+
+func TestSuccessfulServerSubscriptionTelemetryIsNotDurable(t *testing.T) {
+	for _, kind := range []string{"query", "sync"} {
+		if transactionTelemetryIsDurable(transactionTelemetryEntry{Kind: kind, Phase: "server", Outcome: "ok"}) {
+			t.Fatalf("successful server %s telemetry must stay aggregate-only", kind)
+		}
+		if !transactionTelemetryIsDurable(transactionTelemetryEntry{Kind: kind, Phase: "server", Outcome: "error"}) {
+			t.Fatalf("server %s errors must remain durable", kind)
+		}
+	}
+	if !transactionTelemetryIsDurable(transactionTelemetryEntry{Kind: "mutation", Phase: "server", Outcome: "ok"}) {
+		t.Fatal("successful mutations must remain durable")
+	}
+	if !transactionTelemetryIsDurable(transactionTelemetryEntry{Kind: "query", Phase: "browser", Outcome: "ok"}) {
+		t.Fatal("browser telemetry must remain durable")
 	}
 }
 

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const cli = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 
-test("dev manifest preserves function dependency options", () => {
+test("codegen manifest preserves function dependency options without runtime sync", () => {
   const project = mkdtempSync(join(tmpdir(), "gonvex-cli-dependencies-"));
   try {
     mkdirSync(join(project, "gonvex"));
@@ -25,9 +25,11 @@ func Register(app *gonvex.App) {
     ListLocations,
     gonvex.Reads("locations").Columns("tenantId", "updatedAt").Filters("tenantId").OrdersBy("updatedAt").Windowed().Predicate("active"),
     gonvex.Reads("users"),
+    gonvex.ReadsEphemeral(),
     gonvex.ShareByPermissions(),
   )
   app.Mutation("locations.upsert", UpsertLocation, gonvex.Writes("locations").Columns("tenantId", "userId"))
+  app.Mutation("presence.beat", Beat, gonvex.WritesEphemeral())
 }
 `,
     );
@@ -35,11 +37,13 @@ func Register(app *gonvex.App) {
     const environment = Object.fromEntries(
       Object.entries(process.env).filter(([, value]) => !value?.trimStart().startsWith("()")),
     );
-    spawnSync(
+    const generated = spawnSync(
       process.execPath,
-      [cli, "dev", "--project", project, "--runtime-url", "http://127.0.0.1:65534", "--once"],
+      [cli, "codegen", "--project", project],
       { env: environment, encoding: "utf8" },
     );
+    assert.equal(generated.status, 0, generated.stderr);
+    assert.match(generated.stdout, /without runtime sync/);
 
     const manifest = JSON.parse(readFileSync(join(project, "gonvex", "_generated", "manifest.json"), "utf8"));
     assert.deepEqual(manifest.functions["locations.list"].dependencies, {
@@ -54,10 +58,14 @@ func Register(app *gonvex.App) {
         },
         { table: "users" },
       ],
+      readsEphemeral: true,
       shareByPermissions: true,
     });
     assert.deepEqual(manifest.functions["locations.upsert"].dependencies, {
       writes: [{ table: "locations", columns: ["tenantId", "userId"] }],
+    });
+    assert.deepEqual(manifest.functions["presence.beat"].dependencies, {
+      writesEphemeral: true,
     });
   } finally {
     rmSync(project, { recursive: true, force: true });

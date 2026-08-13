@@ -15,22 +15,72 @@ type telemetrySchemaDB interface {
 }
 
 func (s *Server) recordTransactionTelemetry(entry transactionTelemetryEntry) {
+	s.recordTransactionTelemetryBatch([]transactionTelemetryEntry{entry})
+}
+
+func (s *Server) recordTransactionTelemetryBatch(entries []transactionTelemetryEntry) {
 	if !s.config.TelemetryEnabled {
 		return
 	}
-	entry.Project = strings.TrimSpace(entry.Project)
-	if entry.Project == "" {
-		entry.Project = "default"
+	normalized := make([]transactionTelemetryEntry, 0, len(entries))
+	for _, entry := range entries {
+		entry.Project = strings.TrimSpace(entry.Project)
+		if entry.Project == "" {
+			entry.Project = "default"
+		}
+		normalized = append(normalized, entry)
 	}
-	s.metrics.recordTransaction(entry)
-	select {
-	case s.telemetryWrites <- struct{}{}:
-		go func() {
-			defer func() { <-s.telemetryWrites }()
-			s.persistTransactionTelemetry(entry)
-		}()
-	default:
-		slog.Debug("telemetry write dropped because persistence queue is full", "project", entry.Project, "path", entry.Path)
+	s.metrics.recordTransactions(normalized)
+	dropped := 0
+	for index, entry := range normalized {
+		if !transactionTelemetryIsDurable(entry) {
+			continue
+		}
+		select {
+		case s.telemetryWrites <- struct{}{}:
+			go func(entry transactionTelemetryEntry) {
+				defer func() { <-s.telemetryWrites }()
+				s.persistTransactionTelemetry(entry)
+			}(entry)
+		default:
+			dropped = len(normalized) - index
+			break
+		}
+		if dropped > 0 {
+			break
+		}
+	}
+	if dropped > 0 {
+		slog.Debug("telemetry writes dropped because persistence queue is full", "count", dropped)
+	}
+}
+
+// Successful server-side subscription executions are extremely high-cardinality:
+// one shared execution can account for thousands of logical subscribers. Their
+// aggregate timings remain available in runtime metrics and the optional JSONL
+// stream, but writing one PostgreSQL row per subscriber can overwhelm the same
+// database the application is trying to serve. Durable telemetry retains all
+// failures, mutations/actions, and client/browser events.
+func transactionTelemetryIsDurable(entry transactionTelemetryEntry) bool {
+	if entry.Outcome == "error" || entry.Phase == "browser" {
+		return true
+	}
+	return entry.Kind != "query" && entry.Kind != "sync"
+}
+
+func (s *Server) enqueueSubscriptionTelemetry(entries []transactionTelemetryEntry) {
+	if len(entries) == 0 || !s.config.TelemetryEnabled {
+		return
+	}
+	// The buffer is sized for several complete high-fanout commits. Backpressure
+	// is preferable to silently losing observability if sustained producers ever
+	// outrun the single ordered accounting worker.
+	s.subscriptionTelemetry <- entries
+}
+
+func (s *Server) runSubscriptionTelemetry() {
+	for entries := range s.subscriptionTelemetry {
+		s.recordTransactionTelemetryBatch(entries)
 	}
 }
 
@@ -45,8 +95,6 @@ func (s *Server) persistTransactionTelemetry(entry transactionTelemetryEntry) {
 		}
 		return
 	}
-	defer db.Close()
-
 	deviceJSON := strings.TrimSpace(entry.DeviceJSON)
 	if deviceJSON == "" {
 		deviceJSON = "{}"
@@ -110,6 +158,13 @@ func (s *Server) persistTransactionTelemetry(entry transactionTelemetryEntry) {
 }
 
 func (s *Server) openProjectTelemetryDB(ctx context.Context, projectID string) (*sql.DB, error) {
+	projectID = strings.TrimSpace(projectID)
+	s.telemetryDBMu.Lock()
+	defer s.telemetryDBMu.Unlock()
+	if db := s.telemetryDBs[projectID]; db != nil {
+		return db, nil
+	}
+
 	baseURL := s.projectTelemetryBaseURL(projectID)
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, nil
@@ -122,7 +177,12 @@ func (s *Server) openProjectTelemetryDB(ctx context.Context, projectID string) (
 	db, err := dbpool.Open(telemetryURL)
 	if err == nil {
 		if pingErr := db.PingContext(ctx); pingErr == nil {
-			return db, ensureTelemetrySchema(ctx, db)
+			if schemaErr := ensureTelemetrySchema(ctx, db); schemaErr != nil {
+				_ = db.Close()
+				return nil, schemaErr
+			}
+			s.telemetryDBs[projectID] = db
+			return db, nil
 		}
 		_ = db.Close()
 	}
@@ -138,7 +198,12 @@ func (s *Server) openProjectTelemetryDB(ctx context.Context, projectID string) (
 		_ = db.Close()
 		return nil, err
 	}
-	return db, ensureTelemetrySchema(ctx, db)
+	if err := ensureTelemetrySchema(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	s.telemetryDBs[projectID] = db
+	return db, nil
 }
 
 func (s *Server) projectTelemetryBaseURL(projectID string) string {

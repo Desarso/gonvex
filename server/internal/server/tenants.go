@@ -15,6 +15,7 @@ import (
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/dbpool"
 	"github.com/gonvex/gonvex/server/internal/schema"
+	"github.com/gonvex/gonvex/server/internal/sqlmigration"
 )
 
 const projectTenantHydrationTTL = 5 * time.Second
@@ -546,7 +547,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 			s.mergeProjectTenants(project, []tenantTarget{registered})
 		}
 		if existing.databaseURL != "" {
-			if err := provisionTenantDatabase(r.Context(), existing.databaseURL, s.runtime.ManifestForProject(project).Schema.TenantSchema()); err != nil {
+			if err := s.provisionTenantDatabaseWithSync(r.Context(), project, existing.databaseURL); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
@@ -583,7 +584,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if err := provisionTenantDatabase(r.Context(), tenantDatabaseURL, s.runtime.ManifestForProject(project).Schema.TenantSchema()); err != nil {
+	if err := s.provisionTenantDatabaseWithSync(r.Context(), project, tenantDatabaseURL); err != nil {
 		_ = dropProjectDatabase(context.Background(), s.config.PostgresURL, databaseName)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -867,6 +868,41 @@ func provisionTenantDatabase(ctx context.Context, databaseURL string, desiredSch
 	if err := db.PingContext(ctx); err != nil {
 		return err
 	}
+	return ensureTenantLocalTables(ctx, db)
+}
+
+func (s *Server) provisionTenantDatabaseWithSync(ctx context.Context, project string, databaseURL string) error {
+	if databaseURL == "" {
+		return fmt.Errorf("tenant database URL is not configured")
+	}
+	current := s.runtime.ManifestForProject(project)
+	desiredSchema := current.Schema.TenantSchema()
+	syncDefinitions, err := syncDefinitionsForSchema(manifestSyncDefinitions(current), desiredSchema)
+	if err != nil {
+		return err
+	}
+	// Existing tenant databases may predate durable sync. Re-applying the
+	// ordinary application schema alone leaves them without _gonvex_sync_clock,
+	// causing every sync.openMany subscription to stall. ApplyWithSync is
+	// idempotent and repairs both old and newly created tenant databases.
+	if _, err := schema.ApplyWithSync(ctx, databaseURL, desiredSchema, syncDefinitions); err != nil {
+		return err
+	}
+	migrations, err := migrationsFromBundle(current.Bundle)
+	if err != nil {
+		return err
+	}
+	if _, err := sqlmigration.Apply(ctx, databaseURL, sqlmigration.Filter(migrations, sqlmigration.ScopeTenant), false); err != nil {
+		return fmt.Errorf("apply tenant SQL migrations: %w", err)
+	}
+	db, err := dbpool.Open(databaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		return err
+	}
 	if err := ensureTenantLocalTables(ctx, db); err != nil {
 		return err
 	}
@@ -1043,6 +1079,7 @@ func (s *Server) applyTenantSchemasForProject(
 	project string,
 	desiredSchema manifest.Schema,
 	syncDefinitions map[string]manifest.SyncDefinition,
+	options schema.ApplyOptions,
 ) (schema.Result, error) {
 	s.hydrateProjectTenantDatabases(ctx, project)
 	desiredSchema = desiredSchema.TenantSchema()
@@ -1061,7 +1098,7 @@ func (s *Server) applyTenantSchemasForProject(
 		return schema.Result{}, err
 	}
 	return applyTenantSchemas(ctx, tenants, desiredSchema, func(ctx context.Context, databaseURL string, desired manifest.Schema) (schema.Result, error) {
-		return schema.ApplyWithSync(ctx, databaseURL, desired, tenantSyncDefinitions)
+		return schema.ApplyWithOptions(ctx, databaseURL, desired, tenantSyncDefinitions, options)
 	})
 }
 

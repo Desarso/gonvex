@@ -152,14 +152,14 @@ func TestRunLoadMeasuresMutationsAndSubscriptionInvalidations(t *testing.T) {
 			case "query.subscribe":
 				_ = connection.WriteJSON(map[string]any{"type": "query.result", "id": message["id"], "path": message["path"], "reason": "initial", "result": []any{}})
 			case "mutation.call":
-				now := float64(time.Now().UnixNano()) / float64(time.Millisecond)
+				committedAt := float64(time.Now().Add(-4*time.Millisecond).UnixNano()) / float64(time.Millisecond)
 				_ = connection.WriteJSON(map[string]any{
 					"type": "mutation.result", "id": message["id"], "path": message["path"], "result": "ok",
-					"trace": map[string]any{"serverDurationMs": 2},
+					"trace": map[string]any{"serverDurationMs": 2, "serverMutationCommittedAtMs": committedAt},
 				})
 				_ = connection.WriteJSON(map[string]any{
 					"type": "query.progress", "id": "u000001-s001", "path": "analytics.listSessionLogs", "reason": "invalidate",
-					"trace": map[string]any{"serverDurationMs": 3, "serverChangeCommittedAtMs": now - 4},
+					"trace": map[string]any{"serverDurationMs": 3, "serverChangeCommittedAtMs": committedAt},
 				})
 			}
 		}
@@ -192,5 +192,8 @@ func TestRunLoadMeasuresMutationsAndSubscriptionInvalidations(t *testing.T) {
 	}
 	if report.Latency.Mutation.Count != report.Mutations.Succeeded || report.Latency.InvalidationChangeToClient.Count != report.Invalidations.Messages {
 		t.Fatalf("missing latency samples: %#v", report.Latency)
+	}
+	if report.TTLU.CommitsWithPropagation != report.Mutations.Succeeded || report.TTLU.PropagationSamples != report.Mutations.Succeeded {
+		t.Fatalf("missing TTLU samples: %#v", report.TTLU)
 	}
 }

@@ -243,6 +243,70 @@ describe("GonvexClient", () => {
 		expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", id });
 	});
 
+	it("atomically applies keyed patches to object collections", () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		const handler = vi.fn();
+		client.subscribeQuery(ref, {}, handler);
+		const socket = latestSocket();
+		socket.open();
+		const [{ id }] = sentMessages(socket);
+		socket.receive({
+			type: "query.result", id,
+			result: {
+				taskUsers: [{ id: "u1", taskId: "a" }],
+				taskTags: [{ id: "t1", taskId: "a" }],
+				taskCustomFieldValues: [],
+			},
+			subscriptionRevision: { epoch: "runtime-a", sequence: 20 },
+		});
+		socket.receive({
+			type: "query.objectPatch", id,
+			baseRevision: { epoch: "runtime-a", sequence: 20 },
+			subscriptionRevision: { epoch: "runtime-a", sequence: 21 },
+			collections: {
+				taskUsers: {
+					updated: [{ id: "u1", taskId: "b" }],
+					inserted: [{ id: "u2", taskId: "c" }],
+					order: ["u2", "u1"],
+				},
+			},
+		});
+		expect(handler).toHaveBeenCalledTimes(2);
+		expect(handler.mock.calls[1][0]).toMatchObject({
+			type: "query.result",
+			result: {
+				taskUsers: [{ id: "u2", taskId: "c" }, { id: "u1", taskId: "b" }],
+				taskTags: [{ id: "t1", taskId: "a" }],
+				taskCustomFieldValues: [],
+			},
+		});
+	});
+
+	it("applies compact keyed prepend order deltas", () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		const handler = vi.fn();
+		client.subscribeQuery(ref, {}, handler);
+		const socket = latestSocket();
+		socket.open();
+		const [{ id }] = sentMessages(socket);
+		socket.receive({
+			type: "query.result", id,
+			result: [{ id: "b" }, { id: "a" }],
+			subscriptionRevision: { epoch: "runtime-a", sequence: 30 },
+		});
+		socket.receive({
+			type: "query.patch", id,
+			baseRevision: { epoch: "runtime-a", sequence: 30 },
+			subscriptionRevision: { epoch: "runtime-a", sequence: 31 },
+			inserted: [{ id: "c" }],
+			prepend: ["c"],
+		});
+		expect(handler.mock.calls[1][0]).toMatchObject({
+			type: "query.result",
+			result: [{ id: "c" }, { id: "b" }, { id: "a" }],
+		});
+	});
+
   it("converts http runtime URLs to websocket URLs for ConvexReactClient compatibility", () => {
     const client = new ConvexReactClient("https://runtime.example.com/");
     client.connect();

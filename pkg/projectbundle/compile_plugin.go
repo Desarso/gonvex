@@ -133,7 +133,10 @@ func runGoBuild(projectDir string, outputPath string) error {
 		return fmt.Errorf("tidy project bundle module: %w: %s", err, string(output))
 	}
 
-	cmd := exec.Command("go", "build", "-buildmode=plugin", "-o", outputPath, ".")
+	// -buildvcs=false: bundle dirs are never git repos, and VCS discovery from
+	// cache dirs can hit a filesystem-boundary fatal (git exit 128) that go
+	// otherwise surfaces as a compile failure.
+	cmd := exec.Command("go", "build", "-buildmode=plugin", "-buildvcs=false", "-o", outputPath, ".")
 	cmd.Dir = projectDir
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 	output, err := cmd.CombinedOutput()

@@ -50,7 +50,12 @@ type WriteDependency = {
 type FunctionDependencies = {
   reads?: ReadDependency[];
   writes?: WriteDependency[];
+  readsEphemeral?: boolean;
+  writesEphemeral?: boolean;
   shareByPermissions?: boolean;
+	shareByVisibility?: string;
+	shareResultFrom?: string;
+	shareResultField?: string;
 };
 
 type Column = {
@@ -279,6 +284,10 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (command === "dev") {
     await runDev(argv.slice(1));
+    return;
+  }
+  if (command === "codegen") {
+    await runCodegen(argv.slice(1));
     return;
   }
   if (command === "init") {
@@ -651,6 +660,19 @@ async function runDev(argv: string[]) {
     console.error("[gonvex] one-shot sync did not succeed; exiting non-zero");
     process.exitCode = 1;
   }
+}
+
+async function runCodegen(argv: string[]) {
+  const projectRoot = resolve(valueFor(argv, "--project") ?? ".");
+  const settings = await loadSettings(projectRoot, {
+    projectID: valueFor(argv, "--project-id"),
+  });
+  const backendDir = join(projectRoot, "gonvex");
+  await mkdir(backendDir, { recursive: true });
+  const files = await goFiles(backendDir);
+  const manifest = await buildManifest(projectRoot, files, settings.projectID);
+  await writeBindings(projectRoot, manifest);
+  console.log(`[gonvex] generated ${Object.keys(manifest.functions).length} function binding(s) without runtime sync`);
 }
 
 async function runEnv(argv: string[]) {
@@ -1103,7 +1125,9 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
 
   while (!signal?.aborted) {
     const files = await goFiles(backendDir);
-    const fingerprint = await filesFingerprint(files);
+    // Watch migrations too: editing or adding one must trigger a re-sync,
+    // otherwise a new migration sits unapplied until an unrelated .go edit.
+    const fingerprint = await filesFingerprint([...files, ...await migrationFiles(join(root, "migrations"))]);
     const now = Date.now();
     const shouldBuild = fingerprint !== lastFingerprint;
     const shouldRetryRuntimeSync = !once && !lastSyncSucceeded && lastManifest !== null && now - lastSyncAttempt > runtimeSyncRetryMs;
@@ -1132,7 +1156,11 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
         console.log(`[gonvex] synced project ${settings.projectID || "(key-inferred)"} to ${settings.runtimeURL}`);
       } catch (error) {
         lastSyncSucceeded = false;
-        console.error(`[gonvex] runtime sync failed: ${error instanceof Error ? error.message : String(error)}`);
+        const detail = error instanceof Error ? error.message : String(error);
+        const valkeyHint = isLocalRuntimeURL(settings.runtimeURL)
+          ? " Local runtimes require a reachable VALKEY_URL (or REDIS_URL), for example VALKEY_URL=redis://127.0.0.1:6380/0."
+          : "";
+        console.error(`[gonvex] runtime sync failed: ${detail}.${valkeyHint}`);
       }
     } else if (shouldVerifyRuntimeState) {
       const manifest = lastManifest;
@@ -1187,6 +1215,14 @@ async function buildSourceBundle(root: string, files: string[], projectID: strin
     const source = await readFile(file);
     const rel = relative(backendDir, file).replace(/\\/g, "/");
     encodedFiles[`app/${rel}`] = Buffer.from(source).toString("base64");
+  }
+  // Versioned SQL migrations ship in the bundle under migrations/, which is
+  // where the runtime looks for them. Without this the runtime sees no
+  // migrations at all and silently applies only the declarative schema.
+  for (const file of await migrationFiles(join(root, "migrations"))) {
+    const source = await readFile(file);
+    const rel = relative(join(root, "migrations"), file).replace(/\\/g, "/");
+    encodedFiles[`migrations/${rel}`] = Buffer.from(source).toString("base64");
   }
   const hash = createHash("sha256");
   for (const path of Object.keys(encodedFiles).sort()) {
@@ -1285,7 +1321,7 @@ function parseSyncDefinition(callBody: string): SyncDefinition | undefined {
 
 function parseFunctionDependencies(callBody: string): FunctionDependencies {
   const dependencies: FunctionDependencies = {};
-  const pattern = /(?:gonvex\.)?(Reads|Writes|ShareByPermissions)\s*\(/g;
+  const pattern = /(?:gonvex\.)?(Reads|Writes|ReadsEphemeral|WritesEphemeral|ShareByPermissions|ShareByVisibility|ShareResultFrom)\s*\(/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(callBody)) !== null) {
     const option = match[1]!;
@@ -1293,11 +1329,37 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
     const closeParen = findClosingParen(callBody, openParen);
     if (closeParen < 0) break;
 
+    if (option === "ReadsEphemeral") {
+      dependencies.readsEphemeral = true;
+      pattern.lastIndex = closeParen + 1;
+      continue;
+    }
+
+    if (option === "WritesEphemeral") {
+      dependencies.writesEphemeral = true;
+      pattern.lastIndex = closeParen + 1;
+      continue;
+    }
+
     if (option === "ShareByPermissions") {
       dependencies.shareByPermissions = true;
       pattern.lastIndex = closeParen + 1;
       continue;
     }
+
+		if (option === "ShareByVisibility") {
+			dependencies.shareByVisibility = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
+			pattern.lastIndex = closeParen + 1;
+			continue;
+		}
+
+		if (option === "ShareResultFrom") {
+			const values = stringArgs(callBody.slice(openParen + 1, closeParen));
+			dependencies.shareResultFrom = values[0];
+			dependencies.shareResultField = values[1];
+			pattern.lastIndex = closeParen + 1;
+			continue;
+		}
 
     const tables = stringArgs(callBody.slice(openParen + 1, closeParen));
     const start = option === "Reads"
@@ -1971,6 +2033,7 @@ async function writeProjectEnv(root: string, runtimeURL: string, projectID: stri
     VITE_GONVEX_PROJECT_ID: projectID,
     VITE_GONVEX_URL: runtimeURL,
     VITE_GONVEX_WS_URL: webSocketURL(runtimeURL),
+    ...(isLocalRuntimeURL(runtimeURL) ? { VALKEY_URL: "redis://127.0.0.1:6380/0" } : {}),
   }, overwrite);
 }
 
@@ -2309,6 +2372,21 @@ async function goFiles(root: string): Promise<string[]> {
   return files.sort();
 }
 
+async function migrationFiles(root: string): Promise<string[]> {
+  if (!existsSync(root)) return [];
+  const entries = await readdir(root, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await migrationFiles(path));
+    } else if (entry.isFile() && entry.name.endsWith(".sql")) {
+      files.push(path);
+    }
+  }
+  return files.sort();
+}
+
 async function filesFingerprint(files: string[]) {
   const hash = createHash("sha256");
   for (const file of files) {
@@ -2358,7 +2436,17 @@ async function writeEnvLocal(root: string, project: string, runtime: string) {
   const envPath = join(root, ".env.local");
   if (existsSync(envPath)) return;
   const wsURL = runtime.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/$/, "") + "/ws";
-  await writeFile(envPath, `GONVEX_PROJECT_ID=${project}\nGONVEX_RUNTIME_URL=${runtime}\nGONVEX_PROJECT_KEY=\nVITE_GONVEX_PROJECT_ID=${project}\nVITE_GONVEX_URL=${runtime}\nVITE_GONVEX_WS_URL=${wsURL}\n`);
+  const valkey = isLocalRuntimeURL(runtime) ? "VALKEY_URL=redis://127.0.0.1:6380/0\n" : "";
+  await writeFile(envPath, `GONVEX_PROJECT_ID=${project}\nGONVEX_RUNTIME_URL=${runtime}\nGONVEX_PROJECT_KEY=\n${valkey}VITE_GONVEX_PROJECT_ID=${project}\nVITE_GONVEX_URL=${runtime}\nVITE_GONVEX_WS_URL=${wsURL}\n`);
+}
+
+function isLocalRuntimeURL(runtime: string) {
+  try {
+    const hostname = new URL(runtime).hostname;
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
 }
 
 function templateDir(template: string) {
@@ -2432,8 +2520,9 @@ function sleep(ms: number, signal?: AbortSignal) {
 }
 
 function printHelp() {
-  console.log("Usage: gonvex <dev|init|create|env|auth|login|logout|whoami|project|token> [options]");
+  console.log("Usage: gonvex <dev|codegen|init|create|env|auth|login|logout|whoami|project|token> [options]");
   console.log("  gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--verbose-logs] [-- <command>]");
+  console.log("  gonvex codegen [--project <path>] [--project-id <id>]");
   console.log("  gonvex init [--template vite-react] [--project <id>] [--runtime <url>]");
   console.log("  gonvex create <app-name> [--runtime-url <url>] [--provision] [--database-mode single|multiTenant] [--google-auth] [--origin <url>]... [--signup-mode personal|inviteOnly] [--owner <email>]");
   console.log("  gonvex env <list|get|set|push|remove> [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>]");

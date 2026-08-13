@@ -78,7 +78,7 @@ func TestDurableSyncLogOrdersConcurrentTransactionsAndProjectsColumns(t *testing
 		t.Fatal(err)
 	}
 	if _, err := rolledBack.Exec(
-		`INSERT INTO `+quoteIdent(tableName)+` ("id", "workspaceId", "title", "updatedAt") VALUES ('rolled-back', 'workspace-a', 'never-visible', 0)`,
+		`INSERT INTO ` + quoteIdent(tableName) + ` ("id", "workspaceId", "title", "updatedAt") VALUES ('rolled-back', 'workspace-a', 'never-visible', 0)`,
 	); err != nil {
 		_ = rolledBack.Rollback()
 		t.Fatal(err)
@@ -144,19 +144,19 @@ func TestDurableSyncLogOrdersConcurrentTransactionsAndProjectsColumns(t *testing
 		t.Fatal(err)
 	}
 	if _, err := lifecycle.Exec(
-		`INSERT INTO `+quoteIdent(tableName)+` ("id", "workspaceId", "title", "updatedAt") VALUES ('lifecycle', 'workspace-a', 'created', 1)`,
+		`INSERT INTO ` + quoteIdent(tableName) + ` ("id", "workspaceId", "title", "updatedAt") VALUES ('lifecycle', 'workspace-a', 'created', 1)`,
 	); err != nil {
 		_ = lifecycle.Rollback()
 		t.Fatal(err)
 	}
 	if _, err := lifecycle.Exec(
-		`UPDATE `+quoteIdent(tableName)+` SET "title" = 'updated', "updatedAt" = 2 WHERE "id" = 'lifecycle'`,
+		`UPDATE ` + quoteIdent(tableName) + ` SET "title" = 'updated', "updatedAt" = 2 WHERE "id" = 'lifecycle'`,
 	); err != nil {
 		_ = lifecycle.Rollback()
 		t.Fatal(err)
 	}
 	if _, err := lifecycle.Exec(
-		`DELETE FROM `+quoteIdent(tableName)+` WHERE "id" = 'lifecycle'`,
+		`DELETE FROM ` + quoteIdent(tableName) + ` WHERE "id" = 'lifecycle'`,
 	); err != nil {
 		_ = lifecycle.Rollback()
 		t.Fatal(err)

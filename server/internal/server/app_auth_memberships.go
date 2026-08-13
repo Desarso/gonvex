@@ -367,7 +367,7 @@ func (s *Server) createAppAuthTenant(ctx context.Context, projectID string, user
 			_ = dropProjectDatabase(context.Background(), s.config.PostgresURL, databaseName)
 		}
 	}()
-	if err := provisionTenantDatabase(ctx, tenantDatabaseURL, s.runtime.ManifestForProject(projectID).Schema.TenantSchema()); err != nil {
+	if err := s.provisionTenantDatabaseWithSync(ctx, projectID, tenantDatabaseURL); err != nil {
 		return appAuthTenant{}, err
 	}
 	target := tenantTarget{

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,11 +27,19 @@ const (
 	authModeSynthetic authMode = "synthetic"
 )
 
+func boolCapability(enabled bool) int {
+	if enabled {
+		return 1
+	}
+	return 0
+}
+
 type runConfig struct {
 	URL                        string
 	Project                    string
 	Tenant                     string
 	Tenants                    []string
+	Users                      int
 	Connections                int
 	SubscriptionsPerConnection int
 	RampDuration               time.Duration
@@ -42,11 +52,13 @@ type runConfig struct {
 	AuthMode                   authMode
 	SharedToken                string
 	Compression                bool
+	QueryResultBatch           bool
 	MaximumDialConcurrency     int
 	Variables                  map[string]string
 	SampleInterval             time.Duration
 	TargetPID                  int
 	Safety                     safetyLimits
+	RunID                      string
 }
 
 type runMetrics struct {
@@ -88,6 +100,16 @@ type runMetrics struct {
 	resourceMu  sync.Mutex
 	samples     []ResourceSample
 	abortReason string
+
+	mutationPathMu sync.Mutex
+	mutationPaths  map[string]*mutationPathMetrics
+	propagation    *propagationAggregator
+}
+
+type mutationPathMetrics struct {
+	sent      uint64
+	succeeded uint64
+	errors    uint64
 }
 
 type tenantMetrics struct {
@@ -116,11 +138,15 @@ type tenantMetrics struct {
 }
 
 type pathMetrics struct {
-	initialResults uint64
-	errors         uint64
-	payloadBytes   uint64
-	initialLatency *latencyHistogram
-	serverLatency  *latencyHistogram
+	initialResults            uint64
+	errors                    uint64
+	payloadBytes              uint64
+	invalidations             InvalidationReport
+	initialLatency            *latencyHistogram
+	serverLatency             *latencyHistogram
+	invalidationLatency       *latencyHistogram
+	invalidationServerLatency *latencyHistogram
+	functionLatency           *latencyHistogram
 }
 
 type RunReport struct {
@@ -138,6 +164,7 @@ type RunReport struct {
 	Subscriptions SubscriptionReport      `json:"subscriptions"`
 	Mutations     MutationReport          `json:"mutations"`
 	Invalidations InvalidationReport      `json:"invalidations"`
+	TTLU          TTLUReport              `json:"ttlu"`
 	Wire          WireReport              `json:"wire"`
 	Latency       LatencyReport           `json:"latency"`
 	Paths         map[string]PathReport   `json:"paths"`
@@ -149,8 +176,11 @@ type RunConfigurationReport struct {
 	AuthMode                   authMode `json:"authMode"`
 	IdentityMode               string   `json:"identityMode"`
 	Compression                bool     `json:"compression"`
+	QueryResultBatch           bool     `json:"queryResultBatch"`
 	TenantCount                int      `json:"tenantCount"`
+	Users                      int      `json:"users"`
 	Connections                int      `json:"connections"`
+	ConnectionsPerUser         float64  `json:"connectionsPerUser"`
 	SubscriptionsPerConnection int      `json:"subscriptionsPerConnection"`
 	RampMS                     int64    `json:"rampMs"`
 	HoldMS                     int64    `json:"holdMs"`
@@ -189,12 +219,23 @@ type SubscriptionReport struct {
 }
 
 type MutationReport struct {
-	Path       string  `json:"path,omitempty"`
-	RatePerSec float64 `json:"ratePerSec"`
-	Sent       uint64  `json:"sent"`
-	Succeeded  uint64  `json:"succeeded"`
-	Errors     uint64  `json:"errors"`
-	ErrorRate  float64 `json:"errorRate"`
+	Path                string                        `json:"path,omitempty"`
+	RatePerSec          float64                       `json:"ratePerSec"` // legacy alias for requestedRatePerSec
+	RequestedRatePerSec float64                       `json:"requestedRatePerSec"`
+	AchievedRatePerSec  float64                       `json:"achievedRatePerSec"`
+	Sent                uint64                        `json:"sent"`
+	Succeeded           uint64                        `json:"succeeded"`
+	Errors              uint64                        `json:"errors"`
+	ErrorRate           float64                       `json:"errorRate"`
+	ByPath              map[string]MutationPathReport `json:"byPath,omitempty"`
+}
+
+type MutationPathReport struct {
+	RequestedRatePerSec float64 `json:"requestedRatePerSec"`
+	AchievedRatePerSec  float64 `json:"achievedRatePerSec"`
+	Sent                uint64  `json:"sent"`
+	Succeeded           uint64  `json:"succeeded"`
+	Errors              uint64  `json:"errors"`
 }
 
 type InvalidationReport struct {
@@ -234,23 +275,33 @@ type HistogramReport struct {
 }
 
 type PathReport struct {
-	InitialResults uint64          `json:"initialResults"`
-	Errors         uint64          `json:"errors"`
-	PayloadBytes   uint64          `json:"payloadBytes"`
-	InitialLatency HistogramReport `json:"initialLatency"`
-	ServerLatency  HistogramReport `json:"serverLatency"`
+	InitialResults             uint64             `json:"initialResults"`
+	Errors                     uint64             `json:"errors"`
+	PayloadBytes               uint64             `json:"payloadBytes"`
+	InitialLatency             HistogramReport    `json:"initialLatency"`
+	ServerLatency              HistogramReport    `json:"serverLatency"`
+	Invalidations              InvalidationReport `json:"invalidations"`
+	InvalidationChangeToClient HistogramReport    `json:"invalidationChangeToClient"`
+	InvalidationServerQuery    HistogramReport    `json:"invalidationServerQuery"`
+	FunctionLatency            HistogramReport    `json:"functionLatency"`
 }
 
 type serverEnvelope struct {
-	Type   string          `json:"type"`
-	ID     string          `json:"id"`
-	Path   string          `json:"path"`
-	Reason string          `json:"reason"`
-	Error  string          `json:"error"`
-	Result json.RawMessage `json:"result"`
-	Trace  *struct {
-		ServerDurationMS          float64 `json:"serverDurationMs"`
-		ServerChangeCommittedAtMS float64 `json:"serverChangeCommittedAtMs"`
+	Type        string           `json:"type"`
+	ID          string           `json:"id"`
+	IDs         []string         `json:"ids"`
+	QueryType   string           `json:"queryType"`
+	Path        string           `json:"path"`
+	Reason      string           `json:"reason"`
+	Error       string           `json:"error"`
+	Result      json.RawMessage  `json:"result"`
+	MutationIDs []string         `json:"mutationIds"`
+	Messages    []serverEnvelope `json:"messages"`
+	Trace       *struct {
+		ServerDurationMS            float64         `json:"serverDurationMs"`
+		ServerMutationCommittedAtMS float64         `json:"serverMutationCommittedAtMs"`
+		ServerChangeCommittedAtMS   float64         `json:"serverChangeCommittedAtMs"`
+		QueryPerf                   json.RawMessage `json:"queryPerf"`
 	} `json:"trace"`
 }
 
@@ -278,6 +329,8 @@ func newRunMetrics() *runMetrics {
 		paths:                     map[string]*pathMetrics{},
 		errorSamples:              map[string]uint64{},
 		tenants:                   map[string]*tenantMetrics{},
+		mutationPaths:             map[string]*mutationPathMetrics{},
+		propagation:               newPropagationAggregator(),
 	}
 }
 
@@ -297,8 +350,11 @@ func (m *runMetrics) tenant(tenant string) *tenantMetrics {
 	return metrics
 }
 
-func (m *runMetrics) recordMutation(tenant string, latency, serverDuration time.Duration) {
+func (m *runMetrics) recordMutation(tenant, path string, latency, serverDuration time.Duration) {
 	m.mutationResults.Add(1)
+	m.mutationPathMu.Lock()
+	m.mutationPath(path).succeeded++
+	m.mutationPathMu.Unlock()
 	m.mutationLatency.Observe(latency)
 	metrics := m.tenant(tenant)
 	metrics.mutationResults.Add(1)
@@ -309,33 +365,80 @@ func (m *runMetrics) recordMutation(tenant string, latency, serverDuration time.
 	}
 }
 
-func (m *runMetrics) recordMutationError(tenant string) {
+func (m *runMetrics) recordMutationError(tenant, path string) {
 	m.mutationErrors.Add(1)
 	m.tenant(tenant).mutationErrors.Add(1)
+	m.mutationPathMu.Lock()
+	m.mutationPath(path).errors++
+	m.mutationPathMu.Unlock()
 }
 
-func (m *runMetrics) recordInvalidation(tenant, kind string, latency, serverDuration time.Duration, payloadBytes int) {
+func (m *runMetrics) recordMutationSent(tenant, path string) {
+	m.mutationsSent.Add(1)
+	m.tenant(tenant).mutationsSent.Add(1)
+	m.mutationPathMu.Lock()
+	m.mutationPath(path).sent++
+	m.mutationPathMu.Unlock()
+}
+
+// mutationPath requires mutationPathMu to be held.
+func (m *runMetrics) mutationPath(path string) *mutationPathMetrics {
+	metrics := m.mutationPaths[path]
+	if metrics == nil {
+		metrics = &mutationPathMetrics{}
+		m.mutationPaths[path] = metrics
+	}
+	return metrics
+}
+
+func (m *runMetrics) recordInvalidation(tenant, path, kind string, latency, serverDuration, functionDuration time.Duration, payloadBytes int) {
+	m.recordInvalidationN(tenant, path, kind, latency, serverDuration, functionDuration, payloadBytes, 1)
+}
+
+func (m *runMetrics) recordInvalidationN(tenant, path, kind string, latency, serverDuration, functionDuration time.Duration, payloadBytes int, count uint64) {
 	tenantMetrics := m.tenant(tenant)
 	switch kind {
 	case "query.result":
-		m.invalidationResults.Add(1)
-		tenantMetrics.invalidationResults.Add(1)
-	case "query.patch":
-		m.invalidationPatches.Add(1)
-		tenantMetrics.invalidationPatches.Add(1)
+		m.invalidationResults.Add(count)
+		tenantMetrics.invalidationResults.Add(count)
+	case "query.patch", "query.pagePatch", "query.objectPatch":
+		m.invalidationPatches.Add(count)
+		tenantMetrics.invalidationPatches.Add(count)
 	case "query.progress":
-		m.invalidationProgress.Add(1)
-		tenantMetrics.invalidationProgress.Add(1)
+		m.invalidationProgress.Add(count)
+		tenantMetrics.invalidationProgress.Add(count)
 	}
 	m.invalidationBytes.Add(uint64(payloadBytes))
 	tenantMetrics.invalidationBytes.Add(uint64(payloadBytes))
 	if latency >= 0 {
-		m.invalidationLatency.Observe(latency)
-		tenantMetrics.invalidationLatency.Observe(latency)
+		m.invalidationLatency.ObserveN(latency, count)
+		tenantMetrics.invalidationLatency.ObserveN(latency, count)
 	}
 	if serverDuration > 0 {
-		m.invalidationServerLatency.Observe(serverDuration)
-		tenantMetrics.invalidationServerLatency.Observe(serverDuration)
+		m.invalidationServerLatency.ObserveN(serverDuration, count)
+		tenantMetrics.invalidationServerLatency.ObserveN(serverDuration, count)
+	}
+	pathMetrics := m.path(path)
+	m.pathMu.Lock()
+	pathMetrics.invalidations.Messages += count
+	pathMetrics.invalidations.PayloadBytes += uint64(payloadBytes)
+	switch kind {
+	case "query.result":
+		pathMetrics.invalidations.FullResults += count
+	case "query.patch", "query.pagePatch", "query.objectPatch":
+		pathMetrics.invalidations.Patches += count
+	case "query.progress":
+		pathMetrics.invalidations.Progress += count
+	}
+	m.pathMu.Unlock()
+	if latency >= 0 {
+		pathMetrics.invalidationLatency.ObserveN(latency, count)
+	}
+	if serverDuration > 0 {
+		pathMetrics.invalidationServerLatency.ObserveN(serverDuration, count)
+	}
+	if functionDuration > 0 {
+		pathMetrics.functionLatency.ObserveN(functionDuration, count)
 	}
 }
 
@@ -344,7 +447,7 @@ func (m *runMetrics) path(path string) *pathMetrics {
 	defer m.pathMu.Unlock()
 	metrics := m.paths[path]
 	if metrics == nil {
-		metrics = &pathMetrics{initialLatency: newLatencyHistogram(), serverLatency: newLatencyHistogram()}
+		metrics = &pathMetrics{initialLatency: newLatencyHistogram(), serverLatency: newLatencyHistogram(), invalidationLatency: newLatencyHistogram(), invalidationServerLatency: newLatencyHistogram(), functionLatency: newLatencyHistogram()}
 		m.paths[path] = metrics
 	}
 	return metrics
@@ -420,10 +523,18 @@ func (m *runMetrics) abort() string {
 }
 
 func runLoad(ctx context.Context, config runConfig, profile Profile) (RunReport, error) {
+	if config.Users == 0 {
+		// Preserve the original programmatic API: one user per connection.
+		config.Users = config.Connections
+	}
 	if err := validateRunConfig(config, profile); err != nil {
 		return RunReport{}, err
 	}
+	plans := makeSessionPlans(config, profile)
 	startedAt := time.Now().UTC()
+	if config.RunID == "" {
+		config.RunID = "r" + strconv.FormatInt(startedAt.UnixNano(), 36)
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	metrics := newRunMetrics()
@@ -442,22 +553,25 @@ func runLoad(ctx context.Context, config runConfig, profile Profile) (RunReport,
 
 	launched := 0
 launchLoop:
-	for index := 0; index < config.Connections; index++ {
+	for index, plan := range plans {
 		if index > 0 && config.RampDuration > 0 {
-			interval := config.RampDuration / time.Duration(config.Connections)
+			interval := config.RampDuration / time.Duration(len(plans))
 			if err := waitContext(runCtx, interval); err != nil {
 				break launchLoop
 			}
 		}
 		clients.Add(1)
 		launched++
-		go func(userIndex int) {
+		go func(plan sessionPlan) {
 			defer clients.Done()
-			runVirtualUser(runCtx, config, profile, userIndex, metrics, dialSemaphore, mutationStart, mutationStop)
-		}(index)
+			runVirtualUser(runCtx, config, profile, plan, metrics, dialSemaphore, mutationStart, mutationStop)
+		}(plan)
 	}
 
-	expectedSubscriptions := uint64(config.Connections * config.SubscriptionsPerConnection)
+	expectedSubscriptions := uint64(0)
+	for _, plan := range plans {
+		expectedSubscriptions += uint64(plan.subscriptionCount)
+	}
 	initialDeadline := time.NewTimer(config.InitialTimeout)
 	defer initialDeadline.Stop()
 	abortReason := metrics.abort()
@@ -501,7 +615,7 @@ launchLoop:
 		case <-time.After(config.HoldDuration):
 		}
 		close(mutationStop)
-		if abortReason == "" && config.MutationRate > 0 {
+		if abortReason == "" && requestedMutationRate(config, profile) > 0 {
 			settleDeadline := time.NewTimer(config.ConnectTimeout)
 			settleTicker := time.NewTicker(time.Millisecond)
 		settleLoop:
@@ -522,6 +636,10 @@ launchLoop:
 				default:
 				}
 			}
+			// Mutation acknowledgements can precede the last reactive delivery.
+			// The protocol does not expose an expected recipient count, so retain
+			// every socket for the full operation timeout as a bounded drain window.
+			_ = waitContext(runCtx, config.ConnectTimeout)
 		}
 	}
 	cancel()
@@ -535,14 +653,38 @@ func validateRunConfig(config runConfig, profile Profile) error {
 	if strings.TrimSpace(config.URL) == "" {
 		return fmt.Errorf("runtime URL is required")
 	}
+	if config.Users < 1 {
+		return fmt.Errorf("users must be positive")
+	}
+	if config.Connections < config.Users {
+		return fmt.Errorf("connections (%d) must be at least users (%d)", config.Connections, config.Users)
+	}
 	if config.Connections < 1 {
 		return fmt.Errorf("connections must be positive")
 	}
 	if len(config.tenantList()) == 0 {
 		return fmt.Errorf("at least one tenant is required")
 	}
-	if config.SubscriptionsPerConnection < 0 || config.SubscriptionsPerConnection > len(profile.Subscriptions) {
-		return fmt.Errorf("subscriptions per connection must be between 0 and %d", len(profile.Subscriptions))
+	availableSubscriptions := len(profile.expandedSubscriptions())
+	if config.SubscriptionsPerConnection < -1 || config.SubscriptionsPerConnection > availableSubscriptions {
+		return fmt.Errorf("subscriptions per connection must be -1 or between 0 and %d", availableSubscriptions)
+	}
+	validationVariables := profile.sessionVariables(0, config.Variables)
+	for name, value := range map[string]any{
+		"tenant": config.tenantList()[0], "userId": "gonvex-load-000001",
+		"sequence": "1", "mutationId": "u000001-c01-m000001",
+	} {
+		validationVariables[name] = value
+	}
+	for _, spec := range profile.expandedSubscriptions() {
+		if _, err := spec.expandedArgs(validationVariables); err != nil {
+			return fmt.Errorf("subscription %s args: %w", spec.Path, err)
+		}
+	}
+	for _, spec := range profile.Mutations {
+		if _, err := spec.expandedArgs(validationVariables); err != nil {
+			return fmt.Errorf("mutation %s args: %w", spec.Path, err)
+		}
 	}
 	if config.ConnectTimeout <= 0 || config.InitialTimeout <= 0 {
 		return fmt.Errorf("connect and initial timeouts must be positive")
@@ -576,6 +718,27 @@ func validateRunConfig(config runConfig, profile Profile) error {
 	return nil
 }
 
+type sessionPlan struct {
+	userIndex         int
+	connectionIndex   int
+	subscriptionCount int
+}
+
+func makeSessionPlans(config runConfig, profile Profile) []sessionPlan {
+	plans := make([]sessionPlan, 0, config.Connections)
+	connectionsByUser := make([]int, config.Users)
+	for index := 0; index < config.Connections; index++ {
+		userIndex := index % config.Users
+		plan := sessionPlan{
+			userIndex: userIndex, connectionIndex: connectionsByUser[userIndex],
+			subscriptionCount: profile.subscriptionCount(index, config.SubscriptionsPerConnection),
+		}
+		connectionsByUser[userIndex]++
+		plans = append(plans, plan)
+	}
+	return plans
+}
+
 func (config runConfig) tenantList() []string {
 	if len(config.Tenants) > 0 {
 		return config.Tenants
@@ -591,7 +754,8 @@ func (config runConfig) tenantForUser(userIndex int) string {
 	return tenants[userIndex%len(tenants)]
 }
 
-func runVirtualUser(ctx context.Context, config runConfig, profile Profile, userIndex int, metrics *runMetrics, dialSemaphore chan struct{}, mutationStart, mutationStop <-chan struct{}) {
+func runVirtualUser(ctx context.Context, config runConfig, profile Profile, plan sessionPlan, metrics *runMetrics, dialSemaphore chan struct{}, mutationStart, mutationStop <-chan struct{}) {
+	userIndex := plan.userIndex
 	tenant := config.tenantForUser(userIndex)
 	tenantMetrics := metrics.tenant(tenant)
 	metrics.connectionAttempts.Add(1)
@@ -648,9 +812,12 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 		if config.AuthMode == authModeSynthetic {
 			token = syntheticJWT(userID)
 		}
-		authID := fmt.Sprintf("auth-%06d", userIndex+1)
+		authID := fmt.Sprintf("auth-%06d-%02d", userIndex+1, plan.connectionIndex+1)
 		authStarted := time.Now()
-		if err := writeEnvelope(connection, metrics, map[string]any{"type": "auth", "id": authID, "token": token, "tenant": tenant, "project": config.Project}); err != nil {
+		if err := writeEnvelope(connection, metrics, map[string]any{
+			"type": "auth", "id": authID, "token": token, "tenant": tenant, "project": config.Project,
+			"capabilities": map[string]any{"queryPagePatch": 1, "queryObjectPatch": 1, "queryOrderDelta": 1, "queryFanout": 1, "queryResultBatch": boolCapability(config.QueryResultBatch)},
+		}); err != nil {
 			metrics.recordSetupError(tenant, "__auth__")
 			metrics.setupFinished.Add(1)
 			return
@@ -665,39 +832,78 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 		tenantMetrics.authLatency.Observe(time.Since(authStarted))
 	}
 
-	pending := make(map[string]*pendingSubscription, config.SubscriptionsPerConnection)
+	pending := make(map[string]*pendingSubscription, plan.subscriptionCount)
 	pendingMutations := map[string]pendingMutation{}
 	var pendingMutationMu sync.Mutex
 	type receivedEnvelope struct {
 		message      serverEnvelope
 		payloadBytes int
+		receivedAt   time.Time
 		err          error
 	}
 	// Read while subscriptions are being written. A browser's WebSocket event
 	// loop does this concurrently; waiting until every write completes can
 	// deadlock when initial snapshots fill both peers' socket buffers.
-	received := make(chan receivedEnvelope, max(64, config.SubscriptionsPerConnection*2))
+	received := make(chan receivedEnvelope, max(64, plan.subscriptionCount*2))
+	var setupSettled atomic.Bool
 	_ = connection.SetReadDeadline(time.Now().Add(config.InitialTimeout))
 	go func() {
 		for {
 			message, payloadBytes, err := readEnvelope(connection, metrics)
-			received <- receivedEnvelope{message: message, payloadBytes: payloadBytes, err: err}
+			receivedAt := time.Now()
 			if err != nil {
+				received <- receivedEnvelope{message: message, payloadBytes: payloadBytes, receivedAt: receivedAt, err: err}
 				return
+			}
+			queue := []serverEnvelope{message}
+			if message.Type == "query.batch" {
+				queue = message.Messages
+			}
+			first := true
+			for _, nested := range queue {
+				if nested.Type == "query.fanout" && len(nested.IDs) > 0 {
+					if setupSettled.Load() && nested.Reason == "invalidate" {
+						copyBytes := 0
+						if first {
+							copyBytes, first = payloadBytes, false
+						}
+						received <- receivedEnvelope{message: nested, payloadBytes: copyBytes, receivedAt: receivedAt}
+						continue
+					}
+					for _, id := range nested.IDs {
+						copy := nested
+						copy.Type, copy.ID, copy.IDs, copy.QueryType = nested.QueryType, id, nil, ""
+						copyBytes := 0
+						if first {
+							copyBytes, first = payloadBytes, false
+						}
+						received <- receivedEnvelope{message: copy, payloadBytes: copyBytes, receivedAt: receivedAt}
+					}
+					continue
+				}
+				copyBytes := 0
+				if first {
+					copyBytes, first = payloadBytes, false
+				}
+				received <- receivedEnvelope{message: nested, payloadBytes: copyBytes, receivedAt: receivedAt}
 			}
 		}
 	}()
-	variables := cloneStrings(config.Variables)
+	variables := profile.sessionVariables(userIndex, config.Variables)
 	variables["tenant"] = tenant
 	variables["userId"] = userID
-	for index := 0; index < config.SubscriptionsPerConnection; index++ {
-		spec := profile.Subscriptions[index]
+	subscriptions := profile.expandedSubscriptions()
+	for index := 0; index < plan.subscriptionCount; index++ {
+		spec := subscriptions[index]
 		args, err := spec.expandedArgs(variables)
 		if err != nil {
 			metrics.recordError(tenant, spec.Path, err.Error())
 			continue
 		}
 		id := fmt.Sprintf("u%06d-s%03d", userIndex+1, index+1)
+		if plan.connectionIndex > 0 {
+			id = fmt.Sprintf("u%06d-c%02d-s%03d", userIndex+1, plan.connectionIndex+1, index+1)
+		}
 		sentAt := time.Now()
 		pending[id] = &pendingSubscription{path: spec.Path, sentAt: sentAt}
 		if err := writeEnvelope(connection, metrics, map[string]any{"type": "query.subscribe", "id": id, "path": spec.Path, "args": args}); err != nil {
@@ -712,9 +918,9 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 	settled := 0
 	mutationWriterStarted := false
 	for {
-		if settled == len(pending) && !mutationWriterStarted && config.MutationRate > 0 {
+		if settled == len(pending) && !mutationWriterStarted && connectionHasMutations(config, profile, plan) {
 			mutationWriterStarted = true
-			go runMutationWriter(ctx, mutationStart, mutationStop, connection, config, tenant, userID, userIndex, metrics, &pendingMutationMu, pendingMutations)
+			go runMutationWriter(ctx, mutationStart, mutationStop, connection, config, profile, tenant, userID, plan, metrics, &pendingMutationMu, pendingMutations)
 		}
 		envelope := <-received
 		if envelope.err != nil {
@@ -730,6 +936,23 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 			return
 		}
 		message := envelope.message
+		if message.Type == "query.fanout" && message.Reason == "invalidate" && len(message.IDs) > 0 {
+			receivedAt := envelope.receivedAt
+			if receivedAt.IsZero() {
+				receivedAt = time.Now()
+			}
+			delay := changeToClientDuration(message, receivedAt)
+			metrics.recordInvalidationN(tenant, message.Path, message.QueryType, delay, traceDuration(message), traceFunctionDuration(message), envelope.payloadBytes, uint64(len(message.IDs)))
+			if message.Trace != nil {
+				clientID := fmt.Sprintf("u%06d-c%02d", userIndex+1, plan.connectionIndex+1)
+				if len(message.MutationIDs) > 0 {
+					metrics.propagation.RecordDeliveryIDs(message.MutationIDs, clientID, float64(receivedAt.UnixNano())/float64(time.Millisecond))
+				} else {
+					metrics.propagation.RecordDelivery(message.Trace.ServerChangeCommittedAtMS, clientID, delay)
+				}
+			}
+			continue
+		}
 		pendingMutationMu.Lock()
 		mutation, isMutation := pendingMutations[message.ID]
 		if isMutation && (message.Type == "mutation.result" || message.Type == "mutation.error") {
@@ -739,9 +962,12 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 		if isMutation {
 			if message.Type == "mutation.result" {
 				serverDuration := traceDuration(message)
-				metrics.recordMutation(tenant, time.Since(mutation.sentAt), serverDuration)
+				metrics.recordMutation(tenant, mutation.path, time.Since(mutation.sentAt), serverDuration)
+				if message.Trace != nil {
+					metrics.propagation.RecordCommitID(message.ID, message.Trace.ServerMutationCommittedAtMS, mutation.path)
+				}
 			} else if message.Type == "mutation.error" {
-				metrics.recordMutationError(tenant)
+				metrics.recordMutationError(tenant, mutation.path)
 				metrics.recordErrorSample(mutation.path, message.Error)
 			}
 			continue
@@ -750,8 +976,21 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 		if subscription == nil {
 			continue
 		}
-		if message.Reason == "invalidate" && (message.Type == "query.result" || message.Type == "query.patch" || message.Type == "query.progress") {
-			metrics.recordInvalidation(tenant, message.Type, changeToClientDuration(message, time.Now()), traceDuration(message), envelope.payloadBytes)
+		if message.Reason == "invalidate" && (message.Type == "query.result" || message.Type == "query.patch" || message.Type == "query.pagePatch" || message.Type == "query.objectPatch" || message.Type == "query.progress") {
+			receivedAt := envelope.receivedAt
+			if receivedAt.IsZero() {
+				receivedAt = time.Now()
+			}
+			delay := changeToClientDuration(message, receivedAt)
+			metrics.recordInvalidation(tenant, subscription.path, message.Type, delay, traceDuration(message), traceFunctionDuration(message), envelope.payloadBytes)
+			if message.Trace != nil {
+				clientID := fmt.Sprintf("u%06d-c%02d", userIndex+1, plan.connectionIndex+1)
+				if len(message.MutationIDs) > 0 {
+					metrics.propagation.RecordDeliveryIDs(message.MutationIDs, clientID, float64(receivedAt.UnixNano())/float64(time.Millisecond))
+				} else {
+					metrics.propagation.RecordDelivery(message.Trace.ServerChangeCommittedAtMS, clientID, delay)
+				}
+			}
 			continue
 		}
 		switch message.Type {
@@ -775,62 +1014,125 @@ func runVirtualUser(ctx context.Context, config runConfig, profile Profile, user
 			metrics.recordError(tenant, subscription.path, message.Error)
 		}
 		if settled == len(pending) {
+			setupSettled.Store(true)
 			_ = connection.SetReadDeadline(time.Time{})
 		}
 	}
 }
 
-func runMutationWriter(ctx context.Context, start, stop <-chan struct{}, connection *websocket.Conn, config runConfig, tenant, userID string, userIndex int, metrics *runMetrics, pendingMu *sync.Mutex, pending map[string]pendingMutation) {
+type mutationSchedule struct {
+	spec     MutationSpec
+	interval time.Duration
+	next     time.Time
+}
+
+func connectionHasMutations(config runConfig, profile Profile, plan sessionPlan) bool {
+	return config.MutationRate > 0 || (plan.connectionIndex == 0 && len(profile.Mutations) > 0)
+}
+
+func requestedMutationRate(config runConfig, profile Profile) float64 {
+	rate := config.MutationRate
+	for _, spec := range profile.Mutations {
+		rate += spec.RatePerMinute / 60
+		rate += float64(activeUserCount(config.Users, spec.ActiveUsers)) * spec.RatePerUserPerMinute / 60
+	}
+	return rate
+}
+
+func requestedMutationRates(config runConfig, profile Profile) map[string]float64 {
+	rates := map[string]float64{}
+	if config.MutationRate > 0 {
+		rates[config.MutationPath] += config.MutationRate
+	}
+	for _, spec := range profile.Mutations {
+		rates[spec.Path] += spec.RatePerMinute / 60
+		rates[spec.Path] += float64(activeUserCount(config.Users, spec.ActiveUsers)) * spec.RatePerUserPerMinute / 60
+	}
+	return rates
+}
+
+func activeUserCount(users int, fraction float64) int {
+	return int(math.Round(float64(users) * fraction))
+}
+
+func mutationSchedules(config runConfig, profile Profile, plan sessionPlan, now time.Time) []mutationSchedule {
+	schedules := []mutationSchedule{}
+	if config.MutationRate > 0 {
+		rate := config.MutationRate / float64(config.Connections)
+		schedules = append(schedules, mutationSchedule{
+			spec:     MutationSpec{Path: config.MutationPath, Args: config.MutationArgs},
+			interval: time.Duration(float64(time.Second) / rate), next: now,
+		})
+	}
+	if plan.connectionIndex != 0 {
+		return schedules
+	}
+	for mutationIndex, spec := range profile.Mutations {
+		rate := spec.RatePerMinute / 60 / float64(config.Users)
+		if plan.userIndex < activeUserCount(config.Users, spec.ActiveUsers) {
+			rate += spec.RatePerUserPerMinute / 60
+		}
+		if rate <= 0 {
+			continue
+		}
+		interval := time.Duration(float64(time.Second) / rate)
+		phaseParts := 10000
+		phase := deterministicIndex(fmt.Sprintf("%s:phase:%d", spec.Path, mutationIndex), plan.userIndex, phaseParts)
+		next := now.Add(time.Duration(float64(interval) * float64(phase) / float64(phaseParts)))
+		schedules = append(schedules, mutationSchedule{spec: spec, interval: interval, next: next})
+	}
+	return schedules
+}
+
+func runMutationWriter(ctx context.Context, start, stop <-chan struct{}, connection *websocket.Conn, config runConfig, profile Profile, tenant, userID string, plan sessionPlan, metrics *runMetrics, pendingMu *sync.Mutex, pending map[string]pendingMutation) {
 	select {
 	case <-ctx.Done():
 		return
 	case <-start:
 	}
-	perUserInterval := time.Duration(float64(time.Second) * float64(config.Connections) / config.MutationRate)
-	if perUserInterval < time.Millisecond {
-		perUserInterval = time.Millisecond
+	schedules := mutationSchedules(config, profile, plan, time.Now())
+	if len(schedules) == 0 {
+		return
 	}
-	offset := time.Duration(float64(perUserInterval) * float64(userIndex) / float64(config.Connections))
-	if offset > 0 {
-		timer := time.NewTimer(offset)
-		defer timer.Stop()
+	sequence := 0
+	for {
+		nextIndex := 0
+		for index := range schedules {
+			if schedules[index].next.Before(schedules[nextIndex].next) {
+				nextIndex = index
+			}
+		}
+		timer := time.NewTimer(time.Until(schedules[nextIndex].next))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
 		case <-stop:
+			timer.Stop()
 			return
 		case <-timer.C:
 		}
-	}
-	ticker := time.NewTicker(perUserInterval)
-	defer ticker.Stop()
-	sequence := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-stop:
-			return
-		default:
-		}
 		sequence++
-		variables := cloneStrings(config.Variables)
+		variables := profile.sessionVariables(plan.userIndex, config.Variables)
 		variables["tenant"] = tenant
 		variables["userId"] = userID
 		variables["sequence"] = fmt.Sprintf("%d", sequence)
-		variables["mutationId"] = fmt.Sprintf("u%06d-m%06d", userIndex+1, sequence)
-		args, ok := expandProfileValue(config.MutationArgs, variables).(map[string]any)
-		if !ok {
-			metrics.recordMutationError(tenant)
-			return
+		variables["mutationId"] = fmt.Sprintf("%s-u%06d-c%02d-m%06d", config.RunID, plan.userIndex+1, plan.connectionIndex+1, sequence)
+		schedule := &schedules[nextIndex]
+		args, err := schedule.spec.expandedArgs(variables)
+		if err != nil {
+			metrics.recordMutationError(tenant, schedule.spec.Path)
+			metrics.recordErrorSample(schedule.spec.Path, err.Error())
+			schedule.next = schedule.next.Add(schedule.interval)
+			continue
 		}
-		id := variables["mutationId"]
+		id := variables["mutationId"].(string)
 		sentAt := time.Now()
 		pendingMu.Lock()
-		pending[id] = pendingMutation{path: config.MutationPath, sentAt: sentAt}
+		pending[id] = pendingMutation{path: schedule.spec.Path, sentAt: sentAt}
 		pendingMu.Unlock()
 		message := map[string]any{
-			"type": "mutation.call", "id": id, "path": config.MutationPath, "args": args,
+			"type": "mutation.call", "id": id, "path": schedule.spec.Path, "args": args,
 			"trace": map[string]any{"clientSentAtMs": float64(sentAt.UnixNano()) / float64(time.Millisecond)},
 		}
 		if err := writeEnvelope(connection, metrics, message); err != nil {
@@ -838,18 +1140,14 @@ func runMutationWriter(ctx context.Context, start, stop <-chan struct{}, connect
 			delete(pending, id)
 			pendingMu.Unlock()
 			if ctx.Err() == nil {
-				metrics.recordMutationError(tenant)
+				metrics.recordMutationError(tenant, schedule.spec.Path)
 			}
 			return
 		}
-		metrics.mutationsSent.Add(1)
-		metrics.tenant(tenant).mutationsSent.Add(1)
-		select {
-		case <-ctx.Done():
-			return
-		case <-stop:
-			return
-		case <-ticker.C:
+		metrics.recordMutationSent(tenant, schedule.spec.Path)
+		schedule.next = schedule.next.Add(schedule.interval)
+		if schedule.next.Before(time.Now()) {
+			schedule.next = time.Now().Add(schedule.interval)
 		}
 	}
 }
@@ -859,6 +1157,19 @@ func traceDuration(message serverEnvelope) time.Duration {
 		return 0
 	}
 	return time.Duration(message.Trace.ServerDurationMS * float64(time.Millisecond))
+}
+
+func traceFunctionDuration(message serverEnvelope) time.Duration {
+	if message.Trace == nil || len(message.Trace.QueryPerf) == 0 {
+		return 0
+	}
+	var perf struct {
+		ServerFunctionDurationMS float64 `json:"serverFunctionDurationMs"`
+	}
+	if json.Unmarshal(message.Trace.QueryPerf, &perf) != nil || perf.ServerFunctionDurationMS <= 0 {
+		return 0
+	}
+	return time.Duration(perf.ServerFunctionDurationMS * float64(time.Millisecond))
 }
 
 func changeToClientDuration(message serverEnvelope, receivedAt time.Time) time.Duration {
@@ -954,6 +1265,11 @@ func waitContext(ctx context.Context, duration time.Duration) error {
 }
 
 func (m *runMetrics) report(profile Profile, config runConfig, startedAt, completedAt time.Time, abortReason string) RunReport {
+	plans := makeSessionPlans(config, profile)
+	totalSubscriptionTarget := 0
+	for _, plan := range plans {
+		totalSubscriptionTarget += plan.subscriptionCount
+	}
 	sent := m.subscriptionsSent.Load()
 	errors := m.subscriptionErrors.Load()
 	errorRate := float64(0)
@@ -972,6 +1288,30 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 	if mutationSent > 0 {
 		mutationErrorRate = float64(mutationErrors) / float64(mutationSent)
 	}
+	holdSeconds := config.HoldDuration.Seconds()
+	requestedRates := requestedMutationRates(config, profile)
+	mutationByPath := map[string]MutationPathReport{}
+	m.mutationPathMu.Lock()
+	for path, metrics := range m.mutationPaths {
+		achieved := float64(0)
+		if holdSeconds > 0 {
+			achieved = float64(metrics.succeeded) / holdSeconds
+		}
+		mutationByPath[path] = MutationPathReport{
+			RequestedRatePerSec: requestedRates[path], AchievedRatePerSec: achieved,
+			Sent: metrics.sent, Succeeded: metrics.succeeded, Errors: metrics.errors,
+		}
+	}
+	for path, rate := range requestedRates {
+		if _, ok := mutationByPath[path]; !ok {
+			mutationByPath[path] = MutationPathReport{RequestedRatePerSec: rate}
+		}
+	}
+	m.mutationPathMu.Unlock()
+	achievedMutationRate := float64(0)
+	if holdSeconds > 0 {
+		achievedMutationRate = float64(m.mutationResults.Load()) / holdSeconds
+	}
 	paths := map[string]PathReport{}
 	errorSamples := []ErrorSample{}
 	m.pathMu.Lock()
@@ -983,11 +1323,15 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 	for _, path := range pathNames {
 		metrics := m.paths[path]
 		paths[path] = PathReport{
-			InitialResults: metrics.initialResults,
-			Errors:         metrics.errors,
-			PayloadBytes:   metrics.payloadBytes,
-			InitialLatency: histogramReport(metrics.initialLatency),
-			ServerLatency:  histogramReport(metrics.serverLatency),
+			InitialResults:             metrics.initialResults,
+			Errors:                     metrics.errors,
+			PayloadBytes:               metrics.payloadBytes,
+			InitialLatency:             histogramReport(metrics.initialLatency),
+			ServerLatency:              histogramReport(metrics.serverLatency),
+			Invalidations:              metrics.invalidations,
+			InvalidationChangeToClient: histogramReport(metrics.invalidationLatency),
+			InvalidationServerQuery:    histogramReport(metrics.invalidationServerLatency),
+			FunctionLatency:            histogramReport(metrics.functionLatency),
 		}
 	}
 	for key, count := range m.errorSamples {
@@ -1009,11 +1353,15 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 	m.resourceMu.Unlock()
 	tenantReports := map[string]TenantReport{}
 	tenantNames := config.tenantList()
-	for tenantIndex, tenant := range tenantNames {
+	for _, tenant := range tenantNames {
 		metrics := m.tenant(tenant)
-		targetConnections := config.Connections / len(tenantNames)
-		if tenantIndex < config.Connections%len(tenantNames) {
-			targetConnections++
+		targetConnections := 0
+		targetSubscriptions := 0
+		for _, plan := range plans {
+			if config.tenantForUser(plan.userIndex) == tenant {
+				targetConnections++
+				targetSubscriptions += plan.subscriptionCount
+			}
 		}
 		tenantSent := metrics.subscriptionsSent.Load()
 		tenantErrors := metrics.subscriptionErrors.Load()
@@ -1034,12 +1382,13 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 				SetupErrors: metrics.setupErrors.Load(),
 			},
 			Subscriptions: SubscriptionReport{
-				Target: uint64(targetConnections * config.SubscriptionsPerConnection), Sent: tenantSent,
+				Target: uint64(targetSubscriptions), Sent: tenantSent,
 				InitialResults: metrics.initialResults.Load(), Errors: tenantErrors, ErrorRate: tenantErrorRate,
 			},
 			Mutations: MutationReport{
-				Path: config.MutationPath, RatePerSec: config.MutationRate / float64(len(tenantNames)),
-				Sent: tenantMutationSent, Succeeded: metrics.mutationResults.Load(), Errors: tenantMutationErrors,
+				Path: config.MutationPath, RatePerSec: requestedMutationRate(config, profile) / float64(len(tenantNames)),
+				RequestedRatePerSec: requestedMutationRate(config, profile) / float64(len(tenantNames)),
+				Sent:                tenantMutationSent, Succeeded: metrics.mutationResults.Load(), Errors: tenantMutationErrors,
 				ErrorRate: tenantMutationErrorRate,
 			},
 			Invalidations: InvalidationReport{
@@ -1073,8 +1422,9 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 		Tenant:  primaryTenant,
 		Tenants: tenantReports,
 		Configuration: RunConfigurationReport{
-			AuthMode: config.AuthMode, IdentityMode: identityMode, Compression: config.Compression,
-			TenantCount: len(tenantNames), Connections: config.Connections,
+			AuthMode: config.AuthMode, IdentityMode: identityMode, Compression: config.Compression, QueryResultBatch: config.QueryResultBatch,
+			TenantCount: len(tenantNames), Users: config.Users, Connections: config.Connections,
+			ConnectionsPerUser:         float64(config.Connections) / float64(config.Users),
 			SubscriptionsPerConnection: config.SubscriptionsPerConnection,
 			RampMS:                     config.RampDuration.Milliseconds(), HoldMS: config.HoldDuration.Milliseconds(),
 			MutationPath: config.MutationPath, MutationRatePerSec: config.MutationRate,
@@ -1091,21 +1441,24 @@ func (m *runMetrics) report(profile Profile, config runConfig, startedAt, comple
 			SetupErrors:      m.setupErrors.Load(),
 		},
 		Subscriptions: SubscriptionReport{
-			Target:         uint64(config.Connections * config.SubscriptionsPerConnection),
+			Target:         uint64(totalSubscriptionTarget),
 			Sent:           sent,
 			InitialResults: m.initialResults.Load(),
 			Errors:         errors,
 			ErrorRate:      errorRate,
 		},
 		Mutations: MutationReport{
-			Path: config.MutationPath, RatePerSec: config.MutationRate, Sent: mutationSent,
-			Succeeded: m.mutationResults.Load(), Errors: mutationErrors, ErrorRate: mutationErrorRate,
+			Path: config.MutationPath, RatePerSec: requestedMutationRate(config, profile),
+			RequestedRatePerSec: requestedMutationRate(config, profile), AchievedRatePerSec: achievedMutationRate,
+			Sent: mutationSent, Succeeded: m.mutationResults.Load(), Errors: mutationErrors,
+			ErrorRate: mutationErrorRate, ByPath: mutationByPath,
 		},
 		Invalidations: InvalidationReport{
 			Messages:    m.invalidationResults.Load() + m.invalidationPatches.Load() + m.invalidationProgress.Load(),
 			FullResults: m.invalidationResults.Load(), Patches: m.invalidationPatches.Load(),
 			Progress: m.invalidationProgress.Load(), PayloadBytes: m.invalidationBytes.Load(),
 		},
+		TTLU: m.propagation.Report(),
 		Wire: WireReport{
 			BytesRead:            wireRead,
 			BytesWritten:         m.wireBytesWritten.Load(),

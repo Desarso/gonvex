@@ -13,6 +13,7 @@ import (
 	"go/token"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
@@ -34,6 +36,7 @@ type projectSettings struct {
 	ProjectID  string
 	RuntimeURL string
 	Key        string
+	DryRun     bool
 }
 
 type gonvexConfig struct {
@@ -70,6 +73,7 @@ func runDev(args []string) error {
 	projectID := flags.String("project-id", "", "gonvex project ID")
 	key := flags.String("key", "", "gonvex project key")
 	once := flags.Bool("once", false, "generate and sync once, then exit")
+	dryRun := flags.Bool("dry-run", false, "show pending SQL migrations without changing the runtime")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -92,6 +96,10 @@ func runDev(args []string) error {
 	if *key != "" {
 		settings.Key = *key
 	}
+	settings.DryRun = *dryRun
+	if *dryRun && !*once {
+		return fmt.Errorf("--dry-run requires --once")
+	}
 	if len(childCommand) > 0 {
 		return runDevWithCommand(root, settings, childCommand)
 	}
@@ -100,7 +108,13 @@ func runDev(args []string) error {
 }
 
 func runDevWithCommand(root string, settings projectSettings, childCommand []string) error {
-	if err := watchProject(context.Background(), root, settings, true); err != nil {
+	// The first sync commonly races the runtime's own startup: `make dev`
+	// launches the runtime and this command together, and the runtime needs a
+	// few seconds to compile and bind. Failing on the first refused connection
+	// takes the whole dev session down, so wait for the runtime to accept the
+	// sync before starting the child process. Only connection-level failures
+	// are retried — a rejected sync (bad key, invalid schema) fails fast.
+	if err := syncWithStartupRetry(root, settings); err != nil {
 		return err
 	}
 
@@ -137,6 +151,40 @@ func runDevWithCommand(root string, settings projectSettings, childCommand []str
 	return commandErr
 }
 
+// devStartupSyncTimeout bounds how long the first sync waits for a runtime that
+// is still starting. Long enough for a cold `go build` of the runtime binary,
+// short enough that a genuinely absent runtime still fails the session.
+var devStartupSyncTimeout = 60 * time.Second
+
+func syncWithStartupRetry(root string, settings projectSettings) error {
+	deadline := time.Now().Add(devStartupSyncTimeout)
+	announced := false
+	for attempt := 0; ; attempt++ {
+		err := watchProject(context.Background(), root, settings, true)
+		if err == nil || !runtimeUnreachable(err) || time.Now().After(deadline) {
+			return err
+		}
+		if !announced {
+			fmt.Printf("[gonvex] waiting for runtime at %s ...\n", settings.RuntimeURL)
+			announced = true
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// runtimeUnreachable reports whether the sync failed because nothing is
+// listening yet, as opposed to the runtime rejecting the request.
+func runtimeUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
 func watchProject(ctx context.Context, root string, settings projectSettings, once bool) error {
 	backendDir := filepath.Join(root, "gonvex")
 	if err := os.MkdirAll(backendDir, 0o755); err != nil {
@@ -156,7 +204,13 @@ func watchProject(ctx context.Context, root string, settings projectSettings, on
 			return err
 		}
 
-		fingerprint, err := fingerprint(files)
+		watchedFiles := append([]string(nil), files...)
+		migrationFiles, err := sqlFiles(filepath.Join(root, "migrations"))
+		if err != nil {
+			return err
+		}
+		watchedFiles = append(watchedFiles, migrationFiles...)
+		fingerprint, err := fingerprint(watchedFiles)
 		if err != nil {
 			return err
 		}
@@ -172,6 +226,11 @@ func watchProject(ctx context.Context, root string, settings projectSettings, on
 			}
 			if err := syncRuntime(settings, m); err != nil {
 				fmt.Printf("[gonvex] runtime sync failed: %v\n", err)
+				if once {
+					return err
+				}
+			} else if settings.DryRun {
+				fmt.Printf("[gonvex] inspected pending migrations for project %s\n", settings.ProjectID)
 			} else {
 				fmt.Printf("[gonvex] synced project %s to %s\n", settings.ProjectID, settings.RuntimeURL)
 			}
@@ -204,6 +263,26 @@ func goFiles(root string) ([]string, error) {
 		}
 		return nil
 	})
+	return files, err
+}
+
+func sqlFiles(root string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if os.IsNotExist(err) && path == root {
+			return filepath.SkipDir
+		}
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	return files, err
 }
 
@@ -262,6 +341,32 @@ func buildManifest(root string, files []string, projectID string) (manifest.Mani
 		for name, table := range parsedSchema.Tables {
 			schema.Tables[name] = table
 		}
+	}
+	migrationRoot := filepath.Join(root, "migrations")
+	if err := filepath.WalkDir(migrationRoot, func(file string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if os.IsNotExist(walkErr) && file == migrationRoot {
+				return filepath.SkipDir
+			}
+			return walkErr
+		}
+		if entry.IsDir() {
+			if file != migrationRoot {
+				return fmt.Errorf("migrations directory must not contain subdirectories: %s", file)
+			}
+			return nil
+		}
+		if !strings.HasSuffix(entry.Name(), ".sql") {
+			return fmt.Errorf("migrations directory may contain only .sql files: %s", entry.Name())
+		}
+		contents, err := os.ReadFile(file)
+		if err != nil {
+			return err
+		}
+		bundleFiles[path.Join("migrations", entry.Name())] = projectbundle.EncodeFile(contents)
+		return nil
+	}); err != nil && !os.IsNotExist(err) {
+		return manifest.Manifest{}, err
 	}
 	schema = schema.Normalize()
 
@@ -460,8 +565,25 @@ func parseDependencyOption(expression ast.Expr, dependencies *manifest.FunctionD
 				dependencies.Writes = append(dependencies.Writes, manifest.WriteDependency{Table: value})
 			}
 			return dependencyOptionTarget{kind: "write", start: start}
+		case "ReadsEphemeral":
+			dependencies.ReadsEphemeral = true
+		case "WritesEphemeral":
+			dependencies.WritesEphemeral = true
 		case "ShareByPermissions":
 			dependencies.ShareByPermissions = true
+		case "ShareByVisibility":
+			values := stringArguments(call.Args)
+			if len(values) > 0 {
+				dependencies.ShareByVisibility = values[0]
+			}
+		case "ShareResultFrom":
+			values := stringArguments(call.Args)
+			if len(values) > 0 {
+				dependencies.ShareResultFrom = values[0]
+			}
+			if len(values) > 1 {
+				dependencies.ShareResultField = values[1]
+			}
 		}
 		return dependencyOptionTarget{}
 	}
@@ -709,7 +831,11 @@ func syncRuntime(settings projectSettings, m manifest.Manifest) error {
 		return err
 	}
 
-	request, err := http.NewRequest(http.MethodPost, strings.TrimRight(settings.RuntimeURL, "/")+"/dev/sync", bytes.NewReader(payload))
+	endpoint := strings.TrimRight(settings.RuntimeURL, "/") + "/dev/sync"
+	if settings.DryRun {
+		endpoint += "?dryRun=true"
+	}
+	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -729,6 +855,21 @@ func syncRuntime(settings projectSettings, m manifest.Manifest) error {
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		body, _ := io.ReadAll(response.Body)
 		return fmt.Errorf("runtime returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	if settings.DryRun {
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			return err
+		}
+		var report any
+		if err := json.Unmarshal(body, &report); err != nil {
+			return fmt.Errorf("decode dry-run response: %w", err)
+		}
+		formatted, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Printf("[gonvex] migration dry run:\n%s\n", formatted)
 	}
 	return nil
 }
@@ -803,5 +944,5 @@ func env(key string, fallback string) string {
 }
 
 func printHelp() {
-	fmt.Println("Usage: gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [-- <command>]")
+	fmt.Println("Usage: gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--dry-run] [-- <command>]")
 }

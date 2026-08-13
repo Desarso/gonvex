@@ -81,10 +81,17 @@ as part of this upgrade.
 ### Whagons Coolify deployments
 
 The `Runtime regression` GitHub workflow deploys every successful push to `main`
-to the Whagons development and production Coolify service stacks. It updates both
-remote Git build contexts to the exact commit SHA, writes that SHA to
+only to the Whagons development Coolify service stack. It updates both remote Git
+build contexts in that stack to the exact commit SHA, writes that SHA to
 `GONVEX_RUNTIME_VERSION`, verifies the saved Compose definition, and then queues
-the deployments. Pull requests run the same regression suite but never deploy.
+the development deployment. Pull requests run the same regression suite but never
+deploy.
+
+Production is a separate promotion lane. After the development release passes the
+Whagons Monitor verification at `https://monitor.whagons.com/releases`, promote
+that exact Gonvex SHA to the production branch and deploy only the production
+Coolify service. A push to `main` must never update the production runtime
+directly.
 
 The workflow reads `COOLIFY_API_URL` and `COOLIFY_API_TOKEN` from the protected
 `gonvex-runtime` GitHub environment. Keep the token there rather than in the

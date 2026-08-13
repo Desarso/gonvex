@@ -42,6 +42,13 @@ func newLatencyHistogram() *latencyHistogram {
 }
 
 func (h *latencyHistogram) Observe(value time.Duration) {
+	h.ObserveN(value, 1)
+}
+
+func (h *latencyHistogram) ObserveN(value time.Duration, count uint64) {
+	if count == 0 {
+		return
+	}
 	if value < 0 {
 		value = 0
 	}
@@ -54,9 +61,9 @@ func (h *latencyHistogram) Observe(value time.Duration) {
 			break
 		}
 	}
-	h.counts[index]++
-	h.count++
-	h.total += value
+	h.counts[index] += count
+	h.count += count
+	h.total += value * time.Duration(count)
 	if value > h.max {
 		h.max = value
 	}

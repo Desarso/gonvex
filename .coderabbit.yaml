@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  high_level_summary: true
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: true
+  tools:
+    github-checks:
+      enabled: true
+      timeout_ms: 900000
+  path_instructions:
+    - path: "**/*.go"
+      instructions: |
+        Check concurrency safety, authorization boundaries, tenant isolation,
+        transaction behavior, resource cleanup, and useful error propagation.
+    - path: "**/*.{ts,tsx,mts,mjs}"
+      instructions: |
+        Check type safety, API compatibility, async error handling, browser and
+        server runtime boundaries, and regression coverage.
+    - path: ".github/workflows/**"
+      instructions: |
+        Check least-privilege permissions, fork safety, immutable test behavior,
+        and whether required checks can be bypassed or deadlocked.

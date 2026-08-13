@@ -186,7 +186,7 @@ Available context includes:
 ```txt
 ProjectID, TenantID, User, Permissions
 DB, LandlordDB, TenantDB, Tx
-Storage, Data, Sandbox, Scheduler
+Storage, Data, Sandbox, Scheduler, Ephemeral
 Logger, Env, Context
 ```
 
@@ -195,6 +195,32 @@ environment fallback. Mutations run with `ctx.Tx`; jobs they enqueue through
 `ctx.Scheduler` are published only after the mutation commits. Long-running
 actions can call `ctx.NotifyTableChanged(...)` after committing intermediate
 writes.
+
+### Ephemeral state
+
+`ctx.Ephemeral` stores tenant-local JSON values in Valkey. Project and tenant
+namespaces are applied by the runtime, every write requires a positive TTL, and
+app code cannot select another scope:
+
+```go
+type Lease struct {
+  UserID string `json:"userId"`
+}
+
+func Beat(ctx *gonvex.MutationCtx, _ struct{}) (any, error) {
+  return nil, ctx.Ephemeral.Set("presence/lease/"+ctx.User.ID, Lease{
+    UserID: ctx.User.ID,
+  }, 2*time.Minute)
+}
+```
+
+The API is `Set(key, value, ttl)`, `Get(key, &target)`, `Delete(key)`, and
+`List(prefix)`. `List` uses a per-project/tenant sorted set ordered by expiry,
+then `MGET`s only that tenant's live values; it never scans the global Valkey
+keyspace. Mark queries that read it with `gonvex.ReadsEphemeral()` so their
+results bypass the durable query cache. Mark mutations that write only
+ephemeral state with `gonvex.WritesEphemeral()` so Gonvex opens no Postgres
+transaction, bumps no sync revision, and schedules no reactive invalidation.
 
 ## Generated Types
 

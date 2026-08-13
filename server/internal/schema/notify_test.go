@@ -23,6 +23,7 @@ func TestNotifySQLForTableUsesTableNameAndChannel(t *testing.T) {
 		"pg_notify('gonvex_table_change'",
 		"'table', 'messages'",
 		"'operation', 'update'",
+		"'mutationId', NULLIF(current_setting('gonvex.mutation_id', true), '')",
 		"'changedColumns', CASE WHEN cardinality(changed_columns) <= 100",
 		"FULL OUTER JOIN new_rows new_row USING (\"id\")",
 		"jsonb_object_keys(",
@@ -31,6 +32,79 @@ func TestNotifySQLForTableUsesTableNameAndChannel(t *testing.T) {
 	} {
 		if !strings.Contains(sql, want) {
 			t.Fatalf("expected notify SQL to contain %q:\n%s", want, sql)
+		}
+	}
+}
+
+func TestNotifySQLForTableUsesConvexIDAndSuppressesEmptyStatements(t *testing.T) {
+	sql, err := NotifySQLForTable("tasks", manifest.Table{Columns: map[string]manifest.Column{
+		"_id":    {Type: "id"},
+		"taskId": {Type: "id"},
+		"name":   {Type: "text"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`SELECT "_id" FROM new_rows WHERE "_id" IS NOT NULL`,
+		`FULL OUTER JOIN new_rows new_row USING ("_id")`,
+		"IF row_count = 0 THEN",
+		"'broad', row_count >= 500",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected notify SQL to contain %q:\n%s", want, sql)
+		}
+	}
+}
+
+func TestNotifySQLIncludesCommittedUserIDsWhenColumnExists(t *testing.T) {
+	sql, err := NotifySQLForTable("notifications", manifest.Table{Columns: map[string]manifest.Column{
+		"_id": {Type: "id"}, "userId": {Type: "id"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`SELECT "userId" FROM new_rows`, `'userIds', CASE WHEN row_count < 500 THEN user_ids`} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected notify SQL to contain %q:\n%s", want, sql)
+		}
+	}
+}
+
+func TestNotifySQLIncludesOldAndNewWorkspaceIDsForUpdates(t *testing.T) {
+	sql, err := NotifySQLForTable("tasks", manifest.Table{Columns: map[string]manifest.Column{
+		"_id": {Type: "id"}, "workspaceId": {Type: "id"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`SELECT "workspaceId" FROM old_rows UNION SELECT "workspaceId" FROM new_rows`,
+		`'workspaceIds', CASE WHEN row_count < 500 THEN workspace_ids`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected notify SQL to contain %q:\n%s", want, sql)
+		}
+	}
+}
+
+func TestNotifySQLFallsBackToBroadInvalidationBeforePostgresPayloadLimit(t *testing.T) {
+	sql, err := NotifySQLForTable("taskWorkspaceContexts", manifest.Table{Columns: map[string]manifest.Column{
+		"_id": {Type: "id"}, "taskId": {Type: "id"}, "userId": {Type: "id"}, "workspaceId": {Type: "id"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"octet_length(notify_payload) >= 8000",
+		"notify_payload := json_build_object(",
+		"'broad', true",
+		"'ids', ARRAY[]::text[]",
+		"PERFORM pg_notify('gonvex_table_change', notify_payload)",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected oversized NOTIFY fallback SQL to contain %q:\n%s", want, sql)
 		}
 	}
 }

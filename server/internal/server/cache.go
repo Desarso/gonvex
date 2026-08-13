@@ -33,15 +33,47 @@ func newRowsCache(rawURL string, ttl time.Duration) (*rowsCache, error) {
 	if rawURL == "" || ttl <= 0 {
 		return nil, nil
 	}
-	options, err := redis.ParseURL(rawURL)
+	client, err := newValkeyClient(rawURL)
 	if err != nil {
 		return nil, err
 	}
+	return newRowsCacheWithClient(client, ttl), nil
+}
+
+func newValkeyClient(rawURL string) (*redis.Client, error) {
+	options, err := redis.ParseURL(strings.TrimSpace(rawURL))
+	if err != nil {
+		return nil, err
+	}
+	return redis.NewClient(options), nil
+}
+
+func openRequiredValkey(rawURL string) (*redis.Client, error) {
+	if strings.TrimSpace(rawURL) == "" {
+		return nil, fmt.Errorf("VALKEY_URL (or REDIS_URL) is required; set it to a Valkey/Redis URL such as redis://127.0.0.1:6380/0")
+	}
+	client, err := newValkeyClient(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("VALKEY_URL (or REDIS_URL) is invalid: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("cannot connect to Valkey using VALKEY_URL (or REDIS_URL): %w", err)
+	}
+	return client, nil
+}
+
+func newRowsCacheWithClient(client *redis.Client, ttl time.Duration) *rowsCache {
+	if client == nil || ttl <= 0 {
+		return nil
+	}
 	return &rowsCache{
-		client:    redis.NewClient(options),
+		client:    client,
 		ttl:       ttl,
 		bootEpoch: fmt.Sprintf("%d-%d", time.Now().UTC().UnixNano(), os.Getpid()),
-	}, nil
+	}
 }
 
 func (c *rowsCache) enabled() bool {

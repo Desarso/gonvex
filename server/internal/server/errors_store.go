@@ -73,7 +73,6 @@ func (s *Server) openErrorDB(ctx context.Context, project string) (*sql.DB, erro
 		return db, err
 	}
 	if err := ensureErrorSchema(ctx, db); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
@@ -86,7 +85,6 @@ func (s *Server) persistError(ctx context.Context, event capturedError) (availab
 	if err != nil || db == nil {
 		return db != nil, false, err
 	}
-	defer db.Close()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return true, false, err
@@ -165,7 +163,6 @@ func (s *Server) persistentErrorGroups(ctx context.Context, project, status, rel
 	if err != nil || db == nil {
 		return nil, nil, db != nil, err
 	}
-	defer db.Close()
 
 	releaseRows, err := db.QueryContext(ctx, `SELECT release
 		FROM gonvex_error_events
@@ -281,7 +278,6 @@ func (s *Server) persistentErrorGroup(ctx context.Context, project, fp string) (
 	if err != nil || db == nil {
 		return nil, db != nil, err
 	}
-	defer db.Close()
 	group, err := scanErrorGroup(db.QueryRowContext(ctx, errorGroupSelect+` WHERE project_id=$1 AND fingerprint=$2`, project, fp))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, true, nil
@@ -294,7 +290,6 @@ func (s *Server) updatePersistentErrorGroup(ctx context.Context, project, fp str
 	if err != nil || db == nil {
 		return nil, db != nil, err
 	}
-	defer db.Close()
 	result, err := db.ExecContext(ctx, `UPDATE gonvex_error_groups SET
 		status=COALESCE(NULLIF($3,''),status), priority=COALESCE(NULLIF($4,''),priority), assignee=CASE WHEN $5 THEN $6 ELSE assignee END
 		WHERE project_id=$1 AND fingerprint=$2`, project, fp, update.Status, update.Priority, update.AssigneeSet, update.Assignee)

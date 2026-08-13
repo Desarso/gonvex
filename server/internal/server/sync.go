@@ -228,8 +228,13 @@ func (c *wsConn) openSyncMany(ctx context.Context, opens []syncOpenRequest) {
 		for _, open := range opens {
 			message := clientMessage{ID: open.ID, Path: open.Path, Args: open.Args}
 			c.server.metrics.recordOperationalLog(c.syncProtocolLog(message, "open", 0, 0, err), time.Now().UTC())
+			// A batched open still represents independent subscriptions. Route the
+			// storage/bootstrap failure to every id so clients can mark each
+			// collection failed and activate their query fallback. A single
+			// id-less error is dispatched as a system frame and leaves all callers
+			// waiting forever.
+			c.write(serverMessage{Type: "sync.error", ID: open.ID, Path: open.Path, Error: err.Error()})
 		}
-		c.write(serverMessage{Type: "sync.error", Error: err.Error()})
 		return
 	}
 

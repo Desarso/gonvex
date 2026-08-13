@@ -12,18 +12,7 @@ import (
 // traffic. Memory and CPU are capacity averages, not client attribution.
 func (s *Server) resourceSnapshot(websocket websocketMetricSnapshot) runtimeResourceSnapshot {
 	memoryBytes := processResidentBytes()
-	cpuSeconds := processCPUSeconds()
-	now := time.Now()
-	s.resourceMu.Lock()
-	if !s.resourceSampleAt.IsZero() {
-		elapsed := now.Sub(s.resourceSampleAt).Seconds()
-		if elapsed > 0 && cpuSeconds >= s.resourceCPUSeconds {
-			s.resourceCPUPercent = (cpuSeconds - s.resourceCPUSeconds) / elapsed * 100
-		}
-	}
-	s.resourceSampleAt, s.resourceCPUSeconds = now, cpuSeconds
-	cpuPercent := s.resourceCPUPercent
-	s.resourceMu.Unlock()
+	cpuPercent := s.sampleCPUPercent(time.Now())
 
 	result := runtimeResourceSnapshot{MemoryBytes: memoryBytes, CPUPercent: cpuPercent, BytesReceived: websocket.BytesReceived, BytesSent: websocket.BytesSent}
 	if websocket.Connections > 0 {
@@ -33,6 +22,24 @@ func (s *Server) resourceSnapshot(websocket websocketMetricSnapshot) runtimeReso
 		result.BytesPerClient = (websocket.BytesReceived + websocket.BytesSent) / clients
 	}
 	return result
+}
+
+// sampleCPUPercent computes process CPU% over the window since the previous
+// sample from any caller (metrics polls and the background load sampler share
+// the same state, so the reported percent always covers the most recent
+// window regardless of who sampled last).
+func (s *Server) sampleCPUPercent(now time.Time) float64 {
+	cpuSeconds := processCPUSeconds()
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
+	if !s.resourceSampleAt.IsZero() {
+		elapsed := now.Sub(s.resourceSampleAt).Seconds()
+		if elapsed > 0 && cpuSeconds >= s.resourceCPUSeconds {
+			s.resourceCPUPercent = (cpuSeconds - s.resourceCPUSeconds) / elapsed * 100
+		}
+	}
+	s.resourceSampleAt, s.resourceCPUSeconds = now, cpuSeconds
+	return s.resourceCPUPercent
 }
 
 func processResidentBytes() uint64 {

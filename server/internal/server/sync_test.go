@@ -509,6 +509,29 @@ func TestSyncBatchProtocolPreservesIndependentResumeState(t *testing.T) {
 	}
 }
 
+func TestSyncOpenManyStorageFailureIsRoutedToEverySubscription(t *testing.T) {
+	connection, peer := newSyncReadyTestConnection(t, false)
+	connection.server = New(config.Config{
+		ProjectDatabases: map[string]string{
+			connection.project: "postgres://127.0.0.1:1/missing",
+		},
+	})
+	connection.openSyncMany(context.Background(), []syncOpenRequest{
+		{ID: "priorities", Path: "sync.priorities", Args: json.RawMessage(`{"tenantId":"tenant-a"}`)},
+		{ID: "templates", Path: "sync.templates", Args: json.RawMessage(`{"tenantId":"tenant-a"}`)},
+	})
+
+	frames := readSyncTestFrames(t, peer, 2)
+	for index, want := range []struct{ id, path string }{
+		{id: "priorities", path: "sync.priorities"},
+		{id: "templates", path: "sync.templates"},
+	} {
+		if frames[index].Type != "sync.error" || frames[index].ID != want.id || frames[index].Path != want.path || frames[index].Error == "" {
+			t.Fatalf("frame %d = %#v, want addressed sync.error for %s", index, frames[index], want.path)
+		}
+	}
+}
+
 func TestSyncSubscriptionReadyFanoutIsCapabilityGated(t *testing.T) {
 	const subscriptionCount = 5
 	for _, test := range []struct {

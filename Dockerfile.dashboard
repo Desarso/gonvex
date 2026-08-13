@@ -31,8 +31,9 @@ RUN pnpm --filter @gonvex/dashboard build
 
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
 WORKDIR /app
-ENV NODE_ENV=production
+ENV NODE_ENV=production PORT=8080
 COPY apps/dashboard/server.mjs ./server.mjs
 COPY --from=build /app/apps/dashboard/dist /usr/share/nginx/html
-EXPOSE 80
+USER node
+EXPOSE 8080
 CMD ["node", "server.mjs"]

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/pkg/projectbundle"
 )
 
 func TestParseRegistrationsIncludesPublicHTTPAsHTTP(t *testing.T) {
@@ -31,17 +32,47 @@ func Register(app interface{ PublicHTTP(string, any) }) {
 	}
 }
 
+func TestBuildManifestShipsRootMigrationFiles(t *testing.T) {
+	root := t.TempDir()
+	backend := filepath.Join(root, "gonvex")
+	if err := os.MkdirAll(filepath.Join(root, "migrations"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	goFile := filepath.Join(backend, "register.go")
+	if err := os.MkdirAll(backend, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(goFile, []byte("package app\nfunc Register(any) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sql := []byte("-- gonvex:scope tenant\nSELECT 1;\n")
+	if err := os.WriteFile(filepath.Join(root, "migrations", "0001_start.sql"), sql, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := buildManifest(root, []string{goFile}, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bundle.Bundle.Files["migrations/0001_start.sql"]; got != projectbundle.EncodeFile(sql) {
+		t.Fatalf("migration was not bundled: %q", got)
+	}
+}
+
 func TestParseRegistrationsIncludesDependencyOptions(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "tasks.go")
 	source := `package app
 import "github.com/gonvex/gonvex/pkg/gonvex"
 func Register(app *gonvex.App) {
-  app.Query("tasks.list", ListTasks,
-    gonvex.Reads("tasks").Columns("id", "title").Filters("status").OrdersBy("updated_at").Windowed(),
-    gonvex.ShareByPermissions(),
-  )
+	  app.Query("tasks.list", ListTasks,
+	    gonvex.Reads("tasks").Columns("id", "title").Filters("status").OrdersBy("updated_at").Windowed(),
+	    gonvex.ReadsEphemeral(),
+	    gonvex.ShareByPermissions(),
+	    gonvex.ShareByVisibility("internal.taskVisibility"),
+	    gonvex.ShareResultFrom("internal.tasksShared", "query"),
+	  )
   app.Mutation("tasks.update", UpdateTask, gonvex.Writes("tasks").Columns("title"))
+  app.Mutation("presence.beat", Beat, gonvex.WritesEphemeral())
 }`
 	if err := os.WriteFile(file, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
@@ -51,12 +82,18 @@ func Register(app *gonvex.App) {
 		t.Fatal(err)
 	}
 	query := entries["tasks.list"]
-	if len(query.Dependencies.Reads) != 1 || !query.Dependencies.Reads[0].Windowed || !query.Dependencies.ShareByPermissions {
+	if len(query.Dependencies.Reads) != 1 || !query.Dependencies.Reads[0].Windowed || !query.Dependencies.ReadsEphemeral || !query.Dependencies.ShareByPermissions {
 		t.Fatalf("query dependencies = %#v", query.Dependencies)
+	}
+	if query.Dependencies.ShareByVisibility != "internal.taskVisibility" || query.Dependencies.ShareResultFrom != "internal.tasksShared" || query.Dependencies.ShareResultField != "query" {
+		t.Fatalf("query sharing dependencies = %#v", query.Dependencies)
 	}
 	mutation := entries["tasks.update"]
 	if len(mutation.Dependencies.Writes) != 1 || mutation.Dependencies.Writes[0].Table != "tasks" {
 		t.Fatalf("mutation dependencies = %#v", mutation.Dependencies)
+	}
+	if beat := entries["presence.beat"]; !beat.Dependencies.WritesEphemeral {
+		t.Fatalf("ephemeral mutation dependencies = %#v", beat.Dependencies)
 	}
 }
 

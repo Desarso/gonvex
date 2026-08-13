@@ -1,0 +1,63 @@
+# SQL migrations
+
+Gonvex applies versioned SQL migrations during the same `/dev/sync` operation that installs an application's schema and functions. Projects without a `migrations/` directory retain the previous sync behavior.
+
+## Files and scope
+
+Put migrations in the project-root `migrations/` directory and name them `NNNN_description.sql`, for example `0001_add_search_vector.sql`. Gonvex includes these files in the source bundle and bundle hash, validates them, and applies them in lexical filename order.
+
+Every file must begin with one of these header comments before its first SQL statement:
+
+```sql
+-- gonvex:scope tenant
+```
+
+```sql
+-- gonvex:scope landlord
+```
+
+The parser's safe fallback is tenant scope, but sync rejects a missing directive so the intended database is reviewable. A tenant migration runs against every registered tenant database for the project. A landlord migration runs once against the project's landlord database.
+
+## Tracking and edits
+
+Each database has a `gonvex_migrations` table with the migration filename, SHA-256 checksum, application timestamp, and duration in milliseconds. An applied filename is never run again. Never edit an applied migration: if its current checksum differs from the recorded checksum, sync fails. Add a new migration instead.
+
+Each migration runs in one transaction by default. A statement failure rolls back both its SQL and tracking row.
+
+During sync Gonvex first reconciles the additive declarative schema, then runs SQL migrations, and activates the new function bundle only after both succeed. A tenant database created later receives the deployed tenant schema and all tenant migrations before it is marked ready.
+
+PostgreSQL operations that forbid a transaction block require this header:
+
+```sql
+-- gonvex:scope tenant
+-- gonvex:no-transaction
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS messages_by_created_at
+ON messages (created_at);
+```
+
+In no-transaction mode Gonvex executes top-level statements individually and records the migration only after every statement succeeds. Earlier statements can remain after a later failure, so every statement in such a migration should be safely retryable (`IF EXISTS`/`IF NOT EXISTS` where PostgreSQL supports it). Gonvex's splitter understands quoted strings, quoted identifiers, comments, and dollar-quoted function bodies.
+
+Tenant rollout continues after an individual tenant fails so healthy tenant databases are not blocked. Gonvex collects every failure, identifies its tenant, and fails the overall sync. The runtime manifest is not activated when any migration fails. Landlord failure stops before tenant rollout.
+
+Applied migrations are logged and returned in the `/dev/sync` JSON response. To inspect pending migrations without applying SQL, schema changes, or a runtime bundle, run:
+
+```sh
+gonvex dev --once --dry-run
+```
+
+Dry run still connects to each target database to compare tracking records and checksums.
+
+## Empty undeclared columns
+
+The declarative schema can optionally remove a column that the current schema no longer declares, but only when the column contains no non-NULL values. A constant, redundant, false, zero, or empty-string value is data and is never considered empty. Non-empty undeclared columns remain in place and produce the existing warning. Declared columns are never candidates.
+
+This behavior is disabled by default. Enable it on the runtime with:
+
+```sh
+GONVEX_DROP_EMPTY_UNDECLARED_COLUMNS=true
+```
+
+The opt-in is deliberately runtime-side: an older or rolled-back application bundle must not gain destructive behavior merely by being deployed. Operators should enable it only where deploy ordering and rollback policy make declarative cleanup acceptable. Explicit destructive or data-aware cleanup belongs in a versioned SQL migration.
+
+For tenant tables, Gonvex enumerates every registered tenant database and approves a drop only when the same undeclared column is empty in all of them. It then rechecks emptiness immediately before each physical drop. This fleet-wide rule avoids intentionally creating per-tenant schema drift. If any tenant has a non-NULL value, every tenant keeps the column. Landlord tables receive the same undeclared-and-empty checks against the single landlord database and are also protected by the opt-in flag.

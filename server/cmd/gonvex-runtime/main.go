@@ -10,7 +10,11 @@ import (
 
 func main() {
 	cfg := config.FromEnv()
-	runtime := gonvexruntime.New(cfg)
+	runtime, err := gonvexruntime.NewRequired(cfg)
+	if err != nil {
+		slog.Error("gonvex runtime startup failed", "error", err)
+		os.Exit(1)
+	}
 
 	slog.Info("starting gonvex runtime", "addr", cfg.Addr)
 	if err := gonvexruntime.NewHTTPServer(cfg.Addr, runtime.Handler()).ListenAndServe(); err != nil {
