@@ -98,6 +98,8 @@ type Server struct {
 	appAuthVersions       map[string]uint64
 	syncPruneMu           sync.Mutex
 	syncPrunedAt          map[string]time.Time
+	runtimeHydrationMu    sync.RWMutex
+	runtimeHydrationFails map[string]struct{}
 }
 
 func New(cfg config.Config) *Server {
@@ -176,6 +178,7 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		appAuthLookups:        map[string]*appAuthRequirementLookup{},
 		appAuthVersions:       map[string]uint64{},
 		syncPrunedAt:          map[string]time.Time{},
+		runtimeHydrationFails: map[string]struct{}{},
 		provisionTenant:       provisionTenantDatabase,
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
@@ -359,8 +362,13 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":          true,
+	failedManifests := s.runtimeHydrationFailureCount()
+	status := http.StatusOK
+	if failedManifests > 0 {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, map[string]any{
+		"ok":          failedManifests == 0,
 		"time":        time.Now().UTC().Format(time.RFC3339Nano),
 		"postgresSet": s.config.PostgresURL != "",
 		"valkeySet":   s.config.ValkeyURL != "",
@@ -369,6 +377,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"googleAuth": map[string]any{
 			"ready": s.googleAuthBrokerReady(), "callbackUrl": s.configuredGoogleCallbackURL(),
 			"issues": s.googleAuthReadinessIssues(),
+		},
+		"runtimeManifests": map[string]any{
+			"ready":          failedManifests == 0,
+			"failedProjects": failedManifests,
 		},
 	})
 }
@@ -867,7 +879,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		bundleHash = next.Bundle.Hash
 	}
 	slog.Info("dev sync applying manifest", "project", next.Project, "functions", len(next.Functions), "bundleHash", bundleHash)
-	if err := s.runtime.SyncManifest(next); err != nil {
+	if err := s.syncRuntimeManifest(next); err != nil {
 		syncErr = err
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
@@ -1142,11 +1154,13 @@ func (s *Server) hydrateRuntimeState(ctx context.Context) {
 	s.hydrateProjects()
 	manifests, err := s.loadRuntimeManifests(ctx)
 	if err != nil {
+		s.markRuntimeHydrationFailure("__catalog__")
 		slog.Debug("load persisted Gonvex runtime manifests", "error", err)
 		return
 	}
+	s.clearRuntimeHydrationFailure("__catalog__")
 	for _, next := range manifests {
-		if err := s.runtime.SyncManifest(next); err != nil {
+		if err := s.syncRuntimeManifest(next); err != nil {
 			slog.Warn("load persisted Gonvex runtime manifest", "project", next.Project, "error", err)
 			continue
 		}
@@ -1182,13 +1196,15 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 	}
 	next, ok, err := s.loadRuntimeManifest(ctx, projectID)
 	if err != nil {
+		s.markRuntimeHydrationFailure(projectID)
 		slog.Debug("load persisted Gonvex project runtime manifest", "project", projectID, "error", err)
 		return
 	}
 	if !ok {
+		s.clearRuntimeHydrationFailure(projectID)
 		return
 	}
-	if err := s.runtime.SyncManifest(next); err != nil {
+	if err := s.syncRuntimeManifest(next); err != nil {
 		slog.Warn("load persisted Gonvex project runtime manifest", "project", projectID, "error", err)
 		return
 	}
@@ -1196,6 +1212,33 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 		s.markSchemaFingerprint(projectID, schemaFingerprint(next.Schema, next.Functions))
 	}
 	s.registerProjectCrons(projectID)
+}
+
+func (s *Server) syncRuntimeManifest(next manifest.Manifest) error {
+	if err := s.runtime.SyncManifest(next); err != nil {
+		s.markRuntimeHydrationFailure(next.Project)
+		return err
+	}
+	s.clearRuntimeHydrationFailure(next.Project)
+	return nil
+}
+
+func (s *Server) markRuntimeHydrationFailure(projectID string) {
+	s.runtimeHydrationMu.Lock()
+	s.runtimeHydrationFails[projectID] = struct{}{}
+	s.runtimeHydrationMu.Unlock()
+}
+
+func (s *Server) clearRuntimeHydrationFailure(projectID string) {
+	s.runtimeHydrationMu.Lock()
+	delete(s.runtimeHydrationFails, projectID)
+	s.runtimeHydrationMu.Unlock()
+}
+
+func (s *Server) runtimeHydrationFailureCount() int {
+	s.runtimeHydrationMu.RLock()
+	defer s.runtimeHydrationMu.RUnlock()
+	return len(s.runtimeHydrationFails)
 }
 
 func (s *Server) appForProject(ctx context.Context, projectID string) *gonvex.App {

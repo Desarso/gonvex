@@ -35,9 +35,10 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 	// Both fallbacks below hand the app an identity taken from the presented
 	// token rather than a Gonvex session. That identity is only trustworthy
 	// when the token's signature was checked, which firebaseIdentityFromToken
-	// does whenever GONVEX_FIREBASE_PROJECT_ID is configured.
+	// does whenever the project declares Firebase configuration.
+	firebaseProjectID := s.firebaseProjectID(ctx, projectID)
 	appIdentity := func() (*gonvex.User, string, error) {
-		user, err := s.firebaseIdentityFromToken(ctx, token)
+		user, err := s.firebaseIdentityFromToken(ctx, firebaseProjectID, token)
 		if err != nil {
 			return nil, "", err
 		}
@@ -47,9 +48,10 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 		}
 		return user, tenant, nil
 	}
+	hasVerifiedAppIdentity := firebaseProjectID != ""
 
 	if s.config.LandlordURL == "" {
-		if s.config.RequireAuth {
+		if s.config.RequireAuth && !hasVerifiedAppIdentity {
 			return nil, nil, "", "", fmt.Errorf("landlord database URL is not configured")
 		}
 		user, tenant, err := appIdentity()
@@ -61,7 +63,7 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 
 	session, err := landlord.ValidateSession(ctx, s.config.LandlordURL, token, requestedTenantID)
 	if err != nil {
-		if s.config.RequireAuth {
+		if s.config.RequireAuth && !hasVerifiedAppIdentity {
 			return nil, nil, "", "", err
 		}
 		user, tenant, identityErr := appIdentity()

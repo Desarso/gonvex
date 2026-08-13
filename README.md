@@ -45,7 +45,7 @@ Gonvex is for developers who like Convex's product shape but want infrastructure
 First, start the local reference runtime in a separate checkout:
 
 ```bash
-git clone https://github.com/Desarso/gonvex.git
+git clone https://github.com/Whagons-International/gonvex.git
 cd gonvex
 make stack
 ```
@@ -208,7 +208,7 @@ Dashboard           Optional web UI for inspecting projects, tables, functions, 
 For local self-hosting, run the full stack with Docker:
 
 ```bash
-git clone https://github.com/Desarso/gonvex.git
+git clone https://github.com/Whagons-International/gonvex.git
 cd gonvex
 cp .env.example .env
 make stack

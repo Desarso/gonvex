@@ -105,6 +105,67 @@ func TestVerifiedFirebaseTokenAuthenticates(t *testing.T) {
 	}
 }
 
+// Public unified runtimes keep authentication enforcement enabled globally,
+// while legacy projects can opt into a trusted external identity provider.
+// A verified Firebase token must remain usable in that configuration; it is
+// not a Gonvex landlord session and therefore cannot be looked up in sessions.
+func TestVerifiedFirebaseTokenAuthenticatesWhenRuntimeRequiresAuth(t *testing.T) {
+	signer := newFirebaseTestSigner(t)
+	server := New(config.Config{
+		RequireAuth:       true,
+		FirebaseProjectID: "whagons-5",
+		FirebaseJWKSURL:   signer.jwks.URL,
+	})
+
+	user, _, project, tenant, err := server.authenticateSocket(
+		context.Background(),
+		"whagons-5",
+		"whagons-5",
+		signer.token(t, validFirebaseClaims("whagons-5")),
+		"calaluna",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.ID != "firebase-user-123" || user.Email != "malek.gabriel33@gmail.com" {
+		t.Fatalf("expected verified Firebase user, got %#v", user)
+	}
+	if project != "whagons-5" || tenant != "calaluna" {
+		t.Fatalf("expected requested project/tenant, got %q/%q", project, tenant)
+	}
+}
+
+func TestFirebaseAuthenticationConfigurationIsProjectScoped(t *testing.T) {
+	signer := newFirebaseTestSigner(t)
+	server := New(config.Config{
+		RequireAuth:     true,
+		FirebaseJWKSURL: signer.jwks.URL,
+	})
+	server.projectEnvCache = map[string]projectEnvCacheEntry{
+		"whagons-project": {
+			values: map[string]string{
+				"FIREBASE_SERVICE_ACCOUNT_KEY": `{"project_id":"whagons-5","private_key":"not-used-for-token-verification"}`,
+			},
+			fetchedAt: time.Now(),
+		},
+	}
+	token := signer.token(t, validFirebaseClaims("whagons-5"))
+
+	user, _, project, _, err := server.authenticateSocket(
+		context.Background(), "whagons-project", "whagons-project", token, "calaluna")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.ID != "firebase-user-123" || project != "whagons-project" {
+		t.Fatalf("expected project-scoped Firebase identity, got user=%#v project=%q", user, project)
+	}
+
+	if _, _, _, _, err := server.authenticateSocket(
+		context.Background(), "native-project", "native-project", token, "native-tenant"); err == nil {
+		t.Fatal("expected the same Firebase token to be rejected for an unconfigured project")
+	}
+}
+
 // The whole point of the change: an attacker-minted token that is merely
 // well-formed must not authenticate as the user it names.
 func TestForgedFirebaseTokenIsRejected(t *testing.T) {
@@ -124,7 +185,7 @@ func TestFirebaseTokenSignedByAnotherKeyIsRejected(t *testing.T) {
 	server := signer.server("whagons-5")
 
 	token := attacker.token(t, validFirebaseClaims("whagons-5"))
-	_, err := server.verifyFirebaseIDToken(context.Background(), token)
+	_, err := server.verifyFirebaseIDToken(context.Background(), "whagons-5", token)
 	if err == nil || !strings.Contains(err.Error(), "signature is invalid") {
 		t.Fatalf("expected a signature failure, got %v", err)
 	}
@@ -152,7 +213,7 @@ func TestFirebaseTokenClaimsAreEnforced(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			claims := validFirebaseClaims("whagons-5")
 			testCase.mutate(claims)
-			_, err := server.verifyFirebaseIDToken(context.Background(), signer.token(t, claims))
+			_, err := server.verifyFirebaseIDToken(context.Background(), "whagons-5", signer.token(t, claims))
 			if err == nil || !strings.Contains(err.Error(), testCase.message) {
 				t.Fatalf("expected %q, got %v", testCase.message, err)
 			}

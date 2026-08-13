@@ -1,8 +1,26 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
-const gonvexContextPattern = /https:\/\/github\.com\/Desarso\/gonvex\.git#(?:[0-9a-f]{40}|main)/g;
+const gonvexContextPattern = /https:\/\/github\.com\/Whagons-International\/gonvex\.git#(?:[0-9a-f]{40}|main)/g;
 const runtimeVersionPattern = /^(\s{6}GONVEX_RUNTIME_VERSION:)\s*.*$/m;
+
+function composeServiceBlock(compose, serviceName) {
+  const lines = compose.split(/\r?\n/);
+  const header = `  ${serviceName}:`;
+  const start = lines.findIndex((line) => line.trimEnd() === header);
+  if (start < 0) {
+    throw new Error(`saved Compose does not contain the ${serviceName} service`);
+  }
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\S/.test(line) || /^  \S[^:]*:\s*(?:#.*)?$/.test(line)) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n");
+}
 
 export function stampRuntimeCompose(compose, sha) {
   if (!/^[0-9a-f]{40}$/.test(sha)) {
@@ -14,7 +32,7 @@ export function stampRuntimeCompose(compose, sha) {
     throw new Error(`expected exactly 2 Gonvex Git build contexts, found ${contexts.length}`);
   }
 
-  let stamped = compose.replace(gonvexContextPattern, `https://github.com/Desarso/gonvex.git#${sha}`);
+  let stamped = compose.replace(gonvexContextPattern, `https://github.com/Whagons-International/gonvex.git#${sha}`);
   if (runtimeVersionPattern.test(stamped)) {
     stamped = stamped.replace(runtimeVersionPattern, `$1 '${sha}'`);
   } else {
@@ -28,29 +46,33 @@ export function stampRuntimeCompose(compose, sha) {
 }
 
 export function verifyRuntimeCompose(compose, sha) {
-  const context = `https://github.com/Desarso/gonvex.git#${sha}`;
+  const context = `https://github.com/Whagons-International/gonvex.git#${sha}`;
   const contextCount = compose.split(context).length - 1;
   if (contextCount !== 2) {
     throw new Error(`saved Compose does not contain exactly 2 build contexts for ${sha}`);
   }
+  const runtime = composeServiceBlock(compose, "gonvex-runtime");
   const runtimeVersion = new RegExp(
     `^\\s{6}GONVEX_RUNTIME_VERSION:\\s*["']?${sha}["']?\\s*$`,
     "m",
   );
-  if (!runtimeVersion.test(compose)) {
+  if (!runtimeVersion.test(runtime)) {
     throw new Error(`saved Compose does not identify runtime ${sha}`);
   }
-  for (const fragment of [
-    "gonvex-runtime-permissions:",
-    "mkdir -p /var/lib/gonvex/data",
-    "chmod -R u+rwX /var/lib/gonvex",
-    "DAC_OVERRIDE",
-    "FOWNER",
-    "service_completed_successfully",
-  ]) {
-    if (!compose.includes(fragment)) {
-      throw new Error(`saved Compose is missing runtime volume initializer fragment: ${fragment}`);
-    }
+  if (compose.includes("gonvex-runtime-permissions:")) {
+    throw new Error("saved Compose must not depend on a runtime permission initializer");
+  }
+  if (!/^\s{4}working_dir:\s*\/var\/lib\/gonvex\s*$/m.test(runtime)) {
+    throw new Error("saved Compose must use the writable Gonvex runtime directory");
+  }
+  if (!/^\s{4}user:\s*["']?0:0["']?\s*$/m.test(runtime)) {
+    throw new Error("saved Compose must run the Gonvex runtime as container root");
+  }
+  if (!/^\s{4}cap_drop:\s*\n\s{6}-\s*ALL\s*$/m.test(runtime)) {
+    throw new Error("saved Compose must drop all runtime Linux capabilities");
+  }
+  if (!/^\s{6}GONVEX_REQUIRE_AUTH:\s*["']?true["']?\s*$/m.test(runtime)) {
+    throw new Error("saved shared dev Compose must enforce project authentication");
   }
 }
 

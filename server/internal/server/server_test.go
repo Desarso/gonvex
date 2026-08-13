@@ -55,6 +55,31 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestHealthFailsWhenPersistedRuntimeManifestCannotHydrate(t *testing.T) {
+	server := New(config.Config{})
+	server.markRuntimeHydrationFailure("project-with-broken-manifest")
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d", http.StatusServiceUnavailable, recorder.Code)
+	}
+	var payload struct {
+		OK               bool `json:"ok"`
+		RuntimeManifests struct {
+			Ready          bool `json:"ready"`
+			FailedProjects int  `json:"failedProjects"`
+		} `json:"runtimeManifests"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.OK || payload.RuntimeManifests.Ready || payload.RuntimeManifests.FailedProjects != 1 {
+		t.Fatalf("unexpected health payload: %+v", payload)
+	}
+}
+
 func TestDataTablesWithoutDatabase(t *testing.T) {
 	server := New(config.Config{})
 	recorder := httptest.NewRecorder()
