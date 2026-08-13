@@ -253,7 +253,11 @@ describe("sync revision watermarks", () => {
       capabilities: { syncIntegrity: 1, syncWatermark: 1 },
     });
     await flushAsyncWork();
-    const firstOpen = sentMessages(firstSocket).find((message) => message.type === "sync.open");
+    const firstOpen = await vi.waitFor(() => {
+      const message = sentMessages(firstSocket).find((candidate) => candidate.type === "sync.open");
+      expect(message).toBeDefined();
+      return message!;
+    });
     firstSocket.receive({
       type: "sync.ready",
       id: firstOpen.id,

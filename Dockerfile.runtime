@@ -6,7 +6,14 @@
 # version and the same gonvex source (via the go.mod replace) for plugin ABI match.
 FROM golang:1.26@sha256:7caba5286b4c3613a337b709c573047d8ae62ee76106647313b61e72b99f20af AS build
 WORKDIR /src
-ENV GOMAXPROCS=2 GOFLAGS=-p=2
+# Go plugin package hashes include the absolute module-cache source path. Build
+# the host runtime from the same paths used later by the in-image plugin
+# compiler, otherwise identical dependencies fail plugin.Open after deploy.
+ENV GOCACHE=/var/lib/gonvex/go-build \
+    GOMODCACHE=/var/lib/gonvex/go/pkg/mod \
+    GOPATH=/var/lib/gonvex/go \
+    GOMAXPROCS=2 \
+    GOFLAGS="-mod=mod -p=2"
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
@@ -23,8 +30,9 @@ RUN groupadd --system --gid 10001 gonvex \
 #   replace github.com/gonvex/gonvex => $GONVEX_MODULE_ROOT
 # so the plugin build resolves the framework against this checkout.
 COPY --from=build /src /src
-# Warm module cache so plugin `go mod tidy`/build resolves deps without refetching.
-COPY --from=build --chown=gonvex:gonvex /go/pkg/mod /var/lib/gonvex/go/pkg/mod
+# Preserve the exact module-cache path used to compile the host binary so
+# plugin package hashes remain ABI-compatible at runtime.
+COPY --from=build --chown=gonvex:gonvex /var/lib/gonvex/go/pkg/mod /var/lib/gonvex/go/pkg/mod
 COPY --from=build /out/gonvex-runtime /usr/local/bin/gonvex-runtime
 # Data-file artifacts (DuckDB databases for assistant-uploaded CSV/XLSX/XLS)
 # live here; mount a volume to keep them across deploys. Artifacts re-ingest
