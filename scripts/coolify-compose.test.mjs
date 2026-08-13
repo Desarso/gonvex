@@ -76,7 +76,7 @@ test("runtime is health-gated on private durable dependencies", () => {
   assert.deepEqual(permissions.command, [
     "sh",
     "-ec",
-    "chown -R 10001:10001 /var/lib/gonvex && chmod -R u+rwX /var/lib/gonvex",
+    "mkdir -p /var/lib/gonvex/data /var/lib/gonvex/go-build /var/lib/gonvex/go/pkg/mod /var/lib/gonvex/plugins /var/lib/gonvex/tmp && chown -R 10001:10001 /var/lib/gonvex && chmod -R u+rwX /var/lib/gonvex",
   ]);
   assert.equal(permissions.read_only, true);
   assert.equal(dashboard.depends_on["gonvex-runtime"].condition, "service_healthy");

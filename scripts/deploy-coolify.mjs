@@ -42,6 +42,7 @@ export function verifyRuntimeCompose(compose, sha) {
   }
   for (const fragment of [
     "gonvex-runtime-permissions:",
+    "mkdir -p /var/lib/gonvex/data",
     "chmod -R u+rwX /var/lib/gonvex",
     "FOWNER",
     "service_completed_successfully",
