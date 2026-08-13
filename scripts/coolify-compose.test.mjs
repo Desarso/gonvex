@@ -15,7 +15,7 @@ const environment = {
   GONVEX_DASHBOARD_AUTH_PROJECT_ID: "dashboard-auth-test",
   GONVEX_BOOTSTRAP_EMAIL: "malek.gabriel33@gmail.com",
   SERVICE_FQDN_GONVEXRUNTIME_8080: "https://gonvex-unified-dev.example.test",
-  SERVICE_FQDN_GONVEXDASHBOARD_8080: "https://gonvex-unified-dashboard-dev.example.test",
+  SERVICE_FQDN_GONVEXDASHBOARD_80: "https://gonvex-unified-dashboard-dev.example.test",
   SERVICE_URL_GONVEXRUNTIME_8080: "https://gonvex-unified-dev.example.test",
   GONVEX_EXTERNAL_URL: "https://gonvex-unified-dev.example.test",
 };
@@ -93,7 +93,7 @@ test("Coolify magic URLs expose only runtime and dashboard", () => {
     "https://gonvex-unified-dev.example.test",
   );
   assert.equal(
-    dashboard.environment.SERVICE_FQDN_GONVEXDASHBOARD_8080,
+    dashboard.environment.SERVICE_FQDN_GONVEXDASHBOARD_80,
     "https://gonvex-unified-dashboard-dev.example.test",
   );
 });

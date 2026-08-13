@@ -117,7 +117,7 @@ test("production public routes use the Gabriel server HTTP challenge resolver", 
   );
   assert.equal(
     dashboardLabels["traefik.http.services.gonvex-maker-dashboard-lehttp.loadbalancer.server.port"],
-    "8080",
+    "80",
   );
   assert.match(
     dashboardLabels["traefik.http.routers.gonvex-maker-dashboard-lehttp.rule"],

@@ -132,8 +132,8 @@ services:
       gonvex-runtime:
         condition: service_healthy
     environment:
-      SERVICE_FQDN_GONVEXDASHBOARD_8080: ${SERVICE_FQDN_GONVEXDASHBOARD_8080}
-      PORT: "8080"
+      SERVICE_FQDN_GONVEXDASHBOARD_80: ${SERVICE_FQDN_GONVEXDASHBOARD_80}
+      PORT: "80"
       # Keep the dashboard session API protected. Native Google auth is handled
       # by the SPA, while an unauthenticated cookie lookup must return 401
       # instead of manufacturing the server's Local Developer fallback.
@@ -151,7 +151,7 @@ services:
     cap_drop:
       - ALL
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz | grep -qx ok"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz | grep -qx ok"]
       interval: 10s
       timeout: 5s
       retries: 30
