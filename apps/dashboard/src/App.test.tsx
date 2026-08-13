@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, DatabaseHealthSection, LogDetailsSheet, RealtimeDashboard, SchedulesPage, dashboardEmailAllowed, dataEditorInputValue, dataRowIdentity, googleLoginEnabled, parseDataEditorValue, parseEmailAllowlist, runtimeLogSourceSummary, runtimeLogsForCopy } from "./App";
+import { App, DatabaseHealthSection, LogDetailsSheet, RealtimeDashboard, SchedulesPage, dashboardEmailAllowed, dashboardMetricsWebSocketProtocols, dataEditorInputValue, dataRowIdentity, googleLoginEnabled, parseDataEditorValue, parseEmailAllowlist, runtimeLogSourceSummary, runtimeLogsForCopy } from "./App";
 
 async function renderProjectApp() {
   const user = userEvent.setup();
@@ -58,6 +58,13 @@ describe("App", () => {
     vi.unstubAllGlobals();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
+  });
+
+  it("carries metrics WebSocket credentials outside the URL", () => {
+    expect(dashboardMetricsWebSocketProtocols(" signed-token ")).toEqual([
+      "gonvex-dashboard-auth.signed-token",
+    ]);
+    expect(dashboardMetricsWebSocketProtocols(" ")).toEqual([]);
   });
 
   it("preserves row value types while preparing dashboard edits", () => {

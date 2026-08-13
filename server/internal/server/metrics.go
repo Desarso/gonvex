@@ -214,21 +214,20 @@ type transactionMetricsBucket struct {
 }
 
 type runtimeMetricsSnapshot struct {
-	GeneratedAt      string                               `json:"generatedAt"`
-	Functions        map[string]functionMetricSnapshot    `json:"functions"`
-	Transactions     map[string]transactionMetricSnapshot `json:"transactions"`
-	Cache            cacheMetricSnapshot                  `json:"cache"`
-	Running          runningMetricSnapshot                `json:"running"`
-	WebSocket        websocketMetricSnapshot              `json:"websocket"`
-	Database         databaseMetricSnapshot               `json:"database"`
-	Resources        runtimeResourceSnapshot              `json:"resources"`
-	Load             loadMetricSnapshot                   `json:"load"`
-	Propagation      propagationMetricSnapshot            `json:"propagation"`
-	Reactive         reactiveMetricSnapshot               `json:"reactive"`
-	Scheduler        *schedulerSnapshot                   `json:"scheduler,omitempty"`
-	Logs             []runtimeLogEntry                    `json:"logs"`
-	TelemetryLogs    []transactionTelemetryEntry          `json:"telemetryLogs"`
-	TelemetryLogPath string                               `json:"telemetryLogPath,omitempty"`
+	GeneratedAt   string                               `json:"generatedAt"`
+	Functions     map[string]functionMetricSnapshot    `json:"functions"`
+	Transactions  map[string]transactionMetricSnapshot `json:"transactions"`
+	Cache         cacheMetricSnapshot                  `json:"cache"`
+	Running       runningMetricSnapshot                `json:"running"`
+	WebSocket     websocketMetricSnapshot              `json:"websocket"`
+	Database      databaseMetricSnapshot               `json:"database"`
+	Resources     runtimeResourceSnapshot              `json:"resources"`
+	Load          loadMetricSnapshot                   `json:"load"`
+	Propagation   propagationMetricSnapshot            `json:"propagation"`
+	Reactive      reactiveMetricSnapshot               `json:"reactive"`
+	Scheduler     *schedulerSnapshot                   `json:"scheduler,omitempty"`
+	Logs          []runtimeLogEntry                    `json:"logs"`
+	TelemetryLogs []transactionTelemetryEntry          `json:"telemetryLogs"`
 }
 
 type runtimeResourceSnapshot struct {
@@ -741,6 +740,7 @@ func newRuntimeMetrics(telemetryPath ...string) *runtimeMetrics {
 	if len(telemetryPath) > 0 {
 		path = telemetryPath[0]
 	}
+	hardenExistingTelemetryPath(path)
 	return &runtimeMetrics{
 		functions:        map[string]*functionMetrics{},
 		transactions:     map[string]*transactionMetrics{},
@@ -1088,10 +1088,7 @@ func (m *runtimeMetrics) recordTransactions(entries []transactionTelemetryEntry)
 	var encoder *json.Encoder
 	var file *os.File
 	if m.telemetryPath != "" {
-		if dir := filepath.Dir(m.telemetryPath); dir != "." && dir != "" {
-			_ = os.MkdirAll(dir, 0o755)
-		}
-		if opened, err := os.OpenFile(m.telemetryPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+		if opened, err := openTelemetryFile(m.telemetryPath); err == nil {
 			file = opened
 			encoder = json.NewEncoder(file)
 			defer file.Close()
@@ -1238,13 +1235,12 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 			Connections:   connections,
 			Subscriptions: subscriptions,
 		},
-		Database:         m.databaseSnapshot(projectFilter),
-		Load:             m.loadSnapshotLocked(),
-		Propagation:      m.propagationSnapshotLocked(now),
-		Reactive:         m.reactive.snapshot(),
-		Logs:             logs,
-		TelemetryLogs:    telemetryLogs,
-		TelemetryLogPath: m.telemetryPath,
+		Database:      m.databaseSnapshot(projectFilter),
+		Load:          m.loadSnapshotLocked(),
+		Propagation:   m.propagationSnapshotLocked(now),
+		Reactive:      m.reactive.snapshot(),
+		Logs:          logs,
+		TelemetryLogs: telemetryLogs,
 	}
 }
 
@@ -1365,20 +1361,38 @@ func (m *runtimeMetrics) appendTelemetryLog(entry transactionTelemetryEntry) {
 	}
 }
 
-func (m *runtimeMetrics) appendTelemetryFileLocked(entry transactionTelemetryEntry) {
-	if m.telemetryPath == "" {
+func hardenExistingTelemetryPath(path string) {
+	if path == "" {
 		return
 	}
-	if dir := filepath.Dir(m.telemetryPath); dir != "." && dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			_ = os.Chmod(dir, 0o700)
+		}
 	}
-	file, err := os.OpenFile(m.telemetryPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		_ = os.Chmod(path, 0o600)
+	}
+}
+
+func openTelemetryFile(path string) (*os.File, error) {
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return
+		return nil, err
 	}
-	defer file.Close()
-	encoder := json.NewEncoder(file)
-	_ = encoder.Encode(entry)
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
 }
 
 func (m *functionMetrics) bucket(now time.Time) *functionMetricsBucket {

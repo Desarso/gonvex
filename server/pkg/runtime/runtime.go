@@ -25,5 +25,5 @@ func ListenAndServe(app *gonvex.App) error {
 		return fmt.Errorf("gonvex runtime startup failed: %w", err)
 	}
 	slog.Info("starting gonvex runtime", "addr", cfg.Addr)
-	return http.ListenAndServe(cfg.Addr, runtime.Handler())
+	return server.NewHTTPServer(cfg.Addr, runtime.Handler()).ListenAndServe()
 }

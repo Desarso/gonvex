@@ -1362,6 +1362,11 @@ function dashboardAccessToken(): string {
   }
 }
 
+export function dashboardMetricsWebSocketProtocols(token: string): string[] {
+  const normalized = token.trim();
+  return normalized ? [`gonvex-dashboard-auth.${normalized}`] : [];
+}
+
 function useRuntimeMetrics(project: ProjectTarget, enabled = true) {
   const [metrics, setMetrics] = useState<RuntimeMetricsResponse | null>(null);
   const [reachable, setReachable] = useState(true);
@@ -1400,7 +1405,11 @@ function useRuntimeMetrics(project: ProjectTarget, enabled = true) {
 
     const url = new URL(wsURL);
     url.searchParams.set("project", project.id);
-    const socket = new WebSocket(url.toString());
+    const token = dashboardAccessToken();
+    const protocols = dashboardMetricsWebSocketProtocols(token);
+    const socket = protocols.length > 0
+      ? new WebSocket(url.toString(), protocols)
+      : new WebSocket(url.toString());
     const fallbackTimer = window.setTimeout(loadFallbackOnce, 2000);
     socket.addEventListener("open", () => {
       window.clearTimeout(fallbackTimer);
