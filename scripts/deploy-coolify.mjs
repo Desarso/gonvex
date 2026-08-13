@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const gonvexContextPattern = /https:\/\/github\.com\/Desarso\/gonvex\.git#(?:[0-9a-f]{40}|main)/g;
@@ -39,6 +40,16 @@ export function verifyRuntimeCompose(compose, sha) {
   if (!runtimeVersion.test(compose)) {
     throw new Error(`saved Compose does not identify runtime ${sha}`);
   }
+  for (const fragment of [
+    "gonvex-runtime-permissions:",
+    "chmod -R u+rwX /var/lib/gonvex",
+    "FOWNER",
+    "service_completed_successfully",
+  ]) {
+    if (!compose.includes(fragment)) {
+      throw new Error(`saved Compose is missing runtime volume initializer fragment: ${fragment}`);
+    }
+  }
 }
 
 function requiredEnvironment(name) {
@@ -70,29 +81,33 @@ async function coolifyRequest(base, token, path, init = {}) {
   return text ? JSON.parse(text) : undefined;
 }
 
-export async function deployCoolifyServices({ base, token, serviceUUIDs, sha }) {
-  const updates = [];
+export async function deployCoolifyServices({ base, token, serviceUUIDs, sha, composeTemplate }) {
+  if (typeof composeTemplate !== "string" || composeTemplate.trim() === "") {
+    throw new Error("canonical Coolify Compose template is required");
+  }
+  const compose = stampRuntimeCompose(composeTemplate, sha);
+  verifyRuntimeCompose(compose, sha);
+
   for (const uuid of serviceUUIDs) {
     const service = await coolifyRequest(base, token, `/services/${encodeURIComponent(uuid)}`);
     if (typeof service?.docker_compose_raw !== "string") {
       throw new Error(`Coolify service ${uuid} did not return docker_compose_raw`);
     }
-    updates.push({ uuid, compose: stampRuntimeCompose(service.docker_compose_raw, sha) });
   }
 
-  for (const { uuid, compose } of updates) {
+  for (const uuid of serviceUUIDs) {
     await coolifyRequest(base, token, `/services/${encodeURIComponent(uuid)}`, {
       method: "PATCH",
       body: JSON.stringify({ docker_compose_raw: Buffer.from(compose).toString("base64") }),
     });
   }
 
-  for (const { uuid } of updates) {
+  for (const uuid of serviceUUIDs) {
     const service = await coolifyRequest(base, token, `/services/${encodeURIComponent(uuid)}`);
     verifyRuntimeCompose(service.docker_compose_raw, sha);
   }
 
-  for (const { uuid } of updates) {
+  for (const uuid of serviceUUIDs) {
     await coolifyRequest(
       base,
       token,
@@ -111,7 +126,11 @@ async function main() {
     .map((value) => value.trim())
     .filter(Boolean);
   if (serviceUUIDs.length === 0) throw new Error("COOLIFY_SERVICE_UUIDS is empty");
-  await deployCoolifyServices({ base, token, serviceUUIDs, sha });
+  const composeTemplate = await readFile(
+    new URL("../docker-compose.coolify.yml", import.meta.url),
+    "utf8",
+  );
+  await deployCoolifyServices({ base, token, serviceUUIDs, sha, composeTemplate });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
