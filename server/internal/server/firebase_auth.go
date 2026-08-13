@@ -63,8 +63,7 @@ func firebaseProjectIDFromServiceAccount(raw string) string {
 // firebaseIdentityFromToken turns a browser-presented Firebase ID token into an
 // authenticated user. When the project has no Firebase project configured it
 // preserves the legacy local-development behavior of trusting token claims.
-func (s *Server) firebaseIdentityFromToken(ctx context.Context, runtimeProjectID string, token string) (*gonvex.User, error) {
-	firebaseProjectID := s.firebaseProjectID(ctx, runtimeProjectID)
+func (s *Server) firebaseIdentityFromToken(ctx context.Context, firebaseProjectID string, token string) (*gonvex.User, error) {
 	if firebaseProjectID == "" {
 		return devUserFromJWT(token), nil
 	}

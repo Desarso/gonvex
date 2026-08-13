@@ -35,9 +35,10 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 	// Both fallbacks below hand the app an identity taken from the presented
 	// token rather than a Gonvex session. That identity is only trustworthy
 	// when the token's signature was checked, which firebaseIdentityFromToken
-	// does whenever the project's GONVEX_FIREBASE_PROJECT_ID is configured.
+	// does whenever the project declares Firebase configuration.
+	firebaseProjectID := s.firebaseProjectID(ctx, projectID)
 	appIdentity := func() (*gonvex.User, string, error) {
-		user, err := s.firebaseIdentityFromToken(ctx, projectID, token)
+		user, err := s.firebaseIdentityFromToken(ctx, firebaseProjectID, token)
 		if err != nil {
 			return nil, "", err
 		}
@@ -47,7 +48,7 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 		}
 		return user, tenant, nil
 	}
-	hasVerifiedAppIdentity := s.firebaseProjectID(ctx, projectID) != ""
+	hasVerifiedAppIdentity := firebaseProjectID != ""
 
 	if s.config.LandlordURL == "" {
 		if s.config.RequireAuth && !hasVerifiedAppIdentity {
