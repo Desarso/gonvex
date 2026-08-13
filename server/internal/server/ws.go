@@ -1551,7 +1551,7 @@ func (s *Server) flushTableChange(key string) {
 	}
 
 	listenerHealthy := s.subscriptions.listeners.healthy(change.project, change.tenant)
-	if change.commitID != "" && listenerHealthy && len(change.observedDetails) == 0 {
+	if change.commitID != "" && listenerHealthy && len(change.observedDetails) == 0 && !s.changeTouchesLandlordTable(change) {
 		// A successful handler may be a no-op. With a healthy LISTEN connection,
 		// the absence of a trigger notification means there is no committed row
 		// change to propagate. A delayed notification remains safe: it creates a
@@ -1567,6 +1567,20 @@ func (s *Server) flushTableChange(key string) {
 	}
 	s.subscriptions.requestChange(delivery)
 	s.resetSyncsForVisibilityChange(delivery)
+}
+
+// changeTouchesLandlordTable reports whether a declared mutation write can be
+// committed outside the active tenant database. The tenant listener cannot
+// observe landlord triggers, so absence of a tenant notification is not proof
+// that such a mutation was a no-op.
+func (s *Server) changeTouchesLandlordTable(change pendingTableChange) bool {
+	landlordTables := s.runtime.ManifestForProject(change.project).Schema.LandlordTables
+	for table := range change.declaredTables {
+		if _, ok := landlordTables[table]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func detailForTable(change tableChange, table string, precise bool) tableChangeDetail {

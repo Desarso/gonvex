@@ -288,6 +288,32 @@ func TestHealthyListenerSuppressesDeclaredOnlyNoOpCommit(t *testing.T) {
 	eventually(t, time.Second, func() bool { return executions.Load() == 1 })
 }
 
+func TestHealthyTenantListenerDoesNotSuppressLandlordWrite(t *testing.T) {
+	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	if err := server.runtime.SyncManifest(manifest.Manifest{
+		Project: "project-a",
+		Schema: manifest.Schema{LandlordTables: map[string]manifest.Table{
+			"users": {},
+		}},
+	}); err != nil {
+		t.Fatalf("sync manifest: %v", err)
+	}
+	manager := server.subscriptions
+	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
+	var executions atomic.Int32
+	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
+		executions.Add(1)
+		return []map[string]any{{"id": "user-1"}}, nil
+	}
+	indexedTestGroup(manager, "users.list", "users", &executions)
+
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: "landlord-commit",
+		broad: true, tables: map[string]bool{"users": true}, changedAtMS: 10,
+	})
+	eventually(t, time.Second, func() bool { return executions.Load() == 1 })
+}
+
 func TestLateAdditionalTableForPreciseCommitUsesCommittedSnapshot(t *testing.T) {
 	oldCooldown := subscriptionRerunCooldown
 	subscriptionRerunCooldown = 10 * time.Millisecond
