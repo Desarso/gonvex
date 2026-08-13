@@ -66,11 +66,7 @@ services:
       GONVEX_DB_MAX_OPEN_CONNS: ${GONVEX_DB_MAX_OPEN_CONNS:-2}
       GONVEX_DB_MAX_IDLE_CONNS: ${GONVEX_DB_MAX_IDLE_CONNS:-1}
       GONVEX_ENVIRONMENT: production
-      # Whagons authenticates with Firebase; it does not use Gonvex-native
-      # landlord sessions. Keep native enforcement off while still verifying
-      # every presented Firebase token against the Whagons Firebase project.
-      GONVEX_REQUIRE_AUTH: "false"
-      GONVEX_FIREBASE_PROJECT_ID: ${GONVEX_FIREBASE_PROJECT_ID:-whagons-5}
+      GONVEX_REQUIRE_AUTH: "true"
       SERVICE_FQDN_GONVEXRUNTIME_8080: ${SERVICE_FQDN_GONVEXRUNTIME_8080}
       GONVEX_PUBLIC_URL: ${GONVEX_EXTERNAL_URL:?}
       GONVEX_AUTH_URL: ${GONVEX_EXTERNAL_URL:?}

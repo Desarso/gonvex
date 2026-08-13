@@ -64,8 +64,7 @@ test("runtime is health-gated on private durable dependencies", () => {
   assert.equal(runtime.working_dir, "/var/lib/gonvex");
   assert.equal(runtime.user, "0:0");
   assert.deepEqual(runtime.cap_drop, ["ALL"]);
-  assert.equal(runtime.environment.GONVEX_REQUIRE_AUTH, "false");
-  assert.equal(runtime.environment.GONVEX_FIREBASE_PROJECT_ID, "whagons-5");
+  assert.equal(runtime.environment.GONVEX_REQUIRE_AUTH, "true");
   assert.equal(runtime.depends_on["gonvex-postgres"].condition, "service_healthy");
   assert.equal(runtime.depends_on["gonvex-valkey"].condition, "service_healthy");
   assert.equal(services["gonvex-runtime-permissions"], undefined);

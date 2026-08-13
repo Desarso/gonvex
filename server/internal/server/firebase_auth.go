@@ -22,21 +22,59 @@ import (
 // reused — a separate cache because it is a different endpoint with its own
 // rotation schedule.
 
+// firebaseProjectID resolves external authentication per runtime project. The
+// process-level setting remains a fallback for older single-project installs.
+func (s *Server) firebaseProjectID(ctx context.Context, runtimeProjectID string) string {
+	projectEnv := s.projectEnvValues(ctx, runtimeProjectID)
+	if configured := strings.TrimSpace(projectEnv["GONVEX_FIREBASE_PROJECT_ID"]); configured != "" {
+		return configured
+	}
+	if configured := firebaseProjectIDFromServiceAccount(projectEnv["FIREBASE_SERVICE_ACCOUNT_KEY"]); configured != "" {
+		return configured
+	}
+	return strings.TrimSpace(s.config.FirebaseProjectID)
+}
+
+func firebaseProjectIDFromServiceAccount(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	candidates := [][]byte{[]byte(raw)}
+	if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil {
+		candidates = append(candidates, decoded)
+	}
+	if decoded, err := base64.RawStdEncoding.DecodeString(raw); err == nil {
+		candidates = append(candidates, decoded)
+	}
+	for _, candidate := range candidates {
+		var account struct {
+			ProjectID string `json:"project_id"`
+		}
+		if json.Unmarshal(candidate, &account) == nil {
+			if projectID := strings.TrimSpace(account.ProjectID); projectID != "" {
+				return projectID
+			}
+		}
+	}
+	return ""
+}
+
 // firebaseIdentityFromToken turns a browser-presented Firebase ID token into an
-// authenticated user. When FirebaseProjectID is unset it preserves the legacy
-// behavior of trusting the token's claims without verification; that is only
-// safe for local development, and the error return is always nil there.
-func (s *Server) firebaseIdentityFromToken(ctx context.Context, token string) (*gonvex.User, error) {
-	if strings.TrimSpace(s.config.FirebaseProjectID) == "" {
+// authenticated user. When the project has no Firebase project configured it
+// preserves the legacy local-development behavior of trusting token claims.
+func (s *Server) firebaseIdentityFromToken(ctx context.Context, runtimeProjectID string, token string) (*gonvex.User, error) {
+	firebaseProjectID := s.firebaseProjectID(ctx, runtimeProjectID)
+	if firebaseProjectID == "" {
 		return devUserFromJWT(token), nil
 	}
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("authentication is required")
 	}
-	return s.verifyFirebaseIDToken(ctx, token)
+	return s.verifyFirebaseIDToken(ctx, firebaseProjectID, token)
 }
 
-func (s *Server) verifyFirebaseIDToken(ctx context.Context, token string) (*gonvex.User, error) {
+func (s *Server) verifyFirebaseIDToken(ctx context.Context, firebaseProjectID string, token string) (*gonvex.User, error) {
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 3 {
 		return nil, fmt.Errorf("the Firebase ID token is malformed")
@@ -75,7 +113,7 @@ func (s *Server) verifyFirebaseIDToken(ctx context.Context, token string) (*gonv
 	if err := decodeJWTPart(parts[1], &claims); err != nil {
 		return nil, fmt.Errorf("the Firebase ID token claims are malformed")
 	}
-	project := strings.TrimSpace(s.config.FirebaseProjectID)
+	project := strings.TrimSpace(firebaseProjectID)
 	now := time.Now().Unix()
 	if claims.Issuer != "https://securetoken.google.com/"+project {
 		return nil, fmt.Errorf("the Firebase ID token issuer is invalid")

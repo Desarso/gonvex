@@ -20,8 +20,7 @@ const compose = `services:
       - ALL
     environment:
       GONVEX_ADDR: '0.0.0.0:8080'
-      GONVEX_REQUIRE_AUTH: 'false'
-      GONVEX_FIREBASE_PROJECT_ID: \${GONVEX_FIREBASE_PROJECT_ID:-whagons-5}
+      GONVEX_REQUIRE_AUTH: 'true'
   gonvex-dashboard:
     build:
       context: 'https://github.com/Whagons-International/gonvex.git#${oldSha}'
@@ -101,6 +100,5 @@ test("deploys the canonical Compose instead of preserving stale Coolify structur
   assert.match(savedCompose, /working_dir: \/var\/lib\/gonvex/);
   assert.match(savedCompose, /user: '0:0'/);
   assert.match(savedCompose, /cap_drop:\n\s+- ALL/);
-  assert.match(savedCompose, /GONVEX_REQUIRE_AUTH: 'false'/);
-  assert.match(savedCompose, /GONVEX_FIREBASE_PROJECT_ID: \$\{GONVEX_FIREBASE_PROJECT_ID:-whagons-5\}/);
+  assert.match(savedCompose, /GONVEX_REQUIRE_AUTH: 'true'/);
 });

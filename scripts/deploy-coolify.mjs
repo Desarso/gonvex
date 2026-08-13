@@ -52,11 +52,8 @@ export function verifyRuntimeCompose(compose, sha) {
   if (!/^\s{4}cap_drop:\s*\n\s{6}-\s*ALL\s*$/m.test(compose)) {
     throw new Error("saved Compose must drop all runtime Linux capabilities");
   }
-  if (!/^\s{6}GONVEX_REQUIRE_AUTH:\s*["']?false["']?\s*$/m.test(compose)) {
-    throw new Error("saved dev Compose must not require Gonvex-native app sessions");
-  }
-  if (!/^\s{6}GONVEX_FIREBASE_PROJECT_ID:\s*\$\{GONVEX_FIREBASE_PROJECT_ID:-whagons-5\}\s*$/m.test(compose)) {
-    throw new Error("saved dev Compose must verify Whagons Firebase ID tokens");
+  if (!/^\s{6}GONVEX_REQUIRE_AUTH:\s*["']?true["']?\s*$/m.test(compose)) {
+    throw new Error("saved shared dev Compose must enforce project authentication");
   }
 }
 
