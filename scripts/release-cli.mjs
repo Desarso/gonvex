@@ -153,7 +153,7 @@ ${context}`,
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${apiKey}`,
-      "HTTP-Referer": "https://github.com/Desarso/gonvex",
+      "HTTP-Referer": "https://github.com/Whagons-International/gonvex",
       "X-Title": "Gonvex Release Notes",
     },
     body,

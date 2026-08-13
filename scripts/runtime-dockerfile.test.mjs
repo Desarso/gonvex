@@ -21,4 +21,6 @@ test("runtime binary and project plugins compile from the same module-cache path
     new RegExp(`COPY --from=build[^\\n]* ${moduleCache} ${moduleCache}`),
   );
   assert.doesNotMatch(dockerfile, /COPY --from=build[^\n]* \/go\/pkg\/mod/);
+  assert.match(runtime, /WORKDIR \/var\/lib\/gonvex\nUSER 0:0/);
+  assert.doesNotMatch(runtime, /useradd|groupadd|chown/);
 });

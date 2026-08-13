@@ -22,17 +22,14 @@ RUN CGO_ENABLED=1 go build -o /out/gonvex-runtime ./server/cmd/gonvex-runtime
 
 FROM golang:1.26@sha256:7caba5286b4c3613a337b709c573047d8ae62ee76106647313b61e72b99f20af
 WORKDIR /app
-RUN groupadd --system --gid 10001 gonvex \
-    && useradd --system --uid 10001 --gid gonvex --home-dir /home/gonvex --create-home gonvex \
-    && mkdir -p /var/lib/gonvex/data /var/lib/gonvex/go-build /var/lib/gonvex/plugins /var/lib/gonvex/tmp \
-    && chown -R gonvex:gonvex /var/lib/gonvex /home/gonvex
+RUN mkdir -p /var/lib/gonvex/data /var/lib/gonvex/go-build /var/lib/gonvex/plugins /var/lib/gonvex/tmp
 # Gonvex module source: synced project bundles render
 #   replace github.com/gonvex/gonvex => $GONVEX_MODULE_ROOT
 # so the plugin build resolves the framework against this checkout.
 COPY --from=build /src /src
 # Preserve the exact module-cache path used to compile the host binary so
 # plugin package hashes remain ABI-compatible at runtime.
-COPY --from=build --chown=gonvex:gonvex /var/lib/gonvex/go/pkg/mod /var/lib/gonvex/go/pkg/mod
+COPY --from=build /var/lib/gonvex/go/pkg/mod /var/lib/gonvex/go/pkg/mod
 COPY --from=build /out/gonvex-runtime /usr/local/bin/gonvex-runtime
 # Data-file artifacts (DuckDB databases for assistant-uploaded CSV/XLSX/XLS)
 # live here; mount a volume to keep them across deploys. Artifacts re-ingest
@@ -50,6 +47,7 @@ ENV GONVEX_ADDR=0.0.0.0:8080 \
     CGO_ENABLED=1 \
     GOMAXPROCS=2 \
     GOFLAGS="-mod=mod -p=2"
-USER 10001:10001
+WORKDIR /var/lib/gonvex
+USER 0:0
 EXPOSE 8080
 CMD ["gonvex-runtime"]

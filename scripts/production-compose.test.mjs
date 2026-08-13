@@ -33,7 +33,6 @@ test("production compose keeps stateful dependencies private and pinned", () => 
     "gonvex-maker-postgres",
     "gonvex-maker-postgres-backup",
     "gonvex-maker-runtime",
-    "gonvex-maker-runtime-permissions",
     "gonvex-maker-valkey",
   ];
   assert.deepEqual(Object.keys(compose.services).sort(), expected);
@@ -69,10 +68,11 @@ test("production compose keeps stateful dependencies private and pinned", () => 
 test("production runtime and dashboard require protected durable configuration", () => {
   const { services } = resolvedCompose();
   const runtime = services["gonvex-maker-runtime"];
-  const permissions = services["gonvex-maker-runtime-permissions"];
   const dashboard = services["gonvex-maker-dashboard"];
   assert.equal(runtime.environment.GONVEX_ENVIRONMENT, "production");
   assert.equal(runtime.environment.GONVEX_REQUIRE_AUTH, "true");
+  assert.equal(runtime.working_dir, "/var/lib/gonvex");
+  assert.equal(runtime.user, "0:0");
   assert.equal(
     runtime.environment.GONVEX_PUBLIC_URL,
     "https://gonvex-maker.whagons.com",
@@ -87,7 +87,7 @@ test("production runtime and dashboard require protected durable configuration",
   assert.equal(runtime.environment.GONVEX_DB_MAX_OPEN_CONNS, "2");
   assert.equal(runtime.environment.GONVEX_DB_MAX_IDLE_CONNS, "1");
   assert.equal(runtime.environment.S3_ENDPOINT, "http://gonvex-maker-minio:9000");
-  assert.deepEqual(runtime.cap_drop, ["ALL"]);
+  assert.equal(runtime.cap_drop, undefined);
   assert.equal(dashboard.environment.DASHBOARD_AUTH_ENABLED, "true");
   assert.equal(dashboard.environment.DASHBOARD_COOKIE_SECURE, "true");
   assert.equal(dashboard.environment.GONVEX_RUNTIME_URL, "http://gonvex-maker-runtime:8080");
@@ -95,19 +95,7 @@ test("production runtime and dashboard require protected durable configuration",
   assert.equal(runtime.depends_on["gonvex-maker-postgres"].condition, "service_healthy");
   assert.equal(runtime.depends_on["gonvex-maker-valkey"].condition, "service_healthy");
   assert.equal(runtime.depends_on["gonvex-maker-minio-init"].condition, "service_healthy");
-  assert.equal(
-    runtime.depends_on["gonvex-maker-runtime-permissions"].condition,
-    "service_completed_successfully",
-  );
-  assert.equal(permissions.user, "0:0");
-  assert.deepEqual(permissions.cap_drop, ["ALL"]);
-  assert.deepEqual(permissions.cap_add, ["CHOWN", "DAC_OVERRIDE", "FOWNER"]);
-  assert.deepEqual(permissions.command, [
-    "sh",
-    "-ec",
-    "mkdir -p /var/lib/gonvex/data /var/lib/gonvex/go-build /var/lib/gonvex/go/pkg/mod /var/lib/gonvex/plugins /var/lib/gonvex/tmp && chown -R 10001:10001 /var/lib/gonvex && chmod -R u+rwX /var/lib/gonvex",
-  ]);
-  assert.equal(permissions.read_only, true);
+  assert.equal(services["gonvex-maker-runtime-permissions"], undefined);
 });
 
 test("production public routes use the Gabriel server HTTP challenge resolver", () => {

@@ -12,29 +12,19 @@ const newSha = "b".repeat(40);
 const compose = `services:
   gonvex-runtime:
     build:
-      context: 'https://github.com/Desarso/gonvex.git#${oldSha}'
+      context: 'https://github.com/Whagons-International/gonvex.git#${oldSha}'
       dockerfile: Dockerfile.runtime
+    working_dir: /var/lib/gonvex
+    user: '0:0'
     environment:
       GONVEX_ADDR: '0.0.0.0:8080'
   gonvex-dashboard:
     build:
-      context: 'https://github.com/Desarso/gonvex.git#${oldSha}'
+      context: 'https://github.com/Whagons-International/gonvex.git#${oldSha}'
       dockerfile: Dockerfile.dashboard
 `;
 
-const canonicalCompose = compose.replace(
-  "  gonvex-runtime:",
-  `  gonvex-runtime-permissions:
-    command: ["sh", "-ec", "mkdir -p /var/lib/gonvex/data /var/lib/gonvex/go-build /var/lib/gonvex/go/pkg/mod /var/lib/gonvex/plugins /var/lib/gonvex/tmp && chown -R 10001:10001 /var/lib/gonvex && chmod -R u+rwX /var/lib/gonvex"]
-    cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-      - FOWNER
-  gonvex-runtime:
-    depends_on:
-      gonvex-runtime-permissions:
-        condition: service_completed_successfully`,
-);
+const canonicalCompose = compose;
 
 test("pins both Gonvex builds and stamps the runtime version", () => {
   const stamped = stampRuntimeCompose(compose, newSha);
@@ -71,10 +61,10 @@ test("verifies Coolify's quote-normalized Compose semantically", () => {
 
   assert.doesNotThrow(() => verifyRuntimeCompose(normalized, newSha));
   assert.throws(() => verifyRuntimeCompose(normalized, oldSha), /does not contain exactly 2/);
-  assert.throws(
-    () => verifyRuntimeCompose(stampRuntimeCompose(compose, newSha), newSha),
-    /missing runtime volume initializer fragment/,
-  );
+  assert.throws(() => verifyRuntimeCompose(
+    stampRuntimeCompose(compose.replace("    user: '0:0'\n", ""), newSha),
+    newSha,
+  ), /container root/);
 });
 
 test("deploys the canonical Compose instead of preserving stale Coolify structure", async () => {
@@ -103,9 +93,7 @@ test("deploys the canonical Compose instead of preserving stale Coolify structur
     globalThis.fetch = originalFetch;
   }
 
-  assert.match(savedCompose, /gonvex-runtime-permissions:/);
-  assert.match(savedCompose, /mkdir -p \/var\/lib\/gonvex\/data .*\/var\/lib\/gonvex\/tmp/);
-  assert.match(savedCompose, /chmod -R u\+rwX \/var\/lib\/gonvex/);
-  assert.match(savedCompose, /- FOWNER/);
-  assert.match(savedCompose, /- DAC_OVERRIDE/);
+  assert.doesNotMatch(savedCompose, /gonvex-runtime-permissions:/);
+  assert.match(savedCompose, /working_dir: \/var\/lib\/gonvex/);
+  assert.match(savedCompose, /user: '0:0'/);
 });

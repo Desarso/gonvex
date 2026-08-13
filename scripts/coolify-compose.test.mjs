@@ -30,13 +30,12 @@ function resolvedCompose() {
   return JSON.parse(result.stdout);
 }
 
-test("Coolify stack combines the current Gonvex resources and volume initializer", () => {
+test("Coolify stack combines the current Gonvex resources without a permission sidecar", () => {
   const compose = resolvedCompose();
   assert.deepEqual(Object.keys(compose.services).sort(), [
     "gonvex-dashboard",
     "gonvex-postgres",
     "gonvex-runtime",
-    "gonvex-runtime-permissions",
     "gonvex-valkey",
   ]);
 
@@ -51,7 +50,6 @@ test("Coolify stack combines the current Gonvex resources and volume initializer
 test("runtime is health-gated on private durable dependencies", () => {
   const { services, volumes } = resolvedCompose();
   const runtime = services["gonvex-runtime"];
-  const permissions = services["gonvex-runtime-permissions"];
   const dashboard = services["gonvex-dashboard"];
 
   assert.equal(
@@ -64,21 +62,12 @@ test("runtime is health-gated on private durable dependencies", () => {
     "https://gonvex-unified-dev.example.test",
   );
   assert.equal(runtime.environment.GONVEX_REQUIRE_AUTH, "true");
+  assert.equal(runtime.working_dir, "/var/lib/gonvex");
+  assert.equal(runtime.user, "0:0");
+  assert.equal(runtime.cap_drop, undefined);
   assert.equal(runtime.depends_on["gonvex-postgres"].condition, "service_healthy");
   assert.equal(runtime.depends_on["gonvex-valkey"].condition, "service_healthy");
-  assert.equal(
-    runtime.depends_on["gonvex-runtime-permissions"].condition,
-    "service_completed_successfully",
-  );
-  assert.equal(permissions.user, "0:0");
-  assert.deepEqual(permissions.cap_drop, ["ALL"]);
-  assert.deepEqual(permissions.cap_add, ["CHOWN", "DAC_OVERRIDE", "FOWNER"]);
-  assert.deepEqual(permissions.command, [
-    "sh",
-    "-ec",
-    "mkdir -p /var/lib/gonvex/data /var/lib/gonvex/go-build /var/lib/gonvex/go/pkg/mod /var/lib/gonvex/plugins /var/lib/gonvex/tmp && chown -R 10001:10001 /var/lib/gonvex && chmod -R u+rwX /var/lib/gonvex",
-  ]);
-  assert.equal(permissions.read_only, true);
+  assert.equal(services["gonvex-runtime-permissions"], undefined);
   assert.equal(dashboard.depends_on["gonvex-runtime"].condition, "service_healthy");
   assert.equal(dashboard.environment.GONVEX_RUNTIME_URL, "http://gonvex-runtime:8080");
   assert.equal(dashboard.environment.DASHBOARD_AUTH_ENABLED, "true");

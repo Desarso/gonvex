@@ -40,36 +40,18 @@ services:
       timeout: 5s
       retries: 30
 
-  gonvex-runtime-permissions:
-    image: busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
-    user: "0:0"
-    command: ["sh", "-ec", "mkdir -p /var/lib/gonvex/data /var/lib/gonvex/go-build /var/lib/gonvex/go/pkg/mod /var/lib/gonvex/plugins /var/lib/gonvex/tmp && chown -R 10001:10001 /var/lib/gonvex && chmod -R u+rwX /var/lib/gonvex"]
-    restart: "no"
-    network_mode: none
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-      - FOWNER
-    volumes:
-      - gonvex-runtime-data:/var/lib/gonvex
-
   gonvex-runtime:
     build:
-      context: https://github.com/Desarso/gonvex.git#main
+      context: https://github.com/Whagons-International/gonvex.git#main
       dockerfile: Dockerfile.runtime
+    working_dir: /var/lib/gonvex
+    user: "0:0"
     restart: unless-stopped
     depends_on:
       gonvex-postgres:
         condition: service_healthy
       gonvex-valkey:
         condition: service_healthy
-      gonvex-runtime-permissions:
-        condition: service_completed_successfully
     environment:
       GONVEX_ADDR: 0.0.0.0:8080
       GONVEX_LANDLORD_DATABASE_URL: postgres://gonvex:${GONVEX_POSTGRES_PASSWORD:?}@gonvex-postgres:5432/gonvex?sslmode=disable
@@ -120,8 +102,6 @@ services:
       - /tmp:size=2G,mode=1777
     security_opt:
       - no-new-privileges:true
-    cap_drop:
-      - ALL
     healthcheck:
       test:
         - CMD-SHELL
@@ -136,7 +116,7 @@ services:
 
   gonvex-dashboard:
     build:
-      context: https://github.com/Desarso/gonvex.git#main
+      context: https://github.com/Whagons-International/gonvex.git#main
       dockerfile: Dockerfile.dashboard
       args:
         VITE_GONVEX_URL: ${GONVEX_EXTERNAL_URL:?}

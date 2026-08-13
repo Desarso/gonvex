@@ -8,7 +8,7 @@ export function baseOptions(): BaseLayoutProps {
     links: [
       {
         text: 'GitHub',
-        url: 'https://github.com/Desarso/gonvex',
+        url: 'https://github.com/Whagons-International/gonvex',
         external: true,
       },
     ],
