@@ -14,11 +14,14 @@ concurrency:
 
 jobs:
   test:
+    name: CI
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.x"
           cache: true
@@ -29,8 +32,8 @@ jobs:
         run: corepack enable && corepack prepare pnpm@11.1.2 --activate
       - name: Install workspace
         run: pnpm install --frozen-lockfile
-      - name: Validate production Compose contract
-        run: pnpm test:production-compose
+      - name: Validate repository script contracts
+        run: node --test scripts/*.test.mjs
       - name: Test Go runtime
         run: go test -count=1 -p 1 ./...
         env:
@@ -39,6 +42,8 @@ jobs:
         run: pnpm build:packages
       - name: Test JavaScript workspace
         run: pnpm -r test
+      - name: Type-check JavaScript workspace
+        run: pnpm typecheck
 
   deploy-dev-runtime:
     if: github.event_name == 'push'
@@ -51,6 +56,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
