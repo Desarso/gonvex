@@ -25,7 +25,7 @@ const compose = `services:
 const canonicalCompose = compose.replace(
   "  gonvex-runtime:",
   `  gonvex-runtime-permissions:
-    command: ["sh", "-ec", "chown -R 10001:10001 /var/lib/gonvex && chmod -R u+rwX /var/lib/gonvex"]
+    command: ["sh", "-ec", "mkdir -p /var/lib/gonvex/data /var/lib/gonvex/go-build /var/lib/gonvex/go/pkg/mod /var/lib/gonvex/plugins /var/lib/gonvex/tmp && chown -R 10001:10001 /var/lib/gonvex && chmod -R u+rwX /var/lib/gonvex"]
     cap_add:
       - CHOWN
       - FOWNER
@@ -103,6 +103,7 @@ test("deploys the canonical Compose instead of preserving stale Coolify structur
   }
 
   assert.match(savedCompose, /gonvex-runtime-permissions:/);
+  assert.match(savedCompose, /mkdir -p \/var\/lib\/gonvex\/data .*\/var\/lib\/gonvex\/tmp/);
   assert.match(savedCompose, /chmod -R u\+rwX \/var\/lib\/gonvex/);
   assert.match(savedCompose, /- FOWNER/);
 });
