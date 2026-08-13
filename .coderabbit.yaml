@@ -3,7 +3,7 @@ language: en-US
 
 reviews:
   profile: chill
-  # CodeRabbit is advisory. CI and a human approval own merge authority.
+  # CodeRabbit is advisory. CI and Macroscope own automated merge authority.
   request_changes_workflow: false
   high_level_summary: true
   review_status: true
