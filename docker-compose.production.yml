@@ -216,7 +216,7 @@ services:
       gonvex-maker-runtime:
         condition: service_healthy
     environment:
-      PORT: "8080"
+      PORT: "80"
       DASHBOARD_AUTH_ENABLED: "true"
       DASHBOARD_COOKIE_SECURE: "true"
       DASHBOARD_AUTH_USER: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
@@ -238,9 +238,9 @@ services:
       - traefik.http.routers.gonvex-maker-dashboard-lehttp.tls.certresolver=lehttp
       - traefik.http.routers.gonvex-maker-dashboard-lehttp.priority=1000
       - traefik.http.routers.gonvex-maker-dashboard-lehttp.service=gonvex-maker-dashboard-lehttp
-      - traefik.http.services.gonvex-maker-dashboard-lehttp.loadbalancer.server.port=8080
+      - traefik.http.services.gonvex-maker-dashboard-lehttp.loadbalancer.server.port=80
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz | grep -qx ok"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz | grep -qx ok"]
       interval: 10s
       timeout: 5s
       retries: 30
