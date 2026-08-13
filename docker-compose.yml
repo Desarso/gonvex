@@ -101,6 +101,8 @@ services:
       - "8080:8080"
     volumes:
       - runtime-data:/var/lib/gonvex
+    cap_drop:
+      - ALL
     healthcheck:
       test:
         - CMD-SHELL

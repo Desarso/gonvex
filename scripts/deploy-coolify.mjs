@@ -49,6 +49,9 @@ export function verifyRuntimeCompose(compose, sha) {
   if (!/^\s{4}user:\s*["']?0:0["']?\s*$/m.test(compose)) {
     throw new Error("saved Compose must run the Gonvex runtime as container root");
   }
+  if (!/^\s{4}cap_drop:\s*\n\s{6}-\s*ALL\s*$/m.test(compose)) {
+    throw new Error("saved Compose must drop all runtime Linux capabilities");
+  }
 }
 
 function requiredEnvironment(name) {

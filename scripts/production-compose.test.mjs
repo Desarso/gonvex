@@ -87,7 +87,7 @@ test("production runtime and dashboard require protected durable configuration",
   assert.equal(runtime.environment.GONVEX_DB_MAX_OPEN_CONNS, "2");
   assert.equal(runtime.environment.GONVEX_DB_MAX_IDLE_CONNS, "1");
   assert.equal(runtime.environment.S3_ENDPOINT, "http://gonvex-maker-minio:9000");
-  assert.equal(runtime.cap_drop, undefined);
+  assert.deepEqual(runtime.cap_drop, ["ALL"]);
   assert.equal(dashboard.environment.DASHBOARD_AUTH_ENABLED, "true");
   assert.equal(dashboard.environment.DASHBOARD_COOKIE_SECURE, "true");
   assert.equal(dashboard.environment.GONVEX_RUNTIME_URL, "http://gonvex-maker-runtime:8080");

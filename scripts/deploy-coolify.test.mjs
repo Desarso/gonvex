@@ -16,6 +16,8 @@ const compose = `services:
       dockerfile: Dockerfile.runtime
     working_dir: /var/lib/gonvex
     user: '0:0'
+    cap_drop:
+      - ALL
     environment:
       GONVEX_ADDR: '0.0.0.0:8080'
   gonvex-dashboard:
@@ -96,4 +98,5 @@ test("deploys the canonical Compose instead of preserving stale Coolify structur
   assert.doesNotMatch(savedCompose, /gonvex-runtime-permissions:/);
   assert.match(savedCompose, /working_dir: \/var\/lib\/gonvex/);
   assert.match(savedCompose, /user: '0:0'/);
+  assert.match(savedCompose, /cap_drop:\n\s+- ALL/);
 });

@@ -170,6 +170,8 @@ services:
       - /tmp:size=2G,mode=1777
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
     labels:
       - traefik.enable=true
       - "traefik.http.routers.gonvex-maker-runtime-lehttp.rule=Host(`gonvex-maker.whagons.com`) && PathPrefix(`/`)"
