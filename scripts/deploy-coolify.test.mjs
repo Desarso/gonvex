@@ -70,6 +70,37 @@ test("verifies Coolify's quote-normalized Compose semantically", () => {
   ), /container root/);
 });
 
+test("requires runtime settings on the runtime service, not a decoy service", () => {
+  const stamped = stampRuntimeCompose(canonicalCompose, newSha);
+  for (const { runtimeSetting, dashboardDecoy, error } of [
+    {
+      runtimeSetting: "    working_dir: /var/lib/gonvex\n",
+      dashboardDecoy: "    working_dir: /var/lib/gonvex\n",
+      error: /writable Gonvex runtime directory/,
+    },
+    {
+      runtimeSetting: "    user: '0:0'\n",
+      dashboardDecoy: "    user: '0:0'\n",
+      error: /container root/,
+    },
+    {
+      runtimeSetting: "    cap_drop:\n      - ALL\n",
+      dashboardDecoy: "    cap_drop:\n      - ALL\n",
+      error: /drop all runtime Linux capabilities/,
+    },
+    {
+      runtimeSetting: "      GONVEX_REQUIRE_AUTH: 'true'\n",
+      dashboardDecoy: "    environment:\n      GONVEX_REQUIRE_AUTH: 'true'\n",
+      error: /enforce project authentication/,
+    },
+  ]) {
+    const dashboardDecoys = stamped
+      .replace(runtimeSetting, "")
+      .replace("  gonvex-dashboard:\n", `  gonvex-dashboard:\n${dashboardDecoy}`);
+    assert.throws(() => verifyRuntimeCompose(dashboardDecoys, newSha), error);
+  }
+});
+
 test("deploys the canonical Compose instead of preserving stale Coolify structure", async () => {
   let savedCompose = compose;
   const originalFetch = globalThis.fetch;
