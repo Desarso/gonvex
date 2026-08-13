@@ -11,7 +11,7 @@ import (
 
 const NotifyChannel = "gonvex_table_change"
 const NotifySchemaVersion = manifest.NotifySchemaVersion
-const notifySchemaVersionFunction = "gonvex_notify_schema_v13"
+const notifySchemaVersionFunction = "gonvex_notify_schema_v14"
 
 func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]manifest.Table) ([]string, error) {
 	artifacts, err := loadNotifyArtifacts(ctx, db)
@@ -35,7 +35,7 @@ func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]ma
 		applied = append(applied, fmt.Sprintf("ensured notify triggers for %s", tableName))
 	}
 	if !artifacts.functions[notifySchemaVersionFunction] {
-		if _, err := db.ExecContext(ctx, `CREATE OR REPLACE FUNCTION gonvex_notify_schema_v13() RETURNS integer AS $$ BEGIN RETURN 13; END; $$ LANGUAGE plpgsql IMMUTABLE;`); err != nil {
+		if _, err := db.ExecContext(ctx, `CREATE OR REPLACE FUNCTION gonvex_notify_schema_v14() RETURNS integer AS $$ BEGIN RETURN 14; END; $$ LANGUAGE plpgsql IMMUTABLE;`); err != nil {
 			return applied, err
 		}
 	}
@@ -250,6 +250,32 @@ func notifyFunctionSQL(functionName string, tableName string, transitionTable st
 			changedColumnsSQL = "changed_columns := ARRAY[" + strings.Join(quoted, ", ") + "]::text[];"
 		}
 	}
+	detailedPayloadSQL := fmt.Sprintf(`notify_payload := json_build_object(
+    'table', %s,
+    'operation', %s,
+    'mutationId', NULLIF(current_setting('gonvex.mutation_id', true), ''),
+    'broad', %s,
+    'count', row_count,
+	'ids', %s,
+	'taskIds', CASE WHEN row_count < 500 THEN task_ids ELSE ARRAY[]::text[] END,
+	'userIds', CASE WHEN row_count < 500 THEN user_ids ELSE ARRAY[]::text[] END,
+	'workspaceIds', CASE WHEN row_count < 500 THEN workspace_ids ELSE ARRAY[]::text[] END,
+    'changedColumns', CASE WHEN cardinality(changed_columns) <= 100 THEN changed_columns ELSE ARRAY[]::text[] END
+  )::text;`, quoteLiteral(tableName), quoteLiteral(operation), broadExpression, idsExpression)
+	compactPayloadSQL := fmt.Sprintf(`IF octet_length(notify_payload) >= 8000 THEN
+    notify_payload := json_build_object(
+      'table', %s,
+      'operation', %s,
+      'mutationId', NULLIF(current_setting('gonvex.mutation_id', true), ''),
+      'broad', true,
+      'count', row_count,
+      'ids', ARRAY[]::text[],
+      'taskIds', ARRAY[]::text[],
+      'userIds', ARRAY[]::text[],
+      'workspaceIds', ARRAY[]::text[],
+      'changedColumns', ARRAY[]::text[]
+    )::text;
+  END IF;`, quoteLiteral(tableName), quoteLiteral(operation))
 
 	return fmt.Sprintf(`CREATE OR REPLACE FUNCTION %s()
 RETURNS trigger AS $$
@@ -260,6 +286,7 @@ DECLARE
 	task_ids text[];
 	user_ids text[];
 	workspace_ids text[];
+	notify_payload text;
 BEGIN
 	%s
 
@@ -275,21 +302,14 @@ BEGIN
 
   %s
 
-  PERFORM pg_notify(%s, json_build_object(
-    'table', %s,
-    'operation', %s,
-    'mutationId', NULLIF(current_setting('gonvex.mutation_id', true), ''),
-    'broad', %s,
-    'count', row_count,
-	'ids', %s,
-	'taskIds', CASE WHEN row_count < 500 THEN task_ids ELSE ARRAY[]::text[] END,
-	'userIds', CASE WHEN row_count < 500 THEN user_ids ELSE ARRAY[]::text[] END,
-	'workspaceIds', CASE WHEN row_count < 500 THEN workspace_ids ELSE ARRAY[]::text[] END,
-    'changedColumns', CASE WHEN cardinality(changed_columns) <= 100 THEN changed_columns ELSE ARRAY[]::text[] END
-  )::text);
+  %s
+
+  %s
+
+  PERFORM pg_notify(%s, notify_payload);
   RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;`, functionName, idRead, taskIDRead, userIDRead, workspaceIDRead, changedColumnsSQL, quoteLiteral(NotifyChannel), quoteLiteral(tableName), quoteLiteral(operation), broadExpression, idsExpression)
+$$ LANGUAGE plpgsql;`, functionName, idRead, taskIDRead, userIDRead, workspaceIDRead, changedColumnsSQL, detailedPayloadSQL, compactPayloadSQL, quoteLiteral(NotifyChannel))
 }
 
 func quoteLiteral(value string) string {

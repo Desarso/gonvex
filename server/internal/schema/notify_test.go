@@ -88,6 +88,27 @@ func TestNotifySQLIncludesOldAndNewWorkspaceIDsForUpdates(t *testing.T) {
 	}
 }
 
+func TestNotifySQLFallsBackToBroadInvalidationBeforePostgresPayloadLimit(t *testing.T) {
+	sql, err := NotifySQLForTable("taskWorkspaceContexts", manifest.Table{Columns: map[string]manifest.Column{
+		"_id": {Type: "id"}, "taskId": {Type: "id"}, "userId": {Type: "id"}, "workspaceId": {Type: "id"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"octet_length(notify_payload) >= 8000",
+		"notify_payload := json_build_object(",
+		"'broad', true",
+		"'ids', ARRAY[]::text[]",
+		"PERFORM pg_notify('gonvex_table_change', notify_payload)",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected oversized NOTIFY fallback SQL to contain %q:\n%s", want, sql)
+		}
+	}
+}
+
 func TestNotifySQLForTableWithoutIDUsesBroadInvalidation(t *testing.T) {
 	sql, err := NotifySQLForTable("events", manifest.Table{Columns: map[string]manifest.Column{
 		"name": {Type: "text"},
