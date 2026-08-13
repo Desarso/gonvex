@@ -72,7 +72,7 @@ test("runtime is health-gated on private durable dependencies", () => {
   );
   assert.equal(permissions.user, "0:0");
   assert.deepEqual(permissions.cap_drop, ["ALL"]);
-  assert.deepEqual(permissions.cap_add, ["CHOWN", "FOWNER"]);
+  assert.deepEqual(permissions.cap_add, ["CHOWN", "DAC_OVERRIDE", "FOWNER"]);
   assert.deepEqual(permissions.command, [
     "sh",
     "-ec",

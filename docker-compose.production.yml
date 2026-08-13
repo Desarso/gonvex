@@ -125,6 +125,7 @@ services:
       - ALL
     cap_add:
       - CHOWN
+      - DAC_OVERRIDE
       - FOWNER
     volumes:
       - gonvex-runtime-data:/var/lib/gonvex
