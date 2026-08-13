@@ -28,6 +28,7 @@ const canonicalCompose = compose.replace(
     command: ["sh", "-ec", "mkdir -p /var/lib/gonvex/data /var/lib/gonvex/go-build /var/lib/gonvex/go/pkg/mod /var/lib/gonvex/plugins /var/lib/gonvex/tmp && chown -R 10001:10001 /var/lib/gonvex && chmod -R u+rwX /var/lib/gonvex"]
     cap_add:
       - CHOWN
+      - DAC_OVERRIDE
       - FOWNER
   gonvex-runtime:
     depends_on:
@@ -106,4 +107,5 @@ test("deploys the canonical Compose instead of preserving stale Coolify structur
   assert.match(savedCompose, /mkdir -p \/var\/lib\/gonvex\/data .*\/var\/lib\/gonvex\/tmp/);
   assert.match(savedCompose, /chmod -R u\+rwX \/var\/lib\/gonvex/);
   assert.match(savedCompose, /- FOWNER/);
+  assert.match(savedCompose, /- DAC_OVERRIDE/);
 });

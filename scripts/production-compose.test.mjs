@@ -101,7 +101,7 @@ test("production runtime and dashboard require protected durable configuration",
   );
   assert.equal(permissions.user, "0:0");
   assert.deepEqual(permissions.cap_drop, ["ALL"]);
-  assert.deepEqual(permissions.cap_add, ["CHOWN", "FOWNER"]);
+  assert.deepEqual(permissions.cap_add, ["CHOWN", "DAC_OVERRIDE", "FOWNER"]);
   assert.deepEqual(permissions.command, [
     "sh",
     "-ec",

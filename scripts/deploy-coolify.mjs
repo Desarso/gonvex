@@ -44,6 +44,7 @@ export function verifyRuntimeCompose(compose, sha) {
     "gonvex-runtime-permissions:",
     "mkdir -p /var/lib/gonvex/data",
     "chmod -R u+rwX /var/lib/gonvex",
+    "DAC_OVERRIDE",
     "FOWNER",
     "service_completed_successfully",
   ]) {
