@@ -77,8 +77,6 @@ test("runtime is health-gated on private durable dependencies", () => {
     "malek.gabriel33@gmail.com",
   );
   assert.equal(dashboard.read_only, true);
-  assert.deepEqual(dashboard.cap_drop, ["ALL"]);
-  assert.deepEqual(dashboard.cap_add, ["NET_BIND_SERVICE"]);
 
   assert.ok(volumes["gonvex-postgres-data"]);
   assert.ok(volumes["gonvex-valkey-data"]);

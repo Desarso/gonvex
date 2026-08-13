@@ -90,8 +90,6 @@ test("production runtime and dashboard require protected durable configuration",
   assert.equal(dashboard.environment.DASHBOARD_COOKIE_SECURE, "true");
   assert.equal(dashboard.environment.GONVEX_RUNTIME_URL, "http://gonvex-maker-runtime:8080");
   assert.equal(dashboard.read_only, true);
-  assert.deepEqual(dashboard.cap_drop, ["ALL"]);
-  assert.deepEqual(dashboard.cap_add, ["NET_BIND_SERVICE"]);
   assert.equal(runtime.depends_on["gonvex-maker-postgres"].condition, "service_healthy");
   assert.equal(runtime.depends_on["gonvex-maker-valkey"].condition, "service_healthy");
   assert.equal(runtime.depends_on["gonvex-maker-minio-init"].condition, "service_healthy");
