@@ -2,8 +2,9 @@
 language: en-US
 
 reviews:
-  profile: assertive
-  request_changes_workflow: true
+  profile: chill
+  # CodeRabbit is advisory. CI and a human approval own merge authority.
+  request_changes_workflow: false
   high_level_summary: true
   review_status: true
   auto_review:
@@ -26,3 +27,11 @@ reviews:
       instructions: |
         Check least-privilege permissions, fork safety, immutable test behavior,
         and whether required checks can be bypassed or deadlocked.
+    - path: "{Dockerfile*,docker-compose*.yml}"
+      instructions: |
+        Do not recommend generic non-root, capability, port, or filesystem
+        hardening changes. Container security changes are valid only when the PR
+        includes a persisted-volume restart test proving runtime manifests,
+        compiled plugins, and writable data/cache paths survive the change.
+        Treat the existing deployment contract and its regression tests as the
+        authority; leave unproven hardening ideas as non-blocking observations.

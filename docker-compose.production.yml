@@ -112,6 +112,22 @@ services:
       timeout: 5s
       retries: 12
 
+  gonvex-maker-runtime-permissions:
+    image: busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+    user: "0:0"
+    command: ["chown", "-R", "10001:10001", "/var/lib/gonvex"]
+    restart: "no"
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    volumes:
+      - gonvex-runtime-data:/var/lib/gonvex
+
   gonvex-maker-runtime:
     build:
       context: .
@@ -124,6 +140,8 @@ services:
         condition: service_healthy
       gonvex-maker-minio-init:
         condition: service_healthy
+      gonvex-maker-runtime-permissions:
+        condition: service_completed_successfully
     environment:
       GONVEX_ADDR: 0.0.0.0:8080
       GONVEX_LANDLORD_DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
