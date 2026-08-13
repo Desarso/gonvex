@@ -33,6 +33,7 @@ test("production compose keeps stateful dependencies private and pinned", () => 
     "gonvex-maker-postgres",
     "gonvex-maker-postgres-backup",
     "gonvex-maker-runtime",
+    "gonvex-maker-runtime-permissions",
     "gonvex-maker-valkey",
   ];
   assert.deepEqual(Object.keys(compose.services).sort(), expected);
@@ -68,6 +69,7 @@ test("production compose keeps stateful dependencies private and pinned", () => 
 test("production runtime and dashboard require protected durable configuration", () => {
   const { services } = resolvedCompose();
   const runtime = services["gonvex-maker-runtime"];
+  const permissions = services["gonvex-maker-runtime-permissions"];
   const dashboard = services["gonvex-maker-dashboard"];
   assert.equal(runtime.environment.GONVEX_ENVIRONMENT, "production");
   assert.equal(runtime.environment.GONVEX_REQUIRE_AUTH, "true");
@@ -93,6 +95,15 @@ test("production runtime and dashboard require protected durable configuration",
   assert.equal(runtime.depends_on["gonvex-maker-postgres"].condition, "service_healthy");
   assert.equal(runtime.depends_on["gonvex-maker-valkey"].condition, "service_healthy");
   assert.equal(runtime.depends_on["gonvex-maker-minio-init"].condition, "service_healthy");
+  assert.equal(
+    runtime.depends_on["gonvex-maker-runtime-permissions"].condition,
+    "service_completed_successfully",
+  );
+  assert.equal(permissions.user, "0:0");
+  assert.deepEqual(permissions.cap_drop, ["ALL"]);
+  assert.deepEqual(permissions.cap_add, ["CHOWN"]);
+  assert.deepEqual(permissions.command, ["chown", "-R", "10001:10001", "/var/lib/gonvex"]);
+  assert.equal(permissions.read_only, true);
 });
 
 test("production public routes use the Gabriel server HTTP challenge resolver", () => {
