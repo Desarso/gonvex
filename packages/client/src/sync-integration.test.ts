@@ -1209,22 +1209,22 @@ describe("durable sync integration", () => {
     const second = socket();
     second.open();
     second.receive({ type: "session.ready", queryCache: directive });
-    await flushAsyncWork();
-
-    expect(sentMessages(second)).toContainEqual(expect.objectContaining({
-      type: "sync.open",
-      id: open.id,
-      cursor: { epoch: "sync-a", revision: 20 },
-    }));
+    await vi.waitFor(() => {
+      expect(sentMessages(second)).toContainEqual(expect.objectContaining({
+        type: "sync.open",
+        id: open.id,
+        cursor: { epoch: "sync-a", revision: 20 },
+      }));
+    });
 
     second.receive({ type: "sync.reset", id: open.id, path: ref.path, reason: "cursor-expired" });
-    await flushAsyncWork();
-
-    expect(store.deletes).toEqual([{
-      scope,
-      path: ref.path,
-      args: { workspaceId: "workspace-a" },
-    }]);
+    await vi.waitFor(() => {
+      expect(store.deletes).toEqual([{
+        scope,
+        path: ref.path,
+        args: { workspaceId: "workspace-a" },
+      }]);
+    });
     expect(sentMessages(second).at(-1)).toMatchObject({
       type: "sync.open",
       id: open.id,
