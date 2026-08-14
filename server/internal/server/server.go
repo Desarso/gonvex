@@ -503,7 +503,7 @@ func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant := tenantIDFromRequest(project, tenantID(r))
 	if s.cache.enabled() {
-		key := s.cache.rowsKey(project, tenant, table, r.URL.Query())
+		key := s.cache.rowsKey(r.Context(), project, tenant, table, r.URL.Query())
 		if payload, ok := s.cache.get(r.Context(), key); ok {
 			cacheOutcome = "hit"
 			s.metrics.recordCache(project, "hit")
@@ -556,7 +556,7 @@ func (s *Server) handleDataRows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.cache.enabled() {
-		s.cache.set(r.Context(), s.cache.rowsKey(project, tenant, table, r.URL.Query()), payload)
+		s.cache.set(r.Context(), s.cache.rowsKey(r.Context(), project, tenant, table, r.URL.Query()), payload)
 	}
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -850,10 +850,18 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	fingerprint := schemaFingerprint(next.Schema, next.Functions)
 	loadedManifest := s.runtime.ManifestForProject(next.Project)
 	loadedFingerprint := schemaFingerprint(loadedManifest.Schema, loadedManifest.Functions)
-	if !s.config.DropEmptyUndeclaredColumns && fingerprint != "" && (s.schemaFingerprintApplied(next.Project, fingerprint) || (loadedFingerprint == fingerprint && loadedManifest.NotifySchemaVersion == next.NotifySchemaVersion)) {
-		schemaSkipped = true
-	} else {
-		syncDefinitions := manifestSyncDefinitions(next)
+	syncDefinitions := manifestSyncDefinitions(next)
+	unchangedSchema := !s.config.DropEmptyUndeclaredColumns && fingerprint != "" && (s.schemaFingerprintApplied(next.Project, fingerprint) || (loadedFingerprint == fingerprint && loadedManifest.NotifySchemaVersion == next.NotifySchemaVersion))
+	if unchangedSchema {
+		storageInstalled, storageErr := s.projectSyncStorageInstalled(r.Context(), next.Project, next.Schema, syncDefinitions)
+		if storageErr != nil {
+			syncErr = storageErr
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": storageErr.Error()})
+			return
+		}
+		schemaSkipped = storageInstalled
+	}
+	if !schemaSkipped {
 		landlordApplyOptions, tenantApplyOptions, optionErr := s.emptyColumnDropOptions(r.Context(), next.Project, next.Schema)
 		if optionErr != nil {
 			syncErr = optionErr

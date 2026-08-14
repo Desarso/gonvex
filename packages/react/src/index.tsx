@@ -18,6 +18,8 @@ export { ConvexReactClient };
 export type AuthState = {
   isLoading: boolean;
   isAuthenticated: boolean;
+  /** Terminal runtime rejection after one forced token refresh attempt. */
+  authError?: Error | null;
   fetchAccessToken?: (args: { forceRefreshToken: boolean }) => Promise<string | null>;
 };
 
@@ -89,10 +91,20 @@ export function ConvexProviderWithAuth(props: {
 }) {
   const auth = props.useAuth();
   const [tokenReady, setTokenReady] = useState(false);
+  const [clientAuthError, setClientAuthError] = useState<Error | null>(null);
+  const authError = auth.authError ?? clientAuthError;
+
+  useEffect(() => props.client.onAuthError((message) => {
+    setClientAuthError(new Error(message || "Authentication failed"));
+    setTokenReady(false);
+  }), [props.client]);
 
   useEffect(() => {
     setTokenReady(false);
-    if (auth.isLoading || !auth.isAuthenticated || !auth.fetchAccessToken) return;
+    if (auth.isLoading || !auth.isAuthenticated || !auth.fetchAccessToken) {
+      if (!auth.isLoading && !auth.isAuthenticated) setClientAuthError(null);
+      return;
+    }
     const fetchAccessToken = auth.fetchAccessToken;
     let cancelled = false;
     void fetchAccessToken({ forceRefreshToken: false }).then(
@@ -102,6 +114,7 @@ export function ConvexProviderWithAuth(props: {
           // on reconnect and force-refreshes on auth.error itself, instead of
           // replaying this token verbatim after it expires.
           props.client.setAuth({ token: token ?? undefined, fetchToken: fetchAccessToken });
+          setClientAuthError(null);
           setTokenReady(Boolean(token));
         }
       },
@@ -126,13 +139,14 @@ export function ConvexProviderWithAuth(props: {
   const authValue = useMemo<AuthState>(
     () => ({
       ...auth,
-      isLoading: auth.isLoading || (auth.isAuthenticated && !tokenReady),
-      isAuthenticated: auth.isAuthenticated && tokenReady,
+      authError,
+      isLoading: !authError && (auth.isLoading || (auth.isAuthenticated && !tokenReady)),
+      isAuthenticated: !authError && auth.isAuthenticated && tokenReady,
     }),
-    [auth, tokenReady],
+    [auth, authError, tokenReady],
   );
 
-  const shouldHoldChildren = auth.isLoading || (auth.isAuthenticated && !tokenReady);
+  const shouldHoldChildren = !authError && (auth.isLoading || (auth.isAuthenticated && !tokenReady));
 
   return (
     <GonvexAuthContext.Provider value={authValue}>

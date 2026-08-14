@@ -9,9 +9,28 @@ import (
 	"strings"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
 
 const SyncNotifyChannel = "gonvex_sync_change"
+
+// SyncStorageInstalled reports whether a database has the durable sync clock
+// and change log. Schema fingerprint equality is not sufficient: a restored
+// or partially provisioned database may have the expected application schema
+// while these runtime-owned tables are absent.
+func SyncStorageInstalled(ctx context.Context, databaseURL string) (bool, error) {
+	db, err := dbpool.Open(databaseURL)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	var installed bool
+	err = db.QueryRowContext(ctx, `
+		SELECT to_regclass('public._gonvex_sync_clock') IS NOT NULL
+		   AND to_regclass('public._gonvex_sync_changes') IS NOT NULL
+	`).Scan(&installed)
+	return installed, err
+}
 
 // InstallSyncLog installs the durable, transaction-ordered change log for
 // tables referenced by Sync functions. Ordinary tables pay no write overhead.

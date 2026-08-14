@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/gonvex/gonvex/server/internal/dbpool"
 	"github.com/gonvex/gonvex/server/internal/schema"
 	"github.com/gonvex/gonvex/server/internal/sqlmigration"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const projectTenantHydrationTTL = 5 * time.Second
@@ -329,21 +331,33 @@ func (s *Server) deleteTenantRegistry(ctx context.Context, project string, tenan
 }
 
 func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
+	if err := s.hydrateLandlordTenantsWithError(ctx, project); err != nil {
+		slog.Debug("hydrate landlord tenants", "project", project, "error", err)
+	}
+}
+
+func (s *Server) hydrateLandlordTenantsWithError(ctx context.Context, project string) error {
 	project = strings.TrimSpace(project)
 	if project == "" {
-		return
+		return nil
 	}
 	projectDatabaseURL := s.databaseURLForProject(project)
 	if strings.TrimSpace(projectDatabaseURL) == "" {
-		return
+		return nil
 	}
 	store, err := s.tenantStores.Store(ctx, tenantStoreKey(project, "__landlord__"), projectDatabaseURL)
 	if err != nil {
-		return
+		return fmt.Errorf("open landlord database: %w", err)
 	}
 	rows, err := store.DB.QueryContext(ctx, `SELECT id, COALESCE(name, ''), COALESCE(database, ''), COALESCE(domain, '') FROM tenants ORDER BY name, id`)
 	if err != nil {
-		return
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) && postgresError.Code == "42P01" {
+			// The landlord tenants table is an optional discovery source. Generic
+			// Gonvex projects can register tenant databases directly instead.
+			return nil
+		}
+		return fmt.Errorf("query landlord tenants: %w", err)
 	}
 	defer rows.Close()
 
@@ -355,7 +369,7 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 		var databaseAlias string
 		var domain string
 		if err := rows.Scan(&documentID, &name, &databaseAlias, &domain); err != nil {
-			return
+			return fmt.Errorf("scan landlord tenant: %w", err)
 		}
 		tenantID := persistedTenantRelationshipID(documentID, databaseAlias, domain)
 		if tenantID == "" {
@@ -393,8 +407,11 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 		}
 		imported[tenantStoreKey(project, tenantID)] = tenant
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate landlord tenants: %w", err)
+	}
 	if len(imported) == 0 {
-		return
+		return nil
 	}
 
 	resolved := make([]tenantTarget, 0, len(imported))
@@ -431,6 +448,7 @@ func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
 		}
 		s.mergeProjectTenants(project, []tenantTarget{registered})
 	}
+	return nil
 }
 
 func (s *Server) resolveTenantDatabaseURLLocked(project string, tenant tenantTarget) tenantTarget {
@@ -1081,7 +1099,9 @@ func (s *Server) applyTenantSchemasForProject(
 	syncDefinitions map[string]manifest.SyncDefinition,
 	options schema.ApplyOptions,
 ) (schema.Result, error) {
-	s.hydrateProjectTenantDatabases(ctx, project)
+	if err := s.hydrateProjectTenantDatabasesWithError(ctx, project, s.hydrateProjectTenantDatabasesUncachedWithError); err != nil {
+		return schema.Result{}, fmt.Errorf("discover tenant databases: %w", err)
+	}
 	desiredSchema = desiredSchema.TenantSchema()
 
 	s.projectMu.RLock()
@@ -1100,6 +1120,50 @@ func (s *Server) applyTenantSchemasForProject(
 	return applyTenantSchemas(ctx, tenants, desiredSchema, func(ctx context.Context, databaseURL string, desired manifest.Schema) (schema.Result, error) {
 		return schema.ApplyWithOptions(ctx, databaseURL, desired, tenantSyncDefinitions, options)
 	})
+}
+
+func (s *Server) projectSyncStorageInstalled(
+	ctx context.Context,
+	project string,
+	desiredSchema manifest.Schema,
+	syncDefinitions map[string]manifest.SyncDefinition,
+) (bool, error) {
+	landlordDefinitions, err := syncDefinitionsForSchema(syncDefinitions, desiredSchema.LandlordSchema())
+	if err != nil {
+		return false, err
+	}
+	if len(landlordDefinitions) > 0 {
+		installed, err := schema.SyncStorageInstalled(ctx, s.databaseURLForProject(project))
+		if err != nil || !installed {
+			return installed, err
+		}
+	}
+
+	tenantDefinitions, err := syncDefinitionsForSchema(syncDefinitions, desiredSchema.TenantSchema())
+	if err != nil {
+		return false, err
+	}
+	if len(tenantDefinitions) == 0 {
+		return true, nil
+	}
+	if err := s.hydrateProjectTenantDatabasesWithError(ctx, project, s.hydrateProjectTenantDatabasesUncachedWithError); err != nil {
+		return false, fmt.Errorf("discover tenant databases: %w", err)
+	}
+	s.projectMu.RLock()
+	tenants := make([]tenantTarget, 0, len(s.tenants))
+	for _, tenant := range s.tenants {
+		if tenant.ProjectID == project && tenant.databaseURL != "" {
+			tenants = append(tenants, tenant)
+		}
+	}
+	s.projectMu.RUnlock()
+	for _, tenant := range dedupeTenantTargets(tenants) {
+		installed, err := schema.SyncStorageInstalled(ctx, tenant.databaseURL)
+		if err != nil || !installed {
+			return installed, err
+		}
+	}
+	return true, nil
 }
 
 type tenantSchemaApplyFunc func(context.Context, string, manifest.Schema) (schema.Result, error)
@@ -1173,7 +1237,9 @@ func applyTenantSchemas(
 }
 
 func (s *Server) hydrateProjectTenantDatabases(ctx context.Context, project string) {
-	s.hydrateProjectTenantDatabasesWith(ctx, project, s.hydrateProjectTenantDatabasesUncached)
+	if err := s.hydrateProjectTenantDatabasesWithError(ctx, project, s.hydrateProjectTenantDatabasesUncachedWithError); err != nil {
+		slog.Debug("hydrate project tenant databases", "project", project, "error", err)
+	}
 }
 
 func (s *Server) hydrateProjectTenantDatabasesWith(
@@ -1181,33 +1247,55 @@ func (s *Server) hydrateProjectTenantDatabasesWith(
 	project string,
 	hydrate func(context.Context, string),
 ) {
-	project = strings.TrimSpace(project)
-	if project == "" {
-		return
-	}
-	_, _, _ = s.tenantHydrations.Do(project, func() (any, error) {
-		if !s.shouldHydrateProjectTenants(project) {
-			return nil, nil
-		}
+	_ = s.hydrateProjectTenantDatabasesWithError(ctx, project, func(ctx context.Context, project string) error {
 		hydrate(ctx, project)
-		return nil, nil
+		return nil
 	})
 }
 
+func (s *Server) hydrateProjectTenantDatabasesWithError(
+	ctx context.Context,
+	project string,
+	hydrate func(context.Context, string) error,
+) error {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return nil
+	}
+	_, err, _ := s.tenantHydrations.Do(project, func() (any, error) {
+		if !s.shouldHydrateProjectTenants(project) {
+			return nil, nil
+		}
+		if err := hydrate(ctx, project); err != nil {
+			s.invalidateProjectTenantHydration(project)
+			return nil, err
+		}
+		return nil, nil
+	})
+	return err
+}
+
 func (s *Server) hydrateProjectTenantDatabasesUncached(ctx context.Context, project string) {
+	if err := s.hydrateProjectTenantDatabasesUncachedWithError(ctx, project); err != nil {
+		slog.Debug("hydrate project tenant databases", "project", project, "error", err)
+	}
+}
+
+func (s *Server) hydrateProjectTenantDatabasesUncachedWithError(ctx context.Context, project string) error {
 	// Load the durable registry first so landlord rows can adopt the already
 	// migrated physical database instead of generating an empty replacement.
 	registered, err := s.loadTenantRegistry(ctx, project)
 	if err != nil {
-		slog.Debug("load tenant relationship registry", "project", project, "error", err)
-	} else {
-		s.mergeProjectTenants(project, registered)
+		return fmt.Errorf("load tenant relationship registry: %w", err)
 	}
+	s.mergeProjectTenants(project, registered)
 
 	// The project's own landlord database is the source of public tenant ids.
 	// Its legacy Convex document ids are replaced by domains while preserving
 	// any registered database relationship loaded above.
-	s.hydrateLandlordTenants(ctx, project)
+	if err := s.hydrateLandlordTenantsWithError(ctx, project); err != nil {
+		return err
+	}
 
 	// Project-scoped environment configuration predates the registry. Preserve
 	// those explicit mappings and backfill them without exposing global entries
@@ -1234,12 +1322,11 @@ func (s *Server) hydrateProjectTenantDatabasesUncached(ctx context.Context, proj
 	// UUIDv6 projects never enter this path, so a fresh project cannot adopt any
 	// pre-existing database by name or table shape.
 	if !shouldMigrateLegacyTenantRelationships(project) || strings.TrimSpace(s.config.PostgresURL) == "" {
-		return
+		return nil
 	}
 	legacy, err := s.discoverLegacyProjectTenantDatabases(ctx, project)
 	if err != nil {
-		slog.Debug("migrate legacy tenant relationships", "project", project, "error", err)
-		return
+		return fmt.Errorf("discover legacy tenant databases: %w", err)
 	}
 	for _, tenant := range legacy {
 		if s.projectHasTenantDatabase(project, tenant.databaseName) {
@@ -1254,6 +1341,7 @@ func (s *Server) hydrateProjectTenantDatabasesUncached(ctx context.Context, proj
 		}
 		s.mergeProjectTenants(project, []tenantTarget{persisted})
 	}
+	return nil
 }
 
 func (s *Server) mergeProjectTenants(project string, tenants []tenantTarget) {
@@ -1402,16 +1490,21 @@ func shouldMigrateLegacyTenantRelationships(project string) bool {
 }
 
 func (s *Server) existingLocalDatabaseNames(ctx context.Context) map[string]bool {
+	names, _ := s.existingLocalDatabaseNamesWithError(ctx)
+	return names
+}
+
+func (s *Server) existingLocalDatabaseNamesWithError(ctx context.Context) (map[string]bool, error) {
 	if strings.TrimSpace(s.config.PostgresURL) == "" {
-		return nil
+		return nil, nil
 	}
 	maintenanceURL, err := databaseURL(s.config.PostgresURL, "postgres")
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	store, err := s.tenantStores.Store(ctx, "__maintenance__", maintenanceURL)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	rows, err := store.DB.QueryContext(ctx, `
 		SELECT datname
@@ -1419,7 +1512,7 @@ func (s *Server) existingLocalDatabaseNames(ctx context.Context) map[string]bool
 		WHERE datistemplate = false
 	`)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -1427,11 +1520,14 @@ func (s *Server) existingLocalDatabaseNames(ctx context.Context) map[string]bool
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return nil
+			return nil, err
 		}
 		names[name] = true
 	}
-	return names
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return names, nil
 }
 
 func persistedTenantRelationshipID(documentID string, databaseAlias string, domain string) string {

@@ -209,6 +209,38 @@ func TestSchedulerRunAfterEnqueuesOneShot(t *testing.T) {
 	})
 }
 
+func TestInMemorySchedulerPrioritizesOneShotsOverCronBacklog(t *testing.T) {
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	started := make(chan scheduledJob, 1)
+	sc := newScheduler(func(_ context.Context, job scheduledJob) error {
+		started <- job
+		return nil
+	})
+	sc.now = func() time.Time { return now }
+	sc.maxConcurrent = 1
+	sc.jobs = append(sc.jobs,
+		scheduledJob{
+			ID: "cron-overdue", ProjectID: "project-a", TenantID: "tenant-a",
+			FunctionPath: "tasks.generateDueRecurringTasks", CronName: "generate due recurring tasks",
+			RunAt: now.Add(-time.Hour), ScheduledFor: now.Add(-time.Hour),
+		},
+		scheduledJob{
+			ID: "job-assistant", ProjectID: "project-a", TenantID: "tenant-a",
+			FunctionPath: "assistant.processThread", RunAt: now, ScheduledFor: now,
+		},
+	)
+
+	sc.dispatchDue(context.Background())
+	select {
+	case job := <-started:
+		if job.ID != "job-assistant" {
+			t.Fatalf("one-shot job was starved behind cron backlog: %#v", job)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scheduler did not dispatch a due job")
+	}
+}
+
 func TestSchedulerHandleEncodesArgs(t *testing.T) {
 	var mu sync.Mutex
 	var captured json.RawMessage

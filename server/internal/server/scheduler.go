@@ -343,7 +343,12 @@ func (sc *scheduler) dispatchDue(ctx context.Context) {
 		reg.NextRun = reg.Schedule.Next(now)
 	}
 
-	sort.Slice(due, func(left, right int) bool {
+	sort.SliceStable(due, func(left, right int) bool {
+		leftCron := due[left].CronName != ""
+		rightCron := due[right].CronName != ""
+		if leftCron != rightCron {
+			return !leftCron
+		}
 		return due[left].ScheduledFor.Before(due[right].ScheduledFor)
 	})
 
