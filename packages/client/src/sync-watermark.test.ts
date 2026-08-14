@@ -285,12 +285,14 @@ describe("sync revision watermarks", () => {
     });
     await flushAsyncWork();
 
-    expect(sentMessages(secondSocket).find((message) => message.type === "sync.open")).toEqual(
-      expect.objectContaining({
-        path,
-        cursor: { epoch: "sync-epoch", revision: 12 },
-        digest: expect.any(String),
-      }),
-    );
+    await vi.waitFor(() => {
+      expect(sentMessages(secondSocket).find((message) => message.type === "sync.open")).toEqual(
+        expect.objectContaining({
+          path,
+          cursor: { epoch: "sync-epoch", revision: 12 },
+          digest: expect.any(String),
+        }),
+      );
+    });
   });
 });
