@@ -53,6 +53,16 @@ test("requires public health and the exact runtime version after deployment", ()
   assert.throws(() => assertDashboardHealth("starting\n"), /not healthy/);
 });
 
+test("main CI leaves development deployment to Coolify auto-deploy", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/runtime-regression.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(workflow, /push:\s*\n\s*branches: \[main\]/);
+  assert.doesNotMatch(workflow, /deploy-dev-runtime/);
+  assert.doesNotMatch(workflow, /scripts\/deploy-coolify\.mjs/);
+});
+
 test("production promotion waits for approval and records the release only after smoke tests", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/promote-production.yml", import.meta.url),
