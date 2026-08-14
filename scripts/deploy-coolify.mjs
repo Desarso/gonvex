@@ -73,6 +73,33 @@ export function verifyRollingApplication(application, role, sha) {
   }
 }
 
+function environmentValue(environment, key) {
+  const entry = environment?.find((candidate) => candidate?.key === key);
+  return String(entry?.real_value ?? entry?.value ?? "").trim();
+}
+
+export function verifyRuntimeEnvironment(environment, sha) {
+  if (environmentValue(environment, "GONVEX_REQUIRE_AUTH") !== "true") {
+    throw new Error("runtime application must enforce GONVEX_REQUIRE_AUTH=true");
+  }
+  if (environmentValue(environment, "GONVEX_RUNTIME_VERSION") !== sha) {
+    throw new Error(`runtime application must advertise exact version ${sha}`);
+  }
+}
+
+async function upsertApplicationEnvironment(base, token, uuid, key, value) {
+  const environment = await coolifyRequest(
+    base,
+    token,
+    `/applications/${encodeURIComponent(uuid)}/envs`,
+  );
+  const exists = environment?.some((candidate) => candidate?.key === key);
+  await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}/envs`, {
+    method: exists ? "PATCH" : "POST",
+    body: JSON.stringify({ key, value, is_literal: true, is_preview: false }),
+  });
+}
+
 async function waitForDeployment(base, token, deploymentUUID, options = {}) {
   const timeoutMS = options.timeoutMS ?? 12 * 60 * 1000;
   const intervalMS = options.intervalMS ?? 5_000;
@@ -113,6 +140,9 @@ export async function deployRollingApplications({
   for (const role of ["runtime", "dashboard"]) {
     const uuid = applications[role];
     const contract = applicationContracts[role];
+    if (role === "runtime") {
+      await upsertApplicationEnvironment(base, token, uuid, "GONVEX_RUNTIME_VERSION", sha);
+    }
     await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`, {
       method: "PATCH",
       body: JSON.stringify({
@@ -130,6 +160,14 @@ export async function deployRollingApplications({
     });
     const saved = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
     verifyRollingApplication(saved, role, sha);
+    if (role === "runtime") {
+      const environment = await coolifyRequest(
+        base,
+        token,
+        `/applications/${encodeURIComponent(uuid)}/envs`,
+      );
+      verifyRuntimeEnvironment(environment, sha);
+    }
 
     const queued = await coolifyRequest(
       base,
@@ -142,6 +180,14 @@ export async function deployRollingApplications({
 
     const deployed = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
     verifyRollingApplication(deployed, role, sha);
+    if (role === "runtime") {
+      const environment = await coolifyRequest(
+        base,
+        token,
+        `/applications/${encodeURIComponent(uuid)}/envs`,
+      );
+      verifyRuntimeEnvironment(environment, sha);
+    }
     if (deployed.status !== "running:healthy") {
       throw new Error(`${role} ended deployment as ${deployed.status ?? "unknown"}`);
     }

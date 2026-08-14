@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   deployRollingApplications,
   verifyRollingApplication,
+  verifyRuntimeEnvironment,
 } from "./deploy-coolify.mjs";
 
 const sha = "b".repeat(40);
@@ -41,17 +42,55 @@ test("requires Dockerfile applications with readiness and no host port mapping",
   );
 });
 
+test("requires runtime auth enforcement and the exact advertised version", () => {
+  const environment = [
+    { key: "GONVEX_REQUIRE_AUTH", real_value: "true" },
+    { key: "GONVEX_RUNTIME_VERSION", real_value: sha },
+  ];
+  assert.doesNotThrow(() => verifyRuntimeEnvironment(environment, sha));
+  assert.throws(
+    () => verifyRuntimeEnvironment(environment.filter((entry) => entry.key !== "GONVEX_REQUIRE_AUTH"), sha),
+    /GONVEX_REQUIRE_AUTH=true/,
+  );
+  assert.throws(
+    () => verifyRuntimeEnvironment(environment, "c".repeat(40)),
+    /advertise exact version/,
+  );
+});
+
 test("pins and finishes runtime before deploying dashboard", async () => {
   const events = [];
   const states = {
     "runtime-uuid": application("runtime", { git_commit_sha: "HEAD" }),
     "dashboard-uuid": application("dashboard", { git_commit_sha: "HEAD" }),
   };
+  const environments = {
+    "runtime-uuid": [
+      { key: "GONVEX_REQUIRE_AUTH", real_value: "true" },
+      { key: "GONVEX_RUNTIME_VERSION", real_value: "HEAD" },
+    ],
+    "dashboard-uuid": [],
+  };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     const target = new URL(url);
     const method = init.method ?? "GET";
-    const applicationMatch = target.pathname.match(/\/applications\/(.+)$/);
+    const environmentMatch = target.pathname.match(/\/applications\/([^/]+)\/envs$/);
+    if (environmentMatch) {
+      const uuid = decodeURIComponent(environmentMatch[1]);
+      if (method === "GET") return Response.json(environments[uuid]);
+      const update = JSON.parse(init.body);
+      const existing = environments[uuid].find((entry) => entry.key === update.key);
+      if (existing) {
+        existing.value = update.value;
+        existing.real_value = update.value;
+      } else {
+        environments[uuid].push({ key: update.key, value: update.value, real_value: update.value });
+      }
+      events.push(`env:${uuid}:${update.key}`);
+      return Response.json({});
+    }
+    const applicationMatch = target.pathname.match(/\/applications\/([^/]+)$/);
     if (applicationMatch) {
       const uuid = decodeURIComponent(applicationMatch[1]);
       if (method === "PATCH") {
@@ -89,6 +128,7 @@ test("pins and finishes runtime before deploying dashboard", async () => {
   }
 
   assert.deepEqual(events, [
+    "env:runtime-uuid:GONVEX_RUNTIME_VERSION",
     "patch:runtime-uuid",
     "deploy:runtime-uuid",
     "finished:runtime-uuid",

@@ -94,9 +94,10 @@ Postgres, data files rehydrate from object storage, and sharing Go plugin caches
 between two runtime binaries would make a rolling overlap unsafe.
 
 The runtime does not report healthy until every persisted project manifest has
-hydrated. During the short rolling overlap, a PostgreSQL advisory lock elects one
-scheduler leader so HTTP and WebSocket traffic can use both containers without
-executing cron jobs twice.
+hydrated. Scheduled jobs use a shared Valkey queue with renewable execution
+leases, crash recovery, and deterministic cron-occurrence IDs. HTTP and WebSocket
+traffic can therefore use both rolling containers while any replica safely
+enqueues or executes scheduled work without losing or duplicating a cron fire.
 
 Production is a separate promotion lane. After the development release passes the
 Whagons Monitor verification at `https://monitor.whagons.com/releases`, promote
