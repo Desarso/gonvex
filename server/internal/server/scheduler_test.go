@@ -180,6 +180,38 @@ func TestSchedulerExpandsTenantCronIntoTenantBoundJobs(t *testing.T) {
 	}
 }
 
+func TestSchedulerDeterministicallyStaggersTenantCrons(t *testing.T) {
+	sc := newScheduler(nil)
+	now := time.Date(2026, 8, 14, 22, 0, 0, 0, time.UTC)
+	sc.now = func() time.Time { return now }
+	specs := []gonvex.CronSpec{{
+		Name: "reconcile recurrences", Interval: time.Minute,
+		FunctionPath: "workplans.reconcileSchedules", PerTenant: true,
+	}}
+	tenants := []string{"tenant-a", "tenant-b", "tenant-c", "tenant-d"}
+	sc.syncCrons("project-a", specs, tenants...)
+
+	first := map[string]time.Time{}
+	unique := map[time.Time]bool{}
+	for _, reg := range sc.crons {
+		first[reg.TenantID] = reg.NextRun
+		unique[reg.NextRun] = true
+		if reg.NextRun.Before(now) || !reg.NextRun.Before(now.Add(time.Minute)) {
+			t.Fatalf("tenant %s next run %s is outside the one-minute window", reg.TenantID, reg.NextRun)
+		}
+	}
+	if len(unique) < 2 {
+		t.Fatalf("tenant cron occurrences are aligned at %v", unique)
+	}
+
+	sc.syncCrons("project-a", specs, tenants...)
+	for _, reg := range sc.crons {
+		if reg.NextRun != first[reg.TenantID] {
+			t.Fatalf("tenant %s stagger changed from %s to %s", reg.TenantID, first[reg.TenantID], reg.NextRun)
+		}
+	}
+}
+
 func TestSchedulerRunAfterEnqueuesOneShot(t *testing.T) {
 	var mu sync.Mutex
 	var seen []string

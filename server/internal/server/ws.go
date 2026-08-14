@@ -1470,10 +1470,6 @@ func (s *Server) broadcastTenantRowIDChange(projectID string, tenantID string, t
 
 func (s *Server) scheduleTableChange(change tableChange) {
 	changedTables := tableChangeTables(change)
-	s.cache.invalidateQueries(context.Background(), change.project, change.tenant, changedTables)
-	for _, table := range changedTables {
-		s.cache.invalidateRows(context.Background(), change.project, change.tenant, table)
-	}
 	s.tableChangeMu.Lock()
 	tableKey := strings.Join(changedTables, "\x1f")
 	if commitID := strings.TrimSpace(change.commitID); commitID != "" {
@@ -1564,6 +1560,11 @@ func (s *Server) flushTableChange(key string) {
 		// An empty table set is never authoritative. Preserve the legacy
 		// tenant-wide correctness backstop for malformed/unknown changes.
 		delivery.broad = true
+	}
+	changedTables := tableChangeTables(delivery)
+	s.cache.invalidateQueries(context.Background(), delivery.project, delivery.tenant, changedTables)
+	for _, table := range changedTables {
+		s.cache.invalidateRows(context.Background(), delivery.project, delivery.tenant, table)
 	}
 	s.subscriptions.requestChange(delivery)
 	s.resetSyncsForVisibilityChange(delivery)

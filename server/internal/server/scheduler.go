@@ -20,6 +20,7 @@ const (
 	schedulerTickInterval   = 500 * time.Millisecond
 	schedulerMaxConcurrent  = 16
 	schedulerRecentRunLimit = 30
+	tenantCronMaxStagger    = 5 * time.Minute
 )
 
 // scheduledExecutor runs a single scheduled job. The server provides an
@@ -226,7 +227,7 @@ func (sc *scheduler) syncCrons(projectID string, specs []gonvex.CronSpec, tenant
 	sort.Strings(cleanTenantIDs)
 
 	for _, spec := range specs {
-		schedule, err := scheduleForSpec(spec)
+		baseSchedule, err := scheduleForSpec(spec)
 		if err != nil {
 			sc.logger.Warn("skip cron with invalid schedule", "project", projectID, "cron", spec.Name, "error", err)
 			continue
@@ -236,6 +237,10 @@ func (sc *scheduler) syncCrons(projectID string, specs []gonvex.CronSpec, tenant
 			targetTenants = cleanTenantIDs
 		}
 		for _, tenantID := range targetTenants {
+			schedule := baseSchedule
+			if spec.PerTenant {
+				schedule = staggerTenantCronSchedule(baseSchedule, spec, projectID, tenantID)
+			}
 			reg := &cronRegistration{ProjectID: projectID, TenantID: tenantID, Spec: spec, Schedule: schedule}
 			reg.NextRun = schedule.Next(now)
 			if prior, ok := previous[tenantID+"\x00"+spec.Name]; ok {
@@ -252,6 +257,40 @@ func (sc *scheduler) syncCrons(projectID string, specs []gonvex.CronSpec, tenant
 		}
 	}
 	sc.signal()
+}
+
+type offsetCronSchedule struct {
+	base   cronSchedule
+	offset time.Duration
+}
+
+func (schedule offsetCronSchedule) Next(after time.Time) time.Time {
+	if schedule.base == nil {
+		return time.Time{}
+	}
+	next := schedule.base.Next(after.Add(-schedule.offset))
+	if next.IsZero() {
+		return time.Time{}
+	}
+	return next.Add(schedule.offset)
+}
+
+func staggerTenantCronSchedule(base cronSchedule, spec gonvex.CronSpec, projectID, tenantID string) cronSchedule {
+	window := tenantCronMaxStagger
+	if spec.Interval > 0 && spec.Interval < window {
+		window = spec.Interval
+	}
+	windowMillis := window.Milliseconds()
+	if windowMillis <= 1 {
+		return base
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{projectID, tenantID, spec.Name}, "\x00")))
+	seed := uint64(0)
+	for _, value := range sum[:8] {
+		seed = seed<<8 | uint64(value)
+	}
+	offset := time.Duration(seed%uint64(windowMillis)) * time.Millisecond
+	return offsetCronSchedule{base: base, offset: offset}
 }
 
 func scheduleForSpec(spec gonvex.CronSpec) (cronSchedule, error) {

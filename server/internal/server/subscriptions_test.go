@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/config"
@@ -259,7 +260,14 @@ func TestUnhealthyListenerFallsBackToDeclaredWrites(t *testing.T) {
 }
 
 func TestHealthyListenerSuppressesDeclaredOnlyNoOpCommit(t *testing.T) {
-	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
+	redisServer := miniredis.RunT(t)
+	server := New(config.Config{
+		TenantListenerLimit:  0,
+		SharedResultMaxBytes: 1 << 20,
+		ValkeyURL:            "redis://" + redisServer.Addr(),
+		RowsCacheTTL:         time.Minute,
+	})
+	t.Cleanup(func() { _ = server.cache.close() })
 	manager := server.subscriptions
 	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
 	var executions atomic.Int32
@@ -268,6 +276,12 @@ func TestHealthyListenerSuppressesDeclaredOnlyNoOpCommit(t *testing.T) {
 		return []map[string]any{{"id": "task-1"}}, nil
 	}
 	indexedTestGroup(manager, "tasks.list", "tasks", &executions)
+	ctx := context.Background()
+	beforeRows := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks")
+	beforeQueries, ok := server.cache.queryGeneration(ctx, "project-a", "tenant-a", []string{"tasks"})
+	if !ok {
+		t.Fatal("query cache is not enabled")
+	}
 
 	server.scheduleTableChange(tableChange{
 		project: "project-a", tenant: "tenant-a", commitID: "no-op-commit",
@@ -276,6 +290,11 @@ func TestHealthyListenerSuppressesDeclaredOnlyNoOpCommit(t *testing.T) {
 	time.Sleep(tableChangeDebounce + 25*time.Millisecond)
 	if got := executions.Load(); got != 0 {
 		t.Fatalf("declared-only healthy commit executions = %d, want 0", got)
+	}
+	afterRows := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks")
+	afterQueries, _ := server.cache.queryGeneration(ctx, "project-a", "tenant-a", []string{"tasks"})
+	if afterRows != beforeRows || afterQueries != beforeQueries {
+		t.Fatalf("no-op commit invalidated caches: rows %q -> %q, queries %q -> %q", beforeRows, afterRows, beforeQueries, afterQueries)
 	}
 
 	// A notification delayed beyond the declared-write debounce still starts a
@@ -286,6 +305,42 @@ func TestHealthyListenerSuppressesDeclaredOnlyNoOpCommit(t *testing.T) {
 		triggerObserved: true, changedAtMS: 11,
 	})
 	eventually(t, time.Second, func() bool { return executions.Load() == 1 })
+	if got := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks"); got == beforeRows {
+		t.Fatal("observed task write did not invalidate the row cache")
+	}
+}
+
+func TestHealthyListenerInvalidatesOnlyObservedWriteTables(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	server := New(config.Config{
+		TenantListenerLimit:  0,
+		SharedResultMaxBytes: 1 << 20,
+		ValkeyURL:            "redis://" + redisServer.Addr(),
+		RowsCacheTTL:         time.Minute,
+	})
+	t.Cleanup(func() { _ = server.cache.close() })
+	installTestTenantListener(server.subscriptions.listeners, "project-a", "tenant-a", true)
+	ctx := context.Background()
+	beforeTasks := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks")
+	beforeLogs := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "taskLogs")
+
+	const commitID = "actual-write-commit"
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: commitID, broad: true,
+		tables: map[string]bool{"tasks": true, "taskLogs": true}, changedAtMS: 10,
+	})
+	server.scheduleTableChange(tableChange{
+		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "tasks",
+		operation: "update", triggerObserved: true, changedAtMS: 11,
+	})
+	time.Sleep(tableChangeDebounce + 25*time.Millisecond)
+
+	if got := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks"); got == beforeTasks {
+		t.Fatal("observed task write did not invalidate tasks")
+	}
+	if got := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "taskLogs"); got != beforeLogs {
+		t.Fatalf("unobserved declared taskLogs write invalidated cache: %q -> %q", beforeLogs, got)
+	}
 }
 
 func TestHealthyTenantListenerDoesNotSuppressLandlordWrite(t *testing.T) {
