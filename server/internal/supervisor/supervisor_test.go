@@ -209,6 +209,11 @@ func runSupervisorWorkerHelper() {
 	})
 
 	server := &http.Server{Addr: os.Getenv("GONVEX_ADDR"), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	listener, err := InheritedWorkerListener()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -217,7 +222,11 @@ func runSupervisorWorkerHelper() {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if listener == nil {
+		fmt.Fprintln(os.Stderr, "supervisor test worker did not inherit a listener")
+		os.Exit(1)
+	}
+	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

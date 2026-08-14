@@ -18,8 +18,18 @@ func TestCompiledPluginPathIsScopedToRuntimeBinary(t *testing.T) {
 	if firstPath == secondPath {
 		t.Fatal("different runtime binaries reused the same compiled plugin path")
 	}
-	if filepath.Base(firstPath) != "gonvex_plugin_project-a_abcdef123456_runtime-a.so" {
+	want := "gonvex_plugin_" + projectCacheKey("project-a") + "_abcdef123456_runtime-a.so"
+	if filepath.Base(firstPath) != want {
 		t.Fatalf("unexpected runtime-scoped plugin path: %s", firstPath)
+	}
+}
+
+func TestCompiledPluginPathUsesCollisionResistantProjectIdentity(t *testing.T) {
+	loader := &Loader{cacheDir: t.TempDir(), runtimeFingerprint: "runtime"}
+	first := loader.compiledPluginPath("team/a", "abcdef1234567890")
+	second := loader.compiledPluginPath("team?a", "abcdef1234567890")
+	if first == second {
+		t.Fatalf("distinct project IDs collided: %s", first)
 	}
 }
 
@@ -27,10 +37,11 @@ func TestRemoveIncompatibleCompiledPluginsPreservesCurrentRuntime(t *testing.T) 
 	cacheDir := t.TempDir()
 	loader := &Loader{cacheDir: cacheDir, runtimeFingerprint: "runtime-new"}
 	current := loader.compiledPluginPath("project-a", "abcdef1234567890")
-	old := filepath.Join(cacheDir, "compiled", "gonvex_plugin_abcdef123456_runtime-old.so")
+	old := filepath.Join(cacheDir, "compiled", "gonvex_plugin_abcdef123456_runtime-oldx.so")
 	legacy := filepath.Join(cacheDir, "compiled", "gonvex_plugin_abcdef123456.so")
-	projectOld := filepath.Join(cacheDir, "compiled", "gonvex_plugin_project-a_abcdef123456_runtime-old.so")
-	for _, path := range []string{current, old, legacy, projectOld} {
+	projectOld := filepath.Join(cacheDir, "compiled", "gonvex_plugin_"+projectCacheKey("project-a")+"_abcdef123456_runtime-old.so")
+	prefixCollision := filepath.Join(cacheDir, "compiled", "gonvex_plugin_abcdef123456-project_abcdef123456_runtime-new.so")
+	for _, path := range []string{current, old, legacy, projectOld, prefixCollision} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -47,6 +58,9 @@ func TestRemoveIncompatibleCompiledPluginsPreservesCurrentRuntime(t *testing.T) 
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("incompatible plugin still exists: %s", path)
 		}
+	}
+	if _, err := os.Stat(prefixCollision); err != nil {
+		t.Fatalf("another project's prefix-colliding plugin was removed: %v", err)
 	}
 }
 
@@ -74,7 +88,7 @@ func TestPruneCompiledPluginsBoundsEachProject(t *testing.T) {
 	}
 
 	loader.pruneCompiledPlugins("project-a", current)
-	projectA, _ := filepath.Glob(filepath.Join(cacheDir, "compiled", "gonvex_plugin_project-a_*.so"))
+	projectA, _ := filepath.Glob(filepath.Join(cacheDir, "compiled", "gonvex_plugin_"+projectCacheKey("project-a")+"_*.so"))
 	if len(projectA) != compiledPluginGenerationsPerProject {
 		t.Fatalf("project-a cache has %d entries, want %d", len(projectA), compiledPluginGenerationsPerProject)
 	}

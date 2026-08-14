@@ -3,6 +3,8 @@
 package projectbundle
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"plugin"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
@@ -27,8 +30,13 @@ func (l *Loader) compiledPluginPath(projectID string, hash string) string {
 	return filepath.Join(
 		l.cacheDir,
 		"compiled",
-		"gonvex_plugin_"+sanitizeProjectID(projectID)+"_"+safeHashPrefix(hash)+"_"+l.runtimeFingerprint+".so",
+		"gonvex_plugin_"+projectCacheKey(projectID)+"_"+safeHashPrefix(hash)+"_"+l.runtimeFingerprint+".so",
 	)
+}
+
+func projectCacheKey(projectID string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(projectID)))
+	return hex.EncodeToString(digest[:])
 }
 
 func (l *Loader) compileAndRegister(projectID string, projectDir string, _ string, hash string) (*gonvex.App, error) {
@@ -63,10 +71,11 @@ func (l *Loader) compileAndRegister(projectID string, projectDir string, _ strin
 
 func (l *Loader) removeIncompatibleCompiledPlugins(projectID string, hash string, current string) {
 	patterns := []string{
-		filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+sanitizeProjectID(projectID)+"_"+safeHashPrefix(hash)+"_*.so"),
+		filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+projectCacheKey(projectID)+"_"+safeHashPrefix(hash)+"_*.so"),
 		// Clean up the pre-worker cache naming scheme. Those files were shared by
 		// hash only and can never be trusted across a new runtime fingerprint.
-		filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+safeHashPrefix(hash)+"*.so"),
+		filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+safeHashPrefix(hash)+"_????????????.so"),
+		filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+safeHashPrefix(hash)+".so"),
 	}
 	for _, pattern := range patterns {
 		matches, _ := filepath.Glob(pattern)
@@ -79,7 +88,7 @@ func (l *Loader) removeIncompatibleCompiledPlugins(projectID string, hash string
 }
 
 func (l *Loader) pruneCompiledPlugins(projectID string, current string) {
-	pattern := filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+sanitizeProjectID(projectID)+"_*.so")
+	pattern := filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+projectCacheKey(projectID)+"_*.so")
 	matches, _ := filepath.Glob(pattern)
 	type cachedPlugin struct {
 		path    string

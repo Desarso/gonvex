@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,7 +20,10 @@ import (
 func main() {
 	cfg := config.FromEnv()
 	if reloadSupervisorEnabled() {
-		runSupervisor(cfg)
+		if err := runSupervisor(cfg); err != nil {
+			slog.Error("gonvex runtime supervisor stopped", "error", err)
+			os.Exit(1)
+		}
 		return
 	}
 	runWorker(cfg)
@@ -31,11 +35,10 @@ func reloadSupervisorEnabled() bool {
 	return (enabled == "1" || enabled == "true" || enabled == "yes" || enabled == "on") && worker != "1"
 }
 
-func runSupervisor(cfg config.Config) {
+func runSupervisor(cfg config.Config) error {
 	runtimeSupervisor, err := supervisor.Start(context.Background(), supervisor.Config{})
 	if err != nil {
-		slog.Error("gonvex runtime supervisor startup failed", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("start runtime supervisor: %w", err)
 	}
 	defer runtimeSupervisor.Close()
 
@@ -55,11 +58,12 @@ func runSupervisor(cfg config.Config) {
 		if err := server.Shutdown(shutdownContext); err != nil {
 			slog.Warn("graceful gateway shutdown timed out", "error", err)
 		}
+		return nil
 	case err := <-serverErrors:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("gonvex runtime gateway stopped", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("serve runtime gateway: %w", err)
 		}
+		return nil
 	}
 }
 
@@ -73,8 +77,17 @@ func runWorker(cfg config.Config) {
 	defer runtime.Close()
 
 	server := gonvexruntime.NewHTTPServer(cfg.Addr, runtime.Handler())
+	listener, err := supervisor.InheritedWorkerListener()
+	if err != nil {
+		slog.Error("gonvex runtime listener inheritance failed", "error", err)
+		os.Exit(1)
+	}
 	serverErrors := make(chan error, 1)
 	go func() {
+		if listener != nil {
+			serverErrors <- server.Serve(listener)
+			return
+		}
 		serverErrors <- server.ListenAndServe()
 	}()
 

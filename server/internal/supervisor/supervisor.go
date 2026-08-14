@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ const (
 	defaultDrainTimeout   = 20 * time.Second
 	defaultHealthInterval = 250 * time.Millisecond
 	recycleWorkerHeader   = "X-Gonvex-Recycle-Worker"
+	workerListenerFDEnv   = "GONVEX_WORKER_LISTENER_FD"
 )
 
 // Config controls the permanent gateway and its recyclable runtime workers.
@@ -224,12 +226,15 @@ func (s *Supervisor) replaceActiveWorker() {
 }
 
 func (s *Supervisor) startWorker() (*workerProcess, error) {
-	address, err := availableLoopbackAddress()
+	address, listener, listenerFile, err := reserveLoopbackListener()
 	if err != nil {
 		return nil, err
 	}
+	defer listener.Close()
+	defer listenerFile.Close()
 	command := exec.Command(s.config.Executable, s.config.Args...)
 	command.Env = workerEnvironment(os.Environ(), s.config.Env, address)
+	command.ExtraFiles = []*os.File{listenerFile}
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	worker := &workerProcess{address: address, command: command, done: make(chan error, 1), drained: make(chan struct{})}
@@ -350,16 +355,46 @@ func (worker *workerProcess) closeDrainedLocked() {
 	}
 }
 
-func availableLoopbackAddress() (string, error) {
+func reserveLoopbackListener() (string, net.Listener, *os.File, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return "", fmt.Errorf("reserve runtime worker address: %w", err)
+		return "", nil, nil, fmt.Errorf("reserve runtime worker address: %w", err)
 	}
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		return "", fmt.Errorf("release runtime worker address: %w", err)
+	fileProvider, ok := listener.(interface{ File() (*os.File, error) })
+	if !ok {
+		listener.Close()
+		return "", nil, nil, fmt.Errorf("runtime worker listener %T cannot be inherited", listener)
 	}
-	return address, nil
+	listenerFile, err := fileProvider.File()
+	if err != nil {
+		listener.Close()
+		return "", nil, nil, fmt.Errorf("duplicate runtime worker listener: %w", err)
+	}
+	return listener.Addr().String(), listener, listenerFile, nil
+}
+
+// InheritedWorkerListener returns the already-bound loopback listener passed
+// by the gateway. Holding the socket open across exec eliminates the
+// choose-port/close/bind race during worker startup.
+func InheritedWorkerListener() (net.Listener, error) {
+	value := strings.TrimSpace(os.Getenv(workerListenerFDEnv))
+	if value == "" {
+		return nil, nil
+	}
+	fd, err := strconv.Atoi(value)
+	if err != nil || fd < 3 {
+		return nil, fmt.Errorf("invalid inherited runtime worker listener fd %q", value)
+	}
+	file := os.NewFile(uintptr(fd), "gonvex-runtime-worker-listener")
+	if file == nil {
+		return nil, fmt.Errorf("open inherited runtime worker listener fd %d", fd)
+	}
+	listener, err := net.FileListener(file)
+	_ = file.Close()
+	if err != nil {
+		return nil, fmt.Errorf("inherit runtime worker listener: %w", err)
+	}
+	return listener, nil
 }
 
 func workerEnvironment(base []string, additions []string, address string) []string {
@@ -372,6 +407,7 @@ func workerEnvironment(base []string, additions []string, address string) []stri
 	}
 	values["GONVEX_ADDR"] = address
 	values["GONVEX_RUNTIME_WORKER"] = "1"
+	values[workerListenerFDEnv] = "3"
 
 	environment := make([]string, 0, len(values))
 	for name, value := range values {
