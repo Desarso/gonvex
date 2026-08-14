@@ -29,6 +29,8 @@ import (
 )
 
 type Server struct {
+	ctx                   context.Context
+	cancel                context.CancelFunc
 	config                config.Config
 	runtime               *runtime.Runtime
 	app                   *gonvex.App
@@ -100,6 +102,7 @@ type Server struct {
 	syncPrunedAt          map[string]time.Time
 	runtimeHydrationMu    sync.RWMutex
 	runtimeHydrationFails map[string]struct{}
+	runtimeHydrationReady atomic.Bool
 }
 
 func New(cfg config.Config) *Server {
@@ -122,12 +125,17 @@ func NewRequiredWithApp(cfg config.Config, app *gonvex.App) (*Server, error) {
 	}
 	ephemeral := &valkeyEphemeralBackend{client: client}
 	cache := newRowsCacheWithClient(client, cfg.RowsCacheTTL)
-	return newServer(cfg, app, ephemeral, cache), nil
+	server := newServer(cfg, app, ephemeral, cache)
+	server.scheduler.store = newValkeyScheduledJobStore(client)
+	server.scheduler.start(server.ctx)
+	go server.hydrateRuntimeState(server.ctx)
+	return server, nil
 }
 
 func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	var cache *rowsCache
 	var ephemeral ephemeralBackend
+	var schedulerStore scheduledJobStore
 	if strings.TrimSpace(cfg.ValkeyURL) != "" {
 		client, err := newValkeyClient(cfg.ValkeyURL)
 		if err != nil {
@@ -135,16 +143,28 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		} else {
 			cache = newRowsCacheWithClient(client, cfg.RowsCacheTTL)
 			ephemeral = &valkeyEphemeralBackend{client: client}
+			schedulerStore = newValkeyScheduledJobStore(client)
 		}
 	}
-	return newServer(cfg, app, ephemeral, cache)
+	server := newServer(cfg, app, ephemeral, cache)
+	// Lightweight constructors are used by isolated tests and local embedding.
+	// They do not require the production readiness barrier or distributed
+	// scheduler lease.
+	server.runtimeHydrationReady.Store(true)
+	server.scheduler.store = schedulerStore
+	server.scheduler.start(server.ctx)
+	go server.hydrateRuntimeState(server.ctx)
+	return server
 }
 
 func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, cache *rowsCache) *Server {
 	if app == nil {
 		app = gonvex.NewApp()
 	}
+	serverContext, cancel := context.WithCancel(context.Background())
 	server := &Server{
+		ctx:     serverContext,
+		cancel:  cancel,
 		config:  cfg,
 		runtime: runtime.NewWithLoader(projectbundle.NewLoader(cfg.PluginCacheDir, cfg.GonvexModuleRoot)),
 		app:     app,
@@ -193,9 +213,7 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 	}
 	server.loadConfiguredTenantDatabases()
 	server.startLandlordMigrations()
-	server.scheduler.start(context.Background())
-	server.startLoadSampler(context.Background())
-	go server.hydrateRuntimeState(context.Background())
+	server.startLoadSampler(server.ctx)
 	return server
 }
 
@@ -363,12 +381,13 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	failedManifests := s.runtimeHydrationFailureCount()
+	hydrated := s.runtimeHydrationReady.Load()
 	status := http.StatusOK
-	if failedManifests > 0 {
+	if !hydrated || failedManifests > 0 {
 		status = http.StatusServiceUnavailable
 	}
 	writeJSON(w, status, map[string]any{
-		"ok":          failedManifests == 0,
+		"ok":          hydrated && failedManifests == 0,
 		"time":        time.Now().UTC().Format(time.RFC3339Nano),
 		"postgresSet": s.config.PostgresURL != "",
 		"valkeySet":   s.config.ValkeyURL != "",
@@ -379,7 +398,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			"issues": s.googleAuthReadinessIssues(),
 		},
 		"runtimeManifests": map[string]any{
-			"ready":          failedManifests == 0,
+			"ready":          hydrated && failedManifests == 0,
 			"failedProjects": failedManifests,
 		},
 	})
@@ -1148,6 +1167,7 @@ func registeredTenantForAlias(tenants map[string]tenantTarget, projectID string,
 }
 
 func (s *Server) hydrateRuntimeState(ctx context.Context) {
+	defer s.runtimeHydrationReady.Store(true)
 	// Resolve every project's database + key from the control plane so
 	// databaseURLForProject works right after a restart, without waiting for
 	// something to list projects first.

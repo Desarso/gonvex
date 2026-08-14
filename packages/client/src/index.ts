@@ -91,6 +91,12 @@ type SyncSubscription = {
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
   rows: JsonValue[];
   cursor?: SyncCursor;
+  // Keep the newest cursor seen in the current epoch even while an integrity
+  // reset clears `cursor` to force a fresh snapshot. Without this floor, a
+  // delayed pre-reset snapshot can be accepted during the reopen and become
+  // current again.
+  cursorFloor?: SyncCursor;
+  retiredEpochs: Set<string>;
   keyField: string;
   mode?: "eager" | "progressive";
   truncated?: boolean;
@@ -120,6 +126,25 @@ type SyncSubscription = {
    */
   persistedRows?: JsonValue[];
 };
+
+function syncCursorIsStale(subscription: SyncSubscription, cursor: SyncCursor) {
+  if (subscription.retiredEpochs.has(cursor.epoch)) return true;
+  const floor = subscription.cursorFloor;
+  return floor?.epoch === cursor.epoch && cursor.revision < floor.revision;
+}
+
+function raiseSyncCursorFloor(subscription: SyncSubscription, cursor: SyncCursor) {
+  if (subscription.cursorFloor && subscription.cursorFloor.epoch !== cursor.epoch) {
+    subscription.retiredEpochs.add(subscription.cursorFloor.epoch);
+  }
+  if (
+    !subscription.cursorFloor
+    || subscription.cursorFloor.epoch !== cursor.epoch
+    || cursor.revision > subscription.cursorFloor.revision
+  ) {
+    subscription.cursorFloor = cursor;
+  }
+}
 type OneShotQuery = {
   id: string;
   path: string;
@@ -1015,6 +1040,7 @@ export class GonvexClient {
       hashes: {},
       forceFullIntegrity: false,
       verificationGeneration: 0,
+      retiredEpochs: new Set(),
     };
     this.syncSubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => this.handleSyncMessage(subscription, message as SyncMessage));
@@ -1081,6 +1107,7 @@ export class GonvexClient {
       // subscriptions advance through deltas; accepting an unsolicited or
       // delayed snapshot could roll a verified collection back to old rows.
       if (!subscription.opening) return;
+      if (syncCursorIsStale(subscription, message.cursor)) return;
       if (subscription.cursor
         && message.cursor.epoch === subscription.cursor.epoch
         && message.cursor.revision < subscription.cursor.revision) return;
@@ -1089,6 +1116,7 @@ export class GonvexClient {
       subscription.isUpToDate = false;
       subscription.opening = false;
       subscription.cursor = message.cursor;
+      raiseSyncCursorFloor(subscription, message.cursor);
       subscription.keyField = message.key;
       subscription.mode = message.mode;
       subscription.truncated = undefined;
@@ -1115,6 +1143,7 @@ export class GonvexClient {
       return;
     }
     if (message.type === "sync.delta") {
+      if (syncCursorIsStale(subscription, message.cursor)) return;
       if (subscription.cursor && (
         message.cursor.epoch !== subscription.cursor.epoch
         || message.cursor.revision < subscription.cursor.revision
@@ -1127,6 +1156,7 @@ export class GonvexClient {
       subscription.verificationGeneration += 1;
       subscription.isUpToDate = false;
       subscription.cursor = message.cursor;
+      raiseSyncCursorFloor(subscription, message.cursor);
       subscription.rows = applySyncDelta(
         subscription.rows,
         subscription.keyField,
@@ -1217,6 +1247,7 @@ export class GonvexClient {
       if (!subscription.cursor || (
         message.cursor.epoch !== subscription.cursor.epoch
         || message.cursor.revision < subscription.cursor.revision
+        || syncCursorIsStale(subscription, message.cursor)
       )) return;
       const generation = ++subscription.verificationGeneration;
       if (!message.digest && this.serverCapabilities.syncIntegrity === 1) {
@@ -1292,6 +1323,7 @@ export class GonvexClient {
     subscription.isUpToDate = true;
     subscription.opening = false;
     subscription.cursor = message.cursor;
+    raiseSyncCursorFloor(subscription, message.cursor);
     subscription.mode = message.mode ?? subscription.mode;
     subscription.truncated = message.truncated;
     subscription.integrityDigest = verifiedDigest;
@@ -1323,6 +1355,7 @@ export class GonvexClient {
         || subscription.integrityEpoch !== cursor.epoch
       ) continue;
       subscription.cursor = { ...cursor, revision };
+      raiseSyncCursorFloor(subscription, subscription.cursor);
       this.scheduleSyncWatermarkPersistence(subscription);
     }
   }
@@ -1419,6 +1452,7 @@ export class GonvexClient {
         // the ready that follows this resume must not rewrite them.
         subscription.persistedRows = cached.rows;
         subscription.cursor = cached.cursor;
+        raiseSyncCursorFloor(subscription, cached.cursor);
         subscription.keyField = cached.keyField;
         subscription.mode = cached.mode;
         subscription.truncated = cached.truncated;
@@ -2213,6 +2247,8 @@ export class GonvexClient {
       subscription.integrityEpoch = undefined;
       subscription.forceFullIntegrity = false;
       subscription.cursor = undefined;
+      subscription.cursorFloor = undefined;
+      subscription.retiredEpochs.clear();
       subscription.lastMessage = undefined;
       subscription.cacheReadGeneration = undefined;
       subscription.opening = false;

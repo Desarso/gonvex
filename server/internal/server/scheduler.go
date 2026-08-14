@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -27,6 +29,7 @@ type scheduledExecutor func(ctx context.Context, job scheduledJob) error
 // ctx.Scheduler, or a single fire of a registered cron.
 type scheduledJob struct {
 	ID           string
+	ClaimToken   string
 	ProjectID    string
 	TenantID     string
 	FunctionPath string
@@ -71,9 +74,10 @@ type schedulerRun struct {
 	Error      string  `json:"error,omitempty"`
 }
 
-// scheduler is the in-process job runner that powers the dashboard's
-// scheduler/concurrency panels. Jobs and crons live in memory; crons are
-// re-derived from each project's compiled app on every manifest sync.
+// scheduler is the in-process executor and metrics collector. With a store
+// configured, queued jobs are durable in Valkey and safely claimable by any
+// replica; only derived cron registrations and dashboard metrics live in this
+// process. Crons are re-derived from each compiled app on manifest sync.
 type scheduler struct {
 	mu            sync.Mutex
 	now           func() time.Time
@@ -94,7 +98,9 @@ type scheduler struct {
 	buckets map[int64]*schedulerBucket
 	recent  []schedulerRun
 
-	wake chan struct{}
+	wake  chan struct{}
+	store scheduledJobStore
+	owner string
 }
 
 func newScheduler(exec scheduledExecutor) *scheduler {
@@ -106,6 +112,7 @@ func newScheduler(exec scheduledExecutor) *scheduler {
 		crons:         map[string]*cronRegistration{},
 		buckets:       map[int64]*schedulerBucket{},
 		wake:          make(chan struct{}, 1),
+		owner:         newScheduledJobID("runtime_"),
 	}
 }
 
@@ -144,7 +151,7 @@ func (h schedulerHandle) RunAt(at time.Time, functionPath string, args any) (str
 		Args:         raw,
 		RunAt:        at,
 		ScheduledFor: at,
-	}), nil
+	})
 }
 
 func encodeSchedulerArgs(args any) (json.RawMessage, error) {
@@ -157,17 +164,28 @@ func encodeSchedulerArgs(args any) (json.RawMessage, error) {
 	return json.Marshal(args)
 }
 
-func (sc *scheduler) enqueue(job scheduledJob) string {
+func (sc *scheduler) enqueue(job scheduledJob) (string, error) {
 	sc.mu.Lock()
-	sc.idSeq++
-	job.ID = fmt.Sprintf("job_%d", sc.idSeq)
+	if job.ID == "" {
+		job.ID = newScheduledJobID("job_")
+	}
 	if job.ScheduledFor.IsZero() {
 		job.ScheduledFor = job.RunAt
 	}
-	sc.jobs = append(sc.jobs, job)
+	store := sc.store
+	if store == nil {
+		sc.jobs = append(sc.jobs, job)
+	}
 	sc.mu.Unlock()
+	if store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := store.enqueue(ctx, job); err != nil {
+			return "", fmt.Errorf("persist scheduled job: %w", err)
+		}
+	}
 	sc.signal()
-	return job.ID
+	return job.ID, nil
 }
 
 func (sc *scheduler) signal() {
@@ -267,6 +285,44 @@ func (sc *scheduler) dispatchDue(ctx context.Context) {
 	now := sc.now()
 	sc.mu.Lock()
 	sc.observeRunningLocked(now)
+	if sc.store != nil {
+		store := sc.store
+		available := sc.maxConcurrent - sc.running
+		var cronJobs []scheduledJob
+		for _, reg := range sc.crons {
+			if reg.NextRun.IsZero() || reg.NextRun.After(now) {
+				continue
+			}
+			job := sc.cronJobLocked(reg, now)
+			job.ID = deterministicCronJobID(job)
+			cronJobs = append(cronJobs, job)
+		}
+		sc.mu.Unlock()
+
+		for _, job := range cronJobs {
+			if err := store.enqueue(ctx, job); err != nil {
+				sc.logger.Warn("persist due cron", "project", job.ProjectID, "tenant", job.TenantID, "cron", job.CronName, "error", err)
+				continue
+			}
+			sc.advancePersistedCron(job, now)
+		}
+		if available <= 0 {
+			return
+		}
+		claimed, err := store.claimDue(ctx, now, available, sc.owner)
+		if err != nil {
+			sc.logger.Warn("claim scheduled jobs", "error", err)
+			return
+		}
+		sc.mu.Lock()
+		sc.running += len(claimed)
+		sc.queued = 0
+		sc.mu.Unlock()
+		for _, job := range claimed {
+			go sc.execute(ctx, job, now)
+		}
+		return
+	}
 
 	var due []scheduledJob
 	remaining := sc.jobs[:0]
@@ -312,6 +368,27 @@ func (sc *scheduler) dispatchDue(ctx context.Context) {
 	}
 }
 
+func deterministicCronJobID(job scheduledJob) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		job.ProjectID,
+		job.TenantID,
+		job.CronName,
+		job.ScheduledFor.UTC().Format(time.RFC3339Nano),
+	}, "\x00")))
+	return "cron_" + hex.EncodeToString(sum[:16])
+}
+
+func (sc *scheduler) advancePersistedCron(job scheduledJob, now time.Time) {
+	key := job.ProjectID + "\x00" + job.TenantID + "\x00" + job.CronName
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	reg := sc.crons[key]
+	if reg == nil || !reg.NextRun.Equal(job.ScheduledFor) {
+		return
+	}
+	reg.NextRun = reg.Schedule.Next(now)
+}
+
 func (sc *scheduler) cronJobLocked(reg *cronRegistration, now time.Time) scheduledJob {
 	sc.idSeq++
 	return scheduledJob{
@@ -331,12 +408,74 @@ func (sc *scheduler) execute(ctx context.Context, job scheduledJob, dispatchedAt
 	if lag < 0 {
 		lag = 0
 	}
+	jobContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopRenewing := make(chan struct{})
+	renewed := make(chan struct{})
+	if sc.store != nil {
+		go func() {
+			defer close(renewed)
+			ticker := time.NewTicker(scheduledJobLease / 3)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopRenewing:
+					return
+				case <-jobContext.Done():
+					return
+				case <-ticker.C:
+					alive, err := sc.store.renew(jobContext, job.ID, job.ClaimToken)
+					if err != nil {
+						if jobContext.Err() != nil {
+							return
+						}
+						cancel()
+						return
+					}
+					if !alive {
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	} else {
+		close(renewed)
+	}
+
 	start := sc.now()
 	var err error
 	if sc.exec != nil {
-		err = sc.exec(ctx, job)
+		err = sc.exec(jobContext, job)
 	} else {
 		err = fmt.Errorf("scheduler executor not configured")
+	}
+	if sc.store != nil {
+		close(stopRenewing)
+		<-renewed
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err != nil {
+			_ = sc.store.release(cleanupContext, job.ID, job.ClaimToken)
+		} else {
+			var cleanupErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				cleanupErr = sc.store.complete(cleanupContext, job.ID, job.ClaimToken)
+				if cleanupErr == nil {
+					break
+				}
+				if attempt < 2 {
+					select {
+					case <-cleanupContext.Done():
+					case <-time.After(time.Duration(attempt+1) * 100 * time.Millisecond):
+					}
+				}
+			}
+			if cleanupErr != nil {
+				err = fmt.Errorf("complete scheduled job %s: %w", job.ID, cleanupErr)
+				sc.logger.Warn("complete scheduled job", "job", job.ID, "error", cleanupErr)
+			}
+		}
+		cleanupCancel()
 	}
 	duration := sc.now().Sub(start)
 	sc.finish(job, lag, duration, err)

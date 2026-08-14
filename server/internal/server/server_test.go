@@ -55,6 +55,17 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestHealthWaitsForRuntimeManifestHydration(t *testing.T) {
+	server := newServer(config.Config{}, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d before manifest hydration, got %d", http.StatusServiceUnavailable, recorder.Code)
+	}
+}
+
 func TestHealthFailsWhenPersistedRuntimeManifestCannotHydrate(t *testing.T) {
 	server := New(config.Config{})
 	server.markRuntimeHydrationFailure("project-with-broken-manifest")

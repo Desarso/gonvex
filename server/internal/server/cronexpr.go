@@ -12,7 +12,9 @@ type cronSchedule interface {
 	Next(after time.Time) time.Time
 }
 
-// intervalSchedule fires every interval, measured from the previous fire.
+// intervalSchedule fires on stable wall-clock boundaries. Distributed runtime
+// replicas therefore derive the same occurrence timestamp and enqueue the same
+// deterministic cron job ID during a rolling overlap.
 type intervalSchedule struct {
 	interval time.Duration
 }
@@ -21,7 +23,9 @@ func (s intervalSchedule) Next(after time.Time) time.Time {
 	if s.interval <= 0 {
 		return time.Time{}
 	}
-	return after.Add(s.interval)
+	intervalNanos := s.interval.Nanoseconds()
+	nextNanos := (after.UnixNano()/intervalNanos + 1) * intervalNanos
+	return time.Unix(0, nextNanos).In(after.Location())
 }
 
 // exprSchedule is a parsed standard 5-field cron expression

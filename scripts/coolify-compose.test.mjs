@@ -6,98 +6,30 @@ import test from "node:test";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const composePath = path.join(root, "docker-compose.coolify.yml");
-const environment = {
-  ...process.env,
-  GONVEX_POSTGRES_PASSWORD: "compose-postgres",
-  GONVEX_DASHBOARD_PASSWORD: "compose-dashboard",
-  GONVEX_DASHBOARD_SESSION_SECRET: "compose-session",
-  GONVEX_GOOGLE_LOGIN_ENABLED: "true",
-  GONVEX_DASHBOARD_AUTH_PROJECT_ID: "dashboard-auth-test",
-  GONVEX_BOOTSTRAP_EMAIL: "malek.gabriel33@gmail.com",
-  SERVICE_FQDN_GONVEXRUNTIME_8080: "https://gonvex-unified-dev.example.test",
-  SERVICE_FQDN_GONVEXDASHBOARD_80: "https://gonvex-unified-dashboard-dev.example.test",
-  SERVICE_URL_GONVEXRUNTIME_8080: "https://gonvex-unified-dev.example.test",
-  GONVEX_EXTERNAL_URL: "https://gonvex-unified-dev.example.test",
-};
 
 function resolvedCompose() {
   const result = spawnSync(
     "docker",
     ["compose", "-f", composePath, "config", "--format", "json"],
-    { cwd: root, env: environment, encoding: "utf8" },
+    {
+      cwd: root,
+      env: { ...process.env, GONVEX_POSTGRES_PASSWORD: "compose-postgres" },
+      encoding: "utf8",
+    },
   );
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
 }
 
-test("Coolify stack combines the current Gonvex resources without a permission sidecar", () => {
+test("Coolify Compose is a stable data plane only", () => {
   const compose = resolvedCompose();
-  assert.deepEqual(Object.keys(compose.services).sort(), [
-    "gonvex-dashboard",
-    "gonvex-postgres",
-    "gonvex-runtime",
-    "gonvex-valkey",
-  ]);
-
+  assert.deepEqual(Object.keys(compose.services).sort(), ["gonvex-postgres", "gonvex-valkey"]);
+  assert.equal(compose.services["gonvex-runtime"], undefined);
+  assert.equal(compose.services["gonvex-dashboard"], undefined);
+  assert.equal(compose.volumes["gonvex-runtime-data"], undefined);
+  assert.ok(compose.volumes["gonvex-postgres-data"]);
+  assert.ok(compose.volumes["gonvex-valkey-data"]);
   for (const service of Object.values(compose.services)) {
-    assert.equal(service.ports, undefined, "Coolify services must not publish host ports");
+    assert.equal(service.ports, undefined, "durable dependencies must not publish host ports");
   }
-
-  assert.equal(compose.services["gonvex-postgres"].expose, undefined);
-  assert.equal(compose.services["gonvex-valkey"].expose, undefined);
-});
-
-test("runtime is health-gated on private durable dependencies", () => {
-  const { services, volumes } = resolvedCompose();
-  const runtime = services["gonvex-runtime"];
-  const dashboard = services["gonvex-dashboard"];
-
-  assert.equal(
-    runtime.environment.DATABASE_URL,
-    "postgres://gonvex:compose-postgres@gonvex-postgres:5432/gonvex?sslmode=disable",
-  );
-  assert.equal(runtime.environment.VALKEY_URL, "redis://gonvex-valkey:6379/0");
-  assert.equal(
-    runtime.environment.GONVEX_PUBLIC_URL,
-    "https://gonvex-unified-dev.example.test",
-  );
-  assert.equal(runtime.working_dir, "/var/lib/gonvex");
-  assert.equal(runtime.user, "0:0");
-  assert.deepEqual(runtime.cap_drop, ["ALL"]);
-  assert.equal(runtime.environment.GONVEX_REQUIRE_AUTH, "true");
-  assert.equal(runtime.depends_on["gonvex-postgres"].condition, "service_healthy");
-  assert.equal(runtime.depends_on["gonvex-valkey"].condition, "service_healthy");
-  assert.equal(services["gonvex-runtime-permissions"], undefined);
-  assert.equal(dashboard.depends_on["gonvex-runtime"].condition, "service_healthy");
-  assert.equal(dashboard.environment.GONVEX_RUNTIME_URL, "http://gonvex-runtime:8080");
-  assert.equal(dashboard.environment.DASHBOARD_AUTH_ENABLED, "true");
-  assert.equal(
-    dashboard.build.args.VITE_GONVEX_DASHBOARD_AUTH_PROJECT_ID,
-    "dashboard-auth-test",
-  );
-  assert.equal(dashboard.build.args.VITE_GONVEX_GOOGLE_LOGIN_ENABLED, "true");
-  assert.equal(
-    dashboard.build.args.VITE_GONVEX_ALLOWED_EMAILS,
-    "malek.gabriel33@gmail.com",
-  );
-  assert.equal(dashboard.read_only, true);
-
-  assert.ok(volumes["gonvex-postgres-data"]);
-  assert.ok(volumes["gonvex-valkey-data"]);
-  assert.ok(volumes["gonvex-runtime-data"]);
-});
-
-test("Coolify magic URLs expose only runtime and dashboard", () => {
-  const compose = resolvedCompose();
-  const runtime = compose.services["gonvex-runtime"];
-  const dashboard = compose.services["gonvex-dashboard"];
-
-  assert.equal(
-    runtime.environment.GONVEX_PUBLIC_URL,
-    "https://gonvex-unified-dev.example.test",
-  );
-  assert.equal(
-    dashboard.environment.SERVICE_FQDN_GONVEXDASHBOARD_80,
-    "https://gonvex-unified-dashboard-dev.example.test",
-  );
 });
