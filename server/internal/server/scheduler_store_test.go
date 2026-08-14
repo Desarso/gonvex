@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -128,6 +130,58 @@ func TestValkeyScheduledJobsPrioritizeOneShotsOverCronBacklog(t *testing.T) {
 	if len(claimed) != 1 || claimed[0].ID != oneShot.ID {
 		t.Fatalf("one-shot job was starved behind cron backlog: %#v", claimed)
 	}
+}
+
+func TestValkeyScheduledJobsPrioritizeOneShotBeyondLegacyScanWindow(t *testing.T) {
+	_, client, store := testScheduledJobStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	pipe := client.Pipeline()
+	for index := 0; index < 4100; index++ {
+		job := scheduledJob{
+			ID:           fmt.Sprintf("legacy-cron-%04d", index),
+			ProjectID:    "project-a",
+			TenantID:     "tenant-a",
+			FunctionPath: "tasks.generateDueRecurringTasks",
+			RunAt:        now.Add(-time.Hour),
+			ScheduledFor: now.Add(-time.Hour),
+			CronName:     "generate due recurring tasks",
+		}
+		payload, err := json.Marshal(payloadForScheduledJob(job))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe.HSet(ctx, scheduledJobPayloadsKey, job.ID, payload)
+		pipe.ZAdd(ctx, scheduledJobsKey, redis.Z{Score: float64(job.RunAt.UnixMilli()), Member: job.ID})
+	}
+	oneShot := scheduledJob{
+		ID: "legacy-job-assistant", ProjectID: "project-a", TenantID: "tenant-a",
+		FunctionPath: "assistant.processThread", RunAt: now, ScheduledFor: now,
+	}
+	payload, err := json.Marshal(payloadForScheduledJob(oneShot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipe.HSet(ctx, scheduledJobPayloadsKey, oneShot.ID, payload)
+	pipe.ZAdd(ctx, scheduledJobsKey, redis.Z{Score: float64(oneShot.RunAt.UnixMilli()), Member: oneShot.ID})
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 3; attempt++ {
+		claimed, err := store.claimDue(ctx, now, 1, "runtime-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(claimed) == 0 {
+			continue
+		}
+		if claimed[0].ID != oneShot.ID {
+			t.Fatalf("legacy cron was claimed while a one-shot remained queued: %#v", claimed)
+		}
+		return
+	}
+	t.Fatal("one-shot was not found while migrating the legacy cron backlog")
 }
 
 func TestValkeyScheduledJobCompletionRequiresClaimOwnership(t *testing.T) {

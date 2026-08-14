@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/config"
 )
 
@@ -150,6 +152,50 @@ func TestProjectTenantHydrationIsCachedAndShared(t *testing.T) {
 	})
 	if got := hydrations.Load(); got != 1 {
 		t.Fatalf("expected hydration result to remain cached, got %d runs", got)
+	}
+}
+
+func TestProjectTenantHydrationErrorIsReturnedAndNotCached(t *testing.T) {
+	server := &Server{tenantHydrationAt: map[string]time.Time{}}
+	var hydrations atomic.Int32
+	wantErr := errors.New("tenant discovery failed")
+	hydrate := func(context.Context, string) error {
+		hydrations.Add(1)
+		return wantErr
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		err := server.hydrateProjectTenantDatabasesWithError(context.Background(), "project-a", hydrate)
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("hydration error = %v, want %v", err, wantErr)
+		}
+	}
+	if got := hydrations.Load(); got != 2 {
+		t.Fatalf("failed hydration was cached; got %d runs, want 2", got)
+	}
+}
+
+func TestProjectSyncStorageCheckReturnsTenantDiscoveryFailure(t *testing.T) {
+	server := newServer(config.Config{PostgresURL: "://invalid"}, nil, nil, nil)
+	t.Cleanup(func() {
+		server.cancel()
+		server.tenantStores.Close()
+	})
+	desired := manifest.Schema{TenantTables: map[string]manifest.Table{
+		"tasks": {Columns: map[string]manifest.Column{
+			"id": {Type: "string", PrimaryKey: true},
+		}},
+	}}
+	definitions := map[string]manifest.SyncDefinition{
+		"tasks": {Table: "tasks", Key: "id", Columns: []string{"id"}},
+	}
+
+	installed, err := server.projectSyncStorageInstalled(context.Background(), "project-a", desired, definitions)
+	if err == nil {
+		t.Fatal("tenant discovery failure was treated as installed sync storage")
+	}
+	if installed {
+		t.Fatal("tenant discovery failure returned installed=true")
 	}
 }
 
