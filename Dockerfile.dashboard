@@ -36,4 +36,6 @@ COPY apps/dashboard/server.mjs ./server.mjs
 COPY --from=build /app/apps/dashboard/dist /usr/share/nginx/html
 USER node
 EXPOSE 80
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=30 \
+  CMD wget -qO- http://127.0.0.1/healthz | grep -qx ok
 CMD ["node", "server.mjs"]

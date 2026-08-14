@@ -50,4 +50,6 @@ ENV GONVEX_ADDR=0.0.0.0:8080 \
 WORKDIR /var/lib/gonvex
 USER 0:0
 EXPOSE 8080
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=30 \
+  CMD bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080; printf "GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3; grep -q "200 OK" <&3'
 CMD ["gonvex-runtime"]

@@ -81,11 +81,22 @@ as part of this upgrade.
 ### Whagons Coolify deployments
 
 The `Runtime regression` GitHub workflow deploys every successful push to `main`
-only to the Whagons development Coolify service stack. It updates both remote Git
-build contexts in that stack to the exact commit SHA, writes that SHA to
-`GONVEX_RUNTIME_VERSION`, verifies the saved Compose definition, and then queues
-the development deployment. Pull requests run the same regression suite but never
-deploy.
+only to the Whagons development runtime and dashboard Applications. Both use the
+Dockerfile build pack, have `/healthz` checks, and are pinned to the exact tested
+commit. Coolify starts the replacement, waits for readiness, moves traffic, and
+then stops the previous container. The runtime deploy finishes before the dashboard
+deploy starts. Pull requests run the same regression suite but never deploy.
+
+Postgres and Valkey stay in the separate `docker-compose.coolify.yml` data-plane
+service. Runtime releases therefore do not restart either durable dependency.
+`/var/lib/gonvex` is intentionally container-local: source manifests live in
+Postgres, data files rehydrate from object storage, and sharing Go plugin caches
+between two runtime binaries would make a rolling overlap unsafe.
+
+The runtime does not report healthy until every persisted project manifest has
+hydrated. During the short rolling overlap, a PostgreSQL advisory lock elects one
+scheduler leader so HTTP and WebSocket traffic can use both containers without
+executing cron jobs twice.
 
 Production is a separate promotion lane. After the development release passes the
 Whagons Monitor verification at `https://monitor.whagons.com/releases`, promote
@@ -93,10 +104,12 @@ that exact Gonvex SHA to the production branch and deploy only the production
 Coolify service. A push to `main` must never update the production runtime
 directly.
 
-The workflow reads `COOLIFY_API_URL` and `COOLIFY_API_TOKEN` from the protected
-`gonvex-runtime` GitHub environment. Keep the token there rather than in the
-repository. The exact SHA pin makes the running source auditable and avoids a
-moving-branch race during a rebuild.
+The workflow reads `COOLIFY_API_URL`, `COOLIFY_RUNTIME_APPLICATION_UUID`, and
+`COOLIFY_DASHBOARD_APPLICATION_UUID` as protected environment variables and
+`COOLIFY_API_TOKEN` as a protected secret in the `gonvex-runtime` GitHub
+environment. Keep the token there rather than in the repository. The exact SHA
+pin makes the running source auditable and avoids a moving-branch race during a
+rebuild.
 
 Project-key authentication for project environment variables first shipped in
 runtime v0.1.9 (source commit `c49ef6a`). The exact response

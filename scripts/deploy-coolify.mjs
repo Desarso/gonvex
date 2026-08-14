@@ -1,80 +1,25 @@
-import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
-const gonvexContextPattern = /https:\/\/github\.com\/Whagons-International\/gonvex\.git#(?:[0-9a-f]{40}|main)/g;
-const runtimeVersionPattern = /^(\s{6}GONVEX_RUNTIME_VERSION:)\s*.*$/m;
+const finishedDeploymentStates = new Set(["finished", "success"]);
+const failedDeploymentStates = new Set([
+  "cancelled",
+  "cancelled-by-user",
+  "failed",
+  "error",
+]);
 
-function composeServiceBlock(compose, serviceName) {
-  const lines = compose.split(/\r?\n/);
-  const header = `  ${serviceName}:`;
-  const start = lines.findIndex((line) => line.trimEnd() === header);
-  if (start < 0) {
-    throw new Error(`saved Compose does not contain the ${serviceName} service`);
-  }
-  let end = lines.length;
-  for (let index = start + 1; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (/^\S/.test(line) || /^  \S[^:]*:\s*(?:#.*)?$/.test(line)) {
-      end = index;
-      break;
-    }
-  }
-  return lines.slice(start, end).join("\n");
-}
-
-export function stampRuntimeCompose(compose, sha) {
-  if (!/^[0-9a-f]{40}$/.test(sha)) {
-    throw new Error("GONVEX_DEPLOY_SHA must be a full lowercase Git commit SHA");
-  }
-
-  const contexts = compose.match(gonvexContextPattern) ?? [];
-  if (contexts.length !== 2) {
-    throw new Error(`expected exactly 2 Gonvex Git build contexts, found ${contexts.length}`);
-  }
-
-  let stamped = compose.replace(gonvexContextPattern, `https://github.com/Whagons-International/gonvex.git#${sha}`);
-  if (runtimeVersionPattern.test(stamped)) {
-    stamped = stamped.replace(runtimeVersionPattern, `$1 '${sha}'`);
-  } else {
-    const runtimeEnvironment = /(^  gonvex-runtime:\n[\s\S]*?^    environment:\n)/m;
-    if (!runtimeEnvironment.test(stamped)) {
-      throw new Error("could not find the gonvex-runtime environment block");
-    }
-    stamped = stamped.replace(runtimeEnvironment, `$1      GONVEX_RUNTIME_VERSION: '${sha}'\n`);
-  }
-  return stamped;
-}
-
-export function verifyRuntimeCompose(compose, sha) {
-  const context = `https://github.com/Whagons-International/gonvex.git#${sha}`;
-  const contextCount = compose.split(context).length - 1;
-  if (contextCount !== 2) {
-    throw new Error(`saved Compose does not contain exactly 2 build contexts for ${sha}`);
-  }
-  const runtime = composeServiceBlock(compose, "gonvex-runtime");
-  const runtimeVersion = new RegExp(
-    `^\\s{6}GONVEX_RUNTIME_VERSION:\\s*["']?${sha}["']?\\s*$`,
-    "m",
-  );
-  if (!runtimeVersion.test(runtime)) {
-    throw new Error(`saved Compose does not identify runtime ${sha}`);
-  }
-  if (compose.includes("gonvex-runtime-permissions:")) {
-    throw new Error("saved Compose must not depend on a runtime permission initializer");
-  }
-  if (!/^\s{4}working_dir:\s*\/var\/lib\/gonvex\s*$/m.test(runtime)) {
-    throw new Error("saved Compose must use the writable Gonvex runtime directory");
-  }
-  if (!/^\s{4}user:\s*["']?0:0["']?\s*$/m.test(runtime)) {
-    throw new Error("saved Compose must run the Gonvex runtime as container root");
-  }
-  if (!/^\s{4}cap_drop:\s*\n\s{6}-\s*ALL\s*$/m.test(runtime)) {
-    throw new Error("saved Compose must drop all runtime Linux capabilities");
-  }
-  if (!/^\s{6}GONVEX_REQUIRE_AUTH:\s*["']?true["']?\s*$/m.test(runtime)) {
-    throw new Error("saved shared dev Compose must enforce project authentication");
-  }
-}
+export const applicationContracts = Object.freeze({
+  runtime: Object.freeze({
+    dockerfile: "/Dockerfile.runtime",
+    port: "8080",
+    healthPath: "/healthz",
+  }),
+  dashboard: Object.freeze({
+    dockerfile: "/Dockerfile.dashboard",
+    port: "80",
+    healthPath: "/healthz",
+  }),
+});
 
 function requiredEnvironment(name) {
   const value = process.env[name]?.trim();
@@ -105,39 +50,102 @@ async function coolifyRequest(base, token, path, init = {}) {
   return text ? JSON.parse(text) : undefined;
 }
 
-export async function deployCoolifyServices({ base, token, serviceUUIDs, sha, composeTemplate }) {
-  if (typeof composeTemplate !== "string" || composeTemplate.trim() === "") {
-    throw new Error("canonical Coolify Compose template is required");
+export function verifyRollingApplication(application, role, sha) {
+  const contract = applicationContracts[role];
+  if (!contract) throw new Error(`unknown Gonvex application role ${role}`);
+  if (application?.build_pack !== "dockerfile") {
+    throw new Error(`${role} must use the Dockerfile build pack`);
   }
-  const compose = stampRuntimeCompose(composeTemplate, sha);
-  verifyRuntimeCompose(compose, sha);
+  if (application.dockerfile_location !== contract.dockerfile) {
+    throw new Error(`${role} must build ${contract.dockerfile}`);
+  }
+  if (String(application.ports_exposes) !== contract.port) {
+    throw new Error(`${role} must expose container port ${contract.port}`);
+  }
+  if (application.git_commit_sha !== sha) {
+    throw new Error(`${role} is not pinned to ${sha}`);
+  }
+  if (!application.health_check_enabled || application.health_check_path !== contract.healthPath) {
+    throw new Error(`${role} must use the ${contract.healthPath} readiness check`);
+  }
+  if (String(application.ports_mappings ?? "").trim() !== "") {
+    throw new Error(`${role} must not publish a host port; rolling replicas need the same container port`);
+  }
+}
 
-  for (const uuid of serviceUUIDs) {
-    const service = await coolifyRequest(base, token, `/services/${encodeURIComponent(uuid)}`);
-    if (typeof service?.docker_compose_raw !== "string") {
-      throw new Error(`Coolify service ${uuid} did not return docker_compose_raw`);
+async function waitForDeployment(base, token, deploymentUUID, options = {}) {
+  const timeoutMS = options.timeoutMS ?? 12 * 60 * 1000;
+  const intervalMS = options.intervalMS ?? 5_000;
+  const deadline = Date.now() + timeoutMS;
+  while (Date.now() < deadline) {
+    const deployment = await coolifyRequest(
+      base,
+      token,
+      `/deployments/${encodeURIComponent(deploymentUUID)}`,
+    );
+    const status = String(deployment?.status ?? "").toLowerCase();
+    if (finishedDeploymentStates.has(status)) return deployment;
+    if (failedDeploymentStates.has(status)) {
+      throw new Error(`Coolify deployment ${deploymentUUID} ended as ${status}`);
     }
+    await new Promise((resolve) => setTimeout(resolve, intervalMS));
+  }
+  throw new Error(`Coolify deployment ${deploymentUUID} did not finish before timeout`);
+}
+
+export async function deployRollingApplications({
+  base,
+  token,
+  applications,
+  sha,
+  waitOptions,
+}) {
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    throw new Error("GONVEX_DEPLOY_SHA must be a full lowercase Git commit SHA");
+  }
+  for (const role of ["runtime", "dashboard"]) {
+    if (!applications?.[role]) throw new Error(`missing Coolify ${role} application UUID`);
   }
 
-  for (const uuid of serviceUUIDs) {
-    await coolifyRequest(base, token, `/services/${encodeURIComponent(uuid)}`, {
+  // Runtime first: the dashboard may proxy session/API traffic to it. Each
+  // application is pinned to the exact tested commit before Coolify starts the
+  // health-first rolling replacement.
+  for (const role of ["runtime", "dashboard"]) {
+    const uuid = applications[role];
+    const contract = applicationContracts[role];
+    await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`, {
       method: "PATCH",
-      body: JSON.stringify({ docker_compose_raw: Buffer.from(compose).toString("base64") }),
+      body: JSON.stringify({
+        git_commit_sha: sha,
+        health_check_enabled: true,
+        health_check_path: contract.healthPath,
+        health_check_port: contract.port,
+        health_check_method: "GET",
+        health_check_return_code: 200,
+        health_check_interval: 10,
+        health_check_timeout: 5,
+        health_check_retries: 30,
+        health_check_start_period: role === "runtime" ? 30 : 15,
+      }),
     });
-  }
+    const saved = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
+    verifyRollingApplication(saved, role, sha);
 
-  for (const uuid of serviceUUIDs) {
-    const service = await coolifyRequest(base, token, `/services/${encodeURIComponent(uuid)}`);
-    verifyRuntimeCompose(service.docker_compose_raw, sha);
-  }
-
-  for (const uuid of serviceUUIDs) {
-    await coolifyRequest(
+    const queued = await coolifyRequest(
       base,
       token,
       `/deploy?uuid=${encodeURIComponent(uuid)}&force=true`,
     );
-    console.log(`Queued Coolify service ${uuid} at ${sha}`);
+    const deploymentUUID = queued?.deployments?.[0]?.deployment_uuid;
+    if (!deploymentUUID) throw new Error(`Coolify did not return a ${role} deployment UUID`);
+    await waitForDeployment(base, token, deploymentUUID, waitOptions);
+
+    const deployed = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
+    verifyRollingApplication(deployed, role, sha);
+    if (deployed.status !== "running:healthy") {
+      throw new Error(`${role} ended deployment as ${deployed.status ?? "unknown"}`);
+    }
+    console.log(`Deployed rolling Gonvex ${role} ${uuid} at ${sha}`);
   }
 }
 
@@ -145,16 +153,15 @@ async function main() {
   const base = apiBase(requiredEnvironment("COOLIFY_API_URL"));
   const token = requiredEnvironment("COOLIFY_API_TOKEN");
   const sha = requiredEnvironment("GONVEX_DEPLOY_SHA");
-  const serviceUUIDs = requiredEnvironment("COOLIFY_SERVICE_UUIDS")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  if (serviceUUIDs.length === 0) throw new Error("COOLIFY_SERVICE_UUIDS is empty");
-  const composeTemplate = await readFile(
-    new URL("../docker-compose.coolify.yml", import.meta.url),
-    "utf8",
-  );
-  await deployCoolifyServices({ base, token, serviceUUIDs, sha, composeTemplate });
+  await deployRollingApplications({
+    base,
+    token,
+    sha,
+    applications: {
+      runtime: requiredEnvironment("COOLIFY_RUNTIME_APPLICATION_UUID"),
+      dashboard: requiredEnvironment("COOLIFY_DASHBOARD_APPLICATION_UUID"),
+    },
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

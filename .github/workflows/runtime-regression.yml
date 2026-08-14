@@ -61,12 +61,13 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-      - name: Deploy exact runtime commit to Coolify
+      - name: Roll exact runtime and dashboard commit in Coolify
         run: node scripts/deploy-coolify.mjs
         env:
           COOLIFY_API_URL: ${{ vars.COOLIFY_API_URL }}
           COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
           # Main is the development release lane. Production is promoted only
           # after the corresponding Monitor verification passes.
-          COOLIFY_SERVICE_UUIDS: ftfmdopfb3j0e88s0crl6iny
+          COOLIFY_RUNTIME_APPLICATION_UUID: ${{ vars.COOLIFY_RUNTIME_APPLICATION_UUID }}
+          COOLIFY_DASHBOARD_APPLICATION_UUID: ${{ vars.COOLIFY_DASHBOARD_APPLICATION_UUID }}
           GONVEX_DEPLOY_SHA: ${{ github.sha }}
