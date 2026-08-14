@@ -36,13 +36,13 @@ func Register(app *gonvex.App) {
     UpdateTask,
     gonvex.Writes("tasks").Columns("title", "done"),
     gonvex.Writes("taskAudit"),
-    gonvex.OptimisticMutation("tasks").RowIDArg("taskId").FieldsArg("updates"),
+    gonvex.OptimisticMutation(` + "` tasks `" + `).RowIDArg(` + "` taskId `" + `).FieldsArg(` + "` updates `" + `),
   )
   app.Query(
     "tasks.preview",
     PreviewTasks,
     gonvex.Writes("queryWrites"),
-    gonvex.OptimisticProjection("tasks").Key("_id").ResultPath("page"),
+    gonvex.OptimisticProjection(` + "` tasks `" + `).Key(` + "` _id `" + `).ResultPath(` + "` page `" + `),
   )
   app.Action("tasks.reindex", ReindexTasks, gonvex.Writes("actionWrites"))
   app.Sync(

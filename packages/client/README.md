@@ -214,9 +214,11 @@ Optimistic mutations are persisted before transport even in fail-closed mode,
 so a process reload cannot expose an older cached row while an accepted write
 is still waiting for its authoritative subscription update.
 
-Pass `{ offline: "queue" }` to durably accept a transport failure and replay
-the same idempotency key after reconnect. Deterministic server errors are never
-queued and always roll the optimistic entity overlay back.
+Pass `{ offline: "queue" }` to a mutation to durably accept a transport failure
+and replay the same idempotency key after reconnect, whether or not that
+mutation also declares optimistic UI metadata. Actions are never queued.
+Deterministic server errors are never queued and always roll an optimistic
+entity overlay back when one exists.
 
 Live queries keep last-good data at the React layer (`useQueryResult`) and
 resubscribe after reconnect. Call `client.retryQuery(ref, args)` to force a

@@ -1208,7 +1208,6 @@ export class GonvexClient {
       subscription.integrityDigest = undefined;
       subscription.integrityRows = undefined;
       subscription.integrityEpoch = undefined;
-      this.acknowledgeOptimisticSource(subscription.key, message.mutationIds);
       const snapshot: SyncMessage = {
         type: "sync.snapshot",
         id: subscription.id,
@@ -1224,6 +1223,7 @@ export class GonvexClient {
       };
       subscription.lastMessage = snapshot;
       this.emitSyncMessage(subscription, snapshot);
+      this.acknowledgeOptimisticSource(subscription.key, message.mutationIds);
       this.persistSyncDelta(subscription, message.upserts ?? [], message.deleted ?? []);
       return;
     }
@@ -1796,6 +1796,10 @@ export class GonvexClient {
     if (Number.isFinite(nextAttemptAt) && nextAttemptAt > Date.now()) {
       this.scheduleOutboxDrain(nextAttemptAt - Date.now());
     }
+    // If this scope was installed after the socket authenticated, no reconnect
+    // or new enqueue may occur to wake the queue. The await inside drainOutbox
+    // yields until this restore promise resolves, then safely resumes it.
+    void this.drainOutbox();
   }
 
   private addOptimisticMutation(mutationId: string, patches: OptimisticPatch[], accepted = false) {
@@ -1804,14 +1808,16 @@ export class GonvexClient {
     this.overlay.add(mutationId, patches, { accepted });
   }
 
-  private settleOptimisticMutation(mutationId: string) {
-    for (const settledId of this.overlay.accept(mutationId)) void this.ackOptimisticMutation(settledId);
+  private async settleOptimisticMutation(mutationId: string) {
+    await Promise.all(
+      this.overlay.accept(mutationId).map((settledId) => this.ackOptimisticMutation(settledId)),
+    );
   }
 
-  private rejectOptimisticMutation(mutationId: string) {
+  private async rejectOptimisticMutation(mutationId: string) {
     this.optimisticMutationIds.delete(mutationId);
     this.overlay.reject(mutationId);
-    void this.ackOptimisticMutation(mutationId);
+    await this.ackOptimisticMutation(mutationId);
   }
 
   private async ackOptimisticMutation(mutationId: string) {
@@ -1837,6 +1843,7 @@ export class GonvexClient {
         if (!entry) return;
         if (scope !== this.outboxScope) return;
         await this.mutationOutbox.markInflight(entry.id);
+        if (scope !== this.outboxScope) return;
         try {
           await this.call(
             "mutation",
@@ -1846,10 +1853,14 @@ export class GonvexClient {
             entry.idempotencyKey,
           );
           await this.mutationOutbox.markCommitted(entry.id);
-          this.settleOptimisticMutation(entry.idempotencyKey);
+          if ((entry.patches?.length ?? 0) > 0) {
+            await this.settleOptimisticMutation(entry.idempotencyKey);
+          } else {
+            await this.ackOptimisticMutation(entry.idempotencyKey);
+          }
         } catch (error) {
           if (error instanceof GonvexClientError && error.code === "server") {
-            this.rejectOptimisticMutation(entry.idempotencyKey);
+            await this.rejectOptimisticMutation(entry.idempotencyKey);
             continue;
           }
           await this.mutationOutbox.fail(entry.id, mutationErrorMessage(error));
@@ -1885,7 +1896,7 @@ export class GonvexClient {
     const mutationId = randomID();
     const patches = options.optimistic
       ?? optimisticPatchesFromReference(ref.optimistic?.mutation, args);
-    if (patches.length === 0) {
+    if (patches.length === 0 && options.offline !== "queue") {
       return this.call<T>(
         "mutation",
         ref,
@@ -1920,7 +1931,7 @@ export class GonvexClient {
       state: "inflight",
     });
     if (scope !== this.outboxScope) {
-      await this.mutationOutbox.fail(entry.id, "Authentication scope changed before mutation send");
+      await this.mutationOutbox.ack(entry.id);
       throw new GonvexClientError(
         `Authentication changed before mutation ${ref.path} could be sent.`,
         { code: "disconnected", path: ref.path, operation: "mutation" },
@@ -1937,14 +1948,18 @@ export class GonvexClient {
         mutationId,
       );
       await this.mutationOutbox.markCommitted(entry.id);
-      this.settleOptimisticMutation(mutationId);
+      if (patches.length > 0) {
+        await this.settleOptimisticMutation(mutationId);
+      } else {
+        await this.ackOptimisticMutation(mutationId);
+      }
       return result;
     } catch (error: unknown) {
       if (isQueueableMutationError(error) && options.offline === "queue") {
         await this.mutationOutbox.fail(entry.id, mutationErrorMessage(error));
         return { status: "queued", mutationId };
       }
-      this.rejectOptimisticMutation(mutationId);
+      await this.rejectOptimisticMutation(mutationId);
       throw error;
     }
   }
@@ -3009,7 +3024,7 @@ function sameAuthTokenIdentity(left: GonvexClientAuth, right: GonvexClientAuth) 
 
 function mutationOutboxScope(url: string, auth: GonvexClientAuth) {
   const identity = authIdentityKey(auth);
-  if (identity) return `identity\u0000${identity}`;
+  if (identity) return ["identity", url, identity].join("\u0000");
   // Anonymous/dev-auth clients still need a stable namespace, but it must be
   // isolated by deployment and tenant. Once an authenticated identity is
   // installed, applyAuth switches away from this scope before restoring or

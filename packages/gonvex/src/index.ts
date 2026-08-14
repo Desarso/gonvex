@@ -1377,16 +1377,18 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
 
     if (option === "OptimisticMutation") {
       const entity = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
-      const definition: OptimisticMutationDefinition = { entity: entity ?? "", rowIdPath: [], fieldsPath: [] };
+      const definition: OptimisticMutationDefinition = { entity: entity?.trim() ?? "", rowIdPath: [], fieldsPath: [] };
       let cursor = closeParen + 1;
       while (cursor < callBody.length) {
         const chain = chainedGoMethod(callBody, cursor, "RowIDArg|FieldsArg");
         if (!chain) break;
         const chainClose = findClosingParen(callBody, chain.openParen);
         if (chainClose < 0) break;
-        const path = stringArgs(callBody.slice(chain.openParen + 1, chainClose))[0] ?? "";
-        if (chain.method === "RowIDArg") definition.rowIdPath = path.split(".").filter(Boolean);
-        if (chain.method === "FieldsArg") definition.fieldsPath = path.split(".").filter(Boolean);
+        const path = cleanParsedOptimisticPath(
+          stringArgs(callBody.slice(chain.openParen + 1, chainClose))[0] ?? "",
+        );
+        if (chain.method === "RowIDArg") definition.rowIdPath = path;
+        if (chain.method === "FieldsArg") definition.fieldsPath = path;
         cursor = chainClose + 1;
       }
       if (definition.entity) dependencies.optimisticMutation = definition;
@@ -1396,7 +1398,7 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
 
     if (option === "OptimisticProjection") {
       const entity = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
-      const definition: OptimisticProjectionDefinition = { entity: entity ?? "", key: "id", resultPath: [] };
+      const definition: OptimisticProjectionDefinition = { entity: entity?.trim() ?? "", key: "id", resultPath: [] };
       let cursor = closeParen + 1;
       while (cursor < callBody.length) {
         const chain = chainedGoMethod(callBody, cursor, "Key|ResultPath");
@@ -1404,8 +1406,8 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
         const chainClose = findClosingParen(callBody, chain.openParen);
         if (chainClose < 0) break;
         const value = stringArgs(callBody.slice(chain.openParen + 1, chainClose))[0] ?? "";
-        if (chain.method === "Key" && value) definition.key = value;
-        if (chain.method === "ResultPath") definition.resultPath = value.split(".").filter(Boolean);
+        if (chain.method === "Key" && value.trim()) definition.key = value.trim();
+        if (chain.method === "ResultPath") definition.resultPath = cleanParsedOptimisticPath(value);
         cursor = chainClose + 1;
       }
       if (definition.entity) dependencies.optimisticProjection = definition;
@@ -2550,7 +2552,23 @@ function columnType(kind: string) {
 }
 
 function stringArgs(input: string) {
-  return [...input.matchAll(/"([^"]+)"/g)].map((match) => match[1]!);
+  const values: string[] = [];
+  for (const match of input.matchAll(/"((?:\\.|[^"\\])*)"|`([^`]*)`/g)) {
+    if (match[2] !== undefined) {
+      values.push(match[2]);
+      continue;
+    }
+    try {
+      values.push(JSON.parse(`"${match[1] ?? ""}"`) as string);
+    } catch {
+      values.push(match[1] ?? "");
+    }
+  }
+  return values;
+}
+
+function cleanParsedOptimisticPath(value: string) {
+  return value.split(".").map((segment) => segment.trim()).filter(Boolean);
 }
 
 function valueFor(args: string[], key: string) {

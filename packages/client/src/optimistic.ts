@@ -177,7 +177,14 @@ export class OptimisticOverlay {
   acknowledgeMatching(source: string, entity: string, rows: readonly Row[], keyField: string): string[] {
     for (const entry of this.entries) {
       if (!entry.accepted || !entry.targets.has(source)) continue;
-      const patches = entry.patches.filter((patch) => patchEntity(patch) === entity);
+      const patches = entry.patches.filter((patch) => {
+        if (patchEntity(patch) !== entity) return false;
+        if (patch.op === "delete") return patchMatchesRows(patch, rows, keyField);
+        return rows.some((row) => {
+          const key = row[keyField];
+          return key !== null && key !== undefined && String(key) === patch.rowId;
+        });
+      });
       if (patches.length === 0 || !patches.every((patch) => patchMatchesRows(patch, rows, keyField))) continue;
       entry.acknowledgedTargets.add(source);
     }
@@ -248,7 +255,10 @@ export function optimisticPatchesFromReference(
 ): OptimisticPatch[] {
   if (!definition?.entity) return [];
   const record = isRecord(args) ? args : {};
-  const rowId = String(readPath(record, definition.rowIdPath) ?? record.id ?? record._id ?? "");
+  const configuredRowId = definition.rowIdPath.length > 0
+    ? readPath(record, definition.rowIdPath)
+    : undefined;
+  const rowId = String(configuredRowId ?? record.id ?? record._id ?? "");
   const nested = readPath(record, definition.fieldsPath);
   if (!rowId || !isRecord(nested)) return [];
   return [{

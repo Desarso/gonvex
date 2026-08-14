@@ -116,6 +116,18 @@ describe("DexieMutationOutbox", () => {
     await expect(outbox.count(otherScope)).resolves.toBe(1);
   });
 
+  it("keeps other scopes in the memory fallback mirror after a scoped load", async () => {
+    const outbox = createOutbox("scope-memory-mirror");
+    const otherScope = "project-a\u0000tenant-a\u0000user-b";
+    await outbox.enqueue({ scope, path: "tasks.update", args: { priority: 1 } });
+    await outbox.enqueue({ scope: otherScope, path: "tasks.update", args: { priority: 2 } });
+
+    await outbox.loadAll(scope);
+    await outbox.loadAll(otherScope);
+
+    expect((outbox as unknown as { memoryEntries: Map<number, unknown> }).memoryEntries.size).toBe(2);
+  });
+
   it("backs off failures exponentially and does not return them before they are ready", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(10_000);
     const outbox = createOutbox("backoff");

@@ -133,7 +133,7 @@ export class DexieMutationOutbox implements MutationOutbox {
         });
         if (changed) await database.entries.bulkPut(entries);
       });
-      this.replaceMemoryEntries(entries);
+      this.replaceMemoryEntriesForScope(scope, entries);
       if (changed) this.notify();
       return entries.map(cloneEntry);
     } catch {
@@ -299,11 +299,6 @@ export class DexieMutationOutbox implements MutationOutbox {
   private remember(entry: MutationOutboxEntry) {
     this.memoryEntries.set(entry.id, cloneEntry(entry));
     this.nextMemoryId = Math.max(this.nextMemoryId, entry.id + 1);
-  }
-
-  private replaceMemoryEntries(entries: MutationOutboxEntry[]) {
-    this.memoryEntries.clear();
-    for (const entry of entries) this.remember(entry);
   }
 
   private replaceMemoryEntriesForScope(scope: string, entries: MutationOutboxEntry[]) {

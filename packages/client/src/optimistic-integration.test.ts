@@ -182,6 +182,7 @@ describe("optimistic mutation integration", () => {
     });
 
     const call = sentMessages(socket).find((message) => message.type === "mutation.call");
+    const callsBeforeDelta = handler.mock.calls.length;
     socket.receive({
       type: "sync.delta",
       id: sentMessages(socket).find((message) => message.type === "sync.open").id,
@@ -196,6 +197,10 @@ describe("optimistic mutation integration", () => {
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Server confirmed" }],
     });
+    const deltaTitles = handler.mock.calls.slice(callsBeforeDelta).map(([message]) => (
+      message.result?.[0]?.title
+    ));
+    expect(deltaTitles).not.toContain("Server title");
     expect(client.optimisticOverlay.pendingFor(syncRef.path, "task-a")).toBe(false);
   });
 
@@ -217,6 +222,7 @@ describe("optimistic mutation integration", () => {
       result: [{ id: "task-a", title: "Optimistic title" }],
     });
 
+    const callsBeforeAcceptedDelta = handler.mock.calls.length;
     socket.receive({
       type: "sync.delta",
       id: sentMessages(socket).find((message) => message.type === "sync.open").id,
@@ -228,6 +234,10 @@ describe("optimistic mutation integration", () => {
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Server confirmed" }],
     });
+    const acceptedDeltaTitles = handler.mock.calls.slice(callsBeforeAcceptedDelta).map(([message]) => (
+      message.result?.[0]?.title
+    ));
+    expect(acceptedDeltaTitles).not.toContain("Server title");
     expect(client.optimisticOverlay.pendingFor(syncRef.path, "task-a")).toBe(false);
   });
 
@@ -413,6 +423,7 @@ describe("optimistic mutation integration", () => {
     socket.receive({ type: "mutation.error", id: call.id, path: mutationRef.path, error: "not allowed" });
 
     await expect(mutation).rejects.toMatchObject<GonvexClientError>({ code: "server" });
+    await expect(client.outboxCount()).resolves.toBe(0);
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Server title" }],
     });
@@ -459,6 +470,26 @@ describe("optimistic mutation integration", () => {
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Server confirmed" }],
     });
+  });
+
+  it("queues and acknowledges offline mutations without optimistic UI metadata", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
+    const mutation = client.mutation(mutationRef, { id: "task-a" }, { offline: "queue" });
+    await flushAsyncWork();
+    const firstSocket = latestSocket();
+    firstSocket.disconnect();
+    await expect(mutation).resolves.toMatchObject({ status: "queued" });
+    await expect(client.outboxCount()).resolves.toBe(1);
+
+    await vi.advanceTimersByTimeAsync(2_500);
+    const secondSocket = latestSocket();
+    secondSocket.open();
+    await flushAsyncWork();
+    const replay = sentMessages(secondSocket).find((message) => message.type === "mutation.call");
+    secondSocket.receive({ type: "mutation.result", id: replay.id, path: mutationRef.path, result: "ok" });
+    await flushAsyncWork();
+
+    await expect(client.outboxCount()).resolves.toBe(0);
   });
 
   it("rebuilds pending optimistic state from a persisted outbox after reload", async () => {
@@ -516,6 +547,13 @@ describe("optimistic mutation integration", () => {
     latestSocket().disconnect();
     await expect(queued).resolves.toMatchObject({ status: "queued" });
     firstClient.close();
+
+    const otherDeploymentClient = new GonvexClient(
+      "ws://other-runtime.test/ws",
+      clientOptions("user-a"),
+    );
+    await expect(otherDeploymentClient.outboxCount()).resolves.toBe(0);
+    otherDeploymentClient.close();
 
     const otherClient = new GonvexClient("ws://runtime.test/ws", clientOptions("user-b"));
     await expect(otherClient.outboxCount()).resolves.toBe(0);
