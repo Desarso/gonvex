@@ -184,6 +184,42 @@ func TestValkeyScheduledJobsPrioritizeOneShotBeyondLegacyScanWindow(t *testing.T
 	t.Fatal("one-shot was not found while migrating the legacy cron backlog")
 }
 
+func TestValkeyScheduledJobClaimScanIsBounded(t *testing.T) {
+	_, client, store := testScheduledJobStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	pipe := client.Pipeline()
+	for index := 0; index <= scheduledClaimPageLimit*64; index++ {
+		job := scheduledJob{
+			ID:           fmt.Sprintf("one-shot-%04d", index),
+			ProjectID:    "project-a",
+			FunctionPath: "tasks.run",
+			RunAt:        now,
+			ScheduledFor: now,
+		}
+		payload, err := json.Marshal(payloadForScheduledJob(job))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pipe.HSet(ctx, scheduledJobPayloadsKey, job.ID, payload)
+		pipe.ZAdd(ctx, scheduledOneShotJobsKey, redis.Z{Score: float64(now.UnixMilli()), Member: job.ID})
+		if index < scheduledClaimPageLimit*64 {
+			pipe.Set(ctx, scheduledJobClaimPrefix+job.ID, "another-runtime", scheduledJobLease)
+		}
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := store.claimDue(ctx, now, 1, "runtime-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("claim scan exceeded its page bound: %#v", claimed)
+	}
+}
+
 func TestValkeyScheduledJobCompletionRequiresClaimOwnership(t *testing.T) {
 	_, _, store := testScheduledJobStore(t)
 	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)

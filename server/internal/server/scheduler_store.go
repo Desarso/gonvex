@@ -26,6 +26,7 @@ const (
 	scheduledJobLease         = 5 * time.Minute
 	scheduledJobDedupeTTL     = 30 * 24 * time.Hour
 	scheduledLegacyBatchLimit = 4096
+	scheduledClaimPageLimit   = 16
 )
 
 type scheduledJobStore interface {
@@ -120,7 +121,9 @@ end
 local function claim_from(jobs_key)
   local offset = 0
   local page_size = math.max(limit * 8, 64)
-  while #claimed < limit * 3 do
+  local pages = 0
+  while #claimed < limit * 3 and pages < tonumber(ARGV[7]) do
+    pages = pages + 1
     local ids = redis.call('ZRANGEBYSCORE', jobs_key, '-inf', ARGV[1], 'LIMIT', offset, page_size)
     if #ids == 0 then
       return
@@ -207,6 +210,7 @@ func (store *valkeyScheduledJobStore) claimDue(ctx context.Context, now time.Tim
 		owner,
 		scheduledJobLease.Milliseconds(),
 		scheduledLegacyBatchLimit,
+		scheduledClaimPageLimit,
 	).Result()
 	if err != nil {
 		return nil, err
