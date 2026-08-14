@@ -1793,6 +1793,10 @@ export class GonvexClient {
       || scope !== this.outboxScope
     ) return;
     for (const entry of entries) {
+      if (entry.state === "committed" && (entry.patches?.length ?? 0) === 0) {
+        await this.mutationOutbox.ack(entry.id);
+        continue;
+      }
       this.optimisticOutboxEntryIds.set(entry.idempotencyKey, entry.id);
       this.addOptimisticMutation(entry.idempotencyKey, entry.patches ?? [], entry.state === "committed");
     }
@@ -2055,8 +2059,9 @@ export class GonvexClient {
    * Flush a queue of mutations in one `mutation.callMany` frame (queue order,
    * one websocket round trip). Each entry settles independently — a failed
    * call does not reject the batch — so offline queues can apply per-row
-   * outcomes. Falls back to sequential `mutation` calls on runtimes that do
-   * not advertise the `mutationBatch` capability.
+   * outcomes. Falls back to the standard per-mutation path when the runtime
+   * lacks batching or when a call needs generated/explicit optimism or durable
+   * offline queuing, so there is never a second mutation-state implementation.
    */
   async mutationMany<T = JsonValue>(
     calls: Array<{ ref: FunctionReference; args?: JsonValue }>,
@@ -2073,7 +2078,10 @@ export class GonvexClient {
           ? error
           : new GonvexClientError(String(error), { code: "server", path, operation: "mutation" }),
       }));
-    if (this.serverCapabilities.mutationBatch !== 1) {
+    const requiresStandardMutationPath = options.offline === "queue"
+      || options.optimistic !== undefined
+      || calls.some((call) => call.ref.optimistic?.mutation !== undefined);
+    if (this.serverCapabilities.mutationBatch !== 1 || requiresStandardMutationPath) {
       const outcomes: Array<{ status: "ok"; result: T } | { status: "error"; error: GonvexClientError }> = [];
       for (const call of calls) {
         outcomes.push(await settle(this.mutation<T>(call.ref, call.args ?? {}, options), call.ref.path));

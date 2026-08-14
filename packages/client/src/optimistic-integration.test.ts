@@ -77,6 +77,13 @@ const objectQueryRef: FunctionReference = {
   optimistic: { projection: { entity: "tasks", key: "id", resultPath: [] } },
 };
 const mutationRef: FunctionReference = { kind: "mutation", path: "tasks.update" };
+const generatedMutationRef: FunctionReference = {
+  kind: "mutation",
+  path: "tasks.generatedUpdate",
+  optimistic: {
+    mutation: { entity: "tasks", rowIdPath: ["taskId"], fieldsPath: ["updates"] },
+  },
+};
 const directive = {
   protocolVersion: 1 as const,
   scope: "scope-user-a-0000000000000000000000000000000000000000000000000000",
@@ -167,6 +174,33 @@ function optimisticEntityPatch(title: string) {
 }
 
 describe("optimistic mutation integration", () => {
+  it("routes optimistic mutationMany calls through the standard durable mutation path", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", capabilities: { mutationBatch: 1 } });
+
+    const outcomes = client.mutationMany([{ ref: generatedMutationRef, args: {
+      taskId: "task-a",
+      updates: { priorityId: "priority-high" },
+    } }]);
+    await flushAsyncWork();
+
+    expect(sentMessages(socket).some((message) => message.type === "mutation.callMany")).toBe(false);
+    const call = sentMessages(socket).find((message) => message.type === "mutation.call");
+    expect(call).toMatchObject({ path: generatedMutationRef.path });
+    socket.receive({
+      type: "mutation.result",
+      id: call.id,
+      path: generatedMutationRef.path,
+      result: "ok",
+    });
+
+    await expect(outcomes).resolves.toEqual([{ status: "ok", result: "ok" }]);
+    await expect(client.outboxCount()).resolves.toBe(0);
+  });
+
   it("emits optimistic rows before ack and keeps authoritative rows after settling", async () => {
     const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
     const handler = vi.fn();

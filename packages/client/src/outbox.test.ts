@@ -88,6 +88,25 @@ describe("DexieMutationOutbox", () => {
     await expect(outbox.nextReady(scope, Date.now())).resolves.toMatchObject({ id: blocked.id });
   });
 
+  it("does not let an accepted committed row block a newer write", async () => {
+    const outbox = createOutbox("committed-ordering");
+    const committed = await outbox.enqueue({
+      scope,
+      path: "tasks.update",
+      args: { value: 1 },
+      entityKeys: ["task:a"],
+    });
+    const pending = await outbox.enqueue({
+      scope,
+      path: "tasks.update",
+      args: { value: 2 },
+      entityKeys: ["task:a"],
+    });
+    await outbox.markCommitted(committed.id);
+
+    await expect(outbox.nextReady(scope, Date.now())).resolves.toMatchObject({ id: pending.id });
+  });
+
   it("removes acknowledged entries", async () => {
     const outbox = createOutbox("ack");
     const first = await outbox.enqueue({ scope, path: "tasks.create", args: { id: "a" } });
@@ -138,6 +157,27 @@ describe("DexieMutationOutbox", () => {
 
     await expect(outbox.count(scope)).resolves.toBe(0);
     await expect(outbox.count(otherScope)).resolves.toBe(1);
+  });
+
+  it("never resurrects an acknowledged row racing markCommitted", async () => {
+    const outbox = createOutbox("commit-ack-race");
+    const entry = await outbox.enqueue({ scope, path: "tasks.update", args: {} });
+
+    await Promise.all([outbox.markCommitted(entry.id), outbox.ack(entry.id)]);
+
+    await expect(outbox.count(scope)).resolves.toBe(0);
+  });
+
+  it("does not delete an entry enqueued after scoped clearing starts", async () => {
+    const outbox = createOutbox("clear-enqueue-race");
+    const oldEntry = await outbox.enqueue({ scope, path: "tasks.update", args: { value: 1 } });
+
+    const clearing = outbox.clear(scope);
+    const nextEntry = await outbox.enqueue({ scope, path: "tasks.update", args: { value: 2 } });
+    await clearing;
+
+    await expect(outbox.loadAll(scope)).resolves.toMatchObject([{ id: nextEntry.id }]);
+    await expect(outbox.loadAll(scope)).resolves.not.toContainEqual(expect.objectContaining({ id: oldEntry.id }));
   });
 
   it("backs off failures exponentially and does not return them before they are ready", async () => {

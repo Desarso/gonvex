@@ -182,10 +182,14 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
     try {
       const database = await this.open();
-      const entry = await database.entries.get(id);
-      if (!entry || entry.state === "committed") return;
-      const updated = { ...entry, state: "committed" as const };
-      await database.entries.put(updated);
+      let updated: MutationOutboxEntry | undefined;
+      await database.transaction("rw", database.entries, async () => {
+        const entry = await database.entries.get(id);
+        if (!entry || entry.state === "committed") return;
+        updated = { ...entry, state: "committed" as const };
+        await database.entries.put(updated);
+      });
+      if (!updated) return;
       this.remember(updated);
       this.notify();
     } catch {
@@ -242,12 +246,15 @@ export class DexieMutationOutbox implements MutationOutbox {
   }
 
   async clear(scope: string): Promise<void> {
+    // Snapshot ids synchronously. An enqueue that starts after clear must not
+    // be swallowed by a later scope-wide IndexedDB delete after open() yields.
+    const ids = this.sortedMemoryEntries(scope).map((entry) => entry.id);
     for (const [id, entry] of this.memoryEntries) {
       if (entry.scope === scope) this.memoryEntries.delete(id);
     }
-    if (!this.memoryOnly) {
+    if (!this.memoryOnly && ids.length > 0) {
       try {
-        await (await this.open()).entries.where("scope").equals(scope).delete();
+        await (await this.open()).entries.bulkDelete(ids);
       } catch {
         this.degradeToMemory();
       }
@@ -386,6 +393,10 @@ export function createMutationOutbox(options: MutationOutboxOptions = {}): Mutat
 function firstReady(entries: MutationOutboxEntry[], now: number) {
   const blockedEntityKeys = new Set<string>();
   for (const entry of entries) {
+    // The runtime already accepted committed entries. They remain only to
+    // protect stale cached projections until reconciliation and must not block
+    // a newer pending write to the same entity.
+    if (entry.state === "committed") continue;
     if (
       entry.state === "pending"
       && entry.nextAttemptAt <= now
