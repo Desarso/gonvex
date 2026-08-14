@@ -376,6 +376,7 @@ export class GonvexClient {
   private outboxReady: Promise<void>;
   private outboxScope = "";
   private outboxScopeGeneration = 0;
+  private readonly outboxEphemeralScope = randomID();
   private readonly unsubscribeOutbox: () => void;
   private readonly unsubscribeOverlay: () => void;
   private drainingOutbox = false;
@@ -679,6 +680,9 @@ export class GonvexClient {
 
   close() {
     this.manuallyClosed = true;
+    if (isEphemeralOutboxScope(this.outboxScope)) {
+      void this.mutationOutbox.clear(this.outboxScope);
+    }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
@@ -1761,9 +1765,10 @@ export class GonvexClient {
   }
 
   private activateOutboxScope(): Promise<void> {
-    const scope = mutationOutboxScope(this.url, this.auth);
+    const scope = mutationOutboxScope(this.url, this.auth, this.outboxEphemeralScope);
     if (scope === this.outboxScope) return this.outboxReady ?? Promise.resolve();
 
+    const previousScope = this.outboxScope;
     const generation = ++this.outboxScopeGeneration;
     // Pending state from the previous authenticated identity must disappear
     // from every live projection immediately. Its durable rows remain scoped
@@ -1771,6 +1776,9 @@ export class GonvexClient {
     for (const mutationId of this.optimisticMutationIds) this.overlay.reject(mutationId);
     this.optimisticMutationIds.clear();
     this.optimisticOutboxEntryIds.clear();
+    if (isEphemeralOutboxScope(previousScope)) {
+      void this.mutationOutbox.clear(previousScope);
+    }
     this.outboxScope = scope;
     const ready = this.restoreOutbox(scope, generation);
     this.outboxReady = ready;
@@ -1835,6 +1843,7 @@ export class GonvexClient {
       || !this.socket
       || this.socket.readyState !== WebSocket.OPEN
     ) return;
+    const drainScope = this.outboxScope;
     this.drainingOutbox = true;
     try {
       while (!this.manuallyClosed && this.socket?.readyState === WebSocket.OPEN) {
@@ -1870,6 +1879,9 @@ export class GonvexClient {
       }
     } finally {
       this.drainingOutbox = false;
+      if (!this.manuallyClosed && drainScope !== this.outboxScope) {
+        void this.drainOutbox();
+      }
     }
   }
 
@@ -3022,14 +3034,24 @@ function sameAuthTokenIdentity(left: GonvexClientAuth, right: GonvexClientAuth) 
   return leftIdentity !== "" && leftIdentity === rightIdentity;
 }
 
-function mutationOutboxScope(url: string, auth: GonvexClientAuth) {
+function mutationOutboxScope(url: string, auth: GonvexClientAuth, ephemeralScope: string) {
   const identity = authIdentityKey(auth);
   if (identity) return ["identity", url, identity].join("\u0000");
+  if (auth.token || auth.identity || auth.fetchToken) {
+    // Opaque tokens (or credentials installed before tenant selection) do not
+    // expose a stable user key. A per-client scope preserves current-session
+    // queue semantics without ever restoring those rows under another user.
+    return ["ephemeral-auth", url, ephemeralScope].join("\u0000");
+  }
   // Anonymous/dev-auth clients still need a stable namespace, but it must be
   // isolated by deployment and tenant. Once an authenticated identity is
   // installed, applyAuth switches away from this scope before restoring or
   // sending its durable mutations.
   return ["anonymous", url, auth.project ?? "", auth.tenant ?? ""].join("\u0000");
+}
+
+function isEphemeralOutboxScope(scope: string) {
+  return scope.startsWith("ephemeral-auth\u0000");
 }
 
 function queryCacheDirectiveFromAuthResult(result: JsonValue): QueryCacheDirective | undefined {

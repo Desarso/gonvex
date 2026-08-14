@@ -566,6 +566,33 @@ describe("optimistic mutation integration", () => {
     restoredClient.close();
   });
 
+  it("never restores opaque-token mutations without a provable identity", async () => {
+    vi.useRealTimers();
+    vi.stubGlobal("window", { setTimeout: globalThis.setTimeout });
+    const databaseName = `gonvex-optimistic-opaque-${crypto.randomUUID()}`;
+    const options = {
+      project: "project-a",
+      tenant: "tenant-a",
+      token: "opaque-user-token",
+      sync: false as const,
+      outbox: { databaseName },
+    };
+    const firstClient = new GonvexClient("ws://runtime.test/ws", options);
+    const queued = firstClient.mutation(mutationRef, { id: "task-a" }, {
+      optimistic: optimisticEntityPatch("Opaque session title"),
+      offline: "queue",
+    });
+    await waitForOutboxCount(firstClient, 1);
+    latestSocket().disconnect();
+    await expect(queued).resolves.toMatchObject({ status: "queued" });
+    firstClient.close();
+
+    const reloadedClient = new GonvexClient("ws://runtime.test/ws", options);
+    await expect(reloadedClient.outboxCount()).resolves.toBe(0);
+    expect(reloadedClient.optimisticOverlay.pendingFor("tasks", "task-a")).toBe(false);
+    reloadedClient.close();
+  });
+
   it("persists an online optimistic mutation before transport and restores it until reconciliation", async () => {
     vi.useRealTimers();
     vi.stubGlobal("window", { setTimeout: globalThis.setTimeout });

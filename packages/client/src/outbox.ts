@@ -47,6 +47,7 @@ export type MutationOutbox = {
   ack(id: number): Promise<void>;
   fail(id: number, error: string): Promise<void>;
   count(scope: string): Promise<number>;
+  clear(scope: string): Promise<void>;
   subscribe(listener: () => void): () => void;
 };
 
@@ -238,6 +239,20 @@ export class DexieMutationOutbox implements MutationOutbox {
       this.degradeToMemory();
       return this.sortedMemoryEntries(scope).length;
     }
+  }
+
+  async clear(scope: string): Promise<void> {
+    for (const [id, entry] of this.memoryEntries) {
+      if (entry.scope === scope) this.memoryEntries.delete(id);
+    }
+    if (!this.memoryOnly) {
+      try {
+        await (await this.open()).entries.where("scope").equals(scope).delete();
+      } catch {
+        this.degradeToMemory();
+      }
+    }
+    this.notify();
   }
 
   subscribe(listener: () => void): () => void {

@@ -128,6 +128,18 @@ describe("DexieMutationOutbox", () => {
     expect((outbox as unknown as { memoryEntries: Map<number, unknown> }).memoryEntries.size).toBe(2);
   });
 
+  it("clears only the requested scope", async () => {
+    const outbox = createOutbox("scope-clear");
+    const otherScope = "project-a\u0000tenant-a\u0000user-b";
+    await outbox.enqueue({ scope, path: "tasks.update", args: {} });
+    await outbox.enqueue({ scope: otherScope, path: "tasks.update", args: {} });
+
+    await outbox.clear(scope);
+
+    await expect(outbox.count(scope)).resolves.toBe(0);
+    await expect(outbox.count(otherScope)).resolves.toBe(1);
+  });
+
   it("backs off failures exponentially and does not return them before they are ready", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(10_000);
     const outbox = createOutbox("backoff");

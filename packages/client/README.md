@@ -142,9 +142,11 @@ in the mutation outbox and is re-applied to cached rows after reload. Outbox
 rows are isolated by project, tenant, and authenticated identity; an account
 switch removes the previous identity's overlay and can never replay its writes
 under the new session. Unscoped rows from the pre-isolation schema are removed
-during migration because their owner cannot be proven. For a complex projection
-that cannot be derived from one nested fields argument, callers can still
-provide explicit `optimistic` entity patches.
+during migration because their owner cannot be proven. If an opaque credential
+does not expose a stable identity (and no `identity` hint is supplied), its
+outbox is deliberately session-only rather than risking cross-user replay. For
+a complex projection that cannot be derived from one nested fields argument,
+callers can still provide explicit `optimistic` entity patches.
 
 ## Lightweight Error Tracking
 
