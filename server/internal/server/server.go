@@ -898,6 +898,11 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		bundleHash = next.Bundle.Hash
 	}
 	slog.Info("dev sync applying manifest", "project", next.Project, "functions", len(next.Functions), "bundleHash", bundleHash)
+	// The plugin loader may successfully dlopen a module and then reject its
+	// registration or fail to persist the manifest. Go cannot unload that module,
+	// so tell the permanent gateway to recycle this worker even on the resulting
+	// non-2xx response. Unsupervised/local embedding safely ignores the header.
+	w.Header().Set("X-Gonvex-Recycle-Worker", "1")
 	if err := s.syncRuntimeManifest(next); err != nil {
 		syncErr = err
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})

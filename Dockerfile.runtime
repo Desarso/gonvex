@@ -36,6 +36,7 @@ COPY --from=build /out/gonvex-runtime /usr/local/bin/gonvex-runtime
 # from object storage on miss, so an ephemeral dir also works (just slower on
 # first access after a redeploy).
 ENV GONVEX_ADDR=0.0.0.0:8080 \
+    GONVEX_RELOAD_SUPERVISOR=true \
     GONVEX_MODULE_ROOT=/src \
     GONVEX_PLUGIN_CACHE_DIR=/var/lib/gonvex/plugins \
     GONVEX_DATA_DIR=/var/lib/gonvex/data \
