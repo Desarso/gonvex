@@ -93,6 +93,25 @@ export function verifyRuntimeEnvironment(environment, sha) {
   if (environmentValue(environment, "GONVEX_RUNTIME_VERSION") !== sha) {
     throw new Error(`runtime application must advertise exact version ${sha}`);
   }
+  const buildTimeKeys = environment
+    ?.filter((entry) => entry?.is_buildtime === true && entry?.is_preview !== true)
+    .map((entry) => entry.key) ?? [];
+  if (buildTimeKeys.length > 0) {
+    throw new Error(`runtime secrets must not be build-time variables: ${buildTimeKeys.join(", ")}`);
+  }
+}
+
+export function verifyDashboardEnvironment(environment) {
+  const privateBuildTimeKeys = environment
+    ?.filter(
+      (entry) => entry?.is_buildtime === true
+        && entry?.is_preview !== true
+        && !String(entry?.key ?? "").startsWith("VITE_"),
+    )
+    .map((entry) => entry.key) ?? [];
+  if (privateBuildTimeKeys.length > 0) {
+    throw new Error(`dashboard private variables must not be build-time variables: ${privateBuildTimeKeys.join(", ")}`);
+  }
 }
 
 async function upsertApplicationEnvironment(base, token, uuid, key, value) {
@@ -168,14 +187,13 @@ export async function deployRollingApplications({
     });
     const saved = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
     verifyRollingApplication(saved, role, sha);
-    if (role === "runtime") {
-      const environment = await coolifyRequest(
-        base,
-        token,
-        `/applications/${encodeURIComponent(uuid)}/envs`,
-      );
-      verifyRuntimeEnvironment(environment, sha);
-    }
+    const savedEnvironment = await coolifyRequest(
+      base,
+      token,
+      `/applications/${encodeURIComponent(uuid)}/envs`,
+    );
+    if (role === "runtime") verifyRuntimeEnvironment(savedEnvironment, sha);
+    else verifyDashboardEnvironment(savedEnvironment);
 
     const queued = await coolifyRequest(
       base,
@@ -188,14 +206,13 @@ export async function deployRollingApplications({
 
     const deployed = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
     verifyRollingApplication(deployed, role, sha);
-    if (role === "runtime") {
-      const environment = await coolifyRequest(
-        base,
-        token,
-        `/applications/${encodeURIComponent(uuid)}/envs`,
-      );
-      verifyRuntimeEnvironment(environment, sha);
-    }
+    const deployedEnvironment = await coolifyRequest(
+      base,
+      token,
+      `/applications/${encodeURIComponent(uuid)}/envs`,
+    );
+    if (role === "runtime") verifyRuntimeEnvironment(deployedEnvironment, sha);
+    else verifyDashboardEnvironment(deployedEnvironment);
     if (deployed.status !== "running:healthy") {
       throw new Error(`${role} ended deployment as ${deployed.status ?? "unknown"}`);
     }

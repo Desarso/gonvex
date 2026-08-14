@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deployRollingApplications,
+  verifyDashboardEnvironment,
   verifyRollingApplication,
   verifyRuntimeEnvironment,
 } from "./deploy-coolify.mjs";
@@ -44,8 +45,8 @@ test("requires Dockerfile applications with readiness and no host port mapping",
 
 test("requires runtime auth enforcement and the exact advertised version", () => {
   const environment = [
-    { key: "GONVEX_REQUIRE_AUTH", real_value: "true" },
-    { key: "GONVEX_RUNTIME_VERSION", real_value: sha },
+    { key: "GONVEX_REQUIRE_AUTH", real_value: "true", is_buildtime: false },
+    { key: "GONVEX_RUNTIME_VERSION", real_value: sha, is_buildtime: false },
   ];
   assert.doesNotThrow(() => verifyRuntimeEnvironment(environment, sha));
   assert.throws(
@@ -55,6 +56,18 @@ test("requires runtime auth enforcement and the exact advertised version", () =>
   assert.throws(
     () => verifyRuntimeEnvironment(environment, "c".repeat(40)),
     /advertise exact version/,
+  );
+  assert.throws(
+    () => verifyRuntimeEnvironment([...environment, { key: "S3_SECRET_ACCESS_KEY", value: "secret", is_buildtime: true }], sha),
+    /must not be build-time variables/,
+  );
+  assert.doesNotThrow(() => verifyDashboardEnvironment([
+    { key: "VITE_GONVEX_URL", value: "https://runtime.test", is_buildtime: true },
+    { key: "DASHBOARD_SESSION_SECRET", value: "secret", is_buildtime: false },
+  ]));
+  assert.throws(
+    () => verifyDashboardEnvironment([{ key: "DASHBOARD_SESSION_SECRET", value: "secret", is_buildtime: true }]),
+    /private variables must not be build-time variables/,
   );
 });
 
@@ -66,8 +79,8 @@ test("pins and finishes runtime before deploying dashboard", async () => {
   };
   const environments = {
     "runtime-uuid": [
-      { key: "GONVEX_REQUIRE_AUTH", real_value: "true" },
-      { key: "GONVEX_RUNTIME_VERSION", real_value: "HEAD" },
+      { key: "GONVEX_REQUIRE_AUTH", real_value: "true", is_buildtime: false },
+      { key: "GONVEX_RUNTIME_VERSION", real_value: "HEAD", is_buildtime: false },
     ],
     "dashboard-uuid": [],
   };
