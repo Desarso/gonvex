@@ -1826,14 +1826,14 @@ export class GonvexClient {
     );
   }
 
-  private async rejectOptimisticMutation(mutationId: string) {
+  private async rejectOptimisticMutation(mutationId: string, knownEntryId?: number) {
     this.optimisticMutationIds.delete(mutationId);
     this.overlay.reject(mutationId);
-    await this.ackOptimisticMutation(mutationId);
+    await this.ackOptimisticMutation(mutationId, knownEntryId);
   }
 
-  private async ackOptimisticMutation(mutationId: string) {
-    const entryId = this.optimisticOutboxEntryIds.get(mutationId);
+  private async ackOptimisticMutation(mutationId: string, knownEntryId?: number) {
+    const entryId = knownEntryId ?? this.optimisticOutboxEntryIds.get(mutationId);
     this.optimisticOutboxEntryIds.delete(mutationId);
     this.optimisticMutationIds.delete(mutationId);
     if (entryId !== undefined) await this.mutationOutbox.ack(entryId);
@@ -1869,11 +1869,11 @@ export class GonvexClient {
           if ((entry.patches?.length ?? 0) > 0) {
             await this.settleOptimisticMutation(entry.idempotencyKey);
           } else {
-            await this.ackOptimisticMutation(entry.idempotencyKey);
+            await this.ackOptimisticMutation(entry.idempotencyKey, entry.id);
           }
         } catch (error) {
           if (error instanceof GonvexClientError && error.code === "server") {
-            await this.rejectOptimisticMutation(entry.idempotencyKey);
+            await this.rejectOptimisticMutation(entry.idempotencyKey, entry.id);
             continue;
           }
           await this.mutationOutbox.fail(entry.id, mutationErrorMessage(error));
@@ -1967,7 +1967,7 @@ export class GonvexClient {
       if (patches.length > 0) {
         await this.settleOptimisticMutation(mutationId);
       } else {
-        await this.ackOptimisticMutation(mutationId);
+        await this.ackOptimisticMutation(mutationId, entry.id);
       }
       return result;
     } catch (error: unknown) {
@@ -1975,7 +1975,7 @@ export class GonvexClient {
         await this.mutationOutbox.fail(entry.id, mutationErrorMessage(error));
         return { status: "queued", mutationId };
       }
-      await this.rejectOptimisticMutation(mutationId);
+      await this.rejectOptimisticMutation(mutationId, entry.id);
       throw error;
     }
   }

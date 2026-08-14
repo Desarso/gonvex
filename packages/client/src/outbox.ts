@@ -163,10 +163,14 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
     try {
       const database = await this.open();
-      const entry = await database.entries.get(id);
-      if (!entry || entry.state === "inflight") return;
-      const updated = { ...entry, state: "inflight" as const };
-      await database.entries.put(updated);
+      let updated: MutationOutboxEntry | undefined;
+      await database.transaction("rw", database.entries, async () => {
+        const entry = await database.entries.get(id);
+        if (!entry || entry.state === "inflight") return;
+        updated = { ...entry, state: "inflight" as const };
+        await database.entries.put(updated);
+      });
+      if (!updated) return;
       this.remember(updated);
       this.notify();
     } catch {
@@ -223,10 +227,14 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
     try {
       const database = await this.open();
-      const entry = await database.entries.get(id);
-      if (!entry) return;
-      const updated = failedEntry(entry, error, Date.now());
-      await database.entries.put(updated);
+      let updated: MutationOutboxEntry | undefined;
+      await database.transaction("rw", database.entries, async () => {
+        const entry = await database.entries.get(id);
+        if (!entry) return;
+        updated = failedEntry(entry, error, Date.now());
+        await database.entries.put(updated);
+      });
+      if (!updated) return;
       this.remember(updated);
       this.notify();
     } catch {
