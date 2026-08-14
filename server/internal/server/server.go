@@ -388,6 +388,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 	writeJSON(w, status, map[string]any{
 		"ok":          hydrated && failedManifests == 0,
+		"version":     runtimeBuildVersion(),
 		"time":        time.Now().UTC().Format(time.RFC3339Nano),
 		"postgresSet": s.config.PostgresURL != "",
 		"valkeySet":   s.config.ValkeyURL != "",

@@ -292,6 +292,65 @@ func TestSchedulerCompletesSuccessfulJobWhenParentContextIsCanceled(t *testing.T
 	}
 }
 
+func TestSchedulerCompletesFailedJobWithoutRetryingForever(t *testing.T) {
+	store := &schedulerFinalizationStore{}
+	sc := newScheduler(func(context.Context, scheduledJob) error {
+		return errors.New("authentication required")
+	})
+	sc.store = store
+	sc.running = 1
+	now := time.Now()
+	sc.execute(context.Background(), scheduledJob{
+		ID: "job-terminal-error", ClaimToken: "claim-1", FunctionPath: "assistant.processThread", RunAt: now, ScheduledFor: now,
+	}, now)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.completeCalls != 1 || store.releaseCalls != 0 {
+		t.Fatalf("complete calls = %d, release calls = %d", store.completeCalls, store.releaseCalls)
+	}
+	if snapshot := sc.snapshot(); snapshot.Completed != 0 || snapshot.Failed != 1 {
+		t.Fatalf("failed execution recorded as %+v", snapshot)
+	}
+}
+
+func TestSchedulerCompletesDeterministicFailureEvenWhenParentIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store := &schedulerFinalizationStore{}
+	sc := newScheduler(func(context.Context, scheduledJob) error {
+		cancel()
+		return errors.New("authentication required")
+	})
+	sc.store = store
+	sc.running = 1
+	now := time.Now()
+	sc.execute(ctx, scheduledJob{
+		ID: "job-terminal-race", ClaimToken: "claim-1", FunctionPath: "assistant.processThread", RunAt: now, ScheduledFor: now,
+	}, now)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.completeCalls != 1 || store.releaseCalls != 0 {
+		t.Fatalf("complete calls = %d, release calls = %d", store.completeCalls, store.releaseCalls)
+	}
+}
+
+func TestSchedulerReleasesInterruptedFailedJobForRecovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := &schedulerFinalizationStore{}
+	sc := newScheduler(func(ctx context.Context, _ scheduledJob) error { return ctx.Err() })
+	sc.store = store
+	sc.running = 1
+	now := time.Now()
+	sc.execute(ctx, scheduledJob{
+		ID: "job-interrupted", ClaimToken: "claim-1", FunctionPath: "tasks.run", RunAt: now, ScheduledFor: now,
+	}, now)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.completeCalls != 0 || store.releaseCalls != 1 {
+		t.Fatalf("complete calls = %d, release calls = %d", store.completeCalls, store.releaseCalls)
+	}
+}
+
 func TestSchedulerRetriesAndRecordsCompletionFailure(t *testing.T) {
 	store := &schedulerFinalizationStore{completeErr: errors.New("valkey unavailable")}
 	sc := newScheduler(func(context.Context, scheduledJob) error { return nil })

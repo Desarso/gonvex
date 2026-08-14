@@ -45,6 +45,7 @@ type registeredMutationResult struct {
 }
 
 func TestHealth(t *testing.T) {
+	t.Setenv("GONVEX_RUNTIME_VERSION", "0123456789abcdef0123456789abcdef01234567")
 	server := New(config.Config{PostgresURL: "postgres://example", S3Endpoint: "http://localhost:9000", S3Bucket: "gonvex-dev"})
 	recorder := httptest.NewRecorder()
 
@@ -52,6 +53,15 @@ func TestHealth(t *testing.T) {
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
+	}
+	var payload struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Version != "0123456789abcdef0123456789abcdef01234567" {
+		t.Fatalf("health version = %q", payload.Version)
 	}
 }
 

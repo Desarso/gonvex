@@ -99,18 +99,29 @@ leases, crash recovery, and deterministic cron-occurrence IDs. HTTP and WebSocke
 traffic can therefore use both rolling containers while any replica safely
 enqueues or executes scheduled work without losing or duplicating a cron fire.
 
-Production is a separate promotion lane. After the development release passes the
-Whagons Monitor verification at `https://monitor.whagons.com/releases`, promote
-that exact Gonvex SHA to the production branch and deploy only the production
-Coolify service. A push to `main` must never update the production runtime
-directly.
+Production is a separate, manually approved promotion lane. Run **Promote Gonvex
+production** with the full SHA that is already healthy in development and a
+verified backup or restore-point reference. The workflow requires successful CI,
+proves that both `main` and `production` can reach the candidate by fast-forward,
+and verifies the exact SHA reported by the development runtime. The protected
+`gonvex-production` environment pauses before any production secret or deploy step
+is released.
+
+After approval, the workflow rolls the independent production runtime first and
+the dashboard second. Postgres and Valkey remain in the production data-plane
+service and are not restarted. Public health checks must report the exact runtime
+SHA before the workflow fast-forwards `production` without force and creates the
+immutable `gonvex-prod-<sha>` release tag. A failed rollout leaves the production
+branch and release tag at the last verified deployment. A push to `main` never
+updates production directly.
 
 The workflow reads `COOLIFY_API_URL`, `COOLIFY_RUNTIME_APPLICATION_UUID`, and
 `COOLIFY_DASHBOARD_APPLICATION_UUID` as protected environment variables and
 `COOLIFY_API_TOKEN` as a protected secret in the `gonvex-runtime` GitHub
-environment. Keep the token there rather than in the repository. The exact SHA
-pin makes the running source auditable and avoids a moving-branch race during a
-rebuild.
+environment. Production uses the same variable names in the protected
+`gonvex-production` environment, pointed at the production Applications. Keep the
+token in a GitHub secret rather than in a workflow file. The exact SHA pin makes
+the running source auditable and avoids a moving-branch race during a rebuild.
 
 Project-key authentication for project environment variables first shipped in
 runtime v0.1.9 (source commit `c49ef6a`). The exact response

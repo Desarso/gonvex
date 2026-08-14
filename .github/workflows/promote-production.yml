@@ -1,0 +1,129 @@
+name: Promote Gonvex production
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA from main to promote
+        required: true
+        type: string
+      backup_reference:
+        description: Verified production backup or restore-point reference
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  checks: read
+
+concurrency:
+  group: gonvex-production-promotion
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate production candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: gonvex-runtime
+    outputs:
+      production_sha: ${{ steps.production.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve current production release
+        id: production
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/production" --jq .object.sha)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+      - name: Require a concrete backup reference
+        env:
+          BACKUP_REFERENCE: ${{ inputs.backup_reference }}
+        run: test -n "${BACKUP_REFERENCE//[[:space:]]/}"
+      - name: Verify CI, ancestry, and the exact healthy dev runtime
+        run: node scripts/release-gates.mjs candidate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GONVEX_DEPLOY_SHA: ${{ inputs.sha }}
+          GONVEX_PRODUCTION_SHA: ${{ steps.production.outputs.sha }}
+          COOLIFY_API_URL: ${{ vars.COOLIFY_API_URL }}
+          COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+          COOLIFY_RUNTIME_APPLICATION_UUID: ${{ vars.COOLIFY_RUNTIME_APPLICATION_UUID }}
+          COOLIFY_DASHBOARD_APPLICATION_UUID: ${{ vars.COOLIFY_DASHBOARD_APPLICATION_UUID }}
+          GONVEX_RUNTIME_HEALTH_URL: ${{ vars.GONVEX_RUNTIME_HEALTH_URL }}
+
+  deploy:
+    name: Approve and deploy production
+    needs: validate
+    runs-on: ubuntu-latest
+    # One ordered rollout can consume 24 minutes. Reserve the same budget for
+    # the compensating rollback if atomic release finalization is rejected.
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      checks: read
+    environment:
+      name: gonvex-production
+      url: ${{ vars.GONVEX_DASHBOARD_HEALTH_URL }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Roll runtime, then dashboard, at the approved commit
+        run: node scripts/deploy-coolify.mjs
+        env:
+          COOLIFY_API_URL: ${{ vars.COOLIFY_API_URL }}
+          COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+          COOLIFY_RUNTIME_APPLICATION_UUID: ${{ vars.COOLIFY_RUNTIME_APPLICATION_UUID }}
+          COOLIFY_DASHBOARD_APPLICATION_UUID: ${{ vars.COOLIFY_DASHBOARD_APPLICATION_UUID }}
+          GONVEX_DEPLOY_SHA: ${{ inputs.sha }}
+      - name: Verify public production endpoints and exact runtime version
+        run: node scripts/release-gates.mjs deployment
+        env:
+          GONVEX_DEPLOY_SHA: ${{ inputs.sha }}
+          GONVEX_RUNTIME_HEALTH_URL: ${{ vars.GONVEX_RUNTIME_HEALTH_URL }}
+          GONVEX_DASHBOARD_HEALTH_URL: ${{ vars.GONVEX_DASHBOARD_HEALTH_URL }}
+      - name: Atomically record the release branch and immutable tag
+        id: finalize
+        env:
+          DEPLOY_SHA: ${{ inputs.sha }}
+          BACKUP_REFERENCE: ${{ inputs.backup_reference }}
+        run: |
+          TAG="gonvex-prod-${DEPLOY_SHA:0:12}"
+          EXISTING=$(git ls-remote origin "refs/tags/$TAG^{}" | awk '{print $1}')
+          if [ -n "$EXISTING" ]; then
+            test "$EXISTING" = "$DEPLOY_SHA"
+            git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+          else
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git tag -a "$TAG" "$DEPLOY_SHA" -m "Gonvex production release $DEPLOY_SHA
+
+            Backup: $BACKUP_REFERENCE"
+          fi
+          for ATTEMPT in 1 2 3; do
+            if git push --atomic origin \
+              "refs/tags/$TAG" \
+              "$DEPLOY_SHA:refs/heads/production"; then
+              exit 0
+            fi
+            sleep $((ATTEMPT * 2))
+          done
+          exit 1
+      - name: Roll back deployment if release metadata cannot be finalized
+        if: ${{ failure() && steps.finalize.outcome != 'success' }}
+        run: node scripts/deploy-coolify.mjs
+        env:
+          COOLIFY_API_URL: ${{ vars.COOLIFY_API_URL }}
+          COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+          COOLIFY_RUNTIME_APPLICATION_UUID: ${{ vars.COOLIFY_RUNTIME_APPLICATION_UUID }}
+          COOLIFY_DASHBOARD_APPLICATION_UUID: ${{ vars.COOLIFY_DASHBOARD_APPLICATION_UUID }}
+          GONVEX_DEPLOY_SHA: ${{ needs.validate.outputs.production_sha }}
