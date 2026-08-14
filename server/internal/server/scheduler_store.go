@@ -95,27 +95,40 @@ func (store *valkeyScheduledJobStore) enqueue(ctx context.Context, job scheduled
 }
 
 var claimScheduledJobsScript = redis.NewScript(`
-local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+local limit = tonumber(ARGV[2])
+local page_size = math.max(limit * 4, 64)
+local max_pages = 16
+local offset = 0
 local claimed = {}
-for _, id in ipairs(ids) do
-  if #claimed >= tonumber(ARGV[2]) * 3 then
+for page = 1, max_pages do
+  local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', offset, page_size)
+  if #ids == 0 then
     break
   end
-  local claim_key = ARGV[3] .. id
-  if redis.call('EXISTS', claim_key) == 0 then
-    local fence = redis.call('INCR', KEYS[3])
-    local claim_token = ARGV[4] .. ':' .. tostring(fence)
-    redis.call('SET', claim_key, claim_token, 'PX', ARGV[5])
-    local payload = redis.call('HGET', KEYS[2], id)
-    if payload then
-      table.insert(claimed, id)
-      table.insert(claimed, payload)
-      table.insert(claimed, claim_token)
-    else
-      redis.call('ZREM', KEYS[1], id)
-      redis.call('DEL', claim_key)
+  for _, id in ipairs(ids) do
+    if #claimed >= limit * 3 then
+      break
+    end
+    local claim_key = ARGV[3] .. id
+    if redis.call('EXISTS', claim_key) == 0 then
+      local fence = redis.call('INCR', KEYS[3])
+      local claim_token = ARGV[4] .. ':' .. tostring(fence)
+      redis.call('SET', claim_key, claim_token, 'PX', ARGV[5])
+      local payload = redis.call('HGET', KEYS[2], id)
+      if payload then
+        table.insert(claimed, id)
+        table.insert(claimed, payload)
+        table.insert(claimed, claim_token)
+      else
+        redis.call('ZREM', KEYS[1], id)
+        redis.call('DEL', claim_key)
+      end
     end
   end
+  if #claimed >= limit * 3 or #ids < page_size then
+    break
+  end
+  offset = offset + #ids
 end
 return claimed
 `)
@@ -148,6 +161,9 @@ func (store *valkeyScheduledJobStore) claimDue(ctx context.Context, now time.Tim
 		claimToken := fmt.Sprint(values[index+2])
 		var payload scheduledJobPayload
 		if err := json.Unmarshal(raw, &payload); err != nil {
+			for _, claimed := range jobs {
+				_ = store.release(ctx, claimed.ID, claimed.ClaimToken)
+			}
 			_ = store.release(ctx, id, claimToken)
 			return nil, fmt.Errorf("decode scheduled job %s: %w", id, err)
 		}
@@ -179,6 +195,9 @@ func (store *valkeyScheduledJobStore) renew(ctx context.Context, id string, owne
 
 var completeScheduledJobScript = redis.NewScript(`
 if redis.call('GET', KEYS[3]) ~= ARGV[1] then
+  if redis.call('GET', KEYS[3]) == false and redis.call('HEXISTS', KEYS[2], ARGV[2]) == 0 and redis.call('ZSCORE', KEYS[1], ARGV[2]) == false then
+    return 1
+  end
   return 0
 end
 redis.call('ZREM', KEYS[1], ARGV[2])

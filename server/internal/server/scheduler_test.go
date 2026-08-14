@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,33 @@ import (
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 )
+
+type schedulerFinalizationStore struct {
+	mu            sync.Mutex
+	completeCalls int
+	releaseCalls  int
+	completeErr   error
+}
+
+func (store *schedulerFinalizationStore) enqueue(context.Context, scheduledJob) error { return nil }
+func (store *schedulerFinalizationStore) claimDue(context.Context, time.Time, int, string) ([]scheduledJob, error) {
+	return nil, nil
+}
+func (store *schedulerFinalizationStore) renew(context.Context, string, string) (bool, error) {
+	return true, nil
+}
+func (store *schedulerFinalizationStore) complete(context.Context, string, string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.completeCalls++
+	return store.completeErr
+}
+func (store *schedulerFinalizationStore) release(context.Context, string, string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.releaseCalls++
+	return nil
+}
 
 func TestParseCronExprNext(t *testing.T) {
 	mustParse := func(expr string) exprSchedule {
@@ -206,6 +234,48 @@ func TestSchedulerHandleEncodesArgs(t *testing.T) {
 	defer mu.Unlock()
 	if string(captured) != `{"n":3}` {
 		t.Fatalf("unexpected encoded args: %s", string(captured))
+	}
+}
+
+func TestSchedulerCompletesSuccessfulJobWhenParentContextIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	store := &schedulerFinalizationStore{}
+	sc := newScheduler(func(context.Context, scheduledJob) error {
+		cancel()
+		return nil
+	})
+	sc.store = store
+	sc.running = 1
+	now := time.Now()
+	sc.execute(ctx, scheduledJob{
+		ID: "job-success", ClaimToken: "claim-1", FunctionPath: "tasks.run", RunAt: now, ScheduledFor: now,
+	}, now)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.completeCalls != 1 || store.releaseCalls != 0 {
+		t.Fatalf("complete calls = %d, release calls = %d", store.completeCalls, store.releaseCalls)
+	}
+	if snapshot := sc.snapshot(); snapshot.Completed != 1 || snapshot.Failed != 0 {
+		t.Fatalf("successful canceled-parent execution recorded as %+v", snapshot)
+	}
+}
+
+func TestSchedulerRetriesAndRecordsCompletionFailure(t *testing.T) {
+	store := &schedulerFinalizationStore{completeErr: errors.New("valkey unavailable")}
+	sc := newScheduler(func(context.Context, scheduledJob) error { return nil })
+	sc.store = store
+	sc.running = 1
+	now := time.Now()
+	sc.execute(context.Background(), scheduledJob{
+		ID: "job-finalize-failure", ClaimToken: "claim-1", FunctionPath: "tasks.run", RunAt: now, ScheduledFor: now,
+	}, now)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.completeCalls != 3 || store.releaseCalls != 0 {
+		t.Fatalf("complete calls = %d, release calls = %d", store.completeCalls, store.releaseCalls)
+	}
+	if snapshot := sc.snapshot(); snapshot.Completed != 0 || snapshot.Failed != 1 {
+		t.Fatalf("completion failure recorded as %+v", snapshot)
 	}
 }
 

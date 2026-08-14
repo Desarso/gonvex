@@ -139,6 +139,35 @@ func TestValkeyScheduledJobReclaimUsesANewFencingToken(t *testing.T) {
 	if err := store.complete(context.Background(), job.ID, second[0].ClaimToken); err != nil {
 		t.Fatalf("new claim completion failed: %v", err)
 	}
+	if err := store.complete(context.Background(), job.ID, second[0].ClaimToken); err != nil {
+		t.Fatalf("retrying an already-applied completion failed: %v", err)
+	}
+}
+
+func TestValkeyScheduledJobDecodeFailureReleasesEarlierClaims(t *testing.T) {
+	_, client, store := testScheduledJobStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	for _, id := range []string{"job-a", "job-b"} {
+		if err := store.enqueue(ctx, scheduledJob{
+			ID: id, ProjectID: "project-a", FunctionPath: "tasks.run", RunAt: now, ScheduledFor: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := client.HSet(ctx, scheduledJobPayloadsKey, "job-b", "{invalid-json").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.claimDue(ctx, now, 2, "runtime-a"); err == nil {
+		t.Fatal("malformed scheduled payload unexpectedly decoded")
+	}
+	reclaimed, err := store.claimDue(ctx, now, 1, "runtime-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reclaimed) != 1 || reclaimed[0].ID != "job-a" {
+		t.Fatalf("valid earlier claim was not released: %#v", reclaimed)
+	}
 }
 
 func TestValkeySchedulerExecutesJobEnqueuedByAnotherReplica(t *testing.T) {

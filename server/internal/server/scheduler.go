@@ -74,9 +74,10 @@ type schedulerRun struct {
 	Error      string  `json:"error,omitempty"`
 }
 
-// scheduler is the in-process job runner that powers the dashboard's
-// scheduler/concurrency panels. Jobs and crons live in memory; crons are
-// re-derived from each project's compiled app on every manifest sync.
+// scheduler is the in-process executor and metrics collector. With a store
+// configured, queued jobs are durable in Valkey and safely claimable by any
+// replica; only derived cron registrations and dashboard metrics live in this
+// process. Crons are re-derived from each compiled app on manifest sync.
 type scheduler struct {
 	mu            sync.Mutex
 	now           func() time.Time
@@ -424,7 +425,14 @@ func (sc *scheduler) execute(ctx context.Context, job scheduledJob, dispatchedAt
 					return
 				case <-ticker.C:
 					alive, err := sc.store.renew(jobContext, job.ID, job.ClaimToken)
-					if err != nil || !alive {
+					if err != nil {
+						if jobContext.Err() != nil {
+							return
+						}
+						cancel()
+						return
+					}
+					if !alive {
 						cancel()
 						return
 					}
@@ -446,10 +454,26 @@ func (sc *scheduler) execute(ctx context.Context, job scheduledJob, dispatchedAt
 		close(stopRenewing)
 		<-renewed
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if jobContext.Err() != nil {
+		if err != nil {
 			_ = sc.store.release(cleanupContext, job.ID, job.ClaimToken)
-		} else if cleanupErr := sc.store.complete(cleanupContext, job.ID, job.ClaimToken); cleanupErr != nil {
-			sc.logger.Warn("complete scheduled job", "job", job.ID, "error", cleanupErr)
+		} else {
+			var cleanupErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				cleanupErr = sc.store.complete(cleanupContext, job.ID, job.ClaimToken)
+				if cleanupErr == nil {
+					break
+				}
+				if attempt < 2 {
+					select {
+					case <-cleanupContext.Done():
+					case <-time.After(time.Duration(attempt+1) * 100 * time.Millisecond):
+					}
+				}
+			}
+			if cleanupErr != nil {
+				err = fmt.Errorf("complete scheduled job %s: %w", job.ID, cleanupErr)
+				sc.logger.Warn("complete scheduled job", "job", job.ID, "error", cleanupErr)
+			}
 		}
 		cleanupCancel()
 	}
