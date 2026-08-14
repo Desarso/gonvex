@@ -872,6 +872,61 @@ describe("durable sync integration", () => {
     expect(store.replacements.at(-1)?.cursor).toEqual({ epoch: "sync-a", revision: 20 });
   });
 
+  it("rejects a delayed snapshot while reopening after an integrity reset", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store: new FakeSyncStore() } });
+    const watch = client.watchSync<{ id: string; title: string }>(ref, { workspaceId: "workspace-a" });
+    watch.onUpdate(() => undefined);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const open = sentMessages().find((message) => message.type === "sync.open");
+    const currentRows = [{ id: "task-a", title: "current" }];
+
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: currentRows,
+      cursor: { epoch: "sync-a", revision: 20 },
+      key: "id",
+      mode: "eager",
+    });
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 20 },
+      mode: "eager",
+      digest: await digestRows(currentRows),
+    });
+    await flushAsyncWork();
+
+    socket().receive({ type: "sync.reset", id: open.id, path: ref.path, reason: "integrity-mismatch" });
+    await flushAsyncWork();
+    const delayedRows = [{ id: "task-a", title: "delayed-old-value" }];
+    socket().receive({
+      type: "sync.snapshot",
+      id: open.id,
+      path: ref.path,
+      result: delayedRows,
+      cursor: { epoch: "sync-a", revision: 19 },
+      key: "id",
+      mode: "eager",
+    });
+    socket().receive({
+      type: "sync.ready",
+      id: open.id,
+      path: ref.path,
+      cursor: { epoch: "sync-a", revision: 19 },
+      mode: "eager",
+      digest: await digestRows(delayedRows),
+    });
+    await flushAsyncWork();
+
+    expect(watch.status().isUpToDate).toBe(false);
+    expect(watch.localSyncResult()).toEqual(currentRows);
+  });
+
   it("reuses a verified digest for consecutive ready frames with unchanged rows", async () => {
     const store = new FakeSyncStore();
     const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
