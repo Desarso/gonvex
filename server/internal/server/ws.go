@@ -321,13 +321,14 @@ type tableChangeDetail struct {
 }
 
 type pendingTableChange struct {
-	project         string
-	tenant          string
-	commitID        string
-	declaredTables  map[string]bool
-	observedDetails map[string]tableChangeDetail
-	otherDetails    map[string]tableChangeDetail
-	changedAtMS     float64
+	project                string
+	tenant                 string
+	commitID               string
+	declaredTables         map[string]bool
+	observedDetails        map[string]tableChangeDetail
+	cacheInvalidatedTables map[string]bool
+	otherDetails           map[string]tableChangeDetail
+	changedAtMS            float64
 }
 
 type wsConn struct {
@@ -1470,9 +1471,11 @@ func (s *Server) broadcastTenantRowIDChange(projectID string, tenantID string, t
 
 func (s *Server) scheduleTableChange(change tableChange) {
 	changedTables := tableChangeTables(change)
-	s.cache.invalidateQueries(context.Background(), change.project, change.tenant, changedTables)
-	for _, table := range changedTables {
-		s.cache.invalidateRows(context.Background(), change.project, change.tenant, table)
+	if change.triggerObserved {
+		// PostgreSQL emits trigger notifications only after commit. Invalidate
+		// their authoritative physical tables before this function returns so a
+		// query cannot reuse pre-commit cache entries during the delivery batch.
+		s.invalidateTableCaches(change.project, change.tenant, changedTables)
 	}
 	s.tableChangeMu.Lock()
 	tableKey := strings.Join(changedTables, "\x1f")
@@ -1505,6 +1508,10 @@ func (s *Server) scheduleTableChange(change tableChange) {
 				pending.observedDetails = map[string]tableChangeDetail{}
 			}
 			pending.observedDetails[table] = mergeTableChangeDetail(pending.observedDetails[table], detailForTable(change, table, true))
+			if pending.cacheInvalidatedTables == nil {
+				pending.cacheInvalidatedTables = map[string]bool{}
+			}
+			pending.cacheInvalidatedTables[table] = true
 			continue
 		}
 		if pending.commitID != "" && change.broad {
@@ -1565,8 +1572,32 @@ func (s *Server) flushTableChange(key string) {
 		// tenant-wide correctness backstop for malformed/unknown changes.
 		delivery.broad = true
 	}
+	changedTables := tableChangeTables(delivery)
+	cacheTables := make([]string, 0, len(changedTables))
+	for _, table := range changedTables {
+		if !change.cacheInvalidatedTables[table] {
+			cacheTables = append(cacheTables, table)
+		}
+	}
+	if len(changedTables) == 0 {
+		// Preserve the tenant-wide query-generation backstop for malformed or
+		// unknown changes that do not identify any physical table.
+		s.cache.invalidateQueries(context.Background(), delivery.project, delivery.tenant, nil)
+	} else {
+		s.invalidateTableCaches(delivery.project, delivery.tenant, cacheTables)
+	}
 	s.subscriptions.requestChange(delivery)
 	s.resetSyncsForVisibilityChange(delivery)
+}
+
+func (s *Server) invalidateTableCaches(projectID string, tenantID string, tables []string) {
+	if len(tables) == 0 {
+		return
+	}
+	s.cache.invalidateQueries(context.Background(), projectID, tenantID, tables)
+	for _, table := range tables {
+		s.cache.invalidateRows(context.Background(), projectID, tenantID, table)
+	}
 }
 
 // changeTouchesLandlordTable reports whether a declared mutation write can be

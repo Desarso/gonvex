@@ -778,6 +778,11 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 		WHERE status = 'pending' AND cron_name <> ''`); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_scheduled_jobs_completed
+		ON gonvex_scheduled_jobs (completed_at, id)
+		WHERE status = 'completed'`); err != nil {
+		return err
+	}
 	// Project environment variables, stored in the runtime registry (not in any
 	// browsable tenant/project database) and hidden from the Data browser.
 	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_project_env (

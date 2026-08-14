@@ -180,6 +180,80 @@ func TestSchedulerExpandsTenantCronIntoTenantBoundJobs(t *testing.T) {
 	}
 }
 
+func TestSchedulerDeterministicallyStaggersTenantCrons(t *testing.T) {
+	sc := newScheduler(nil)
+	now := time.Date(2026, 8, 14, 22, 0, 0, 0, time.UTC)
+	sc.now = func() time.Time { return now }
+	specs := []gonvex.CronSpec{{
+		Name: "reconcile recurrences", Interval: time.Minute,
+		FunctionPath: "workplans.reconcileSchedules", PerTenant: true,
+	}}
+	tenants := []string{"tenant-a", "tenant-b", "tenant-c", "tenant-d"}
+	sc.syncCrons("project-a", specs, tenants...)
+
+	first := map[string]time.Time{}
+	unique := map[time.Time]bool{}
+	for _, reg := range sc.crons {
+		first[reg.TenantID] = reg.NextRun
+		unique[reg.NextRun] = true
+		if reg.NextRun.Before(now) || !reg.NextRun.Before(now.Add(time.Minute)) {
+			t.Fatalf("tenant %s next run %s is outside the one-minute window", reg.TenantID, reg.NextRun)
+		}
+	}
+	if len(unique) < 2 {
+		t.Fatalf("tenant cron occurrences are aligned at %v", unique)
+	}
+
+	sc.syncCrons("project-a", specs, tenants...)
+	for _, reg := range sc.crons {
+		if reg.NextRun != first[reg.TenantID] {
+			t.Fatalf("tenant %s stagger changed from %s to %s", reg.TenantID, first[reg.TenantID], reg.NextRun)
+		}
+	}
+}
+
+func TestStaggeredCronKeepsCanonicalOccurrenceIdentityAndMeasuresActualLag(t *testing.T) {
+	canonical := time.Date(2026, 8, 14, 22, 1, 0, 0, time.UTC)
+	offset := 20 * time.Second
+	actual := canonical.Add(offset)
+	reg := &cronRegistration{
+		ProjectID: "project-a",
+		TenantID:  "tenant-a",
+		Spec: gonvex.CronSpec{
+			Name: "reconcile recurrences", FunctionPath: "workplans.reconcileSchedules", PerTenant: true,
+		},
+		Schedule: offsetCronSchedule{base: intervalSchedule{interval: time.Minute}, offset: offset},
+		NextRun:  actual,
+	}
+	sc := newScheduler(func(context.Context, scheduledJob) error { return nil })
+	job := sc.cronJobLocked(reg, actual)
+
+	if !job.RunAt.Equal(actual) {
+		t.Fatalf("staggered runAt = %s, want %s", job.RunAt, actual)
+	}
+	if !job.ScheduledFor.Equal(canonical) {
+		t.Fatalf("logical occurrence = %s, want canonical %s", job.ScheduledFor, canonical)
+	}
+	oldRuntimeJob := job
+	oldRuntimeJob.RunAt = canonical
+	oldRuntimeJob.ScheduledFor = canonical
+	if deterministicCronJobID(job) != deterministicCronJobID(oldRuntimeJob) {
+		t.Fatalf("stagger changed deterministic cron identity: %q != %q", deterministicCronJobID(job), deterministicCronJobID(oldRuntimeJob))
+	}
+	sc.crons[reg.key()] = reg
+	sc.advancePersistedCron(job, actual)
+	if !reg.NextRun.Equal(actual.Add(time.Minute)) {
+		t.Fatalf("staggered cron advanced to %s, want %s", reg.NextRun, actual.Add(time.Minute))
+	}
+
+	sc.running = 1
+	sc.now = func() time.Time { return actual }
+	sc.execute(context.Background(), job, actual)
+	if sc.lastLagMS != 0 {
+		t.Fatalf("intentional stagger counted as scheduler lag: %.2fms", sc.lastLagMS)
+	}
+}
+
 func TestSchedulerRunAfterEnqueuesOneShot(t *testing.T) {
 	var mu sync.Mutex
 	var seen []string
