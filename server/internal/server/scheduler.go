@@ -37,6 +37,9 @@ type scheduledJob struct {
 	FunctionPath string
 	Args         json.RawMessage
 	RunAt        time.Time
+	// ScheduledFor is the canonical cron occurrence used for stable identity;
+	// RunAt includes any intentional tenant stagger. They are equal for
+	// one-shots and unstaggered crons.
 	ScheduledFor time.Time
 	CronName     string
 }
@@ -275,6 +278,13 @@ func (schedule offsetCronSchedule) Next(after time.Time) time.Time {
 	return next.Add(schedule.offset)
 }
 
+func canonicalCronOccurrence(schedule cronSchedule, runAt time.Time) time.Time {
+	if staggered, ok := schedule.(offsetCronSchedule); ok {
+		return runAt.Add(-staggered.offset)
+	}
+	return runAt
+}
+
 func staggerTenantCronSchedule(base cronSchedule, spec gonvex.CronSpec, projectID, tenantID string) cronSchedule {
 	window := tenantCronMaxStagger
 	if spec.Interval > 0 && spec.Interval < window {
@@ -389,7 +399,7 @@ func (sc *scheduler) dispatchDue(ctx context.Context) {
 		if leftCron != rightCron {
 			return !leftCron
 		}
-		return due[left].ScheduledFor.Before(due[right].ScheduledFor)
+		return due[left].RunAt.Before(due[right].RunAt)
 	})
 
 	var start []scheduledJob
@@ -428,7 +438,7 @@ func (sc *scheduler) advancePersistedCron(job scheduledJob, now time.Time) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	reg := sc.crons[key]
-	if reg == nil || !reg.NextRun.Equal(job.ScheduledFor) {
+	if reg == nil || !reg.NextRun.Equal(job.RunAt) {
 		return
 	}
 	reg.NextRun = reg.Schedule.Next(now)
@@ -443,13 +453,13 @@ func (sc *scheduler) cronJobLocked(reg *cronRegistration, now time.Time) schedul
 		FunctionPath: reg.Spec.FunctionPath,
 		Args:         reg.Spec.Args,
 		RunAt:        reg.NextRun,
-		ScheduledFor: reg.NextRun,
+		ScheduledFor: canonicalCronOccurrence(reg.Schedule, reg.NextRun),
 		CronName:     reg.Spec.Name,
 	}
 }
 
 func (sc *scheduler) execute(ctx context.Context, job scheduledJob, dispatchedAt time.Time) {
-	lag := dispatchedAt.Sub(job.ScheduledFor)
+	lag := dispatchedAt.Sub(job.RunAt)
 	if lag < 0 {
 		lag = 0
 	}

@@ -5,13 +5,23 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"sync"
 	"time"
+)
+
+const (
+	scheduledJobCompletionRetention = 30 * 24 * time.Hour
+	scheduledJobPruneInterval       = time.Minute
+	scheduledJobPruneBatch          = 1000
 )
 
 type scheduledJobDatabase func(context.Context) (*sql.DB, error)
 
 type postgresScheduledJobStore struct {
-	database scheduledJobDatabase
+	database  scheduledJobDatabase
+	pruneMu   sync.Mutex
+	nextPrune time.Time
 }
 
 func newPostgresScheduledJobStore(database scheduledJobDatabase) *postgresScheduledJobStore {
@@ -58,6 +68,9 @@ func (store *postgresScheduledJobStore) claimDue(ctx context.Context, now time.T
 	if limit <= 0 {
 		return nil, nil
 	}
+	if err := store.maybePruneCompleted(ctx, now); err != nil {
+		slog.Warn("prune completed scheduled jobs", "error", err)
+	}
 	db, err := store.db(ctx)
 	if err != nil {
 		return nil, err
@@ -101,6 +114,43 @@ func (store *postgresScheduledJobStore) claimDue(ctx context.Context, now time.T
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
+}
+
+func (store *postgresScheduledJobStore) maybePruneCompleted(ctx context.Context, now time.Time) error {
+	store.pruneMu.Lock()
+	if !store.nextPrune.IsZero() && now.Before(store.nextPrune) {
+		store.pruneMu.Unlock()
+		return nil
+	}
+	store.nextPrune = now.Add(scheduledJobPruneInterval)
+	store.pruneMu.Unlock()
+	_, err := store.pruneCompleted(ctx, now.Add(-scheduledJobCompletionRetention), scheduledJobPruneBatch)
+	return err
+}
+
+func (store *postgresScheduledJobStore) pruneCompleted(ctx context.Context, before time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	db, err := store.db(ctx)
+	if err != nil {
+		return 0, err
+	}
+	result, err := db.ExecContext(ctx, `WITH expired AS (
+		SELECT id
+		FROM gonvex_scheduled_jobs
+		WHERE status = 'completed' AND completed_at < $1
+		ORDER BY completed_at ASC, id ASC
+		FOR UPDATE SKIP LOCKED
+		LIMIT $2
+	)
+	DELETE FROM gonvex_scheduled_jobs AS jobs
+	USING expired
+	WHERE jobs.id = expired.id`, before, limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 type scheduledJobAdoption int

@@ -99,6 +99,44 @@ func TestPostgresScheduledJobsPersistPrioritizeAndFenceClaims(t *testing.T) {
 	}
 }
 
+func TestPostgresScheduledJobsPruneOnlyExpiredCompletions(t *testing.T) {
+	db, store := testPostgresScheduledJobStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		id        string
+		status    string
+		completed any
+	}{
+		{id: "completed-expired", status: "completed", completed: now.Add(-scheduledJobCompletionRetention - time.Hour)},
+		{id: "completed-recent", status: "completed", completed: now.Add(-scheduledJobCompletionRetention + time.Hour)},
+		{id: "pending-old", status: "pending", completed: nil},
+	} {
+		if _, err := db.ExecContext(ctx, `INSERT INTO gonvex_scheduled_jobs
+			(id, project_id, function_path, run_at, scheduled_for, status, completed_at)
+			VALUES ($1, 'project-a', 'tasks.run', $2, $2, $3, $4)`, row.id, now.Add(-90*24*time.Hour), row.status, row.completed); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removed, err := store.pruneCompleted(ctx, now.Add(-scheduledJobCompletionRetention), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed rows = %d, want 1", removed)
+	}
+	for id, want := range map[string]bool{"completed-expired": false, "completed-recent": true, "pending-old": true} {
+		var exists bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM gonvex_scheduled_jobs WHERE id = $1)`, id).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists != want {
+			t.Fatalf("job %s exists = %v, want %v", id, exists, want)
+		}
+	}
+}
+
 func TestMigratingSchedulerDoesNotDuplicateLegacyExecution(t *testing.T) {
 	db, primary, legacy, store := testMigratingScheduledJobStore(t)
 	ctx := context.Background()
