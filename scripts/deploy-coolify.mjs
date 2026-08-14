@@ -75,7 +75,15 @@ export function verifyRollingApplication(application, role, sha) {
 
 function environmentValue(environment, key) {
   const entry = environment?.find((candidate) => candidate?.key === key);
-  return String(entry?.real_value ?? entry?.value ?? "").trim();
+  const value = String(entry?.value ?? entry?.real_value ?? "").trim();
+  if (
+    value.length >= 2
+    && ((value.startsWith("'") && value.endsWith("'"))
+      || (value.startsWith('"') && value.endsWith('"')))
+  ) {
+    return value.slice(1, -1);
+  }
+  return value;
 }
 
 export function verifyRuntimeEnvironment(environment, sha) {
