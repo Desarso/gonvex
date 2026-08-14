@@ -343,6 +343,65 @@ func TestHealthyListenerInvalidatesOnlyObservedWriteTables(t *testing.T) {
 	}
 }
 
+func TestObservedWriteInvalidatesCacheBeforeTriggerBatchFlush(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	server := New(config.Config{
+		TenantListenerLimit:  0,
+		SharedResultMaxBytes: 1 << 20,
+		ValkeyURL:            "redis://" + redisServer.Addr(),
+		RowsCacheTTL:         time.Minute,
+	})
+	t.Cleanup(func() { _ = server.cache.close() })
+	ctx := context.Background()
+	beforeRows := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks")
+	beforeQueries, ok := server.cache.queryGeneration(ctx, "project-a", "tenant-a", []string{"tasks"})
+	if !ok {
+		t.Fatal("query cache is not enabled")
+	}
+
+	const commitID = "immediate-cache-invalidation"
+	server.tableChangeMu.Lock()
+	scheduled := make(chan struct{})
+	go func() {
+		server.scheduleTableChange(tableChange{
+			project: "project-a", tenant: "tenant-a", commitID: commitID, table: "tasks",
+			operation: "update", triggerObserved: true, changedAtMS: 11,
+		})
+		close(scheduled)
+	}()
+
+	// Holding tableChangeMu prevents the batching timer from even being
+	// scheduled. The authoritative trigger must still invalidate both cache
+	// generations before scheduleTableChange reaches that batching step.
+	invalidated := false
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		afterRows := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks")
+		afterQueries, _ := server.cache.queryGeneration(ctx, "project-a", "tenant-a", []string{"tasks"})
+		if afterRows != beforeRows && afterQueries != beforeQueries {
+			invalidated = true
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	server.tableChangeMu.Unlock()
+	<-scheduled
+
+	const key = "project-a:tenant-a:commit\x1fimmediate-cache-invalidation"
+	server.tableChangeMu.Lock()
+	timer := server.tableChangeWait[key]
+	if timer != nil {
+		timer.Stop()
+	}
+	delete(server.tableChangeWait, key)
+	delete(server.tableChanges, key)
+	server.tableChangeMu.Unlock()
+
+	if !invalidated {
+		t.Fatal("observed write did not invalidate caches before entering the trigger batching section")
+	}
+}
+
 func TestHealthyTenantListenerDoesNotSuppressLandlordWrite(t *testing.T) {
 	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
 	if err := server.runtime.SyncManifest(manifest.Manifest{
