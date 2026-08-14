@@ -85,6 +85,12 @@ func TestProjectRegistrySchemaIncludesRuntimeMutationLogs(t *testing.T) {
 	if !strings.Contains(joined, "entry JSONB NOT NULL") {
 		t.Fatalf("expected complete runtime log JSON in control-plane migration")
 	}
+	if !strings.Contains(joined, "CREATE TABLE IF NOT EXISTS gonvex_scheduled_jobs") {
+		t.Fatalf("expected durable scheduled job table in control-plane migration")
+	}
+	if !strings.Contains(joined, "claim_token TEXT NOT NULL") {
+		t.Fatalf("expected scheduled job claim fencing in control-plane migration")
+	}
 }
 
 func TestRuntimeMetricsRestoresLatestMutationLogsInOrder(t *testing.T) {

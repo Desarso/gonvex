@@ -749,6 +749,35 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 		ON gonvex_runtime_mutation_logs (project_id, id DESC)`); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_scheduled_jobs (
+		id TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL,
+		tenant_id TEXT NOT NULL DEFAULT '',
+		function_path TEXT NOT NULL,
+		args JSONB,
+		run_at TIMESTAMPTZ NOT NULL,
+		scheduled_for TIMESTAMPTZ NOT NULL,
+		cron_name TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
+		claim_sequence BIGINT NOT NULL DEFAULT 0,
+		claim_token TEXT NOT NULL DEFAULT '',
+		lease_until TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		completed_at TIMESTAMPTZ
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_scheduled_jobs_due_oneshot
+		ON gonvex_scheduled_jobs (run_at, id)
+		WHERE status = 'pending' AND cron_name = ''`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_scheduled_jobs_due_cron
+		ON gonvex_scheduled_jobs (run_at, id)
+		WHERE status = 'pending' AND cron_name <> ''`); err != nil {
+		return err
+	}
 	// Project environment variables, stored in the runtime registry (not in any
 	// browsable tenant/project database) and hidden from the Data browser.
 	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_project_env (
@@ -1105,6 +1134,9 @@ func (s *Server) deleteProjectRegistry(ctx context.Context, projectID string) er
 	}
 	defer db.Close()
 	if _, err := db.ExecContext(ctx, `DELETE FROM gonvex_runtime_manifests WHERE project_id = $1`, projectID); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM gonvex_scheduled_jobs WHERE project_id = $1`, projectID); err != nil {
 		return err
 	}
 	_, err = db.ExecContext(ctx, `DELETE FROM gonvex_runtime_projects WHERE id = $1`, projectID)

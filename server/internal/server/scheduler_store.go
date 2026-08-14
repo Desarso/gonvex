@@ -41,7 +41,7 @@ type valkeyScheduledJobStore struct {
 	client *redis.Client
 }
 
-func newValkeyScheduledJobStore(client *redis.Client) scheduledJobStore {
+func newValkeyScheduledJobStore(client *redis.Client) *valkeyScheduledJobStore {
 	if client == nil {
 		return nil
 	}
@@ -270,6 +270,7 @@ redis.call('ZREM', KEYS[2], ARGV[2])
 redis.call('ZREM', KEYS[3], ARGV[2])
 redis.call('HDEL', KEYS[4], ARGV[2])
 redis.call('DEL', KEYS[5])
+redis.call('SET', KEYS[6], '1', 'PX', ARGV[3])
 return 1
 `)
 
@@ -283,9 +284,11 @@ func (store *valkeyScheduledJobStore) complete(ctx context.Context, id string, o
 			scheduledJobsKey,
 			scheduledJobPayloadsKey,
 			scheduledJobClaimPrefix + id,
+			scheduledJobDedupePrefix + id,
 		},
 		owner,
 		id,
+		scheduledJobDedupeTTL.Milliseconds(),
 	).Int64()
 	if err != nil {
 		return err
@@ -311,6 +314,83 @@ func (store *valkeyScheduledJobStore) release(ctx context.Context, id string, ow
 		owner,
 	).Result()
 	return err
+}
+
+var guardScheduledJobScript = redis.NewScript(`
+local payload_exists = redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1
+local seen = redis.call('EXISTS', KEYS[2]) == 1
+if payload_exists then
+  return 1
+end
+if seen then
+  return 2
+end
+local existing = redis.call('GET', KEYS[3])
+if existing then
+  if existing == ARGV[2] then
+    redis.call('PEXPIRE', KEYS[3], ARGV[3])
+    return 0
+  end
+  return 1
+end
+if redis.call('SET', KEYS[3], ARGV[2], 'NX', 'PX', ARGV[3]) then
+  return 0
+end
+return 1
+`)
+
+// guard shares the legacy claim key with Valkey-only runtimes. A Postgres job
+// therefore cannot overlap the same deterministic cron occurrence while old
+// and new containers coexist during a rolling update.
+func (store *valkeyScheduledJobStore) guard(ctx context.Context, id string, owner string) (legacyScheduledJobGuard, error) {
+	result, err := guardScheduledJobScript.Run(
+		ctx,
+		store.client,
+		[]string{scheduledJobPayloadsKey, scheduledJobDedupePrefix + id, scheduledJobClaimPrefix + id},
+		id,
+		owner,
+		scheduledJobLease.Milliseconds(),
+	).Int64()
+	if err != nil {
+		return legacyScheduledJobPending, err
+	}
+	switch result {
+	case 0:
+		return legacyScheduledJobGuarded, nil
+	case 2:
+		return legacyScheduledJobCompleted, nil
+	default:
+		return legacyScheduledJobPending, nil
+	}
+}
+
+// refreshCompletionMarkers closes the only ambiguity left by the Valkey-only
+// scheduler during a rolling upgrade. Its enqueue marker historically expired
+// after 30 days even when the scheduled job was farther in the future. Refresh
+// every still-queued payload before the Postgres runtime starts claiming work,
+// so completion by an overlapping old runtime remains distinguishable from a
+// brand-new Postgres-only job.
+func (store *valkeyScheduledJobStore) refreshCompletionMarkers(ctx context.Context) error {
+	var cursor uint64
+	for {
+		entries, next, err := store.client.HScan(ctx, scheduledJobPayloadsKey, cursor, "", 500).Result()
+		if err != nil {
+			return err
+		}
+		pipe := store.client.Pipeline()
+		for index := 0; index+1 < len(entries); index += 2 {
+			pipe.Set(ctx, scheduledJobDedupePrefix+entries[index], "1", scheduledJobDedupeTTL)
+		}
+		if len(entries) > 0 {
+			if _, err := pipe.Exec(ctx); err != nil {
+				return err
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return nil
+		}
+	}
 }
 
 func newScheduledJobID(prefix string) string {
