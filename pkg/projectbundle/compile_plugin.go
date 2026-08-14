@@ -3,6 +3,8 @@
 package projectbundle
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -10,30 +12,42 @@ import (
 	"path/filepath"
 	"plugin"
 	"reflect"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 )
+
+const compiledPluginGenerationsPerProject = 2
 
 // compiledPluginPath is the persistent cache location for a bundle's compiled
 // .so, keyed by both content and the exact runtime binary. Go plugins are tied
 // to their host package build IDs; an incompatible plugin must never be passed
 // to plugin.Open because the failed attempt can prevent a compatible rebuild
 // from loading in that process.
-func (l *Loader) compiledPluginPath(hash string) string {
+func (l *Loader) compiledPluginPath(projectID string, hash string) string {
 	return filepath.Join(
 		l.cacheDir,
 		"compiled",
-		"gonvex_plugin_"+safeHashPrefix(hash)+"_"+l.runtimeFingerprint+".so",
+		"gonvex_plugin_"+projectCacheKey(projectID)+"_"+safeHashPrefix(hash)+"_"+l.runtimeFingerprint+".so",
 	)
 }
 
-func (l *Loader) compileAndRegister(projectDir string, _ string, hash string) (*gonvex.App, error) {
+func projectCacheKey(projectID string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(projectID)))
+	return hex.EncodeToString(digest[:])
+}
+
+func (l *Loader) compileAndRegister(projectID string, projectDir string, _ string, hash string) (*gonvex.App, error) {
 	// Fast path: reuse a previously-compiled plugin for this exact bundle if it
 	// exists and is compatible with the running binary.
-	cached := l.compiledPluginPath(hash)
-	l.removeIncompatibleCompiledPlugins(hash, cached)
+	cached := l.compiledPluginPath(projectID, hash)
+	l.removeIncompatibleCompiledPlugins(projectID, hash, cached)
 	if _, err := os.Stat(cached); err == nil {
 		if app, err := registerFromPlugin(cached); err == nil {
+			_ = os.Chtimes(cached, time.Now(), time.Now())
+			l.pruneCompiledPlugins(projectID, cached)
 			return app, nil
 		}
 		// Stale (e.g. built against an older runtime binary) or corrupt: drop it
@@ -48,16 +62,56 @@ func (l *Loader) compileAndRegister(projectDir string, _ string, hash string) (*
 	// Persist the freshly-compiled plugin for future restarts (best effort: a
 	// copy failure just means we recompile next time).
 	_ = copyFile(pluginPath, cached)
-	return registerFromPlugin(pluginPath)
+	app, err := registerFromPlugin(pluginPath)
+	if err == nil {
+		l.pruneCompiledPlugins(projectID, cached)
+	}
+	return app, err
 }
 
-func (l *Loader) removeIncompatibleCompiledPlugins(hash string, current string) {
-	pattern := filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+safeHashPrefix(hash)+"*.so")
-	matches, _ := filepath.Glob(pattern)
-	for _, candidate := range matches {
-		if candidate != current {
-			_ = os.Remove(candidate)
+func (l *Loader) removeIncompatibleCompiledPlugins(projectID string, hash string, current string) {
+	patterns := []string{
+		filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+projectCacheKey(projectID)+"_"+safeHashPrefix(hash)+"_*.so"),
+		// Clean up the pre-worker cache naming scheme. Those files were shared by
+		// hash only and can never be trusted across a new runtime fingerprint.
+		filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+safeHashPrefix(hash)+"_????????????.so"),
+		filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+safeHashPrefix(hash)+".so"),
+	}
+	for _, pattern := range patterns {
+		matches, _ := filepath.Glob(pattern)
+		for _, candidate := range matches {
+			if candidate != current {
+				_ = os.Remove(candidate)
+			}
 		}
+	}
+}
+
+func (l *Loader) pruneCompiledPlugins(projectID string, current string) {
+	pattern := filepath.Join(l.cacheDir, "compiled", "gonvex_plugin_"+projectCacheKey(projectID)+"_*.so")
+	matches, _ := filepath.Glob(pattern)
+	type cachedPlugin struct {
+		path    string
+		modTime time.Time
+	}
+	plugins := make([]cachedPlugin, 0, len(matches))
+	for _, candidate := range matches {
+		info, err := os.Stat(candidate)
+		if err == nil {
+			plugins = append(plugins, cachedPlugin{path: candidate, modTime: info.ModTime()})
+		}
+	}
+	sort.SliceStable(plugins, func(left, right int) bool {
+		if plugins[left].path == current {
+			return true
+		}
+		if plugins[right].path == current {
+			return false
+		}
+		return plugins[left].modTime.After(plugins[right].modTime)
+	})
+	for index := compiledPluginGenerationsPerProject; index < len(plugins); index++ {
+		_ = os.Remove(plugins[index].path)
 	}
 }
 

@@ -148,7 +148,7 @@ func (l *Loader) Load(projectID string, bundle manifest.SourceBundle) (*gonvex.A
 		return nil, fmt.Errorf("write go.mod: %w", err)
 	}
 
-	app, err := l.compileAndRegister(projectDir, packageName, bundle.Hash)
+	app, err := l.compileAndRegister(projectID, projectDir, packageName, bundle.Hash)
 	if err != nil {
 		return nil, err
 	}
