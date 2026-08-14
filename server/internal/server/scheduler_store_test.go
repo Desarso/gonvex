@@ -12,7 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func testScheduledJobStore(t *testing.T) (*miniredis.Miniredis, *redis.Client, scheduledJobStore) {
+func testScheduledJobStore(t *testing.T) (*miniredis.Miniredis, *redis.Client, *valkeyScheduledJobStore) {
 	t.Helper()
 	redisServer := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
@@ -236,6 +236,47 @@ func TestValkeyScheduledJobCompletionRequiresClaimOwnership(t *testing.T) {
 	}
 	if err := store.complete(context.Background(), job.ID, claimed[0].ClaimToken); err != nil {
 		t.Fatalf("completion by claim owner failed: %v", err)
+	}
+}
+
+func TestValkeyMigrationRefreshesExpiredMarkersBeforeOldRuntimeCompletion(t *testing.T) {
+	_, client, store := testScheduledJobStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	job := scheduledJob{
+		ID: "cron-marker-expired", ProjectID: "project-a", TenantID: "tenant-a",
+		FunctionPath: "tasks.generate", CronName: "generate", RunAt: now, ScheduledFor: now,
+	}
+	if err := store.enqueue(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Del(ctx, scheduledJobDedupePrefix+job.ID).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.refreshCompletionMarkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.claimDue(ctx, now, 1, "old-runtime")
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("old claim = %#v, %v", claimed, err)
+	}
+	// Reproduce completion by the deployed pre-migration runtime: it removed
+	// the queue payload and claim but did not refresh the marker itself.
+	pipe := client.Pipeline()
+	pipe.ZRem(ctx, scheduledOneShotJobsKey, job.ID)
+	pipe.ZRem(ctx, scheduledCronJobsKey, job.ID)
+	pipe.ZRem(ctx, scheduledJobsKey, job.ID)
+	pipe.HDel(ctx, scheduledJobPayloadsKey, job.ID)
+	pipe.Del(ctx, scheduledJobClaimPrefix+job.ID)
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := store.guard(ctx, job.ID, "new-runtime:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guard != legacyScheduledJobCompleted {
+		t.Fatalf("guard after old completion = %v, want completed", guard)
 	}
 }
 

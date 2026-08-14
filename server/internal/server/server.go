@@ -127,8 +127,19 @@ func NewRequiredWithApp(cfg config.Config, app *gonvex.App) (*Server, error) {
 	cache := newRowsCacheWithClient(client, cfg.RowsCacheTTL)
 	server := newServer(cfg, app, ephemeral, cache)
 	legacyScheduler := newValkeyScheduledJobStore(client)
+	postgresScheduler := server.postgresScheduledJobStore()
+	if postgresScheduler != nil {
+		migrationContext, cancelMigration := context.WithTimeout(context.Background(), 30*time.Second)
+		migrationErr := legacyScheduler.refreshCompletionMarkers(migrationContext)
+		cancelMigration()
+		if migrationErr != nil {
+			server.Close()
+			_ = client.Close()
+			return nil, fmt.Errorf("prepare scheduled job migration: %w", migrationErr)
+		}
+	}
 	server.scheduler.store = newMigratingScheduledJobStore(
-		server.postgresScheduledJobStore(),
+		postgresScheduler,
 		legacyScheduler,
 	)
 	server.scheduler.start(server.ctx)
@@ -156,7 +167,15 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	// scheduler lease.
 	server.runtimeHydrationReady.Store(true)
 	if legacyScheduler != nil {
-		server.scheduler.store = newMigratingScheduledJobStore(server.postgresScheduledJobStore(), legacyScheduler)
+		postgresScheduler := server.postgresScheduledJobStore()
+		if postgresScheduler != nil {
+			migrationContext, cancelMigration := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := legacyScheduler.refreshCompletionMarkers(migrationContext); err != nil {
+				slog.Warn("prepare scheduled job migration in lightweight runtime", "error", err)
+			}
+			cancelMigration()
+		}
+		server.scheduler.store = newMigratingScheduledJobStore(postgresScheduler, legacyScheduler)
 	}
 	server.scheduler.start(server.ctx)
 	go server.hydrateRuntimeState(server.ctx)

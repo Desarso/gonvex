@@ -18,6 +18,7 @@ const (
 type legacyScheduledJobStore interface {
 	scheduledJobStore
 	guard(context.Context, string, string) (legacyScheduledJobGuard, error)
+	refreshCompletionMarkers(context.Context) error
 }
 
 // migratingScheduledJobStore makes Postgres the durable scheduler source while

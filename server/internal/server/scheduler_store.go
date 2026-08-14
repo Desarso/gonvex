@@ -364,6 +364,35 @@ func (store *valkeyScheduledJobStore) guard(ctx context.Context, id string, owne
 	}
 }
 
+// refreshCompletionMarkers closes the only ambiguity left by the Valkey-only
+// scheduler during a rolling upgrade. Its enqueue marker historically expired
+// after 30 days even when the scheduled job was farther in the future. Refresh
+// every still-queued payload before the Postgres runtime starts claiming work,
+// so completion by an overlapping old runtime remains distinguishable from a
+// brand-new Postgres-only job.
+func (store *valkeyScheduledJobStore) refreshCompletionMarkers(ctx context.Context) error {
+	var cursor uint64
+	for {
+		entries, next, err := store.client.HScan(ctx, scheduledJobPayloadsKey, cursor, "", 500).Result()
+		if err != nil {
+			return err
+		}
+		pipe := store.client.Pipeline()
+		for index := 0; index+1 < len(entries); index += 2 {
+			pipe.Set(ctx, scheduledJobDedupePrefix+entries[index], "1", scheduledJobDedupeTTL)
+		}
+		if len(entries) > 0 {
+			if _, err := pipe.Exec(ctx); err != nil {
+				return err
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return nil
+		}
+	}
+}
+
 func newScheduledJobID(prefix string) string {
 	var bytes [16]byte
 	if _, err := rand.Read(bytes[:]); err == nil {
