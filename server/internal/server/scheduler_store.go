@@ -15,6 +15,7 @@ import (
 const (
 	scheduledJobsKey         = "gonvex:scheduler:{global}:jobs"
 	scheduledJobPayloadsKey  = "gonvex:scheduler:{global}:payloads"
+	scheduledJobFenceKey     = "gonvex:scheduler:{global}:fence"
 	scheduledJobClaimPrefix  = "gonvex:scheduler:{global}:claim:"
 	scheduledJobDedupePrefix = "gonvex:scheduler:{global}:seen:"
 	scheduledJobLease        = 5 * time.Minute
@@ -97,15 +98,19 @@ var claimScheduledJobsScript = redis.NewScript(`
 local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
 local claimed = {}
 for _, id in ipairs(ids) do
-  if #claimed >= tonumber(ARGV[2]) * 2 then
+  if #claimed >= tonumber(ARGV[2]) * 3 then
     break
   end
   local claim_key = ARGV[3] .. id
-  if redis.call('SET', claim_key, ARGV[4], 'NX', 'PX', ARGV[5]) then
+  if redis.call('EXISTS', claim_key) == 0 then
+    local fence = redis.call('INCR', KEYS[3])
+    local claim_token = ARGV[4] .. ':' .. tostring(fence)
+    redis.call('SET', claim_key, claim_token, 'PX', ARGV[5])
     local payload = redis.call('HGET', KEYS[2], id)
     if payload then
       table.insert(claimed, id)
       table.insert(claimed, payload)
+      table.insert(claimed, claim_token)
     else
       redis.call('ZREM', KEYS[1], id)
       redis.call('DEL', claim_key)
@@ -122,7 +127,7 @@ func (store *valkeyScheduledJobStore) claimDue(ctx context.Context, now time.Tim
 	result, err := claimScheduledJobsScript.Run(
 		ctx,
 		store.client,
-		[]string{scheduledJobsKey, scheduledJobPayloadsKey},
+		[]string{scheduledJobsKey, scheduledJobPayloadsKey, scheduledJobFenceKey},
 		now.UnixMilli(),
 		limit,
 		scheduledJobClaimPrefix,
@@ -133,20 +138,22 @@ func (store *valkeyScheduledJobStore) claimDue(ctx context.Context, now time.Tim
 		return nil, err
 	}
 	values, ok := result.([]any)
-	if !ok || len(values)%2 != 0 {
+	if !ok || len(values)%3 != 0 {
 		return nil, fmt.Errorf("scheduler claim returned malformed payload %T", result)
 	}
-	jobs := make([]scheduledJob, 0, len(values)/2)
-	for index := 0; index < len(values); index += 2 {
+	jobs := make([]scheduledJob, 0, len(values)/3)
+	for index := 0; index < len(values); index += 3 {
 		id := fmt.Sprint(values[index])
 		raw := []byte(fmt.Sprint(values[index+1]))
+		claimToken := fmt.Sprint(values[index+2])
 		var payload scheduledJobPayload
 		if err := json.Unmarshal(raw, &payload); err != nil {
-			_ = store.release(ctx, id, owner)
+			_ = store.release(ctx, id, claimToken)
 			return nil, fmt.Errorf("decode scheduled job %s: %w", id, err)
 		}
 		job := payload.job()
 		job.ID = id
+		job.ClaimToken = claimToken
 		jobs = append(jobs, job)
 	}
 	return jobs, nil

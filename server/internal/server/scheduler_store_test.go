@@ -42,7 +42,7 @@ func TestValkeyScheduledJobsAreClaimedOnceAndSurviveWorkerRelease(t *testing.T) 
 	if len(second) != 0 {
 		t.Fatalf("concurrent runtime claimed leased job: %#v", second)
 	}
-	if err := store.release(context.Background(), job.ID, "runtime-a"); err != nil {
+	if err := store.release(context.Background(), job.ID, first[0].ClaimToken); err != nil {
 		t.Fatal(err)
 	}
 	second, err = store.claimDue(context.Background(), now, 10, "runtime-b")
@@ -52,7 +52,7 @@ func TestValkeyScheduledJobsAreClaimedOnceAndSurviveWorkerRelease(t *testing.T) 
 	if len(second) != 1 || second[0].ID != job.ID {
 		t.Fatalf("released job was not reclaimed: %#v", second)
 	}
-	if err := store.complete(context.Background(), job.ID, "runtime-b"); err != nil {
+	if err := store.complete(context.Background(), job.ID, second[0].ClaimToken); err != nil {
 		t.Fatal(err)
 	}
 	// A lagging rolling replica can still observe the same cron occurrence after
@@ -106,11 +106,38 @@ func TestValkeyScheduledJobCompletionRequiresClaimOwnership(t *testing.T) {
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim = %#v, %v", claimed, err)
 	}
-	if err := store.complete(context.Background(), job.ID, "runtime-b"); err == nil {
+	if err := store.complete(context.Background(), job.ID, "not-the-claim-token"); err == nil {
 		t.Fatal("completion by a non-owner unexpectedly succeeded")
 	}
-	if err := store.complete(context.Background(), job.ID, "runtime-a"); err != nil {
+	if err := store.complete(context.Background(), job.ID, claimed[0].ClaimToken); err != nil {
 		t.Fatalf("completion by claim owner failed: %v", err)
+	}
+}
+
+func TestValkeyScheduledJobReclaimUsesANewFencingToken(t *testing.T) {
+	redisServer, _, store := testScheduledJobStore(t)
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	job := scheduledJob{ID: "job-reclaimed", ProjectID: "project-a", FunctionPath: "tasks.run", RunAt: now, ScheduledFor: now}
+	if err := store.enqueue(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.claimDue(context.Background(), now, 1, "runtime-a")
+	if err != nil || len(first) != 1 || first[0].ClaimToken == "" {
+		t.Fatalf("first claim = %#v, %v", first, err)
+	}
+	redisServer.FastForward(scheduledJobLease + time.Millisecond)
+	second, err := store.claimDue(context.Background(), now, 1, "runtime-a")
+	if err != nil || len(second) != 1 || second[0].ClaimToken == "" {
+		t.Fatalf("second claim = %#v, %v", second, err)
+	}
+	if first[0].ClaimToken == second[0].ClaimToken {
+		t.Fatal("reclaim reused the stale execution's fencing token")
+	}
+	if err := store.complete(context.Background(), job.ID, first[0].ClaimToken); err == nil {
+		t.Fatal("stale execution completed the newer claim")
+	}
+	if err := store.complete(context.Background(), job.ID, second[0].ClaimToken); err != nil {
+		t.Fatalf("new claim completion failed: %v", err)
 	}
 }
 

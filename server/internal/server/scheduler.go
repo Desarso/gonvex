@@ -29,6 +29,7 @@ type scheduledExecutor func(ctx context.Context, job scheduledJob) error
 // ctx.Scheduler, or a single fire of a registered cron.
 type scheduledJob struct {
 	ID           string
+	ClaimToken   string
 	ProjectID    string
 	TenantID     string
 	FunctionPath string
@@ -422,7 +423,7 @@ func (sc *scheduler) execute(ctx context.Context, job scheduledJob, dispatchedAt
 				case <-jobContext.Done():
 					return
 				case <-ticker.C:
-					alive, err := sc.store.renew(jobContext, job.ID, sc.owner)
+					alive, err := sc.store.renew(jobContext, job.ID, job.ClaimToken)
 					if err != nil || !alive {
 						cancel()
 						return
@@ -446,8 +447,8 @@ func (sc *scheduler) execute(ctx context.Context, job scheduledJob, dispatchedAt
 		<-renewed
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if jobContext.Err() != nil {
-			_ = sc.store.release(cleanupContext, job.ID, sc.owner)
-		} else if cleanupErr := sc.store.complete(cleanupContext, job.ID, sc.owner); cleanupErr != nil {
+			_ = sc.store.release(cleanupContext, job.ID, job.ClaimToken)
+		} else if cleanupErr := sc.store.complete(cleanupContext, job.ID, job.ClaimToken); cleanupErr != nil {
 			sc.logger.Warn("complete scheduled job", "job", job.ID, "error", cleanupErr)
 		}
 		cleanupCancel()
