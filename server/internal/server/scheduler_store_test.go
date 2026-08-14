@@ -95,6 +95,41 @@ func TestValkeyScheduledJobsSkipLeasedJobsWhenClaimingLaterDueWork(t *testing.T)
 	}
 }
 
+func TestValkeyScheduledJobsPrioritizeOneShotsOverCronBacklog(t *testing.T) {
+	_, _, store := testScheduledJobStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	for index := 0; index < 80; index++ {
+		job := scheduledJob{
+			ID:           newScheduledJobID("cron_"),
+			ProjectID:    "project-a",
+			TenantID:     "tenant-a",
+			FunctionPath: "tasks.generateDueRecurringTasks",
+			RunAt:        now.Add(-time.Hour),
+			ScheduledFor: now.Add(-time.Hour),
+			CronName:     "generate due recurring tasks",
+		}
+		if err := store.enqueue(ctx, job); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oneShot := scheduledJob{
+		ID: "job-assistant", ProjectID: "project-a", TenantID: "tenant-a",
+		FunctionPath: "assistant.processThread", RunAt: now, ScheduledFor: now,
+	}
+	if err := store.enqueue(ctx, oneShot); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := store.claimDue(ctx, now, 1, "runtime-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != oneShot.ID {
+		t.Fatalf("one-shot job was starved behind cron backlog: %#v", claimed)
+	}
+}
+
 func TestValkeyScheduledJobCompletionRequiresClaimOwnership(t *testing.T) {
 	_, _, store := testScheduledJobStore(t)
 	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)

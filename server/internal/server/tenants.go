@@ -1102,6 +1102,48 @@ func (s *Server) applyTenantSchemasForProject(
 	})
 }
 
+func (s *Server) projectSyncStorageInstalled(
+	ctx context.Context,
+	project string,
+	desiredSchema manifest.Schema,
+	syncDefinitions map[string]manifest.SyncDefinition,
+) (bool, error) {
+	landlordDefinitions, err := syncDefinitionsForSchema(syncDefinitions, desiredSchema.LandlordSchema())
+	if err != nil {
+		return false, err
+	}
+	if len(landlordDefinitions) > 0 {
+		installed, err := schema.SyncStorageInstalled(ctx, s.databaseURLForProject(project))
+		if err != nil || !installed {
+			return installed, err
+		}
+	}
+
+	tenantDefinitions, err := syncDefinitionsForSchema(syncDefinitions, desiredSchema.TenantSchema())
+	if err != nil {
+		return false, err
+	}
+	if len(tenantDefinitions) == 0 {
+		return true, nil
+	}
+	s.hydrateProjectTenantDatabases(ctx, project)
+	s.projectMu.RLock()
+	tenants := make([]tenantTarget, 0, len(s.tenants))
+	for _, tenant := range s.tenants {
+		if tenant.ProjectID == project && tenant.databaseURL != "" {
+			tenants = append(tenants, tenant)
+		}
+	}
+	s.projectMu.RUnlock()
+	for _, tenant := range dedupeTenantTargets(tenants) {
+		installed, err := schema.SyncStorageInstalled(ctx, tenant.databaseURL)
+		if err != nil || !installed {
+			return installed, err
+		}
+	}
+	return true, nil
+}
+
 type tenantSchemaApplyFunc func(context.Context, string, manifest.Schema) (schema.Result, error)
 
 // A schema apply uses at most two PostgreSQL connections. Keep rollout

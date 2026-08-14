@@ -96,40 +96,43 @@ func (store *valkeyScheduledJobStore) enqueue(ctx context.Context, job scheduled
 
 var claimScheduledJobsScript = redis.NewScript(`
 local limit = tonumber(ARGV[2])
-local page_size = math.max(limit * 4, 64)
-local max_pages = 16
-local offset = 0
 local claimed = {}
-for page = 1, max_pages do
-  local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', offset, page_size)
-  if #ids == 0 then
-    break
-  end
+
+-- User-triggered RunAfter jobs must not sit behind hours of overdue tenant
+-- crons. Read a bounded due window once, then claim one-shots before crons.
+-- The 4096 floor covers thousands of per-tenant cron registrations without
+-- turning this atomic script into an unbounded scan.
+local scan_limit = math.max(limit * 64, 4096)
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, scan_limit)
+
+local function claim_kind(want_cron)
   for _, id in ipairs(ids) do
     if #claimed >= limit * 3 then
-      break
+      return
     end
-    local claim_key = ARGV[3] .. id
-    if redis.call('EXISTS', claim_key) == 0 then
-      local fence = redis.call('INCR', KEYS[3])
-      local claim_token = ARGV[4] .. ':' .. tostring(fence)
-      redis.call('SET', claim_key, claim_token, 'PX', ARGV[5])
-      local payload = redis.call('HGET', KEYS[2], id)
-      if payload then
-        table.insert(claimed, id)
-        table.insert(claimed, payload)
-        table.insert(claimed, claim_token)
-      else
-        redis.call('ZREM', KEYS[1], id)
-        redis.call('DEL', claim_key)
+    local payload = redis.call('HGET', KEYS[2], id)
+    if payload then
+      local decoded_ok, decoded = pcall(cjson.decode, payload)
+      local is_cron = decoded_ok and type(decoded) == 'table' and decoded['cronName'] ~= nil and decoded['cronName'] ~= ''
+      if is_cron == want_cron then
+        local claim_key = ARGV[3] .. id
+        if redis.call('EXISTS', claim_key) == 0 then
+          local fence = redis.call('INCR', KEYS[3])
+          local claim_token = ARGV[4] .. ':' .. tostring(fence)
+          redis.call('SET', claim_key, claim_token, 'PX', ARGV[5])
+          table.insert(claimed, id)
+          table.insert(claimed, payload)
+          table.insert(claimed, claim_token)
+        end
       end
+    else
+      redis.call('ZREM', KEYS[1], id)
     end
   end
-  if #claimed >= limit * 3 or #ids < page_size then
-    break
-  end
-  offset = offset + #ids
 end
+
+claim_kind(false)
+claim_kind(true)
 return claimed
 `)
 

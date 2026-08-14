@@ -87,10 +87,36 @@ func (c *rowsCache) close() error {
 	return c.client.Close()
 }
 
-func (c *rowsCache) rowsKey(projectID string, tenantID string, table string, query url.Values) string {
+func (c *rowsCache) rowsKey(ctx context.Context, projectID string, tenantID string, table string, query url.Values) string {
 	hash := sha256.Sum256([]byte(query.Encode()))
+	generationHash := sha256.Sum256([]byte(c.rowsGeneration(ctx, projectID, tenantID, table)))
 	projectID, tenantID = cacheScope(projectID, tenantID)
-	return "gonvex:rows:v2:" + projectID + ":" + tenantID + ":" + table + ":" + hex.EncodeToString(hash[:])
+	return "gonvex:rows:v2:" + projectID + ":" + tenantID + ":" + table + ":" +
+		hex.EncodeToString(generationHash[:12]) + ":" + hex.EncodeToString(hash[:])
+}
+
+func (c *rowsCache) rowsGeneration(ctx context.Context, projectID string, tenantID string, table string) string {
+	if !c.enabled() {
+		return c.bootEpoch
+	}
+	keys := []string{
+		c.rowsGenerationKey(projectID, tenantID, "*"),
+		c.rowsGenerationKey(projectID, tenantID, table),
+	}
+	values, err := c.client.MGet(ctx, keys...).Result()
+	if err != nil {
+		return c.bootEpoch
+	}
+	return strings.Join([]string{
+		"boot=" + c.bootEpoch,
+		keys[0] + "=" + strings.TrimSpace(fmt.Sprint(values[0])),
+		keys[1] + "=" + strings.TrimSpace(fmt.Sprint(values[1])),
+	}, "\x00")
+}
+
+func (c *rowsCache) rowsGenerationKey(projectID string, tenantID string, table string) string {
+	projectID, tenantID = cacheScope(projectID, tenantID)
+	return "gonvex:rows:v2:generation:" + cacheKeyPart(projectID) + ":" + cacheKeyPart(tenantID) + ":" + cacheKeyPart(table)
 }
 
 func (c *rowsCache) get(ctx context.Context, key string) ([]byte, bool) {
@@ -199,12 +225,10 @@ func (c *rowsCache) invalidateRows(ctx context.Context, projectID string, tenant
 	if !c.enabled() {
 		return
 	}
-	projectID, tenantID = cacheScope(projectID, tenantID)
-	pattern := "gonvex:rows:v2:" + projectID + ":" + tenantID + ":*"
-	if table != "" {
-		pattern = "gonvex:rows:v2:" + projectID + ":" + tenantID + ":" + table + ":*"
+	if strings.TrimSpace(table) == "" {
+		table = "*"
 	}
-	c.deletePattern(ctx, pattern)
+	_ = c.client.Incr(ctx, c.rowsGenerationKey(projectID, tenantID, table)).Err()
 }
 
 func (c *rowsCache) deletePattern(ctx context.Context, pattern string) {
@@ -231,6 +255,7 @@ func (c *rowsCache) clearProject(ctx context.Context, projectID string) int64 {
 	projectID, _ = cacheScope(projectID, "")
 	patterns := []string{
 		"gonvex:rows:v2:" + projectID + ":*",
+		"gonvex:rows:v2:generation:" + cacheKeyPart(projectID) + ":*",
 		"gonvex:queries:v2:" + cacheKeyPart(projectID) + ":*",
 		"gonvex:queries:v2:generation:" + cacheKeyPart(projectID) + ":*",
 	}

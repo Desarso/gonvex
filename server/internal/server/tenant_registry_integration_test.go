@@ -63,6 +63,65 @@ func TestProvisionExistingTenantRepairsDurableSyncStorage(t *testing.T) {
 	}
 }
 
+func TestUnchangedDevSyncRepairsMissingDurableSyncStorage(t *testing.T) {
+	baseURL := tenantRegistryTestPostgresURL(t)
+	databaseURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_sync_skip_repair_"+tenantRegistryTestSuffix(t))
+	const project = "sync-skip-repair-project"
+	current := manifest.Manifest{
+		Project: project,
+		Schema: manifest.Schema{Tables: map[string]manifest.Table{
+			"priorities": {Columns: map[string]manifest.Column{
+				"id": {Type: "string", PrimaryKey: true},
+			}},
+		}},
+		Functions: map[string]manifest.FunctionEntry{
+			"sync.priorities": {
+				Kind: manifest.FunctionKindSync,
+				Sync: &manifest.SyncDefinition{Table: "priorities", Key: "id", Columns: []string{"id"}},
+			},
+		},
+	}
+	payload, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := New(config.Config{ProjectDatabases: map[string]string{project: databaseURL}})
+	syncProject := func() map[string]any {
+		recorder := httptest.NewRecorder()
+		runtime.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", bytes.NewReader(payload)))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("sync status %d: %s", recorder.Code, recorder.Body.String())
+		}
+		var response map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	syncProject()
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`DROP TABLE _gonvex_sync_changes, _gonvex_sync_clock`); err != nil {
+		t.Fatal(err)
+	}
+
+	response := syncProject()
+	if skipped, _ := response["schemaSkipped"].(bool); skipped {
+		t.Fatal("unchanged manifest skipped schema despite missing durable sync storage")
+	}
+	var repaired bool
+	if err := db.QueryRow(`SELECT to_regclass('_gonvex_sync_clock') IS NOT NULL AND to_regclass('_gonvex_sync_changes') IS NOT NULL`).Scan(&repaired); err != nil {
+		t.Fatal(err)
+	}
+	if !repaired {
+		t.Fatal("unchanged sync did not restore durable sync storage")
+	}
+}
+
 func tenantRegistryTestPostgresURL(t *testing.T) string {
 	t.Helper()
 	value := strings.TrimSpace(os.Getenv("GONVEX_TEST_POSTGRES_URL"))

@@ -3,7 +3,7 @@ import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionState, FunctionReference, GonvexClient } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { ConvexProviderWithAuth, GonvexProvider, useConvexConnectionState, useMutation, useQuery, useQueryResult, useSync } from "./index";
+import { ConvexProviderWithAuth, GonvexProvider, useConvexAuth, useConvexConnectionState, useMutation, useQuery, useQueryResult, useSync } from "./index";
 
 const ref: FunctionReference = { kind: "query", path: "tasks.list" };
 
@@ -11,6 +11,7 @@ class FakeGonvexClient {
   readonly queryListeners = new Set<(message: ServerMessage) => void>();
   readonly scopeHandlers = new Set<() => void>();
   readonly connectionHandlers = new Set<(state: ConnectionState) => void>();
+  readonly authErrorHandlers = new Set<(error: string) => void>();
   readonly retryQuery = vi.fn();
   readonly mutation = vi.fn(() => Promise.resolve(null));
   readonly action = vi.fn(() => Promise.resolve(null));
@@ -63,6 +64,15 @@ class FakeGonvexClient {
     return () => {
       this.connectionHandlers.delete(handler);
     };
+  }
+
+  onAuthError(handler: (error: string) => void) {
+    this.authErrorHandlers.add(handler);
+    return () => this.authErrorHandlers.delete(handler);
+  }
+
+  emitAuthError(error: string) {
+    for (const handler of Array.from(this.authErrorHandlers)) handler(error);
   }
 
   emitQuery(message: ServerMessage) {
@@ -381,5 +391,26 @@ describe("ConvexProviderWithAuth", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("exposes terminal auth rejection and keeps children mounted for sign-in routing", async () => {
+    const client = new FakeGonvexClient();
+    const fetchAccessToken = vi.fn(() => Promise.resolve("jwt-token"));
+    function AuthProbe() {
+      const auth = useConvexAuth();
+      return <output data-testid="auth-state">{JSON.stringify({ authenticated: auth.isAuthenticated, error: auth.authError?.message })}</output>;
+    }
+
+    const view = render(
+      <ConvexProviderWithAuth client={client as unknown as GonvexClient} useAuth={() => authState(fetchAccessToken)}>
+        <AuthProbe />
+      </ConvexProviderWithAuth>,
+    );
+    await act(async () => {});
+    expect(view.getByTestId("auth-state").textContent).toBe('{"authenticated":true}');
+
+    act(() => client.emitAuthError("token expired"));
+
+    expect(view.getByTestId("auth-state").textContent).toBe('{"authenticated":false,"error":"token expired"}');
   });
 });

@@ -264,7 +264,7 @@ func TestClearProjectCacheDoesNotClearOtherProjects(t *testing.T) {
 	ctx := context.Background()
 	projectAQuery := cache.queryKey("project-a", "tenant-a", "generation", "scope", "tasks.list", nil)
 	projectBQuery := cache.queryKey("project-b", "tenant-b", "generation", "scope", "tasks.list", nil)
-	projectARows := cache.rowsKey("project-a", "tenant-a", "tasks", nil)
+	projectARows := cache.rowsKey(ctx, "project-a", "tenant-a", "tasks", nil)
 	cache.set(ctx, projectAQuery, []byte("a"))
 	cache.set(ctx, projectBQuery, []byte("b"))
 	cache.set(ctx, projectARows, []byte("rows"))
