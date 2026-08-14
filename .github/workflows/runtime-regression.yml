@@ -49,7 +49,10 @@ jobs:
     if: github.event_name == 'push'
     needs: test
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Coolify can queue builds, and the runtime/dashboard each have a 12-minute
+    # deployment deadline in deploy-coolify.mjs. Give the ordered pair enough
+    # room to finish without Actions cancelling a healthy rollout midway.
+    timeout-minutes: 30
     environment: gonvex-runtime
     concurrency:
       group: gonvex-dev-runtime-deploy

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -455,11 +456,17 @@ func (sc *scheduler) execute(ctx context.Context, job scheduledJob, dispatchedAt
 	} else {
 		err = fmt.Errorf("scheduler executor not configured")
 	}
+	executionContextErr := jobContext.Err()
+	executionInterrupted := err != nil && executionContextErr != nil && errors.Is(err, executionContextErr)
 	if sc.store != nil {
 		close(stopRenewing)
 		<-renewed
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err != nil {
+		// A normal function error is the terminal result of this scheduled
+		// invocation. Removing its durable queue entry prevents a permanently
+		// invalid job from being claimed and failed forever. Only an interrupted
+		// execution (runtime shutdown or lost lease) is released for retry.
+		if executionInterrupted {
 			_ = sc.store.release(cleanupContext, job.ID, job.ClaimToken)
 		} else {
 			var cleanupErr error
