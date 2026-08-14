@@ -69,6 +69,51 @@ func TestValkeyScheduledJobsAreClaimedOnceAndSurviveWorkerRelease(t *testing.T) 
 	}
 }
 
+func TestValkeyScheduledJobsSkipLeasedJobsWhenClaimingLaterDueWork(t *testing.T) {
+	_, _, store := testScheduledJobStore(t)
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	for _, id := range []string{"job-a", "job-b", "job-c"} {
+		if err := store.enqueue(context.Background(), scheduledJob{
+			ID: id, ProjectID: "project-a", FunctionPath: "tasks.run", RunAt: now, ScheduledFor: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := store.claimDue(context.Background(), now, 2, "runtime-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 {
+		t.Fatalf("first runtime claimed %d jobs, want 2", len(first))
+	}
+	later, err := store.claimDue(context.Background(), now, 1, "runtime-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(later) != 1 || later[0].ID != "job-c" {
+		t.Fatalf("later due work was starved behind leases: %#v", later)
+	}
+}
+
+func TestValkeyScheduledJobCompletionRequiresClaimOwnership(t *testing.T) {
+	_, _, store := testScheduledJobStore(t)
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	job := scheduledJob{ID: "job-owned", ProjectID: "project-a", FunctionPath: "tasks.run", RunAt: now, ScheduledFor: now}
+	if err := store.enqueue(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.claimDue(context.Background(), now, 1, "runtime-a")
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %#v, %v", claimed, err)
+	}
+	if err := store.complete(context.Background(), job.ID, "runtime-b"); err == nil {
+		t.Fatal("completion by a non-owner unexpectedly succeeded")
+	}
+	if err := store.complete(context.Background(), job.ID, "runtime-a"); err != nil {
+		t.Fatalf("completion by claim owner failed: %v", err)
+	}
+}
+
 func TestValkeySchedulerExecutesJobEnqueuedByAnotherReplica(t *testing.T) {
 	_, _, store := testScheduledJobStore(t)
 	producer := newScheduler(nil)

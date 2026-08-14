@@ -94,9 +94,12 @@ func (store *valkeyScheduledJobStore) enqueue(ctx context.Context, job scheduled
 }
 
 var claimScheduledJobsScript = redis.NewScript(`
-local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
 local claimed = {}
 for _, id in ipairs(ids) do
+  if #claimed >= tonumber(ARGV[2]) * 2 then
+    break
+  end
   local claim_key = ARGV[3] .. id
   if redis.call('SET', claim_key, ARGV[4], 'NX', 'PX', ARGV[5]) then
     local payload = redis.call('HGET', KEYS[2], id)
@@ -178,14 +181,20 @@ return 1
 `)
 
 func (store *valkeyScheduledJobStore) complete(ctx context.Context, id string, owner string) error {
-	_, err := completeScheduledJobScript.Run(
+	completed, err := completeScheduledJobScript.Run(
 		ctx,
 		store.client,
 		[]string{scheduledJobsKey, scheduledJobPayloadsKey, scheduledJobClaimPrefix + id},
 		owner,
 		id,
-	).Result()
-	return err
+	).Int64()
+	if err != nil {
+		return err
+	}
+	if completed != 1 {
+		return fmt.Errorf("scheduled job %s completion rejected: claim is missing or owned by another runtime", id)
+	}
+	return nil
 }
 
 var releaseScheduledJobScript = redis.NewScript(`

@@ -927,6 +927,55 @@ describe("durable sync integration", () => {
     expect(watch.localSyncResult()).toEqual(currentRows);
   });
 
+  it("rejects a retired runtime epoch while accepting a genuinely new epoch", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: { store: new FakeSyncStore() } });
+    const watch = client.watchSync<{ id: string; title: string }>(ref, { workspaceId: "workspace-a" });
+    watch.onUpdate(() => undefined);
+    socket().open();
+    socket().receive({ type: "session.ready", queryCache: directive });
+    await flushAsyncWork();
+    const open = sentMessages().find((message) => message.type === "sync.open");
+
+    const settleEpoch = async (epoch: string, title: string) => {
+      const rows = [{ id: "task-a", title }];
+      socket().receive({
+        type: "sync.snapshot",
+        id: open.id,
+        path: ref.path,
+        result: rows,
+        cursor: { epoch, revision: 1 },
+        key: "id",
+        mode: "eager",
+      });
+      socket().receive({
+        type: "sync.ready",
+        id: open.id,
+        path: ref.path,
+        cursor: { epoch, revision: 1 },
+        mode: "eager",
+        digest: await digestRows(rows),
+      });
+      await flushAsyncWork();
+      return rows;
+    };
+
+    await settleEpoch("runtime-a", "from-a");
+    socket().receive({ type: "sync.reset", id: open.id, path: ref.path, reason: "runtime-epoch" });
+    await flushAsyncWork();
+    const currentRows = await settleEpoch("runtime-b", "from-b");
+    expect(watch.status().isUpToDate).toBe(true);
+
+    socket().receive({ type: "sync.reset", id: open.id, path: ref.path, reason: "integrity-mismatch" });
+    await flushAsyncWork();
+    await settleEpoch("runtime-a", "delayed-from-retired-a");
+    expect(watch.status().isUpToDate).toBe(false);
+    expect(watch.localSyncResult()).toEqual(currentRows);
+
+    const nextRows = await settleEpoch("runtime-c", "from-c");
+    expect(watch.status().isUpToDate).toBe(true);
+    expect(watch.localSyncResult()).toEqual(nextRows);
+  });
+
   it("reuses a verified digest for consecutive ready frames with unchanged rows", async () => {
     const store = new FakeSyncStore();
     const client = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
