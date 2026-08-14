@@ -125,16 +125,20 @@ The dashboard Health view reports registered cron schedules, recent runs,
 failures, scheduler lag, execution duration, queued work, and concurrency.
 Scheduled function calls also appear in normal function metrics.
 
-## Current durability boundary
+## Durability and multi-replica execution
 
-The scheduler is in-process:
+Every one-shot job and deterministic cron occurrence is stored in the control
+Postgres database before it can be claimed. A runtime restart or rolling
+replacement therefore does not discard scheduled work. Replicas claim due rows
+with PostgreSQL row locks, renewable leases, and fencing tokens, while one-shot
+jobs are always selected ahead of an overdue cron backlog.
 
-- recurring schedules are rebuilt from the compiled app after runtime startup
-  or manifest sync;
-- one-shot `RunAfter` and `RunAt` jobs are held in memory and do not survive a
-  runtime restart;
-- one runtime process executes up to 16 scheduled calls concurrently;
-- multi-replica leader election and a durable job queue are not implemented.
+Recurring definitions still come from the compiled app and are rebuilt after
+runtime startup or manifest sync. Their occurrence IDs are deterministic, so
+overlapping replicas can derive the same fire without executing it twice. One
+runtime process executes up to 16 scheduled calls concurrently.
 
-Use an external durable queue or scheduler for work that must survive runtime
-replacement until Gonvex adds persisted scheduled jobs.
+The runtime retains completed rows for deduplication and auditability. A normal
+function error is a terminal scheduled result; only an interrupted execution
+such as runtime shutdown or lease loss is released for recovery. There is not
+yet a public cancellation, retry, or dead-letter API.

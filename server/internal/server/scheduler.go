@@ -76,7 +76,7 @@ type schedulerRun struct {
 }
 
 // scheduler is the in-process executor and metrics collector. With a store
-// configured, queued jobs are durable in Valkey and safely claimable by any
+// configured, queued jobs are durable in Postgres and safely claimable by any
 // replica; only derived cron registrations and dashboard metrics live in this
 // process. Crons are re-derived from each compiled app on manifest sync.
 type scheduler struct {

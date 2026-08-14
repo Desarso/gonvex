@@ -126,7 +126,11 @@ func NewRequiredWithApp(cfg config.Config, app *gonvex.App) (*Server, error) {
 	ephemeral := &valkeyEphemeralBackend{client: client}
 	cache := newRowsCacheWithClient(client, cfg.RowsCacheTTL)
 	server := newServer(cfg, app, ephemeral, cache)
-	server.scheduler.store = newValkeyScheduledJobStore(client)
+	legacyScheduler := newValkeyScheduledJobStore(client)
+	server.scheduler.store = newMigratingScheduledJobStore(
+		server.postgresScheduledJobStore(),
+		legacyScheduler,
+	)
 	server.scheduler.start(server.ctx)
 	go server.hydrateRuntimeState(server.ctx)
 	return server, nil
@@ -135,7 +139,7 @@ func NewRequiredWithApp(cfg config.Config, app *gonvex.App) (*Server, error) {
 func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	var cache *rowsCache
 	var ephemeral ephemeralBackend
-	var schedulerStore scheduledJobStore
+	var legacyScheduler legacyScheduledJobStore
 	if strings.TrimSpace(cfg.ValkeyURL) != "" {
 		client, err := newValkeyClient(cfg.ValkeyURL)
 		if err != nil {
@@ -143,7 +147,7 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 		} else {
 			cache = newRowsCacheWithClient(client, cfg.RowsCacheTTL)
 			ephemeral = &valkeyEphemeralBackend{client: client}
-			schedulerStore = newValkeyScheduledJobStore(client)
+			legacyScheduler = newValkeyScheduledJobStore(client)
 		}
 	}
 	server := newServer(cfg, app, ephemeral, cache)
@@ -151,10 +155,21 @@ func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	// They do not require the production readiness barrier or distributed
 	// scheduler lease.
 	server.runtimeHydrationReady.Store(true)
-	server.scheduler.store = schedulerStore
+	if legacyScheduler != nil {
+		server.scheduler.store = newMigratingScheduledJobStore(server.postgresScheduledJobStore(), legacyScheduler)
+	}
 	server.scheduler.start(server.ctx)
 	go server.hydrateRuntimeState(server.ctx)
 	return server
+}
+
+func (s *Server) postgresScheduledJobStore() *postgresScheduledJobStore {
+	if strings.TrimSpace(s.projectRegistryURL()) == "" {
+		return nil
+	}
+	return newPostgresScheduledJobStore(func(ctx context.Context) (*sql.DB, error) {
+		return s.pooledProjectRegistry(ctx)
+	})
 }
 
 func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, cache *rowsCache) *Server {

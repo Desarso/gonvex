@@ -155,10 +155,15 @@ through runtime-managed DuckDB artifacts; it is not a general warehouse.
 
 ## Scheduler Durability
 
-Registered cron schedules are reconstructed from the app bundle, but one-shot
-`ctx.Scheduler.RunAfter`/`RunAt` jobs live in runtime memory. They do not survive
-a restart. Multi-replica leader election, durable job persistence, retries, and
-dead-letter handling are not implemented.
+One-shot jobs and deterministic cron occurrences are persisted in Postgres and
+claimed with renewable multi-replica leases. They survive runtime restarts and
+health-first rolling replacements. Registered cron definitions are reconstructed
+from the app bundle after startup or manifest sync.
+
+Interrupted executions are recoverable after their lease is released or
+expires. Normal function errors are terminal and recorded in runtime metrics;
+public cancellation, manual retry, retention controls, and dead-letter APIs are
+not implemented yet.
 
 ## Production Guidance
 
@@ -167,6 +172,6 @@ Treat Gonvex as beta and plan explicitly for:
 - production migrations
 - deployment/versioning and rollback
 - tenant fleet backup/restore
-- durable scheduled jobs
+- scheduler retention and dead-letter policies beyond the built-in durable queue
 - identity-provider and audit requirements beyond native Google auth
 - operating the self-hosted runtime, because no public managed service is available

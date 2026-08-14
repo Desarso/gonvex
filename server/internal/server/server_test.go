@@ -170,6 +170,7 @@ func TestInternalDataTablesAreHidden(t *testing.T) {
 		{name: "project env", table: "gonvex_project_env", want: true},
 		{name: "runtime projects", table: "gonvex_runtime_projects", want: true},
 		{name: "runtime manifests", table: "gonvex_runtime_manifests", want: true},
+		{name: "scheduled jobs", table: "gonvex_scheduled_jobs", want: true},
 		{name: "telemetry", table: "telemetry_events", want: true},
 		{name: "app users", table: "users", want: false},
 		{name: "app tenants", table: "tenants", want: false},

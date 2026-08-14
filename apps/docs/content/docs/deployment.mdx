@@ -94,10 +94,12 @@ Postgres, data files rehydrate from object storage, and sharing Go plugin caches
 between two runtime binaries would make a rolling overlap unsafe.
 
 The runtime does not report healthy until every persisted project manifest has
-hydrated. Scheduled jobs use a shared Valkey queue with renewable execution
-leases, crash recovery, and deterministic cron-occurrence IDs. HTTP and WebSocket
-traffic can therefore use both rolling containers while any replica safely
-enqueues or executes scheduled work without losing or duplicating a cron fire.
+hydrated. Scheduled jobs and deterministic cron occurrences live in Postgres and
+use renewable row leases for crash recovery. During upgrades from the earlier
+Valkey-only scheduler, Valkey claim keys remain as a compatibility fence and the
+new runtime drains old queued jobs into Postgres. HTTP and WebSocket traffic can
+therefore use both rolling containers while either version safely schedules or
+executes work without duplicating a cron fire.
 
 Production is a separate, manually approved promotion lane. Run **Promote Gonvex
 production** with the full SHA that is already healthy in development and a
