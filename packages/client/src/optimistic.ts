@@ -1,14 +1,29 @@
 export type Row = Record<string, unknown>;
 
+export type OptimisticProjection = {
+  entity: string;
+  key: string;
+  resultPath: readonly string[];
+};
+
+export type OptimisticMutationDefinition = {
+  entity: string;
+  rowIdPath: readonly string[];
+  fieldsPath: readonly string[];
+};
+
 type OptimisticRowPatch = {
-  collection: string;
+  /** Canonical entity/table name. `collection` remains a compatibility alias. */
+  entity?: string;
+  collection?: string;
   rowId: string;
   op: "patch" | "insert";
   fields: Record<string, unknown>;
 };
 
 type OptimisticDeletePatch = {
-  collection: string;
+  entity?: string;
+  collection?: string;
   rowId: string;
   op: "delete";
   fields?: never;
@@ -19,6 +34,9 @@ export type OptimisticPatch = OptimisticRowPatch | OptimisticDeletePatch;
 type OverlayEntry = {
   mutationId: string;
   patches: OptimisticPatch[];
+  accepted: boolean;
+  targets: Set<string>;
+  acknowledgedTargets: Set<string>;
 };
 
 type CollectionCache = {
@@ -28,27 +46,58 @@ type CollectionCache = {
 };
 
 /**
- * An ordered, in-memory view of mutations that have not settled yet.
+ * Ordered pending entity mutations layered over immutable authoritative data.
  *
- * Authoritative sync rows remain untouched. Consumers materialize this overlay
- * at read time, so rejecting an entry simply reveals the current server state.
+ * A source is one concrete sync/query subscription (including its arguments).
+ * Successful mutations remain pending until every source that exposed the
+ * optimistic row reports that mutation id in an authoritative update. This
+ * prevents a fast RPC acknowledgement from revealing an older subscription
+ * snapshot while its invalidation is still in flight.
  */
 export class OptimisticOverlay {
   private readonly entries: OverlayEntry[] = [];
-  private readonly listeners = new Set<(collection: string) => void>();
+  private readonly listeners = new Set<(entity: string) => void>();
   private readonly cache = new Map<string, CollectionCache>();
   private version = 0;
 
-  /** Append a mutation's patches after every currently pending mutation. */
-  add(mutationId: string, patches: OptimisticPatch[]): void {
-    if (patches.length === 0) return;
-    this.entries.push({ mutationId, patches: patches.map(clonePatch) });
-    this.changed(affectedCollections(patches));
+  add(mutationId: string, patches: OptimisticPatch[], options: { accepted?: boolean } = {}): void {
+    const normalized = patches.map(clonePatch).filter((patch) => patchEntity(patch) !== "");
+    if (normalized.length === 0) return;
+    this.entries.push({
+      mutationId,
+      patches: normalized,
+      accepted: options.accepted === true,
+      targets: new Set(),
+      acknowledgedTargets: new Set(),
+    });
+    this.changed(affectedEntities(normalized));
   }
 
-  /** Remove patches after a successful authoritative server result. */
+  /** Reserve a live projection even when its first snapshot is still pending. */
+  expectSource(source: string, entity: string): void {
+    let added = false;
+    for (const entry of this.entries) {
+      if (!entry.patches.some((patch) => patchEntity(patch) === entity)) continue;
+      if (entry.targets.has(source)) continue;
+      entry.targets.add(source);
+      added = true;
+    }
+    if (!added) return;
+    this.version += 1;
+    this.cache.clear();
+  }
+
+  /** Mark the transport result successful without dropping visible optimism. */
+  accept(mutationId: string): string[] {
+    const entry = this.entries.find((candidate) => candidate.mutationId === mutationId);
+    if (!entry) return [];
+    entry.accepted = true;
+    return this.settleReadyEntries();
+  }
+
+  /** Compatibility alias. Prefer accept followed by authoritative acknowledge. */
   settle(mutationId: string): void {
-    this.remove(mutationId);
+    this.accept(mutationId);
   }
 
   /** Remove patches after a deterministic server rejection. */
@@ -56,15 +105,32 @@ export class OptimisticOverlay {
     this.remove(mutationId);
   }
 
-  /** Materialize one collection without mutating its authoritative rows. */
-  apply(collection: string, rows: readonly Row[], keyField: string): Row[] {
-    const cached = this.cache.get(collection);
+  /**
+   * Materialize entity rows for a concrete source. The three-argument overload
+   * preserves the original collection-path API by using the entity as source.
+   */
+  apply(entity: string, rows: readonly Row[], keyField: string): Row[];
+  apply(source: string, entity: string, rows: readonly Row[], keyField: string): Row[];
+  apply(
+    sourceOrEntity: string,
+    entityOrRows: string | readonly Row[],
+    rowsOrKey: readonly Row[] | string,
+    maybeKey?: string,
+  ): Row[] {
+    const legacy = Array.isArray(entityOrRows);
+    const source = legacy ? sourceOrEntity : sourceOrEntity;
+    const entity = legacy ? sourceOrEntity : entityOrRows as string;
+    const rows = (legacy ? entityOrRows : rowsOrKey) as readonly Row[];
+    const keyField = (legacy ? rowsOrKey : maybeKey) as string;
+    const cacheKey = `${source}\u0000${entity}`;
+    const cached = this.cache.get(cacheKey);
     if (cached?.base === rows && cached.version === this.version) return cached.rows;
 
     let materialized = rows.slice();
     for (const entry of this.entries) {
+      let touched = false;
       for (const patch of entry.patches) {
-        if (patch.collection !== collection) continue;
+        if (patchEntity(patch) !== entity) continue;
         const index = materialized.findIndex((row) => {
           const key = row[keyField];
           return key !== null && key !== undefined && String(key) === patch.rowId;
@@ -72,48 +138,102 @@ export class OptimisticOverlay {
         if (patch.op === "patch") {
           if (index >= 0) {
             materialized[index] = { ...materialized[index], ...patch.fields };
+            touched = true;
           }
         } else if (patch.op === "insert") {
-          if (index < 0) {
-            materialized.push({ ...patch.fields, [keyField]: patch.rowId });
-          }
+          if (index < 0) materialized.push({ ...patch.fields, [keyField]: patch.rowId });
+          touched = true;
         } else if (index >= 0) {
           materialized = [...materialized.slice(0, index), ...materialized.slice(index + 1)];
+          touched = true;
         }
+      }
+      if (touched) {
+        entry.targets.add(source);
+      } else if (entry.targets.has(source)) {
+        // The source cannot expose this row, so it is already reconciled from
+        // that source's perspective.
+        entry.acknowledgedTargets.add(source);
       }
     }
 
-    this.cache.set(collection, { base: rows, version: this.version, rows: materialized });
+    this.cache.set(cacheKey, { base: rows, version: this.version, rows: materialized });
     return materialized;
   }
 
-  /** Subscribe to collections whose materialized rows may have changed. */
-  subscribe(listener: (collection: string) => void): () => void {
+  /** Record authoritative delivery for a source; returns fully reconciled ids. */
+  acknowledge(source: string, mutationIds: readonly string[] | undefined): string[] {
+    if (!mutationIds?.length) return [];
+    const ids = new Set(mutationIds);
+    for (const entry of this.entries) {
+      if (ids.has(entry.mutationId) && entry.targets.has(source)) {
+        entry.acknowledgedTargets.add(source);
+      }
+    }
+    return this.settleReadyEntries();
+  }
+
+  /** Reconcile restored committed entries against an authoritative snapshot. */
+  acknowledgeMatching(source: string, entity: string, rows: readonly Row[], keyField: string): string[] {
+    for (const entry of this.entries) {
+      if (!entry.accepted || !entry.targets.has(source)) continue;
+      const patches = entry.patches.filter((patch) => patchEntity(patch) === entity);
+      if (patches.length === 0 || !patches.every((patch) => patchMatchesRows(patch, rows, keyField))) continue;
+      entry.acknowledgedTargets.add(source);
+    }
+    return this.settleReadyEntries();
+  }
+
+  /** Stop waiting for a subscription that no longer exists. */
+  removeSource(source: string): string[] {
+    for (const entry of this.entries) {
+      entry.targets.delete(source);
+      entry.acknowledgedTargets.delete(source);
+    }
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(`${source}\u0000`)) this.cache.delete(key);
+    }
+    return this.settleReadyEntries();
+  }
+
+  subscribe(listener: (entity: string) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
-  /** Whether any pending mutation touches this collection row. */
-  pendingFor(collection: string, rowId: string): boolean {
+  pendingFor(entity: string, rowId: string): boolean {
     return this.entries.some((entry) => entry.patches.some((patch) => (
-      patch.collection === collection && patch.rowId === rowId
+      patchEntity(patch) === entity && patch.rowId === rowId
     )));
+  }
+
+  private settleReadyEntries(): string[] {
+    const settled: string[] = [];
+    for (let index = this.entries.length - 1; index >= 0; index -= 1) {
+      const entry = this.entries[index]!;
+      if (!entry.accepted) continue;
+      if ([...entry.targets].some((target) => !entry.acknowledgedTargets.has(target))) continue;
+      this.entries.splice(index, 1);
+      settled.push(entry.mutationId);
+      this.changed(affectedEntities(entry.patches));
+    }
+    return settled.reverse();
   }
 
   private remove(mutationId: string) {
     const index = this.entries.findIndex((entry) => entry.mutationId === mutationId);
     if (index < 0) return;
     const [entry] = this.entries.splice(index, 1);
-    this.changed(affectedCollections(entry!.patches));
+    this.changed(affectedEntities(entry!.patches));
   }
 
-  private changed(collections: Set<string>) {
+  private changed(entities: Set<string>) {
     this.version += 1;
     this.cache.clear();
-    for (const collection of collections) {
+    for (const entity of entities) {
       for (const listener of Array.from(this.listeners)) {
         try {
-          listener(collection);
+          listener(entity);
         } catch {
           // A view listener must not be able to break mutation delivery.
         }
@@ -122,11 +242,79 @@ export class OptimisticOverlay {
   }
 }
 
-function affectedCollections(patches: readonly OptimisticPatch[]) {
-  return new Set(patches.map((patch) => patch.collection));
+export function optimisticPatchesFromReference(
+  definition: OptimisticMutationDefinition | undefined,
+  args: unknown,
+): OptimisticPatch[] {
+  if (!definition?.entity) return [];
+  const record = isRecord(args) ? args : {};
+  const rowId = String(readPath(record, definition.rowIdPath) ?? record.id ?? record._id ?? "");
+  const nested = readPath(record, definition.fieldsPath);
+  if (!rowId || !isRecord(nested)) return [];
+  return [{
+    entity: definition.entity,
+    rowId,
+    op: "patch",
+    fields: normalizeOptimisticFields(nested),
+  }];
+}
+
+function normalizeOptimisticFields(fields: Record<string, unknown>) {
+  const normalized: Record<string, unknown> = { ...fields };
+  for (const [key, value] of Object.entries(fields)) {
+    const camel = key.replace(/_([a-z0-9])/g, (_, character: string) => character.toUpperCase());
+    if (!(camel in normalized)) normalized[camel] = value;
+  }
+  return normalized;
+}
+
+function readPath(value: unknown, path: readonly string[]): unknown {
+  let current = value;
+  for (const segment of path) {
+    if (!isRecord(current)) return undefined;
+    current = current[segment];
+  }
+  return current;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function patchEntity(patch: OptimisticPatch) {
+  return String(patch.entity ?? patch.collection ?? "");
+}
+
+function affectedEntities(patches: readonly OptimisticPatch[]) {
+  return new Set(patches.map(patchEntity).filter(Boolean));
 }
 
 function clonePatch(patch: OptimisticPatch): OptimisticPatch {
   if (patch.op === "delete") return { ...patch };
   return { ...patch, fields: { ...patch.fields } };
+}
+
+function patchMatchesRows(patch: OptimisticPatch, rows: readonly Row[], keyField: string) {
+  const row = rows.find((candidate) => {
+    const key = candidate[keyField];
+    return key !== null && key !== undefined && String(key) === patch.rowId;
+  });
+  if (patch.op === "delete") return row === undefined;
+  if (!row) return false;
+  return Object.entries(patch.fields).every(([key, value]) => valuesEqual(row[key], value));
+}
+
+function valuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => valuesEqual(value, right[index]));
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index] && valuesEqual(left[key], right[key]));
 }

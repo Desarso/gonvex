@@ -264,6 +264,7 @@ export type ServerMessage =
     cacheScope?: string;
     cacheRevision?: string;
     subscriptionRevision?: SubscriptionRevision;
+    mutationIds?: string[];
   }
   | {
     type: "query.progress";
@@ -272,6 +273,7 @@ export type ServerMessage =
     reason?: "initial" | "invalidate" | "recover";
     throughRevision: SubscriptionRevision;
     trace?: MessageTrace;
+    mutationIds?: string[];
   }
   | {
     type: "query.patch";
@@ -289,6 +291,7 @@ export type ServerMessage =
     cacheScope?: string;
     cacheRevision?: string;
     trace?: MessageTrace;
+    mutationIds?: string[];
   }
 	| {
 		type: "query.pagePatch";
@@ -307,6 +310,7 @@ export type ServerMessage =
 		cacheScope?: string;
 		cacheRevision?: string;
 		trace?: MessageTrace;
+		mutationIds?: string[];
 	}
 	| {
 		type: "query.objectPatch";
@@ -319,6 +323,7 @@ export type ServerMessage =
 		cacheScope?: string;
 		cacheRevision?: string;
 		trace?: MessageTrace;
+		mutationIds?: string[];
 	}
   | {
     type: "sync.snapshot";

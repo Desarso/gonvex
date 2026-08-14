@@ -25,7 +25,14 @@ import {
   type SyncStoreOptions,
 } from "./sync-store.js";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
-import { OptimisticOverlay, type OptimisticPatch, type Row } from "./optimistic.js";
+import {
+  OptimisticOverlay,
+  optimisticPatchesFromReference,
+  type OptimisticMutationDefinition,
+  type OptimisticPatch,
+  type OptimisticProjection,
+  type Row,
+} from "./optimistic.js";
 import {
   createMutationOutbox,
   type MutationOutbox,
@@ -69,6 +76,7 @@ type QuerySubscription = {
   id: string;
   key: string;
   path: string;
+  projection?: OptimisticProjection;
   args: JsonValue;
   listeners: Set<SubscriptionHandler>;
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
@@ -86,6 +94,7 @@ type SyncSubscription = {
   id: string;
   key: string;
   path: string;
+  entity: string;
   args: JsonValue;
   listeners: Set<SyncSubscriptionHandler>;
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
@@ -164,6 +173,10 @@ type PendingCall = {
 export type FunctionReference = {
   kind: string;
   path: string;
+  optimistic?: {
+    projection?: OptimisticProjection;
+    mutation?: OptimisticMutationDefinition;
+  };
 };
 
 export type GonvexClientErrorCode = "server" | "timeout" | "disconnected" | "closed" | "auth";
@@ -359,7 +372,10 @@ export class GonvexClient {
   private readonly mutationOutbox: MutationOutbox;
   private readonly overlay = new OptimisticOverlay();
   private readonly optimisticMutationIds = new Set<string>();
-  private readonly outboxReady: Promise<void>;
+  private readonly optimisticOutboxEntryIds = new Map<string, number>();
+  private outboxReady: Promise<void>;
+  private outboxScope = "";
+  private outboxScopeGeneration = 0;
   private readonly unsubscribeOutbox: () => void;
   private readonly unsubscribeOverlay: () => void;
   private drainingOutbox = false;
@@ -403,10 +419,14 @@ export class GonvexClient {
     this.unsubscribeOutbox = this.mutationOutbox.subscribe(() => {
       void this.drainOutbox();
     });
-    this.unsubscribeOverlay = this.overlay.subscribe((collection) => {
-      this.emitOptimisticCollection(collection);
+    this.unsubscribeOverlay = this.overlay.subscribe((entity) => {
+      this.emitOptimisticEntity(entity);
     });
-    this.outboxReady = this.restoreOutbox();
+    // Defer the first restore by one microtask. Apps commonly construct the
+    // client and immediately install a cached token/identity; waiting lets the
+    // durable queue select that authenticated scope instead of briefly
+    // restoring an anonymous user's entries.
+    this.outboxReady = Promise.resolve().then(() => this.activateOutboxScope());
     this.timeouts = {
       queryTimeoutMs: options.timeouts?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
       mutationTimeoutMs: options.timeouts?.mutationTimeoutMs ?? DEFAULT_MUTATION_TIMEOUT_MS,
@@ -426,7 +446,7 @@ export class GonvexClient {
   /** Number of mutations waiting for a definitive server result. */
   async outboxCount(): Promise<number> {
     await this.outboxReady;
-    return this.mutationOutbox.count();
+    return this.mutationOutbox.count(this.outboxScope);
   }
 
   connectionState(): ConnectionState {
@@ -506,7 +526,10 @@ export class GonvexClient {
       this.resetQueryCacheScope();
     }
     this.auth = nextAuth;
-    if (scopeMayChange) this.recoverWarmSyncDirective();
+    if (scopeMayChange) {
+      void this.activateOutboxScope();
+      this.recoverWarmSyncDirective();
+    }
     if (auth.tenant !== undefined) this.errorReporter?.setTenant(auth.tenant);
     if (auth.project !== undefined) this.errorReporter?.setProject(auth.project);
     if (auth.telemetry !== undefined) {
@@ -787,7 +810,7 @@ export class GonvexClient {
         this.sendSubscription(existing);
       } else if (cached) {
         queueMicrotask(() => {
-          if (existing.listeners.has(onMessage)) onMessage(cached);
+          if (existing.listeners.has(onMessage)) onMessage(this.materializeQueryMessage(existing, cached));
         });
       }
       return () => this.unsubscribeQueryListener(key, onMessage);
@@ -797,10 +820,14 @@ export class GonvexClient {
       id: randomID(),
       key,
       path: ref.path,
+      projection: ref.optimistic?.projection,
       args,
       listeners: new Set([onMessage]),
       serverSettled: false,
     };
+    if (subscription.projection) {
+      this.overlay.expectSource(subscription.key, subscription.projection.entity);
+    }
     this.querySubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => {
       const normalized = this.normalizeSubscriptionMessage(subscription, message);
@@ -834,8 +861,13 @@ export class GonvexClient {
           clientReceivedAtMs: nowMs(),
         });
       }
+      const outgoing = this.materializeQueryMessage(subscription, message);
       for (const listener of Array.from(subscription.listeners)) {
-        listener(message);
+        listener(outgoing);
+      }
+      if (message.type === "query.result") {
+        this.acknowledgeOptimisticSource(subscription.key, message.mutationIds);
+        this.acknowledgeOptimisticQuerySnapshot(subscription, message.result);
       }
       if (message.type === "query.result") {
         this.persistQueryResult(subscription, message);
@@ -862,6 +894,7 @@ export class GonvexClient {
       subscription.lastRevision = message.throughRevision;
       subscription.revisionSocketGeneration = this.socketGeneration;
       subscription.serverSettled = true;
+      this.acknowledgeOptimisticSource(subscription.key, message.mutationIds);
       // Progress advances freshness without waking React/query listeners.
       return undefined;
     }
@@ -895,6 +928,7 @@ export class GonvexClient {
         cacheScope: message.cacheScope,
         cacheRevision: message.cacheRevision,
         subscriptionRevision: message.subscriptionRevision,
+        mutationIds: message.mutationIds,
       };
     }
 		if (message.type === "query.pagePatch") {
@@ -916,7 +950,7 @@ export class GonvexClient {
 			const metadata = isJsonRecord(message.result) ? message.result : {};
 			subscription.lastRevision = message.subscriptionRevision;
 			subscription.revisionSocketGeneration = this.socketGeneration;
-			return { ...message, type: "query.result", result: { ...previous.result, ...metadata, page } };
+			return { ...message, type: "query.result", result: { ...previous.result, ...metadata, page }, mutationIds: message.mutationIds };
 		}
 		if (message.type === "query.objectPatch") {
 			if (!sameRevision(message.baseRevision, subscription.lastRevision)) {
@@ -945,7 +979,7 @@ export class GonvexClient {
 			}
 			subscription.lastRevision = message.subscriptionRevision;
 			subscription.revisionSocketGeneration = this.socketGeneration;
-			return { ...message, type: "query.result", result };
+			return { ...message, type: "query.result", result, mutationIds: message.mutationIds };
 		}
     if (message.type === "query.result" && message.subscriptionRevision) {
       if (!this.acceptRevision(subscription, message.subscriptionRevision)) return undefined;
@@ -1029,6 +1063,7 @@ export class GonvexClient {
       id: randomID(),
       key,
       path: ref.path,
+      entity: ref.optimistic?.projection?.entity ?? ref.path,
       args,
       listeners: new Set([onMessage]),
       rows: [],
@@ -1042,6 +1077,7 @@ export class GonvexClient {
       verificationGeneration: 0,
       retiredEpochs: new Set(),
     };
+    this.overlay.expectSource(subscription.key, subscription.entity);
     this.syncSubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => this.handleSyncMessage(subscription, message as SyncMessage));
     this.startSync(subscription);
@@ -1172,6 +1208,7 @@ export class GonvexClient {
       subscription.integrityDigest = undefined;
       subscription.integrityRows = undefined;
       subscription.integrityEpoch = undefined;
+      this.acknowledgeOptimisticSource(subscription.key, message.mutationIds);
       const snapshot: SyncMessage = {
         type: "sync.snapshot",
         id: subscription.id,
@@ -1372,6 +1409,15 @@ export class GonvexClient {
   private emitSyncMessage(subscription: SyncSubscription, message: SyncMessage) {
     const outgoing = this.materializeSyncMessage(subscription, message);
     for (const listener of Array.from(subscription.listeners)) listener(outgoing);
+    if (message.type === "sync.snapshot") {
+      const settled = this.overlay.acknowledgeMatching(
+        subscription.key,
+        subscription.entity,
+        message.result as unknown as readonly Row[],
+        message.key,
+      );
+      for (const mutationId of settled) void this.ackOptimisticMutation(mutationId);
+    }
   }
 
   private materializeSyncMessage(subscription: SyncSubscription, message: SyncMessage): SyncMessage {
@@ -1379,18 +1425,65 @@ export class GonvexClient {
     return {
       ...message,
       result: this.overlay.apply(
-        subscription.path,
+        subscription.key,
+        subscription.entity,
         message.result as unknown as readonly Row[],
         message.key,
       ) as unknown as JsonValue[],
     };
   }
 
-  private emitOptimisticCollection(collection: string) {
+  private materializeQueryMessage(subscription: QuerySubscription, message: ServerMessage): ServerMessage {
+    const projection = subscription.projection;
+    if (!projection || message.type !== "query.result") return message;
+    const projected = rowsAtPath(message.result, projection.resultPath);
+    if (!projected) return message;
+    const materialized = this.overlay.apply(
+      subscription.key,
+      projection.entity,
+      projected.rows as unknown as readonly Row[],
+      projection.key,
+    ) as unknown as JsonValue[];
+    return {
+      ...message,
+      result: replaceRowsAtPath(message.result, projection.resultPath, materialized, projected.scalar),
+    };
+  }
+
+  private emitOptimisticEntity(entity: string) {
     for (const subscription of this.syncSubscriptions.values()) {
-      if (subscription.path !== collection || subscription.lastMessage?.type !== "sync.snapshot") continue;
+      if (subscription.entity !== entity) continue;
+      this.overlay.expectSource(subscription.key, entity);
+      if (subscription.lastMessage?.type !== "sync.snapshot") continue;
       this.emitSyncMessage(subscription, subscription.lastMessage);
     }
+    for (const subscription of this.querySubscriptions.values()) {
+      if (subscription.projection?.entity !== entity) continue;
+      this.overlay.expectSource(subscription.key, entity);
+      if (subscription.lastMessage?.type !== "query.result") continue;
+      const outgoing = this.materializeQueryMessage(subscription, subscription.lastMessage);
+      for (const listener of Array.from(subscription.listeners)) listener(outgoing);
+      this.acknowledgeOptimisticQuerySnapshot(subscription, subscription.lastMessage.result);
+    }
+  }
+
+  private acknowledgeOptimisticSource(source: string, mutationIds: readonly string[] | undefined) {
+    const settled = this.overlay.acknowledge(source, mutationIds);
+    for (const mutationId of settled) void this.ackOptimisticMutation(mutationId);
+  }
+
+  private acknowledgeOptimisticQuerySnapshot(subscription: QuerySubscription, result: JsonValue) {
+    const projection = subscription.projection;
+    if (!projection) return;
+    const projected = rowsAtPath(result, projection.resultPath);
+    if (!projected) return;
+    const settled = this.overlay.acknowledgeMatching(
+      subscription.key,
+      projection.entity,
+      projected.rows as unknown as readonly Row[],
+      projection.key,
+    );
+    for (const mutationId of settled) void this.ackOptimisticMutation(mutationId);
   }
 
   private markSyncSubscriptionsOutOfDate() {
@@ -1595,6 +1688,7 @@ export class GonvexClient {
       this.clearSyncRetry(latest);
       this.pendingSyncOpens.delete(latest);
       this.syncSubscriptions.delete(key);
+      for (const mutationId of this.overlay.removeSource(key)) void this.ackOptimisticMutation(mutationId);
       this.handlers.delete(latest.id);
       this.send({ type: "sync.close", id: latest.id });
     }, this.syncSubscriptionRetentionMs);
@@ -1666,11 +1760,33 @@ export class GonvexClient {
     );
   }
 
-  private async restoreOutbox() {
-    const entries = await this.mutationOutbox.loadAll();
-    if (this.manuallyClosed) return;
+  private activateOutboxScope(): Promise<void> {
+    const scope = mutationOutboxScope(this.url, this.auth);
+    if (scope === this.outboxScope) return this.outboxReady ?? Promise.resolve();
+
+    const generation = ++this.outboxScopeGeneration;
+    // Pending state from the previous authenticated identity must disappear
+    // from every live projection immediately. Its durable rows remain scoped
+    // in IndexedDB and can be resumed only if that identity returns.
+    for (const mutationId of this.optimisticMutationIds) this.overlay.reject(mutationId);
+    this.optimisticMutationIds.clear();
+    this.optimisticOutboxEntryIds.clear();
+    this.outboxScope = scope;
+    const ready = this.restoreOutbox(scope, generation);
+    this.outboxReady = ready;
+    return ready;
+  }
+
+  private async restoreOutbox(scope: string, generation: number) {
+    const entries = await this.mutationOutbox.loadAll(scope);
+    if (
+      this.manuallyClosed
+      || generation !== this.outboxScopeGeneration
+      || scope !== this.outboxScope
+    ) return;
     for (const entry of entries) {
-      this.addOptimisticMutation(entry.idempotencyKey, entry.patches ?? []);
+      this.optimisticOutboxEntryIds.set(entry.idempotencyKey, entry.id);
+      this.addOptimisticMutation(entry.idempotencyKey, entry.patches ?? [], entry.state === "committed");
     }
     const nextAttemptAt = Math.min(
       ...entries
@@ -1682,20 +1798,27 @@ export class GonvexClient {
     }
   }
 
-  private addOptimisticMutation(mutationId: string, patches: OptimisticPatch[]) {
+  private addOptimisticMutation(mutationId: string, patches: OptimisticPatch[], accepted = false) {
     if (patches.length === 0 || this.optimisticMutationIds.has(mutationId)) return;
     this.optimisticMutationIds.add(mutationId);
-    this.overlay.add(mutationId, patches);
+    this.overlay.add(mutationId, patches, { accepted });
   }
 
   private settleOptimisticMutation(mutationId: string) {
-    this.optimisticMutationIds.delete(mutationId);
-    this.overlay.settle(mutationId);
+    for (const settledId of this.overlay.accept(mutationId)) void this.ackOptimisticMutation(settledId);
   }
 
   private rejectOptimisticMutation(mutationId: string) {
     this.optimisticMutationIds.delete(mutationId);
     this.overlay.reject(mutationId);
+    void this.ackOptimisticMutation(mutationId);
+  }
+
+  private async ackOptimisticMutation(mutationId: string) {
+    const entryId = this.optimisticOutboxEntryIds.get(mutationId);
+    this.optimisticOutboxEntryIds.delete(mutationId);
+    this.optimisticMutationIds.delete(mutationId);
+    if (entryId !== undefined) await this.mutationOutbox.ack(entryId);
   }
 
   private async drainOutbox() {
@@ -1709,8 +1832,10 @@ export class GonvexClient {
     this.drainingOutbox = true;
     try {
       while (!this.manuallyClosed && this.socket?.readyState === WebSocket.OPEN) {
-        const entry = await this.mutationOutbox.nextReady(Date.now());
+        const scope = this.outboxScope;
+        const entry = await this.mutationOutbox.nextReady(scope, Date.now());
         if (!entry) return;
+        if (scope !== this.outboxScope) return;
         await this.mutationOutbox.markInflight(entry.id);
         try {
           await this.call(
@@ -1720,11 +1845,10 @@ export class GonvexClient {
             this.timeouts.mutationTimeoutMs,
             entry.idempotencyKey,
           );
-          await this.mutationOutbox.ack(entry.id);
+          await this.mutationOutbox.markCommitted(entry.id);
           this.settleOptimisticMutation(entry.idempotencyKey);
         } catch (error) {
           if (error instanceof GonvexClientError && error.code === "server") {
-            await this.mutationOutbox.ack(entry.id);
             this.rejectOptimisticMutation(entry.idempotencyKey);
             continue;
           }
@@ -1759,31 +1883,70 @@ export class GonvexClient {
     options: CallOptions = {},
   ): Promise<T | QueuedMutationOutcome> {
     const mutationId = randomID();
-    const patches = options.optimistic ?? [];
-    this.addOptimisticMutation(mutationId, patches);
-    return this.call<T>(
-      "mutation",
-      ref,
+    const patches = options.optimistic
+      ?? optimisticPatchesFromReference(ref.optimistic?.mutation, args);
+    if (patches.length === 0) {
+      return this.call<T>(
+        "mutation",
+        ref,
+        args,
+        options.timeoutMs ?? this.timeouts.mutationTimeoutMs,
+        mutationId,
+      );
+    }
+    return this.runOptimisticMutation<T>(ref, args, options, mutationId, patches);
+  }
+
+  private async runOptimisticMutation<T>(
+    ref: FunctionReference,
+    args: JsonValue,
+    options: CallOptions,
+    mutationId: string,
+    patches: OptimisticPatch[],
+  ): Promise<T | QueuedMutationOutcome> {
+    // The startup recovery transaction converts abandoned inflight entries to
+    // pending. Finish it before inserting a brand-new direct send, otherwise
+    // recovery can mistake that live entry for a crashed mutation and race the
+    // direct call through the background drain.
+    await this.outboxReady;
+    const scope = this.outboxScope;
+    const entry = await this.mutationOutbox.enqueue({
+      scope,
+      path: ref.path,
       args,
-      options.timeoutMs ?? this.timeouts.mutationTimeoutMs,
-      mutationId,
-    ).then((result) => {
+      idempotencyKey: mutationId,
+      entityKeys: patches.map((patch) => `${patch.entity ?? patch.collection ?? ""}:${patch.rowId}`),
+      patches,
+      state: "inflight",
+    });
+    if (scope !== this.outboxScope) {
+      await this.mutationOutbox.fail(entry.id, "Authentication scope changed before mutation send");
+      throw new GonvexClientError(
+        `Authentication changed before mutation ${ref.path} could be sent.`,
+        { code: "disconnected", path: ref.path, operation: "mutation" },
+      );
+    }
+    this.optimisticOutboxEntryIds.set(mutationId, entry.id);
+    this.addOptimisticMutation(mutationId, patches);
+    try {
+      const result = await this.call<T>(
+        "mutation",
+        ref,
+        args,
+        options.timeoutMs ?? this.timeouts.mutationTimeoutMs,
+        mutationId,
+      );
+      await this.mutationOutbox.markCommitted(entry.id);
       this.settleOptimisticMutation(mutationId);
       return result;
-    }).catch(async (error: unknown) => {
+    } catch (error: unknown) {
       if (isQueueableMutationError(error) && options.offline === "queue") {
-        await this.mutationOutbox.enqueue({
-          path: ref.path,
-          args,
-          idempotencyKey: mutationId,
-          entityKeys: patches.map((patch) => patch.rowId),
-          patches,
-        });
+        await this.mutationOutbox.fail(entry.id, mutationErrorMessage(error));
         return { status: "queued", mutationId };
       }
       this.rejectOptimisticMutation(mutationId);
       throw error;
-    });
+    }
   }
 
   action<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}, options: CallOptions = {}): Promise<T> {
@@ -1989,6 +2152,7 @@ export class GonvexClient {
       const latest = this.querySubscriptions.get(key);
       if (!latest || latest.listeners.size > 0) return;
       this.querySubscriptions.delete(key);
+      for (const mutationId of this.overlay.removeSource(key)) void this.ackOptimisticMutation(mutationId);
       this.send({ type: "query.unsubscribe", id: latest.id });
       setTimeout(() => this.handlers.delete(latest.id), 500);
     }, this.querySubscriptionRetentionMs);
@@ -2286,9 +2450,11 @@ export class GonvexClient {
         cacheRevision: cached.revision,
       };
       subscription.lastMessage = message;
+      const outgoing = this.materializeQueryMessage(subscription, message);
       for (const listener of Array.from(subscription.listeners)) {
-        listener(message);
+        listener(outgoing);
       }
+      this.acknowledgeOptimisticQuerySnapshot(subscription, message.result);
     }).catch(() => {
       // Persistent cache failures never affect the server query path.
     }).finally(() => {
@@ -2561,6 +2727,33 @@ export class GonvexClient {
   }
 }
 
+function rowsAtPath(
+  result: JsonValue,
+  path: readonly string[],
+): { rows: JsonValue[]; scalar: boolean } | undefined {
+  let current: JsonValue | undefined = result;
+  for (const segment of path) {
+    if (!isJsonRecord(current)) return undefined;
+    current = current[segment];
+  }
+  if (Array.isArray(current)) return { rows: current, scalar: false };
+  if (isJsonRecord(current)) return { rows: [current], scalar: true };
+  return undefined;
+}
+
+function replaceRowsAtPath(
+  result: JsonValue,
+  path: readonly string[],
+  rows: JsonValue[],
+  scalar: boolean,
+): JsonValue {
+  if (path.length === 0) return scalar ? (rows[0] ?? null) : rows;
+  if (!isJsonRecord(result)) return result;
+  const [head, ...tail] = path;
+  const current = result[head!];
+  return { ...result, [head!]: replaceRowsAtPath(current ?? null, tail, rows, scalar) };
+}
+
 function querySubscriptionKey(ref: FunctionReference, args: JsonValue) {
   return `${ref.path}\u0000${stableStringify(args)}`;
 }
@@ -2812,6 +3005,16 @@ function sameAuthTokenIdentity(left: GonvexClientAuth, right: GonvexClientAuth) 
   const leftIdentity = authIdentityKey(left);
   const rightIdentity = authIdentityKey(right);
   return leftIdentity !== "" && leftIdentity === rightIdentity;
+}
+
+function mutationOutboxScope(url: string, auth: GonvexClientAuth) {
+  const identity = authIdentityKey(auth);
+  if (identity) return `identity\u0000${identity}`;
+  // Anonymous/dev-auth clients still need a stable namespace, but it must be
+  // isolated by deployment and tenant. Once an authenticated identity is
+  // installed, applyAuth switches away from this scope before restoring or
+  // sending its durable mutations.
+  return ["anonymous", url, auth.project ?? "", auth.tenant ?? ""].join("\u0000");
 }
 
 function queryCacheDirectiveFromAuthResult(result: JsonValue): QueryCacheDirective | undefined {

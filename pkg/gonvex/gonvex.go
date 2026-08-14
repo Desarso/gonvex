@@ -152,14 +152,34 @@ func (o *SyncTableOption) RetainFor(duration time.Duration) *SyncTableOption {
 // includes the user identity in a shared-subscription key, which is the safe
 // default for handlers that inspect ctx.User.
 type FunctionDependencies struct {
-	Reads              []ReadDependency
-	Writes             []WriteDependency
-	ReadsEphemeral     bool
-	WritesEphemeral    bool
-	ShareByPermissions bool
-	ShareByVisibility  string
-	ShareResultFrom    string
-	ShareResultField   string
+	Reads                []ReadDependency
+	Writes               []WriteDependency
+	ReadsEphemeral       bool
+	WritesEphemeral      bool
+	ShareByPermissions   bool
+	ShareByVisibility    string
+	ShareResultFrom      string
+	ShareResultField     string
+	OptimisticMutation   *OptimisticMutationDefinition
+	OptimisticProjection *OptimisticProjectionDefinition
+}
+
+// OptimisticMutationDefinition tells generated clients how mutation arguments
+// identify and patch one entity. It is client metadata only; authorization and
+// authoritative writes remain entirely server-side.
+type OptimisticMutationDefinition struct {
+	Entity     string
+	RowIDPath  []string
+	FieldsPath []string
+}
+
+// OptimisticProjectionDefinition identifies an entity collection nested in a
+// query result so the client can materialize the same pending entity mutations
+// into live subscriptions and durable syncs.
+type OptimisticProjectionDefinition struct {
+	Entity     string
+	Key        string
+	ResultPath []string
 }
 
 type ReadDependency struct {
@@ -178,6 +198,65 @@ type WriteDependency struct {
 
 type FunctionOption interface {
 	applyFunctionOption(*FunctionDependencies)
+}
+
+type optimisticMutationOption struct{ definition OptimisticMutationDefinition }
+
+// OptimisticMutation declares the entity patched by a mutation. RowIDArg and
+// FieldsArg accept dotted paths for nested argument objects.
+func OptimisticMutation(entity string) *optimisticMutationOption {
+	return &optimisticMutationOption{definition: OptimisticMutationDefinition{Entity: strings.TrimSpace(entity)}}
+}
+
+func (o *optimisticMutationOption) RowIDArg(path string) *optimisticMutationOption {
+	o.definition.RowIDPath = cleanOptimisticPath(path)
+	return o
+}
+
+func (o *optimisticMutationOption) FieldsArg(path string) *optimisticMutationOption {
+	o.definition.FieldsPath = cleanOptimisticPath(path)
+	return o
+}
+
+func (o *optimisticMutationOption) applyFunctionOption(target *FunctionDependencies) {
+	definition := o.definition
+	definition.RowIDPath = append([]string(nil), definition.RowIDPath...)
+	definition.FieldsPath = append([]string(nil), definition.FieldsPath...)
+	target.OptimisticMutation = &definition
+}
+
+type optimisticProjectionOption struct {
+	definition OptimisticProjectionDefinition
+}
+
+// OptimisticProjection declares where entity rows live inside a query result.
+// ResultPath accepts a dotted path; omit it for a top-level row array.
+func OptimisticProjection(entity string) *optimisticProjectionOption {
+	return &optimisticProjectionOption{definition: OptimisticProjectionDefinition{
+		Entity: strings.TrimSpace(entity),
+		Key:    "id",
+	}}
+}
+
+func (o *optimisticProjectionOption) Key(key string) *optimisticProjectionOption {
+	o.definition.Key = strings.TrimSpace(key)
+	return o
+}
+
+func (o *optimisticProjectionOption) ResultPath(path string) *optimisticProjectionOption {
+	o.definition.ResultPath = cleanOptimisticPath(path)
+	return o
+}
+
+func (o *optimisticProjectionOption) applyFunctionOption(target *FunctionDependencies) {
+	definition := o.definition
+	definition.ResultPath = append([]string(nil), definition.ResultPath...)
+	target.OptimisticProjection = &definition
+}
+
+func cleanOptimisticPath(path string) []string {
+	parts := strings.Split(path, ".")
+	return cleanDependencyNames(parts)
 }
 
 type readOption struct{ dependencies []ReadDependency }

@@ -713,6 +713,7 @@ export function useQueryResult<T = JsonValue>(
   const client = useGonvexClient();
   const path = ref.path;
   const kind = ref.kind;
+  const optimisticKey = JSON.stringify(ref.optimistic ?? null);
   const argsKey = JSON.stringify(args);
   const keepPreviousData = options.keepPreviousData !== false;
   const timeoutMs = options.timeoutMs ?? DEFAULT_LIVE_QUERY_SLOW_MS;
@@ -755,7 +756,7 @@ export function useQueryResult<T = JsonValue>(
       setState({ data: undefined, status: "loading", error: null, isStale: false });
       startSlowTimer();
     });
-    const unsubscribeQuery = client.subscribeQuery({ kind, path }, args, (message) => {
+    const unsubscribeQuery = client.subscribeQuery(ref, args, (message) => {
       if (message.type === "query.result") {
         clearSlowTimer();
         setState({ data: message.result as T, status: "success", error: null, isStale: false });
@@ -808,7 +809,7 @@ export function useQueryResult<T = JsonValue>(
       unsubscribeConnection?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, kind, path, argsKey, keepPreviousData, startSlowTimer, clearSlowTimer]);
+  }, [client, kind, path, optimisticKey, argsKey, keepPreviousData, startSlowTimer, clearSlowTimer]);
 
   const retry = useCallback(() => {
     if (args === "skip") return;
@@ -820,10 +821,10 @@ export function useQueryResult<T = JsonValue>(
     }));
     startSlowTimer();
     if (typeof client.retryQuery === "function") {
-      client.retryQuery({ kind, path }, JSON.parse(argsKey) as JsonValue);
+      client.retryQuery(ref, JSON.parse(argsKey) as JsonValue);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, kind, path, argsKey, startSlowTimer]);
+  }, [client, kind, path, optimisticKey, argsKey, startSlowTimer]);
 
   return {
     data: state.data,
@@ -843,6 +844,7 @@ export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue 
   const [error, setError] = useState<Error | null>(null);
   const path = ref.path;
   const kind = ref.kind;
+  const optimisticKey = JSON.stringify(ref.optimistic ?? null);
   const argsKey = JSON.stringify(args);
 
   useEffect(() => {
@@ -857,7 +859,7 @@ export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue 
       setResult(undefined);
       setError(null);
     });
-    const unsubscribeQuery = client.subscribeQuery({ kind, path }, args, (message) => {
+    const unsubscribeQuery = client.subscribeQuery(ref, args, (message) => {
       if (message.type === "query.result") {
         setResult(message.result as T);
         setError(null);
@@ -871,7 +873,7 @@ export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue 
       unsubscribeScope();
       unsubscribeQuery();
     };
-  }, [client, kind, path, argsKey]);
+  }, [client, kind, path, optimisticKey, argsKey]);
 
   // Convex-compatible: a failed query throws during render so error
   // boundaries can catch it, instead of being indistinguishable from loading.
@@ -887,11 +889,12 @@ export function useSync<T extends JsonValue = JsonValue>(
   const client = useGonvexClient();
   const path = ref.path;
   const kind = ref.kind;
+  const optimisticKey = JSON.stringify(ref.optimistic ?? null);
   const argsKey = JSON.stringify(args);
   const watch = useMemo(
-    () => args === "skip" ? undefined : client.watchSync<T>({ kind, path }, args),
+    () => args === "skip" ? undefined : client.watchSync<T>(ref, args),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [client, kind, path, argsKey],
+    [client, kind, path, optimisticKey, argsKey],
   );
   return useSyncExternalStore(
     useCallback((onStoreChange) => watch?.onUpdate(onStoreChange) ?? (() => undefined), [watch]),
@@ -909,15 +912,16 @@ export function useSyncSelector<T extends JsonValue = JsonValue, Selected = unkn
   const client = useGonvexClient();
   const path = ref.path;
   const kind = ref.kind;
+  const optimisticKey = JSON.stringify(ref.optimistic ?? null);
   const argsKey = JSON.stringify(args);
   const selectorRef = useRef(selector);
   const equalityRef = useRef(isEqual);
   selectorRef.current = selector;
   equalityRef.current = isEqual;
   const watch = useMemo(
-    () => args === "skip" ? undefined : client.watchSync<T>({ kind, path }, args),
+    () => args === "skip" ? undefined : client.watchSync<T>(ref, args),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [client, kind, path, argsKey],
+    [client, kind, path, optimisticKey, argsKey],
   );
   const selectedRef = useRef<{ initialized: boolean; value: Selected | undefined }>({
     initialized: false,

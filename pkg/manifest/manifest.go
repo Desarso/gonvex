@@ -44,14 +44,28 @@ type SyncDefinition struct {
 // changes. Older manifests omit this field; the runtime treats that as unknown
 // and falls back to conservative project/tenant-scoped invalidation.
 type FunctionDependencies struct {
-	Reads              []ReadDependency  `json:"reads,omitempty"`
-	Writes             []WriteDependency `json:"writes,omitempty"`
-	ReadsEphemeral     bool              `json:"readsEphemeral,omitempty"`
-	WritesEphemeral    bool              `json:"writesEphemeral,omitempty"`
-	ShareByPermissions bool              `json:"shareByPermissions,omitempty"`
-	ShareByVisibility  string            `json:"shareByVisibility,omitempty"`
-	ShareResultFrom    string            `json:"shareResultFrom,omitempty"`
-	ShareResultField   string            `json:"shareResultField,omitempty"`
+	Reads                []ReadDependency                `json:"reads,omitempty"`
+	Writes               []WriteDependency               `json:"writes,omitempty"`
+	ReadsEphemeral       bool                            `json:"readsEphemeral,omitempty"`
+	WritesEphemeral      bool                            `json:"writesEphemeral,omitempty"`
+	ShareByPermissions   bool                            `json:"shareByPermissions,omitempty"`
+	ShareByVisibility    string                          `json:"shareByVisibility,omitempty"`
+	ShareResultFrom      string                          `json:"shareResultFrom,omitempty"`
+	ShareResultField     string                          `json:"shareResultField,omitempty"`
+	OptimisticMutation   *OptimisticMutationDefinition   `json:"optimisticMutation,omitempty"`
+	OptimisticProjection *OptimisticProjectionDefinition `json:"optimisticProjection,omitempty"`
+}
+
+type OptimisticMutationDefinition struct {
+	Entity     string   `json:"entity"`
+	RowIDPath  []string `json:"rowIdPath"`
+	FieldsPath []string `json:"fieldsPath"`
+}
+
+type OptimisticProjectionDefinition struct {
+	Entity     string   `json:"entity"`
+	Key        string   `json:"key"`
+	ResultPath []string `json:"resultPath"`
 }
 
 type ReadDependency struct {
