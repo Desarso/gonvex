@@ -1936,6 +1936,12 @@ export class GonvexClient {
     // recovery can mistake that live entry for a crashed mutation and race the
     // direct call through the background drain.
     await this.outboxReady;
+    if (this.manuallyClosed) {
+      throw new GonvexClientError(
+        `Gonvex client was closed before mutation ${ref.path} could be sent.`,
+        { code: "closed", path: ref.path, operation: "mutation" },
+      );
+    }
     const scope = this.outboxScope;
     const entry = await this.mutationOutbox.enqueue({
       scope,
@@ -1946,6 +1952,13 @@ export class GonvexClient {
       patches,
       state: "inflight",
     });
+    if (this.manuallyClosed) {
+      await this.mutationOutbox.ack(entry.id);
+      throw new GonvexClientError(
+        `Gonvex client was closed before mutation ${ref.path} could be sent.`,
+        { code: "closed", path: ref.path, operation: "mutation" },
+      );
+    }
     if (scope !== this.outboxScope) {
       await this.mutationOutbox.ack(entry.id);
       throw new GonvexClientError(

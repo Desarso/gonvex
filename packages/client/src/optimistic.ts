@@ -59,6 +59,7 @@ export class OptimisticOverlay {
   private readonly listeners = new Set<(entity: string) => void>();
   private readonly cache = new Map<string, CollectionCache>();
   private version = 0;
+  private settling = false;
 
   add(mutationId: string, patches: OptimisticPatch[], options: { accepted?: boolean } = {}): void {
     const normalized = patches.map(clonePatch).filter((patch) => patchEntity(patch) !== "");
@@ -215,16 +216,27 @@ export class OptimisticOverlay {
   }
 
   private settleReadyEntries(): string[] {
+    // Removing an entry emits a new materialized snapshot. Query/sync
+    // listeners may synchronously acknowledge that snapshot and re-enter this
+    // method, so only the outer settlement pass is allowed to splice entries.
+    // The nested acknowledgement still updates acknowledgedTargets; the outer
+    // reverse loop observes that state when it reaches the remaining entry.
+    if (this.settling) return [];
+    this.settling = true;
     const settled: string[] = [];
-    for (let index = this.entries.length - 1; index >= 0; index -= 1) {
-      const entry = this.entries[index]!;
-      if (!entry.accepted) continue;
-      if ([...entry.targets].some((target) => !entry.acknowledgedTargets.has(target))) continue;
-      this.entries.splice(index, 1);
-      settled.push(entry.mutationId);
-      this.changed(affectedEntities(entry.patches));
+    try {
+      for (let index = this.entries.length - 1; index >= 0; index -= 1) {
+        const entry = this.entries[index];
+        if (!entry?.accepted) continue;
+        if ([...entry.targets].some((target) => !entry.acknowledgedTargets.has(target))) continue;
+        this.entries.splice(index, 1);
+        settled.push(entry.mutationId);
+        this.changed(affectedEntities(entry.patches));
+      }
+      return settled.reverse();
+    } finally {
+      this.settling = false;
     }
-    return settled.reverse();
   }
 
   private remove(mutationId: string) {

@@ -128,4 +128,29 @@ describe("OptimisticOverlay", () => {
     )).toEqual(["mutation"]);
     expect(overlay.pendingFor("tasks", "a")).toBe(false);
   });
+
+  it("settles multiple accepted mutations safely when snapshot emission re-enters reconciliation", () => {
+    const overlay = new OptimisticOverlay();
+    const authoritative = [{ id: "a", done: true }];
+    overlay.add("first", [
+      { entity: "tasks", rowId: "a", op: "patch", fields: { done: true } },
+    ]);
+    overlay.add("second", [
+      { entity: "tasks", rowId: "a", op: "patch", fields: { done: true } },
+    ]);
+    overlay.apply("workspace-a", "tasks", [{ id: "a", title: "Base" }], "id");
+    overlay.accept("first");
+    overlay.accept("second");
+    overlay.subscribe(() => {
+      overlay.acknowledgeMatching("workspace-a", "tasks", authoritative, "id");
+    });
+
+    expect(overlay.acknowledgeMatching(
+      "workspace-a",
+      "tasks",
+      authoritative,
+      "id",
+    )).toEqual(["first", "second"]);
+    expect(overlay.pendingFor("tasks", "a")).toBe(false);
+  });
 });

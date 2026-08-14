@@ -6,6 +6,7 @@ import {
   type FunctionReference,
   type QueuedMutationOutcome,
 } from "./index";
+import { DexieMutationOutbox } from "./outbox";
 
 type Listener = (event: { data?: string }) => void;
 
@@ -101,6 +102,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -174,6 +176,36 @@ function optimisticEntityPatch(title: string) {
 }
 
 describe("optimistic mutation integration", () => {
+  it("does not reconnect or retain a mutation whose enqueue finishes after close", async () => {
+    let releaseEnqueue!: () => void;
+    const enqueueGate = new Promise<void>((resolve) => {
+      releaseEnqueue = resolve;
+    });
+    let enqueueStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      enqueueStarted = resolve;
+    });
+    const originalEnqueue = DexieMutationOutbox.prototype.enqueue;
+    vi.spyOn(DexieMutationOutbox.prototype, "enqueue").mockImplementation(async function (mutation) {
+      enqueueStarted();
+      await enqueueGate;
+      return originalEnqueue.call(this, mutation);
+    });
+
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
+    const mutation = client.mutation(mutationRef, { id: "task-a" }, {
+      optimistic: optimisticPatch("Never sent"),
+    });
+    await started;
+    client.close();
+    releaseEnqueue();
+
+    await expect(mutation).rejects.toMatchObject<GonvexClientError>({ code: "closed" });
+    await expect(client.outboxCount()).resolves.toBe(0);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(client.optimisticOverlay.pendingFor(syncRef.path, "task-a")).toBe(false);
+  });
+
   it("routes optimistic mutationMany calls through the standard durable mutation path", async () => {
     const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
     client.connect();
