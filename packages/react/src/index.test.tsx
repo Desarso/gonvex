@@ -3,7 +3,7 @@ import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionState, FunctionReference, GonvexClient } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { ConvexProviderWithAuth, GonvexProvider, useConvexConnectionState, useMutation, useQuery, useQueryResult } from "./index";
+import { ConvexProviderWithAuth, GonvexProvider, useConvexConnectionState, useMutation, useQuery, useQueryResult, useSync } from "./index";
 
 const ref: FunctionReference = { kind: "query", path: "tasks.list" };
 
@@ -16,6 +16,9 @@ class FakeGonvexClient {
   readonly action = vi.fn(() => Promise.resolve(null));
   readonly setAuth = vi.fn();
   subscribedArgs: unknown[] = [];
+  subscribedRefs: FunctionReference[] = [];
+  watchedSyncRefs: FunctionReference[] = [];
+  readonly syncRows: unknown[] = [];
   state: ConnectionState = {
     isWebSocketConnected: true,
     hasEverConnected: true,
@@ -27,11 +30,20 @@ class FakeGonvexClient {
     inflightOneShotQueries: 0,
   };
 
-  subscribeQuery(_ref: FunctionReference, args: unknown, handler: (message: ServerMessage) => void) {
+  subscribeQuery(ref: FunctionReference, args: unknown, handler: (message: ServerMessage) => void) {
+    this.subscribedRefs.push(ref);
     this.subscribedArgs.push(args);
     this.queryListeners.add(handler);
     return () => {
       this.queryListeners.delete(handler);
+    };
+  }
+
+  watchSync(ref: FunctionReference) {
+    this.watchedSyncRefs.push(ref);
+    return {
+      localSyncResult: () => this.syncRows,
+      onUpdate: () => () => undefined,
     };
   }
 
@@ -184,6 +196,19 @@ describe("useQueryResult", () => {
 });
 
 describe("useQuery", () => {
+  it("preserves generated optimistic projection metadata", () => {
+    const client = new FakeGonvexClient();
+    const projectedRef: FunctionReference = {
+      kind: "query",
+      path: "tasks.byWorkspace",
+      optimistic: { projection: { entity: "tasks", key: "_id", resultPath: ["page"] } },
+    };
+
+    renderHook(() => useQuery(projectedRef, {}), { wrapper: wrapperFor(client) });
+
+    expect(client.subscribedRefs.at(-1)).toBe(projectedRef);
+  });
+
   it("returns undefined while loading and the result once it arrives", () => {
     const client = new FakeGonvexClient();
     const { result } = renderHook(() => useQuery<string[]>(ref, {}), { wrapper: wrapperFor(client) });
@@ -237,6 +262,21 @@ describe("useQuery", () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+});
+
+describe("useSync", () => {
+  it("preserves generated optimistic projection metadata", () => {
+    const client = new FakeGonvexClient();
+    const projectedRef: FunctionReference = {
+      kind: "sync",
+      path: "sync.recentWorkspaceTasks",
+      optimistic: { projection: { entity: "tasks", key: "_id", resultPath: [] } },
+    };
+
+    renderHook(() => useSync(projectedRef, {}), { wrapper: wrapperFor(client) });
+
+    expect(client.watchedSyncRefs.at(-1)).toBe(projectedRef);
   });
 });
 

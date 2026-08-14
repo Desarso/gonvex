@@ -36,8 +36,14 @@ func Register(app *gonvex.App) {
     UpdateTask,
     gonvex.Writes("tasks").Columns("title", "done"),
     gonvex.Writes("taskAudit"),
+    gonvex.OptimisticMutation(` + "` tasks `" + `).RowIDArg(` + "` taskId `" + `).FieldsArg(` + "` updates `" + `),
   )
-  app.Query("tasks.preview", PreviewTasks, gonvex.Writes("queryWrites"))
+  app.Query(
+    "tasks.preview",
+    PreviewTasks,
+    gonvex.Writes("queryWrites"),
+    gonvex.OptimisticProjection(` + "` tasks `" + `).Key(` + "` _id `" + `).ResultPath(` + "` page `" + `),
+  )
   app.Action("tasks.reindex", ReindexTasks, gonvex.Writes("actionWrites"))
   app.Sync(
     "tasks.sync",
@@ -57,6 +63,15 @@ func Register(app *gonvex.App) {
     );
 
     const bindings = await import(`${pathToFileURL(apiPath).href}?test=${Date.now()}`);
+    assert.deepEqual(bindings.api.tasks.update.optimistic, {
+      mutation: { entity: "tasks", rowIdPath: ["taskId"], fieldsPath: ["updates"] },
+    });
+    assert.deepEqual(bindings.api.tasks.preview.optimistic, {
+      projection: { entity: "tasks", key: "_id", resultPath: ["page"] },
+    });
+    assert.deepEqual(bindings.api.tasks.sync.optimistic, {
+      projection: { entity: "tasks", key: "_id", resultPath: [] },
+    });
     assert.deepEqual(bindings.optimisticWrites, {
       "tasks.update": [
         { table: "tasks", columns: ["title", "done"] },
@@ -101,6 +116,15 @@ func Register(app *gonvex.App) {
         fields: { done: false },
       },
     ]);
+    assert.deepEqual(bindings.optimisticPatchesFor("tasks.update", {
+      taskId: "task-3",
+      updates: { title: "Nested", done: true },
+    }), [{
+      entity: "tasks",
+      rowId: "task-3",
+      op: "patch",
+      fields: { title: "Nested", done: true },
+    }]);
     assert.deepEqual(bindings.optimisticPatchesFor("tasks.update", { title: "No identifier" }), []);
   } finally {
     rmSync(project, { recursive: true, force: true });

@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { OptimisticOverlay, type Row } from "./optimistic";
+import {
+  OptimisticOverlay,
+  optimisticPatchesFromReference,
+  type Row,
+} from "./optimistic";
 
 describe("OptimisticOverlay", () => {
   it("folds patch, insert, and delete operations in entry order", () => {
@@ -90,5 +94,63 @@ describe("OptimisticOverlay", () => {
     overlay.reject("mutation");
     expect(overlay.pendingFor("tasks.list", "a")).toBe(false);
     expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses id fallbacks when generated mutation metadata omits a row-id path", () => {
+    expect(optimisticPatchesFromReference({
+      entity: "tasks",
+      rowIdPath: [],
+      fieldsPath: ["updates"],
+    }, {
+      id: "task-a",
+      updates: { priorityId: "priority-high" },
+    })).toEqual([{
+      entity: "tasks",
+      rowId: "task-a",
+      op: "patch",
+      fields: { priorityId: "priority-high" },
+    }]);
+  });
+
+  it("reconciles a restored multi-row mutation against only rows a source exposes", () => {
+    const overlay = new OptimisticOverlay();
+    overlay.add("mutation", [
+      { entity: "tasks", rowId: "a", op: "patch", fields: { done: true } },
+      { entity: "tasks", rowId: "b", op: "patch", fields: { done: true } },
+    ], { accepted: true });
+    overlay.apply("workspace-a", "tasks", [{ id: "a", done: true }], "id");
+
+    expect(overlay.acknowledgeMatching(
+      "workspace-a",
+      "tasks",
+      [{ id: "a", done: true }],
+      "id",
+    )).toEqual(["mutation"]);
+    expect(overlay.pendingFor("tasks", "a")).toBe(false);
+  });
+
+  it("settles multiple accepted mutations safely when snapshot emission re-enters reconciliation", () => {
+    const overlay = new OptimisticOverlay();
+    const authoritative = [{ id: "a", done: true }];
+    overlay.add("first", [
+      { entity: "tasks", rowId: "a", op: "patch", fields: { done: true } },
+    ]);
+    overlay.add("second", [
+      { entity: "tasks", rowId: "a", op: "patch", fields: { done: true } },
+    ]);
+    overlay.apply("workspace-a", "tasks", [{ id: "a", title: "Base" }], "id");
+    overlay.accept("first");
+    overlay.accept("second");
+    overlay.subscribe(() => {
+      overlay.acknowledgeMatching("workspace-a", "tasks", authoritative, "id");
+    });
+
+    expect(overlay.acknowledgeMatching(
+      "workspace-a",
+      "tasks",
+      authoritative,
+      "id",
+    )).toEqual(["first", "second"]);
+    expect(overlay.pendingFor("tasks", "a")).toBe(false);
   });
 });

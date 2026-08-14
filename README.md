@@ -160,8 +160,11 @@ const openCount = useSyncSelector<Task, number>(
 ```
 
 Sync collections render from a scope-isolated IndexedDB store, then resume with
-delta-only delivery when the retained Postgres cursor is still valid. They are
-not an offline mutation queue; writes still go through mutations.
+delta-only delivery when the retained Postgres cursor is still valid. Writes
+still go through mutations. Mutations with generated optimistic metadata are
+durably overlaid onto every matching sync or query projection and reconcile on
+the authoritative mutation id; callers can opt into disconnect replay with
+`{ offline: "queue" }`.
 
 ## Native Google Login
 

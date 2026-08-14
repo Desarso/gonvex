@@ -11,6 +11,8 @@ export type MutationOutboxOptions = {
 export type MutationOutboxEntry = {
   /** Auto-incremented sequence number. Lower ids always happened first. */
   id: number;
+  /** Authenticated project/tenant/user identity that owns this mutation. */
+  scope: string;
   path: string;
   args: unknown;
   idempotencyKey: string;
@@ -22,25 +24,30 @@ export type MutationOutboxEntry = {
   attempts: number;
   nextAttemptAt: number;
   lastError?: string;
-  state: "pending" | "inflight";
+  state: "pending" | "inflight" | "committed";
 };
 
 export type EnqueueMutation = {
+  scope: string;
   path: string;
   args: unknown;
   idempotencyKey?: string;
   entityKeys?: string[];
   patches?: OptimisticPatch[];
+  /** Direct online sends start inflight so the background drain cannot race them. */
+  state?: "pending" | "inflight";
 };
 
 export type MutationOutbox = {
   enqueue(mutation: EnqueueMutation): Promise<MutationOutboxEntry>;
-  loadAll(): Promise<MutationOutboxEntry[]>;
-  nextReady(now: number): Promise<MutationOutboxEntry | undefined>;
+  loadAll(scope: string): Promise<MutationOutboxEntry[]>;
+  nextReady(scope: string, now: number): Promise<MutationOutboxEntry | undefined>;
   markInflight(id: number): Promise<void>;
+  markCommitted(id: number): Promise<void>;
   ack(id: number): Promise<void>;
   fail(id: number, error: string): Promise<void>;
-  count(): Promise<number>;
+  count(scope: string): Promise<number>;
+  clear(scope: string): Promise<void>;
   subscribe(listener: () => void): () => void;
 };
 
@@ -86,6 +93,7 @@ export class DexieMutationOutbox implements MutationOutbox {
   async enqueue(mutation: EnqueueMutation): Promise<MutationOutboxEntry> {
     const createdAt = Date.now();
     const entry: NewMutationOutboxEntry = {
+      scope: mutation.scope,
       path: mutation.path,
       args: cloneValue(mutation.args),
       idempotencyKey: mutation.idempotencyKey ?? createIdempotencyKey(),
@@ -94,7 +102,7 @@ export class DexieMutationOutbox implements MutationOutbox {
       createdAt,
       attempts: 0,
       nextAttemptAt: createdAt,
-      state: "pending",
+      state: mutation.state ?? "pending",
     };
 
     if (this.memoryOnly) return this.enqueueInMemory(entry);
@@ -111,14 +119,14 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
   }
 
-  async loadAll(): Promise<MutationOutboxEntry[]> {
-    if (this.memoryOnly) return this.loadAllFromMemory();
+  async loadAll(scope: string): Promise<MutationOutboxEntry[]> {
+    if (this.memoryOnly) return this.loadAllFromMemory(scope);
     try {
       const database = await this.open();
       let changed = false;
       let entries: MutationOutboxEntry[] = [];
       await database.transaction("rw", database.entries, async () => {
-        entries = await database.entries.orderBy("id").toArray();
+        entries = await database.entries.where("scope").equals(scope).sortBy("id");
         entries = entries.map((entry) => {
           if (entry.state !== "inflight") return entry;
           changed = true;
@@ -126,25 +134,25 @@ export class DexieMutationOutbox implements MutationOutbox {
         });
         if (changed) await database.entries.bulkPut(entries);
       });
-      this.replaceMemoryEntries(entries);
+      this.replaceMemoryEntriesForScope(scope, entries);
       if (changed) this.notify();
       return entries.map(cloneEntry);
     } catch {
       this.degradeToMemory();
-      return this.loadAllFromMemory();
+      return this.loadAllFromMemory(scope);
     }
   }
 
-  async nextReady(now: number): Promise<MutationOutboxEntry | undefined> {
-    if (this.memoryOnly) return cloneOptionalEntry(firstReady(this.sortedMemoryEntries(), now));
+  async nextReady(scope: string, now: number): Promise<MutationOutboxEntry | undefined> {
+    if (this.memoryOnly) return cloneOptionalEntry(firstReady(this.sortedMemoryEntries(scope), now));
     try {
       const database = await this.open();
-      const entries = await database.entries.orderBy("id").toArray();
-      this.replaceMemoryEntries(entries);
+      const entries = await database.entries.where("scope").equals(scope).sortBy("id");
+      this.replaceMemoryEntriesForScope(scope, entries);
       return cloneOptionalEntry(firstReady(entries, now));
     } catch {
       this.degradeToMemory();
-      return cloneOptionalEntry(firstReady(this.sortedMemoryEntries(), now));
+      return cloneOptionalEntry(firstReady(this.sortedMemoryEntries(scope), now));
     }
   }
 
@@ -155,15 +163,42 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
     try {
       const database = await this.open();
-      const entry = await database.entries.get(id);
-      if (!entry || entry.state === "inflight") return;
-      const updated = { ...entry, state: "inflight" as const };
-      await database.entries.put(updated);
+      let updated: MutationOutboxEntry | undefined;
+      await database.transaction("rw", database.entries, async () => {
+        const entry = await database.entries.get(id);
+        if (!entry || entry.state === "inflight") return;
+        updated = { ...entry, state: "inflight" as const };
+        await database.entries.put(updated);
+      });
+      if (!updated) return;
       this.remember(updated);
       this.notify();
     } catch {
       this.degradeToMemory();
       this.markInflightInMemory(id);
+    }
+  }
+
+  async markCommitted(id: number): Promise<void> {
+    if (this.memoryOnly) {
+      this.markCommittedInMemory(id);
+      return;
+    }
+    try {
+      const database = await this.open();
+      let updated: MutationOutboxEntry | undefined;
+      await database.transaction("rw", database.entries, async () => {
+        const entry = await database.entries.get(id);
+        if (!entry || entry.state === "committed") return;
+        updated = { ...entry, state: "committed" as const };
+        await database.entries.put(updated);
+      });
+      if (!updated) return;
+      this.remember(updated);
+      this.notify();
+    } catch {
+      this.degradeToMemory();
+      this.markCommittedInMemory(id);
     }
   }
 
@@ -192,10 +227,14 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
     try {
       const database = await this.open();
-      const entry = await database.entries.get(id);
-      if (!entry) return;
-      const updated = failedEntry(entry, error, Date.now());
-      await database.entries.put(updated);
+      let updated: MutationOutboxEntry | undefined;
+      await database.transaction("rw", database.entries, async () => {
+        const entry = await database.entries.get(id);
+        if (!entry) return;
+        updated = failedEntry(entry, error, Date.now());
+        await database.entries.put(updated);
+      });
+      if (!updated) return;
       this.remember(updated);
       this.notify();
     } catch {
@@ -204,14 +243,31 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
   }
 
-  async count(): Promise<number> {
-    if (this.memoryOnly) return this.memoryEntries.size;
+  async count(scope: string): Promise<number> {
+    if (this.memoryOnly) return this.sortedMemoryEntries(scope).length;
     try {
-      return await (await this.open()).entries.count();
+      return await (await this.open()).entries.where("scope").equals(scope).count();
     } catch {
       this.degradeToMemory();
-      return this.memoryEntries.size;
+      return this.sortedMemoryEntries(scope).length;
     }
+  }
+
+  async clear(scope: string): Promise<void> {
+    // Snapshot ids synchronously. An enqueue that starts after clear must not
+    // be swallowed by a later scope-wide IndexedDB delete after open() yields.
+    const ids = this.sortedMemoryEntries(scope).map((entry) => entry.id);
+    for (const [id, entry] of this.memoryEntries) {
+      if (entry.scope === scope) this.memoryEntries.delete(id);
+    }
+    if (!this.memoryOnly && ids.length > 0) {
+      try {
+        await (await this.open()).entries.bulkDelete(ids);
+      } catch {
+        this.degradeToMemory();
+      }
+    }
+    this.notify();
   }
 
   subscribe(listener: () => void): () => void {
@@ -226,21 +282,29 @@ export class DexieMutationOutbox implements MutationOutbox {
     return cloneEntry(stored);
   }
 
-  private loadAllFromMemory(): MutationOutboxEntry[] {
+  private loadAllFromMemory(scope: string): MutationOutboxEntry[] {
     let changed = false;
     for (const [id, entry] of this.memoryEntries) {
+      if (entry.scope !== scope) continue;
       if (entry.state !== "inflight") continue;
       this.memoryEntries.set(id, { ...entry, state: "pending" });
       changed = true;
     }
     if (changed) this.notify();
-    return this.sortedMemoryEntries().map(cloneEntry);
+    return this.sortedMemoryEntries(scope).map(cloneEntry);
   }
 
   private markInflightInMemory(id: number) {
     const entry = this.memoryEntries.get(id);
     if (!entry || entry.state === "inflight") return;
     this.memoryEntries.set(id, { ...entry, state: "inflight" });
+    this.notify();
+  }
+
+  private markCommittedInMemory(id: number) {
+    const entry = this.memoryEntries.get(id);
+    if (!entry || entry.state === "committed") return;
+    this.memoryEntries.set(id, { ...entry, state: "committed" });
     this.notify();
   }
 
@@ -256,8 +320,10 @@ export class DexieMutationOutbox implements MutationOutbox {
     this.notify();
   }
 
-  private sortedMemoryEntries() {
-    return [...this.memoryEntries.values()].sort((left, right) => left.id - right.id);
+  private sortedMemoryEntries(scope?: string) {
+    return [...this.memoryEntries.values()]
+      .filter((entry) => scope === undefined || entry.scope === scope)
+      .sort((left, right) => left.id - right.id);
   }
 
   private remember(entry: MutationOutboxEntry) {
@@ -265,8 +331,10 @@ export class DexieMutationOutbox implements MutationOutbox {
     this.nextMemoryId = Math.max(this.nextMemoryId, entry.id + 1);
   }
 
-  private replaceMemoryEntries(entries: MutationOutboxEntry[]) {
-    this.memoryEntries.clear();
+  private replaceMemoryEntriesForScope(scope: string, entries: MutationOutboxEntry[]) {
+    for (const [id, entry] of this.memoryEntries) {
+      if (entry.scope === scope) this.memoryEntries.delete(id);
+    }
     for (const entry of entries) this.remember(entry);
   }
 
@@ -309,6 +377,16 @@ export class DexieMutationOutbox implements MutationOutbox {
     database.version(1).stores({
       entries: "++id, state, nextAttemptAt",
     });
+    database.version(2).stores({
+      entries: "++id, scope, state, nextAttemptAt, [scope+state], [scope+nextAttemptAt]",
+    }).upgrade(async (transaction) => {
+      // Version 1 did not record an authenticated owner. Replaying one of
+      // those rows after an account switch is unsafe, so leave it quarantined
+      // by deleting it instead of guessing which identity created it.
+      await transaction.table("entries").filter((entry) => (
+        typeof entry.scope !== "string" || entry.scope.length === 0
+      )).delete();
+    });
     database.on("versionchange", () => database.close());
     await database.open();
     this.database = database;
@@ -323,6 +401,10 @@ export function createMutationOutbox(options: MutationOutboxOptions = {}): Mutat
 function firstReady(entries: MutationOutboxEntry[], now: number) {
   const blockedEntityKeys = new Set<string>();
   for (const entry of entries) {
+    // The runtime already accepted committed entries. They remain only to
+    // protect stale cached projections until reconciliation and must not block
+    // a newer pending write to the same entity.
+    if (entry.state === "committed") continue;
     if (
       entry.state === "pending"
       && entry.nextAttemptAt <= now

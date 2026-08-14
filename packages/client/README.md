@@ -99,8 +99,54 @@ const memoryOnly = new GonvexClient(url, { sync: false });
 The default global IndexedDB budget is 100 MiB. Server-declared per-collection
 row/byte budgets still apply, and least-recently-used collections are evicted
 first. Storage is isolated by runtime, project, tenant, authenticated identity,
-and permissions. Sync is not an offline write queue; mutations and actions
-retain the fail-closed policy below.
+and permissions.
+
+## Entity-level optimistic mutations
+
+Declare how a mutation maps its arguments to an entity row and how each live
+read projects that entity:
+
+```go
+app.Mutation(
+  "tasks.update",
+  updateTask,
+  gonvex.OptimisticMutation("tasks").RowIDArg("taskId").FieldsArg("updates"),
+)
+
+app.Query(
+  "tasks.byWorkspace",
+  tasksByWorkspace,
+  gonvex.OptimisticProjection("tasks").Key("_id").ResultPath("page"),
+)
+```
+
+Generated references carry this metadata, so a normal mutation call is enough:
+
+```ts
+await client.mutation(api.tasks.update, {
+  taskId,
+  updates: { priority_id: priorityId },
+});
+```
+
+The client persists the pending mutation before exposing it, layers it over
+every matching sync and query subscription, and notifies watchers immediately.
+An RPC result marks the write accepted but does not remove it; the overlay is
+retired only when every source that displayed it reports the mutation id (or a
+restored committed snapshot already matches). Deterministic server errors
+remove the overlay and repaint the authoritative rows. This keeps stale query
+or sync frames from briefly reverting the UI.
+
+The authoritative sync/query cache stays immutable. Durable pending state lives
+in the mutation outbox and is re-applied to cached rows after reload. Outbox
+rows are isolated by project, tenant, and authenticated identity; an account
+switch removes the previous identity's overlay and can never replay its writes
+under the new session. Unscoped rows from the pre-isolation schema are removed
+during migration because their owner cannot be proven. If an opaque credential
+does not expose a stable identity (and no `identity` hint is supplied), its
+outbox is deliberately session-only rather than risking cross-user replay. For
+a complex projection that cannot be derived from one nested fields argument,
+callers can still provide explicit `optimistic` entity patches.
 
 ## Lightweight Error Tracking
 
@@ -162,12 +208,19 @@ Rejected operations throw `GonvexClientError` with `code`:
 - `closed` — client was explicitly closed
 - `auth` — authentication rejected
 
-### Mutation / action fail-closed policy
+### Mutation / action disconnect policy
 
-Pending mutations and actions are **never** auto-replayed after disconnect.
-They reject with `code: "disconnected"` (or `timeout` / `closed`). Silent
-re-fire of non-idempotent writes is unsafe; offline queues belong in the app
-(or mobile offline layer), not this client.
+Actions and mutations without `{ offline: "queue" }` fail closed after a
+disconnect. They reject with `code: "disconnected"` (or `timeout` / `closed`).
+Optimistic mutations are persisted before transport even in fail-closed mode,
+so a process reload cannot expose an older cached row while an accepted write
+is still waiting for its authoritative subscription update.
+
+Pass `{ offline: "queue" }` to a mutation to durably accept a transport failure
+and replay the same idempotency key after reconnect, whether or not that
+mutation also declares optimistic UI metadata. Actions are never queued.
+Deterministic server errors are never queued and always roll an optimistic
+entity overlay back when one exists.
 
 Live queries keep last-good data at the React layer (`useQueryResult`) and
 resubscribe after reconnect. Call `client.retryQuery(ref, args)` to force a
@@ -181,6 +234,8 @@ The package exports:
 - `ConvexReactClient` compatibility alias
 - `GonvexClientError`, `ConnectionState`, timeout defaults
 - transparent persistent query caching and lower-level experimental cache helpers
+- durable entity-level optimistic overlays for query and sync projections
+- opt-in mutation outbox replay with stable idempotency keys
 - `subscribeSync`, `watchSync`, and normalized persistent sync storage
 - browser capability and telemetry helpers
 - `GonvexErrorReporter` and automatic operation error reporting
