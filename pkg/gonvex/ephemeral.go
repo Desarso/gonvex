@@ -33,6 +33,8 @@ func (entry EphemeralEntry) Decode(target any) error {
 //
 // The runtime automatically scopes every operation to the executing project
 // and tenant. App functions cannot select or override that namespace.
+// RuntimeContext.ProjectEphemeral exposes a separate project-wide namespace
+// for explicitly cross-tenant transient state.
 type EphemeralAPI interface {
 	Set(key string, value any, ttl time.Duration) error
 	Get(key string, target any) (found bool, err error)

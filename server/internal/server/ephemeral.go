@@ -21,6 +21,7 @@ const maxEphemeralKeyBytes = 512
 
 type ephemeralBackend interface {
 	ForTenant(context.Context, string, string) gonvex.EphemeralAPI
+	ForProject(context.Context, string) gonvex.EphemeralAPI
 }
 
 type valkeyEphemeralBackend struct{ client *redis.Client }
@@ -29,11 +30,22 @@ func (backend *valkeyEphemeralBackend) ForTenant(ctx context.Context, projectID,
 	return newTenantEphemeralAPI(ctx, backend.client, projectID, tenantID)
 }
 
+func (backend *valkeyEphemeralBackend) ForProject(ctx context.Context, projectID string) gonvex.EphemeralAPI {
+	return newProjectEphemeralAPI(ctx, backend.client, projectID)
+}
+
 func newScopedEphemeralAPI(ctx context.Context, backend ephemeralBackend, projectID, tenantID string) gonvex.EphemeralAPI {
 	if backend == nil {
 		return nil
 	}
 	return backend.ForTenant(ctx, projectID, tenantID)
+}
+
+func newProjectScopedEphemeralAPI(ctx context.Context, backend ephemeralBackend, projectID string) gonvex.EphemeralAPI {
+	if backend == nil {
+		return nil
+	}
+	return backend.ForProject(ctx, projectID)
 }
 
 // tenantEphemeralAPI keeps one expiry-sorted index per project/tenant. Listing
@@ -58,6 +70,24 @@ func newTenantEphemeralAPI(ctx context.Context, client *redis.Client, projectID,
 	}
 	projectID, tenantID = cacheScope(projectID, tenantID)
 	scope := sha256.Sum256([]byte(projectID + "\x00" + tenantID))
+	return newEphemeralAPI(ctx, client, scope)
+}
+
+func newProjectEphemeralAPI(ctx context.Context, client *redis.Client, projectID string) gonvex.EphemeralAPI {
+	if client == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	projectID, _ = cacheScope(projectID, projectID)
+	// Keep this distinct from the existing project+tenant hash input so no
+	// tenant identifier can collide with the project-wide namespace.
+	scope := sha256.Sum256([]byte("gonvex:project-ephemeral:v1\x00" + projectID))
+	return newEphemeralAPI(ctx, client, scope)
+}
+
+func newEphemeralAPI(ctx context.Context, client *redis.Client, scope [sha256.Size]byte) gonvex.EphemeralAPI {
 	// A Redis hash tag keeps this tenant's index and values in one cluster slot.
 	prefix := "gonvex:ephemeral:v1:{" + hex.EncodeToString(scope[:16]) + "}"
 	return &tenantEphemeralAPI{

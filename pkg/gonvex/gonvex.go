@@ -425,8 +425,12 @@ type RuntimeContext struct {
 	Sandbox     SandboxAPI
 	Data        DataAPI
 	Ephemeral   EphemeralAPI
-	Scheduler   Scheduler
-	Logger      *slog.Logger
+	// ProjectEphemeral is shared by every tenant in this project. Use it only
+	// for deliberately cross-tenant transient state such as an operator-facing
+	// live-session registry; ordinary app presence belongs in Ephemeral.
+	ProjectEphemeral EphemeralAPI
+	Scheduler        Scheduler
+	Logger           *slog.Logger
 
 	// NotifyTableChange, when set by the host server, broadcasts a table
 	// invalidation to live query subscribers. Long-running actions call
@@ -908,6 +912,9 @@ func (c *RuntimeContext) normalize() {
 	}
 	if c.Ephemeral == nil {
 		c.Ephemeral = ephemeralUnavailable{}
+	}
+	if c.ProjectEphemeral == nil {
+		c.ProjectEphemeral = ephemeralUnavailable{}
 	}
 }
 

@@ -93,6 +93,40 @@ func TestValkeyEphemeralTTLListDeleteAndNamespaces(t *testing.T) {
 	}
 }
 
+func TestProjectEphemeralIsSharedAcrossTenantsAndIsolatedAcrossProjects(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	client, err := newValkeyClient("redis://" + redisServer.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	backend := &valkeyEphemeralBackend{client: client}
+	projectAFromTenantA := backend.ForProject(context.Background(), "project-a")
+	projectAFromTenantB := backend.ForProject(context.Background(), "project-a")
+	projectB := backend.ForProject(context.Background(), "project-b")
+	tenantA := backend.ForTenant(context.Background(), "project-a", "tenant-a")
+
+	want := map[string]any{"session": "live"}
+	if err := projectAFromTenantA.Set("support/session/1", want, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	var got map[string]any
+	if found, err := projectAFromTenantB.Get("support/session/1", &got); err != nil || !found {
+		t.Fatalf("project peer Get found=%v err=%v", found, err)
+	}
+	if got["session"] != want["session"] {
+		t.Fatalf("project peer value = %#v, want %#v", got, want)
+	}
+	if found, err := projectB.Get("support/session/1", &got); err != nil || found {
+		t.Fatalf("other project Get found=%v err=%v", found, err)
+	}
+	if found, err := tenantA.Get("support/session/1", &got); err != nil || found {
+		t.Fatalf("tenant namespace Get found=%v err=%v", found, err)
+	}
+}
+
 func TestEphemeralValidationRequiresTTLAndSafeFragments(t *testing.T) {
 	redisServer := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
