@@ -38,6 +38,25 @@ func TestAppDispatchesQuery(t *testing.T) {
 	}
 }
 
+func TestRuntimeContextNormalizesTenantAndProjectEphemeralStores(t *testing.T) {
+	app := NewApp()
+	app.Query("ephemeral.scopes", func(ctx *QueryCtx, _ struct{}) (bool, error) {
+		var value map[string]any
+		_, tenantErr := ctx.Ephemeral.Get("lease", &value)
+		_, projectErr := ctx.ProjectEphemeral.Get("lease", &value)
+		return errors.Is(tenantErr, ErrEphemeralNotConfigured) &&
+			errors.Is(projectErr, ErrEphemeralNotConfigured), nil
+	})
+
+	result, err := app.ExecuteQuery(&QueryCtx{}, "ephemeral.scopes", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != true {
+		t.Fatalf("normalized scopes = %#v, want both unavailable stores", result)
+	}
+}
+
 func TestPublicHTTPRecordsExplicitAnonymousVisibility(t *testing.T) {
 	app := NewApp()
 	handler := func(_ *HTTPContext, _ HTTPRequest) (HTTPResponse, error) {

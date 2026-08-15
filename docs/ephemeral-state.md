@@ -27,6 +27,29 @@ for _, entry := range entries {
 err = ctx.Ephemeral.Delete("presence/lease/" + userID)
 ```
 
+`ctx.ProjectEphemeral` exposes the same API in a separate namespace shared by
+every tenant in one project. It is intended for deliberately cross-tenant
+transient state, such as an operator-facing live-session registry:
+
+```go
+type projectLease struct {
+    TenantID string `json:"tenantId"`
+    UserID   string `json:"userId"`
+}
+
+err := ctx.ProjectEphemeral.Set(
+    "support/session/"+ctx.TenantID+"/"+sessionID,
+    projectLease{TenantID: ctx.TenantID, UserID: ctx.User.ID},
+    90*time.Second,
+)
+```
+
+Use the tenant-scoped API by default. A trusted backend function that lists a
+project namespace can observe entries written by every tenant, so project-wide
+keys and payloads should include tenant and owner identity and readers should
+validate that identity against durable authorization data. Tenant and project
+namespaces are hashed separately and cannot collide.
+
 `Set` always requires a positive TTL. Values must be JSON-serializable. Keys
 and list prefixes must be valid UTF-8, are length-limited, reject control
 characters, and are escaped before they become Valkey value keys.
@@ -40,10 +63,10 @@ invalidations for those calls.
 
 ## Listing design
 
-Each project/tenant namespace has one sorted set whose members are logical app
+Each tenant or project namespace has one sorted set whose members are logical app
 keys and whose scores are expiry timestamps. `Set` updates the expiring value
 and the sorted-set member together. `List(prefix)` prunes expired members,
-reads live members from that tenant's set, filters the logical prefix, and
+reads live members from that scope's set, filters the logical prefix, and
 fetches values with `MGET`. `Delete` removes both records.
 
 This deliberately avoids Redis `SCAN`: listing cost is bounded by entries in
