@@ -32,9 +32,14 @@ every tenant in one project. It is intended for deliberately cross-tenant
 transient state, such as an operator-facing live-session registry:
 
 ```go
+type projectLease struct {
+    TenantID string `json:"tenantId"`
+    UserID   string `json:"userId"`
+}
+
 err := ctx.ProjectEphemeral.Set(
-    "support/session/"+sessionID,
-    lease{UserID: ctx.User.ID},
+    "support/session/"+ctx.TenantID+"/"+sessionID,
+    projectLease{TenantID: ctx.TenantID, UserID: ctx.User.ID},
     90*time.Second,
 )
 ```
