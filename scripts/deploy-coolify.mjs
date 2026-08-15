@@ -74,7 +74,9 @@ export function verifyRollingApplication(application, role, sha) {
 }
 
 function environmentValue(environment, key) {
-  const entry = environment?.find((candidate) => candidate?.key === key);
+  const entry = environment?.find(
+    (candidate) => candidate?.key === key && candidate?.is_preview !== true,
+  );
   const value = String(entry?.value ?? entry?.real_value ?? "").trim();
   if (
     value.length >= 2
@@ -86,9 +88,18 @@ function environmentValue(environment, key) {
   return value;
 }
 
-export function verifyRuntimeEnvironment(environment, sha) {
-  if (environmentValue(environment, "GONVEX_REQUIRE_AUTH") !== "true") {
-    throw new Error("runtime application must enforce GONVEX_REQUIRE_AUTH=true");
+function normalizedExpectedAuthMode(expectedRequireAuth) {
+  const expected = String(expectedRequireAuth ?? "").trim().toLowerCase();
+  if (expected !== "true" && expected !== "false") {
+    throw new Error("expected runtime auth mode must be true or false");
+  }
+  return expected;
+}
+
+export function verifyRuntimeEnvironment(environment, sha, expectedRequireAuth) {
+  const expected = normalizedExpectedAuthMode(expectedRequireAuth);
+  if (environmentValue(environment, "GONVEX_REQUIRE_AUTH") !== expected) {
+    throw new Error(`runtime application must set GONVEX_REQUIRE_AUTH=${expected}`);
   }
   if (environmentValue(environment, "GONVEX_RUNTIME_VERSION") !== sha) {
     throw new Error(`runtime application must advertise exact version ${sha}`);
@@ -152,11 +163,13 @@ export async function deployRollingApplications({
   token,
   applications,
   sha,
+  expectedRequireAuth,
   waitOptions,
 }) {
   if (!/^[0-9a-f]{40}$/.test(sha)) {
     throw new Error("GONVEX_DEPLOY_SHA must be a full lowercase Git commit SHA");
   }
+  const expectedAuthMode = normalizedExpectedAuthMode(expectedRequireAuth);
   for (const role of ["runtime", "dashboard"]) {
     if (!applications?.[role]) throw new Error(`missing Coolify ${role} application UUID`);
   }
@@ -192,7 +205,7 @@ export async function deployRollingApplications({
       token,
       `/applications/${encodeURIComponent(uuid)}/envs`,
     );
-    if (role === "runtime") verifyRuntimeEnvironment(savedEnvironment, sha);
+    if (role === "runtime") verifyRuntimeEnvironment(savedEnvironment, sha, expectedAuthMode);
     else verifyDashboardEnvironment(savedEnvironment);
 
     const queued = await coolifyRequest(
@@ -211,7 +224,7 @@ export async function deployRollingApplications({
       token,
       `/applications/${encodeURIComponent(uuid)}/envs`,
     );
-    if (role === "runtime") verifyRuntimeEnvironment(deployedEnvironment, sha);
+    if (role === "runtime") verifyRuntimeEnvironment(deployedEnvironment, sha, expectedAuthMode);
     else verifyDashboardEnvironment(deployedEnvironment);
     if (deployed.status !== "running:healthy") {
       throw new Error(`${role} ended deployment as ${deployed.status ?? "unknown"}`);
@@ -224,6 +237,7 @@ async function main() {
   const base = apiBase(requiredEnvironment("COOLIFY_API_URL"));
   const token = requiredEnvironment("COOLIFY_API_TOKEN");
   const sha = requiredEnvironment("GONVEX_DEPLOY_SHA");
+  const expectedRequireAuth = requiredEnvironment("GONVEX_EXPECT_REQUIRE_AUTH");
   await deployRollingApplications({
     base,
     token,
@@ -232,6 +246,7 @@ async function main() {
       runtime: requiredEnvironment("COOLIFY_RUNTIME_APPLICATION_UUID"),
       dashboard: requiredEnvironment("COOLIFY_DASHBOARD_APPLICATION_UUID"),
     },
+    expectedRequireAuth,
   });
 }
 
