@@ -62,3 +62,35 @@ jobs:
         run: pnpm -r test
       - name: Type-check JavaScript workspace
         run: pnpm typecheck
+
+  deploy-dev-runtime:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    # This is the sole repository-to-Coolify deployment lane. Keep the
+    # repository-level Coolify webhook inactive to avoid duplicate rollouts.
+    # Coolify can queue builds, and the runtime/dashboard each have a 12-minute
+    # deployment deadline in deploy-coolify.mjs. Give the ordered pair enough
+    # room to finish without Actions cancelling a healthy rollout midway.
+    timeout-minutes: 30
+    environment: gonvex-runtime
+    concurrency:
+      group: gonvex-dev-runtime-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Roll exact runtime and dashboard commit in Coolify
+        run: node scripts/deploy-coolify.mjs
+        env:
+          COOLIFY_API_URL: ${{ vars.COOLIFY_API_URL }}
+          COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+          # Main is the development release lane. Production is promoted only
+          # after the corresponding Monitor verification passes.
+          COOLIFY_RUNTIME_APPLICATION_UUID: ${{ vars.COOLIFY_RUNTIME_APPLICATION_UUID }}
+          COOLIFY_DASHBOARD_APPLICATION_UUID: ${{ vars.COOLIFY_DASHBOARD_APPLICATION_UUID }}
+          GONVEX_DEPLOY_SHA: ${{ github.sha }}
