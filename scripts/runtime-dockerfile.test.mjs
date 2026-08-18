@@ -6,20 +6,42 @@ import test from "node:test";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dockerfile = readFileSync(path.join(root, "Dockerfile.runtime"), "utf8");
-const moduleCache = "/var/lib/gonvex/go/pkg/mod";
+const persistentRoot = "/var/lib/gonvex";
+const moduleRoot = "/opt/gonvex/go";
+const moduleCache = `${moduleRoot}/pkg/mod`;
+const buildCache = "/var/cache/gonvex/go-build";
+const temporaryBuildRoot = "/var/cache/gonvex/tmp";
 
-test("runtime binary and project plugins compile from the same module-cache path", () => {
+test("runtime compiler state stays visible when persistent and tmpfs roots are mounted", () => {
   const firstFrom = dockerfile.indexOf("FROM ");
   const secondFrom = dockerfile.indexOf("\nFROM ", firstFrom + 1);
   const build = dockerfile.slice(firstFrom, secondFrom);
   const runtime = dockerfile.slice(secondFrom + 1);
 
+  assert.match(build, new RegExp(`GOCACHE=${buildCache}`));
   assert.match(build, new RegExp(`GOMODCACHE=${moduleCache}`));
+  assert.match(build, new RegExp(`GOPATH=${moduleRoot}`));
+  assert.match(runtime, new RegExp(`GOCACHE=${buildCache}`));
   assert.match(runtime, new RegExp(`GOMODCACHE=${moduleCache}`));
+  assert.match(runtime, new RegExp(`GOPATH=${moduleRoot}`));
+  assert.match(runtime, new RegExp(`TMPDIR=${temporaryBuildRoot}(?:\\s|$)`));
   assert.match(
     runtime,
     new RegExp(`COPY --from=build[^\\n]* ${moduleCache} ${moduleCache}`),
   );
+  for (const compilerPath of [moduleRoot, moduleCache, buildCache, temporaryBuildRoot]) {
+    assert.equal(
+      compilerPath.startsWith(`${persistentRoot}/`),
+      false,
+      `${compilerPath} must not be hidden by the production volume`,
+    );
+  }
+  assert.equal(
+    temporaryBuildRoot === "/tmp" || temporaryBuildRoot.startsWith("/tmp/"),
+    false,
+    `${temporaryBuildRoot} must not live on the production noexec tmpfs`,
+  );
+  assert.match(runtime, /GONVEX_DATA_DIR=\/var\/lib\/gonvex\/data/);
   assert.doesNotMatch(dockerfile, /COPY --from=build[^\n]* \/go\/pkg\/mod/);
   assert.match(runtime, /WORKDIR \/var\/lib\/gonvex\nUSER 0:0/);
   assert.doesNotMatch(runtime, /useradd|groupadd|chown/);
