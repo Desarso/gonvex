@@ -125,6 +125,20 @@ environment. Production uses the same variable names in the protected
 token in a GitHub secret rather than in a workflow file. The exact SHA pin makes
 the running source auditable and avoids a moving-branch race during a rebuild.
 
+The deploy verifier also receives an explicit expected runtime auth mode. The
+development lane requires `GONVEX_REQUIRE_AUTH=true`. Production currently
+requires `GONVEX_REQUIRE_AUTH=false` because Skills Vault still performs its own
+`auth.login` bootstrap over a WebSocket before it has a Gonvex-native
+`gvx_session_` token. This compatibility mode does not disable configured
+Firebase verification or per-project native auth; those project-specific checks
+still take precedence. Migrate Skills Vault to Gonvex native app auth before
+changing the production expectation to `true`.
+
+The data-plane Compose attaches Postgres and Valkey to the shared `coolify`
+network with stable `gonvex-postgres` and `gonvex-valkey` aliases. Tenant
+database URLs stored in the registry use those names, so deployments must retain
+the aliases whenever the data containers are recreated.
+
 Project-key authentication for project environment variables first shipped in
 runtime v0.1.9 (source commit `c49ef6a`). The exact response
 `{"error":"dashboard sign-in is required"}` from

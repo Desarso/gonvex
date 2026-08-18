@@ -43,22 +43,35 @@ test("requires Dockerfile applications with readiness and no host port mapping",
   );
 });
 
-test("requires runtime auth enforcement and the exact advertised version", () => {
+test("requires the environment-specific runtime auth mode and exact advertised version", () => {
   const environment = [
-    { key: "GONVEX_REQUIRE_AUTH", real_value: "true", is_buildtime: false },
-    { key: "GONVEX_RUNTIME_VERSION", real_value: sha, is_buildtime: false },
+    { key: "GONVEX_REQUIRE_AUTH", real_value: "true", is_buildtime: false, is_preview: true },
+    { key: "GONVEX_REQUIRE_AUTH", real_value: "false", is_buildtime: false, is_preview: false },
+    { key: "GONVEX_RUNTIME_VERSION", real_value: sha, is_buildtime: false, is_preview: false },
   ];
-  assert.doesNotThrow(() => verifyRuntimeEnvironment(environment, sha));
+  assert.doesNotThrow(() => verifyRuntimeEnvironment(environment, sha, "false"));
   assert.throws(
-    () => verifyRuntimeEnvironment(environment.filter((entry) => entry.key !== "GONVEX_REQUIRE_AUTH"), sha),
+    () => verifyRuntimeEnvironment(environment, sha, "true"),
     /GONVEX_REQUIRE_AUTH=true/,
   );
   assert.throws(
-    () => verifyRuntimeEnvironment(environment, "c".repeat(40)),
+    () => verifyRuntimeEnvironment(
+      environment.filter((entry) => entry.key !== "GONVEX_REQUIRE_AUTH"),
+      sha,
+      "false",
+    ),
+    /GONVEX_REQUIRE_AUTH=false/,
+  );
+  assert.throws(
+    () => verifyRuntimeEnvironment(environment, sha),
+    /expected runtime auth mode must be true or false/,
+  );
+  assert.throws(
+    () => verifyRuntimeEnvironment(environment, "c".repeat(40), "false"),
     /advertise exact version/,
   );
   assert.throws(
-    () => verifyRuntimeEnvironment([...environment, { key: "S3_SECRET_ACCESS_KEY", value: "secret", is_buildtime: true }], sha),
+    () => verifyRuntimeEnvironment([...environment, { key: "S3_SECRET_ACCESS_KEY", value: "secret", is_buildtime: true }], sha, "false"),
     /must not be build-time variables/,
   );
   assert.doesNotThrow(() => verifyDashboardEnvironment([
@@ -134,6 +147,7 @@ test("pins and finishes runtime before deploying dashboard", async () => {
       token: "test-token",
       sha,
       applications: { runtime: "runtime-uuid", dashboard: "dashboard-uuid" },
+      expectedRequireAuth: "true",
       waitOptions: { timeoutMS: 100, intervalMS: 0 },
     });
   } finally {

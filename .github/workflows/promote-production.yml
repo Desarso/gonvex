@@ -85,6 +85,10 @@ jobs:
           COOLIFY_RUNTIME_APPLICATION_UUID: ${{ vars.COOLIFY_RUNTIME_APPLICATION_UUID }}
           COOLIFY_DASHBOARD_APPLICATION_UUID: ${{ vars.COOLIFY_DASHBOARD_APPLICATION_UUID }}
           GONVEX_DEPLOY_SHA: ${{ inputs.sha }}
+          # Skills Vault currently bootstraps its own auth.login mutation over
+          # an unauthenticated socket; native gvx_session auth is not enabled
+          # for that project yet.
+          GONVEX_EXPECT_REQUIRE_AUTH: "false"
       - name: Verify public production endpoints and exact runtime version
         run: node scripts/release-gates.mjs deployment
         env:
@@ -127,3 +131,4 @@ jobs:
           COOLIFY_RUNTIME_APPLICATION_UUID: ${{ vars.COOLIFY_RUNTIME_APPLICATION_UUID }}
           COOLIFY_DASHBOARD_APPLICATION_UUID: ${{ vars.COOLIFY_DASHBOARD_APPLICATION_UUID }}
           GONVEX_DEPLOY_SHA: ${{ needs.validate.outputs.production_sha }}
+          GONVEX_EXPECT_REQUIRE_AUTH: "false"
