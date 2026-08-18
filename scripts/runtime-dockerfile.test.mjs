@@ -10,9 +10,9 @@ const persistentRoot = "/var/lib/gonvex";
 const moduleRoot = "/opt/gonvex/go";
 const moduleCache = `${moduleRoot}/pkg/mod`;
 const buildCache = "/var/cache/gonvex/go-build";
-const temporaryBuildRoot = "/tmp/gonvex";
+const temporaryBuildRoot = "/var/cache/gonvex/tmp";
 
-test("runtime compiler state stays visible when the persistent root is mounted", () => {
+test("runtime compiler state stays visible when persistent and tmpfs roots are mounted", () => {
   const firstFrom = dockerfile.indexOf("FROM ");
   const secondFrom = dockerfile.indexOf("\nFROM ", firstFrom + 1);
   const build = dockerfile.slice(firstFrom, secondFrom);
@@ -24,7 +24,7 @@ test("runtime compiler state stays visible when the persistent root is mounted",
   assert.match(runtime, new RegExp(`GOCACHE=${buildCache}`));
   assert.match(runtime, new RegExp(`GOMODCACHE=${moduleCache}`));
   assert.match(runtime, new RegExp(`GOPATH=${moduleRoot}`));
-  assert.match(runtime, new RegExp(`TMPDIR=${temporaryBuildRoot}`));
+  assert.match(runtime, new RegExp(`TMPDIR=${temporaryBuildRoot}(?:\\s|$)`));
   assert.match(
     runtime,
     new RegExp(`COPY --from=build[^\\n]* ${moduleCache} ${moduleCache}`),
@@ -36,6 +36,11 @@ test("runtime compiler state stays visible when the persistent root is mounted",
       `${compilerPath} must not be hidden by the production volume`,
     );
   }
+  assert.equal(
+    temporaryBuildRoot === "/tmp" || temporaryBuildRoot.startsWith("/tmp/"),
+    false,
+    `${temporaryBuildRoot} must not live on the production noexec tmpfs`,
+  );
   assert.match(runtime, /GONVEX_DATA_DIR=\/var\/lib\/gonvex\/data/);
   assert.doesNotMatch(dockerfile, /COPY --from=build[^\n]* \/go\/pkg\/mod/);
   assert.match(runtime, /WORKDIR \/var\/lib\/gonvex\nUSER 0:0/);

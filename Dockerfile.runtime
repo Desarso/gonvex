@@ -24,7 +24,7 @@ RUN CGO_ENABLED=1 go build -o /out/gonvex-runtime ./server/cmd/gonvex-runtime
 
 FROM golang:1.26@sha256:7caba5286b4c3613a337b709c573047d8ae62ee76106647313b61e72b99f20af
 WORKDIR /app
-RUN mkdir -p /var/cache/gonvex/go-build /var/lib/gonvex/data /var/lib/gonvex/plugins /tmp/gonvex
+RUN mkdir -p /var/cache/gonvex/go-build /var/cache/gonvex/tmp /var/lib/gonvex/data /var/lib/gonvex/plugins
 # Gonvex module source: synced project bundles render
 #   replace github.com/gonvex/gonvex => $GONVEX_MODULE_ROOT
 # so the plugin build resolves the framework against this checkout.
@@ -46,7 +46,7 @@ ENV GONVEX_ADDR=0.0.0.0:8080 \
     GOCACHE=/var/cache/gonvex/go-build \
     GOMODCACHE=/opt/gonvex/go/pkg/mod \
     GOPATH=/opt/gonvex/go \
-    TMPDIR=/tmp/gonvex \
+    TMPDIR=/var/cache/gonvex/tmp \
     CGO_ENABLED=1 \
     GOMAXPROCS=2 \
     GOFLAGS="-mod=mod -p=2"
