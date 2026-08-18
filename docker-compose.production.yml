@@ -158,7 +158,7 @@ services:
       S3_ACCESS_KEY_ID: ${GONVEX_MINIO_ROOT_USER:-gonvex}
       S3_SECRET_ACCESS_KEY: ${SERVICE_PASSWORD_64_GONVEX_MINIO}
       S3_FORCE_PATH_STYLE: "true"
-      GOCACHE: /var/lib/gonvex/go-build
+      GOCACHE: /var/cache/gonvex/go-build
     volumes:
       - gonvex-runtime-data:/var/lib/gonvex
     networks:
