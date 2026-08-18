@@ -53,19 +53,14 @@ test("requires public health and the exact runtime version after deployment", ()
   assert.throws(() => assertDashboardHealth("starting\n"), /not healthy/);
 });
 
-test("main CI owns exact-SHA development deployment after tests", async () => {
+test("main CI leaves development deployment to Coolify auto-deploy", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/runtime-regression.yml", import.meta.url),
     "utf8",
   );
   assert.match(workflow, /push:\s*\n\s*branches: \[main\]/);
-  const testJob = workflow.indexOf("  test:");
-  const deployJob = workflow.indexOf("  deploy-dev-runtime:");
-  assert.ok(testJob >= 0 && testJob < deployJob);
-  const deploy = workflow.slice(deployJob);
-  assert.match(deploy, /needs: test/);
-  assert.match(deploy, /run: node scripts\/deploy-coolify\.mjs/);
-  assert.match(deploy, /GONVEX_DEPLOY_SHA: \$\{\{ github\.sha \}\}/);
+  assert.doesNotMatch(workflow, /deploy-dev-runtime/);
+  assert.doesNotMatch(workflow, /scripts\/deploy-coolify\.mjs/);
 });
 
 test("production promotion waits for approval and records the release only after smoke tests", async () => {
