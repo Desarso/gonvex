@@ -2022,6 +2022,11 @@ func (s *Server) executeTenantQuery(ctx context.Context, projectID string, tenan
 }
 
 func (s *Server) executeTenantQueryForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
+	release, admitted := s.acquireQueryAdmission(ctx, admissionForeground, projectID, tenantID)
+	if !admitted {
+		return nil, ctx.Err()
+	}
+	defer release()
 	return s.executeTenantQueryForCallerCached(ctx, projectID, tenantID, caller, path, rawArgs, "", "internal")
 }
 
