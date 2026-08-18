@@ -52,9 +52,17 @@ type Config struct {
 	SharedResultMaxBytes        int
 	SharedSubscriptionGrace     time.Duration
 	SharedSubscriptionMaxFanout int
-	// SubscriptionRerunConcurrency bounds invalidate/recover executions. Zero
-	// preserves unlimited behavior for lightweight tests and embedded callers.
+	// SubscriptionRerunConcurrency is the global cap on concurrent
+	// database-backed query executions (reactive reruns, sync recomputation,
+	// and bootstrap hydration). Zero preserves unlimited behavior for
+	// lightweight tests and embedded callers.
 	SubscriptionRerunConcurrency int
+	// QueryBootstrapConcurrency bounds how many of those executions may be
+	// bootstrap hydration (initial subscription executions and sync snapshots)
+	// while reactive or foreground work is waiting. Zero derives a quarter of
+	// SubscriptionRerunConcurrency; hydration may still borrow idle capacity
+	// beyond this share when nothing else is queued.
+	QueryBootstrapConcurrency int
 	DashboardSecret              string
 	TrustedProxyCIDRs            []string
 	// DashboardAuthProjectID is the one Gonvex application whose native Google
@@ -122,6 +130,7 @@ func FromEnv() Config {
 		SharedSubscriptionGrace:      envDuration("GONVEX_SHARED_SUBSCRIPTION_GRACE", defaultSharedSubscriptionGrace),
 		SharedSubscriptionMaxFanout:  envInt("GONVEX_SHARED_SUBSCRIPTION_MAX_FANOUT", defaultSharedSubscriptionFanout),
 		SubscriptionRerunConcurrency: envInt("GONVEX_SUBSCRIPTION_RERUN_CONCURRENCY", defaultSubscriptionRerunConcurrency),
+		QueryBootstrapConcurrency:    envInt("GONVEX_QUERY_BOOTSTRAP_CONCURRENCY", 0),
 		DashboardSecret:              env("GONVEX_DASHBOARD_SESSION_SECRET", env("DASHBOARD_SESSION_SECRET", "")),
 		TrustedProxyCIDRs:            envList("GONVEX_TRUSTED_PROXY_CIDRS"),
 		DashboardAuthProjectID:       strings.TrimSpace(env("GONVEX_DASHBOARD_AUTH_PROJECT_ID", "")),

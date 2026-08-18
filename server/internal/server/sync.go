@@ -310,7 +310,14 @@ func (c *wsConn) openSyncWithClock(
 	}
 
 	phase = "snapshot"
+	release, admitted := c.server.acquireQueryAdmission(ctx, admissionBootstrap, c.project, c.tenant)
+	if !admitted {
+		protocolErr = ctx.Err()
+		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: protocolErr.Error()})
+		return
+	}
 	result, err := c.server.executeTenantQueryForCallerUncached(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
+	release()
 	if err != nil {
 		protocolErr = err
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: err.Error()})
@@ -715,6 +722,10 @@ func (s *Server) deliverAuthoritativeSync(
 	changes []syncLogChange,
 	latest syncCursor,
 ) (bool, error) {
+	release, admitted := s.acquireQueryAdmission(ctx, admissionReactive, subscription.project, subscription.tenant)
+	if !admitted {
+		return false, ctx.Err()
+	}
 	result, err := s.executeTenantQueryForCallerUncached(
 		ctx,
 		subscription.project,
@@ -723,6 +734,7 @@ func (s *Server) deliverAuthoritativeSync(
 		subscription.path,
 		subscription.args,
 	)
+	release()
 	if err != nil {
 		return false, err
 	}

@@ -39,6 +39,7 @@ type Server struct {
 	tenantStores          *tenantStoreResolver
 	ephemeral             ephemeralBackend
 	cache                 *rowsCache
+	admission             *queryAdmission
 	metrics               *runtimeMetrics
 	scheduler             *scheduler
 	telemetryWrites       chan struct{}
@@ -236,6 +237,8 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		provisionTenant:       provisionTenantDatabase,
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
+	server.admission = newQueryAdmission(cfg.SubscriptionRerunConcurrency, cfg.QueryBootstrapConcurrency)
+	server.metrics.admissionSource = server.admission.snapshot
 	server.subscriptions = newSubscriptionManager(server)
 	server.scheduler = newScheduler(server.runScheduledJob)
 	server.tenantStores = newTenantStoreResolver(&server.config)
