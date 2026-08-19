@@ -301,6 +301,16 @@ func (s *Supervisor) stopWorker(worker *workerProcess) {
 		return
 	}
 	drained := worker.beginDrain()
+	// Give in-flight HTTP requests a brief window to finish before any signal:
+	// a worker that exits promptly on SIGTERM (one predating the drain signal)
+	// must not be killed mid-request. Live WebSockets pin the request count, so
+	// this grace expires quickly whenever there is anything left to drain.
+	grace := time.NewTimer(min(2*time.Second, s.config.DrainTimeout/2))
+	select {
+	case <-drained:
+	case <-grace.C:
+	}
+	grace.Stop()
 	// SIGTERM asks a supervised worker to close its WebSockets gradually with
 	// close code 1012 (service restart) so clients reconnect staggered instead
 	// of as one wave. Workers that predate the drain signal treat it as an
