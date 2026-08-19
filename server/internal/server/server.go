@@ -45,6 +45,12 @@ type Server struct {
 	telemetryWrites       chan struct{}
 	telemetryDBMu         sync.Mutex
 	telemetryDBs          map[string]*sql.DB
+	// Lazily initialized under mutationIdempotencyMu; both maps key on the
+	// tenant database URL.
+	mutationIdempotencyMu       sync.Mutex
+	mutationIdempotencyReady    map[string]bool
+	mutationIdempotencySweptAt  map[string]time.Time
+	mutationIdempotencyInstalls singleflight.Group
 	subscriptionTelemetry chan []transactionTelemetryEntry
 	projectMu             sync.RWMutex
 	projects              map[string]projectTarget

@@ -164,6 +164,32 @@ describe("GonvexClient", () => {
 		]);
 	});
 
+	it("sends the outbox idempotency key on replayable mutations and omits it on one-shots", async () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		client.connect();
+		const socket = latestSocket();
+		socket.open();
+		socket.receive({ type: "session.ready", capabilities: {} });
+
+		const optimistic = client.mutation(
+			{ kind: "mutation", path: "tasks.update" },
+			{ id: "a", title: "T" },
+			{ optimistic: [{ collection: "tasks.list", rowId: "a", op: "patch", fields: { title: "T" } }] },
+		);
+		await vi.advanceTimersByTimeAsync(0);
+		const [replayable] = sentMessages(socket).filter((frame) => frame.type === "mutation.call");
+		expect(replayable.idempotencyKey).toBe(replayable.id);
+		socket.receive({ type: "mutation.result", id: replayable.id, path: replayable.path, result: null });
+		await optimistic;
+
+		const oneShot = client.mutation({ kind: "mutation", path: "tasks.create" }, { title: "x" });
+		await vi.advanceTimersByTimeAsync(0);
+		const oneShotCall = sentMessages(socket).filter((frame) => frame.type === "mutation.call").at(-1);
+		expect(oneShotCall.idempotencyKey).toBeUndefined();
+		socket.receive({ type: "mutation.result", id: oneShotCall.id, path: oneShotCall.path, result: "id-x" });
+		await expect(oneShot).resolves.toBe("id-x");
+	});
+
 	it("rejects stale revisions and advances progress without notifying listeners", () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const handler = vi.fn();

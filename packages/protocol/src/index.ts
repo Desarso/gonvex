@@ -126,6 +126,8 @@ export type MutationCallRequest = {
   path: string;
   args: JsonValue;
   trace?: MessageTrace;
+  /** Stable key for a replayable write; see the `mutation.call` message. */
+  idempotencyKey?: string;
 };
 
 export type SyncOpenRequest = {
@@ -199,7 +201,19 @@ export type ClientMessage =
   | { type: "sync.openMany"; opens: SyncOpenRequest[] }
   | { type: "query.subscribeMany"; subscribes: QuerySubscribeRequest[] }
   | { type: "sync.close"; id: string }
-  | { type: "mutation.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }
+  | {
+    type: "mutation.call";
+    id: string;
+    path: string;
+    args: JsonValue;
+    trace?: MessageTrace;
+    /**
+     * Stable key for a replayable write from the client outbox. The runtime
+     * executes the mutation once per key and serves the stored result to
+     * every duplicate delivery.
+     */
+    idempotencyKey?: string;
+  }
   | { type: "mutation.callMany"; calls: MutationCallRequest[] }
   | { type: "action.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }
   | {

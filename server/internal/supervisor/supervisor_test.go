@@ -36,6 +36,9 @@ func TestRecyclesPluginWorkersAcrossBundleGenerations(t *testing.T) {
 		runSupervisorWorkerHelper()
 		return
 	}
+	if runtime.GOOS != "linux" {
+		t.Skipf("worker RSS measurement reads /proc/<pid>/statm, which requires Linux (GOOS=%s)", runtime.GOOS)
+	}
 
 	moduleRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	if err != nil {

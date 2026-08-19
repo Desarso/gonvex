@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,9 @@ import (
 )
 
 func TestRunLoadKeepsPersistentSubscriptionsAndMeasuresWireTraffic(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("the host memory safety reserve reads /proc/meminfo, which requires Linux (GOOS=%s)", runtime.GOOS)
+	}
 	var sockets atomic.Int64
 	var subscriptions atomic.Int64
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
