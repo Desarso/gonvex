@@ -124,7 +124,11 @@ func (l *Loader) Load(projectID string, bundle manifest.SourceBundle) (*gonvex.A
 	if packageName == "" {
 		packageName = "app"
 	}
-	sharedBundleKey := strings.Join([]string{modulePath, packageName, strings.TrimSpace(bundle.GoVersion), bundle.Hash}, "\x00")
+	// Go identifies plugins by their generated module path. Use the full bundle
+	// hash here (rather than the filename's shortened prefix) so every alias for
+	// that identity converges on the same in-process App without weakening the
+	// source-content identity.
+	sharedBundleKey := strings.Join([]string{modulePath, bundle.Hash}, "\x00")
 	value, err, _ := l.sharedBundleLoads.Do(sharedBundleKey, func() (any, error) {
 		l.mu.RLock()
 		app := l.sharedBundles[sharedBundleKey]
