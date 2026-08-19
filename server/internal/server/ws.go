@@ -30,6 +30,7 @@ type clientMessage struct {
 	Project            string                  `json:"project,omitempty"`
 	Tenant             string                  `json:"tenant,omitempty"`
 	Trace              *messageTrace           `json:"trace,omitempty"`
+	IdempotencyKey     string                  `json:"idempotencyKey,omitempty"`
 	Kind               string                  `json:"kind,omitempty"`
 	Reason             string                  `json:"reason,omitempty"`
 	Outcome            string                  `json:"outcome,omitempty"`
@@ -66,6 +67,10 @@ type mutationCallRequest struct {
 	Path  string          `json:"path"`
 	Args  json.RawMessage `json:"args,omitempty"`
 	Trace *messageTrace   `json:"trace,omitempty"`
+	// IdempotencyKey marks a replayable write from the client outbox. Replays
+	// reuse the key, so the runtime executes the mutation once and serves the
+	// stored result to every duplicate delivery.
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
 
 type syncOpenRequest struct {
@@ -409,6 +414,15 @@ type callerContext struct {
 	permissions map[string]any
 }
 
+// subject is the authenticated identity that idempotency claims are scoped
+// to, so one user's stored mutation result is never replayable by another.
+func (caller callerContext) subject() string {
+	if caller.user == nil {
+		return ""
+	}
+	return caller.user.ID
+}
+
 var wsUpgrader = websocket.Upgrader{
 	EnableCompression: true,
 	CheckOrigin:       func(_ *http.Request) bool { return true },
@@ -636,6 +650,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		}
 		c.callMutation(ctx, receivedAt, mutationCallRequest{
 			ID: message.ID, Path: message.Path, Args: message.Args, Trace: message.Trace,
+			IdempotencyKey: message.IdempotencyKey,
 		})
 	case "mutation.callMany":
 		// Offline queues flush their backlog in one frame on reconnect. Calls
@@ -939,7 +954,12 @@ func (c *wsConn) callMutation(ctx context.Context, receivedAt time.Time, request
 	trace := traceFromClient(request.Trace)
 	trace.ServerReceivedAtMS = epochMillis(receivedAt)
 	trace.ServerMutationStartedAtMS = epochMillis(time.Now())
-	result, err := c.server.executeTenantMutationForCaller(withMutationID(ctx, request.ID), c.project, c.tenant, c.caller(), request.Path, request.Args)
+	caller := c.caller()
+	mutationCtx := withMutationID(ctx, request.ID)
+	if key := strings.TrimSpace(request.IdempotencyKey); key != "" {
+		mutationCtx = withMutationIdempotency(mutationCtx, key, caller.subject())
+	}
+	result, err := c.server.executeTenantMutationForCaller(mutationCtx, c.project, c.tenant, caller, request.Path, request.Args)
 	committedAt := time.Now().UTC()
 	trace.ServerMutationCommittedAtMS = epochMillis(committedAt)
 	trace.ServerCompletedAtMS = epochMillis(committedAt)
@@ -2365,11 +2385,32 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 	if mutationCtx.Context == nil {
 		mutationCtx.Context = context.Background()
 	}
+	claim, hasClaim := mutationIdempotencyFromContext(mutationCtx.Context)
+	if hasClaim {
+		if err := s.ensureMutationIdempotencyStorage(mutationCtx.Context, mutationCtx.DB, mutationCtx.DatabaseURL); err != nil {
+			return nil, err
+		}
+	}
 	tx, err := mutationCtx.DB.BeginTx(mutationCtx.Context, nil)
 	if err != nil {
 		return nil, err
 	}
 	mutationCtx.Tx = tx
+	if hasClaim {
+		claimed, err := claimMutationIdempotency(mutationCtx.Context, tx, claim, path)
+		if err != nil {
+			_ = tx.Rollback()
+			mutationCtx.Tx = nil
+			return nil, err
+		}
+		if !claimed {
+			// A previous delivery of this write already committed. Serve its
+			// stored result instead of executing the handler a second time.
+			_ = tx.Rollback()
+			mutationCtx.Tx = nil
+			return replayMutationIdempotencyResult(mutationCtx.Context, mutationCtx.DB, claim, path)
+		}
+	}
 	if mutationID := mutationIDFromContext(mutationCtx.Context); mutationID != "" {
 		if _, err := tx.ExecContext(mutationCtx.Context, `SELECT set_config('gonvex.mutation_id', $1, true)`, mutationID); err != nil {
 			_ = tx.Rollback()
@@ -2387,10 +2428,19 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 		_ = tx.Rollback()
 		return nil, err
 	}
+	if hasClaim {
+		if err := storeMutationIdempotencyResult(mutationCtx.Context, tx, claim, result); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	mutationCtx.Tx = nil
+	if hasClaim {
+		s.maybeSweepMutationIdempotency(mutationCtx.DB, mutationCtx.DatabaseURL)
+	}
 	if err := deferred.flush(); err != nil {
 		mutationCtx.Logger.Error("failed to publish committed scheduled work", "path", path, "error", err)
 	}

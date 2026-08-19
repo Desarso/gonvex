@@ -6,6 +6,27 @@ export type MutationOutboxOptions = {
   indexedDB?: IDBFactory;
   IDBKeyRange?: typeof IDBKeyRange;
   enabled?: boolean;
+  /**
+   * Injectable durable record storage for runtimes without IndexedDB (React
+   * Native). When provided, the queue semantics still run in the SDK; the
+   * store only persists entries so they survive an app restart.
+   */
+  store?: OutboxStore;
+};
+
+/**
+ * A dumb durable record store backing {@link StoreMutationOutbox}. It holds
+ * whole entries keyed by id and knows nothing about queue semantics — total
+ * order, causal barriers, and inflight recovery all stay in the SDK.
+ */
+export type OutboxStore = {
+  /** Every persisted entry across all scopes; called once to hydrate. */
+  load(): Promise<MutationOutboxEntry[]>;
+  /** Insert or replace the entry with this id. */
+  put(entry: MutationOutboxEntry): Promise<void>;
+  delete(id: number): Promise<void>;
+  clear(scope?: string): Promise<void>;
+  close?(): void;
 };
 
 export type MutationOutboxEntry = {
@@ -394,7 +415,190 @@ export class DexieMutationOutbox implements MutationOutbox {
   }
 }
 
+/**
+ * The same totally ordered queue semantics as {@link DexieMutationOutbox},
+ * run entirely in memory with every state transition written through an
+ * injected {@link OutboxStore}. Hydration replays `store.load()` once and
+ * seeds the auto-increment id from the highest persisted id, so replayed
+ * entries keep their original ids, idempotency keys, and enqueue order.
+ *
+ * The store is an optimization for durability, not a prerequisite for the
+ * optimistic mutation path. A failing store permanently degrades this
+ * instance to the same queue semantics in memory for the current session.
+ */
+export class StoreMutationOutbox implements MutationOutbox {
+  private readonly store: OutboxStore;
+  private readonly listeners = new Set<() => void>();
+  private readonly entries = new Map<number, MutationOutboxEntry>();
+  private readonly ready: Promise<void>;
+  private memoryOnly: boolean;
+  private nextId = 1;
+
+  constructor(store: OutboxStore, options: { enabled?: boolean } = {}) {
+    this.store = store;
+    this.memoryOnly = options.enabled === false;
+    this.ready = this.memoryOnly ? Promise.resolve() : this.hydrate();
+  }
+
+  async enqueue(mutation: EnqueueMutation): Promise<MutationOutboxEntry> {
+    await this.ready;
+    const createdAt = Date.now();
+    const entry: MutationOutboxEntry = {
+      id: this.nextId++,
+      scope: mutation.scope,
+      path: mutation.path,
+      args: cloneValue(mutation.args),
+      idempotencyKey: mutation.idempotencyKey ?? createIdempotencyKey(),
+      entityKeys: [...(mutation.entityKeys ?? [])],
+      patches: mutation.patches?.map(clonePatch),
+      createdAt,
+      attempts: 0,
+      nextAttemptAt: createdAt,
+      state: mutation.state ?? "pending",
+    };
+    this.entries.set(entry.id, entry);
+    await this.persistPut(entry);
+    this.notify();
+    return cloneEntry(entry);
+  }
+
+  async loadAll(scope: string): Promise<MutationOutboxEntry[]> {
+    await this.ready;
+    const recovered: MutationOutboxEntry[] = [];
+    for (const [id, entry] of this.entries) {
+      if (entry.scope !== scope || entry.state !== "inflight") continue;
+      const pending = { ...entry, state: "pending" as const };
+      this.entries.set(id, pending);
+      recovered.push(pending);
+    }
+    await Promise.all(recovered.map((entry) => this.persistPut(entry)));
+    if (recovered.length > 0) this.notify();
+    return this.sortedEntries(scope).map(cloneEntry);
+  }
+
+  async nextReady(scope: string, now: number): Promise<MutationOutboxEntry | undefined> {
+    await this.ready;
+    return cloneOptionalEntry(firstReady(this.sortedEntries(scope), now));
+  }
+
+  async markInflight(id: number): Promise<void> {
+    await this.ready;
+    const entry = this.entries.get(id);
+    if (!entry || entry.state === "inflight") return;
+    const updated = { ...entry, state: "inflight" as const };
+    this.entries.set(id, updated);
+    await this.persistPut(updated);
+    this.notify();
+  }
+
+  async markCommitted(id: number): Promise<void> {
+    await this.ready;
+    const entry = this.entries.get(id);
+    if (!entry || entry.state === "committed") return;
+    const updated = { ...entry, state: "committed" as const };
+    this.entries.set(id, updated);
+    await this.persistPut(updated);
+    this.notify();
+  }
+
+  async ack(id: number): Promise<void> {
+    await this.ready;
+    if (!this.entries.delete(id)) return;
+    await this.persistDelete(id);
+    this.notify();
+  }
+
+  async fail(id: number, error: string): Promise<void> {
+    await this.ready;
+    const entry = this.entries.get(id);
+    if (!entry) return;
+    const updated = failedEntry(entry, error, Date.now());
+    this.entries.set(id, updated);
+    await this.persistPut(updated);
+    this.notify();
+  }
+
+  async count(scope: string): Promise<number> {
+    await this.ready;
+    return this.sortedEntries(scope).length;
+  }
+
+  async clear(scope: string): Promise<void> {
+    await this.ready;
+    // Delete by snapshotted id, never scope-wide, so an enqueue racing this
+    // clear is not swallowed by a later store delete.
+    const ids: number[] = [];
+    for (const [id, entry] of this.entries) {
+      if (entry.scope !== scope) continue;
+      this.entries.delete(id);
+      ids.push(id);
+    }
+    await Promise.all(ids.map((id) => this.persistDelete(id)));
+    this.notify();
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private async hydrate() {
+    try {
+      for (const entry of await this.store.load()) {
+        this.entries.set(entry.id, cloneEntry(entry));
+        this.nextId = Math.max(this.nextId, entry.id + 1);
+      }
+    } catch {
+      this.degradeToMemory();
+    }
+  }
+
+  private async persistPut(entry: MutationOutboxEntry) {
+    if (this.memoryOnly) return;
+    try {
+      await this.store.put(cloneEntry(entry));
+    } catch {
+      this.degradeToMemory();
+    }
+  }
+
+  private async persistDelete(id: number) {
+    if (this.memoryOnly) return;
+    try {
+      await this.store.delete(id);
+    } catch {
+      this.degradeToMemory();
+    }
+  }
+
+  private sortedEntries(scope: string) {
+    return [...this.entries.values()]
+      .filter((entry) => entry.scope === scope)
+      .sort((left, right) => left.id - right.id);
+  }
+
+  private notify() {
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch {
+        // A subscriber must not be able to break mutation delivery.
+      }
+    }
+  }
+
+  private degradeToMemory() {
+    this.memoryOnly = true;
+    try {
+      this.store.close?.();
+    } catch {
+      // Losing the store only loses durability, never the queue.
+    }
+  }
+}
+
 export function createMutationOutbox(options: MutationOutboxOptions = {}): MutationOutbox {
+  if (options.store) return new StoreMutationOutbox(options.store, { enabled: options.enabled });
   return new DexieMutationOutbox(options);
 }
 
