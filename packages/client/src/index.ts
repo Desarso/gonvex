@@ -36,6 +36,7 @@ import {
 import {
   createMutationOutbox,
   type MutationOutbox,
+  type OutboxStore,
 } from "./outbox.js";
 export * from "./cache.js";
 export * from "./cache-coordinator.js";
@@ -49,6 +50,7 @@ export * from "./sync-store.js";
 export * from "./error-reporter.js";
 export * from "./optimistic.js";
 export * from "./outbox.js";
+export * from "./kv-stores.js";
 export * from "./signals.js";
 export type { QueryCacheDirective } from "@gonvex/protocol";
 
@@ -298,8 +300,10 @@ export type GonvexClientOptions = GonvexClientAuth & {
   /**
    * Durable mutation queue settings. Every replay keeps its original
    * idempotency key, making an accidental cross-tab double-send server-safe.
+   * Runtimes without IndexedDB inject `store` to keep queued mutations
+   * durable; queue semantics always stay in the SDK.
    */
-  outbox?: { databaseName?: string; enabled?: boolean };
+  outbox?: { databaseName?: string; enabled?: boolean; store?: OutboxStore };
   errorReporting?: false | Omit<ErrorReporterOptions, "endpoint" | "project" | "tenant">;
   timeouts?: GonvexTimeoutOptions;
 };
