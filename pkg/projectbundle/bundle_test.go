@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/pkg/projectbundle"
 )
@@ -42,6 +43,47 @@ func TestLoadProjectBundle(t *testing.T) {
 	}
 	if _, ok := app.Lookup("sample.echo"); !ok {
 		t.Fatalf("expected sample.echo to be registered")
+	}
+}
+
+func TestLoadSharedProjectBundleForMultipleProjects(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Go plugin bundles are not supported on Windows; use Linux/macOS runtime for plugin-backed sync tests")
+	}
+
+	moduleRoot, err := gonvexModuleRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	source, err := os.ReadFile(filepath.Join("testdata", "app", "register.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bundle := manifest.SourceBundle{
+		ModulePath:  "gonvexapp/shared-project",
+		PackageName: "app",
+		Files: map[string]string{
+			"app/register.go": projectbundle.EncodeFile(source),
+		},
+	}
+	bundle.Hash = projectbundle.HashFiles(bundle.Files)
+
+	loader := projectbundle.NewLoader(t.TempDir(), moduleRoot)
+	var sharedApp *gonvex.App
+	for _, projectID := range []string{"web-project", "mobile-alias-project"} {
+		app, loadErr := loader.Load(projectID, bundle)
+		if loadErr != nil {
+			t.Fatalf("load shared bundle for %s: %v", projectID, loadErr)
+		}
+		if _, ok := app.Lookup("sample.echo"); !ok {
+			t.Fatalf("expected sample.echo to be registered for %s", projectID)
+		}
+		if sharedApp != nil && app != sharedApp {
+			t.Fatalf("shared source bundle was opened more than once")
+		}
+		sharedApp = app
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"golang.org/x/sync/singleflight"
 )
 
 var safeProjectID = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
@@ -25,10 +26,15 @@ var safeProjectID = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 const godanticImportPath = "github.com/Desarso/godantic"
 
 type Loader struct {
+	mu                 sync.RWMutex
 	cacheDir           string
 	moduleRoot         string
 	runtimeFingerprint string
 	apps               map[string]*loadedProject
+	// sharedBundles prevents project aliases backed by the same source bundle
+	// from opening the same Go plugin identity more than once in a worker.
+	sharedBundles     map[string]*gonvex.App
+	sharedBundleLoads singleflight.Group
 }
 
 var (
@@ -50,6 +56,7 @@ func NewLoader(cacheDir string, moduleRoot string) *Loader {
 		moduleRoot:         strings.TrimSpace(moduleRoot),
 		runtimeFingerprint: currentRuntimeFingerprint(),
 		apps:               map[string]*loadedProject{},
+		sharedBundles:      map[string]*gonvex.App{},
 	}
 }
 
@@ -83,6 +90,8 @@ func (l *Loader) AppForProject(projectID string) *gonvex.App {
 	if projectID == "" {
 		return nil
 	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	if loaded, ok := l.apps[projectID]; ok && loaded != nil && loaded.app != nil {
 		return loaded.app
 	}
@@ -100,9 +109,12 @@ func (l *Loader) Load(projectID string, bundle manifest.SourceBundle) (*gonvex.A
 	if len(bundle.Files) == 0 {
 		return nil, fmt.Errorf("bundle has no source files")
 	}
+	l.mu.RLock()
 	if cached, ok := l.apps[projectID]; ok && cached.hash == bundle.Hash && cached.app != nil {
+		l.mu.RUnlock()
 		return cached.app, nil
 	}
+	l.mu.RUnlock()
 
 	modulePath := strings.TrimSpace(bundle.ModulePath)
 	if modulePath == "" {
@@ -112,7 +124,35 @@ func (l *Loader) Load(projectID string, bundle manifest.SourceBundle) (*gonvex.A
 	if packageName == "" {
 		packageName = "app"
 	}
+	sharedBundleKey := strings.Join([]string{modulePath, packageName, strings.TrimSpace(bundle.GoVersion), bundle.Hash}, "\x00")
+	value, err, _ := l.sharedBundleLoads.Do(sharedBundleKey, func() (any, error) {
+		l.mu.RLock()
+		app := l.sharedBundles[sharedBundleKey]
+		l.mu.RUnlock()
+		if app != nil {
+			return app, nil
+		}
 
+		app, compileErr := l.compileBundle(projectID, modulePath, packageName, bundle)
+		if compileErr != nil {
+			return nil, compileErr
+		}
+		l.mu.Lock()
+		l.sharedBundles[sharedBundleKey] = app
+		l.mu.Unlock()
+		return app, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	app := value.(*gonvex.App)
+	l.mu.Lock()
+	l.apps[projectID] = &loadedProject{hash: bundle.Hash, app: app}
+	l.mu.Unlock()
+	return app, nil
+}
+
+func (l *Loader) compileBundle(projectID string, modulePath string, packageName string, bundle manifest.SourceBundle) (*gonvex.App, error) {
 	projectDir := filepath.Join(l.cacheDir, sanitizeProjectID(projectID))
 	if err := os.RemoveAll(projectDir); err != nil {
 		return nil, fmt.Errorf("reset project bundle cache: %w", err)
@@ -152,7 +192,6 @@ func (l *Loader) Load(projectID string, bundle manifest.SourceBundle) (*gonvex.A
 	if err != nil {
 		return nil, err
 	}
-	l.apps[projectID] = &loadedProject{hash: bundle.Hash, app: app}
 	return app, nil
 }
 
