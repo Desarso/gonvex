@@ -40,7 +40,7 @@ func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 	token := bearerToken(r)
 	requiresRuntimeAuth := s.projectRequiresAuthentication(r.Context(), project) && !function.Public
 	if !requiresRuntimeAuth && token != "" {
-		requiresRuntimeAuth = s.runtimeOwnsOptionalHTTPBearer(r.Context(), project, token)
+		requiresRuntimeAuth = runtimeOwnsOptionalHTTPBearer(token)
 	}
 	if requiresRuntimeAuth {
 		user, permissions, authenticatedProject, authenticatedTenant, err := s.authenticateSocket(
@@ -103,17 +103,12 @@ func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 // unchanged. Runtime-owned sessions and JWT-shaped Firebase credentials still
 // authenticate here so an optional verified caller is available to the app.
 // Protected functions always authenticate, regardless of token shape.
-func (s *Server) runtimeOwnsOptionalHTTPBearer(ctx context.Context, project string, token string) bool {
+func runtimeOwnsOptionalHTTPBearer(token string) bool {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return false
 	}
 	if strings.HasPrefix(token, "gvx_session_") {
-		return true
-	}
-	if s.firebaseProjectID(ctx, project) == "" {
-		// Preserve legacy landlord/native behavior for projects that do not use
-		// Firebase. Their runtime session token may be opaque.
 		return true
 	}
 	return jwtShaped(token)

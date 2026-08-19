@@ -3,12 +3,33 @@ import test from "node:test";
 
 import {
   deployRollingApplications,
+  verifyApplicationUpdateAcknowledgement,
   verifyDashboardEnvironment,
   verifyRollingApplication,
   verifyRuntimeEnvironment,
 } from "./deploy-coolify.mjs";
 
 const sha = "b".repeat(40);
+
+test("requires Coolify to acknowledge the exact application settings update", () => {
+  assert.doesNotThrow(() => verifyApplicationUpdateAcknowledgement(
+    { uuid: "runtime-uuid" },
+    "runtime",
+    "runtime-uuid",
+  ));
+  assert.throws(
+    () => verifyApplicationUpdateAcknowledgement({}, "runtime", "runtime-uuid"),
+    /settings update was not acknowledged/,
+  );
+  assert.throws(
+    () => verifyApplicationUpdateAcknowledgement(
+      { uuid: "different-uuid" },
+      "runtime",
+      "runtime-uuid",
+    ),
+    /settings update was not acknowledged/,
+  );
+});
 
 function application(role, overrides = {}) {
   const runtime = role === "runtime";
@@ -54,6 +75,12 @@ test("requires the selected runtime auth policy, loopback proxy, and exact adver
     () => verifyRuntimeEnvironment(environment, sha, true),
     /GONVEX_REQUIRE_AUTH=true/,
   );
+  assert.doesNotThrow(() => verifyRuntimeEnvironment([
+    { key: "GONVEX_REQUIRE_AUTH", real_value: "true", is_preview: true, is_buildtime: false },
+    { key: "GONVEX_RUNTIME_VERSION", real_value: "preview", is_preview: true, is_buildtime: false },
+    { key: "GONVEX_TRUSTED_PROXY_CIDRS", real_value: "192.0.2.0/24", is_preview: true, is_buildtime: false },
+    ...environment,
+  ], sha, false));
   assert.throws(
     () => verifyRuntimeEnvironment(environment, "c".repeat(40), false),
     /advertise exact version/,
@@ -92,8 +119,10 @@ test("pins and finishes runtime before deploying dashboard", async () => {
   };
   const environments = {
     "runtime-uuid": [
+      { key: "GONVEX_REQUIRE_AUTH", real_value: "true", is_preview: true, is_buildtime: false },
+      { key: "GONVEX_RUNTIME_VERSION", real_value: "preview", is_preview: true, is_buildtime: false },
+      { key: "GONVEX_TRUSTED_PROXY_CIDRS", real_value: "192.0.2.0/24", is_preview: true, is_buildtime: false },
       { key: "GONVEX_REQUIRE_AUTH", real_value: "false", is_buildtime: false },
-      { key: "GONVEX_RUNTIME_VERSION", real_value: "HEAD", is_buildtime: false },
       { key: "GONVEX_TRUSTED_PROXY_CIDRS", real_value: "10.0.0.0/8", is_buildtime: false },
     ],
     "dashboard-uuid": [],
@@ -107,14 +136,21 @@ test("pins and finishes runtime before deploying dashboard", async () => {
       const uuid = decodeURIComponent(environmentMatch[1]);
       if (method === "GET") return Response.json(environments[uuid]);
       const update = JSON.parse(init.body);
-      const existing = environments[uuid].find((entry) => entry.key === update.key);
+      const existing = environments[uuid].find(
+        (entry) => entry.key === update.key && entry.is_preview !== true,
+      );
       if (existing) {
         existing.value = update.value;
         existing.real_value = update.value;
       } else {
-        environments[uuid].push({ key: update.key, value: update.value, real_value: update.value });
+        environments[uuid].push({
+          key: update.key,
+          value: update.value,
+          real_value: update.value,
+          is_preview: update.is_preview,
+        });
       }
-      events.push(`env:${uuid}:${update.key}`);
+      events.push(`env:${method}:${uuid}:${update.key}`);
       return Response.json({});
     }
     const applicationMatch = target.pathname.match(/\/applications\/([^/]+)$/);
@@ -157,8 +193,8 @@ test("pins and finishes runtime before deploying dashboard", async () => {
   }
 
   assert.deepEqual(events, [
-    "env:runtime-uuid:GONVEX_RUNTIME_VERSION",
-    "env:runtime-uuid:GONVEX_TRUSTED_PROXY_CIDRS",
+    "env:POST:runtime-uuid:GONVEX_RUNTIME_VERSION",
+    "env:PATCH:runtime-uuid:GONVEX_TRUSTED_PROXY_CIDRS",
     "patch:runtime-uuid",
     "deploy:runtime-uuid",
     "finished:runtime-uuid",
@@ -169,11 +205,21 @@ test("pins and finishes runtime before deploying dashboard", async () => {
   assert.equal(states["runtime-uuid"].is_auto_deploy_enabled, false);
   assert.equal(states["dashboard-uuid"].is_auto_deploy_enabled, false);
   assert.equal(
-    environments["runtime-uuid"].find((entry) => entry.key === "GONVEX_REQUIRE_AUTH").real_value,
+    environments["runtime-uuid"].find(
+      (entry) => entry.key === "GONVEX_REQUIRE_AUTH" && entry.is_preview !== true,
+    ).real_value,
     "false",
   );
   assert.equal(
-    environments["runtime-uuid"].find((entry) => entry.key === "GONVEX_TRUSTED_PROXY_CIDRS").real_value,
+    environments["runtime-uuid"].find(
+      (entry) => entry.key === "GONVEX_TRUSTED_PROXY_CIDRS" && entry.is_preview !== true,
+    ).real_value,
     "10.0.0.0/8,127.0.0.1/32",
+  );
+  assert.equal(
+    environments["runtime-uuid"].find(
+      (entry) => entry.key === "GONVEX_RUNTIME_VERSION" && entry.is_preview === true,
+    ).real_value,
+    "preview",
   );
 });

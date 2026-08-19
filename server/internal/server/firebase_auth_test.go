@@ -186,6 +186,30 @@ func TestPublicHTTPPassesOpaqueBearerToApplicationAuth(t *testing.T) {
 	}
 }
 
+func TestPublicHTTPPassesOpaqueBearerWithoutFirebaseConfiguration(t *testing.T) {
+	runtime := New(config.Config{RequireAuth: true})
+	app := gonvex.NewApp()
+	app.PublicHTTP("/external-api", func(ctx *gonvex.HTTPContext, request gonvex.HTTPRequest) (gonvex.HTTPResponse, error) {
+		if ctx.User != nil {
+			return gonvex.HTTPResponse{Status: http.StatusInternalServerError}, nil
+		}
+		return gonvex.HTTPResponse{
+			Status: http.StatusOK,
+			Body:   []byte(request.Headers["authorization"][0]),
+		}, nil
+	})
+	runtime.app = app
+
+	request := httptest.NewRequest(http.MethodGet, "/external-api", nil)
+	request.Header.Set("authorization", "Bearer whg_live_test_credential")
+	response := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "Bearer whg_live_test_credential" {
+		t.Fatalf("opaque application bearer did not reach public handler: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestPublicHTTPStillRejectsMalformedFirebaseJWT(t *testing.T) {
 	signer := newFirebaseTestSigner(t)
 	runtime := New(config.Config{

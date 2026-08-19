@@ -58,7 +58,7 @@ async function coolifyRequest(base, token, path, init = {}) {
   return text ? JSON.parse(text) : undefined;
 }
 
-export function verifyRollingApplication(application, role, sha, autoDeploy) {
+export function verifyRollingApplication(application, role, sha) {
   const contract = applicationContracts[role];
   if (!contract) throw new Error(`unknown Gonvex application role ${role}`);
   if (application?.build_pack !== "dockerfile") {
@@ -73,12 +73,6 @@ export function verifyRollingApplication(application, role, sha, autoDeploy) {
   if (application.git_commit_sha !== sha) {
     throw new Error(`${role} is not pinned to ${sha}`);
   }
-  if (
-    typeof application.is_auto_deploy_enabled === "boolean"
-    && application.is_auto_deploy_enabled !== autoDeploy
-  ) {
-    throw new Error(`${role} auto-deploy setting does not match ${autoDeploy}`);
-  }
   if (!application.health_check_enabled || application.health_check_path !== contract.healthPath) {
     throw new Error(`${role} must use the ${contract.healthPath} readiness check`);
   }
@@ -87,8 +81,20 @@ export function verifyRollingApplication(application, role, sha, autoDeploy) {
   }
 }
 
+export function verifyApplicationUpdateAcknowledgement(update, role, uuid) {
+  if (update?.uuid !== uuid) {
+    throw new Error(`${role} settings update was not acknowledged for ${uuid}`);
+  }
+}
+
+function productionEnvironmentEntry(environment, key) {
+  return environment?.find(
+    (candidate) => candidate?.key === key && candidate?.is_preview !== true,
+  );
+}
+
 function environmentValue(environment, key) {
-  const entry = environment?.find((candidate) => candidate?.key === key);
+  const entry = productionEnvironmentEntry(environment, key);
   const value = String(entry?.value ?? entry?.real_value ?? "").trim();
   if (
     value.length >= 2
@@ -145,7 +151,7 @@ async function upsertApplicationEnvironment(base, token, uuid, key, value) {
     token,
     `/applications/${encodeURIComponent(uuid)}/envs`,
   );
-  const exists = environment?.some((candidate) => candidate?.key === key);
+  const exists = productionEnvironmentEntry(environment, key) !== undefined;
   await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}/envs`, {
     method: exists ? "PATCH" : "POST",
     body: JSON.stringify({ key, value, is_literal: true, is_preview: false }),
@@ -239,7 +245,7 @@ export async function deployRollingApplications({
   for (const role of ["runtime", "dashboard"]) {
     const uuid = applications[role];
     const contract = applicationContracts[role];
-    await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`, {
+    const updated = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`, {
       method: "PATCH",
       body: JSON.stringify({
         git_commit_sha: sha,
@@ -255,8 +261,14 @@ export async function deployRollingApplications({
         health_check_start_period: role === "runtime" ? 30 : 15,
       }),
     });
+    // Coolify 4.1.2 stores this flag on the application_settings relation but
+    // omits that relation from GET /applications/{uuid}. Its PATCH endpoint
+    // saves the relation before returning the updated application's UUID, so
+    // validate that write acknowledgement instead of pretending an omitted
+    // GET field is a read-back verification.
+    verifyApplicationUpdateAcknowledgement(updated, role, uuid);
     const saved = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
-    verifyRollingApplication(saved, role, sha, autoDeploy);
+    verifyRollingApplication(saved, role, sha);
     const savedEnvironment = await coolifyRequest(
       base,
       token,
@@ -275,7 +287,7 @@ export async function deployRollingApplications({
     await waitForDeployment(base, token, deploymentUUID, waitOptions);
 
     const deployed = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
-    verifyRollingApplication(deployed, role, sha, autoDeploy);
+    verifyRollingApplication(deployed, role, sha);
     const deployedEnvironment = await coolifyRequest(
       base,
       token,
