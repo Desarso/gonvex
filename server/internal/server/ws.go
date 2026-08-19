@@ -389,6 +389,10 @@ type wsConn struct {
 	readyTimer        *time.Timer
 	bytesReceived     atomic.Uint64
 	bytesSent         atomic.Uint64
+	// writesInFlight counts mutation/action frames currently executing on this
+	// connection's reader goroutine, so a worker drain can close idle sockets
+	// first and avoid interrupting an acknowledged-but-uncommitted write.
+	writesInFlight atomic.Int32
 }
 
 type pendingSyncWatermark struct {
@@ -490,6 +494,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 	receivedAt := time.Now()
 	c.observeActivity(message, receivedAt)
+	switch message.Type {
+	case "mutation.call", "mutation.callMany", "action.call":
+		c.writesInFlight.Add(1)
+		defer c.writesInFlight.Add(-1)
+	}
 	switch message.Type {
 	case "auth":
 		requestedProject := strings.TrimSpace(message.Project)

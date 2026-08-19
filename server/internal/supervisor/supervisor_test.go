@@ -195,8 +195,12 @@ func runSupervisorWorkerHelper() {
 		}
 		next := strconv.Itoa(current + 1)
 		app = loadGenerationOrExit(loader, next)
+		// Every generation is a genuinely changed bundle, so this stub always
+		// dlopen'd a replacement module: report it exactly like the real
+		// /dev/sync handler, which sets the header only for replacement loads
+		// (or failed load attempts) and never for unchanged bundles.
+		response.Header().Set(recycleWorkerHeader, "1")
 		if request.URL.Query().Get("failAfterLoad") == "true" {
-			response.Header().Set(recycleWorkerHeader, "1")
 			http.Error(response, "simulated persistence failure", http.StatusUnprocessableEntity)
 			return
 		}

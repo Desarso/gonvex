@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -169,9 +170,12 @@ func (s *Supervisor) newProxy() *httputil.ReverseProxy {
 	}
 	proxy.ModifyResponse = func(response *http.Response) error {
 		request := response.Request
-		syncSucceeded := response.StatusCode >= 200 && response.StatusCode < 300
+		// The worker reports whether this sync actually dlopen'd a new plugin
+		// module (or attempted to and failed, which can poison the process).
+		// A /dev/sync whose bundle hash is unchanged loads nothing, so
+		// recycling for it would only manufacture a reconnect wave.
 		workerLoadedBundle := response.Header.Get(recycleWorkerHeader) == "1"
-		if request != nil && request.Method == http.MethodPost && request.URL.Path == "/dev/sync" && request.URL.Query().Get("dryRun") != "true" && (syncSucceeded || workerLoadedBundle) {
+		if request != nil && request.Method == http.MethodPost && request.URL.Path == "/dev/sync" && request.URL.Query().Get("dryRun") != "true" && workerLoadedBundle {
 			s.RequestRecycle()
 		}
 		return nil
@@ -297,6 +301,11 @@ func (s *Supervisor) stopWorker(worker *workerProcess) {
 		return
 	}
 	drained := worker.beginDrain()
+	// SIGTERM asks a supervised worker to close its WebSockets gradually with
+	// close code 1012 (service restart) so clients reconnect staggered instead
+	// of as one wave. Workers that predate the drain signal treat it as an
+	// immediate graceful shutdown, which the deadline below already assumed.
+	_ = worker.command.Process.Signal(syscall.SIGTERM)
 	timer := time.NewTimer(s.config.DrainTimeout)
 	select {
 	case <-drained:

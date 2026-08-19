@@ -63,8 +63,8 @@ type Config struct {
 	// SubscriptionRerunConcurrency; hydration may still borrow idle capacity
 	// beyond this share when nothing else is queued.
 	QueryBootstrapConcurrency int
-	DashboardSecret              string
-	TrustedProxyCIDRs            []string
+	DashboardSecret           string
+	TrustedProxyCIDRs         []string
 	// DashboardAuthProjectID is the one Gonvex application whose native Google
 	// sessions may authenticate to the control-plane dashboard. Keeping this
 	// explicit prevents a session minted for an arbitrary customer project from

@@ -217,21 +217,21 @@ type transactionMetricsBucket struct {
 }
 
 type runtimeMetricsSnapshot struct {
-	GeneratedAt   string                               `json:"generatedAt"`
-	Functions     map[string]functionMetricSnapshot    `json:"functions"`
-	Transactions  map[string]transactionMetricSnapshot `json:"transactions"`
-	Cache         cacheMetricSnapshot                  `json:"cache"`
-	Running       runningMetricSnapshot                `json:"running"`
-	WebSocket     websocketMetricSnapshot              `json:"websocket"`
-	Database      databaseMetricSnapshot               `json:"database"`
-	Resources     runtimeResourceSnapshot              `json:"resources"`
-	Load          loadMetricSnapshot                   `json:"load"`
-	Propagation   propagationMetricSnapshot            `json:"propagation"`
-	Reactive      reactiveMetricSnapshot               `json:"reactive"`
-	QueryAdmission queryAdmissionMetricSnapshot        `json:"queryAdmission"`
-	Scheduler     *schedulerSnapshot                   `json:"scheduler,omitempty"`
-	Logs          []runtimeLogEntry                    `json:"logs"`
-	TelemetryLogs []transactionTelemetryEntry          `json:"telemetryLogs"`
+	GeneratedAt    string                               `json:"generatedAt"`
+	Functions      map[string]functionMetricSnapshot    `json:"functions"`
+	Transactions   map[string]transactionMetricSnapshot `json:"transactions"`
+	Cache          cacheMetricSnapshot                  `json:"cache"`
+	Running        runningMetricSnapshot                `json:"running"`
+	WebSocket      websocketMetricSnapshot              `json:"websocket"`
+	Database       databaseMetricSnapshot               `json:"database"`
+	Resources      runtimeResourceSnapshot              `json:"resources"`
+	Load           loadMetricSnapshot                   `json:"load"`
+	Propagation    propagationMetricSnapshot            `json:"propagation"`
+	Reactive       reactiveMetricSnapshot               `json:"reactive"`
+	QueryAdmission queryAdmissionMetricSnapshot         `json:"queryAdmission"`
+	Scheduler      *schedulerSnapshot                   `json:"scheduler,omitempty"`
+	Logs           []runtimeLogEntry                    `json:"logs"`
+	TelemetryLogs  []transactionTelemetryEntry          `json:"telemetryLogs"`
 }
 
 type runtimeResourceSnapshot struct {
