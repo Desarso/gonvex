@@ -127,12 +127,19 @@ type sharedSubscription struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu                      sync.Mutex
-	listeners               map[*subscriptionToken]querySubscription
-	running                 bool
-	coalescing              bool
-	awaitingListener        bool
-	dirty                   bool
+	mu               sync.Mutex
+	listeners        map[*subscriptionToken]querySubscription
+	running          bool
+	coalescing       bool
+	awaitingListener bool
+	dirty            bool
+	// staleWhileIdle records an invalidation that arrived while the group had
+	// no listeners (grace window). The retained snapshot predates that commit,
+	// so a joining listener must trigger a fresh execution instead of being
+	// served the stale replay — one-shot consumers (the legacy bridge, HTTP
+	// queries) treat the first result as authoritative and would otherwise
+	// read pre-mutation state forever.
+	staleWhileIdle          bool
 	requested               uint64
 	completed               uint64
 	revision                uint64
@@ -223,7 +230,7 @@ func (m *subscriptionManager) attach(sub querySubscription) {
 	group.listeners[sub.token] = sub
 	group.visibilityUsers = nil
 	group.visibilityUsersRevision++
-	hasSnapshot := len(group.lastResult) > 0
+	hasSnapshot := len(group.lastResult) > 0 && !group.staleWhileIdle
 	lastError := group.lastError
 	running := group.running
 	awaitingListener := group.awaitingListener
@@ -901,6 +908,13 @@ func (group *sharedSubscription) run() {
 		group.dirty = false
 		group.mu.Unlock()
 		if len(listeners) == 0 || group.ctx.Err() != nil {
+			if len(listeners) == 0 && group.ctx.Err() == nil && reason == "invalidate" {
+				// The commit that requested this run is now unrepresented in the
+				// retained snapshot. Serve no replays until a fresh execution.
+				group.mu.Lock()
+				group.staleWhileIdle = true
+				group.mu.Unlock()
+			}
 			group.finishRun(requested)
 			return
 		}
@@ -1418,6 +1432,7 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 	}
 	revision := group.manager.sequence.Add(1)
 	group.revision = revision
+	group.staleWhileIdle = false
 	group.lastHash = hash
 	group.hasHash = true
 	group.lastError = ""
@@ -1543,6 +1558,7 @@ func (group *sharedSubscription) completePartitionedResult(result *visibilityPar
 	sharedPreviousRevision := group.revision
 	previousPartitions := group.partitionBaselines
 	group.revision = group.manager.sequence.Add(1)
+	group.staleWhileIdle = false
 	revision := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: group.revision}
 	// A partitioned result proves that the old shared baseline is no longer
 	// valid. Send full results now and force the next converged execution to
@@ -1671,6 +1687,7 @@ func (group *sharedSubscription) completeConvergedPartitionResult(shared *visibi
 	listeners := group.listenerSnapshotLocked()
 	mutationIDs := sortedStringSet(group.activeCommitIDs)
 	group.revision = group.manager.sequence.Add(1)
+	group.staleWhileIdle = false
 	revision := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: group.revision}
 	group.lastHash = shared.hash
 	group.hasHash = true
