@@ -27,6 +27,14 @@ function requiredEnvironment(name) {
   return value;
 }
 
+function requiredBooleanEnvironment(name) {
+  const value = requiredEnvironment(name);
+  if (value !== "true" && value !== "false") {
+    throw new Error(`${name} must be true or false`);
+  }
+  return value === "true";
+}
+
 function apiBase(value) {
   const base = value.replace(/\/$/, "");
   return base.endsWith("/api/v1") ? base : `${base}/api/v1`;
@@ -50,7 +58,7 @@ async function coolifyRequest(base, token, path, init = {}) {
   return text ? JSON.parse(text) : undefined;
 }
 
-export function verifyRollingApplication(application, role, sha) {
+export function verifyRollingApplication(application, role, sha, autoDeploy) {
   const contract = applicationContracts[role];
   if (!contract) throw new Error(`unknown Gonvex application role ${role}`);
   if (application?.build_pack !== "dockerfile") {
@@ -64,6 +72,12 @@ export function verifyRollingApplication(application, role, sha) {
   }
   if (application.git_commit_sha !== sha) {
     throw new Error(`${role} is not pinned to ${sha}`);
+  }
+  if (
+    typeof application.is_auto_deploy_enabled === "boolean"
+    && application.is_auto_deploy_enabled !== autoDeploy
+  ) {
+    throw new Error(`${role} auto-deploy setting does not match ${autoDeploy}`);
   }
   if (!application.health_check_enabled || application.health_check_path !== contract.healthPath) {
     throw new Error(`${role} must use the ${contract.healthPath} readiness check`);
@@ -86,18 +100,29 @@ function environmentValue(environment, key) {
   return value;
 }
 
-export function verifyRuntimeEnvironment(environment, sha) {
-  if (environmentValue(environment, "GONVEX_REQUIRE_AUTH") !== "true") {
-    throw new Error("runtime application must enforce GONVEX_REQUIRE_AUTH=true");
-  }
-  if (environmentValue(environment, "GONVEX_RUNTIME_VERSION") !== sha) {
-    throw new Error(`runtime application must advertise exact version ${sha}`);
+function verifyRuntimePolicyEnvironment(environment, expectedRequireAuth) {
+  const expected = String(expectedRequireAuth);
+  if (environmentValue(environment, "GONVEX_REQUIRE_AUTH") !== expected) {
+    throw new Error(`runtime application must set GONVEX_REQUIRE_AUTH=${expected}`);
   }
   const buildTimeKeys = environment
     ?.filter((entry) => entry?.is_buildtime === true && entry?.is_preview !== true)
     .map((entry) => entry.key) ?? [];
   if (buildTimeKeys.length > 0) {
     throw new Error(`runtime secrets must not be build-time variables: ${buildTimeKeys.join(", ")}`);
+  }
+}
+
+export function verifyRuntimeEnvironment(environment, sha, expectedRequireAuth) {
+  verifyRuntimePolicyEnvironment(environment, expectedRequireAuth);
+  if (environmentValue(environment, "GONVEX_RUNTIME_VERSION") !== sha) {
+    throw new Error(`runtime application must advertise exact version ${sha}`);
+  }
+  const trustedProxies = environmentValue(environment, "GONVEX_TRUSTED_PROXY_CIDRS")
+    .split(",")
+    .map((value) => value.trim());
+  if (!trustedProxies.includes("127.0.0.1/32")) {
+    throw new Error("runtime application must trust supervisor proxy 127.0.0.1/32");
   }
 }
 
@@ -127,6 +152,14 @@ async function upsertApplicationEnvironment(base, token, uuid, key, value) {
   });
 }
 
+function withTrustedProxy(environment, cidr) {
+  const configured = environmentValue(environment, "GONVEX_TRUSTED_PROXY_CIDRS")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return [...new Set([...configured, cidr])].join(",");
+}
+
 async function waitForDeployment(base, token, deploymentUUID, options = {}) {
   const timeoutMS = options.timeoutMS ?? 12 * 60 * 1000;
   const intervalMS = options.intervalMS ?? 5_000;
@@ -152,6 +185,8 @@ export async function deployRollingApplications({
   token,
   applications,
   sha,
+  expectedRequireAuth,
+  autoDeploy,
   waitOptions,
 }) {
   if (!/^[0-9a-f]{40}$/.test(sha)) {
@@ -160,6 +195,43 @@ export async function deployRollingApplications({
   for (const role of ["runtime", "dashboard"]) {
     if (!applications?.[role]) throw new Error(`missing Coolify ${role} application UUID`);
   }
+  if (typeof expectedRequireAuth !== "boolean") {
+    throw new Error("expectedRequireAuth must be explicitly true or false");
+  }
+  if (typeof autoDeploy !== "boolean") {
+    throw new Error("autoDeploy must be explicitly true or false");
+  }
+
+  // Fail before changing a source pin or starting a deployment if the selected
+  // auth policy does not match the application. Promotion must never silently
+  // turn authentication on or off.
+  const initialRuntimeEnvironment = await coolifyRequest(
+    base,
+    token,
+    `/applications/${encodeURIComponent(applications.runtime)}/envs`,
+  );
+  verifyRuntimePolicyEnvironment(initialRuntimeEnvironment, expectedRequireAuth);
+  const initialDashboardEnvironment = await coolifyRequest(
+    base,
+    token,
+    `/applications/${encodeURIComponent(applications.dashboard)}/envs`,
+  );
+  verifyDashboardEnvironment(initialDashboardEnvironment);
+
+  await upsertApplicationEnvironment(
+    base,
+    token,
+    applications.runtime,
+    "GONVEX_RUNTIME_VERSION",
+    sha,
+  );
+  await upsertApplicationEnvironment(
+    base,
+    token,
+    applications.runtime,
+    "GONVEX_TRUSTED_PROXY_CIDRS",
+    withTrustedProxy(initialRuntimeEnvironment, "127.0.0.1/32"),
+  );
 
   // Runtime first: the dashboard may proxy session/API traffic to it. Each
   // application is pinned to the exact tested commit before Coolify starts the
@@ -167,13 +239,11 @@ export async function deployRollingApplications({
   for (const role of ["runtime", "dashboard"]) {
     const uuid = applications[role];
     const contract = applicationContracts[role];
-    if (role === "runtime") {
-      await upsertApplicationEnvironment(base, token, uuid, "GONVEX_RUNTIME_VERSION", sha);
-    }
     await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`, {
       method: "PATCH",
       body: JSON.stringify({
         git_commit_sha: sha,
+        is_auto_deploy_enabled: autoDeploy,
         health_check_enabled: true,
         health_check_path: contract.healthPath,
         health_check_port: contract.port,
@@ -186,13 +256,13 @@ export async function deployRollingApplications({
       }),
     });
     const saved = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
-    verifyRollingApplication(saved, role, sha);
+    verifyRollingApplication(saved, role, sha, autoDeploy);
     const savedEnvironment = await coolifyRequest(
       base,
       token,
       `/applications/${encodeURIComponent(uuid)}/envs`,
     );
-    if (role === "runtime") verifyRuntimeEnvironment(savedEnvironment, sha);
+    if (role === "runtime") verifyRuntimeEnvironment(savedEnvironment, sha, expectedRequireAuth);
     else verifyDashboardEnvironment(savedEnvironment);
 
     const queued = await coolifyRequest(
@@ -205,13 +275,13 @@ export async function deployRollingApplications({
     await waitForDeployment(base, token, deploymentUUID, waitOptions);
 
     const deployed = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
-    verifyRollingApplication(deployed, role, sha);
+    verifyRollingApplication(deployed, role, sha, autoDeploy);
     const deployedEnvironment = await coolifyRequest(
       base,
       token,
       `/applications/${encodeURIComponent(uuid)}/envs`,
     );
-    if (role === "runtime") verifyRuntimeEnvironment(deployedEnvironment, sha);
+    if (role === "runtime") verifyRuntimeEnvironment(deployedEnvironment, sha, expectedRequireAuth);
     else verifyDashboardEnvironment(deployedEnvironment);
     if (deployed.status !== "running:healthy") {
       throw new Error(`${role} ended deployment as ${deployed.status ?? "unknown"}`);
@@ -232,6 +302,8 @@ async function main() {
       runtime: requiredEnvironment("COOLIFY_RUNTIME_APPLICATION_UUID"),
       dashboard: requiredEnvironment("COOLIFY_DASHBOARD_APPLICATION_UUID"),
     },
+    expectedRequireAuth: requiredBooleanEnvironment("GONVEX_EXPECT_REQUIRE_AUTH"),
+    autoDeploy: requiredBooleanEnvironment("GONVEX_COOLIFY_AUTO_DEPLOY"),
   });
 }
 

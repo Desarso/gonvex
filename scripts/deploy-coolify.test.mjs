@@ -43,23 +43,36 @@ test("requires Dockerfile applications with readiness and no host port mapping",
   );
 });
 
-test("requires runtime auth enforcement and the exact advertised version", () => {
+test("requires the selected runtime auth policy, loopback proxy, and exact advertised version", () => {
   const environment = [
-    { key: "GONVEX_REQUIRE_AUTH", real_value: "true", is_buildtime: false },
+    { key: "GONVEX_REQUIRE_AUTH", real_value: "false", is_buildtime: false },
     { key: "GONVEX_RUNTIME_VERSION", real_value: sha, is_buildtime: false },
+    { key: "GONVEX_TRUSTED_PROXY_CIDRS", real_value: "10.0.0.0/8,127.0.0.1/32", is_buildtime: false },
   ];
-  assert.doesNotThrow(() => verifyRuntimeEnvironment(environment, sha));
+  assert.doesNotThrow(() => verifyRuntimeEnvironment(environment, sha, false));
   assert.throws(
-    () => verifyRuntimeEnvironment(environment.filter((entry) => entry.key !== "GONVEX_REQUIRE_AUTH"), sha),
+    () => verifyRuntimeEnvironment(environment, sha, true),
     /GONVEX_REQUIRE_AUTH=true/,
   );
   assert.throws(
-    () => verifyRuntimeEnvironment(environment, "c".repeat(40)),
+    () => verifyRuntimeEnvironment(environment, "c".repeat(40), false),
     /advertise exact version/,
   );
   assert.throws(
-    () => verifyRuntimeEnvironment([...environment, { key: "S3_SECRET_ACCESS_KEY", value: "secret", is_buildtime: true }], sha),
+    () => verifyRuntimeEnvironment(
+      [...environment, { key: "S3_SECRET_ACCESS_KEY", value: "secret", is_buildtime: true }],
+      sha,
+      false,
+    ),
     /must not be build-time variables/,
+  );
+  assert.throws(
+    () => verifyRuntimeEnvironment(
+      environment.filter((entry) => entry.key !== "GONVEX_TRUSTED_PROXY_CIDRS"),
+      sha,
+      false,
+    ),
+    /127\.0\.0\.1\/32/,
   );
   assert.doesNotThrow(() => verifyDashboardEnvironment([
     { key: "VITE_GONVEX_URL", value: "https://runtime.test", is_buildtime: true },
@@ -79,8 +92,9 @@ test("pins and finishes runtime before deploying dashboard", async () => {
   };
   const environments = {
     "runtime-uuid": [
-      { key: "GONVEX_REQUIRE_AUTH", real_value: "true", is_buildtime: false },
+      { key: "GONVEX_REQUIRE_AUTH", real_value: "false", is_buildtime: false },
       { key: "GONVEX_RUNTIME_VERSION", real_value: "HEAD", is_buildtime: false },
+      { key: "GONVEX_TRUSTED_PROXY_CIDRS", real_value: "10.0.0.0/8", is_buildtime: false },
     ],
     "dashboard-uuid": [],
   };
@@ -134,6 +148,8 @@ test("pins and finishes runtime before deploying dashboard", async () => {
       token: "test-token",
       sha,
       applications: { runtime: "runtime-uuid", dashboard: "dashboard-uuid" },
+      expectedRequireAuth: false,
+      autoDeploy: false,
       waitOptions: { timeoutMS: 100, intervalMS: 0 },
     });
   } finally {
@@ -142,6 +158,7 @@ test("pins and finishes runtime before deploying dashboard", async () => {
 
   assert.deepEqual(events, [
     "env:runtime-uuid:GONVEX_RUNTIME_VERSION",
+    "env:runtime-uuid:GONVEX_TRUSTED_PROXY_CIDRS",
     "patch:runtime-uuid",
     "deploy:runtime-uuid",
     "finished:runtime-uuid",
@@ -149,4 +166,14 @@ test("pins and finishes runtime before deploying dashboard", async () => {
     "deploy:dashboard-uuid",
     "finished:dashboard-uuid",
   ]);
+  assert.equal(states["runtime-uuid"].is_auto_deploy_enabled, false);
+  assert.equal(states["dashboard-uuid"].is_auto_deploy_enabled, false);
+  assert.equal(
+    environments["runtime-uuid"].find((entry) => entry.key === "GONVEX_REQUIRE_AUTH").real_value,
+    "false",
+  );
+  assert.equal(
+    environments["runtime-uuid"].find((entry) => entry.key === "GONVEX_TRUSTED_PROXY_CIDRS").real_value,
+    "10.0.0.0/8,127.0.0.1/32",
+  );
 });

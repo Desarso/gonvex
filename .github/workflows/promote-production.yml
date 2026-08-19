@@ -11,6 +11,14 @@ on:
         description: Verified production backup or restore-point reference
         required: true
         type: string
+      require_auth:
+        description: Expected production GONVEX_REQUIRE_AUTH policy; the workflow verifies but never changes it
+        required: true
+        type: choice
+        default: "false"
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: read
@@ -85,6 +93,10 @@ jobs:
           COOLIFY_RUNTIME_APPLICATION_UUID: ${{ vars.COOLIFY_RUNTIME_APPLICATION_UUID }}
           COOLIFY_DASHBOARD_APPLICATION_UUID: ${{ vars.COOLIFY_DASHBOARD_APPLICATION_UUID }}
           GONVEX_DEPLOY_SHA: ${{ inputs.sha }}
+          GONVEX_EXPECT_REQUIRE_AUTH: ${{ inputs.require_auth }}
+          # Production promotions own this lane. Disable push auto-deploy before
+          # the workflow advances the production branch to avoid a second rollout.
+          GONVEX_COOLIFY_AUTO_DEPLOY: "false"
       - name: Verify public production endpoints and exact runtime version
         run: node scripts/release-gates.mjs deployment
         env:
@@ -127,3 +139,5 @@ jobs:
           COOLIFY_RUNTIME_APPLICATION_UUID: ${{ vars.COOLIFY_RUNTIME_APPLICATION_UUID }}
           COOLIFY_DASHBOARD_APPLICATION_UUID: ${{ vars.COOLIFY_DASHBOARD_APPLICATION_UUID }}
           GONVEX_DEPLOY_SHA: ${{ needs.validate.outputs.production_sha }}
+          GONVEX_EXPECT_REQUIRE_AUTH: ${{ inputs.require_auth }}
+          GONVEX_COOLIFY_AUTO_DEPLOY: "false"

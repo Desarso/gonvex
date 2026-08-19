@@ -38,7 +38,11 @@ func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 	tenant := tenantIDFromRequest(project, tenantID(r))
 	caller := callerContext{}
 	token := bearerToken(r)
-	if (s.projectRequiresAuthentication(r.Context(), project) && !function.Public) || token != "" {
+	requiresRuntimeAuth := s.projectRequiresAuthentication(r.Context(), project) && !function.Public
+	if !requiresRuntimeAuth && token != "" {
+		requiresRuntimeAuth = s.runtimeOwnsOptionalHTTPBearer(r.Context(), project, token)
+	}
+	if requiresRuntimeAuth {
 		user, permissions, authenticatedProject, authenticatedTenant, err := s.authenticateSocket(
 			r.Context(), project, tenant, token, tenantID(r),
 		)
@@ -92,6 +96,32 @@ func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeHTTPResponse(w, response)
+}
+
+// Public HTTP functions are application-owned authentication boundaries. They
+// must receive opaque provider/API credentials (for example a webhook bearer)
+// unchanged. Runtime-owned sessions and JWT-shaped Firebase credentials still
+// authenticate here so an optional verified caller is available to the app.
+// Protected functions always authenticate, regardless of token shape.
+func (s *Server) runtimeOwnsOptionalHTTPBearer(ctx context.Context, project string, token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	if strings.HasPrefix(token, "gvx_session_") {
+		return true
+	}
+	if s.firebaseProjectID(ctx, project) == "" {
+		// Preserve legacy landlord/native behavior for projects that do not use
+		// Firebase. Their runtime session token may be opaque.
+		return true
+	}
+	return jwtShaped(token)
+}
+
+func jwtShaped(token string) bool {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	return len(parts) == 3 && parts[0] != "" && parts[1] != "" && parts[2] != ""
 }
 
 func (s *Server) httpContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (*gonvex.HTTPContext, error) {

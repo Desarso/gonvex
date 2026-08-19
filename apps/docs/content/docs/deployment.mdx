@@ -80,18 +80,24 @@ as part of this upgrade.
 
 ### Whagons Coolify deployments
 
-The `Runtime regression` GitHub workflow deploys every successful push to `main`
-only to the Whagons development runtime and dashboard Applications. Both use the
-Dockerfile build pack, have `/healthz` checks, and are pinned to the exact tested
-commit. Coolify starts the replacement, waits for readiness, moves traffic, and
-then stops the previous container. The runtime deploy finishes before the dashboard
-deploy starts. Pull requests run the same regression suite but never deploy.
+The `Runtime regression` GitHub workflow validates pull requests and pushes to
+`main`, but it does not call the Coolify deployment API. The Whagons development
+runtime and dashboard track `main` at `HEAD`; the repository's Coolify push webhook
+is their single deployment lane. Coolify starts each replacement, waits for its
+`/healthz` check, moves traffic, and then stops the previous container. Pull requests
+run the regression suite but never deploy.
+
+Coolify supplies the resolved `SOURCE_COMMIT` to each running container. The runtime
+prefers a valid full SHA from that value over the legacy manually maintained
+`GONVEX_RUNTIME_VERSION`, so `/healthz.version` identifies the actual webhook
+checkout and the production promotion gate cannot pass on stale version metadata.
 
 Postgres and Valkey stay in the separate `docker-compose.coolify.yml` data-plane
 service. Runtime releases therefore do not restart either durable dependency.
-`/var/lib/gonvex` is intentionally container-local: source manifests live in
-Postgres, data files rehydrate from object storage, and sharing Go plugin caches
-between two runtime binaries would make a rolling overlap unsafe.
+Source manifests live in Postgres and data files can rehydrate from object storage.
+An installation may persist `/var/lib/gonvex` for data files, plugins, and telemetry;
+the Go module cache, build cache, and compiler temporary directory live outside that
+tree so a volume mounted there cannot hide compiler-owned directories from the image.
 
 The runtime does not report healthy until every persisted project manifest has
 hydrated. Scheduled jobs and deterministic cron occurrences live in Postgres and
@@ -103,7 +109,9 @@ executes work without duplicating a cron fire.
 
 Production is a separate, manually approved promotion lane. Run **Promote Gonvex
 production** with the full SHA that is already healthy in development and a
-verified backup or restore-point reference. The workflow requires successful CI,
+verified backup or restore-point reference. Select the production runtime's current
+`GONVEX_REQUIRE_AUTH` value explicitly; the workflow verifies that choice and never
+silently changes the authentication policy during an upgrade. The workflow requires successful CI,
 proves that both `main` and `production` can reach the candidate by fast-forward,
 and verifies the exact SHA reported by the development runtime. The protected
 `gonvex-production` environment pauses before any production secret or deploy step
@@ -111,11 +119,14 @@ is released.
 
 After approval, the workflow rolls the independent production runtime first and
 the dashboard second. Postgres and Valkey remain in the production data-plane
-service and are not restarted. Public health checks must report the exact runtime
-SHA before the workflow fast-forwards `production` without force and creates the
-immutable `gonvex-prod-<sha>` release tag. A failed rollout leaves the production
-branch and release tag at the last verified deployment. A push to `main` never
-updates production directly.
+service and are not restarted. Before deployment it preserves configured trusted
+proxy networks, adds `127.0.0.1/32` for the supervisor-to-worker hop, and disables
+push auto-deploy on both production Applications. This prevents the final
+`production` branch update from causing a duplicate Coolify rollout. Public health
+checks must report the exact runtime SHA before the workflow fast-forwards
+`production` without force and creates the immutable `gonvex-prod-<sha>` release
+tag. A failed rollout leaves the production branch and release tag at the last
+verified deployment. A push to `main` never updates production directly.
 
 The workflow reads `COOLIFY_API_URL`, `COOLIFY_RUNTIME_APPLICATION_UUID`, and
 `COOLIFY_DASHBOARD_APPLICATION_UUID` as protected environment variables and

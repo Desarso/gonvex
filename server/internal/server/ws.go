@@ -234,10 +234,28 @@ const (
 var subscriptionRerunCooldown time.Duration
 
 func runtimeBuildVersion() string {
+	// Coolify resolves SOURCE_COMMIT to the exact checkout for webhook and API
+	// deployments. Prefer it over the legacy manually-maintained value so a
+	// branch-following development app cannot advertise a stale SHA.
+	if version := strings.TrimSpace(os.Getenv("SOURCE_COMMIT")); isFullGitSHA(version) {
+		return version
+	}
 	if version := strings.TrimSpace(os.Getenv("GONVEX_RUNTIME_VERSION")); version != "" {
 		return version
 	}
 	return developmentRuntimeVersion
+}
+
+func isFullGitSHA(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // subscriptionToken is deliberately non-zero-sized. Go may give separate

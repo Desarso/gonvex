@@ -45,6 +45,7 @@ type registeredMutationResult struct {
 }
 
 func TestHealth(t *testing.T) {
+	t.Setenv("SOURCE_COMMIT", "")
 	t.Setenv("GONVEX_RUNTIME_VERSION", "0123456789abcdef0123456789abcdef01234567")
 	server := New(config.Config{PostgresURL: "postgres://example", S3Endpoint: "http://localhost:9000", S3Bucket: "gonvex-dev"})
 	recorder := httptest.NewRecorder()
@@ -62,6 +63,35 @@ func TestHealth(t *testing.T) {
 	}
 	if payload.Version != "0123456789abcdef0123456789abcdef01234567" {
 		t.Fatalf("health version = %q", payload.Version)
+	}
+}
+
+func TestHealthPrefersCoolifySourceCommit(t *testing.T) {
+	const sourceCommit = "89abcdef0123456789abcdef0123456789abcdef"
+	t.Setenv("SOURCE_COMMIT", sourceCommit)
+	t.Setenv("GONVEX_RUNTIME_VERSION", "0123456789abcdef0123456789abcdef01234567")
+	server := New(config.Config{})
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	var payload struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Version != sourceCommit {
+		t.Fatalf("health version = %q, want Coolify source commit %q", payload.Version, sourceCommit)
+	}
+}
+
+func TestHealthIgnoresUnresolvedCoolifySourceCommit(t *testing.T) {
+	t.Setenv("SOURCE_COMMIT", "HEAD")
+	t.Setenv("GONVEX_RUNTIME_VERSION", "0123456789abcdef0123456789abcdef01234567")
+
+	if version := runtimeBuildVersion(); version != "0123456789abcdef0123456789abcdef01234567" {
+		t.Fatalf("runtime version = %q", version)
 	}
 }
 
