@@ -91,20 +91,40 @@ func runWorker(cfg config.Config) {
 		serverErrors <- server.ListenAndServe()
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// A supervised worker keeps SIGTERM as the "drain" signal: the supervisor
+	// sends it after activating the replacement worker so this process closes
+	// its WebSockets gradually (code 1012) instead of dropping them all when it
+	// exits. SIGINT remains the immediate shutdown. Standalone runtimes keep
+	// the historic behavior where both signals shut down immediately.
+	supervised := strings.TrimSpace(os.Getenv("GONVEX_RUNTIME_WORKER")) == "1"
+	stopSignals := []os.Signal{os.Interrupt, syscall.SIGTERM}
+	var drainSignals chan os.Signal
+	if supervised {
+		stopSignals = []os.Signal{os.Interrupt}
+		drainSignals = make(chan os.Signal, 1)
+		signal.Notify(drainSignals, syscall.SIGTERM)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), stopSignals...)
 	defer stop()
 	slog.Info("starting gonvex runtime", "addr", cfg.Addr)
-	select {
-	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownContext); err != nil {
-			slog.Warn("graceful HTTP shutdown timed out", "error", err)
+	for {
+		select {
+		case <-drainSignals:
+			drainSignals = nil
+			go runtime.DrainWebSockets(0)
+			continue
+		case <-ctx.Done():
+			shutdownContext, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			if err := server.Shutdown(shutdownContext); err != nil {
+				slog.Warn("graceful HTTP shutdown timed out", "error", err)
+			}
+		case err := <-serverErrors:
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("gonvex runtime stopped", "error", err)
+				os.Exit(1)
+			}
 		}
-	case err := <-serverErrors:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("gonvex runtime stopped", "error", err)
-			os.Exit(1)
-		}
+		return
 	}
 }

@@ -57,6 +57,9 @@ type runtimeMetrics struct {
 	// onFunctionError forwards failed log entries to the error store (see
 	// runtime_errors.go). Set once at server construction; nil in tests.
 	onFunctionError func(runtimeLogEntry)
+	// admissionSource reads the query admission controller's counters for the
+	// metrics API. Set once at server construction; nil in isolated tests.
+	admissionSource func() queryAdmissionSnapshot
 }
 
 type logSubscriber struct {
@@ -214,20 +217,21 @@ type transactionMetricsBucket struct {
 }
 
 type runtimeMetricsSnapshot struct {
-	GeneratedAt   string                               `json:"generatedAt"`
-	Functions     map[string]functionMetricSnapshot    `json:"functions"`
-	Transactions  map[string]transactionMetricSnapshot `json:"transactions"`
-	Cache         cacheMetricSnapshot                  `json:"cache"`
-	Running       runningMetricSnapshot                `json:"running"`
-	WebSocket     websocketMetricSnapshot              `json:"websocket"`
-	Database      databaseMetricSnapshot               `json:"database"`
-	Resources     runtimeResourceSnapshot              `json:"resources"`
-	Load          loadMetricSnapshot                   `json:"load"`
-	Propagation   propagationMetricSnapshot            `json:"propagation"`
-	Reactive      reactiveMetricSnapshot               `json:"reactive"`
-	Scheduler     *schedulerSnapshot                   `json:"scheduler,omitempty"`
-	Logs          []runtimeLogEntry                    `json:"logs"`
-	TelemetryLogs []transactionTelemetryEntry          `json:"telemetryLogs"`
+	GeneratedAt    string                               `json:"generatedAt"`
+	Functions      map[string]functionMetricSnapshot    `json:"functions"`
+	Transactions   map[string]transactionMetricSnapshot `json:"transactions"`
+	Cache          cacheMetricSnapshot                  `json:"cache"`
+	Running        runningMetricSnapshot                `json:"running"`
+	WebSocket      websocketMetricSnapshot              `json:"websocket"`
+	Database       databaseMetricSnapshot               `json:"database"`
+	Resources      runtimeResourceSnapshot              `json:"resources"`
+	Load           loadMetricSnapshot                   `json:"load"`
+	Propagation    propagationMetricSnapshot            `json:"propagation"`
+	Reactive       reactiveMetricSnapshot               `json:"reactive"`
+	QueryAdmission queryAdmissionMetricSnapshot         `json:"queryAdmission"`
+	Scheduler      *schedulerSnapshot                   `json:"scheduler,omitempty"`
+	Logs           []runtimeLogEntry                    `json:"logs"`
+	TelemetryLogs  []transactionTelemetryEntry          `json:"telemetryLogs"`
 }
 
 type runtimeResourceSnapshot struct {
@@ -324,6 +328,44 @@ type reactiveMetricSnapshot struct {
 	ListenerLimitRefusals              uint64  `json:"listenerLimitRefusals"`
 	SharedSubscriptions                int     `json:"sharedSubscriptions"`
 	SubscriptionListeners              int     `json:"subscriptionListeners"`
+}
+
+type queryAdmissionClassSnapshot struct {
+	Active             int     `json:"active"`
+	QueueDepth         int     `json:"queueDepth"`
+	Admitted           uint64  `json:"admitted"`
+	Waited             uint64  `json:"waited"`
+	Cancelled          uint64  `json:"cancelled"`
+	WaitMS             float64 `json:"waitMs"`
+	MaxWaitMS          float64 `json:"maxWaitMs"`
+	TenantsQueued      int     `json:"tenantsQueued"`
+	LargestTenantQueue int     `json:"largestTenantQueue"`
+}
+
+type queryAdmissionMetricSnapshot struct {
+	Enabled                    bool                        `json:"enabled"`
+	TotalPermits               int                         `json:"totalPermits"`
+	BootstrapPermits           int                         `json:"bootstrapPermits"`
+	Active                     int                         `json:"active"`
+	BootstrapActive            int                         `json:"bootstrapActive"`
+	Reactive                   queryAdmissionClassSnapshot `json:"reactive"`
+	Foreground                 queryAdmissionClassSnapshot `json:"foreground"`
+	Bootstrap                  queryAdmissionClassSnapshot `json:"bootstrap"`
+	ReactiveDelayedByBootstrap uint64                      `json:"reactiveDelayedByBootstrap"`
+}
+
+func admissionClassSnapshot(metric admissionClassMetrics) queryAdmissionClassSnapshot {
+	return queryAdmissionClassSnapshot{
+		Active:             metric.Active,
+		QueueDepth:         metric.QueueDepth,
+		Admitted:           metric.Admitted,
+		Waited:             metric.Waited,
+		Cancelled:          metric.Cancelled,
+		WaitMS:             metric.WaitMS,
+		MaxWaitMS:          metric.MaxWaitMS,
+		TenantsQueued:      metric.TenantsQueued,
+		LargestTenantQueue: metric.LargestTenantQ,
+	}
 }
 
 func (m *runtimeMetrics) recordReactive(update func(*reactiveMetricState)) {
@@ -1225,7 +1267,7 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 		return telemetryLogs[left].Time > telemetryLogs[right].Time
 	})
 
-	return runtimeMetricsSnapshot{
+	result := runtimeMetricsSnapshot{
 		GeneratedAt:  now.Format(time.RFC3339Nano),
 		Functions:    functions,
 		Transactions: transactions,
@@ -1242,6 +1284,27 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 		Logs:          logs,
 		TelemetryLogs: telemetryLogs,
 	}
+	if m.admissionSource != nil {
+		admission := m.admissionSource()
+		result.QueryAdmission = queryAdmissionMetricSnapshot{
+			Enabled:                    admission.TotalPermits > 0,
+			TotalPermits:               admission.TotalPermits,
+			BootstrapPermits:           admission.BootstrapPermits,
+			Active:                     admission.Active,
+			BootstrapActive:            admission.BootstrapActive,
+			Reactive:                   admissionClassSnapshot(admission.Classes[admissionReactive]),
+			Foreground:                 admissionClassSnapshot(admission.Classes[admissionForeground]),
+			Bootstrap:                  admissionClassSnapshot(admission.Classes[admissionBootstrap]),
+			ReactiveDelayedByBootstrap: admission.Classes[admissionReactive].DelayedByBurst,
+		}
+		if admission.TotalPermits > 0 {
+			// The pre-admission rerun limiter reported these two fields; keep
+			// them alive for existing dashboards and load-test tooling.
+			result.Reactive.SubscriptionRerunQueueDepth = admission.Classes[admissionReactive].QueueDepth
+			result.Reactive.SubscriptionRerunQueueWaitMS = admission.Classes[admissionReactive].WaitMS
+		}
+	}
+	return result
 }
 
 func (m *runtimeMetrics) databaseSnapshot(project string) databaseMetricSnapshot {

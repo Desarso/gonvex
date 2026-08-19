@@ -39,6 +39,7 @@ type Server struct {
 	tenantStores          *tenantStoreResolver
 	ephemeral             ephemeralBackend
 	cache                 *rowsCache
+	admission             *queryAdmission
 	metrics               *runtimeMetrics
 	scheduler             *scheduler
 	telemetryWrites       chan struct{}
@@ -236,6 +237,8 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		provisionTenant:       provisionTenantDatabase,
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
+	server.admission = newQueryAdmission(cfg.SubscriptionRerunConcurrency, cfg.QueryBootstrapConcurrency)
+	server.metrics.admissionSource = server.admission.snapshot
 	server.subscriptions = newSubscriptionManager(server)
 	server.scheduler = newScheduler(server.runScheduledJob)
 	server.tenantStores = newTenantStoreResolver(&server.config)
@@ -941,15 +944,29 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		bundleHash = next.Bundle.Hash
 	}
 	slog.Info("dev sync applying manifest", "project", next.Project, "functions", len(next.Functions), "bundleHash", bundleHash)
-	// The plugin loader may successfully dlopen a module and then reject its
-	// registration or fail to persist the manifest. Go cannot unload that module,
-	// so tell the permanent gateway to recycle this worker even on the resulting
-	// non-2xx response. Unsupervised/local embedding safely ignores the header.
-	w.Header().Set("X-Gonvex-Recycle-Worker", "1")
+	// Only a sync that replaces an already-loaded plugin module needs a worker
+	// recycle: Go cannot unload the previous module. An unchanged bundle hash
+	// loads nothing, and a first load leaves this worker current, so recycling
+	// for those would only manufacture a reconnect wave. A failed load attempt
+	// still recycles because plugin.Open can poison the process (see
+	// projectbundle). Unsupervised/local embedding safely ignores the header.
+	previousHash := ""
+	if previous := s.runtime.ManifestForProject(next.Project); previous.Bundle != nil {
+		previousHash = previous.Bundle.Hash
+	}
+	alreadyLoaded := s.runtime.AppForProject(next.Project) != nil
+	bundleChanged := next.Bundle != nil && next.Bundle.Hash != previousHash
+	loadAttempted := next.Bundle != nil && (bundleChanged || !alreadyLoaded)
 	if err := s.syncRuntimeManifest(next); err != nil {
+		if loadAttempted {
+			w.Header().Set("X-Gonvex-Recycle-Worker", "1")
+		}
 		syncErr = err
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
+	}
+	if alreadyLoaded && bundleChanged {
+		w.Header().Set("X-Gonvex-Recycle-Worker", "1")
 	}
 	s.registerProjectCrons(next.Project)
 	if err := s.saveRuntimeManifest(r.Context(), next); err != nil {

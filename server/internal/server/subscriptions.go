@@ -53,7 +53,6 @@ type subscriptionManager struct {
 	listenerCount    int
 	listeners        *tenantListenerManager
 	sequence         atomic.Uint64
-	rerunSlots       chan struct{}
 	execute          func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error)
 	visibilityMu     sync.Mutex
 	visibilityRuns   map[string]*visibilityExecution
@@ -174,9 +173,6 @@ func newSubscriptionManager(server *Server) *subscriptionManager {
 		visibilityAttach: map[string]visibilityAttachEntry{},
 	}
 	manager.listeners = newTenantListenerManager(server)
-	if server.config.SubscriptionRerunConcurrency > 0 {
-		manager.rerunSlots = make(chan struct{}, server.config.SubscriptionRerunConcurrency)
-	}
 	manager.execute = func(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string, changedAtMS float64) (any, error) {
 		return server.executeTenantQueryForCallerCached(ctx, group.project, group.tenant, listener.caller, group.path, group.args, group.cacheScope, reason)
 	}
@@ -528,7 +524,12 @@ func (m *subscriptionManager) resolveAttachVisibilityKey(sub querySubscription) 
 	_ = json.Unmarshal(sub.args, &values)
 	values["__gonvexVisibilityUsers"] = []map[string]string{{"id": sub.caller.user.ID, "email": sub.caller.user.Email}}
 	resolverArgs, _ := json.Marshal(values)
+	release, acquired := m.server.acquireQueryAdmission(sub.ctx, admissionBootstrap, sub.project, sub.tenant)
+	if !acquired {
+		return ""
+	}
 	result, err := m.server.executeTenantQueryForCallerUncached(sub.ctx, sub.project, sub.tenant, sub.caller, resolver, resolverArgs)
+	release()
 	if err != nil {
 		return ""
 	}
@@ -990,7 +991,7 @@ func (m *subscriptionManager) executeVisibilityShared(ctx context.Context, group
 		_ = json.Unmarshal(group.args, &values)
 		values["__gonvexVisibilityUsers"] = users
 		resolverArgs, _ := json.Marshal(values)
-		releaseSlot, acquired := m.acquireRerunSlot(ctx, reason)
+		releaseSlot, acquired := m.acquireExecutionSlot(ctx, reason, group.project, group.tenant)
 		if !acquired {
 			resolverRun.err = ctx.Err()
 		} else {
@@ -1121,7 +1122,7 @@ func (m *subscriptionManager) executeVisibilityPartition(ctx context.Context, gr
 	m.visibilityMu.Unlock()
 
 	executionStarted := time.Now()
-	releaseSlot, acquired := m.acquireRerunSlot(ctx, reason)
+	releaseSlot, acquired := m.acquireExecutionSlot(ctx, reason, group.project, group.tenant)
 	if !acquired {
 		active.err = ctx.Err()
 	} else {
@@ -1238,7 +1239,7 @@ func visibilityKeyForUser(result any, userID string) string {
 }
 
 func (m *subscriptionManager) executeWithRerunSlot(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string, changedAtMS float64) (any, error) {
-	release, acquired := m.acquireRerunSlot(ctx, reason)
+	release, acquired := m.acquireExecutionSlot(ctx, reason, group.project, group.tenant)
 	if !acquired {
 		return nil, ctx.Err()
 	}
@@ -1246,33 +1247,11 @@ func (m *subscriptionManager) executeWithRerunSlot(ctx context.Context, group *s
 	return m.execute(ctx, group, listener, reason, changedAtMS)
 }
 
-func (m *subscriptionManager) acquireRerunSlot(ctx context.Context, reason string) (func(), bool) {
-	if m.rerunSlots == nil || (reason != "invalidate" && reason != "recover") {
-		return func() {}, true
-	}
-	select {
-	case m.rerunSlots <- struct{}{}:
-		return func() { <-m.rerunSlots }, true
-	default:
-	}
-	queuedAt := time.Now()
-	m.server.metrics.recordReactive(func(metric *reactiveMetricState) { metric.SubscriptionRerunQueueDepth++ })
-	select {
-	case m.rerunSlots <- struct{}{}:
-		waitMS := float64(time.Since(queuedAt).Microseconds()) / 1000
-		m.server.metrics.recordReactive(func(metric *reactiveMetricState) {
-			metric.SubscriptionRerunQueueDepth--
-			metric.SubscriptionRerunQueueWaitMS += waitMS
-		})
-		return func() { <-m.rerunSlots }, true
-	case <-ctx.Done():
-		waitMS := float64(time.Since(queuedAt).Microseconds()) / 1000
-		m.server.metrics.recordReactive(func(metric *reactiveMetricState) {
-			metric.SubscriptionRerunQueueDepth--
-			metric.SubscriptionRerunQueueWaitMS += waitMS
-		})
-		return nil, false
-	}
+// acquireExecutionSlot admits one shared-subscription execution through the
+// unified query admission controller. Invalidation and recovery reruns are
+// reactive; initial executions are bootstrap hydration.
+func (m *subscriptionManager) acquireExecutionSlot(ctx context.Context, reason, project, tenant string) (func(), bool) {
+	return m.server.acquireQueryAdmission(ctx, admissionClassForReason(reason), project, tenant)
 }
 
 func (group *sharedSubscription) commitAlreadyRequestedLocked(commitID string) bool {
