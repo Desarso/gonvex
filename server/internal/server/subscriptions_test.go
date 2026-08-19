@@ -1155,3 +1155,36 @@ func eventually(t *testing.T, timeout time.Duration, condition func() bool) {
 	}
 	t.Fatal("condition was not satisfied")
 }
+
+// An invalidation that arrives while a shard has no listeners (the detach
+// grace window) cannot rerun the query — but the retained snapshot now
+// predates that commit. A listener joining before the grace expires used to be
+// served that stale snapshot as its first (and, for one-shot consumers like
+// the legacy bridge, only) result: a mutation committed between one client
+// closing and the next opening was invisible. The join must instead see no
+// servable snapshot until a fresh execution completes.
+func TestGraceIdleInvalidationMarksRetainedSnapshotUnservable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	group := &sharedSubscription{
+		ctx:        ctx,
+		cancel:     cancel,
+		listeners:  map[*subscriptionToken]querySubscription{},
+		lastResult: json.RawMessage(`[{"id":"stale"}]`),
+	}
+	group.requested++
+	group.pendingReason = "invalidate"
+	group.running = true
+	group.run()
+
+	group.mu.Lock()
+	stale := group.staleWhileIdle
+	servable := len(group.lastResult) > 0 && !group.staleWhileIdle
+	group.mu.Unlock()
+	if !stale {
+		t.Fatal("an invalidation with no listeners must mark the retained snapshot stale")
+	}
+	if servable {
+		t.Fatal("a stale snapshot must not be servable to a joining listener")
+	}
+}
