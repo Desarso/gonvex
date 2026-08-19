@@ -1868,6 +1868,7 @@ export class GonvexClient {
             entry.args as JsonValue,
             this.timeouts.mutationTimeoutMs,
             entry.idempotencyKey,
+            entry.idempotencyKey,
           );
           await this.mutationOutbox.markCommitted(entry.id);
           if ((entry.patches?.length ?? 0) > 0) {
@@ -1973,11 +1974,14 @@ export class GonvexClient {
     this.optimisticOutboxEntryIds.set(mutationId, entry.id);
     this.addOptimisticMutation(mutationId, patches);
     try {
+      // The direct send is outbox-managed: a crash here replays the entry
+      // with the same idempotency key, so the server must dedupe it.
       const result = await this.call<T>(
         "mutation",
         ref,
         args,
         options.timeoutMs ?? this.timeouts.mutationTimeoutMs,
+        mutationId,
         mutationId,
       );
       await this.mutationOutbox.markCommitted(entry.id);
@@ -2130,12 +2134,20 @@ export class GonvexClient {
     args: JsonValue,
     timeoutMs: number,
     id?: string,
+    idempotencyKey?: string,
   ): Promise<T> {
     this.connect();
     const entry = this.registerCall<T>(kind, ref, args, timeoutMs, id);
     if (kind === "mutation") {
       try { const w=(globalThis as any); if (w && w.__wsTapLog) w.__wsTapLog.push({ dir:"mut-args", type:"mutation.call", path: ref.path, argTenant: ((args as any)&&(args as any).tenantId)||null, authTenant: (this as any).auth?.tenant||null, authProject:(this as any).auth?.project||null, href: (w.location&&w.location.href)||null }); } catch(e){}
-      this.send({ type: "mutation.call", id: entry.id, path: ref.path, args, trace: { clientSentAtMs: entry.clientSentAtMs } });
+      this.send({
+        type: "mutation.call",
+        id: entry.id,
+        path: ref.path,
+        args,
+        trace: { clientSentAtMs: entry.clientSentAtMs },
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+      });
     } else {
       this.send({ type: "action.call", id: entry.id, path: ref.path, args, trace: { clientSentAtMs: entry.clientSentAtMs } });
     }
