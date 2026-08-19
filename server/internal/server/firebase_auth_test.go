@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/server/internal/config"
 )
 
@@ -132,6 +133,152 @@ func TestVerifiedFirebaseTokenAuthenticatesWhenRuntimeRequiresAuth(t *testing.T)
 	}
 	if project != "whagons-5" || tenant != "calaluna" {
 		t.Fatalf("expected requested project/tenant, got %q/%q", project, tenant)
+	}
+}
+
+func TestPublicHTTPPassesOpaqueBearerToApplicationAuth(t *testing.T) {
+	signer := newFirebaseTestSigner(t)
+	runtime := New(config.Config{
+		RequireAuth:     true,
+		FirebaseJWKSURL: signer.jwks.URL,
+	})
+	runtime.projectEnvCache = map[string]projectEnvCacheEntry{
+		"whagons-project": {
+			values: map[string]string{
+				"FIREBASE_SERVICE_ACCOUNT_KEY": `{"project_id":"whagons-5"}`,
+			},
+			fetchedAt: time.Now(),
+		},
+	}
+	app := gonvex.NewApp()
+	app.PublicHTTP("/external-api", func(ctx *gonvex.HTTPContext, request gonvex.HTTPRequest) (gonvex.HTTPResponse, error) {
+		if ctx.User != nil {
+			return gonvex.HTTPResponse{Status: http.StatusInternalServerError}, nil
+		}
+		credential := request.Headers["authorization"]
+		if len(credential) == 0 {
+			credential = request.Headers["x-api-key"]
+		}
+		return gonvex.HTTPResponse{
+			Status: http.StatusOK,
+			Body:   []byte(credential[0]),
+		}, nil
+	})
+	runtime.app = app
+
+	request := httptest.NewRequest(http.MethodGet, "/external-api", nil)
+	request.Header.Set("x-gonvex-project-id", "whagons-project")
+	request.Header.Set("authorization", "Bearer whg_live_test_credential")
+	response := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "Bearer whg_live_test_credential" {
+		t.Fatalf("opaque application bearer did not reach public handler: %d %s", response.Code, response.Body.String())
+	}
+
+	apiKeyRequest := httptest.NewRequest(http.MethodGet, "/external-api", nil)
+	apiKeyRequest.Header.Set("x-gonvex-project-id", "whagons-project")
+	apiKeyRequest.Header.Set("x-api-key", "whg_live_test_credential")
+	apiKeyResponse := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(apiKeyResponse, apiKeyRequest)
+	if apiKeyResponse.Code != http.StatusOK || apiKeyResponse.Body.String() != "whg_live_test_credential" {
+		t.Fatalf("x-api-key did not reach public handler: %d %s", apiKeyResponse.Code, apiKeyResponse.Body.String())
+	}
+}
+
+func TestPublicHTTPPassesOpaqueBearerWithoutFirebaseConfiguration(t *testing.T) {
+	runtime := New(config.Config{RequireAuth: true})
+	app := gonvex.NewApp()
+	app.PublicHTTP("/external-api", func(ctx *gonvex.HTTPContext, request gonvex.HTTPRequest) (gonvex.HTTPResponse, error) {
+		if ctx.User != nil {
+			return gonvex.HTTPResponse{Status: http.StatusInternalServerError}, nil
+		}
+		return gonvex.HTTPResponse{
+			Status: http.StatusOK,
+			Body:   []byte(request.Headers["authorization"][0]),
+		}, nil
+	})
+	runtime.app = app
+
+	request := httptest.NewRequest(http.MethodGet, "/external-api", nil)
+	request.Header.Set("authorization", "Bearer whg_live_test_credential")
+	response := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "Bearer whg_live_test_credential" {
+		t.Fatalf("opaque application bearer did not reach public handler: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPublicHTTPStillRejectsMalformedFirebaseJWT(t *testing.T) {
+	signer := newFirebaseTestSigner(t)
+	runtime := New(config.Config{
+		RequireAuth:       true,
+		FirebaseProjectID: "whagons-5",
+		FirebaseJWKSURL:   signer.jwks.URL,
+	})
+	app := gonvex.NewApp()
+	app.PublicHTTP("/external-api", func(_ *gonvex.HTTPContext, _ gonvex.HTTPRequest) (gonvex.HTTPResponse, error) {
+		return gonvex.HTTPResponse{Status: http.StatusOK}, nil
+	})
+	runtime.app = app
+
+	request := httptest.NewRequest(http.MethodGet, "/external-api", nil)
+	request.Header.Set("authorization", "Bearer not-base64.not-base64.not-base64")
+	response := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), "Firebase ID token") {
+		t.Fatalf("JWT-shaped Firebase credential was not rejected: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPublicHTTPReceivesVerifiedFirebaseCaller(t *testing.T) {
+	signer := newFirebaseTestSigner(t)
+	runtime := New(config.Config{
+		RequireAuth:       true,
+		FirebaseProjectID: "whagons-5",
+		FirebaseJWKSURL:   signer.jwks.URL,
+	})
+	app := gonvex.NewApp()
+	app.PublicHTTP("/optional-user", func(ctx *gonvex.HTTPContext, _ gonvex.HTTPRequest) (gonvex.HTTPResponse, error) {
+		if ctx.User == nil {
+			return gonvex.HTTPResponse{Status: http.StatusUnauthorized}, nil
+		}
+		return gonvex.HTTPResponse{Status: http.StatusOK, Body: []byte(ctx.User.ID)}, nil
+	})
+	runtime.app = app
+
+	request := httptest.NewRequest(http.MethodGet, "/optional-user", nil)
+	request.Header.Set("authorization", "Bearer "+signer.token(t, validFirebaseClaims("whagons-5")))
+	response := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "firebase-user-123" {
+		t.Fatalf("verified Firebase caller did not reach public handler: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestProtectedHTTPRejectsOpaqueApplicationBearer(t *testing.T) {
+	signer := newFirebaseTestSigner(t)
+	runtime := New(config.Config{
+		RequireAuth:       true,
+		FirebaseProjectID: "whagons-5",
+		FirebaseJWKSURL:   signer.jwks.URL,
+	})
+	app := gonvex.NewApp()
+	app.HTTP("/protected", func(_ *gonvex.HTTPContext, _ gonvex.HTTPRequest) (gonvex.HTTPResponse, error) {
+		return gonvex.HTTPResponse{Status: http.StatusOK}, nil
+	})
+	runtime.app = app
+
+	request := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	request.Header.Set("authorization", "Bearer whg_live_test_credential")
+	response := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("protected handler accepted application-owned bearer: %d %s", response.Code, response.Body.String())
 	}
 }
 

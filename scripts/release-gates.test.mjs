@@ -69,6 +69,9 @@ test("production promotion waits for approval and records the release only after
     "utf8",
   );
   assert.match(workflow, /name: gonvex-production/);
+  assert.match(workflow, /require_auth:/);
+  assert.match(workflow, /GONVEX_EXPECT_REQUIRE_AUTH: \$\{\{ inputs\.require_auth \}\}/);
+  assert.match(workflow, /GONVEX_COOLIFY_AUTO_DEPLOY: "false"/);
   const deploy = workflow.indexOf("Roll runtime, then dashboard");
   const smoke = workflow.indexOf("Verify public production endpoints");
   const finalize = workflow.indexOf("Atomically record the release branch and immutable tag");
