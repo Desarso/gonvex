@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
+	"github.com/gonvex/gonvex/pkg/moduleengine"
 	"github.com/gonvex/gonvex/server/internal/data"
 	"github.com/gonvex/gonvex/server/internal/dbpool"
 	"github.com/gonvex/gonvex/server/internal/sandbox"
@@ -2093,14 +2094,18 @@ func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projec
 	if isLegacyTaskQuery(path) {
 		return s.executeLegacyQuery(ctx, projectID, tenantID, path, rawArgs)
 	}
-	app := s.appForProject(ctx, projectID)
-	if _, ok := app.Lookup(path); ok {
+	engine := s.engineForProject(ctx, projectID)
+	if engine != nil {
+		if _, ok := engine.Describe(path); !ok {
+			return nil, fmt.Errorf("query %q is not implemented by the runtime", path)
+		}
 		queryCtx, err := s.queryContext(ctx, projectID, tenantID, caller)
 		if err != nil {
 			return nil, err
 		}
 		if queryCtx.DB == nil {
-			return app.ExecuteQuery(queryCtx, path, rawArgs)
+			result, err := engine.InvokeQuery(queryCtx, moduleengine.Invocation{Path: path, Args: rawArgs})
+			return result.Value, err
 		}
 		tx, err := queryCtx.DB.BeginTx(queryCtx.Context, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 		if err != nil {
@@ -2111,7 +2116,7 @@ func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projec
 		queryCtx.TenantDB = nil
 		queryCtx.ControlPlaneDB = nil
 		queryCtx.LandlordDB = nil
-		result, err := app.ExecuteQuery(queryCtx, path, rawArgs)
+		result, err := engine.InvokeQuery(queryCtx, moduleengine.Invocation{Path: path, Args: rawArgs})
 		if err != nil {
 			_ = tx.Rollback()
 			return nil, err
@@ -2119,7 +2124,7 @@ func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projec
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
-		return result, nil
+		return result.Value, nil
 	}
 	return nil, fmt.Errorf("query %q is not implemented by the runtime", path)
 }
@@ -2183,13 +2188,13 @@ func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID s
 	if isLegacyTaskMutation(path) {
 		return s.executeLegacyMutation(ctx, projectID, tenantID, path, rawArgs)
 	}
-	app := s.appForProject(ctx, projectID)
-	if _, ok := app.Lookup(path); ok {
+	engine := s.engineForProject(ctx, projectID)
+	if _, ok := engine.Describe(path); ok {
 		mutationCtx, err := s.mutationContext(ctx, projectID, tenantID, caller)
 		if err != nil {
 			return nil, err
 		}
-		result, err := s.executeRegisteredMutation(app, mutationCtx, path, rawArgs)
+		result, err := s.executeRegisteredMutation(engine, mutationCtx, path, rawArgs)
 		if err != nil {
 			return nil, err
 		}
@@ -2219,9 +2224,12 @@ func (s *Server) runTenantsOnProvisioned(ctx context.Context, projectID string, 
 	if tenantID == "" {
 		return nil
 	}
-	app := s.appForProject(ctx, projectID)
-	function, ok := app.Lookup("tenants.onProvisioned")
-	if !ok || function.Kind != gonvex.FunctionKindReducer || !function.Internal {
+	engine := s.engineForProject(ctx, projectID)
+	if engine == nil {
+		return nil
+	}
+	descriptor, ok := engine.Describe("tenants.onProvisioned")
+	if !ok || descriptor.Kind != moduleengine.KindReducer || !descriptor.Internal {
 		return nil
 	}
 	mutationCtx, err := s.mutationContext(ctx, projectID, tenantID, caller)
@@ -2232,14 +2240,14 @@ func (s *Server) runTenantsOnProvisioned(ctx context.Context, projectID string, 
 	if err != nil {
 		return fmt.Errorf("tenants.onProvisioned args: %w", err)
 	}
-	if _, err := s.runMutationInTx(mutationCtx, "tenants.onProvisioned", rawArgs, app.ExecuteInternalReducer); err != nil {
+	if _, err := s.runMutationInTx(mutationCtx, "tenants.onProvisioned", rawArgs, moduleengine.ReducerExec(engine.InvokeInternalReducer)); err != nil {
 		return fmt.Errorf("tenants.onProvisioned: %w", err)
 	}
 	return nil
 }
 
-func (s *Server) executeRegisteredMutation(app *gonvex.App, mutationCtx *gonvex.ReducerCtx, path string, rawArgs json.RawMessage) (any, error) {
-	return s.runMutationInTx(mutationCtx, path, rawArgs, app.ExecuteReducer)
+func (s *Server) executeRegisteredMutation(engine moduleengine.ModuleEngine, mutationCtx *gonvex.ReducerCtx, path string, rawArgs json.RawMessage) (any, error) {
+	return s.runMutationInTx(mutationCtx, path, rawArgs, moduleengine.ReducerExec(engine.InvokeReducer))
 }
 
 // runMutationInTx runs a mutation-style handler inside a database transaction
@@ -2375,20 +2383,24 @@ func (s *Server) executeTenantActionForCaller(ctx context.Context, projectID str
 		s.metrics.recordFunctionExecution(execution, err)
 	}()
 
-	app := s.appForProject(ctx, projectID)
-	if _, ok := app.Lookup(path); ok {
+	engine := s.engineForProject(ctx, projectID)
+	if _, ok := engine.Describe(path); ok {
 		actionCtx, err := s.actionContext(ctx, projectID, tenantID, caller)
 		if err != nil {
 			return nil, err
 		}
-		return app.ExecuteAction(actionCtx, path, rawArgs)
+		result, err := engine.InvokeAction(actionCtx, moduleengine.Invocation{Path: path, Args: rawArgs})
+		if err != nil {
+			return nil, err
+		}
+		return result.Value, nil
 	}
 	return nil, fmt.Errorf("action %q is not implemented by the runtime", path)
 }
 
 func (s *Server) functionKind(projectID string, path string, fallback string) string {
-	if function, ok := s.app.Lookup(path); ok && function.Kind != "" {
-		return string(function.Kind)
+	if descriptor, ok := s.appEngine.Describe(path); ok && descriptor.Kind != "" {
+		return string(descriptor.Kind)
 	}
 	if entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]; ok && entry.Kind != "" {
 		return string(entry.Kind)
@@ -2533,9 +2545,9 @@ func (s *Server) sandboxForCaller(projectID string, tenantID string, caller call
 			// is registered so names like tasks.bulkDelete (which also exist as
 			// raw runtime Actions) get confirm gates + friendly args, not the
 			// bare runtime path that required a manual tenantId.
-			app := s.appForProject(ctx, projectID)
+			engine := s.engineForProject(ctx, projectID)
 			if path != "assistant.sandboxAction" {
-				if _, ok := app.Lookup("assistant.sandboxAction"); ok {
+				if _, ok := engine.Describe("assistant.sandboxAction"); ok {
 					wrapped, wrapErr := json.Marshal(map[string]any{
 						"name":     path,
 						"args":     json.RawMessage(args),
@@ -2593,8 +2605,8 @@ func (s *Server) sandboxForCaller(projectID string, tenantID string, caller call
 // just executes whatever {name, args} the resolver returns. Apps without a
 // resolver keep the raw path — same behavior as before this hook existed.
 func (s *Server) resolveSandboxFunction(ctx context.Context, projectID string, tenantID string, caller callerContext, kind string, path string, args json.RawMessage) (string, json.RawMessage, error) {
-	app := s.appForProject(ctx, projectID)
-	if _, ok := app.Lookup("assistant.sandboxResolve"); !ok {
+	engine := s.engineForProject(ctx, projectID)
+	if _, ok := engine.Describe("assistant.sandboxResolve"); !ok {
 		return path, args, nil
 	}
 	wrapped, err := json.Marshal(map[string]any{"kind": kind, "name": path, "args": args, "tenantId": tenantID})

@@ -9,24 +9,25 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
+	"github.com/gonvex/gonvex/pkg/moduleengine"
 )
 
 const maxRegisteredHTTPBodyBytes = 2 << 20
 
 func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 	project := s.projectIDForRegisteredHTTP(r)
-	app := s.appForProject(r.Context(), project)
-	if app == nil {
+	engine := s.engineForProject(r.Context(), project)
+	if engine == nil {
 		http.NotFound(w, r)
 		return
 	}
-	function, ok := app.Lookup(r.URL.Path)
-	if !ok || function.Kind != gonvex.FunctionKindHTTP {
+	descriptor, ok := engine.Describe(r.URL.Path)
+	if !ok || descriptor.Kind != moduleengine.KindHTTP {
 		http.NotFound(w, r)
 		return
 	}
 
-	kind := string(gonvex.FunctionKindHTTP)
+	kind := string(moduleengine.KindHTTP)
 	s.metrics.recordFunctionStart(kind)
 	started := time.Now()
 	var opErr error
@@ -38,7 +39,7 @@ func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 	tenant := tenantIDFromRequest(project, tenantID(r))
 	caller := callerContext{}
 	token := bearerToken(r)
-	requiresRuntimeAuth := s.projectRequiresAuthentication(r.Context(), project) && !function.Public
+	requiresRuntimeAuth := s.projectRequiresAuthentication(r.Context(), project) && !descriptor.Public
 	if !requiresRuntimeAuth && token != "" {
 		requiresRuntimeAuth = runtimeOwnsOptionalHTTPBearer(token)
 	}
@@ -92,21 +93,24 @@ func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 		headers["host"] = []string{r.Host}
 	}
 
-	response, err := app.ExecuteHTTP(httpCtx, r.URL.Path, gonvex.HTTPRequest{
-		Method:     r.Method,
-		Path:       r.URL.Path,
-		RawQuery:   r.URL.RawQuery,
-		Query:      mapQueryValues(r.URL.Query()),
-		Headers:    headers,
-		Body:       body,
-		RemoteAddr: r.RemoteAddr,
+	result, err := engine.InvokeHTTP(httpCtx, moduleengine.HTTPInvocation{
+		Path: r.URL.Path,
+		Request: gonvex.HTTPRequest{
+			Method:     r.Method,
+			Path:       r.URL.Path,
+			RawQuery:   r.URL.RawQuery,
+			Query:      mapQueryValues(r.URL.Query()),
+			Headers:    headers,
+			Body:       body,
+			RemoteAddr: r.RemoteAddr,
+		},
 	})
 	if err != nil {
 		opErr = err
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeHTTPResponse(w, response)
+	writeHTTPResponse(w, result.Response)
 }
 
 // Public HTTP functions are application-owned authentication boundaries. They

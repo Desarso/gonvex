@@ -5,6 +5,7 @@ import (
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/pkg/moduleengine"
 	"github.com/gonvex/gonvex/pkg/projectbundle"
 )
 
@@ -13,6 +14,18 @@ type Runtime struct {
 	manifest  manifest.Manifest
 	manifests map[string]manifest.Manifest
 	loader    *projectbundle.Loader
+	// engines memoizes the module engine serving each project. Engines are
+	// meant to be long-lived — a future out-of-process engine owns a worker
+	// pool or a set of isolates — so the wrapper is reused until the loader
+	// swaps in a differently compiled module for that project.
+	engines map[string]loadedEngine
+}
+
+// loadedEngine pairs an engine with the loaded module it was built from, so a
+// replaced bundle invalidates the memoized engine.
+type loadedEngine struct {
+	app    *gonvex.App
+	engine moduleengine.ModuleEngine
 }
 
 func New() *Runtime {
@@ -30,6 +43,7 @@ func NewWithLoader(loader *projectbundle.Loader) *Runtime {
 		},
 		manifests: map[string]manifest.Manifest{},
 		loader:    loader,
+		engines:   map[string]loadedEngine{},
 	}
 }
 
@@ -48,10 +62,43 @@ func (r *Runtime) SyncManifest(next manifest.Manifest) error {
 	return nil
 }
 
+// AppForProject returns the compiled Go module loaded for projectID. It stays
+// the compatibility entry point for host code and tests that need the Go type
+// itself; dispatch resolves EngineForProject instead.
 func (r *Runtime) AppForProject(projectID string) *gonvex.App {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.loader.AppForProject(projectID)
+}
+
+// EngineForProject returns the module engine serving projectID, or nil when no
+// module is loaded for it. Compiled Go bundles are wrapped in a GoAppEngine;
+// engines for other languages resolve here too once their loaders exist, which
+// is the one place the host learns which implementation runs a project.
+func (r *Runtime) EngineForProject(projectID string) moduleengine.ModuleEngine {
+	app := r.AppForProject(projectID)
+	if app == nil {
+		return nil
+	}
+	r.mu.RLock()
+	loaded, ok := r.engines[projectID]
+	r.mu.RUnlock()
+	if ok && loaded.app == app {
+		return loaded.engine
+	}
+	// Build under the write lock so concurrent resolvers of the same module
+	// converge on one engine instance rather than racing to replace each other.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if loaded, ok := r.engines[projectID]; ok && loaded.app == app {
+		return loaded.engine
+	}
+	engine := moduleengine.NewGoAppEngine(app)
+	if r.engines == nil {
+		r.engines = map[string]loadedEngine{}
+	}
+	r.engines[projectID] = loadedEngine{app: app, engine: engine}
+	return engine
 }
 
 func (r *Runtime) ProjectIDs() []string {

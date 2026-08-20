@@ -18,6 +18,7 @@ import (
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/pkg/moduleengine"
 	"github.com/gonvex/gonvex/pkg/projectbundle"
 	"github.com/gonvex/gonvex/pkg/storage"
 	"github.com/gonvex/gonvex/server/internal/config"
@@ -34,6 +35,7 @@ type Server struct {
 	config          config.Config
 	runtime         *runtime.Runtime
 	app             *gonvex.App
+	appEngine       moduleengine.ModuleEngine
 	storage         *storage.Factory
 	dataFiles       *datafiles.Manager
 	tenantStores    *tenantStoreResolver
@@ -242,6 +244,11 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		runtimeHydrationFails: map[string]struct{}{},
 		provisionTenant:       provisionTenantDatabase,
 	}
+	// appEngine dispatches the embedded app through the same seam as
+	// bundle-loaded modules, so single-app embedding and multi-project workers
+	// share one execution path. It is the fallback for requests naming a project
+	// this worker has no module loaded for.
+	server.appEngine = moduleengine.NewGoAppEngine(app)
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
 	server.admission = newQueryAdmission(cfg.SubscriptionRerunConcurrency, cfg.QueryBootstrapConcurrency)
 	server.metrics.admissionSource = server.admission.snapshot
@@ -265,23 +272,23 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 // scheduled work shows up in the function and concurrency metrics too.
 func (s *Server) runScheduledJob(ctx context.Context, job scheduledJob) error {
 	ctx = withMutationID(ctx, job.ID)
-	app := s.appForProject(ctx, job.ProjectID)
-	function, ok := app.Lookup(job.FunctionPath)
+	engine := s.engineForProject(ctx, job.ProjectID)
+	descriptor, ok := engine.Describe(job.FunctionPath)
 	if !ok {
 		return fmt.Errorf("scheduled function %q is not registered", job.FunctionPath)
 	}
-	switch function.Kind {
-	case gonvex.FunctionKindAction:
+	switch descriptor.Kind {
+	case moduleengine.KindAction:
 		_, err := s.executeTenantAction(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
 		return err
-	case gonvex.FunctionKindReducer:
-		if function.Internal {
+	case moduleengine.KindReducer:
+		if descriptor.Internal {
 			return s.executeScheduledInternalReducer(ctx, job)
 		}
 		_, err := s.executeTenantMutation(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
 		return err
 	default:
-		return fmt.Errorf("scheduled function %q must be a mutation or action, got %s", job.FunctionPath, function.Kind)
+		return fmt.Errorf("scheduled function %q must be a mutation or action, got %s", job.FunctionPath, descriptor.Kind)
 	}
 }
 
@@ -298,12 +305,12 @@ func (s *Server) executeScheduledInternalReducer(ctx context.Context, job schedu
 		s.metrics.recordFunction(job.ProjectID, job.FunctionPath, kind, time.Since(started), err)
 	}()
 
-	app := s.appForProject(ctx, job.ProjectID)
+	engine := s.engineForProject(ctx, job.ProjectID)
 	mutationCtx, ctxErr := s.mutationContext(ctx, job.ProjectID, job.TenantID, callerContext{})
 	if ctxErr != nil {
 		return ctxErr
 	}
-	_, err = s.runMutationInTx(mutationCtx, job.FunctionPath, job.Args, app.ExecuteInternalReducer)
+	_, err = s.runMutationInTx(mutationCtx, job.FunctionPath, job.Args, moduleengine.ReducerExec(engine.InvokeInternalReducer))
 	return err
 }
 
@@ -313,8 +320,8 @@ func (s *Server) registerProjectCrons(projectID string) {
 	if s.scheduler == nil {
 		return
 	}
-	app := s.runtime.AppForProject(projectID)
-	if app == nil {
+	engine := s.runtime.EngineForProject(projectID)
+	if engine == nil {
 		return
 	}
 	s.hydrateProjectTenantDatabases(context.Background(), projectID)
@@ -328,7 +335,7 @@ func (s *Server) registerProjectCrons(projectID string) {
 		}
 	}
 	s.projectMu.RUnlock()
-	s.scheduler.syncCrons(projectID, app.Crons(), tenantIDs...)
+	s.scheduler.syncCrons(projectID, engine.Crons(), tenantIDs...)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -931,7 +938,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	if previous := s.runtime.ManifestForProject(next.Project); previous.Bundle != nil {
 		previousHash = previous.Bundle.Hash
 	}
-	alreadyLoaded := s.runtime.AppForProject(next.Project) != nil
+	alreadyLoaded := s.runtime.EngineForProject(next.Project) != nil
 	bundleChanged := next.Bundle != nil && next.Bundle.Hash != previousHash
 	loadAttempted := next.Bundle != nil && (bundleChanged || !alreadyLoaded)
 	if err := s.syncRuntimeManifest(next); err != nil {
@@ -1253,7 +1260,7 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 	if !haveDB {
 		s.hydrateProjects()
 	}
-	if s.runtime.AppForProject(projectID) != nil {
+	if s.runtime.EngineForProject(projectID) != nil {
 		return
 	}
 	next, ok, err := s.loadRuntimeManifest(ctx, projectID)
@@ -1303,6 +1310,21 @@ func (s *Server) runtimeHydrationFailureCount() int {
 	return len(s.runtimeHydrationFails)
 }
 
+// engineForProject resolves the module engine that serves projectID, hydrating
+// this worker's runtime state on demand. It falls back to the engine wrapping
+// the embedded app so single-app embedding (server/pkg/runtime) keeps behaving
+// exactly as before. The result is never nil, so callers can Describe/Invoke
+// against it directly.
+func (s *Server) engineForProject(ctx context.Context, projectID string) moduleengine.ModuleEngine {
+	s.hydrateRuntimeStateForProject(ctx, projectID)
+	if engine := s.runtime.EngineForProject(projectID); engine != nil {
+		return engine
+	}
+	return s.appEngine
+}
+
+// appForProject is engineForProject's compatibility twin for host code that
+// still needs the compiled Go module itself rather than the engine seam.
 func (s *Server) appForProject(ctx context.Context, projectID string) *gonvex.App {
 	s.hydrateRuntimeStateForProject(ctx, projectID)
 	if app := s.runtime.AppForProject(projectID); app != nil {
