@@ -1,15 +1,18 @@
 // TypeScript server modules ship as a language-neutral module artifact rather
 // than the Go source bundle: the runtime receives declarative function metadata
-// plus the module sources (and an optional prebuilt JavaScript bundle) instead
-// of a package it has to compile with the Go toolchain.
+// plus the module sources and a required, self-contained JavaScript bundle
+// instead of a package it has to compile with the Go toolchain.
 //
 // Parsing stays regex- and scanner-based, matching how the Go registrations are
 // read in index.ts. Pulling the TypeScript compiler into the CLI at runtime
 // would cost more than the declarative metadata this pipeline needs.
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile, readdir } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { builtinModules } from "node:module";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+
+import { rolldown, type OutputChunk, type RolldownPlugin } from "rolldown";
 
 import type {
   FunctionDependencies,
@@ -33,11 +36,15 @@ import type {
 /** Bumped whenever the artifact layout changes; mixed into the hash. */
 export const moduleArtifactGeneration = 1;
 
-/** Conventional prebuilt bundle when gonvex.json does not name one. */
+/** Deterministic ESM output when gonvex.json does not name one. */
 const defaultBundlePath = join("_build", "module.js");
 
 const moduleSourceExtensions = [".ts", ".tsx", ".mts", ".cts"];
-const skippedDirectories = new Set(["_generated", "node_modules", "dist", "build"]);
+const skippedDirectories = new Set(["_build", "_generated", "node_modules", "dist", "build"]);
+const defaultEntrypoints = ["index.ts", "index.mts", "index.tsx", "main.ts", "module.ts"];
+const nodeBuiltinImports = new Set(
+  builtinModules.flatMap((name) => name.startsWith("node:") ? [name, name.slice(5)] : [name, `node:${name}`]),
+);
 // `gonvex auth add google` writes gonvex/auth.tsx for the browser; it is not a
 // server module, and it must not make a Go backend look like a TypeScript one.
 const skippedSourceFiles = new Set(["auth.tsx", "auth.ts"]);
@@ -83,7 +90,7 @@ export type ModuleArtifactOptions = {
   migrations: string[];
   /** gonvex.json `module.entrypoint`, project-relative. */
   entrypoint?: string;
-  /** gonvex.json `module.bundle`, project-relative. */
+  /** gonvex.json `module.bundle`, project-relative output under gonvex/_build. */
   bundle?: string;
 };
 
@@ -113,6 +120,8 @@ export async function moduleSourceFiles(backendDir: string): Promise<string[]> {
 
 export async function buildModuleArtifact(options: ModuleArtifactOptions): Promise<ModuleArtifact> {
   const sources = [...options.files].sort();
+  const entrypoint = resolveEntrypoint(options.root, options.backendDir, sources, options.entrypoint);
+  const javascript = await bundleModuleJavaScript(options, entrypoint.absolute);
   const files: Record<string, string> = {};
   const functions: Record<string, ModuleFunction> = {};
   for (const file of sources) {
@@ -128,16 +137,15 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   for (const file of [...options.migrations].sort()) {
     files[projectPath(options.root, file)] = (await readFile(file)).toString("base64");
   }
-  const javascript = await readBundledJavaScript(options.root, options.backendDir, options.bundle);
   const sortedFiles = sortedRecord(files);
   return {
     language: "typescript",
     generation: moduleArtifactGeneration,
     hash: artifactHash(sortedFiles, javascript),
-    entrypoint: resolveEntrypoint(options.root, options.backendDir, sources, options.entrypoint),
+    entrypoint: entrypoint.projectPath,
     functions: sortedRecord(functions),
     files: sortedFiles,
-    ...(javascript ? { javascript } : {}),
+    javascript,
   };
 }
 
@@ -168,35 +176,104 @@ function artifactHash(files: Record<string, string>, javascript?: ModuleJavaScri
   return hash.digest("hex");
 }
 
-async function readBundledJavaScript(root: string, backendDir: string, configured?: string): Promise<ModuleJavaScript | undefined> {
-  const declared = configured?.trim();
-  const path = declared ? resolve(root, declared) : join(backendDir, defaultBundlePath);
-  if (!existsSync(path)) {
-    if (declared) {
-      console.warn(`[gonvex] module bundle ${declared} does not exist; shipping module sources without prebuilt JavaScript`);
-    }
-    return undefined;
+async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint: string): Promise<ModuleJavaScript> {
+  const buildDir = resolve(options.backendDir, "_build");
+  const declaredOutput = options.bundle?.trim();
+  if (declaredOutput && isAbsolute(declaredOutput)) {
+    throw new Error("gonvex.json module.bundle must be a project-relative path under gonvex/_build");
   }
-  const code = await readFile(path);
-  const sourceMapPath = `${path}.map`;
-  const sourceMap = existsSync(sourceMapPath) ? await readFile(sourceMapPath) : undefined;
+  const outputPath = declaredOutput ? resolve(options.root, declaredOutput) : resolve(options.backendDir, defaultBundlePath);
+  assertInside(buildDir, outputPath, "gonvex.json module.bundle must resolve under gonvex/_build");
+
+  await mkdir(dirname(outputPath), { recursive: true });
+  let bundle: Awaited<ReturnType<typeof rolldown>>;
+  try {
+    bundle = await rolldown({
+      input: entrypoint,
+      cwd: options.root,
+      platform: "neutral",
+      tsconfig: false,
+      external: () => false,
+      resolve: {
+        conditionNames: ["import", "default"],
+        mainFields: ["module", "main"],
+      },
+      plugins: [rejectNodeBuiltinsPlugin()],
+    });
+  } catch (error) {
+    throw moduleBundleError(entrypoint, error);
+  }
+
+  try {
+    const result = await bundle.generate({
+      file: outputPath,
+      format: "esm",
+      codeSplitting: false,
+      sourcemap: false,
+    });
+    const chunks = result.output.filter((item): item is OutputChunk => item.type === "chunk");
+    const assets = result.output.filter((item) => item.type === "asset");
+    if (chunks.length !== 1 || assets.length !== 0) {
+      throw new Error(`expected one self-contained ESM chunk, received ${chunks.length} chunks and ${assets.length} assets`);
+    }
+    const chunk = chunks[0]!;
+    const externalImports = [...chunk.imports, ...chunk.dynamicImports];
+    if (externalImports.length > 0) {
+      throw new Error(`module bundle contains unbundled imports: ${externalImports.join(", ")}`);
+    }
+    if (!chunk.code.trim()) throw new Error("module bundle is empty");
+
+    await writeFile(outputPath, chunk.code, "utf8");
+    const code = Buffer.from(chunk.code, "utf8");
+    return {
+      path: projectPath(options.root, outputPath),
+      hash: createHash("sha256").update(code).digest("hex"),
+      code: code.toString("base64"),
+    };
+  } catch (error) {
+    throw moduleBundleError(entrypoint, error);
+  } finally {
+    await bundle.close();
+  }
+}
+
+function rejectNodeBuiltinsPlugin(): RolldownPlugin {
   return {
-    path: projectPath(root, path),
-    hash: createHash("sha256").update(code).digest("hex"),
-    code: code.toString("base64"),
-    ...(sourceMap ? { sourceMap: sourceMap.toString("base64") } : {}),
+    name: "gonvex-reject-node-builtins",
+    resolveId(source, importer) {
+      if (!source.startsWith("node:") && !nodeBuiltinImports.has(source)) return null;
+      const importedBy = importer ? ` imported by ${importer}` : "";
+      this.error(`Node runtime module ${JSON.stringify(source)} is unavailable in Gonvex modules${importedBy}`);
+    },
   };
+}
+
+function moduleBundleError(entrypoint: string, error: unknown) {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new Error(`failed to bundle TypeScript module ${entrypoint}: ${detail}`, { cause: error });
 }
 
 function resolveEntrypoint(root: string, backendDir: string, sources: string[], configured?: string) {
   const declared = configured?.trim();
-  if (declared) return projectPath(root, resolve(root, declared));
-  for (const candidate of ["index.ts", "index.mts", "index.tsx", "main.ts", "module.ts"]) {
-    const path = join(backendDir, candidate);
-    if (sources.includes(path)) return projectPath(root, path);
+  if (declared && isAbsolute(declared)) {
+    throw new Error("gonvex.json module.entrypoint must be a project-relative path");
   }
-  const first = sources[0];
-  return first ? projectPath(root, first) : "";
+  const absolute = declared ? resolve(root, declared) : defaultEntrypoints
+    .map((candidate) => resolve(backendDir, candidate))
+    .find((candidate) => sources.includes(candidate));
+  if (!absolute) {
+    throw new Error(`TypeScript modules require gonvex.json module.entrypoint or one of: ${defaultEntrypoints.map((name) => `gonvex/${name}`).join(", ")}`);
+  }
+  assertInside(root, absolute, "gonvex.json module.entrypoint must resolve inside the project");
+  if (!sources.includes(absolute)) {
+    throw new Error(`TypeScript module entrypoint ${projectPath(root, absolute)} is missing or is not a server module source`);
+  }
+  return { absolute, projectPath: projectPath(root, absolute) };
+}
+
+function assertInside(parent: string, candidate: string, message: string) {
+  const nested = relative(resolve(parent), resolve(candidate));
+  if (nested === ".." || nested.startsWith(`..${sep}`) || isAbsolute(nested)) throw new Error(message);
 }
 
 function parseModuleFunctions(root: string, backendDir: string, file: string, source: string): Array<[string, ModuleFunction]> {

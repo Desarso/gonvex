@@ -2,9 +2,9 @@
 
 The Gonvex CLI for app-local development with the Gonvex runtime.
 
-Gonvex gives you a Convex-style workflow with Go backend functions, generated
-TypeScript bindings, React hooks, realtime subscriptions, and a local runtime
-backed by Postgres.
+Gonvex gives you a Convex-style workflow with Go or TypeScript backend
+functions, generated TypeScript bindings, React hooks, realtime subscriptions,
+and a local runtime backed by Postgres.
 
 ## Install
 
@@ -62,8 +62,23 @@ npx gonvex dev -- vite
 
 The manifest supports Queries, Reducers, Actions, authenticated and public HTTP
 handlers, structured Live Queries, and bounded Replica Collections. Live Query
-dependencies are derived from their plans; declared write sets do not exist. The uploaded source bundle is
-compiled and cached by the runtime. Registered `app.Cron`, `app.CronExpr`,
+dependencies are derived from their plans; declared write sets do not exist. Go
+backends upload a source bundle compiled and cached by the runtime. TypeScript
+backends are bundled by the CLI into one self-contained, platform-neutral ESM
+module before upload. The default entrypoint search starts at `gonvex/index.ts`;
+configure a different project-relative path with `module.entrypoint` in
+`gonvex.json`:
+
+```json
+{
+  "language": "typescript",
+  "module": { "entrypoint": "gonvex/index.ts" }
+}
+```
+
+Build output is written to `gonvex/_build/module.js` and is not watched as source.
+Unresolved packages and Node built-in imports fail the build instead of becoming
+runtime imports. Registered `app.Cron`, `app.CronExpr`,
 `app.TenantCron`, and `app.TenantCronExpr` schedules are loaded from that
 compiled app.
 

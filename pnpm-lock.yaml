@@ -215,6 +215,9 @@ importers:
       '@gonvex/react':
         specifier: workspace:*
         version: link:../react
+      rolldown:
+        specifier: ^1.2.3
+        version: 1.2.3
     devDependencies:
       '@types/node':
         specifier: ^24.12.4

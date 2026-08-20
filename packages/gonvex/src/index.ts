@@ -56,7 +56,7 @@ type ProjectConfig = {
   module?: {
     /** Project-relative module entrypoint. */
     entrypoint?: string;
-    /** Project-relative prebuilt JavaScript bundle. */
+    /** Project-relative ESM output path under gonvex/_build. */
     bundle?: string;
   };
   auth?: {
@@ -1087,7 +1087,13 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
     const sources = await collectBackendSources(root);
     // Watch migrations too: editing or adding one must trigger a re-sync,
     // otherwise a new migration sits unapplied until an unrelated .go edit.
-    const fingerprint = await filesFingerprint([...sources.files, ...await migrationFiles(join(root, "migrations"))]);
+    // gonvex.json selects the TypeScript entrypoint and bundle destination. It
+    // belongs in the fingerprint, while gonvex/_build is excluded from source
+    // collection so writing the generated ESM cannot trigger a rebuild loop.
+    const configPath = join(root, "gonvex.json");
+    const fingerprintFiles = [...sources.files, ...await migrationFiles(join(root, "migrations"))];
+    if (existsSync(configPath)) fingerprintFiles.push(configPath);
+    const fingerprint = await filesFingerprint(fingerprintFiles);
     const now = Date.now();
     const shouldBuild = fingerprint !== lastFingerprint;
     const shouldRetryRuntimeSync = !once && !lastSyncSucceeded && lastManifest !== null && now - lastSyncAttempt > runtimeSyncRetryMs;
