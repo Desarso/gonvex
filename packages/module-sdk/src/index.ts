@@ -191,9 +191,35 @@ export type OptimisticTransaction = {
 export type QueryOptions<Args, Result> = {
   readonly args?: PortableSchema;
   readonly result?: PortableSchema;
-  readonly delivery?: "oneShot" | "live";
+  readonly delivery?: "oneShot" | "live" | "replica";
   readonly livePlan?: LiveQueryPlan;
+  /** Preferred v2 spelling; `livePlan` remains supported for compatibility. */
+  readonly liveQueryPlan?: LiveQueryPlan;
+  readonly replica?: ReplicaCollectionDefinition;
+  /** Alias accepted by the first-class replicaCollection builder. */
+  readonly replicaCollection?: ReplicaCollectionDefinition;
   readonly run?: Handler<QueryContext, Args, Result>;
+};
+
+/** Declarative contract for a bounded, locally materialized query collection. */
+export type ReplicaCollectionDefinition = {
+  readonly table: string;
+  readonly key: string;
+  readonly columns: readonly string[];
+  readonly equalFilters?: Readonly<Record<string, string>>;
+  readonly excludeWhenSet?: readonly string[];
+  readonly visibilityTables?: readonly string[];
+  readonly orderBy?: string;
+  readonly orderDirection?: "asc" | "desc";
+  /** `eager` is complete at initial delivery; `progressive` may fill incrementally. */
+  readonly mode?: "eager" | "progressive";
+  readonly maxRows?: number;
+  readonly maxBytes?: number;
+  readonly retentionMs?: number;
+};
+
+export type ReplicaCollectionOptions<Args, Result> = Omit<QueryOptions<Args, Result>, "delivery" | "replica" | "replicaCollection"> & {
+  readonly replica: ReplicaCollectionDefinition;
 };
 
 export type ReducerOptions<Args, Result> = {
@@ -205,7 +231,12 @@ export type ReducerOptions<Args, Result> = {
   readonly optimistic?: OptimisticTransaction;
   /** Required exception for a public interactive reducer that cannot predict a safe local transaction. */
   readonly nonOptimisticReason?: string;
+  readonly internal?: boolean;
   readonly run?: Handler<ReducerContext, Args, Result>;
+};
+
+export type InternalReducerOptions<Args, Result> = Omit<ReducerOptions<Args, Result>, "offline" | "interactive" | "internal"> & {
+  readonly offline?: OfflinePolicy;
 };
 
 export type ActionOptions<Args, Result> = {
@@ -232,8 +263,10 @@ export type ModuleFunctionManifest = {
   readonly kind: ModuleFunctionKind;
   readonly args?: PortableSchema;
   readonly result?: PortableSchema;
-  readonly delivery?: "oneShot" | "live";
+  readonly internal?: boolean;
+  readonly delivery?: "oneShot" | "live" | "replica";
   readonly livePlan?: LiveQueryPlan;
+  readonly replica?: ReplicaCollectionDefinition;
   readonly offline?: OfflinePolicy;
   readonly interactive?: boolean;
   readonly optimistic?: OptimisticTransaction;
@@ -357,6 +390,26 @@ const validateOptimisticTransaction = (value: unknown, path: string): asserts va
   }
 };
 
+const validateReplicaCollection = (value: unknown, path: string): asserts value is ReplicaCollectionDefinition => {
+  if (!isRecord(value) || typeof value.table !== "string" || !value.table.trim() ||
+    typeof value.key !== "string" || !value.key.trim() || !Array.isArray(value.columns) ||
+    value.columns.some((column) => typeof column !== "string" || !column.trim())) {
+    throw new Error(`replica collection ${path} requires a table, key, and columns`);
+  }
+  for (const field of ["maxRows", "maxBytes", "retentionMs"] as const) {
+    const budget = value[field];
+    if (budget !== undefined && (typeof budget !== "number" || !Number.isSafeInteger(budget) || budget <= 0)) {
+      throw new Error(`replica collection ${path} ${field} must be a positive integer`);
+    }
+  }
+  if (value.mode !== undefined && value.mode !== "eager" && value.mode !== "progressive") {
+    throw new Error(`replica collection ${path} has an invalid completeness mode`);
+  }
+  if (value.orderDirection !== undefined && value.orderDirection !== "asc" && value.orderDirection !== "desc") {
+    throw new Error(`replica collection ${path} has an invalid order direction`);
+  }
+};
+
 const stableValue = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(stableValue);
   if (isRecord(value)) {
@@ -419,16 +472,35 @@ export class ModuleBuilder {
   }
 
   query<Args = JsonValue, Result = JsonValue>(path: string, options: QueryOptions<Args, Result> = {}): RegisteredFunction<Args, Result> {
+    const livePlan = options.liveQueryPlan ?? options.livePlan;
+    const replica = options.replicaCollection ?? options.replica;
+    const delivery = options.delivery ?? (replica ? "replica" : livePlan ? "live" : "oneShot");
+    if (delivery === "live" && !livePlan) throw new Error(`live query ${normalizePath(path)} requires a live query plan`);
+    if (delivery === "replica") {
+      if (!replica) throw new Error(`replica collection ${normalizePath(path)} requires a replica definition`);
+      validateReplicaCollection(replica, normalizePath(path));
+    }
     const definition = this.manifestCollector.register(path, {
       kind: "query",
       args: options.args,
       result: options.result,
-      delivery: options.delivery ?? (options.livePlan ? "live" : "oneShot"),
-      livePlan: options.livePlan,
+      delivery,
+      livePlan,
+      replica,
     });
     const registration = freeze({ path: definition.path, kind: definition.kind, definition, handler: options.run as RegisteredFunction<Args, Result>["handler"] });
     this.runtimeEntries.set(definition.path, registration as RuntimeFunctionRegistration);
     return registration;
+  }
+
+  /** Register a Query delivered as a live, structured query stream. */
+  liveQuery<Args = JsonValue, Result = JsonValue>(path: string, options: Omit<QueryOptions<Args, Result>, "delivery"> = {}): RegisteredFunction<Args, Result> {
+    return this.query(path, { ...options, delivery: "live" });
+  }
+
+  /** Register a Query delivered as a bounded local replica collection. */
+  replicaCollection<Args = JsonValue, Result = JsonValue>(path: string, options: ReplicaCollectionOptions<Args, Result>): RegisteredFunction<Args, Result> {
+    return this.query(path, { ...options, delivery: "replica", replica: options.replica });
   }
 
   reducer<Args = JsonValue, Result = JsonValue>(path: string, options: ReducerOptions<Args, Result>): RegisteredFunction<Args, Result> {
@@ -447,12 +519,23 @@ export class ModuleBuilder {
       result: options.result,
       offline: options.offline,
       interactive: options.interactive ?? true,
+      internal: options.internal,
       optimistic: options.optimistic,
       nonOptimisticReason: options.nonOptimisticReason?.trim() || undefined,
     });
     const registration = freeze({ path: definition.path, kind: definition.kind, definition, handler: options.run as RegisteredFunction<Args, Result>["handler"] });
     this.runtimeEntries.set(definition.path, registration as RuntimeFunctionRegistration);
     return registration;
+  }
+
+  /** Register a non-public Reducer while retaining kind `reducer` in the manifest. */
+  internalReducer<Args = JsonValue, Result = JsonValue>(path: string, options: InternalReducerOptions<Args, Result>): RegisteredFunction<Args, Result> {
+    return this.reducer(path, {
+      ...options,
+      offline: options.offline ?? { mode: "forbidden" },
+      interactive: false,
+      internal: true,
+    });
   }
 
   action<Args = JsonValue, Result = JsonValue>(path: string, options: ActionOptions<Args, Result> = {}): RegisteredFunction<Args, Result> {
@@ -527,6 +610,10 @@ export class ModuleRuntimeRegistry {
       if (registration.definition.interactive !== false && registration.definition.optimistic === undefined && !registration.definition.nonOptimisticReason?.trim()) {
         throw new Error(`interactive reducer ${path} requires an optimistic transaction or nonOptimisticReason`);
       }
+    }
+    if (registration.definition.delivery === "replica") {
+      if (!registration.definition.replica) throw new Error(`replica query ${path} requires a replica definition`);
+      validateReplicaCollection(registration.definition.replica, path);
     }
     if (this.entries.has(path)) throw new Error(`duplicate runtime registration: ${path}`);
     this.entries.set(path, freeze({ ...registration, path }));
