@@ -122,27 +122,14 @@ func (s *Server) loadTenantPermissions(ctx context.Context, projectID string, te
 // Control-plane directory/index rows can locate a database, but only an active
 // member row in that tenant database grants access.
 func (s *Server) loadTenantMember(ctx context.Context, projectID string, tenantID string, accountID string) (*gonvex.Member, error) {
-	s.hydrateProjectTenantDatabases(ctx, projectID)
-	databaseURL := s.databaseURLForTenant(projectID, tenantID)
-	var err error
-	databaseURL, err = s.ensureRuntimeTenantDatabase(ctx, projectID, tenantIDFromRequest(projectID, tenantID), databaseURL)
+	db, err := s.tenantMemberDB(ctx, projectID, tenantID)
 	if err != nil {
-		return nil, err
-	}
-	store, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, tenantID), databaseURL)
-	if err != nil {
-		return nil, err
-	}
-	if store.DB == nil {
-		return nil, fmt.Errorf("tenant database is unavailable")
-	}
-	if err := ensureTenantLocalTables(ctx, store.DB); err != nil {
 		return nil, err
 	}
 
 	member := &gonvex.Member{}
 	var rawPermissions []byte
-	if err := store.DB.QueryRowContext(ctx, `
+	if err := db.QueryRowContext(ctx, `
 		SELECT COALESCE(NULLIF(id, ''), user_id), COALESCE(NULLIF(account_id, ''), user_id),
 			status, display_name, avatar_url, role, permissions
 		FROM members

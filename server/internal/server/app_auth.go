@@ -246,9 +246,13 @@ func (s *Server) appAuthProjectCounts(ctx context.Context, projectID string) (in
 	}
 	defer db.Close()
 	var tenantCount, membershipCount, invitationCount int
+	// membershipCount is a directory statistic read from the projection. It is
+	// never consulted to decide access, so trailing a tenant commit is harmless.
 	_ = db.QueryRowContext(ctx, `SELECT
 		(SELECT count(*) FROM gonvex_runtime_tenants WHERE project_id = $1),
-		(SELECT count(*) FROM gonvex_auth_memberships WHERE project_id = $1),
+		(SELECT count(*) FROM account_tenant_index i
+			JOIN gonvex_runtime_tenants t ON t.tenant_id = i.tenant_id
+			WHERE t.project_id = $1 AND i.status = 'active'),
 		(SELECT count(*) FROM gonvex_auth_membership_invitations WHERE project_id = $1 AND expires_at > now())`, projectID).Scan(
 		&tenantCount, &membershipCount, &invitationCount,
 	)
@@ -1473,10 +1477,12 @@ func (s *Server) validateAppSession(ctx context.Context, requestedProjectID stri
 	if err != nil {
 		return validatedAppSession{}, "", err
 	}
-	tenant, err := selectAppAuthTenant(tenants, requestedTenantID)
+	tenant, err := s.resolveAppAuthTenant(ctx, session.ProjectID, session.User.accountID(), tenants, requestedTenantID)
 	if err != nil {
 		return validatedAppSession{}, "", err
 	}
+	// The tenant's own member row is the admission decision, re-read here even
+	// when discovery already reported a role.
 	member, err := s.loadTenantMember(ctx, session.ProjectID, tenant.ID, session.User.accountID())
 	if err != nil {
 		return validatedAppSession{}, "", err

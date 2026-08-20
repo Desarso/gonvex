@@ -984,6 +984,10 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 		ON gonvex_auth_refresh_tokens (expires_at)`); err != nil {
 		return err
 	}
+	// Migration-only compatibility table. Tenant-local members are the sole
+	// membership, role, and owner authority; nothing at runtime reads or writes
+	// gonvex_auth_memberships, and it survives only to seed the directory
+	// projection below until the schema cleanup drops it.
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_memberships (
 		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
 		user_id TEXT NOT NULL,
@@ -1002,9 +1006,10 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 		ON gonvex_auth_memberships (project_id, tenant_id, role, user_id)`); err != nil {
 		return err
 	}
-	// Compatibility bootstrap only. Once tenant change-feed projection is
-	// current, account_tenant_index is maintained from committed tenant member
-	// revisions and gonvex_auth_memberships can be removed.
+	// One-time discovery bootstrap at revision 0, so any committed tenant member
+	// revision supersedes it. account_tenant_index is otherwise maintained from
+	// the tenant outbox and change feed, and only ever locates a tenant database:
+	// admission still re-reads that tenant's own member row.
 	if _, err := db.ExecContext(ctx, `INSERT INTO account_tenant_index (
 		account_id, tenant_id, member_id, status, tenant_membership_revision, updated_at
 	)

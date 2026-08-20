@@ -12,6 +12,11 @@ import (
 	controlidentity "github.com/gonvex/gonvex/server/internal/controlplane/identity"
 )
 
+// controlPlaneMembershipProjectionTimeout bounds the directory update that runs
+// straight after a membership commit. Exceeding it is not a failure: the outbox
+// row survives and the change feed drains it.
+const controlPlaneMembershipProjectionTimeout = 5 * time.Second
+
 type pendingMemberProjection struct {
 	controlidentity.AccountTenantIndex
 }
@@ -123,6 +128,19 @@ func (s *Server) retryMemberProjection(projectID string, projection controlident
 	}
 }
 
+// projectTenantMemberDirectory publishes a committed tenant membership to the
+// Control Plane directory. It runs after the tenant commit and never inside it,
+// so a directory failure leaves the outbox row for the change feed to retry and
+// can never turn a successful membership change into a business error.
+func (s *Server) projectTenantMemberDirectory(projectID, tenantID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), controlPlaneMembershipProjectionTimeout)
+	defer cancel()
+	if err := s.drainControlPlaneMembershipOutboxContext(ctx, projectID, tenantID); err != nil {
+		slog.Warn("control-plane member directory projection deferred to the tenant outbox",
+			"project", projectID, "tenant", tenantID, "error", fmt.Sprint(err))
+	}
+}
+
 // drainControlPlaneMembershipOutbox retries the tenant-local transactional
 // outbox. The trigger that writes this table runs in the same Postgres commit
 // as members, so a process crash or unavailable Control Plane cannot lose the
@@ -130,22 +148,22 @@ func (s *Server) retryMemberProjection(projectID string, projection controlident
 func (s *Server) drainControlPlaneMembershipOutbox(projectID, tenantID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	databaseURL := s.databaseURLForTenant(projectID, tenantID)
-	if strings.TrimSpace(databaseURL) == "" {
-		return
+	if err := s.drainControlPlaneMembershipOutboxContext(ctx, projectID, tenantID); err != nil {
+		slog.Debug("control-plane member outbox drain did not complete",
+			"project", projectID, "tenant", tenantID, "error", fmt.Sprint(err))
 	}
-	store, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, tenantID), databaseURL)
-	if err != nil || store.DB == nil {
-		return
+}
+
+func (s *Server) drainControlPlaneMembershipOutboxContext(ctx context.Context, projectID, tenantID string) error {
+	tenantDB, err := s.tenantMemberDB(ctx, projectID, tenantID)
+	if err != nil {
+		return err
 	}
-	if err := ensureTenantLocalTables(ctx, store.DB); err != nil {
-		return
-	}
-	rows, err := store.DB.QueryContext(ctx, `SELECT account_id, member_id, status, membership_revision
+	rows, err := tenantDB.QueryContext(ctx, `SELECT account_id, member_id, status, membership_revision
 		FROM _gonvex_control_plane_membership_outbox
 		ORDER BY membership_revision, account_id LIMIT 1000`)
 	if err != nil {
-		return
+		return err
 	}
 	pending := []pendingMemberProjection{}
 	for rows.Next() {
@@ -153,25 +171,32 @@ func (s *Server) drainControlPlaneMembershipOutbox(projectID, tenantID string) {
 		item.TenantID = tenantID
 		if err := rows.Scan(&item.AccountID, &item.MemberID, &item.Status, &item.TenantMembershipRevision); err != nil {
 			rows.Close()
-			return
+			return err
 		}
 		pending = append(pending, item)
 	}
 	if err := rows.Close(); err != nil {
-		return
+		return err
+	}
+	if len(pending) == 0 {
+		return nil
 	}
 	controlDB, err := s.pooledProjectRegistry(ctx)
-	if err != nil || controlDB == nil {
-		return
+	if err != nil {
+		return err
+	}
+	if controlDB == nil {
+		return fmt.Errorf("control-plane database is unavailable")
 	}
 	projector := controlidentity.MembershipProjector{DB: controlDB}
 	for _, item := range pending {
 		if err := projector.Upsert(ctx, item.AccountTenantIndex); err != nil {
-			return
+			return err
 		}
-		if _, err := store.DB.ExecContext(ctx, `DELETE FROM _gonvex_control_plane_membership_outbox
+		if _, err := tenantDB.ExecContext(ctx, `DELETE FROM _gonvex_control_plane_membership_outbox
 			WHERE account_id = $1 AND membership_revision <= $2`, item.AccountID, item.TenantMembershipRevision); err != nil {
-			return
+			return err
 		}
 	}
+	return nil
 }
