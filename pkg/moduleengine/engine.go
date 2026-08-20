@@ -50,6 +50,12 @@ type Descriptor struct {
 	// Delivery distinguishes one-shot Queries, Live Queries, and Replica
 	// Collections without inventing extra executable function kinds.
 	Delivery gonvex.DeliveryMode
+	// Dependencies and Replica are executable delivery contracts exposed by
+	// every engine. Keeping them on the descriptor lets the host route Live
+	// Queries and Replica Collections without reaching back into a compiled Go
+	// application.
+	Dependencies gonvex.FunctionDependencies
+	Replica      *gonvex.ReplicaCollectionDefinition
 }
 
 // Invocation is one call into a module: which function to run and its

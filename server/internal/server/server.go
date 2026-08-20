@@ -34,7 +34,6 @@ type Server struct {
 	cancel          context.CancelFunc
 	config          config.Config
 	runtime         *runtime.Runtime
-	app             *gonvex.App
 	appEngine       moduleengine.ModuleEngine
 	storage         *storage.Factory
 	dataFiles       *datafiles.Manager
@@ -210,7 +209,6 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		cancel:  cancel,
 		config:  cfg,
 		runtime: runtime.NewWithLoader(projectbundle.NewLoader(cfg.PluginCacheDir, cfg.GonvexModuleRoot)),
-		app:     app,
 		storage: storage.NewFactory(storage.Config{
 			Endpoint:        cfg.S3Endpoint,
 			Region:          cfg.S3Region,
@@ -1321,16 +1319,6 @@ func (s *Server) engineForProject(ctx context.Context, projectID string) modulee
 		return engine
 	}
 	return s.appEngine
-}
-
-// appForProject is engineForProject's compatibility twin for host code that
-// still needs the compiled Go module itself rather than the engine seam.
-func (s *Server) appForProject(ctx context.Context, projectID string) *gonvex.App {
-	s.hydrateRuntimeStateForProject(ctx, projectID)
-	if app := s.runtime.AppForProject(projectID); app != nil {
-		return app
-	}
-	return s.app
 }
 
 func (s *Server) configuredTenantDatabaseURLLocked(projectID string, tenant tenantTarget) string {

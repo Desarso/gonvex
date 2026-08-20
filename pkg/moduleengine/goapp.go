@@ -127,11 +127,13 @@ func (e *GoAppEngine) InvokeHTTP(ctx *gonvex.HTTPContext, call HTTPInvocation) (
 
 func describeFunction(function gonvex.Function) Descriptor {
 	return Descriptor{
-		Path:     function.Path,
-		Kind:     Kind(function.Kind),
-		Public:   function.Public,
-		Internal: function.Internal,
-		Delivery: function.Delivery,
+		Path:         function.Path,
+		Kind:         Kind(function.Kind),
+		Public:       function.Public,
+		Internal:     function.Internal,
+		Delivery:     function.Delivery,
+		Dependencies: function.Dependencies,
+		Replica:      function.Replica,
 	}
 }
 

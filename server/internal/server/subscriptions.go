@@ -16,6 +16,7 @@ import (
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/pkg/moduleengine"
 )
 
 // Diffing tiny results costs more CPU than it can save on the wire. The
@@ -475,19 +476,18 @@ func (s *Server) liveQueryDependencies(ctx context.Context, project, path string
 	if exists && entry.Kind == manifest.FunctionKindQuery && entry.Delivery == manifest.DeliveryLive && entry.Dependencies.LiveQueryPlan != nil {
 		return append([]manifest.ReadDependency(nil), entry.Dependencies.Reads...), entry.Dependencies.LiveQueryPlan, true
 	}
-	app := s.appForProject(ctx, project)
-	function, exists := app.Lookup(path)
-	if !exists || function.Kind != gonvex.FunctionKindQuery || function.Delivery != gonvex.DeliveryLive || function.Dependencies.LiveQueryPlan == nil {
+	descriptor, exists := s.engineForProject(ctx, project).Describe(path)
+	if !exists || descriptor.Kind != moduleengine.KindQuery || descriptor.Delivery != gonvex.DeliveryLive || descriptor.Dependencies.LiveQueryPlan == nil {
 		return nil, nil, false
 	}
-	reads := make([]manifest.ReadDependency, 0, len(function.Dependencies.Reads))
-	for _, read := range function.Dependencies.Reads {
+	reads := make([]manifest.ReadDependency, 0, len(descriptor.Dependencies.Reads))
+	for _, read := range descriptor.Dependencies.Reads {
 		reads = append(reads, manifest.ReadDependency{
 			Table: read.Table, Columns: append([]string(nil), read.Columns...), Filters: append([]string(nil), read.Filters...),
 			OrdersBy: append([]string(nil), read.OrdersBy...), Windowed: read.Windowed,
 		})
 	}
-	encoded, _ := json.Marshal(function.Dependencies.LiveQueryPlan)
+	encoded, _ := json.Marshal(descriptor.Dependencies.LiveQueryPlan)
 	plan := &manifest.LiveQueryPlan{}
 	_ = json.Unmarshal(encoded, plan)
 	return reads, plan, true

@@ -1750,8 +1750,12 @@ func (s *Server) queryDependencyTables(projectID, path string) []string {
 		tables = appendUniqueStrings(tables, read.Table)
 	}
 	if len(tables) == 0 {
-		if function, ok := s.app.Lookup(path); ok {
-			for _, read := range function.Dependencies.Reads {
+		engine := s.runtime.EngineForProject(projectID)
+		if engine == nil {
+			engine = s.appEngine
+		}
+		if descriptor, ok := engine.Describe(path); ok {
+			for _, read := range descriptor.Dependencies.Reads {
 				tables = appendUniqueStrings(tables, read.Table)
 			}
 		}
@@ -2399,11 +2403,15 @@ func (s *Server) executeTenantActionForCaller(ctx context.Context, projectID str
 }
 
 func (s *Server) functionKind(projectID string, path string, fallback string) string {
-	if descriptor, ok := s.appEngine.Describe(path); ok && descriptor.Kind != "" {
-		return string(descriptor.Kind)
-	}
 	if entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]; ok && entry.Kind != "" {
 		return string(entry.Kind)
+	}
+	engine := s.runtime.EngineForProject(projectID)
+	if engine == nil {
+		engine = s.appEngine
+	}
+	if descriptor, ok := engine.Describe(path); ok && descriptor.Kind != "" {
+		return string(descriptor.Kind)
 	}
 	return fallback
 }
