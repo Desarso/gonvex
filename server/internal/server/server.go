@@ -261,7 +261,6 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		server.metrics.startMutationLogPersistence(postgresRuntimeMutationLogStore{server: server})
 	}
 	server.loadConfiguredTenantDatabases()
-	server.startControlPlaneMigrations()
 	server.startLoadSampler(server.ctx)
 	return server
 }
@@ -436,7 +435,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /dev/errors/groups/{fingerprint}", s.handleUpdateErrorGroup)
 	mux.HandleFunc("GET /dev/errors/groups/{fingerprint}/bug-report", s.handleErrorBugReport)
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
-	mux.HandleFunc("/", s.handleRegisteredHTTP)
 	return withGzip(withJSON(s.withDashboardProjectAuth(mux)))
 }
 
@@ -865,7 +863,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	sqlMigrations, err := migrationsFromBundle(next.Bundle)
+	sqlMigrations, err := migrationsFromManifest(next)
 	if err != nil {
 		syncErr = err
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -907,13 +905,13 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		schemaSkipped = storageInstalled
 	}
 	if !schemaSkipped {
-		landlordApplyOptions, tenantApplyOptions, optionErr := s.emptyColumnDropOptions(r.Context(), next.Project, next.Schema)
+		controlPlaneApplyOptions, tenantApplyOptions, optionErr := s.emptyColumnDropOptions(r.Context(), next.Project, next.Schema)
 		if optionErr != nil {
 			syncErr = optionErr
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": optionErr.Error()})
 			return
 		}
-		landlordReplicaCollectionDefinitions, definitionErr := syncDefinitionsForSchema(syncDefinitions, next.Schema.LandlordSchema())
+		controlPlaneReplicaCollectionDefinitions, definitionErr := syncDefinitionsForSchema(syncDefinitions, next.Schema.ControlPlaneSchema())
 		if definitionErr != nil {
 			syncErr = definitionErr
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": definitionErr.Error()})
@@ -922,9 +920,9 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		migrationResult, err = schema.ApplyWithOptions(
 			r.Context(),
 			s.databaseURLForProject(next.Project),
-			next.Schema.LandlordSchema(),
-			landlordReplicaCollectionDefinitions,
-			landlordApplyOptions,
+			next.Schema.ControlPlaneSchema(),
+			controlPlaneReplicaCollectionDefinitions,
+			controlPlaneApplyOptions,
 		)
 		if err != nil {
 			syncErr = err
@@ -944,6 +942,14 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		syncErr = err
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error(), "migrations": sqlMigrationResult})
 		return
+	}
+	if next.Module != nil {
+		tenantMigrationResult, err = s.installProjectModuleChangeFeeds(r.Context(), next.Project)
+		if err != nil {
+			syncErr = err
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	bundleHash := ""
@@ -968,7 +974,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	}
 	alreadyLoaded := s.runtime.EngineForProject(next.Project) != nil
 	bundleChanged := next.Bundle != nil && next.Bundle.Hash != previousHash
-	loadAttempted := next.Bundle != nil && !next.UsesModuleHost() && (bundleChanged || !alreadyLoaded)
+	loadAttempted := next.Bundle != nil && (bundleChanged || !alreadyLoaded)
 	if err := s.syncRuntimeManifest(r.Context(), next); err != nil {
 		if loadAttempted {
 			w.Header().Set("X-Gonvex-Recycle-Worker", "1")
@@ -977,7 +983,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
-	if alreadyLoaded && bundleChanged && !next.UsesModuleHost() {
+	if alreadyLoaded && bundleChanged {
 		w.Header().Set("X-Gonvex-Recycle-Worker", "1")
 	}
 	s.registerProjectCrons(next.Project)
@@ -1134,7 +1140,7 @@ func (s *Server) databaseURLForProject(projectID string) string {
 // requireProjectDatabase preserves the zero-configuration, single-database
 // local runtime while preventing a multi-project runtime from routing a typo
 // or stale project id into its control database. That fallback can make a
-// function appear healthy while it reads an empty set of landlord tables.
+// function appear healthy while it reads an empty project schema.
 func (s *Server) requireProjectDatabase(projectID string) error {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
@@ -1192,7 +1198,7 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 		}
 		// Preserve the historical single-database fallback for existing project
 		// IDs. UUID projects require an explicit tenant relationship and never
-		// route an unknown tenant to the landlord database.
+		// route an unknown tenant to the project database.
 		return s.config.DatabaseURL(projectID)
 	}
 	return ""
@@ -1279,7 +1285,7 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 	// Projects are created dynamically, so resolve this project's database from
 	// the control plane (gonvex_runtime_projects) on demand if we haven't yet.
 	// Without this, databaseURLForProject falls back to POSTGRES_URL and the
-	// runtime reads landlord tables from the wrong (control) database. This must
+	// runtime reads project tables from the wrong (control-plane) database. This must
 	// run even when the app/manifest is already loaded, since the DB mapping is
 	// independent of the compiled bundle.
 	s.projectMu.RLock()

@@ -13,15 +13,13 @@ Every file must begin with one of these header comments before its first SQL sta
 ```
 
 ```sql
--- gonvex:scope landlord
+-- gonvex:scope control-plane
 ```
 
-`landlord` is the legacy migration-scope spelling retained for compatibility;
-it refers to the Control Plane database. The parser's safe fallback is tenant
-scope, but sync rejects a missing directive so the intended database is
-reviewable. A tenant migration runs against every registered tenant database
-for the project. A Control Plane migration runs once against the project's
-Control Plane database.
+The parser's safe fallback is tenant scope, but sync rejects a missing
+directive so the intended database is reviewable. A tenant migration runs
+against every registered tenant database for the project. A Control Plane
+migration runs once against the project's Control Plane database.
 
 ## Tracking and edits
 

@@ -39,23 +39,23 @@ func (s *memoryMutationLogStore) Append(_ context.Context, entry runtimeLogEntry
 	return nil
 }
 
-func TestRuntimeMetricsPersistsOnlyMutations(t *testing.T) {
+func TestRuntimeMetricsPersistsSuccessfulReducersAndFailures(t *testing.T) {
 	store := &memoryMutationLogStore{appended: make(chan runtimeLogEntry, 2)}
 	metrics := newRuntimeMetrics()
 	metrics.startMutationLogPersistence(store)
 	now := time.Now().UTC()
 	request := sanitizeRuntimeLogRequest(json.RawMessage(`{"title":"Test","accessToken":"secret"}`))
-	metrics.recordRuntimeLog(runtimeLogEntry{Time: now.Format(time.RFC3339Nano), Project: "project-a", Path: "tasks.create", Kind: "mutation", Outcome: "ok", Request: request}, now)
-	metrics.recordRuntimeLog(runtimeLogEntry{Time: now.Add(time.Millisecond).Format(time.RFC3339Nano), Project: "project-a", Path: "tasks.cleanup", Kind: "internalMutation", Outcome: "ok"}, now)
+	metrics.recordRuntimeLog(runtimeLogEntry{Time: now.Format(time.RFC3339Nano), Project: "project-a", Path: "tasks.create", Kind: "reducer", Outcome: "ok", Request: request}, now)
+	metrics.recordRuntimeLog(runtimeLogEntry{Time: now.Add(time.Millisecond).Format(time.RFC3339Nano), Project: "project-a", Path: "tasks.cleanup", Kind: "action", Outcome: "error", Error: "boom"}, now)
 	metrics.recordRuntimeLog(runtimeLogEntry{Time: now.Add(2 * time.Millisecond).Format(time.RFC3339Nano), Project: "project-a", Path: "tasks.list", Kind: "query", Outcome: "ok"}, now)
 
-	for _, wantKind := range []string{"mutation", "internalMutation"} {
+	for _, wantKind := range []string{"reducer", "action"} {
 		select {
 		case entry := <-store.appended:
 			if entry.Kind != wantKind {
 				t.Fatalf("persisted kind = %q, want %q", entry.Kind, wantKind)
 			}
-			if entry.Kind == "mutation" && string(entry.Request) != `{"accessToken":"[REDACTED]","title":"Test"}` {
+			if entry.Kind == "reducer" && string(entry.Request) != `{"accessToken":"[REDACTED]","title":"Test"}` {
 				t.Fatalf("persisted request = %s", entry.Request)
 			}
 		case <-time.After(time.Second):
@@ -66,11 +66,11 @@ func TestRuntimeMetricsPersistsOnlyMutations(t *testing.T) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if len(store.entries) != 2 {
-		t.Fatalf("persisted entries = %d, want only two mutations", len(store.entries))
+		t.Fatalf("persisted entries = %d, want Reducer plus failure", len(store.entries))
 	}
 }
 
-func TestProjectRegistrySchemaIncludesRuntimeMutationLogs(t *testing.T) {
+func TestProjectRegistrySchemaIncludesRuntimeReducerLogs(t *testing.T) {
 	statements := []string{}
 	db := &recordingDB{exec: func(query string, args ...any) {
 		statements = append(statements, query)
@@ -79,8 +79,8 @@ func TestProjectRegistrySchemaIncludesRuntimeMutationLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(statements, "\n")
-	if !strings.Contains(joined, "CREATE TABLE IF NOT EXISTS gonvex_runtime_mutation_logs") {
-		t.Fatalf("expected runtime mutation log table in control-plane migration")
+	if !strings.Contains(joined, "CREATE TABLE IF NOT EXISTS gonvex_runtime_reducer_logs") {
+		t.Fatalf("expected runtime Reducer log table in Control Plane migration")
 	}
 	if !strings.Contains(joined, "entry JSONB NOT NULL") {
 		t.Fatalf("expected complete runtime log JSON in control-plane migration")

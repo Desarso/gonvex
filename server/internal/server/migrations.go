@@ -17,15 +17,15 @@ import (
 )
 
 type projectMigrationResult struct {
-	Landlord sqlmigration.Result `json:"landlord"`
-	Tenants  sqlmigration.Result `json:"tenants"`
+	ControlPlane sqlmigration.Result `json:"controlPlane"`
+	Tenants      sqlmigration.Result `json:"tenants"`
 }
 
 func (s *Server) emptyColumnDropOptions(ctx context.Context, project string, desired manifest.Schema) (schema.ApplyOptions, schema.ApplyOptions, error) {
 	if !s.config.DropEmptyUndeclaredColumns {
 		return schema.ApplyOptions{}, schema.ApplyOptions{}, nil
 	}
-	landlord, err := schema.EmptyUndeclaredColumns(ctx, s.databaseURLForProject(project), desired.LandlordSchema())
+	controlPlane, err := schema.EmptyUndeclaredColumns(ctx, s.databaseURLForProject(project), desired.ControlPlaneSchema())
 	if err != nil {
 		return schema.ApplyOptions{}, schema.ApplyOptions{}, fmt.Errorf("inspect control plane empty columns: %w", err)
 	}
@@ -38,7 +38,7 @@ func (s *Server) emptyColumnDropOptions(ctx context.Context, project string, des
 		}
 		sets = append(sets, candidates)
 	}
-	return schema.ApplyOptions{DropEmptyUndeclaredColumns: landlord}, schema.ApplyOptions{DropEmptyUndeclaredColumns: intersectColumnSets(sets)}, nil
+	return schema.ApplyOptions{DropEmptyUndeclaredColumns: controlPlane}, schema.ApplyOptions{DropEmptyUndeclaredColumns: intersectColumnSets(sets)}, nil
 }
 
 func intersectColumnSets(sets []map[string]bool) map[string]bool {
@@ -61,12 +61,18 @@ func intersectColumnSets(sets []map[string]bool) map[string]bool {
 	return result
 }
 
-func migrationsFromBundle(bundle *manifest.SourceBundle) ([]sqlmigration.Migration, error) {
-	if bundle == nil {
+func migrationsFromManifest(current manifest.Manifest) ([]sqlmigration.Migration, error) {
+	var encodedFiles map[string]string
+	switch {
+	case current.Module != nil:
+		encodedFiles = current.Module.Files
+	case current.Bundle != nil:
+		encodedFiles = current.Bundle.Files
+	default:
 		return nil, nil
 	}
 	files := map[string][]byte{}
-	for file, encoded := range bundle.Files {
+	for file, encoded := range encodedFiles {
 		if path.Dir(file) != "migrations" || !strings.HasSuffix(file, ".sql") {
 			continue
 		}
@@ -99,14 +105,14 @@ type migrationApplyFunc func(context.Context, string, []sqlmigration.Migration, 
 
 func (s *Server) applyProjectSQLMigrations(ctx context.Context, project string, migrations []sqlmigration.Migration, dryRun bool) (projectMigrationResult, error) {
 	result := projectMigrationResult{}
-	landlord := sqlmigration.Filter(migrations, sqlmigration.ScopeLandlord)
+	controlPlane := sqlmigration.Filter(migrations, sqlmigration.ScopeControlPlane)
 	var err error
-	result.Landlord, err = sqlmigration.Apply(ctx, s.databaseURLForProject(project), landlord, dryRun)
+	result.ControlPlane, err = sqlmigration.Apply(ctx, s.databaseURLForProject(project), controlPlane, dryRun)
 	if err != nil {
 		return result, fmt.Errorf("control plane database migration failed: %w", err)
 	}
-	for _, name := range result.Landlord.Applied {
-		slog.Info("applied Control Plane SQL migration", "project", project, "scope", "landlord", "migration", name)
+	for _, name := range result.ControlPlane.Applied {
+		slog.Info("applied Control Plane SQL migration", "project", project, "scope", "control-plane", "migration", name)
 	}
 	tenantResult, err := applyTenantSQLMigrations(ctx, s.projectTenantTargets(ctx, project), sqlmigration.Filter(migrations, sqlmigration.ScopeTenant), dryRun, sqlmigration.Apply)
 	result.Tenants = tenantResult

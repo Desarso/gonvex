@@ -377,11 +377,11 @@ func TestObservedWriteInvalidatesCacheBeforeTriggerBatchFlush(t *testing.T) {
 	}
 }
 
-func TestHealthyTenantListenerDoesNotSuppressLandlordWrite(t *testing.T) {
+func TestHealthyTenantListenerDoesNotSuppressControlPlaneWrite(t *testing.T) {
 	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
 	if err := server.runtime.SyncManifest(manifest.Manifest{
 		Project: "project-a",
-		Schema: manifest.Schema{LandlordTables: map[string]manifest.Table{
+		Schema: manifest.Schema{ControlPlaneTables: map[string]manifest.Table{
 			"users": {},
 		}},
 	}); err != nil {
@@ -397,7 +397,7 @@ func TestHealthyTenantListenerDoesNotSuppressLandlordWrite(t *testing.T) {
 	indexedTestGroup(manager, "users.list", "users", &executions)
 
 	server.scheduleTableChange(tableChange{
-		project: "project-a", tenant: "tenant-a", commitID: "landlord-commit",
+		project: "project-a", tenant: "tenant-a", commitID: "control-plane-commit",
 		tables: map[string]bool{"users": true}, changedAtMS: 10,
 	})
 	eventually(t, time.Second, func() bool { return executions.Load() == 1 })

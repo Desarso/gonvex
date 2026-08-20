@@ -279,37 +279,6 @@ func (e *RemoteEngine) InvokeAction(ctx *gonvex.ActionCtx, call Invocation) (Res
 	return Result{Value: value}, nil
 }
 
-func (e *RemoteEngine) InvokeHTTP(ctx *gonvex.HTTPContext, call HTTPInvocation) (HTTPResult, error) {
-	if ctx == nil {
-		ctx = &gonvex.HTTPContext{}
-	}
-	descriptor, err := e.expect(call.Path, KindHTTP, false)
-	if err != nil {
-		return HTTPResult{}, err
-	}
-	args, err := json.Marshal(call.Request)
-	if err != nil {
-		return HTTPResult{}, &gonvex.DispatchError{Code: "invalid_args", Path: call.Path, Message: fmt.Sprintf("invalid request for %q: %v", call.Path, err), Err: err}
-	}
-	dispatcher := newActionHostCalls(&ctx.RuntimeContext)
-	defer dispatcher.close()
-	value, err := e.invoke(ctx.Context, invocationFor(&ctx.RuntimeContext, actionCapabilities(&ctx.RuntimeContext)), descriptor, args, dispatcher)
-	if err != nil {
-		return HTTPResult{}, err
-	}
-	// An HTTP module returns the response shape as JSON; re-encoding it is the
-	// cheapest way to reuse the one decoder the host already trusts.
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return HTTPResult{}, &gonvex.DispatchError{Code: "invalid_response", Path: call.Path, Message: fmt.Sprintf("HTTP function %q returned a value that is not a response: %v", call.Path, err)}
-	}
-	var response gonvex.HTTPResponse
-	if err := json.Unmarshal(encoded, &response); err != nil {
-		return HTTPResult{}, &gonvex.DispatchError{Code: "invalid_response", Path: call.Path, Message: fmt.Sprintf("HTTP function %q returned a value that is not a response: %v", call.Path, err)}
-	}
-	return HTTPResult{Response: response}, nil
-}
-
 // expect resolves a path and enforces the same visibility rules a compiled Go
 // module enforces: an unknown path, a wrong kind, and an internal reducer
 // reached from the public entry point all fail before anything is dispatched.

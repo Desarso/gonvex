@@ -42,12 +42,20 @@ export const startTask = reducer({
       { operation: "patch", entity: "tasks", id: ["taskId"], fields: { status: "in_progress" } },
     ],
   },
-  run: async ({ db }, { taskId }) => db.update("tasks", taskId, { status: "in_progress" }),
+  run: async ({ db, actions }, { taskId }) => {
+    const task = await db.update("tasks", taskId, { status: "in_progress" });
+    await actions.enqueue("notifications.taskStarted", { taskId });
+    return task;
+  },
 });
 ```
 
+`actions.enqueue` records the Action in the Reducer's Postgres transaction. The
+host delivers it only after the business transaction commits and retries failed
+deliveries from the durable outbox.
+
 The host-specific implementation is intentionally separate from this SDK.
-The same manifest shape can describe a V8 TypeScript module or a Wasm module.
+The manifest describes a TypeScript module executed by the bounded V8 host.
 
 Executable handlers stay in a host-side registry. The registry dispatches only
 when both the path and function kind match; it never creates database or
@@ -67,3 +75,26 @@ await runtime.dispatch({
 handler-free payloads for a host loader. `QueryContext`, `ReducerContext`, and
 `ActionContext` remain separate types, so capability boundaries are visible to
 module authors and adapters.
+
+Module identity follows the v2 account/member split:
+
+```ts
+run: async (ctx) => {
+  const account = ctx.auth.account;
+  const member = ctx.member;
+  const tenant = ctx.tenant;
+
+  if (!account || !member || !tenant) throw new Error("tenant identity is required");
+  return { accountId: account.id, memberId: member.id, tenantId: tenant.id };
+}
+```
+
+`auth.account`, `member`, and `tenant` are nullable because they mirror the
+runtime ABI for anonymous or system invocations. The top-level `ctx.account`
+field is a temporary compatibility alias for `ctx.auth.account`; new modules
+should use the nested v2 spelling.
+
+Application modules expose exactly three executable kinds: Query, Reducer, and
+Action. An infrastructure adapter that accepts an inbound webhook verifies and
+normalizes the request, then invokes an Action; webhooks are not a fourth module
+function kind.

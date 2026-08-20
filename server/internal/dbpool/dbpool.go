@@ -11,7 +11,7 @@ import (
 const (
 	// The process-wide connection budget remains the hard safety boundary. A
 	// two-connection per-database default leaves a single hot tenant limited to
-	// four physical connections across its tenant and landlord pools, while most
+	// four physical connections across its tenant and Control Plane pools, while most
 	// of the safe process budget sits unused.
 	defaultMaxOpen = 16
 	defaultMaxIdle = 1

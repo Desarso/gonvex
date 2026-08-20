@@ -151,7 +151,7 @@ func (b *connectionBudget) stats() BudgetStats {
 }
 
 // RuntimeBudgetStats returns the aggregate connection budget for this runtime
-// process, across landlord, registry, telemetry, and tenant database pools.
+// process, across Control Plane, registry, telemetry, and tenant database pools.
 func RuntimeBudgetStats() BudgetStats {
 	return runtimeBudget.stats()
 }

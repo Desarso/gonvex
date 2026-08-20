@@ -173,7 +173,7 @@ func TestPostgresUUIDv6ProjectIgnoresUnrelatedAppDatabase(t *testing.T) {
 	_ = unrelatedDB.Close()
 
 	cfg := config.Config{
-		LandlordURL:      controlURL,
+		ControlPlaneURL:  controlURL,
 		PostgresURL:      baseURL,
 		ProjectDatabases: map[string]string{},
 		ProjectKeys:      map[string]string{},
@@ -330,8 +330,8 @@ func TestPostgresLegacyProjectTenantBackfillSurvivesRestart(t *testing.T) {
 	tenantURL := createTenantRegistryTestDatabase(t, baseURL, tenantName)
 
 	cfg := config.Config{
-		LandlordURL: controlURL,
-		PostgresURL: baseURL,
+		ControlPlaneURL: controlURL,
+		PostgresURL:     baseURL,
 		ProjectDatabases: map[string]string{
 			projectID: projectURL,
 		},
@@ -378,18 +378,13 @@ func TestPostgresLegacyProjectTenantBackfillSurvivesRestart(t *testing.T) {
 	}
 }
 
-func TestPostgresLandlordHydrationPreservesRegisteredPhysicalTenantDatabase(t *testing.T) {
+func TestPostgresRuntimeIgnoresLegacyLandlordTenantTable(t *testing.T) {
 	baseURL := tenantRegistryTestPostgresURL(t)
 	suffix := tenantRegistryTestSuffix(t)
-	controlName := "gonvex_preserve_control_" + suffix
-	projectName := "gonvex_preserve_project_" + suffix
-	originalTenantName, err := generateTenantPhysicalDatabaseName()
-	if err != nil {
-		t.Fatal(err)
-	}
+	controlName := "gonvex_ignore_legacy_control_" + suffix
+	projectName := "gonvex_ignore_legacy_project_" + suffix
 	controlURL := createTenantRegistryTestDatabase(t, baseURL, controlName)
 	projectURL := createTenantRegistryTestDatabase(t, baseURL, projectName)
-	originalTenantURL := createTenantRegistryTestDatabase(t, baseURL, originalTenantName)
 	projectID, err := generateProjectID()
 	if err != nil {
 		t.Fatal(err)
@@ -415,8 +410,8 @@ func TestPostgresLandlordHydrationPreservesRegisteredPhysicalTenantDatabase(t *t
 	_ = projectDB.Close()
 
 	cfg := config.Config{
-		LandlordURL: controlURL,
-		PostgresURL: baseURL,
+		ControlPlaneURL: controlURL,
+		PostgresURL:     baseURL,
 		ProjectDatabases: map[string]string{
 			projectID: projectURL,
 		},
@@ -425,12 +420,12 @@ func TestPostgresLandlordHydrationPreservesRegisteredPhysicalTenantDatabase(t *t
 	server := New(cfg)
 	project := projectTarget{
 		ID:             projectID,
-		Name:           "Preserve Tenant Relationship Test",
+		Name:           "Ignore Legacy Tenant Table Test",
 		Environment:    "test",
 		Database:       projectName,
 		DatabaseMode:   "multiTenant",
 		Status:         "local",
-		Description:    "Tenant hydration regression test.",
+		Description:    "Legacy identity tables are migration input only.",
 		Provisioned:    true,
 		RuntimeCreated: true,
 		databaseURL:    projectURL,
@@ -440,22 +435,6 @@ func TestPostgresLandlordHydrationPreservesRegisteredPhysicalTenantDatabase(t *t
 	if err := server.saveProjectRegistry(context.Background(), project); err != nil {
 		t.Fatalf("save project relationship: %v", err)
 	}
-	registered, err := server.saveTenantRegistry(context.Background(), tenantTarget{
-		ID:             "toasting",
-		ProjectID:      projectID,
-		Name:           "Toasting",
-		Database:       "toasting",
-		databaseName:   originalTenantName,
-		databaseURL:    originalTenantURL,
-		domain:         "toasting",
-		Status:         "active",
-		Description:    "Persisted tenant from landlord database.",
-		Provisioned:    true,
-		RuntimeCreated: false,
-	})
-	if err != nil {
-		t.Fatalf("save tenant relationship: %v", err)
-	}
 
 	restarted := New(cfg)
 	restarted.hydrateProjectTenantDatabasesUncached(context.Background(), projectID)
@@ -463,13 +442,7 @@ func TestPostgresLandlordHydrationPreservesRegisteredPhysicalTenantDatabase(t *t
 	if err != nil {
 		t.Fatalf("load tenant relationship after hydration: %v", err)
 	}
-	if len(loaded) != 1 {
-		t.Fatalf("expected one tenant relationship, got %+v", loaded)
-	}
-	if loaded[0].RelationshipID != registered.RelationshipID {
-		t.Fatalf("hydration replaced relationship id: before=%q after=%q", registered.RelationshipID, loaded[0].RelationshipID)
-	}
-	if loaded[0].databaseName != originalTenantName || loaded[0].databaseURL != originalTenantURL {
-		t.Fatalf("hydration orphaned the registered tenant database: before=%q after=%q", originalTenantName, loaded[0].databaseName)
+	if len(loaded) != 0 {
+		t.Fatalf("runtime imported tenant rows from the legacy table: %+v", loaded)
 	}
 }

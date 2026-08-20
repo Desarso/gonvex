@@ -176,6 +176,9 @@ func TestProjectRegistryDropsRuntimeLogKindConstraint(t *testing.T) {
 	if strings.Contains(joined, "kind IN ('mutation', 'internalMutation')") {
 		t.Fatal("runtime log table still restricts kind to mutations")
 	}
+	if !strings.Contains(joined, "ALTER TABLE gonvex_runtime_mutation_logs RENAME TO gonvex_runtime_reducer_logs") {
+		t.Fatal("existing runtime audit log is not migrated to Reducer terminology")
+	}
 	if !strings.Contains(joined, "DROP CONSTRAINT IF EXISTS gonvex_runtime_mutation_logs_kind_check") {
 		t.Fatal("existing deployments keep the old kind CHECK and reject failure logs")
 	}

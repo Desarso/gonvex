@@ -24,6 +24,8 @@ type hostCallDispatcher interface {
 	close()
 }
 
+var errModuleHostClosed = errors.New("moduleengine: module host closed the connection")
+
 // session is one live connection to a module host. It multiplexes requests by
 // id in one direction and host calls by invocation id in the other, so a module
 // call and the database reads it makes travel over the same connection while
@@ -99,7 +101,7 @@ func (s *session) readLoop() {
 		payload, err := readFrame(reader, s.limit)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				err = errors.New("moduleengine: module host closed the connection")
+				err = errModuleHostClosed
 			}
 			s.close(err)
 			return

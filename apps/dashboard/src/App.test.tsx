@@ -1004,7 +1004,7 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: /no tables/i })).toBeInTheDocument();
     expect(screen.getByText(/connect a project and push its schema/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/active database/i)).toHaveTextContent(/gonvex_dev/i);
-    expect(screen.queryByText(/^landlord$/i)).not.toBeInTheDocument();
+    expect(new URL(window.location.href).searchParams.get("db")).toBe("control-plane");
     expect(screen.queryByRole("button", { name: /\+ tenant db/i })).not.toBeInTheDocument();
   });
 });

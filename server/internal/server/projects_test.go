@@ -545,7 +545,7 @@ func TestUUIDv6ProjectRequiresExplicitTenantRelationship(t *testing.T) {
 		t.Fatalf("expected explicitly related tenant database URL, got %q", got)
 	}
 	if got := server.databaseURLForTenant(projectID, ""); got != "postgres://example/project" {
-		t.Fatalf("expected landlord/project database URL, got %q", got)
+		t.Fatalf("expected project control-plane database URL, got %q", got)
 	}
 }
 
@@ -606,97 +606,6 @@ func TestLegacyTenantDatabaseNameUsesAliasWithScopedSuffix(t *testing.T) {
 	want := "testing_a7f9f7df_6a7b_45f7_b44d_bde2068dca27"
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
-	}
-}
-
-func TestPersistedTenantDatabaseNamePrefersExistingDatabaseAlias(t *testing.T) {
-	got := tenantDatabaseNameForPersistedTenant(
-		"whagons-5",
-		"calaluna",
-		"calaluna",
-		"calaluna",
-		map[string]bool{"calaluna": true, "calaluna_whagons_5": true},
-	)
-
-	if got != "calaluna" {
-		t.Fatalf("expected existing database alias to win, got %q", got)
-	}
-}
-
-func TestPersistedTenantDatabaseNamePrefersLegacyScopedNameWhenPresent(t *testing.T) {
-	got := tenantDatabaseNameForPersistedTenant(
-		"whagons-5",
-		"calaluna",
-		"calaluna",
-		"calaluna",
-		map[string]bool{"calaluna_whagons_5": true},
-	)
-	if got != "calaluna_whagons_5" {
-		t.Fatalf("expected existing legacy scoped name, got %q", got)
-	}
-}
-
-func TestPersistedTenantDatabaseNameUsesUUIDv6WhenNothingExists(t *testing.T) {
-	got := tenantDatabaseNameForPersistedTenant(
-		"whagons-5",
-		"calaluna",
-		"calaluna",
-		"calaluna",
-		map[string]bool{},
-	)
-	if !isUUIDv6(got) {
-		t.Fatalf("expected UUIDv6 for brand-new tenant DB, got %q", got)
-	}
-}
-
-func TestPersistedTenantRelationshipIDPrefersDomainOverOpaqueDocumentID(t *testing.T) {
-	got := persistedTenantRelationshipID(
-		"0123456789abcdefghijklmnopqrstuv",
-		"arenal-paraiso",
-		"arenal-paraiso",
-	)
-	if got != "arenal-paraiso" {
-		t.Fatalf("expected tenant domain, got %q", got)
-	}
-
-	if fallback := persistedTenantRelationshipID("tenant-id", "tenant-db", "tenant.example"); fallback != "tenant-id" {
-		t.Fatalf("expected document id fallback, got %q", fallback)
-	}
-}
-
-func TestMatchingRegisteredTenantReusesMigratedDatabaseForLandlordDomain(t *testing.T) {
-	project := "01f18c3a-3f57-657e-a2ad-e277f004b781"
-	documentID := "yx75qjh3t7mkvx25y1gjgkmfch82qwq9"
-	migrated := tenantTarget{
-		RelationshipID: "01f18c48-3695-6bae-aa2a-da2cb3ad268c",
-		ID:             documentID,
-		ProjectID:      project,
-		Database:       "whagons",
-		databaseName:   "migrated-database",
-		databaseURL:    "postgres://example/migrated-database",
-		Provisioned:    true,
-		registered:     true,
-	}
-	empty := tenantTarget{
-		ID:           "whagons",
-		ProjectID:    project,
-		Database:     "whagons",
-		databaseName: "empty-database",
-		registered:   true,
-	}
-
-	got, ok := matchingRegisteredTenant(
-		map[string]tenantTarget{"migrated": migrated, "empty": empty},
-		project,
-		documentID,
-		"whagons",
-		"whagons",
-	)
-	if !ok {
-		t.Fatal("expected migrated tenant match")
-	}
-	if got.RelationshipID != migrated.RelationshipID || got.databaseName != migrated.databaseName {
-		t.Fatalf("matched wrong tenant: %#v", got)
 	}
 }
 
@@ -829,28 +738,6 @@ func TestTenantDatabaseAliasTakenChecksProjectScope(t *testing.T) {
 	}
 	if server.tenantDatabaseAliasTakenLocked("project-a", "testing", "project-a:testing") {
 		t.Fatal("did not expect current tenant key to collide with itself")
-	}
-}
-
-func TestTenantReferenceAliasesIncludeTenantIdentityAndDatabase(t *testing.T) {
-	got := tenantReferenceAliases(tenantTarget{
-		ID:           "kh7y5pbycsqxej1d5pq388d5gs84je8c",
-		Name:         "Cala Luna",
-		Database:     "calaluna",
-		databaseName: "calaluna",
-		domain:       "calaluna",
-	})
-
-	want := map[string]bool{
-		"kh7y5pbycsqxej1d5pq388d5gs84je8c": true,
-		"calaluna":                         true,
-		"Cala Luna":                        true,
-	}
-	for _, value := range got {
-		delete(want, value)
-	}
-	if len(want) > 0 {
-		t.Fatalf("missing aliases: %+v from %v", want, got)
 	}
 }
 

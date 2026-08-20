@@ -116,7 +116,7 @@ func TestPostgresAccountTokenProjectProvisioning(t *testing.T) {
 	suffix := tenantRegistryTestSuffix(t)
 	controlURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_account_tokens_"+suffix)
 	server := New(config.Config{
-		LandlordURL:     controlURL,
+		ControlPlaneURL: controlURL,
 		PostgresURL:     baseURL,
 		RequireAuth:     true,
 		DashboardSecret: "account-token-test-session-secret",

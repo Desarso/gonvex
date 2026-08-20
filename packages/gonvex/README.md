@@ -60,9 +60,10 @@ frontend dev server:
 npx gonvex dev -- vite
 ```
 
-The manifest supports Queries, Reducers, Actions, authenticated and public HTTP
-handlers, structured Live Queries, and bounded Replica Collections. Live Query
-dependencies are derived from their plans; declared write sets do not exist. Go
+The manifest supports exactly Queries, Reducers, and Actions as executable
+application kinds. Structured Live Queries and bounded Replica Collections are
+Query delivery modes. Live Query dependencies are derived from their plans;
+declared write sets do not exist. Go
 backends upload a source bundle compiled and cached by the runtime. TypeScript
 backends are bundled by the CLI into one self-contained, platform-neutral ESM
 module before upload. The default entrypoint search starts at `gonvex/index.ts`;

@@ -40,9 +40,8 @@ to replace an optimistic overlay only after the authoritative revision arrives.
 This is the v2 delivery contract: public reads are Queries delivered as Live
 Queries or Replica Collections, and public writes are Reducers. The former
 declared `Writes` metadata, manual invalidation API, and generic reactive-query
-API are not part of v2. This document describes the implemented sync path; the
-broader identity/control-plane migration remains a compatibility cutover for
-deployments that still use legacy landlord names.
+API are not part of v2. This document describes the implemented sync path and
+the Control Plane account plus tenant-local Member identity model.
 
 ## One normalized store
 

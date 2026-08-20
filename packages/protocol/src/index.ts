@@ -1,8 +1,4 @@
-export type FunctionKind =
-  | "query"
-  | "reducer"
-  | "action"
-  | "http";
+export type FunctionKind = "query" | "reducer" | "action";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 

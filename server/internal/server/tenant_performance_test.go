@@ -198,29 +198,3 @@ func TestProjectSyncStorageCheckReturnsTenantDiscoveryFailure(t *testing.T) {
 		t.Fatal("tenant discovery failure returned installed=true")
 	}
 }
-
-func TestLandlordHydrationReusesLandlordAndMaintenancePools(t *testing.T) {
-	resolver := newTenantStoreResolver(&config.Config{})
-	var opens atomic.Int32
-	resolver.openDatabase = func(context.Context, string) (*sql.DB, error) {
-		opens.Add(1)
-		return openTenantPerformanceDB()
-	}
-	server := &Server{
-		config: config.Config{
-			PostgresURL: "postgres://localhost/control",
-			ProjectDatabases: map[string]string{
-				"project-a": "postgres://localhost/project-a",
-			},
-		},
-		tenantStores: resolver,
-	}
-
-	server.hydrateLandlordTenants(context.Background(), "project-a")
-	server.hydrateLandlordTenants(context.Background(), "project-a")
-
-	if got := opens.Load(); got != 2 {
-		t.Fatalf("expected one landlord pool and one maintenance pool, got %d database opens", got)
-	}
-	resolver.Close()
-}

@@ -34,7 +34,6 @@ export const schema = {
     },
   },
   controlPlaneTables: {},
-  landlordTables: {},
   tenantTables: {
     messages: {
       columns: {
@@ -70,6 +69,5 @@ export const schema = {
 } as const;
 
 export const controlPlane = { tables: schema.controlPlaneTables ?? {} } as const;
-export const landlord = controlPlane;
 export const tenant = { tables: schema.tenantTables ?? schema.tables } as const;
 export const tables = tenant.tables;

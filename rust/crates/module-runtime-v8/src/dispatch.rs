@@ -26,11 +26,12 @@ fn structural_capabilities(kind: &FunctionKind) -> Capabilities {
         FunctionKind::Reducer => Capabilities {
             db_read: true,
             db_write: true,
+            action_outbox: true,
             ..Capabilities::default()
         },
-        // Actions and HTTP handlers run outside the transaction: they may reach
-        // the network and storage, and mutate only by calling a reducer.
-        FunctionKind::Action | FunctionKind::Http => Capabilities {
+        // Actions run outside the transaction: they may reach the network and
+        // storage, and mutate only by calling a reducer.
+        FunctionKind::Action => Capabilities {
             run_reducer: true,
             network: true,
             storage: true,
@@ -45,6 +46,7 @@ pub(crate) fn effective_capabilities(kind: &FunctionKind, granted: &Capabilities
     Capabilities {
         db_read: structural.db_read && granted.db_read,
         db_write: structural.db_write && granted.db_write,
+        action_outbox: structural.action_outbox && granted.action_outbox,
         run_reducer: structural.run_reducer && granted.run_reducer,
         network: structural.network && granted.network,
         storage: structural.storage && granted.storage,
@@ -56,7 +58,6 @@ pub(crate) fn kind_name(kind: &FunctionKind) -> &'static str {
         FunctionKind::Query => "query",
         FunctionKind::Reducer => "reducer",
         FunctionKind::Action => "action",
-        FunctionKind::Http => "http",
     }
 }
 
@@ -65,6 +66,7 @@ pub(crate) fn kind_name(kind: &FunctionKind) -> &'static str {
 pub(crate) struct CapabilityFlags {
     db_read: bool,
     db_write: bool,
+    action_outbox: bool,
     run_reducer: bool,
     network: bool,
     storage: bool,
@@ -75,6 +77,7 @@ impl From<&Capabilities> for CapabilityFlags {
         Self {
             db_read: capabilities.db_read,
             db_write: capabilities.db_write,
+            action_outbox: capabilities.action_outbox,
             run_reducer: capabilities.run_reducer,
             network: capabilities.network,
             storage: capabilities.storage,
@@ -152,6 +155,11 @@ pub(crate) enum HostCallRequest {
         #[serde(default)]
         id: serde_json::Value,
     },
+    ActionEnqueue {
+        function: String,
+        #[serde(default)]
+        args: serde_json::Value,
+    },
     RunReducer {
         function: String,
         #[serde(default)]
@@ -204,6 +212,10 @@ impl HostCallRequest {
                 table,
                 key: key_column(key),
                 id: encode(id)?,
+            },
+            Self::ActionEnqueue { function, args } => HostCall::ActionEnqueue {
+                function,
+                args: encode(args)?,
             },
             Self::RunReducer { function, args } => HostCall::RunReducer {
                 function,

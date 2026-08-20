@@ -6,7 +6,6 @@ const (
 	FunctionKindQuery   FunctionKind = "query"
 	FunctionKindReducer FunctionKind = "reducer"
 	FunctionKindAction  FunctionKind = "action"
-	FunctionKindHTTP    FunctionKind = "http"
 )
 
 type DeliveryMode string
@@ -132,11 +131,7 @@ type ReadDependency struct {
 type Schema struct {
 	Tables             map[string]Table `json:"tables"`
 	ControlPlaneTables map[string]Table `json:"controlPlaneTables,omitempty"`
-	// LandlordTables is the legacy wire/source name for ControlPlaneTables.
-	// Normalize aliases both fields to the same map so callers cannot observe
-	// two divergent control-plane schemas during the terminology migration.
-	LandlordTables map[string]Table `json:"landlordTables,omitempty"`
-	TenantTables   map[string]Table `json:"tenantTables,omitempty"`
+	TenantTables       map[string]Table `json:"tenantTables,omitempty"`
 }
 
 type Table struct {
@@ -212,34 +207,14 @@ func EmptySchema() Schema {
 	return Schema{
 		Tables:             tenantTables,
 		ControlPlaneTables: controlPlaneTables,
-		LandlordTables:     controlPlaneTables,
 		TenantTables:       tenantTables,
 	}
 }
 
 func (s Schema) Normalize() Schema {
-	// ControlPlaneTables is canonical. During the wire migration, accept the
-	// old landlordTables spelling and merge both spellings into one map when a
-	// payload contains both. Preferred terminology wins on key collisions.
-	controlPlaneTables := s.ControlPlaneTables
-	if controlPlaneTables == nil {
-		controlPlaneTables = s.LandlordTables
+	if s.ControlPlaneTables == nil {
+		s.ControlPlaneTables = map[string]Table{}
 	}
-	if controlPlaneTables == nil {
-		controlPlaneTables = map[string]Table{}
-	}
-	if s.ControlPlaneTables != nil && s.LandlordTables != nil && !sameTableMap(s.ControlPlaneTables, s.LandlordTables) {
-		merged := make(map[string]Table, len(s.LandlordTables)+len(s.ControlPlaneTables))
-		for name, table := range s.LandlordTables {
-			merged[name] = table
-		}
-		for name, table := range s.ControlPlaneTables {
-			merged[name] = table
-		}
-		controlPlaneTables = merged
-	}
-	s.ControlPlaneTables = controlPlaneTables
-	s.LandlordTables = controlPlaneTables
 
 	if s.TenantTables == nil {
 		if s.Tables == nil {
@@ -281,59 +256,10 @@ func (s Schema) ControlPlaneSchema() Schema {
 	return Schema{Tables: s.ControlPlaneTables}
 }
 
-// LandlordSchema is retained as a source-compatible alias for
-// ControlPlaneSchema. New code should use ControlPlaneSchema.
-func (s Schema) LandlordSchema() Schema {
-	return s.ControlPlaneSchema()
-}
-
 func (s Schema) TenantSchema() Schema {
 	s = s.Normalize()
 	if s.TenantTables == nil {
 		return Schema{Tables: s.Tables}
 	}
 	return Schema{Tables: s.TenantTables}
-}
-
-func sameTableMap(left, right map[string]Table) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for name, leftTable := range left {
-		rightTable, ok := right[name]
-		if !ok || !sameTable(leftTable, rightTable) {
-			return false
-		}
-	}
-	return true
-}
-
-func sameTable(left, right Table) bool {
-	if len(left.Columns) != len(right.Columns) || len(left.Indexes) != len(right.Indexes) {
-		return false
-	}
-	for name, leftColumn := range left.Columns {
-		if right.Columns[name] != leftColumn {
-			return false
-		}
-	}
-	for name, leftIndex := range left.Indexes {
-		rightIndex, ok := right.Indexes[name]
-		if !ok || leftIndex.Unique != rightIndex.Unique || leftIndex.Kind != rightIndex.Kind || !sameStrings(leftIndex.Columns, rightIndex.Columns) {
-			return false
-		}
-	}
-	return true
-}
-
-func sameStrings(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }

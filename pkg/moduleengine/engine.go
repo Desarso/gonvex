@@ -32,7 +32,6 @@ const (
 	KindQuery   Kind = "query"
 	KindReducer Kind = "reducer"
 	KindAction  Kind = "action"
-	KindHTTP    Kind = "http"
 )
 
 // Descriptor is the language-neutral view of one registered function: the
@@ -42,9 +41,6 @@ const (
 type Descriptor struct {
 	Path string
 	Kind Kind
-	// Public marks an HTTP function that may run without a Gonvex session
-	// because the module authenticates the request itself.
-	Public bool
 	// Internal marks a Reducer callable only by the host, scheduler, or Action.
 	Internal bool
 	// Delivery distinguishes one-shot Queries, Live Queries, and Replica
@@ -71,18 +67,6 @@ type Invocation struct {
 // sees one shape regardless of the module's language.
 type Result struct {
 	Value any
-}
-
-// HTTPInvocation is an HTTP function call. The request is already normalized to
-// the transport-independent gonvex.HTTPRequest the host builds from net/http.
-type HTTPInvocation struct {
-	Path    string
-	Request gonvex.HTTPRequest
-}
-
-// HTTPResult carries the response an HTTP function returned.
-type HTTPResult struct {
-	Response gonvex.HTTPResponse
 }
 
 // ReducerInvoker is the shape shared by ModuleEngine's two reducer entry
@@ -127,5 +111,4 @@ type ModuleEngine interface {
 	InvokeReducer(ctx *gonvex.ReducerCtx, call Invocation) (Result, error)
 	InvokeInternalReducer(ctx *gonvex.ReducerCtx, call Invocation) (Result, error)
 	InvokeAction(ctx *gonvex.ActionCtx, call Invocation) (Result, error)
-	InvokeHTTP(ctx *gonvex.HTTPContext, call HTTPInvocation) (HTTPResult, error)
 }

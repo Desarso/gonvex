@@ -2,13 +2,44 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/sqlmigration"
 )
+
+func TestMigrationsFromManifestReadsTypeScriptModuleArtifact(t *testing.T) {
+	source := "-- gonvex:scope tenant\nSELECT 1;\n"
+	current := manifest.Manifest{Module: &manifest.ModuleArtifact{Files: map[string]string{
+		"migrations/0001_tasks.sql": base64.StdEncoding.EncodeToString([]byte(source)),
+		"gonvex/index.ts":           base64.StdEncoding.EncodeToString([]byte("export {};")),
+	}}}
+	migrations, err := migrationsFromManifest(current)
+	if err != nil {
+		t.Fatalf("read TypeScript migrations: %v", err)
+	}
+	if len(migrations) != 1 || migrations[0].Name != "0001_tasks.sql" || string(migrations[0].SQL) != source {
+		t.Fatalf("unexpected migrations: %#v", migrations)
+	}
+}
+
+func TestMigrationsFromManifestReadsGoSourceBundle(t *testing.T) {
+	source := "-- gonvex:scope tenant\nSELECT 2;\n"
+	current := manifest.Manifest{Bundle: &manifest.SourceBundle{Files: map[string]string{
+		"migrations/0002_tasks.sql": base64.StdEncoding.EncodeToString([]byte(source)),
+	}}}
+	migrations, err := migrationsFromManifest(current)
+	if err != nil {
+		t.Fatalf("read Go migrations: %v", err)
+	}
+	if len(migrations) != 1 || migrations[0].Name != "0002_tasks.sql" || string(migrations[0].SQL) != source {
+		t.Fatalf("unexpected migrations: %#v", migrations)
+	}
+}
 
 func TestTenantSQLMigrationsContinueAfterFailure(t *testing.T) {
 	tenants := []tenantTarget{{ID: "a", databaseURL: "db-a"}, {ID: "b", databaseURL: "db-b"}, {ID: "c", databaseURL: "db-c"}}

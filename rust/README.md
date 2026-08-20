@@ -1,6 +1,6 @@
 # Gonvex v2 Rust module host
 
-This workspace is the language-neutral application-module seam and the host
+This workspace is the TypeScript application-module seam and the V8 host
 process that executes it. It does not replace the Go runtime: Go still owns
 HTTP, Postgres, tenancy, identity, the change feed, and every transaction.
 
@@ -24,16 +24,15 @@ V8ModuleEngine  ·  GenerationRegistry
 Go QueryCtx / ReducerCtx / ActionCtx
 ```
 
-`gonvex-module-runtime` owns only the ABI: function contracts, invocation
+`gonvex-module-runtime` owns only the host ABI: function contracts, invocation
 identity/tenant context, capability declarations, host calls, and result/error
-types. It deliberately moves values as bytes and JSON metadata so the host is
-not coupled to TypeScript, Go, or a database client.
+types. It deliberately moves values as bytes and JSON metadata so the V8 host
+is not coupled to a database client.
 
 `gonvex-module-runtime-v8` executes TypeScript modules: it loads the bundled
 JavaScript ESM artifact into deno_core isolates and dispatches calls to the
-exported handlers a manifest names. `gonvex-module-runtime-wasm` is still a
-seam for a future Wasmtime Component Model adapter, and its `ModuleEngine`
-implementation fails explicitly until that engine is linked.
+exported handlers a manifest names. Whagons modules are TypeScript-only; a
+future full Rust rewrite concerns the Gonvex host itself, not application code.
 
 `gonvex-server-host` provides atomic module generations. New calls acquire a
 lease on the active generation; publishing generation N+1 prevents new calls
@@ -118,16 +117,15 @@ context object simply lacks the methods for capabilities that were not granted.
 | Kind    | Context surface                                                     |
 | ------- | ------------------------------------------------------------------- |
 | Query   | `ctx.db.query`                                                      |
-| Reducer | `ctx.db.query`, `ctx.db.insert`, `ctx.db.update`, `ctx.db.delete`   |
+| Reducer | `ctx.db.query/insert/update/delete`, `ctx.actions.enqueue`          |
 | Action  | `ctx.runReducer`, `ctx.fetch`, `ctx.storage`                        |
-| Http    | same as Action                                                      |
 
 A Query's reads run inside a read-only transaction the Go host opens for the
 invocation, so a write is refused by Postgres itself. A Reducer's calls run on
 the exact transaction the Go host already holds for that mutation, so the
-module's writes and the host's bookkeeping commit together or not at all. An
-Action has no database handle at all: durable change re-enters through
-`runReducer`.
+module's writes, durable Action outbox rows, and host bookkeeping commit
+together or not at all. An Action has no database handle at all: durable change
+re-enters through `runReducer`.
 
 Writes never travel as SQL text. `insert`, `update` and `delete` name a table, a
 key and a JSON object; the Go host validates and quotes the identifiers and

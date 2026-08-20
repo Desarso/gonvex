@@ -2024,7 +2024,7 @@ func queryCacheWriteDecision(path string, result any) queryCacheWriteChoice {
 	}
 
 	// Never cache nil / missing-row results. Existence lookups like
-	// tenants.getByDomain returning null during a schema/landlord blip would
+	// tenants.getByDomain returning null during a schema/control-plane blip would
 	// otherwise stick for emptyResultTTL and bounce clients to missingTenant.
 	if result == nil {
 		return queryCacheWriteChoice{store: false}
@@ -2123,7 +2123,6 @@ func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projec
 		queryCtx.DB = nil
 		queryCtx.TenantDB = nil
 		queryCtx.ControlPlaneDB = nil
-		queryCtx.LandlordDB = nil
 		result, err := engine.InvokeQuery(queryCtx, moduleengine.Invocation{Path: path, Args: rawArgs})
 		if err != nil {
 			_ = tx.Rollback()
@@ -2213,7 +2212,7 @@ func (s *Server) executeTenantReducerForCaller(ctx context.Context, projectID st
 			// Optional app hook: seed structural defaults into the newly
 			// provisioned tenant database (roles, permissions, etc.). Runs with
 			// the new tenant as active context so TenantTable writes land in the
-			// right DB — not the landlord DB used during tenants.create itself.
+			// right DB — not the project control-plane DB used during tenants.create itself.
 			if err := s.runTenantsOnProvisioned(ctx, projectID, result, caller); err != nil {
 				return nil, err
 			}
@@ -2306,7 +2305,7 @@ func (s *Server) runReducerInTx(reducerCtx *gonvex.ReducerCtx, path string, rawA
 	originalScheduler := reducerCtx.Scheduler
 	deferred := newDeferredScheduler(originalScheduler)
 	reducerCtx.Scheduler = deferred
-	reducerCtx.Outbox = postgresActionOutbox{tx: tx, user: reducerCtx.User}
+	reducerCtx.Outbox = postgresActionOutbox{tx: tx, user: reducerCtx.Auth.Account}
 	// Reducer code receives only the transaction handle. Raw pools would allow
 	// an accidental write to commit outside the atomic business intent.
 	restrictReducerCapabilities(reducerCtx)
@@ -2342,7 +2341,6 @@ func restrictReducerCapabilities(ctx *gonvex.ReducerCtx) {
 	ctx.DB = nil
 	ctx.TenantDB = nil
 	ctx.ControlPlaneDB = nil
-	ctx.LandlordDB = nil
 	ctx.Storage = gonvex.UnavailableStorage()
 	ctx.Sandbox = gonvex.UnavailableSandbox()
 	ctx.Data = gonvex.UnavailableData()
@@ -2447,7 +2445,6 @@ func (s *Server) actionContext(ctx context.Context, projectID string, tenantID s
 	runtimeCtx.DB = nil
 	runtimeCtx.TenantDB = nil
 	runtimeCtx.ControlPlaneDB = nil
-	runtimeCtx.LandlordDB = nil
 	runtimeCtx.Tx = nil
 	runtimeCtx.Data = gonvex.UnavailableData()
 	runtimeCtx.Reducers = &actionReducerCaller{
@@ -2481,8 +2478,8 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 	if err != nil {
 		return gonvex.RuntimeContext{}, err
 	}
-	landlordURL := s.databaseURLForProject(projectID)
-	landlordStore, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, "__landlord__"), landlordURL)
+	controlPlaneURL := s.databaseURLForProject(projectID)
+	controlPlaneStore, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, "__control_plane__"), controlPlaneURL)
 	if err != nil {
 		return gonvex.RuntimeContext{}, err
 	}
@@ -2499,8 +2496,7 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		Member:           caller.member,
 		DatabaseURL:      store.DatabaseURL,
 		DB:               store.DB,
-		ControlPlaneDB:   landlordStore.DB,
-		LandlordDB:       landlordStore.DB,
+		ControlPlaneDB:   controlPlaneStore.DB,
 		TenantDB:         store.DB,
 		Storage:          storageAPI,
 		Sandbox:          s.sandboxForCaller(projectID, activeTenant, caller, dataAPI),
@@ -2508,8 +2504,6 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		Ephemeral:        newScopedEphemeralAPI(ctx, s.ephemeral, projectID, activeTenant),
 		ProjectEphemeral: newProjectScopedEphemeralAPI(ctx, s.ephemeral, projectID),
 		Scheduler:        s.scheduler.For(projectID, activeTenant),
-		User:             caller.user,
-		Permissions:      caller.permissions,
 		Logger:           logger,
 		Env:              s.projectEnvValues(ctx, projectID),
 	}, nil

@@ -77,7 +77,11 @@ const objectQueryRef: FunctionReference = {
   path: "tasks.get",
   optimistic: { projection: { entity: "tasks", key: "id", resultPath: [] } },
 };
-const reducerRef: FunctionReference = { kind: "reducer", path: "tasks.update" };
+const reducerRef: FunctionReference = {
+  kind: "reducer",
+  path: "tasks.update",
+  offline: { mode: "allowed", conflict: "expectedVersion" },
+};
 const generatedReducerRef: FunctionReference = {
   kind: "reducer",
   path: "tasks.generatedUpdate",
@@ -543,6 +547,20 @@ describe("optimistic reducer integration", () => {
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Server confirmed" }],
     });
+  });
+
+  it("rejects offline queueing when the generated Reducer contract forbids it", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
+    await expect(client.reducer({
+      kind: "reducer",
+      path: "approvals.decide",
+      offline: { mode: "forbidden" },
+    }, { attemptId: "attempt-1" }, { offline: "queue" })).rejects.toMatchObject<GonvexClientError>({
+      code: "disconnected",
+      operation: "reducer",
+    });
+    await expect(client.outboxCount()).resolves.toBe(0);
+    client.close();
   });
 
   it("queues and acknowledges offline reducers without optimistic UI metadata", async () => {

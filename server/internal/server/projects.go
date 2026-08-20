@@ -590,9 +590,8 @@ type projectRegistryExecer interface {
 }
 
 func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error {
-	// Identity v2 lives in the Control Plane. These tables are additive during
-	// cutover: legacy auth rows remain readable until the explicit migration has
-	// verified every account and tenant-member reference.
+	// Identity v2 lives in the Control Plane. Legacy identity data is imported
+	// only by the explicit identity-v2 migration command, never by runtime reads.
 	if err := controlidentity.InstallSchema(ctx, db); err != nil {
 		return fmt.Errorf("install control-plane identity schema: %w", err)
 	}
@@ -735,7 +734,17 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	)`); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_mutation_logs (
+	// One-way update migration. Runtime code never reads the legacy name after
+	// this block; existing audit history is retained under the reducer term.
+	if _, err := db.ExecContext(ctx, `DO $$ BEGIN
+		IF to_regclass('public.gonvex_runtime_mutation_logs') IS NOT NULL
+			AND to_regclass('public.gonvex_runtime_reducer_logs') IS NULL THEN
+			ALTER TABLE gonvex_runtime_mutation_logs RENAME TO gonvex_runtime_reducer_logs;
+		END IF;
+	END $$`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_reducer_logs (
 		id BIGSERIAL PRIMARY KEY,
 		project_id TEXT NOT NULL DEFAULT '',
 		kind TEXT NOT NULL,
@@ -746,14 +755,14 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	}
 	// The table now also stores FAILED queries/actions/http calls, which the
 	// in-memory ring drops within minutes (see runtimeLogIsDurable). Existing
-	// deployments carry a kind CHECK that only allowed the two mutation kinds and
+	// deployments carried a kind CHECK that only allowed old mutation names and
 	// silently rejected every one of those inserts.
-	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_mutation_logs
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_reducer_logs
 		DROP CONSTRAINT IF EXISTS gonvex_runtime_mutation_logs_kind_check`); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_runtime_mutation_logs_by_project
-		ON gonvex_runtime_mutation_logs (project_id, id DESC)`); err != nil {
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_runtime_reducer_logs_by_project
+		ON gonvex_runtime_reducer_logs (project_id, id DESC)`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_scheduled_jobs (
@@ -982,41 +991,6 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	}
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_refresh_tokens_by_expiry
 		ON gonvex_auth_refresh_tokens (expires_at)`); err != nil {
-		return err
-	}
-	// Migration-only compatibility table. Tenant-local members are the sole
-	// membership, role, and owner authority; nothing at runtime reads or writes
-	// gonvex_auth_memberships, and it survives only to seed the directory
-	// projection below until the schema cleanup drops it.
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_memberships (
-		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
-		user_id TEXT NOT NULL,
-		tenant_id TEXT NOT NULL,
-		role TEXT NOT NULL DEFAULT 'member',
-		permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (project_id, user_id, tenant_id),
-		FOREIGN KEY (project_id, user_id) REFERENCES gonvex_auth_users(project_id, id) ON DELETE CASCADE,
-		FOREIGN KEY (project_id, tenant_id) REFERENCES gonvex_runtime_tenants(project_id, tenant_id) ON DELETE CASCADE
-	)`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_memberships_by_tenant
-		ON gonvex_auth_memberships (project_id, tenant_id, role, user_id)`); err != nil {
-		return err
-	}
-	// One-time discovery bootstrap at revision 0, so any committed tenant member
-	// revision supersedes it. account_tenant_index is otherwise maintained from
-	// the tenant outbox and change feed, and only ever locates a tenant database:
-	// admission still re-reads that tenant's own member row.
-	if _, err := db.ExecContext(ctx, `INSERT INTO account_tenant_index (
-		account_id, tenant_id, member_id, status, tenant_membership_revision, updated_at
-	)
-	SELECT COALESCE(NULLIF(u.account_id, ''), u.id), m.tenant_id, m.user_id, 'active', 0, now()
-	FROM gonvex_auth_memberships m
-	JOIN gonvex_auth_users u ON u.project_id = m.project_id AND u.id = m.user_id
-	ON CONFLICT (account_id, tenant_id) DO NOTHING`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_membership_invitations (

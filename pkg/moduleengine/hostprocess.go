@@ -246,6 +246,12 @@ func (h *RemoteHost) Close(ctx context.Context) error {
 			GraceMS: uint64(h.options.ShutdownTimeout / time.Millisecond),
 		}, nil)
 		cancel()
+		// A host may close its control socket immediately after accepting the
+		// shutdown request. That is a successful terminal state, even if the final
+		// acknowledgement loses the race with EOF.
+		if errors.Is(shutdownErr, errModuleHostClosed) {
+			shutdownErr = nil
+		}
 		if shutdownErr != nil {
 			h.options.Logger.Warn("module host did not confirm shutdown", "error", shutdownErr)
 		}

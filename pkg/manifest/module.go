@@ -87,7 +87,7 @@ func (a ModuleArtifact) Validate() error {
 			return fmt.Errorf("module declares a function with an empty path")
 		}
 		switch function.Kind {
-		case FunctionKindQuery, FunctionKindReducer, FunctionKindAction, FunctionKindHTTP:
+		case FunctionKindQuery, FunctionKindReducer, FunctionKindAction:
 		default:
 			return fmt.Errorf("module function %q has unknown kind %q", path, function.Kind)
 		}

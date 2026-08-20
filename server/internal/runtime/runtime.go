@@ -27,9 +27,8 @@ type Runtime struct {
 	engines map[string]loadedEngine
 }
 
-// loadedEngine pairs an engine with the module it was built from, so a replaced
-// bundle or a replaced artifact invalidates the memoized engine. Exactly one of
-// app and remote is set.
+// loadedEngine pairs the routed engine with the module artifacts it was built
+// from, so replacing either side invalidates the memoized composite.
 type loadedEngine struct {
 	app    *gonvex.App
 	remote *moduleengine.RemoteEngine
@@ -95,19 +94,38 @@ func (r *Runtime) SyncManifestContext(ctx context.Context, next manifest.Manifes
 		next.Module = &normalized
 	}
 
-	var installed *loadedEngine
-	switch {
-	case next.UsesModuleHost():
-		engine, err := r.activateModule(ctx, next)
+	var app *gonvex.App
+	if next.Bundle != nil && len(next.Bundle.Files) > 0 {
+		var err error
+		app, err = r.loader.Load(next.Project, *next.Bundle)
 		if err != nil {
 			return err
 		}
-		installed = engine
-	case next.Bundle != nil && len(next.Bundle.Files) > 0:
-		if _, err := r.loader.Load(next.Project, *next.Bundle); err != nil {
+	}
+	var remote *moduleengine.RemoteEngine
+	var identity string
+	if next.Module != nil {
+		loaded, err := r.activateModule(ctx, next)
+		if err != nil {
 			return err
 		}
-	case next.Module != nil:
+		remote = loaded.remote
+		identity = loaded.identity
+	}
+	var goEngine moduleengine.ModuleEngine
+	if app != nil {
+		goEngine = moduleengine.NewGoAppEngine(app)
+	}
+	var moduleEngine moduleengine.ModuleEngine
+	if remote != nil {
+		moduleEngine = remote
+	}
+	engine, err := moduleengine.NewCompositeEngine(goEngine, moduleEngine)
+	if err != nil {
+		return err
+	}
+	installed := &loadedEngine{app: app, remote: remote, engine: engine, identity: identity}
+	if next.Module != nil && remote == nil {
 		// A module artifact in a language this runtime has no engine for is a
 		// deployment error, not something to quietly ignore.
 		return fmt.Errorf("project %q ships a %s module, which this runtime cannot execute", next.Project, next.Module.NormalizedLanguage())
@@ -118,11 +136,7 @@ func (r *Runtime) SyncManifestContext(ctx context.Context, next manifest.Manifes
 	if installed != nil {
 		r.engines[next.Project] = *installed
 	} else if next.Project != "" {
-		// Switching a project back to a Go bundle must not leave a remote engine
-		// shadowing it.
-		if previous, ok := r.engines[next.Project]; ok && previous.remote != nil {
-			delete(r.engines, next.Project)
-		}
+		delete(r.engines, next.Project)
 	}
 	r.manifest = next
 	if next.Project != "" {
@@ -187,6 +201,9 @@ func (r *Runtime) EngineForProject(projectID string) moduleengine.ModuleEngine {
 	r.mu.RLock()
 	loaded, ok := r.engines[projectID]
 	r.mu.RUnlock()
+	if ok && loaded.engine != nil {
+		return loaded.engine
+	}
 	if ok && loaded.remote != nil {
 		return loaded.remote
 	}

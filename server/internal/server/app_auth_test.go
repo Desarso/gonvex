@@ -19,8 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gonvex/gonvex/pkg/gonvex"
-	"github.com/gonvex/gonvex/pkg/moduleengine"
 	"github.com/gonvex/gonvex/server/internal/config"
 )
 
@@ -88,7 +86,7 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 	baseURL := tenantRegistryTestPostgresURL(t)
 	controlURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_app_auth_"+tenantRegistryTestSuffix(t))
 	const projectID = "app-auth-project"
-	runtime := New(config.Config{LandlordURL: controlURL, PostgresURL: baseURL, DashboardAuthProjectID: projectID})
+	runtime := New(config.Config{ControlPlaneURL: controlURL, PostgresURL: baseURL, DashboardAuthProjectID: projectID})
 	if err := runtime.saveProjectRegistry(context.Background(), projectTarget{
 		ID: projectID, Name: "Auth App", Environment: "test", Database: "auth_app",
 		DatabaseMode: "single", StorageBucket: "", Status: "test", Description: "auth integration test",
@@ -282,50 +280,6 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 	if meResponse.Code != http.StatusOK || !strings.Contains(meResponse.Body.String(), user.ID) {
 		t.Fatalf("HTTP auth identity failed: %d %s", meResponse.Code, meResponse.Body.String())
 	}
-	app := gonvex.NewApp()
-	app.HTTP("/protected-account", func(ctx *gonvex.HTTPContext, _ gonvex.HTTPRequest) (gonvex.HTTPResponse, error) {
-		payload, _ := json.Marshal(map[string]any{
-			"userId": ctx.User.ID, "email": ctx.User.Email, "role": ctx.Permissions["role"],
-		})
-		return gonvex.HTTPResponse{Status: http.StatusOK, Body: payload}, nil
-	})
-	app.PublicHTTP("/provider-signed-callback", func(ctx *gonvex.HTTPContext, _ gonvex.HTTPRequest) (gonvex.HTTPResponse, error) {
-		if ctx.User != nil {
-			return gonvex.HTTPResponse{Status: http.StatusInternalServerError}, nil
-		}
-		return gonvex.HTTPResponse{Status: http.StatusAccepted}, nil
-	})
-	runtime.appEngine = moduleengine.NewGoAppEngine(app)
-	anonymousHTTPRequest := httptest.NewRequest(http.MethodGet, "/protected-account", nil)
-	anonymousHTTPRequest.Header.Set("x-gonvex-project-id", projectID)
-	anonymousHTTPResponse := httptest.NewRecorder()
-	runtime.Handler().ServeHTTP(anonymousHTTPResponse, anonymousHTTPRequest)
-	if anonymousHTTPResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("protected HTTP function accepted an anonymous request: %d %s", anonymousHTTPResponse.Code, anonymousHTTPResponse.Body.String())
-	}
-	authenticatedHTTPRequest := httptest.NewRequest(http.MethodGet, "/protected-account", nil)
-	authenticatedHTTPRequest.Header.Set("x-gonvex-project-id", projectID)
-	authenticatedHTTPRequest.Header.Set("authorization", "Bearer "+grant.AccessToken)
-	authenticatedHTTPResponse := httptest.NewRecorder()
-	runtime.Handler().ServeHTTP(authenticatedHTTPResponse, authenticatedHTTPRequest)
-	if authenticatedHTTPResponse.Code != http.StatusOK || !strings.Contains(authenticatedHTTPResponse.Body.String(), user.ID) || !strings.Contains(authenticatedHTTPResponse.Body.String(), `"role":"member"`) {
-		t.Fatalf("protected HTTP function did not receive the verified caller: %d %s", authenticatedHTTPResponse.Code, authenticatedHTTPResponse.Body.String())
-	}
-	publicHTTPRequest := httptest.NewRequest(http.MethodPost, "/provider-signed-callback", nil)
-	publicHTTPRequest.Header.Set("x-gonvex-project-id", projectID)
-	publicHTTPResponse := httptest.NewRecorder()
-	runtime.Handler().ServeHTTP(publicHTTPResponse, publicHTTPRequest)
-	if publicHTTPResponse.Code != http.StatusAccepted {
-		t.Fatalf("public signed callback required a user session: %d %s", publicHTTPResponse.Code, publicHTTPResponse.Body.String())
-	}
-	invalidPublicRequest := httptest.NewRequest(http.MethodPost, "/provider-signed-callback", nil)
-	invalidPublicRequest.Header.Set("x-gonvex-project-id", projectID)
-	invalidPublicRequest.Header.Set("authorization", "Bearer invalid-explicit-token")
-	invalidPublicResponse := httptest.NewRecorder()
-	runtime.Handler().ServeHTTP(invalidPublicResponse, invalidPublicRequest)
-	if invalidPublicResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("public callback ignored an explicitly invalid token: %d %s", invalidPublicResponse.Code, invalidPublicResponse.Body.String())
-	}
 	if _, _, err := runtime.exchangeAppAuthCode(context.Background(), projectID, code, verifier, redirectURI); err == nil {
 		t.Fatal("expected an authorization code replay to be rejected")
 	}
@@ -390,7 +344,7 @@ func TestAppAuthSingleDatabaseInviteOnlyRequiresCentralInvitation(t *testing.T) 
 	baseURL := tenantRegistryTestPostgresURL(t)
 	controlURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_app_auth_single_invite_"+tenantRegistryTestSuffix(t))
 	const projectID = "single-invite-project"
-	runtime := New(config.Config{LandlordURL: controlURL, PostgresURL: baseURL})
+	runtime := New(config.Config{ControlPlaneURL: controlURL, PostgresURL: baseURL})
 	if err := runtime.saveProjectRegistry(context.Background(), projectTarget{
 		ID: projectID, Name: "Private App", Environment: "test", Database: "private_app",
 		DatabaseMode: "single", Status: "test", Description: "single invite-only auth test",
@@ -432,7 +386,7 @@ func TestAppAuthSingleDatabaseInviteOnlyRequiresCentralInvitation(t *testing.T) 
 func TestAppAuthMultiTenantPersonalWorkspaceInvitationsAndSwitching(t *testing.T) {
 	baseURL := tenantRegistryTestPostgresURL(t)
 	controlURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_app_auth_multi_"+tenantRegistryTestSuffix(t))
-	runtime := New(config.Config{LandlordURL: controlURL, PostgresURL: baseURL})
+	runtime := New(config.Config{ControlPlaneURL: controlURL, PostgresURL: baseURL})
 	projectID, err := generateProjectID()
 	if err != nil {
 		t.Fatal(err)

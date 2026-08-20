@@ -70,7 +70,7 @@ func TestPostgresProjectEnvAuthorizationThroughRouterAndMiddleware(t *testing.T)
 	}
 
 	server := New(config.Config{
-		LandlordURL:     controlURL,
+		ControlPlaneURL: controlURL,
 		PostgresURL:     baseURL,
 		RequireAuth:     true,
 		DashboardSecret: "project-env-integration-session-secret",
@@ -139,7 +139,7 @@ func TestPostgresProjectEnvAuthorizationThroughRouterAndMiddleware(t *testing.T)
 	// request below therefore proves the persisted project-key registration is
 	// hydrated before authorization, as it is after a real runtime restart.
 	runtimeServer := New(config.Config{
-		LandlordURL:     controlURL,
+		ControlPlaneURL: controlURL,
 		PostgresURL:     baseURL,
 		RequireAuth:     true,
 		DashboardSecret: "project-env-integration-session-secret",

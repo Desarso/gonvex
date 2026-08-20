@@ -5,17 +5,18 @@ description: What is implemented today and what still needs product/runtime work
 
 # Current Limits
 
-Gonvex is beta software. The runtime executes uploaded Go applications with a
-deliberately narrow data model: Queries, Reducers, Actions, Replica Collections,
-and structured Live Queries. Remaining limits are primarily migration safety,
-fleet operations, richer conflict policies, and managed hosting.
+Gonvex is beta software. The runtime exposes exactly three executable
+application kinds: Queries, Reducers, and Actions. Replica Collections and
+structured Live Queries are Query delivery modes. Remaining limits are
+primarily migration safety, fleet operations, richer conflict policies, and
+managed hosting.
 
 ## Implemented Today
 
 The current codebase includes:
 
 - app-local read-only Queries, transactional Reducers, external-work Actions,
-  HTTP handlers, Replica Collections, and structured Live Queries;
+  Replica Collections, and structured Live Queries;
 - uploaded source bundles compiled and cached per project;
 - generated TypeScript API references and scoped schema metadata;
 - safe Postgres schema sync for project and tenant databases;

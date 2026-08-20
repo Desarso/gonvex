@@ -1,9 +1,8 @@
 //! Language-neutral Gonvex module ABI.
 //!
 //! The ABI deliberately transports JSON-shaped metadata and byte payloads.
-//! The host never depends on TypeScript, Go, or a particular database driver.
-//! V8 and Wasm adapters can therefore implement this crate without changing
-//! the HTTP, Postgres, change-feed, or generation lifecycle code.
+//! The host never depends on TypeScript source or a particular database driver.
+//! The current application-module runtime supports TypeScript through V8 only.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -19,9 +18,6 @@ pub type ModuleGeneration = u64;
 #[serde(rename_all = "lowercase")]
 pub enum ModuleLanguage {
     TypeScript,
-    Rust,
-    Wasm,
-    Other(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -30,7 +26,6 @@ pub enum FunctionKind {
     Query,
     Reducer,
     Action,
-    Http,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -64,7 +59,7 @@ pub struct ModuleManifest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ModuleArtifact {
     pub manifest: ModuleManifest,
-    /// Bundled JavaScript, Wasm component bytes, or another engine payload.
+    /// Bundled JavaScript ESM payload.
     /// The host treats this as opaque and verifies `artifact_hash` before load.
     pub payload: Vec<u8>,
 }
@@ -149,6 +144,7 @@ pub struct InvocationContext {
 pub struct Capabilities {
     pub db_read: bool,
     pub db_write: bool,
+    pub action_outbox: bool,
     pub run_reducer: bool,
     pub network: bool,
     pub storage: bool,
@@ -173,8 +169,9 @@ pub struct InvocationResult {
 
 /// The host operations a module may ask for. The vocabulary matches the
 /// `@gonvex/module-sdk` context surface one to one — `ReadDB.query` plus
-/// `WriteDB.insert/update/delete` — so a table write never travels as
-/// interpolated SQL text. Payloads are JSON bytes; the host owns the
+/// `WriteDB.insert/update/delete` plus `ReducerActions.enqueue` — so a table
+/// write never travels as interpolated SQL text and external work is recorded
+/// by the host-owned transaction. Payloads are JSON bytes; the host owns the
 /// transaction, the identifier quoting, and the parameter binding.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HostCall {
@@ -201,6 +198,10 @@ pub enum HostCall {
         table: String,
         key: String,
         id: Vec<u8>,
+    },
+    ActionEnqueue {
+        function: String,
+        args: Vec<u8>,
     },
     RunReducer {
         function: String,
@@ -235,6 +236,7 @@ impl HostCall {
         match self {
             Self::DbQuery { .. } => "db_read",
             Self::DbInsert { .. } | Self::DbUpdate { .. } | Self::DbDelete { .. } => "db_write",
+            Self::ActionEnqueue { .. } => "action_outbox",
             Self::RunReducer { .. } => "run_reducer",
             Self::Fetch { .. } => "network",
             Self::Storage { .. } => "storage",
@@ -246,6 +248,7 @@ impl HostCall {
         let allowed = match name {
             "db_read" => capabilities.db_read,
             "db_write" => capabilities.db_write,
+            "action_outbox" => capabilities.action_outbox,
             "run_reducer" => capabilities.run_reducer,
             "network" => capabilities.network,
             _ => capabilities.storage,
@@ -286,7 +289,7 @@ pub enum ModuleError {
 }
 
 /// The only runtime contract the Rust host needs from an application module.
-/// Implementations may be V8, Wasmtime, or another engine in the future.
+/// The production implementation is the bounded V8 engine.
 pub trait ModuleEngine: Send + Sync {
     fn manifest(&self) -> &ModuleManifest;
 

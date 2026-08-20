@@ -476,13 +476,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gonvex-module-runtime-wasm"
-version = "0.1.0"
-dependencies = [
- "gonvex-module-runtime",
-]
-
-[[package]]
 name = "gonvex-server-host"
 version = "0.1.0"
 dependencies = [

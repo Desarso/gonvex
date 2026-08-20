@@ -3,6 +3,7 @@ package moduleengine
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -84,6 +85,29 @@ func TestRemoteEngineExecutesV8AndSwapsGenerationWithoutReconnect(t *testing.T) 
 		"hasDb": false, "hasFetch": true, "hasStorage": false,
 	})
 
+	outbox := &recordingActionOutbox{}
+	reducerResult, err := first.InvokeReducer(
+		&gonvex.ReducerCtx{RuntimeContext: gonvex.RuntimeContext{
+			Context: runtimeContext.Context,
+			Auth:    runtimeContext.Auth,
+			Tenant:  runtimeContext.Tenant,
+			Member:  runtimeContext.Member,
+			Tx:      &sql.Tx{},
+			Outbox:  outbox,
+		}},
+		Invocation{Path: "system.enqueue", Args: json.RawMessage(`{"notificationId":"notification-1"}`)},
+	)
+	if err != nil {
+		t.Fatalf("invoke reducer Action outbox: %v", err)
+	}
+	assertRemoteResult(t, reducerResult.Value, map[string]any{"outboxId": "outbox-1"})
+	if outbox.path != "notifications.deliver" {
+		t.Fatalf("V8 Action outbox path = %q", outbox.path)
+	}
+	if args, ok := outbox.args.(map[string]any); !ok || args["notificationId"] != "notification-1" {
+		t.Fatalf("V8 Action outbox args = %#v", outbox.args)
+	}
+
 	second := newRemoteTestEngine(t, host, 2)
 	if err := second.Activate(context.Background()); err != nil {
 		t.Fatalf("activate second generation: %v", err)
@@ -128,6 +152,9 @@ export async function capabilities(ctx) {
     hasStorage: Object.prototype.hasOwnProperty.call(ctx, "storage"),
   };
 }
+export async function enqueue(ctx, args) {
+  return { outboxId: await ctx.actions.enqueue("notifications.deliver", args) };
+}
 `)
 	digest := sha256.Sum256(code)
 	hash := hex.EncodeToString(digest[:])
@@ -141,6 +168,9 @@ export async function capabilities(ctx) {
 			},
 			"system.capabilities": {
 				Kind: manifest.FunctionKindAction, Handler: "capabilities", Export: "capabilities", File: "gonvex/index.ts",
+			},
+			"system.enqueue": {
+				Kind: manifest.FunctionKindReducer, Handler: "enqueue", Export: "enqueue", File: "gonvex/index.ts",
 			},
 		},
 		Files: map[string]string{},

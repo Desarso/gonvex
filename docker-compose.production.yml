@@ -128,7 +128,7 @@ services:
         condition: service_healthy
     environment:
       GONVEX_ADDR: 0.0.0.0:8080
-      GONVEX_LANDLORD_DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
+      GONVEX_CONTROL_PLANE_DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
       DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
       VALKEY_URL: redis://gonvex-maker-valkey:6379/0
       GONVEX_PLUGIN_CACHE_DIR: /var/lib/gonvex/plugins

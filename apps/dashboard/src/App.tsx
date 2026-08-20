@@ -124,10 +124,7 @@ type ManifestTable = {
 };
 
 type ManifestSchema = {
-  /** Preferred Control Plane schema key. */
   controlPlaneTables?: Record<string, ManifestTable>;
-  /** Legacy manifest key retained for older runtimes. */
-  landlordTables?: Record<string, ManifestTable>;
   tenantTables?: Record<string, ManifestTable>;
   tables?: Record<string, ManifestTable>;
 };
@@ -930,8 +927,8 @@ const dashboardDatabaseModesKey = "gonvex-dashboard-database-modes";
 const dashboardDetectedTenantsKey = "gonvex-dashboard-detected-tenants";
 const dashboardHideTestTenantsKey = "gonvex-dashboard-hide-test-tenants";
 const logsColumnWidthsKey = "gonvex-logs-column-widths";
-// Internal source ID remains stable for older runtime responses and bookmarks.
-const controlPlaneDataSourceID = "__gonvex_landlord__";
+const controlPlaneDataSourceID = "__gonvex_control_plane__";
+const controlPlaneDataSourceURLValue = "control-plane";
 const dataDatabaseQueryParam = "db";
 const dataTableQueryParam = "table";
 const dataSearchQueryParam = "q";
@@ -2800,8 +2797,7 @@ function pathForProjectPage(projectID: string, id: PageID): string {
 function dataSourceFromURL(): string {
   if (typeof window === "undefined") return controlPlaneDataSourceID;
   const raw = new URLSearchParams(window.location.search).get(dataDatabaseQueryParam)?.trim() ?? "";
-  // `landlord` is the legacy URL value; keep accepting it during the cutover.
-  return raw && raw !== "landlord" ? raw : controlPlaneDataSourceID;
+  return raw && raw !== controlPlaneDataSourceURLValue ? raw : controlPlaneDataSourceID;
 }
 
 function dataStateFromURL(): {
@@ -2902,8 +2898,10 @@ function setDataStateInURL(update: {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
   if (update.sourceID !== undefined) {
-    // Preserve the legacy `db=landlord` URL contract for existing bookmarks.
-    url.searchParams.set(dataDatabaseQueryParam, update.sourceID && update.sourceID !== controlPlaneDataSourceID ? update.sourceID : "landlord");
+    url.searchParams.set(
+      dataDatabaseQueryParam,
+      update.sourceID && update.sourceID !== controlPlaneDataSourceID ? update.sourceID : controlPlaneDataSourceURLValue,
+    );
   }
   if (update.table !== undefined) {
     if (update.table) url.searchParams.set(dataTableQueryParam, update.table);
@@ -2996,11 +2994,6 @@ function tenantLooksInternalOrTest(tenant: TenantTarget): boolean {
       || normalized.includes("-e2e-")
       || normalized.includes("_e2e_");
   });
-}
-
-function tablesLookMultiTenant(tables: DataTableInfo[]): boolean {
-  const names = new Set(tables.map((table) => table.name));
-  return names.has("tenants") && (names.has("userTenantMap") || names.has("users"));
 }
 
 function useViewportHeight() {
@@ -5577,10 +5570,6 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
       .then((payload: { tables: DataTableInfo[] }) => {
         if (cancelled) return;
         const nextTables = payload.tables ?? [];
-        if (!currentTenantID && tablesLookMultiTenant(nextTables)) {
-          setDetectedMultiTenant(true);
-          props.onTenantsDetected?.(true);
-        }
         setTables(nextTables);
         setStatus(currentTenantID ? `Viewing tenant database: ${activeTenantDisplay}` : "Viewing Control Plane / project database");
         setRuntimeAvailable(true);
@@ -5705,8 +5694,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   const editingRow = editingRowIndex === null ? undefined : rowCache[editingRowIndex];
   const editingRowID = dataRowIdentity(editingRow);
   const erdGraph = useMemo(() => createERDGraph(tables), [tables]);
-  // Preserve the legacy storage suffix so existing ERD layouts remain available.
-  const erdLayoutKey = `${erdLayoutStoragePrefix}:${props.project.id}:${currentTenantID || "landlord"}`;
+  const erdLayoutKey = `${erdLayoutStoragePrefix}:${props.project.id}:${currentTenantID || controlPlaneDataSourceURLValue}`;
   const selectedERDTableInfo = tables.find((table) => table.name === selectedERDTable) ?? null;
   const selectedERDRelations = erdGraph.edges.filter((edge) => edge.source === selectedERDTable || edge.target === selectedERDTable);
   const handleERDNodesChange = useCallback((changes: NodeChange<Node<ERDNodeData>>[]) => {

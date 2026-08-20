@@ -49,7 +49,7 @@ const (
 // sandboxIdentityKey carries the authenticated user, optional permissions, and
 // optional tenant that should back host RPCs from a Go sandbox process.
 // Scheduled assistant loops build RuntimeContext with an empty caller, then
-// bind the thread owner onto ctx.User — the sandbox host was created earlier
+// bind the thread owner onto ctx.Auth.Account — the sandbox host was created earlier
 // with that empty caller closed over. Injecting identity into the RunGo
 // context lets host RPCs (whagonsAction/Mutation/Query) run as the bound user
 // and tenant instead of failing with "Not authenticated" / "tenantId is

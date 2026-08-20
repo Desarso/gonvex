@@ -186,6 +186,8 @@ pub struct CapabilitiesWire {
     #[serde(default)]
     pub db_write: bool,
     #[serde(default)]
+    pub action_outbox: bool,
+    #[serde(default)]
     pub run_reducer: bool,
     #[serde(default)]
     pub network: bool,
@@ -198,6 +200,7 @@ impl From<CapabilitiesWire> for Capabilities {
         Self {
             db_read: wire.db_read,
             db_write: wire.db_write,
+            action_outbox: wire.action_outbox,
             run_reducer: wire.run_reducer,
             network: wire.network,
             storage: wire.storage,
@@ -275,7 +278,6 @@ pub fn parse_kind(kind: &str) -> Option<FunctionKind> {
         "query" => Some(FunctionKind::Query),
         "reducer" => Some(FunctionKind::Reducer),
         "action" => Some(FunctionKind::Action),
-        "http" => Some(FunctionKind::Http),
         _ => None,
     }
 }
@@ -285,7 +287,6 @@ pub fn kind_name(kind: &FunctionKind) -> &'static str {
         FunctionKind::Query => "query",
         FunctionKind::Reducer => "reducer",
         FunctionKind::Action => "action",
-        FunctionKind::Http => "http",
     }
 }
 
@@ -444,6 +445,10 @@ pub enum HostCallFrame {
         key: String,
         id: serde_json::Value,
     },
+    ActionEnqueue {
+        function: String,
+        args: serde_json::Value,
+    },
     RunReducer {
         function: String,
         args: serde_json::Value,
@@ -497,6 +502,10 @@ impl HostCallFrame {
                 key,
                 id: decode(id, "id")?,
             },
+            HostCall::ActionEnqueue { function, args } => Self::ActionEnqueue {
+                function,
+                args: decode(args, "args")?,
+            },
             HostCall::RunReducer { function, args } => Self::RunReducer {
                 function,
                 args: decode(args, "args")?,
@@ -509,5 +518,25 @@ impl HostCallFrame {
                 payload: decode(payload, "payload")?,
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_enqueue_host_call_is_encoded_for_the_wire() {
+        let frame = HostCallFrame::from_host_call(HostCall::ActionEnqueue {
+            function: "notifications.send".to_owned(),
+            args: br#"{"taskId":"task-123","kind":"started"}"#.to_vec(),
+        })
+        .expect("action enqueue payload should be valid JSON");
+
+        let encoded = serde_json::to_value(frame).expect("host call frame should serialize");
+        assert_eq!(encoded["kind"], "actionEnqueue");
+        assert_eq!(encoded["function"], "notifications.send");
+        assert_eq!(encoded["args"]["taskId"], "task-123");
+        assert_eq!(encoded["args"]["kind"], "started");
     }
 }

@@ -54,8 +54,7 @@ The target identity model is Control Plane plus isolated tenant databases. The
 Control Plane owns Accounts, auth identities, the tenant directory and routing,
 and the `account_tenant_index` projection. A tenant database owns Members and
 tenant roles, teams, and permissions. This is the v2 architecture and migration
-target; deployments may still expose legacy landlord names and compatibility
-paths while the cutover completes.
+target.
 
 ## Quickstart
 
@@ -261,8 +260,8 @@ or unreachable; there is no in-memory fallback.
 
 Gonvex currently includes:
 
-- uploaded Go execution for Queries, Reducers, Actions, HTTP handlers, structured
-  Live Queries, and Replica Collections
+- application execution through exactly Queries, Reducers, and Actions, with
+  structured Live Queries and Replica Collections as Query delivery modes
 - safe Postgres schema sync with project and tenant scopes
 - generated TypeScript API and schema references
 - React hooks for Queries, Reducers, Actions, auth, connection state, Live Queries, and Replica Collections

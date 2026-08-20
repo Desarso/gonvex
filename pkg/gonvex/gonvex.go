@@ -21,7 +21,6 @@ const (
 	FunctionKindQuery   FunctionKind = "query"
 	FunctionKindReducer FunctionKind = "reducer"
 	FunctionKindAction  FunctionKind = "action"
-	FunctionKindHTTP    FunctionKind = "http"
 )
 
 type DeliveryMode string
@@ -41,7 +40,6 @@ type App struct {
 type Function struct {
 	Path         string
 	Kind         FunctionKind
-	Public       bool
 	Internal     bool
 	Delivery     DeliveryMode
 	Dependencies FunctionDependencies
@@ -277,7 +275,7 @@ type shareByPermissionsOption struct{}
 
 // ShareByPermissions allows callers with the same permission fingerprint to
 // share one server-side subscription execution and result. Only use it when a
-// handler's result does not otherwise depend on ctx.User.
+// handler's result does not otherwise depend on ctx.Auth.Account.
 func ShareByPermissions() FunctionOption { return shareByPermissionsOption{} }
 
 func (shareByPermissionsOption) applyFunctionOption(target *FunctionDependencies) {
@@ -367,23 +365,17 @@ type RuntimeContext struct {
 	Auth        AuthContext
 	Tenant      *TenantIdentity
 	Member      *Member
-	// User and Permissions are compatibility views of Auth.Account and Member.
-	// New application modules must use the explicit identity objects above.
-	User        *User
-	Permissions map[string]any
 	DatabaseURL string
 	DB          *sql.DB
 	// ControlPlaneDB is the global identity, directory, and routing database.
 	// Application business state must remain in the selected tenant DB.
 	ControlPlaneDB *sql.DB
-	// LandlordDB is a compatibility alias removed after identity-v2 cutover.
-	LandlordDB *sql.DB
-	TenantDB   *sql.DB
-	Tx         *sql.Tx
-	Storage    StorageAPI
-	Sandbox    SandboxAPI
-	Data       DataAPI
-	Ephemeral  EphemeralAPI
+	TenantDB       *sql.DB
+	Tx             *sql.Tx
+	Storage        StorageAPI
+	Sandbox        SandboxAPI
+	Data           DataAPI
+	Ephemeral      EphemeralAPI
 	// ProjectEphemeral is shared by every tenant in this project. Use it only
 	// for deliberately cross-tenant transient state such as an operator-facing
 	// live-session registry; ordinary app presence belongs in Ephemeral.
@@ -492,54 +484,6 @@ type ActionCtx struct {
 	RuntimeContext
 }
 
-type HTTPContext struct {
-	RuntimeContext
-}
-
-type HTTPRequest struct {
-	Method     string              `json:"method"`
-	Path       string              `json:"path"`
-	RawQuery   string              `json:"rawQuery,omitempty"`
-	Query      map[string][]string `json:"query,omitempty"`
-	Headers    map[string][]string `json:"headers,omitempty"`
-	Body       []byte              `json:"body,omitempty"`
-	RemoteAddr string              `json:"remoteAddr,omitempty"`
-}
-
-type HTTPResponse struct {
-	Status  int                 `json:"status,omitempty"`
-	Headers map[string][]string `json:"headers,omitempty"`
-	Body    []byte              `json:"body,omitempty"`
-}
-
-func TextResponse(status int, body string, contentType string) HTTPResponse {
-	if contentType == "" {
-		contentType = "text/plain; charset=utf-8"
-	}
-	return HTTPResponse{
-		Status: status,
-		Headers: map[string][]string{
-			"content-type": []string{contentType},
-		},
-		Body: []byte(body),
-	}
-}
-
-func JSONResponse(status int, value any) HTTPResponse {
-	body, err := json.Marshal(value)
-	if err != nil {
-		body = []byte(`{"error":"failed to encode response"}`)
-		status = 500
-	}
-	return HTTPResponse{
-		Status: status,
-		Headers: map[string][]string{
-			"content-type": []string{"application/json"},
-		},
-		Body: body,
-	}
-}
-
 type DispatchError struct {
 	Code    string
 	Path    string
@@ -590,18 +534,6 @@ func (a *App) Reducer(path string, handler any, options ...FunctionOption) {
 
 func (a *App) Action(path string, handler any, options ...FunctionOption) {
 	a.register(FunctionKindAction, path, handler, options...)
-}
-
-func (a *App) HTTP(path string, handler any, options ...FunctionOption) {
-	a.register(FunctionKindHTTP, path, handler, options...)
-}
-
-// PublicHTTP registers an HTTP handler that may execute without a Gonvex user
-// session even when native application authentication is enabled. It is
-// intended for provider-signed callbacks such as payment webhooks. The handler
-// must authenticate the request itself before changing state.
-func (a *App) PublicHTTP(path string, handler any, options ...FunctionOption) {
-	a.registerWithVisibility(FunctionKindHTTP, path, handler, true, options...)
 }
 
 func (a *App) InternalReducer(path string, handler any, options ...FunctionOption) {
@@ -698,38 +630,7 @@ func (a *App) ExecuteAction(ctx *ActionCtx, path string, rawArgs json.RawMessage
 	return a.execute(path, rawArgs, ctx, FunctionKindAction)
 }
 
-func (a *App) ExecuteHTTP(ctx *HTTPContext, path string, request HTTPRequest) (HTTPResponse, error) {
-	if ctx == nil {
-		ctx = &HTTPContext{}
-	}
-	rawArgs, err := json.Marshal(request)
-	if err != nil {
-		return HTTPResponse{}, err
-	}
-	result, err := a.execute(path, rawArgs, ctx, FunctionKindHTTP)
-	if err != nil {
-		return HTTPResponse{}, err
-	}
-	response, ok := result.(HTTPResponse)
-	if !ok {
-		return HTTPResponse{}, &DispatchError{Code: "invalid_response", Path: path, Message: fmt.Sprintf("HTTP function %q returned %T, want gonvex.HTTPResponse", path, result)}
-	}
-	return response, nil
-}
-
 func (a *App) register(kind FunctionKind, path string, handler any, options ...FunctionOption) {
-	a.registerWithVisibility(kind, path, handler, false, options...)
-}
-
-func (a *App) setDelivery(path string, delivery DeliveryMode) {
-	a.mu.Lock()
-	function := a.functions[path]
-	function.Delivery = delivery
-	a.functions[path] = function
-	a.mu.Unlock()
-}
-
-func (a *App) registerWithVisibility(kind FunctionKind, path string, handler any, public bool, options ...FunctionOption) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		panic("gonvex: function path is required")
@@ -748,13 +649,20 @@ func (a *App) registerWithVisibility(kind FunctionKind, path string, handler any
 	if existing, ok := a.functions[path]; ok {
 		panic(fmt.Sprintf("gonvex: function %q already registered as %s", path, existing.Kind))
 	}
-	function.Public = public
 	for _, option := range options {
 		if option != nil {
 			option.applyFunctionOption(&function.Dependencies)
 		}
 	}
 	a.functions[path] = function
+}
+
+func (a *App) setDelivery(path string, delivery DeliveryMode) {
+	a.mu.Lock()
+	function := a.functions[path]
+	function.Delivery = delivery
+	a.functions[path] = function
+	a.mu.Unlock()
 }
 
 func (a *App) execute(path string, rawArgs json.RawMessage, ctx any, allowedKinds ...FunctionKind) (any, error) {
@@ -818,8 +726,6 @@ func ctxTypeForKind(kind FunctionKind) reflect.Type {
 		return reflect.TypeOf((*ReducerCtx)(nil))
 	case FunctionKindAction:
 		return reflect.TypeOf((*ActionCtx)(nil))
-	case FunctionKindHTTP:
-		return reflect.TypeOf((*HTTPContext)(nil))
 	default:
 		return reflect.TypeOf((*QueryCtx)(nil))
 	}
@@ -897,23 +803,8 @@ func (c *RuntimeContext) normalize() {
 	if c.TenantID == "" {
 		c.TenantID = c.ProjectID
 	}
-	if c.Auth.Account == nil && c.User != nil {
-		c.Auth.Account = c.User
-	}
-	if c.User == nil && c.Auth.Account != nil {
-		c.User = c.Auth.Account
-	}
 	if c.Tenant == nil {
 		c.Tenant = &TenantIdentity{ID: c.TenantID, ProjectID: c.ProjectID}
-	}
-	if c.Permissions == nil && c.Member != nil {
-		c.Permissions = c.Member.Permissions
-	}
-	if c.ControlPlaneDB == nil {
-		c.ControlPlaneDB = c.LandlordDB
-	}
-	if c.LandlordDB == nil {
-		c.LandlordDB = c.ControlPlaneDB
 	}
 	if c.Storage == nil {
 		c.Storage = storageUnavailable{}
@@ -947,10 +838,6 @@ func (c *ActionCtx) normalize() {
 	c.RuntimeContext.normalize()
 }
 
-func (c *HTTPContext) normalize() {
-	c.RuntimeContext.normalize()
-}
-
 type Schema struct{}
 type Table struct{}
 
@@ -965,7 +852,7 @@ func Nullable(options *columnOptions) {
 }
 
 func (s *Schema) Table(name string, define func(*Table)) {}
-func (s *Schema) LandlordTable(name string, define func(*Table)) {
+func (s *Schema) ControlPlaneTable(name string, define func(*Table)) {
 	s.Table(name, define)
 }
 func (s *Schema) TenantTable(name string, define func(*Table)) {

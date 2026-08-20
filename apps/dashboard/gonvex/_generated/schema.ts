@@ -6,9 +6,6 @@ export const controlPlane = {
   },
 } as const;
 
-// Compatibility alias for the former landlord scope.
-export const landlord = controlPlane;
-
 export const tenant = {
   scope: "tenant",
   tables: {
@@ -608,11 +605,9 @@ export const tables = tenant.tables;
 
 export const schema = {
   controlPlane,
-  landlord,
   tenant,
   tables,
 } as const;
 
-export type LandlordTableName = keyof typeof landlord.tables;
 export type TenantTableName = keyof typeof tenant.tables;
 export type TableName = TenantTableName;

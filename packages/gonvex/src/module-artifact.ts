@@ -62,11 +62,9 @@ const moduleFunctionKinds = new Map<string, ModuleFunctionRegistration>([
   ["reducer", { kind: "reducer" }],
   ["internalreducer", { kind: "reducer", internal: true }],
   ["action", { kind: "action" }],
-  ["http", { kind: "http" }],
-  ["publichttp", { kind: "http" }],
 ]);
 
-const kindAlternation = "query|liveQuery|replicaCollection|reducer|internalReducer|action|http|publicHttp";
+const kindAlternation = "query|liveQuery|replicaCollection|reducer|internalReducer|action";
 const definitionPattern = new RegExp(
   `export\\s+(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?::[^=;]+)?=\\s*(?:await\\s+)?(${kindAlternation})\\s*(<[^(){};]*>)?\\s*\\(`,
   "gi",
@@ -128,6 +126,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     const contents = await readFile(file);
     files[projectPath(options.root, file)] = contents.toString("base64");
     for (const [path, entry] of parseModuleFunctions(options.root, options.backendDir, file, contents.toString("utf8"))) {
+      if (functions[path]) throw new Error(`duplicate module function path ${JSON.stringify(path)}`);
       functions[path] = entry;
     }
   }
@@ -494,7 +493,7 @@ function dependenciesFromOptions(
   const dependencies: FunctionDependencies = {};
 
   // Reads is retained only for legacy one-shot Query declarations. Reducers,
-  // Actions, HTTP handlers and structured Live Queries derive their behavior
+  // Actions and structured Live Queries derive their behavior
   // from the executable contract instead of hand-written dependency metadata.
   if (kind === "query" && delivery === "oneShot") {
     const reads = tableDependencies(options.get("reads")?.value);

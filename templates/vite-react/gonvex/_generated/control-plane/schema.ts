@@ -4,5 +4,4 @@ export const schema = {
 } as const;
 
 export const controlPlane = schema;
-export const landlord = controlPlane;
 export const tables = schema.tables;

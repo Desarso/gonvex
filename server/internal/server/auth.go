@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
-	"github.com/gonvex/gonvex/server/internal/controlplane/legacyidentity"
 )
 
 func (s *Server) authenticateSocket(ctx context.Context, projectID string, currentTenantID string, token string, requestedTenantID string) (*gonvex.User, map[string]any, string, string, error) {
@@ -54,34 +53,17 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 	}
 	hasVerifiedAppIdentity := firebaseProjectID != ""
 
-	if s.config.ControlPlaneURL == "" {
-		if s.config.RequireAuth && !hasVerifiedAppIdentity {
-			return nil, nil, "", "", fmt.Errorf("control plane database URL is not configured")
-		}
-		user, tenant, err := appIdentity()
-		if err != nil {
-			return nil, nil, "", "", err
-		}
-		return user, map[string]any{}, projectID, tenant, nil
+	if s.config.RequireAuth && !hasVerifiedAppIdentity {
+		return nil, nil, "", "", fmt.Errorf("project %q has no supported application authentication provider", projectID)
 	}
-
-	session, err := legacyidentity.ValidateSession(ctx, s.config.ControlPlaneURL, token, requestedTenantID)
-	if err != nil {
-		if s.config.RequireAuth && !hasVerifiedAppIdentity {
-			return nil, nil, "", "", err
-		}
-		user, tenant, identityErr := appIdentity()
-		if identityErr != nil {
-			return nil, nil, "", "", identityErr
-		}
-		return user, map[string]any{}, projectID, tenant, nil
-	}
-	user := &gonvex.User{ID: session.UserID, Email: session.Email}
-	permissions, err := s.loadTenantPermissions(ctx, projectID, session.ActiveTenantID, session.UserID)
+	user, tenant, err := appIdentity()
 	if err != nil {
 		return nil, nil, "", "", err
 	}
-	return user, permissions, projectID, session.ActiveTenantID, nil
+	if s.config.RequireAuth && user == nil {
+		return nil, nil, "", "", fmt.Errorf("authentication is required")
+	}
+	return user, map[string]any{}, projectID, tenant, nil
 }
 
 func devUserFromJWT(token string) *gonvex.User {

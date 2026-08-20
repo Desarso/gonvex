@@ -185,11 +185,12 @@ type memberIdentity struct {
 // capabilities is the host's grant. The module host intersects it with what the
 // function kind may structurally reach, so a grant can only ever narrow.
 type capabilities struct {
-	DBRead     bool `json:"dbRead"`
-	DBWrite    bool `json:"dbWrite"`
-	RunReducer bool `json:"runReducer"`
-	Network    bool `json:"network"`
-	Storage    bool `json:"storage"`
+	DBRead       bool `json:"dbRead"`
+	DBWrite      bool `json:"dbWrite"`
+	ActionOutbox bool `json:"actionOutbox"`
+	RunReducer   bool `json:"runReducer"`
+	Network      bool `json:"network"`
+	Storage      bool `json:"storage"`
 }
 
 // artifactPayload is the module as the runtime holds it. The host re-verifies
@@ -285,13 +286,14 @@ type hostCallPayload struct {
 }
 
 const (
-	hostCallDBQuery    = "dbQuery"
-	hostCallDBInsert   = "dbInsert"
-	hostCallDBUpdate   = "dbUpdate"
-	hostCallDBDelete   = "dbDelete"
-	hostCallRunReducer = "runReducer"
-	hostCallFetch      = "fetch"
-	hostCallStorage    = "storage"
+	hostCallDBQuery       = "dbQuery"
+	hostCallDBInsert      = "dbInsert"
+	hostCallDBUpdate      = "dbUpdate"
+	hostCallDBDelete      = "dbDelete"
+	hostCallActionEnqueue = "actionEnqueue"
+	hostCallRunReducer    = "runReducer"
+	hostCallFetch         = "fetch"
+	hostCallStorage       = "storage"
 )
 
 // readFrame reads one length-prefixed JSON frame. The prefix is what bounds the
@@ -338,7 +340,7 @@ func writeFrame(writer io.Writer, payload []byte, limit int) error {
 // Query/Reducer/Action vocabulary the host speaks.
 func normalizeKind(kind Kind) string {
 	switch kind {
-	case KindQuery, KindReducer, KindAction, KindHTTP:
+	case KindQuery, KindReducer, KindAction:
 		return string(kind)
 	default:
 		return strings.ToLower(strings.TrimSpace(string(kind)))

@@ -91,11 +91,11 @@ Backend functions receive the account as `ctx.User`. The user ID is generated pe
 Gonvex project, so the same Google account is not exposed as one shared identifier
 to unrelated applications.
 
-Registered HTTP functions use the same runtime boundary: once Google is enabled,
-anonymous requests receive `401`, and a valid project session populates `ctx.User`
-and `ctx.Permissions`. For a direct `fetch`, obtain the token from
-`useGonvexAuth().fetchAccessToken(...)` and send it as
-`Authorization: Bearer <token>`.
+Application modules do not register HTTP functions. Browser and mobile code
+invoke Queries, Reducers, and Actions through the authenticated runtime
+protocol. An infrastructure adapter receiving an external webhook must verify
+and normalize the provider request before invoking an Action; durable changes
+then re-enter through a Reducer.
 
 ### Why no app needs a Google Cloud project
 

@@ -17,8 +17,9 @@ import (
 type Scope string
 
 const (
-	ScopeTenant   Scope = "tenant"
-	ScopeLandlord Scope = "landlord"
+	ScopeTenant       Scope = "tenant"
+	ScopeControlPlane Scope = "control-plane"
+	legacyScopeName         = "landlord"
 )
 
 var migrationName = regexp.MustCompile(`^[0-9]{4}_[A-Za-z0-9][A-Za-z0-9_-]*\.sql$`)
@@ -48,7 +49,7 @@ func Parse(files map[string][]byte) ([]Migration, error) {
 			return nil, fmt.Errorf("migration %s: %w", name, err)
 		}
 		if !explicit {
-			return nil, fmt.Errorf("migration %s: missing required -- gonvex:scope tenant|landlord directive (tenant is the safe parser default)", name)
+			return nil, fmt.Errorf("migration %s: missing required -- gonvex:scope tenant|control-plane directive (tenant is the safe parser default)", name)
 		}
 		sum := sha256.Sum256(contents)
 		migrations = append(migrations, Migration{
@@ -76,7 +77,10 @@ func directives(contents string) (Scope, bool, bool, error) {
 		switch {
 		case strings.HasPrefix(directive, "gonvex:scope"):
 			value := strings.TrimSpace(strings.TrimPrefix(directive, "gonvex:scope"))
-			if value != string(ScopeTenant) && value != string(ScopeLandlord) {
+			if value == legacyScopeName {
+				value = string(ScopeControlPlane)
+			}
+			if value != string(ScopeTenant) && value != string(ScopeControlPlane) {
 				return scope, explicit, noTransaction, fmt.Errorf("invalid scope %q", value)
 			}
 			scope, explicit = Scope(value), true

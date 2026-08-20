@@ -2,7 +2,7 @@
 // language-neutral module artifact pipeline. The runtime consumes the manifest
 // as JSON, so every field here mirrors `pkg/manifest` on the Go side.
 
-export type FunctionKind = "query" | "reducer" | "action" | "http";
+export type FunctionKind = "query" | "reducer" | "action";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -105,10 +105,7 @@ export type Table = {
 
 export type SchemaDefinition = {
   tables: Record<string, Table>;
-  /** Preferred terminology; emitted alongside landlordTables during cutover. */
-  controlPlaneTables?: Record<string, Table>;
-  /** Legacy wire key retained until every deployed runtime is v2-aware. */
-  landlordTables: Record<string, Table>;
+  controlPlaneTables: Record<string, Table>;
   tenantTables: Record<string, Table>;
 };
 

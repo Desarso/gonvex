@@ -35,18 +35,14 @@ const (
 
 type Config struct {
 	Addr string
-	// ControlPlaneURL is the canonical control-plane database URL. LandlordURL
-	// is retained as a compatibility alias for existing embedders and config
-	// literals.
-	ControlPlaneURL  string
-	LandlordURL      string
-	PostgresURL      string
-	TenantDatabases  map[string]string
-	ProjectDatabases map[string]string
-	ProjectKeys      map[string]string
-	// ProjectHosts maps browser-facing hostnames to project IDs for anonymous
-	// registered HTTP functions (for example universal-link and webhook hosts).
-	ProjectHosts                map[string]string
+	// ControlPlaneURL is the control-plane database URL. Legacy landlord
+	// configuration is accepted only by the explicit identity migration command,
+	// never by the running server.
+	ControlPlaneURL             string
+	PostgresURL                 string
+	TenantDatabases             map[string]string
+	ProjectDatabases            map[string]string
+	ProjectKeys                 map[string]string
 	GonvexModuleRoot            string
 	PluginCacheDir              string
 	ValkeyURL                   string
@@ -98,10 +94,8 @@ type Config struct {
 	GoogleTokenURL     string
 	GoogleJWKSURL      string
 	// FirebaseProjectID turns on verification of Firebase ID tokens presented as
-	// app credentials. Empty keeps the legacy behavior: the token's claims are
-	// decoded without any signature or expiry check, so any forged JWT
-	// authenticates as whatever "sub" it names. Set it in every deployment that
-	// authenticates browsers with Firebase.
+	// app credentials. Empty permits unsigned token decoding for local development
+	// only, so deployments that authenticate browsers with Firebase must set it.
 	FirebaseProjectID string
 	FirebaseJWKSURL   string
 	// Environment labels projects created/imported on this runtime instance in the
@@ -138,15 +132,9 @@ type Config struct {
 	ModuleHostExecutionTimeout   time.Duration
 }
 
-// Normalize resolves the control-plane URL aliases once at the runtime
-// boundary. The canonical value wins when both fields are supplied.
+// Normalize canonicalizes values supplied by embedders.
 func (cfg *Config) Normalize() {
-	if strings.TrimSpace(cfg.ControlPlaneURL) == "" {
-		cfg.ControlPlaneURL = cfg.LandlordURL
-	}
-	// Keep compatibility readers on the canonical value even if an embedder
-	// supplied both fields with different URLs.
-	cfg.LandlordURL = cfg.ControlPlaneURL
+	cfg.ControlPlaneURL = strings.TrimSpace(cfg.ControlPlaneURL)
 }
 
 func FromEnv() Config {
@@ -154,12 +142,11 @@ func FromEnv() Config {
 
 	config := Config{
 		Addr:                         env("GONVEX_ADDR", ":8080"),
-		ControlPlaneURL:              env("GONVEX_CONTROL_PLANE_DATABASE_URL", env("GONVEX_CONTROL_PLANE_URL", env("CONTROL_PLANE_DATABASE_URL", env("CONTROL_PLANE_URL", env("GONVEX_LANDLORD_DATABASE_URL", env("LANDLORD_DATABASE_URL", "")))))),
+		ControlPlaneURL:              env("GONVEX_CONTROL_PLANE_DATABASE_URL", env("GONVEX_CONTROL_PLANE_URL", env("CONTROL_PLANE_DATABASE_URL", env("CONTROL_PLANE_URL", "")))),
 		PostgresURL:                  env("DATABASE_URL", env("POSTGRES_URL", "")),
 		TenantDatabases:              envStringMap("GONVEX_TENANT_DATABASE_URLS"),
 		ProjectDatabases:             envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
 		ProjectKeys:                  envStringMap("GONVEX_PROJECT_KEYS"),
-		ProjectHosts:                 envStringMap("GONVEX_PROJECT_HOSTS"),
 		GonvexModuleRoot:             env("GONVEX_MODULE_ROOT", ""),
 		PluginCacheDir:               env("GONVEX_PLUGIN_CACHE_DIR", ""),
 		ValkeyURL:                    env("VALKEY_URL", env("REDIS_URL", "")),

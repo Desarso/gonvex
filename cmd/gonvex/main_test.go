@@ -10,28 +10,6 @@ import (
 	"github.com/gonvex/gonvex/pkg/projectbundle"
 )
 
-func TestParseRegistrationsIncludesPublicHTTPAsHTTP(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "register.go")
-	source := `package backend
-
-func Register(app interface{ PublicHTTP(string, any) }) {
-	app.PublicHTTP("/webhooks/provider", ProviderWebhook)
-}
-`
-	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := parseRegistrations(dir, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry, ok := entries["/webhooks/provider"]
-	if !ok || entry.Kind != manifest.FunctionKindHTTP || entry.Handler != "ProviderWebhook" {
-		t.Fatalf("public HTTP registration = %#v", entry)
-	}
-}
-
 func TestBuildManifestShipsRootMigrationFiles(t *testing.T) {
 	root := t.TempDir()
 	backend := filepath.Join(root, "gonvex")
@@ -138,7 +116,7 @@ func TestParseSchemaScopesTables(t *testing.T) {
 import "github.com/gonvex/gonvex/pkg/gonvex"
 
 func Schema(s *gonvex.Schema) {
-	s.LandlordTable("billing_accounts", func(t *gonvex.Table) {
+	s.ControlPlaneTable("billing_accounts", func(t *gonvex.Table) {
 		t.ID("id")
 		t.String("tenant_id")
 	})
@@ -161,8 +139,8 @@ func Schema(s *gonvex.Schema) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := schema.LandlordTables["billing_accounts"]; !ok {
-		t.Fatalf("expected billing_accounts in landlord tables")
+	if _, ok := schema.ControlPlaneTables["billing_accounts"]; !ok {
+		t.Fatalf("expected billing_accounts in Control Plane tables")
 	}
 	if _, ok := schema.TenantTables["tasks"]; !ok {
 		t.Fatalf("expected tasks in tenant tables")
@@ -171,7 +149,7 @@ func Schema(s *gonvex.Schema) {
 		t.Fatalf("expected legacy Table shorthand in tenant tables")
 	}
 	if _, ok := schema.Tables["billing_accounts"]; ok {
-		t.Fatalf("did not expect landlord table in legacy tenant tables")
+		t.Fatalf("did not expect Control Plane table in tenant tables")
 	}
 	index := schema.TenantTables["messages"].Indexes["body_trgm"]
 	if index.Kind != "trigram" {
@@ -192,7 +170,7 @@ func TestWriteBindingsWritesScopedSchemaFiles(t *testing.T) {
 			Tables: map[string]manifest.Table{
 				"tasks": {Columns: map[string]manifest.Column{"id": {Type: "id", PrimaryKey: true}}, Indexes: map[string]manifest.Index{}},
 			},
-			LandlordTables: map[string]manifest.Table{
+			ControlPlaneTables: map[string]manifest.Table{
 				"billing_accounts": {Columns: map[string]manifest.Column{"id": {Type: "id", PrimaryKey: true}}, Indexes: map[string]manifest.Index{}},
 			},
 			TenantTables: map[string]manifest.Table{
@@ -200,20 +178,30 @@ func TestWriteBindingsWritesScopedSchemaFiles(t *testing.T) {
 			},
 		},
 	}
+	legacyDir := filepath.Join(root, "gonvex/_generated/landlord")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "schema.ts"), []byte("legacy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := writeBindings(root, m); err != nil {
 		t.Fatal(err)
 	}
 	for _, rel := range []string{
 		"gonvex/_generated/schema.ts",
-		"gonvex/_generated/landlord/schema.ts",
-		"gonvex/_generated/landlord/tables.ts",
+		"gonvex/_generated/control-plane/schema.ts",
+		"gonvex/_generated/control-plane/tables.ts",
 		"gonvex/_generated/tenant/schema.ts",
 		"gonvex/_generated/tenant/tables.ts",
 	} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
 			t.Fatalf("expected generated file %s: %v", rel, err)
 		}
+	}
+	if _, err := os.Stat(legacyDir); !os.IsNotExist(err) {
+		t.Fatalf("expected obsolete generated directory to be removed, got %v", err)
 	}
 
 	topLevel, err := os.ReadFile(filepath.Join(root, "gonvex/_generated/schema.ts"))
@@ -222,6 +210,6 @@ func TestWriteBindingsWritesScopedSchemaFiles(t *testing.T) {
 	}
 	content := string(topLevel)
 	if !strings.Contains(content, "billing_accounts") || !strings.Contains(content, "tasks") {
-		t.Fatalf("expected top-level schema to contain landlord and tenant tables:\n%s", content)
+		t.Fatalf("expected top-level schema to contain Control Plane and tenant tables:\n%s", content)
 	}
 }

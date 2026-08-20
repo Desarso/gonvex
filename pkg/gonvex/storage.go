@@ -19,7 +19,7 @@ var (
 )
 
 // FileVisibility controls who may read a stored file. Permission enforcement
-// happens in handler code (see ctx.User / ctx.Permissions); the visibility is
+// happens in handler code (see ctx.Auth.Account / ctx.Member); the visibility is
 // recorded on the metadata row so handlers and download flows can reason about
 // it consistently.
 type FileVisibility string
@@ -69,7 +69,7 @@ type UploadOptions struct {
 	Size int64
 	// Visibility defaults to FileVisibilityPrivate when empty.
 	Visibility FileVisibility
-	// OwnerID associates the file with a user. Defaults to ctx.User.ID.
+	// OwnerID associates the file with an account or tenant member.
 	OwnerID string
 	// Expires overrides the presigned upload URL lifetime. Optional.
 	Expires time.Duration

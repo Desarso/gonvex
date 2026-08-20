@@ -50,9 +50,6 @@ func invocationFor(runtimeCtx *gonvex.RuntimeContext, granted capabilities) invo
 		invocation.Tenant = &tenantIdentity{ID: runtimeCtx.TenantID, ProjectID: runtimeCtx.ProjectID}
 	}
 	account := runtimeCtx.Auth.Account
-	if account == nil {
-		account = runtimeCtx.User
-	}
 	if account != nil {
 		invocation.Account = &accountIdentity{
 			ID:        account.ID,
@@ -71,9 +68,7 @@ func invocationFor(runtimeCtx *gonvex.RuntimeContext, granted capabilities) invo
 			Permissions: member.Permissions,
 		}
 	}
-	if len(runtimeCtx.Permissions) > 0 {
-		invocation.Permissions = runtimeCtx.Permissions
-	} else if runtimeCtx.Member != nil && len(runtimeCtx.Member.Permissions) > 0 {
+	if runtimeCtx.Member != nil && len(runtimeCtx.Member.Permissions) > 0 {
 		invocation.Permissions = runtimeCtx.Member.Permissions
 	}
 	return invocation
@@ -98,7 +93,11 @@ func reducerCapabilities(ctx *gonvex.ReducerCtx) capabilities {
 	// Without one there is nothing atomic to write into, so the module is told
 	// so by absence rather than by a failure halfway through.
 	inTransaction := ctx.Tx != nil
-	return capabilities{DBRead: inTransaction, DBWrite: inTransaction}
+	return capabilities{
+		DBRead:       inTransaction,
+		DBWrite:      inTransaction,
+		ActionOutbox: inTransaction && ctx.Outbox != nil,
+	}
 }
 
 func actionCapabilities(runtimeCtx *gonvex.RuntimeContext) capabilities {
@@ -215,9 +214,30 @@ func (h *reducerHostCalls) dispatch(ctx context.Context, call hostCallPayload) (
 		return runUpdate(ctx, tx, call)
 	case hostCallDBDelete:
 		return runDelete(ctx, tx, call)
+	case hostCallActionEnqueue:
+		return h.enqueueAction(ctx, call)
 	default:
 		return nil, fmt.Errorf("a reducer may not call %q", call.Kind)
 	}
+}
+
+func (h *reducerHostCalls) enqueueAction(ctx context.Context, call hostCallPayload) (json.RawMessage, error) {
+	if h.ctx == nil || h.ctx.Outbox == nil {
+		return nil, fmt.Errorf("the durable Action outbox is unavailable to this reducer")
+	}
+	path := strings.TrimSpace(call.Function)
+	if path == "" {
+		return nil, fmt.Errorf("actions.enqueue requires an Action path")
+	}
+	args, err := decodeJSONValue(call.Args)
+	if err != nil {
+		return nil, fmt.Errorf("Action %q arguments are not valid JSON: %w", path, err)
+	}
+	id, err := h.ctx.Outbox.Enqueue(ctx, path, args)
+	if err != nil {
+		return nil, err
+	}
+	return encodeJSONValue(id)
 }
 
 func (h *reducerHostCalls) transaction() (*sql.Tx, error) {

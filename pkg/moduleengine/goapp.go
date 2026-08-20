@@ -114,22 +114,10 @@ func (e *GoAppEngine) InvokeAction(ctx *gonvex.ActionCtx, call Invocation) (Resu
 	return Result{Value: value}, nil
 }
 
-func (e *GoAppEngine) InvokeHTTP(ctx *gonvex.HTTPContext, call HTTPInvocation) (HTTPResult, error) {
-	if e == nil || e.app == nil {
-		return HTTPResult{}, notRegistered(call.Path)
-	}
-	response, err := e.app.ExecuteHTTP(ctx, call.Path, call.Request)
-	if err != nil {
-		return HTTPResult{}, err
-	}
-	return HTTPResult{Response: response}, nil
-}
-
 func describeFunction(function gonvex.Function) Descriptor {
 	return Descriptor{
 		Path:         function.Path,
 		Kind:         Kind(function.Kind),
-		Public:       function.Public,
 		Internal:     function.Internal,
 		Delivery:     function.Delivery,
 		Dependencies: function.Dependencies,

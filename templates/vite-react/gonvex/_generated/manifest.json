@@ -49,7 +49,6 @@
       }
     },
     "controlPlaneTables": {},
-    "landlordTables": {},
     "tenantTables": {
       "messages": {
         "columns": {

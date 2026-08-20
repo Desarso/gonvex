@@ -43,6 +43,43 @@ type databaseSchemaSnapshot struct {
 	indexes map[string]bool
 }
 
+// InspectApplicationSchema projects the tables already created by versioned
+// SQL migrations into the manifest shape used by the durable change feed.
+// TypeScript modules intentionally use SQL migrations as their schema owner;
+// this keeps that single source of DDL truth while still letting Gonvex attach
+// authoritative transaction triggers to every application table.
+func InspectApplicationSchema(ctx context.Context, databaseURL string) (manifest.Schema, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return manifest.Schema{Tables: map[string]manifest.Table{}}, nil
+	}
+	db, err := dbpool.Open(databaseURL)
+	if err != nil {
+		return manifest.Schema{}, err
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		return manifest.Schema{}, err
+	}
+	snapshot, err := inspectDatabaseSchema(ctx, db)
+	if err != nil {
+		return manifest.Schema{}, err
+	}
+	tables := make(map[string]manifest.Table, len(snapshot.columns))
+	for tableName, existing := range snapshot.columns {
+		if strings.HasPrefix(tableName, "_gonvex_") || tableName == "gonvex_migrations" {
+			continue
+		}
+		columns := make(map[string]manifest.Column, len(existing))
+		for columnName, column := range existing {
+			columns[columnName] = manifest.Column{
+				Type: column.Type, Nullable: column.Nullable, PrimaryKey: column.PrimaryKey,
+			}
+		}
+		tables[tableName] = manifest.Table{Columns: columns, Indexes: map[string]manifest.Index{}}
+	}
+	return manifest.Schema{Tables: tables}, nil
+}
+
 func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Result, error) {
 	return ApplyWithSync(ctx, databaseURL, desired, nil)
 }

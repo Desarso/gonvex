@@ -2,8 +2,7 @@
 //!
 //! This crate is intentionally independent of HTTP, Postgres, and an engine
 //! implementation. It can be embedded beside the existing Go runtime first;
-//! the Go loader remains the default until a future selector installs a V8 or
-//! Wasm engine here.
+//! the Go loader remains the default until the V8 engine is selected.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, RwLock};

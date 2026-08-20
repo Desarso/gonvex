@@ -30,3 +30,20 @@ func TestValkeyURLAcceptsRedisURLAlias(t *testing.T) {
 		t.Fatalf("VALKEY_URL did not take precedence: %q", got)
 	}
 }
+
+func TestControlPlaneURLDoesNotReadLegacyLandlordEnvironment(t *testing.T) {
+	t.Setenv("GONVEX_CONTROL_PLANE_DATABASE_URL", "")
+	t.Setenv("GONVEX_CONTROL_PLANE_URL", "")
+	t.Setenv("CONTROL_PLANE_DATABASE_URL", "")
+	t.Setenv("CONTROL_PLANE_URL", "")
+	t.Setenv("GONVEX_LANDLORD_DATABASE_URL", "postgres://legacy.example/landlord")
+	t.Setenv("LANDLORD_DATABASE_URL", "postgres://legacy.example/landlord")
+	if got := FromEnv().ControlPlaneURL; got != "" {
+		t.Fatalf("legacy landlord environment configured the runtime Control Plane: %q", got)
+	}
+
+	t.Setenv("GONVEX_CONTROL_PLANE_DATABASE_URL", "  postgres://control.example/gonvex  ")
+	if got := FromEnv().ControlPlaneURL; got != "postgres://control.example/gonvex" {
+		t.Fatalf("ControlPlaneURL = %q", got)
+	}
+}

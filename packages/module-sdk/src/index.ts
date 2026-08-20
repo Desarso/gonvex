@@ -9,8 +9,8 @@ export type JsonValue =
 
 export type JsonObject = { [key: string]: JsonValue };
 
-export type ModuleLanguage = "typescript" | "rust" | "wasm" | (string & {});
-export type ModuleEngine = "v8" | "wasmtime" | (string & {});
+export type ModuleLanguage = "typescript";
+export type ModuleEngine = "v8";
 
 export type PortableSchema =
   | StringSchema
@@ -138,13 +138,27 @@ export type Tenant = { readonly id: string; readonly name?: string };
 export type Member = {
   readonly id: string;
   readonly accountId: string;
-  readonly status: "active" | "revoked" | "disabled" | (string & {});
-  readonly roles: readonly string[];
-  readonly permissions: readonly string[];
+  readonly status?: "active" | "revoked" | "disabled" | (string & {});
+  readonly role?: string;
+  readonly displayName?: string;
+  readonly permissions: Readonly<Record<string, JsonValue>> | null;
 };
 
-export type AuthContext = { readonly account: Account };
-export type TenantContext = { readonly tenant: Tenant; readonly member: Member };
+/**
+ * Authentication identity exposed to a module.
+ *
+ * `auth.account` is the v2 spelling. The top-level `account` field is retained
+ * as a compatibility alias for early module examples and adapters. Both are
+ * nullable because the V8 host always mirrors the ABI's optional identity
+ * values into the context, including for anonymous/system invocations.
+ */
+export type AuthContext = {
+  readonly auth: { readonly account: Account | null };
+  readonly account: Account | null;
+};
+
+/** Tenant and tenant-local member identity, both nullable at the ABI boundary. */
+export type TenantContext = { readonly tenant: Tenant | null; readonly member: Member | null };
 
 export type ReadDB = {
   readonly query: <T = JsonValue>(statement: string, parameters?: readonly JsonValue[]) => Promise<readonly T[]>;
@@ -156,18 +170,34 @@ export type WriteDB = ReadDB & {
   readonly delete: (table: string, id: string) => Promise<void>;
 };
 
+/** Durable external work recorded in the Reducer's current transaction. */
+export type ReducerActions = {
+  readonly enqueue: (path: string, args: JsonValue) => Promise<string>;
+};
+
 export type QueryContext = AuthContext & TenantContext & { readonly db: ReadDB; readonly now: number };
 
 export type ReducerContext = AuthContext & TenantContext & {
   readonly db: WriteDB;
+  readonly actions: ReducerActions;
   readonly now: number;
-  readonly runReducer: <T = JsonValue>(path: string, args: JsonValue) => Promise<T>;
+};
+
+export type ActionStorage = {
+  readonly generateUploadUrl: (options?: JsonObject) => Promise<JsonValue>;
+  readonly getUrl: (fileId: string) => Promise<JsonValue>;
+  readonly generateDownloadUrl: (fileId: string, ttlMs?: number) => Promise<JsonValue>;
+  readonly getMetadata: (fileId: string) => Promise<JsonValue>;
+  readonly delete: (fileId: string) => Promise<JsonValue>;
+  readonly store: (contentBase64: string, options?: JsonObject) => Promise<JsonValue>;
+  readonly call: (operation: string, payload?: JsonValue) => Promise<JsonValue>;
 };
 
 export type ActionContext = AuthContext & TenantContext & {
   readonly now: number;
   readonly fetch: (input: string | URL, init?: RequestInit) => Promise<Response>;
   readonly runReducer: <T = JsonValue>(path: string, args: JsonValue) => Promise<T>;
+  readonly storage?: ActionStorage;
 };
 
 export type Handler<Context, Args, Result> = (context: Context, args: Args) => Result | Promise<Result>;
@@ -178,9 +208,13 @@ export type OfflinePolicy =
   | { readonly mode: "onlineOnly"; readonly reason: string };
 
 export type OptimisticID = string | readonly string[];
+/** Resolve this value from Reducer arguments in the client Local Replica. */
+export type OptimisticArgument = { readonly $arg: string | readonly string[] };
+export type OptimisticValue = JsonValue | OptimisticArgument | readonly OptimisticValue[] | { readonly [key: string]: OptimisticValue };
+export type OptimisticObject = { readonly [key: string]: OptimisticValue };
 export type OptimisticEffect =
-  | { readonly operation: "patch"; readonly entity: string; readonly id: OptimisticID; readonly fields: JsonObject }
-  | { readonly operation: "upsert"; readonly entity: string; readonly id: OptimisticID; readonly value: JsonObject }
+  | { readonly operation: "patch"; readonly entity: string; readonly id: OptimisticID; readonly fields: OptimisticObject }
+  | { readonly operation: "upsert"; readonly entity: string; readonly id: OptimisticID; readonly value: OptimisticObject }
   | { readonly operation: "delete"; readonly entity: string; readonly id: OptimisticID };
 
 export type OptimisticTransaction = {
@@ -683,7 +717,7 @@ export class ModuleBuilder {
 }
 
 /**
- * Host-side executable registry. It is deliberately unaware of V8, Wasmtime,
+ * Host-side executable registry. It is deliberately unaware of V8,
  * Postgres, or network transport; an engine supplies the capability-bearing
  * context and this registry only selects and invokes the registered handler.
  */

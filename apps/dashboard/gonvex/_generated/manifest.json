@@ -831,7 +831,6 @@
       }
     },
     "controlPlaneTables": {},
-    "landlordTables": {},
     "tenantTables": {
       "dashboard_demo_tasks": {
         "columns": {

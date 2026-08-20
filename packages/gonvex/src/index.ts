@@ -40,6 +40,8 @@ export type { ProjectLanguage } from "./module-artifact.js";
 type BackendSources = {
   language: ProjectLanguage;
   files: string[];
+  goFiles: string[];
+  moduleFiles: string[];
   config: ProjectConfig;
 };
 
@@ -1162,30 +1164,62 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
 async function collectBackendSources(root: string): Promise<BackendSources> {
   const backendDir = join(root, "gonvex");
   const config = await loadConfig(root);
+  const [go, module] = await Promise.all([goFiles(backendDir), moduleSourceFiles(backendDir)]);
   const language = await detectProjectLanguage(backendDir, config.language);
-  const files = language === "typescript" ? await moduleSourceFiles(backendDir) : await goFiles(backendDir);
-  return { language, files, config };
+  const sidecar = module.length > 0 && go.length > 0 && Boolean(config.module?.entrypoint);
+  if (go.length > 0 && module.length > 0 && !sidecar && language === "go") {
+    // A Go project may opt into a TypeScript sidecar only through an explicit
+    // module entrypoint; otherwise a stray .ts file must not alter its build.
+    return { language, files: go, goFiles: go, moduleFiles: [], config };
+  }
+  return {
+    language,
+    files: sidecar ? [...go, ...module].sort() : language === "typescript" ? module : go,
+    goFiles: go,
+    moduleFiles: sidecar || language === "typescript" ? module : [],
+    config,
+  };
 }
 
 async function buildManifest(root: string, sources: BackendSources, projectID: string): Promise<Manifest> {
-  if (sources.language === "typescript") return buildModuleManifest(root, sources, projectID);
   const functions: Record<string, FunctionEntry> = {};
   const schema = emptySchemaDefinition();
   let packageName = "app";
-  for (const file of sources.files) {
+  for (const file of sources.goFiles) {
     Object.assign(functions, await parseRegistrations(root, file));
     mergeSchemaDefinition(schema, await parseSchema(file));
     if (packageName === "app") {
       packageName = await detectPackageName(file);
     }
   }
-  const bundle = await buildSourceBundle(root, sources.files, projectID, packageName);
+  const bundle = sources.goFiles.length > 0
+    ? await buildSourceBundle(root, sources.goFiles, projectID, packageName)
+    : undefined;
+  const module = sources.moduleFiles.length > 0
+    ? await buildModuleArtifact({
+      root,
+      backendDir: join(root, "gonvex"),
+      files: sources.moduleFiles,
+      migrations: await migrationFiles(join(root, "migrations")),
+      entrypoint: sources.config.module?.entrypoint,
+      bundle: sources.config.module?.bundle,
+    })
+    : undefined;
+  const moduleFunctions = module ? moduleManifestFunctions(module) : {};
+  for (const [path, entry] of Object.entries(moduleFunctions)) {
+    if (functions[path]) throw new Error(`duplicate module function path ${JSON.stringify(path)} between Go and TypeScript modules`);
+    functions[path] = entry;
+  }
+  if (!bundle && !module) {
+    throw new Error("Gonvex backend has no Go or TypeScript module sources");
+  }
   return {
     project: projectID,
     generatedAt: new Date().toISOString(),
     functions,
     schema,
-    bundle,
+    ...(bundle ? { bundle } : {}),
+    ...(module ? { module } : {}),
   };
 }
 
@@ -1253,7 +1287,7 @@ function sanitizeProjectID(projectID: string) {
 
 async function parseRegistrations(root: string, file: string) {
   const source = await readFile(file, "utf8");
-  const pattern = /app\.(Query|LiveQuery|ReplicaCollection|Reducer|Action|HTTP|PublicHTTP|InternalReducer)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)/g;
+  const pattern = /app\.(Query|LiveQuery|ReplicaCollection|Reducer|Action|InternalReducer)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)/g;
   const entries: Record<string, FunctionEntry> = {};
   for (const match of source.matchAll(pattern)) {
     const entry: FunctionEntry = {
@@ -1627,7 +1661,7 @@ function findClosingParen(source: string, openParen: number) {
 
 async function parseSchema(file: string) {
   const source = await readFile(file, "utf8");
-  const tablePattern = /s\.(Table|TenantTable|ControlPlaneTable|LandlordTable)\(\s*"([^"]+)"\s*,\s*func\([^)]*\)\s*\{([\s\S]*?)\n\s*\}\s*\)/g;
+  const tablePattern = /s\.(Table|TenantTable|ControlPlaneTable)\(\s*"([^"]+)"\s*,\s*func\([^)]*\)\s*\{([\s\S]*?)\n\s*\}\s*\)/g;
   const columnPattern = /t\.(ID|String|Text|Int|Int64|Float64|Bool|Time|JSON)\(\s*"([^"]+)"([^)]*)\)/g;
   const indexPattern = /t\.(Index|UniqueIndex|TrigramIndex)\(\s*"([^"]+)"([^)]*)\)/g;
   const schema = emptySchemaDefinition();
@@ -1651,9 +1685,8 @@ async function parseSchema(file: string) {
         ...(indexMatch[1] === "TrigramIndex" ? { kind: "trigram" } : {}),
       };
     }
-    if (scope === "ControlPlaneTable" || scope === "LandlordTable") {
-      (schema.controlPlaneTables ??= {})[name] = table;
-      schema.landlordTables[name] = table;
+    if (scope === "ControlPlaneTable") {
+      schema.controlPlaneTables[name] = table;
     } else {
       schema.tenantTables[name] = table;
       schema.tables[name] = table;
@@ -1665,6 +1698,7 @@ async function parseSchema(file: string) {
 async function writeBindings(root: string, manifest: Manifest): Promise<BindingWriteResult> {
   const dir = join(root, "gonvex", "_generated");
   await mkdir(dir, { recursive: true });
+  await rm(join(dir, "landlord"), { recursive: true, force: true });
   let changedFiles = 0;
   if (await writeManifestIfChanged(join(dir, "manifest.json"), manifest)) changedFiles += 1;
   const outputs: Record<string, string> = {
@@ -1673,10 +1707,8 @@ async function writeBindings(root: string, manifest: Manifest): Promise<BindingW
     "react.ts": '// Generated by gonvex dev. Do not edit.\nexport { ConvexProvider, ConvexProviderWithAuth, ConvexReactClient, createGonvexAuth, GonvexAuthProvider, GonvexGoogleAuthButton, GonvexProvider, useAction, useConvex, useConvexAuth, useConvexConnectionState, useEntity, useGonvexAuth, useLiveQuery, useLiveQueryState, usePaginatedQuery, useQuery, useReducer, useReplicaCollection, useReplicaSelector } from "@gonvex/react";\nexport type { GonvexAuthConfig, GonvexAuthTenant, GonvexAuthUser, GonvexAuthValue } from "@gonvex/react";\n',
     "types.ts": "// Generated by gonvex dev. Do not edit.\nexport type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };\n",
     "schema.ts": renderSchemaIndex(manifest),
-    "control-plane/schema.ts": renderScopedSchemaModule("control-plane", manifest.schema.controlPlaneTables ?? manifest.schema.landlordTables),
-    "control-plane/tables.ts": renderScopedTablesModule("control-plane", manifest.schema.controlPlaneTables ?? manifest.schema.landlordTables),
-    "landlord/schema.ts": '// Generated by gonvex dev. Do not edit.\nexport { schema, controlPlane, landlord, tables } from "../control-plane/schema";\nexport type { TableName } from "../control-plane/schema";\n',
-    "landlord/tables.ts": '// Generated by gonvex dev. Do not edit.\nexport { tables } from "../control-plane/tables";\nexport type { TableName } from "../control-plane/tables";\n',
+    "control-plane/schema.ts": renderScopedSchemaModule("control-plane", manifest.schema.controlPlaneTables),
+    "control-plane/tables.ts": renderScopedTablesModule("control-plane", manifest.schema.controlPlaneTables),
     "tenant/schema.ts": renderScopedSchemaModule("tenant", manifest.schema.tenantTables),
     "tenant/tables.ts": renderScopedTablesModule("tenant", manifest.schema.tenantTables),
     // Module-artifact projects emit the artifact next to the manifest so the
@@ -1801,6 +1833,7 @@ function renderAPI(manifest: Manifest) {
       kind: entry.kind,
       path,
       ...(entry.delivery ? { delivery: entry.delivery } : {}),
+      ...(entry.offline !== undefined ? { offline: entry.offline } : {}),
       ...(isModuleSchema(entry.args) ? { args: entry.args } : {}),
       ...(isModuleSchema(entry.result) ? { result: entry.result } : {}),
     };
@@ -1847,6 +1880,23 @@ function renderAPI(manifest: Manifest) {
     "    const readPath = (value: unknown, segments: readonly string[]): unknown =>",
     "      segments.reduce<unknown>((current, segment) =>",
     "        current && typeof current === \"object\" ? (current as Record<string, unknown>)[segment] : undefined, value);",
+    "    const resolveValue = (value: unknown): unknown => {",
+    "      if (Array.isArray(value)) return value.map(resolveValue);",
+    "      if (!value || typeof value !== \"object\") return value;",
+    "      const record = value as Record<string, unknown>;",
+    "      if (Object.keys(record).length === 1 && Object.prototype.hasOwnProperty.call(record, \"$arg\")) {",
+    "        const path = record.$arg;",
+    "        const segments = Array.isArray(path)",
+    "          ? path.filter((part): part is string => typeof part === \"string\" && part.trim().length > 0)",
+    "          : typeof path === \"string\" ? path.split(\".\").map((part) => part.trim()).filter(Boolean) : [];",
+    "        return segments.length > 0 ? readPath(args, segments) : undefined;",
+    "      }",
+    "      return Object.fromEntries(Object.entries(record).map(([key, item]) => [key, resolveValue(item)]));",
+    "    };",
+    "    const containsUndefined = (value: unknown): boolean =>",
+    "      value === undefined || (Array.isArray(value)",
+    "        ? value.some(containsUndefined)",
+    "        : !!value && typeof value === \"object\" && Object.values(value as Record<string, unknown>).some(containsUndefined));",
     "    const patches: Array<{ entity?: string; collection?: string; rowId: string; op: \"patch\" | \"insert\" | \"upsert\" | \"delete\"; fields?: Record<string, unknown> }> = [];",
     "    for (const effect of transaction.effects) {",
     "      const rawId = Array.isArray(effect.id) ? readPath(args, effect.id) : effect.id;",
@@ -1856,8 +1906,10 @@ function renderAPI(manifest: Manifest) {
     "        patches.push({ entity: effect.entity, rowId, op: \"delete\" });",
     "        continue;",
     "      }",
-    "      const fields = effect.operation === \"patch\" ? effect.fields : effect.value;",
-    "      if (!fields || typeof fields !== \"object\" || Array.isArray(fields)) return [];",
+    "      const template = effect.operation === \"patch\" ? effect.fields : effect.value;",
+    "      if (!template || typeof template !== \"object\" || Array.isArray(template)) return [];",
+    "      const fields = resolveValue(template);",
+    "      if (!fields || typeof fields !== \"object\" || Array.isArray(fields) || containsUndefined(fields)) return [];",
     "      patches.push({ entity: effect.entity, rowId, op: effect.operation === \"upsert\" ? \"upsert\" : \"patch\", fields: { ...(fields as Record<string, unknown>) } });",
     "    }",
     "    return patches;",
@@ -1883,14 +1935,12 @@ function renderAPI(manifest: Manifest) {
 }
 
 function renderSchemaIndex(manifest: Manifest) {
-  const controlPlane = renderSchemaObject("control-plane", manifest.schema.controlPlaneTables ?? manifest.schema.landlordTables, 0);
+  const controlPlane = renderSchemaObject("control-plane", manifest.schema.controlPlaneTables, 0);
   const tenant = renderSchemaObject("tenant", manifest.schema.tenantTables, 0);
   return [
     "// Generated by gonvex dev. Do not edit.",
     "",
     `export const controlPlane = ${controlPlane} as const;`,
-    "",
-    "export const landlord = controlPlane;",
     "",
     `export const tenant = ${tenant} as const;`,
     "",
@@ -1898,14 +1948,11 @@ function renderSchemaIndex(manifest: Manifest) {
     "",
     "export const schema = {",
     "  controlPlane,",
-    "  landlord,",
     "  tenant,",
     "  tables,",
     "} as const;",
     "",
     "export type ControlPlaneTableName = keyof typeof controlPlane.tables;",
-    "/** @deprecated Use ControlPlaneTableName. */",
-    "export type LandlordTableName = ControlPlaneTableName;",
     "export type TenantTableName = keyof typeof tenant.tables;",
     "export type TableName = TenantTableName;",
     "",
@@ -1918,7 +1965,7 @@ function renderScopedSchemaModule(scope: "control-plane" | "tenant", tables: Rec
     "",
     `export const schema = ${renderSchemaObject(scope, tables, 0)} as const;`,
     "",
-    ...(scope === "control-plane" ? ["export const controlPlane = schema;", "export const landlord = controlPlane;"] : ["export const tenant = schema;"]),
+    ...(scope === "control-plane" ? ["export const controlPlane = schema;"] : ["export const tenant = schema;"]),
     "export const tables = schema.tables;",
     "",
     "export type TableName = keyof typeof tables;",
@@ -1968,20 +2015,15 @@ function propertyKey(key: string) {
 }
 
 function emptySchemaDefinition(): SchemaDefinition {
-  const controlPlaneTables: Record<string, Table> = {};
   return {
     tables: {},
-    controlPlaneTables,
-    landlordTables: controlPlaneTables,
+    controlPlaneTables: {},
     tenantTables: {},
   };
 }
 
 function mergeSchemaDefinition(target: SchemaDefinition, source: SchemaDefinition) {
-  const controlPlaneTables = target.controlPlaneTables ?? target.landlordTables;
-  Object.assign(controlPlaneTables, source.landlordTables, source.controlPlaneTables ?? {});
-  target.controlPlaneTables = controlPlaneTables;
-  target.landlordTables = controlPlaneTables;
+  Object.assign(target.controlPlaneTables, source.controlPlaneTables);
   Object.assign(target.tenantTables, source.tenantTables);
   target.tables = target.tenantTables;
 }
@@ -2668,7 +2710,6 @@ function templateDir(template: string) {
 function functionKind(raw: string): FunctionKind {
   if (raw === "InternalReducer") return "reducer";
   if (raw === "LiveQuery" || raw === "ReplicaCollection") return "query";
-  if (raw === "PublicHTTP") return "http";
   return raw.toLowerCase() as FunctionKind;
 }
 

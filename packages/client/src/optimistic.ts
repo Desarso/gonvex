@@ -14,10 +14,12 @@ export type OptimisticReducerDefinition = {
 
 /** A path into reducer arguments, or a literal row identifier. */
 export type OptimisticID = string | readonly string[];
+export type OptimisticArgument = { readonly $arg: string | readonly string[] };
+export type OptimisticValue = unknown | OptimisticArgument | readonly OptimisticValue[] | { readonly [key: string]: OptimisticValue };
 
 export type OptimisticEffectDefinition =
-  | { operation: "patch"; entity: string; id: OptimisticID; fields: Readonly<Record<string, unknown>> }
-  | { operation: "upsert"; entity: string; id: OptimisticID; value: Readonly<Record<string, unknown>> }
+  | { operation: "patch"; entity: string; id: OptimisticID; fields: Readonly<Record<string, OptimisticValue>> }
+  | { operation: "upsert"; entity: string; id: OptimisticID; value: Readonly<Record<string, OptimisticValue>> }
   | { operation: "delete"; entity: string; id: OptimisticID };
 
 /** Ordered effects from a module reducer's atomic optimistic transaction. */
@@ -325,8 +327,10 @@ function optimisticPatchesFromTransaction(
     if (effect.operation === "delete") {
       patches.push({ entity: effect.entity, rowId, op: "delete" });
     } else {
-      const fields = effect.operation === "patch" ? effect.fields : effect.value;
-      if (!isRecord(fields)) return [];
+      const template = effect.operation === "patch" ? effect.fields : effect.value;
+      if (!isRecord(template)) return [];
+      const fields = resolveOptimisticValue(template, record);
+      if (!isRecord(fields) || containsUndefined(fields)) return [];
       patches.push({
         entity: effect.entity,
         rowId,
@@ -336,6 +340,25 @@ function optimisticPatchesFromTransaction(
     }
   }
   return patches;
+}
+
+function resolveOptimisticValue(value: unknown, args: Record<string, unknown>): unknown {
+  if (Array.isArray(value)) return value.map((item) => resolveOptimisticValue(item, args));
+  if (!isRecord(value)) return value;
+  if (Object.keys(value).length === 1 && Object.prototype.hasOwnProperty.call(value, "$arg")) {
+    const path = value.$arg;
+    const segments = Array.isArray(path)
+      ? path.filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+      : typeof path === "string" ? path.split(".").map((part) => part.trim()).filter(Boolean) : [];
+    return segments.length > 0 ? readPath(args, segments) : undefined;
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolveOptimisticValue(item, args)]));
+}
+
+function containsUndefined(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (Array.isArray(value)) return value.some(containsUndefined);
+  return isRecord(value) && Object.values(value).some(containsUndefined);
 }
 
 function optimisticRowId(id: OptimisticID, args: Record<string, unknown>): string {

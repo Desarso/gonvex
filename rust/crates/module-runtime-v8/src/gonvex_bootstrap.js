@@ -8,10 +8,11 @@
 //
 // The context objects built here are the `@gonvex/module-sdk` surface:
 // `QueryContext` gets `db.query`, `ReducerContext` adds `db.insert/update/
-// delete` and `runReducer`, `ActionContext` gets `fetch`, `runReducer` and
-// `storage` but no database handle at all. Writes travel as a table name, a key
-// and a JSON object — never as SQL text a module interpolated values into. The
-// Go host quotes the identifiers and binds the values as parameters.
+// delete` and the transactional `actions.enqueue`, while `ActionContext` gets
+// `fetch`, `runReducer` and `storage` but no database handle at all. Writes
+// travel as a table name, a key and a JSON object — never as SQL text a module
+// interpolated values into. The Go host quotes the identifiers and binds the
+// values as parameters.
 //
 // Reaching `Deno.core.ops.op_gonvex_host_call` directly is not a privilege
 // escalation: the Rust op re-checks the capability and the host-call budget of
@@ -182,6 +183,12 @@
       });
     }
     if (granted.dbRead || granted.dbWrite) context.db = Object.freeze(db);
+
+    if (granted.actionOutbox) {
+      context.actions = Object.freeze({
+        enqueue: (name, args) => hostCall({ kind: "actionEnqueue", function: text("Action", name), args: optional(args) }),
+      });
+    }
 
     if (granted.runReducer) {
       context.runReducer = (name, args) => hostCall({ kind: "runReducer", function: text("reducer", name), args: optional(args) });

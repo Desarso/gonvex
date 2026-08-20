@@ -4,6 +4,12 @@
 # Debian (glibc) is used rather than Alpine/musl because Go plugins are unreliable
 # under musl. The runtime binary and the plugins must be built with the same Go
 # version and the same gonvex source (via the go.mod replace) for plugin ABI match.
+FROM rust:1.94-bookworm AS module-host-build
+WORKDIR /src/rust
+COPY rust/Cargo.toml rust/Cargo.lock ./
+COPY rust/crates ./crates
+RUN cargo build --locked --release -p gonvex-module-host
+
 FROM golang:1.26@sha256:7caba5286b4c3613a337b709c573047d8ae62ee76106647313b61e72b99f20af AS build
 WORKDIR /src
 # Go plugin package hashes include the absolute module-cache source path. Build
@@ -33,6 +39,10 @@ COPY --from=build /src /src
 # plugin package hashes remain ABI-compatible at runtime.
 COPY --from=build /opt/gonvex/go/pkg/mod /opt/gonvex/go/pkg/mod
 COPY --from=build /out/gonvex-runtime /usr/local/bin/gonvex-runtime
+# TypeScript application functions execute in the bounded Rust/V8 module host.
+# The Go runtime supervises this one process lazily when the first TypeScript
+# artifact is synced; keeping the path explicit avoids PATH-dependent fallback.
+COPY --from=module-host-build /src/rust/target/release/gonvex-module-host /usr/local/bin/gonvex-module-host
 # Data-file artifacts (DuckDB databases for assistant-uploaded CSV/XLSX/XLS)
 # live here; mount a volume to keep them across deploys. Artifacts re-ingest
 # from object storage on miss, so an ephemeral dir also works (just slower on
@@ -41,6 +51,8 @@ ENV GONVEX_ADDR=0.0.0.0:8080 \
     GONVEX_RELOAD_SUPERVISOR=true \
     GONVEX_MODULE_ROOT=/src \
     GONVEX_PLUGIN_CACHE_DIR=/var/lib/gonvex/plugins \
+    GONVEX_MODULE_HOST_ENABLED=true \
+    GONVEX_MODULE_HOST_BINARY=/usr/local/bin/gonvex-module-host \
     GONVEX_DATA_DIR=/var/lib/gonvex/data \
     GONVEX_TELEMETRY_LOG=/var/lib/gonvex/telemetry.jsonl \
     GOCACHE=/var/cache/gonvex/go-build \

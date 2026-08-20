@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,7 +16,6 @@ import (
 	"github.com/gonvex/gonvex/server/internal/dbpool"
 	"github.com/gonvex/gonvex/server/internal/schema"
 	"github.com/gonvex/gonvex/server/internal/sqlmigration"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const projectTenantHydrationTTL = 5 * time.Second
@@ -90,9 +88,6 @@ func tenantTargetPriority(tenant tenantTarget) int {
 	if tenant.registered {
 		return 4
 	}
-	if tenant.Description == "Persisted tenant from landlord database." {
-		return 3
-	}
 	if tenant.Description == "Discovered local tenant database." {
 		return 2
 	}
@@ -100,38 +95,6 @@ func tenantTargetPriority(tenant tenantTarget) int {
 		return 1
 	}
 	return 0
-}
-
-func matchingRegisteredTenant(
-	tenants map[string]tenantTarget,
-	project string,
-	documentID string,
-	databaseAlias string,
-	domain string,
-) (tenantTarget, bool) {
-	documentID = strings.TrimSpace(documentID)
-	databaseAlias = strings.TrimSpace(databaseAlias)
-	domain = strings.TrimSpace(domain)
-	var fallback tenantTarget
-	foundFallback := false
-	for _, tenant := range tenants {
-		if tenant.ProjectID != project || !tenant.registered {
-			continue
-		}
-		if documentID != "" && tenant.ID == documentID {
-			return tenant, true
-		}
-		if databaseAlias != "" && normalizeDatabaseAlias(tenant.Database) == normalizeDatabaseAlias(databaseAlias) {
-			fallback = tenant
-			foundFallback = true
-			continue
-		}
-		if !foundFallback && domain != "" && strings.EqualFold(strings.TrimSpace(tenant.domain), domain) {
-			fallback = tenant
-			foundFallback = true
-		}
-	}
-	return fallback, foundFallback
 }
 
 func (s *Server) loadConfiguredTenantDatabases() {
@@ -257,7 +220,7 @@ func (s *Server) saveTenantRegistry(ctx context.Context, tenant tenantTarget) (t
 	}
 	defer db.Close()
 
-	// A landlord-backed tenant may have a non-human tenant id while an older
+	// A registered tenant may have a non-human tenant id while an older
 	// runtime inferred the same relationship from its project-scoped database
 	// alias. Reuse that row's UUID instead of creating duplicate ownership rows.
 	var existingRelationshipID string
@@ -328,127 +291,6 @@ func (s *Server) deleteTenantRegistry(ctx context.Context, project string, tenan
 		_, err = db.ExecContext(ctx, `DELETE FROM gonvex_runtime_tenants WHERE project_id = $1 AND tenant_id = $2`, project, tenant.ID)
 	}
 	return err
-}
-
-func (s *Server) hydrateLandlordTenants(ctx context.Context, project string) {
-	if err := s.hydrateLandlordTenantsWithError(ctx, project); err != nil {
-		slog.Debug("hydrate landlord tenants", "project", project, "error", err)
-	}
-}
-
-func (s *Server) hydrateLandlordTenantsWithError(ctx context.Context, project string) error {
-	project = strings.TrimSpace(project)
-	if project == "" {
-		return nil
-	}
-	projectDatabaseURL := s.databaseURLForProject(project)
-	if strings.TrimSpace(projectDatabaseURL) == "" {
-		return nil
-	}
-	store, err := s.tenantStores.Store(ctx, tenantStoreKey(project, "__landlord__"), projectDatabaseURL)
-	if err != nil {
-		return fmt.Errorf("open landlord database: %w", err)
-	}
-	rows, err := store.DB.QueryContext(ctx, `SELECT id, COALESCE(name, ''), COALESCE(database, ''), COALESCE(domain, '') FROM tenants ORDER BY name, id`)
-	if err != nil {
-		var postgresError *pgconn.PgError
-		if errors.As(err, &postgresError) && postgresError.Code == "42P01" {
-			// The landlord tenants table is an optional discovery source. Generic
-			// Gonvex projects can register tenant databases directly instead.
-			return nil
-		}
-		return fmt.Errorf("query landlord tenants: %w", err)
-	}
-	defer rows.Close()
-
-	existingDatabases := s.existingLocalDatabaseNames(ctx)
-	imported := map[string]tenantTarget{}
-	for rows.Next() {
-		var documentID string
-		var name string
-		var databaseAlias string
-		var domain string
-		if err := rows.Scan(&documentID, &name, &databaseAlias, &domain); err != nil {
-			return fmt.Errorf("scan landlord tenant: %w", err)
-		}
-		tenantID := persistedTenantRelationshipID(documentID, databaseAlias, domain)
-		if tenantID == "" {
-			continue
-		}
-		if strings.TrimSpace(name) == "" {
-			name = tenantID
-		}
-		tenant := tenantTarget{
-			ID:           tenantID,
-			ProjectID:    project,
-			Name:         name,
-			Database:     databaseAlias,
-			Status:       "local",
-			Description:  "Persisted tenant from landlord database.",
-			Provisioned:  false,
-			databaseName: tenantDatabaseNameForPersistedTenant(project, tenantID, databaseAlias, domain, existingDatabases),
-			domain:       domain,
-		}
-		s.projectMu.RLock()
-		existing, found := matchingRegisteredTenant(
-			s.tenants,
-			project,
-			documentID,
-			databaseAlias,
-			domain,
-		)
-		s.projectMu.RUnlock()
-		if found {
-			tenant.RelationshipID = existing.RelationshipID
-			tenant.databaseName = existing.databaseName
-			tenant.databaseURL = existing.databaseURL
-			tenant.Provisioned = existing.Provisioned
-			tenant.RuntimeCreated = existing.RuntimeCreated
-		}
-		imported[tenantStoreKey(project, tenantID)] = tenant
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate landlord tenants: %w", err)
-	}
-	if len(imported) == 0 {
-		return nil
-	}
-
-	resolved := make([]tenantTarget, 0, len(imported))
-	s.projectMu.Lock()
-	if s.config.TenantDatabases == nil {
-		s.config.TenantDatabases = map[string]string{}
-	}
-	for key, tenant := range imported {
-		existing := s.tenants[key]
-		tenant.RelationshipID = existing.RelationshipID
-		tenant = s.resolveTenantDatabaseURLLocked(project, tenant)
-		previousURL := existing.databaseURL
-		if existing.Provisioned && existing.databaseURL != "" && existing.databaseURL == tenant.databaseURL {
-			tenant.Provisioned = true
-		}
-		s.tenants[key] = tenant
-		if explicitURL := s.explicitTenantDatabases[key]; explicitURL != "" {
-			s.config.TenantDatabases[key] = explicitURL
-		} else if tenant.databaseURL != "" {
-			s.config.TenantDatabases[key] = tenant.databaseURL
-		}
-		if previousURL != "" && previousURL != tenant.databaseURL {
-			go s.cache.invalidateRows(context.Background(), project, tenant.ID, "")
-		}
-		resolved = append(resolved, tenant)
-	}
-	s.projectMu.Unlock()
-
-	for _, tenant := range resolved {
-		registered, err := s.saveTenantRegistry(ctx, tenant)
-		if err != nil {
-			slog.Debug("persist landlord tenant relationship", "project", project, "tenant", tenant.ID, "error", err)
-			continue
-		}
-		s.mergeProjectTenants(project, []tenantTarget{registered})
-	}
-	return nil
 }
 
 func (s *Server) resolveTenantDatabaseURLLocked(project string, tenant tenantTarget) tenantTarget {
@@ -685,10 +527,6 @@ func (s *Server) handleDeleteTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	s.projectMu.Unlock()
 
-	if err := s.cleanupProjectLandlordTenantReferences(r.Context(), project, tenant); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
 	if err := s.deleteTenantRegistry(r.Context(), project, tenant); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("delete tenant relationship: %v", err)})
 		return
@@ -712,119 +550,6 @@ func (s *Server) handleDeleteTenant(w http.ResponseWriter, r *http.Request) {
 	s.cache.invalidateRows(r.Context(), project, tenantID, "")
 	s.registerProjectCrons(project)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (s *Server) cleanupProjectLandlordTenantReferences(ctx context.Context, project string, tenant tenantTarget) error {
-	projectDatabaseURL := s.databaseURLForProject(project)
-	if strings.TrimSpace(projectDatabaseURL) == "" {
-		return nil
-	}
-	db, err := dbpool.Open(projectDatabaseURL)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	if err := db.PingContext(ctx); err != nil {
-		return err
-	}
-
-	aliases := tenantReferenceAliases(tenant)
-	if len(aliases) == 0 {
-		return nil
-	}
-	if err := deleteRowsMatchingAnyColumn(ctx, db, "userTenantMap", []string{"tenantId", "tenant_id"}, aliases); err != nil {
-		return err
-	}
-	if err := deleteRowsMatchingAnyColumn(ctx, db, "users", []string{"tenantId", "tenant_id"}, aliases); err != nil {
-		return err
-	}
-	return deleteRowsMatchingAnyColumn(ctx, db, "tenants", []string{"id", "domain", "database"}, aliases)
-}
-
-func tenantReferenceAliases(tenant tenantTarget) []string {
-	seen := map[string]bool{}
-	aliases := []string{}
-	for _, value := range []string{tenant.ID, tenant.domain, tenant.Database, tenant.databaseName, tenant.Name} {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			continue
-		}
-		seen[value] = true
-		aliases = append(aliases, value)
-	}
-	return aliases
-}
-
-func deleteRowsMatchingAnyColumn(ctx context.Context, db *sql.DB, table string, candidateColumns []string, aliases []string) error {
-	if len(aliases) == 0 || !serverTableExists(ctx, db, table) {
-		return nil
-	}
-	columns, err := serverTableColumns(ctx, db, table)
-	if err != nil {
-		return err
-	}
-	columnSet := map[string]bool{}
-	for _, column := range columns {
-		columnSet[column] = true
-	}
-	matchedColumns := []string{}
-	for _, column := range candidateColumns {
-		if columnSet[column] {
-			matchedColumns = append(matchedColumns, column)
-		}
-	}
-	if len(matchedColumns) == 0 {
-		return nil
-	}
-
-	for _, alias := range aliases {
-		predicates := make([]string, 0, len(matchedColumns))
-		args := make([]any, 0, len(matchedColumns))
-		for _, column := range matchedColumns {
-			args = append(args, alias)
-			predicates = append(predicates, fmt.Sprintf("%s::text = $%d", quoteIdent(column), len(args)))
-		}
-		query := fmt.Sprintf("DELETE FROM %s WHERE %s", quoteIdent(table), strings.Join(predicates, " OR "))
-		if _, err := db.ExecContext(ctx, query, args...); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func serverTableExists(ctx context.Context, db *sql.DB, table string) bool {
-	var exists bool
-	err := db.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM information_schema.tables
-			WHERE table_schema = 'public' AND table_name = $1
-		)
-	`, table).Scan(&exists)
-	return err == nil && exists
-}
-
-func serverTableColumns(ctx context.Context, db *sql.DB, table string) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT column_name
-		FROM information_schema.columns
-		WHERE table_schema = 'public' AND table_name = $1
-		ORDER BY ordinal_position
-	`, table)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	columns := []string{}
-	for rows.Next() {
-		var column string
-		if err := rows.Scan(&column); err != nil {
-			return nil, err
-		}
-		columns = append(columns, column)
-	}
-	return columns, rows.Err()
 }
 
 func (s *Server) uniqueTenantIDLocked(projectID string, name string) string {
@@ -906,7 +631,7 @@ func (s *Server) provisionTenantDatabaseWithSync(ctx context.Context, project st
 	if _, err := schema.ApplyWithSync(ctx, databaseURL, desiredSchema, syncDefinitions); err != nil {
 		return err
 	}
-	migrations, err := migrationsFromBundle(current.Bundle)
+	migrations, err := migrationsFromManifest(current)
 	if err != nil {
 		return err
 	}
@@ -923,6 +648,11 @@ func (s *Server) provisionTenantDatabaseWithSync(ctx context.Context, project st
 	}
 	if err := ensureTenantLocalTables(ctx, db); err != nil {
 		return err
+	}
+	if current.Module != nil {
+		if _, err := installModuleChangeFeedForDatabase(ctx, databaseURL); err != nil {
+			return fmt.Errorf("install TypeScript module change feed: %w", err)
+		}
 	}
 	return nil
 }
@@ -959,7 +689,7 @@ func (s *Server) ensureRuntimeTenantDatabaseOnce(ctx context.Context, project st
 	postgresURL := strings.TrimSpace(s.config.PostgresURL)
 	s.projectMu.RUnlock()
 	if isUUIDProjectID(project) && tenantDatabaseURL == projectDatabaseURL {
-		return "", fmt.Errorf("tenant %q cannot use project %q's landlord database", tenantID, project)
+		return "", fmt.Errorf("tenant %q cannot use project %q's control-plane database", tenantID, project)
 	}
 	if !ok || tenant.databaseURL == "" || tenant.databaseURL != tenantDatabaseURL || tenantDatabaseURL == projectDatabaseURL {
 		return tenantDatabaseURL, nil
@@ -1058,7 +788,7 @@ func (s *Server) provisionCreatedTenant(ctx context.Context, project string, res
 	if tenantID == "" {
 		return nil
 	}
-	// tenants.create just inserted the landlord row. The mutation path already
+	// tenants.create just returned the tenant identity. The reducer path already
 	// hydrated this project for the request context, so a TTL-gated hydrate
 	// would skip and leave the new tenant unregistered — which surfaces as
 	// "tenant X is not related to project Y" for UUID multi-tenant projects.
@@ -1122,14 +852,53 @@ func (s *Server) applyTenantSchemasForProject(
 	})
 }
 
+// installProjectModuleChangeFeeds attaches the authoritative change feed to
+// schemas owned by TypeScript SQL migrations. Unlike Go modules, TypeScript
+// modules do not duplicate their DDL in a declarative schema manifest; the
+// committed database schema is inspected after migrations and every
+// application table is enrolled directly.
+func (s *Server) installProjectModuleChangeFeeds(ctx context.Context, project string) (schema.Result, error) {
+	if err := s.hydrateProjectTenantDatabasesWithError(ctx, project, s.hydrateProjectTenantDatabasesUncachedWithError); err != nil {
+		return schema.Result{}, fmt.Errorf("discover tenant databases: %w", err)
+	}
+	s.projectMu.RLock()
+	tenants := make([]tenantTarget, 0, len(s.tenants))
+	for _, tenant := range s.tenants {
+		if tenant.ProjectID == project && tenant.databaseURL != "" {
+			tenants = append(tenants, tenant)
+		}
+	}
+	s.projectMu.RUnlock()
+	return applyTenantSchemas(ctx, tenants, manifest.Schema{}, func(ctx context.Context, databaseURL string, _ manifest.Schema) (schema.Result, error) {
+		return installModuleChangeFeedForDatabase(ctx, databaseURL)
+	})
+}
+
+func installModuleChangeFeedForDatabase(ctx context.Context, databaseURL string) (schema.Result, error) {
+	observed, err := schema.InspectApplicationSchema(ctx, databaseURL)
+	if err != nil {
+		return schema.Result{}, err
+	}
+	if len(observed.Tables) == 0 {
+		return schema.Result{}, fmt.Errorf("TypeScript tenant schema has no application tables after migrations")
+	}
+	db, err := dbpool.Open(databaseURL)
+	if err != nil {
+		return schema.Result{}, err
+	}
+	defer db.Close()
+	applied, err := schema.InstallSyncLog(ctx, db, observed, nil)
+	return schema.Result{Applied: applied}, err
+}
+
 func (s *Server) projectSyncStorageInstalled(
 	ctx context.Context,
 	project string,
 	desiredSchema manifest.Schema,
 	_ map[string]manifest.ReplicaCollectionDefinition,
 ) (bool, error) {
-	landlordSchema := desiredSchema.LandlordSchema()
-	if len(landlordSchema.Tables) > 0 {
+	controlPlaneSchema := desiredSchema.ControlPlaneSchema()
+	if len(controlPlaneSchema.Tables) > 0 {
 		installed, err := schema.SyncStorageInstalled(ctx, s.databaseURLForProject(project))
 		if err != nil || !installed {
 			return installed, err
@@ -1276,20 +1045,12 @@ func (s *Server) hydrateProjectTenantDatabasesUncached(ctx context.Context, proj
 }
 
 func (s *Server) hydrateProjectTenantDatabasesUncachedWithError(ctx context.Context, project string) error {
-	// Load the durable registry first so landlord rows can adopt the already
-	// migrated physical database instead of generating an empty replacement.
+	// The Control Plane registry is the only runtime tenant directory.
 	registered, err := s.loadTenantRegistry(ctx, project)
 	if err != nil {
 		return fmt.Errorf("load tenant relationship registry: %w", err)
 	}
 	s.mergeProjectTenants(project, registered)
-
-	// The project's own landlord database is the source of public tenant ids.
-	// Its legacy Convex document ids are replaced by domains while preserving
-	// any registered database relationship loaded above.
-	if err := s.hydrateLandlordTenantsWithError(ctx, project); err != nil {
-		return err
-	}
 
 	// Project-scoped environment configuration predates the registry. Preserve
 	// those explicit mappings and backfill them without exposing global entries
@@ -1483,60 +1244,6 @@ func shouldMigrateLegacyTenantRelationships(project string) bool {
 	return strings.TrimSpace(project) != "" && !isUUIDProjectID(project)
 }
 
-func (s *Server) existingLocalDatabaseNames(ctx context.Context) map[string]bool {
-	names, _ := s.existingLocalDatabaseNamesWithError(ctx)
-	return names
-}
-
-func (s *Server) existingLocalDatabaseNamesWithError(ctx context.Context) (map[string]bool, error) {
-	if strings.TrimSpace(s.config.PostgresURL) == "" {
-		return nil, nil
-	}
-	maintenanceURL, err := databaseURL(s.config.PostgresURL, "postgres")
-	if err != nil {
-		return nil, err
-	}
-	store, err := s.tenantStores.Store(ctx, "__maintenance__", maintenanceURL)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := store.DB.QueryContext(ctx, `
-		SELECT datname
-		FROM pg_database
-		WHERE datistemplate = false
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	names := map[string]bool{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		names[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return names, nil
-}
-
-func persistedTenantRelationshipID(documentID string, databaseAlias string, domain string) string {
-	documentID = strings.TrimSpace(documentID)
-	databaseAlias = strings.TrimSpace(databaseAlias)
-	domain = strings.TrimSpace(domain)
-	if domain != "" && databaseAlias == domain && isLegacyConvexDocumentID(documentID) {
-		return domain
-	}
-	if documentID != "" {
-		return documentID
-	}
-	return domain
-}
-
 func isLegacyConvexDocumentID(value string) bool {
 	if len(value) != 32 {
 		return false
@@ -1547,24 +1254,6 @@ func isLegacyConvexDocumentID(value string) bool {
 		}
 	}
 	return true
-}
-
-func tenantDatabaseNameForPersistedTenant(project string, tenantID string, databaseAlias string, domain string, existingDatabases map[string]bool) string {
-	// Prefer an already-existing physical database (legacy slug names, prior
-	// provision, or an explicit alias) so hydrate never invents a new UUID for
-	// a tenant that already has data on disk.
-	for _, candidate := range uniqueStrings([]string{databaseAlias, tenantID, domain}) {
-		if existingDatabases[candidate] {
-			return candidate
-		}
-		legacy := legacyTenantDatabaseNameWithAlias(project, tenantID, candidate)
-		if existingDatabases[legacy] {
-			return legacy
-		}
-	}
-	// Brand-new tenant: opaque UUIDv6 physical name. Display name stays in
-	// gonvex_runtime_tenants.name (and database_alias for a human slug).
-	return tenantDatabaseNameWithAlias(project, tenantID, databaseAlias)
 }
 
 func isMissingTenantDatabaseError(err error) bool {

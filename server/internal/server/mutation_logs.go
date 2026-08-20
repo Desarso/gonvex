@@ -38,7 +38,7 @@ func (s postgresRuntimeMutationLogStore) LoadRecent(ctx context.Context, limit i
 	rows, err := db.QueryContext(ctx, `SELECT entry
 		FROM (
 			SELECT id, entry
-			FROM gonvex_runtime_mutation_logs
+			FROM gonvex_runtime_reducer_logs
 			ORDER BY id DESC
 			LIMIT $1
 		) recent
@@ -72,7 +72,7 @@ func (s postgresRuntimeMutationLogStore) Append(ctx context.Context, entry runti
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_runtime_mutation_logs (project_id, kind, entry)
+	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_runtime_reducer_logs (project_id, kind, entry)
 		VALUES ($1, $2, $3::jsonb)`, entry.Project, entry.Kind, string(raw))
 	return err
 }
@@ -132,7 +132,7 @@ func (m *runtimeMetrics) restoreMutationLogs(entries []runtimeLogEntry) {
 
 // runtimeLogIsDurable decides what outlives the in-memory ring.
 //
-// Mutations are the durable audit trail. FAILURES of every kind are durable too:
+// Reducers are the durable audit trail. FAILURES of every kind are durable too:
 // the ring holds metricsLogLimit entries shared by all projects and tenants, which
 // at production traffic is a matter of minutes — so the single log line explaining
 // a failed query or action was routinely gone before anyone went looking for it.
@@ -142,7 +142,7 @@ func runtimeLogIsDurable(entry runtimeLogEntry) bool {
 	if entry.Outcome == "error" {
 		return true
 	}
-	return entry.Kind == "mutation" || entry.Kind == "internalMutation"
+	return entry.Kind == "reducer"
 }
 
 func (m *runtimeMetrics) persistMutationLog(entry runtimeLogEntry) {
@@ -155,7 +155,7 @@ func (m *runtimeMetrics) persistMutationLog(entry runtimeLogEntry) {
 	if writes == nil {
 		return
 	}
-	if entry.Kind != "mutation" && entry.Kind != "internalMutation" {
+	if entry.Kind != "reducer" {
 		// Failure diagnostics are best-effort: a queue this far behind means the
 		// registry database is struggling, and stalling live request handlers to
 		// record a log line would turn a slow database into an outage.
@@ -167,6 +167,6 @@ func (m *runtimeMetrics) persistMutationLog(entry runtimeLogEntry) {
 		return
 	}
 	// Backpressure is preferable to silently losing durable history when the
-	// database is slower than the mutation rate.
+	// database is slower than the Reducer rate.
 	writes <- entry
 }

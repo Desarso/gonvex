@@ -192,6 +192,11 @@ export type FunctionReference = {
   kind: string;
   path: string;
   delivery?: "oneShot" | "live" | "replica";
+  offline?: {
+    mode: "forbidden" | "allowed" | "onlineOnly";
+    conflict?: "reject" | "expectedVersion" | "merge";
+    reason?: string;
+  };
   live?: { entity: string; key: string; resultPath?: readonly string[] };
   optimistic?: {
     projection?: OptimisticProjection;
@@ -2229,19 +2234,29 @@ export class GonvexClient {
     args: JsonValue = {},
     options: CallOptions = {},
   ): Promise<T | QueuedReducerOutcome> {
+    if (options.offline === "queue" && ref.offline?.mode !== "allowed") {
+      return Promise.reject(new GonvexClientError(
+        `Reducer ${ref.path} does not allow offline queueing.`,
+        { code: "disconnected", path: ref.path, operation: "reducer" },
+      ));
+    }
+    const effectiveOptions: CallOptions = {
+      ...options,
+      offline: options.offline ?? (ref.offline?.mode === "allowed" ? "queue" : "reject"),
+    };
     const reducerId = randomID();
-    const patches = options.optimistic
+    const patches = effectiveOptions.optimistic
       ?? optimisticPatchesFromReference(ref.optimistic?.transaction ?? ref.optimistic?.reducer, args);
-    if (patches.length === 0 && options.offline !== "queue") {
+    if (patches.length === 0 && effectiveOptions.offline !== "queue") {
       return this.call<T>(
         "reducer",
         ref,
         args,
-        options.timeoutMs ?? this.timeouts.reducerTimeoutMs,
+        effectiveOptions.timeoutMs ?? this.timeouts.reducerTimeoutMs,
         reducerId,
       );
     }
-    return this.runOptimisticReducer<T>(ref, args, options, reducerId, patches);
+    return this.runOptimisticReducer<T>(ref, args, effectiveOptions, reducerId, patches);
   }
 
   private async runOptimisticReducer<T>(

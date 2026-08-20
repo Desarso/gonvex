@@ -96,10 +96,10 @@ func TestPostgresProjectKeyRotationPersistsAcrossRestart(t *testing.T) {
 		t.Fatal("generate prior synthetic project key")
 	}
 	server := New(config.Config{
-		LandlordURL: controlURL,
-		PostgresURL: baseURL,
-		AdminKey:    "runtime-admin-key",
-		ProjectKeys: map[string]string{projectID: priorKey},
+		ControlPlaneURL: controlURL,
+		PostgresURL:     baseURL,
+		AdminKey:        "runtime-admin-key",
+		ProjectKeys:     map[string]string{projectID: priorKey},
 	})
 	project := projectTarget{
 		ID: projectID, Name: "Project key rotation", Environment: "test",
@@ -143,7 +143,7 @@ func TestPostgresProjectKeyRotationPersistsAcrossRestart(t *testing.T) {
 		t.Fatal("registry did not contain only the replacement project key")
 	}
 
-	restarted := New(config.Config{LandlordURL: controlURL, PostgresURL: baseURL, AdminKey: "runtime-admin-key"})
+	restarted := New(config.Config{ControlPlaneURL: controlURL, PostgresURL: baseURL, AdminKey: "runtime-admin-key"})
 	restarted.hydrateProjects()
 	if restarted.acceptsSyncKey(projectID, priorKey) || restarted.acceptsProjectEnvKey(projectID, priorKey) {
 		t.Fatal("restarted runtime accepted the prior project key")
@@ -163,10 +163,10 @@ func TestPostgresProjectKeyRotationPersistenceFailureLeavesPriorKeyActive(t *tes
 		t.Fatal("generate prior synthetic project key")
 	}
 	server := New(config.Config{
-		LandlordURL: controlURL,
-		PostgresURL: baseURL,
-		AdminKey:    "runtime-admin-key",
-		ProjectKeys: map[string]string{projectID: priorKey},
+		ControlPlaneURL: controlURL,
+		PostgresURL:     baseURL,
+		AdminKey:        "runtime-admin-key",
+		ProjectKeys:     map[string]string{projectID: priorKey},
 	})
 	server.projectMu.Lock()
 	server.projects[projectID] = projectTarget{

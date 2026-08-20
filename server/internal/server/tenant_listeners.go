@@ -53,8 +53,8 @@ func (m *tenantListenerManager) acquire(project, tenant string) <-chan struct{} 
 	if listener := m.active[key]; listener != nil {
 		if listener.databaseURL != databaseURL {
 			// Tenant routing can be hydrated after the first subscription opens.
-			// A listener connected before that hydration points at the project /
-			// landlord database forever, so sync/query invalidations from the real
+			// A listener connected before that hydration points at the project
+			// database forever, so sync/query invalidations from the real
 			// tenant database are never observed. Carry the existing references to
 			// a replacement listener; their eventual release calls are key-based.
 			if listener.idle != nil {
