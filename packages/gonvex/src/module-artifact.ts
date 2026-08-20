@@ -434,7 +434,10 @@ function dependenciesFromOptions(
   }
 
   const liveQueryPlan = liveQueryPlanFromOptions(options);
-  if (liveQueryPlan) dependencies.liveQueryPlan = liveQueryPlan;
+  if (liveQueryPlan) {
+    dependencies.liveQueryPlan = liveQueryPlan;
+    dependencies.reads = [readDependencyFromLiveQueryPlan(liveQueryPlan)];
+  }
   if (options.get("shareByPermissions")?.value === true) dependencies.shareByPermissions = true;
   const shareByVisibility = stringEntry(options, "shareByVisibility");
   if (shareByVisibility) dependencies.shareByVisibility = shareByVisibility;
@@ -450,6 +453,25 @@ function dependenciesFromOptions(
   const nonOptimisticReason = stringEntry(options, "nonOptimisticReason");
   if (nonOptimisticReason) dependencies.nonOptimisticReason = nonOptimisticReason;
   return Object.keys(dependencies).length > 0 ? dependencies : undefined;
+}
+
+function readDependencyFromLiveQueryPlan(plan: LiveQueryPlan): ReadDependency {
+  const filters = new Set<string>();
+  for (const column of plan.search?.columns ?? []) filters.add(column);
+  collectLiveExpressionColumns(plan.where, filters);
+  return {
+    table: plan.table,
+    ...(plan.columns && plan.columns.length > 0 ? { columns: [...plan.columns] } : {}),
+    ...(filters.size > 0 ? { filters: [...filters].sort() } : {}),
+    ...(plan.sort?.allowedColumns?.length ? { ordersBy: [...plan.sort.allowedColumns] } : {}),
+    ...(plan.window ? { windowed: true } : {}),
+  };
+}
+
+function collectLiveExpressionColumns(expression: LiveExpression | undefined, columns: Set<string>): void {
+  if (!expression) return;
+  if (expression.column) columns.add(expression.column);
+  for (const child of expression.children ?? []) collectLiveExpressionColumns(child, columns);
 }
 
 function tableDependencies(value: JsonValue | undefined): ReadDependency[] {
