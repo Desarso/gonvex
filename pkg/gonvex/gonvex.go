@@ -400,6 +400,7 @@ type RuntimeContext struct {
 }
 
 type queryChangeContextKey struct{}
+type processEnvDisabledContextKey struct{}
 
 type QueryChangeInfo struct {
 	Reason      string
@@ -457,8 +458,26 @@ func (rc *RuntimeContext) EnvValue(name string) string {
 		if v, ok := rc.Env[name]; ok && strings.TrimSpace(v) != "" {
 			return v
 		}
+		if rc.Context != nil {
+			if disabled, _ := rc.Context.Value(processEnvDisabledContextKey{}).(bool); disabled {
+				return ""
+			}
+		}
 	}
 	return os.Getenv(name)
+}
+
+// DisableProcessEnv prevents this context from resolving missing environment
+// values from the host process. Hosts use it when constructing contexts for
+// handlers that must not receive raw runtime secrets.
+func (rc *RuntimeContext) DisableProcessEnv() {
+	if rc != nil {
+		base := rc.Context
+		if base == nil {
+			base = context.Background()
+		}
+		rc.Context = context.WithValue(base, processEnvDisabledContextKey{}, true)
+	}
 }
 
 type QueryCtx struct {

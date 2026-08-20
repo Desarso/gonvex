@@ -10,6 +10,7 @@ import (
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/moduleengine"
+	"github.com/google/uuid"
 )
 
 const maxRegisteredHTTPBodyBytes = 2 << 20
@@ -138,6 +139,29 @@ func (s *Server) httpContext(ctx context.Context, projectID string, tenantID str
 	runtimeCtx, err := s.runtimeContext(ctx, projectID, tenantID, caller)
 	if err != nil {
 		return nil, err
+	}
+
+	// HTTP handlers are an application-facing capability boundary. They may
+	// use safe runtime services such as storage, scheduling, and ephemeral
+	// state, but durable application state must be reached through Reducers;
+	// no database pool, transaction, database URL, or environment secret is
+	// part of the handler context.
+	runtimeCtx.DB = nil
+	runtimeCtx.ControlPlaneDB = nil
+	runtimeCtx.LandlordDB = nil
+	runtimeCtx.TenantDB = nil
+	runtimeCtx.Tx = nil
+	runtimeCtx.DatabaseURL = ""
+	runtimeCtx.Env = nil
+	runtimeCtx.DisableProcessEnv()
+	runtimeCtx.Data = gonvex.UnavailableData()
+	runtimeCtx.OperationID = "http:" + uuid.NewString()
+	reducerCaller := callerContext{
+		user: runtimeCtx.User, member: runtimeCtx.Member, permissions: runtimeCtx.Permissions,
+	}
+	runtimeCtx.Reducers = &actionReducerCaller{
+		server: s, project: projectID, tenant: runtimeCtx.TenantID, caller: reducerCaller,
+		parent: runtimeCtx.OperationID,
 	}
 	return &gonvex.HTTPContext{RuntimeContext: runtimeCtx}, nil
 }
