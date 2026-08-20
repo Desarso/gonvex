@@ -8,7 +8,7 @@
       "file": "gonvex/messages.go"
     },
     "messages.send": {
-      "kind": "mutation",
+      "kind": "reducer",
       "handler": "SendMessage",
       "file": "gonvex/messages.go"
     }
@@ -48,6 +48,7 @@
         }
       }
     },
+    "controlPlaneTables": {},
     "landlordTables": {},
     "tenantTables": {
       "messages": {
@@ -82,15 +83,6 @@
           }
         }
       }
-    }
-  },
-  "bundle": {
-    "hash": "4dd5cc5bf465e6284d6c35a29a09c1a7eca8939c5c8a72fd62c01a78af4643db",
-    "modulePath": "gonvexapp/my-vite-app",
-    "packageName": "backend",
-    "files": {
-      "app/messages.go": "cGFja2FnZSBiYWNrZW5kCgppbXBvcnQgKAoJInRpbWUiCgoJImdpdGh1Yi5jb20vZ29udmV4L2dvbnZleC9wa2cvZ29udmV4IgopCgp0eXBlIExpc3RNZXNzYWdlc0FyZ3Mgc3RydWN0e30KCnR5cGUgU2VuZE1lc3NhZ2VBcmdzIHN0cnVjdCB7CglCb2R5IHN0cmluZyBganNvbjoiYm9keSJgCn0KCnR5cGUgTWVzc2FnZSBzdHJ1Y3QgewoJSUQgICAgICAgIHN0cmluZyAgICBganNvbjoiaWQiYAoJQm9keSAgICAgIHN0cmluZyAgICBganNvbjoiYm9keSJgCglBdXRob3IgICAgc3RyaW5nICAgIGBqc29uOiJhdXRob3IiYAoJQ3JlYXRlZEF0IHRpbWUuVGltZSBganNvbjoiY3JlYXRlZF9hdCJgCn0KCmZ1bmMgUmVnaXN0ZXIoYXBwICpnb252ZXguQXBwKSB7CglhcHAuUXVlcnkoIm1lc3NhZ2VzLmxpc3QiLCBMaXN0TWVzc2FnZXMpCglhcHAuTXV0YXRpb24oIm1lc3NhZ2VzLnNlbmQiLCBTZW5kTWVzc2FnZSkKfQoKZnVuYyBMaXN0TWVzc2FnZXMoY3R4ICpnb252ZXguUXVlcnlDdHgsIGFyZ3MgTGlzdE1lc3NhZ2VzQXJncykgKFtdTWVzc2FnZSwgZXJyb3IpIHsKCXJldHVybiBbXU1lc3NhZ2V7fSwgbmlsCn0KCmZ1bmMgU2VuZE1lc3NhZ2UoY3R4ICpnb252ZXguTXV0YXRpb25DdHgsIGFyZ3MgU2VuZE1lc3NhZ2VBcmdzKSAoTWVzc2FnZSwgZXJyb3IpIHsKCXJldHVybiBNZXNzYWdlewoJCUlEOiAgICAgICAgInBlbmRpbmciLAoJCUJvZHk6ICAgICAgYXJncy5Cb2R5LAoJCUF1dGhvcjogICAgImRlbW8tdXNlciIsCgkJQ3JlYXRlZEF0OiB0aW1lLk5vdygpLlVUQygpLAoJfSwgbmlsCn0K",
-      "app/schema.go": "cGFja2FnZSBiYWNrZW5kCgppbXBvcnQgImdpdGh1Yi5jb20vZ29udmV4L2dvbnZleC9wa2cvZ29udmV4IgoKZnVuYyBTY2hlbWEocyAqZ29udmV4LlNjaGVtYSkgewoJcy5UZW5hbnRUYWJsZSgibWVzc2FnZXMiLCBmdW5jKHQgKmdvbnZleC5UYWJsZSkgewoJCXQuSUQoImlkIikKCQl0LlN0cmluZygiYm9keSIpCgkJdC5TdHJpbmcoImF1dGhvciIpCgkJdC5UaW1lKCJjcmVhdGVkX2F0IikKCgkJdC5JbmRleCgiYnlfY3JlYXRlZF9hdCIsICJjcmVhdGVkX2F0IikKCX0pCn0K"
     }
   }
 }
