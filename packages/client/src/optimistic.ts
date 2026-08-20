@@ -12,12 +12,34 @@ export type OptimisticReducerDefinition = {
   fieldsPath: readonly string[];
 };
 
+/** A path into reducer arguments, or a literal row identifier. */
+export type OptimisticID = string | readonly string[];
+
+export type OptimisticEffectDefinition =
+  | { operation: "patch"; entity: string; id: OptimisticID; fields: Readonly<Record<string, unknown>> }
+  | { operation: "upsert"; entity: string; id: OptimisticID; value: Readonly<Record<string, unknown>> }
+  | { operation: "delete"; entity: string; id: OptimisticID };
+
+/** Ordered effects from a module reducer's atomic optimistic transaction. */
+export type OptimisticTransactionDefinition = {
+  effects: readonly OptimisticEffectDefinition[];
+  expectedRevision?: number;
+};
+
 type OptimisticRowPatch = {
   /** Canonical entity/table name. `collection` remains a compatibility alias. */
   entity?: string;
   collection?: string;
   rowId: string;
   op: "patch" | "insert";
+  fields: Record<string, unknown>;
+};
+
+type OptimisticUpsertPatch = {
+  entity?: string;
+  collection?: string;
+  rowId: string;
+  op: "upsert";
   fields: Record<string, unknown>;
 };
 
@@ -29,7 +51,7 @@ type OptimisticDeletePatch = {
   fields?: never;
 };
 
-export type OptimisticPatch = OptimisticRowPatch | OptimisticDeletePatch;
+export type OptimisticPatch = OptimisticRowPatch | OptimisticUpsertPatch | OptimisticDeletePatch;
 
 type OverlayEntry = {
   reducerId: string;
@@ -143,6 +165,11 @@ export class OptimisticOverlay {
           }
         } else if (patch.op === "insert") {
           if (index < 0) materialized.push({ ...patch.fields, [keyField]: patch.rowId });
+          touched = true;
+        } else if (patch.op === "upsert") {
+          const row = { ...patch.fields, [keyField]: patch.rowId };
+          if (index >= 0) materialized[index] = row;
+          else materialized.push(row);
           touched = true;
         } else if (index >= 0) {
           materialized = [...materialized.slice(0, index), ...materialized.slice(index + 1)];
@@ -262,9 +289,12 @@ export class OptimisticOverlay {
 }
 
 export function optimisticPatchesFromReference(
-  definition: OptimisticReducerDefinition | undefined,
+  definition: OptimisticReducerDefinition | OptimisticTransactionDefinition | undefined,
   args: unknown,
 ): OptimisticPatch[] {
+  if (isOptimisticTransactionDefinition(definition)) {
+    return optimisticPatchesFromTransaction(definition, args);
+  }
   if (!definition?.entity) return [];
   const record = isRecord(args) ? args : {};
   const configuredRowId = definition.rowIdPath.length > 0
@@ -281,7 +311,52 @@ export function optimisticPatchesFromReference(
   }];
 }
 
-function normalizeOptimisticFields(fields: Record<string, unknown>) {
+function optimisticPatchesFromTransaction(
+  transaction: OptimisticTransactionDefinition,
+  args: unknown,
+): OptimisticPatch[] {
+  if (!Array.isArray(transaction.effects) || transaction.effects.length === 0) return [];
+  const record = isRecord(args) ? args : {};
+  const patches: OptimisticPatch[] = [];
+  for (const effect of transaction.effects) {
+    if (!isOptimisticEffectDefinition(effect) || !effect.entity.trim()) return [];
+    const rowId = optimisticRowId(effect.id, record);
+    if (!rowId) return [];
+    if (effect.operation === "delete") {
+      patches.push({ entity: effect.entity, rowId, op: "delete" });
+    } else {
+      const fields = effect.operation === "patch" ? effect.fields : effect.value;
+      if (!isRecord(fields)) return [];
+      patches.push({
+        entity: effect.entity,
+        rowId,
+        op: effect.operation === "upsert" ? "upsert" : "patch",
+        fields: normalizeOptimisticFields(fields),
+      });
+    }
+  }
+  return patches;
+}
+
+function optimisticRowId(id: OptimisticID, args: Record<string, unknown>): string {
+  const value = Array.isArray(id) ? readPath(args, id) : id;
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  return String(value).trim();
+}
+
+function isOptimisticTransactionDefinition(value: unknown): value is OptimisticTransactionDefinition {
+  return isRecord(value) && Array.isArray(value.effects);
+}
+
+function isOptimisticEffectDefinition(value: unknown): value is OptimisticEffectDefinition {
+  if (!isRecord(value) || (value.operation !== "patch" && value.operation !== "upsert" && value.operation !== "delete")) return false;
+  if (typeof value.entity !== "string" || (typeof value.id !== "string" && !Array.isArray(value.id))) return false;
+  if (Array.isArray(value.id) && value.id.some((part) => typeof part !== "string" || !part.trim())) return false;
+  return value.operation === "delete"
+    || isRecord(value.operation === "patch" ? value.fields : value.value);
+}
+
+function normalizeOptimisticFields(fields: Readonly<Record<string, unknown>>) {
   const normalized: Record<string, unknown> = { ...fields };
   for (const [key, value] of Object.entries(fields)) {
     const camel = key.replace(/_([a-z0-9])/g, (_, character: string) => character.toUpperCase());

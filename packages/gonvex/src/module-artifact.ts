@@ -161,6 +161,8 @@ export function moduleManifestFunctions(artifact: ModuleArtifact): Record<string
       ...(entry.delivery ? { delivery: entry.delivery } : {}),
       ...(entry.dependencies ? { dependencies: entry.dependencies } : {}),
       ...(entry.replica ? { replica: entry.replica } : {}),
+      ...(entry.offline === undefined ? {} : { offline: entry.offline }),
+      ...(entry.optimistic === undefined ? {} : { optimistic: entry.optimistic }),
     };
   }
   return functions;
@@ -358,7 +360,16 @@ function moduleFunction(input: {
   const dependencies = dependenciesFromOptions(input.options, input.kind, delivery);
   const replica = delivery === "replica" ? replicaFromOptions(input.options) : undefined;
   const offline = input.options?.get("offline")?.value;
-  const optimistic = input.options?.get("optimistic")?.value;
+  const declaredOptimistic = input.options?.get("optimistic")?.value;
+  // The object-shaped optimisticReducer/projection contract predates v2
+  // transactions and is still read into dependenciesFromOptions below. Keep
+  // it there rather than mistaking it for a transaction.
+  const legacyOptimistic = isJsonObject(declaredOptimistic)
+    && ("reducer" in declaredOptimistic || "projection" in declaredOptimistic);
+  const optimistic = legacyOptimistic ? undefined : declaredOptimistic;
+  if (input.kind === "reducer" && optimistic !== undefined) {
+    validateOptimisticTransaction(optimistic);
+  }
   return {
     kind: input.kind,
     handler: input.handler,
@@ -373,6 +384,48 @@ function moduleFunction(input: {
     ...(offline === undefined ? {} : { offline }),
     ...(optimistic === undefined ? {} : { optimistic }),
   };
+}
+
+/**
+ * Validate the literal optimistic contract while producing the artifact. The
+ * module itself is still validated by @gonvex/module-sdk at load time, but a
+ * malformed literal must not be silently copied into a client manifest.
+ */
+function validateOptimisticTransaction(value: JsonValue): void {
+  if (!isJsonObject(value) || !Array.isArray(value.effects) || value.effects.length === 0) {
+    throw new Error("reducer optimistic metadata must contain a non-empty effects array");
+  }
+  if (value.expectedRevision !== undefined && (
+    typeof value.expectedRevision !== "number"
+    || !Number.isSafeInteger(value.expectedRevision)
+    || value.expectedRevision < 0
+  )) {
+    throw new Error("reducer optimistic expectedRevision must be a non-negative integer");
+  }
+  for (const effect of value.effects) {
+    if (!isJsonObject(effect) || (effect.operation !== "patch" && effect.operation !== "upsert" && effect.operation !== "delete")) {
+      throw new Error("reducer has an invalid optimistic effect");
+    }
+    if (typeof effect.entity !== "string" || !effect.entity.trim()) {
+      throw new Error("reducer optimistic effects require an entity");
+    }
+    if (typeof effect.id !== "string" && (
+      !Array.isArray(effect.id)
+      || effect.id.length === 0
+      || effect.id.some((part) => typeof part !== "string" || !part.trim())
+    )) {
+      throw new Error("reducer optimistic effects require a string id or id references");
+    }
+    if ((effect.operation === "patch" || effect.operation === "upsert") && !isJsonObject(
+      effect.operation === "patch" ? effect.fields : effect.value,
+    )) {
+      throw new Error(`reducer optimistic ${effect.operation} effects require an object value`);
+    }
+  }
+}
+
+function isJsonObject(value: unknown): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function callSchemas(generics?: string, signature?: string): { args: ModuleSchema; result: ModuleSchema } {

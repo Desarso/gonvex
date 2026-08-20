@@ -251,6 +251,7 @@ export class LocalReplica {
         if ((patch.entity ?? patch.collection) !== entity || patch.rowId !== id) continue;
         if (patch.op === "delete") selected = undefined;
         if (patch.op === "insert") selected = cloneRow(patch.fields as ReplicaRow);
+        if (patch.op === "upsert") selected = cloneRow(patch.fields as ReplicaRow);
         if (patch.op === "patch") selected = { ...(selected ?? {}), ...(patch.fields as ReplicaRow) };
       }
     }

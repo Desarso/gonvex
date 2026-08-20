@@ -14,6 +14,10 @@ export type FunctionEntry = {
   delivery?: "oneShot" | "live" | "replica";
   dependencies?: FunctionDependencies;
   replica?: ReplicaCollectionDefinition;
+  /** Reducer delivery policy declared by a TypeScript module. */
+  offline?: JsonValue;
+  /** Ordered atomic optimistic transaction declared by a TypeScript module. */
+  optimistic?: JsonValue;
 };
 
 export type ReplicaCollectionDefinition = {

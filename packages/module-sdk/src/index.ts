@@ -366,8 +366,8 @@ const validateOfflinePolicy = (value: unknown, path: string): asserts value is O
 };
 
 const validateOptimisticTransaction = (value: unknown, path: string): asserts value is OptimisticTransaction => {
-  if (!isRecord(value) || !Array.isArray(value.effects)) {
-    throw new Error(`reducer ${path} optimistic metadata must contain effects`);
+  if (!isRecord(value) || !Array.isArray(value.effects) || value.effects.length === 0) {
+    throw new Error(`reducer ${path} optimistic metadata must contain a non-empty effects array`);
   }
   if (value.expectedRevision !== undefined &&
     (typeof value.expectedRevision !== "number" || !Number.isSafeInteger(value.expectedRevision) || value.expectedRevision < 0)) {
@@ -380,8 +380,9 @@ const validateOptimisticTransaction = (value: unknown, path: string): asserts va
     if (typeof effect.entity !== "string" || !effect.entity.trim()) {
       throw new Error(`reducer ${path} optimistic effects require an entity`);
     }
-    if (typeof effect.id !== "string" &&
-      (!Array.isArray(effect.id) || effect.id.some((part) => typeof part !== "string" || !part.trim()))) {
+    if ((typeof effect.id === "string" && !effect.id.trim()) ||
+      (typeof effect.id !== "string" &&
+      (!Array.isArray(effect.id) || effect.id.length === 0 || effect.id.some((part) => typeof part !== "string" || !part.trim())))) {
       throw new Error(`reducer ${path} optimistic effects require a string id or id references`);
     }
     if ((effect.operation === "patch" || effect.operation === "upsert") && !isRecord(effect.operation === "patch" ? effect.fields : effect.value)) {

@@ -14,6 +14,10 @@ export type FunctionManifestEntry = {
   delivery?: "oneShot" | "live" | "replica";
   dependencies?: FunctionDependencies;
   replica?: ReplicaCollectionDefinition;
+  /** Reducer delivery policy declared by a TypeScript module. */
+  offline?: JsonValue;
+  /** Ordered atomic optimistic transaction declared by a TypeScript module. */
+  optimistic?: JsonValue;
 };
 
 export type ReplicaCollectionDefinition = {
@@ -50,9 +54,24 @@ export type FunctionDependencies = {
   shareByPermissions?: boolean;
 	liveQueryPlan?: LiveQueryPlan;
 	nonOptimisticReason?: string;
+	optimisticReducer?: OptimisticReducerDefinition;
+	optimisticProjection?: OptimisticProjectionDefinition;
 	shareByVisibility?: string;
 	shareResultFrom?: string;
 	shareResultField?: string;
+};
+
+/** Legacy single-patch optimistic reducer contract retained for v1 clients. */
+export type OptimisticReducerDefinition = {
+  entity: string;
+  rowIdPath: string[];
+  fieldsPath: string[];
+};
+
+export type OptimisticProjectionDefinition = {
+  entity: string;
+  key: string;
+  resultPath: string[];
 };
 
 export type LiveQueryPlan = {

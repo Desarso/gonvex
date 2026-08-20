@@ -31,6 +31,7 @@ import {
   type OptimisticReducerDefinition,
   type OptimisticPatch,
   type OptimisticProjection,
+  type OptimisticTransactionDefinition,
   type Row,
 } from "./optimistic.js";
 import {
@@ -193,6 +194,7 @@ export type FunctionReference = {
   optimistic?: {
     projection?: OptimisticProjection;
     reducer?: OptimisticReducerDefinition;
+    transaction?: OptimisticTransactionDefinition;
   };
 };
 
@@ -2020,7 +2022,7 @@ export class GonvexClient {
   ): Promise<T | QueuedReducerOutcome> {
     const reducerId = randomID();
     const patches = options.optimistic
-      ?? optimisticPatchesFromReference(ref.optimistic?.reducer, args);
+      ?? optimisticPatchesFromReference(ref.optimistic?.transaction ?? ref.optimistic?.reducer, args);
     if (patches.length === 0 && options.offline !== "queue") {
       return this.call<T>(
         "reducer",
@@ -2202,7 +2204,7 @@ export class GonvexClient {
       }));
     const requiresStandardReducerPath = options.offline === "queue"
       || options.optimistic !== undefined
-      || calls.some((call) => call.ref.optimistic?.reducer !== undefined);
+      || calls.some((call) => call.ref.optimistic?.reducer !== undefined || call.ref.optimistic?.transaction !== undefined);
     if (this.serverCapabilities.reducerBatch !== 1 || requiresStandardReducerPath) {
       const outcomes: Array<{ status: "ok"; result: T } | { status: "error"; error: GonvexClientError }> = [];
       for (const call of calls) {
