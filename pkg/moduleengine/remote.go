@@ -74,6 +74,7 @@ func NewRemoteEngine(host *RemoteHost, projectID string, artifact manifest.Modul
 			File:     function.File,
 			Args:     function.Args,
 			Result:   function.Result,
+			Metadata: moduleFunctionMetadata(function),
 		})
 	}
 
@@ -96,6 +97,20 @@ func NewRemoteEngine(host *RemoteHost, projectID string, artifact manifest.Modul
 		},
 		descriptors: descriptors,
 	}, nil
+}
+
+func moduleFunctionMetadata(function manifest.ModuleFunction) map[string]any {
+	metadata := map[string]any{}
+	if function.Offline != nil {
+		metadata["offline"] = function.Offline
+	}
+	if function.Optimistic != nil {
+		metadata["optimistic"] = function.Optimistic
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
 }
 
 // Identity is the artifact's content hash. A sync whose module hash is

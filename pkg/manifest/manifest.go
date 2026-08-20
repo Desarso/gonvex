@@ -23,10 +23,14 @@ type FunctionEntry struct {
 	Kind         FunctionKind                 `json:"kind"`
 	Handler      string                       `json:"handler"`
 	File         string                       `json:"file"`
+	Args         any                          `json:"args,omitempty"`
+	Result       any                          `json:"result,omitempty"`
 	Internal     bool                         `json:"internal,omitempty"`
 	Delivery     DeliveryMode                 `json:"delivery,omitempty"`
 	Dependencies FunctionDependencies         `json:"dependencies,omitempty"`
 	Replica      *ReplicaCollectionDefinition `json:"replica,omitempty"`
+	Offline      any                          `json:"offline,omitempty"`
+	Optimistic   any                          `json:"optimistic,omitempty"`
 }
 
 // ReplicaCollectionDefinition describes an entity-shaped, locally materialized collection.
