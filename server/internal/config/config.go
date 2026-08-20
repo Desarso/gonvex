@@ -20,6 +20,19 @@ const (
 	defaultSubscriptionRerunConcurrency = 32
 )
 
+// Module host defaults. They bound one process that serves every project, so
+// they are sized for a runtime's whole module workload rather than per tenant.
+const (
+	defaultModuleHostStartTimeout     = 30 * time.Second
+	defaultModuleHostRequestTimeout   = 30 * time.Second
+	defaultModuleHostShutdownTimeout  = 10 * time.Second
+	defaultModuleHostDrainTimeout     = 30 * time.Second
+	defaultModuleHostMaxFrameBytes    = 64 << 20
+	defaultModuleHostConcurrency      = 32
+	defaultModuleHostIsolatePool      = 4
+	defaultModuleHostExecutionTimeout = 10 * time.Second
+)
+
 type Config struct {
 	Addr             string
 	// ControlPlaneURL is the canonical control-plane database URL. LandlordURL
@@ -98,6 +111,31 @@ type Config struct {
 	// DropEmptyUndeclaredColumns enables conservative declarative cleanup. It is
 	// off by default so deploying an older bundle cannot erase newer columns.
 	DropEmptyUndeclaredColumns bool
+
+	// ModuleHost* configure the out-of-process module host that executes
+	// TypeScript module artifacts. The whole group is opt-in: with none of it
+	// set the runtime looks for the host binary on PATH, and a deployment that
+	// has neither keeps serving compiled Go modules exactly as before. Only a
+	// project whose manifest ships a module artifact needs a host, and such a
+	// project fails its sync with a clear error rather than loading nothing.
+	ModuleHostEnabled bool
+	// ModuleHostBinary is the executable this runtime supervises. One process
+	// serves every project and every tenant.
+	ModuleHostBinary string
+	// ModuleHostEndpoint is a local address (unix:/path.sock or
+	// tcp:127.0.0.1:7787). Set on its own it means an externally managed host
+	// this runtime only connects to.
+	ModuleHostEndpoint        string
+	ModuleHostStartTimeout    time.Duration
+	ModuleHostRequestTimeout  time.Duration
+	ModuleHostShutdownTimeout time.Duration
+	// ModuleHostDrainTimeout bounds how long a retired module generation may
+	// keep finishing its in-flight calls after a newer one is activated.
+	ModuleHostDrainTimeout time.Duration
+	ModuleHostMaxFrameBytes int
+	ModuleHostMaxConcurrentCalls int
+	ModuleHostIsolatePoolSize    int
+	ModuleHostExecutionTimeout   time.Duration
 }
 
 // Normalize resolves the control-plane URL aliases once at the runtime
@@ -159,6 +197,18 @@ func FromEnv() Config {
 		FirebaseJWKSURL:              env("GONVEX_FIREBASE_JWKS_URL", "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"),
 		Environment:                  env("GONVEX_ENVIRONMENT", "local dev"),
 		DropEmptyUndeclaredColumns:   envBool("GONVEX_DROP_EMPTY_UNDECLARED_COLUMNS", false),
+
+		ModuleHostEnabled:            envBool("GONVEX_MODULE_HOST_ENABLED", true),
+		ModuleHostBinary:             strings.TrimSpace(env("GONVEX_MODULE_HOST_BINARY", "")),
+		ModuleHostEndpoint:           strings.TrimSpace(env("GONVEX_MODULE_HOST_ENDPOINT", "")),
+		ModuleHostStartTimeout:       envDuration("GONVEX_MODULE_HOST_START_TIMEOUT", defaultModuleHostStartTimeout),
+		ModuleHostRequestTimeout:     envDuration("GONVEX_MODULE_HOST_REQUEST_TIMEOUT", defaultModuleHostRequestTimeout),
+		ModuleHostShutdownTimeout:    envDuration("GONVEX_MODULE_HOST_SHUTDOWN_TIMEOUT", defaultModuleHostShutdownTimeout),
+		ModuleHostDrainTimeout:       envDuration("GONVEX_MODULE_HOST_DRAIN_TIMEOUT", defaultModuleHostDrainTimeout),
+		ModuleHostMaxFrameBytes:      envInt("GONVEX_MODULE_HOST_MAX_FRAME_BYTES", defaultModuleHostMaxFrameBytes),
+		ModuleHostMaxConcurrentCalls: envInt("GONVEX_MODULE_HOST_MAX_CONCURRENT_CALLS", defaultModuleHostConcurrency),
+		ModuleHostIsolatePoolSize:    envInt("GONVEX_MODULE_HOST_ISOLATE_POOL_SIZE", defaultModuleHostIsolatePool),
+		ModuleHostExecutionTimeout:   envDuration("GONVEX_MODULE_HOST_EXECUTION_TIMEOUT", defaultModuleHostExecutionTimeout),
 	}
 	config.Normalize()
 	return config

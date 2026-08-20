@@ -1,0 +1,20 @@
+[package]
+name = "gonvex-module-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gonvex-module-host"
+path = "src/main.rs"
+
+[dependencies]
+gonvex-module-runtime = { path = "../module-runtime" }
+gonvex-module-runtime-v8 = { path = "../module-runtime-v8" }
+gonvex-server-host = { path = "../server" }
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

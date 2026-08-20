@@ -63,6 +63,8 @@ pub(crate) struct CallSpec {
     pub(crate) invocation: Invocation,
     /// Already narrowed to the function kind by `dispatch::effective_capabilities`.
     pub(crate) capabilities: Capabilities,
+    /// The host's wall clock for this call, surfaced to the module as `ctx.now`.
+    pub(crate) now_unix_ms: u64,
     pub(crate) timeout: Duration,
     pub(crate) max_result_bytes: usize,
     pub(crate) max_host_calls: usize,
@@ -359,7 +361,8 @@ impl ModuleIsolate {
             function: &spec.invocation.function,
             kind: kind_name(&spec.contract.kind),
             capabilities: CapabilityFlags::from(&spec.capabilities),
-            identity: IdentityView::from(&spec.invocation.context.identity),
+            identity: IdentityView::from(&spec.invocation.context),
+            now: spec.now_unix_ms,
             max_result_bytes: spec.max_result_bytes,
         };
         let request = match serde_json::to_string(&request) {

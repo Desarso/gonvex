@@ -7,7 +7,8 @@
 //! an unexpected shape.
 
 use gonvex_module_runtime::{
-    Capabilities, FunctionKind, HostCall, IdentityContext, ModuleError,
+    AccountIdentity, Capabilities, FunctionKind, HostCall, InvocationContext, MemberIdentity,
+    ModuleError, TenantIdentity,
 };
 use serde::{Deserialize, Serialize};
 
@@ -81,25 +82,27 @@ impl From<&Capabilities> for CapabilityFlags {
     }
 }
 
-/// Identity is the only part of the invocation context the module sees. The
-/// project and tenant identifiers stay in the host, which scopes every host
-/// call itself, so module code cannot be the place tenancy is enforced.
+/// Identity is the only part of the invocation context the module sees, and it
+/// is shaped exactly like `@gonvex/module-sdk`'s `AuthContext & TenantContext`.
+/// The database URL, credentials, and the host's own routing stay behind the
+/// host call boundary, so module code can never be the place tenancy is
+/// enforced.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IdentityView<'a> {
-    account_id: Option<&'a str>,
-    member_id: Option<&'a str>,
-    email: Option<&'a str>,
+    account: Option<&'a AccountIdentity>,
+    member: Option<&'a MemberIdentity>,
+    tenant: Option<&'a TenantIdentity>,
     permissions: &'a serde_json::Value,
 }
 
-impl<'a> From<&'a IdentityContext> for IdentityView<'a> {
-    fn from(identity: &'a IdentityContext) -> Self {
+impl<'a> From<&'a InvocationContext> for IdentityView<'a> {
+    fn from(context: &'a InvocationContext) -> Self {
         Self {
-            account_id: identity.account_id.as_deref(),
-            member_id: identity.member_id.as_deref(),
-            email: identity.email.as_deref(),
-            permissions: &identity.permissions,
+            account: context.identity.account.as_ref(),
+            member: context.identity.member.as_ref(),
+            tenant: context.tenant.as_ref(),
+            permissions: &context.identity.permissions,
         }
     }
 }
@@ -111,6 +114,9 @@ pub(crate) struct DispatchRequest<'a> {
     pub(crate) kind: &'static str,
     pub(crate) capabilities: CapabilityFlags,
     pub(crate) identity: IdentityView<'a>,
+    /// Wall-clock milliseconds the host stamped on the invocation, surfaced as
+    /// `ctx.now` so a handler never reads a clock the host does not control.
+    pub(crate) now: u64,
     pub(crate) max_result_bytes: usize,
 }
 
@@ -125,10 +131,26 @@ pub(crate) enum HostCallRequest {
         #[serde(default)]
         parameters: serde_json::Value,
     },
-    DbWrite {
-        statement: String,
+    DbInsert {
+        table: String,
         #[serde(default)]
-        parameters: serde_json::Value,
+        row: serde_json::Value,
+    },
+    DbUpdate {
+        table: String,
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        id: serde_json::Value,
+        #[serde(default)]
+        patch: serde_json::Value,
+    },
+    DbDelete {
+        table: String,
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        id: serde_json::Value,
     },
     RunReducer {
         function: String,
@@ -151,6 +173,9 @@ impl HostCallRequest {
         let encode = |value: serde_json::Value| {
             serde_json::to_vec(&value).map_err(|err| format!("host call payload is not encodable: {err}"))
         };
+        // An empty key column means "the host's default", which keeps the
+        // module from having to know the primary key of every table.
+        let key_column = |key: Option<String>| key.unwrap_or_default();
         Ok(match self {
             Self::DbQuery {
                 statement,
@@ -159,12 +184,25 @@ impl HostCallRequest {
                 statement,
                 parameters: encode(parameters)?,
             },
-            Self::DbWrite {
-                statement,
-                parameters,
-            } => HostCall::DbWrite {
-                statement,
-                parameters: encode(parameters)?,
+            Self::DbInsert { table, row } => HostCall::DbInsert {
+                table,
+                row: encode(row)?,
+            },
+            Self::DbUpdate {
+                table,
+                key,
+                id,
+                patch,
+            } => HostCall::DbUpdate {
+                table,
+                key: key_column(key),
+                id: encode(id)?,
+                patch: encode(patch)?,
+            },
+            Self::DbDelete { table, key, id } => HostCall::DbDelete {
+                table,
+                key: key_column(key),
+                id: encode(id)?,
             },
             Self::RunReducer { function, args } => HostCall::RunReducer {
                 function,

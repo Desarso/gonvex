@@ -6,10 +6,17 @@
 // identity, capabilities and budgets arrive as call arguments and die with the
 // call, which is what makes recycling an isolate across tenants safe.
 //
+// The context objects built here are the `@gonvex/module-sdk` surface:
+// `QueryContext` gets `db.query`, `ReducerContext` adds `db.insert/update/
+// delete` and `runReducer`, `ActionContext` gets `fetch`, `runReducer` and
+// `storage` but no database handle at all. Writes travel as a table name, a key
+// and a JSON object — never as SQL text a module interpolated values into. The
+// Go host quotes the identifiers and binds the values as parameters.
+//
 // Reaching `Deno.core.ops.op_gonvex_host_call` directly is not a privilege
 // escalation: the Rust op re-checks the capability and the host-call budget of
-// the active invocation before it forwards anything, so the context objects
-// built here are ergonomics, not the security boundary.
+// the active invocation before it forwards anything, so these context objects
+// are ergonomics, not the security boundary.
 ((core) => {
   "use strict";
 
@@ -66,22 +73,113 @@
     return value;
   };
 
+  const plainObject = (name, value) => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new TypeError(`${name} must be an object`);
+    }
+    return value;
+  };
+
+  const rowKey = (value) => {
+    if (typeof value === "string" || typeof value === "number") return value;
+    throw new TypeError("row id must be a string or a number");
+  };
+
   const optional = (value) => (value === undefined ? null : value);
+
+  const parameterList = (parameters) => {
+    if (parameters === undefined || parameters === null) return [];
+    if (!Array.isArray(parameters)) throw new TypeError("query parameters must be an array");
+    // Values stay values: they are bound as $1..$n by the host, never spliced
+    // into the statement here.
+    return [...parameters];
+  };
+
+  // A deliberately small Response: enough for the module SDK's fetch contract
+  // without pretending the isolate has streams, redirects, or a cookie jar.
+  const createResponse = (raw) => {
+    const headers = raw && typeof raw.headers === "object" && raw.headers !== null ? raw.headers : {};
+    const body = typeof raw?.body === "string" ? raw.body : "";
+    return Object.freeze({
+      status: raw?.status ?? 0,
+      statusText: raw?.statusText ?? "",
+      ok: (raw?.status ?? 0) >= 200 && (raw?.status ?? 0) < 300,
+      url: raw?.url ?? "",
+      headers: Object.freeze({
+        get: (name) => headers[String(name).toLowerCase()] ?? null,
+        has: (name) => Object.prototype.hasOwnProperty.call(headers, String(name).toLowerCase()),
+        entries: () => Object.entries(headers),
+      }),
+      text: async () => body,
+      json: async () => JSON.parse(body),
+    });
+  };
+
+  const requestInit = (input, init) => {
+    const url = typeof input === "string" ? input : String(input?.href ?? input ?? "");
+    const options = init ?? {};
+    const headers = {};
+    const source = options.headers;
+    if (source && typeof source.entries === "function") {
+      for (const [name, value] of source.entries()) headers[String(name).toLowerCase()] = String(value);
+    } else if (source && typeof source === "object") {
+      for (const [name, value] of Object.entries(source)) headers[String(name).toLowerCase()] = String(value);
+    }
+    let body = null;
+    if (options.body !== undefined && options.body !== null) {
+      if (typeof options.body === "string") body = options.body;
+      else if (typeof options.body === "object") {
+        body = JSON.stringify(options.body);
+        if (headers["content-type"] === undefined) headers["content-type"] = "application/json";
+      } else body = String(options.body);
+    }
+    return { url: text("fetch url", url), method: String(options.method ?? "GET").toUpperCase(), headers, body };
+  };
 
   // Capability separation is structural: the Rust side intersects what the
   // function kind may ever reach with what the host granted this invocation,
   // and a method that is not granted is simply absent from the context. A
-  // query has no way to name a write, an action has no database handle.
+  // Query has no way to name a write, an Action has no database handle.
   const createContext = (request) => {
     const granted = request.capabilities;
-    const context = { kind: request.kind, function: request.function, identity: Object.freeze(request.identity) };
+    const identity = request.identity ?? {};
+    const account = identity.account ?? null;
+    const context = {
+      kind: request.kind,
+      function: request.function,
+      now: request.now,
+      account,
+      auth: Object.freeze({ account }),
+      tenant: identity.tenant ?? null,
+      member: identity.member ?? null,
+      permissions: identity.permissions ?? null,
+    };
 
     const db = {};
     if (granted.dbRead) {
-      db.query = (statement, parameters) => hostCall({ kind: "dbQuery", statement: text("statement", statement), parameters: optional(parameters) });
+      db.query = (statement, parameters) => hostCall({
+        kind: "dbQuery",
+        statement: text("statement", statement),
+        parameters: parameterList(parameters),
+      });
     }
     if (granted.dbWrite) {
-      db.write = (statement, parameters) => hostCall({ kind: "dbWrite", statement: text("statement", statement), parameters: optional(parameters) });
+      db.insert = (table, row) => hostCall({
+        kind: "dbInsert",
+        table: text("table", table),
+        row: plainObject("row", row),
+      });
+      db.update = (table, id, patch) => hostCall({
+        kind: "dbUpdate",
+        table: text("table", table),
+        id: rowKey(id),
+        patch: plainObject("patch", patch),
+      });
+      db.delete = (table, id) => hostCall({
+        kind: "dbDelete",
+        table: text("table", table),
+        id: rowKey(id),
+      });
     }
     if (granted.dbRead || granted.dbWrite) context.db = Object.freeze(db);
 
@@ -89,22 +187,36 @@
       context.runReducer = (name, args) => hostCall({ kind: "runReducer", function: text("reducer", name), args: optional(args) });
     }
     if (granted.network) {
-      context.fetch = (init) => hostCall({ kind: "fetch", request: optional(init) });
+      context.fetch = async (input, init) => createResponse(await hostCall({ kind: "fetch", request: requestInit(input, init) }));
     }
     if (granted.storage) {
+      const storage = (operation, payload) => hostCall({ kind: "storage", operation, payload: optional(payload) });
       context.storage = Object.freeze({
-        call: (operation, payload) => hostCall({ kind: "storage", operation: text("operation", operation), payload: optional(payload) }),
+        generateUploadUrl: (options) => storage("generateUploadUrl", options ?? {}),
+        getUrl: (fileId) => storage("getUrl", { fileId: text("fileId", fileId) }),
+        generateDownloadUrl: (fileId, ttlMs) => storage("generateDownloadUrl", { fileId: text("fileId", fileId), ttlMs: ttlMs ?? 0 }),
+        getMetadata: (fileId) => storage("getMetadata", { fileId: text("fileId", fileId) }),
+        delete: (fileId) => storage("delete", { fileId: text("fileId", fileId) }),
+        // Bytes travel base64-encoded: the op boundary is JSON text in both
+        // directions, so binary payloads have to be named as such.
+        store: (contentBase64, options) => storage("store", { contentBase64: text("content", contentBase64), ...(options ?? {}) }),
+        call: (operation, payload) => storage(text("operation", operation), payload),
       });
     }
     return Object.freeze(context);
   };
 
   // `export const list = query({ handler })` and `export async function list()`
-  // are both legal module shapes, so unwrap one level before giving up.
+  // are both legal module shapes, so unwrap one level before giving up. The
+  // module SDK's declaration helpers park the executable handler on `run`.
   const resolveHandler = (binding) => {
     if (typeof binding === "function") return binding;
     if (binding !== null && typeof binding === "object") {
       if (typeof binding.handler === "function") return binding.handler;
+      if (typeof binding.run === "function") return binding.run;
+      if (binding.options !== null && typeof binding.options === "object" && typeof binding.options.run === "function") {
+        return binding.options.run;
+      }
       if (typeof binding.default === "function") return binding.default;
     }
     return null;

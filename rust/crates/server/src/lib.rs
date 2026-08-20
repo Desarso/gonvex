@@ -123,6 +123,8 @@ impl RetiredGeneration {
 pub enum RegistryError {
     #[error("module generation {0} is not newer than the active generation")]
     NonMonotonicGeneration(u64),
+    #[error("module generation {0} was never loaded")]
+    UnknownGeneration(u64),
     #[error("no active module generation")]
     Empty,
     #[error("module invocation failed: {0}")]
@@ -192,27 +194,60 @@ impl GenerationRegistry {
     /// Drops retired engine references once their in-flight calls have drained.
     /// A timeout leaves the generation retained, making a forced shutdown an
     /// explicit host policy instead of silently dropping an invocation.
+    ///
+    /// Waiting happens with no registry lock held: draining can take as long as
+    /// the slowest in-flight call, and blocking `activate` for that whole window
+    /// would make publishing a generation wait on the one it replaces.
     pub fn reap(&self, timeout: Option<Duration>) -> Vec<u64> {
-        let mut generations = self.generations.lock().expect("generation registry lock");
+        // Read the active generation before taking the registry lock: `activate`
+        // takes `active` and then `generations`, so acquiring them the other way
+        // round here would be a lock-order inversion.
         let active_generation = self.active_generation();
-        let retired: Vec<(u64, Arc<GenerationEntry>)> = generations
-            .iter()
-            .filter_map(|(generation, entry)| {
-                if Some(*generation) == active_generation {
-                    None
-                } else {
-                    Some((*generation, Arc::clone(entry)))
-                }
-            })
-            .collect();
-        let mut removed = Vec::new();
+        let retired: Vec<(u64, Arc<GenerationEntry>)> = {
+            let generations = self.generations.lock().expect("generation registry lock");
+            generations
+                .iter()
+                .filter(|(generation, _)| Some(**generation) != active_generation)
+                .map(|(generation, entry)| (*generation, Arc::clone(entry)))
+                .collect()
+        };
+        let mut drained = Vec::new();
         for (generation, entry) in retired {
             if entry.wait_for_drain(timeout) {
-                generations.remove(&generation);
-                removed.push(generation);
+                drained.push(generation);
             }
         }
-        removed
+        if !drained.is_empty() {
+            let mut generations = self.generations.lock().expect("generation registry lock");
+            for generation in &drained {
+                generations.remove(generation);
+            }
+        }
+        drained
+    }
+
+    /// Retires the active generation and waits for every generation to drain.
+    /// Returns false when a call was still running at the deadline, which the
+    /// host reports rather than silently abandoning the invocation.
+    pub fn drain(&self, timeout: Option<Duration>) -> bool {
+        if let Some(entry) = self.active.write().expect("active generation lock").take() {
+            entry.retire();
+        }
+        let entries: Vec<Arc<GenerationEntry>> = self
+            .generations
+            .lock()
+            .expect("generation registry lock")
+            .values()
+            .map(Arc::clone)
+            .collect();
+        let mut drained = true;
+        for entry in entries {
+            drained &= entry.wait_for_drain(timeout);
+        }
+        if drained {
+            self.generations.lock().expect("generation registry lock").clear();
+        }
+        drained
     }
 }
 
@@ -235,5 +270,159 @@ impl ModuleHostRuntime {
             let result = lease.engine().invoke(host, invocation).await;
             result.map_err(RegistryError::Invocation)
         })
+    }
+}
+
+/// Every module the host serves, keyed by module id (one per Gonvex project).
+///
+/// One process serves every project: an engine is per module generation, not
+/// per tenant, and tenancy travels on the invocation context instead. A module
+/// is loaded into a staging slot first and becomes reachable only when it is
+/// activated, so a generation that fails to load or to warm never serves a
+/// call.
+#[derive(Default)]
+pub struct ModuleRegistry {
+    modules: Mutex<BTreeMap<String, Arc<ModuleSlot>>>,
+}
+
+struct ModuleSlot {
+    registry: Arc<GenerationRegistry>,
+    /// Loaded but not yet activated generations, highest generation last.
+    staged: Mutex<BTreeMap<u64, Arc<dyn ModuleEngine>>>,
+    /// Monotonic generation counter, never reused within one host process.
+    issued: Mutex<u64>,
+}
+
+impl ModuleSlot {
+    fn new() -> Self {
+        Self {
+            registry: Arc::new(GenerationRegistry::new()),
+            staged: Mutex::new(BTreeMap::new()),
+            issued: Mutex::new(0),
+        }
+    }
+}
+
+impl ModuleRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn slot(&self, module_id: &str) -> Arc<ModuleSlot> {
+        let mut modules = self.modules.lock().expect("module registry lock");
+        Arc::clone(
+            modules
+                .entry(module_id.to_owned())
+                .or_insert_with(|| Arc::new(ModuleSlot::new())),
+        )
+    }
+
+    /// Reserves the next generation for a module. The host allocates before it
+    /// builds an engine, because the generation is part of the engine's own
+    /// manifest, and a caller that supplies its own generation must still be
+    /// strictly ahead of everything this process has issued or activated.
+    pub fn reserve_generation(&self, module_id: &str, requested: Option<u64>) -> Result<u64, RegistryError> {
+        let slot = self.slot(module_id);
+        let mut issued = slot.issued.lock().expect("module generation lock");
+        let floor = (*issued).max(slot.registry.active_generation().unwrap_or(0));
+        let generation = match requested {
+            Some(requested) if requested <= floor => {
+                return Err(RegistryError::NonMonotonicGeneration(requested))
+            }
+            Some(requested) => requested,
+            None => floor + 1,
+        };
+        *issued = generation;
+        Ok(generation)
+    }
+
+    /// Holds a loaded engine until it is activated. Staging a generation twice
+    /// replaces the earlier engine, which is what a retried load should do.
+    pub fn stage(&self, module_id: &str, generation: u64, engine: Arc<dyn ModuleEngine>) {
+        let slot = self.slot(module_id);
+        slot.staged
+            .lock()
+            .expect("module staging lock")
+            .insert(generation, engine);
+    }
+
+    /// Atomically makes a staged generation the target for new calls. Calls
+    /// already running on the previous generation finish on it.
+    pub fn activate(
+        &self,
+        module_id: &str,
+        generation: u64,
+    ) -> Result<Option<RetiredGeneration>, RegistryError> {
+        let slot = self.slot(module_id);
+        let engine = slot
+            .staged
+            .lock()
+            .expect("module staging lock")
+            .remove(&generation)
+            .ok_or(RegistryError::UnknownGeneration(generation))?;
+        let retired = slot.registry.activate(engine)?;
+        // Anything still staged below the new generation can never be activated
+        // now that activation is strictly monotonic.
+        slot.staged
+            .lock()
+            .expect("module staging lock")
+            .retain(|staged, _| *staged > generation);
+        Ok(retired)
+    }
+
+    pub fn acquire(&self, module_id: &str) -> Result<GenerationLease, RegistryError> {
+        self.slot(module_id).registry.acquire()
+    }
+
+    pub fn active_generation(&self, module_id: &str) -> Option<u64> {
+        self.modules
+            .lock()
+            .expect("module registry lock")
+            .get(module_id)
+            .and_then(|slot| slot.registry.active_generation())
+    }
+
+    /// Drops retired generations of one module whose calls have finished.
+    pub fn reap(&self, module_id: &str, timeout: Option<Duration>) -> Vec<u64> {
+        self.slot(module_id).registry.reap(timeout)
+    }
+
+    /// Retires a module entirely, waiting for its calls within `timeout`.
+    pub fn unload(&self, module_id: &str, timeout: Option<Duration>) -> bool {
+        let slot = self.modules.lock().expect("module registry lock").remove(module_id);
+        match slot {
+            Some(slot) => {
+                slot.staged.lock().expect("module staging lock").clear();
+                slot.registry.drain(timeout)
+            }
+            None => true,
+        }
+    }
+
+    pub fn module_ids(&self) -> Vec<String> {
+        self.modules
+            .lock()
+            .expect("module registry lock")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Bounded shutdown: every module is retired and every in-flight call is
+    /// given `timeout` to finish. False means at least one call was still
+    /// running, which the caller reports instead of pretending it drained.
+    pub fn shutdown(&self, timeout: Option<Duration>) -> bool {
+        let slots: Vec<Arc<ModuleSlot>> = {
+            let mut modules = self.modules.lock().expect("module registry lock");
+            let slots = modules.values().map(Arc::clone).collect();
+            modules.clear();
+            slots
+        };
+        let mut drained = true;
+        for slot in slots {
+            slot.staged.lock().expect("module staging lock").clear();
+            drained &= slot.registry.drain(timeout);
+        }
+        drained
     }
 }

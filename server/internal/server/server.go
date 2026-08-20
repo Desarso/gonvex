@@ -209,7 +209,7 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		ctx:     serverContext,
 		cancel:  cancel,
 		config:  cfg,
-		runtime: runtime.NewWithLoader(projectbundle.NewLoader(cfg.PluginCacheDir, cfg.GonvexModuleRoot)),
+		runtime: runtime.NewWithModuleHost(projectbundle.NewLoader(cfg.PluginCacheDir, cfg.GonvexModuleRoot), moduleHostFor(cfg)),
 		storage: storage.NewFactory(storage.Config{
 			Endpoint:        cfg.S3Endpoint,
 			Region:          cfg.S3Region,
@@ -264,6 +264,30 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 	server.startControlPlaneMigrations()
 	server.startLoadSampler(server.ctx)
 	return server
+}
+
+// moduleHostFor builds the runtime's one module host handle. It starts nothing:
+// the process is launched, or the configured endpoint dialled, the first time a
+// project's module artifact needs it. One host serves every project and every
+// tenant — engines are per module generation, and tenancy travels on the
+// invocation context, so a process per tenant would only multiply V8 heaps.
+func moduleHostFor(cfg config.Config) *moduleengine.RemoteHost {
+	if !cfg.ModuleHostEnabled {
+		return nil
+	}
+	return moduleengine.NewRemoteHost(moduleengine.HostOptions{
+		Endpoint:           cfg.ModuleHostEndpoint,
+		Binary:             cfg.ModuleHostBinary,
+		StartTimeout:       cfg.ModuleHostStartTimeout,
+		RequestTimeout:     cfg.ModuleHostRequestTimeout,
+		ShutdownTimeout:    cfg.ModuleHostShutdownTimeout,
+		DrainTimeout:       cfg.ModuleHostDrainTimeout,
+		MaxFrameBytes:      cfg.ModuleHostMaxFrameBytes,
+		MaxConcurrentCalls: cfg.ModuleHostMaxConcurrentCalls,
+		IsolatePoolSize:    cfg.ModuleHostIsolatePoolSize,
+		ExecutionTimeout:   cfg.ModuleHostExecutionTimeout,
+		Logger:             slog.Default().With("component", "module-host"),
+	})
 }
 
 // runScheduledJob is the scheduler's executor: it dispatches a due job through
@@ -933,14 +957,19 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	// for those would only manufacture a reconnect wave. A failed load attempt
 	// still recycles because plugin.Open can poison the process (see
 	// projectbundle). Unsupervised/local embedding safely ignores the header.
+	//
+	// A module artifact never recycles the worker. The module host swaps
+	// generations atomically in its own process, old calls finish on the old
+	// generation, and this worker keeps its WebSockets — a client must not see
+	// a reconnect because a developer saved a file.
 	previousHash := ""
 	if previous := s.runtime.ManifestForProject(next.Project); previous.Bundle != nil {
 		previousHash = previous.Bundle.Hash
 	}
 	alreadyLoaded := s.runtime.EngineForProject(next.Project) != nil
 	bundleChanged := next.Bundle != nil && next.Bundle.Hash != previousHash
-	loadAttempted := next.Bundle != nil && (bundleChanged || !alreadyLoaded)
-	if err := s.syncRuntimeManifest(next); err != nil {
+	loadAttempted := next.Bundle != nil && !next.UsesModuleHost() && (bundleChanged || !alreadyLoaded)
+	if err := s.syncRuntimeManifest(r.Context(), next); err != nil {
 		if loadAttempted {
 			w.Header().Set("X-Gonvex-Recycle-Worker", "1")
 		}
@@ -948,7 +977,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
-	if alreadyLoaded && bundleChanged {
+	if alreadyLoaded && bundleChanged && !next.UsesModuleHost() {
 		w.Header().Set("X-Gonvex-Recycle-Worker", "1")
 	}
 	s.registerProjectCrons(next.Project)
@@ -1228,7 +1257,7 @@ func (s *Server) hydrateRuntimeState(ctx context.Context) {
 	}
 	s.clearRuntimeHydrationFailure("__catalog__")
 	for _, next := range manifests {
-		if err := s.syncRuntimeManifest(next); err != nil {
+		if err := s.syncRuntimeManifest(ctx, next); err != nil {
 			slog.Warn("load persisted Gonvex runtime manifest", "project", next.Project, "error", err)
 			continue
 		}
@@ -1272,7 +1301,7 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 		s.clearRuntimeHydrationFailure(projectID)
 		return
 	}
-	if err := s.syncRuntimeManifest(next); err != nil {
+	if err := s.syncRuntimeManifest(ctx, next); err != nil {
 		slog.Warn("load persisted Gonvex project runtime manifest", "project", projectID, "error", err)
 		return
 	}
@@ -1282,8 +1311,11 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 	s.registerProjectCrons(projectID)
 }
 
-func (s *Server) syncRuntimeManifest(next manifest.Manifest) error {
-	if err := s.runtime.SyncManifest(next); err != nil {
+// syncRuntimeManifest installs a manifest. ctx matters for module artifacts:
+// loading one starts or reaches an out-of-process host, so a caller's deadline
+// has to reach that work rather than being dropped at the runtime boundary.
+func (s *Server) syncRuntimeManifest(ctx context.Context, next manifest.Manifest) error {
+	if err := s.runtime.SyncManifestContext(ctx, next); err != nil {
 		s.markRuntimeHydrationFailure(next.Project)
 		return err
 	}

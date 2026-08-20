@@ -69,24 +69,78 @@ pub struct ModuleArtifact {
     pub payload: Vec<u8>,
 }
 
+/// The global human identity a call runs as. Tenant-local authorization lives
+/// on `MemberIdentity`; nothing here is a credential.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct IdentityContext {
-    pub account_id: Option<String>,
-    pub member_id: Option<String>,
+#[serde(rename_all = "camelCase")]
+pub struct AccountIdentity {
+    pub id: String,
+    #[serde(default)]
     pub email: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+/// The tenant-local identity and authorization subject.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberIdentity {
+    pub id: String,
+    #[serde(default)]
+    pub account_id: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub permissions: serde_json::Value,
+}
+
+/// The tenant a call is scoped to. It deliberately carries no database URL or
+/// credential: the host resolves the connection itself.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantIdentity {
+    pub id: String,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityContext {
+    #[serde(default)]
+    pub account: Option<AccountIdentity>,
+    #[serde(default)]
+    pub member: Option<MemberIdentity>,
+    /// The permission fingerprint the host resolved for this call. It is a
+    /// projection of the member's permissions, never a capability by itself.
     #[serde(default)]
     pub permissions: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InvocationContext {
     pub project_id: String,
     pub tenant_id: String,
     pub operation_id: Option<String>,
+    #[serde(default)]
+    pub tenant: Option<TenantIdentity>,
     pub identity: IdentityContext,
     pub generation: ModuleGeneration,
     #[serde(default)]
     pub capabilities: Capabilities,
+    /// Wall-clock start of the call, in milliseconds since the epoch. The host
+    /// decides it so every engine reports the same `now` for one invocation.
+    #[serde(default)]
+    pub now_unix_ms: u64,
     #[serde(skip)]
     pub deadline: Option<SystemTime>,
 }
@@ -117,13 +171,48 @@ pub struct InvocationResult {
     pub origin_command_id: Option<String>,
 }
 
+/// The host operations a module may ask for. The vocabulary matches the
+/// `@gonvex/module-sdk` context surface one to one — `ReadDB.query` plus
+/// `WriteDB.insert/update/delete` — so a table write never travels as
+/// interpolated SQL text. Payloads are JSON bytes; the host owns the
+/// transaction, the identifier quoting, and the parameter binding.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HostCall {
-    DbQuery { statement: String, parameters: Vec<u8> },
-    DbWrite { statement: String, parameters: Vec<u8> },
-    RunReducer { function: String, args: Vec<u8> },
-    Fetch { request: Vec<u8> },
-    Storage { operation: String, payload: Vec<u8> },
+    DbQuery {
+        statement: String,
+        /// JSON array of positional values bound as `$1..$n` by the host.
+        parameters: Vec<u8>,
+    },
+    DbInsert {
+        table: String,
+        /// JSON object of column name to value.
+        row: Vec<u8>,
+    },
+    DbUpdate {
+        table: String,
+        /// Key column, defaulting to `id` when empty.
+        key: String,
+        /// JSON-encoded key value.
+        id: Vec<u8>,
+        /// JSON object of column name to value.
+        patch: Vec<u8>,
+    },
+    DbDelete {
+        table: String,
+        key: String,
+        id: Vec<u8>,
+    },
+    RunReducer {
+        function: String,
+        args: Vec<u8>,
+    },
+    Fetch {
+        request: Vec<u8>,
+    },
+    Storage {
+        operation: String,
+        payload: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -140,13 +229,26 @@ pub enum HostError {
 }
 
 impl HostCall {
+    /// The capability name this call needs, used for both the check and the
+    /// denial message a module sees.
+    pub fn capability(&self) -> &'static str {
+        match self {
+            Self::DbQuery { .. } => "db_read",
+            Self::DbInsert { .. } | Self::DbUpdate { .. } | Self::DbDelete { .. } => "db_write",
+            Self::RunReducer { .. } => "run_reducer",
+            Self::Fetch { .. } => "network",
+            Self::Storage { .. } => "storage",
+        }
+    }
+
     pub fn check_capability(&self, capabilities: &Capabilities) -> Result<(), HostError> {
-        let (allowed, name) = match self {
-            Self::DbQuery { .. } => (capabilities.db_read, "db_read"),
-            Self::DbWrite { .. } => (capabilities.db_write, "db_write"),
-            Self::RunReducer { .. } => (capabilities.run_reducer, "run_reducer"),
-            Self::Fetch { .. } => (capabilities.network, "network"),
-            Self::Storage { .. } => (capabilities.storage, "storage"),
+        let name = self.capability();
+        let allowed = match name {
+            "db_read" => capabilities.db_read,
+            "db_write" => capabilities.db_write,
+            "run_reducer" => capabilities.run_reducer,
+            "network" => capabilities.network,
+            _ => capabilities.storage,
         };
         if allowed {
             Ok(())

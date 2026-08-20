@@ -122,10 +122,18 @@ impl V8ModuleEngine {
         &self.inner.config
     }
 
-    /// Starts one isolate and evaluates the bundle so a broken artifact fails
-    /// at publish time rather than on a user's first call.
+    /// Starts every isolate in the pool and evaluates the bundle in each, so a
+    /// broken artifact fails at load time rather than on a user's first call
+    /// and an activated generation is warm before it serves traffic. Leases are
+    /// held together, so this warms the pool rather than one reused isolate.
     pub async fn prewarm(&self) -> Result<(), ModuleError> {
-        self.inner.pool.acquire().await?.release_unused();
+        let mut leases = Vec::with_capacity(self.inner.config.isolate_pool_size.max(1));
+        for _ in 0..self.inner.config.isolate_pool_size.max(1) {
+            leases.push(self.inner.pool.acquire().await?);
+        }
+        for lease in leases {
+            lease.release_unused();
+        }
         Ok(())
     }
 }
@@ -161,6 +169,16 @@ impl EngineInner {
         let timeout = self.call_timeout(&invocation.context)?;
         let capabilities = effective_capabilities(&contract.kind, &invocation.context.capabilities);
         let context = invocation.context.clone();
+        // A host-stamped `now` keeps every engine reporting the same clock for
+        // one invocation; falling back to this process's clock only matters for
+        // an embedder that does not set one.
+        let now_unix_ms = match context.now_unix_ms {
+            0 => SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or_default(),
+            stamped => stamped,
+        };
 
         let lease = self.pool.acquire().await?;
         let (host_sender, mut host_calls) = mpsc::unbounded_channel::<HostRequest>();
@@ -170,6 +188,7 @@ impl EngineInner {
                 contract,
                 invocation,
                 capabilities,
+                now_unix_ms,
                 timeout,
                 max_result_bytes: self.config.max_result_bytes,
                 max_host_calls: self.config.max_host_calls,

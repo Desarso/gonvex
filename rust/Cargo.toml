@@ -4,6 +4,7 @@ members = [
   "crates/module-runtime",
   "crates/module-runtime-v8",
   "crates/module-runtime-wasm",
+  "crates/module-host",
   "crates/server",
 ]
 
@@ -16,7 +17,19 @@ version = "0.1.0"
 # deno_core moves its op, module, and event-loop APIs between minor releases,
 # so the V8 adapter tracks one version deliberately instead of floating.
 deno_core = "0.320"
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = [
+  "io-util",
+  "macros",
+  "net",
+  "process",
+  "rt",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
