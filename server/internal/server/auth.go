@@ -54,7 +54,7 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 	}
 	hasVerifiedAppIdentity := firebaseProjectID != ""
 
-	if s.config.LandlordURL == "" {
+	if s.config.ControlPlaneURL == "" {
 		if s.config.RequireAuth && !hasVerifiedAppIdentity {
 			return nil, nil, "", "", fmt.Errorf("control plane database URL is not configured")
 		}
@@ -65,7 +65,7 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 		return user, map[string]any{}, projectID, tenant, nil
 	}
 
-	session, err := legacyidentity.ValidateSession(ctx, s.config.LandlordURL, token, requestedTenantID)
+	session, err := legacyidentity.ValidateSession(ctx, s.config.ControlPlaneURL, token, requestedTenantID)
 	if err != nil {
 		if s.config.RequireAuth && !hasVerifiedAppIdentity {
 			return nil, nil, "", "", err

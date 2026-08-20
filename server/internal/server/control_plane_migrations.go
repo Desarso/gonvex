@@ -12,13 +12,13 @@ import (
 // tables while the account/member Control Plane migration is rolling out.
 // LandlordURL remains a deprecated configuration alias for this endpoint.
 func (s *Server) startControlPlaneMigrations() {
-	if s.config.LandlordURL == "" {
+	if s.config.ControlPlaneURL == "" {
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		result, err := legacyidentity.Apply(ctx, s.config.LandlordURL)
+		result, err := legacyidentity.Apply(ctx, s.config.ControlPlaneURL)
 		if err != nil {
 			slog.Error("control plane migration failed", "error", err)
 			return

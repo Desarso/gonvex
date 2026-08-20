@@ -221,8 +221,8 @@ func (s *Server) projectTelemetryBaseURL(projectID string) string {
 			return project.databaseURL
 		}
 	}
-	if strings.TrimSpace(s.config.LandlordURL) != "" {
-		return s.config.LandlordURL
+	if strings.TrimSpace(s.config.ControlPlaneURL) != "" {
+		return s.config.ControlPlaneURL
 	}
 	return ""
 }

@@ -22,6 +22,10 @@ const (
 
 type Config struct {
 	Addr             string
+	// ControlPlaneURL is the canonical control-plane database URL. LandlordURL
+	// is retained as a compatibility alias for existing embedders and config
+	// literals.
+	ControlPlaneURL  string
 	LandlordURL      string
 	PostgresURL      string
 	TenantDatabases  map[string]string
@@ -96,12 +100,23 @@ type Config struct {
 	DropEmptyUndeclaredColumns bool
 }
 
+// Normalize resolves the control-plane URL aliases once at the runtime
+// boundary. The canonical value wins when both fields are supplied.
+func (cfg *Config) Normalize() {
+	if strings.TrimSpace(cfg.ControlPlaneURL) == "" {
+		cfg.ControlPlaneURL = cfg.LandlordURL
+	}
+	// Keep compatibility readers on the canonical value even if an embedder
+	// supplied both fields with different URLs.
+	cfg.LandlordURL = cfg.ControlPlaneURL
+}
+
 func FromEnv() Config {
 	loadDotEnv(".env")
 
-	return Config{
+	config := Config{
 		Addr:                         env("GONVEX_ADDR", ":8080"),
-		LandlordURL:                  env("GONVEX_LANDLORD_DATABASE_URL", env("LANDLORD_DATABASE_URL", "")),
+		ControlPlaneURL:              env("GONVEX_CONTROL_PLANE_DATABASE_URL", env("GONVEX_CONTROL_PLANE_URL", env("CONTROL_PLANE_DATABASE_URL", env("CONTROL_PLANE_URL", env("GONVEX_LANDLORD_DATABASE_URL", env("LANDLORD_DATABASE_URL", "")))))),
 		PostgresURL:                  env("DATABASE_URL", env("POSTGRES_URL", "")),
 		TenantDatabases:              envStringMap("GONVEX_TENANT_DATABASE_URLS"),
 		ProjectDatabases:             envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
@@ -145,6 +160,8 @@ func FromEnv() Config {
 		Environment:                  env("GONVEX_ENVIRONMENT", "local dev"),
 		DropEmptyUndeclaredColumns:   envBool("GONVEX_DROP_EMPTY_UNDECLARED_COLUMNS", false),
 	}
+	config.Normalize()
+	return config
 }
 
 func (cfg Config) TenantDatabaseURL(tenantID string) string {

@@ -512,8 +512,8 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) projectRegistryURL() string {
-	if strings.TrimSpace(s.config.LandlordURL) != "" {
-		return s.config.LandlordURL
+	if strings.TrimSpace(s.config.ControlPlaneURL) != "" {
+		return s.config.ControlPlaneURL
 	}
 	return s.config.PostgresURL
 }

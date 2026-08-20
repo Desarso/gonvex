@@ -200,6 +200,7 @@ func (s *Server) postgresScheduledJobStore() *postgresScheduledJobStore {
 }
 
 func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, cache *rowsCache) *Server {
+	cfg.Normalize()
 	if app == nil {
 		app = gonvex.NewApp()
 	}
