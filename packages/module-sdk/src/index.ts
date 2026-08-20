@@ -203,6 +203,8 @@ export type ReducerOptions<Args, Result> = {
   /** Set false for reducers that are not invoked directly by an interactive client. */
   readonly interactive?: boolean;
   readonly optimistic?: OptimisticTransaction;
+  /** Required exception for a public interactive reducer that cannot predict a safe local transaction. */
+  readonly nonOptimisticReason?: string;
   readonly run?: Handler<ReducerContext, Args, Result>;
 };
 
@@ -235,6 +237,7 @@ export type ModuleFunctionManifest = {
   readonly offline?: OfflinePolicy;
   readonly interactive?: boolean;
   readonly optimistic?: OptimisticTransaction;
+  readonly nonOptimisticReason?: string;
 };
 
 export type ModuleManifest = {
@@ -435,6 +438,9 @@ export class ModuleBuilder {
     if (options.interactive === false && options.optimistic !== undefined) {
       throw new Error(`non-interactive reducer ${normalized} cannot declare optimistic metadata`);
     }
+    if (options.interactive !== false && options.optimistic === undefined && !options.nonOptimisticReason?.trim()) {
+      throw new Error(`interactive reducer ${normalized} requires an optimistic transaction or nonOptimisticReason`);
+    }
     const definition = this.manifestCollector.register(path, {
       kind: "reducer",
       args: options.args,
@@ -442,6 +448,7 @@ export class ModuleBuilder {
       offline: options.offline,
       interactive: options.interactive ?? true,
       optimistic: options.optimistic,
+      nonOptimisticReason: options.nonOptimisticReason?.trim() || undefined,
     });
     const registration = freeze({ path: definition.path, kind: definition.kind, definition, handler: options.run as RegisteredFunction<Args, Result>["handler"] });
     this.runtimeEntries.set(definition.path, registration as RuntimeFunctionRegistration);
@@ -516,6 +523,9 @@ export class ModuleRuntimeRegistry {
       validateOfflinePolicy(registration.definition.offline, path);
       if (registration.definition.optimistic !== undefined) {
         validateOptimisticTransaction(registration.definition.optimistic, path);
+      }
+      if (registration.definition.interactive !== false && registration.definition.optimistic === undefined && !registration.definition.nonOptimisticReason?.trim()) {
+        throw new Error(`interactive reducer ${path} requires an optimistic transaction or nonOptimisticReason`);
       }
     }
     if (this.entries.has(path)) throw new Error(`duplicate runtime registration: ${path}`);

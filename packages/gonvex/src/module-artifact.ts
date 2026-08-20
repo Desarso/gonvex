@@ -16,16 +16,18 @@ import type {
   FunctionEntry,
   FunctionKind,
   JsonValue,
+  LiveExpression,
+  LiveQueryPlan,
+  LiveValue,
   ModuleArtifact,
   ModuleFunction,
   ModuleJavaScript,
   ModuleLanguage,
   ModuleSchema,
-  OptimisticMutationDefinition,
+  ReplicaCollectionDefinition,
   OptimisticProjectionDefinition,
+  OptimisticReducerDefinition,
   ReadDependency,
-  SyncDefinition,
-  WriteDependency,
 } from "./manifest-types.js";
 
 /** Bumped whenever the artifact layout changes; mixed into the hash. */
@@ -40,18 +42,24 @@ const skippedDirectories = new Set(["_generated", "node_modules", "dist", "build
 // server module, and it must not make a Go backend look like a TypeScript one.
 const skippedSourceFiles = new Set(["auth.tsx", "auth.ts"]);
 
-const moduleFunctionKinds = new Map<string, FunctionKind>([
-  ["query", "query"],
-  ["mutation", "mutation"],
-  ["action", "action"],
-  ["http", "http"],
-  ["publichttp", "http"],
-  ["internalmutation", "internalMutation"],
-  ["livegrid", "liveGrid"],
-  ["sync", "sync"],
+type ModuleFunctionRegistration = {
+  kind: FunctionKind;
+  internal?: boolean;
+  delivery?: ModuleFunction["delivery"];
+};
+
+const moduleFunctionKinds = new Map<string, ModuleFunctionRegistration>([
+  ["query", { kind: "query", delivery: "oneShot" }],
+  ["livequery", { kind: "query", delivery: "live" }],
+  ["replicacollection", { kind: "query", delivery: "replica" }],
+  ["reducer", { kind: "reducer" }],
+  ["internalreducer", { kind: "reducer", internal: true }],
+  ["action", { kind: "action" }],
+  ["http", { kind: "http" }],
+  ["publichttp", { kind: "http" }],
 ]);
 
-const kindAlternation = "query|mutation|action|http|publicHttp|internalMutation|liveGrid|sync";
+const kindAlternation = "query|liveQuery|replicaCollection|reducer|internalReducer|action|http|publicHttp";
 const definitionPattern = new RegExp(
   `export\\s+(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?::[^=;]+)?=\\s*(?:await\\s+)?(${kindAlternation})\\s*(<[^(){};]*>)?\\s*\\(`,
   "gi",
@@ -141,8 +149,10 @@ export function moduleManifestFunctions(artifact: ModuleArtifact): Record<string
       kind: entry.kind,
       handler: entry.handler,
       file: entry.file,
+      ...(entry.internal ? { internal: true } : {}),
+      ...(entry.delivery ? { delivery: entry.delivery } : {}),
       ...(entry.dependencies ? { dependencies: entry.dependencies } : {}),
-      ...(entry.sync ? { sync: entry.sync } : {}),
+      ...(entry.replica ? { replica: entry.replica } : {}),
     };
   }
   return functions;
@@ -199,11 +209,11 @@ function parseModuleFunctions(root: string, backendDir: string, file: string, so
   definitionPattern.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = definitionPattern.exec(source)) !== null) {
-    const kind = moduleFunctionKinds.get((match[2] ?? "").toLowerCase());
+    const registration = moduleFunctionKinds.get((match[2] ?? "").toLowerCase());
     const openParen = match.index + match[0].length - 1;
     const call = readCallArguments(source, openParen);
     definitionPattern.lastIndex = Math.max(call.end, openParen + 1);
-    if (!kind) continue;
+    if (!registration) continue;
     const exportName = match[1]!;
     const options = call.args.find((argument) => argument.entries)?.entries;
     // `query(listMessages)` passes the handler directly instead of options.
@@ -214,7 +224,7 @@ function parseModuleFunctions(root: string, backendDir: string, file: string, so
     entries.push([
       declaredPath ?? (prefix ? `${prefix}.${exportName}` : exportName),
       moduleFunction({
-        kind,
+        ...registration,
         file: relativeFile,
         handler: identifierText(handlerEntry?.text) ?? inlineHandler ?? exportName,
         exportName,
@@ -229,11 +239,11 @@ function parseModuleFunctions(root: string, backendDir: string, file: string, so
   // registration form, so a module can name its own paths.
   registrationPattern.lastIndex = 0;
   while ((match = registrationPattern.exec(source)) !== null) {
-    const kind = moduleFunctionKinds.get((match[1] ?? "").toLowerCase());
+    const registration = moduleFunctionKinds.get((match[1] ?? "").toLowerCase());
     const openParen = match.index + match[0].length - 1;
     const call = readCallArguments(source, openParen);
     registrationPattern.lastIndex = Math.max(call.end, openParen + 1);
-    if (!kind) continue;
+    if (!registration) continue;
     const declaredPath = call.args[0]?.value;
     const path = typeof declaredPath === "string" ? declaredPath.trim() : "";
     if (!path) continue;
@@ -241,7 +251,7 @@ function parseModuleFunctions(root: string, backendDir: string, file: string, so
     entries.push([
       path,
       moduleFunction({
-        kind,
+        ...registration,
         file: relativeFile,
         handler: identifierText(call.args[1]?.text) ?? path.split(".").pop() ?? path,
         generics: match[2],
@@ -256,6 +266,8 @@ function parseModuleFunctions(root: string, backendDir: string, file: string, so
 
 function moduleFunction(input: {
   kind: FunctionKind;
+  internal?: boolean;
+  delivery?: ModuleFunction["delivery"];
   file: string;
   handler: string;
   exportName?: string;
@@ -264,21 +276,23 @@ function moduleFunction(input: {
   options?: ObjectEntries;
 }): ModuleFunction {
   const schemas = callSchemas(input.generics, input.signature);
-  const dependencies = dependenciesFromOptions(input.options);
-  const sync = syncFromOptions(input.options);
-  const delivery = input.options?.get("delivery")?.value;
+  const configuredDelivery = input.options?.get("delivery")?.value;
+  const delivery = normalizeDelivery(configuredDelivery) ?? input.delivery;
+  const dependencies = dependenciesFromOptions(input.options, input.kind, delivery);
+  const replica = delivery === "replica" ? replicaFromOptions(input.options) : undefined;
   const offline = input.options?.get("offline")?.value;
   const optimistic = input.options?.get("optimistic")?.value;
   return {
     kind: input.kind,
     handler: input.handler,
     file: input.file,
+    ...(input.internal ? { internal: true } : {}),
     ...(input.exportName ? { export: input.exportName } : {}),
     args: schemas.args,
     result: schemas.result,
     ...(dependencies ? { dependencies } : {}),
-    ...(sync ? { sync } : {}),
     ...(delivery === undefined ? {} : { delivery }),
+    ...(replica ? { replica } : {}),
     ...(offline === undefined ? {} : { offline }),
     ...(optimistic === undefined ? {} : { optimistic }),
   };
@@ -326,16 +340,24 @@ function unwrapPromise(type?: string) {
   return (match ? match[1]!.trim() : declared) || undefined;
 }
 
-function dependenciesFromOptions(options?: ObjectEntries): FunctionDependencies | undefined {
+function dependenciesFromOptions(
+  options: ObjectEntries | undefined,
+  kind: FunctionKind,
+  delivery: ModuleFunction["delivery"],
+): FunctionDependencies | undefined {
   if (!options) return undefined;
   const dependencies: FunctionDependencies = {};
-  const reads = tableDependencies(options.get("reads")?.value);
-  if (reads.length > 0) dependencies.reads = reads;
-  const writes: WriteDependency[] = tableDependencies(options.get("writes")?.value)
-    .map(({ table, columns }) => ({ table, ...(columns ? { columns } : {}) }));
-  if (writes.length > 0) dependencies.writes = writes;
-  if (options.get("readsEphemeral")?.value === true) dependencies.readsEphemeral = true;
-  if (options.get("writesEphemeral")?.value === true) dependencies.writesEphemeral = true;
+
+  // Reads is retained only for legacy one-shot Query declarations. Reducers,
+  // Actions, HTTP handlers and structured Live Queries derive their behavior
+  // from the executable contract instead of hand-written dependency metadata.
+  if (kind === "query" && delivery === "oneShot") {
+    const reads = tableDependencies(options.get("reads")?.value);
+    if (reads.length > 0) dependencies.reads = reads;
+  }
+
+  const liveQueryPlan = liveQueryPlanFromOptions(options);
+  if (liveQueryPlan) dependencies.liveQueryPlan = liveQueryPlan;
   if (options.get("shareByPermissions")?.value === true) dependencies.shareByPermissions = true;
   const shareByVisibility = stringEntry(options, "shareByVisibility");
   if (shareByVisibility) dependencies.shareByVisibility = shareByVisibility;
@@ -344,10 +366,12 @@ function dependenciesFromOptions(options?: ObjectEntries): FunctionDependencies 
   const shareResultField = stringEntry(options, "shareResultField");
   if (shareResultField) dependencies.shareResultField = shareResultField;
   const optimistic = options.get("optimistic")?.value;
-  const mutation = optimisticMutation(readMember(optimistic, "mutation"));
-  if (mutation) dependencies.optimisticMutation = mutation;
-  const projection = optimisticProjection(readMember(optimistic, "projection"));
+  const reducer = optimisticReducer(options.get("optimisticReducer")?.value ?? readMember(optimistic, "reducer"));
+  if (reducer) dependencies.optimisticReducer = reducer;
+  const projection = optimisticProjection(options.get("optimisticProjection")?.value ?? readMember(optimistic, "projection"));
   if (projection) dependencies.optimisticProjection = projection;
+  const nonOptimisticReason = stringEntry(options, "nonOptimisticReason");
+  if (nonOptimisticReason) dependencies.nonOptimisticReason = nonOptimisticReason;
   return Object.keys(dependencies).length > 0 ? dependencies : undefined;
 }
 
@@ -369,14 +393,12 @@ function tableDependencies(value: JsonValue | undefined): ReadDependency[] {
     const ordersBy = stringArray(readMember(item, "ordersBy"));
     if (ordersBy) dependency.ordersBy = ordersBy;
     if (readMember(item, "windowed") === true) dependency.windowed = true;
-    const predicate = stringMember(item, "predicate");
-    if (predicate) dependency.predicate = predicate;
     dependencies.push(dependency);
   }
   return dependencies;
 }
 
-function optimisticMutation(value: JsonValue | undefined): OptimisticMutationDefinition | undefined {
+function optimisticReducer(value: JsonValue | undefined): OptimisticReducerDefinition | undefined {
   const entity = stringMember(value, "entity");
   if (!entity) return undefined;
   return {
@@ -396,11 +418,105 @@ function optimisticProjection(value: JsonValue | undefined): OptimisticProjectio
   };
 }
 
-function syncFromOptions(options?: ObjectEntries): SyncDefinition | undefined {
-  const value = options?.get("sync")?.value;
+function normalizeDelivery(value: JsonValue | undefined): ModuleFunction["delivery"] | undefined {
+  if (value === "oneShot" || value === "live" || value === "replica") return value;
+  return undefined;
+}
+
+function liveQueryPlanFromOptions(options: ObjectEntries): LiveQueryPlan | undefined {
+  const value = options.get("liveQueryPlan")?.value
+    ?? options.get("livePlan")?.value
+    ?? options.get("LiveQueryPlan")?.value
+    ?? options.get("LivePlan")?.value;
+  return parseLiveQueryPlan(value);
+}
+
+function parseLiveQueryPlan(value: JsonValue | undefined): LiveQueryPlan | undefined {
   const table = stringMember(value, "table");
   if (!table) return undefined;
-  const definition: SyncDefinition = {
+  const plan: LiveQueryPlan = {
+    table,
+    key: stringMember(value, "key") ?? "id",
+  };
+  const columns = stringArray(readMember(value, "columns"));
+  if (columns) plan.columns = columns;
+  const resultPath = pathArray(readMember(value, "resultPath"));
+  if (resultPath.length > 0) plan.resultPath = resultPath;
+  const where = parseLiveExpression(readMember(value, "where"));
+  if (where) plan.where = where;
+  const searchValue = readMember(value, "search");
+  const searchArgument = stringMember(searchValue, "argument");
+  const searchColumns = stringArray(readMember(searchValue, "columns"));
+  if (searchArgument && searchColumns) plan.search = { argument: searchArgument, columns: searchColumns };
+  const sortValue = readMember(value, "sort");
+  const sortDefaultColumn = stringMember(sortValue, "defaultColumn");
+  const sortDefaultDirection = stringMember(sortValue, "defaultDirection");
+  const sortAllowedColumns = stringArray(readMember(sortValue, "allowedColumns"));
+  if (sortDefaultColumn && sortDefaultDirection && sortAllowedColumns) {
+    plan.sort = {
+      columnArgument: stringMember(sortValue, "columnArgument"),
+      directionArgument: stringMember(sortValue, "directionArgument"),
+      defaultColumn: sortDefaultColumn,
+      defaultDirection: sortDefaultDirection,
+      allowedColumns: sortAllowedColumns,
+    };
+  }
+  const windowValue = readMember(value, "window");
+  const offsetArgument = stringMember(windowValue, "offsetArgument");
+  const limitArgument = stringMember(windowValue, "limitArgument");
+  const defaultLimit = numberMember(windowValue, "defaultLimit");
+  const maxLimit = numberMember(windowValue, "maxLimit");
+  if (offsetArgument && limitArgument && defaultLimit !== undefined && maxLimit !== undefined) {
+    plan.window = { offsetArgument, limitArgument, defaultLimit, maxLimit };
+  }
+  if (readMember(value, "serverOnly") === true) plan.serverOnly = true;
+  return plan;
+}
+
+function parseLiveExpression(value: JsonValue | undefined): LiveExpression | undefined {
+  const operator = stringMember(value, "operator");
+  if (!operator || ![
+    "eq", "neq", "gt", "gte", "lt", "lte", "in", "contains",
+    "containsInsensitive", "range", "and", "or", "not", "server",
+  ].includes(operator)) return undefined;
+  const expression: LiveExpression = { operator: operator as LiveExpression["operator"] };
+  const column = stringMember(value, "column");
+  if (column) expression.column = column;
+  const parsedValue = parseLiveValue(readMember(value, "value"));
+  if (parsedValue) expression.value = parsedValue;
+  const valueTo = parseLiveValue(readMember(value, "valueTo"));
+  if (valueTo) expression.valueTo = valueTo;
+  const childrenValue = readMember(value, "children");
+  if (Array.isArray(childrenValue)) {
+    const children = childrenValue.map(parseLiveExpression).filter((child): child is LiveExpression => child !== undefined);
+    if (children.length > 0) expression.children = children;
+  }
+  return expression;
+}
+
+function parseLiveValue(value: JsonValue | undefined): LiveValue | undefined {
+  const argument = stringMember(value, "argument");
+  if (argument) return { argument };
+  const literal = readMember(value, "literal");
+  return literal === undefined ? undefined : { literal };
+}
+
+function literalObject(options?: ObjectEntries): JsonValue | undefined {
+  if (!options) return undefined;
+  const object: Record<string, JsonValue> = {};
+  for (const [key, entry] of options) {
+    if (entry.value !== undefined) object[key] = entry.value;
+  }
+  return Object.keys(object).length > 0 ? object : undefined;
+}
+
+function replicaFromOptions(options?: ObjectEntries): ReplicaCollectionDefinition | undefined {
+  const value = options?.get("replica")?.value
+    ?? options?.get("replicaCollection")?.value
+    ?? literalObject(options);
+  const table = stringMember(value, "table");
+  if (!table) return undefined;
+  const definition: ReplicaCollectionDefinition = {
     table,
     key: stringMember(value, "key") ?? "id",
     columns: stringArray(readMember(value, "columns")) ?? [],
