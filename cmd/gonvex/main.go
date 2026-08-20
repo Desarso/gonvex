@@ -60,6 +60,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "dev":
 		return runDev(args[1:])
+	case "migrate":
+		return runMigrate(args[1:])
 	default:
 		printHelp()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -1104,5 +1106,7 @@ func env(key string, fallback string) string {
 }
 
 func printHelp() {
-	fmt.Println("Usage: gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--dry-run] [-- <command>]")
+	fmt.Println("Usage:")
+	fmt.Println("  gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--dry-run] [-- <command>]")
+	fmt.Println("  gonvex migrate identity-v2 (--plan | --apply | --verify) [options]")
 }

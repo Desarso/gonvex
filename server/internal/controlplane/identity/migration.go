@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // MigrationStore is the persistence boundary for plan/apply/verify. A store
@@ -62,6 +63,9 @@ func PlanIdentityMigration(runID, source string, records []LegacyIdentity, exist
 // refuses unresolved identity collisions unless the caller explicitly opts in
 // after review; no migration command should silently merge ambiguous users.
 func ApplyIdentityMigration(ctx context.Context, store MigrationStore, plan MigrationPlan, allowUnresolvedCollisions bool) error {
+	if err := ValidateIdentityMigrationPlan(plan); err != nil {
+		return err
+	}
 	if len(plan.Collisions) > 0 && !allowUnresolvedCollisions {
 		return fmt.Errorf("identity migration has %d unresolved collisions", len(plan.Collisions))
 	}
@@ -89,8 +93,11 @@ func ApplyIdentityMigration(ctx context.Context, store MigrationStore, plan Migr
 			return err
 		}
 	}
+	checkpoint.RunID = plan.RunID
+	checkpoint.Scope = plan.Source
 	checkpoint.CompletedIndex = len(plan.Items) - 1
 	checkpoint.RowsProcessed = len(plan.Items)
+	checkpoint.Checksum = plan.Checksum
 	checkpoint.Status = "complete"
 	if err := store.SaveCheckpoint(ctx, checkpoint); err != nil {
 		return err
@@ -99,6 +106,9 @@ func ApplyIdentityMigration(ctx context.Context, store MigrationStore, plan Migr
 }
 
 func VerifyIdentityMigration(ctx context.Context, store MigrationStore, plan MigrationPlan) (VerificationResult, error) {
+	if err := ValidateIdentityMigrationPlan(plan); err != nil {
+		return VerificationResult{}, err
+	}
 	findings, err := store.VerifyIdentityMigration(ctx, plan)
 	if err != nil {
 		return VerificationResult{}, err
@@ -106,13 +116,45 @@ func VerifyIdentityMigration(ctx context.Context, store MigrationStore, plan Mig
 	return VerificationResult{PlanChecksum: plan.Checksum, Findings: findings}, nil
 }
 
+// ValidateIdentityMigrationPlan proves that a plan still matches the
+// deterministic account resolutions that were reviewed. Apply and verify call
+// it before consulting migration state so an edited or mismatched plan cannot
+// resume an earlier run.
+func ValidateIdentityMigrationPlan(plan MigrationPlan) error {
+	if strings.TrimSpace(plan.RunID) == "" || strings.TrimSpace(plan.Source) == "" {
+		return fmt.Errorf("identity migration plan runId and source are required")
+	}
+	if strings.TrimSpace(plan.Checksum) == "" {
+		return fmt.Errorf("identity migration plan checksum is required")
+	}
+	checksum, err := planChecksum(plan)
+	if err != nil {
+		return err
+	}
+	if checksum != plan.Checksum {
+		return fmt.Errorf("identity migration plan checksum mismatch: expected %s, computed %s", plan.Checksum, checksum)
+	}
+	return nil
+}
+
 func planChecksum(plan MigrationPlan) (string, error) {
 	payload := struct {
-		RunID      string                    `json:"runId"`
-		Source     string                    `json:"source"`
-		Items      []LegacyAccountResolution `json:"items"`
-		Collisions []LegacyAccountResolution `json:"collisions"`
-	}{RunID: plan.RunID, Source: plan.Source, Items: plan.Items, Collisions: plan.Collisions}
+		RunID               string                    `json:"runId"`
+		Source              string                    `json:"source"`
+		Items               []LegacyAccountResolution `json:"items"`
+		Collisions          []LegacyAccountResolution `json:"collisions"`
+		LegacyRows          int                       `json:"legacyRows"`
+		UniqueAccounts      int                       `json:"uniqueAccounts"`
+		ProviderMatches     int                       `json:"providerMatches"`
+		EmailMatches        int                       `json:"emailMatches"`
+		NewAccounts         int                       `json:"newAccounts"`
+		AmbiguousCollisions int                       `json:"ambiguousCollisions"`
+	}{
+		RunID: plan.RunID, Source: plan.Source, Items: plan.Items, Collisions: plan.Collisions,
+		LegacyRows: plan.LegacyRows, UniqueAccounts: plan.UniqueAccounts,
+		ProviderMatches: plan.ProviderMatches, EmailMatches: plan.EmailMatches,
+		NewAccounts: plan.NewAccounts, AmbiguousCollisions: plan.AmbiguousCollisions,
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "", err

@@ -38,6 +38,75 @@ type PostgresMigrationStore struct {
 	DB MigrationDB
 }
 
+// LoadExistingAccounts reads the current Control Plane identity graph without
+// installing or mutating schema. Migration planning deliberately uses this
+// read-only path so --plan can never change the database it is inspecting.
+func LoadExistingAccounts(ctx context.Context, db Queryer) ([]ExistingAccount, error) {
+	if db == nil {
+		return nil, fmt.Errorf("control-plane migration database is required")
+	}
+	var accountsTable sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass('accounts')`).Scan(&accountsTable); err != nil {
+		return nil, fmt.Errorf("inspect control-plane identity schema: %w", err)
+	}
+	if !accountsTable.Valid {
+		return []ExistingAccount{}, nil
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id, auth_realm_id, email, name, avatar_url, disabled_at
+		FROM accounts ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("load control-plane accounts (is identity-v2 schema installed?): %w", err)
+	}
+	defer rows.Close()
+
+	accounts := make([]ExistingAccount, 0)
+	byID := make(map[string]int)
+	for rows.Next() {
+		var account Account
+		var disabledAt sql.NullTime
+		if err := rows.Scan(&account.ID, &account.AuthRealmID, &account.Email, &account.Name, &account.AvatarURL, &disabledAt); err != nil {
+			return nil, err
+		}
+		if disabledAt.Valid {
+			account.DisabledAt = &disabledAt.Time
+		}
+		byID[account.ID] = len(accounts)
+		accounts = append(accounts, ExistingAccount{Account: account, Identities: []AccountIdentity{}})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var identitiesTable sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass('account_identities')`).Scan(&identitiesTable); err != nil {
+		return nil, fmt.Errorf("inspect control-plane account identity schema: %w", err)
+	}
+	if !identitiesTable.Valid {
+		return accounts, nil
+	}
+
+	identityRows, err := db.QueryContext(ctx, `SELECT account_id, provider, issuer, subject, email, verified_email
+		FROM account_identities ORDER BY account_id, provider, issuer, subject`)
+	if err != nil {
+		return nil, fmt.Errorf("load control-plane account identities: %w", err)
+	}
+	defer identityRows.Close()
+	for identityRows.Next() {
+		var item AccountIdentity
+		if err := identityRows.Scan(&item.AccountID, &item.Provider, &item.Issuer, &item.Subject, &item.Email, &item.VerifiedEmail); err != nil {
+			return nil, err
+		}
+		index, ok := byID[item.AccountID]
+		if !ok {
+			return nil, fmt.Errorf("account identity references missing account %q", item.AccountID)
+		}
+		accounts[index].Identities = append(accounts[index].Identities, item)
+	}
+	if err := identityRows.Err(); err != nil {
+		return nil, err
+	}
+	return accounts, nil
+}
+
 func (s PostgresMigrationStore) database() (MigrationDB, error) {
 	if s.DB == nil {
 		return nil, fmt.Errorf("control-plane migration database is required")

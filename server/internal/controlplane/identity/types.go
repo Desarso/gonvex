@@ -34,20 +34,20 @@ type AccountTenantIndex struct {
 }
 
 type LegacyIdentity struct {
-	Source        string
-	LegacyUserID  string
-	Provider      string
-	Issuer        string
-	Subject       string
-	Email         string
-	EmailVerified bool
-	Name          string
-	AvatarURL     string
+	Source        string `json:"source"`
+	LegacyUserID  string `json:"legacyUserId"`
+	Provider      string `json:"provider,omitempty"`
+	Issuer        string `json:"issuer,omitempty"`
+	Subject       string `json:"subject,omitempty"`
+	Email         string `json:"email,omitempty"`
+	EmailVerified bool   `json:"emailVerified"`
+	Name          string `json:"name,omitempty"`
+	AvatarURL     string `json:"avatarUrl,omitempty"`
 }
 
 type ExistingAccount struct {
-	Account    Account
-	Identities []AccountIdentity
+	Account    Account           `json:"account"`
+	Identities []AccountIdentity `json:"identities"`
 }
 
 type ResolutionKind string
@@ -60,59 +60,59 @@ const (
 )
 
 type LegacyAccountResolution struct {
-	Legacy      LegacyIdentity
-	Account     Account
-	Identity    AccountIdentity
-	Kind        ResolutionKind
-	Candidates  []string
-	NeedsReview bool
+	Legacy      LegacyIdentity  `json:"legacy"`
+	Account     Account         `json:"account"`
+	Identity    AccountIdentity `json:"identity"`
+	Kind        ResolutionKind  `json:"kind"`
+	Candidates  []string        `json:"candidates,omitempty"`
+	NeedsReview bool            `json:"needsReview"`
 }
 
 type IdentityResolutionResult struct {
-	Items      []LegacyAccountResolution
-	Collisions []LegacyAccountResolution
+	Items      []LegacyAccountResolution `json:"items"`
+	Collisions []LegacyAccountResolution `json:"collisions"`
 }
 
 type MigrationPlan struct {
-	RunID               string
-	Source              string
-	Checksum            string
-	Items               []LegacyAccountResolution
-	Collisions          []LegacyAccountResolution
-	LegacyRows          int
-	UniqueAccounts      int
-	ProviderMatches     int
-	EmailMatches        int
-	NewAccounts         int
-	AmbiguousCollisions int
+	RunID               string                    `json:"runId"`
+	Source              string                    `json:"source"`
+	Checksum            string                    `json:"checksum"`
+	Items               []LegacyAccountResolution `json:"items"`
+	Collisions          []LegacyAccountResolution `json:"collisions"`
+	LegacyRows          int                       `json:"legacyRows"`
+	UniqueAccounts      int                       `json:"uniqueAccounts"`
+	ProviderMatches     int                       `json:"providerMatches"`
+	EmailMatches        int                       `json:"emailMatches"`
+	NewAccounts         int                       `json:"newAccounts"`
+	AmbiguousCollisions int                       `json:"ambiguousCollisions"`
 }
 
 type MigrationRun struct {
-	ID           string
-	Source       string
-	PlanChecksum string
-	Status       string
+	ID           string `json:"id"`
+	Source       string `json:"source"`
+	PlanChecksum string `json:"planChecksum"`
+	Status       string `json:"status"`
 }
 
 type MigrationCheckpoint struct {
-	RunID            string
-	Scope            string
-	CompletedIndex   int
-	LastLegacyUserID string
-	RowsProcessed    int
-	Checksum         string
-	Status           string
+	RunID            string `json:"runId"`
+	Scope            string `json:"scope"`
+	CompletedIndex   int    `json:"completedIndex"`
+	LastLegacyUserID string `json:"lastLegacyUserId"`
+	RowsProcessed    int    `json:"rowsProcessed"`
+	Checksum         string `json:"checksum"`
+	Status           string `json:"status"`
 }
 
 type VerificationFinding struct {
-	Code      string
-	Scope     string
-	LegacyID  string
-	AccountID string
-	Detail    string
+	Code      string `json:"code"`
+	Scope     string `json:"scope"`
+	LegacyID  string `json:"legacyId,omitempty"`
+	AccountID string `json:"accountId,omitempty"`
+	Detail    string `json:"detail"`
 }
 
 type VerificationResult struct {
-	PlanChecksum string
-	Findings     []VerificationFinding
+	PlanChecksum string                `json:"planChecksum"`
+	Findings     []VerificationFinding `json:"findings"`
 }
