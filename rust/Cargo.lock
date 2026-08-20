@@ -476,6 +476,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gonvex-runtime"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "gonvex-server-host"
 version = "0.1.0"
 dependencies = [
