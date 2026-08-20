@@ -1054,7 +1054,7 @@ func (s *Server) markTenantDatabaseProvisioned(ctx context.Context, project stri
 }
 
 func (s *Server) provisionCreatedTenant(ctx context.Context, project string, result any) error {
-	tenantID := tenantIDFromMutationResult(result)
+	tenantID := tenantIDFromReducerResult(result)
 	if tenantID == "" {
 		return nil
 	}
@@ -1072,7 +1072,7 @@ func (s *Server) provisionCreatedTenant(ctx context.Context, project string, res
 	return nil
 }
 
-func tenantIDFromMutationResult(result any) string {
+func tenantIDFromReducerResult(result any) string {
 	switch value := result.(type) {
 	case string:
 		return strings.TrimSpace(value)

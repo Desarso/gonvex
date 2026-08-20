@@ -169,7 +169,7 @@ type FunctionDependencies struct {
 	NonOptimisticReason  string
 }
 
-// OptimisticReducerDefinition tells generated clients how mutation arguments
+// OptimisticReducerDefinition tells generated clients how reducer arguments
 // identify and patch one entity. It is client metadata only; authorization and
 // authoritative writes remain entirely server-side.
 type OptimisticReducerDefinition struct {
@@ -179,7 +179,7 @@ type OptimisticReducerDefinition struct {
 }
 
 // OptimisticProjectionDefinition identifies an entity collection nested in a
-// query result so the client can materialize the same pending entity mutations
+// query result so the client can materialize the same pending entity changes
 // into live subscriptions and durable syncs.
 type OptimisticProjectionDefinition struct {
 	Entity     string
@@ -201,7 +201,7 @@ type FunctionOption interface {
 
 type optimisticReducerOption struct{ definition OptimisticReducerDefinition }
 
-// OptimisticReducer declares the entity patched by a mutation. RowIDArg and
+// OptimisticReducer declares the entity patched by a reducer. RowIDArg and
 // FieldsArg accept dotted paths for nested argument objects.
 func OptimisticReducer(entity string) *optimisticReducerOption {
 	return &optimisticReducerOption{definition: OptimisticReducerDefinition{Entity: strings.TrimSpace(entity)}}

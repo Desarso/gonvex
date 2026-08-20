@@ -90,7 +90,7 @@ type HTTPResult struct {
 type ReducerInvoker func(*gonvex.ReducerCtx, Invocation) (Result, error)
 
 // ReducerExec adapts a typed reducer entry point to the (ctx, path, args)
-// callback shape used by host helpers that wrap a mutation in a database
+// callback shape used by host helpers that wrap a reducer in a database
 // transaction. It exists so transaction management stays independent of the
 // seam's request/result types.
 func ReducerExec(invoke ReducerInvoker) func(*gonvex.ReducerCtx, string, json.RawMessage) (any, error) {

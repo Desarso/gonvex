@@ -35,11 +35,11 @@ type registeredQueryArgs struct {
 	Name string `json:"name"`
 }
 
-type registeredMutationArgs struct {
+type registeredReducerArgs struct {
 	Title string `json:"title"`
 }
 
-type registeredMutationResult struct {
+type registeredReducerResult struct {
 	Title     string `json:"title"`
 	ProjectID string `json:"projectId"`
 }
@@ -396,23 +396,23 @@ func TestExecuteRegisteredQuery(t *testing.T) {
 	}
 }
 
-func TestExecuteRegisteredMutation(t *testing.T) {
+func TestExecuteRegisteredReducer(t *testing.T) {
 	app := gonvex.NewApp()
-	app.Reducer("custom.create", func(ctx *gonvex.ReducerCtx, args registeredMutationArgs) (registeredMutationResult, error) {
+	app.Reducer("custom.create", func(ctx *gonvex.ReducerCtx, args registeredReducerArgs) (registeredReducerResult, error) {
 		if ctx.Tx != nil {
 			t.Fatal("expected nil transaction without configured database")
 		}
-		return registeredMutationResult{Title: args.Title, ProjectID: ctx.ProjectID}, nil
+		return registeredReducerResult{Title: args.Title, ProjectID: ctx.ProjectID}, nil
 	}, gonvex.OnlineOnlyNonOptimistic("server dispatch test fixture"))
 	server := NewWithApp(config.Config{}, app)
 
-	result, err := server.executeMutation(context.Background(), "project-a", "custom.create", json.RawMessage(`{"title":"Ship"}`))
+	result, err := server.executeReducer(context.Background(), "project-a", "custom.create", json.RawMessage(`{"title":"Ship"}`))
 	if err != nil {
-		t.Fatalf("execute registered mutation: %v", err)
+		t.Fatalf("execute registered reducer: %v", err)
 	}
-	payload, ok := result.(registeredMutationResult)
+	payload, ok := result.(registeredReducerResult)
 	if !ok {
-		t.Fatalf("expected registeredMutationResult, got %T", result)
+		t.Fatalf("expected registeredReducerResult, got %T", result)
 	}
 	if payload.Title != "Ship" || payload.ProjectID != "project-a" {
 		t.Fatalf("unexpected payload: %#v", payload)
@@ -426,8 +426,8 @@ func TestMetricsTracksDataCacheAndFunctionCalls(t *testing.T) {
 	if _, err := server.executeQuery(context.Background(), "", "tasks.grid", nil); err != nil {
 		t.Fatalf("execute query: %v", err)
 	}
-	if _, err := server.executeMutation(context.Background(), "", "missing.mutation", nil); err == nil {
-		t.Fatal("expected missing mutation to fail")
+	if _, err := server.executeReducer(context.Background(), "", "missing.mutation", nil); err == nil {
+		t.Fatal("expected missing reducer to fail")
 	}
 
 	recorder := httptest.NewRecorder()

@@ -33,7 +33,7 @@ func (r *actionReducerCaller) Call(ctx context.Context, path string, args any) (
 	key := actionReducerIdempotencyKey(r.parent, sequence, path, raw)
 	ctx = withMutationID(ctx, key)
 	ctx = withMutationIdempotency(ctx, key, r.caller.subject())
-	return r.server.executeTenantMutationForCaller(ctx, r.project, r.tenant, r.caller, path, raw)
+	return r.server.executeTenantReducerForCaller(ctx, r.project, r.tenant, r.caller, path, raw)
 }
 
 func actionReducerIdempotencyKey(parent string, sequence uint64, path string, raw json.RawMessage) string {

@@ -986,11 +986,11 @@ func (c *wsConn) callReducer(ctx context.Context, receivedAt time.Time, request 
 	trace.ServerReceivedAtMS = epochMillis(receivedAt)
 	trace.ServerReducerStartedAtMS = epochMillis(time.Now())
 	caller := c.caller()
-	mutationCtx := withMutationID(ctx, request.ID)
+	reducerCtx := withMutationID(ctx, request.ID)
 	if key := strings.TrimSpace(request.IdempotencyKey); key != "" {
-		mutationCtx = withMutationIdempotency(mutationCtx, key, caller.subject())
+		reducerCtx = withMutationIdempotency(reducerCtx, key, caller.subject())
 	}
-	result, err := c.server.executeTenantMutationForCaller(mutationCtx, c.project, c.tenant, caller, request.Path, request.Args)
+	result, err := c.server.executeTenantReducerForCaller(reducerCtx, c.project, c.tenant, caller, request.Path, request.Args)
 	committedAt := time.Now().UTC()
 	trace.ServerReducerCommittedAtMS = epochMillis(committedAt)
 	trace.ServerCompletedAtMS = epochMillis(committedAt)
@@ -2172,16 +2172,16 @@ func (s *Server) executeLegacyQuery(ctx context.Context, projectID string, tenan
 	}
 }
 
-func (s *Server) executeMutation(ctx context.Context, projectID string, path string, rawArgs json.RawMessage) (result any, err error) {
-	return s.executeTenantMutation(ctx, projectID, tenantIDFromRequest(projectID, ""), path, rawArgs)
+func (s *Server) executeReducer(ctx context.Context, projectID string, path string, rawArgs json.RawMessage) (result any, err error) {
+	return s.executeTenantReducer(ctx, projectID, tenantIDFromRequest(projectID, ""), path, rawArgs)
 }
 
-func (s *Server) executeTenantMutation(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (result any, err error) {
-	return s.executeTenantMutationForCaller(ctx, projectID, tenantID, callerContext{}, path, rawArgs)
+func (s *Server) executeTenantReducer(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (result any, err error) {
+	return s.executeTenantReducerForCaller(ctx, projectID, tenantID, callerContext{}, path, rawArgs)
 }
 
-func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
-	kind := s.functionKind(projectID, path, "mutation")
+func (s *Server) executeTenantReducerForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
+	kind := s.functionKind(projectID, path, "reducer")
 	s.metrics.recordFunctionStart(kind)
 	execution := newRuntimeFunctionLog(projectID, tenantID, path, kind, caller, rawArgs)
 	defer func() {
@@ -2189,16 +2189,16 @@ func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID s
 		s.metrics.recordFunctionExecution(execution, err)
 	}()
 
-	if isLegacyTaskMutation(path) {
-		return s.executeLegacyMutation(ctx, projectID, tenantID, path, rawArgs)
+	if isLegacyTaskReducer(path) {
+		return s.executeLegacyReducer(ctx, projectID, tenantID, path, rawArgs)
 	}
 	engine := s.engineForProject(ctx, projectID)
 	if _, ok := engine.Describe(path); ok {
-		mutationCtx, err := s.mutationContext(ctx, projectID, tenantID, caller)
+		reducerCtx, err := s.reducerContext(ctx, projectID, tenantID, caller)
 		if err != nil {
 			return nil, err
 		}
-		result, err := s.executeRegisteredMutation(engine, mutationCtx, path, rawArgs)
+		result, err := s.executeRegisteredReducer(engine, reducerCtx, path, rawArgs)
 		if err != nil {
 			return nil, err
 		}
@@ -2216,15 +2216,15 @@ func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID s
 		}
 		return result, nil
 	}
-	return nil, fmt.Errorf("mutation %q is not implemented by the runtime", path)
+	return nil, fmt.Errorf("reducer %q is not implemented by the runtime", path)
 }
 
-// runTenantsOnProvisioned invokes the optional internal mutation
+// runTenantsOnProvisioned invokes the optional internal reducer
 // "tenants.onProvisioned" against the newly created tenant database after
 // provisionCreatedTenant succeeds. Apps that do not register the hook are
 // skipped. Failures surface so create does not silently leave an empty shell.
 func (s *Server) runTenantsOnProvisioned(ctx context.Context, projectID string, result any, caller callerContext) error {
-	tenantID := tenantIDFromMutationResult(result)
+	tenantID := tenantIDFromReducerResult(result)
 	if tenantID == "" {
 		return nil
 	}
@@ -2236,7 +2236,7 @@ func (s *Server) runTenantsOnProvisioned(ctx context.Context, projectID string, 
 	if !ok || descriptor.Kind != moduleengine.KindReducer || !descriptor.Internal {
 		return nil
 	}
-	mutationCtx, err := s.mutationContext(ctx, projectID, tenantID, caller)
+	reducerCtx, err := s.reducerContext(ctx, projectID, tenantID, caller)
 	if err != nil {
 		return fmt.Errorf("tenants.onProvisioned: %w", err)
 	}
@@ -2244,78 +2244,78 @@ func (s *Server) runTenantsOnProvisioned(ctx context.Context, projectID string, 
 	if err != nil {
 		return fmt.Errorf("tenants.onProvisioned args: %w", err)
 	}
-	if _, err := s.runMutationInTx(mutationCtx, "tenants.onProvisioned", rawArgs, moduleengine.ReducerExec(engine.InvokeInternalReducer)); err != nil {
+	if _, err := s.runReducerInTx(reducerCtx, "tenants.onProvisioned", rawArgs, moduleengine.ReducerExec(engine.InvokeInternalReducer)); err != nil {
 		return fmt.Errorf("tenants.onProvisioned: %w", err)
 	}
 	return nil
 }
 
-func (s *Server) executeRegisteredMutation(engine moduleengine.ModuleEngine, mutationCtx *gonvex.ReducerCtx, path string, rawArgs json.RawMessage) (any, error) {
-	return s.runMutationInTx(mutationCtx, path, rawArgs, moduleengine.ReducerExec(engine.InvokeReducer))
+func (s *Server) executeRegisteredReducer(engine moduleengine.ModuleEngine, reducerCtx *gonvex.ReducerCtx, path string, rawArgs json.RawMessage) (any, error) {
+	return s.runReducerInTx(reducerCtx, path, rawArgs, moduleengine.ReducerExec(engine.InvokeReducer))
 }
 
-// runMutationInTx runs a mutation-style handler inside a database transaction
+// runReducerInTx runs a reducer handler inside a database transaction
 // when a database is configured, committing on success and rolling back on
-// error. It is shared by client-triggered mutations and scheduled internal
-// mutations so both get the same transactional guarantees.
-func (s *Server) runMutationInTx(mutationCtx *gonvex.ReducerCtx, path string, rawArgs json.RawMessage, exec func(*gonvex.ReducerCtx, string, json.RawMessage) (any, error)) (any, error) {
-	if mutationCtx.DB == nil {
-		restrictReducerCapabilities(mutationCtx)
-		return exec(mutationCtx, path, rawArgs)
+// error. It is shared by client-triggered reducers and scheduled internal
+// reducers so both get the same transactional guarantees.
+func (s *Server) runReducerInTx(reducerCtx *gonvex.ReducerCtx, path string, rawArgs json.RawMessage, exec func(*gonvex.ReducerCtx, string, json.RawMessage) (any, error)) (any, error) {
+	if reducerCtx.DB == nil {
+		restrictReducerCapabilities(reducerCtx)
+		return exec(reducerCtx, path, rawArgs)
 	}
-	database := mutationCtx.DB
-	if mutationCtx.Context == nil {
-		mutationCtx.Context = context.Background()
+	database := reducerCtx.DB
+	if reducerCtx.Context == nil {
+		reducerCtx.Context = context.Background()
 	}
-	claim, hasClaim := mutationIdempotencyFromContext(mutationCtx.Context)
+	claim, hasClaim := mutationIdempotencyFromContext(reducerCtx.Context)
 	if hasClaim {
-		if err := s.ensureMutationIdempotencyStorage(mutationCtx.Context, database, mutationCtx.DatabaseURL); err != nil {
+		if err := s.ensureMutationIdempotencyStorage(reducerCtx.Context, database, reducerCtx.DatabaseURL); err != nil {
 			return nil, err
 		}
 	}
-	tx, err := database.BeginTx(mutationCtx.Context, nil)
+	tx, err := database.BeginTx(reducerCtx.Context, nil)
 	if err != nil {
 		return nil, err
 	}
-	mutationCtx.Tx = tx
+	reducerCtx.Tx = tx
 	if hasClaim {
-		claimed, err := claimMutationIdempotency(mutationCtx.Context, tx, claim, path)
+		claimed, err := claimMutationIdempotency(reducerCtx.Context, tx, claim, path)
 		if err != nil {
 			_ = tx.Rollback()
-			mutationCtx.Tx = nil
+			reducerCtx.Tx = nil
 			return nil, err
 		}
 		if !claimed {
 			// A previous delivery of this write already committed. Serve its
 			// stored result instead of executing the handler a second time.
 			_ = tx.Rollback()
-			mutationCtx.Tx = nil
-			return replayMutationIdempotencyResult(mutationCtx.Context, database, claim, path)
+			reducerCtx.Tx = nil
+			return replayMutationIdempotencyResult(reducerCtx.Context, database, claim, path)
 		}
 	}
-	if mutationID := mutationIDFromContext(mutationCtx.Context); mutationID != "" {
-		if _, err := tx.ExecContext(mutationCtx.Context, `SELECT set_config('gonvex.mutation_id', $1, true)`, mutationID); err != nil {
+	if mutationID := mutationIDFromContext(reducerCtx.Context); mutationID != "" {
+		if _, err := tx.ExecContext(reducerCtx.Context, `SELECT set_config('gonvex.mutation_id', $1, true)`, mutationID); err != nil {
 			_ = tx.Rollback()
 			return nil, err
 		}
 	}
-	originalScheduler := mutationCtx.Scheduler
+	originalScheduler := reducerCtx.Scheduler
 	deferred := newDeferredScheduler(originalScheduler)
-	mutationCtx.Scheduler = deferred
-	mutationCtx.Outbox = postgresActionOutbox{tx: tx, user: mutationCtx.User}
+	reducerCtx.Scheduler = deferred
+	reducerCtx.Outbox = postgresActionOutbox{tx: tx, user: reducerCtx.User}
 	// Reducer code receives only the transaction handle. Raw pools would allow
 	// an accidental write to commit outside the atomic business intent.
-	restrictReducerCapabilities(mutationCtx)
+	restrictReducerCapabilities(reducerCtx)
 	defer func() {
-		mutationCtx.Scheduler = originalScheduler
+		reducerCtx.Scheduler = originalScheduler
 	}()
-	result, err := exec(mutationCtx, path, rawArgs)
+	result, err := exec(reducerCtx, path, rawArgs)
 	if err != nil {
 		_ = tx.Rollback()
 		return nil, err
 	}
 	if hasClaim {
-		if err := storeMutationIdempotencyResult(mutationCtx.Context, tx, claim, result); err != nil {
+		if err := storeMutationIdempotencyResult(reducerCtx.Context, tx, claim, result); err != nil {
 			_ = tx.Rollback()
 			return nil, err
 		}
@@ -2323,14 +2323,14 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.ReducerCtx, path string, ra
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	mutationCtx.Tx = nil
+	reducerCtx.Tx = nil
 	if hasClaim {
-		s.maybeSweepMutationIdempotency(database, mutationCtx.DatabaseURL)
+		s.maybeSweepMutationIdempotency(database, reducerCtx.DatabaseURL)
 	}
 	if err := deferred.flush(); err != nil {
-		mutationCtx.Logger.Error("failed to publish committed scheduled work", "path", path, "error", err)
+		reducerCtx.Logger.Error("failed to publish committed scheduled work", "path", path, "error", err)
 	}
-	go s.drainActionOutbox(mutationCtx.ProjectID, mutationCtx.TenantID)
+	go s.drainActionOutbox(reducerCtx.ProjectID, reducerCtx.TenantID)
 	return result, nil
 }
 
@@ -2344,7 +2344,7 @@ func restrictReducerCapabilities(ctx *gonvex.ReducerCtx) {
 	ctx.Data = gonvex.UnavailableData()
 }
 
-func (s *Server) executeLegacyMutation(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (any, error) {
+func (s *Server) executeLegacyReducer(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (any, error) {
 	s.hydrateRuntimeStateForProject(ctx, projectID)
 	s.hydrateProjectTenantDatabases(ctx, projectID)
 	switch path {
@@ -2366,7 +2366,7 @@ func (s *Server) executeLegacyMutation(ctx context.Context, projectID string, te
 		}
 		return result, nil
 	default:
-		return nil, fmt.Errorf("mutation %q is not implemented by the runtime", path)
+		return nil, fmt.Errorf("reducer %q is not implemented by the runtime", path)
 	}
 }
 
@@ -2424,7 +2424,7 @@ func (s *Server) queryContext(ctx context.Context, projectID string, tenantID st
 	return &gonvex.QueryCtx{RuntimeContext: runtimeCtx}, nil
 }
 
-func (s *Server) mutationContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (*gonvex.ReducerCtx, error) {
+func (s *Server) reducerContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (*gonvex.ReducerCtx, error) {
 	runtimeCtx, err := s.runtimeContext(ctx, projectID, tenantID, caller)
 	if err != nil {
 		return nil, err
@@ -2581,7 +2581,7 @@ func (s *Server) sandboxForCaller(projectID string, tenantID string, caller call
 			if err != nil {
 				return nil, err
 			}
-			return s.executeTenantMutationForCaller(ctx, projectID, hostTenant, hostCaller, path, resolvedArgs)
+			return s.executeTenantReducerForCaller(ctx, projectID, hostTenant, hostCaller, path, resolvedArgs)
 		case "data.inspect":
 			var inspectReq gonvex.DataInspectRequest
 			if err := json.Unmarshal(args, &inspectReq); err != nil {
@@ -2664,6 +2664,6 @@ func isLegacyTaskQuery(path string) bool {
 	return path == "tasks.grid"
 }
 
-func isLegacyTaskMutation(path string) bool {
+func isLegacyTaskReducer(path string) bool {
 	return path == "tasks.randomizeStatusPriority"
 }

@@ -30,7 +30,7 @@ func wsDrainWindowFromEnv() time.Duration {
 // DrainWebSockets closes every live WebSocket connection spread across the
 // window using close code 1012 (service restart), so clients reconnect to the
 // replacement worker staggered instead of as one synchronized wave. Idle
-// connections close first; a connection executing a mutation or action is
+// connections close first; a connection executing a reducer or action is
 // given until the end of the window to finish before its close. The call
 // blocks until every connection has been closed.
 func (s *Server) DrainWebSockets(window time.Duration) {

@@ -267,7 +267,7 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 }
 
 // runScheduledJob is the scheduler's executor: it dispatches a due job through
-// the same mutation/action execution path as client-triggered calls, so
+// the same reducer/action execution path as client-triggered calls, so
 // scheduled work shows up in the function and concurrency metrics too.
 func (s *Server) runScheduledJob(ctx context.Context, job scheduledJob) error {
 	ctx = withMutationID(ctx, job.ID)
@@ -284,16 +284,16 @@ func (s *Server) runScheduledJob(ctx context.Context, job scheduledJob) error {
 		if descriptor.Internal {
 			return s.executeScheduledInternalReducer(ctx, job)
 		}
-		_, err := s.executeTenantMutation(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
+		_, err := s.executeTenantReducer(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
 		return err
 	default:
-		return fmt.Errorf("scheduled function %q must be a mutation or action, got %s", job.FunctionPath, descriptor.Kind)
+		return fmt.Errorf("scheduled function %q must be a reducer or action, got %s", job.FunctionPath, descriptor.Kind)
 	}
 }
 
-// executeScheduledInternalReducer runs an internal mutation from the scheduler.
-// Internal mutations aren't reachable from clients, so they're dispatched here
-// rather than through executeTenantMutation, but still get metrics and a
+// executeScheduledInternalReducer runs an internal reducer from the scheduler.
+// Internal reducers aren't reachable from clients, so they're dispatched here
+// rather than through executeTenantReducer, but still get metrics and a
 // surrounding transaction.
 func (s *Server) executeScheduledInternalReducer(ctx context.Context, job scheduledJob) (err error) {
 	const kind = "reducer"
@@ -305,11 +305,11 @@ func (s *Server) executeScheduledInternalReducer(ctx context.Context, job schedu
 	}()
 
 	engine := s.engineForProject(ctx, job.ProjectID)
-	mutationCtx, ctxErr := s.mutationContext(ctx, job.ProjectID, job.TenantID, callerContext{})
+	reducerCtx, ctxErr := s.reducerContext(ctx, job.ProjectID, job.TenantID, callerContext{})
 	if ctxErr != nil {
 		return ctxErr
 	}
-	_, err = s.runMutationInTx(mutationCtx, job.FunctionPath, job.Args, moduleengine.ReducerExec(engine.InvokeInternalReducer))
+	_, err = s.runReducerInTx(reducerCtx, job.FunctionPath, job.Args, moduleengine.ReducerExec(engine.InvokeInternalReducer))
 	return err
 }
 

@@ -24,7 +24,7 @@ const (
 )
 
 // scheduledExecutor runs a single scheduled job. The server provides an
-// implementation that dispatches to the mutation or action execution path.
+// implementation that dispatches to the reducer or action execution path.
 type scheduledExecutor func(ctx context.Context, job scheduledJob) error
 
 // scheduledJob is one unit of deferred work: either a one-shot job enqueued via

@@ -10,7 +10,7 @@ import (
 )
 
 // deferredScheduler preserves Convex's commit ordering: jobs scheduled inside
-// a mutation become visible to the scheduler only after that mutation commits.
+// a reducer become visible to the scheduler only after that reducer commits.
 // Without this buffer, a zero-delay job can race the transaction and observe
 // the row that triggered it as missing.
 type deferredScheduler struct {
