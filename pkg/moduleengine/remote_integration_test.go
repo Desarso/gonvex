@@ -58,6 +58,9 @@ func TestRemoteEngineExecutesV8AndSwapsGenerationWithoutReconnect(t *testing.T) 
 	if firstGeneration == 0 {
 		t.Fatal("first module generation was not assigned")
 	}
+	if status := host.Status(); !status.Ready || !status.Running || !status.Connected || status.Epoch == 0 {
+		t.Fatalf("module host is not healthy after activation: %+v", status)
+	}
 
 	runtimeContext := gonvex.RuntimeContext{
 		Context: context.Background(),
@@ -150,6 +153,36 @@ func TestRemoteEngineExecutesV8AndSwapsGenerationWithoutReconnect(t *testing.T) 
 		"version": float64(2), "value": "after-swap", "account": "acct-gabriel",
 		"member": "member-gabriel", "tenant": "tenant-el-rey", "hasDb": false,
 	})
+
+	host.mu.Lock()
+	process := host.process
+	previousEpoch := host.epoch
+	host.mu.Unlock()
+	if process == nil || process.cmd == nil || process.cmd.Process == nil {
+		t.Fatal("managed module host process is missing")
+	}
+	if err := process.cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill module host: %v", err)
+	}
+	<-process.exited
+	if status := host.Status(); status.Ready || status.Running || status.Error == "" {
+		t.Fatalf("dead module host reported healthy: %+v", status)
+	}
+
+	recovered, err := second.InvokeQuery(
+		&gonvex.QueryCtx{RuntimeContext: runtimeContext},
+		Invocation{Path: "system.echo", Args: json.RawMessage(`{"value":"after-restart"}`)},
+	)
+	if err != nil {
+		t.Fatalf("invoke after module host restart: %v", err)
+	}
+	assertRemoteResult(t, recovered.Value, map[string]any{
+		"version": float64(2), "value": "after-restart", "account": "acct-gabriel",
+		"member": "member-gabriel", "tenant": "tenant-el-rey", "hasDb": false,
+	})
+	if status := host.Status(); !status.Ready || status.Epoch <= previousEpoch {
+		t.Fatalf("module host did not recover on the next invocation: %+v", status)
+	}
 }
 
 func newRemoteTestEngine(t *testing.T, host *RemoteHost, version int) *RemoteEngine {

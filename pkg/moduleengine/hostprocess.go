@@ -94,6 +94,21 @@ type RemoteHost struct {
 	socketOwned string
 }
 
+// HostStatus is a lock-consistent snapshot of the TypeScript module host.
+// Ready means a configured host has a live control session and, when Gonvex
+// owns the process, that child has not exited.
+type HostStatus struct {
+	Configured bool
+	Managed    bool
+	Started    bool
+	Running    bool
+	Connected  bool
+	Ready      bool
+	Closed     bool
+	Epoch      uint64
+	Error      string
+}
+
 // NewRemoteHost returns a host handle. It starts nothing: the process is
 // launched, or the endpoint dialled, the first time a module needs it, so a
 // deployment with no TypeScript modules never pays for one.
@@ -131,6 +146,45 @@ func (h *RemoteHost) Describe() string {
 		return fmt.Sprintf("%s (managed)", h.options.Binary)
 	}
 	return fmt.Sprintf("%s (external)", h.options.Endpoint)
+}
+
+// Status reports module-host liveness without starting a lazy host or changing
+// module state. The server combines this with its active-module count so an
+// unused, intentionally lazy host does not make an empty runtime unhealthy.
+func (h *RemoteHost) Status() HostStatus {
+	if h == nil {
+		return HostStatus{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	status := HostStatus{
+		Configured: h.options.Binary != "" || h.options.Endpoint != "",
+		Managed:    h.managed,
+		Closed:     h.closed,
+		Epoch:      h.epoch,
+	}
+	if h.process != nil {
+		status.Started = true
+		status.Running = h.process.running()
+		if !status.Running {
+			status.Error = fmt.Sprintf("module host process exited: %v", h.process.exitErr())
+		}
+	} else if !h.managed && h.session != nil {
+		status.Started = true
+		status.Running = h.session.alive()
+	}
+	if h.session != nil {
+		status.Connected = h.session.alive()
+		if !status.Connected && status.Error == "" {
+			status.Error = fmt.Sprintf("module host connection lost: %v", h.session.err())
+		}
+	}
+	if status.Closed && status.Error == "" {
+		status.Error = "module host is shut down"
+	}
+	processReady := !status.Managed || status.Running
+	status.Ready = status.Configured && !status.Closed && processReady && status.Connected
+	return status
 }
 
 func (h *RemoteHost) drainTimeout() time.Duration { return h.options.DrainTimeout }

@@ -142,13 +142,21 @@ func TestHealth(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, recorder.Code)
 	}
 	var payload struct {
-		Version string `json:"version"`
+		Version    string `json:"version"`
+		ModuleHost struct {
+			Required       bool `json:"required"`
+			Ready          bool `json:"ready"`
+			ActiveProjects int  `json:"activeProjects"`
+		} `json:"moduleHost"`
 	}
 	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if payload.Version != "0123456789abcdef0123456789abcdef01234567" {
 		t.Fatalf("health version = %q", payload.Version)
+	}
+	if payload.ModuleHost.Required || !payload.ModuleHost.Ready || payload.ModuleHost.ActiveProjects != 0 {
+		t.Fatalf("unexpected module host health: %+v", payload.ModuleHost)
 	}
 }
 
@@ -223,6 +231,51 @@ func TestHealthFailsWhenPersistedRuntimeManifestCannotHydrate(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	if payload.OK || payload.RuntimeManifests.Ready || payload.RuntimeManifests.FailedProjects != 1 {
+		t.Fatalf("unexpected health payload: %+v", payload)
+	}
+}
+
+func TestHealthFailsWhenRequiredModuleHostStops(t *testing.T) {
+	binary, err := filepath.Abs("../../../rust/target/debug/gonvex-module-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(binary); err != nil || info.IsDir() {
+		t.Skip("build gonvex-module-host before running TypeScript runtime integration tests")
+	}
+	server := New(config.Config{ModuleHostEnabled: true, ModuleHostBinary: binary})
+	t.Cleanup(server.Close)
+	module := typeScriptTestManifest("health-project", map[string]manifest.FunctionEntry{
+		"health.ping": {Kind: manifest.FunctionKindAction},
+	})
+	if err := server.runtime.SyncManifest(module); err != nil {
+		t.Fatalf("activate TypeScript module: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.runtime.ModuleHost().Close(ctx); err != nil {
+		t.Fatalf("close module host: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d", http.StatusServiceUnavailable, recorder.Code)
+	}
+	var payload struct {
+		OK         bool `json:"ok"`
+		ModuleHost struct {
+			Required       bool   `json:"required"`
+			Ready          bool   `json:"ready"`
+			ActiveProjects int    `json:"activeProjects"`
+			Reason         string `json:"reason"`
+		} `json:"moduleHost"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.OK || !payload.ModuleHost.Required || payload.ModuleHost.Ready || payload.ModuleHost.ActiveProjects != 1 || payload.ModuleHost.Reason != "shut-down" {
 		t.Fatalf("unexpected health payload: %+v", payload)
 	}
 }

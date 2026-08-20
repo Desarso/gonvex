@@ -420,12 +420,14 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	failedManifests := s.runtimeHydrationFailureCount()
 	hydrated := s.runtimeHydrationReady.Load()
+	moduleHost := s.runtime.ModuleHostHealth()
+	ready := hydrated && failedManifests == 0 && moduleHost.Ready
 	status := http.StatusOK
-	if !hydrated || failedManifests > 0 {
+	if !ready {
 		status = http.StatusServiceUnavailable
 	}
 	writeJSON(w, status, map[string]any{
-		"ok":          hydrated && failedManifests == 0,
+		"ok":          ready,
 		"version":     runtimeBuildVersion(),
 		"time":        time.Now().UTC().Format(time.RFC3339Nano),
 		"postgresSet": s.config.PostgresURL != "",
@@ -440,6 +442,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			"ready":          hydrated && failedManifests == 0,
 			"failedProjects": failedManifests,
 		},
+		"moduleHost": moduleHost,
 	})
 }
 

@@ -26,6 +26,22 @@ type loadedEngine struct {
 	identity string
 }
 
+// ModuleHostHealth describes whether the Rust process required by active
+// TypeScript projects can currently accept calls. A runtime with no active
+// projects leaves the host lazy and remains ready.
+type ModuleHostHealth struct {
+	Required       bool   `json:"required"`
+	Ready          bool   `json:"ready"`
+	Configured     bool   `json:"configured"`
+	Managed        bool   `json:"managed"`
+	Started        bool   `json:"started"`
+	Running        bool   `json:"running"`
+	Connected      bool   `json:"connected"`
+	ActiveProjects int    `json:"activeProjects"`
+	Epoch          uint64 `json:"epoch,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
 func New() *Runtime {
 	return NewWithModuleHost(nil)
 }
@@ -50,6 +66,49 @@ func (r *Runtime) ModuleHost() *moduleengine.RemoteHost {
 		return nil
 	}
 	return r.moduleHost
+}
+
+// ModuleHostHealth reports module-host liveness without starting the lazy
+// host. Once at least one TypeScript project is active, losing the Rust host
+// makes the runtime unhealthy until the next module invocation reconnects it.
+func (r *Runtime) ModuleHostHealth() ModuleHostHealth {
+	if r == nil {
+		return ModuleHostHealth{Ready: true}
+	}
+	r.mu.RLock()
+	activeProjects := len(r.engines)
+	r.mu.RUnlock()
+
+	var status moduleengine.HostStatus
+	if r.moduleHost != nil {
+		status = r.moduleHost.Status()
+	}
+	required := activeProjects > 0
+	health := ModuleHostHealth{
+		Required:       required,
+		Ready:          !required || status.Ready,
+		Configured:     status.Configured,
+		Managed:        status.Managed,
+		Started:        status.Started,
+		Running:        status.Running,
+		Connected:      status.Connected,
+		ActiveProjects: activeProjects,
+		Epoch:          status.Epoch,
+	}
+	if health.Ready {
+		return health
+	}
+	switch {
+	case !status.Configured:
+		health.Reason = "not-configured"
+	case status.Closed:
+		health.Reason = "shut-down"
+	case status.Managed && status.Started && !status.Running:
+		health.Reason = "process-exited"
+	default:
+		health.Reason = "not-connected"
+	}
+	return health
 }
 
 func (r *Runtime) SyncManifest(next manifest.Manifest) error {
