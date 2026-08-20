@@ -9,117 +9,34 @@ import { dirname, join, relative, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
-type FunctionKind = "query" | "reducer" | "action" | "http";
+import {
+  buildModuleArtifact,
+  detectProjectLanguage,
+  moduleManifestFunctions,
+  moduleSourceFiles,
+  type ProjectLanguage,
+} from "./module-artifact.js";
+import type {
+  FunctionDependencies,
+  FunctionEntry,
+  FunctionKind,
+	LiveQueryPlan,
+  Manifest,
+  OptimisticProjectionDefinition,
+	OptimisticReducerDefinition,
+	ReplicaCollectionDefinition,
+  SchemaDefinition,
+  SourceBundle,
+  Table,
+} from "./manifest-types.js";
 
-type FunctionEntry = {
-  kind: FunctionKind;
-  handler: string;
-  file: string;
-  internal?: boolean;
-  delivery?: "oneShot" | "live" | "replica";
-  dependencies?: FunctionDependencies;
-  replica?: ReplicaCollectionDefinition;
-};
+export type * from "./manifest-types.js";
+export type { ProjectLanguage } from "./module-artifact.js";
 
-type ReplicaCollectionDefinition = {
-  table: string;
-  key: string;
-  columns: string[];
-  equalFilters?: Record<string, string>;
-  excludeWhenSet?: string[];
-  visibilityTables?: string[];
-  orderBy?: string;
-  orderDirection?: "asc" | "desc";
-  mode?: "eager" | "progressive";
-  maxRows?: number;
-  maxBytes?: number;
-};
-
-type ReadDependency = {
-  table: string;
-  columns?: string[];
-  filters?: string[];
-  ordersBy?: string[];
-  windowed?: boolean;
-};
-
-type FunctionDependencies = {
-  reads?: ReadDependency[];
-  shareByPermissions?: boolean;
-  liveQueryPlan?: LiveQueryPlan;
-  nonOptimisticReason?: string;
-	shareByVisibility?: string;
-	shareResultFrom?: string;
-	shareResultField?: string;
-	optimisticReducer?: OptimisticReducerDefinition;
-	optimisticProjection?: OptimisticProjectionDefinition;
-};
-
-type LiveQueryPlan = {
-  table: string;
-  key: string;
-  columns?: string[];
-  resultPath?: string[];
-  where?: LiveExpression;
-  search?: { argument: string; columns: string[] };
-  sort?: { columnArgument: string; directionArgument: string; defaultColumn: string; defaultDirection: string; allowedColumns: string[] };
-  window?: { offsetArgument: string; limitArgument: string; defaultLimit: number; maxLimit: number };
-  serverOnly?: boolean;
-};
-
-type LiveExpression = {
-  operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "contains" | "containsInsensitive" | "range" | "and" | "or" | "not" | "server";
-  column?: string;
-  value?: LiveValue;
-  valueTo?: LiveValue;
-  children?: LiveExpression[];
-};
-
-type LiveValue = { argument?: string; literal?: unknown };
-
-type OptimisticReducerDefinition = {
-  entity: string;
-  rowIdPath: string[];
-  fieldsPath: string[];
-};
-
-type OptimisticProjectionDefinition = {
-  entity: string;
-  key: string;
-  resultPath: string[];
-};
-
-type Column = {
-  type: string;
-  nullable: boolean;
-  primaryKey: boolean;
-};
-
-type Table = {
-  columns: Record<string, Column>;
-  indexes: Record<string, { columns: string[]; unique: boolean; kind?: string }>;
-};
-
-type SchemaDefinition = {
-  tables: Record<string, Table>;
-  landlordTables: Record<string, Table>;
-  tenantTables: Record<string, Table>;
-};
-
-type Manifest = {
-  project: string;
-  generatedAt: string;
-  functions: Record<string, FunctionEntry>;
-  schema: SchemaDefinition;
-  bundle?: SourceBundle;
-};
-
-type SourceBundle = {
-  hash: string;
-  modulePath: string;
-  packageName: string;
-  goVersion?: string;
-  files: Record<string, string>;
+type BackendSources = {
+  language: ProjectLanguage;
+  files: string[];
+  config: ProjectConfig;
 };
 
 type Settings = {
@@ -134,6 +51,14 @@ type ProjectConfig = {
   backendDir?: string;
   generatedDir?: string;
   tenantMode?: string;
+  /** Overrides backend language detection; "go" or "typescript". */
+  language?: string;
+  module?: {
+    /** Project-relative module entrypoint. */
+    entrypoint?: string;
+    /** Project-relative prebuilt JavaScript bundle. */
+    bundle?: string;
+  };
   auth?: {
     providers?: {
       google?: {
@@ -700,10 +625,14 @@ async function runCodegen(argv: string[]) {
   });
   const backendDir = join(projectRoot, "gonvex");
   await mkdir(backendDir, { recursive: true });
-  const files = await goFiles(backendDir);
-  const manifest = await buildManifest(projectRoot, files, settings.projectID);
+  const sources = await collectBackendSources(projectRoot);
+  const manifest = await buildManifest(projectRoot, sources, settings.projectID);
   await writeBindings(projectRoot, manifest);
   console.log(`[gonvex] generated ${Object.keys(manifest.functions).length} function binding(s) without runtime sync`);
+  if (manifest.module) {
+    const fileCount = Object.keys(manifest.module.files).length;
+    console.log(`[gonvex] built ${manifest.module.language} module artifact ${manifest.module.hash.slice(0, 12)} from ${fileCount} file(s)`);
+  }
 }
 
 async function runEnv(argv: string[]) {
@@ -1155,10 +1084,10 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
   let lastRuntimeCheck = initialState?.lastRuntimeCheck ?? 0;
 
   while (!signal?.aborted) {
-    const files = await goFiles(backendDir);
+    const sources = await collectBackendSources(root);
     // Watch migrations too: editing or adding one must trigger a re-sync,
     // otherwise a new migration sits unapplied until an unrelated .go edit.
-    const fingerprint = await filesFingerprint([...files, ...await migrationFiles(join(root, "migrations"))]);
+    const fingerprint = await filesFingerprint([...sources.files, ...await migrationFiles(join(root, "migrations"))]);
     const now = Date.now();
     const shouldBuild = fingerprint !== lastFingerprint;
     const shouldRetryRuntimeSync = !once && !lastSyncSucceeded && lastManifest !== null && now - lastSyncAttempt > runtimeSyncRetryMs;
@@ -1168,7 +1097,7 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
       lastFingerprint = fingerprint;
       let manifest: Manifest;
       if (shouldBuild) {
-        manifest = await buildManifest(root, files, settings.projectID);
+        manifest = await buildManifest(root, sources, settings.projectID);
       } else {
         manifest = lastManifest!;
       }
@@ -1218,24 +1147,57 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
   return { lastFingerprint, lastManifest, lastSyncAttempt, lastSyncSucceeded, lastRuntimeCheck };
 }
 
-async function buildManifest(root: string, files: string[], projectID: string): Promise<Manifest> {
+// Backend sources are collected once per build so the fingerprint, the
+// manifest, and the shipped artifact all agree on the same file set.
+async function collectBackendSources(root: string): Promise<BackendSources> {
+  const backendDir = join(root, "gonvex");
+  const config = await loadConfig(root);
+  const language = await detectProjectLanguage(backendDir, config.language);
+  const files = language === "typescript" ? await moduleSourceFiles(backendDir) : await goFiles(backendDir);
+  return { language, files, config };
+}
+
+async function buildManifest(root: string, sources: BackendSources, projectID: string): Promise<Manifest> {
+  if (sources.language === "typescript") return buildModuleManifest(root, sources, projectID);
   const functions: Record<string, FunctionEntry> = {};
   const schema = emptySchemaDefinition();
   let packageName = "app";
-  for (const file of files) {
+  for (const file of sources.files) {
     Object.assign(functions, await parseRegistrations(root, file));
     mergeSchemaDefinition(schema, await parseSchema(file));
     if (packageName === "app") {
       packageName = await detectPackageName(file);
     }
   }
-  const bundle = await buildSourceBundle(root, files, projectID, packageName);
+  const bundle = await buildSourceBundle(root, sources.files, projectID, packageName);
   return {
     project: projectID,
     generatedAt: new Date().toISOString(),
     functions,
     schema,
     bundle,
+  };
+}
+
+// TypeScript projects ship the language-neutral artifact instead of the Go
+// source bundle. Table definitions still come from Go schema parsing, so the
+// manifest schema stays empty until a TypeScript schema surface exists; the
+// artifact carries the module sources the runtime needs in the meantime.
+async function buildModuleManifest(root: string, sources: BackendSources, projectID: string): Promise<Manifest> {
+  const artifact = await buildModuleArtifact({
+    root,
+    backendDir: join(root, "gonvex"),
+    files: sources.files,
+    migrations: await migrationFiles(join(root, "migrations")),
+    entrypoint: sources.config.module?.entrypoint,
+    bundle: sources.config.module?.bundle,
+  });
+  return {
+    project: projectID,
+    generatedAt: new Date().toISOString(),
+    functions: moduleManifestFunctions(artifact),
+    schema: emptySchemaDefinition(),
+    module: artifact,
   };
 }
 
@@ -1704,6 +1666,9 @@ async function writeBindings(root: string, manifest: Manifest): Promise<BindingW
     "landlord/tables.ts": renderScopedTablesModule("landlord", manifest.schema.landlordTables),
     "tenant/schema.ts": renderScopedSchemaModule("tenant", manifest.schema.tenantTables),
     "tenant/tables.ts": renderScopedTablesModule("tenant", manifest.schema.tenantTables),
+    // Module-artifact projects emit the artifact next to the manifest so the
+    // deploy payload is inspectable without re-running codegen.
+    ...(manifest.module ? { "module.json": `${JSON.stringify(manifest.module, null, 2)}\n` } : {}),
   };
   for (const [name, contents] of Object.entries(outputs)) {
     if (await writeFileIfChanged(join(dir, name), contents)) changedFiles += 1;
@@ -1788,13 +1753,22 @@ function functionEntryChanged(previous: Manifest, current: Manifest, path: strin
   const previousEntry = previous.functions[path]!;
   const currentEntry = current.functions[path]!;
   if (JSON.stringify(previousEntry) !== JSON.stringify(currentEntry)) return true;
-  const previousBundleFile = bundleFileForFunction(previousEntry);
-  const currentBundleFile = bundleFileForFunction(currentEntry);
-  return previous.bundle?.files[previousBundleFile] !== current.bundle?.files[currentBundleFile];
+  return sourceForFunction(previous, previousEntry) !== sourceForFunction(current, currentEntry);
+}
+
+// Bundles key sources by their package-relative path; module artifacts key them
+// by their project-relative path, which is what FunctionEntry.file already is.
+function sourceForFunction(manifest: Manifest, entry: FunctionEntry) {
+  if (manifest.module) return manifest.module.files[normalizedFunctionFile(entry)];
+  return manifest.bundle?.files[bundleFileForFunction(entry)];
+}
+
+function normalizedFunctionFile(entry: FunctionEntry) {
+  return entry.file.replace(/\\/g, "/").replace(/^\.?\//, "");
 }
 
 function bundleFileForFunction(entry: FunctionEntry) {
-  const normalized = entry.file.replace(/\\/g, "/").replace(/^\.?\//, "");
+  const normalized = normalizedFunctionFile(entry);
   const withoutGonvexPrefix = normalized.startsWith("gonvex/") ? normalized.slice("gonvex/".length) : normalized;
   return `app/${withoutGonvexPrefix}`;
 }
@@ -2083,8 +2057,12 @@ async function runtimeHasManifest(settings: Settings, manifest: Manifest) {
   if (!response.ok) return false;
   const current = await response.json() as Manifest;
   return current.project === manifest.project
-    && current.bundle?.hash === manifest.bundle?.hash
+    && deployedSourceHash(current) === deployedSourceHash(manifest)
     && Object.keys(current.functions ?? {}).length === Object.keys(manifest.functions ?? {}).length;
+}
+
+function deployedSourceHash(manifest: Manifest) {
+  return manifest.bundle?.hash ?? manifest.module?.hash;
 }
 
 async function ensureProjectSettings(root: string, settings: Settings, options: { keyWasExplicit: boolean; runtimeWasExplicit: boolean }): Promise<Settings> {
