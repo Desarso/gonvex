@@ -1,4 +1,4 @@
-package landlord
+package legacyidentity
 
 import (
 	"context"
@@ -6,10 +6,14 @@ import (
 	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
 
+// Result describes compatibility tables applied to the Control Plane.
 type Result struct {
 	Applied []string `json:"applied"`
 }
 
+// Apply installs the legacy identity tables needed by compatibility session
+// authentication. It is intentionally separate from the identity-v2 schema,
+// which owns accounts, members, and the account tenant index.
 func Apply(ctx context.Context, databaseURL string) (Result, error) {
 	if databaseURL == "" {
 		return Result{}, nil

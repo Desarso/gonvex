@@ -27,7 +27,7 @@ func (s *Server) emptyColumnDropOptions(ctx context.Context, project string, des
 	}
 	landlord, err := schema.EmptyUndeclaredColumns(ctx, s.databaseURLForProject(project), desired.LandlordSchema())
 	if err != nil {
-		return schema.ApplyOptions{}, schema.ApplyOptions{}, fmt.Errorf("inspect landlord empty columns: %w", err)
+		return schema.ApplyOptions{}, schema.ApplyOptions{}, fmt.Errorf("inspect control plane empty columns: %w", err)
 	}
 	targets := s.projectTenantTargets(ctx, project)
 	sets := make([]map[string]bool, 0, len(targets))
@@ -103,10 +103,10 @@ func (s *Server) applyProjectSQLMigrations(ctx context.Context, project string, 
 	var err error
 	result.Landlord, err = sqlmigration.Apply(ctx, s.databaseURLForProject(project), landlord, dryRun)
 	if err != nil {
-		return result, fmt.Errorf("landlord database migration failed: %w", err)
+		return result, fmt.Errorf("control plane database migration failed: %w", err)
 	}
 	for _, name := range result.Landlord.Applied {
-		slog.Info("applied SQL migration", "project", project, "scope", "landlord", "migration", name)
+		slog.Info("applied Control Plane SQL migration", "project", project, "scope", "landlord", "migration", name)
 	}
 	tenantResult, err := applyTenantSQLMigrations(ctx, s.projectTenantTargets(ctx, project), sqlmigration.Filter(migrations, sqlmigration.ScopeTenant), dryRun, sqlmigration.Apply)
 	result.Tenants = tenantResult

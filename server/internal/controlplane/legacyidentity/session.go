@@ -1,4 +1,4 @@
-package landlord
+package legacyidentity
 
 import (
 	"context"
@@ -11,16 +11,21 @@ import (
 	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
 
+// Session is the compatibility representation of a pre-identity-v2 session.
+// New code should use Control Plane accounts and tenant members instead.
 type Session struct {
 	UserID         string
 	Email          string
 	ActiveTenantID string
 }
 
+// ValidateSession keeps legacy session authentication available while the
+// Control Plane identity migration is rolled out. The LandlordURL/config
+// aliases remain supported by callers during this transition.
 func ValidateSession(ctx context.Context, databaseURL string, token string, requestedTenantID string) (Session, error) {
 	token = strings.TrimSpace(token)
 	if databaseURL == "" {
-		return Session{}, fmt.Errorf("landlord database URL is not configured")
+		return Session{}, fmt.Errorf("control plane database URL is not configured")
 	}
 	if token == "" {
 		return Session{}, fmt.Errorf("session token is required")

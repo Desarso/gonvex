@@ -1,4 +1,4 @@
-package landlord
+package legacyidentity
 
 import (
 	"context"
@@ -20,9 +20,9 @@ func TestValidateSessionRequiresToken(t *testing.T) {
 	}
 }
 
-func TestValidateSessionRequiresLandlordDatabase(t *testing.T) {
+func TestValidateSessionRequiresControlPlaneDatabase(t *testing.T) {
 	_, err := ValidateSession(context.Background(), "", "token", "tenant-a")
 	if err == nil {
-		t.Fatal("expected missing landlord database error")
+		t.Fatal("expected missing control plane database error")
 	}
 }

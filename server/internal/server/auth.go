@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
-	"github.com/gonvex/gonvex/server/internal/landlord"
+	"github.com/gonvex/gonvex/server/internal/controlplane/legacyidentity"
 )
 
 func (s *Server) authenticateSocket(ctx context.Context, projectID string, currentTenantID string, token string, requestedTenantID string) (*gonvex.User, map[string]any, string, string, error) {
@@ -56,7 +56,7 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 
 	if s.config.LandlordURL == "" {
 		if s.config.RequireAuth && !hasVerifiedAppIdentity {
-			return nil, nil, "", "", fmt.Errorf("landlord database URL is not configured")
+			return nil, nil, "", "", fmt.Errorf("control plane database URL is not configured")
 		}
 		user, tenant, err := appIdentity()
 		if err != nil {
@@ -65,7 +65,7 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 		return user, map[string]any{}, projectID, tenant, nil
 	}
 
-	session, err := landlord.ValidateSession(ctx, s.config.LandlordURL, token, requestedTenantID)
+	session, err := legacyidentity.ValidateSession(ctx, s.config.LandlordURL, token, requestedTenantID)
 	if err != nil {
 		if s.config.RequireAuth && !hasVerifiedAppIdentity {
 			return nil, nil, "", "", err

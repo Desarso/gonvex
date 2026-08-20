@@ -262,7 +262,7 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		server.metrics.startMutationLogPersistence(postgresRuntimeMutationLogStore{server: server})
 	}
 	server.loadConfiguredTenantDatabases()
-	server.startLandlordMigrations()
+	server.startControlPlaneMigrations()
 	server.startLoadSampler(server.ctx)
 	return server
 }

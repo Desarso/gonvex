@@ -1,4 +1,4 @@
-package landlord
+package legacyidentity
 
 import (
 	"context"
@@ -16,7 +16,7 @@ func TestApplyWithEmptyDatabaseURLIsNoop(t *testing.T) {
 	}
 }
 
-func TestMigrationStatementsIncludeLandlordTables(t *testing.T) {
+func TestMigrationStatementsIncludeLegacyIdentityTables(t *testing.T) {
 	joined := ""
 	for _, statement := range migrationStatements() {
 		joined += "\n" + statement.sql
