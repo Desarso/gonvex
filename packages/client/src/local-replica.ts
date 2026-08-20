@@ -33,16 +33,21 @@ export type ReplicaSnapshot = {
   liveQueries: Record<string, LiveQueryMembership>;
 };
 
+/** Opaque persistence namespace for one deployment/project/tenant identity. */
+export type ReplicaScope = string;
+
+const defaultReplicaScope: ReplicaScope = "default";
+
 /**
  * Storage implementations must persist the complete transaction atomically.
  * The SQLite adapter maps this call to BEGIN/apply/cursor/COMMIT; IndexedDB
  * implementations use one readwrite transaction over the same stores.
  */
 export interface LocalReplicaStorage {
-  load(): Promise<ReplicaSnapshot | undefined>;
-  applyTransaction(transaction: ReplicaTransaction, snapshot: ReplicaSnapshot): Promise<void>;
+  load(scope?: ReplicaScope): Promise<ReplicaSnapshot | undefined>;
+  applyTransaction(transaction: ReplicaTransaction, snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
   /** Persist a normalized Query/Collection materialization atomically. */
-  replaceSnapshot?(snapshot: ReplicaSnapshot): Promise<void>;
+  replaceSnapshot?(snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
 }
 
 type PendingCommand = {
@@ -71,29 +76,66 @@ export class LocalReplica {
   private hydration?: Promise<void>;
   private freshnessValue: ReplicaFreshness = "verifying";
   private versionValue = 0;
+  private scopeValue: ReplicaScope = defaultReplicaScope;
+  private scopeLoaded = false;
+  private scopeActivation?: Promise<void>;
+  private scopeActivationName?: ReplicaScope;
+  private scopeActivationGeneration = 0;
 
-  constructor(private readonly storage?: LocalReplicaStorage) {}
+  constructor(private readonly storage?: LocalReplicaStorage) {
+    // A memory-only direct user has no asynchronous scope to hydrate and can
+    // continue using the historical immediate APIs under the safe default.
+    if (!storage) this.scopeLoaded = true;
+  }
 
   hydrate(): Promise<void> {
     if (this.hydration) return this.hydration;
-    const hydration = this.application.then(() => this.hydrateNow());
-    this.application = hydration.catch(() => undefined);
-    this.hydration = hydration;
-    return hydration;
+    this.hydration = this.activateScope(defaultReplicaScope);
+    return this.hydration;
   }
 
-  private async hydrateNow() {
-    const snapshot = await this.storage?.load();
-    if (!snapshot) return;
-    this.cursorValue = snapshot.cursor;
-    this.entities = entitiesFromSnapshot(snapshot.entities);
-    this.liveQueries = new Map(Object.entries(snapshot.liveQueries).map(([key, value]) => [key, cloneMembership(value)]));
-    this.freshnessValue = "verifying";
-    this.notify();
+  /**
+   * Atomically switch the authoritative store to an opaque persistence scope.
+   * A newer request supersedes an older one even if the older storage read is
+   * slow (or resolves after auth has already changed again).
+   */
+  activateScope(scope: ReplicaScope = defaultReplicaScope): Promise<void> {
+    const nextScope = normalizeReplicaScope(scope);
+    if (this.scopeLoaded && this.scopeValue === nextScope) return this.application;
+    if (this.scopeActivation && this.scopeActivationName === nextScope) return this.scopeActivation;
+    // Fail closed immediately while the async read is in flight. This keeps a
+    // synchronous auth change from exposing the prior identity's rows.
+    const wasLoaded = this.scopeLoaded;
+    this.scopeLoaded = false;
+    if (wasLoaded) this.notify();
+    const generation = ++this.scopeActivationGeneration;
+    const activation = this.application.then(async () => {
+      // A prior transaction may still be in the storage queue. Wait for it so
+      // a same-scope activation cannot load a snapshot from before its commit.
+      await this.persistence;
+      const snapshot = await this.storage?.load(nextScope);
+      if (generation !== this.scopeActivationGeneration) return;
+      this.scopeValue = nextScope;
+      this.scopeLoaded = true;
+      this.cursorValue = snapshot?.cursor;
+      this.entities = snapshot ? entitiesFromSnapshot(snapshot.entities) : new Map();
+      this.liveQueries = snapshot
+        ? new Map(Object.entries(snapshot.liveQueries).map(([key, value]) => [key, cloneMembership(value)]))
+        : new Map();
+      // Optimistic commands belong to the old identity and must never be
+      // projected while the newly restored scope is becoming authoritative.
+      this.pendingCommands.clear();
+      this.freshnessValue = "verifying";
+      this.notify();
+    });
+    this.application = activation.catch(() => undefined);
+    this.scopeActivation = activation;
+    this.scopeActivationName = nextScope;
+    return activation;
   }
 
   cursor() {
-    return this.cursorValue ? { ...this.cursorValue } : undefined;
+    return this.scopeLoaded && this.cursorValue ? { ...this.cursorValue } : undefined;
   }
 
   freshness() {
@@ -137,8 +179,9 @@ export class LocalReplica {
     this.notify();
   }
 
-  applyTransaction(transaction: ReplicaTransaction): Promise<void> {
-    const application = this.application.then(() => this.applyTransactionNow(transaction));
+  applyTransaction(transaction: ReplicaTransaction, scope?: ReplicaScope): Promise<void> {
+    const requestedScope = scope === undefined ? undefined : normalizeReplicaScope(scope);
+    const application = this.application.then(() => this.applyTransactionNow(transaction, requestedScope));
     this.application = application.catch(() => undefined);
     return application;
   }
@@ -151,6 +194,7 @@ export class LocalReplica {
     completeness: "complete" | "partial";
     source: "server" | "cache";
     cursor?: ReplicaCursor;
+    scope?: ReplicaScope;
   }): Promise<void> {
     const application = this.application.then(() => this.materializeWindowNow(input));
     this.application = application.catch(() => undefined);
@@ -165,7 +209,9 @@ export class LocalReplica {
     completeness: "complete" | "partial";
     source: "server" | "cache";
     cursor?: ReplicaCursor;
+    scope?: ReplicaScope;
   }) {
+    if (input.scope !== undefined && normalizeReplicaScope(input.scope) !== this.scopeValue) return;
     if (!input.signature.trim() || !input.entity.trim() || !input.key.trim()) {
       throw new Error("replica materialization requires signature, entity, and key");
     }
@@ -197,8 +243,9 @@ export class LocalReplica {
       nextCursor = { ...input.cursor };
     }
     const snapshot = snapshotFrom(nextCursor, nextEntities, nextQueries);
+    const writeScope = this.scopeValue;
     if (this.storage?.replaceSnapshot) {
-      await this.persist(() => this.storage!.replaceSnapshot!(snapshot));
+      await this.persist(() => this.storage!.replaceSnapshot!(snapshot, writeScope));
     }
     this.entities = nextEntities;
     this.liveQueries = nextQueries;
@@ -207,7 +254,8 @@ export class LocalReplica {
     this.notify();
   }
 
-  private async applyTransactionNow(transaction: ReplicaTransaction) {
+  private async applyTransactionNow(transaction: ReplicaTransaction, scope?: ReplicaScope) {
+    if (scope !== undefined && scope !== this.scopeValue) return;
     validateTransaction(transaction);
     if (this.cursorValue?.epoch === transaction.cursor.epoch && transaction.cursor.revision <= this.cursorValue.revision) {
       return;
@@ -230,7 +278,8 @@ export class LocalReplica {
     }
 
     const snapshot = snapshotFrom(transaction.cursor, nextEntities, nextQueries);
-    await this.persist(() => this.storage?.applyTransaction(transaction, snapshot));
+    const writeScope = this.scopeValue;
+    await this.persist(() => this.storage?.applyTransaction(transaction, snapshot, writeScope));
 
     // Publish the whole committed transaction in one state swap and notify UI
     // exactly once. No subscriber can observe a partial entity/query update.
@@ -244,6 +293,7 @@ export class LocalReplica {
   }
 
   entity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): T | undefined {
+    if (!this.scopeLoaded) return undefined;
     let row = this.entities.get(entity)?.get(id);
     let selected = row ? cloneRow(row) : undefined;
     for (const command of this.pendingCommands.values()) {
@@ -259,6 +309,9 @@ export class LocalReplica {
   }
 
   liveQuery<T extends ReplicaRow = ReplicaRow>(signature: string): LiveQueryResult<T> {
+    if (!this.scopeLoaded) {
+      return { rows: [], source: "cache", completeness: "partial", freshness: this.freshnessValue };
+    }
     const membership = this.liveQueries.get(signature);
     if (!membership) {
       return { rows: [], source: "cache", completeness: "partial", freshness: this.freshnessValue };
@@ -275,10 +328,11 @@ export class LocalReplica {
   }
 
   hasLiveQuery(signature: string) {
-    return this.liveQueries.has(signature);
+    return this.scopeLoaded && this.liveQueries.has(signature);
   }
 
   snapshot(): ReplicaSnapshot {
+    if (!this.scopeLoaded) return { entities: {}, liveQueries: {} };
     return snapshotFrom(this.cursorValue, this.entities, this.liveQueries);
   }
 
@@ -307,12 +361,17 @@ export class LocalReplica {
 }
 
 export class MemoryLocalReplicaStorage implements LocalReplicaStorage {
-  private value?: ReplicaSnapshot;
-  async load() { return this.value ? cloneSnapshot(this.value) : undefined; }
-  async applyTransaction(_transaction: ReplicaTransaction, snapshot: ReplicaSnapshot) {
-    this.value = cloneSnapshot(snapshot);
+  private readonly values = new Map<ReplicaScope, ReplicaSnapshot>();
+  async load(scope: ReplicaScope = defaultReplicaScope) {
+    const value = this.values.get(normalizeReplicaScope(scope));
+    return value ? cloneSnapshot(value) : undefined;
   }
-  async replaceSnapshot(snapshot: ReplicaSnapshot) { this.value = cloneSnapshot(snapshot); }
+  async applyTransaction(_transaction: ReplicaTransaction, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope) {
+    this.values.set(normalizeReplicaScope(scope), cloneSnapshot(snapshot));
+  }
+  async replaceSnapshot(snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope) {
+    this.values.set(normalizeReplicaScope(scope), cloneSnapshot(snapshot));
+  }
 }
 
 function validateTransaction(transaction: ReplicaTransaction) {
@@ -348,4 +407,9 @@ function snapshotFrom(cursor: ReplicaCursor | undefined, entities: Map<string, M
 }
 function cloneSnapshot(value: ReplicaSnapshot) {
   return snapshotFrom(value.cursor, entitiesFromSnapshot(value.entities), new Map(Object.entries(value.liveQueries)));
+}
+
+function normalizeReplicaScope(scope: ReplicaScope): ReplicaScope {
+  if (typeof scope !== "string" || !scope.trim()) return defaultReplicaScope;
+  return scope;
 }

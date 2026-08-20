@@ -39,7 +39,7 @@ import {
   type ReducerOutbox,
   type OutboxStore,
 } from "./outbox.js";
-import { LocalReplica, type LocalReplicaStorage, type ReplicaRow } from "./local-replica.js";
+import { LocalReplica, type LocalReplicaStorage, type ReplicaRow, type ReplicaScope } from "./local-replica.js";
 export * from "./cache.js";
 export * from "./cache-coordinator.js";
 export * from "./browser-cache.js";
@@ -105,6 +105,7 @@ type QuerySubscription = {
   socketGeneration?: number;
   lastRevision?: SubscriptionRevision;
   revisionSocketGeneration?: number;
+  scope?: ReplicaScope;
 };
 type SyncSubscription = {
   id: string;
@@ -150,6 +151,7 @@ type SyncSubscription = {
    * stored rows can be left untouched.
    */
   persistedRows?: JsonValue[];
+  scope?: ReplicaScope;
 };
 
 function syncCursorIsStale(subscription: SyncSubscription, cursor: ReplicaCursor) {
@@ -406,6 +408,8 @@ export class GonvexClient {
   private outboxScope = "";
   private outboxScopeGeneration = 0;
   private readonly outboxEphemeralScope = randomID();
+  private replicaScope: ReplicaScope = "";
+  private replicaReady: Promise<void> = Promise.resolve();
   private readonly unsubscribeOutbox: () => void;
   private readonly unsubscribeOverlay: () => void;
   private drainingOutbox = false;
@@ -447,7 +451,6 @@ export class GonvexClient {
     this.syncStore = createSyncStore(options.replica ?? options.sync);
     this.reducerOutbox = createReducerOutbox(options.outbox);
     this.replica = new LocalReplica(options.localReplica?.storage);
-    void this.replica.hydrate();
     this.unsubscribeOutbox = this.reducerOutbox.subscribe(() => {
       void this.drainOutbox();
     });
@@ -569,6 +572,7 @@ export class GonvexClient {
     this.auth = nextAuth;
     if (scopeMayChange) {
       void this.activateOutboxScope();
+      this.rotateSubscriptionScopes();
       this.recoverWarmSyncDirective();
     }
     if (auth.tenant !== undefined) this.errorReporter?.setTenant(auth.tenant);
@@ -687,6 +691,10 @@ export class GonvexClient {
         return;
       }
       if (message.type === "replica.transaction") {
+        // Replica frames carry no tenant/scope field. During auth renewal we
+        // cannot safely attribute a late frame to either side of the switch.
+        if (this.authInFlight) return;
+        const scope = this.replicaScope;
         void this.replica.applyTransaction({
           cursor: message.cursor,
           originCommandId: message.originCommandId,
@@ -695,7 +703,7 @@ export class GonvexClient {
             oldValue: asReplicaRow(change.oldValue),
             newValue: asReplicaRow(change.newValue),
           })),
-        }).catch(() => this.replica.setFreshness("verifying"));
+        }, scope).catch(() => this.replica.setFreshness("verifying"));
         return;
       }
       if (message.type === "sync.watermark") {
@@ -884,13 +892,15 @@ export class GonvexClient {
       args,
       listeners: new Set([onMessage]),
       serverSettled: false,
+      scope: this.replicaScope,
     };
     if (subscription.projection) {
       this.overlay.expectSource(subscription.key, subscription.projection.entity);
     }
     this.querySubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => {
-      void this.handleQueryMessage(subscription, message).catch(() => this.replica.setFreshness("verifying"));
+      const scope = subscription.scope ?? this.replicaScope;
+      void this.handleQueryMessage(subscription, message, scope).catch(() => this.replica.setFreshness("verifying"));
     });
     this.sendSubscription(subscription);
     this.startQueryCacheRead(subscription);
@@ -898,7 +908,8 @@ export class GonvexClient {
     return () => this.unsubscribeQueryListener(key, onMessage);
   }
 
-  private async handleQueryMessage(subscription: QuerySubscription, message: ServerMessage) {
+  private async handleQueryMessage(subscription: QuerySubscription, message: ServerMessage, scope = this.replicaScope) {
+      if (scope !== this.replicaScope || (subscription.scope !== undefined && subscription.scope !== scope)) return;
       const normalized = this.normalizeSubscriptionMessage(subscription, message);
       if (!normalized) return;
       message = normalized;
@@ -935,10 +946,11 @@ export class GonvexClient {
         // reads. Publish the query callback only after its entity/membership
         // window has been durably committed and atomically swapped.
         try {
-          await this.materializeLiveQuery(subscription, message.result, Boolean(message.subscriptionRevision));
+          await this.materializeLiveQuery(subscription, message.result, Boolean(message.subscriptionRevision), scope);
         } catch {
           this.replica.setFreshness("verifying");
         }
+        if (scope !== this.replicaScope || subscription.scope !== scope) return;
         this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
         this.acknowledgeOptimisticQuerySnapshot(subscription, message.result);
       }
@@ -953,7 +965,7 @@ export class GonvexClient {
       }
   }
 
-  private materializeLiveQuery(subscription: QuerySubscription, result: JsonValue, authoritative: boolean): Promise<void> {
+  private materializeLiveQuery(subscription: QuerySubscription, result: JsonValue, authoritative: boolean, scope = this.replicaScope): Promise<void> {
     const live = subscription.live;
     if (!live) return Promise.resolve();
     const projected = rowsAtPath(result, live.resultPath);
@@ -968,6 +980,7 @@ export class GonvexClient {
       rows,
       completeness: "complete",
       source: authoritative ? "server" : "cache",
+      scope,
     });
   }
 
@@ -1157,6 +1170,7 @@ export class GonvexClient {
       args,
       listeners: new Set([onMessage]),
       rows: [],
+      scope: this.replicaScope,
       keyField: "id",
       opening: false,
       persistence: Promise.resolve(),
@@ -1170,7 +1184,8 @@ export class GonvexClient {
     this.overlay.expectSource(subscription.key, subscription.entity);
     this.syncSubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => {
-      void this.handleSyncMessage(subscription, message as SyncMessage)
+      const scope = subscription.scope ?? this.replicaScope;
+      void this.handleSyncMessage(subscription, message as SyncMessage, scope)
         .catch(() => this.replica.setFreshness("verifying"));
     });
     this.startSync(subscription);
@@ -1375,7 +1390,8 @@ export class GonvexClient {
     };
   }
 
-  private async handleSyncMessage(subscription: SyncSubscription, message: SyncMessage) {
+  private async handleSyncMessage(subscription: SyncSubscription, message: SyncMessage, scope = this.replicaScope) {
+    if (scope !== this.replicaScope || (subscription.scope !== undefined && subscription.scope !== scope)) return;
     if (message.type === "sync.snapshot") {
       // Snapshots are only valid responses to an outstanding sync.open. Live
       // subscriptions advance through deltas; accepting an unsolicited or
@@ -1413,11 +1429,11 @@ export class GonvexClient {
       const snapshot: SyncMessage = { ...message, result: subscription.rows };
       subscription.lastMessage = snapshot;
       try {
-        await this.materializeReplicaCollection(subscription, "cache");
+        await this.materializeReplicaCollection(subscription, "cache", scope);
       } catch {
         this.replica.setFreshness("verifying");
       }
-      this.emitSyncMessage(subscription, snapshot);
+      this.emitSyncMessage(subscription, snapshot, scope);
       this.persistSyncSnapshot(subscription);
       return;
     }
@@ -1466,11 +1482,11 @@ export class GonvexClient {
       };
       subscription.lastMessage = snapshot;
       try {
-        await this.materializeReplicaCollection(subscription, "cache");
+        await this.materializeReplicaCollection(subscription, "cache", scope);
       } catch {
         this.replica.setFreshness("verifying");
       }
-      this.emitSyncMessage(subscription, snapshot);
+      this.emitSyncMessage(subscription, snapshot, scope);
       this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
       this.persistSyncDelta(subscription, message.upserts ?? [], message.deleted ?? []);
       return;
@@ -1508,18 +1524,18 @@ export class GonvexClient {
       // compatibility reset callback. The transport scratch rows are already
       // empty, but watchReplica must never continue exposing the old window.
       try {
-        await this.materializeReplicaCollection(subscription, "cache");
+        await this.materializeReplicaCollection(subscription, "cache", scope);
       } catch {
         this.replica.setFreshness("verifying");
       }
-      this.emitSyncMessage(subscription, message);
+      this.emitSyncMessage(subscription, message, scope);
       queueMicrotask(() => this.sendSyncOpen(subscription));
       return;
     }
     if (message.type === "sync.syncing") {
       subscription.verificationGeneration += 1;
       subscription.isUpToDate = false;
-      this.emitSyncMessage(subscription, message);
+      this.emitSyncMessage(subscription, message, scope);
       return;
     }
     if (message.type === "sync.needHashes") {
@@ -1532,7 +1548,7 @@ export class GonvexClient {
         id: subscription.id,
         path: subscription.path,
         reason: "integrity-reconciling",
-      });
+      }, scope);
       queueMicrotask(() => this.sendSyncOpen(subscription));
       return;
     }
@@ -1549,7 +1565,7 @@ export class GonvexClient {
           id: subscription.id,
           path: subscription.path,
           reason: "integrity-missing",
-        });
+        }, scope);
         return;
       }
       if (
@@ -1563,7 +1579,7 @@ export class GonvexClient {
           // integrity failure. The memo may be stale even though row identity
           // says the collection has not changed.
         } else {
-          await this.acceptSyncReady(subscription, message, subscription.integrityDigest);
+          await this.acceptSyncReady(subscription, message, subscription.integrityDigest, scope);
           return;
         }
       }
@@ -1580,13 +1596,13 @@ export class GonvexClient {
               id: subscription.id,
               path: subscription.path,
               reason: "integrity-mismatch",
-            });
+            }, scope);
             return;
           }
           subscription.hashes = hashes;
           subscription.integrityDigest = digest;
           subscription.integrityRows = subscription.rows;
-          await this.acceptSyncReady(subscription, message, digest);
+          await this.acceptSyncReady(subscription, message, digest, scope);
         }).catch(() => {
           if (generation !== subscription.verificationGeneration) return;
           this.handleSyncMessage(subscription, {
@@ -1594,7 +1610,7 @@ export class GonvexClient {
             id: subscription.id,
             path: subscription.path,
             reason: "integrity-mismatch",
-          });
+          }, scope);
         });
       return;
     }
@@ -1604,13 +1620,14 @@ export class GonvexClient {
       subscription.opening = false;
       this.scheduleSyncRetry(subscription);
     }
-    this.emitSyncMessage(subscription, message);
+    this.emitSyncMessage(subscription, message, scope);
   }
 
   private async acceptSyncReady(
     subscription: SyncSubscription,
     message: SyncReadyMessage,
     verifiedDigest = message.digest,
+    scope = this.replicaScope,
   ) {
     this.clearSyncRetry(subscription, true);
     subscription.isUpToDate = true;
@@ -1624,7 +1641,7 @@ export class GonvexClient {
     subscription.integrityEpoch = message.cursor.epoch;
     subscription.forceFullIntegrity = false;
     try {
-      await this.materializeReplicaCollection(subscription, "server");
+      await this.materializeReplicaCollection(subscription, "server", scope);
     } catch {
       this.replica.setFreshness("verifying");
     }
@@ -1635,10 +1652,11 @@ export class GonvexClient {
     this.emitSyncMessage(
       subscription,
       message.digest === verifiedDigest ? message : { ...message, digest: verifiedDigest },
+      scope,
     );
   }
 
-  private materializeReplicaCollection(subscription: SyncSubscription, source: "server" | "cache"): Promise<void> {
+  private materializeReplicaCollection(subscription: SyncSubscription, source: "server" | "cache", scope = this.replicaScope): Promise<void> {
     const rows = subscription.rows.filter((row): row is ReplicaRow => (
       row !== null && typeof row === "object" && !Array.isArray(row)
     ));
@@ -1650,6 +1668,7 @@ export class GonvexClient {
       completeness: subscription.truncated ? "partial" : "complete",
       source,
       cursor: subscription.cursor,
+      scope,
     });
   }
 
@@ -1682,7 +1701,8 @@ export class GonvexClient {
     }, syncWatermarkPersistDelayMs);
   }
 
-  private emitSyncMessage(subscription: SyncSubscription, message: SyncMessage) {
+  private emitSyncMessage(subscription: SyncSubscription, message: SyncMessage, scope = this.replicaScope) {
+    if (scope !== this.replicaScope || subscription.scope !== scope) return;
     const outgoing = this.materializeSyncMessage(subscription, message);
     for (const listener of Array.from(subscription.listeners)) listener(outgoing);
     if (message.type === "sync.snapshot") {
@@ -1786,6 +1806,7 @@ export class GonvexClient {
       return;
     }
     const scope = syncPersistenceScope(directive);
+    const replicaScope = this.replicaScope;
     const generation = this.syncScopeGeneration;
     if (subscription.cacheReadGeneration === generation) return;
     subscription.cacheReadGeneration = generation;
@@ -1800,6 +1821,7 @@ export class GonvexClient {
       if (
         this.syncSubscriptions.get(subscription.key) !== subscription
         || this.syncScopeGeneration !== generation
+        || this.replicaScope !== replicaScope
       ) return;
       this.sendSyncOpen(subscription);
     }, syncStoreReadTimeoutMs);
@@ -1811,6 +1833,7 @@ export class GonvexClient {
       if (
         this.syncSubscriptions.get(subscription.key) !== subscription
         || this.syncScopeGeneration !== generation
+        || this.replicaScope !== replicaScope
         || !currentDirective
         || syncPersistenceScope(currentDirective) !== scope
       ) return;
@@ -1851,11 +1874,11 @@ export class GonvexClient {
         };
         subscription.lastMessage = message;
         try {
-          await this.materializeReplicaCollection(subscription, "cache");
+          await this.materializeReplicaCollection(subscription, "cache", replicaScope);
         } catch {
           this.replica.setFreshness("verifying");
         }
-        this.emitSyncMessage(subscription, message);
+        this.emitSyncMessage(subscription, message, replicaScope);
       }
       this.sendSyncOpen(subscription);
     }).catch(() => {
@@ -1868,6 +1891,8 @@ export class GonvexClient {
 
   private sendSyncOpen(subscription: SyncSubscription) {
     if (subscription.listeners.size === 0 || subscription.opening) return;
+    const requestScope = this.replicaScope;
+    subscription.scope = requestScope;
     if (subscription.cursor && subscription.integrityRows !== subscription.rows) {
       subscription.opening = true;
       const rows = subscription.rows;
@@ -1882,6 +1907,7 @@ export class GonvexClient {
           || subscription.listeners.size === 0
           || subscription.rows !== rows
           || subscription.keyField !== keyField
+          || subscription.scope !== requestScope
         ) return;
         subscription.hashes = hashes;
         subscription.integrityDigest = digest;
@@ -1901,7 +1927,7 @@ export class GonvexClient {
           id: subscription.id,
           path: subscription.path,
           reason: "integrity-mismatch",
-        });
+        }, requestScope);
       });
       return;
     }
@@ -2043,7 +2069,7 @@ export class GonvexClient {
 
   private activateOutboxScope(): Promise<void> {
     const scope = reducerOutboxScope(this.url, this.auth, this.outboxEphemeralScope);
-    if (scope === this.outboxScope) return this.outboxReady ?? Promise.resolve();
+    if (scope === this.outboxScope) return this.outboxReady ?? this.replicaReady;
 
     const previousScope = this.outboxScope;
     const generation = ++this.outboxScopeGeneration;
@@ -2057,12 +2083,15 @@ export class GonvexClient {
       void this.reducerOutbox.clear(previousScope);
     }
     this.outboxScope = scope;
+    this.replicaScope = scope;
+    this.replicaReady = this.replica.activateScope(scope);
     const ready = this.restoreOutbox(scope, generation);
     this.outboxReady = ready;
     return ready;
   }
 
   private async restoreOutbox(scope: string, generation: number) {
+    await this.replicaReady;
     const entries = await this.reducerOutbox.loadAll(scope);
     if (
       this.manuallyClosed
@@ -2508,6 +2537,7 @@ export class GonvexClient {
         return;
       }
     }
+    subscription.scope = this.replicaScope;
     subscription.socketGeneration = this.socketGeneration;
     // Route reloads register dozens of live queries at once. Collapse the
     // burst into one batched frame per tick instead of one frame per query.
@@ -2757,11 +2787,44 @@ export class GonvexClient {
     }
   }
 
+  /**
+   * A subscription id is also the server's response routing key. Rotate it on
+   * auth scope changes so a delayed frame from the previous tenant cannot be
+   * delivered to a handler that now materializes into the new scope.
+   */
+  private rotateSubscriptionScopes() {
+    for (const subscription of this.querySubscriptions.values()) {
+      this.handlers.delete(subscription.id);
+      this.pendingQuerySubscribes.delete(subscription);
+      subscription.id = randomID();
+      subscription.socketGeneration = undefined;
+      subscription.scope = this.replicaScope;
+      this.handlers.set(subscription.id, (message) => {
+        const scope = subscription.scope ?? this.replicaScope;
+        void this.handleQueryMessage(subscription, message, scope)
+          .catch(() => this.replica.setFreshness("verifying"));
+      });
+    }
+    for (const subscription of this.syncSubscriptions.values()) {
+      this.handlers.delete(subscription.id);
+      this.pendingSyncOpens.delete(subscription);
+      subscription.id = randomID();
+      subscription.socketGeneration = undefined;
+      subscription.scope = this.replicaScope;
+      this.handlers.set(subscription.id, (message) => {
+        const scope = subscription.scope ?? this.replicaScope;
+        void this.handleSyncMessage(subscription, message as SyncMessage, scope)
+          .catch(() => this.replica.setFreshness("verifying"));
+      });
+    }
+  }
+
   private startQueryCacheRead(subscription: QuerySubscription) {
     const store = this.queryCache;
     const directive = this.queryCacheDirective;
     if (!store || !directive || subscription.serverSettled) return;
     const generation = this.queryCacheGeneration;
+    const replicaScope = this.replicaScope;
     if (subscription.cacheReadGeneration === generation) return;
     subscription.cacheReadGeneration = generation;
     const read = store.read(directive.scope, subscription.path, subscription.args, directive.maxAgeMs).then(async (cached) => {
@@ -2772,6 +2835,7 @@ export class GonvexClient {
         || subscription.listeners.size === 0
         || this.queryCacheGeneration !== generation
         || this.queryCacheDirective?.scope !== directive.scope
+        || this.replicaScope !== replicaScope
       ) {
         return;
       }
@@ -2788,7 +2852,7 @@ export class GonvexClient {
       };
       subscription.lastMessage = message;
       try {
-        await this.materializeLiveQuery(subscription, message.result, false);
+        await this.materializeLiveQuery(subscription, message.result, false, replicaScope);
       } catch {
         this.replica.setFreshness("verifying");
       }
