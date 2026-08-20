@@ -4,7 +4,6 @@ members = [
   "crates/module-runtime",
   "crates/module-runtime-v8",
   "crates/module-host",
-  "crates/runtime",
   "crates/server",
 ]
 

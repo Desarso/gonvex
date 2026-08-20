@@ -113,9 +113,8 @@ func NewRemoteHost(options HostOptions) *RemoteHost {
 	return host
 }
 
-// Available reports whether a module host is configured at all. A runtime with
-// no host still serves Go modules; only a TypeScript manifest needs one, and it
-// fails loudly rather than silently degrading.
+// Available reports whether a module host is configured at all. TypeScript
+// manifests require this host and fail loudly rather than silently degrading.
 func (h *RemoteHost) Available() bool {
 	if h == nil {
 		return false

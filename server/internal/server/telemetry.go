@@ -60,7 +60,7 @@ func (s *Server) recordTransactionTelemetryBatch(entries []transactionTelemetryE
 // aggregate timings remain available in runtime metrics and the optional JSONL
 // stream, but writing one PostgreSQL row per subscriber can overwhelm the same
 // database the application is trying to serve. Durable telemetry retains all
-// failures, mutations/actions, and client/browser events.
+// failures, reducers/actions, and client/browser events.
 func transactionTelemetryIsDurable(entry transactionTelemetryEntry) bool {
 	if entry.Outcome == "error" || entry.Phase == "browser" {
 		return true

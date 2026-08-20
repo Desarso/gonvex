@@ -21,7 +21,7 @@ func ensureErrorSchema(ctx context.Context, db telemetrySchemaDB) error {
 			tenant_id TEXT NOT NULL DEFAULT '',
 			release TEXT NOT NULL DEFAULT '',
 			level TEXT NOT NULL DEFAULT 'error',
-			user_id TEXT NOT NULL DEFAULT '',
+			account_id TEXT NOT NULL DEFAULT '',
 			device_id TEXT NOT NULL DEFAULT '',
 			payload JSONB NOT NULL,
 			PRIMARY KEY (project_id, event_id)
@@ -29,6 +29,18 @@ func ensureErrorSchema(ctx context.Context, db telemetrySchemaDB) error {
 		// Deployed tables predate the column. Everything recorded before
 		// levels existed was an error, so the default backfills correctly.
 		`ALTER TABLE gonvex_error_events ADD COLUMN IF NOT EXISTS level TEXT NOT NULL DEFAULT 'error'`,
+		// One-way identity terminology migration for deployed runtime error data.
+		`DO $$ BEGIN
+			IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'gonvex_error_events' AND column_name = 'user_id') THEN
+				IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'gonvex_error_events' AND column_name = 'account_id') THEN
+					ALTER TABLE gonvex_error_events RENAME COLUMN user_id TO account_id;
+				ELSE
+					UPDATE gonvex_error_events SET account_id = user_id WHERE account_id = '' AND user_id <> '';
+					ALTER TABLE gonvex_error_events DROP COLUMN user_id;
+				END IF;
+			END IF;
+		END $$`,
+		`UPDATE gonvex_error_events SET payload = (payload - 'user') || jsonb_build_object('account', COALESCE(payload->'account', payload->'user')) WHERE payload ? 'user'`,
 		`CREATE INDEX IF NOT EXISTS gonvex_error_events_group ON gonvex_error_events (project_id, fingerprint, occurred_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS gonvex_error_events_tenant ON gonvex_error_events (project_id, tenant_id, occurred_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS gonvex_error_events_release ON gonvex_error_events (project_id, release, fingerprint, occurred_at DESC)`,
@@ -47,12 +59,23 @@ func ensureErrorSchema(ctx context.Context, db telemetrySchemaDB) error {
 			tenants JSONB NOT NULL DEFAULT '{}'::jsonb,
 			releases JSONB NOT NULL DEFAULT '{}'::jsonb,
 			environments JSONB NOT NULL DEFAULT '{}'::jsonb,
-			users JSONB NOT NULL DEFAULT '{}'::jsonb,
+			accounts JSONB NOT NULL DEFAULT '{}'::jsonb,
 			devices JSONB NOT NULL DEFAULT '{}'::jsonb,
 			latest_event JSONB NOT NULL,
 			regression BOOLEAN NOT NULL DEFAULT false,
 			PRIMARY KEY (project_id, fingerprint)
 		)`,
+		`DO $$ BEGIN
+			IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'gonvex_error_groups' AND column_name = 'users') THEN
+				IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'gonvex_error_groups' AND column_name = 'accounts') THEN
+					ALTER TABLE gonvex_error_groups RENAME COLUMN users TO accounts;
+				ELSE
+					UPDATE gonvex_error_groups SET accounts = accounts || users;
+					ALTER TABLE gonvex_error_groups DROP COLUMN users;
+				END IF;
+			END IF;
+		END $$`,
+		`UPDATE gonvex_error_groups SET latest_event = (latest_event - 'user') || jsonb_build_object('account', COALESCE(latest_event->'account', latest_event->'user')) WHERE latest_event ? 'user'`,
 		`ALTER TABLE gonvex_error_groups ADD COLUMN IF NOT EXISTS level TEXT NOT NULL DEFAULT 'error'`,
 		`CREATE INDEX IF NOT EXISTS gonvex_error_groups_inbox ON gonvex_error_groups (project_id, status, last_seen DESC)`,
 		// A separate name: redefining an existing index is a no-op under
@@ -97,9 +120,9 @@ func (s *Server) persistError(ctx context.Context, event capturedError) (availab
 	}
 	when := eventTime(event.Timestamp)
 	result, err := tx.ExecContext(ctx, `INSERT INTO gonvex_error_events
-		(project_id, event_id, fingerprint, occurred_at, tenant_id, release, user_id, device_id, payload, level)
+		(project_id, event_id, fingerprint, occurred_at, tenant_id, release, account_id, device_id, payload, level)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
-		ON CONFLICT (project_id, event_id) DO NOTHING`, event.Project, event.EventID, fingerprint(event), when, event.Tenant, event.Release, errorUserID(event), event.DeviceID, payload, normalizeErrorLevel(event.Level))
+		ON CONFLICT (project_id, event_id) DO NOTHING`, event.Project, event.EventID, fingerprint(event), when, event.Tenant, event.Release, errorAccountID(event), event.DeviceID, payload, normalizeErrorLevel(event.Level))
 	if err != nil {
 		return true, false, err
 	}
@@ -130,7 +153,7 @@ func (s *Server) persistError(ctx context.Context, event capturedError) (availab
 }
 
 const errorGroupSelect = `SELECT fingerprint, project_id, title, culprit, level, status, priority, assignee,
-	first_seen, last_seen, event_count, tenants, releases, environments, users, devices, latest_event, regression
+	first_seen, last_seen, event_count, tenants, releases, environments, accounts, devices, latest_event, regression
 	FROM gonvex_error_groups`
 
 type rowScanner interface{ Scan(...any) error }
@@ -139,9 +162,9 @@ func scanErrorGroup(row rowScanner) (*errorGroup, error) {
 	group := &errorGroup{}
 	var firstSeen, lastSeen time.Time
 	var level string
-	var tenants, releases, environments, users, devices, latest []byte
+	var tenants, releases, environments, accounts, devices, latest []byte
 	if err := row.Scan(&group.Fingerprint, &group.Project, &group.Title, &group.Culprit, &level, &group.Status, &group.Priority, &group.Assignee,
-		&firstSeen, &lastSeen, &group.Count, &tenants, &releases, &environments, &users, &devices, &latest, &group.Regression); err != nil {
+		&firstSeen, &lastSeen, &group.Count, &tenants, &releases, &environments, &accounts, &devices, &latest, &group.Regression); err != nil {
 		return nil, err
 	}
 	group.Level = normalizeErrorLevel(level)
@@ -150,7 +173,7 @@ func scanErrorGroup(row rowScanner) (*errorGroup, error) {
 	group.Tenants = decodeCountMap(tenants)
 	group.Releases = decodeCountMap(releases)
 	group.Environments = decodeCountMap(environments)
-	group.Users = decodeCountMap(users)
+	group.Accounts = decodeCountMap(accounts)
 	group.Devices = decodeCountMap(devices)
 	if err := json.Unmarshal(latest, &group.Latest); err != nil {
 		return nil, err
@@ -307,14 +330,14 @@ func (s *Server) updatePersistentErrorGroup(ctx context.Context, project, fp str
 func upsertErrorGroup(ctx context.Context, tx *sql.Tx, group *errorGroup) error {
 	latest, _ := json.Marshal(group.Latest)
 	_, err := tx.ExecContext(ctx, `INSERT INTO gonvex_error_groups
-		(project_id,fingerprint,title,culprit,status,priority,assignee,first_seen,last_seen,event_count,tenants,releases,environments,users,devices,latest_event,regression,level)
+		(project_id,fingerprint,title,culprit,status,priority,assignee,first_seen,last_seen,event_count,tenants,releases,environments,accounts,devices,latest_event,regression,level)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17,$18)
 		ON CONFLICT (project_id,fingerprint) DO UPDATE SET title=EXCLUDED.title,culprit=EXCLUDED.culprit,status=EXCLUDED.status,
 		priority=EXCLUDED.priority,assignee=EXCLUDED.assignee,last_seen=EXCLUDED.last_seen,event_count=EXCLUDED.event_count,
-		tenants=EXCLUDED.tenants,releases=EXCLUDED.releases,environments=EXCLUDED.environments,users=EXCLUDED.users,devices=EXCLUDED.devices,
+		tenants=EXCLUDED.tenants,releases=EXCLUDED.releases,environments=EXCLUDED.environments,accounts=EXCLUDED.accounts,devices=EXCLUDED.devices,
 		latest_event=EXCLUDED.latest_event,regression=EXCLUDED.regression,level=EXCLUDED.level`, group.Project, group.Fingerprint, group.Title, group.Culprit,
 		group.Status, group.Priority, group.Assignee, group.FirstSeen, group.LastSeen, group.Count, encodeJSON(group.Tenants), encodeJSON(group.Releases),
-		encodeJSON(group.Environments), encodeJSON(group.Users), encodeJSON(group.Devices), latest, group.Regression, groupLevel(group))
+		encodeJSON(group.Environments), encodeJSON(group.Accounts), encodeJSON(group.Devices), latest, group.Regression, groupLevel(group))
 	return err
 }
 
@@ -332,11 +355,11 @@ func decodeCountMap(raw []byte) map[string]int {
 	_ = json.Unmarshal(raw, &value)
 	return value
 }
-func errorUserID(event capturedError) string {
-	if id := stringValue(event.User["id"]); id != "" {
+func errorAccountID(event capturedError) string {
+	if id := stringValue(event.Account["id"]); id != "" {
 		return id
 	}
-	return stringValue(event.User["email"])
+	return stringValue(event.Account["email"])
 }
 
 func validateErrorGroupUpdate(update errorGroupUpdate) error {

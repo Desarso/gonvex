@@ -9,8 +9,9 @@
   "files": ["dist", "README.md"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": { "@gonvex/client": "workspace:*" },
-  "devDependencies": { "typescript": "^6.0.3" }
+  "devDependencies": { "typescript": "^6.0.3", "vitest": "^4.1.6" }
 }

@@ -27,7 +27,7 @@ type capturedError struct {
 	Tenant      string            `json:"tenant,omitempty"`
 	Release     string            `json:"release,omitempty"`
 	Environment string            `json:"environment,omitempty"`
-	User        map[string]any    `json:"user,omitempty"`
+	Account     map[string]any    `json:"account,omitempty"`
 	DeviceID    string            `json:"deviceId,omitempty"`
 	SessionID   string            `json:"sessionId,omitempty"`
 	URL         string            `json:"url,omitempty"`
@@ -52,7 +52,7 @@ type errorGroup struct {
 	Tenants      map[string]int `json:"tenants"`
 	Releases     map[string]int `json:"releases"`
 	Environments map[string]int `json:"environments"`
-	Users        map[string]int `json:"users"`
+	Accounts     map[string]int `json:"accounts"`
 	Devices      map[string]int `json:"devices"`
 	Regression   bool           `json:"regression"`
 	Latest       capturedError  `json:"latest"`
@@ -203,7 +203,7 @@ func errorGroupForEvents(base *errorGroup, events []capturedError) *errorGroup {
 }
 
 func newErrorGroup(event capturedError, fp string, when time.Time) *errorGroup {
-	group := &errorGroup{Fingerprint: fp, Project: event.Project, Title: event.Message, Level: normalizeErrorLevel(event.Level), Culprit: event.Culprit, Status: "unresolved", Priority: "medium", FirstSeen: when.Format(time.RFC3339Nano), Tenants: map[string]int{}, Releases: map[string]int{}, Environments: map[string]int{}, Users: map[string]int{}, Devices: map[string]int{}}
+	group := &errorGroup{Fingerprint: fp, Project: event.Project, Title: event.Message, Level: normalizeErrorLevel(event.Level), Culprit: event.Culprit, Status: "unresolved", Priority: "medium", FirstSeen: when.Format(time.RFC3339Nano), Tenants: map[string]int{}, Releases: map[string]int{}, Environments: map[string]int{}, Accounts: map[string]int{}, Devices: map[string]int{}}
 	applyErrorToGroup(group, event, when)
 	return group
 }
@@ -234,8 +234,8 @@ func applyErrorToGroup(group *errorGroup, event capturedError, when time.Time) {
 	if event.DeviceID != "" {
 		group.Devices[event.DeviceID]++
 	}
-	if id := errorUserID(event); id != "" {
-		group.Users[id]++
+	if id := errorAccountID(event); id != "" {
+		group.Accounts[id]++
 	}
 	if group.Count >= 500 || len(group.Tenants) >= 25 {
 		group.Priority = "critical"
@@ -369,7 +369,7 @@ func sanitizeCapturedError(event capturedError) capturedError {
 	event.SessionID = truncateErrorString(event.SessionID, 200)
 	event.URL = truncateErrorString(strings.Split(strings.Split(event.URL, "?")[0], "#")[0], 2000)
 	event.UserAgent = truncateErrorString(event.UserAgent, 2000)
-	event.User = sanitizeErrorMap(event.User, 0)
+	event.Account = sanitizeErrorMap(event.Account, 0)
 	event.Context = sanitizeErrorMap(event.Context, 0)
 	trimmedTags := map[string]string{}
 	count := 0
@@ -688,10 +688,10 @@ func (s *Server) handleErrorBugReport(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeErrorBugReport(w http.ResponseWriter, group *errorGroup) {
-	writeJSON(w, 200, map[string]any{"title": group.Title, "markdown": bugReport(group), "agentContext": map[string]any{"fingerprint": group.Fingerprint, "project": group.Project, "tenantImpact": group.Tenants, "userImpact": group.Users, "deviceImpact": group.Devices, "release": group.Latest.Release, "culprit": group.Culprit, "stack": group.Latest.Stack, "breadcrumbs": group.Latest.Breadcrumbs, "context": group.Latest.Context}})
+	writeJSON(w, 200, map[string]any{"title": group.Title, "markdown": bugReport(group), "agentContext": map[string]any{"fingerprint": group.Fingerprint, "project": group.Project, "tenantImpact": group.Tenants, "accountImpact": group.Accounts, "deviceImpact": group.Devices, "release": group.Latest.Release, "culprit": group.Culprit, "stack": group.Latest.Stack, "breadcrumbs": group.Latest.Breadcrumbs, "context": group.Latest.Context}})
 }
 
 func bugReport(g *errorGroup) string {
-	return fmt.Sprintf("## %s\n\n**Fingerprint:** `%s`\n**Impact:** %d events, %d tenants, %d users, %d devices\n**First/last seen:** %s / %s\n**Release:** %s\n**Likely source:** `%s`\n\n### Error\n```\n%s\n```\n\n### Acceptance criteria\n- Reproduce or verify the failing path.\n- Add a regression test that fails before the fix.\n- Fix the root cause without suppressing unrelated errors.\n- Verify the fix against the affected release and tenant context.\n", g.Title, g.Fingerprint, g.Count, len(g.Tenants), len(g.Users), len(g.Devices), g.FirstSeen, g.LastSeen, g.Latest.Release, g.Culprit, g.Latest.Stack)
+	return fmt.Sprintf("## %s\n\n**Fingerprint:** `%s`\n**Impact:** %d events, %d tenants, %d accounts, %d devices\n**First/last seen:** %s / %s\n**Release:** %s\n**Likely source:** `%s`\n\n### Error\n```\n%s\n```\n\n### Acceptance criteria\n- Reproduce or verify the failing path.\n- Add a regression test that fails before the fix.\n- Fix the root cause without suppressing unrelated errors.\n- Verify the fix against the affected release and tenant context.\n", g.Title, g.Fingerprint, g.Count, len(g.Tenants), len(g.Accounts), len(g.Devices), g.FirstSeen, g.LastSeen, g.Latest.Release, g.Culprit, g.Latest.Stack)
 }
 func stringValue(v any) string { value, _ := v.(string); return value }

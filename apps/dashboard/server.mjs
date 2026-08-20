@@ -11,7 +11,7 @@ export const sessionCookieName = "gonvex_dashboard_session";
 const rootDir = process.env.DASHBOARD_STATIC_ROOT ?? "/usr/share/nginx/html";
 const port = Number(process.env.PORT ?? "80");
 const authEnabled = envFlag(process.env.DASHBOARD_AUTH_ENABLED, true);
-const authUser = normalizeEmail(process.env.DASHBOARD_AUTH_USER ?? "");
+const authAccount = normalizeEmail(process.env.DASHBOARD_AUTH_ACCOUNT ?? "");
 const authPassword = process.env.DASHBOARD_AUTH_PASSWORD ?? "";
 const sessionSecret = process.env.DASHBOARD_SESSION_SECRET ?? authPassword;
 const cookieSecure = envFlag(process.env.DASHBOARD_COOKIE_SECURE, true);
@@ -222,14 +222,14 @@ async function handleAPI(request, response, url) {
       }
       session = payload.session;
     } catch {
-      if (!authUser || !authPassword) return writeJSON(response, 503, { error: "dashboard auth is not configured" });
-      if (!verifyCredentials(parsed.email, parsed.password, authUser, authPassword)) {
+      if (!authAccount || !authPassword) return writeJSON(response, 503, { error: "dashboard auth is not configured" });
+      if (!verifyCredentials(parsed.email, parsed.password, authAccount, authPassword)) {
         return writeJSON(response, 401, { error: "invalid email or password" });
       }
       session = {
-        email: authUser,
+        email: authAccount,
         expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
-        name: displayNameFromEmail(authUser),
+        name: displayNameFromEmail(authAccount),
         provider: "gonvex",
       };
     }

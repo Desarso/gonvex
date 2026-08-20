@@ -15,7 +15,7 @@ import (
 
 type postgresActionOutbox struct {
 	tx   *sql.Tx
-	user *gonvex.User
+	user *gonvex.Account
 }
 
 func (o postgresActionOutbox) Enqueue(ctx context.Context, actionPath string, args any) (string, error) {
@@ -45,7 +45,11 @@ type claimedActionOutbox struct {
 }
 
 func (s *Server) drainActionOutbox(project, tenant string) {
-	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	parent := s.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 	databaseURL := s.databaseURLForTenant(project, tenantIDFromRequest(project, tenant))
 	if strings.TrimSpace(databaseURL) == "" {
@@ -63,9 +67,9 @@ func (s *Server) drainActionOutbox(project, tenant string) {
 		}
 		caller := callerContext{}
 		if row.userID != "" {
-			caller.user = &gonvex.User{ID: row.userID, Email: row.email}
+			caller.user = &gonvex.Account{ID: row.userID, Email: row.email}
 		}
-		_, actionErr := s.executeTenantActionForCaller(withMutationID(ctx, row.id), project, tenant, caller, row.path, row.args)
+		_, actionErr := s.executeTenantActionForCaller(withCommandID(ctx, row.id), project, tenant, caller, row.path, row.args)
 		if actionErr == nil {
 			_, _ = db.ExecContext(ctx, `DELETE FROM _gonvex_action_outbox WHERE id = $1`, row.id)
 			continue

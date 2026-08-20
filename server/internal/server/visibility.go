@@ -47,9 +47,9 @@ func visibilityPlanDependencies(plan manifest.VisibilityPlan) []string {
 			}
 		}
 	}
-	if visibilityPlanUsesIdentity(plan) {
-		values["members"] = struct{}{}
-	}
+	// Active tenant membership is the first gate for every visibility plan,
+	// including plans whose row predicate is otherwise public within a tenant.
+	values["members"] = struct{}{}
 	result := make([]string, 0, len(values))
 	for value := range values {
 		result = append(result, value)
@@ -58,39 +58,27 @@ func visibilityPlanDependencies(plan manifest.VisibilityPlan) []string {
 	return result
 }
 
-func visibilityPlanUsesIdentity(plan manifest.VisibilityPlan) bool {
-	if visibilityExpressionUsesIdentity(plan.Where) {
-		return true
-	}
-	for _, set := range plan.Sets {
-		for _, constraint := range set.Where {
-			if constraint.Context == "account.id" || constraint.Context == "member.id" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func visibilityExpressionUsesIdentity(expression *manifest.VisibilityExpression) bool {
-	if expression == nil {
-		return false
-	}
-	if expression.Operator == "permission" || expression.Operator == "role" || expression.Context != "" {
-		return true
-	}
-	for _, child := range expression.Children {
-		if visibilityExpressionUsesIdentity(child) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Server) visibilityPlan(project, table string) (manifest.VisibilityPlan, bool) {
 	current := s.runtime.ManifestForProject(project)
 	plan, ok := current.Visibility[strings.TrimSpace(table)]
 	return plan, ok
+}
+
+// requiredVisibilityPlan is the runtime guard for every server delivery mode
+// that can put rows in a client-visible result. Deployment validation catches
+// bad manifests early, but the manifest can be replaced while connections and
+// subscriptions are still alive. Those paths must fail closed instead of
+// falling back to an arbitrary module query.
+func (s *Server) requiredVisibilityPlan(project, table string) (manifest.VisibilityPlan, error) {
+	table = strings.TrimSpace(table)
+	plan, ok := s.visibilityPlan(project, table)
+	if !ok {
+		return manifest.VisibilityPlan{}, fmt.Errorf("visibility plan required for table %q", table)
+	}
+	if err := validateVisibilityPlan(table, plan); err != nil {
+		return manifest.VisibilityPlan{}, fmt.Errorf("invalid visibility plan for table %q: %w", table, err)
+	}
+	return plan, nil
 }
 
 func (s *Server) requireVisibilityPlans(current manifest.Manifest) error {
@@ -104,6 +92,9 @@ func (s *Server) requireVisibilityPlans(current manifest.Manifest) error {
 	for path, entry := range current.Functions {
 		if entry.Kind != manifest.FunctionKindQuery {
 			continue
+		}
+		if livePlan := entry.Dependencies.LiveQueryPlan; livePlan != nil && livePlan.Window != nil && livePlan.Window.Count != "" && livePlan.Window.Count != "exact" {
+			return fmt.Errorf("query %q live query plan window count must be exact", path)
 		}
 		table := ""
 		key := ""
@@ -119,7 +110,13 @@ func (s *Server) requireVisibilityPlans(current manifest.Manifest) error {
 				key = strings.TrimSpace(entry.Dependencies.LiveQueryPlan.Key)
 			}
 		default:
-			continue
+			// A Query with no explicit delivery is one-shot by definition. It
+			// still requires the same structured source plan so the server can
+			// apply centralized visibility instead of invoking arbitrary module SQL.
+			if entry.Dependencies.LiveQueryPlan != nil {
+				table = strings.TrimSpace(entry.Dependencies.LiveQueryPlan.Table)
+				key = strings.TrimSpace(entry.Dependencies.LiveQueryPlan.Key)
+			}
 		}
 		if table == "" {
 			return fmt.Errorf("query %q has no source table", path)
@@ -340,6 +337,14 @@ func (s *Server) resolveVisibilityContext(ctx context.Context, project, tenant s
 	return nil, errVisibilityChangedDuringLoad
 }
 
+func (s *Server) resolveCurrentVisibilityContext(ctx context.Context, project, tenant string, caller callerContext, plan manifest.VisibilityPlan) (*resolvedVisibilityContext, error) {
+	clock, err := currentReplicaClock(ctx, s.databaseURLForTenant(project, tenant))
+	if err != nil {
+		return nil, fmt.Errorf("read current visibility revision: %w", err)
+	}
+	return s.resolveVisibilityContext(ctx, project, tenant, caller, plan, clock.Revision)
+}
+
 func (s *Server) loadVisibilityContext(ctx context.Context, project, tenant string, caller callerContext, plan manifest.VisibilityPlan) (*resolvedVisibilityContext, error) {
 	databaseURL := s.databaseURLForTenant(project, tenant)
 	db, err := dbpool.Open(databaseURL)
@@ -352,6 +357,26 @@ func (s *Server) loadVisibilityContext(ctx context.Context, project, tenant stri
 		return nil, err
 	}
 	defer tx.Rollback()
+	resolved, err := loadVisibilityContextFrom(ctx, tx, project, tenant, caller, plan)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return resolved, nil
+}
+
+type visibilityQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// loadVisibilityContextFrom resolves identity and visibility inputs from the
+// caller-provided database snapshot. Snapshot callers use this together with
+// their row query and sync-clock read so authorization, rows, and cursor all
+// describe exactly the same committed database state.
+func loadVisibilityContextFrom(ctx context.Context, queryer visibilityQueryer, project, tenant string, caller callerContext, plan manifest.VisibilityPlan) (*resolvedVisibilityContext, error) {
 	resolved := &resolvedVisibilityContext{
 		ScopeKey: project + "\x00" + tenant,
 		Direct: map[string]string{
@@ -363,37 +388,35 @@ func (s *Server) loadVisibilityContext(ctx context.Context, project, tenant stri
 		Sets:         map[string]map[string]struct{}{},
 		Dependencies: map[string]struct{}{},
 	}
-	if visibilityPlanUsesIdentity(plan) {
-		accountID := resolved.Direct["account.id"]
-		if accountID == "" {
-			return nil, fmt.Errorf("visibility requires an authenticated account")
-		}
-		var (
-			memberID       string
-			role           string
-			rawPermissions []byte
-		)
-		if err := tx.QueryRowContext(ctx, `
-			SELECT COALESCE(NULLIF(id, ''), user_id), role, permissions
+	accountID := resolved.Direct["account.id"]
+	if accountID == "" {
+		return nil, fmt.Errorf("visibility requires an authenticated account")
+	}
+	var (
+		memberID       string
+		role           string
+		rawPermissions []byte
+	)
+	if err := queryer.QueryRowContext(ctx, `
+			SELECT id, role, permissions
 			FROM members
-			WHERE (account_id = $1 OR user_id = $1) AND status = 'active'
+			WHERE account_id = $1 AND status = 'active'
 		`, accountID).Scan(&memberID, &role, &rawPermissions); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil, fmt.Errorf("active tenant member for account %q not found", accountID)
-			}
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("active tenant member for account %q not found", accountID)
+		}
+		return nil, err
+	}
+	resolved.Direct["member.id"] = memberID
+	resolved.Role = role
+	if len(rawPermissions) > 0 {
+		if err := json.Unmarshal(rawPermissions, &resolved.Permissions); err != nil {
 			return nil, err
 		}
-		resolved.Direct["member.id"] = memberID
-		resolved.Role = role
-		if len(rawPermissions) > 0 {
-			if err := json.Unmarshal(rawPermissions, &resolved.Permissions); err != nil {
-				return nil, err
-			}
-		}
-		resolved.Permissions["role"] = role
-		resolved.Dependencies["members"] = struct{}{}
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT revision FROM _gonvex_sync_clock WHERE singleton = true`).Scan(&resolved.Revision); err != nil {
+	resolved.Permissions["role"] = role
+	resolved.Dependencies["members"] = struct{}{}
+	if err := queryer.QueryRowContext(ctx, `SELECT revision FROM _gonvex_sync_clock WHERE singleton = true`).Scan(&resolved.Revision); err != nil {
 		return nil, fmt.Errorf("read visibility revision: %w", err)
 	}
 	setNames := make([]string, 0, len(plan.Sets))
@@ -407,7 +430,7 @@ func (s *Server) loadVisibilityContext(ctx context.Context, project, tenant stri
 		if buildErr != nil {
 			return nil, fmt.Errorf("visibility set %q: %w", name, buildErr)
 		}
-		rows, queryErr := tx.QueryContext(ctx, query, args...)
+		rows, queryErr := queryer.QueryContext(ctx, query, args...)
 		if queryErr != nil {
 			return nil, fmt.Errorf("visibility set %q: %w", name, queryErr)
 		}
@@ -430,9 +453,6 @@ func (s *Server) loadVisibilityContext(ctx context.Context, project, tenant stri
 		for _, join := range set.Joins {
 			resolved.Dependencies[join.Table] = struct{}{}
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
 	}
 	resolved.Fingerprint = visibilityFingerprint(plan, resolved)
 	return resolved, nil
@@ -684,7 +704,7 @@ func visibilityTransitionOperation(oldVisible, newVisible bool) (string, bool) {
 	}
 }
 
-func memberChangeIdentities(batch syncChangeBatch) map[string]struct{} {
+func memberChangeIdentities(batch replicaChangeBatch) map[string]struct{} {
 	identities := map[string]struct{}{}
 	for _, change := range batch.changes {
 		if change.table != "members" {
@@ -695,7 +715,7 @@ func memberChangeIdentities(batch syncChangeBatch) map[string]struct{} {
 			if len(raw) == 0 || string(raw) == "null" || json.Unmarshal(raw, &row) != nil {
 				continue
 			}
-			for _, field := range []string{"id", "member_id", "memberId", "account_id", "accountId", "user_id", "userId"} {
+			for _, field := range []string{"id", "account_id"} {
 				if identity := strings.TrimSpace(fmt.Sprint(row[field])); identity != "" && identity != "<nil>" {
 					identities[identity] = struct{}{}
 				}
@@ -709,7 +729,7 @@ func memberChangeIdentities(batch syncChangeBatch) map[string]struct{} {
 // live sockets whenever its authoritative members row changes. A valid session
 // can authenticate again and receive the new role/permissions; a revoked member
 // fails the tenant database admission check.
-func (s *Server) refreshCommittedMemberConnections(project, tenant string, batch syncChangeBatch) {
+func (s *Server) refreshCommittedMemberConnections(project, tenant string, batch replicaChangeBatch) {
 	identities := memberChangeIdentities(batch)
 	if len(identities) == 0 {
 		return
@@ -823,7 +843,7 @@ func compileVisibilitySQL(expression *manifest.VisibilityExpression, plan manife
 func compileMemberAttributeSQL(direct map[string]string, builder *visibilitySQLBuilder, predicate string) string {
 	account := builder.argument(direct["account.id"])
 	return `EXISTS (SELECT 1 FROM members AS _gonvex_member WHERE ` +
-		`(_gonvex_member.account_id = ` + account + ` OR _gonvex_member.user_id = ` + account + `) ` +
+		`_gonvex_member.account_id = ` + account + ` ` +
 		`AND _gonvex_member.status = 'active' AND (` + predicate + `))`
 }
 
@@ -836,14 +856,30 @@ func compileVisibilitySetWithBuilder(set manifest.VisibilitySet, direct map[stri
 }
 
 func (s *Server) executeStructuredReplicaQuery(ctx context.Context, project, tenant string, caller callerContext, definition manifest.ReplicaCollectionDefinition, rawArgs json.RawMessage) (any, error) {
-	plan, ok := s.visibilityPlan(project, definition.Table)
-	if !ok {
-		return nil, fmt.Errorf("visibility plan required for replica table %q", definition.Table)
-	}
-	resolved, err := s.resolveVisibilityContext(ctx, project, tenant, caller, plan, 0)
+	plan, err := s.requiredVisibilityPlan(project, definition.Table)
 	if err != nil {
 		return nil, err
 	}
+	resolved, err := s.resolveCurrentVisibilityContext(ctx, project, tenant, caller, plan)
+	if err != nil {
+		return nil, err
+	}
+	return s.executeStructuredReplicaQueryWith(ctx, project, tenant, definition, rawArgs, plan, resolved, nil)
+}
+
+// executeStructuredReplicaQueryWith executes a Replica Collection query using
+// a pre-resolved visibility context. When queryer is non-nil, all SQL runs in
+// that caller-owned transaction; this is used by initial snapshots to pin the
+// rows and cursor to one repeatable-read snapshot.
+func (s *Server) executeStructuredReplicaQueryWith(
+	ctx context.Context,
+	project, tenant string,
+	definition manifest.ReplicaCollectionDefinition,
+	rawArgs json.RawMessage,
+	plan manifest.VisibilityPlan,
+	resolved *resolvedVisibilityContext,
+	queryer visibilityQueryer,
+) (any, error) {
 	args := map[string]any{}
 	if len(rawArgs) > 0 {
 		decoder := json.NewDecoder(strings.NewReader(string(rawArgs)))
@@ -859,9 +895,7 @@ func (s *Server) executeStructuredReplicaQuery(ctx context.Context, project, ten
 		return nil, err
 	}
 	predicates = append(predicates, visibilityPredicate)
-	if visibilityPlanUsesIdentity(plan) {
-		predicates = append(predicates, compileActiveMemberSQL(resolved.Direct, builder))
-	}
+	predicates = append(predicates, compileActiveMemberSQL(resolved.Direct, builder))
 	for _, columnName := range definition.ExcludeWhenSet {
 		column, err := quoteVisibilityIdentifier(columnName)
 		if err != nil {
@@ -890,15 +924,18 @@ func (s *Server) executeStructuredReplicaQuery(ctx context.Context, project, ten
 	if definition.MaxRows > 0 {
 		limit = definition.MaxRows + 1
 	}
+	if queryer != nil {
+		return queryVisibleRowsWith(ctx, queryer, definition.Table, definition.Columns, predicates, definition.OrderBy, definition.OrderDirection, 0, limit, builder.args)
+	}
 	return s.queryVisibleRows(ctx, project, tenant, definition.Table, definition.Columns, predicates, definition.OrderBy, definition.OrderDirection, 0, limit, builder.args)
 }
 
 func (s *Server) executeStructuredLiveQuery(ctx context.Context, project, tenant string, caller callerContext, plan manifest.LiveQueryPlan, rawArgs json.RawMessage) (any, error) {
-	visibility, ok := s.visibilityPlan(project, plan.Table)
-	if !ok {
-		return nil, fmt.Errorf("visibility plan required for live query table %q", plan.Table)
+	visibility, err := s.requiredVisibilityPlan(project, plan.Table)
+	if err != nil {
+		return nil, err
 	}
-	resolved, err := s.resolveVisibilityContext(ctx, project, tenant, caller, visibility, 0)
+	resolved, err := s.resolveCurrentVisibilityContext(ctx, project, tenant, caller, visibility)
 	if err != nil {
 		return nil, err
 	}
@@ -917,9 +954,7 @@ func (s *Server) executeStructuredLiveQuery(ctx context.Context, project, tenant
 		return nil, err
 	}
 	predicates = append(predicates, visibilityPredicate)
-	if visibilityPlanUsesIdentity(visibility) {
-		predicates = append(predicates, compileActiveMemberSQL(resolved.Direct, builder))
-	}
+	predicates = append(predicates, compileActiveMemberSQL(resolved.Direct, builder))
 	if plan.Where != nil {
 		predicate, compileErr := compileLiveExpressionSQL(plan.Where, args, builder, "r")
 		if compileErr != nil {
@@ -941,6 +976,15 @@ func (s *Server) executeStructuredLiveQuery(ctx context.Context, project, tenant
 			if len(parts) > 0 {
 				predicates = append(predicates, "("+strings.Join(parts, " OR ")+")")
 			}
+		}
+	}
+	if plan.Filters != nil {
+		filterPredicate, filterErr := compileLiveFiltersSQL(plan.Filters, args, builder, "r")
+		if filterErr != nil {
+			return nil, filterErr
+		}
+		if filterPredicate != "" {
+			predicates = append(predicates, filterPredicate)
 		}
 	}
 	orderBy, direction := "", ""
@@ -976,10 +1020,27 @@ func (s *Server) executeStructuredLiveQuery(ctx context.Context, project, tenant
 	if err != nil {
 		return nil, err
 	}
+	if plan.Window != nil && plan.Window.Count == "exact" && len(plan.ResultPath) > 0 {
+		total, countErr := s.queryVisibleCount(ctx, project, tenant, plan.Table, predicates, builder.args)
+		if countErr != nil {
+			return nil, countErr
+		}
+		return visibilityResultAtPathWithMetadata(rows, plan.ResultPath, total, offset, limit), nil
+	}
 	return visibilityResultAtPath(rows, plan.ResultPath), nil
 }
 
 func (s *Server) queryVisibleRows(ctx context.Context, project, tenant, tableName string, columnNames, predicates []string, orderBy, direction string, offset, limit int, args []any) ([]any, error) {
+	databaseURL := s.databaseURLForTenant(project, tenant)
+	db, err := dbpool.Open(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	return queryVisibleRowsWith(ctx, db, tableName, columnNames, predicates, orderBy, direction, offset, limit, args)
+}
+
+func queryVisibleRowsWith(ctx context.Context, queryer visibilityQueryer, tableName string, columnNames, predicates []string, orderBy, direction string, offset, limit int, args []any) ([]any, error) {
 	table, err := quoteVisibilityIdentifier(tableName)
 	if err != nil {
 		return nil, err
@@ -1023,13 +1084,7 @@ func (s *Server) queryVisibleRows(ctx context.Context, project, tenant, tableNam
 		query += ` OFFSET $` + strconv.Itoa(len(args))
 	}
 	query += `) AS _gonvex_visible_row`
-	databaseURL := s.databaseURLForTenant(project, tenant)
-	db, err := dbpool.Open(databaseURL)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := queryer.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1049,6 +1104,28 @@ func (s *Server) queryVisibleRows(ctx context.Context, project, tenant, tableNam
 		result = append(result, value)
 	}
 	return result, rows.Err()
+}
+
+func (s *Server) queryVisibleCount(ctx context.Context, project, tenant, tableName string, predicates []string, args []any) (int, error) {
+	table, err := quoteVisibilityIdentifier(tableName)
+	if err != nil {
+		return 0, err
+	}
+	query := `SELECT count(*) FROM ` + table + ` AS r`
+	if len(predicates) > 0 {
+		query += ` WHERE ` + strings.Join(predicates, ` AND `)
+	}
+	databaseURL := s.databaseURLForTenant(project, tenant)
+	db, err := dbpool.Open(databaseURL)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	var total int64
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&total); err != nil {
+		return 0, err
+	}
+	return int(total), nil
 }
 
 func compileLiveExpressionSQL(expression *manifest.LiveExpression, args map[string]any, builder *visibilitySQLBuilder, rowAlias string) (string, error) {
@@ -1116,6 +1193,121 @@ func compileLiveExpressionSQL(expression *manifest.LiveExpression, args map[stri
 	}
 }
 
+func compileLiveFiltersSQL(definition *manifest.LiveFilters, args map[string]any, builder *visibilitySQLBuilder, rowAlias string) (string, error) {
+	if definition == nil {
+		return "", nil
+	}
+	if strings.TrimSpace(definition.Argument) == "" {
+		return "", fmt.Errorf("live query filters require an argument")
+	}
+	allowedColumns := make(map[string]bool, len(definition.AllowedColumns))
+	for _, column := range definition.AllowedColumns {
+		if strings.TrimSpace(column) == "" {
+			return "", fmt.Errorf("live query filters contain an invalid allowed column %q", column)
+		}
+		if _, err := quoteVisibilityIdentifier(column); err != nil {
+			return "", fmt.Errorf("live query filters contain an invalid allowed column %q", column)
+		}
+		allowedColumns[column] = true
+	}
+	allowedOperators := make(map[manifest.FilterOperator]bool, len(definition.AllowedOperators))
+	for _, operator := range definition.AllowedOperators {
+		if !validLiveFilterOperator(operator) {
+			return "", fmt.Errorf("live query filters contain an unsupported allowed operator %q", operator)
+		}
+		allowedOperators[operator] = true
+	}
+	raw, exists := args[definition.Argument]
+	if !exists || raw == nil {
+		return "", nil
+	}
+	filters, ok := raw.([]any)
+	if !ok {
+		return "", fmt.Errorf("live query filter argument %q must be an array", definition.Argument)
+	}
+	predicates := make([]string, 0, len(filters))
+	for index, rawFilter := range filters {
+		filter, ok := rawFilter.(map[string]any)
+		if !ok {
+			return "", fmt.Errorf("live query filter %d must be an object", index)
+		}
+		column, ok := filter["column"].(string)
+		if !ok || !allowedColumns[column] {
+			return "", fmt.Errorf("live query filter %d has an unallowed column", index)
+		}
+		operatorText, ok := filter["operator"].(string)
+		operator := manifest.FilterOperator(operatorText)
+		if !ok || !allowedOperators[operator] {
+			return "", fmt.Errorf("live query filter %d has an unallowed operator", index)
+		}
+		value, ok := filter["value"].(string)
+		if !ok {
+			return "", fmt.Errorf("live query filter %d value must be a string", index)
+		}
+		valueTo, hasValueTo := filter["valueTo"].(string)
+		if _, exists := filter["valueTo"]; exists && !hasValueTo {
+			return "", fmt.Errorf("live query filter %d valueTo must be a string", index)
+		}
+		columnName, _ := quoteVisibilityIdentifier(column)
+		left := rowAlias + "." + columnName
+		text := "COALESCE(" + left + "::text, '')"
+		valueArg := builder.argument(value)
+		var predicate string
+		switch operator {
+		case "contains", "notContains":
+			predicate = "strpos(lower(" + text + "), lower(" + valueArg + "::text)) " + map[manifest.FilterOperator]string{"contains": ">", "notContains": "="}[operator] + " 0"
+		case "equals", "notEquals":
+			predicate = text + map[manifest.FilterOperator]string{"equals": " = ", "notEquals": " <> "}[operator] + valueArg + "::text"
+		case "startsWith":
+			predicate = "left(lower(" + text + "), length(lower(" + valueArg + "::text))) = lower(" + valueArg + "::text)"
+		case "endsWith":
+			predicate = "right(lower(" + text + "), length(lower(" + valueArg + "::text))) = lower(" + valueArg + "::text)"
+		case "empty":
+			predicate = text + " = ''"
+		case "notEmpty":
+			predicate = text + " <> ''"
+		case "oneOf":
+			var values []any
+			if err := json.Unmarshal([]byte(value), &values); err != nil || values == nil {
+				return "", fmt.Errorf("live query filter %d oneOf value must be a JSON array", index)
+			}
+			if len(values) == 0 {
+				predicate = "FALSE"
+			} else {
+				placeholders := make([]string, 0, len(values))
+				for _, item := range values {
+					if item == nil {
+						return "", fmt.Errorf("live query filter %d oneOf values must be scalar", index)
+					}
+					placeholders = append(placeholders, builder.argument(fmt.Sprint(item)))
+				}
+				predicate = text + " IN (" + strings.Join(placeholders, ", ") + ")"
+			}
+		case "lessThan", "lessThanOrEqual", "greaterThan", "greaterThanOrEqual":
+			operatorSQL := map[manifest.FilterOperator]string{"lessThan": "<", "lessThanOrEqual": "<=", "greaterThan": ">", "greaterThanOrEqual": ">="}[operator]
+			predicate = left + " " + operatorSQL + " " + valueArg
+		case "inRange":
+			if !hasValueTo {
+				return "", fmt.Errorf("live query filter %d inRange requires valueTo", index)
+			}
+			predicate = left + " BETWEEN " + valueArg + " AND " + builder.argument(valueTo)
+		default:
+			return "", fmt.Errorf("live query filter %d has unsupported operator", index)
+		}
+		predicates = append(predicates, "("+predicate+")")
+	}
+	return strings.Join(predicates, " AND "), nil
+}
+
+func validLiveFilterOperator(operator manifest.FilterOperator) bool {
+	switch operator {
+	case "contains", "notContains", "equals", "notEquals", "startsWith", "endsWith", "empty", "notEmpty", "oneOf", "lessThan", "lessThanOrEqual", "greaterThan", "greaterThanOrEqual", "inRange":
+		return true
+	default:
+		return false
+	}
+}
+
 func liveSQLValue(value *manifest.LiveValue, args map[string]any) any {
 	if value == nil {
 		return nil
@@ -1168,6 +1360,27 @@ func visibilityResultAtPath(rows []any, path []string) any {
 	for index, part := range path {
 		if index == len(path)-1 {
 			cursor[part] = rows
+			break
+		}
+		next := map[string]any{}
+		cursor[part] = next
+		cursor = next
+	}
+	return root
+}
+
+func visibilityResultAtPathWithMetadata(rows []any, path []string, total, offset, limit int) any {
+	if len(path) == 0 {
+		return rows
+	}
+	root := map[string]any{}
+	cursor := root
+	for index, part := range path {
+		if index == len(path)-1 {
+			cursor[part] = rows
+			cursor["total"] = total
+			cursor["offset"] = offset
+			cursor["limit"] = limit
 			break
 		}
 		next := map[string]any{}

@@ -82,7 +82,6 @@ services:
       GONVEX_CONTROL_PLANE_DATABASE_URL: postgres://postgres:postgres@postgres:5432/gonvex_dev?sslmode=disable
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/gonvex_dev?sslmode=disable
       VALKEY_URL: redis://valkey:6379/0
-      GONVEX_PLUGIN_CACHE_DIR: /var/lib/gonvex/plugins
       GONVEX_TELEMETRY_LOG: /var/lib/gonvex/telemetry.jsonl
       GONVEX_ROWS_CACHE_TTL: 10m
       S3_ENDPOINT: http://minio:9000

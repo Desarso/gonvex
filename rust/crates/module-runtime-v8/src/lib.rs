@@ -31,8 +31,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use gonvex_module_runtime::{
-    remaining_budget, BoxFuture, FunctionContract, Invocation, InvocationContext, InvocationResult,
-    ModuleArtifact, ModuleEngine, ModuleError, ModuleHost, ModuleLanguage, ModuleManifest,
+    remaining_budget, validate_portable_schema, validate_portable_schema_definition, BoxFuture,
+    FunctionContract, Invocation, InvocationContext, InvocationResult, ModuleArtifact,
+    ModuleEngine, ModuleError, ModuleHost, ModuleLanguage, ModuleManifest,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -108,6 +109,30 @@ impl V8ModuleEngine {
 
         let mut functions = HashMap::with_capacity(artifact.manifest.functions.len());
         for contract in &artifact.manifest.functions {
+            let args_schema = contract.args_schema.as_ref().ok_or_else(|| {
+                ModuleError::InvalidArtifact(format!(
+                    "function {} has no arguments schema",
+                    contract.path
+                ))
+            })?;
+            validate_portable_schema_definition(args_schema).map_err(|error| {
+                ModuleError::InvalidArtifact(format!(
+                    "function {} arguments schema is invalid: {error}",
+                    contract.path
+                ))
+            })?;
+            let result_schema = contract.result_schema.as_ref().ok_or_else(|| {
+                ModuleError::InvalidArtifact(format!(
+                    "function {} has no result schema",
+                    contract.path
+                ))
+            })?;
+            validate_portable_schema_definition(result_schema).map_err(|error| {
+                ModuleError::InvalidArtifact(format!(
+                    "function {} result schema is invalid: {error}",
+                    contract.path
+                ))
+            })?;
             if functions
                 .insert(contract.path.clone(), contract.clone())
                 .is_some()
@@ -179,6 +204,16 @@ impl EngineInner {
         if contract.kind != invocation.kind {
             return Err(ModuleError::WrongFunctionKind(invocation.function.clone()));
         }
+        let arguments: serde_json::Value = serde_json::from_slice(&invocation.args)
+            .map_err(|error| ModuleError::InvalidArguments(format!("$: invalid JSON: {error}")))?;
+        validate_portable_schema(
+            contract
+                .args_schema
+                .as_ref()
+                .expect("artifact validation requires arguments schema"),
+            &arguments,
+        )
+        .map_err(ModuleError::InvalidArguments)?;
         let timeout = self.call_timeout(&invocation.context)?;
         let capabilities = effective_capabilities(&contract.kind, &invocation.context.capabilities);
         let context = invocation.context.clone();
@@ -198,7 +233,7 @@ impl EngineInner {
         let (reply, mut replied) = oneshot::channel();
         lease.dispatch(WorkerCall {
             spec: CallSpec {
-                contract,
+                contract: contract.clone(),
                 invocation,
                 capabilities,
                 now_unix_ms,
@@ -230,7 +265,7 @@ impl EngineInner {
             }
         };
 
-        match reply {
+        let result = match reply {
             Ok(reply) => {
                 lease.finish(reply.healthy);
                 reply.result
@@ -240,7 +275,18 @@ impl EngineInner {
             Err(_) => Err(ModuleError::Execution(
                 "module isolate stopped before returning a result".to_owned(),
             )),
-        }
+        }?;
+        let value: serde_json::Value = serde_json::from_slice(&result.value)
+            .map_err(|error| ModuleError::InvalidResult(format!("$: invalid JSON: {error}")))?;
+        validate_portable_schema(
+            contract
+                .result_schema
+                .as_ref()
+                .expect("artifact validation requires result schema"),
+            &value,
+        )
+        .map_err(ModuleError::InvalidResult)?;
+        Ok(result)
     }
 
     /// The call deadline is the configured ceiling, shortened by whatever the

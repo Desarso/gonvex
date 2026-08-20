@@ -1,100 +1,87 @@
 ---
 title: Gonvex
-description: Build realtime Go + Postgres backends with generated TypeScript bindings.
+description: Build realtime TypeScript + Postgres applications with a normalized Local Replica.
 ---
 
 # Gonvex
 
-Gonvex is a Convex-style backend for teams that want to write backend logic in
-Go while keeping the frontend developer experience tight: generated TypeScript
-bindings, transactional realtime delivery, a persistent Local Replica, schema sync, and a
-self-hosted runtime that knows about projects, tenants, users, and roles.
-
-The application workflow is:
+Gonvex is a self-hostable realtime backend for TypeScript applications. It
+combines transactional Reducers, exact Postgres change feeds, a persistent
+normalized Local Replica, bounded Replica Collections, and indexed Live Queries.
 
 ```bash
-npm create gonvex@latest my-app
+npm create gonvex@latest my-app -- --template vite-react
 cd my-app
 npm install
 npm run dev
 ```
 
-Then define backend code next to your app:
+The app-local module layout is:
 
 ```txt
 my-app/
   gonvex/
-    schema.go
-    tasks.go
+    index.ts
+    tasks.ts
     _generated/
-      api.ts
-      react.ts
-      client.ts
+  migrations/
+    0001_initial.sql
 ```
 
-Your React app imports generated bindings:
+## What Gonvex provides
 
-```ts
-import { api } from "./gonvex/_generated/api";
+- **Three executable kinds**: read-only Queries, atomic Reducers, and
+  external-work Actions.
+- **Generated TypeScript bindings**: typed function references and React hooks.
+- **Committed change feed**: exact Postgres transactions drive realtime delivery.
+- **Local Replica**: one normalized authoritative/optimistic store for browser
+  and mobile state.
+- **Replica Collections**: bounded authorized entity sets persisted locally.
+- **Live Queries**: exact server-computed windows for large datasets.
+- **Centralized visibility**: one old/new row visibility decision for snapshots,
+  Live Queries, Replica Collections, and revocation.
+- **Control Plane and tenants**: global Accounts, tenant-local Members, routing,
+  and isolated tenant databases.
+- **Durable background work**: outbox Actions and persisted scheduling.
 
-const tasks = useLiveQueryState(api.tasks.grid, { status: "open" });
-const createTask = useReducer(api.tasks.create);
-```
-
-## What Gonvex Provides
-
-- **Three function kinds**: read-only Queries, transactional Reducers, and external-work Actions.
-- **Generated TypeScript bindings**: frontend-safe references to your app backend functions.
-- **Postgres schema management**: define tables and indexes in Go.
-- **Committed change feed**: Postgres changes, not declared write guesses, drive realtime delivery.
-- **Replica Collections**: keep authorized, bounded entities in IndexedDB or SQLite and resume from a revision cursor.
-- **Structured Live Queries**: exact indexed server windows over arbitrarily large datasets.
-- **Local Replica**: one normalized authoritative/optimistic client store shared by every view.
-- **Multi-project runtime**: one runtime can host many projects.
-- **Multi-tenant projects**: route verified members to isolated tenant databases.
-- **User and membership model**: users can belong to multiple tenants with roles and permissions.
-- **Scheduling**: register interval, cron-expression, per-tenant, and one-shot background work.
-- **Dashboard**: inspect projects, schemas, functions, tenants, files, errors, logs, metrics, realtime connections, and scheduler health.
-
-## Core Concepts
+## Core concepts
 
 ```txt
-Project
-  A Gonvex application, usually one product/app/repo.
+Account
+  Global authenticated human or service identity.
 
-Tenant
-  A customer/account/workspace inside a project. Tenants can have isolated databases.
+Member
+  Account's tenant-local identity, roles, teams, and permissions.
 
-Control Plane database
-  Runtime-owned control database that stores projects, tenants, users, memberships, and routing info.
+Control Plane
+  Runtime-owned identity, tenant directory, and database-routing database.
 
 Tenant database
-  The actual application data store for one tenant or tenant group.
+  Tenant-local Members and application data.
 
-Gonvex folder
-  The app-local backend source folder checked into your frontend repo.
+Query
+  Read once; arbitrary SQL is allowed.
 
-Generated bindings
-  TypeScript files generated from your Go backend registrations.
+Replica Collection
+  Keep a bounded structured entity set synchronized locally.
+
+Live Query
+  Keep an exact structured server window synchronized without replicating the
+  entire dataset.
 ```
 
-## Recommended Reading
+## Recommended reading
 
 1. [Quickstart](./quickstart)
 2. [Installation](./installation)
-3. [Initialize a Project](./init-project)
-4. [Projects and Tenants](./projects-and-tenants)
-5. [Frontend Multitenancy](./frontend-multitenancy)
-6. [Auth and Membership](./auth-and-membership)
-7. [Schema](./schema)
-8. [Functions and Bindings](./functions-and-bindings)
-9. [Realtime Delivery](./realtime-subscriptions)
-10. [Replica Collections and Local Replica](./durable-sync)
-11. [Scheduling and Background Jobs](./scheduling)
+3. [Projects and Tenants](./projects-and-tenants)
+4. [Auth and Membership](./auth-and-membership)
+5. [Functions and Bindings](./functions-and-bindings)
+6. [Schema and Migrations](./schema)
+7. [Live Queries](./live-queries)
+8. [Replica Collections and Local Replica](./replica-collections)
+9. [Scheduling and Background Jobs](./scheduling)
 
-## Current Status
-
-Gonvex is in beta. These docs distinguish implemented behavior from roadmap
-work. Migration rollouts, tenant fleet operations, deployment automation,
-scheduler retention/dead-letter controls, and a public hosted service are the
-largest remaining platform boundaries; see [Current Limits](./current-limits).
+Gonvex is beta software. Migration rollouts, tenant fleet operations,
+deployment automation, scheduler retention controls, and a public hosted
+service remain platform work; see [Current Limits](./current-limits).

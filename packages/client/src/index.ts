@@ -3,61 +3,62 @@ import type {
   ClientMessage,
   JsonValue,
   MessageTrace,
-  QueryCacheDirective,
   ServerCapabilities,
   ServerMessage,
   SubscriptionRevision,
   ReplicaCursor,
-  SyncOpenRequest,
+  ReplicaDirective,
+  ReplicaOpenRequest,
 } from "@gonvex/protocol";
-import {
-  createQueryCacheStore,
-  defaultQueryCacheReadTimeoutMs,
-  type QueryCacheOptions,
-  type QueryCacheStatus,
-  type QueryCacheStore,
-} from "./query-cache.js";
-import {
-  createSyncStore,
-  syncHashesDigest,
-  syncRowsHashes,
-  type SyncStore,
-  type SyncStoreOptions,
-} from "./sync-store.js";
+import { replicaHashesDigest, replicaRowsHashes, replicaRowKey } from "./replica-integrity.js";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
 import {
-  OptimisticOverlay,
   optimisticPatchesFromReference,
-  type OptimisticReducerDefinition,
   type OptimisticPatch,
-  type OptimisticProjection,
   type OptimisticTransactionDefinition,
-  type Row,
 } from "./optimistic.js";
 import {
   createReducerOutbox,
   type ReducerOutbox,
   type OutboxStore,
 } from "./outbox.js";
-import { LocalReplica, type LocalReplicaStorage, type ReplicaRow, type ReplicaScope } from "./local-replica.js";
-export * from "./cache.js";
-export * from "./cache-coordinator.js";
-export * from "./browser-cache.js";
-export * from "./browser-cache-client.js";
-export * from "./browser-cache-shared-worker.js";
-export * from "./browser-capabilities.js";
-export * from "./persistent-cache.js";
-export * from "./query-cache.js";
-export * from "./sync-store.js";
+import {
+  LocalReplica,
+  MemoryLocalReplicaStorage,
+  type LocalReplicaStorage,
+  type LocalReplicaView,
+  type ReplicaChange,
+  type ReplicaFreshness,
+  type ReplicaRow,
+  type ReplicaScope,
+  type ReplicaSnapshot,
+  type ReplicaTransaction,
+  type ReplicaWindow,
+  type LiveQueryResult,
+} from "./local-replica.js";
+import { runOfflineLiveQuery, type LiveQueryPlan, type OfflineLiveQueryResult } from "./query-expression.js";
 export * from "./error-reporter.js";
 export * from "./optimistic.js";
 export * from "./outbox.js";
 export * from "./kv-stores.js";
 export * from "./signals.js";
-export * from "./local-replica.js";
+// Keep the mutable LocalReplica implementation private to GonvexClient. The
+// public package exposes only the read-only view plus storage/value types.
+export {
+  MemoryLocalReplicaStorage,
+  type LocalReplicaStorage,
+  type LocalReplicaView,
+  type ReplicaChange,
+  type ReplicaFreshness,
+  type ReplicaRow,
+  type ReplicaScope,
+  type ReplicaSnapshot,
+  type ReplicaTransaction,
+  type ReplicaWindow,
+  type LiveQueryResult,
+} from "./local-replica.js";
 export * from "./query-expression.js";
 export * from "./indexeddb-replica.js";
-export type { QueryCacheDirective } from "@gonvex/protocol";
 
 function asReplicaRow(value: JsonValue | undefined): ReplicaRow | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -66,24 +67,41 @@ function asReplicaRow(value: JsonValue | undefined): ReplicaRow | undefined {
 }
 
 type SubscriptionHandler = (message: ServerMessage) => void;
-export type SyncReadyMessage = Extract<ServerMessage, { type: "sync.ready" }> & {
+export type ReplicaReadyMessage = Extract<ServerMessage, { type: "replica.ready" }> & {
   /** True when the server cut this collection at its row or byte budget. */
   truncated?: boolean;
 };
-export type SyncMessage =
+
+function createLocalReplicaView(replica: LocalReplica): LocalReplicaView {
+  return Object.freeze({
+    cursor: () => replica.cursor(),
+    freshness: () => replica.freshness(),
+    version: () => replica.version(),
+    subscribe: (listener) => replica.subscribe(listener),
+    hasPendingCommand: (commandId) => replica.hasPendingCommand(commandId),
+    getWindow: (signature) => replica.getWindow(signature),
+    listWindows: () => replica.listWindows(),
+    windowRows: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.windowRows<T>(signature),
+    entity: <T extends ReplicaRow = ReplicaRow>(entity: string, id: string) => replica.entity<T>(entity, id),
+    entityRows: <T extends ReplicaRow = ReplicaRow>(entity: string) => replica.entityRows<T>(entity),
+    entityCompleteness: (entity) => replica.entityCompleteness(entity),
+    liveQuery: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.liveQuery<T>(signature),
+    hasLiveQuery: (signature) => replica.hasLiveQuery(signature),
+    snapshot: () => replica.snapshot(),
+  } satisfies LocalReplicaView);
+}
+export type ReplicaMessage =
   | Extract<ServerMessage, {
     type:
-      | "sync.snapshot"
-      | "sync.delta"
-      | "sync.needHashes"
-      | "sync.syncing"
-      | "sync.reset"
-      | "sync.error";
+      | "replica.snapshot"
+      | "replica.delta"
+      | "replica.needHashes"
+      | "replica.syncing"
+      | "replica.reset"
+      | "replica.error";
   }>
-  | SyncReadyMessage;
-export type SyncSubscriptionHandler = (message: SyncMessage) => void;
-/** Public Replica Collection name; `SyncSubscriptionHandler` remains as a compatibility alias. */
-export type ReplicaSubscriptionHandler = SyncSubscriptionHandler;
+  | ReplicaReadyMessage;
+export type ReplicaSubscriptionHandler = (message: ReplicaMessage) => void;
 type WatchUpdateHandler = () => void;
 type TelemetryHandler = (event: GonvexTelemetryEvent) => void;
 type ConnectionStateHandler = (state: ConnectionState) => void;
@@ -91,76 +109,49 @@ type QuerySubscription = {
   id: string;
   key: string;
   path: string;
-  projection?: OptimisticProjection;
   live?: { entity: string; key: string; resultPath: string[] };
   args: JsonValue;
   listeners: Set<SubscriptionHandler>;
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
   lastMessage?: ServerMessage;
   serverSettled: boolean;
-  cacheReadGeneration?: number;
-  cacheReadPromise?: Promise<void>;
-  cacheReadFallbackTimer?: ReturnType<typeof setTimeout>;
-  cachedRevision?: string;
   socketGeneration?: number;
   lastRevision?: SubscriptionRevision;
   revisionSocketGeneration?: number;
   scope?: ReplicaScope;
 };
-type SyncSubscription = {
+type ReplicaSubscription = {
   id: string;
   key: string;
   path: string;
   entity: string;
   args: JsonValue;
-  listeners: Set<SyncSubscriptionHandler>;
+  listeners: Set<ReplicaSubscriptionHandler>;
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
-  rows: JsonValue[];
-  cursor?: ReplicaCursor;
   // Keep the newest cursor seen in the current epoch even while an integrity
   // reset clears `cursor` to force a fresh snapshot. Without this floor, a
   // delayed pre-reset snapshot can be accepted during the reopen and become
   // current again.
   cursorFloor?: ReplicaCursor;
   retiredEpochs: Set<string>;
-  keyField: string;
-  mode?: "eager" | "progressive";
-  truncated?: boolean;
-  orderBy?: string;
-  orderDirection?: "asc" | "desc";
-  maxRows?: number;
-  maxBytes?: number;
-  lastMessage?: SyncMessage;
-  cacheReadGeneration?: number;
+  lastMessage?: ReplicaMessage;
   socketGeneration?: number;
   opening: boolean;
-  persistence: Promise<void>;
   retryTimer?: ReturnType<typeof setTimeout>;
   retryAttempt: number;
   isUpToDate: boolean;
-  hashes: Record<string, string>;
-  integrityDigest?: string;
-  integrityRows?: JsonValue[];
-  integrityEpoch?: string;
   forceFullIntegrity: boolean;
   verificationGeneration: number;
-  watermarkPersistTimer?: ReturnType<typeof setTimeout>;
-  /**
-   * The exact rows array last written to (or read from) the sync store. When
-   * a later persist carries the same array, only the cursor has moved and the
-   * stored rows can be left untouched.
-   */
-  persistedRows?: JsonValue[];
   scope?: ReplicaScope;
 };
 
-function syncCursorIsStale(subscription: SyncSubscription, cursor: ReplicaCursor) {
+function replicaCursorIsStale(subscription: ReplicaSubscription, cursor: ReplicaCursor) {
   if (subscription.retiredEpochs.has(cursor.epoch)) return true;
   const floor = subscription.cursorFloor;
   return floor?.epoch === cursor.epoch && cursor.revision < floor.revision;
 }
 
-function raiseSyncCursorFloor(subscription: SyncSubscription, cursor: ReplicaCursor) {
+function raiseReplicaCursorFloor(subscription: ReplicaSubscription, cursor: ReplicaCursor) {
   if (subscription.cursorFloor && subscription.cursorFloor.epoch !== cursor.epoch) {
     subscription.retiredEpochs.add(subscription.cursorFloor.epoch);
   }
@@ -188,7 +179,7 @@ type PendingCall = {
   timeoutTimer?: ReturnType<typeof setTimeout>;
 };
 
-export type FunctionReference = {
+export type FunctionReference<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue> = {
   kind: string;
   path: string;
   delivery?: "oneShot" | "live" | "replica";
@@ -197,10 +188,8 @@ export type FunctionReference = {
     conflict?: "reject" | "expectedVersion" | "merge";
     reason?: string;
   };
-  live?: { entity: string; key: string; resultPath?: readonly string[] };
+  live?: { entity: string; key: string; resultPath?: readonly string[]; plan: LiveQueryPlan };
   optimistic?: {
-    projection?: OptimisticProjection;
-    reducer?: OptimisticReducerDefinition;
     transaction?: OptimisticTransactionDefinition;
   };
 };
@@ -255,7 +244,7 @@ export type GonvexTimeoutOptions = {
 };
 
 export const DEFAULT_QUERY_TIMEOUT_MS = 20_000;
-export const DEFAULT_MUTATION_TIMEOUT_MS = 20_000;
+export const DEFAULT_REDUCER_TIMEOUT_MS = 20_000;
 export const DEFAULT_ACTION_TIMEOUT_MS = 60_000;
 
 export type CallOptions = {
@@ -284,31 +273,22 @@ export type GonvexClientAuth = {
   tenant?: string;
   telemetry?: boolean;
   /**
-   * Async source of the auth token, mirroring Convex's `fetchToken` contract.
+   * Async source of the auth token.
    * When installed, the client re-fetches before every auth send — on first
    * connect, on every reconnect, and once more with `forceRefreshToken: true`
    * when the server rejects the current token — so a socket that outlives a
-   * short-lived JWT (e.g. an ~1h Firebase ID token) reauthenticates with a
+   * short-lived Gonvex app session reauthenticates with a
    * live credential instead of replaying the expired one. A `token` passed in
    * the same `setAuth` call is trusted and sent as-is; resolving `null` signs
    * the session out; a rejected fetch keeps the currently installed token so
    * an offline start is not signed out.
    */
   fetchToken?: GonvexAuthTokenFetcher;
-  /**
-   * Non-secret identity hint ({@link https://datatracker.ietf.org/doc/html/rfc7519 JWT}
-   * `sub` and `iss` claims) that stands in for a token when deriving the local
-   * cache identity. Lets a cold start with no usable token — e.g. an offline
-   * tab whose identity provider cannot refresh — recover the warm query-cache
-   * directive and serve cached reads. Never sent to the server; a parseable
-   * token always takes precedence, and both must derive the same key for the
-   * same user (persist the claims of the last token you installed).
-   */
+  /** Non-secret identity hint used to isolate local-replica persistence. */
   identity?: { sub: string; iss?: string };
 };
 
 export type GonvexClientOptions = GonvexClientAuth & {
-  queryCache?: false | QueryCacheOptions;
   /**
    * Keep listenerless live queries subscribed for this long so route
    * backtracking can reuse their current result without WebSocket churn.
@@ -316,16 +296,10 @@ export type GonvexClientOptions = GonvexClientAuth & {
    */
   querySubscriptionRetentionMs?: number;
   /**
-   * Keep listenerless durable syncs open briefly across React remounts.
+   * Keep listenerless Replica Collections open briefly across React remounts.
    * Defaults to 250ms, preventing close/open/snapshot churn in StrictMode.
    */
-  syncSubscriptionRetentionMs?: number;
-  /** Keep listenerless Replica Collections open briefly across remounts. */
   replicaSubscriptionRetentionMs?: number;
-  /** Persistent storage for bounded Replica Collections. */
-  replica?: false | SyncStoreOptions;
-  /** @deprecated Use `replica`. */
-  sync?: false | SyncStoreOptions;
   /**
    * Durable reducer queue settings. Every replay keeps its original
    * idempotency key, making an accidental cross-tab double-send server-safe.
@@ -343,7 +317,7 @@ export type GonvexTelemetryEvent = {
   type: "reducer" | "action" | "query";
   id: string;
   path: string;
-  reason?: "initial" | "invalidate" | "recover";
+  reason?: "initial" | "change" | "recover";
   outcome: "ok" | "error";
   error?: string;
   clientSentAtMs?: number;
@@ -356,34 +330,28 @@ export type GonvexTelemetryEvent = {
 // Small collections can send their row hashes immediately and repair in one
 // round trip. Everything else resumes with one 64-byte digest and only sends
 // the hash map when the server proves that something actually differs
-// (sync.needHashes) — the server verifies digest-only resumes with zero row
+// (replica.needHashes) — the server verifies digest-only resumes with zero row
 // data on the unchanged path, so a reload uploads bytes, not hash maps.
-const compactSyncIntegrityThreshold = 16;
-// Must match the runtime's per-frame sync.openMany admission limit. Keeping
-// this client-side prevents one oversized page from stranding every sync in a
+// Must match the runtime's per-frame replica.openMany admission limit. Keeping
+// this client-side prevents one oversized page from stranding every replica in a
 // batch behind a frame-level rejection.
-const maxSyncBatchOpens = 256;
+const maxReplicaBatchOpens = 256;
 // A wedged IndexedDB (observed in Chrome: open() never fires any event, so no
 // rejection ever reaches the store's error handling) must degrade the warm
 // start into a cold open — never into a permanently empty screen. Reads
 // normally settle in a few milliseconds.
-const syncStoreReadTimeoutMs = 1_000;
-// Watermarks can arrive for every tenant revision. Bound cursor-only IndexedDB
-// writes per collection while keeping the in-memory resume cursor immediate.
-const syncWatermarkPersistDelayMs = 1_000;
 
 export class GonvexClient {
   private socket: WebSocket | undefined;
   private readonly handlers = new Map<string, SubscriptionHandler>();
   private readonly querySubscriptions = new Map<string, QuerySubscription>();
-  private readonly syncSubscriptions = new Map<string, SyncSubscription>();
+  private readonly replicaSubscriptions = new Map<string, ReplicaSubscription>();
   private readonly oneShotQueries = new Map<string, OneShotQuery>();
   private readonly telemetryHandlers = new Set<TelemetryHandler>();
   private readonly pendingMessages: ClientMessage[] = [];
-  private readonly pendingSyncOpens = new Set<SyncSubscription>();
+  private readonly pendingReplicaOpens = new Set<ReplicaSubscription>();
   private readonly pendingQuerySubscribes = new Set<QuerySubscription>();
-  private readonly syncPersistence = new Map<string, Promise<void>>();
-  private syncOpenFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  private replicaOpenFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private querySubscribeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private serverCapabilities: ServerCapabilities = {};
   private auth: GonvexClientAuth = {};
@@ -398,15 +366,11 @@ export class GonvexClient {
   private authRetriedAfterError = false;
   private readonly authErrorHandlers = new Set<(error: string) => void>();
   private telemetryEnabled = false;
-  private readonly queryCache: QueryCacheStore | undefined;
-  private readonly queryCacheWaitForScope: boolean;
-  private readonly queryCacheReadTimeoutMs: number;
   private readonly querySubscriptionRetentionMs: number;
-  private readonly syncSubscriptionRetentionMs: number;
-  private readonly syncStore: SyncStore | undefined;
+  private readonly replicaSubscriptionRetentionMs: number;
   private readonly reducerOutbox: ReducerOutbox;
-  private readonly overlay = new OptimisticOverlay();
   private readonly replica: LocalReplica;
+  private readonly replicaView: LocalReplicaView;
   private readonly optimisticReducerIds = new Set<string>();
   private readonly optimisticOutboxEntryIds = new Map<string, number>();
   private outboxReady: Promise<void>;
@@ -414,18 +378,11 @@ export class GonvexClient {
   private outboxScopeGeneration = 0;
   private readonly outboxEphemeralScope = randomID();
   private replicaScope: ReplicaScope = "";
+  private hasAuthoritativeReplicaScope = false;
   private replicaReady: Promise<void> = Promise.resolve();
   private readonly unsubscribeOutbox: () => void;
-  private readonly unsubscribeOverlay: () => void;
   private drainingOutbox = false;
   private outboxDrainTimer: ReturnType<typeof setTimeout> | undefined;
-  private queryCacheDirective: QueryCacheDirective | undefined;
-  private queryCacheGeneration = 0;
-  // Sync collections live under a visibility-only scope that survives query
-  // cache rotations (deploys); their warm reads are guarded separately.
-  private syncScopeGeneration = 0;
-  private queryCacheNegotiatedSocketGeneration: number | undefined;
-  private syncIdentityGeneration = 0;
   private readonly sessionScopeHandlers = new Set<() => void>();
   private readonly errorReporter: GonvexErrorReporter | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -442,25 +399,17 @@ export class GonvexClient {
   constructor(private readonly url: string, options: GonvexClientOptions = {}) {
     this.auth = authFromOptions(options);
     this.telemetryEnabled = options.telemetry === true;
-    this.queryCache = createQueryCacheStore(options.queryCache);
-    this.queryCacheWaitForScope = options.queryCache !== undefined && options.queryCache !== false;
-    this.queryCacheReadTimeoutMs = queryCacheReadTimeout(
-      options.queryCache === false ? undefined : options.queryCache?.readTimeoutMs,
-    );
     this.querySubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
       options.querySubscriptionRetentionMs,
     );
-    this.syncSubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
-      options.replicaSubscriptionRetentionMs ?? options.syncSubscriptionRetentionMs,
+    this.replicaSubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
+      options.replicaSubscriptionRetentionMs,
     );
-    this.syncStore = createSyncStore(options.replica ?? options.sync);
     this.reducerOutbox = createReducerOutbox(options.outbox);
     this.replica = new LocalReplica(options.localReplica?.storage);
+    this.replicaView = createLocalReplicaView(this.replica);
     this.unsubscribeOutbox = this.reducerOutbox.subscribe(() => {
       void this.drainOutbox();
-    });
-    this.unsubscribeOverlay = this.overlay.subscribe((entity) => {
-      this.emitOptimisticEntity(entity);
     });
     // Select the initial identity scope synchronously so subscriptions created
     // immediately after the client cannot capture an empty placeholder scope.
@@ -468,33 +417,44 @@ export class GonvexClient {
     // snapshot can publish, so anonymous rows still cannot flash on screen.
     const initialScope = reducerOutboxScope(this.url, this.auth, this.outboxEphemeralScope);
     this.outboxScope = initialScope;
-    this.replicaScope = initialScope;
-    const initialGeneration = ++this.outboxScopeGeneration;
-    this.replicaReady = this.replica.activateScope(initialScope);
-    this.outboxReady = Promise.resolve().then(() => this.restoreOutbox(initialScope, initialGeneration));
+    this.replicaScope = ["awaiting-server-scope", this.url, this.outboxEphemeralScope].join("\u0000");
+    this.outboxScopeGeneration += 1;
+    this.replicaReady = this.replica.activateScope(this.replicaScope, true);
+    this.outboxReady = Promise.resolve();
     this.timeouts = {
       queryTimeoutMs: options.timeouts?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
-      reducerTimeoutMs: options.timeouts?.reducerTimeoutMs ?? DEFAULT_MUTATION_TIMEOUT_MS,
+      reducerTimeoutMs: options.timeouts?.reducerTimeoutMs ?? DEFAULT_REDUCER_TIMEOUT_MS,
       actionTimeoutMs: options.timeouts?.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS,
     };
     if (options.errorReporting && options.project) {
       this.errorReporter = new GonvexErrorReporter({ endpoint: url, project: options.project, tenant: options.tenant, ...options.errorReporting });
     }
-    this.recoverWarmSyncDirective();
-  }
-
-  /** The client's materialized optimistic state for pending-row indicators. */
-  get optimisticOverlay(): OptimisticOverlay {
-    return this.overlay;
   }
 
   /** The single normalized authoritative + optimistic application data store. */
-  get localReplica(): LocalReplica {
-    return this.replica;
+  get localReplica(): LocalReplicaView {
+    return this.replicaView;
   }
 
   replicaSignature(ref: FunctionReference, args: JsonValue = {}) {
     return querySubscriptionKey(ref, args);
+  }
+
+  /** Run the generated Live Query plan over the bounded normalized cache. */
+  offlineLiveQuery<T extends ReplicaRow = ReplicaRow>(
+    ref: FunctionReference,
+    args: JsonValue = {},
+  ): OfflineLiveQueryResult<T> {
+    if (!ref.live?.plan) {
+      return { rows: [], completeness: "partial", supported: false, unsupportedOperator: "missingPlan" };
+    }
+    const queryArgs = isJsonRecord(args) ? args : {};
+    return runOfflineLiveQuery(
+      this.replica.entityRows<T>(ref.live.entity),
+      ref.live.plan,
+      queryArgs,
+      this.replica.entityCompleteness(ref.live.entity),
+    );
   }
 
   /** Number of reducers waiting for a definitive server result. */
@@ -577,13 +537,12 @@ export class GonvexClient {
       // e.g. installing the hint after its token is already live — are inert.
       || (hasOwn(auth, "identity") && !sameAuthTokenIdentity(this.auth, nextAuth));
     if (scopeMayChange) {
-      this.resetQueryCacheScope();
+      this.resetReplicaScopeState();
     }
     this.auth = nextAuth;
     if (scopeMayChange) {
       void this.activateOutboxScope();
       this.rotateSubscriptionScopes();
-      this.recoverWarmSyncDirective();
     }
     if (auth.tenant !== undefined) this.errorReporter?.setTenant(auth.tenant);
     if (auth.project !== undefined) this.errorReporter?.setProject(auth.project);
@@ -620,7 +579,7 @@ export class GonvexClient {
       if (this.socket !== socket || this.manuallyClosed) return;
       this.isWebSocketConnected = false;
       this.replica.setFreshness("offline");
-      this.markSyncSubscriptionsOutOfDate();
+      this.markReplicaSubscriptionsOutOfDate();
       this.authInFlight = false;
       if (this.authWatchdogTimer) {
         clearTimeout(this.authWatchdogTimer);
@@ -651,17 +610,21 @@ export class GonvexClient {
       }
       if (message.type === "session.ready") {
         this.serverCapabilities = message.capabilities ?? {};
-        if (!this.auth.token && !this.auth.tenant) {
-          this.installQueryCacheDirective(message.queryCache);
-          this.queryCacheNegotiatedSocketGeneration = this.socketGeneration;
-          this.resumeQuerySubscriptions();
+        if (!message.replica) {
+          this.rejectMissingReplicaDirective();
+          return;
         }
-        return;
-      }
-      if (message.type === "session.scope") {
-        this.installQueryCacheDirective(message.queryCache);
-        this.queryCacheNegotiatedSocketGeneration = this.socketGeneration;
-        this.resumeQuerySubscriptions();
+        const ready = this.activateReplicaDirective(message.replica);
+        if (!this.auth.token && !this.auth.tenant) {
+          void ready
+            .then(() => {
+              this.resumeQuerySubscriptions();
+              this.resumeReplicaSubscriptions();
+            })
+            .catch((error) => this.rejectReplicaDirective(error));
+        } else {
+          void ready.catch((error) => this.rejectReplicaDirective(error));
+        }
         return;
       }
       if (message.type === "auth.result" || message.type === "auth.error") {
@@ -672,10 +635,19 @@ export class GonvexClient {
         }
         if (message.type === "auth.result") {
           this.authRetriedAfterError = false;
-          void this.activateOutboxScope();
-          this.installQueryCacheDirective(queryCacheDirectiveFromAuthResult(message.result));
-          this.queryCacheNegotiatedSocketGeneration = this.socketGeneration;
-          this.resumeQuerySubscriptions();
+          const directive = replicaDirectiveFromAuthResult(message.result);
+          if (!directive) {
+            this.rejectMissingReplicaDirective();
+            this.flushPendingMessages();
+            return;
+          }
+          void this.activateReplicaDirective(directive)
+            .then(() => this.activateOutboxScope())
+            .then(() => {
+              this.resumeQuerySubscriptions();
+              this.resumeReplicaSubscriptions();
+            })
+            .catch((error) => this.rejectReplicaDirective(error));
         } else {
           const fetcher = this.auth.fetchToken;
           if (fetcher && !this.authRetriedAfterError) {
@@ -690,14 +662,13 @@ export class GonvexClient {
           }
           this.authRetriedAfterError = false;
           this.quarantineReplicaScope();
-          this.resetQueryCacheScope();
           this.notifyAuthError(message.error);
         }
         this.flushPendingMessages();
       }
-      if (message.type === "sync.readyMany") {
+      if (message.type === "replica.readyMany") {
         for (const ready of message.ready) {
-          const readyMessage = { type: "sync.ready", ...ready } as SyncReadyMessage;
+          const readyMessage = { type: "replica.ready", ...ready } as ReplicaReadyMessage;
           this.handlers.get(ready.id)?.(readyMessage);
         }
         return;
@@ -715,12 +686,16 @@ export class GonvexClient {
             oldValue: asReplicaRow(change.oldValue),
             newValue: asReplicaRow(change.newValue),
           })),
-        }, scope).catch(() => this.replica.setFreshness("verifying"));
+        }, scope).then(() => {
+          if (message.originCommandId && !this.replica.hasPendingCommand(message.originCommandId)) {
+            void this.ackOptimisticReducer(message.originCommandId);
+          }
+        }).catch(() => this.replica.setFreshness("verifying"));
         return;
       }
-      if (message.type === "sync.watermark") {
-        if (this.serverCapabilities.syncWatermark === 1) {
-          this.handleSyncWatermark(message.revision);
+      if (message.type === "replica.watermark") {
+        if (this.serverCapabilities.replicaWatermark === 1) {
+          this.handleReplicaWatermark(message.revision);
         }
         return;
       }
@@ -770,20 +745,15 @@ export class GonvexClient {
       `Gonvex client was closed while waiting for ${call.kind} ${call.path}`,
       { code: "closed", path: call.path, operation: call.kind },
     ));
-    for (const subscription of this.syncSubscriptions.values()) {
-      this.clearSyncRetry(subscription);
+    for (const subscription of this.replicaSubscriptions.values()) {
+      this.clearReplicaRetry(subscription);
       if (subscription.unsubscribeTimer) clearTimeout(subscription.unsubscribeTimer);
-      if (subscription.watermarkPersistTimer) {
-        clearTimeout(subscription.watermarkPersistTimer);
-        subscription.watermarkPersistTimer = undefined;
-        this.persistSyncSnapshot(subscription, true);
-      }
     }
-    if (this.syncOpenFlushTimer) {
-      clearTimeout(this.syncOpenFlushTimer);
-      this.syncOpenFlushTimer = undefined;
+    if (this.replicaOpenFlushTimer) {
+      clearTimeout(this.replicaOpenFlushTimer);
+      this.replicaOpenFlushTimer = undefined;
     }
-    this.pendingSyncOpens.clear();
+    this.pendingReplicaOpens.clear();
     if (this.querySubscribeFlushTimer) {
       clearTimeout(this.querySubscribeFlushTimer);
       this.querySubscribeFlushTimer = undefined;
@@ -794,22 +764,14 @@ export class GonvexClient {
       this.outboxDrainTimer = undefined;
     }
     this.unsubscribeOutbox();
-    this.unsubscribeOverlay();
-    for (const subscription of this.querySubscriptions.values()) {
-      if (subscription.cacheReadFallbackTimer) clearTimeout(subscription.cacheReadFallbackTimer);
-    }
     this.handlers.clear();
     this.querySubscriptions.clear();
-    this.syncSubscriptions.clear();
+    this.replicaSubscriptions.clear();
     this.sessionScopeHandlers.clear();
     this.authErrorHandlers.clear();
     // Invalidate any token fetch still in flight so its resolve can't touch
     // the closed client's caches.
     this.authFetchGeneration += 1;
-    this.queryCacheGeneration += 1;
-    this.queryCacheDirective = undefined;
-    this.queryCache?.close();
-    this.syncStore?.close();
     this.errorReporter?.close();
     const socket = this.socket;
     this.socket = undefined;
@@ -842,23 +804,10 @@ export class GonvexClient {
     return () => this.sessionScopeHandlers.delete(handler);
   }
 
-  async clearQueryCache(options: { allScopes?: boolean } = {}) {
-    if (!this.queryCache) return;
-    const scope = options.allScopes ? undefined : this.queryCacheDirective?.scope;
-    if (!options.allScopes && !scope) return;
-    await this.queryCache.clear(scope);
-  }
-
-  getQueryCacheStatus(): QueryCacheStatus {
-    return this.queryCache?.status() ?? {
-      enabled: false,
-      readsEnabled: false,
-      writesEnabled: false,
-      reason: "disabled-by-client",
-    };
-  }
-
-  subscribeQuery(ref: FunctionReference, args: JsonValue = {}, onMessage: SubscriptionHandler) {
+  subscribeLiveQuery<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue>(ref: FunctionReference<Args, Result>, args: Args = {} as Args, onMessage: SubscriptionHandler) {
+    if (!ref.live?.plan || ref.delivery !== "live") {
+      throw new GonvexClientError(`Query ${ref.path} is not a structured Live Query`, { code: "server", path: ref.path, operation: "query" });
+    }
     this.connect();
     const key = querySubscriptionKey(ref, args);
     const existing = this.querySubscriptions.get(key);
@@ -869,12 +818,11 @@ export class GonvexClient {
         existing.unsubscribeTimer = undefined;
       }
       existing.listeners.add(onMessage);
-      this.startQueryCacheRead(existing);
       // Replay the latest result/error to this late joiner. Coalesced subscriptions
       // share a single server subscription, so the server only sends `initial` once —
       // to the first subscriber. Without this replay, components that mount after the
       // initial result arrives (e.g. a dialog opened later) would never receive data
-      // until the next server-side invalidation. Replaying here (not via the shared
+      // until the next committed change. Replaying here (not via the shared
       // handler) keeps the cached value flowing without emitting extra telemetry/traffic.
       const cached = existing.lastMessage;
       if (wasOrphaned && cached?.type === "query.error") {
@@ -899,23 +847,18 @@ export class GonvexClient {
       id: randomID(),
       key,
       path: ref.path,
-      projection: ref.optimistic?.projection,
       live: ref.live ? { ...ref.live, resultPath: [...(ref.live.resultPath ?? [])] } : undefined,
       args,
       listeners: new Set([onMessage]),
       serverSettled: false,
       scope: this.replicaScope,
     };
-    if (subscription.projection) {
-      this.overlay.expectSource(subscription.key, subscription.projection.entity);
-    }
     this.querySubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => {
       const scope = subscription.scope ?? this.replicaScope;
       void this.handleQueryMessage(subscription, message, scope).catch(() => this.replica.setFreshness("verifying"));
     });
     this.sendSubscription(subscription);
-    this.startQueryCacheRead(subscription);
 
     return () => this.unsubscribeQueryListener(key, onMessage);
   }
@@ -926,9 +869,6 @@ export class GonvexClient {
       if (!normalized) return;
       message = normalized;
       if (message.type === "query.result") {
-        if (message.cacheScope && message.cacheScope !== this.queryCacheDirective?.scope) {
-          return;
-        }
         subscription.serverSettled = true;
         subscription.lastMessage = message;
         this.recordTelemetry({
@@ -958,7 +898,7 @@ export class GonvexClient {
         // reads. Publish the query callback only after its entity/membership
         // window has been durably committed and atomically swapped.
         try {
-          await this.materializeLiveQuery(subscription, message.result, Boolean(message.subscriptionRevision), scope);
+          await this.materializeLiveQuery(subscription, message, scope);
         } catch {
           this.replica.setFreshness("verifying");
         }
@@ -972,28 +912,34 @@ export class GonvexClient {
       for (const listener of Array.from(subscription.listeners)) {
         listener(outgoing);
       }
-      if (message.type === "query.result") {
-        this.persistQueryResult(subscription, message);
-      } else if (message.type === "query.error") {
-        this.deleteCachedQuery(subscription);
-      }
+      // One-shot results are transient. Live rows are persisted by LocalReplica.
   }
 
-  private materializeLiveQuery(subscription: QuerySubscription, result: JsonValue, authoritative: boolean, scope = this.replicaScope): Promise<void> {
+  private materializeLiveQuery(
+    subscription: QuerySubscription,
+    message: Extract<ServerMessage, { type: "query.result" }>,
+    scope = this.replicaScope,
+  ): Promise<void> {
     const live = subscription.live;
     if (!live) return Promise.resolve();
-    const projected = rowsAtPath(result, live.resultPath);
+    const projected = rowsAtPath(message.result, live.resultPath);
     if (!projected) return Promise.resolve();
     const rows = projected.rows.filter((row): row is ReplicaRow => (
       row !== null && typeof row === "object" && !Array.isArray(row)
     ));
     return this.replica.materializeWindow({
       signature: subscription.key,
+      kind: "live",
       entity: live.entity,
       key: live.key,
       rows,
       completeness: "complete",
-      source: authoritative ? "server" : "cache",
+      source: message.subscriptionRevision ? "server" : "cache",
+      resultSkeleton: replaceRowsAtPath(message.result, live.resultPath, [], projected.scalar),
+      resultPath: [...live.resultPath],
+      scalar: projected.scalar,
+      windowRevision: message.windowRevision,
+      subscriptionRevision: message.subscriptionRevision,
       scope,
     });
   }
@@ -1042,8 +988,8 @@ export class GonvexClient {
         result,
         reason: message.reason,
         trace: message.trace,
-        cacheScope: message.cacheScope,
-        cacheRevision: message.cacheRevision,
+        replicaScope: message.replicaScope,
+        windowRevision: message.windowRevision,
         subscriptionRevision: message.subscriptionRevision,
         originCommandIds: message.originCommandIds,
       };
@@ -1116,50 +1062,10 @@ export class GonvexClient {
     return subscription.revisionSocketGeneration !== this.socketGeneration;
   }
 
-  watchQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}) {
-    let latest: T | undefined;
-    let latestError: Error | undefined;
-    const updateHandlers = new Set<WatchUpdateHandler>();
-
-    const unsubscribe = this.subscribeQuery(ref, args, (message) => {
-      if (message.type === "query.result") {
-        latest = message.result as T;
-        latestError = undefined;
-        for (const handler of updateHandlers) handler();
-      }
-      if (message.type === "query.error") {
-        latestError = new Error(message.error);
-        for (const handler of updateHandlers) handler();
-      }
-    });
-    const unsubscribeScope = this.onSessionScopeChange(() => {
-      latest = undefined;
-      latestError = undefined;
-      for (const handler of updateHandlers) handler();
-    });
-
-    return {
-      localQueryResult() {
-        if (latestError) throw latestError;
-        return latest;
-      },
-      onUpdate(handler: WatchUpdateHandler) {
-        updateHandlers.add(handler);
-        return () => {
-          updateHandlers.delete(handler);
-          if (updateHandlers.size === 0) {
-            unsubscribe();
-            unsubscribeScope();
-          }
-        };
-      },
-    };
-  }
-
-  subscribeSync(ref: FunctionReference, args: JsonValue = {}, onMessage: SyncSubscriptionHandler) {
+  private subscribeReplicaTransport<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue>(ref: FunctionReference<Args, Result>, args: Args = {} as Args, onMessage: ReplicaSubscriptionHandler) {
     this.connect();
     const key = querySubscriptionKey(ref, args);
-    const existing = this.syncSubscriptions.get(key);
+    const existing = this.replicaSubscriptions.get(key);
     if (existing) {
       if (existing.unsubscribeTimer) {
         clearTimeout(existing.unsubscribeTimer);
@@ -1169,121 +1075,64 @@ export class GonvexClient {
       if (existing.lastMessage) {
         queueMicrotask(() => {
           if (existing.listeners.has(onMessage) && existing.lastMessage) {
-            onMessage(this.materializeSyncMessage(existing, existing.lastMessage));
+            onMessage(this.materializeReplicaMessage(existing, existing.lastMessage));
           }
         });
       }
-      return () => this.unsubscribeSyncListener(key, onMessage);
+      return () => this.unsubscribeReplicaListener(key, onMessage);
     }
 
-    const subscription: SyncSubscription = {
+    const subscription: ReplicaSubscription = {
       id: randomID(),
       key,
       path: ref.path,
-      entity: ref.optimistic?.projection?.entity ?? ref.path,
+      entity: ref.live?.entity ?? ref.path,
       args,
       listeners: new Set([onMessage]),
-      rows: [],
       scope: this.replicaScope,
-      keyField: "id",
       opening: false,
-      persistence: Promise.resolve(),
       retryAttempt: 0,
       isUpToDate: false,
-      hashes: {},
       forceFullIntegrity: false,
       verificationGeneration: 0,
       retiredEpochs: new Set(),
     };
-    this.overlay.expectSource(subscription.key, subscription.entity);
-    this.syncSubscriptions.set(key, subscription);
+    this.replicaSubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => {
       const scope = subscription.scope ?? this.replicaScope;
-      void this.handleSyncMessage(subscription, message as SyncMessage, scope)
+      void this.handleReplicaMessage(subscription, message as ReplicaMessage, scope)
         .catch(() => this.replica.setFreshness("verifying"));
     });
-    this.startSync(subscription);
-    return () => this.unsubscribeSyncListener(key, onMessage);
+    this.startReplica(subscription);
+    return () => this.unsubscribeReplicaListener(key, onMessage);
   }
 
   /** Subscribe to a bounded Replica Collection. */
-  subscribeReplica(ref: FunctionReference, args: JsonValue = {}, onMessage: ReplicaSubscriptionHandler) {
-    return this.subscribeSync(ref, args, onMessage);
-  }
-
-  watchSync<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue = {}) {
-    let latest: T[] | undefined;
-    let latestError: Error | undefined;
-    const thisClient = this;
-    const key = querySubscriptionKey(ref, args);
-    const updateHandlers = new Set<WatchUpdateHandler>();
-    const notify = () => {
-      for (const handler of updateHandlers) handler();
-    };
-    const unsubscribe = this.subscribeSync(ref, args, (message) => {
-      if (message.type === "sync.snapshot") {
-        latest = message.result as T[];
-        latestError = undefined;
-        notify();
-      } else if (message.type === "sync.ready") {
-        latestError = undefined;
-        notify();
-      } else if (message.type === "sync.syncing" || message.type === "sync.reset") {
-        notify();
-      } else if (message.type === "sync.error") {
-        latestError = new Error(message.error);
-        notify();
-      }
-    });
-    const unsubscribeScope = this.onSessionScopeChange(() => {
-      latest = undefined;
-      latestError = undefined;
-      notify();
-    });
-    return {
-      localSyncResult() {
-        if (latestError) throw latestError;
-        return latest;
-      },
-      status() {
-        return {
-          isLoading: latest === undefined,
-          isUpToDate: thisClient.syncSubscriptions.get(key)?.isUpToDate === true,
-        };
-      },
-      onUpdate(handler: WatchUpdateHandler) {
-        updateHandlers.add(handler);
-        return () => {
-          updateHandlers.delete(handler);
-          if (updateHandlers.size === 0) {
-            unsubscribe();
-            unsubscribeScope();
-          }
-        };
-      },
-    };
+  subscribeReplica<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue>(ref: FunctionReference<Args, Result>, args: Args = {} as Args, onMessage: ReplicaSubscriptionHandler) {
+    return this.subscribeReplicaTransport(ref, args, onMessage);
   }
 
   /** Watch a bounded Replica Collection through the normalized Local Replica. */
-  watchReplica<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue = {}) {
+  watchReplica<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args) {
     const key = querySubscriptionKey(ref, args);
     const updateHandlers = new Set<WatchUpdateHandler>();
     let latestError: Error | undefined;
     let snapshotVersion = -1;
     let snapshotRows: T[] | undefined;
+    let releaseTimer: ReturnType<typeof setTimeout> | undefined;
     const notify = () => {
       for (const handler of updateHandlers) handler();
     };
-    // Keep the SyncSubscription as transport/reconciliation state only. The
+    // Keep the ReplicaSubscription as transport/reconciliation state only. The
     // value returned by this watch always comes from normalized LocalReplica.
-    const unsubscribeSync = this.subscribeSync(ref, args, (message) => {
-      if (message.type === "sync.error") {
+    const unsubscribeTransport = this.subscribeReplicaTransport(ref, args, (message) => {
+      if (message.type === "replica.error") {
         latestError = new Error(message.error);
         notify();
-      } else if (message.type === "sync.syncing" || message.type === "sync.reset") {
+      } else if (message.type === "replica.syncing" || message.type === "replica.reset") {
         latestError = undefined;
         notify();
-      } else if (message.type === "sync.snapshot" || message.type === "sync.ready") {
+      } else if (message.type === "replica.snapshot" || message.type === "replica.ready") {
         latestError = undefined;
       }
     });
@@ -1304,17 +1153,27 @@ export class GonvexClient {
       },
       status: () => ({
         isLoading: !this.replica.hasLiveQuery(key),
-        isUpToDate: this.syncSubscriptions.get(key)?.isUpToDate === true,
+        isUpToDate: this.replicaSubscriptions.get(key)?.isUpToDate === true,
       }),
       onUpdate(handler: WatchUpdateHandler) {
+        if (releaseTimer) {
+          clearTimeout(releaseTimer);
+          releaseTimer = undefined;
+        }
         updateHandlers.add(handler);
+        queueMicrotask(() => {
+          if (updateHandlers.has(handler)) handler();
+        });
         return () => {
           updateHandlers.delete(handler);
-          if (updateHandlers.size === 0) {
-            unsubscribeSync();
+          if (updateHandlers.size > 0 || releaseTimer) return;
+          releaseTimer = setTimeout(() => {
+            releaseTimer = undefined;
+            if (updateHandlers.size > 0) return;
+            unsubscribeTransport();
             unsubscribeReplica();
             unsubscribeScope();
-          }
+          }, 0);
         };
       },
     };
@@ -1325,7 +1184,7 @@ export class GonvexClient {
    * latest query result is retained only as the transport-shaped skeleton;
    * its row window is always rebuilt from LocalReplica membership/entities.
    */
-  watchLiveQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}) {
+  watchLiveQuery<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args) {
     const key = querySubscriptionKey(ref, args);
     const updateHandlers = new Set<WatchUpdateHandler>();
     let transportResult: JsonValue | undefined;
@@ -1334,6 +1193,7 @@ export class GonvexClient {
     let snapshotResult: T | undefined;
     let latestError: Error | undefined;
     let notifyQueued = false;
+    let releaseTimer: ReturnType<typeof setTimeout> | undefined;
     const notify = () => {
       if (notifyQueued) return;
       notifyQueued = true;
@@ -1342,7 +1202,7 @@ export class GonvexClient {
         for (const handler of updateHandlers) handler();
       });
     };
-    const unsubscribeQuery = this.subscribeQuery(ref, args, (message) => {
+    const unsubscribeQuery = this.subscribeLiveQuery(ref, args, (message) => {
       if (message.type === "query.result") {
         transportResult = message.result;
         transportGeneration += 1;
@@ -1362,8 +1222,9 @@ export class GonvexClient {
     // intermediate wake-up; later transactions notify directly from the
     // normalized store.
     const unsubscribeReplica = this.replica.subscribe(() => {
-      if (transportResult !== undefined) notify();
+      if (transportResult !== undefined || this.replica.hasLiveQuery(key)) notify();
     });
+    void this.replicaReady.then(() => notify());
     const unsubscribeScope = this.onSessionScopeChange(() => {
       transportResult = undefined;
       transportGeneration += 1;
@@ -1375,439 +1236,249 @@ export class GonvexClient {
     return {
       localLiveQueryResult: () => {
         if (latestError) throw latestError;
-        if (transportResult === undefined || !ref.live || !this.replica.hasLiveQuery(key)) return undefined;
+        if (!ref.live) return undefined;
+        const offline = this.replica.freshness() === "offline" && ref.live.plan
+          ? this.offlineLiveQuery(ref, args)
+          : undefined;
+        if (!this.replica.hasLiveQuery(key) && !offline?.supported) return undefined;
+        const window = this.replica.getWindow(key);
+        const skeleton = transportResult ?? window?.resultSkeleton;
+        if (skeleton === undefined && (ref.live.resultPath?.length ?? 0) > 0) return undefined;
         const nextToken = `${this.replica.version()}:${transportGeneration}`;
         if (snapshotToken === nextToken) return snapshotResult;
-        const projected = rowsAtPath(transportResult, ref.live.resultPath ?? []);
-        snapshotResult = !projected
-          ? transportResult as T
+        const materializedRows = offline?.supported
+          ? offline.rows as unknown as JsonValue[]
+          : this.replica.liveQuery(key).rows as unknown as JsonValue[];
+        const base = skeleton ?? [];
+        const projected = rowsAtPath(base, ref.live.resultPath ?? []);
+        let nextResult = !projected
+          ? base as T
           : replaceRowsAtPath(
-            transportResult,
+            base,
             ref.live.resultPath ?? [],
-            this.replica.liveQuery(key).rows as unknown as JsonValue[],
+            materializedRows,
             projected.scalar,
           ) as T;
+        if (offline?.supported && projected) {
+          nextResult = replaceOfflineLiveQueryMetadata(nextResult, ref.live.resultPath ?? [], offline) as T;
+        }
+        snapshotResult = nextResult;
         snapshotToken = nextToken;
         return snapshotResult;
       },
       onUpdate(handler: WatchUpdateHandler) {
+        if (releaseTimer) {
+          clearTimeout(releaseTimer);
+          releaseTimer = undefined;
+        }
         updateHandlers.add(handler);
+        queueMicrotask(() => {
+          if (updateHandlers.has(handler)) handler();
+        });
         return () => {
           updateHandlers.delete(handler);
-          if (updateHandlers.size === 0) {
+          if (updateHandlers.size > 0 || releaseTimer) return;
+          releaseTimer = setTimeout(() => {
+            releaseTimer = undefined;
+            if (updateHandlers.size > 0) return;
             unsubscribeQuery();
             unsubscribeReplica();
             unsubscribeScope();
-          }
+          }, 0);
         };
       },
     };
   }
 
-  private async handleSyncMessage(subscription: SyncSubscription, message: SyncMessage, scope = this.replicaScope) {
+  private async handleReplicaMessage(subscription: ReplicaSubscription, message: ReplicaMessage, scope = this.replicaScope) {
     if (scope !== this.replicaScope || (subscription.scope !== undefined && subscription.scope !== scope)) return;
-    if (message.type === "sync.snapshot") {
-      // Snapshots are only valid responses to an outstanding sync.open. Live
-      // subscriptions advance through deltas; accepting an unsolicited or
-      // delayed snapshot could roll a verified collection back to old rows.
-      if (!subscription.opening) return;
-      if (syncCursorIsStale(subscription, message.cursor)) return;
-      if (subscription.cursor
-        && message.cursor.epoch === subscription.cursor.epoch
-        && message.cursor.revision < subscription.cursor.revision) return;
-      this.clearSyncRetry(subscription, true);
-      subscription.verificationGeneration += 1;
-      subscription.isUpToDate = false;
+    const current = () => this.replica.getWindow(subscription.key);
+    if (message.type === "replica.snapshot") {
+      if (!subscription.opening || replicaCursorIsStale(subscription, message.cursor)) return;
+      this.clearReplicaRetry(subscription, true);
       subscription.opening = false;
-      subscription.cursor = message.cursor;
-      raiseSyncCursorFloor(subscription, message.cursor);
-      subscription.keyField = message.key;
-      subscription.mode = message.mode;
-      subscription.truncated = undefined;
-      subscription.orderBy = message.orderBy;
-      subscription.orderDirection = message.orderDirection;
-      subscription.maxRows = message.maxRows;
-      subscription.maxBytes = message.maxBytes;
-      subscription.rows = boundSyncRows(
-        message.result,
-        message.key,
-        message.maxRows,
-        message.maxBytes,
-        message.orderBy,
-        message.orderDirection,
-      );
-      subscription.hashes = { ...(message.hashes ?? {}) };
-      subscription.integrityDigest = undefined;
-      subscription.integrityRows = undefined;
-      subscription.integrityEpoch = undefined;
-      const snapshot: SyncMessage = { ...message, result: subscription.rows };
+      subscription.isUpToDate = false;
+      raiseReplicaCursorFloor(subscription, message.cursor);
+      const rows = boundReplicaRows(message.result, message.key, message.maxRows, message.maxBytes, message.orderBy, message.orderDirection);
+      const window = {
+        signature: subscription.key,
+        kind: "replica" as const,
+        entity: subscription.entity,
+        key: message.key,
+        rows: rows.filter((row): row is ReplicaRow => asReplicaRow(row) !== undefined).map((row) => asReplicaRow(row)! ),
+        completeness: "complete" as const,
+        source: "server" as const,
+        cursor: message.cursor,
+        mode: message.mode,
+        orderBy: message.orderBy,
+        orderDirection: message.orderDirection,
+        maxRows: message.maxRows,
+        maxBytes: message.maxBytes,
+        hashes: message.hashes,
+        scope,
+      };
+      await this.replica.replaceWindow(window);
+      const snapshot: ReplicaMessage = { ...message, result: this.replica.windowRows(subscription.key) };
       subscription.lastMessage = snapshot;
-      // Queue transport persistence before awaiting Local Replica I/O. Later
-      // delta/reset frames can arrive in the same task; enqueueing here keeps
-      // their durable operations in wire order while UI publication still
-      // waits for canonical materialization.
-      this.persistSyncSnapshot(subscription);
-      try {
-        await this.materializeReplicaCollection(subscription, "cache", scope);
-      } catch {
-        this.replica.setFreshness("verifying");
-      }
-      this.emitSyncMessage(subscription, snapshot, scope);
+      this.emitReplicaMessage(subscription, snapshot, scope);
       return;
     }
-    if (message.type === "sync.delta") {
-      if (syncCursorIsStale(subscription, message.cursor)) return;
-      if (subscription.cursor && (
-        message.cursor.epoch !== subscription.cursor.epoch
-        || message.cursor.revision < subscription.cursor.revision
-        || (
-          message.cursor.revision === subscription.cursor.revision
-          && !message.digest
-        )
-      )) return;
-      this.clearSyncRetry(subscription, true);
-      subscription.verificationGeneration += 1;
+    if (message.type === "replica.delta") {
+      const prior = current();
+      if (replicaCursorIsStale(subscription, message.cursor) || (prior?.cursor && message.cursor.revision < prior.cursor.revision)) return;
+      this.clearReplicaRetry(subscription, true);
       subscription.isUpToDate = false;
-      subscription.cursor = message.cursor;
-      raiseSyncCursorFloor(subscription, message.cursor);
-      subscription.rows = applySyncDelta(
-        subscription.rows,
-        subscription.keyField,
-        message.upserts ?? [],
-        message.deleted ?? [],
-        subscription.maxRows,
-        subscription.maxBytes,
-        subscription.orderBy,
-        subscription.orderDirection,
-      );
-      for (const key of message.deleted ?? []) delete subscription.hashes[key];
-      Object.assign(subscription.hashes, message.hashes ?? {});
-      subscription.integrityDigest = undefined;
-      subscription.integrityRows = undefined;
-      subscription.integrityEpoch = undefined;
-      const snapshot: SyncMessage = {
-        type: "sync.snapshot",
-        id: subscription.id,
-        path: subscription.path,
-        result: subscription.rows,
+      raiseReplicaCursorFloor(subscription, message.cursor);
+      await this.replica.applyWindowDelta({
+        signature: subscription.key,
+        kind: "replica",
+        entity: subscription.entity,
+        key: prior?.key ?? "id",
+        upserts: (message.upserts ?? []).filter((row): row is ReplicaRow => asReplicaRow(row) !== undefined).map((row) => asReplicaRow(row)! ),
+        deleted: message.deleted ?? [],
+        completeness: prior?.completeness ?? "partial",
+        source: "server",
         cursor: message.cursor,
-        key: subscription.keyField,
-        mode: subscription.mode,
-        orderBy: subscription.orderBy,
-        orderDirection: subscription.orderDirection,
-        maxRows: subscription.maxRows,
-        maxBytes: subscription.maxBytes,
+        mode: prior?.mode,
+        truncated: prior?.truncated,
+        orderBy: prior?.orderBy,
+        orderDirection: prior?.orderDirection,
+        maxRows: prior?.maxRows,
+        maxBytes: prior?.maxBytes,
+        hashes: message.hashes ?? prior?.hashes,
+      });
+      const snapshot: ReplicaMessage = {
+        type: "replica.snapshot", id: subscription.id, path: subscription.path,
+        result: this.replica.windowRows(subscription.key), cursor: message.cursor,
+        key: prior?.key ?? "id", mode: prior?.mode, orderBy: prior?.orderBy,
+        orderDirection: prior?.orderDirection, maxRows: prior?.maxRows, maxBytes: prior?.maxBytes,
       };
       subscription.lastMessage = snapshot;
-      this.persistSyncDelta(subscription, message.upserts ?? [], message.deleted ?? []);
-      try {
-        await this.materializeReplicaCollection(subscription, "cache", scope);
-      } catch {
-        this.replica.setFreshness("verifying");
-      }
       this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
-      this.emitSyncMessage(subscription, snapshot, scope);
+      this.emitReplicaMessage(subscription, snapshot, scope);
       return;
     }
-    if (message.type === "sync.reset") {
-      this.clearSyncRetry(subscription, true);
-      if (subscription.watermarkPersistTimer) {
-        clearTimeout(subscription.watermarkPersistTimer);
-        subscription.watermarkPersistTimer = undefined;
-      }
-      subscription.verificationGeneration += 1;
+    if (message.type === "replica.reset") {
+      this.clearReplicaRetry(subscription, true);
       subscription.isUpToDate = false;
-      subscription.cursor = undefined;
-      subscription.truncated = undefined;
-      subscription.rows = [];
-      subscription.persistedRows = undefined;
-      subscription.hashes = {};
-      subscription.integrityDigest = undefined;
-      subscription.integrityRows = undefined;
-      subscription.integrityEpoch = undefined;
-      subscription.forceFullIntegrity = false;
+      subscription.opening = false;
+      subscription.cursorFloor = undefined;
+      subscription.retiredEpochs.clear();
       subscription.lastMessage = undefined;
-      subscription.opening = false;
-      const directive = this.queryCacheDirective;
-      const store = this.syncStore;
-      if (directive && store) {
-        const scope = syncPersistenceScope(directive);
-        this.enqueueSyncPersistence(subscription, scope, () => store.delete(
-          scope,
-          subscription.path,
-          subscription.args,
-        ));
-      }
-      // Clear this collection's canonical LocalReplica membership before the
-      // compatibility reset callback. The transport scratch rows are already
-      // empty, but watchReplica must never continue exposing the old window.
-      try {
-        await this.materializeReplicaCollection(subscription, "cache", scope);
-      } catch {
-        this.replica.setFreshness("verifying");
-      }
-      this.emitSyncMessage(subscription, message, scope);
-      queueMicrotask(() => this.sendSyncOpen(subscription));
+      await this.replica.removeWindow(subscription.key);
+      this.emitReplicaMessage(subscription, message, scope);
+      queueMicrotask(() => this.sendReplicaOpen(subscription));
       return;
     }
-    if (message.type === "sync.syncing") {
-      subscription.verificationGeneration += 1;
+    if (message.type === "replica.syncing") {
       subscription.isUpToDate = false;
-      this.emitSyncMessage(subscription, message, scope);
+      this.emitReplicaMessage(subscription, message, scope);
       return;
     }
-    if (message.type === "sync.needHashes") {
-      subscription.verificationGeneration += 1;
+    if (message.type === "replica.needHashes") {
       subscription.isUpToDate = false;
       subscription.opening = false;
-      subscription.forceFullIntegrity = true;
-      this.emitSyncMessage(subscription, {
-        type: "sync.syncing",
-        id: subscription.id,
-        path: subscription.path,
-        reason: "integrity-reconciling",
-      }, scope);
-      queueMicrotask(() => this.sendSyncOpen(subscription));
+      this.emitReplicaMessage(subscription, { type: "replica.syncing", id: subscription.id, path: subscription.path, reason: "integrity-reconciling" }, scope);
+      queueMicrotask(() => this.sendReplicaOpen(subscription));
       return;
     }
-    if (message.type === "sync.ready") {
-      if (!subscription.cursor || (
-        message.cursor.epoch !== subscription.cursor.epoch
-        || message.cursor.revision < subscription.cursor.revision
-        || syncCursorIsStale(subscription, message.cursor)
-      )) return;
-      const generation = ++subscription.verificationGeneration;
-      if (!message.digest && this.serverCapabilities.syncIntegrity === 1) {
-        this.handleSyncMessage(subscription, {
-          type: "sync.reset",
-          id: subscription.id,
-          path: subscription.path,
-          reason: "integrity-missing",
-        }, scope);
+    if (message.type === "replica.ready") {
+      const window = current();
+      if (!window?.cursor || replicaCursorIsStale(subscription, message.cursor) || message.cursor.revision < window.cursor.revision) return;
+      const rows = this.replica.windowRows(subscription.key);
+      const hashes = await replicaRowsHashes(rows, window.key);
+      const digest = await replicaHashesDigest(hashes);
+      if (!message.digest || message.digest !== digest) {
+        await this.handleReplicaMessage(subscription, { type: "replica.reset", id: subscription.id, path: subscription.path, reason: "integrity-mismatch" }, scope);
         return;
       }
-      if (
-        !subscription.forceFullIntegrity
-        && subscription.integrityRows === subscription.rows
-        && subscription.integrityDigest
-        && subscription.integrityEpoch === subscription.cursor.epoch
-      ) {
-        if (message.digest && subscription.integrityDigest !== message.digest) {
-          // Re-hash once before treating the server/memo disagreement as an
-          // integrity failure. The memo may be stale even though row identity
-          // says the collection has not changed.
-        } else {
-          await this.acceptSyncReady(subscription, message, subscription.integrityDigest, scope);
-          return;
-        }
-      }
-      void syncRowsHashes(subscription.rows, subscription.keyField).then((hashes) => (
-        syncHashesDigest(hashes).then((digest) => ({ digest, hashes }))
-      )).then(async ({ digest, hashes }) => {
-          if (
-            generation !== subscription.verificationGeneration
-            || this.syncSubscriptions.get(subscription.key) !== subscription
-          ) return;
-          if (message.digest && digest !== message.digest) {
-            this.handleSyncMessage(subscription, {
-              type: "sync.reset",
-              id: subscription.id,
-              path: subscription.path,
-              reason: "integrity-mismatch",
-            }, scope);
-            return;
-          }
-          subscription.hashes = hashes;
-          subscription.integrityDigest = digest;
-          subscription.integrityRows = subscription.rows;
-          await this.acceptSyncReady(subscription, message, digest, scope);
-        }).catch(() => {
-          if (generation !== subscription.verificationGeneration) return;
-          this.handleSyncMessage(subscription, {
-            type: "sync.reset",
-            id: subscription.id,
-            path: subscription.path,
-            reason: "integrity-mismatch",
-          }, scope);
-        });
+      await this.acceptReplicaReady(subscription, message, scope);
       return;
     }
-    if (message.type === "sync.error") {
-      subscription.verificationGeneration += 1;
+    if (message.type === "replica.error") {
       subscription.isUpToDate = false;
       subscription.opening = false;
-      this.scheduleSyncRetry(subscription);
+      this.scheduleReplicaRetry(subscription);
     }
-    this.emitSyncMessage(subscription, message, scope);
+    this.emitReplicaMessage(subscription, message, scope);
   }
 
-  private async acceptSyncReady(
-    subscription: SyncSubscription,
-    message: SyncReadyMessage,
-    verifiedDigest = message.digest,
+  private async acceptReplicaReady(
+    subscription: ReplicaSubscription,
+    message: ReplicaReadyMessage,
     scope = this.replicaScope,
   ) {
-    this.clearSyncRetry(subscription, true);
+    this.clearReplicaRetry(subscription, true);
     subscription.isUpToDate = true;
     subscription.opening = false;
-    subscription.cursor = message.cursor;
-    raiseSyncCursorFloor(subscription, message.cursor);
-    subscription.mode = message.mode ?? subscription.mode;
-    subscription.truncated = message.truncated;
-    subscription.integrityDigest = verifiedDigest;
-    subscription.integrityRows = subscription.rows;
-    subscription.integrityEpoch = message.cursor.epoch;
-    subscription.forceFullIntegrity = false;
-    try {
-      await this.materializeReplicaCollection(subscription, "server", scope);
-    } catch {
-      this.replica.setFreshness("verifying");
+    raiseReplicaCursorFloor(subscription, message.cursor);
+    const window = this.replica.getWindow(subscription.key);
+    if (window) {
+      await this.replica.replaceWindow({
+        ...window, rows: this.replica.windowRows(subscription.key), source: "server", cursor: message.cursor,
+        mode: message.mode ?? window.mode, truncated: message.truncated ?? window.truncated,
+        hashes: window.hashes,
+      });
     }
-    this.persistSyncSnapshot(subscription);
-    // Every emitted ready frame is self-describing: when a legacy runtime
-    // omitted the digest, the locally verified one is stamped in so consumers
-    // observe one contract regardless of the peer's protocol generation.
-    this.emitSyncMessage(
-      subscription,
-      message.digest === verifiedDigest ? message : { ...message, digest: verifiedDigest },
-      scope,
-    );
+    this.emitReplicaMessage(subscription, message, scope);
   }
 
-  private materializeReplicaCollection(subscription: SyncSubscription, source: "server" | "cache", scope = this.replicaScope): Promise<void> {
-    const rows = subscription.rows.filter((row): row is ReplicaRow => (
-      row !== null && typeof row === "object" && !Array.isArray(row)
-    ));
-    return this.replica.materializeWindow({
-      signature: subscription.key,
-      entity: subscription.entity,
-      key: subscription.keyField,
-      rows,
-      completeness: subscription.truncated ? "partial" : "complete",
-      source,
-      cursor: subscription.cursor,
-      scope,
-    });
-  }
-
-  private handleSyncWatermark(revision: number) {
+  private handleReplicaWatermark(revision: number) {
     if (!Number.isSafeInteger(revision) || revision < 0) return;
-    for (const subscription of this.syncSubscriptions.values()) {
-      const cursor = subscription.cursor;
+    for (const subscription of this.replicaSubscriptions.values()) {
+      const cursor = this.replica.getWindow(subscription.key)?.cursor;
       if (
         !cursor
         || cursor.revision >= revision
         || !subscription.isUpToDate
         || subscription.opening
-        || subscription.forceFullIntegrity
-        || subscription.integrityRows !== subscription.rows
-        || !subscription.integrityDigest
-        || subscription.integrityEpoch !== cursor.epoch
+        || !this.replica.getWindow(subscription.key)?.hashes
       ) continue;
-      subscription.cursor = { ...cursor, revision };
-      raiseSyncCursorFloor(subscription, subscription.cursor);
-      this.scheduleSyncWatermarkPersistence(subscription);
+      const window = this.replica.getWindow(subscription.key);
+      if (window) void this.replica.replaceWindow({ ...window, rows: this.replica.windowRows(subscription.key), cursor: { ...cursor, revision } });
     }
   }
 
-  private scheduleSyncWatermarkPersistence(subscription: SyncSubscription) {
-    if (subscription.watermarkPersistTimer) return;
-    subscription.watermarkPersistTimer = setTimeout(() => {
-      subscription.watermarkPersistTimer = undefined;
-      if (this.syncSubscriptions.get(subscription.key) !== subscription) return;
-      this.persistSyncSnapshot(subscription, true);
-    }, syncWatermarkPersistDelayMs);
-  }
-
-  private emitSyncMessage(subscription: SyncSubscription, message: SyncMessage, scope = this.replicaScope) {
+  private emitReplicaMessage(subscription: ReplicaSubscription, message: ReplicaMessage, scope = this.replicaScope) {
     if (scope !== this.replicaScope || subscription.scope !== scope) return;
-    const outgoing = this.materializeSyncMessage(subscription, message);
+    const outgoing = this.materializeReplicaMessage(subscription, message);
     for (const listener of Array.from(subscription.listeners)) listener(outgoing);
-    if (message.type === "sync.snapshot") {
-      const settled = this.overlay.acknowledgeMatching(
-        subscription.key,
-        subscription.entity,
-        message.result as unknown as readonly Row[],
-        message.key,
-      );
-      for (const reducerId of settled) void this.ackOptimisticReducer(reducerId);
-    }
   }
 
-  private materializeSyncMessage(subscription: SyncSubscription, message: SyncMessage): SyncMessage {
-    if (message.type !== "sync.snapshot") return message;
+  private materializeReplicaMessage(subscription: ReplicaSubscription, message: ReplicaMessage): ReplicaMessage {
+    if (message.type !== "replica.snapshot") return message;
     return {
       ...message,
-      result: this.overlay.apply(
-        subscription.key,
-        subscription.entity,
-        message.result as unknown as readonly Row[],
-        message.key,
-      ) as unknown as JsonValue[],
+      result: this.replica.windowRows(subscription.key) as unknown as JsonValue[],
     };
   }
 
   private materializeQueryMessage(subscription: QuerySubscription, message: ServerMessage): ServerMessage {
-    const projection = subscription.projection;
-    if (!projection || message.type !== "query.result") return message;
-    const projected = rowsAtPath(message.result, projection.resultPath);
-    if (!projected) return message;
-    const materialized = this.overlay.apply(
-      subscription.key,
-      projection.entity,
-      projected.rows as unknown as readonly Row[],
-      projection.key,
-    ) as unknown as JsonValue[];
-    return {
-      ...message,
-      result: replaceRowsAtPath(message.result, projection.resultPath, materialized, projected.scalar),
-    };
+    return message;
   }
 
   private emitOptimisticEntity(entity: string) {
-    for (const subscription of this.syncSubscriptions.values()) {
-      if (subscription.entity !== entity) continue;
-      this.overlay.expectSource(subscription.key, entity);
-      if (subscription.lastMessage?.type !== "sync.snapshot") continue;
-      this.emitSyncMessage(subscription, subscription.lastMessage);
-    }
-    for (const subscription of this.querySubscriptions.values()) {
-      if (subscription.projection?.entity !== entity) continue;
-      this.overlay.expectSource(subscription.key, entity);
-      if (subscription.lastMessage?.type !== "query.result") continue;
-      const outgoing = this.materializeQueryMessage(subscription, subscription.lastMessage);
-      for (const listener of Array.from(subscription.listeners)) listener(outgoing);
-      this.acknowledgeOptimisticQuerySnapshot(subscription, subscription.lastMessage.result);
-    }
+    void entity;
   }
 
   private acknowledgeOptimisticSource(source: string, originCommandIds: readonly string[] | undefined) {
-    const settled = this.overlay.acknowledge(source, originCommandIds);
-    for (const reducerId of settled) void this.ackOptimisticReducer(reducerId);
+    void source;
+    for (const commandId of originCommandIds ?? []) this.replica.acknowledgeCommand(commandId);
   }
 
   private acknowledgeOptimisticQuerySnapshot(subscription: QuerySubscription, result: JsonValue) {
-    const projection = subscription.projection;
-    if (!projection) return;
-    const projected = rowsAtPath(result, projection.resultPath);
-    if (!projected) return;
-    const settled = this.overlay.acknowledgeMatching(
-      subscription.key,
-      projection.entity,
-      projected.rows as unknown as readonly Row[],
-      projection.key,
-    );
-    for (const reducerId of settled) void this.ackOptimisticReducer(reducerId);
+    void subscription;
+    void result;
   }
 
-  private markSyncSubscriptionsOutOfDate() {
-    for (const subscription of this.syncSubscriptions.values()) {
+  private markReplicaSubscriptionsOutOfDate() {
+    for (const subscription of this.replicaSubscriptions.values()) {
       const wasUpToDate = subscription.isUpToDate;
       subscription.verificationGeneration += 1;
       subscription.isUpToDate = false;
       if (!wasUpToDate) continue;
-      this.emitSyncMessage(subscription, {
-        type: "sync.syncing",
+      this.emitReplicaMessage(subscription, {
+        type: "replica.syncing",
         id: subscription.id,
         path: subscription.path,
         reason: "disconnected",
@@ -1815,283 +1486,93 @@ export class GonvexClient {
     }
   }
 
-  private startSync(subscription: SyncSubscription) {
-    const directive = this.queryCacheDirective;
-    const store = this.syncStore;
-    if (!directive) return;
-    if (!store) {
-      this.sendSyncOpen(subscription);
-      return;
+  private startReplica(subscription: ReplicaSubscription) {
+    const cached = this.replica.getWindow(subscription.key);
+    if (cached) {
+      subscription.isUpToDate = false;
+      const message: ReplicaMessage = {
+        type: "replica.snapshot", id: subscription.id, path: subscription.path,
+        result: this.replica.windowRows(subscription.key), cursor: cached.cursor ?? { epoch: "cache", revision: 0 },
+        key: cached.key, mode: cached.mode, orderBy: cached.orderBy,
+        orderDirection: cached.orderDirection, maxRows: cached.maxRows, maxBytes: cached.maxBytes,
+      };
+      subscription.lastMessage = message;
+      this.emitReplicaMessage(subscription, message, this.replicaScope);
     }
-    const scope = syncPersistenceScope(directive);
-    const replicaScope = this.replicaScope;
-    const generation = this.syncScopeGeneration;
-    if (subscription.cacheReadGeneration === generation) return;
-    subscription.cacheReadGeneration = generation;
-    // The warm read is an optimization with a deadline. If IndexedDB never
-    // answers (a wedged Chrome origin store emits no event at all, so no
-    // rejection ever fires), open cold after the timeout: a full snapshot
-    // beats a permanently empty screen, and a late read result is discarded.
-    let cacheReadSettled = false;
-    const cacheReadTimer = setTimeout(() => {
-      if (cacheReadSettled) return;
-      cacheReadSettled = true;
-      if (
-        this.syncSubscriptions.get(subscription.key) !== subscription
-        || this.syncScopeGeneration !== generation
-        || this.replicaScope !== replicaScope
-      ) return;
-      this.sendSyncOpen(subscription);
-    }, syncStoreReadTimeoutMs);
-    void store.load(scope, subscription.path, subscription.args).then(async (cached) => {
-      clearTimeout(cacheReadTimer);
-      if (cacheReadSettled) return;
-      cacheReadSettled = true;
-      const currentDirective = this.queryCacheDirective;
-      if (
-        this.syncSubscriptions.get(subscription.key) !== subscription
-        || this.syncScopeGeneration !== generation
-        || this.replicaScope !== replicaScope
-        || !currentDirective
-        || syncPersistenceScope(currentDirective) !== scope
-      ) return;
-      if (cached) {
-        subscription.isUpToDate = false;
-        subscription.rows = cached.rows;
-        // These rows came out of the store, so the store already holds them:
-        // the ready that follows this resume must not rewrite them.
-        subscription.persistedRows = cached.rows;
-        subscription.cursor = cached.cursor;
-        raiseSyncCursorFloor(subscription, cached.cursor);
-        subscription.keyField = cached.keyField;
-        subscription.mode = cached.mode;
-        subscription.truncated = cached.truncated;
-        subscription.orderBy = cached.orderBy;
-        subscription.orderDirection = cached.orderDirection;
-        subscription.maxRows = cached.maxRows;
-        subscription.maxBytes = cached.maxBytes;
-        // Stored hash metadata is never trusted. sendSyncOpen hashes these
-        // actual materialized rows before advertising a cursor, which allows a
-        // corrupt row to be repaired by delta without a full cache reset.
-        subscription.hashes = {};
-        subscription.integrityDigest = undefined;
-        subscription.integrityRows = undefined;
-        subscription.integrityEpoch = undefined;
-        const message: SyncMessage = {
-          type: "sync.snapshot",
-          id: subscription.id,
-          path: subscription.path,
-          result: cached.rows,
-          cursor: cached.cursor,
-          key: cached.keyField,
-          mode: cached.mode,
-          orderBy: cached.orderBy,
-          orderDirection: cached.orderDirection,
-          maxRows: cached.maxRows,
-          maxBytes: cached.maxBytes,
-        };
-        subscription.lastMessage = message;
-        try {
-          await this.materializeReplicaCollection(subscription, "cache", replicaScope);
-        } catch {
-          this.replica.setFreshness("verifying");
-        }
-        this.emitSyncMessage(subscription, message, replicaScope);
-      }
-      this.sendSyncOpen(subscription);
-    }).catch(() => {
-      clearTimeout(cacheReadTimer);
-      if (cacheReadSettled) return;
-      cacheReadSettled = true;
-      this.sendSyncOpen(subscription);
-    });
+    this.sendReplicaOpen(subscription);
   }
 
-  private sendSyncOpen(subscription: SyncSubscription) {
+  private sendReplicaOpen(subscription: ReplicaSubscription) {
     if (subscription.listeners.size === 0 || subscription.opening) return;
     const requestScope = this.replicaScope;
     subscription.scope = requestScope;
-    if (subscription.cursor && subscription.integrityRows !== subscription.rows) {
-      subscription.opening = true;
-      const rows = subscription.rows;
-      const keyField = subscription.keyField;
-      const socketGeneration = this.socketGeneration;
-      void syncRowsHashes(rows, keyField).then((hashes) => (
-        syncHashesDigest(hashes).then((digest) => ({ hashes, digest }))
-      )).then(({ hashes, digest }) => {
-        if (
-          this.socketGeneration !== socketGeneration
-          || this.syncSubscriptions.get(subscription.key) !== subscription
-          || subscription.listeners.size === 0
-          || subscription.rows !== rows
-          || subscription.keyField !== keyField
-          || subscription.scope !== requestScope
-        ) return;
-        subscription.hashes = hashes;
-        subscription.integrityDigest = digest;
-        subscription.integrityRows = rows;
-        subscription.integrityEpoch = subscription.cursor?.epoch;
-        subscription.opening = false;
-        this.sendSyncOpen(subscription);
-      }).catch(() => {
-        if (
-          this.socketGeneration !== socketGeneration
-          || this.syncSubscriptions.get(subscription.key) !== subscription
-          || subscription.rows !== rows
-        ) return;
-        subscription.opening = false;
-        this.handleSyncMessage(subscription, {
-          type: "sync.reset",
-          id: subscription.id,
-          path: subscription.path,
-          reason: "integrity-mismatch",
-        }, requestScope);
-      });
-      return;
-    }
     subscription.opening = true;
     subscription.socketGeneration = this.socketGeneration;
-    const open = this.syncOpenRequest(subscription);
-    if (this.serverCapabilities.syncBatch === 1) {
-      this.pendingSyncOpens.add(subscription);
-      if (!this.syncOpenFlushTimer) {
-        this.syncOpenFlushTimer = setTimeout(() => this.flushSyncOpens(), 0);
+    const open = this.replicaOpenRequest(subscription);
+    if (this.serverCapabilities.replicaBatch === 1) {
+      this.pendingReplicaOpens.add(subscription);
+      if (!this.replicaOpenFlushTimer) {
+        this.replicaOpenFlushTimer = setTimeout(() => this.flushReplicaOpens(), 0);
       }
       return;
     }
-    this.send({ type: "sync.open", ...open });
+    this.send({ type: "replica.open", ...open });
   }
 
-  private syncOpenRequest(subscription: SyncSubscription): SyncOpenRequest {
-    const fullIntegrity = subscription.cursor !== undefined && (
-      subscription.forceFullIntegrity
-      || !subscription.integrityDigest
-      || subscription.rows.length <= compactSyncIntegrityThreshold
-    );
-    const keys = fullIntegrity
-      ? subscription.rows.map((row) => syncRowKey(row, subscription.keyField)).filter(Boolean)
-      : undefined;
+  private replicaOpenRequest(subscription: ReplicaSubscription): ReplicaOpenRequest {
+    const window = this.replica.getWindow(subscription.key);
+    const cursor = window?.cursor;
+    const rows = this.replica.windowRows(subscription.key);
+    const fullIntegrity = cursor !== undefined;
+    const keys = fullIntegrity ? rows.map((row) => replicaRowKey(row, window?.key ?? "id")).filter(Boolean) : undefined;
     return {
       id: subscription.id,
       path: subscription.path,
       args: subscription.args,
-      cursor: subscription.cursor,
+      cursor,
       keys,
-      hashes: fullIntegrity && Object.keys(subscription.hashes).length > 0
-        ? subscription.hashes
-        : undefined,
-      digest: subscription.cursor ? subscription.integrityDigest : undefined,
+      hashes: undefined,
+      digest: undefined,
       fullIntegrity: fullIntegrity || undefined,
     };
   }
 
-  private flushSyncOpens() {
-    this.syncOpenFlushTimer = undefined;
-    const subscriptions = Array.from(this.pendingSyncOpens);
-    this.pendingSyncOpens.clear();
+  private flushReplicaOpens() {
+    this.replicaOpenFlushTimer = undefined;
+    const subscriptions = Array.from(this.pendingReplicaOpens);
+    this.pendingReplicaOpens.clear();
     const opens = subscriptions
       .filter((subscription) => (
         subscription.opening
         && subscription.listeners.size > 0
-        && this.syncSubscriptions.get(subscription.key) === subscription
+        && this.replicaSubscriptions.get(subscription.key) === subscription
       ))
-      .map((subscription) => this.syncOpenRequest(subscription));
-    for (let offset = 0; offset < opens.length; offset += maxSyncBatchOpens) {
-      this.send({ type: "sync.openMany", opens: opens.slice(offset, offset + maxSyncBatchOpens) });
+      .map((subscription) => this.replicaOpenRequest(subscription));
+    for (let offset = 0; offset < opens.length; offset += maxReplicaBatchOpens) {
+      this.send({ type: "replica.openMany", opens: opens.slice(offset, offset + maxReplicaBatchOpens) });
     }
   }
 
-  private unsubscribeSyncListener(key: string, listener: SyncSubscriptionHandler) {
-    const subscription = this.syncSubscriptions.get(key);
+  private unsubscribeReplicaListener(key: string, listener: ReplicaSubscriptionHandler) {
+    const subscription = this.replicaSubscriptions.get(key);
     if (!subscription) return;
     subscription.listeners.delete(listener);
     if (subscription.listeners.size > 0 || subscription.unsubscribeTimer) return;
     subscription.unsubscribeTimer = setTimeout(() => {
-      const latest = this.syncSubscriptions.get(key);
+      const latest = this.replicaSubscriptions.get(key);
       if (!latest || latest.listeners.size > 0) return;
       latest.unsubscribeTimer = undefined;
-      this.clearSyncRetry(latest);
-      this.pendingSyncOpens.delete(latest);
-      this.syncSubscriptions.delete(key);
-      for (const reducerId of this.overlay.removeSource(key)) void this.ackOptimisticReducer(reducerId);
+      this.clearReplicaRetry(latest);
+      this.pendingReplicaOpens.delete(latest);
+      this.replicaSubscriptions.delete(key);
       this.handlers.delete(latest.id);
-      this.send({ type: "sync.close", id: latest.id });
-    }, this.syncSubscriptionRetentionMs);
-  }
-
-  private persistSyncSnapshot(subscription: SyncSubscription, fromWatermark = false) {
-    if (!fromWatermark && subscription.watermarkPersistTimer) {
-      clearTimeout(subscription.watermarkPersistTimer);
-      subscription.watermarkPersistTimer = undefined;
-    }
-    const directive = this.queryCacheDirective;
-    const store = this.syncStore;
-    if (!directive || !store || !subscription.cursor) return;
-    const scope = syncPersistenceScope(directive);
-    // sync.ready arrives for every collection on every reload, almost always
-    // with the rows the store already holds. Persist the advancing cursor but
-    // leave the rows alone unless they actually changed.
-    const rowsUnchanged = subscription.persistedRows === subscription.rows;
-    const value = {
-      rows: subscription.rows,
-      cursor: subscription.cursor,
-      keyField: subscription.keyField,
-      mode: subscription.mode,
-      truncated: subscription.truncated,
-      orderBy: subscription.orderBy,
-      orderDirection: subscription.orderDirection,
-      maxRows: subscription.maxRows,
-      maxBytes: subscription.maxBytes,
-      hashes: { ...subscription.hashes },
-      rowsUnchanged,
-    };
-    subscription.persistedRows = subscription.rows;
-    this.enqueueSyncPersistence(
-      subscription,
-      scope,
-      () => store.replace(scope, subscription.path, subscription.args, value),
-    );
-  }
-
-  private persistSyncDelta(subscription: SyncSubscription, upserts: JsonValue[], deleted: string[]) {
-    if (subscription.watermarkPersistTimer) {
-      clearTimeout(subscription.watermarkPersistTimer);
-      subscription.watermarkPersistTimer = undefined;
-    }
-    const directive = this.queryCacheDirective;
-    const store = this.syncStore;
-    if (!directive || !store || !subscription.cursor) return;
-    const scope = syncPersistenceScope(directive);
-    const value = {
-      cursor: subscription.cursor,
-      keyField: subscription.keyField,
-      mode: subscription.mode,
-      truncated: subscription.truncated,
-      orderBy: subscription.orderBy,
-      orderDirection: subscription.orderDirection,
-      upserts,
-      deleted,
-      maxRows: subscription.maxRows,
-      maxBytes: subscription.maxBytes,
-      hashes: { ...subscription.hashes },
-    };
-    // The delta brings the stored rows to exactly these in-memory rows, so the
-    // sync.ready that closes this batch must not rewrite the whole collection.
-    subscription.persistedRows = subscription.rows;
-    this.enqueueSyncPersistence(
-      subscription,
-      scope,
-      () => store.applyDelta(scope, subscription.path, subscription.args, value),
-    );
+      this.send({ type: "replica.close", id: latest.id });
+    }, this.replicaSubscriptionRetentionMs);
   }
 
   private activateOutboxScope(): Promise<void> {
     const scope = reducerOutboxScope(this.url, this.auth, this.outboxEphemeralScope);
     if (scope === this.outboxScope) {
-      if (this.replicaScope !== scope) {
-        this.replicaScope = scope;
-        this.replicaReady = this.replica.activateScope(scope, true);
-      }
       return this.outboxReady ?? this.replicaReady;
     }
 
@@ -2100,18 +1581,46 @@ export class GonvexClient {
     // Pending state from the previous authenticated identity must disappear
     // from every live projection immediately. Its durable rows remain scoped
     // in IndexedDB and can be resumed only if that identity returns.
-    for (const reducerId of this.optimisticReducerIds) this.overlay.reject(reducerId);
+    for (const reducerId of this.optimisticReducerIds) this.replica.rejectCommand(reducerId);
     this.optimisticReducerIds.clear();
     this.optimisticOutboxEntryIds.clear();
     if (isEphemeralOutboxScope(previousScope)) {
       void this.reducerOutbox.clear(previousScope);
     }
     this.outboxScope = scope;
-    this.replicaScope = scope;
-    this.replicaReady = this.replica.activateScope(scope);
-    const ready = this.restoreOutbox(scope, generation);
+    const ready = this.hasAuthoritativeReplicaScope
+      ? this.restoreOutbox(scope, generation)
+      : Promise.resolve();
     this.outboxReady = ready;
     return ready;
+  }
+
+  private async activateReplicaDirective(directive: ReplicaDirective): Promise<void> {
+    if (
+      directive.protocolVersion !== 1
+      || !directive.visibilityScope.trim()
+      || !directive.epoch.trim()
+    ) {
+      this.quarantineReplicaScope();
+      throw new GonvexClientError("Runtime returned an invalid Local Replica scope", { code: "server", operation: "query" });
+    }
+    const scope = directive.visibilityScope.trim();
+    if (this.hasAuthoritativeReplicaScope && this.replicaScope === scope) {
+      await this.replicaReady;
+      return;
+    }
+    for (const reducerId of this.optimisticReducerIds) this.replica.rejectCommand(reducerId);
+    this.optimisticReducerIds.clear();
+    this.optimisticOutboxEntryIds.clear();
+    this.resetReplicaScopeState();
+    this.replicaScope = scope;
+    this.hasAuthoritativeReplicaScope = true;
+    this.replicaReady = this.replica.activateScope(scope);
+    this.rotateSubscriptionScopes();
+    await this.replicaReady;
+    const generation = this.outboxScopeGeneration;
+    this.outboxReady = this.restoreOutbox(this.outboxScope, generation);
+    await this.outboxReady;
   }
 
   private quarantineReplicaScope() {
@@ -2119,8 +1628,24 @@ export class GonvexClient {
     // login, but make every synchronous selector fail closed immediately.
     // The random suffix prevents a denied scope from ever restoring rows.
     const scope = ["auth-denied", this.url, this.outboxEphemeralScope, randomID()].join("\u0000");
+    for (const reducerId of this.optimisticReducerIds) this.replica.rejectCommand(reducerId);
+    this.optimisticReducerIds.clear();
+    this.optimisticOutboxEntryIds.clear();
+    this.resetReplicaScopeState();
     this.replicaScope = scope;
+    this.hasAuthoritativeReplicaScope = false;
     this.replicaReady = this.replica.activateScope(scope, true);
+    this.rotateSubscriptionScopes();
+  }
+
+  private rejectMissingReplicaDirective() {
+    this.quarantineReplicaScope();
+    this.notifyAuthError("Runtime did not provide an authoritative Local Replica visibility scope");
+  }
+
+  private rejectReplicaDirective(error: unknown) {
+    this.quarantineReplicaScope();
+    this.notifyAuthError(error instanceof Error ? error.message : "Runtime returned an invalid Local Replica scope");
   }
 
   private async restoreOutbox(scope: string, generation: number) {
@@ -2156,19 +1681,15 @@ export class GonvexClient {
   private addOptimisticReducer(reducerId: string, patches: OptimisticPatch[], accepted = false) {
     if (patches.length === 0 || this.optimisticReducerIds.has(reducerId)) return;
     this.optimisticReducerIds.add(reducerId);
-    this.overlay.add(reducerId, patches, { accepted });
     this.replica.applyOptimistic(reducerId, patches);
   }
 
   private async settleOptimisticReducer(reducerId: string) {
-    await Promise.all(
-      this.overlay.accept(reducerId).map((settledId) => this.ackOptimisticReducer(settledId)),
-    );
+    await this.ackOptimisticReducer(reducerId);
   }
 
   private async rejectOptimisticReducer(reducerId: string, knownEntryId?: number) {
     this.optimisticReducerIds.delete(reducerId);
-    this.overlay.reject(reducerId);
     this.replica.rejectCommand(reducerId);
     await this.ackOptimisticReducer(reducerId, knownEntryId);
   }
@@ -2240,15 +1761,15 @@ export class GonvexClient {
     }, delay);
   }
 
-  reducer<T = JsonValue>(
-    ref: FunctionReference,
-    args: JsonValue,
+  reducer<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(
+    ref: FunctionReference<Args, T>,
+    args: Args,
     options: CallOptions & { offline: "queue" },
   ): Promise<T | QueuedReducerOutcome>;
-  reducer<T = JsonValue>(ref: FunctionReference, args?: JsonValue, options?: CallOptions): Promise<T>;
-  reducer<T = JsonValue>(
-    ref: FunctionReference,
-    args: JsonValue = {},
+  reducer<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args?: Args, options?: CallOptions): Promise<T>;
+  reducer<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(
+    ref: FunctionReference<Args, T>,
+    args: Args = {} as Args,
     options: CallOptions = {},
   ): Promise<T | QueuedReducerOutcome> {
     if (options.offline === "queue" && ref.offline?.mode !== "allowed") {
@@ -2263,7 +1784,7 @@ export class GonvexClient {
     };
     const reducerId = randomID();
     const patches = effectiveOptions.optimistic
-      ?? optimisticPatchesFromReference(ref.optimistic?.transaction ?? ref.optimistic?.reducer, args);
+      ?? optimisticPatchesFromReference(ref.optimistic?.transaction, args);
     if (patches.length === 0 && effectiveOptions.offline !== "queue") {
       return this.call<T>(
         "reducer",
@@ -2348,11 +1869,11 @@ export class GonvexClient {
     }
   }
 
-  action<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}, options: CallOptions = {}): Promise<T> {
+  action<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options: CallOptions = {}): Promise<T> {
     return this.call<T>("action", ref, args, options.timeoutMs ?? this.timeouts.actionTimeoutMs);
   }
 
-  query<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}, options: CallOptions = {}): Promise<T> {
+  query<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options: CallOptions = {}): Promise<T> {
     this.connect();
     const id = randomID();
     const timeoutMs = options.timeoutMs ?? this.timeouts.queryTimeoutMs;
@@ -2411,7 +1932,7 @@ export class GonvexClient {
    * e.g. after a `query.error` or when a subscriber gave up waiting. No-op if
    * nothing is subscribed to this query.
    */
-  retryQuery(ref: FunctionReference, args: JsonValue = {}) {
+  retryLiveQuery(ref: FunctionReference, args: JsonValue = {}) {
     const subscription = this.querySubscriptions.get(querySubscriptionKey(ref, args));
     if (!subscription || subscription.listeners.size === 0) return;
     subscription.serverSettled = false;
@@ -2428,14 +1949,14 @@ export class GonvexClient {
    * lacks batching or when a call needs generated/explicit optimism or durable
    * offline queuing, so there is never a second reducer-state implementation.
    */
-  async reducerMany<T = JsonValue>(
+  async reducerMany<T extends JsonValue = JsonValue>(
     calls: Array<{ ref: FunctionReference; args?: JsonValue }>,
     options: CallOptions = {},
-  ): Promise<Array<{ status: "ok"; result: T } | { status: "error"; error: GonvexClientError }>> {
+  ): Promise<Array<{ status: "ok"; result: T | QueuedReducerOutcome } | { status: "error"; error: GonvexClientError }>> {
     if (calls.length === 0) return [];
     this.connect();
     const timeoutMs = options.timeoutMs ?? this.timeouts.reducerTimeoutMs;
-    const settle = (promise: Promise<T>, path: string) => promise
+    const settle = (promise: Promise<T | QueuedReducerOutcome>, path: string) => promise
       .then((result) => ({ status: "ok" as const, result }))
       .catch((error: unknown) => ({
         status: "error" as const,
@@ -2445,9 +1966,9 @@ export class GonvexClient {
       }));
     const requiresStandardReducerPath = options.offline === "queue"
       || options.optimistic !== undefined
-      || calls.some((call) => call.ref.optimistic?.reducer !== undefined || call.ref.optimistic?.transaction !== undefined);
+      || calls.some((call) => call.ref.optimistic?.transaction !== undefined);
     if (this.serverCapabilities.reducerBatch !== 1 || requiresStandardReducerPath) {
-      const outcomes: Array<{ status: "ok"; result: T } | { status: "error"; error: GonvexClientError }> = [];
+      const outcomes: Array<{ status: "ok"; result: T | QueuedReducerOutcome } | { status: "error"; error: GonvexClientError }> = [];
       for (const call of calls) {
         outcomes.push(await settle(this.reducer<T>(call.ref, call.args ?? {}, options), call.ref.path));
       }
@@ -2457,10 +1978,10 @@ export class GonvexClient {
       const entry = this.registerCall<T>("reducer", call.ref, call.args ?? {}, timeoutMs);
       return { ...entry, path: call.ref.path, args: call.args ?? {} };
     });
-    for (let offset = 0; offset < registered.length; offset += maxSyncBatchOpens) {
+    for (let offset = 0; offset < registered.length; offset += maxReplicaBatchOpens) {
       this.send({
         type: "reducer.callMany",
-        calls: registered.slice(offset, offset + maxSyncBatchOpens).map((entry) => ({
+        calls: registered.slice(offset, offset + maxReplicaBatchOpens).map((entry) => ({
           id: entry.id,
           path: entry.path,
           args: entry.args,
@@ -2483,7 +2004,6 @@ export class GonvexClient {
     this.connect();
     const entry = this.registerCall<T>(kind, ref, args, timeoutMs, id);
     if (kind === "reducer") {
-      try { const w=(globalThis as any); if (w && w.__wsTapLog) w.__wsTapLog.push({ dir:"mut-args", type:"reducer.call", path: ref.path, argTenant: ((args as any)&&(args as any).tenantId)||null, authTenant: (this as any).auth?.tenant||null, authProject:(this as any).auth?.project||null, href: (w.location&&w.location.href)||null }); } catch(e){}
       this.send({
         type: "reducer.call",
         id: entry.id,
@@ -2561,7 +2081,6 @@ export class GonvexClient {
       const latest = this.querySubscriptions.get(key);
       if (!latest || latest.listeners.size > 0) return;
       this.querySubscriptions.delete(key);
-      for (const reducerId of this.overlay.removeSource(key)) void this.ackOptimisticReducer(reducerId);
       this.send({ type: "query.unsubscribe", id: latest.id });
       setTimeout(() => this.handlers.delete(latest.id), 500);
     }, this.querySubscriptionRetentionMs);
@@ -2570,16 +2089,6 @@ export class GonvexClient {
   private sendSubscription(subscription: QuerySubscription) {
     if (subscription.listeners.size === 0) return;
     if (subscription.socketGeneration === this.socketGeneration) return;
-    if (this.queryCache && this.queryCacheWaitForScope) {
-      if (!this.queryCacheDirective) {
-        if (this.queryCacheNegotiatedSocketGeneration !== this.socketGeneration) return;
-      } else if (subscription.cacheReadGeneration !== this.queryCacheGeneration) {
-        this.startQueryCacheRead(subscription);
-        return;
-      } else if (subscription.cacheReadPromise) {
-        return;
-      }
-    }
     subscription.scope = this.replicaScope;
     subscription.socketGeneration = this.socketGeneration;
     // Route reloads register dozens of live queries at once. Collapse the
@@ -2596,7 +2105,7 @@ export class GonvexClient {
       id: subscription.id,
       path: subscription.path,
       args: subscription.args,
-      cacheRevision: subscription.cachedRevision,
+      windowRevision: undefined,
     });
   }
 
@@ -2614,10 +2123,10 @@ export class GonvexClient {
         id: subscription.id,
         path: subscription.path,
         args: subscription.args,
-        cacheRevision: subscription.cachedRevision,
+        windowRevision: undefined,
       }));
-    for (let offset = 0; offset < subscribes.length; offset += maxSyncBatchOpens) {
-      this.send({ type: "query.subscribeMany", subscribes: subscribes.slice(offset, offset + maxSyncBatchOpens) });
+    for (let offset = 0; offset < subscribes.length; offset += maxReplicaBatchOpens) {
+      this.send({ type: "query.subscribeMany", subscribes: subscribes.slice(offset, offset + maxReplicaBatchOpens) });
     }
   }
 
@@ -2628,30 +2137,21 @@ export class GonvexClient {
     }
   }
 
-  private enqueueSyncPersistence(
-    subscription: SyncSubscription,
-    scope: string,
-    operation: () => Promise<void>,
-  ) {
-    const key = `${scope}\u0000${subscription.key}`;
-    const previous = this.syncPersistence.get(key) ?? Promise.resolve();
-    const pending = previous
-      .catch(() => undefined)
-      .then(operation)
-      .catch(() => undefined);
-    this.syncPersistence.set(key, pending);
-    subscription.persistence = pending;
-    void pending.finally(() => {
-      if (this.syncPersistence.get(key) === pending) this.syncPersistence.delete(key);
-    });
+  private resumeReplicaSubscriptions() {
+    for (const subscription of this.replicaSubscriptions.values()) {
+      if (subscription.listeners.size === 0) continue;
+      subscription.opening = false;
+      subscription.socketGeneration = undefined;
+      this.sendReplicaOpen(subscription);
+    }
   }
 
-  private scheduleSyncRetry(subscription: SyncSubscription) {
+  private scheduleReplicaRetry(subscription: ReplicaSubscription) {
     if (
       this.manuallyClosed
       || subscription.retryTimer
       || subscription.listeners.size === 0
-      || this.syncSubscriptions.get(subscription.key) !== subscription
+      || this.replicaSubscriptions.get(subscription.key) !== subscription
     ) return;
     const delay = Math.min(250 * (2 ** subscription.retryAttempt), 5_000);
     subscription.retryAttempt += 1;
@@ -2661,14 +2161,14 @@ export class GonvexClient {
         this.manuallyClosed
         || !this.isWebSocketConnected
         || subscription.listeners.size === 0
-        || this.syncSubscriptions.get(subscription.key) !== subscription
+        || this.replicaSubscriptions.get(subscription.key) !== subscription
       ) return;
       subscription.opening = false;
-      this.sendSyncOpen(subscription);
+      this.sendReplicaOpen(subscription);
     }, delay);
   }
 
-  private clearSyncRetry(subscription: SyncSubscription, resetAttempt = false) {
+  private clearReplicaRetry(subscription: ReplicaSubscription, resetAttempt = false) {
     if (subscription.retryTimer) {
       clearTimeout(subscription.retryTimer);
       subscription.retryTimer = undefined;
@@ -2679,7 +2179,6 @@ export class GonvexClient {
   private requestSubscriptionSnapshot(subscription: QuerySubscription) {
     // Do not advertise the cache revision while recovering. Otherwise the
     // runtime can answer with another progress frame instead of a snapshot.
-    subscription.cachedRevision = undefined;
     subscription.serverSettled = false;
     subscription.socketGeneration = undefined;
     this.sendSubscription(subscription);
@@ -2701,12 +2200,12 @@ export class GonvexClient {
     for (const query of this.oneShotQueries.values()) {
       this.sendOneShotQuery(query);
     }
-    for (const subscription of this.syncSubscriptions.values()) {
+    for (const subscription of this.replicaSubscriptions.values()) {
       if (subscription.listeners.size === 0) continue;
-      this.clearSyncRetry(subscription, true);
+      this.clearReplicaRetry(subscription, true);
       subscription.opening = false;
       subscription.socketGeneration = undefined;
-      this.sendSyncOpen(subscription);
+      this.sendReplicaOpen(subscription);
     }
   }
 
@@ -2723,111 +2222,21 @@ export class GonvexClient {
     }, delay);
   }
 
-  private installQueryCacheDirective(value: QueryCacheDirective | undefined) {
-    if (!validQueryCacheDirective(value)) {
-      if (this.queryCacheDirective) this.resetQueryCacheScope();
-      return;
-    }
-    const previous = this.queryCacheDirective;
-    const syncScopeChanged = previous !== undefined
-      && syncPersistenceScope(previous) !== syncPersistenceScope(value);
-    if (previous?.scope === value.scope && !syncScopeChanged) {
-      this.queryCacheDirective = value;
-      return;
-    }
-    if (previous) {
-      // A deploy rotates the query-result scope (results depend on code), but
-      // sync collections are keyed by visibility and survive it: their rows,
-      // cursors, and in-flight warm reads stay valid and are verified by the
-      // server's reconcile on the next open.
-      this.resetQueryResultCacheState();
-      if (syncScopeChanged) this.resetSyncCacheState();
-    }
-    this.queryCacheDirective = value;
-    const identity = authIdentityKey(this.auth);
-    if (identity) void this.syncStore?.saveDirective(identity, value).catch(() => undefined);
-    for (const subscription of this.querySubscriptions.values()) {
-      this.startQueryCacheRead(subscription);
-    }
-    for (const subscription of this.syncSubscriptions.values()) {
-      this.startSync(subscription);
-    }
-  }
-
-  private recoverWarmSyncDirective() {
-    const store = this.syncStore;
-    const identity = authIdentityKey(this.auth);
-    const generation = ++this.syncIdentityGeneration;
-    if (!store || !identity) return;
-    // Same deadline as the warm collection reads: a hung IndexedDB must not
-    // stall directive recovery — the server's auth.result supplies it anyway.
-    const abandonTimer = setTimeout(() => {
-      // Only invalidate this recovery — a newer setAuth may already own the
-      // current generation.
-      if (generation === this.syncIdentityGeneration) this.syncIdentityGeneration += 1;
-    }, syncStoreReadTimeoutMs);
-    void store.loadDirective(identity).then((directive) => {
-      clearTimeout(abandonTimer);
-      if (
-        generation !== this.syncIdentityGeneration
-        || authIdentityKey(this.auth) !== identity
-        || this.queryCacheDirective
-        || !validQueryCacheDirective(directive)
-      ) return;
-      this.installQueryCacheDirective(directive);
-    }).catch(() => {
-      clearTimeout(abandonTimer);
-    });
-  }
-
-  private resetQueryCacheScope() {
-    const hadScope = this.queryCacheDirective !== undefined;
-    this.queryCacheDirective = undefined;
-    this.resetQueryResultCacheState();
-    this.resetSyncCacheState();
-    if (hadScope || this.querySubscriptions.size > 0 || this.syncSubscriptions.size > 0) {
-      for (const handler of this.sessionScopeHandlers) handler();
-    }
-  }
-
-  private resetQueryResultCacheState() {
-    this.queryCacheGeneration += 1;
-    this.queryCacheNegotiatedSocketGeneration = undefined;
+  private resetReplicaScopeState() {
     for (const subscription of this.querySubscriptions.values()) {
       subscription.lastMessage = undefined;
       subscription.serverSettled = false;
-      subscription.cacheReadGeneration = undefined;
-      subscription.cacheReadPromise = undefined;
-      if (subscription.cacheReadFallbackTimer) clearTimeout(subscription.cacheReadFallbackTimer);
-      subscription.cacheReadFallbackTimer = undefined;
-      subscription.cachedRevision = undefined;
     }
-  }
-
-  private resetSyncCacheState() {
-    this.syncScopeGeneration += 1;
-    for (const subscription of this.syncSubscriptions.values()) {
-      this.clearSyncRetry(subscription, true);
-      if (subscription.watermarkPersistTimer) {
-        clearTimeout(subscription.watermarkPersistTimer);
-        subscription.watermarkPersistTimer = undefined;
-      }
+    for (const subscription of this.replicaSubscriptions.values()) {
+      this.clearReplicaRetry(subscription, true);
       subscription.isUpToDate = false;
-      subscription.rows = [];
-      subscription.persistedRows = undefined;
-      subscription.hashes = {};
-      subscription.integrityDigest = undefined;
-      subscription.integrityRows = undefined;
-      subscription.integrityEpoch = undefined;
-      subscription.forceFullIntegrity = false;
-      subscription.cursor = undefined;
       subscription.cursorFloor = undefined;
       subscription.retiredEpochs.clear();
       subscription.lastMessage = undefined;
-      subscription.cacheReadGeneration = undefined;
       subscription.opening = false;
       subscription.verificationGeneration += 1;
     }
+    for (const handler of this.sessionScopeHandlers) handler();
   }
 
   /**
@@ -2848,117 +2257,18 @@ export class GonvexClient {
           .catch(() => this.replica.setFreshness("verifying"));
       });
     }
-    for (const subscription of this.syncSubscriptions.values()) {
+    for (const subscription of this.replicaSubscriptions.values()) {
       this.handlers.delete(subscription.id);
-      this.pendingSyncOpens.delete(subscription);
+      this.pendingReplicaOpens.delete(subscription);
       subscription.id = randomID();
       subscription.socketGeneration = undefined;
       subscription.scope = this.replicaScope;
       this.handlers.set(subscription.id, (message) => {
         const scope = subscription.scope ?? this.replicaScope;
-        void this.handleSyncMessage(subscription, message as SyncMessage, scope)
+        void this.handleReplicaMessage(subscription, message as ReplicaMessage, scope)
           .catch(() => this.replica.setFreshness("verifying"));
       });
     }
-  }
-
-  private startQueryCacheRead(subscription: QuerySubscription) {
-    const store = this.queryCache;
-    const directive = this.queryCacheDirective;
-    if (!store || !directive || subscription.serverSettled) return;
-    const generation = this.queryCacheGeneration;
-    const replicaScope = this.replicaScope;
-    if (subscription.cacheReadGeneration === generation) return;
-    subscription.cacheReadGeneration = generation;
-    const read = store.read(directive.scope, subscription.path, subscription.args, directive.maxAgeMs).then(async (cached) => {
-      const current = this.querySubscriptions.get(subscription.key);
-      if (
-        current !== subscription
-        || subscription.serverSettled
-        || subscription.listeners.size === 0
-        || this.queryCacheGeneration !== generation
-        || this.queryCacheDirective?.scope !== directive.scope
-        || this.replicaScope !== replicaScope
-      ) {
-        return;
-      }
-      subscription.cachedRevision = cached?.revision;
-      if (!cached) return;
-      const message: ServerMessage = {
-        type: "query.result",
-        id: subscription.id,
-        path: subscription.path,
-        result: cached.result,
-        reason: "initial",
-        cacheScope: directive.scope,
-        cacheRevision: cached.revision,
-      };
-      subscription.lastMessage = message;
-      try {
-        await this.materializeLiveQuery(subscription, message.result, false, replicaScope);
-      } catch {
-        this.replica.setFreshness("verifying");
-      }
-      const outgoing = this.materializeQueryMessage(subscription, message);
-      for (const listener of Array.from(subscription.listeners)) {
-        listener(outgoing);
-      }
-      this.acknowledgeOptimisticQuerySnapshot(subscription, message.result);
-    }).catch(() => {
-      // Persistent cache failures never affect the server query path.
-    }).finally(() => {
-      if (subscription.cacheReadFallbackTimer) clearTimeout(subscription.cacheReadFallbackTimer);
-      subscription.cacheReadFallbackTimer = undefined;
-      if (subscription.cacheReadPromise === read) subscription.cacheReadPromise = undefined;
-      if (
-        this.querySubscriptions.get(subscription.key) === subscription
-        && subscription.listeners.size > 0
-        && this.queryCacheGeneration === generation
-        && this.queryCacheDirective?.scope === directive.scope
-      ) {
-        this.sendSubscription(subscription);
-      }
-    });
-    subscription.cacheReadPromise = read;
-    subscription.cacheReadFallbackTimer = setTimeout(() => {
-      if (subscription.cacheReadPromise !== read) return;
-      subscription.cacheReadPromise = undefined;
-      subscription.cacheReadFallbackTimer = undefined;
-      this.sendSubscription(subscription);
-    }, this.queryCacheReadTimeoutMs);
-  }
-
-  private persistQueryResult(subscription: QuerySubscription, message: Extract<ServerMessage, { type: "query.result" }>) {
-    const store = this.queryCache;
-    const directive = this.queryCacheDirective;
-    if (
-      !store
-      || !directive
-      || message.cacheScope !== directive.scope
-      || !message.cacheRevision
-    ) {
-      return;
-    }
-    const generation = this.queryCacheGeneration;
-    queueMicrotask(() => {
-      if (this.queryCacheGeneration !== generation || this.queryCacheDirective?.scope !== directive.scope) return;
-      void store.write({
-        scope: directive.scope,
-        path: subscription.path,
-        args: subscription.args,
-        result: message.result,
-        revision: message.cacheRevision!,
-        maxAgeMs: directive.maxAgeMs,
-      }).catch(() => undefined);
-    });
-    subscription.cachedRevision = message.cacheRevision;
-  }
-
-  private deleteCachedQuery(subscription: QuerySubscription) {
-    const store = this.queryCache;
-    const directive = this.queryCacheDirective;
-    if (!store || !directive) return;
-    void store.delete(directive.scope, subscription.path, subscription.args).catch(() => undefined);
   }
 
   private emitTelemetryFromCall(
@@ -3041,7 +2351,7 @@ export class GonvexClient {
       project: this.auth.project,
       tenant: this.auth.tenant,
       device: browserTelemetryInfo(),
-		capabilities: { syncReadyMany: 1, syncWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1 },
+		capabilities: { replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1 },
     });
   }
 
@@ -3100,7 +2410,6 @@ export class GonvexClient {
       this.authWatchdogTimer = undefined;
     }
     this.quarantineReplicaScope();
-    this.resetQueryCacheScope();
     this.notifyAuthError(error);
     this.flushPendingMessages();
   }
@@ -3111,7 +2420,7 @@ export class GonvexClient {
     }
   }
 
-  // A lost auth reply (e.g. the server swapped its app plugin and dropped
+  // A lost auth reply (for example, during a module-generation swap) that dropped
   // in-flight responses while the socket stayed up) used to leave
   // authInFlight stuck true forever: every later reducer/subscription
   // queued into pendingMessages and was never sent — no error, no timeout,
@@ -3204,8 +2513,35 @@ function replaceRowsAtPath(
   return { ...result, [head!]: replaceRowsAtPath(current ?? null, tail, rows, scalar) };
 }
 
+function replaceOfflineLiveQueryMetadata(
+  result: JsonValue,
+  path: readonly string[],
+  offline: OfflineLiveQueryResult<unknown>,
+): JsonValue {
+  if (path.length === 0 || !isJsonRecord(result)) return result;
+  const [head, ...tail] = path;
+  if (tail.length === 0) {
+    const next = { ...result };
+    delete next.total;
+    delete next.offset;
+    delete next.limit;
+    if (offline.total !== undefined) next.total = offline.total;
+    if (offline.offset !== undefined) next.offset = offline.offset;
+    if (offline.limit !== undefined) next.limit = offline.limit;
+    return next;
+  }
+  const current = result[head!];
+  return { ...result, [head!]: replaceOfflineLiveQueryMetadata(current ?? null, tail, offline) };
+}
+
 function querySubscriptionKey(ref: FunctionReference, args: JsonValue) {
-  return `${ref.path}\u0000${stableStringify(args)}`;
+  const contract = {
+    delivery: ref.delivery ?? "oneShot",
+    live: ref.live
+      ? { entity: ref.live.entity, key: ref.live.key, resultPath: [...(ref.live.resultPath ?? [])], plan: ref.live.plan ?? null }
+      : null,
+  } as unknown as JsonValue;
+  return `${ref.path}\u0000${stableStringify(args)}\u0000${stableStringify(contract)}`;
 }
 
 function countPendingCalls(calls: Map<string, PendingCall>, kind: "reducer" | "action") {
@@ -3254,7 +2590,7 @@ function sameRevision(left: SubscriptionRevision, right: SubscriptionRevision | 
   return !!right && left.epoch === right.epoch && left.sequence === right.sequence;
 }
 
-function boundSyncRows(
+function boundReplicaRows(
   rows: JsonValue[],
   keyField: string,
   maxRows?: number,
@@ -3265,10 +2601,10 @@ function boundSyncRows(
   const kept: JsonValue[] = [];
   const seen = new Set<string>();
   let bytes = 0;
-  for (const row of sortClientSyncRows(rows, orderBy, orderDirection)) {
-    const key = syncRowKey(row, keyField);
+  for (const row of sortReplicaRows(rows, orderBy, orderDirection)) {
+    const key = replicaRowKeyValue(row, keyField);
     if (!key || seen.has(key)) continue;
-    const size = syncJSONSize(row);
+    const size = replicaJSONSize(row);
     if (maxRows && kept.length >= maxRows) break;
     if (maxBytes && bytes + size > maxBytes) break;
     kept.push(row);
@@ -3278,7 +2614,7 @@ function boundSyncRows(
   return kept;
 }
 
-function applySyncDelta(
+function applyReplicaDelta(
   current: JsonValue[],
   keyField: string,
   upserts: JsonValue[],
@@ -3289,12 +2625,12 @@ function applySyncDelta(
   orderDirection?: "asc" | "desc",
 ) {
   const deletedSet = new Set(deleted);
-  const upsertKeys = new Set(upserts.map((row) => syncRowKey(row, keyField)).filter(Boolean));
+  const upsertKeys = new Set(upserts.map((row) => replicaRowKeyValue(row, keyField)).filter(Boolean));
   const remainder = current.filter((row) => {
-    const key = syncRowKey(row, keyField);
+    const key = replicaRowKeyValue(row, keyField);
     return key && !deletedSet.has(key) && !upsertKeys.has(key);
   });
-  return boundSyncRows(
+  return boundReplicaRows(
     [...upserts, ...remainder],
     keyField,
     maxRows,
@@ -3304,7 +2640,7 @@ function applySyncDelta(
   );
 }
 
-function sortClientSyncRows(
+function sortReplicaRows(
   rows: JsonValue[],
   orderBy?: string,
   orderDirection?: "asc" | "desc",
@@ -3312,8 +2648,8 @@ function sortClientSyncRows(
   if (!orderBy) return rows;
   const direction = orderDirection === "asc" ? 1 : -1;
   return [...rows].sort((left, right) => {
-    const leftValue = syncOrderValue(left, orderBy);
-    const rightValue = syncOrderValue(right, orderBy);
+    const leftValue = replicaOrderValue(left, orderBy);
+    const rightValue = replicaOrderValue(right, orderBy);
     if (leftValue === rightValue) return 0;
     if (leftValue === null) return 1;
     if (rightValue === null) return -1;
@@ -3321,19 +2657,19 @@ function sortClientSyncRows(
   });
 }
 
-function syncOrderValue(value: JsonValue, orderBy: string): string | number | null {
+function replicaOrderValue(value: JsonValue, orderBy: string): string | number | null {
   if (!value || Array.isArray(value) || typeof value !== "object") return null;
   const candidate = value[orderBy];
   return typeof candidate === "string" || typeof candidate === "number" ? candidate : null;
 }
 
-function syncRowKey(value: JsonValue, keyField: string) {
+function replicaRowKeyValue(value: JsonValue, keyField: string) {
   if (!value || Array.isArray(value) || typeof value !== "object") return "";
   const key = value[keyField];
   return key === null || key === undefined ? "" : String(key);
 }
 
-function syncJSONSize(value: JsonValue) {
+function replicaJSONSize(value: JsonValue) {
   return new TextEncoder().encode(stableStringify(value)).byteLength;
 }
 
@@ -3396,12 +2732,6 @@ function queryPatchRowKey(value: JsonValue): string {
   return typeof candidate === "string" || typeof candidate === "number" ? String(candidate) : "";
 }
 
-export class ConvexReactClient extends GonvexClient {
-  constructor(url: string, options: GonvexClientOptions = {}) {
-    super(toWebSocketURL(url, options.project), options);
-  }
-}
-
 function authFromOptions(options: GonvexClientOptions): GonvexClientAuth {
   return {
     project: options.project,
@@ -3423,7 +2753,7 @@ function authIdentityKey(auth: GonvexClientAuth) {
   if (!auth.tenant) return "";
   if (auth.token) return authIdentityKeyFromToken(auth);
   // Token-free fallback: an explicit identity hint carries the same claims a
-  // token would supply, so both paths derive the same key for the same user.
+  // token would supply, so both paths derive the same key for the same Account.
   const hint = auth.identity;
   if (hint && typeof hint.sub === "string" && hint.sub.trim()) {
     return [auth.project ?? "", auth.tenant, hint.iss ?? "", hint.sub].join("\u0000");
@@ -3462,8 +2792,8 @@ function reducerOutboxScope(url: string, auth: GonvexClientAuth, ephemeralScope:
   if (identity) return ["identity", url, identity].join("\u0000");
   if (auth.token || auth.identity || auth.fetchToken) {
     // Opaque tokens (or credentials installed before tenant selection) do not
-    // expose a stable user key. A per-client scope preserves current-session
-    // queue semantics without ever restoring those rows under another user.
+    // expose a stable Account key. A per-client scope preserves current-session
+    // queue semantics without ever restoring those rows under another Account.
     return ["ephemeral-auth", url, ephemeralScope].join("\u0000");
   }
   // Anonymous/dev-auth clients still need a stable namespace, but it must be
@@ -3477,53 +2807,29 @@ function isEphemeralOutboxScope(scope: string) {
   return scope.startsWith("ephemeral-auth\u0000");
 }
 
-function queryCacheDirectiveFromAuthResult(result: JsonValue): QueryCacheDirective | undefined {
-  if (!isJsonRecord(result)) return undefined;
-  return validQueryCacheDirective(result.queryCache) ? result.queryCache : undefined;
-}
-
-function validQueryCacheDirective(value: unknown): value is QueryCacheDirective {
-  if (!isJsonRecord(value)) return false;
-  return value.protocolVersion === 1
-    && typeof value.scope === "string"
-    && value.scope.length >= 16
-    && (value.syncScope === undefined
-      || (typeof value.syncScope === "string" && value.syncScope.length >= 16))
-    && typeof value.epoch === "string"
-    && value.epoch.length >= 16
-    && typeof value.maxAgeMs === "number"
-    && Number.isFinite(value.maxAgeMs)
-    && value.maxAgeMs > 0;
-}
-
-/**
- * The scope under which sync collections are persisted and resumed. Newer
- * runtimes send a visibility-only `syncScope` that survives deploys (the
- * authoritative reconcile on resume guarantees correctness across code
- * changes); older runtimes only send the bundle-epoch `scope`.
- */
-function syncPersistenceScope(directive: QueryCacheDirective): string {
-  return typeof directive.syncScope === "string" && directive.syncScope.length >= 16
-    ? directive.syncScope
-    : directive.scope;
-}
-
 function isJsonRecord(value: unknown): value is Record<string, JsonValue> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function hasOwn<T extends object>(value: T, key: PropertyKey) {
-  return Object.prototype.hasOwnProperty.call(value, key);
+function replicaDirectiveFromAuthResult(result: JsonValue): ReplicaDirective | undefined {
+  if (!isJsonRecord(result) || !isJsonRecord(result.replica)) return undefined;
+  const directive = result.replica;
+  if (
+    directive.protocolVersion !== 1
+    || typeof directive.scope !== "string"
+    || typeof directive.visibilityScope !== "string"
+    || typeof directive.epoch !== "string"
+  ) return undefined;
+  return {
+    protocolVersion: 1,
+    scope: directive.scope,
+    visibilityScope: directive.visibilityScope,
+    epoch: directive.epoch,
+  };
 }
 
-function toWebSocketURL(url: string, project?: string) {
-  const wsURL = url.startsWith("ws://") || url.startsWith("wss://")
-    ? new URL(url)
-    : new URL(`${url.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/$/, "")}/ws`);
-  if (project && !wsURL.searchParams.has("project")) {
-    wsURL.searchParams.set("project", project);
-  }
-  return wsURL.toString();
+function hasOwn<T extends object>(value: T, key: PropertyKey) {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function randomID() {
@@ -3542,13 +2848,6 @@ function nowMs() {
     return performanceValue.timeOrigin + performanceValue.now();
   }
   return Date.now();
-}
-
-function queryCacheReadTimeout(value: number | undefined) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return defaultQueryCacheReadTimeoutMs;
-  }
-  return value;
 }
 
 function browserTelemetryInfo(): BrowserTelemetryInfo | undefined {

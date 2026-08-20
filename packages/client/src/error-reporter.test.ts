@@ -24,13 +24,21 @@ describe("GonvexErrorReporter", () => {
   it("batches errors with tenant, release and device context while filtering secrets", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
-    const reporter = new GonvexErrorReporter({ endpoint: "https://errors.test", project: "shop", tenant: "acme", release: "1.4.2", captureGlobalErrors: false });
+    const reporter = new GonvexErrorReporter({
+      endpoint: "https://errors.test", project: "shop", tenant: "acme", release: "1.4.2",
+      account: { id: "acct-1", email: "owner@example.test" }, captureGlobalErrors: false,
+    });
     reporter.captureException(new Error("checkout failed"), { password: "nope", cartId: "cart-1" });
     await reporter.flush();
     const envelopeCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/errors/envelope"));
     expect(envelopeCall).toBeTruthy();
     const body = JSON.parse(envelopeCall![1].body);
-    expect(body.events[0]).toMatchObject({ project: "shop", tenant: "acme", release: "1.4.2", message: "checkout failed", context: { password: "[Filtered]", cartId: "cart-1" } });
+    expect(body.events[0]).toMatchObject({
+      project: "shop", tenant: "acme", release: "1.4.2", message: "checkout failed",
+      account: { id: "acct-1", email: "owner@example.test" },
+      context: { password: "[Filtered]", cartId: "cart-1" },
+    });
+    expect(body.events[0]).not.toHaveProperty("user");
     expect(body.events[0].deviceId).toBeTruthy();
     expect(envelopeCall![1].headers).toMatchObject({ "x-gonvex-project-id": "shop", "x-gonvex-tenant-id": "acme" });
   });

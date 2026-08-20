@@ -5,63 +5,39 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/pkg/moduleengine"
-	"github.com/gonvex/gonvex/pkg/projectbundle"
 )
 
 type Runtime struct {
 	mu        sync.RWMutex
 	manifest  manifest.Manifest
 	manifests map[string]manifest.Manifest
-	loader    *projectbundle.Loader
-	// moduleHost is the one out-of-process module host this runtime talks to,
-	// shared by every project. It is nil when none is configured, which leaves
-	// compiled Go modules working exactly as before.
+	// moduleHost is the one out-of-process TypeScript module host this runtime
+	// talks to, shared by every project.
 	moduleHost *moduleengine.RemoteHost
-	// engines memoizes the module engine serving each project. Engines are
-	// long-lived — a remote engine owns a module generation and its warm
-	// isolates — so the wrapper is reused until the loader swaps in a
-	// differently compiled module or a newer artifact is published.
+	// engines memoizes the module generation serving each project.
 	engines map[string]loadedEngine
 }
 
-// loadedEngine pairs the routed engine with the module artifacts it was built
-// from, so replacing either side invalidates the memoized composite.
 type loadedEngine struct {
-	app    *gonvex.App
-	remote *moduleengine.RemoteEngine
-	engine moduleengine.ModuleEngine
-	// identity is the module artifact's content hash for a remote engine. An
-	// unchanged artifact reuses the active generation instead of publishing a
-	// new one for every sync.
+	remote   *moduleengine.RemoteEngine
+	engine   moduleengine.ModuleEngine
 	identity string
 }
 
 func New() *Runtime {
-	return NewWithLoader(projectbundle.NewLoader("", ""))
+	return NewWithModuleHost(nil)
 }
 
-func NewWithLoader(loader *projectbundle.Loader) *Runtime {
-	return NewWithModuleHost(loader, nil)
-}
-
-// NewWithModuleHost builds a runtime that can also serve module artifacts
-// through host. A nil or unconfigured host keeps every Go project working and
-// makes a TypeScript manifest fail its sync with a clear error instead of
-// silently loading nothing.
-func NewWithModuleHost(loader *projectbundle.Loader, host *moduleengine.RemoteHost) *Runtime {
-	if loader == nil {
-		loader = projectbundle.NewLoader("", "")
-	}
+// NewWithModuleHost builds the TypeScript-only application runtime.
+func NewWithModuleHost(host *moduleengine.RemoteHost) *Runtime {
 	return &Runtime{
 		manifest: manifest.Manifest{
 			Functions: map[string]manifest.FunctionEntry{},
 			Schema:    manifest.EmptySchema(),
 		},
 		manifests:  map[string]manifest.Manifest{},
-		loader:     loader,
 		moduleHost: host,
 		engines:    map[string]loadedEngine{},
 	}
@@ -80,64 +56,25 @@ func (r *Runtime) SyncManifest(next manifest.Manifest) error {
 	return r.SyncManifestContext(context.Background(), next)
 }
 
-// SyncManifestContext installs a project's module. A manifest carrying a
-// TypeScript module artifact is published to the module host and activated
-// before it is installed, so a module that fails to load or to warm leaves the
-// previously active generation serving traffic. Everything else keeps the Go
-// bundle flow untouched.
+// SyncManifestContext publishes and atomically activates a TypeScript module.
+// A module that fails to load or warm leaves the previous generation serving.
 func (r *Runtime) SyncManifestContext(ctx context.Context, next manifest.Manifest) error {
-	// Only the module artifact is normalized here: the manifest itself is
-	// stored exactly as the sync delivered it, which is what every existing
-	// reader of ManifestForProject expects.
-	if next.Module != nil {
-		normalized := next.Module.Normalize()
-		next.Module = &normalized
+	if next.Module == nil {
+		return fmt.Errorf("project %q must ship a TypeScript module artifact", next.Project)
 	}
-
-	var app *gonvex.App
-	if next.Bundle != nil && len(next.Bundle.Files) > 0 {
-		var err error
-		app, err = r.loader.Load(next.Project, *next.Bundle)
-		if err != nil {
-			return err
-		}
+	normalized := *next.Module
+	next.Module = &normalized
+	if err := next.Module.Validate(); err != nil {
+		return fmt.Errorf("project %q module is invalid: %w", next.Project, err)
 	}
-	var remote *moduleengine.RemoteEngine
-	var identity string
-	if next.Module != nil {
-		loaded, err := r.activateModule(ctx, next)
-		if err != nil {
-			return err
-		}
-		remote = loaded.remote
-		identity = loaded.identity
-	}
-	var goEngine moduleengine.ModuleEngine
-	if app != nil {
-		goEngine = moduleengine.NewGoAppEngine(app)
-	}
-	var moduleEngine moduleengine.ModuleEngine
-	if remote != nil {
-		moduleEngine = remote
-	}
-	engine, err := moduleengine.NewCompositeEngine(goEngine, moduleEngine)
+	loaded, err := r.activateModule(ctx, next)
 	if err != nil {
 		return err
-	}
-	installed := &loadedEngine{app: app, remote: remote, engine: engine, identity: identity}
-	if next.Module != nil && remote == nil {
-		// A module artifact in a language this runtime has no engine for is a
-		// deployment error, not something to quietly ignore.
-		return fmt.Errorf("project %q ships a %s module, which this runtime cannot execute", next.Project, next.Module.NormalizedLanguage())
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if installed != nil {
-		r.engines[next.Project] = *installed
-	} else if next.Project != "" {
-		delete(r.engines, next.Project)
-	}
+	r.engines[next.Project] = *loaded
 	r.manifest = next
 	if next.Project != "" {
 		r.manifests[next.Project] = next
@@ -183,56 +120,15 @@ func (r *Runtime) activateModule(ctx context.Context, next manifest.Manifest) (*
 	return &loadedEngine{remote: engine, engine: engine, identity: identity}, nil
 }
 
-// AppForProject returns the compiled Go module loaded for projectID. It stays
-// the compatibility entry point for host code and tests that need the Go type
-// itself; dispatch resolves EngineForProject instead.
-func (r *Runtime) AppForProject(projectID string) *gonvex.App {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.loader.AppForProject(projectID)
-}
-
-// EngineForProject returns the module engine serving projectID, or nil when no
-// module is loaded for it. A project whose manifest shipped a module artifact
-// resolves to the engine that dispatches into the module host; compiled Go
-// bundles resolve to a GoAppEngine. This is the one place the host learns which
-// implementation runs a project, and it never learns the module's language.
+// EngineForProject returns the active TypeScript module engine for projectID.
 func (r *Runtime) EngineForProject(projectID string) moduleengine.ModuleEngine {
 	r.mu.RLock()
 	loaded, ok := r.engines[projectID]
 	r.mu.RUnlock()
-	if ok && loaded.engine != nil {
+	if ok {
 		return loaded.engine
 	}
-	if ok && loaded.remote != nil {
-		return loaded.remote
-	}
-
-	app := r.AppForProject(projectID)
-	if app == nil {
-		return nil
-	}
-	if ok && loaded.app == app && loaded.engine != nil {
-		return loaded.engine
-	}
-	// Build under the write lock so concurrent resolvers of the same module
-	// converge on one engine instance rather than racing to replace each other.
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if loaded, ok := r.engines[projectID]; ok {
-		if loaded.remote != nil {
-			return loaded.remote
-		}
-		if loaded.app == app && loaded.engine != nil {
-			return loaded.engine
-		}
-	}
-	engine := moduleengine.NewGoAppEngine(app)
-	if r.engines == nil {
-		r.engines = map[string]loadedEngine{}
-	}
-	r.engines[projectID] = loadedEngine{app: app, engine: engine}
-	return engine
+	return nil
 }
 
 // ModuleGeneration reports the module-host generation currently serving
@@ -277,8 +173,7 @@ func (r *Runtime) ManifestForProject(projectID string) manifest.Manifest {
 	return r.manifest
 }
 
-// Close releases the module host within a bound. Compiled Go modules have
-// nothing to release: a plugin cannot be unloaded.
+// Close releases the module host within a bound.
 func (r *Runtime) Close(ctx context.Context) error {
 	if r == nil || r.moduleHost == nil {
 		return nil

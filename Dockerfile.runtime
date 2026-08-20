@@ -1,43 +1,31 @@
-# The runtime compiles each project's synced Go functions into a -buildmode=plugin
-# .so at sync time and dlopen()s it, so the *running* image needs a full Go
-# toolchain + cgo (gcc) and the gonvex module source — not just the static binary.
-# Debian (glibc) is used rather than Alpine/musl because Go plugins are unreliable
-# under musl. The runtime binary and the plugins must be built with the same Go
-# version and the same gonvex source (via the go.mod replace) for plugin ABI match.
+# TypeScript application modules execute in the bounded Rust/V8 module host.
+# The Go process currently owns HTTP, Postgres transactions, the change feed,
+# visibility routing, and the replica protocol; it never compiles application
+# source or loads Go plugins.
 FROM rust:1.94-bookworm AS module-host-build
 WORKDIR /src/rust
 COPY rust/Cargo.toml rust/Cargo.lock ./
 COPY rust/crates ./crates
 RUN cargo build --locked --release -p gonvex-module-host
 
-FROM golang:1.26@sha256:7caba5286b4c3613a337b709c573047d8ae62ee76106647313b61e72b99f20af AS build
+# Build the CGO-enabled runtime against the same Debian release as the final
+# image. The unqualified Go tag may advance to a newer glibc and produce a
+# binary that cannot start in Bookworm.
+FROM golang:1.26-bookworm@sha256:6ef6e30f0ea5c384f6d111cf856e024e3086bbdcb1779da3f3b3fbba0aea53d2 AS build
 WORKDIR /src
-# Go plugin package hashes include the absolute module-cache source path. Build
-# the host runtime from the same paths used later by the in-image plugin
-# compiler, otherwise identical dependencies fail plugin.Open after deploy.
-# Compiler-owned state deliberately stays outside /var/lib/gonvex because
-# production mounts its persistent runtime volume over that entire directory.
-ENV GOCACHE=/var/cache/gonvex/go-build \
-    GOMODCACHE=/opt/gonvex/go/pkg/mod \
-    GOPATH=/opt/gonvex/go \
-    GOMAXPROCS=2 \
+ENV GOMAXPROCS=2 \
     GOFLAGS="-mod=mod -p=2"
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# cgo-enabled: -buildmode=plugin requires the host binary to be cgo/dynamically linked.
 RUN CGO_ENABLED=1 go build -o /out/gonvex-runtime ./server/cmd/gonvex-runtime
 
-FROM golang:1.26@sha256:7caba5286b4c3613a337b709c573047d8ae62ee76106647313b61e72b99f20af
+FROM debian:bookworm-slim
 WORKDIR /app
-RUN mkdir -p /var/cache/gonvex/go-build /var/cache/gonvex/tmp /var/lib/gonvex/data /var/lib/gonvex/plugins
-# Gonvex module source: synced project bundles render
-#   replace github.com/gonvex/gonvex => $GONVEX_MODULE_ROOT
-# so the plugin build resolves the framework against this checkout.
-COPY --from=build /src /src
-# Preserve the exact module-cache path used to compile the host binary so
-# plugin package hashes remain ABI-compatible at runtime.
-COPY --from=build /opt/gonvex/go/pkg/mod /opt/gonvex/go/pkg/mod
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bash ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/lib/gonvex/data /var/lib/gonvex/tmp
 COPY --from=build /out/gonvex-runtime /usr/local/bin/gonvex-runtime
 # TypeScript application functions execute in the bounded Rust/V8 module host.
 # The Go runtime supervises this one process lazily when the first TypeScript
@@ -48,20 +36,12 @@ COPY --from=module-host-build /src/rust/target/release/gonvex-module-host /usr/l
 # from object storage on miss, so an ephemeral dir also works (just slower on
 # first access after a redeploy).
 ENV GONVEX_ADDR=0.0.0.0:8080 \
-    GONVEX_RELOAD_SUPERVISOR=true \
-    GONVEX_MODULE_ROOT=/src \
-    GONVEX_PLUGIN_CACHE_DIR=/var/lib/gonvex/plugins \
     GONVEX_MODULE_HOST_ENABLED=true \
     GONVEX_MODULE_HOST_BINARY=/usr/local/bin/gonvex-module-host \
     GONVEX_DATA_DIR=/var/lib/gonvex/data \
     GONVEX_TELEMETRY_LOG=/var/lib/gonvex/telemetry.jsonl \
-    GOCACHE=/var/cache/gonvex/go-build \
-    GOMODCACHE=/opt/gonvex/go/pkg/mod \
-    GOPATH=/opt/gonvex/go \
-    TMPDIR=/var/cache/gonvex/tmp \
-    CGO_ENABLED=1 \
-    GOMAXPROCS=2 \
-    GOFLAGS="-mod=mod -p=2"
+    TMPDIR=/var/lib/gonvex/tmp \
+    GOMAXPROCS=2
 WORKDIR /var/lib/gonvex
 USER 0:0
 EXPOSE 8080

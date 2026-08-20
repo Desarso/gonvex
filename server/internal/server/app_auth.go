@@ -41,7 +41,7 @@ const (
 
 var pkceValuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43,128}$`)
 
-type appAuthUser struct {
+type appAuthAccount struct {
 	ID             string    `json:"id"`
 	AccountID      string    `json:"accountId"`
 	Email          string    `json:"email,omitempty"`
@@ -54,10 +54,7 @@ type appAuthUser struct {
 	LastSignedInAt time.Time `json:"lastSignedInAt,omitempty"`
 }
 
-func (u appAuthUser) accountID() string {
-	if strings.TrimSpace(u.AccountID) != "" {
-		return u.AccountID
-	}
+func (u appAuthAccount) canonicalID() string {
 	return u.ID
 }
 
@@ -259,7 +256,7 @@ func (s *Server) appAuthProjectCounts(ctx context.Context, projectID string) (in
 	return tenantCount, membershipCount, invitationCount
 }
 
-func (s *Server) handleProjectAuthUsers(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleProjectAuthAccounts(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.PathValue("project"))
 	if projectID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
@@ -274,27 +271,34 @@ func (s *Server) handleProjectAuthUsers(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer db.Close()
-	rows, err := db.QueryContext(r.Context(), `SELECT id, COALESCE(NULLIF(account_id, ''), id), email, email_verified, name, picture, provider, disabled_at IS NOT NULL, created_at, last_signed_in_at
-		FROM gonvex_auth_users WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
+	rows, err := db.QueryContext(r.Context(), `SELECT a.id, a.id, a.email,
+		COALESCE(identity.verified_email, FALSE), a.name, a.avatar_url,
+		COALESCE(identity.provider, ''), a.disabled_at IS NOT NULL, a.created_at, a.updated_at
+		FROM accounts a
+		LEFT JOIN LATERAL (
+			SELECT provider, verified_email FROM account_identities
+			WHERE account_id = a.id ORDER BY updated_at DESC LIMIT 1
+		) identity ON TRUE
+		WHERE a.auth_realm_id = $1 ORDER BY a.created_at DESC`, projectID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	defer rows.Close()
-	users := []appAuthUser{}
+	accounts := []appAuthAccount{}
 	for rows.Next() {
-		var user appAuthUser
-		if err := rows.Scan(&user.ID, &user.AccountID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.Disabled, &user.CreatedAt, &user.LastSignedInAt); err != nil {
+		var account appAuthAccount
+		if err := rows.Scan(&account.ID, &account.AccountID, &account.Email, &account.EmailVerified, &account.Name, &account.Picture, &account.Provider, &account.Disabled, &account.CreatedAt, &account.LastSignedInAt); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		users = append(users, user)
+		accounts = append(accounts, account)
 	}
 	if err := rows.Err(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": users})
+	writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts})
 }
 
 func (s *Server) authorizeProjectAuthRequest(w http.ResponseWriter, r *http.Request, projectID string, manage bool) bool {
@@ -550,7 +554,7 @@ func (s *Server) loadNativeAppAuthRequirement(ctx context.Context, projectID str
 		return false, false, err
 	}
 	// Never let attacker-controlled project headers grow this process cache.
-	// Real projects are bounded by the registry or by a bundle/config already
+	// Real projects are bounded by the registry or by a module/config already
 	// loaded into this runtime; arbitrary unknown IDs stay uncached.
 	if !projectExists && !s.knownRuntimeProject(projectID) {
 		return false, false, nil
@@ -567,23 +571,25 @@ func (s *Server) knownRuntimeProject(projectID string) bool {
 	if registered || databaseConfigured || keyConfigured {
 		return true
 	}
-	return s.runtime != nil && s.runtime.AppForProject(projectID) != nil
+	if s.runtime == nil {
+		return false
+	}
+	if s.runtime.EngineForProject(projectID) != nil {
+		return true
+	}
+	for _, loadedProjectID := range s.runtime.ProjectIDs() {
+		if loadedProjectID == projectID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) projectRequiresAuthentication(ctx context.Context, projectID string) bool {
-	if s.config.RequireAuth {
-		return true
-	}
-	if strings.TrimSpace(s.projectRegistryURL()) == "" {
-		return false
-	}
-	enabled, err := s.nativeAppAuthEnabled(ctx, projectID)
-	if err != nil {
-		// A configured control database that cannot answer an authorization query
-		// must not turn a protected project into an anonymous one.
-		return true
-	}
-	return enabled
+	// Application data is never anonymously addressable. Provider enablement
+	// controls how accounts obtain sessions; it does not weaken the tenant
+	// Member gate on Query, Reducer, Action, Replica, or Live Query traffic.
+	return true
 }
 
 func (s *Server) googleAuthConfiguration(ctx context.Context, projectID string) ([]string, bool, error) {
@@ -869,7 +875,7 @@ func (s *Server) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		redirectToApp(w, r, transaction.RedirectURI, map[string]string{"error": "verified_google_email_required", "state": transaction.AppState})
 		return
 	}
-	user, err := s.upsertAppAuthUser(r.Context(), transaction.ProjectID, identity)
+	user, err := s.upsertAppAuthAccount(r.Context(), transaction.ProjectID, identity)
 	if err != nil {
 		redirectToApp(w, r, transaction.RedirectURI, map[string]string{"error": "account_creation_failed", "state": transaction.AppState})
 		return
@@ -935,15 +941,15 @@ func (s *Server) exchangeGoogleCode(ctx context.Context, code string, redirectUR
 	return payload.IDToken, nil
 }
 
-func (s *Server) upsertAppAuthUser(ctx context.Context, projectID string, identity googleIdentity) (appAuthUser, error) {
+func (s *Server) upsertAppAuthAccount(ctx context.Context, projectID string, identity googleIdentity) (appAuthAccount, error) {
 	db, err := s.openProjectRegistry(ctx)
 	if err != nil || db == nil {
-		return appAuthUser{}, fmt.Errorf("auth account store is unavailable")
+		return appAuthAccount{}, fmt.Errorf("auth account store is unavailable")
 	}
 	defer db.Close()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return appAuthUser{}, err
+		return appAuthAccount{}, err
 	}
 	defer tx.Rollback()
 
@@ -952,28 +958,33 @@ func (s *Server) upsertAppAuthUser(ctx context.Context, projectID string, identi
 	// email matches intentionally create no silent merge.
 	const googleIssuer = "https://accounts.google.com"
 	accountID := ""
-	err = tx.QueryRowContext(ctx, `SELECT account_id FROM account_identities
-		WHERE provider = $1 AND issuer = $2 AND subject = $3`, googleProvider, googleIssuer, identity.Subject).Scan(&accountID)
+	err = tx.QueryRowContext(ctx, `SELECT identity.account_id FROM account_identities identity
+		JOIN accounts account ON account.id = identity.account_id
+		WHERE identity.provider = $1 AND identity.issuer = $2 AND identity.subject = $3
+			AND account.auth_realm_id = $4`, googleProvider, googleIssuer, identity.Subject, projectID).Scan(&accountID)
 	if err != nil && err != sql.ErrNoRows {
-		return appAuthUser{}, err
+		return appAuthAccount{}, err
 	}
 	if accountID == "" && identity.EmailVerified && strings.TrimSpace(identity.Email) != "" {
-		rows, queryErr := tx.QueryContext(ctx, `SELECT DISTINCT account_id FROM account_identities
-			WHERE verified_email AND lower(email) = lower($1) ORDER BY account_id LIMIT 2`, identity.Email)
+		rows, queryErr := tx.QueryContext(ctx, `SELECT DISTINCT identity.account_id FROM account_identities identity
+			JOIN accounts account ON account.id = identity.account_id
+			WHERE identity.verified_email AND lower(identity.email) = lower($1)
+				AND account.auth_realm_id = $2
+			ORDER BY identity.account_id LIMIT 2`, identity.Email, projectID)
 		if queryErr != nil {
-			return appAuthUser{}, queryErr
+			return appAuthAccount{}, queryErr
 		}
 		matches := []string{}
 		for rows.Next() {
 			var candidate string
 			if scanErr := rows.Scan(&candidate); scanErr != nil {
 				rows.Close()
-				return appAuthUser{}, scanErr
+				return appAuthAccount{}, scanErr
 			}
 			matches = append(matches, candidate)
 		}
 		if rowsErr := rows.Close(); rowsErr != nil {
-			return appAuthUser{}, rowsErr
+			return appAuthAccount{}, rowsErr
 		}
 		if len(matches) == 1 {
 			accountID = matches[0]
@@ -982,15 +993,16 @@ func (s *Server) upsertAppAuthUser(ctx context.Context, projectID string, identi
 	if accountID == "" {
 		accountID, err = randomID("acct")
 		if err != nil {
-			return appAuthUser{}, err
+			return appAuthAccount{}, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO accounts (id, email, name, avatar_url, updated_at)
-		VALUES ($1, $2, $3, $4, now())
+	if _, err := tx.ExecContext(ctx, `INSERT INTO accounts (id, auth_realm_id, email, name, avatar_url, updated_at)
+		VALUES ($1, $2, $3, $4, $5, now())
 		ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name,
-			avatar_url = EXCLUDED.avatar_url, updated_at = now()`,
-		accountID, identity.Email, identity.Name, identity.Picture); err != nil {
-		return appAuthUser{}, err
+			avatar_url = EXCLUDED.avatar_url, updated_at = now()
+		WHERE accounts.auth_realm_id = EXCLUDED.auth_realm_id`,
+		accountID, projectID, identity.Email, identity.Name, identity.Picture); err != nil {
+		return appAuthAccount{}, err
 	}
 	if err := tx.QueryRowContext(ctx, `INSERT INTO account_identities (
 		account_id, provider, issuer, subject, email, verified_email, updated_at
@@ -998,40 +1010,27 @@ func (s *Server) upsertAppAuthUser(ctx context.Context, projectID string, identi
 	ON CONFLICT (provider, issuer, subject) DO UPDATE SET
 		email = EXCLUDED.email, verified_email = EXCLUDED.verified_email, updated_at = now()
 	RETURNING account_id`, accountID, googleProvider, googleIssuer, identity.Subject, identity.Email, identity.EmailVerified).Scan(&accountID); err != nil {
-		return appAuthUser{}, err
+		return appAuthAccount{}, err
 	}
 
-	userID, err := randomID("user")
-	if err != nil {
-		return appAuthUser{}, err
-	}
-	var user appAuthUser
-	err = tx.QueryRowContext(ctx, `INSERT INTO gonvex_auth_users (
-		id, project_id, account_id, provider, provider_subject, email, email_verified, name, picture, last_signed_in_at, updated_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now())
-	ON CONFLICT (project_id, provider, provider_subject) DO UPDATE SET
-		account_id = EXCLUDED.account_id,
-		email = EXCLUDED.email,
-		email_verified = EXCLUDED.email_verified,
-		name = EXCLUDED.name,
-		picture = EXCLUDED.picture,
-		last_signed_in_at = now(),
-		updated_at = now()
-	WHERE gonvex_auth_users.disabled_at IS NULL
-	RETURNING id, account_id, email, email_verified, name, picture, provider, created_at, last_signed_in_at`,
-		userID, projectID, accountID, googleProvider, identity.Subject, identity.Email, identity.EmailVerified, identity.Name, identity.Picture).Scan(
-		&user.ID, &user.AccountID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
+	var account appAuthAccount
+	err = tx.QueryRowContext(ctx, `SELECT id, id, email, $3::boolean, name, avatar_url, $4::text,
+		disabled_at IS NOT NULL, created_at, updated_at
+		FROM accounts WHERE id = $1 AND auth_realm_id = $2 AND disabled_at IS NULL`,
+		accountID, projectID, identity.EmailVerified, googleProvider).Scan(
+		&account.ID, &account.AccountID, &account.Email, &account.EmailVerified, &account.Name,
+		&account.Picture, &account.Provider, &account.Disabled, &account.CreatedAt, &account.LastSignedInAt,
 	)
 	if err != nil {
-		return appAuthUser{}, err
+		return appAuthAccount{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return appAuthUser{}, err
+		return appAuthAccount{}, err
 	}
-	return user, nil
+	return account, nil
 }
 
-func (s *Server) createAppAuthCode(ctx context.Context, transaction authTransaction, userID string) (string, error) {
+func (s *Server) createAppAuthCode(ctx context.Context, transaction authTransaction, accountID string) (string, error) {
 	code, err := randomID("authcode")
 	if err != nil {
 		return "", err
@@ -1041,10 +1040,32 @@ func (s *Server) createAppAuthCode(ctx context.Context, transaction authTransact
 		return "", fmt.Errorf("auth code store is unavailable")
 	}
 	defer db.Close()
+	// Code issuance is the final step of the native sign-in flow, but callers
+	// (including non-HTTP integrations) may issue a code directly after
+	// upserting an Account. Ensure the canonical tenant Member exists before a
+	// session can be exchanged, rather than minting a session that cannot enter
+	// any tenant.
+	var user appAuthAccount
+	if err := db.QueryRowContext(ctx, `SELECT a.id, a.id, a.email,
+		COALESCE(identity.verified_email, FALSE), a.name, a.avatar_url,
+		COALESCE(identity.provider, ''), a.disabled_at IS NOT NULL, a.created_at, a.updated_at
+		FROM accounts a
+		LEFT JOIN LATERAL (
+			SELECT provider, verified_email FROM account_identities
+			WHERE account_id = a.id ORDER BY updated_at DESC LIMIT 1
+		) identity ON TRUE
+		WHERE a.id = $1 AND a.auth_realm_id = $2 AND a.disabled_at IS NULL`, accountID, transaction.ProjectID).Scan(
+		&user.ID, &user.AccountID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture,
+		&user.Provider, &user.Disabled, &user.CreatedAt, &user.LastSignedInAt); err != nil {
+		return "", err
+	}
+	if err := s.ensureAppAuthMemberships(ctx, transaction.ProjectID, user); err != nil {
+		return "", err
+	}
 	_, _ = db.ExecContext(ctx, `DELETE FROM gonvex_auth_codes WHERE expires_at <= now() OR used_at IS NOT NULL`)
 	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_auth_codes (
-		code_hash, project_id, user_id, redirect_uri, code_challenge, expires_at
-	) VALUES ($1, $2, $3, $4, $5, $6)`, sha256Hex(code), transaction.ProjectID, userID,
+		code_hash, project_id, account_id, redirect_uri, code_challenge, expires_at
+	) VALUES ($1, $2, $3, $4, $5, $6)`, sha256Hex(code), transaction.ProjectID, accountID,
 		transaction.RedirectURI, transaction.CodeChallenge, time.Now().Add(authCodeTTL))
 	return code, err
 }
@@ -1089,7 +1110,7 @@ func (s *Server) handleAppAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var grant appAuthSessionGrant
-	var user appAuthUser
+	var user appAuthAccount
 	var err error
 	switch payload.GrantType {
 	case "authorization_code":
@@ -1158,59 +1179,67 @@ func invalidAppAuthGrant(message string) error {
 	return &invalidAppAuthGrantError{message: message}
 }
 
-func (s *Server) exchangeAppAuthCode(ctx context.Context, projectID string, code string, verifier string, redirectURI string) (appAuthSessionGrant, appAuthUser, error) {
+func (s *Server) exchangeAppAuthCode(ctx context.Context, projectID string, code string, verifier string, redirectURI string) (appAuthSessionGrant, appAuthAccount, error) {
 	db, err := s.openProjectRegistry(ctx)
 	if err != nil || db == nil {
-		return appAuthSessionGrant{}, appAuthUser{}, fmt.Errorf("auth session store is unavailable")
+		return appAuthSessionGrant{}, appAuthAccount{}, fmt.Errorf("auth session store is unavailable")
 	}
 	defer db.Close()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
 	defer tx.Rollback()
-	var storedProject, userID, storedRedirect, challenge string
-	err = tx.QueryRowContext(ctx, `SELECT project_id, user_id, redirect_uri, code_challenge
+	var storedProject, accountID, storedRedirect, challenge string
+	err = tx.QueryRowContext(ctx, `SELECT project_id, account_id, redirect_uri, code_challenge
 		FROM gonvex_auth_codes WHERE code_hash = $1 AND used_at IS NULL AND expires_at > now() FOR UPDATE`, sha256Hex(code)).Scan(
-		&storedProject, &userID, &storedRedirect, &challenge,
+		&storedProject, &accountID, &storedRedirect, &challenge,
 	)
 	if err == sql.ErrNoRows {
-		return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("invalid or expired authorization code")
+		return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("invalid or expired authorization code")
 	}
 	if err != nil {
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
 	if storedProject != projectID || storedRedirect != redirectURI || !constantTimeString(challenge, pkceChallenge(verifier)) {
-		return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("authorization code does not match this client")
+		return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("authorization code does not match this client")
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_codes SET used_at = now() WHERE code_hash = $1`, sha256Hex(code)); err != nil {
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
-	var user appAuthUser
-	if err := tx.QueryRowContext(ctx, `SELECT id, COALESCE(NULLIF(account_id, ''), id), email, email_verified, name, picture, provider, created_at, last_signed_in_at
-		FROM gonvex_auth_users WHERE id = $1 AND project_id = $2 AND disabled_at IS NULL`, userID, projectID).Scan(
-		&user.ID, &user.AccountID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
+	var account appAuthAccount
+	if err := tx.QueryRowContext(ctx, `SELECT a.id, a.id, a.email,
+		COALESCE(identity.verified_email, FALSE), a.name, a.avatar_url,
+		COALESCE(identity.provider, ''), a.created_at, a.updated_at
+		FROM accounts a
+		LEFT JOIN LATERAL (
+			SELECT provider, verified_email FROM account_identities
+			WHERE account_id = a.id ORDER BY updated_at DESC LIMIT 1
+		) identity ON TRUE
+		WHERE a.id = $1 AND a.auth_realm_id = $2 AND a.disabled_at IS NULL`, accountID, projectID).Scan(
+		&account.ID, &account.AccountID, &account.Email, &account.EmailVerified, &account.Name, &account.Picture,
+		&account.Provider, &account.CreatedAt, &account.LastSignedInAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
-			return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("account is unavailable")
+			return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("account is unavailable")
 		}
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
 	familyID, err := randomID("family")
 	if err != nil {
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
-	grant, err := issueAppAuthSessionGrant(ctx, tx, projectID, userID, familyID, time.Now().Add(appRefreshSessionTTL).UTC())
+	grant, err := issueAppAuthSessionGrant(ctx, tx, projectID, accountID, familyID, time.Now().Add(appRefreshSessionTTL).UTC())
 	if err != nil {
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
-	return grant, user, nil
+	return grant, account, nil
 }
 
-func issueAppAuthSessionGrant(ctx context.Context, tx *sql.Tx, projectID string, userID string, familyID string, refreshExpiresAt time.Time) (appAuthSessionGrant, error) {
+func issueAppAuthSessionGrant(ctx context.Context, tx *sql.Tx, projectID string, accountID string, familyID string, refreshExpiresAt time.Time) (appAuthSessionGrant, error) {
 	accessToken, err := newAppAuthToken("session")
 	if err != nil {
 		return appAuthSessionGrant{}, err
@@ -1224,13 +1253,13 @@ func issueAppAuthSessionGrant(ctx context.Context, tx *sql.Tx, projectID string,
 		RefreshToken: refreshToken, RefreshExpiresAt: refreshExpiresAt.UTC(), FamilyID: familyID,
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO gonvex_auth_sessions
-		(token_hash, project_id, user_id, family_id, expires_at)
-		VALUES ($1, $2, $3, $4, $5)`, sha256Hex(grant.AccessToken), projectID, userID, familyID, grant.AccessExpiresAt); err != nil {
+		(token_hash, project_id, account_id, family_id, expires_at)
+		VALUES ($1, $2, $3, $4, $5)`, sha256Hex(grant.AccessToken), projectID, accountID, familyID, grant.AccessExpiresAt); err != nil {
 		return appAuthSessionGrant{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO gonvex_auth_refresh_tokens
-		(token_hash, family_id, project_id, user_id, expires_at)
-		VALUES ($1, $2, $3, $4, $5)`, sha256Hex(grant.RefreshToken), familyID, projectID, userID, grant.RefreshExpiresAt); err != nil {
+		(token_hash, family_id, project_id, account_id, expires_at)
+		VALUES ($1, $2, $3, $4, $5)`, sha256Hex(grant.RefreshToken), familyID, projectID, accountID, grant.RefreshExpiresAt); err != nil {
 		return appAuthSessionGrant{}, err
 	}
 	return grant, nil
@@ -1248,32 +1277,32 @@ func newAppAuthToken(kind string) (string, error) {
 	return "gvx_" + id + "." + base64.RawURLEncoding.EncodeToString(secret[:]), nil
 }
 
-func (s *Server) refreshAppSession(ctx context.Context, projectID string, refreshToken string) (appAuthSessionGrant, appAuthUser, error) {
+func (s *Server) refreshAppSession(ctx context.Context, projectID string, refreshToken string) (appAuthSessionGrant, appAuthAccount, error) {
 	db, err := s.openProjectRegistry(ctx)
 	if err != nil || db == nil {
-		return appAuthSessionGrant{}, appAuthUser{}, fmt.Errorf("auth session store is unavailable")
+		return appAuthSessionGrant{}, appAuthAccount{}, fmt.Errorf("auth session store is unavailable")
 	}
 	defer db.Close()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
 	defer tx.Rollback()
-	var storedProject, userID, familyID string
+	var storedProject, accountID, familyID string
 	var refreshExpiresAt time.Time
 	var usedAt, revokedAt sql.NullTime
-	err = tx.QueryRowContext(ctx, `SELECT project_id, user_id, family_id, expires_at, used_at, revoked_at
+	err = tx.QueryRowContext(ctx, `SELECT project_id, account_id, family_id, expires_at, used_at, revoked_at
 		FROM gonvex_auth_refresh_tokens WHERE token_hash = $1 FOR UPDATE`, sha256Hex(refreshToken)).Scan(
-		&storedProject, &userID, &familyID, &refreshExpiresAt, &usedAt, &revokedAt,
+		&storedProject, &accountID, &familyID, &refreshExpiresAt, &usedAt, &revokedAt,
 	)
 	if err == sql.ErrNoRows {
-		return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("invalid or expired refresh token")
+		return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("invalid or expired refresh token")
 	}
 	if err != nil {
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
 	if storedProject != projectID || revokedAt.Valid || refreshExpiresAt.Before(time.Now()) {
-		return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("invalid or expired refresh token")
+		return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("invalid or expired refresh token")
 	}
 	if usedAt.Valid {
 		if time.Since(usedAt.Time) <= appRefreshReuseGrace {
@@ -1281,40 +1310,48 @@ func (s *Server) refreshAppSession(ctx context.Context, projectID string, refres
 			// duplicate request inside the short grace window is rejected without
 			// revoking the winner; older reuse is treated as replay and revokes the
 			// complete family.
-			return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("refresh token was already rotated; use the latest session")
+			return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("refresh token was already rotated; use the latest session")
 		}
 		if err := revokeAppAuthFamilyTx(ctx, tx, familyID); err != nil {
-			return appAuthSessionGrant{}, appAuthUser{}, err
+			return appAuthSessionGrant{}, appAuthAccount{}, err
 		}
 		if err := tx.Commit(); err != nil {
-			return appAuthSessionGrant{}, appAuthUser{}, err
+			return appAuthSessionGrant{}, appAuthAccount{}, err
 		}
-		s.revokeAppAuthConnections(storedProject, userID)
-		return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("refresh token reuse detected; this login was revoked")
+		s.revokeAppAuthConnections(storedProject, accountID)
+		return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("refresh token reuse detected; this login was revoked")
 	} else {
 		if _, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_refresh_tokens SET used_at = now()
 			WHERE token_hash = $1 AND used_at IS NULL`, sha256Hex(refreshToken)); err != nil {
-			return appAuthSessionGrant{}, appAuthUser{}, err
+			return appAuthSessionGrant{}, appAuthAccount{}, err
 		}
 	}
-	var user appAuthUser
-	if err := tx.QueryRowContext(ctx, `SELECT id, COALESCE(NULLIF(account_id, ''), id), email, email_verified, name, picture, provider, created_at, last_signed_in_at
-		FROM gonvex_auth_users WHERE id = $1 AND project_id = $2 AND disabled_at IS NULL`, userID, projectID).Scan(
-		&user.ID, &user.AccountID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
+	var account appAuthAccount
+	if err := tx.QueryRowContext(ctx, `SELECT a.id, a.id, a.email,
+		COALESCE(identity.verified_email, FALSE), a.name, a.avatar_url,
+		COALESCE(identity.provider, ''), a.created_at, a.updated_at
+		FROM accounts a
+		LEFT JOIN LATERAL (
+			SELECT provider, verified_email FROM account_identities
+			WHERE account_id = a.id ORDER BY updated_at DESC LIMIT 1
+		) identity ON TRUE
+		WHERE a.id = $1 AND a.auth_realm_id = $2 AND a.disabled_at IS NULL`, accountID, projectID).Scan(
+		&account.ID, &account.AccountID, &account.Email, &account.EmailVerified, &account.Name, &account.Picture,
+		&account.Provider, &account.CreatedAt, &account.LastSignedInAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
-			return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("account is unavailable")
+			return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("account is unavailable")
 		}
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
-	grant, err := issueAppAuthSessionGrant(ctx, tx, projectID, userID, familyID, refreshExpiresAt)
+	grant, err := issueAppAuthSessionGrant(ctx, tx, projectID, accountID, familyID, refreshExpiresAt)
 	if err != nil {
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return appAuthSessionGrant{}, appAuthUser{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
-	return grant, user, nil
+	return grant, account, nil
 }
 
 func revokeAppAuthFamilyTx(ctx context.Context, tx *sql.Tx, familyID string) error {
@@ -1330,7 +1367,7 @@ func revokeAppAuthFamilyTx(ctx context.Context, tx *sql.Tx, familyID string) err
 	return err
 }
 
-func (s *Server) writeAppAuthSession(w http.ResponseWriter, r *http.Request, projectID string, grant appAuthSessionGrant, user appAuthUser, requestedTenant string) {
+func (s *Server) writeAppAuthSession(w http.ResponseWriter, r *http.Request, projectID string, grant appAuthSessionGrant, user appAuthAccount, requestedTenant string) {
 	tenants, err := s.listAppAuthTenants(r.Context(), projectID, user.ID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tenant memberships are unavailable"})
@@ -1344,15 +1381,15 @@ func (s *Server) writeAppAuthSession(w http.ResponseWriter, r *http.Request, pro
 			active = tenants[0]
 		}
 		activeTenantID = active.ID
-		activeMember, _ = s.loadTenantMember(r.Context(), projectID, activeTenantID, user.accountID())
+		activeMember, _ = s.loadTenantMember(r.Context(), projectID, activeTenantID, user.canonicalID())
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accessToken": grant.AccessToken, "tokenType": "Bearer",
 		"expiresIn": int(appSessionTTL.Seconds()), "expiresAt": grant.AccessExpiresAt.UnixMilli(),
 		"refreshToken": grant.RefreshToken, "refreshExpiresAt": grant.RefreshExpiresAt.UnixMilli(),
-		"account": gonvex.Account{ID: user.accountID(), Email: user.Email, Name: user.Name, AvatarURL: user.Picture},
+		"account": gonvex.Account{ID: user.canonicalID(), Email: user.Email, Name: user.Name, AvatarURL: user.Picture},
 		"member":  activeMember,
-		"user":    user, "tenants": tenants, "activeTenantId": activeTenantID,
+		"tenants": tenants, "activeTenantId": activeTenantID,
 	})
 }
 
@@ -1384,15 +1421,15 @@ func (s *Server) revokeAppAuthSession(ctx context.Context, accessToken string, r
 		return err
 	}
 	defer tx.Rollback()
-	var familyID, projectID, userID string
+	var familyID, projectID, accountID string
 	err = sql.ErrNoRows
 	if accessToken != "" {
-		err = tx.QueryRowContext(ctx, `SELECT family_id, project_id, user_id FROM gonvex_auth_sessions
-			WHERE token_hash = $1`, sha256Hex(accessToken)).Scan(&familyID, &projectID, &userID)
+		err = tx.QueryRowContext(ctx, `SELECT family_id, project_id, account_id FROM gonvex_auth_sessions
+			WHERE token_hash = $1`, sha256Hex(accessToken)).Scan(&familyID, &projectID, &accountID)
 	}
 	if (accessToken == "" || err == sql.ErrNoRows) && refreshToken != "" {
-		err = tx.QueryRowContext(ctx, `SELECT family_id, project_id, user_id FROM gonvex_auth_refresh_tokens
-			WHERE token_hash = $1`, sha256Hex(refreshToken)).Scan(&familyID, &projectID, &userID)
+		err = tx.QueryRowContext(ctx, `SELECT family_id, project_id, account_id FROM gonvex_auth_refresh_tokens
+			WHERE token_hash = $1`, sha256Hex(refreshToken)).Scan(&familyID, &projectID, &accountID)
 	} else if accessToken == "" {
 		return nil
 	}
@@ -1404,11 +1441,11 @@ func (s *Server) revokeAppAuthSession(ctx context.Context, accessToken string, r
 	}
 	if all {
 		if _, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_sessions SET revoked_at = COALESCE(revoked_at, now())
-			WHERE project_id = $1 AND user_id = $2`, projectID, userID); err != nil {
+			WHERE project_id = $1 AND account_id = $2`, projectID, accountID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_refresh_tokens SET revoked_at = COALESCE(revoked_at, now())
-			WHERE project_id = $1 AND user_id = $2`, projectID, userID); err != nil {
+			WHERE project_id = $1 AND account_id = $2`, projectID, accountID); err != nil {
 			return err
 		}
 	} else if familyID != "" {
@@ -1425,7 +1462,7 @@ func (s *Server) revokeAppAuthSession(ctx context.Context, accessToken string, r
 		return err
 	}
 	if all {
-		s.revokeAppAuthConnections(projectID, userID)
+		s.revokeAppAuthConnections(projectID, accountID)
 	} else if accessToken != "" {
 		s.revokeAppAuthTokenConnection(accessToken)
 	}
@@ -1434,7 +1471,7 @@ func (s *Server) revokeAppAuthSession(ctx context.Context, accessToken string, r
 
 type validatedAppSession struct {
 	ProjectID   string
-	User        appAuthUser
+	Account     appAuthAccount
 	Tenant      appAuthTenant
 	Permissions map[string]any
 }
@@ -1448,11 +1485,19 @@ func (s *Server) loadAppSessionIdentity(ctx context.Context, token string) (vali
 		return validatedAppSession{}, fmt.Errorf("auth session store is unavailable")
 	}
 	var session validatedAppSession
-	err = db.QueryRowContext(ctx, `SELECT s.project_id, u.id, COALESCE(NULLIF(u.account_id, ''), u.id), u.email, u.email_verified, u.name, u.picture, u.provider, u.created_at, u.last_signed_in_at
-		FROM gonvex_auth_sessions s JOIN gonvex_auth_users u ON u.id = s.user_id AND u.project_id = s.project_id
-		WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.disabled_at IS NULL`, sha256Hex(token)).Scan(
-		&session.ProjectID, &session.User.ID, &session.User.AccountID, &session.User.Email, &session.User.EmailVerified, &session.User.Name,
-		&session.User.Picture, &session.User.Provider, &session.User.CreatedAt, &session.User.LastSignedInAt,
+	err = db.QueryRowContext(ctx, `SELECT s.project_id, account.id, account.id, account.email,
+		COALESCE(identity.verified_email, FALSE), account.name, account.avatar_url,
+		COALESCE(identity.provider, ''), account.created_at, account.updated_at
+		FROM gonvex_auth_sessions s
+		JOIN accounts account ON account.id = s.account_id AND account.auth_realm_id = s.project_id
+		LEFT JOIN LATERAL (
+			SELECT provider, verified_email FROM account_identities
+			WHERE account_id = account.id ORDER BY updated_at DESC LIMIT 1
+		) identity ON TRUE
+		WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()
+			AND account.disabled_at IS NULL`, sha256Hex(token)).Scan(
+		&session.ProjectID, &session.Account.ID, &session.Account.AccountID, &session.Account.Email, &session.Account.EmailVerified, &session.Account.Name,
+		&session.Account.Picture, &session.Account.Provider, &session.Account.CreatedAt, &session.Account.LastSignedInAt,
 	)
 	if err == sql.ErrNoRows {
 		return validatedAppSession{}, fmt.Errorf("invalid or expired app session")
@@ -1473,17 +1518,17 @@ func (s *Server) validateAppSession(ctx context.Context, requestedProjectID stri
 	if requestedProjectID != "" && requestedProjectID != session.ProjectID {
 		return validatedAppSession{}, "", fmt.Errorf("app session was issued for a different project")
 	}
-	tenants, err := s.listAppAuthTenants(ctx, session.ProjectID, session.User.ID)
+	tenants, err := s.listAppAuthTenants(ctx, session.ProjectID, session.Account.ID)
 	if err != nil {
 		return validatedAppSession{}, "", err
 	}
-	tenant, err := s.resolveAppAuthTenant(ctx, session.ProjectID, session.User.accountID(), tenants, requestedTenantID)
+	tenant, err := s.resolveAppAuthTenant(ctx, session.ProjectID, session.Account.canonicalID(), tenants, requestedTenantID)
 	if err != nil {
 		return validatedAppSession{}, "", err
 	}
 	// The tenant's own member row is the admission decision, re-read here even
 	// when discovery already reported a role.
-	member, err := s.loadTenantMember(ctx, session.ProjectID, tenant.ID, session.User.accountID())
+	member, err := s.loadTenantMember(ctx, session.ProjectID, tenant.ID, session.Account.canonicalID())
 	if err != nil {
 		return validatedAppSession{}, "", err
 	}

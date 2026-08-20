@@ -1,6 +1,4 @@
-// Manifest shapes shared by the Go source-bundle pipeline and the
-// language-neutral module artifact pipeline. The runtime consumes the manifest
-// as JSON, so every field here mirrors `pkg/manifest` on the Go side.
+// Manifest shapes for the language-neutral TypeScript module pipeline.
 
 export type FunctionKind = "query" | "reducer" | "action";
 
@@ -39,23 +37,12 @@ export type ReplicaCollectionDefinition = {
   maxBytes?: number;
 };
 
-export type ReadDependency = {
-  table: string;
-  columns?: string[];
-  filters?: string[];
-  ordersBy?: string[];
-  windowed?: boolean;
-};
-
 export type FunctionDependencies = {
-  reads?: ReadDependency[];
   shareByPermissions?: boolean;
   shareResultFrom?: string;
   shareResultField?: string;
   liveQueryPlan?: LiveQueryPlan;
   nonOptimisticReason?: string;
-  optimisticReducer?: OptimisticReducerDefinition;
-  optimisticProjection?: OptimisticProjectionDefinition;
 };
 
 export type LiveQueryPlan = {
@@ -65,10 +52,13 @@ export type LiveQueryPlan = {
   resultPath?: string[];
   where?: LiveExpression;
   search?: { argument: string; columns: string[] };
+  filters?: { argument: string; allowedColumns: string[]; allowedOperators: FilterOperator[] };
   sort?: { columnArgument?: string; directionArgument?: string; defaultColumn: string; defaultDirection: "asc" | "desc"; allowedColumns: string[] };
-  window?: { offsetArgument: string; limitArgument: string; defaultLimit: number; maxLimit: number };
+  window?: { offsetArgument: string; limitArgument: string; defaultLimit: number; maxLimit: number; count?: "exact" };
   serverOnly?: boolean;
 };
+
+export type FilterOperator = "contains" | "notContains" | "equals" | "notEquals" | "startsWith" | "endsWith" | "empty" | "notEmpty" | "oneOf" | "lessThan" | "lessThanOrEqual" | "greaterThan" | "greaterThanOrEqual" | "inRange";
 
 export type LiveExpression = {
   operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "contains" | "containsInsensitive" | "range" | "and" | "or" | "not" | "server";
@@ -79,18 +69,6 @@ export type LiveExpression = {
 };
 
 export type LiveValue = { argument?: string; literal?: unknown };
-
-export type OptimisticReducerDefinition = {
-  entity: string;
-  rowIdPath: string[];
-  fieldsPath: string[];
-};
-
-export type OptimisticProjectionDefinition = {
-  entity: string;
-  key: string;
-  resultPath: string[];
-};
 
 export type Column = {
   type: string;
@@ -152,33 +130,42 @@ export type Manifest = {
   generatedAt: string;
   functions: Record<string, FunctionEntry>;
   schema: SchemaDefinition;
-  bundle?: SourceBundle;
-  // Emitted for module-artifact projects (TypeScript today). Go projects keep
-  // shipping `bundle` alone so the runtime sees the exact payload it does now.
-  module?: ModuleArtifact;
+  module: ModuleArtifact;
   visibility?: Record<string, VisibilityPlan>;
 };
 
-export type SourceBundle = {
-  hash: string;
-  modulePath: string;
-  packageName: string;
-  goVersion?: string;
-  files: Record<string, string>;
-};
+export type ModuleLanguage = "typescript";
 
-/** Languages a server module can be authored in. */
-export type ModuleLanguage = "go" | "typescript";
+/** The recursive, language-neutral value schema used by TypeScript modules. */
+export type ModuleSchema =
+  | StringSchema
+  | NumberSchema
+  | BooleanSchema
+  | NullSchema
+  | AnySchema
+  | IdSchema
+  | LiteralSchema
+  | ArraySchema
+  | ObjectSchema
+  | RecordSchema
+  | OptionalSchema;
 
-/**
- * Argument and result shapes are placeholders until codegen can lower real
- * TypeScript types into JSON Schema. `type` carries the declared type text so
- * the runtime (and later generations of this pipeline) can resolve it.
- */
-export type ModuleSchema = {
-  placeholder: true;
-  type?: string;
+export type StringSchema = {
+  kind: "string";
+  format?: "email" | "uri" | "uuid" | "datetime";
+  minLength?: number;
+  maxLength?: number;
 };
+export type NumberSchema = { kind: "number"; integer?: boolean; minimum?: number; maximum?: number };
+export type BooleanSchema = { kind: "boolean" };
+export type NullSchema = { kind: "null" };
+export type AnySchema = { kind: "any" };
+export type IdSchema = { kind: "id"; entity: string };
+export type LiteralSchema = { kind: "literal"; value: JsonValue };
+export type ArraySchema = { kind: "array"; items: ModuleSchema };
+export type ObjectSchema = { kind: "object"; fields: Record<string, ModuleSchema>; allowUnknown?: boolean };
+export type RecordSchema = { kind: "record"; values: ModuleSchema };
+export type OptionalSchema = { kind: "optional"; value: ModuleSchema };
 
 export type ModuleFunction = {
   kind: FunctionKind;
@@ -194,8 +181,8 @@ export type ModuleFunction = {
   internal?: boolean;
   delivery?: "oneShot" | "live" | "replica";
   replica?: ReplicaCollectionDefinition;
-  // Declarative metadata is passed through verbatim: the CLI does not
-  // interpret delivery, offline, or optimistic policies, the runtime does.
+  // Declarative metadata is emitted into the signed artifact contract and
+  // validated again by the runtime before module activation.
   offline?: JsonValue;
   optimistic?: JsonValue;
 };
@@ -224,4 +211,14 @@ export type ModuleArtifact = {
   files: Record<string, string>;
   javascript?: ModuleJavaScript;
   visibility: Record<string, VisibilityPlan>;
+  crons?: ModuleCron[];
+};
+
+export type ModuleCron = {
+  name: string;
+  function: string;
+  args?: JsonValue;
+  scope: "project" | "tenant";
+  intervalMs?: number;
+  expression?: string;
 };

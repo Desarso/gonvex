@@ -1,11 +1,18 @@
 package server
 
 import (
+	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/server/internal/config"
 )
 
 func workspaceVisibilityPlan() manifest.VisibilityPlan {
@@ -45,6 +52,15 @@ func TestVisibilityOldAndNewRowsFailClosed(t *testing.T) {
 	if visibilityRawRowMatches(json.RawMessage(`{"id":"task-1","workspaceId":"workspace-b"}`), plan, resolved) {
 		t.Fatal("a row outside the member's workspace must fail closed")
 	}
+	if visibilityRawRowMatches(json.RawMessage(`{"id":"task-1"}`), plan, resolved) {
+		t.Fatal("a row missing a visibility field must fail closed")
+	}
+	if visibilityRawRowMatches(json.RawMessage(`{"id":`), plan, resolved) {
+		t.Fatal("a malformed row must fail closed")
+	}
+	if visibilityRawRowMatches(nil, plan, resolved) {
+		t.Fatal("a missing row must fail closed")
+	}
 	resolved.Permissions["tasks.viewAll"] = true
 	if !visibilityRawRowMatches(json.RawMessage(`{"id":"task-1","workspaceId":"workspace-b"}`), plan, resolved) {
 		t.Fatal("the explicit view-all permission must admit the row")
@@ -73,15 +89,15 @@ func TestVisibilityTransitionOperationCoversAllOldAndNewStates(t *testing.T) {
 }
 
 func TestMemberChangeIdentitiesIncludesOldAndNewAuthorityKeys(t *testing.T) {
-	identities := memberChangeIdentities(syncChangeBatch{changes: []syncLogChange{
+	identities := memberChangeIdentities(replicaChangeBatch{changes: []replicaLogChange{
 		{
 			table:    "members",
-			oldValue: json.RawMessage(`{"id":"member-old","account_id":"account-old","user_id":"legacy-old"}`),
-			newValue: json.RawMessage(`{"id":"member-new","accountId":"account-new"}`),
+			oldValue: json.RawMessage(`{"id":"member-old","account_id":"account-old"}`),
+			newValue: json.RawMessage(`{"id":"member-new","account_id":"account-new"}`),
 		},
 		{table: "tasks", oldValue: json.RawMessage(`{"account_id":"must-not-match"}`)},
 	}})
-	for _, identity := range []string{"member-old", "account-old", "legacy-old", "member-new", "account-new"} {
+	for _, identity := range []string{"member-old", "account-old", "member-new", "account-new"} {
 		if _, ok := identities[identity]; !ok {
 			t.Fatalf("missing member identity %q in %#v", identity, identities)
 		}
@@ -173,5 +189,283 @@ func TestManifestUpdateRequiresVisibilityForEveryLiveDelivery(t *testing.T) {
 	}
 	if err := (&Server{}).requireVisibilityPlans(current); err != nil {
 		t.Fatalf("explicit public visibility plan was rejected: %v", err)
+	}
+}
+
+func TestVisibilityDependenciesIncludeSetsJoinsAndIdentityAuthority(t *testing.T) {
+	plan := workspaceVisibilityPlan()
+	plan.Sets["workspaces"] = manifest.VisibilitySet{
+		Table: "workspaceMembers", Select: "workspaceId",
+		Joins: []manifest.VisibilityJoin{{Table: "teams", LeftColumn: "teamId", RightColumn: "id"}},
+		Where: []manifest.VisibilityConstraint{{Table: "workspaceMembers", Column: "memberId", Context: "member.id"}},
+	}
+	dependencies := visibilityPlanDependencies(plan)
+	for _, required := range []string{"members", "teams", "workspaceMembers"} {
+		if !stringInSlice(required, dependencies) {
+			t.Fatalf("visibility dependency %q missing from %#v", required, dependencies)
+		}
+	}
+	public := manifest.VisibilityPlan{
+		Table: "statuses", Key: "id", Sets: map[string]manifest.VisibilitySet{},
+		Where: &manifest.VisibilityExpression{Operator: "public"},
+	}
+	if dependencies := visibilityPlanDependencies(public); len(dependencies) != 1 || dependencies[0] != "members" {
+		t.Fatalf("tenant-public visibility did not retain the active Member gate: %#v", dependencies)
+	}
+}
+
+func TestVisibilityInvalidationIsScopedAndDependencyAware(t *testing.T) {
+	server := New(config.Config{})
+	t.Cleanup(server.Close)
+	server.visibilityContexts["tasks-a"] = &resolvedVisibilityContext{
+		ScopeKey: "project-a\x00tenant-a", Dependencies: map[string]struct{}{"workspace_members": {}},
+	}
+	server.visibilityContexts["notes-a"] = &resolvedVisibilityContext{
+		ScopeKey: "project-a\x00tenant-a", Dependencies: map[string]struct{}{"teams": {}},
+	}
+	server.visibilityContexts["tasks-b"] = &resolvedVisibilityContext{
+		ScopeKey: "project-a\x00tenant-b", Dependencies: map[string]struct{}{"workspace_members": {}},
+	}
+
+	server.invalidateVisibilityContexts("project-a", "tenant-a", []string{"workspace_members"})
+	if _, ok := server.visibilityContexts["tasks-a"]; ok {
+		t.Fatal("changed dependency retained a stale visibility context")
+	}
+	if _, ok := server.visibilityContexts["notes-a"]; !ok {
+		t.Fatal("unrelated dependency evicted a valid visibility context")
+	}
+	if _, ok := server.visibilityContexts["tasks-b"]; !ok {
+		t.Fatal("tenant-scoped invalidation evicted another tenant")
+	}
+	if got := server.visibilityEpochs["project-a\x00tenant-a"]; got != 1 {
+		t.Fatalf("visibility epoch = %d, want 1", got)
+	}
+
+	server.invalidateProjectVisibilityContexts("project-a")
+	if len(server.visibilityContexts) != 0 {
+		t.Fatalf("project invalidation retained contexts: %#v", server.visibilityContexts)
+	}
+	if got := server.visibilityEpochs["project-a\x00*"]; got != 1 {
+		t.Fatalf("project visibility epoch = %d, want 1", got)
+	}
+}
+
+func TestStructuredVisibilityQueriesFailClosedWithoutPlan(t *testing.T) {
+	server := New(config.Config{})
+	t.Cleanup(server.Close)
+	if _, err := server.executeStructuredReplicaQuery(context.Background(), "project", "tenant", callerContext{}, manifest.ReplicaCollectionDefinition{Table: "tasks"}, nil); err == nil || !strings.Contains(err.Error(), "visibility plan required") {
+		t.Fatalf("Replica Collection missing-plan error = %v", err)
+	}
+	if _, err := server.executeStructuredLiveQuery(context.Background(), "project", "tenant", callerContext{}, manifest.LiveQueryPlan{Table: "tasks"}, nil); err == nil || !strings.Contains(err.Error(), "visibility plan required") {
+		t.Fatalf("Live Query missing-plan error = %v", err)
+	}
+}
+
+func TestRequiredVisibilityPlanRejectsMalformedPlan(t *testing.T) {
+	plan := manifest.VisibilityPlan{Table: "tasks", Key: "id"}
+	if err := validateVisibilityPlan("tasks", plan); err == nil || !strings.Contains(err.Error(), "must declare where") {
+		t.Fatalf("malformed visibility plan error = %v", err)
+	}
+}
+
+func TestVisibilitySQLAndFingerprintFollowLatestCommittedMembership(t *testing.T) {
+	server := newTypeScriptTestServer(t, config.Config{})
+	const project, tenant = "test", "tenant"
+	tenantURL := server.config.TenantDatabases[project+":"+tenant]
+	db, err := sql.Open("pgx", tenantURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+		CREATE TABLE members (
+			id TEXT PRIMARY KEY,
+			account_id TEXT NOT NULL UNIQUE,
+			status TEXT NOT NULL,
+			role TEXT NOT NULL,
+			permissions JSONB NOT NULL DEFAULT '{}'::jsonb
+		);
+		CREATE TABLE workspace_members (
+			id TEXT PRIMARY KEY,
+			member_id TEXT NOT NULL,
+			workspace_id TEXT NOT NULL
+		);
+		CREATE TABLE tasks (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL,
+			title TEXT NOT NULL
+		);
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := manifest.VisibilityPlan{
+		Table: "tasks", Key: "id",
+		Sets: map[string]manifest.VisibilitySet{
+			"workspaces": {
+				Table: "workspace_members", Select: "workspace_id",
+				Where: []manifest.VisibilityConstraint{{Table: "workspace_members", Column: "member_id", Context: "member.id"}},
+			},
+		},
+		Where: &manifest.VisibilityExpression{Operator: "inSet", Column: "workspace_id", Set: "workspaces"},
+	}
+	replicaDefinition := manifest.ReplicaCollectionDefinition{
+		Table: "tasks", Key: "id", Columns: []string{"id", "workspace_id", "title"},
+	}
+	livePlan := manifest.LiveQueryPlan{
+		Table: "tasks", Key: "id", Columns: []string{"id", "workspace_id", "title"},
+	}
+	current := typeScriptTestManifest(project, map[string]manifest.FunctionEntry{
+		"tasks.recent": {
+			Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica, Replica: &replicaDefinition,
+		},
+		"tasks.grid": {
+			Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryLive,
+			Dependencies: manifest.FunctionDependencies{LiveQueryPlan: &livePlan},
+		},
+	})
+	current.Visibility = map[string]manifest.VisibilityPlan{"tasks": plan}
+	current.Module.Visibility = current.Visibility
+	current.Module.Hash, _ = current.Module.ComputedHash()
+	payload, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", bytes.NewReader(payload)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("sync visibility fixture: status %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO members (id, account_id, status, role, permissions)
+		VALUES ('member-a', 'account-a', 'active', 'member', '{}');
+		INSERT INTO workspace_members (id, member_id, workspace_id)
+		VALUES ('membership-a', 'member-a', 'workspace-a');
+		INSERT INTO tasks (id, workspace_id, title) VALUES
+			('task-a', 'workspace-a', 'Visible A'),
+			('task-b', 'workspace-b', 'Visible B');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	caller := callerContext{user: &gonvex.Account{ID: "account-a"}}
+	assertVisibleTaskIDs(t, mustStructuredReplicaRows(t, server, project, tenant, caller, replicaDefinition), "task-a")
+	assertVisibleTaskIDs(t, mustStructuredLiveRows(t, server, project, tenant, caller, livePlan), "task-a")
+	countPlan := livePlan
+	countPlan.ResultPath = []string{"rows"}
+	countPlan.Window = &manifest.LiveWindow{OffsetArgument: "offset", LimitArgument: "limit", DefaultLimit: 100, MaxLimit: 100, Count: "exact"}
+	countResult, err := server.executeStructuredLiveQuery(context.Background(), project, tenant, caller, countPlan, []byte(`{"offset":0,"limit":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	countEnvelope, ok := countResult.(map[string]any)
+	if !ok {
+		t.Fatalf("exact-count Live Query result type = %T", countResult)
+	}
+	if countEnvelope["total"] != int(1) && countEnvelope["total"] != int64(1) && countEnvelope["total"] != float64(1) {
+		t.Fatalf("exact-count total = %#v, want 1", countEnvelope["total"])
+	}
+	if rows, ok := countEnvelope["rows"].([]any); !ok || len(rows) != 1 {
+		t.Fatalf("exact-count rows = %#v, want one visible row", countEnvelope["rows"])
+	}
+	filteredPlan := livePlan
+	filteredPlan.ResultPath = []string{"rows"}
+	filteredPlan.Filters = &manifest.LiveFilters{
+		Argument:         "filters",
+		AllowedColumns:   []string{"title"},
+		AllowedOperators: []manifest.FilterOperator{"contains"},
+	}
+	filteredPlan.Window = &manifest.LiveWindow{OffsetArgument: "offset", LimitArgument: "limit", DefaultLimit: 100, MaxLimit: 100, Count: "exact"}
+	filteredResult, err := server.executeStructuredLiveQuery(context.Background(), project, tenant, caller, filteredPlan, []byte(`{"filters":[{"column":"title","operator":"contains","value":"visible"}],"offset":0,"limit":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filteredEnvelope, ok := filteredResult.(map[string]any)
+	if !ok || filteredEnvelope["total"] != int(1) && filteredEnvelope["total"] != int64(1) && filteredEnvelope["total"] != float64(1) {
+		t.Fatalf("structured filter exact count = %#v, want 1", filteredResult)
+	}
+	if _, err := server.executeStructuredLiveQuery(context.Background(), project, tenant, caller, filteredPlan, []byte(`{"filters":[{"column":"workspace_id","operator":"contains","value":"workspace"}],"offset":0,"limit":1}`)); err == nil {
+		t.Fatal("unallowlisted structured filter column was accepted")
+	}
+	if _, err := server.executeStructuredLiveQuery(context.Background(), project, tenant, caller, filteredPlan, []byte(`{"filters":[{"column":"title","operator":"server","value":"x"}],"offset":0,"limit":1}`)); err == nil {
+		t.Fatal("unallowlisted structured filter operator was accepted")
+	}
+
+	subscription := querySubscription{
+		ctx: context.Background(), project: project, tenant: tenant, path: "tasks.grid", caller: caller,
+	}
+	firstFingerprint := server.subscriptions.resolveAttachVisibilityKey(subscription)
+	if firstFingerprint == "" || strings.HasPrefix(firstFingerprint, "denied:") {
+		t.Fatalf("initial visibility fingerprint = %q", firstFingerprint)
+	}
+	if _, err := db.Exec(`
+		DELETE FROM workspace_members WHERE id = 'membership-a';
+		INSERT INTO workspace_members (id, member_id, workspace_id)
+		VALUES ('membership-b', 'member-a', 'workspace-b');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	// Do not call invalidateVisibilityContexts here. This deliberately models
+	// the interval after COMMIT and before the LISTEN notification is processed.
+	assertVisibleTaskIDs(t, mustStructuredReplicaRows(t, server, project, tenant, caller, replicaDefinition), "task-b")
+	assertVisibleTaskIDs(t, mustStructuredLiveRows(t, server, project, tenant, caller, livePlan), "task-b")
+	secondFingerprint := server.subscriptions.resolveAttachVisibilityKey(subscription)
+	if secondFingerprint == firstFingerprint || strings.HasPrefix(secondFingerprint, "denied:") {
+		t.Fatalf("attach reused stale visibility fingerprint across committed membership change: before=%q after=%q", firstFingerprint, secondFingerprint)
+	}
+	if _, err := db.Exec(`UPDATE members SET status = 'revoked' WHERE id = 'member-a'`); err != nil {
+		t.Fatal(err)
+	}
+	if key := server.subscriptions.resolveAttachVisibilityKey(subscription); key != "denied:account-a" {
+		t.Fatalf("revoked membership attach key = %q, want fail-closed denial", key)
+	}
+	if _, err := server.executeStructuredLiveQuery(context.Background(), project, tenant, caller, livePlan, nil); err == nil {
+		t.Fatal("revoked membership retained Live Query access")
+	}
+}
+
+func mustStructuredReplicaRows(t *testing.T, server *Server, project, tenant string, caller callerContext, definition manifest.ReplicaCollectionDefinition) []any {
+	t.Helper()
+	result, err := server.executeStructuredReplicaQuery(context.Background(), project, tenant, caller, definition, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, ok := result.([]any)
+	if !ok {
+		t.Fatalf("Replica Collection result type = %T", result)
+	}
+	return rows
+}
+
+func mustStructuredLiveRows(t *testing.T, server *Server, project, tenant string, caller callerContext, plan manifest.LiveQueryPlan) []any {
+	t.Helper()
+	result, err := server.executeStructuredLiveQuery(context.Background(), project, tenant, caller, plan, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, ok := result.([]any)
+	if !ok {
+		t.Fatalf("Live Query result type = %T", result)
+	}
+	return rows
+}
+
+func assertVisibleTaskIDs(t *testing.T, rows []any, want ...string) {
+	t.Helper()
+	got := map[string]bool{}
+	for _, raw := range rows {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("visible row type = %T", raw)
+		}
+		got[strings.TrimSpace(row["id"].(string))] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("visible task ids = %#v, want %#v", got, want)
+	}
+	for _, id := range want {
+		if !got[id] {
+			t.Fatalf("visible task ids = %#v, missing %q", got, id)
+		}
 	}
 }

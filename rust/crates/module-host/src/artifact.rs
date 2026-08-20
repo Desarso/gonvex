@@ -126,10 +126,10 @@ pub fn decode(
         Some(wire.javascript.path.as_str()),
     );
 
-    let artifact_hash = if wire.artifact_hash.trim().is_empty() {
+    let artifact_hash = if wire.hash.trim().is_empty() {
         actual
     } else {
-        wire.artifact_hash.trim().to_owned()
+        wire.hash.trim().to_owned()
     };
     Ok(DecodedArtifact {
         artifact: ModuleArtifact {

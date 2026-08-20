@@ -590,6 +590,22 @@ type projectRegistryExecer interface {
 }
 
 func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error {
+	// Normal startup never upgrades or reads legacy identity tables. Their data
+	// needs account-merging decisions that belong to the explicit migration.
+	if _, err := db.ExecContext(ctx, `DO $$ BEGIN
+		IF to_regclass('public.gonvex_auth_users') IS NOT NULL
+			OR to_regclass('public.gonvex_auth_memberships') IS NOT NULL
+			OR EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema()
+					AND table_name IN ('gonvex_auth_codes', 'gonvex_auth_sessions', 'gonvex_auth_refresh_tokens')
+					AND column_name = 'user_id'
+			) THEN
+			RAISE EXCEPTION 'identity-v2 migration required: run gonvex migrate identity-v2 --plan, --apply, and --verify before starting Gonvex';
+		END IF;
+	END $$`); err != nil {
+		return fmt.Errorf("control-plane identity schema is not ready: %w", err)
+	}
 	// Identity v2 lives in the Control Plane. Legacy identity data is imported
 	// only by the explicit identity-v2 migration command, never by runtime reads.
 	if err := controlidentity.InstallSchema(ctx, db); err != nil {
@@ -656,14 +672,30 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 		ON gonvex_runtime_tenants (project_id, name, tenant_id)`); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_dashboard_users (
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_dashboard_accounts (
 		email TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
-		role TEXT NOT NULL DEFAULT 'user',
+		role TEXT NOT NULL DEFAULT 'standard',
 		password_hash TEXT NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`); err != nil {
+		return err
+	}
+	// One-way upgrade from the pre-Account dashboard identity table. This is
+	// migration code only; the runtime reads and writes the canonical table.
+	if _, err := db.ExecContext(ctx, `DO $$ BEGIN
+		IF to_regclass('public.gonvex_dashboard_users') IS NOT NULL THEN
+			EXECUTE 'INSERT INTO gonvex_dashboard_accounts (email, name, role, password_hash, created_at, updated_at)
+				SELECT email, name, role, password_hash, created_at, updated_at FROM gonvex_dashboard_users
+				ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, role = EXCLUDED.role,
+				password_hash = EXCLUDED.password_hash, updated_at = EXCLUDED.updated_at';
+			DROP TABLE gonvex_dashboard_users;
+		END IF;
+	END $$`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE gonvex_dashboard_accounts SET role = 'standard' WHERE role = 'user'`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_account_access_tokens (
@@ -728,10 +760,28 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_manifests (
 		project_id TEXT PRIMARY KEY,
 		manifest JSONB NOT NULL,
-		bundle_hash TEXT NOT NULL DEFAULT '',
+		module_hash TEXT NOT NULL DEFAULT '',
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `DO $$ BEGIN
+		IF EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'gonvex_runtime_manifests' AND column_name = 'bundle_hash'
+		) THEN
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = 'gonvex_runtime_manifests' AND column_name = 'module_hash'
+			) THEN
+				ALTER TABLE gonvex_runtime_manifests RENAME COLUMN bundle_hash TO module_hash;
+			ELSE
+				UPDATE gonvex_runtime_manifests SET module_hash = bundle_hash WHERE module_hash = '';
+				ALTER TABLE gonvex_runtime_manifests DROP COLUMN bundle_hash;
+			END IF;
+		END IF;
+	END $$`); err != nil {
 		return err
 	}
 	// One-way update migration. Runtime code never reads the legacy name after
@@ -753,9 +803,16 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	)`); err != nil {
 		return err
 	}
+	// Canonicalize retained audit history while it is already being migrated.
+	// The JSON entry is what the dashboard reads, so update both representations.
+	if _, err := db.ExecContext(ctx, `UPDATE gonvex_runtime_reducer_logs
+		SET kind = 'reducer', entry = jsonb_set(entry, '{kind}', to_jsonb('reducer'::text), true)
+		WHERE kind IN ('mutation', 'internalMutation')`); err != nil {
+		return err
+	}
 	// The table now also stores FAILED queries/actions/http calls, which the
 	// in-memory ring drops within minutes (see runtimeLogIsDurable). Existing
-	// deployments carried a kind CHECK that only allowed old mutation names and
+	// deployments carried a kind CHECK that only allowed obsolete write-kind names and
 	// silently rejected every one of those inserts.
 	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_reducer_logs
 		DROP CONSTRAINT IF EXISTS gonvex_runtime_mutation_logs_kind_check`); err != nil {
@@ -834,73 +891,6 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	)`); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_users (
-		id TEXT PRIMARY KEY,
-		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
-		provider TEXT NOT NULL,
-		provider_subject TEXT NOT NULL,
-		email TEXT NOT NULL DEFAULT '',
-		email_verified BOOLEAN NOT NULL DEFAULT FALSE,
-		name TEXT NOT NULL DEFAULT '',
-		picture TEXT NOT NULL DEFAULT '',
-		disabled_at TIMESTAMPTZ,
-		last_signed_in_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		UNIQUE (project_id, provider, provider_subject)
-	)`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_auth_users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_auth_users ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT ''`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE gonvex_auth_users SET account_id = id WHERE account_id = ''`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO accounts (id, email, name, avatar_url, disabled_at, created_at, updated_at)
-		SELECT account_id, email, name, picture, disabled_at, created_at, updated_at
-		FROM gonvex_auth_users
-		WHERE account_id <> ''
-		ON CONFLICT (id) DO UPDATE SET
-			email = EXCLUDED.email, name = EXCLUDED.name, avatar_url = EXCLUDED.avatar_url,
-			disabled_at = EXCLUDED.disabled_at, updated_at = GREATEST(accounts.updated_at, EXCLUDED.updated_at)`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO account_identities (
-		account_id, provider, issuer, subject, email, verified_email, created_at, updated_at
-	)
-	SELECT DISTINCT ON (provider, CASE WHEN provider = 'google' THEN 'https://accounts.google.com' ELSE '' END, provider_subject)
-		account_id, provider,
-		CASE WHEN provider = 'google' THEN 'https://accounts.google.com' ELSE '' END,
-		provider_subject, email, email_verified, created_at, updated_at
-	FROM gonvex_auth_users
-	WHERE account_id <> '' AND provider <> '' AND provider_subject <> ''
-	ORDER BY provider, CASE WHEN provider = 'google' THEN 'https://accounts.google.com' ELSE '' END,
-		provider_subject, created_at, account_id
-	ON CONFLICT (provider, issuer, subject) DO UPDATE SET
-		email = EXCLUDED.email, verified_email = EXCLUDED.verified_email,
-		updated_at = GREATEST(account_identities.updated_at, EXCLUDED.updated_at)`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS gonvex_auth_users_project_account
-		ON gonvex_auth_users (project_id, account_id) WHERE account_id <> ''`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS gonvex_auth_users_project_id
-		ON gonvex_auth_users (project_id, id)`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_users_by_project
-		ON gonvex_auth_users (project_id, created_at DESC)`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_users_by_email
-		ON gonvex_auth_users (project_id, lower(email))`); err != nil {
-		return err
-	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_transactions (
 		token_hash TEXT PRIMARY KEY,
 		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
@@ -921,7 +911,7 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_codes (
 		code_hash TEXT PRIMARY KEY,
 		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
-		user_id TEXT NOT NULL REFERENCES gonvex_auth_users(id) ON DELETE CASCADE,
+		account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 		redirect_uri TEXT NOT NULL,
 		code_challenge TEXT NOT NULL,
 		expires_at TIMESTAMPTZ NOT NULL,
@@ -937,7 +927,7 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_sessions (
 		token_hash TEXT PRIMARY KEY,
 		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
-		user_id TEXT NOT NULL REFERENCES gonvex_auth_users(id) ON DELETE CASCADE,
+		account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 		family_id TEXT NOT NULL DEFAULT '',
 		expires_at TIMESTAMPTZ NOT NULL,
 		revoked_at TIMESTAMPTZ,
@@ -946,23 +936,8 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	)`); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_auth_sessions ADD COLUMN IF NOT EXISTS family_id TEXT NOT NULL DEFAULT ''`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_auth_sessions ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ`); err != nil {
-		return err
-	}
-	// Sessions created before rotating refresh tokens existed used a much longer
-	// bearer lifetime and have no family id. Cap those legacy rows on upgrade so
-	// deploying the hardened session model does not leave seven-day access tokens
-	// valid in the background.
-	if _, err := db.ExecContext(ctx, `UPDATE gonvex_auth_sessions
-		SET expires_at = LEAST(expires_at, created_at + interval '15 minutes')
-		WHERE family_id = '' AND expires_at > created_at + interval '15 minutes'`); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_sessions_by_user
-		ON gonvex_auth_sessions (project_id, user_id, expires_at DESC)`); err != nil {
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_sessions_by_account
+		ON gonvex_auth_sessions (project_id, account_id, expires_at DESC)`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_sessions_by_family
@@ -977,7 +952,7 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 		token_hash TEXT PRIMARY KEY,
 		family_id TEXT NOT NULL,
 		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
-		user_id TEXT NOT NULL REFERENCES gonvex_auth_users(id) ON DELETE CASCADE,
+		account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 		expires_at TIMESTAMPTZ NOT NULL,
 		used_at TIMESTAMPTZ,
 		revoked_at TIMESTAMPTZ,
@@ -1285,20 +1260,20 @@ func (s *Server) saveRuntimeManifest(ctx context.Context, next manifest.Manifest
 	if err != nil {
 		return err
 	}
-	bundleHash := ""
-	if next.Bundle != nil {
-		bundleHash = next.Bundle.Hash
+	moduleHash := ""
+	if next.Module != nil {
+		moduleHash = next.Module.Identity()
 	}
 	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_runtime_manifests (
-		project_id, manifest, bundle_hash, updated_at
+		project_id, manifest, module_hash, updated_at
 	) VALUES ($1, $2::jsonb, $3, now())
 	ON CONFLICT (project_id) DO UPDATE SET
 		manifest = EXCLUDED.manifest,
-		bundle_hash = EXCLUDED.bundle_hash,
+		module_hash = EXCLUDED.module_hash,
 		updated_at = now()`,
 		projectID,
 		string(payload),
-		bundleHash,
+		moduleHash,
 	)
 	return err
 }
@@ -1518,7 +1493,14 @@ func createProjectDatabase(ctx context.Context, baseURL string, databaseName str
 		return "", err
 	}
 	defer db.Close()
-	if _, err := db.ExecContext(ctx, "CREATE DATABASE "+quoteIdent(databaseName)); err != nil {
+	// The maintenance role may have CREATEDB without owning the database
+	// (common in managed/test PostgreSQL).  Explicitly make it the owner so it
+	// also owns the public schema and can provision tenant-local tables.
+	var owner string
+	if err := db.QueryRowContext(ctx, `SELECT current_user`).Scan(&owner); err != nil {
+		return "", err
+	}
+	if _, err := db.ExecContext(ctx, "CREATE DATABASE "+quoteIdent(databaseName)+" OWNER "+quoteIdent(owner)); err != nil {
 		return "", err
 	}
 	return databaseURL(baseURL, databaseName)

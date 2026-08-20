@@ -1,141 +1,55 @@
 ---
 title: Scheduling and Background Jobs
-description: Register recurring jobs and enqueue Reducers or Actions for later execution.
+description: Declare recurring jobs and enqueue Reducers or Actions for later execution.
 ---
 
 # Scheduling and Background Jobs
 
-Gonvex can run recurring project jobs and enqueue one-shot work from a backend
-function. Scheduled calls use the same Reducer/Action execution paths,
-project/tenant routing, metrics, and committed change feed as client calls.
+Recurring jobs are declared in TypeScript module code. They target a Reducer or
+Action and are extracted into the language-neutral module artifact.
 
-## Recurring jobs
+```ts
+import { action, cron, reducer, schema, tenantCron } from "@gonvex/module-sdk";
 
-Register a Reducer or Action by interval:
+export const refresh = action({
+  args: schema.object({}),
+  result: schema.object({ refreshed: schema.boolean() }),
+  run: async ({ fetch }) => {
+    await fetch("https://example.test/refresh");
+    return { refreshed: true };
+  },
+});
 
-```go
-package backend
+export const refreshEveryFiveMinutes = cron({
+  name: "refresh-every-five-minutes",
+  function: "refresh",
+  intervalMs: 5 * 60 * 1000,
+});
 
-import (
-  "time"
-
-  "github.com/gonvex/gonvex/pkg/gonvex"
-)
-
-func Register(app *gonvex.App) {
-  app.Action("reports.refresh", RefreshReports)
-  app.Cron(
-    "refresh reports",
-    15*time.Minute,
-    "reports.refresh",
-    RefreshReportsArgs{},
-  )
-}
+export const tenantCleanup = tenantCron({
+  name: "tenant-cleanup",
+  function: "tasks.cleanup",
+  expression: "0 1 * * *",
+});
 ```
 
-Or use a standard five-field cron expression:
+The target function must be a Reducer or Action, never a Query. A tenant cron
+runs once for each tenant with that tenant's verified context.
 
-```go
-app.CronExpr(
-  "nightly cleanup",
-  "0 3 * * *",
-  "maintenance.cleanup",
-  CleanupArgs{},
-)
-```
+## One-shot work
 
-The five fields are minute, hour, day of month, month, and day of week. The
-referenced function must be a Reducer, internal Reducer, or Action, and the
-arguments must be JSON-encodable.
+Reducers and Actions can use the scheduler supplied in their context for
+durable one-shot work. Work scheduled from a Reducer becomes visible only after
+the Reducer commits. A rollback does not expose its scheduled job.
 
-Cron names must be unique within an app. Manifest sync replaces the project's
-registered schedules while preserving run statistics for unchanged jobs.
+External work belongs in an Action. If the Action needs durable state, call a
+Reducer. Database changes made by a Reducer are committed atomically and routed
+from the Postgres change feed; there is no write declaration or manual
+invalidation API.
 
-## Per-tenant cron jobs
+## Durability
 
-Use a tenant cron when each provisioned tenant should receive its own invocation:
-
-```go
-app.TenantCron(
-  "expire stale sessions",
-  time.Hour,
-  "sessions.expire",
-  ExpireSessionsArgs{},
-)
-
-app.TenantCronExpr(
-  "tenant daily summary",
-  "30 6 * * *",
-  "summaries.create",
-  CreateSummaryArgs{},
-)
-```
-
-Each invocation has that tenant's `ctx.TenantID` and database route. A normal
-`Cron`/`CronExpr` is project-scoped and has no tenant ID.
-
-## One-shot jobs
-
-Every runtime context exposes `ctx.Scheduler`. Enqueue work after a delay:
-
-```go
-func CreateTask(
-  ctx *gonvex.ReducerCtx,
-  args CreateTaskArgs,
-) (Task, error) {
-  task, err := insertTask(ctx, args)
-  if err != nil {
-    return Task{}, err
-  }
-
-  _, err = ctx.Scheduler.RunAfter(
-    10*time.Minute,
-    "tasks.sendReminder",
-    SendReminderArgs{TaskID: task.ID},
-  )
-  return task, err
-}
-```
-
-Or run at an exact time:
-
-```go
-jobID, err := ctx.Scheduler.RunAt(
-  args.PublishAt,
-  "posts.publish",
-  PublishPostArgs{PostID: args.PostID},
-)
-```
-
-Jobs scheduled inside a Reducer are held until that Reducer commits. A failed
-or rolled-back Reducer does not expose its queued work. The new call inherits
-the current project and tenant scope.
-
-## Realtime and observability
-
-Successful scheduled Reducers commit through the same transaction log as
-interactive calls. Gonvex routes their exact row changes automatically; there
-is no write declaration or manual notification API. Actions enqueue or call a
-Reducer when they need to change durable application state.
-
-The dashboard Health view reports registered cron schedules, recent runs,
-failures, scheduler lag, execution duration, queued work, and concurrency.
-Scheduled function calls also appear in normal function metrics.
-
-## Durability and multi-replica execution
-
-Every one-shot job and deterministic cron occurrence is stored in the control
-Postgres database before it can be claimed. A runtime restart or rolling
-replacement therefore does not discard scheduled work. Replicas claim due rows
-with PostgreSQL row locks, renewable leases, and fencing tokens, while one-shot
-jobs are always selected ahead of an overdue cron backlog.
-
-Recurring definitions still come from the compiled app and are rebuilt after
-runtime startup or manifest sync. Their occurrence IDs are deterministic, so
-overlapping replicas can derive the same fire without executing it twice. One
-runtime process executes up to 16 scheduled calls concurrently.
-
-The runtime retains completed rows for deduplication and auditability. A normal
-function error is a terminal scheduled result; only an interrupted execution
-such as runtime shutdown or lease loss is released for recovery. There is not
-yet a public cancellation, retry, or dead-letter API.
+Recurring and one-shot jobs are persisted in Postgres and claimed with
+renewable leases. They survive runtime restarts. Normal failures are recorded
+in runtime metrics; retention, public cancellation, manual retry, and
+dead-letter APIs remain limited beta features.

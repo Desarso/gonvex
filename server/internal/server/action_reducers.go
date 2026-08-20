@@ -30,9 +30,9 @@ func (r *actionReducerCaller) Call(ctx context.Context, path string, args any) (
 	r.sequence++
 	sequence := r.sequence
 	r.mu.Unlock()
-	key := actionReducerIdempotencyKey(r.parent, sequence, path, raw)
-	ctx = withMutationID(ctx, key)
-	ctx = withMutationIdempotency(ctx, key, r.caller.subject())
+	idempotencyKey := actionReducerIdempotencyKey(r.parent, sequence, path, raw)
+	ctx = withCommandID(ctx, idempotencyKey)
+	ctx = withReducerIdempotency(ctx, idempotencyKey, r.caller.subject())
 	return r.server.executeTenantReducerForCaller(ctx, r.project, r.tenant, r.caller, path, raw)
 }
 

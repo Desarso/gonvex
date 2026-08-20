@@ -153,69 +153,6 @@ func (store *postgresScheduledJobStore) pruneCompleted(ctx context.Context, befo
 	return result.RowsAffected()
 }
 
-type scheduledJobAdoption int
-
-const (
-	scheduledJobBusy scheduledJobAdoption = iota
-	scheduledJobAdopted
-	scheduledJobAlreadyCompleted
-)
-
-// adoptClaim moves a job claimed from the pre-Postgres Valkey queue into the
-// durable table while retaining the same fencing token. This lets a new
-// runtime drain work created by an overlapping old runtime without executing
-// the same deterministic cron occurrence twice.
-func (store *postgresScheduledJobStore) adoptClaim(ctx context.Context, job scheduledJob, _ time.Time) (scheduledJobAdoption, error) {
-	db, err := store.db(ctx)
-	if err != nil {
-		return scheduledJobBusy, err
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return scheduledJobBusy, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO gonvex_scheduled_jobs
-		(id, project_id, tenant_id, function_path, args, run_at, scheduled_for, cron_name)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (id) DO NOTHING`,
-		job.ID, job.ProjectID, job.TenantID, job.FunctionPath, nullableSchedulerArgs(job.Args),
-		job.RunAt, job.ScheduledFor, job.CronName,
-	); err != nil {
-		return scheduledJobBusy, err
-	}
-	var adopted bool
-	err = tx.QueryRowContext(ctx, `UPDATE gonvex_scheduled_jobs
-		SET claim_sequence = claim_sequence + 1,
-			claim_token = $2,
-			lease_until = now() + ($3 * interval '1 millisecond'),
-			updated_at = now()
-		WHERE id = $1
-		  AND status = 'pending'
-		  AND (claim_token = '' OR claim_token = $2 OR lease_until IS NULL OR lease_until <= now())
-		RETURNING TRUE`, job.ID, job.ClaimToken, scheduledJobLease.Milliseconds()).Scan(&adopted)
-	if err == nil && adopted {
-		if err := tx.Commit(); err != nil {
-			return scheduledJobBusy, err
-		}
-		return scheduledJobAdopted, nil
-	}
-	if err != nil && err != sql.ErrNoRows {
-		return scheduledJobBusy, err
-	}
-	var status string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM gonvex_scheduled_jobs WHERE id = $1`, job.ID).Scan(&status); err != nil {
-		return scheduledJobBusy, err
-	}
-	if err := tx.Commit(); err != nil {
-		return scheduledJobBusy, err
-	}
-	if status == "completed" {
-		return scheduledJobAlreadyCompleted, nil
-	}
-	return scheduledJobBusy, nil
-}
-
 func (store *postgresScheduledJobStore) renew(ctx context.Context, id string, owner string) (bool, error) {
 	db, err := store.db(ctx)
 	if err != nil {

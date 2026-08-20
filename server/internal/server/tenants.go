@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -41,10 +42,9 @@ func (s *Server) handleTenants(w http.ResponseWriter, r *http.Request) {
 	s.hydrateProjectTenantDatabases(r.Context(), project)
 
 	s.projectMu.RLock()
-	includeLegacyGlobals := project == "" || !isUUIDProjectID(project)
 	tenants := make([]tenantTarget, 0, len(s.tenants))
 	for _, tenant := range s.tenants {
-		if project == "" || tenant.ProjectID == project || (tenant.ProjectID == "" && includeLegacyGlobals) {
+		if project == "" || tenant.ProjectID == project {
 			tenants = append(tenants, tenant)
 		}
 	}
@@ -88,9 +88,6 @@ func tenantTargetPriority(tenant tenantTarget) int {
 	if tenant.registered {
 		return 4
 	}
-	if tenant.Description == "Discovered local tenant database." {
-		return 2
-	}
 	if tenant.ProjectID != "" {
 		return 1
 	}
@@ -108,7 +105,7 @@ func (s *Server) loadConfiguredTenantDatabases() {
 	}
 	for key, databaseURL := range s.config.TenantDatabases {
 		project, tenantID := splitTenantDatabaseKey(key)
-		if tenantID == "" || databaseURL == "" {
+		if project == "" || tenantID == "" || databaseURL == "" {
 			continue
 		}
 		relationshipID := ""
@@ -220,16 +217,15 @@ func (s *Server) saveTenantRegistry(ctx context.Context, tenant tenantTarget) (t
 	}
 	defer db.Close()
 
-	// A registered tenant may have a non-human tenant id while an older
-	// runtime inferred the same relationship from its project-scoped database
-	// alias. Reuse that row's UUID instead of creating duplicate ownership rows.
+	// The tenant relationship id is owned by the Control Plane registry. Match
+	// only the canonical project/tenant identity; database aliases are display
+	// metadata and must never select a different relationship.
 	var existingRelationshipID string
 	err = db.QueryRowContext(ctx, `SELECT relationship_id
 		FROM gonvex_runtime_tenants
 		WHERE project_id = $1
-		  AND (tenant_id = $2 OR ($3 <> '' AND database_name = $3))
-		ORDER BY CASE WHEN tenant_id = $2 THEN 0 ELSE 1 END
-		LIMIT 1`, tenant.ProjectID, tenant.ID, tenant.databaseName).Scan(&existingRelationshipID)
+		  AND tenant_id = $2
+		LIMIT 1`, tenant.ProjectID, tenant.ID).Scan(&existingRelationshipID)
 	if err != nil && err != sql.ErrNoRows {
 		return tenant, err
 	}
@@ -307,18 +303,6 @@ func (s *Server) resolveTenantDatabaseURLLocked(project string, tenant tenantTar
 	return tenant
 }
 
-// createTenantSlugIDAllowed reports whether this caller may register a
-// slug-addressed tenant under a modern (UUID) project. Ownership rows for
-// modern projects normally use opaque UUID v6 ids so dashboard/public creation
-// can't squat slugs or mint duplicate relationships. Two deliberate
-// exceptions: the runtime admin key (CI provisions subdomain-addressed
-// tenants like "e2e-parallel", whose wire id must equal the slug — the shape
-// adopted legacy rows already use), and the auth-optional "local" developer
-// credential so bare local runtimes keep their DX.
-func createTenantSlugIDAllowed(actor dashboardActor, ok bool) bool {
-	return ok && (actor.credentialKind == "adminKey" || actor.credentialKind == "local")
-}
-
 func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var payload struct {
@@ -342,15 +326,9 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 
 	name := strings.TrimSpace(payload.Name)
 	requestedTenantID := strings.TrimSpace(payload.ID)
-	modernProject := isUUIDProjectID(project)
-	if modernProject && requestedTenantID != "" && !isUUIDv6(requestedTenantID) {
-		if actor, ok := s.dashboardActorFromRequest(r); !createTenantSlugIDAllowed(actor, ok) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tenant id must be a UUID v6"})
-			return
-		}
-	}
-	if !modernProject {
-		requestedTenantID = slug(requestedTenantID)
+	if requestedTenantID != "" && !isUUIDv6(requestedTenantID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tenant id must be a UUID v6"})
+		return
 	}
 	if name == "" {
 		name = requestedTenantID
@@ -366,12 +344,12 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 
 	s.projectMu.Lock()
 	projectTarget, projectExists := s.projects[project]
-	if modernProject && !projectExists {
+	if !projectExists {
 		s.projectMu.Unlock()
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
 		return
 	}
-	if modernProject && normalizedDatabaseModeWithDefault(projectTarget.DatabaseMode) != "multiTenant" {
+	if normalizedDatabaseModeWithDefault(projectTarget.DatabaseMode) != "multiTenant" {
 		s.projectMu.Unlock()
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "project is not configured for tenant databases"})
 		return
@@ -379,22 +357,18 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 
 	tenantID := requestedTenantID
 	if tenantID == "" {
-		if modernProject {
-			var err error
-			tenantID, err = generateRelationshipID()
-			if err != nil {
-				s.projectMu.Unlock()
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
-			}
-		} else {
-			tenantID = s.uniqueTenantIDLocked(project, name)
+		var err error
+		tenantID, err = generateRelationshipID()
+		if err != nil {
+			s.projectMu.Unlock()
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
 		}
 	}
 	key := tenantStoreKey(project, tenantID)
 	if existing, ok := s.tenants[key]; ok {
 		s.projectMu.Unlock()
-		if modernProject && !existing.registered {
+		if !existing.registered {
 			registered, err := s.saveTenantRegistry(r.Context(), existing)
 			if err != nil || !registered.registered {
 				if err == nil {
@@ -450,17 +424,6 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	relationshipID := tenantID
-	if !modernProject || !isUUIDv6(tenantID) {
-		// Slug-addressed tenants (legacy projects, or admin-created modern
-		// tenants) still get an opaque relationship id; only UUID tenant ids
-		// double as their own relationship id.
-		relationshipID, err = generateRelationshipID()
-		if err != nil {
-			_ = dropProjectDatabase(context.Background(), s.config.PostgresURL, databaseName)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-	}
 	tenant := tenantTarget{
 		RelationshipID: relationshipID,
 		ID:             tenantID,
@@ -480,7 +443,7 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("persist tenant relationship: %v", err)})
 		return
 	}
-	if modernProject && !registered.registered {
+	if !registered.registered {
 		_ = dropProjectDatabase(context.Background(), s.config.PostgresURL, databaseName)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tenant relationship registry is unavailable"})
 		return
@@ -552,22 +515,6 @@ func (s *Server) handleDeleteTenant(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) uniqueTenantIDLocked(projectID string, name string) string {
-	base := slug(name)
-	if base == "" {
-		base = "tenant"
-	}
-	return uniqueName(base, func(value string) bool {
-		if _, ok := s.tenants[tenantStoreKey(projectID, value)]; ok {
-			return true
-		}
-		if s.config.TenantDatabases != nil && s.config.TenantDatabases[tenantStoreKey(projectID, value)] != "" {
-			return true
-		}
-		return false
-	})
-}
-
 func (s *Server) uniqueTenantDatabaseNameLocked(projectID string, tenantID string) string {
 	base := tenantDatabaseName(projectID, tenantID)
 	return uniqueName(base, func(value string) bool {
@@ -626,7 +573,7 @@ func (s *Server) provisionTenantDatabaseWithSync(ctx context.Context, project st
 	}
 	// Existing tenant databases may predate durable sync. Re-applying the
 	// ordinary application schema alone leaves them without _gonvex_sync_clock,
-	// causing every sync.openMany subscription to stall. ApplyWithSync is
+	// causing every replica.openMany subscription to stall. ApplyWithSync is
 	// idempotent and repairs both old and newly created tenant databases.
 	if _, err := schema.ApplyWithSync(ctx, databaseURL, desiredSchema, syncDefinitions); err != nil {
 		return err
@@ -853,13 +800,13 @@ func (s *Server) applyTenantSchemasForProject(
 }
 
 // installProjectModuleChangeFeeds attaches the authoritative change feed to
-// schemas owned by TypeScript SQL migrations. Unlike Go modules, TypeScript
-// modules do not duplicate their DDL in a declarative schema manifest; the
+// schemas owned by TypeScript SQL migrations. TypeScript modules do not
+// duplicate their DDL in a declarative schema manifest; the
 // committed database schema is inspected after migrations and every
 // application table is enrolled directly.
-func (s *Server) installProjectModuleChangeFeeds(ctx context.Context, project string) (schema.Result, error) {
+func (s *Server) installProjectModuleChangeFeeds(ctx context.Context, project string) (schema.Result, manifest.Schema, error) {
 	if err := s.hydrateProjectTenantDatabasesWithError(ctx, project, s.hydrateProjectTenantDatabasesUncachedWithError); err != nil {
-		return schema.Result{}, fmt.Errorf("discover tenant databases: %w", err)
+		return schema.Result{}, manifest.Schema{}, fmt.Errorf("discover tenant databases: %w", err)
 	}
 	s.projectMu.RLock()
 	tenants := make([]tenantTarget, 0, len(s.tenants))
@@ -869,9 +816,38 @@ func (s *Server) installProjectModuleChangeFeeds(ctx context.Context, project st
 		}
 	}
 	s.projectMu.RUnlock()
-	return applyTenantSchemas(ctx, tenants, manifest.Schema{}, func(ctx context.Context, databaseURL string, _ manifest.Schema) (schema.Result, error) {
-		return installModuleChangeFeedForDatabase(ctx, databaseURL)
-	})
+	if len(tenants) == 0 {
+		return schema.Result{}, manifest.Schema{}, fmt.Errorf("TypeScript project %s has no tenant database to inspect", project)
+	}
+	var combined schema.Result
+	var canonical manifest.Schema
+	var canonicalJSON []byte
+	for _, tenant := range tenants {
+		observed, err := schema.InspectApplicationSchema(ctx, tenant.databaseURL)
+		if err != nil {
+			return combined, manifest.Schema{}, fmt.Errorf("inspect tenant %s schema: %w", tenant.ID, err)
+		}
+		if len(observed.Tables) == 0 {
+			return combined, manifest.Schema{}, fmt.Errorf("TypeScript tenant %s schema has no application tables after migrations", tenant.ID)
+		}
+		encoded, err := json.Marshal(observed.Normalize())
+		if err != nil {
+			return combined, manifest.Schema{}, fmt.Errorf("encode tenant %s schema: %w", tenant.ID, err)
+		}
+		if canonicalJSON == nil {
+			canonical = observed.Normalize()
+			canonicalJSON = encoded
+		} else if !bytes.Equal(canonicalJSON, encoded) {
+			return combined, manifest.Schema{}, fmt.Errorf("tenant %s schema differs from the project schema; finish migrations before activating the module", tenant.ID)
+		}
+		installed, err := installModuleChangeFeedForSchema(ctx, tenant.databaseURL, observed)
+		if err != nil {
+			return combined, manifest.Schema{}, fmt.Errorf("install tenant %s change feed: %w", tenant.ID, err)
+		}
+		combined.Applied = append(combined.Applied, installed.Applied...)
+		combined.Warnings = append(combined.Warnings, installed.Warnings...)
+	}
+	return combined, canonical, nil
 }
 
 func installModuleChangeFeedForDatabase(ctx context.Context, databaseURL string) (schema.Result, error) {
@@ -882,6 +858,10 @@ func installModuleChangeFeedForDatabase(ctx context.Context, databaseURL string)
 	if len(observed.Tables) == 0 {
 		return schema.Result{}, fmt.Errorf("TypeScript tenant schema has no application tables after migrations")
 	}
+	return installModuleChangeFeedForSchema(ctx, databaseURL, observed)
+}
+
+func installModuleChangeFeedForSchema(ctx context.Context, databaseURL string, observed manifest.Schema) (schema.Result, error) {
 	db, err := dbpool.Open(databaseURL)
 	if err != nil {
 		return schema.Result{}, err
@@ -1072,30 +1052,6 @@ func (s *Server) hydrateProjectTenantDatabasesUncachedWithError(ctx context.Cont
 		s.mergeProjectTenants(project, []tenantTarget{persisted})
 	}
 
-	// Pre-registry projects used <alias>_<project-id> as their only durable
-	// relationship. Import that exact historical convention for legacy IDs.
-	// UUIDv6 projects never enter this path, so a fresh project cannot adopt any
-	// pre-existing database by name or table shape.
-	if !shouldMigrateLegacyTenantRelationships(project) || strings.TrimSpace(s.config.PostgresURL) == "" {
-		return nil
-	}
-	legacy, err := s.discoverLegacyProjectTenantDatabases(ctx, project)
-	if err != nil {
-		return fmt.Errorf("discover legacy tenant databases: %w", err)
-	}
-	for _, tenant := range legacy {
-		if s.projectHasTenantDatabase(project, tenant.databaseName) {
-			continue
-		}
-		persisted, saveErr := s.saveTenantRegistry(ctx, tenant)
-		if saveErr != nil {
-			// A legacy runtime may not have a writable control-plane registry.
-			// Keep its exact project-suffixed relationship working in memory.
-			slog.Debug("persist migrated tenant relationship", "project", project, "tenant", tenant.ID, "error", saveErr)
-			persisted = tenant
-		}
-		s.mergeProjectTenants(project, []tenantTarget{persisted})
-	}
 	return nil
 }
 
@@ -1133,21 +1089,6 @@ func (s *Server) mergeProjectTenants(project string, tenants []tenantTarget) {
 	}
 }
 
-func (s *Server) projectHasTenantDatabase(project string, databaseName string) bool {
-	databaseName = strings.TrimSpace(databaseName)
-	if databaseName == "" {
-		return false
-	}
-	s.projectMu.RLock()
-	defer s.projectMu.RUnlock()
-	for _, tenant := range s.tenants {
-		if tenant.ProjectID == project && tenant.databaseName == databaseName {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Server) shouldHydrateProjectTenants(project string) bool {
 	now := time.Now()
 	s.tenantHydrationMu.Lock()
@@ -1169,93 +1110,6 @@ func (s *Server) invalidateProjectTenantHydration(project string) {
 	s.tenantHydrationMu.Unlock()
 }
 
-func (s *Server) discoverLegacyProjectTenantDatabases(ctx context.Context, project string) ([]tenantTarget, error) {
-	db, err := openMaintenanceDB(s.config.PostgresURL)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
-	projectSuffix := tenantDatabaseProjectSuffix(project)
-	projectSuffixPattern := strings.ReplaceAll(projectSuffix, "_", `\_`)
-	projectDatabase := databaseNameFromURL(s.databaseURLForProject(project), "")
-	rows, err := db.QueryContext(ctx, `
-		SELECT datname
-		FROM pg_database
-		WHERE datistemplate = false AND datname LIKE $1 ESCAPE '\'
-		ORDER BY datname
-	`, `%\_`+projectSuffixPattern)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var tenants []tenantTarget
-	for rows.Next() {
-		var databaseName string
-		if err := rows.Scan(&databaseName); err != nil {
-			return nil, err
-		}
-		if databaseName == projectDatabase {
-			continue
-		}
-		alias, ok := legacyTenantDatabaseAlias(project, databaseName)
-		if !ok || alias == "" {
-			continue
-		}
-		tenantID := strings.ReplaceAll(alias, "_", "-")
-		databaseURL, err := databaseURL(s.config.PostgresURL, databaseName)
-		if err != nil {
-			return nil, err
-		}
-		tenants = append(tenants, tenantTarget{
-			ID:             tenantID,
-			ProjectID:      project,
-			Name:           tenantID,
-			Database:       alias,
-			Status:         "local",
-			Description:    "Migrated legacy project tenant database.",
-			Provisioned:    true,
-			RuntimeCreated: true,
-			databaseURL:    databaseURL,
-			databaseName:   databaseName,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return tenants, nil
-}
-
-func legacyTenantDatabaseAlias(project string, databaseName string) (string, bool) {
-	databaseName = strings.TrimSpace(databaseName)
-	projectSuffix := tenantDatabaseProjectSuffix(project)
-	if databaseName == "" || projectSuffix == "" {
-		return "", false
-	}
-	alias, ok := strings.CutSuffix(databaseName, "_"+projectSuffix)
-	if !ok || alias == "" {
-		return "", false
-	}
-	return alias, true
-}
-
-func shouldMigrateLegacyTenantRelationships(project string) bool {
-	return strings.TrimSpace(project) != "" && !isUUIDProjectID(project)
-}
-
-func isLegacyConvexDocumentID(value string) bool {
-	if len(value) != 32 {
-		return false
-	}
-	for _, char := range value {
-		if (char < '0' || char > '9') && (char < 'a' || char > 'z') {
-			return false
-		}
-	}
-	return true
-}
-
 func isMissingTenantDatabaseError(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "database") && strings.Contains(message, "does not exist")
@@ -1263,10 +1117,17 @@ func isMissingTenantDatabaseError(err error) bool {
 
 func ensureTenantLocalTables(ctx context.Context, db *sql.DB) error {
 	statements := []string{
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'members' AND column_name = 'user_id'
+			) THEN
+				RAISE EXCEPTION 'identity-v2 migration required: tenant members still use user_id; run gonvex migrate identity-v2 --apply and --verify';
+			END IF;
+		END $$`,
 		`CREATE TABLE IF NOT EXISTS members (
-			user_id TEXT PRIMARY KEY,
-			id TEXT,
-			account_id TEXT,
+			id TEXT PRIMARY KEY,
+			account_id TEXT NOT NULL UNIQUE,
 			status TEXT NOT NULL DEFAULT 'active',
 			display_name TEXT NOT NULL DEFAULT '',
 			avatar_url TEXT NOT NULL DEFAULT '',
@@ -1276,16 +1137,7 @@ func ensureTenantLocalTables(ctx context.Context, db *sql.DB) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
-		`ALTER TABLE members ADD COLUMN IF NOT EXISTS id TEXT`,
-		`ALTER TABLE members ADD COLUMN IF NOT EXISTS account_id TEXT`,
-		`ALTER TABLE members ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'`,
-		`ALTER TABLE members ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE members ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE members ADD COLUMN IF NOT EXISTS membership_revision BIGINT NOT NULL DEFAULT 1`,
-		`UPDATE members SET id = user_id WHERE id IS NULL OR id = ''`,
-		`UPDATE members SET account_id = user_id WHERE account_id IS NULL OR account_id = ''`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS members_by_id ON members (id) WHERE id IS NOT NULL AND id <> ''`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS members_by_account ON members (account_id) WHERE account_id IS NOT NULL AND account_id <> ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS members_by_account ON members (account_id)`,
 		`CREATE INDEX IF NOT EXISTS members_by_role ON members (role)`,
 		`CREATE INDEX IF NOT EXISTS members_by_status ON members (status, id)`,
 		`CREATE TABLE IF NOT EXISTS _gonvex_control_plane_membership_outbox (
@@ -1304,13 +1156,13 @@ func ensureTenantLocalTables(ctx context.Context, db *sql.DB) error {
 			projected_revision BIGINT;
 		BEGIN
 			IF TG_OP = 'DELETE' THEN
-				projected_account_id := COALESCE(NULLIF(OLD.account_id, ''), OLD.user_id);
-				projected_member_id := COALESCE(NULLIF(OLD.id, ''), OLD.user_id);
+				projected_account_id := OLD.account_id;
+				projected_member_id := OLD.id;
 				projected_status := 'revoked';
 				projected_revision := OLD.membership_revision + 1;
 			ELSE
-				projected_account_id := COALESCE(NULLIF(NEW.account_id, ''), NEW.user_id);
-				projected_member_id := COALESCE(NULLIF(NEW.id, ''), NEW.user_id);
+				projected_account_id := NEW.account_id;
+				projected_member_id := NEW.id;
 				projected_status := NEW.status;
 				projected_revision := NEW.membership_revision;
 			END IF;

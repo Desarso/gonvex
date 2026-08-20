@@ -4860,7 +4860,6 @@ h1 {
 .realtime-user-name code, .realtime-user-destinations span, .realtime-user-count span { overflow: hidden; color: var(--muted); font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
 .realtime-user-count { text-align: right; }
 .realtime-user-count strong { font-size: 1rem; font-variant-numeric: tabular-nums; }
-.realtime-compatibility { margin: 14px 16px 0; padding: 11px 12px; border: 1px solid color-mix(in oklab, var(--warning) 30%, var(--border)); border-radius: var(--field-radius); background: color-mix(in oklab, var(--warning) 8%, var(--surface)); color: color-mix(in oklab, var(--warning) 76%, var(--foreground)); font-size: .8125rem; line-height: 1.5; }
 .realtime-connection-list { display: grid; gap: 10px; padding: 12px; }
 .realtime-connection { overflow: hidden; border: 1px solid var(--separator); border-radius: calc(var(--field-radius) + 1px); background: color-mix(in oklab, var(--surface-secondary) 35%, var(--surface)); }
 .realtime-connection > header { display: grid; grid-template-columns: minmax(130px, .7fr) minmax(180px, 1.3fr) auto; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--separator); color: var(--muted); font-size: .75rem; }

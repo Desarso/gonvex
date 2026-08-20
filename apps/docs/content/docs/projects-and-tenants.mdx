@@ -18,7 +18,7 @@ Tenant
   One customer/account/workspace inside a project. A tenant can have isolated data.
 
 Control Plane database
-  Runtime control database. Stores projects, tenants, users, memberships, roles, routes, and tenant DB connections.
+  Runtime control database. Stores projects, Accounts, tenant-directory projections, auth identities, routes, and tenant DB connections. Tenant databases own authoritative Members, roles, and permissions.
 
 Tenant database
   App data database for one tenant or a shard/group of tenants.
@@ -81,7 +81,7 @@ The dashboard provides:
 - tenant list inside a project
 - create tenant screen
 - tenant switcher inside a project
-- user/membership view
+- Account/Member view
 - role/permission view
 - project environment variables
 - tenant database connection status

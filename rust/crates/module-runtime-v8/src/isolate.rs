@@ -407,6 +407,7 @@ impl ModuleIsolate {
             kind: kind_name(&spec.contract.kind),
             capabilities: CapabilityFlags::from(&spec.capabilities),
             identity: IdentityView::from(&spec.invocation.context),
+            environment: &spec.invocation.context.environment,
             now: spec.now_unix_ms,
             max_result_bytes: spec.max_result_bytes,
         };
@@ -601,6 +602,10 @@ fn handler_candidates(contract: &FunctionContract) -> Vec<String> {
     if let Some((_, leaf)) = contract.path.rsplit_once('.') {
         candidates.push(leaf.to_owned());
     }
+    // `createModule()` projects its registered functions through the module's
+    // default export rather than exporting each handler as a named binding.
+    // The bootstrap resolves the matching registration from this object.
+    candidates.push("default".to_owned());
     candidates.dedup();
     candidates
 }

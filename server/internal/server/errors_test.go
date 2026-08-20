@@ -14,13 +14,13 @@ import (
 
 func TestErrorTrackerGroupsVariableMessagesAndTracksImpact(t *testing.T) {
 	tracker := newErrorTracker(100)
-	fp1, ok := tracker.capture(capturedError{EventID: "one", Project: "shop", Tenant: "acme", Release: "1.2.0", Message: "order 123456 failed", Name: "Error", Culprit: "at checkout (src/cart.ts:20)", DeviceID: "laptop", User: map[string]any{"id": "u1"}})
-	fp2, _ := tracker.capture(capturedError{EventID: "two", Project: "shop", Tenant: "beta", Release: "1.2.0", Message: "order 987654 failed", Name: "Error", Culprit: "at checkout (src/cart.ts:20)", DeviceID: "phone", User: map[string]any{"id": "u2"}})
+	fp1, ok := tracker.capture(capturedError{EventID: "one", Project: "shop", Tenant: "acme", Release: "1.2.0", Message: "order 123456 failed", Name: "Error", Culprit: "at checkout (src/cart.ts:20)", DeviceID: "laptop", Account: map[string]any{"id": "u1"}})
+	fp2, _ := tracker.capture(capturedError{EventID: "two", Project: "shop", Tenant: "beta", Release: "1.2.0", Message: "order 987654 failed", Name: "Error", Culprit: "at checkout (src/cart.ts:20)", DeviceID: "phone", Account: map[string]any{"id": "u2"}})
 	if !ok || fp1 != fp2 {
 		t.Fatalf("expected one group, got %q and %q", fp1, fp2)
 	}
 	group := tracker.groups[fp1]
-	if group.Count != 2 || len(group.Tenants) != 2 || len(group.Users) != 2 || len(group.Devices) != 2 {
+	if group.Count != 2 || len(group.Tenants) != 2 || len(group.Accounts) != 2 || len(group.Devices) != 2 {
 		t.Fatalf("incorrect impact: %#v", group)
 	}
 	if _, duplicate := tracker.capture(capturedError{EventID: "two", Project: "shop", Message: "order 987654 failed"}); duplicate {
@@ -141,11 +141,11 @@ func TestSanitizeCapturedErrorFiltersSecretsInFieldsAndFreeText(t *testing.T) {
 	}
 }
 
-func TestErrorHTTPFlowGroupsTenantUserDeviceAndReleaseImpact(t *testing.T) {
+func TestErrorHTTPFlowGroupsTenantAccountDeviceAndReleaseImpact(t *testing.T) {
 	server := New(config.Config{})
 	body := bytes.NewBufferString(`{"events":[
-		{"eventId":"one","message":"task 123456 save failed","name":"Error","culprit":"at saveTask (src/tasks.ts:40:3)","tenant":"acme","release":"5.1.0+a","deviceId":"laptop","user":{"id":"ada"}},
-		{"eventId":"two","message":"task 987654 save failed","name":"Error","culprit":"at saveTask (src/tasks.ts:99:8)","tenant":"beta","release":"5.1.1+b","deviceId":"phone","user":{"id":"grace"}}
+		{"eventId":"one","message":"task 123456 save failed","name":"Error","culprit":"at saveTask (src/tasks.ts:40:3)","tenant":"acme","release":"5.1.0+a","deviceId":"laptop","account":{"id":"ada"}},
+		{"eventId":"two","message":"task 987654 save failed","name":"Error","culprit":"at saveTask (src/tasks.ts:99:8)","tenant":"beta","release":"5.1.1+b","deviceId":"phone","account":{"id":"grace"}}
 	]}`)
 	request := httptest.NewRequest(http.MethodPost, "/errors/envelope", body)
 	request.Header.Set("x-gonvex-project-id", "whagons-5")
@@ -172,7 +172,7 @@ func TestErrorHTTPFlowGroupsTenantUserDeviceAndReleaseImpact(t *testing.T) {
 		t.Fatalf("expected one root-cause group, got %d: %s", len(payload.Groups), recorder.Body.String())
 	}
 	group := payload.Groups[0]
-	if group.Count != 2 || len(group.Tenants) != 2 || len(group.Users) != 2 || len(group.Devices) != 2 || len(group.Releases) != 2 {
+	if group.Count != 2 || len(group.Tenants) != 2 || len(group.Accounts) != 2 || len(group.Devices) != 2 || len(group.Releases) != 2 {
 		t.Fatalf("incorrect grouped impact: %#v", group)
 	}
 }
@@ -180,9 +180,9 @@ func TestErrorHTTPFlowGroupsTenantUserDeviceAndReleaseImpact(t *testing.T) {
 func TestErrorHTTPFlowFiltersGroupsAndImpactByRelease(t *testing.T) {
 	server := New(config.Config{})
 	body := bytes.NewBufferString(`{"events":[
-		{"eventId":"old-one","timestamp":"2026-07-11T10:00:00Z","message":"task 123456 save failed","name":"Error","culprit":"at saveTask (src/tasks.ts:40:3)","tenant":"legacy","release":"5.1.0","deviceId":"old-phone","user":{"id":"grace"}},
-		{"eventId":"new-one","timestamp":"2026-07-12T10:00:00Z","message":"task 987654 save failed","name":"Error","culprit":"at saveTask (src/tasks.ts:99:8)","tenant":"acme","release":"5.2.0","deviceId":"laptop","user":{"id":"ada"}},
-		{"eventId":"new-two","timestamp":"2026-07-12T11:00:00Z","message":"checkout failed","name":"Error","culprit":"at checkout (src/checkout.ts:20:3)","tenant":"beta","release":"5.2.0","deviceId":"phone","user":{"id":"lin"}}
+		{"eventId":"old-one","timestamp":"2026-07-11T10:00:00Z","message":"task 123456 save failed","name":"Error","culprit":"at saveTask (src/tasks.ts:40:3)","tenant":"legacy","release":"5.1.0","deviceId":"old-phone","account":{"id":"grace"}},
+		{"eventId":"new-one","timestamp":"2026-07-12T10:00:00Z","message":"task 987654 save failed","name":"Error","culprit":"at saveTask (src/tasks.ts:99:8)","tenant":"acme","release":"5.2.0","deviceId":"laptop","account":{"id":"ada"}},
+		{"eventId":"new-two","timestamp":"2026-07-12T11:00:00Z","message":"checkout failed","name":"Error","culprit":"at checkout (src/checkout.ts:20:3)","tenant":"beta","release":"5.2.0","deviceId":"phone","account":{"id":"lin"}}
 	]}`)
 	request := httptest.NewRequest(http.MethodPost, "/errors/envelope", body)
 	request.Header.Set("x-gonvex-project-id", "whagons-5")

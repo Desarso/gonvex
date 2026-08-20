@@ -71,8 +71,10 @@ func TestRunLoadKeepsPersistentSubscriptionsAndMeasuresWireTraffic(t *testing.T)
 	defer server.Close()
 
 	profile, err := loadProfileReader(strings.NewReader(`{
-		"version": 1,
+		"version": 2,
 		"name": "test",
+		"users": 3,
+		"connectionsPerUser": 1,
 		"subscriptions": [
 			{"path":"users.me","args":{"tenantId":"${tenant}"}},
 			{"path":"workspaces.list","args":{"tenantId":"${tenant}"}}
@@ -136,7 +138,7 @@ func TestRunLoadKeepsPersistentSubscriptionsAndMeasuresWireTraffic(t *testing.T)
 	}
 }
 
-func TestRunLoadMeasuresMutationsAndSubscriptionInvalidations(t *testing.T) {
+func TestRunLoadMeasuresReducersAndSubscriptionInvalidations(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		connection, err := upgrader.Upgrade(writer, request, nil)
@@ -155,11 +157,11 @@ func TestRunLoadMeasuresMutationsAndSubscriptionInvalidations(t *testing.T) {
 				_ = connection.WriteJSON(map[string]any{"type": "auth.result", "id": message["id"], "result": map[string]any{}})
 			case "query.subscribe":
 				_ = connection.WriteJSON(map[string]any{"type": "query.result", "id": message["id"], "path": message["path"], "reason": "initial", "result": []any{}})
-			case "mutation.call":
+			case "reducer.call":
 				committedAt := float64(time.Now().Add(-4*time.Millisecond).UnixNano()) / float64(time.Millisecond)
 				_ = connection.WriteJSON(map[string]any{
-					"type": "mutation.result", "id": message["id"], "path": message["path"], "result": "ok",
-					"trace": map[string]any{"serverDurationMs": 2, "serverMutationCommittedAtMs": committedAt},
+					"type": "reducer.result", "id": message["id"], "path": message["path"], "result": "ok",
+					"trace": map[string]any{"serverDurationMs": 2, "serverReducerCommittedAtMs": committedAt},
 				})
 				_ = connection.WriteJSON(map[string]any{
 					"type": "query.progress", "id": "u000001-s001", "path": "analytics.listSessionLogs", "reason": "invalidate",
@@ -171,7 +173,7 @@ func TestRunLoadMeasuresMutationsAndSubscriptionInvalidations(t *testing.T) {
 	defer server.Close()
 
 	profile, err := loadProfileReader(strings.NewReader(`{
-		"version":1,"subscriptions":[{"path":"analytics.listSessionLogs","args":{"tenantId":"${tenant}"}}]
+		"version":2,"users":1,"connectionsPerUser":1,"subscriptions":[{"path":"analytics.listSessionLogs","args":{"tenantId":"${tenant}"}}]
 	}`))
 	if err != nil {
 		t.Fatal(err)
@@ -182,22 +184,22 @@ func TestRunLoadMeasuresMutationsAndSubscriptionInvalidations(t *testing.T) {
 		URL: server.URL, Project: "test", Tenants: []string{"tenant-a"}, Connections: 1,
 		SubscriptionsPerConnection: 1, HoldDuration: 250 * time.Millisecond,
 		ConnectTimeout: time.Second, InitialTimeout: time.Second, AuthMode: authModeSynthetic,
-		MaximumDialConcurrency: 1, MutationPath: "analytics.createSessionLog",
-		MutationArgs: map[string]any{"tenantId": "${tenant}", "event": "load-${sequence}"}, MutationRate: 20,
+		MaximumDialConcurrency: 1, ReducerPath: "analytics.createSessionLog",
+		ReducerArgs: map[string]any{"tenantId": "${tenant}", "event": "load-${sequence}"}, ReducerRate: 20,
 	}, profile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Mutations.Sent < 3 || report.Mutations.Succeeded != report.Mutations.Sent || report.Mutations.Errors != 0 {
-		t.Fatalf("unexpected mutation report: %#v", report.Mutations)
+	if report.Reducers.Sent < 3 || report.Reducers.Succeeded != report.Reducers.Sent || report.Reducers.Errors != 0 {
+		t.Fatalf("unexpected reducer report: %#v", report.Reducers)
 	}
-	if report.Invalidations.Progress != report.Mutations.Succeeded || report.Invalidations.Messages != report.Mutations.Succeeded {
+	if report.Invalidations.Progress != report.Reducers.Succeeded || report.Invalidations.Messages != report.Reducers.Succeeded {
 		t.Fatalf("unexpected invalidation report: %#v", report.Invalidations)
 	}
-	if report.Latency.Mutation.Count != report.Mutations.Succeeded || report.Latency.InvalidationChangeToClient.Count != report.Invalidations.Messages {
+	if report.Latency.Reducer.Count != report.Reducers.Succeeded || report.Latency.InvalidationChangeToClient.Count != report.Invalidations.Messages {
 		t.Fatalf("missing latency samples: %#v", report.Latency)
 	}
-	if report.TTLU.CommitsWithPropagation != report.Mutations.Succeeded || report.TTLU.PropagationSamples != report.Mutations.Succeeded {
+	if report.TTLU.CommitsWithPropagation != report.Reducers.Succeeded || report.TTLU.PropagationSamples != report.Reducers.Succeeded {
 		t.Fatalf("missing TTLU samples: %#v", report.TTLU)
 	}
 }

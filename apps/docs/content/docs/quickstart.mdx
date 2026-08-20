@@ -1,13 +1,11 @@
 ---
 title: Quickstart
-description: Create a new Gonvex app and run it locally.
+description: Create a TypeScript Gonvex app and run it locally.
 ---
 
 # Quickstart
 
-This page creates a Vite React app against the local self-hosted runtime.
-
-Before creating the app, start the reference stack in a separate terminal:
+Start the reference stack in a separate terminal:
 
 ```bash
 git clone https://github.com/Whagons-International/gonvex.git
@@ -15,163 +13,85 @@ cd gonvex
 make stack
 ```
 
-The runtime is then available at `http://localhost:8080` and the dashboard at
-`http://localhost:3000`.
-
-## Create An App
-
-```bash
-npm create gonvex@latest my-app
-cd my-app
-npm install
-```
-
-Explicit Vite React template:
+Create a Vite React app:
 
 ```bash
 npm create gonvex@latest my-app -- --template vite-react
 cd my-app
 npm install
+npm run dev
 ```
 
-The initializer creates:
+The initializer creates TypeScript modules and versioned SQL migrations:
 
 ```txt
 my-app/
   src/
   gonvex/
-    schema.go
-    messages.go
+    index.ts
+    messages.ts
     _generated/
+  migrations/
+    0001_messages.sql
   package.json
   gonvex.json
-  .env.local
 ```
 
-## Start Development
+`gonvex dev` watches the module and migration folders, extracts the manifest,
+bundles the TypeScript module for the V8 host, applies migrations, regenerates
+bindings, and optionally runs the frontend command after `--`.
 
-```bash
-npx gonvex dev
-```
-
-Framework templates usually wrap this in the app dev command. For Vite React:
-
-```bash
-npm run dev
-```
-
-which runs:
-
-```bash
-gonvex dev -- vite
-```
-
-`gonvex dev`:
-
-- connects to the configured Gonvex runtime
-- watch the `gonvex/` folder
-- generate TypeScript bindings
-- upload the Go source bundle and manifest
-- apply safe schema changes
-- run the child app dev server after `--`
-
-## Define Schema
-
-```go
-// gonvex/schema.go
-package backend
-
-import "github.com/gonvex/gonvex/pkg/gonvex"
-
-func Schema(s *gonvex.Schema) {
-  s.Table("tasks", func(t *gonvex.Table) {
-    t.ID("id")
-    t.String("title")
-    t.String("status")
-    t.Time("created_at")
-
-    t.Index("by_status", "status")
-    t.Index("by_created_at", "created_at")
-  })
-}
-```
-
-## Define Functions
-
-```go
-// gonvex/tasks.go
-package backend
-
-import "github.com/gonvex/gonvex/pkg/gonvex"
-
-type ListTasksArgs struct {
-  Status string `json:"status,omitempty"`
-}
-
-func Register(app *gonvex.App) {
-  app.Query("tasks.list", ListTasks)
-  app.Reducer("tasks.create", CreateTask, gonvex.OptimisticReducer("tasks").RowIDArg("id").FieldsArg("task"))
-}
-
-func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
-  // query Postgres through Gonvex APIs
-}
-```
-
-## Use Generated Bindings
+## Define a module
 
 ```ts
+import { reducer, schema } from "@gonvex/module-sdk";
+
+export const create = reducer({
+  args: schema.object({ id: schema.id("tasks"), title: schema.string() }),
+  result: schema.object({ id: schema.id("tasks"), title: schema.string() }),
+  offline: { mode: "allowed", conflict: "expectedVersion" },
+  optimistic: {
+    effects: [{ operation: "upsert", entity: "tasks", id: ["id"], value: {
+      id: { $arg: "id" }, title: { $arg: "title" },
+    } }],
+  },
+  run: ({ db }, task) => db.insert("tasks", task),
+});
+```
+
+Queries are read-only. Reducers are the only normal durable write path. Actions
+perform external work and call a Reducer when they need to change application
+state. Use a Replica Collection for bounded local entities and a structured
+Live Query for large indexed windows.
+
+## Use generated bindings
+
+```tsx
 import { api } from "./gonvex/_generated/api";
 import { useQuery, useReducer } from "./gonvex/_generated/react";
 
 export function Tasks() {
   const tasks = useQuery(api.tasks.list, { status: "open" });
   const createTask = useReducer(api.tasks.create);
-
   return <TaskList tasks={tasks ?? []} onCreate={createTask} />;
 }
 ```
 
-## Connect To A Runtime Project
-
-For real projects, connect the repo to a Gonvex project:
+## Connect a runtime project
 
 ```bash
 npx gonvex login
-npx gonvex project create my-product
-```
-
-Project creation writes the returned project ID, runtime URL, and project key to
-`.env.local`. Use `gonvex project select <project-id>` to connect an existing project.
-
-For a self-hosted production runtime, use its public HTTPS origin:
-
-```txt
-VITE_GONVEX_WS_URL=wss://gonvex.example.com/ws
-```
-
-## Add Tenants
-
-Create a multi-tenant project and manage workspaces through the implemented auth
-commands:
-
-```bash
 npx gonvex project create my-product --database-mode multiTenant
 npx gonvex auth tenants create "Acme" --owner owner@acme.example
-npx gonvex auth memberships add \
-  --tenant <tenant-id> \
-  --email teammate@acme.example \
-  --role member
 ```
 
-Runtime-created tenants receive isolated PostgreSQL databases while sharing the
-project's code and generated bindings.
+The CLI writes the project ID, runtime URL, and project key to `.env.local`.
+Keep the project key server-side; only `VITE_` variables belong in the browser.
 
-## Next Steps
+## Next steps
 
 - [Installation](./installation)
-- [Initialize a Project](./init-project)
+- [Functions and Bindings](./functions-and-bindings)
 - [Projects and Tenants](./projects-and-tenants)
-- [Auth and Membership](./auth-and-membership)
-- [Replica Collections and Local Replica](./durable-sync)
+- [Replica Collections and Local Replica](./replica-collections)
 - [Scheduling and Background Jobs](./scheduling)

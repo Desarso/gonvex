@@ -212,10 +212,9 @@ func TestUpdateProjectRejectsBlankName(t *testing.T) {
 	}
 }
 
-func TestTenantsEndpointIncludesGlobalTenantsForProject(t *testing.T) {
+func TestTenantsEndpointIncludesOnlyProjectTenants(t *testing.T) {
 	server := New(config.Config{
 		TenantDatabases: map[string]string{
-			"global-tenant":      "postgres://postgres:postgres@127.0.0.1:5432/gonvex_global_tenant?sslmode=disable",
 			"other:project-only": "postgres://postgres:postgres@127.0.0.1:5432/gonvex_other_project_only?sslmode=disable",
 			"whagons-5:local":    "postgres://postgres:postgres@127.0.0.1:5432/gonvex_whagons_5_local?sslmode=disable",
 		},
@@ -237,8 +236,8 @@ func TestTenantsEndpointIncludesGlobalTenantsForProject(t *testing.T) {
 	for _, tenant := range payload.Tenants {
 		got[tenant.ID] = true
 	}
-	if !got["global-tenant"] || !got["local"] {
-		t.Fatalf("expected global and project tenants, got %+v", got)
+	if !got["local"] {
+		t.Fatalf("expected project tenant, got %+v", got)
 	}
 	if got["project-only"] {
 		t.Fatalf("did not expect other project's tenant, got %+v", got)
@@ -569,19 +568,6 @@ func TestDataEndpointRejectsUnknownUUIDv6ProjectTenant(t *testing.T) {
 	}
 }
 
-func TestUniqueTenantIDChecksProjectScopedCollisions(t *testing.T) {
-	server := New(config.Config{TenantDatabases: map[string]string{"project-a:acme": "postgres://example/acme"}})
-	server.tenants["project-a:acme-2"] = tenantTarget{ID: "acme-2", ProjectID: "project-a"}
-
-	server.projectMu.Lock()
-	got := server.uniqueTenantIDLocked("project-a", "Acme")
-	server.projectMu.Unlock()
-
-	if got != "acme_2" {
-		t.Fatalf("expected acme_2, got %q", got)
-	}
-}
-
 func TestTenantDatabaseNameUsesUUIDv6PhysicalIdentifier(t *testing.T) {
 	projectID := "a7f9f7df-6a7b-45f7-b44d-bde2068dca27"
 	got := tenantDatabaseNameWithAlias(projectID, "west-coast", "testing")
@@ -597,128 +583,6 @@ func TestTenantDatabaseNameUsesUUIDv6PhysicalIdentifier(t *testing.T) {
 	other := tenantDatabaseNameWithAlias(projectID, "west-coast", "testing")
 	if other == got {
 		t.Fatalf("each new physical database name should be unique, got %q twice", got)
-	}
-}
-
-func TestLegacyTenantDatabaseNameUsesAliasWithScopedSuffix(t *testing.T) {
-	projectID := "a7f9f7df-6a7b-45f7-b44d-bde2068dca27"
-	got := legacyTenantDatabaseNameWithAlias(projectID, "west-coast", "testing")
-	want := "testing_a7f9f7df_6a7b_45f7_b44d_bde2068dca27"
-	if got != want {
-		t.Fatalf("expected %q, got %q", want, got)
-	}
-}
-
-func TestRegisteredTenantForAliasRoutesToMigratedRelationship(t *testing.T) {
-	project := "01f18c3a-3f57-657e-a2ad-e277f004b781"
-	migrated := tenantTarget{
-		RelationshipID: "01f18c48-3695-6bae-aa2a-da2cb3ad268c",
-		ID:             "yx75qjh3t7mkvx25y1gjgkmfch82qwq9",
-		ProjectID:      project,
-		Database:       "whagons",
-		databaseName:   "migrated-database",
-		registered:     true,
-	}
-
-	got, ok := registeredTenantForAlias(
-		map[string]tenantTarget{"migrated": migrated},
-		project,
-		"whagons",
-	)
-	if !ok || got.RelationshipID != migrated.RelationshipID {
-		t.Fatalf("expected migrated alias relationship, got %#v, %v", got, ok)
-	}
-}
-
-func TestTenantForDatabaseRoutingPrefersRegisteredAliasOverUnregisteredExactID(t *testing.T) {
-	project := "01f18c3a-3f57-657e-a2ad-e277f004b781"
-	migrated := tenantTarget{
-		RelationshipID: "01f18c48-3695-6bae-aa2a-da2cb3ad268c",
-		ID:             "yx75qjh3t7mkvx25y1gjgkmfch82qwq9",
-		ProjectID:      project,
-		Database:       "whagons",
-		databaseName:   "migrated-database",
-		registered:     true,
-	}
-	empty := tenantTarget{
-		ID:           "whagons",
-		ProjectID:    project,
-		Database:     "whagons",
-		databaseName: "empty-database",
-		registered:   true,
-	}
-
-	got, ok := tenantForDatabaseRouting(
-		map[string]tenantTarget{
-			tenantStoreKey(project, migrated.ID): migrated,
-			tenantStoreKey(project, empty.ID):    empty,
-		},
-		project,
-		"whagons",
-	)
-	if !ok || got.RelationshipID != migrated.RelationshipID {
-		t.Fatalf("expected migrated alias to win, got %#v, %v", got, ok)
-	}
-}
-
-func TestRegisteredTenantForAliasRejectsAmbiguousRelationships(t *testing.T) {
-	project := "01f18c3a-3f57-657e-a2ad-e277f004b781"
-	tenants := map[string]tenantTarget{
-		"one": {
-			RelationshipID: "one",
-			ProjectID:      project,
-			Database:       "whagons",
-			registered:     true,
-		},
-		"two": {
-			RelationshipID: "two",
-			ProjectID:      project,
-			Database:       "whagons",
-			registered:     true,
-		},
-	}
-	if _, ok := registeredTenantForAlias(tenants, project, "whagons"); ok {
-		t.Fatal("expected ambiguous alias to be rejected")
-	}
-}
-
-func TestLegacyTenantDatabaseMigrationRequiresExactProjectSuffix(t *testing.T) {
-	tests := []struct {
-		name      string
-		project   string
-		database  string
-		wantAlias string
-		want      bool
-	}{
-		{name: "own antigua tenant", project: "whagons5-dev", database: "antigua_whagons5_dev", wantAlias: "antigua", want: true},
-		{name: "own nca tenant", project: "whagons5-dev", database: "nca_whagons5_dev", wantAlias: "nca", want: true},
-		{name: "unrelated project", project: "legacy-project", database: "antigua_whagons5_dev", want: false},
-		{name: "standalone database", project: "whagons5-dev", database: "antigua", want: false},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			alias, got := legacyTenantDatabaseAlias(test.project, test.database)
-			if got != test.want || alias != test.wantAlias {
-				t.Fatalf("expected (%q, %v) for %q, got (%q, %v)", test.wantAlias, test.want, test.database, alias, got)
-			}
-		})
-	}
-}
-
-func TestUUIDv6ProjectsNeverRunLegacyTenantDiscovery(t *testing.T) {
-	project, err := generateProjectID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if shouldMigrateLegacyTenantRelationships(project) {
-		t.Fatalf("UUIDv6 project %q must not infer tenant ownership from database names", project)
-	}
-	if shouldMigrateLegacyTenantRelationships("016d89ff-8d5c-4a75-950e-a498d32dffec") {
-		t.Fatal("UUIDv4 projects must not infer tenant ownership from database names")
-	}
-	if !shouldMigrateLegacyTenantRelationships("whagons5-dev") {
-		t.Fatal("legacy project ids must retain exact-suffix migration support")
 	}
 }
 

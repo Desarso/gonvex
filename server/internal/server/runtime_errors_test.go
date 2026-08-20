@@ -8,9 +8,9 @@ import (
 )
 
 func TestRuntimeMetricsPersistsFailuresOfEveryKind(t *testing.T) {
-	store := &memoryMutationLogStore{appended: make(chan runtimeLogEntry, 4)}
+	store := &memoryReducerLogStore{appended: make(chan runtimeLogEntry, 4)}
 	metrics := newRuntimeMetrics()
-	metrics.startMutationLogPersistence(store)
+	metrics.startReducerLogPersistence(store)
 	now := time.Now().UTC()
 
 	// A failed action is the case that used to vanish with the in-memory ring.
@@ -18,7 +18,7 @@ func TestRuntimeMetricsPersistsFailuresOfEveryKind(t *testing.T) {
 		Time: now.Format(time.RFC3339Nano), Project: "project-a", Path: "assistant.processThread",
 		Kind: "action", Outcome: "error", Error: "thread owner is not a member of this tenant",
 	}, now)
-	// Successful non-mutations stay memory-only.
+	// Successful non-reducers stay memory-only.
 	metrics.recordRuntimeLog(runtimeLogEntry{
 		Time: now.Add(time.Millisecond).Format(time.RFC3339Nano), Project: "project-a",
 		Path: "assistant.processThread", Kind: "action", Outcome: "ok",
@@ -51,8 +51,8 @@ func TestRuntimeMetricsRestoresPersistedFailuresIntoErrorCapture(t *testing.T) {
 	captured := make(chan runtimeLogEntry, 2)
 	metrics.onFunctionError = func(entry runtimeLogEntry) { captured <- entry }
 
-	metrics.restoreMutationLogs([]runtimeLogEntry{
-		{Project: "project-a", Path: "tasks.update", Kind: "mutation", Outcome: "ok"},
+	metrics.restoreReducerLogs([]runtimeLogEntry{
+		{Project: "project-a", Path: "tasks.update", Kind: "reducer", Outcome: "ok"},
 		{Project: "project-a", Path: "dev.sync", Kind: "runtime", Outcome: "error", Error: "schema apply failed"},
 	})
 
@@ -78,7 +78,7 @@ func TestRuntimeMetricsForwardsFailedCallsToErrorCapture(t *testing.T) {
 	now := time.Now().UTC()
 
 	metrics.recordRuntimeLog(runtimeLogEntry{Project: "project-a", Path: "tasks.list", Kind: "query", Outcome: "ok"}, now)
-	metrics.recordRuntimeLog(runtimeLogEntry{Project: "project-a", Path: "teams.create", Kind: "mutation", Outcome: "error", Error: "boom"}, now)
+	metrics.recordRuntimeLog(runtimeLogEntry{Project: "project-a", Path: "teams.create", Kind: "reducer", Outcome: "error", Error: "boom"}, now)
 	metrics.recordRuntimeLog(runtimeLogEntry{Project: "project-a", Path: "dev.sync", Kind: "runtime", Outcome: "error", Error: "schema apply failed"}, now)
 
 	for _, want := range []string{"teams.create", "dev.sync"} {
@@ -98,14 +98,14 @@ func TestRuntimeMetricsForwardsFailedCallsToErrorCapture(t *testing.T) {
 	}
 }
 
-func TestRuntimeErrorEventCarriesTenantUserAndCulprit(t *testing.T) {
+func TestRuntimeErrorEventCarriesTenantAccountAndCulprit(t *testing.T) {
 	event, ok := runtimeErrorEvent(runtimeLogEntry{
 		Time:             "2026-07-27T22:25:38.940Z",
 		ExecutionID:      "ba97d237-c189-4f2c-b4e9-6cb503f93b63",
 		Project:          "project-a",
 		Tenant:           "el-rey-2",
-		UserID:           "user-1",
-		UserEmail:        "person@example.com",
+		AccountID:        "account-1",
+		AccountEmail:     "person@example.com",
 		Path:             "assistant.processThread",
 		Kind:             "action",
 		Outcome:          "error",
@@ -118,8 +118,8 @@ func TestRuntimeErrorEventCarriesTenantUserAndCulprit(t *testing.T) {
 	if !ok {
 		t.Fatal("failed action did not produce an error event")
 	}
-	if event.Tenant != "el-rey-2" || event.User["id"] != "user-1" || event.User["email"] != "person@example.com" {
-		t.Fatalf("event lost its tenant/user attribution: %#v", event)
+	if event.Tenant != "el-rey-2" || event.Account["id"] != "account-1" || event.Account["email"] != "person@example.com" {
+		t.Fatalf("event lost its tenant/account attribution: %#v", event)
 	}
 	if event.Culprit != "action assistant.processThread" {
 		t.Fatalf("culprit = %q, want kind + path so groups stay per function", event.Culprit)
@@ -141,7 +141,7 @@ func TestRuntimeErrorEventCarriesTenantUserAndCulprit(t *testing.T) {
 	// Distinct functions must not collapse into one group.
 	other, _ := runtimeErrorEvent(runtimeLogEntry{
 		Time: "2026-07-27T22:25:38.940Z", ExecutionID: "other", Project: "project-a",
-		Path: "teams.create", Kind: "mutation", Outcome: "error",
+		Path: "teams.create", Kind: "reducer", Outcome: "error",
 		Error: "assistant loop: thread owner is not a member of this tenant",
 	})
 	if fingerprint(event) == fingerprint(other) {
@@ -173,11 +173,15 @@ func TestProjectRegistryDropsRuntimeLogKindConstraint(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(statements, "\n")
-	if strings.Contains(joined, "kind IN ('mutation', 'internalMutation')") {
+	if strings.Contains(joined, "CHECK (kind IN ('mutation', 'internalMutation'))") {
 		t.Fatal("runtime log table still restricts kind to mutations")
 	}
 	if !strings.Contains(joined, "ALTER TABLE gonvex_runtime_mutation_logs RENAME TO gonvex_runtime_reducer_logs") {
 		t.Fatal("existing runtime audit log is not migrated to Reducer terminology")
+	}
+	if !strings.Contains(joined, "WHERE kind IN ('mutation', 'internalMutation')") ||
+		!strings.Contains(joined, "jsonb_set(entry, '{kind}', to_jsonb('reducer'::text), true)") {
+		t.Fatal("existing runtime audit entries are not rewritten to reducer terminology")
 	}
 	if !strings.Contains(joined, "DROP CONSTRAINT IF EXISTS gonvex_runtime_mutation_logs_kind_check") {
 		t.Fatal("existing deployments keep the old kind CHECK and reject failure logs")

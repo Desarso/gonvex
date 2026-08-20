@@ -5,10 +5,10 @@
   "type": "module",
   "packageManager": "pnpm@11.1.2",
   "scripts": {
-    "dev": "go run ../../cmd/gonvex dev --project . -- vite",
+    "dev": "gonvex dev --project . -- vite",
     "dev:vite": "vite",
-    "gonvex:dev": "go run ../../cmd/gonvex dev --project .",
-    "gonvex:once": "go run ../../cmd/gonvex dev --project . --once",
+    "gonvex:dev": "gonvex dev --project .",
+    "gonvex:once": "gonvex dev --project . --once",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run && node --test server.node-test.mjs",
@@ -21,6 +21,7 @@
     "@fortawesome/free-solid-svg-icons": "^7.2.0",
     "@glideapps/glide-data-grid": "^6.0.3",
     "@gonvex/client": "workspace:*",
+    "@gonvex/module-sdk": "workspace:*",
     "@gonvex/protocol": "workspace:*",
     "@gonvex/react": "workspace:*",
     "@heroui/react": "^3.0.5",
@@ -32,6 +33,7 @@
     "recharts": "^3.9.0"
   },
   "devDependencies": {
+    "@gonvex/cli": "workspace:*",
     "@tailwindcss/vite": "^4.3.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",

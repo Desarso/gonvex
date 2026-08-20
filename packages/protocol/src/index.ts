@@ -2,11 +2,36 @@ export type FunctionKind = "query" | "reducer" | "action";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
-/** Opaque, language-neutral function argument/result metadata. */
-export type ModuleSchema = {
-  placeholder: true;
-  type?: string;
+/** The recursive, language-neutral value schema used by TypeScript modules. */
+export type ModuleSchema =
+  | StringSchema
+  | NumberSchema
+  | BooleanSchema
+  | NullSchema
+  | AnySchema
+  | IdSchema
+  | LiteralSchema
+  | ArraySchema
+  | ObjectSchema
+  | RecordSchema
+  | OptionalSchema;
+
+export type StringSchema = {
+  kind: "string";
+  format?: "email" | "uri" | "uuid" | "datetime";
+  minLength?: number;
+  maxLength?: number;
 };
+export type NumberSchema = { kind: "number"; integer?: boolean; minimum?: number; maximum?: number };
+export type BooleanSchema = { kind: "boolean" };
+export type NullSchema = { kind: "null" };
+export type AnySchema = { kind: "any" };
+export type IdSchema = { kind: "id"; entity: string };
+export type LiteralSchema = { kind: "literal"; value: JsonValue };
+export type ArraySchema = { kind: "array"; items: ModuleSchema };
+export type ObjectSchema = { kind: "object"; fields: Record<string, ModuleSchema>; allowUnknown?: boolean };
+export type RecordSchema = { kind: "record"; values: ModuleSchema };
+export type OptionalSchema = { kind: "optional"; value: ModuleSchema };
 
 export type FunctionManifestEntry = {
   kind: FunctionKind;
@@ -54,27 +79,11 @@ export type ReplicaChange = {
 };
 
 export type FunctionDependencies = {
-	reads?: Array<{ table: string; columns?: string[]; filters?: string[]; ordersBy?: string[]; windowed?: boolean }>;
 	shareByPermissions?: boolean;
 	liveQueryPlan?: LiveQueryPlan;
 	nonOptimisticReason?: string;
-	optimisticReducer?: OptimisticReducerDefinition;
-	optimisticProjection?: OptimisticProjectionDefinition;
 	shareResultFrom?: string;
 	shareResultField?: string;
-};
-
-/** Legacy single-patch optimistic reducer contract retained for v1 clients. */
-export type OptimisticReducerDefinition = {
-  entity: string;
-  rowIdPath: string[];
-  fieldsPath: string[];
-};
-
-export type OptimisticProjectionDefinition = {
-  entity: string;
-  key: string;
-  resultPath: string[];
 };
 
 export type LiveQueryPlan = {
@@ -84,10 +93,13 @@ export type LiveQueryPlan = {
   resultPath?: string[];
   where?: LiveExpression;
   search?: { argument: string; columns: string[] };
+  filters?: { argument: string; allowedColumns: string[]; allowedOperators: FilterOperator[] };
   sort?: { columnArgument: string; directionArgument: string; defaultColumn: string; defaultDirection: "asc" | "desc"; allowedColumns: string[] };
-  window?: { offsetArgument: string; limitArgument: string; defaultLimit: number; maxLimit: number };
+  window?: { offsetArgument: string; limitArgument: string; defaultLimit: number; maxLimit: number; count?: "exact" };
   serverOnly?: boolean;
 };
+
+export type FilterOperator = "contains" | "notContains" | "equals" | "notEquals" | "startsWith" | "endsWith" | "empty" | "notEmpty" | "oneOf" | "lessThan" | "lessThanOrEqual" | "greaterThan" | "greaterThanOrEqual" | "inRange";
 
 export type LiveExpression = {
   operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "contains" | "containsInsensitive" | "range" | "and" | "or" | "not" | "server";
@@ -133,18 +145,12 @@ export type BrowserTelemetryInfo = {
   effectiveConnectionType?: string;
 };
 
-export type QueryCacheDirective = {
+export type ReplicaDirective = {
   protocolVersion: 1;
   scope: string;
-  /**
-   * Visibility-only scope (project/tenant/user/permissions, no code epoch)
-   * under which sync collections are persisted and resumed. Unlike `scope`,
-   * it survives deploys; resume safety comes from the server's authoritative
-   * reconcile. Absent on runtimes that predate deploy-stable sync scopes.
-   */
-  syncScope?: string;
+  /** Visibility-only scope for persistent, authoritatively reconciled rows. */
+  visibilityScope: string;
   epoch: string;
-  maxAgeMs: number;
 };
 
 export type ServerCapabilities = {
@@ -152,24 +158,24 @@ export type ServerCapabilities = {
   protocolVersion?: number;
   /** Exact runtime build identifier, normally the deployed Git commit SHA. */
   runtimeVersion?: string;
-  syncBatch?: 1;
-  /** sync.ready frames always carry a collection integrity digest. */
-  syncIntegrity?: 1;
+  replicaBatch?: 1;
+  /** replica.ready frames always carry a collection integrity digest. */
+  replicaIntegrity?: 1;
   /** Server accepts `query.subscribeMany` batched subscription frames. */
   queryBatch?: 1;
 	/** Server emits several independent query updates in one WebSocket frame. */
 	queryResultBatch?: 1;
   /** Server accepts `reducer.callMany` batched command-outbox flushes. */
   reducerBatch?: 1;
-  /** Server emits connection-level sync revision watermarks. */
-  syncWatermark?: 1;
+  /** Server emits connection-level replica revision watermarks. */
+  replicaWatermark?: 1;
 };
 
 export type QuerySubscribeRequest = {
   id: string;
   path: string;
   args: JsonValue;
-  cacheRevision?: string;
+  windowRevision?: string;
 };
 
 export type ReducerCallRequest = {
@@ -181,7 +187,7 @@ export type ReducerCallRequest = {
   idempotencyKey?: string;
 };
 
-export type SyncOpenRequest = {
+export type ReplicaOpenRequest = {
   id: string;
   path: string;
   args: JsonValue;
@@ -192,20 +198,20 @@ export type SyncOpenRequest = {
   fullIntegrity?: boolean;
 };
 
-export type SyncReady = {
+export type ReplicaReady = {
   id: string;
   path?: string;
   cursor: ReplicaCursor;
   mode?: "eager" | "progressive";
-  digest?: string;
+  digest: string;
   truncated?: boolean;
 };
 
 export type ClientCapabilities = {
-  /** Client accepts coalesced `sync.readyMany` server frames. */
-  syncReadyMany?: 1;
-  /** Client accepts connection-level `sync.watermark` server frames. */
-  syncWatermark?: 1;
+  /** Client accepts coalesced `replica.readyMany` server frames. */
+  replicaReadyMany?: 1;
+  /** Client accepts connection-level `replica.watermark` server frames. */
+  replicaWatermark?: 1;
 	/** Client accepts keyed patches for object results with a `page` row array. */
 	queryPagePatch?: 1;
 	/** Client atomically applies keyed patches to named arrays in object results. */
@@ -237,10 +243,10 @@ export type GonvexManifest = {
 export type ClientMessage =
   | { type: "auth"; id: string; token?: string; project?: string; tenant?: string; device?: BrowserTelemetryInfo; capabilities?: ClientCapabilities }
   | { type: "query.call"; id: string; path: string; args: JsonValue }
-  | { type: "query.subscribe"; id: string; path: string; args: JsonValue; cacheRevision?: string }
+  | { type: "query.subscribe"; id: string; path: string; args: JsonValue; windowRevision?: string }
   | { type: "query.unsubscribe"; id: string }
   | {
-    type: "sync.open";
+    type: "replica.open";
     id: string;
     path: string;
     args: JsonValue;
@@ -250,9 +256,9 @@ export type ClientMessage =
     digest?: string;
     fullIntegrity?: boolean;
   }
-  | { type: "sync.openMany"; opens: SyncOpenRequest[] }
+  | { type: "replica.openMany"; opens: ReplicaOpenRequest[] }
   | { type: "query.subscribeMany"; subscribes: QuerySubscribeRequest[] }
-  | { type: "sync.close"; id: string }
+  | { type: "replica.close"; id: string }
   | {
     type: "reducer.call";
     id: string;
@@ -273,7 +279,7 @@ export type ClientMessage =
     id: string;
     kind: "query" | "reducer" | "action";
     path: string;
-    reason?: "initial" | "invalidate" | "recover";
+    reason?: "initial" | "change" | "recover";
     outcome: "ok" | "error";
     error?: string;
     clientSentAtMs?: number;
@@ -294,10 +300,10 @@ export type ServerMessage =
 		ids: string[];
 		path?: string;
 		result?: JsonValue;
-		reason?: "initial" | "invalidate" | "recover";
+		reason?: "initial" | "change" | "recover";
 		trace?: MessageTrace;
-		cacheScope?: string;
-		cacheRevision?: string;
+		replicaScope?: string;
+		windowRevision?: string;
 		subscriptionRevision?: SubscriptionRevision;
 		baseRevision?: SubscriptionRevision;
 		throughRevision?: SubscriptionRevision;
@@ -320,10 +326,9 @@ export type ServerMessage =
     type: "session.ready";
     project?: string;
     tenant?: string;
-    queryCache?: QueryCacheDirective;
+    replica?: ReplicaDirective;
     capabilities?: ServerCapabilities;
   }
-  | { type: "session.scope"; queryCache?: QueryCacheDirective }
   | { type: "auth.result"; id: string; result: JsonValue }
   | { type: "auth.error"; id: string; error: string }
   | {
@@ -331,10 +336,10 @@ export type ServerMessage =
     id: string;
     path?: string;
     result: JsonValue;
-    reason?: "initial" | "invalidate" | "recover";
+    reason?: "initial" | "change" | "recover";
     trace?: MessageTrace;
-    cacheScope?: string;
-    cacheRevision?: string;
+    replicaScope?: string;
+    windowRevision?: string;
     subscriptionRevision?: SubscriptionRevision;
     originCommandIds?: string[];
   }
@@ -342,7 +347,7 @@ export type ServerMessage =
     type: "query.progress";
     id: string;
     path?: string;
-    reason?: "initial" | "invalidate" | "recover";
+    reason?: "initial" | "change" | "recover";
     throughRevision: SubscriptionRevision;
     trace?: MessageTrace;
     originCommandIds?: string[];
@@ -351,7 +356,7 @@ export type ServerMessage =
     type: "query.patch";
     id: string;
     path?: string;
-    reason?: "initial" | "invalidate" | "recover";
+    reason?: "initial" | "change" | "recover";
     baseRevision: SubscriptionRevision;
     subscriptionRevision: SubscriptionRevision;
     inserted?: JsonValue[];
@@ -360,8 +365,8 @@ export type ServerMessage =
     order?: string[];
 		prepend?: string[];
 		append?: string[];
-    cacheScope?: string;
-    cacheRevision?: string;
+    replicaScope?: string;
+    windowRevision?: string;
     trace?: MessageTrace;
     originCommandIds?: string[];
   }
@@ -369,7 +374,7 @@ export type ServerMessage =
 		type: "query.pagePatch";
 		id: string;
 		path?: string;
-		reason?: "initial" | "invalidate" | "recover";
+		reason?: "initial" | "change" | "recover";
 		baseRevision: SubscriptionRevision;
 		subscriptionRevision: SubscriptionRevision;
 		result?: JsonValue;
@@ -379,8 +384,8 @@ export type ServerMessage =
 		order?: string[];
 		prepend?: string[];
 		append?: string[];
-		cacheScope?: string;
-		cacheRevision?: string;
+		replicaScope?: string;
+		windowRevision?: string;
 		trace?: MessageTrace;
 		originCommandIds?: string[];
 	}
@@ -388,17 +393,17 @@ export type ServerMessage =
 		type: "query.objectPatch";
 		id: string;
 		path?: string;
-		reason?: "initial" | "invalidate" | "recover";
+		reason?: "initial" | "change" | "recover";
 		baseRevision: SubscriptionRevision;
 		subscriptionRevision: SubscriptionRevision;
 		collections: Record<string, KeyedCollectionPatch>;
-		cacheScope?: string;
-		cacheRevision?: string;
+		replicaScope?: string;
+		windowRevision?: string;
 		trace?: MessageTrace;
 		originCommandIds?: string[];
 	}
   | {
-    type: "sync.snapshot";
+    type: "replica.snapshot";
     id: string;
     path?: string;
     result: JsonValue[];
@@ -412,7 +417,7 @@ export type ServerMessage =
     hashes?: Record<string, string>;
   }
   | {
-    type: "sync.delta";
+    type: "replica.delta";
     id: string;
     path?: string;
     cursor: ReplicaCursor;
@@ -422,25 +427,25 @@ export type ServerMessage =
     hashes?: Record<string, string>;
     digest?: string;
   }
-  | ({ type: "sync.ready"; digest?: string } & SyncReady)
-  | { type: "sync.readyMany"; ready: SyncReady[] }
-  | { type: "sync.watermark"; revision: number }
-  | { type: "sync.needHashes"; id: string; path?: string }
+  | ({ type: "replica.ready" } & ReplicaReady)
+  | { type: "replica.readyMany"; ready: ReplicaReady[] }
+  | { type: "replica.watermark"; revision: number }
+  | { type: "replica.needHashes"; id: string; path?: string }
   // Client-local status frame emitted when a formerly authoritative materialized
   // collection must be reconciled before it can be trusted again.
   | {
-    type: "sync.syncing";
+    type: "replica.syncing";
     id: string;
     path?: string;
     reason: "disconnected" | "reconciling" | "listener-reconnecting" | "integrity-reconciling";
   }
   | {
-    type: "sync.reset";
+    type: "replica.reset";
     id: string;
     path?: string;
     reason: "cursor-expired" | "definition-changed" | "visibility-changed" | "integrity-mismatch" | "integrity-missing" | "recover";
   }
-  | { type: "sync.error"; id: string; path?: string; error: string }
+  | { type: "replica.error"; id: string; path?: string; error: string }
   | { type: "query.error"; id: string; path?: string; error: string }
   | { type: "reducer.result"; id: string; path?: string; result: JsonValue; originCommandId: string; committedRevision?: number; trace?: MessageTrace }
   | { type: "reducer.error"; id: string; path?: string; error: string; trace?: MessageTrace }

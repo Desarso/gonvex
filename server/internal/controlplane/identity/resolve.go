@@ -65,7 +65,7 @@ func ResolveLegacyAccounts(records []LegacyIdentity, existing []ExistingAccount)
 			for accounts[accountID].ID != "" {
 				accountID = deterministicAccountID(accountID, legacy.LegacyUserID)
 			}
-			accounts[accountID] = Account{ID: accountID, Email: normalizeEmail(legacy.Email), Name: legacy.Name, AvatarURL: legacy.AvatarURL}
+			accounts[accountID] = Account{ID: accountID, AuthRealmID: legacy.Source, Email: normalizeEmail(legacy.Email), Name: legacy.Name, AvatarURL: legacy.AvatarURL}
 		}
 		item := LegacyAccountResolution{
 			Legacy:   legacy,

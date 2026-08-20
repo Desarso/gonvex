@@ -9,7 +9,7 @@ import (
 	"github.com/gonvex/gonvex/pkg/gonvex"
 )
 
-// deferredScheduler preserves Convex's commit ordering: jobs scheduled inside
+// deferredScheduler preserves reducer commit ordering: jobs scheduled inside
 // a reducer become visible to the scheduler only after that reducer commits.
 // Without this buffer, a zero-delay job can race the transaction and observe
 // the row that triggered it as missing.
@@ -24,6 +24,10 @@ type deferredScheduledJob struct {
 	at           time.Time
 	functionPath string
 	args         json.RawMessage
+}
+
+type scheduledTargetValidator interface {
+	ValidateTarget(functionPath string) error
 }
 
 func newDeferredScheduler(base gonvex.Scheduler) *deferredScheduler {
@@ -41,6 +45,11 @@ func (scheduler *deferredScheduler) RunAt(at time.Time, functionPath string, arg
 	functionPath = strings.TrimSpace(functionPath)
 	if functionPath == "" {
 		return "", fmt.Errorf("scheduler: function path is required")
+	}
+	if validator, ok := scheduler.base.(scheduledTargetValidator); ok {
+		if err := validator.ValidateTarget(functionPath); err != nil {
+			return "", err
+		}
 	}
 	raw, err := encodeSchedulerArgs(args)
 	if err != nil {

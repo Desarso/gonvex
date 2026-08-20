@@ -18,6 +18,19 @@ func (s *Server) Close() {
 		return
 	}
 	s.cancel()
+	s.membershipProjectorMu.Lock()
+	s.membershipProjectorClosing = true
+	s.membershipProjectorMu.Unlock()
+	projectionDone := make(chan struct{})
+	go func() {
+		s.membershipProjectorWG.Wait()
+		close(projectionDone)
+	}()
+	select {
+	case <-projectionDone:
+	case <-time.After(moduleHostShutdownGrace):
+		slog.Warn("membership projectors did not shut down cleanly")
+	}
 
 	s.wsMu.RLock()
 	connections := make([]*wsConn, 0, len(s.wsConns))

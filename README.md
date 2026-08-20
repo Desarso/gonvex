@@ -1,7 +1,7 @@
 # Gonvex
 
-Gonvex is an open source Convex-style backend for teams that want the same fast
-app-building loop with Go, Postgres, TypeScript, React, and realtime data.
+Gonvex is an open source realtime backend for teams that want a fast
+TypeScript, Postgres, React, and realtime data workflow.
 
 You write backend functions next to your app, Gonvex generates frontend API
 references, and your React UI calls Queries and Reducers through a persistent
@@ -9,33 +9,34 @@ Local Replica.
 
 ```tsx
 import { api } from "./gonvex/_generated/api";
-import { useReducer, useQuery } from "./gonvex/_generated/react";
+import { useReducer, useReplicaCollection } from "./gonvex/_generated/react";
 
 export function Tasks() {
-  const tasks = useQuery(api.tasks.list, { status: "open" });
+  const tasks = useReplicaCollection(api.tasks.list, {});
   const createTask = useReducer(api.tasks.create);
 
   return <TaskList tasks={tasks ?? []} onCreate={createTask} />;
 }
 ```
 
-Gonvex is for developers who like Convex's product shape but want infrastructure they can inspect, extend, and self-host.
+Gonvex keeps application state in Postgres while delivering an instant,
+persistent Local Replica to web and mobile clients.
 
-> **Status: beta.** The runtime, self-hosted stack, generic Go function
-> execution, native Google auth, multi-tenant routing, Live Queries,
+> **Status: beta.** The runtime, self-hosted stack, TypeScript module execution,
+> native Google auth, multi-tenant routing, Live Queries,
 > Replica Collections, scheduling, and dashboard are implemented. Migration
 > rollouts, fleet backup/restore, deployment automation, and a public hosted
 > service are still stabilizing before 1.0.
 
 ## Why Gonvex
 
-- **Three executable kinds**: define read-only Queries, transactional Reducers, and external-work Actions in Go.
+- **Three executable kinds**: define read-only Queries, transactional Reducers, and external-work Actions in TypeScript.
 - **TypeScript client bindings**: generate stable API references, schema metadata, and React hook exports from your backend.
 - **Committed realtime truth**: route exact Postgres transaction changes through one durable change feed.
 - **Local Replica**: render normalized entities from IndexedDB or SQLite and apply each server transaction atomically.
 - **Live Queries**: keep exact indexed server windows over datasets too large to replicate.
 - **Postgres underneath**: keep your data in a database you already know how to run, back up, inspect, and tune.
-- **Projects, tenants, and auth**: route isolated tenant databases, verify memberships, and add native Google OAuth without a per-app identity SDK.
+- **Projects, tenants, and auth**: route isolated tenant databases, verify Members, and add native Google OAuth without a per-app identity SDK.
 - **Background work**: commit Action outbox rows with business data and process external work after commit.
 - **Operational tooling**: inspect functions, data, files, errors, metrics, connections, and scheduler health in the dashboard.
 - **Self-hostable runtime**: run Gonvex with Postgres, Valkey/Redis, and optional S3-compatible object storage.
@@ -260,7 +261,7 @@ Gonvex is designed to be self-hosted. A full deployment has:
 ```txt
 Gonvex runtime       Executes functions, serves HTTP/WebSocket traffic, routes projects and tenants
 Postgres            Stores app data and Gonvex control-plane data
-Valkey or Redis     Required for cache, realtime coordination, and ephemeral app state
+Valkey or Redis     Optional cache for dashboard data-explorer reads
 Object storage      Optional S3-compatible storage for apps that use file APIs
 Dashboard           Optional web UI for inspecting projects, tables, functions, logs, and metrics
 ```
@@ -285,11 +286,10 @@ S3 API:    http://localhost:9000
 MinIO UI:  http://localhost:9001
 ```
 
-For production self-hosting, put the runtime behind TLS, provide managed Postgres and Valkey/Redis, configure backups, set allowed origins, and use S3-compatible storage only if your app needs files. Production deployment automation is still early, so treat the Docker stack as the best current reference implementation rather than a finished operations guide.
+For production self-hosting, put the runtime behind TLS, provide managed Postgres, configure backups and allowed origins, and add Valkey or S3-compatible storage only when you need dashboard row caching or file APIs. Production deployment automation is still early, so treat the Docker stack as the best current reference implementation rather than a finished operations guide.
 
-`VALKEY_URL` (or the legacy alias `REDIS_URL`) is mandatory. The runtime pings
-it during startup and exits with an actionable error if it is unset, invalid,
-or unreachable; there is no in-memory fallback.
+`VALKEY_URL` is optional. It accelerates dashboard data-explorer reads and has
+no role in reducer, change-feed, visibility, Live Query, or Local Replica correctness.
 
 ## Current Scope
 
@@ -303,7 +303,7 @@ Gonvex currently includes:
 - reconnecting WebSocket client with typed failures and operation timeouts
 - exact committed-change routing, canonical Live Query groups, revision-only
   freshness, unchanged suppression, and adaptive window diffs
-- transparent, scope-isolated browser query cache
+- transparent, scope-isolated persistent Local Replica
 - a normalized Local Replica backed by Postgres revisions and IndexedDB or SQLite
 - multi-project and database-per-tenant routing
 - native Google OAuth with PKCE, memberships, invitations, roles, and live
@@ -330,7 +330,7 @@ Still in progress before a stable production release:
 - Installation: https://desarso.github.io/gonvex/docs/installation/
 - Deployment model: https://desarso.github.io/gonvex/docs/deployment/
 - Current limits: https://desarso.github.io/gonvex/docs/current-limits/
-- Replica Collections and Local Replica: https://desarso.github.io/gonvex/docs/durable-sync/
+- Replica Collections and Local Replica: https://desarso.github.io/gonvex/docs/replica-collections/
 - Scheduling: https://desarso.github.io/gonvex/docs/scheduling/
 
 Run the docs locally:
@@ -345,18 +345,18 @@ pnpm dev:docs
 ```txt
 apps/dashboard/          Dashboard and local integration harness
 apps/docs/               Documentation site
-apps/query-cache-test/    Browser cache integration harness
+apps/local-replica-test/  Local Replica integration harness
 packages/client/         Browser WebSocket client
 packages/react/          React provider and hooks
 packages/protocol/       Shared TypeScript protocol types
 packages/gonvex/         CLI package
 packages/create-gonvex/  App initializer
-pkg/gonvex/              Public Go function SDK
+packages/module-sdk/    TypeScript Query/Reducer/Action module SDK
 pkg/manifest/            Runtime manifest model
 templates/vite-react/    Default starter template
-cmd/gonvex/              Go manifest/code-generation CLI
+cmd/gonvex/              Migration-only command-line utilities
 cmd/gonvex-load/         Persistent WebSocket and Reducer load runner
-server/                  Go runtime server
+server/                  Runtime host server
 infra/                   Local infrastructure helpers
 releases/                Versioned release notes
 ```
@@ -412,7 +412,7 @@ Useful development commands:
 
 ```bash
 make services      # start local Postgres and Valkey
-make runtime       # run the Go runtime with Air
+make runtime       # run the local runtime
 make dashboard     # run the dashboard app
 make packages      # watch/build npm packages
 make docs          # run docs at http://localhost:3001

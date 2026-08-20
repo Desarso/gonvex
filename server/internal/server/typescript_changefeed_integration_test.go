@@ -9,7 +9,7 @@ import (
 
 // This is the cutover invariant for SQL-owned TypeScript modules: installing
 // the module after its migrations must discover the committed application
-// schema and attach the same durable transaction feed used by Go modules.
+// schema and attach the authoritative durable transaction feed.
 func TestTypeScriptSQLSchemaInstallsAuthoritativeChangeFeed(t *testing.T) {
 	baseURL := tenantRegistryTestPostgresURL(t)
 	databaseURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_ts_feed_"+tenantRegistryTestSuffix(t))
@@ -39,7 +39,7 @@ func TestTypeScriptSQLSchemaInstallsAuthoritativeChangeFeed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.ExecContext(context.Background(), `SELECT set_config('gonvex.mutation_id', 'command-ts-1', true)`); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `SELECT set_config('gonvex.command_id', 'command-ts-1', true)`); err != nil {
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
@@ -53,22 +53,22 @@ func TestTypeScriptSQLSchemaInstallsAuthoritativeChangeFeed(t *testing.T) {
 
 	var (
 		revision  int64
-		mutation  string
+		commandID string
 		tableName string
 		rowID     string
 		operation string
 		newValue  []byte
 	)
 	if err := db.QueryRowContext(context.Background(), `SELECT
-		revision, mutation_id, table_name, row_id, operation, new_value
+		revision, command_id, table_name, row_id, operation, new_value
 		FROM _gonvex_sync_changes
 		WHERE table_name = 'tasks' AND row_id = 'task-1'`).Scan(
-		&revision, &mutation, &tableName, &rowID, &operation, &newValue,
+		&revision, &commandID, &tableName, &rowID, &operation, &newValue,
 	); err != nil {
 		t.Fatalf("read committed TypeScript change: %v", err)
 	}
-	if revision <= 0 || mutation != "command-ts-1" || tableName != "tasks" || rowID != "task-1" || operation != "insert" {
-		t.Fatalf("unexpected committed change: revision=%d mutation=%q table=%q row=%q operation=%q", revision, mutation, tableName, rowID, operation)
+	if revision <= 0 || commandID != "command-ts-1" || tableName != "tasks" || rowID != "task-1" || operation != "insert" {
+		t.Fatalf("unexpected committed change: revision=%d commandId=%q table=%q row=%q operation=%q", revision, commandID, tableName, rowID, operation)
 	}
 	var row map[string]any
 	if err := json.Unmarshal(newValue, &row); err != nil {

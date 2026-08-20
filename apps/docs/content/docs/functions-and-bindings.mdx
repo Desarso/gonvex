@@ -1,52 +1,75 @@
 ---
 title: Queries, Reducers, and Actions
-description: Gonvex's three executable function kinds and generated bindings.
+description: Gonvex's three executable TypeScript function kinds and generated bindings.
 ---
 
-Gonvex application code has three executable function kinds.
+# Queries, Reducers, and Actions
+
+Gonvex application code has exactly three executable kinds.
 
 ## Query
 
-Queries are one-shot and read-only. Gonvex runs them in a repeatable-read,
-read-only Postgres transaction.
+A Query is read-only. A one-shot Query and a Live Query both use a structured
+plan, so Gonvex can inject the table's centralized visibility rule before SQL
+executes. A Replica Collection is the bounded local delivery mode for the same
+read model.
 
-```go
-app.Query("tasks.get", GetTask)
-```
+```ts
+import { query, schema } from "@gonvex/module-sdk";
 
-```tsx
-const task = useQuery(api.tasks.get, { id });
+export const list = query({
+  args: schema.object({ workspaceId: schema.id("workspaces") }),
+  result: schema.array(schema.object({ id: schema.id("tasks"), title: schema.string() })),
+  liveQueryPlan: {
+    table: "tasks",
+    key: "id",
+    columns: ["id", "title"],
+    where: { operator: "eq", column: "workspaceId", value: { argument: "workspaceId" } },
+  },
+});
 ```
 
 ## Reducer
 
-Reducers are the only normal durable write path. Each call receives one
-`ctx.Tx`; raw database pools are unavailable so all application-table writes
-belong to the same transaction.
+Reducers are the only normal durable write path. Each invocation is one atomic
+Postgres transaction: all database changes commit together or none commit.
+Every interactive Reducer declares an optimistic transaction or an explicit
+reviewed `nonOptimisticReason`.
 
-```go
-app.Reducer(
-  "tasks.rename",
-  RenameTask,
-  gonvex.OptimisticReducer("tasks").RowIDArg("id").FieldsArg("patch"),
-)
+```ts
+import { reducer, schema } from "@gonvex/module-sdk";
+
+export const rename = reducer({
+  args: schema.object({ id: schema.id("tasks"), title: schema.string() }),
+  result: schema.object({ id: schema.id("tasks"), title: schema.string() }),
+  offline: { mode: "allowed", conflict: "expectedVersion" },
+  optimistic: {
+    effects: [{ operation: "patch", entity: "tasks", id: ["id"], fields: { title: { $arg: "title" } } }],
+  },
+  run: ({ db }, args) => db.update("tasks", args.id, { title: args.title }),
+});
 ```
-
-Every public Reducer needs optimistic metadata. A rare operation that cannot
-safely predict UI state must declare a reviewed reason with
-`OnlineOnlyNonOptimistic(reason)`.
 
 ## Action
 
-Actions perform HTTP, email, AI, file, and other external work. They do not
-receive application database handles. To change durable state, call a Reducer:
+Actions perform external work such as HTTP, email, AI, files, or long-running
+computation. They do not receive an application database handle. To change
+durable state, call a Reducer. Reducers record external work in the durable
+outbox so it runs after commit.
 
-```go
-_, err := ctx.Reducers.Call(ctx, "tasks.markDelivered", args)
+```ts
+import { action, schema } from "@gonvex/module-sdk";
+
+export const send = action({
+  args: schema.object({ taskId: schema.id("tasks") }),
+  result: schema.object({ queued: schema.boolean() }),
+  run: async ({ runReducer, fetch }, args) => {
+    await fetch("https://example.test/notify", { method: "POST", body: JSON.stringify(args) });
+    await runReducer("tasks.markNotified", args);
+    return { queued: true };
+  },
+});
 ```
-
-Reducers enqueue external work with `ctx.Outbox.Enqueue(...)`; the durable
-outbox worker invokes the Action after commit and retries failures.
 
 ## Generated React surface
 
@@ -58,5 +81,6 @@ useReducer(api.tasks.rename)
 useAction(api.mail.send)
 ```
 
-`Writes`, manual invalidation, refetch-after-write, and raw subscription
-lifecycle APIs are not part of the application model.
+The Local Replica is the only frontend source of server state. Do not copy
+Gonvex data into React state, call manual refetches after Reducers, write the
+Gonvex store directly, or own WebSocket/subscription lifecycle code.

@@ -231,7 +231,7 @@ var (
 		"Inspect", "Restock", "Deep-clean", "Calibrate", "Route", "Schedule",
 	}
 	seedObjects = []string{
-		"live grid", "schema sync", "runtime route", "query cache", "mutation path",
+		"live query", "schema migration", "runtime route", "local replica", "reducer path",
 		"upload flow", "table browser", "dev manifest", "migration plan", "status panel",
 		"guest room", "HVAC unit", "minibar", "linen cart", "elevator bank",
 		"fire panel", "POS terminal", "key card encoder", "pool pump", "laundry chute",

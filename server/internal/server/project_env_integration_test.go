@@ -115,7 +115,7 @@ func TestPostgresProjectEnvAuthorizationThroughRouterAndMiddleware(t *testing.T)
 			t.Fatalf("save synthetic project registry: %v", err)
 		}
 	}
-	if err := server.ensureProjectOwnerMember(context.Background(), projectA, dashboardActor{Email: ownerEmail, Name: "Environment Owner", Role: "user"}); err != nil {
+	if err := server.ensureProjectOwnerMember(context.Background(), projectA, dashboardActor{Email: ownerEmail, Name: "Environment Owner", Role: "standard"}); err != nil {
 		t.Fatalf("save synthetic project owner: %v", err)
 	}
 	registry, err := server.openProjectRegistry(context.Background())
@@ -145,11 +145,11 @@ func TestPostgresProjectEnvAuthorizationThroughRouterAndMiddleware(t *testing.T)
 		DashboardSecret: "project-env-integration-session-secret",
 		DevSyncKey:      "runtime-wide-integration-sync-key",
 	})
-	ownerSession, err := runtimeServer.dashboardSessionForActor(dashboardActor{Email: ownerEmail, Name: "Environment Owner", Role: "user"})
+	ownerSession, err := runtimeServer.dashboardSessionForActor(dashboardActor{Email: ownerEmail, Name: "Environment Owner", Role: "standard"})
 	if err != nil {
 		t.Fatal("create synthetic owner session")
 	}
-	adminSession, err := runtimeServer.dashboardSessionForActor(dashboardActor{Email: "env-admin@example.test", Name: "Environment Admin", Role: "user"})
+	adminSession, err := runtimeServer.dashboardSessionForActor(dashboardActor{Email: "env-admin@example.test", Name: "Environment Admin", Role: "standard"})
 	if err != nil {
 		t.Fatal("create synthetic admin session")
 	}

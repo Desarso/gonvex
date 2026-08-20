@@ -106,6 +106,9 @@ type scheduler struct {
 	wake  chan struct{}
 	store scheduledJobStore
 	owner string
+	// validateTarget is set by the server and proves a one-shot schedule points
+	// at an executable Reducer or Action before the caller can commit state.
+	validateTarget func(projectID, functionPath string) error
 }
 
 func newScheduler(exec scheduledExecutor) *scheduler {
@@ -133,6 +136,17 @@ type schedulerHandle struct {
 	tenantID  string
 }
 
+func (h schedulerHandle) ValidateTarget(functionPath string) error {
+	functionPath = strings.TrimSpace(functionPath)
+	if functionPath == "" {
+		return fmt.Errorf("scheduler: function path is required")
+	}
+	if h.sc.validateTarget != nil {
+		return h.sc.validateTarget(h.projectID, functionPath)
+	}
+	return nil
+}
+
 func (h schedulerHandle) RunAfter(delay time.Duration, functionPath string, args any) (string, error) {
 	if delay < 0 {
 		delay = 0
@@ -144,6 +158,9 @@ func (h schedulerHandle) RunAt(at time.Time, functionPath string, args any) (str
 	functionPath = strings.TrimSpace(functionPath)
 	if functionPath == "" {
 		return "", fmt.Errorf("scheduler: function path is required")
+	}
+	if err := h.ValidateTarget(functionPath); err != nil {
+		return "", err
 	}
 	raw, err := encodeSchedulerArgs(args)
 	if err != nil {

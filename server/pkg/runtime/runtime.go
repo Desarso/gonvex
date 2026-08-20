@@ -5,22 +5,21 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/server/internal/config"
 	"github.com/gonvex/gonvex/server/internal/server"
 )
 
-func Handler(app *gonvex.App) http.Handler {
-	runtime, err := server.NewRequiredWithApp(config.FromEnv(), app)
+func Handler() http.Handler {
+	runtime, err := server.NewRequired(config.FromEnv())
 	if err != nil {
 		panic(fmt.Errorf("gonvex runtime startup failed: %w", err))
 	}
 	return runtime.Handler()
 }
 
-func ListenAndServe(app *gonvex.App) error {
+func ListenAndServe() error {
 	cfg := config.FromEnv()
-	runtime, err := server.NewRequiredWithApp(cfg, app)
+	runtime, err := server.NewRequired(cfg)
 	if err != nil {
 		return fmt.Errorf("gonvex runtime startup failed: %w", err)
 	}

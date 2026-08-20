@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -31,19 +32,17 @@ func TestProvisionExistingTenantRepairsDurableSyncStorage(t *testing.T) {
 	if _, err := schemasync.Apply(context.Background(), databaseURL, desired); err != nil {
 		t.Fatal(err)
 	}
-	server := New(config.Config{})
-	if err := server.runtime.SyncManifest(manifest.Manifest{
-		Project: project,
-		Schema:  desired,
-		Functions: map[string]manifest.FunctionEntry{
-			"sync.priorities": {
-				Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica,
-				Replica: &manifest.ReplicaCollectionDefinition{
-					Table: "priorities", Key: "id", Columns: []string{"id", "tenantId"},
-				},
+	server := newTenantRegistryModuleServer(t, config.Config{})
+	moduleManifest := typeScriptTestManifest(project, map[string]manifest.FunctionEntry{
+		"sync.priorities": {
+			Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica,
+			Replica: &manifest.ReplicaCollectionDefinition{
+				Table: "priorities", Key: "id", Columns: []string{"id", "tenantId"},
 			},
 		},
-	}); err != nil {
+	})
+	moduleManifest.Schema = desired
+	if err := server.runtime.SyncManifest(moduleManifest); err != nil {
 		t.Fatal(err)
 	}
 	if err := server.provisionTenantDatabaseWithSync(context.Background(), project, databaseURL); err != nil {
@@ -67,25 +66,37 @@ func TestUnchangedDevSyncRepairsMissingDurableSyncStorage(t *testing.T) {
 	baseURL := tenantRegistryTestPostgresURL(t)
 	databaseURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_sync_skip_repair_"+tenantRegistryTestSuffix(t))
 	const project = "sync-skip-repair-project"
-	current := manifest.Manifest{
-		Project: project,
-		Schema: manifest.Schema{Tables: map[string]manifest.Table{
-			"priorities": {Columns: map[string]manifest.Column{
-				"id": {Type: "string", PrimaryKey: true},
-			}},
+	desired := manifest.Schema{Tables: map[string]manifest.Table{
+		"priorities": {Columns: map[string]manifest.Column{
+			"id": {Type: "string", PrimaryKey: true},
 		}},
-		Functions: map[string]manifest.FunctionEntry{
-			"sync.priorities": {
-				Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica,
-				Replica: &manifest.ReplicaCollectionDefinition{Table: "priorities", Key: "id", Columns: []string{"id"}},
-			},
+	}}
+	current := typeScriptTestManifest(project, map[string]manifest.FunctionEntry{
+		"sync.priorities": {
+			Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica,
+			Replica: &manifest.ReplicaCollectionDefinition{Table: "priorities", Key: "id", Columns: []string{"id"}},
 		},
+	})
+	current.Schema = desired
+	publicPriorities := manifest.VisibilityPlan{
+		Table: "priorities", Key: "id", Sets: map[string]manifest.VisibilitySet{},
+		Where: &manifest.VisibilityExpression{Operator: "public"},
 	}
+	current.Visibility = map[string]manifest.VisibilityPlan{"priorities": publicPriorities}
+	current.Module.Visibility = map[string]manifest.VisibilityPlan{"priorities": publicPriorities}
+	moduleHash, err := current.Module.ComputedHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.Module.Hash = moduleHash
 	payload, err := json.Marshal(current)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := New(config.Config{ProjectDatabases: map[string]string{project: databaseURL}})
+	runtime := newTenantRegistryModuleServer(t, config.Config{
+		ProjectDatabases: map[string]string{project: databaseURL},
+		TenantDatabases:  map[string]string{project + ":tenant": databaseURL},
+	})
 	syncProject := func() map[string]any {
 		recorder := httptest.NewRecorder()
 		runtime.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", bytes.NewReader(payload)))
@@ -318,7 +329,7 @@ func TestPostgresUUIDv6ProjectIgnoresUnrelatedAppDatabase(t *testing.T) {
 	}
 }
 
-func TestPostgresLegacyProjectTenantBackfillSurvivesRestart(t *testing.T) {
+func TestPostgresRuntimeDoesNotDiscoverUnregisteredTenantDatabases(t *testing.T) {
 	baseURL := tenantRegistryTestPostgresURL(t)
 	suffix := tenantRegistryTestSuffix(t)
 	controlName := "gonvex_legacy_control_" + suffix
@@ -327,7 +338,7 @@ func TestPostgresLegacyProjectTenantBackfillSurvivesRestart(t *testing.T) {
 	tenantName := tenantDatabaseNameWithAlias(projectID, "acme", "acme")
 	controlURL := createTenantRegistryTestDatabase(t, baseURL, controlName)
 	projectURL := createTenantRegistryTestDatabase(t, baseURL, projectName)
-	tenantURL := createTenantRegistryTestDatabase(t, baseURL, tenantName)
+	_ = createTenantRegistryTestDatabase(t, baseURL, tenantName)
 
 	cfg := config.Config{
 		ControlPlaneURL: controlURL,
@@ -345,7 +356,7 @@ func TestPostgresLegacyProjectTenantBackfillSurvivesRestart(t *testing.T) {
 		DatabaseMode:   "multiTenant",
 		StorageBucket:  projectID + "-test",
 		Status:         "local",
-		Description:    "Legacy tenant registry integration test.",
+		Description:    "Canonical tenant registry integration test.",
 		Provisioned:    true,
 		RuntimeCreated: true,
 		databaseURL:    projectURL,
@@ -354,18 +365,15 @@ func TestPostgresLegacyProjectTenantBackfillSurvivesRestart(t *testing.T) {
 	server := New(cfg)
 	server.projects[projectID] = project
 	if err := server.saveProjectRegistry(context.Background(), project); err != nil {
-		t.Fatalf("save legacy project registry: %v", err)
+		t.Fatalf("save project registry: %v", err)
 	}
 
 	server.hydrateProjectTenantDatabases(context.Background(), projectID)
 	server.projectMu.RLock()
-	backfilled, ok := server.tenants[tenantStoreKey(projectID, "acme")]
+	_, ok := server.tenants[tenantStoreKey(projectID, "acme")]
 	server.projectMu.RUnlock()
-	if !ok {
-		t.Fatalf("legacy project tenant database %q was not backfilled", tenantName)
-	}
-	if !isUUIDv6(backfilled.RelationshipID) || !backfilled.registered || backfilled.databaseURL != tenantURL {
-		t.Fatalf("unexpected backfilled relationship: %+v", backfilled)
+	if ok {
+		t.Fatalf("unregistered tenant database %q was discovered", tenantName)
 	}
 
 	restarted := New(cfg)
@@ -373,9 +381,25 @@ func TestPostgresLegacyProjectTenantBackfillSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load tenant registry after restart: %v", err)
 	}
-	if len(loaded) != 1 || loaded[0].ID != "acme" || loaded[0].RelationshipID != backfilled.RelationshipID {
-		t.Fatalf("legacy relationship did not survive restart: %+v", loaded)
+	if len(loaded) != 0 {
+		t.Fatalf("unregistered tenant relationship survived restart: %+v", loaded)
 	}
+}
+
+func newTenantRegistryModuleServer(t *testing.T, cfg config.Config) *Server {
+	t.Helper()
+	binary, err := filepath.Abs("../../../rust/target/debug/gonvex-module-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(binary); err != nil || info.IsDir() {
+		t.Skip("build gonvex-module-host before running TypeScript runtime integration tests")
+	}
+	cfg.ModuleHostEnabled = true
+	cfg.ModuleHostBinary = binary
+	server := New(cfg)
+	t.Cleanup(server.Close)
+	return server
 }
 
 func TestPostgresRuntimeIgnoresLegacyLandlordTenantTable(t *testing.T) {

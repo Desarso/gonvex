@@ -109,21 +109,18 @@ func TestProjectEnvRouterRejectsRequestsWithoutCredentialsForEveryMethod(t *test
 	}
 }
 
-func TestProjectEnvRouterScopesLegacyGeneratedDevKeyToEncodedProject(t *testing.T) {
+func TestProjectEnvRouterRejectsRuntimeWideDevKey(t *testing.T) {
 	projectKey, err := generateProjectKey("project-a")
 	if err != nil {
 		t.Fatal("generate synthetic project key")
 	}
 	server := New(config.Config{RequireAuth: true, DevSyncKey: projectKey})
 
-	matching := projectEnvRouterRequest(t, server, http.MethodGet, "project-a", "", projectKey)
-	if matching.Code != http.StatusOK {
-		t.Fatalf("project-bound legacy key: expected status %d, got %d", http.StatusOK, matching.Code)
-	}
-
-	otherProject := projectEnvRouterRequest(t, server, http.MethodGet, "project-b", "", projectKey)
-	if otherProject.Code != http.StatusUnauthorized {
-		t.Fatalf("project-bound legacy key used on another project: expected status %d, got %d", http.StatusUnauthorized, otherProject.Code)
+	for _, project := range []string{"project-a", "project-b"} {
+		response := projectEnvRouterRequest(t, server, http.MethodGet, project, "", projectKey)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("runtime-wide dev key for %s: expected status %d, got %d", project, http.StatusUnauthorized, response.Code)
+		}
 	}
 }
 

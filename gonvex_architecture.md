@@ -31,16 +31,19 @@ read-only Postgres transaction. It is called with `useQuery` or `client.query`.
 ### Reducer
 
 A Reducer is the only public durable state transition. Gonvex begins one
-Postgres transaction and exposes only `ctx.Tx` to application code. Raw pools
+Postgres transaction and exposes only the bounded `ctx.db` capability to application code. Raw pools
 are hidden so an operation cannot accidentally commit outside the business
 transaction. Failure rolls the complete intent back.
 
-```go
-app.Reducer(
-  "tasks.rename",
-  RenameTask,
-  gonvex.OptimisticReducer("tasks").RowIDArg("taskId").FieldsArg("patch"),
-)
+```ts
+export const renameTask = reducer({
+  args: schema.object({ taskId: schema.id("tasks"), title: schema.string() }),
+  offline: { mode: "allowed", conflict: "expectedVersion" },
+  optimistic: {
+    effects: [{ operation: "patch", entity: "tasks", id: ["taskId"], fields: { title: { $arg: "title" } } }],
+  },
+  run: ({ db }, { taskId, title }) => db.update("tasks", taskId, { title }),
+});
 ```
 
 `Writes(...)`, manual notifications, and refetch instructions are not part of
@@ -52,8 +55,8 @@ An Action performs external or long-running work such as HTTP, email, AI,
 push, and files. Its database handles are unavailable. Durable state must
 re-enter through:
 
-```go
-result, err := ctx.Reducers.Call(ctx, "tasks.markDelivered", args)
+```ts
+await ctx.runReducer("tasks.markDelivered", args);
 ```
 
 Business rows and external-work requests should be committed together through
@@ -86,15 +89,20 @@ byte budgets. A complete collection supports exact offline evaluation; a
 truncated collection reports `partial` rather than pretending to represent the
 database.
 
-```go
-app.ReplicaCollection(
-  "tasks.recent",
-  RecentTasks,
-  gonvex.ReplicaTable("tasks").
-    Columns("id", "title", "status", "updated_at").
-    OrderBy("updated_at", "desc").
-    Budget(10_000, 50<<20),
-)
+```ts
+export const recentTasks = replicaCollection({
+  args: schema.object({ workspaceId: schema.id("workspaces") }),
+  result: schema.array(taskSchema),
+  replica: {
+    table: "tasks",
+    key: "id",
+    columns: ["id", "title", "status", "updated_at"],
+    orderBy: "updated_at",
+    orderDirection: "desc",
+    maxRows: 10_000,
+    maxBytes: 50 * 1024 * 1024,
+  },
+});
 ```
 
 ### Live Query
@@ -104,14 +112,26 @@ dataset. It is not arbitrary reactive SQL. Registration requires
 `gonvex.LivePlan(...)`, which declares searchable/filterable/sortable fields,
 window budgets, and offline capability.
 
-```go
-app.LiveQuery("tasks.grid", TasksGrid, gonvex.LivePlan(
-  gonvex.LiveTable("tasks").
-    Filter(gonvex.Eq("workspace_id", gonvex.Arg("workspaceId"))).
-    SearchArg("search", "title", "description").
-    SortArgs("sort", "direction", "deadline", "asc", "deadline", "created_at").
-    WindowArgs("offset", "limit", 100, 150),
-))
+```ts
+export const taskGrid = liveQuery({
+  args: taskGridArgs,
+  result: taskGridResult,
+  liveQueryPlan: {
+    table: "tasks",
+    key: "id",
+    columns: ["id", "workspace_id", "title", "description", "deadline"],
+    where: { operator: "eq", column: "workspace_id", value: { argument: "workspaceId" } },
+    search: { argument: "search", columns: ["title", "description"] },
+    sort: {
+      columnArgument: "sort",
+      directionArgument: "direction",
+      defaultColumn: "deadline",
+      defaultDirection: "asc",
+      allowedColumns: ["deadline", "created_at"],
+    },
+    window: { offsetArgument: "offset", limitArgument: "limit", defaultLimit: 100, maxLimit: 150 },
+  },
+});
 ```
 
 The plan compiles to parameterized PostgreSQL. Identifiers are allowlisted by
@@ -190,6 +210,32 @@ Routing evaluates old and new visibility. A row moving out of a caller's
 scope becomes a delete; a row moving in becomes an upsert. Live Query sharing
 includes the visibility fingerprint. Equal SQL arguments alone never prove
 equal results.
+
+Each delivered table has one structured rule exported by the TypeScript
+module. Gonvex compiles that same rule into snapshot/Live Query SQL and into
+the in-memory old/new change router:
+
+```ts
+export const taskVisibility = visibility({
+  table: "tasks",
+  key: "id",
+  sets: {
+    assigned: {
+      table: "taskUsers",
+      select: "taskId",
+      joins: [],
+      where: [{ table: "taskUsers", column: "memberId", context: "member.id" }],
+    },
+  },
+  where: {
+    operator: "or",
+    children: [
+      { operator: "permission", value: "tasks.viewAll" },
+      { operator: "inSet", column: "id", set: "assigned" },
+    ],
+  },
+});
+```
 
 ## Offline contract
 

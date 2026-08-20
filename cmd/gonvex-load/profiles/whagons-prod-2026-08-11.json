@@ -404,7 +404,7 @@
       "count": 1
     }
   ],
-  "mutations": [
+  "reducers": [
     {
       "path": "tasks.create",
       "args": {"workspaceId": "$workspace", "statusId": "$status", "title": "Gonvex load task"},
@@ -428,7 +428,7 @@
       "ratePerMinute": 30
     }
   ],
-  "mutationsInWindow": [
+  "reducersInWindow": [
     {
       "path": "workplans.generateDueWorkplans",
       "n": 16
@@ -490,8 +490,8 @@
   ],
   "notes": [
     "full app tab = 80-99 subscriptions (~35 sync.* collections + ~45-60 reactive queries)",
-    "background mutation floor ~1.2/s tenant-wide (workplans scheduler 0.57/s + heartbeats 0.5/s) even with zero user interaction",
-    "interactive mutations to simulate on top: tasks.create, tasks.update (status change), taskResources.recordTaskViewByTaskPgId",
+    "background reducer floor ~1.2/s tenant-wide (workplans scheduler 0.57/s + heartbeats 0.5/s) even with zero user interaction",
+    "interactive reducers to simulate on top: tasks.create, tasks.update (status change), taskResources.recordTaskViewByTaskPgId",
     "el-rey generated 92% of all server load with ~30 connections"
   ]
 }

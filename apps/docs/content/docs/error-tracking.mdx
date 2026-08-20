@@ -22,9 +22,9 @@ exceptions, unhandled rejections, and failed Gonvex Queries, Reducers, and
 actions without changing individual call sites:
 
 ```ts
-import { ConvexReactClient } from "@gonvex/client";
+import { GonvexClient } from "@gonvex/client";
 
-const client = new ConvexReactClient(import.meta.env.VITE_GONVEX_URL, {
+const client = new GonvexClient(import.meta.env.VITE_GONVEX_WS_URL, {
   project: "my-project",
   tenant: currentTenant,
   errorReporting: {
@@ -57,7 +57,7 @@ const errors = new GonvexErrorReporter({
   environment: "production",
 });
 
-errors.setUser({ id: user.id, email: user.email });
+errors.setAccount({ id: account.id, email: account.email });
 errors.addBreadcrumb("checkout", "Submitting order", { cartId });
 
 try {

@@ -103,7 +103,7 @@ func TestDurableSyncLogOrdersConcurrentTransactionsAndProjectsColumns(t *testing
 		)
 	}
 
-	// One multi-row mutation must remain one atomic cursor revision.
+	// One multi-row reducer must remain one atomic cursor revision.
 	tx, err := db.Begin()
 	if err != nil {
 		t.Fatal(err)
@@ -177,7 +177,7 @@ func TestDurableSyncLogOrdersConcurrentTransactionsAndProjectsColumns(t *testing
 		t.Fatalf("lifecycle revisions=%d operations=%v", lifecycleRevisions, lifecycleOperations)
 	}
 
-	// Concurrent writers contend on the commit clock. Every committed mutation
+	// Concurrent writers contend on the commit clock. Every committed transaction
 	// must receive a distinct, fully assigned revision with no lost events.
 	const writers = 256
 	var wait sync.WaitGroup

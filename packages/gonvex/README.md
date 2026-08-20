@@ -2,8 +2,8 @@
 
 The Gonvex CLI for app-local development with the Gonvex runtime.
 
-Gonvex gives you a Convex-style workflow with Go or TypeScript backend
-functions, generated TypeScript bindings, React hooks, realtime subscriptions,
+Gonvex gives you a Convex-style workflow with TypeScript backend functions,
+generated TypeScript bindings, React hooks, realtime subscriptions,
 and a local runtime backed by Postgres.
 
 ## Install
@@ -63,9 +63,8 @@ npx gonvex dev -- vite
 The manifest supports exactly Queries, Reducers, and Actions as executable
 application kinds. Structured Live Queries and bounded Replica Collections are
 Query delivery modes. Live Query dependencies are derived from their plans;
-declared write sets do not exist. Go
-backends upload a source bundle compiled and cached by the runtime. TypeScript
-backends are bundled by the CLI into one self-contained, platform-neutral ESM
+declared write sets do not exist. TypeScript modules are bundled by the CLI into
+one self-contained, platform-neutral ESM
 module before upload. The default entrypoint search starts at `gonvex/index.ts`;
 configure a different project-relative path with `module.entrypoint` in
 `gonvex.json`:
@@ -113,7 +112,7 @@ project:
 npx gonvex auth add google --origin http://localhost:5173
 npx gonvex auth status
 npx gonvex auth doctor
-npx gonvex auth users
+npx gonvex auth accounts
 ```
 
 The command registers the exact callback with the runtime and writes
@@ -144,7 +143,7 @@ CLI sends the selected project key in both supported authentication headers, and
 the runtime scopes that key to the exact project in the request. If environment
 commands return `dashboard sign-in is required` while `gonvex dev --once` works,
 upgrade and recreate the runtime; updating this npm package alone does not update
-the deployed Go runtime.
+the deployed Gonvex runtime.
 
 ## Runtime Settings
 

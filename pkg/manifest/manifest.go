@@ -1,5 +1,7 @@
 package manifest
 
+import "encoding/json"
+
 type FunctionKind string
 
 const (
@@ -22,8 +24,8 @@ type FunctionEntry struct {
 	Kind         FunctionKind                 `json:"kind"`
 	Handler      string                       `json:"handler"`
 	File         string                       `json:"file"`
-	Args         any                          `json:"args,omitempty"`
-	Result       any                          `json:"result,omitempty"`
+	Args         ModuleSchema                 `json:"args,omitempty"`
+	Result       ModuleSchema                 `json:"result,omitempty"`
 	Internal     bool                         `json:"internal,omitempty"`
 	Delivery     DeliveryMode                 `json:"delivery,omitempty"`
 	Dependencies FunctionDependencies         `json:"dependencies,omitempty"`
@@ -31,6 +33,12 @@ type FunctionEntry struct {
 	Offline      any                          `json:"offline,omitempty"`
 	Optimistic   any                          `json:"optimistic,omitempty"`
 }
+
+// ModuleSchema is the JSON representation of the recursive PortableSchema
+// contract shared by the TypeScript SDK, generated manifests, and module
+// hosts. It remains a map at this boundary so Go can transport every schema
+// variant without inventing a second schema language.
+type ModuleSchema map[string]any
 
 // ReplicaCollectionDefinition describes an entity-shaped, locally materialized collection.
 // V1 intentionally supports a single source table and equality filters. More
@@ -55,14 +63,11 @@ type ReplicaCollectionDefinition struct {
 // Live Queries without a structured plan are rejected rather than broadly
 // invalidated.
 type FunctionDependencies struct {
-	Reads                []ReadDependency                `json:"reads,omitempty"`
-	ShareByPermissions   bool                            `json:"shareByPermissions,omitempty"`
-	ShareResultFrom      string                          `json:"shareResultFrom,omitempty"`
-	ShareResultField     string                          `json:"shareResultField,omitempty"`
-	OptimisticReducer    *OptimisticReducerDefinition    `json:"optimisticReducer,omitempty"`
-	OptimisticProjection *OptimisticProjectionDefinition `json:"optimisticProjection,omitempty"`
-	LiveQueryPlan        *LiveQueryPlan                  `json:"liveQueryPlan,omitempty"`
-	NonOptimisticReason  string                          `json:"nonOptimisticReason,omitempty"`
+	ShareByPermissions  bool           `json:"shareByPermissions,omitempty"`
+	ShareResultFrom     string         `json:"shareResultFrom,omitempty"`
+	ShareResultField    string         `json:"shareResultField,omitempty"`
+	LiveQueryPlan       *LiveQueryPlan `json:"liveQueryPlan,omitempty"`
+	NonOptimisticReason string         `json:"nonOptimisticReason,omitempty"`
 }
 
 type LiveQueryPlan struct {
@@ -72,9 +77,18 @@ type LiveQueryPlan struct {
 	ResultPath []string        `json:"resultPath,omitempty"`
 	Where      *LiveExpression `json:"where,omitempty"`
 	Search     *LiveSearch     `json:"search,omitempty"`
+	Filters    *LiveFilters    `json:"filters,omitempty"`
 	Sort       *LiveSort       `json:"sort,omitempty"`
 	Window     *LiveWindow     `json:"window,omitempty"`
 	ServerOnly bool            `json:"serverOnly,omitempty"`
+}
+
+type FilterOperator string
+
+type LiveFilters struct {
+	Argument         string           `json:"argument"`
+	AllowedColumns   []string         `json:"allowedColumns"`
+	AllowedOperators []FilterOperator `json:"allowedOperators"`
 }
 
 type LiveExpression struct {
@@ -106,26 +120,7 @@ type LiveWindow struct {
 	LimitArgument  string `json:"limitArgument"`
 	DefaultLimit   int    `json:"defaultLimit"`
 	MaxLimit       int    `json:"maxLimit"`
-}
-
-type OptimisticReducerDefinition struct {
-	Entity     string   `json:"entity"`
-	RowIDPath  []string `json:"rowIdPath"`
-	FieldsPath []string `json:"fieldsPath"`
-}
-
-type OptimisticProjectionDefinition struct {
-	Entity     string   `json:"entity"`
-	Key        string   `json:"key"`
-	ResultPath []string `json:"resultPath"`
-}
-
-type ReadDependency struct {
-	Table    string   `json:"table"`
-	Columns  []string `json:"columns,omitempty"`
-	Filters  []string `json:"filters,omitempty"`
-	OrdersBy []string `json:"ordersBy,omitempty"`
-	Windowed bool     `json:"windowed,omitempty"`
+	Count          string `json:"count,omitempty"`
 }
 
 type Schema struct {
@@ -193,28 +188,37 @@ type VisibilityExpression struct {
 // TypeScript CLI. The fields describe the artifact rather than a runtime
 // implementation so other module languages can use the same wire shape.
 type ModuleArtifact struct {
-	Language   string `json:"language"`
-	Generation int    `json:"generation"`
-	Hash       string `json:"hash,omitempty"`
-	// ArtifactHash is a compatibility alias accepted from older deployment
-	// payloads. Hash is the canonical wire name.
-	ArtifactHash string                    `json:"artifactHash,omitempty"`
-	Entrypoint   string                    `json:"entrypoint"`
-	Functions    map[string]ModuleFunction `json:"functions"`
-	Files        map[string]string         `json:"files"`
-	JavaScript   *ModuleJavaScript         `json:"javascript,omitempty"`
-	Visibility   map[string]VisibilityPlan `json:"visibility,omitempty"`
+	Language   string                    `json:"language"`
+	Generation int                       `json:"generation"`
+	Hash       string                    `json:"hash,omitempty"`
+	Entrypoint string                    `json:"entrypoint"`
+	Functions  map[string]ModuleFunction `json:"functions"`
+	Crons      []ModuleCron              `json:"crons,omitempty"`
+	Files      map[string]string         `json:"files"`
+	JavaScript *ModuleJavaScript         `json:"javascript,omitempty"`
+	Visibility map[string]VisibilityPlan `json:"visibility,omitempty"`
 }
 
-// ModuleFunction carries generated function metadata and opaque schema and
-// policy values. The Go CLI retains these values without interpreting them.
+// ModuleCron is a language-neutral recurring Reducer or Action declaration.
+// Exactly one of IntervalMS and Expression must be set.
+type ModuleCron struct {
+	Name       string          `json:"name"`
+	Function   string          `json:"function"`
+	Args       json.RawMessage `json:"args,omitempty"`
+	Scope      string          `json:"scope"`
+	IntervalMS int64           `json:"intervalMs,omitempty"`
+	Expression string          `json:"expression,omitempty"`
+}
+
+// ModuleFunction carries generated function metadata and portable schema and
+// reducer-policy values. The runtime validates them before activation.
 type ModuleFunction struct {
 	Kind         FunctionKind                 `json:"kind"`
 	Handler      string                       `json:"handler"`
 	File         string                       `json:"file"`
 	Export       string                       `json:"export,omitempty"`
-	Args         any                          `json:"args,omitempty"`
-	Result       any                          `json:"result,omitempty"`
+	Args         ModuleSchema                 `json:"args,omitempty"`
+	Result       ModuleSchema                 `json:"result,omitempty"`
 	Dependencies FunctionDependencies         `json:"dependencies,omitempty"`
 	Internal     bool                         `json:"internal,omitempty"`
 	Delivery     DeliveryMode                 `json:"delivery,omitempty"`
@@ -235,7 +239,6 @@ type Manifest struct {
 	GeneratedAt         string                    `json:"generatedAt"`
 	Functions           map[string]FunctionEntry  `json:"functions"`
 	Schema              Schema                    `json:"schema"`
-	Bundle              *SourceBundle             `json:"bundle,omitempty"`
 	Module              *ModuleArtifact           `json:"module,omitempty"`
 	Visibility          map[string]VisibilityPlan `json:"visibility,omitempty"`
 	NotifySchemaVersion string                    `json:"notifySchemaVersion,omitempty"`
@@ -267,24 +270,12 @@ func (s Schema) Normalize() Schema {
 	return s
 }
 
-// Normalize applies compatibility aliases to a module artifact while
-// retaining both spellings for callers that still consume artifactHash.
-func (a ModuleArtifact) Normalize() ModuleArtifact {
-	if a.Hash == "" {
-		a.Hash = a.ArtifactHash
-	}
-	if a.ArtifactHash == "" {
-		a.ArtifactHash = a.Hash
-	}
-	return a
-}
-
-// Normalize resolves schema and module compatibility aliases. It is safe to
-// call after JSON unmarshalling or before emitting a generated binding.
+// Normalize initializes schema maps and mirrors the one visibility declaration
+// into the module artifact used by the execution host.
 func (m Manifest) Normalize() Manifest {
 	m.Schema = m.Schema.Normalize()
 	if m.Module != nil {
-		normalized := m.Module.Normalize()
+		normalized := *m.Module
 		if m.Visibility == nil {
 			m.Visibility = normalized.Visibility
 		}

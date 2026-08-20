@@ -176,7 +176,7 @@ func TestProjectTenantHydrationErrorIsReturnedAndNotCached(t *testing.T) {
 }
 
 func TestProjectSyncStorageCheckReturnsTenantDiscoveryFailure(t *testing.T) {
-	server := newServer(config.Config{PostgresURL: "://invalid"}, nil, nil, nil)
+	server := newServer(config.Config{PostgresURL: "://invalid"}, nil)
 	t.Cleanup(func() {
 		server.cancel()
 		server.tenantStores.Close()

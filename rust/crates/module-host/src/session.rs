@@ -677,6 +677,12 @@ fn module_error(module_id: &str, function: &str, err: ModuleError) -> WireError 
         ModuleError::Unsupported(message) => {
             WireError::new(codes::UNSUPPORTED, format!("{where_}: {message}"))
         }
+        ModuleError::InvalidArguments(message) => {
+            WireError::new(codes::INVALID_ARGS, format!("{where_}: {message}"))
+        }
+        ModuleError::InvalidResult(message) => {
+            WireError::new(codes::INVALID_RESULT, format!("{where_}: {message}"))
+        }
         ModuleError::Execution(message) => {
             WireError::new(codes::EXECUTION_FAILED, format!("{where_}: {message}"))
         }

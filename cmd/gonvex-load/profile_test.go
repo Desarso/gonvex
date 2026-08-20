@@ -10,9 +10,11 @@ import (
 
 func TestLoadProfileExpandsRuntimeVariablesWithoutMutatingSource(t *testing.T) {
 	raw := `{
-		"version": 1,
+		"version": 2,
 		"name": "whagons-workspace",
-		"variables": {"workspaceId": "workspace-a"},
+		"users": 1,
+		"connectionsPerUser": 1,
+		"pools": {"workspaceId": ["workspace-a"]},
 		"subscriptions": [
 			{"path": "bulk.tasksByWorkspace", "args": {
 				"tenantId": "${tenant}",
@@ -60,9 +62,9 @@ func TestLoadProfileExpandsRuntimeVariablesWithoutMutatingSource(t *testing.T) {
 func TestLoadProfileRejectsInvalidSubscription(t *testing.T) {
 	for name, raw := range map[string]string{
 		"unsupported version": `{"version":3,"subscriptions":[{"path":"users.me","args":{}}]}`,
-		"missing path":        `{"version":1,"subscriptions":[{"args":{}}]}`,
-		"invalid path":        `{"version":1,"subscriptions":[{"path":"users/me","args":{}}]}`,
-		"non-object args":     `{"version":1,"subscriptions":[{"path":"users.me","args":[]}]}`,
+		"missing path":        `{"version":2,"users":1,"connectionsPerUser":1,"subscriptions":[{"args":{}}]}`,
+		"invalid path":        `{"version":2,"users":1,"connectionsPerUser":1,"subscriptions":[{"path":"users/me","args":{}}]}`,
+		"non-object args":     `{"version":2,"users":1,"connectionsPerUser":1,"subscriptions":[{"path":"users.me","args":[]}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := loadProfileReader(strings.NewReader(raw)); err == nil {
@@ -97,7 +99,7 @@ func TestBundledWhagonsProfilesValidate(t *testing.T) {
 	}
 }
 
-func TestVersionTwoProfilePlansUsersPoolsAndMutationTemplates(t *testing.T) {
+func TestVersionTwoProfilePlansUsersPoolsAndReducerTemplates(t *testing.T) {
 	profile, err := loadProfileReader(strings.NewReader(`{
 		"version":2,
 		"name":"sessions",
@@ -109,7 +111,7 @@ func TestVersionTwoProfilePlansUsersPoolsAndMutationTemplates(t *testing.T) {
 			{"path":"tasks.list","args":{"workspaceId":"$workspace","limit":"${limit}"}},
 			{"path":"users.me","args":{}}
 		],
-		"mutations":[{"path":"tasks.create","args":{"workspaceId":"$workspace","owner":"$userId"},"ratePerUserPerMinute":0.2,"activeUsers":0.2}]
+		"reducers":[{"path":"tasks.create","args":{"workspaceId":"$workspace","owner":"$userId"},"ratePerUserPerMinute":0.2,"activeUsers":0.2}]
 	}`))
 	if err != nil {
 		t.Fatal(err)
@@ -133,9 +135,9 @@ func TestVersionTwoProfilePlansUsersPoolsAndMutationTemplates(t *testing.T) {
 	if variables["workspace"] != second["workspace"] {
 		t.Fatalf("the same user must get stable session pool choices: %#v vs %#v", variables, second)
 	}
-	mutationArgs, err := profile.Mutations[0].expandedArgs(variables)
-	if err != nil || mutationArgs["owner"] != "user-3" {
-		t.Fatalf("mutation template expansion failed: args=%#v err=%v", mutationArgs, err)
+	reducerArgs, err := profile.Reducers[0].expandedArgs(variables)
+	if err != nil || reducerArgs["owner"] != "user-3" {
+		t.Fatalf("reducer template expansion failed: args=%#v err=%v", reducerArgs, err)
 	}
 }
 

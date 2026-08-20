@@ -25,9 +25,9 @@ export default function App(props: { runtimeURL: string }) {
     <main className="shell">
       <section className="hero">
         <div className="status">Connected to {props.runtimeURL}</div>
-        <h1>Gonvex app code. Go backend. Realtime React.</h1>
+        <h1>Gonvex app code. TypeScript backend. Realtime React.</h1>
         <p>
-          Edit <code>gonvex/messages.go</code> or <code>gonvex/schema.go</code>. The CLI regenerates bindings and syncs safe schema changes to the runtime.
+          Edit <code>gonvex/messages.ts</code> or the versioned SQL migration in <code>migrations/</code>. The CLI regenerates bindings and applies migrations to the runtime.
         </p>
       </section>
 

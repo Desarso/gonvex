@@ -16,10 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/pkg/moduleengine"
-	"github.com/gonvex/gonvex/pkg/projectbundle"
 	"github.com/gonvex/gonvex/pkg/storage"
 	"github.com/gonvex/gonvex/server/internal/config"
 	"github.com/gonvex/gonvex/server/internal/data"
@@ -34,11 +32,9 @@ type Server struct {
 	cancel          context.CancelFunc
 	config          config.Config
 	runtime         *runtime.Runtime
-	appEngine       moduleengine.ModuleEngine
 	storage         *storage.Factory
 	dataFiles       *datafiles.Manager
 	tenantStores    *tenantStoreResolver
-	ephemeral       ephemeralBackend
 	cache           *rowsCache
 	admission       *queryAdmission
 	metrics         *runtimeMetrics
@@ -46,16 +42,16 @@ type Server struct {
 	telemetryWrites chan struct{}
 	telemetryDBMu   sync.Mutex
 	telemetryDBs    map[string]*sql.DB
-	// Lazily initialized under mutationIdempotencyMu; both maps key on the
+	// Lazily initialized under reducerIdempotencyMu; both maps key on the
 	// tenant database URL.
-	mutationIdempotencyMu       sync.Mutex
-	mutationIdempotencyReady    map[string]bool
-	mutationIdempotencySweptAt  map[string]time.Time
-	mutationIdempotencyInstalls singleflight.Group
-	subscriptionTelemetry       chan []transactionTelemetryEntry
-	projectMu                   sync.RWMutex
-	projects                    map[string]projectTarget
-	tenants                     map[string]tenantTarget
+	reducerIdempotencyMu       sync.Mutex
+	reducerIdempotencyReady    map[string]bool
+	reducerIdempotencySweptAt  map[string]time.Time
+	reducerIdempotencyInstalls singleflight.Group
+	subscriptionTelemetry      chan []transactionTelemetryEntry
+	projectMu                  sync.RWMutex
+	projects                   map[string]projectTarget
+	tenants                    map[string]tenantTarget
 	// explicitTenantDatabases is the immutable deployment-level routing map.
 	// Registry hydration may enrich tenant metadata, but must not replace an
 	// operator-provided database endpoint for the same project/tenant key.
@@ -86,112 +82,76 @@ type Server struct {
 	projectEnvLoads         singleflight.Group
 	tenantProvisions        singleflight.Group
 	provisionTenant         func(context.Context, string, manifest.Schema) error
-	// syncLocks serializes /dev/sync work per project so overlapping syncs
+	// syncLocks serializes /dev/sync work per project so overlapping replicas
 	// (e.g. a failed-then-retried push, or a client that fires twice) can't run
 	// catalog DDL concurrently and trip "tuple concurrently updated".
 	syncLockMu sync.Mutex
 	syncLocks  map[string]*sync.Mutex
 	// schemaHash records the fingerprint of the schema last applied to each
 	// project's database, so an unchanged sync skips the trigger/DDL reapply.
-	schemaHashMu          sync.Mutex
-	schemaHash            map[string]string
-	queryCacheStartedAtMS int64
-	queryCacheSequence    atomic.Uint64
-	errorTracker          *errorTracker
-	runtimeErrors         chan runtimeLogEntry
-	googleKeys            googleKeyCache
-	firebaseKeys          googleKeyCache
-	authRateLimiter       appAuthRateLimiter
-	appAuthConfigMu       sync.Mutex
-	appAuthRequirements   map[string]appAuthRequirementCacheEntry
-	appAuthLookups        map[string]*appAuthRequirementLookup
-	appAuthVersions       map[string]uint64
-	visibilityMu          sync.Mutex
-	visibilityContexts    map[string]*resolvedVisibilityContext
-	visibilityEpochs      map[string]uint64
-	visibilityLoads       singleflight.Group
-	syncPruneMu           sync.Mutex
-	syncPrunedAt          map[string]time.Time
-	runtimeHydrationMu    sync.RWMutex
-	runtimeHydrationFails map[string]struct{}
-	runtimeHydrationReady atomic.Bool
+	schemaHashMu               sync.Mutex
+	schemaHash                 map[string]string
+	replicaStartedAtMS         int64
+	replicaSequence            atomic.Uint64
+	errorTracker               *errorTracker
+	runtimeErrors              chan runtimeLogEntry
+	googleKeys                 googleKeyCache
+	authRateLimiter            appAuthRateLimiter
+	appAuthConfigMu            sync.Mutex
+	appAuthRequirements        map[string]appAuthRequirementCacheEntry
+	appAuthLookups             map[string]*appAuthRequirementLookup
+	appAuthVersions            map[string]uint64
+	membershipProjectorMu      sync.Mutex
+	membershipProjectorWG      sync.WaitGroup
+	membershipProjectorClosing bool
+	visibilityMu               sync.Mutex
+	visibilityContexts         map[string]*resolvedVisibilityContext
+	visibilityEpochs           map[string]uint64
+	visibilityLoads            singleflight.Group
+	syncPruneMu                sync.Mutex
+	syncPrunedAt               map[string]time.Time
+	runtimeHydrationMu         sync.RWMutex
+	runtimeHydrationFails      map[string]struct{}
+	runtimeHydrationReady      atomic.Bool
 }
 
 func New(cfg config.Config) *Server {
-	return NewWithApp(cfg, nil)
-}
-
-// NewRequired constructs a production runtime and verifies its mandatory
-// Valkey dependency before any server background work starts.
-func NewRequired(cfg config.Config) (*Server, error) {
-	return NewRequiredWithApp(cfg, nil)
-}
-
-// NewRequiredWithApp is the app-aware production constructor. New and
-// NewWithApp remain lightweight constructors for isolated package tests; all
-// executable/runtime entry points use this fail-fast constructor.
-func NewRequiredWithApp(cfg config.Config, app *gonvex.App) (*Server, error) {
-	client, err := openRequiredValkey(cfg.ValkeyURL)
-	if err != nil {
-		return nil, err
-	}
-	ephemeral := &valkeyEphemeralBackend{client: client}
-	cache := newRowsCacheWithClient(client, cfg.RowsCacheTTL)
-	server := newServer(cfg, app, ephemeral, cache)
-	legacyScheduler := newValkeyScheduledJobStore(client)
-	postgresScheduler := server.postgresScheduledJobStore()
-	if postgresScheduler != nil {
-		migrationContext, cancelMigration := context.WithTimeout(context.Background(), 30*time.Second)
-		migrationErr := legacyScheduler.refreshCompletionMarkers(migrationContext)
-		cancelMigration()
-		if migrationErr != nil {
-			server.Close()
-			_ = client.Close()
-			return nil, fmt.Errorf("prepare scheduled job migration: %w", migrationErr)
-		}
-	}
-	server.scheduler.store = newMigratingScheduledJobStore(
-		postgresScheduler,
-		legacyScheduler,
-	)
-	server.scheduler.start(server.ctx)
-	go server.hydrateRuntimeState(server.ctx)
-	return server, nil
-}
-
-func NewWithApp(cfg config.Config, app *gonvex.App) *Server {
 	var cache *rowsCache
-	var ephemeral ephemeralBackend
-	var legacyScheduler legacyScheduledJobStore
 	if strings.TrimSpace(cfg.ValkeyURL) != "" {
 		client, err := newValkeyClient(cfg.ValkeyURL)
 		if err != nil {
-			slog.Warn("ephemeral store unavailable in lightweight constructor", "error", err)
+			slog.Warn("dashboard row cache unavailable in lightweight constructor", "error", err)
 		} else {
 			cache = newRowsCacheWithClient(client, cfg.RowsCacheTTL)
-			ephemeral = &valkeyEphemeralBackend{client: client}
-			legacyScheduler = newValkeyScheduledJobStore(client)
 		}
 	}
-	server := newServer(cfg, app, ephemeral, cache)
-	// Lightweight constructors are used by isolated tests and local embedding.
-	// They do not require the production readiness barrier or distributed
-	// scheduler lease.
+	server := newServer(cfg, cache)
 	server.runtimeHydrationReady.Store(true)
-	if legacyScheduler != nil {
-		postgresScheduler := server.postgresScheduledJobStore()
-		if postgresScheduler != nil {
-			migrationContext, cancelMigration := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := legacyScheduler.refreshCompletionMarkers(migrationContext); err != nil {
-				slog.Warn("prepare scheduled job migration in lightweight runtime", "error", err)
-			}
-			cancelMigration()
-		}
-		server.scheduler.store = newMigratingScheduledJobStore(postgresScheduler, legacyScheduler)
+	if postgresScheduler := server.postgresScheduledJobStore(); postgresScheduler != nil {
+		server.scheduler.store = postgresScheduler
+	}
+	// New is the lightweight constructor used by hermetic tests and embedded
+	// tooling. Production enters through NewRequired, which owns background
+	// scheduler execution after all durable dependencies have been verified.
+	go server.hydrateRuntimeState(server.ctx)
+	return server
+}
+
+// NewRequired constructs a production runtime. Valkey is optional and only
+// accelerates dashboard data-explorer reads; application correctness never
+// depends on it.
+func NewRequired(cfg config.Config) (*Server, error) {
+	cache, err := newRowsCache(cfg.ValkeyURL, cfg.RowsCacheTTL)
+	if err != nil {
+		return nil, err
+	}
+	server := newServer(cfg, cache)
+	if postgresScheduler := server.postgresScheduledJobStore(); postgresScheduler != nil {
+		server.scheduler.store = postgresScheduler
 	}
 	server.scheduler.start(server.ctx)
 	go server.hydrateRuntimeState(server.ctx)
-	return server
+	return server, nil
 }
 
 func (s *Server) postgresScheduledJobStore() *postgresScheduledJobStore {
@@ -203,17 +163,14 @@ func (s *Server) postgresScheduledJobStore() *postgresScheduledJobStore {
 	})
 }
 
-func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, cache *rowsCache) *Server {
+func newServer(cfg config.Config, cache *rowsCache) *Server {
 	cfg.Normalize()
-	if app == nil {
-		app = gonvex.NewApp()
-	}
 	serverContext, cancel := context.WithCancel(context.Background())
 	server := &Server{
 		ctx:     serverContext,
 		cancel:  cancel,
 		config:  cfg,
-		runtime: runtime.NewWithModuleHost(projectbundle.NewLoader(cfg.PluginCacheDir, cfg.GonvexModuleRoot), moduleHostFor(cfg)),
+		runtime: runtime.NewWithModuleHost(moduleHostFor(cfg)),
 		storage: storage.NewFactory(storage.Config{
 			Endpoint:        cfg.S3Endpoint,
 			Region:          cfg.S3Region,
@@ -224,7 +181,6 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 			PublicBaseURL:   cfg.StoragePublicURL,
 			URLSigningKey:   cfg.S3SecretAccessKey,
 		}),
-		ephemeral:             ephemeral,
 		cache:                 cache,
 		metrics:               newRuntimeMetrics(cfg.TelemetryLogPath),
 		telemetryWrites:       make(chan struct{}, 4),
@@ -238,7 +194,7 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		tableChanges:          map[string]pendingTableChange{},
 		syncLocks:             map[string]*sync.Mutex{},
 		schemaHash:            map[string]string{},
-		queryCacheStartedAtMS: time.Now().UTC().UnixMilli(),
+		replicaStartedAtMS:    time.Now().UTC().UnixMilli(),
 		errorTracker:          newErrorTracker(10000),
 		appAuthRequirements:   map[string]appAuthRequirementCacheEntry{},
 		appAuthLookups:        map[string]*appAuthRequirementLookup{},
@@ -249,26 +205,37 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		runtimeHydrationFails: map[string]struct{}{},
 		provisionTenant:       provisionTenantDatabase,
 	}
-	// appEngine dispatches the embedded app through the same seam as
-	// bundle-loaded modules, so single-app embedding and multi-project workers
-	// share one execution path. It is the fallback for requests naming a project
-	// this worker has no module loaded for.
-	server.appEngine = moduleengine.NewGoAppEngine(app)
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
 	server.admission = newQueryAdmission(cfg.SubscriptionRerunConcurrency, cfg.QueryBootstrapConcurrency)
 	server.metrics.admissionSource = server.admission.snapshot
 	server.subscriptions = newSubscriptionManager(server)
 	server.scheduler = newScheduler(server.runScheduledJob)
+	server.scheduler.validateTarget = server.validateScheduledTarget
 	server.tenantStores = newTenantStoreResolver(&server.config)
 	server.startRuntimeErrorCapture()
 	go server.runSubscriptionTelemetry()
 	server.metrics.onFunctionError = server.queueRuntimeFunctionError
 	if strings.TrimSpace(server.projectRegistryURL()) != "" {
-		server.metrics.startMutationLogPersistence(postgresRuntimeMutationLogStore{server: server})
+		server.metrics.startReducerLogPersistence(postgresRuntimeReducerLogStore{server: server})
 	}
 	server.loadConfiguredTenantDatabases()
 	server.startLoadSampler(server.ctx)
 	return server
+}
+
+func (s *Server) validateScheduledTarget(projectID, functionPath string) error {
+	engine := s.runtime.EngineForProject(strings.TrimSpace(projectID))
+	if engine == nil {
+		return fmt.Errorf("scheduler: project %q has no active TypeScript module", projectID)
+	}
+	descriptor, ok := engine.Describe(strings.TrimSpace(functionPath))
+	if !ok {
+		return fmt.Errorf("scheduler: function %q is not registered", functionPath)
+	}
+	if descriptor.Kind != moduleengine.KindReducer && descriptor.Kind != moduleengine.KindAction {
+		return fmt.Errorf("scheduler: function %q is a %s; only Reducers and Actions can be scheduled", functionPath, descriptor.Kind)
+	}
+	return nil
 }
 
 // moduleHostFor builds the runtime's one module host handle. It starts nothing:
@@ -299,8 +266,11 @@ func moduleHostFor(cfg config.Config) *moduleengine.RemoteHost {
 // the same reducer/action execution path as client-triggered calls, so
 // scheduled work shows up in the function and concurrency metrics too.
 func (s *Server) runScheduledJob(ctx context.Context, job scheduledJob) error {
-	ctx = withMutationID(ctx, job.ID)
+	ctx = withCommandID(ctx, job.ID)
 	engine := s.engineForProject(ctx, job.ProjectID)
+	if engine == nil {
+		return fmt.Errorf("project %q has no active TypeScript module", job.ProjectID)
+	}
 	descriptor, ok := engine.Describe(job.FunctionPath)
 	if !ok {
 		return fmt.Errorf("scheduled function %q is not registered", job.FunctionPath)
@@ -334,6 +304,9 @@ func (s *Server) executeScheduledInternalReducer(ctx context.Context, job schedu
 	}()
 
 	engine := s.engineForProject(ctx, job.ProjectID)
+	if engine == nil {
+		return fmt.Errorf("project %q has no active TypeScript module", job.ProjectID)
+	}
 	reducerCtx, ctxErr := s.reducerContext(ctx, job.ProjectID, job.TenantID, callerContext{})
 	if ctxErr != nil {
 		return ctxErr
@@ -383,8 +356,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/auth/tokens", s.handleAccountTokens)
 	mux.HandleFunc("POST /dev/auth/tokens", s.handleAccountTokens)
 	mux.HandleFunc("DELETE /dev/auth/tokens/{token}", s.handleRevokeAccountToken)
-	mux.HandleFunc("GET /dev/auth/users", s.handleDashboardUsers)
-	mux.HandleFunc("POST /dev/auth/users", s.handleDashboardUsers)
+	mux.HandleFunc("GET /dev/auth/accounts", s.handleDashboardAccounts)
+	mux.HandleFunc("POST /dev/auth/accounts", s.handleDashboardAccounts)
 	mux.HandleFunc("GET /dev/auth/notifications", s.handleListNotifications)
 	mux.HandleFunc("POST /dev/auth/notifications/read", s.handleReadNotifications)
 	mux.HandleFunc("GET /dev/projects", s.handleProjects)
@@ -401,9 +374,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/projects/{project}/auth/google", s.handleProjectGoogleAuth)
 	mux.HandleFunc("PUT /dev/projects/{project}/auth/google", s.handleProjectGoogleAuth)
 	mux.HandleFunc("DELETE /dev/projects/{project}/auth/google", s.handleProjectGoogleAuth)
-	mux.HandleFunc("GET /dev/projects/{project}/auth/users", s.handleProjectAuthUsers)
-	mux.HandleFunc("PATCH /dev/projects/{project}/auth/users/{user}", s.handleProjectAuthUser)
-	mux.HandleFunc("DELETE /dev/projects/{project}/auth/users/{user}", s.handleProjectAuthUser)
+	mux.HandleFunc("GET /dev/projects/{project}/auth/accounts", s.handleProjectAuthAccounts)
+	mux.HandleFunc("PATCH /dev/projects/{project}/auth/accounts/{account}", s.handleProjectAuthAccount)
+	mux.HandleFunc("DELETE /dev/projects/{project}/auth/accounts/{account}", s.handleProjectAuthAccount)
 	mux.HandleFunc("GET /dev/projects/{project}/auth/memberships", s.handleProjectAuthMemberships)
 	mux.HandleFunc("PUT /dev/projects/{project}/auth/memberships", s.handleProjectAuthMemberships)
 	mux.HandleFunc("DELETE /dev/projects/{project}/auth/memberships", s.handleProjectAuthMemberships)
@@ -836,7 +809,6 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	if next.Functions == nil {
 		next.Functions = map[string]manifest.FunctionEntry{}
 	}
-	next = next.Normalize()
 	if next.Project == "" {
 		next.Project = r.Header.Get("x-gonvex-project-id")
 	}
@@ -853,6 +825,15 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}
+	// Gonvex v2 has one TypeScript application contract. Reject a missing or
+	// divergent artifact before migrations, change-feed installation, or module
+	// activation can observe different function maps.
+	if err := next.ValidateTypeScriptContract(); err != nil {
+		syncErr = err
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	next = next.Normalize()
 	if next.Schema.Tables == nil {
 		next.Schema = manifest.EmptySchema()
 	}
@@ -871,7 +852,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 
 	// Serialize per project: schema.Apply reinstalls NOTIFY triggers via
 	// DROP/CREATE TRIGGER + CREATE OR REPLACE FUNCTION, which update pg_catalog
-	// rows. Two overlapping syncs (or a sync racing live query traffic) trip
+	// rows. Two overlapping replicas (or a sync racing live query traffic) trip
 	// Postgres' "tuple concurrently updated". One sync at a time per project.
 	lock := s.projectSyncLock(next.Project)
 	lock.Lock()
@@ -958,47 +939,33 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if next.Module != nil {
-		tenantMigrationResult, err = s.installProjectModuleChangeFeeds(r.Context(), next.Project)
+		var observedTenantSchema manifest.Schema
+		tenantMigrationResult, observedTenantSchema, err = s.installProjectModuleChangeFeeds(r.Context(), next.Project)
 		if err != nil {
 			syncErr = err
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
+		// SQL migrations are the only TypeScript DDL authority. Persist the
+		// schema PostgreSQL actually committed so dashboard/codegen and runtime
+		// validation describe the database that the module will execute against,
+		// rather than a second hand-maintained declaration.
+		next.Schema = next.Schema.Normalize()
+		next.Schema.TenantTables = observedTenantSchema.Tables
+		next.Schema.Tables = next.Schema.TenantTables
 	}
 
-	bundleHash := ""
-	if next.Bundle != nil {
-		bundleHash = next.Bundle.Hash
+	moduleHash := ""
+	if next.Module != nil {
+		moduleHash = next.Module.Identity()
 	}
-	slog.Info("dev sync applying manifest", "project", next.Project, "functions", len(next.Functions), "bundleHash", bundleHash)
-	// Only a sync that replaces an already-loaded plugin module needs a worker
-	// recycle: Go cannot unload the previous module. An unchanged bundle hash
-	// loads nothing, and a first load leaves this worker current, so recycling
-	// for those would only manufacture a reconnect wave. A failed load attempt
-	// still recycles because plugin.Open can poison the process (see
-	// projectbundle). Unsupervised/local embedding safely ignores the header.
-	//
-	// A module artifact never recycles the worker. The module host swaps
-	// generations atomically in its own process, old calls finish on the old
-	// generation, and this worker keeps its WebSockets — a client must not see
-	// a reconnect because a developer saved a file.
-	previousHash := ""
-	if previous := s.runtime.ManifestForProject(next.Project); previous.Bundle != nil {
-		previousHash = previous.Bundle.Hash
-	}
-	alreadyLoaded := s.runtime.EngineForProject(next.Project) != nil
-	bundleChanged := next.Bundle != nil && next.Bundle.Hash != previousHash
-	loadAttempted := next.Bundle != nil && (bundleChanged || !alreadyLoaded)
+	slog.Info("dev sync applying TypeScript module", "project", next.Project, "functions", len(next.Functions), "moduleHash", moduleHash)
+	// Module generations swap atomically in the V8 host. WebSockets stay
+	// connected and calls already running on the retired generation may finish.
 	if err := s.syncRuntimeManifest(r.Context(), next); err != nil {
-		if loadAttempted {
-			w.Header().Set("X-Gonvex-Recycle-Worker", "1")
-		}
 		syncErr = err
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
-	}
-	if alreadyLoaded && bundleChanged {
-		w.Header().Set("X-Gonvex-Recycle-Worker", "1")
 	}
 	s.registerProjectCrons(next.Project)
 	if err := s.saveRuntimeManifest(r.Context(), next); err != nil {
@@ -1015,14 +982,15 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	s.resetProjectReplicaCollections(next.Project, "manifest-changed")
 	s.rerunProjectSubscriptions(next.Project)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":              true,
-		"project":         next.Project,
-		"functionCount":   len(next.Functions),
-		"schema":          migrationResult,
-		"tenantSchema":    tenantMigrationResult,
-		"migrations":      sqlMigrationResult,
-		"schemaSkipped":   schemaSkipped,
-		"runtimeReloaded": true,
+		"ok":               true,
+		"project":          next.Project,
+		"functionCount":    len(next.Functions),
+		"schema":           migrationResult,
+		"tenantSchema":     tenantMigrationResult,
+		"migrations":       sqlMigrationResult,
+		"schemaDefinition": next.Schema.Normalize(),
+		"schemaSkipped":    schemaSkipped,
+		"runtimeReloaded":  true,
 	})
 }
 
@@ -1202,6 +1170,12 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 	defer s.projectMu.RUnlock()
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" || tenantID == projectID {
+		// The project registry is authoritative for a project's single-database
+		// URL. This also covers projects created at runtime before the next
+		// hydration copies that URL into ProjectDatabases.
+		if project, ok := s.projects[projectID]; ok && strings.TrimSpace(project.databaseURL) != "" {
+			return project.databaseURL
+		}
 		return s.config.DatabaseURL(projectID)
 	}
 	if tenant, ok := tenantForDatabaseRouting(s.tenants, projectID, tenantID); ok {
@@ -1212,61 +1186,12 @@ func (s *Server) databaseURLForTenant(projectID string, tenantID string) string 
 			return tenant.databaseURL
 		}
 	}
-	if !isUUIDProjectID(projectID) {
-		if value := s.configuredTenantDatabaseURLLocked(projectID, tenantTarget{ID: tenantID}); value != "" {
-			return value
-		}
-		// Preserve the historical single-database fallback for existing project
-		// IDs. UUID projects require an explicit tenant relationship and never
-		// route an unknown tenant to the project database.
-		return s.config.DatabaseURL(projectID)
-	}
 	return ""
 }
 
 func tenantForDatabaseRouting(tenants map[string]tenantTarget, projectID string, tenantID string) (tenantTarget, bool) {
 	exact, foundExact := tenants[tenantStoreKey(projectID, tenantID)]
-	if registered, foundRegistered := registeredTenantForAlias(tenants, projectID, tenantID); foundRegistered {
-		return registered, true
-	}
-	if foundExact && exact.registered {
-		return exact, true
-	}
 	return exact, foundExact
-}
-
-func registeredTenantForAlias(tenants map[string]tenantTarget, projectID string, alias string) (tenantTarget, bool) {
-	alias = strings.TrimSpace(alias)
-	if alias == "" {
-		return tenantTarget{}, false
-	}
-	matches := []tenantTarget{}
-	for _, tenant := range tenants {
-		if tenant.ProjectID != projectID || !tenant.registered {
-			continue
-		}
-		aliasMatches := strings.EqualFold(strings.TrimSpace(tenant.Database), alias) ||
-			strings.EqualFold(strings.TrimSpace(tenant.domain), alias)
-		if !aliasMatches {
-			continue
-		}
-		matches = append(matches, tenant)
-	}
-	if len(matches) == 1 {
-		return matches[0], true
-	}
-	var legacy tenantTarget
-	legacyCount := 0
-	for _, tenant := range matches {
-		if isLegacyConvexDocumentID(tenant.ID) {
-			legacy = tenant
-			legacyCount++
-		}
-	}
-	if legacyCount == 1 {
-		return legacy, true
-	}
-	return tenantTarget{}, false
 }
 
 func (s *Server) hydrateRuntimeState(ctx context.Context) {
@@ -1307,7 +1232,7 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 	// Without this, databaseURLForProject falls back to POSTGRES_URL and the
 	// runtime reads project tables from the wrong (control-plane) database. This must
 	// run even when the app/manifest is already loaded, since the DB mapping is
-	// independent of the compiled bundle.
+	// independent of the loaded module generation.
 	s.projectMu.RLock()
 	_, haveDB := s.config.ProjectDatabases[projectID]
 	s.projectMu.RUnlock()
@@ -1367,92 +1292,26 @@ func (s *Server) runtimeHydrationFailureCount() int {
 	return len(s.runtimeHydrationFails)
 }
 
-// engineForProject resolves the module engine that serves projectID, hydrating
-// this worker's runtime state on demand. It falls back to the engine wrapping
-// the embedded app so single-app embedding (server/pkg/runtime) keeps behaving
-// exactly as before. The result is never nil, so callers can Describe/Invoke
-// against it directly.
+// engineForProject resolves the active TypeScript module generation.
 func (s *Server) engineForProject(ctx context.Context, projectID string) moduleengine.ModuleEngine {
 	s.hydrateRuntimeStateForProject(ctx, projectID)
-	if engine := s.runtime.EngineForProject(projectID); engine != nil {
-		return engine
-	}
-	return s.appEngine
+	return s.runtime.EngineForProject(projectID)
 }
 
 func (s *Server) configuredTenantDatabaseURLLocked(projectID string, tenant tenantTarget) string {
 	if s.config.TenantDatabases == nil {
 		return ""
 	}
-	for _, candidate := range tenantLookupCandidates(tenant) {
-		if candidate == "" {
-			continue
-		}
-		if value := s.config.TenantDatabases[tenantStoreKey(projectID, candidate)]; value != "" {
+	if tenant.ID != "" {
+		if value := s.config.TenantDatabases[tenantStoreKey(projectID, tenant.ID)]; value != "" {
 			return value
-		}
-		if !isUUIDProjectID(projectID) {
-			if value := s.config.TenantDatabases[candidate]; value != "" {
-				return value
-			}
-		}
-	}
-	if !isUUIDProjectID(projectID) {
-		needles := tenantDatabaseNeedles(tenant)
-		for key, value := range s.config.TenantDatabases {
-			configuredProject, _ := splitTenantDatabaseKey(key)
-			if configuredProject != "" && configuredProject != projectID {
-				continue
-			}
-			normalizedDatabase := normalizeDatabaseAlias(databaseNameFromURL(value, ""))
-			for _, needle := range needles {
-				if needle != "" && strings.Contains(normalizedDatabase, needle) {
-					return value
-				}
-			}
 		}
 	}
 	return ""
 }
 
-func tenantLookupCandidates(tenant tenantTarget) []string {
-	return uniqueStrings([]string{
-		tenant.ID,
-		tenant.Database,
-		tenant.domain,
-		slug(tenant.Name),
-		strings.ReplaceAll(slug(tenant.Name), "_", "-"),
-	})
-}
-
-func tenantDatabaseNeedles(tenant tenantTarget) []string {
-	values := []string{tenant.ID, tenant.Database, tenant.domain, tenant.Name}
-	needles := make([]string, 0, len(values))
-	for _, value := range values {
-		needle := normalizeDatabaseAlias(value)
-		if len(needle) >= 4 {
-			needles = append(needles, needle)
-		}
-	}
-	return uniqueStrings(needles)
-}
-
 func normalizeDatabaseAlias(value string) string {
 	return strings.ToLower(strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.TrimSpace(value)))
-}
-
-func uniqueStrings(values []string) []string {
-	seen := map[string]bool{}
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			continue
-		}
-		seen[value] = true
-		result = append(result, value)
-	}
-	return result
 }
 
 func withJSON(next http.Handler) http.Handler {

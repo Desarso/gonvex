@@ -69,7 +69,7 @@ func (m *tenantListenerManager) acquire(project, tenant string) <-chan struct{} 
 			m.active[key] = replacement
 			m.mu.Unlock()
 			listener.cancel()
-			m.server.markTenantSyncsOutOfDate(project, tenant, "listener-route-changed")
+			m.server.markTenantReplicasOutOfDate(project, tenant, "listener-route-changed")
 			go m.run(ctx, replacement, databaseURL)
 			return replacement.ready
 		}
@@ -132,13 +132,13 @@ func (m *tenantListenerManager) markDisconnected(listener *tenantListener) {
 	listener.needsRecovery = true
 	listener.ready = make(chan struct{})
 	m.mu.Unlock()
-	m.server.markTenantSyncsOutOfDate(listener.key.project, listener.key.tenant, "listener-reconnecting")
+	m.server.markTenantReplicasOutOfDate(listener.key.project, listener.key.tenant, "listener-reconnecting")
 }
 
 // whileConnected serializes a freshness-sensitive action with listener
 // disconnect detection. In particular, a sync subscription must be published
-// before a concurrent disconnect enumerates subscriptions, and sync.ready must
-// be written before the corresponding sync.syncing frame. Returning the current
+// before a concurrent disconnect enumerates subscriptions, and replica.ready must
+// be written before the corresponding replica.syncing frame. Returning the current
 // readiness barrier lets callers retry safely when they observed an older,
 // already-closed barrier just as the listener disconnected.
 func (m *tenantListenerManager) whileConnected(
@@ -199,7 +199,7 @@ func (m *tenantListenerManager) run(ctx context.Context, listener *tenantListene
 		connection, err := pgx.Connect(connectCtx, databaseURL)
 		cancel()
 		if err == nil {
-			_, err = connection.Exec(ctx, "LISTEN "+schema.SyncNotifyChannel)
+			_, err = connection.Exec(ctx, "LISTEN "+schema.ChangeFeedNotifyChannel)
 		}
 		if err == nil {
 			needsRecovery := m.markReady(listener)
@@ -207,7 +207,9 @@ func (m *tenantListenerManager) run(ctx context.Context, listener *tenantListene
 			// crash immediately after Reducer commit). Drain whenever the tenant
 			// becomes active, independent of a new application-table revision.
 			go m.server.drainActionOutbox(listener.key.project, listener.key.tenant)
-			go m.server.drainControlPlaneMembershipOutbox(listener.key.project, listener.key.tenant)
+			m.server.startMembershipProjection(func() {
+				m.server.drainControlPlaneMembershipOutbox(listener.key.project, listener.key.tenant)
+			})
 			if connectedBefore {
 				m.server.metrics.recordReactive(func(metric *reactiveMetricState) { metric.ListenerReconnects++ })
 			}
@@ -268,22 +270,24 @@ func (m *tenantListenerManager) wait(ctx context.Context, connection *pgx.Conn, 
 		}
 		m.server.notifySyncRevision(key.project, key.tenant, payload.Tables, payload.Epoch, payload.Revision)
 		go m.server.drainActionOutbox(key.project, key.tenant)
-		go m.server.drainControlPlaneMembershipOutbox(key.project, key.tenant)
+		m.server.startMembershipProjection(func() {
+			m.server.drainControlPlaneMembershipOutbox(key.project, key.tenant)
+		})
 		m.dispatchCommittedRevision(ctx, listener, payload)
 	}
 }
 
 func (m *tenantListenerManager) dispatchCommittedRevision(ctx context.Context, listener *tenantListener, payload syncNotifyPayload) {
-	changes, err := readSyncChanges(ctx, listener.databaseURL, payload.Revision-1, payload.Revision)
+	changes, err := readReplicaChanges(ctx, listener.databaseURL, payload.Revision-1, payload.Revision)
 	if err != nil {
 		m.markNeedsRecovery(listener.key.project, listener.key.tenant)
 		m.server.subscriptions.refreshTenant(listener.key.project, listener.key.tenant)
 		return
 	}
-	for _, batch := range groupSyncChanges(changes) {
+	for _, batch := range groupReplicaChanges(changes) {
 		m.server.projectCommittedMemberChanges(listener.key.project, listener.key.tenant, batch)
 		m.server.refreshCommittedMemberConnections(listener.key.project, listener.key.tenant, batch)
-		changedTables := syncBatchTables(batch)
+		changedTables := replicaBatchTables(batch)
 		m.server.invalidateVisibilityContexts(listener.key.project, listener.key.tenant, changedTables)
 		visibilityChange := tableChange{
 			project: listener.key.project,
@@ -294,7 +298,7 @@ func (m *tenantListenerManager) dispatchCommittedRevision(ctx context.Context, l
 			visibilityChange.tables[table] = true
 		}
 		m.server.subscriptions.rebindVisibilityForChange(visibilityChange)
-		m.server.resetSyncsForVisibilityChange(visibilityChange)
+		m.server.resetReplicasForVisibilityChange(visibilityChange)
 		m.server.routeReplicaTransaction(listener.key.project, listener.key.tenant, payload.Epoch, batch)
 		byTable := map[string]*tableChange{}
 		for _, committed := range batch.changes {
@@ -304,7 +308,7 @@ func (m *tenantListenerManager) dispatchCommittedRevision(ctx context.Context, l
 					project: listener.key.project, tenant: listener.key.tenant, table: committed.table,
 					requiredRevision: batch.revision,
 					rowIDs:           map[string]bool{},
-					changedAtMS:      epochMillis(time.Now().UTC()), commitID: strings.TrimSpace(committed.mutationID), triggerObserved: true,
+					changedAtMS:      epochMillis(time.Now().UTC()), originCommandID: strings.TrimSpace(committed.originCommandID), triggerObserved: true,
 				}
 				byTable[committed.table] = change
 			}

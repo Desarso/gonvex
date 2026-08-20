@@ -73,8 +73,8 @@ func TestResultRowIDsAcceptsStructuralProvider(t *testing.T) {
 
 func TestWindowedDependencyDoesNotUseOldRowsAfterOrderingChange(t *testing.T) {
 	group := &sharedSubscription{
-		reads:  []manifest.ReadDependency{{Table: "tasks", Columns: []string{"title"}, OrdersBy: []string{"updatedAt"}, Windowed: true}},
-		rowIDs: map[string]bool{"task-visible": true},
+		dependencies: []subscriptionDependency{{Table: "tasks", Columns: []string{"title"}, OrdersBy: []string{"updatedAt"}, Windowed: true}},
+		rowIDs:       map[string]bool{"task-visible": true},
 	}
 	change := tableChange{
 		table: "tasks", operation: "update", changedColumns: []string{"updatedAt"}, rowIDs: map[string]bool{"task-outside-window": true},
@@ -89,8 +89,8 @@ func TestWindowedDependencyDoesNotUseOldRowsAfterOrderingChange(t *testing.T) {
 
 func TestStructuredLivePlanSkipsRowsOutsideCanonicalFilter(t *testing.T) {
 	group := &sharedSubscription{
-		args:  json.RawMessage(`{"workspaceId":"workspace-a"}`),
-		reads: []manifest.ReadDependency{{Table: "tasks", Filters: []string{"workspace_id"}}},
+		args:         json.RawMessage(`{"workspaceId":"workspace-a"}`),
+		dependencies: []subscriptionDependency{{Table: "tasks", Filters: []string{"workspace_id"}}},
 		livePlan: &manifest.LiveQueryPlan{
 			Table: "tasks", Key: "id",
 			Where: &manifest.LiveExpression{Operator: "eq", Column: "workspace_id", Value: &manifest.LiveValue{Argument: "workspaceId"}},
@@ -117,6 +117,56 @@ func TestStructuredLivePlanSkipsRowsOutsideCanonicalFilter(t *testing.T) {
 	}
 }
 
+func TestStructuredLivePlanFilterRoutingPreservesStringAndTimestampOrdering(t *testing.T) {
+	plan := &manifest.LiveQueryPlan{
+		Table: "tasks", Key: "id",
+		Filters: &manifest.LiveFilters{
+			Argument: "filters", AllowedColumns: []string{"title", "due_at"},
+			AllowedOperators: []manifest.FilterOperator{"lessThan", "inRange"},
+		},
+	}
+	args := json.RawMessage(`{"filters":[{"column":"title","operator":"lessThan","value":"m"}]}`)
+	if !livePlanCouldMatchChange(plan, args, tableChangeDetail{operation: "insert", newValues: []json.RawMessage{json.RawMessage(`{"id":"task-a","title":"alpha"}`)}}) {
+		t.Fatal("string row below less-than bound was incorrectly skipped")
+	}
+	if livePlanCouldMatchChange(plan, args, tableChangeDetail{operation: "insert", newValues: []json.RawMessage{json.RawMessage(`{"id":"task-z","title":"zulu"}`)}}) {
+		t.Fatal("string row above less-than bound incorrectly matched")
+	}
+
+	args = json.RawMessage(`{"filters":[{"column":"due_at","operator":"inRange","value":"2026-08-20T00:00:00Z","valueTo":"2026-08-21T00:00:00Z"}]}`)
+	if !livePlanCouldMatchChange(plan, args, tableChangeDetail{operation: "insert", newValues: []json.RawMessage{json.RawMessage(`{"id":"task-date","due_at":"2026-08-20T12:00:00Z"}`)}}) {
+		t.Fatal("timestamp inside range was incorrectly skipped")
+	}
+	if livePlanCouldMatchChange(plan, args, tableChangeDetail{operation: "insert", newValues: []json.RawMessage{json.RawMessage(`{"id":"task-old","due_at":"2026-08-19T12:00:00Z"}`)}}) {
+		t.Fatal("timestamp outside range incorrectly matched")
+	}
+}
+
+func TestStructuredLivePlanFilterRoutingPreservesNumericOrdering(t *testing.T) {
+	plan := &manifest.LiveQueryPlan{
+		Table: "tasks", Key: "id",
+		Filters: &manifest.LiveFilters{
+			Argument: "filters", AllowedColumns: []string{"priority"},
+			AllowedOperators: []manifest.FilterOperator{"greaterThanOrEqual", "inRange"},
+		},
+	}
+	args := json.RawMessage(`{"filters":[{"column":"priority","operator":"greaterThanOrEqual","value":"3"}]}`)
+	if !livePlanCouldMatchChange(plan, args, tableChangeDetail{operation: "insert", newValues: []json.RawMessage{json.RawMessage(`{"id":"task-3","priority":3}`)}}) {
+		t.Fatal("numeric row at lower bound was incorrectly skipped")
+	}
+	if livePlanCouldMatchChange(plan, args, tableChangeDetail{operation: "insert", newValues: []json.RawMessage{json.RawMessage(`{"id":"task-2","priority":2}`)}}) {
+		t.Fatal("numeric row below lower bound incorrectly matched")
+	}
+
+	args = json.RawMessage(`{"filters":[{"column":"priority","operator":"inRange","value":"2","valueTo":"4"}]}`)
+	if !livePlanCouldMatchChange(plan, args, tableChangeDetail{operation: "insert", newValues: []json.RawMessage{json.RawMessage(`{"id":"task-4","priority":4}`)}}) {
+		t.Fatal("numeric row at upper bound was incorrectly skipped")
+	}
+	if livePlanCouldMatchChange(plan, args, tableChangeDetail{operation: "insert", newValues: []json.RawMessage{json.RawMessage(`{"id":"task-5","priority":5}`)}}) {
+		t.Fatal("numeric row above upper bound incorrectly matched")
+	}
+}
+
 func installTestTenantListener(manager *tenantListenerManager, project, tenant string, connected bool) {
 	manager.mu.Lock()
 	manager.active[tenantListenerKey{project: project, tenant: tenant}] = &tenantListener{
@@ -129,9 +179,9 @@ func indexedTestGroup(manager *subscriptionManager, key, table string, execution
 	token := newSubscriptionToken()
 	group := &sharedSubscription{
 		manager: manager, key: key, project: "project-a", tenant: "tenant-a", path: key,
-		ctx: context.Background(), reads: []manifest.ReadDependency{{Table: table}},
+		ctx: context.Background(), dependencies: []subscriptionDependency{{Table: table}},
 		listeners: map[*subscriptionToken]querySubscription{
-			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.User{ID: "user-a"}}},
+			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.Account{ID: "user-a"}}},
 		},
 	}
 	manager.mu.Lock()
@@ -158,9 +208,9 @@ func TestCommittedFeedInvalidatesOnlyChangedTables(t *testing.T) {
 	indexedTestGroup(manager, "tasks.list", "tasks", &taskExecutions)
 	indexedTestGroup(manager, "taskLogs.list", "task_logs", &logExecutions)
 
-	const commitID = "precise-commit"
+	const originCommandID = "precise-commit"
 	server.scheduleTableChange(tableChange{
-		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "tasks",
+		project: "project-a", tenant: "tenant-a", originCommandID: originCommandID, table: "tasks",
 		operation: "update", changedColumns: []string{"title"}, rowIDs: map[string]bool{"task-1": true},
 		triggerObserved: true, changedAtMS: 11,
 	})
@@ -172,7 +222,7 @@ func TestCommittedFeedInvalidatesOnlyChangedTables(t *testing.T) {
 	}
 }
 
-func TestCommitBatchKeepsMutationCommitTimestamp(t *testing.T) {
+func TestCommitBatchKeepsReducerCommitTimestamp(t *testing.T) {
 	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
 	installTestTenantListener(server.subscriptions.listeners, "project-a", "tenant-a", true)
 	observed := make(chan float64, 1)
@@ -183,7 +233,7 @@ func TestCommitBatchKeepsMutationCommitTimestamp(t *testing.T) {
 	}
 	_ = group
 	server.scheduleTableChange(tableChange{
-		project: "project-a", tenant: "tenant-a", commitID: "commit-a", table: "tasks",
+		project: "project-a", tenant: "tenant-a", originCommandID: "commit-a", table: "tasks",
 		triggerObserved: true, changedAtMS: 125,
 	})
 	select {
@@ -201,7 +251,7 @@ func TestAdjacentTriggerNotificationsForCommitBatchAcrossTables(t *testing.T) {
 	installTestTenantListener(server.subscriptions.listeners, "project-a", "tenant-a", true)
 	var executions atomic.Int32
 	group := indexedTestGroup(server.subscriptions, "tasks.list", "tasks", nil)
-	group.reads = append(group.reads, manifest.ReadDependency{Table: "taskUsers"})
+	group.dependencies = append(group.dependencies, subscriptionDependency{Table: "taskUsers"})
 	server.subscriptions.mu.Lock()
 	server.subscriptions.indexGroupLocked(group)
 	server.subscriptions.mu.Unlock()
@@ -211,7 +261,7 @@ func TestAdjacentTriggerNotificationsForCommitBatchAcrossTables(t *testing.T) {
 	}
 	for _, table := range []string{"tasks", "taskUsers"} {
 		server.scheduleTableChange(tableChange{
-			project: "project-a", tenant: "tenant-a", commitID: "commit-batch", table: table,
+			project: "project-a", tenant: "tenant-a", originCommandID: "commit-batch", table: table,
 			triggerObserved: true, changedAtMS: 100,
 		})
 	}
@@ -234,9 +284,9 @@ func TestCommittedFeedRemainsPreciseDuringListenerRecovery(t *testing.T) {
 	indexedTestGroup(manager, "tasks.list", "tasks", &executions)
 	indexedTestGroup(manager, "taskLogs.list", "task_logs", &executions)
 
-	const commitID = "fallback-commit"
+	const originCommandID = "fallback-commit"
 	server.scheduleTableChange(tableChange{
-		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "tasks",
+		project: "project-a", tenant: "tenant-a", originCommandID: originCommandID, table: "tasks",
 		operation: "update", triggerObserved: true, changedAtMS: 11,
 	})
 
@@ -262,24 +312,19 @@ func TestNoOpReducerProducesNoChangeFeedInvalidation(t *testing.T) {
 	indexedTestGroup(manager, "tasks.list", "tasks", &executions)
 	ctx := context.Background()
 	beforeRows := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks")
-	beforeQueries, ok := server.cache.queryGeneration(ctx, "project-a", "tenant-a", []string{"tasks"})
-	if !ok {
-		t.Fatal("query cache is not enabled")
-	}
 
 	time.Sleep(tableChangeDebounce + 25*time.Millisecond)
 	if got := executions.Load(); got != 0 {
 		t.Fatalf("declared-only healthy commit executions = %d, want 0", got)
 	}
 	afterRows := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks")
-	afterQueries, _ := server.cache.queryGeneration(ctx, "project-a", "tenant-a", []string{"tasks"})
-	if afterRows != beforeRows || afterQueries != beforeQueries {
-		t.Fatalf("no-op commit invalidated caches: rows %q -> %q, queries %q -> %q", beforeRows, afterRows, beforeQueries, afterQueries)
+	if afterRows != beforeRows {
+		t.Fatalf("no-op commit invalidated data explorer rows: %q -> %q", beforeRows, afterRows)
 	}
 
 	// A later committed transaction still starts a precise run.
 	server.scheduleTableChange(tableChange{
-		project: "project-a", tenant: "tenant-a", commitID: "no-op-commit", table: "tasks",
+		project: "project-a", tenant: "tenant-a", originCommandID: "no-op-commit", table: "tasks",
 		operation: "update", changedColumns: []string{"title"}, rowIDs: map[string]bool{"task-1": true},
 		triggerObserved: true, changedAtMS: 11,
 	})
@@ -303,9 +348,9 @@ func TestChangeFeedInvalidatesOnlyCommittedTables(t *testing.T) {
 	beforeTasks := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks")
 	beforeLogs := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "taskLogs")
 
-	const commitID = "actual-write-commit"
+	const originCommandID = "actual-write-commit"
 	server.scheduleTableChange(tableChange{
-		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "tasks",
+		project: "project-a", tenant: "tenant-a", originCommandID: originCommandID, table: "tasks",
 		operation: "update", triggerObserved: true, changedAtMS: 11,
 	})
 	time.Sleep(tableChangeDebounce + 25*time.Millisecond)
@@ -329,31 +374,26 @@ func TestObservedWriteInvalidatesCacheBeforeTriggerBatchFlush(t *testing.T) {
 	t.Cleanup(func() { _ = server.cache.close() })
 	ctx := context.Background()
 	beforeRows := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks")
-	beforeQueries, ok := server.cache.queryGeneration(ctx, "project-a", "tenant-a", []string{"tasks"})
-	if !ok {
-		t.Fatal("query cache is not enabled")
-	}
 
-	const commitID = "immediate-cache-invalidation"
+	const originCommandID = "immediate-cache-invalidation"
 	server.tableChangeMu.Lock()
 	scheduled := make(chan struct{})
 	go func() {
 		server.scheduleTableChange(tableChange{
-			project: "project-a", tenant: "tenant-a", commitID: commitID, table: "tasks",
+			project: "project-a", tenant: "tenant-a", originCommandID: originCommandID, table: "tasks",
 			operation: "update", triggerObserved: true, changedAtMS: 11,
 		})
 		close(scheduled)
 	}()
 
 	// Holding tableChangeMu prevents the batching timer from even being
-	// scheduled. The authoritative trigger must still invalidate both cache
-	// generations before scheduleTableChange reaches that batching step.
+	// scheduled. The authoritative trigger must still invalidate the dashboard
+	// data explorer row cache before scheduleTableChange reaches that step.
 	invalidated := false
 	deadline := time.Now().Add(250 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		afterRows := server.cache.rowsGeneration(ctx, "project-a", "tenant-a", "tasks")
-		afterQueries, _ := server.cache.queryGeneration(ctx, "project-a", "tenant-a", []string{"tasks"})
-		if afterRows != beforeRows && afterQueries != beforeQueries {
+		if afterRows != beforeRows {
 			invalidated = true
 			break
 		}
@@ -377,32 +417,6 @@ func TestObservedWriteInvalidatesCacheBeforeTriggerBatchFlush(t *testing.T) {
 	}
 }
 
-func TestHealthyTenantListenerDoesNotSuppressControlPlaneWrite(t *testing.T) {
-	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
-	if err := server.runtime.SyncManifest(manifest.Manifest{
-		Project: "project-a",
-		Schema: manifest.Schema{ControlPlaneTables: map[string]manifest.Table{
-			"users": {},
-		}},
-	}); err != nil {
-		t.Fatalf("sync manifest: %v", err)
-	}
-	manager := server.subscriptions
-	installTestTenantListener(manager.listeners, "project-a", "tenant-a", true)
-	var executions atomic.Int32
-	manager.execute = func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error) {
-		executions.Add(1)
-		return []map[string]any{{"id": "user-1"}}, nil
-	}
-	indexedTestGroup(manager, "users.list", "users", &executions)
-
-	server.scheduleTableChange(tableChange{
-		project: "project-a", tenant: "tenant-a", commitID: "control-plane-commit",
-		tables: map[string]bool{"users": true}, changedAtMS: 10,
-	})
-	eventually(t, time.Second, func() bool { return executions.Load() == 1 })
-}
-
 func TestLateAdditionalTableForPreciseCommitUsesCommittedSnapshot(t *testing.T) {
 	oldCooldown := subscriptionRerunCooldown
 	subscriptionRerunCooldown = 10 * time.Millisecond
@@ -418,9 +432,9 @@ func TestLateAdditionalTableForPreciseCommitUsesCommittedSnapshot(t *testing.T) 
 	token := newSubscriptionToken()
 	group := &sharedSubscription{
 		manager: manager, key: "combined.list", project: "project-a", tenant: "tenant-a", path: "combined.list",
-		ctx: context.Background(), reads: []manifest.ReadDependency{{Table: "tasks"}, {Table: "task_logs"}},
+		ctx: context.Background(), dependencies: []subscriptionDependency{{Table: "tasks"}, {Table: "task_logs"}},
 		listeners: map[*subscriptionToken]querySubscription{
-			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.User{ID: "user-a"}}},
+			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.Account{ID: "user-a"}}},
 		},
 	}
 	manager.mu.Lock()
@@ -428,14 +442,14 @@ func TestLateAdditionalTableForPreciseCommitUsesCommittedSnapshot(t *testing.T) 
 	manager.indexGroupLocked(group)
 	manager.mu.Unlock()
 
-	const commitID = "late-table-commit"
+	const originCommandID = "late-table-commit"
 	manager.requestChange(tableChange{
-		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "tasks",
+		project: "project-a", tenant: "tenant-a", originCommandID: originCommandID, table: "tasks",
 		tables: map[string]bool{"tasks": true}, details: map[string]tableChangeDetail{"tasks": {}},
 	})
 	eventually(t, time.Second, func() bool { return executions.Load() == 1 })
 	manager.requestChange(tableChange{
-		project: "project-a", tenant: "tenant-a", commitID: commitID, table: "task_logs",
+		project: "project-a", tenant: "tenant-a", originCommandID: originCommandID, table: "task_logs",
 		tables: map[string]bool{"task_logs": true}, details: map[string]tableChangeDetail{"task_logs": {}},
 	})
 	time.Sleep(subscriptionRerunCooldown + 25*time.Millisecond)
@@ -504,7 +518,7 @@ func TestSubscriptionRunnerSerializesAndCoalescesBurst(t *testing.T) {
 		ctx: context.Background(), listeners: map[*subscriptionToken]querySubscription{},
 	}
 	token := newSubscriptionToken()
-	group.listeners[token] = querySubscription{token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.User{ID: "user-a"}}}
+	group.listeners[token] = querySubscription{token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.Account{ID: "user-a"}}}
 
 	group.request("initial", 0)
 	select {
@@ -513,7 +527,7 @@ func TestSubscriptionRunnerSerializesAndCoalescesBurst(t *testing.T) {
 		t.Fatal("first execution did not start")
 	}
 	for index := 0; index < 20; index++ {
-		group.request("invalidate", float64(index+1))
+		group.request("change", float64(index+1))
 	}
 	close(release)
 	eventually(t, time.Second, func() bool {
@@ -531,7 +545,7 @@ func TestSubscriptionRunnerSerializesAndCoalescesBurst(t *testing.T) {
 	if first.reason != "initial" || first.changedAtMS != 0 {
 		t.Fatalf("first execution change = %#v", first)
 	}
-	if second.reason != "invalidate" || second.changedAtMS != 20 {
+	if second.reason != "change" || second.changedAtMS != 20 {
 		t.Fatalf("coalesced execution change = %#v, want latest revision 20", second)
 	}
 }
@@ -555,9 +569,9 @@ func TestSubscriptionCooldownBoundsDistinctCommitBurstAndDeliversFinalState(t *t
 	token := newSubscriptionToken()
 	group := &sharedSubscription{
 		manager: manager, key: "tasks.latest", project: "project-a", tenant: "tenant-a", path: "tasks.latest",
-		ctx: context.Background(), reads: []manifest.ReadDependency{{Table: "tasks"}},
+		ctx: context.Background(), dependencies: []subscriptionDependency{{Table: "tasks"}},
 		listeners: map[*subscriptionToken]querySubscription{
-			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.User{ID: "user-a"}}},
+			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.Account{ID: "user-a"}}},
 		},
 	}
 	group.request("initial", 0)
@@ -569,7 +583,7 @@ func TestSubscriptionCooldownBoundsDistinctCommitBurstAndDeliversFinalState(t *t
 
 	for index := 1; index <= 20; index++ {
 		state.Store(int32(index))
-		group.requestForCommit("invalidate", float64(index), "commit-"+strconv.Itoa(index))
+		group.requestForCommit("change", float64(index), "commit-"+strconv.Itoa(index))
 	}
 	eventually(t, time.Second, func() bool {
 		group.mu.Lock()
@@ -642,9 +656,9 @@ func TestDeclaredAndPhysicalInvalidationsForCommitExecuteSubscriptionOnce(t *tes
 	token := newSubscriptionToken()
 	group := &sharedSubscription{
 		manager: manager, key: "tasks-group", project: "project-a", tenant: "tenant-a", path: "tasks.list",
-		ctx: groupCtx, cancel: groupCancel, reads: []manifest.ReadDependency{{Table: "tasks"}},
+		ctx: groupCtx, cancel: groupCancel, dependencies: []subscriptionDependency{{Table: "tasks"}},
 		listeners: map[*subscriptionToken]querySubscription{
-			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.User{ID: "user-a"}}},
+			token: {token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.Account{ID: "user-a"}}},
 		},
 	}
 	manager.mu.Lock()
@@ -652,14 +666,14 @@ func TestDeclaredAndPhysicalInvalidationsForCommitExecuteSubscriptionOnce(t *tes
 	manager.indexGroupLocked(group)
 	manager.mu.Unlock()
 
-	const commitID = "mutation-one"
+	const originCommandID = "command-one"
 	server.scheduleTableChange(tableChange{
 		project: "project-a", tenant: "tenant-a", tables: map[string]bool{"tasks": true, "taskLogs": true},
-		changedAtMS: 10, commitID: commitID,
+		changedAtMS: 10, originCommandID: originCommandID,
 	})
 	server.scheduleTableChange(tableChange{
 		project: "project-a", tenant: "tenant-a", table: "tasks", operation: "update",
-		changedColumns: []string{"title"}, rowIDs: map[string]bool{"task-1": true}, changedAtMS: 11, commitID: commitID,
+		changedColumns: []string{"title"}, rowIDs: map[string]bool{"task-1": true}, changedAtMS: 11, originCommandID: originCommandID,
 	})
 	eventually(t, time.Second, func() bool {
 		group.mu.Lock()
@@ -671,7 +685,7 @@ func TestDeclaredAndPhysicalInvalidationsForCommitExecuteSubscriptionOnce(t *tes
 	// harmless: commit-aware subscription deduplication prevents a second run.
 	server.scheduleTableChange(tableChange{
 		project: "project-a", tenant: "tenant-a", table: "tasks", operation: "update",
-		changedColumns: []string{"title"}, changedAtMS: 12, commitID: commitID,
+		changedColumns: []string{"title"}, changedAtMS: 12, originCommandID: originCommandID,
 	})
 	time.Sleep(tableChangeDebounce + 25*time.Millisecond)
 	if got := executions.Load(); got != 1 {
@@ -687,10 +701,13 @@ func TestDeclaredAndPhysicalInvalidationsForCommitExecuteSubscriptionOnce(t *tes
 
 func TestRapidCommitsCoalesceToLatestResultAndAdvanceRevision(t *testing.T) {
 	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
-	connection, peer := newSyncReadyTestConnection(t, false)
+	connection, peer := newReplicaReadyTestConnection(t, false)
 	connection.server = server
 	connection.project = "project-a"
 	connection.tenant = "tenant-a"
+	connection.auth = true
+	connection.authToken = "gvx_session_test"
+	connection.authCheckedAt = time.Now()
 
 	manager := server.subscriptions
 	var state atomic.Int32
@@ -703,14 +720,14 @@ func TestRapidCommitsCoalesceToLatestResultAndAdvanceRevision(t *testing.T) {
 	token := newSubscriptionToken()
 	sub := querySubscription{
 		conn: connection, id: "query-1", project: "project-a", tenant: "tenant-a", path: "tasks.latest",
-		token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.User{ID: "user-a"}},
+		token: token, ctx: context.Background(), caller: callerContext{user: &gonvex.Account{ID: "user-a"}},
 	}
 	connection.mu.Lock()
 	connection.subs[sub.id] = sub
 	connection.mu.Unlock()
 	group := &sharedSubscription{
 		manager: manager, key: "latest-group", project: sub.project, tenant: sub.tenant, path: sub.path,
-		ctx: groupCtx, cancel: groupCancel, reads: []manifest.ReadDependency{{Table: "tasks"}},
+		ctx: groupCtx, cancel: groupCancel, dependencies: []subscriptionDependency{{Table: "tasks"}},
 		listeners: map[*subscriptionToken]querySubscription{token: sub},
 	}
 	manager.mu.Lock()
@@ -719,27 +736,27 @@ func TestRapidCommitsCoalesceToLatestResultAndAdvanceRevision(t *testing.T) {
 	manager.mu.Unlock()
 
 	group.request("initial", 0)
-	initial := readSyncTestFrames(t, peer, 1)[0]
+	initial := readReplicaTestFrames(t, peer, 1)[0]
 	if initial.Type != "query.result" || initial.SubscriptionRevision == nil || initial.SubscriptionRevision.Sequence != 1 {
 		t.Fatalf("initial query frame = %+v, want result at revision 1", initial)
 	}
 
 	state.Store(1)
-	manager.requestChange(tableChange{project: "project-a", tenant: "tenant-a", table: "tasks", changedAtMS: 20, commitID: "commit-one"})
+	manager.requestChange(tableChange{project: "project-a", tenant: "tenant-a", table: "tasks", changedAtMS: 20, originCommandID: "commit-one"})
 	state.Store(2)
-	manager.requestChange(tableChange{project: "project-a", tenant: "tenant-a", table: "tasks", changedAtMS: 21, commitID: "commit-two"})
+	manager.requestChange(tableChange{project: "project-a", tenant: "tenant-a", table: "tasks", changedAtMS: 21, originCommandID: "commit-two"})
 	eventually(t, time.Second, func() bool {
 		group.mu.Lock()
 		defer group.mu.Unlock()
 		return !group.running && executions.Load() == 2
 	})
 
-	latest := readSyncTestFrames(t, peer, 1)[0]
+	latest := readReplicaTestFrames(t, peer, 1)[0]
 	if latest.Type != "query.result" || latest.SubscriptionRevision == nil || latest.SubscriptionRevision.Sequence != 2 {
 		t.Fatalf("coalesced query frame = %+v, want result at revision 2", latest)
 	}
 	if len(latest.OriginCommandIDs) != 2 || latest.OriginCommandIDs[0] != "commit-one" || latest.OriginCommandIDs[1] != "commit-two" {
-		t.Fatalf("coalesced query mutation IDs = %v, want both commits", latest.OriginCommandIDs)
+		t.Fatalf("coalesced query origin command IDs = %v, want both commits", latest.OriginCommandIDs)
 	}
 	var payload struct {
 		Value int32 `json:"value"`
@@ -789,7 +806,7 @@ func TestSingleListenerGroupKeepsHashWithoutRetainingResultPayload(t *testing.T)
 		t.Fatalf("single-listener group retained %d result bytes", len(group.lastResult))
 	}
 
-	group.completeResult(result, "invalidate", 0, time.Now())
+	group.completeResult(result, "change", 0, time.Now())
 	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.UnchangedResultsSuppressed; got != 1 {
 		t.Fatalf("unchanged results suppressed = %d, want 1", got)
 	}
@@ -798,7 +815,7 @@ func TestSingleListenerGroupKeepsHashWithoutRetainingResultPayload(t *testing.T)
 	}
 
 	group.listeners[newSubscriptionToken()] = querySubscription{ctx: context.Background()}
-	group.completeResult([]map[string]any{{"id": "task-1", "title": "changed"}}, "invalidate", 0, time.Now())
+	group.completeResult([]map[string]any{{"id": "task-1", "title": "changed"}}, "change", 0, time.Now())
 	if len(group.lastResult) == 0 {
 		t.Fatal("shared group did not retain a replayable result")
 	}
@@ -823,7 +840,7 @@ func TestWindowedSingleListenerRetainsSnapshotForKeyedPatches(t *testing.T) {
 	}
 	after := append([]map[string]any(nil), before...)
 	after[0] = map[string]any{"id": "task-0", "title": "after", "body": strings.Repeat("x", minimumPatchResultBytes)}
-	group.completeResult(after, "invalidate", 0, time.Now())
+	group.completeResult(after, "change", 0, time.Now())
 	if got := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive.Patches; got != 1 {
 		t.Fatalf("patches = %d, want 1", got)
 	}
@@ -869,14 +886,14 @@ func TestSubscriptionResultSuppressionIgnoresTopLevelPerformanceMetadata(t *test
 	}
 
 	group.completeResult(result("same", 1.25), "initial", 0, time.Now())
-	group.completeResult(result("same", 8.75), "invalidate", 0, time.Now())
+	group.completeResult(result("same", 8.75), "change", 0, time.Now())
 
 	reactive := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive
 	if reactive.FullResults != 1 || reactive.UnchangedResultsSuppressed != 1 || reactive.ProgressMessages != 0 {
 		t.Fatalf("volatile-only rerun metrics = %+v, want one full result followed by a delivery-free suppression", reactive)
 	}
 
-	group.completeResult(result("changed", 3.5), "invalidate", 0, time.Now())
+	group.completeResult(result("changed", 3.5), "change", 0, time.Now())
 	reactive = server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive
 	if reactive.FullResults != 2 || reactive.UnchangedResultsSuppressed != 1 {
 		t.Fatalf("semantic-change metrics = %+v, want a second full result", reactive)
@@ -886,9 +903,9 @@ func TestSubscriptionResultSuppressionIgnoresTopLevelPerformanceMetadata(t *test
 func TestDependencyIndexSelectsOnlyMatchingTenantTableAndColumns(t *testing.T) {
 	server := New(config.Config{TenantListenerLimit: 0})
 	manager := server.subscriptions
-	tasks := &sharedSubscription{manager: manager, project: "p", tenant: "a", path: "tasks.list", ctx: context.Background(), listeners: map[*subscriptionToken]querySubscription{}, reads: []manifest.ReadDependency{{Table: "tasks", Columns: []string{"title"}}}}
-	users := &sharedSubscription{manager: manager, project: "p", tenant: "a", path: "users.list", ctx: context.Background(), listeners: map[*subscriptionToken]querySubscription{}, reads: []manifest.ReadDependency{{Table: "users"}}}
-	otherTenant := &sharedSubscription{manager: manager, project: "p", tenant: "b", path: "tasks.list", ctx: context.Background(), listeners: map[*subscriptionToken]querySubscription{}, reads: []manifest.ReadDependency{{Table: "tasks"}}}
+	tasks := &sharedSubscription{manager: manager, project: "p", tenant: "a", path: "tasks.list", ctx: context.Background(), listeners: map[*subscriptionToken]querySubscription{}, dependencies: []subscriptionDependency{{Table: "tasks", Columns: []string{"title"}}}}
+	users := &sharedSubscription{manager: manager, project: "p", tenant: "a", path: "users.list", ctx: context.Background(), listeners: map[*subscriptionToken]querySubscription{}, dependencies: []subscriptionDependency{{Table: "users"}}}
+	otherTenant := &sharedSubscription{manager: manager, project: "p", tenant: "b", path: "tasks.list", ctx: context.Background(), listeners: map[*subscriptionToken]querySubscription{}, dependencies: []subscriptionDependency{{Table: "tasks"}}}
 	manager.mu.Lock()
 	manager.indexGroupLocked(tasks)
 	manager.indexGroupLocked(users)
@@ -905,98 +922,8 @@ func TestDependencyIndexSelectsOnlyMatchingTenantTableAndColumns(t *testing.T) {
 	}
 }
 
-func TestSharedKeyRequiresExplicitPermissionSharing(t *testing.T) {
-	server := New(config.Config{TenantListenerLimit: 0})
-	server.runtime.SyncManifest(manifest.Manifest{Project: "p", Functions: map[string]manifest.FunctionEntry{
-		"tasks.list": {Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryLive, Dependencies: testLiveDependencies("tasks", true)},
-	}, Schema: manifest.EmptySchema()})
-	base := querySubscription{project: "p", tenant: "a", path: "tasks.list", args: json.RawMessage(`{"status":"open"}`), caller: callerContext{user: &gonvex.User{ID: "one"}, permissions: map[string]any{"role": "member"}}}
-	other := base
-	other.caller.user = &gonvex.User{ID: "two"}
-	base.cacheScope = "browser-user-one"
-	other.cacheScope = "browser-user-two"
-	firstKey, _, _ := server.subscriptions.groupKeyAndDependencies(base)
-	secondKey, _, _ := server.subscriptions.groupKeyAndDependencies(other)
-	if firstKey != secondKey {
-		t.Fatal("same permission scope should share when explicitly enabled")
-	}
-	other.tenant = "b"
-	thirdKey, _, _ := server.subscriptions.groupKeyAndDependencies(other)
-	if firstKey == thirdKey {
-		t.Fatal("different tenants must never share")
-	}
-}
-
-func TestSharedKeySeparatesUsersAndBundleVersionsByDefault(t *testing.T) {
-	server := New(config.Config{TenantListenerLimit: 0})
-	current := manifest.Manifest{
-		Project: "p",
-		Functions: map[string]manifest.FunctionEntry{
-			"tasks.list": {Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryLive, Dependencies: testLiveDependencies("tasks", false)},
-		},
-		Schema: manifest.EmptySchema(),
-		Bundle: &manifest.SourceBundle{Hash: "bundle-a"},
-	}
-	if err := server.runtime.SyncManifest(current); err != nil {
-		t.Fatal(err)
-	}
-	base := querySubscription{project: "p", tenant: "a", path: "tasks.list", args: json.RawMessage(`{"status":"open"}`), caller: callerContext{user: &gonvex.User{ID: "one"}, permissions: map[string]any{"role": "member"}}}
-	otherUser := base
-	otherUser.caller.user = &gonvex.User{ID: "two"}
-	firstKey, _, _ := server.subscriptions.groupKeyAndDependencies(base)
-	secondKey, _, _ := server.subscriptions.groupKeyAndDependencies(otherUser)
-	if firstKey == secondKey {
-		t.Fatal("different users must not share unless permission-only sharing is explicit")
-	}
-
-	current.Bundle.Hash = "bundle-b"
-	if err := server.runtime.SyncManifest(current); err != nil {
-		t.Fatal(err)
-	}
-	afterDeploy, _, _ := server.subscriptions.groupKeyAndDependencies(base)
-	if firstKey == afterDeploy {
-		t.Fatal("bundle deployment must create a distinct shared key")
-	}
-}
-
-func TestSharedKeySeparatesQueryCacheScopes(t *testing.T) {
-	server := New(config.Config{TenantListenerLimit: 0})
-	if err := server.runtime.SyncManifest(manifest.Manifest{
-		Project: "p",
-		Functions: map[string]manifest.FunctionEntry{
-			"tasks.list": {
-				Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryLive,
-				Dependencies: testLiveDependencies("tasks", false),
-			},
-		},
-		Schema: manifest.EmptySchema(),
-		Bundle: &manifest.SourceBundle{Hash: "same-bundle"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	first := querySubscription{
-		project: "p", tenant: "a", path: "tasks.list",
-		args: json.RawMessage(`{"status":"open"}`),
-		caller: callerContext{
-			user:        &gonvex.User{ID: "one"},
-			permissions: map[string]any{"role": "member"},
-		},
-		cacheScope: "scope-before-manifest-change",
-	}
-	second := first
-	second.cacheScope = "scope-after-manifest-change"
-
-	firstKey, _, _ := server.subscriptions.groupKeyAndDependencies(first)
-	secondKey, _, _ := server.subscriptions.groupKeyAndDependencies(second)
-	if firstKey == secondKey {
-		t.Fatal("different query cache scopes must not share a subscription group")
-	}
-}
-
 func testLiveDependencies(table string, shareByPermissions bool) manifest.FunctionDependencies {
 	return manifest.FunctionDependencies{
-		Reads:              []manifest.ReadDependency{{Table: table}},
 		ShareByPermissions: shareByPermissions,
 		LiveQueryPlan:      &manifest.LiveQueryPlan{Table: table, Key: "id"},
 	}
@@ -1101,7 +1028,7 @@ func TestGraceIdleInvalidationLeavesRevisionBehind(t *testing.T) {
 		lastResult: json.RawMessage(`[{"id":"stale"}]`),
 	}
 	group.requiredRevision = 42
-	group.pendingReason = "invalidate"
+	group.pendingReason = "change"
 	group.running = true
 	group.run()
 

@@ -5,12 +5,12 @@ export default defineConfig({
   fullyParallel: true,
   webServer: [
     {
-      command: "node tests/support/query-cache-server.mjs",
+      command: "node tests/support/local-replica-server.mjs",
       url: "http://127.0.0.1:4180/health",
       reuseExistingServer: true,
     },
     {
-      command: "pnpm --filter @gonvex/query-cache-test-app dev --host 127.0.0.1 --port 4173",
+      command: "pnpm --filter @gonvex/local-replica-test-app dev --host 127.0.0.1 --port 4173",
       url: "http://127.0.0.1:4173",
       reuseExistingServer: true,
     },

@@ -17,7 +17,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-const identityMigrationScope = "account resolution and Control Plane migration ledger only; tenant schemas and foreign keys are not rewritten"
+const identityMigrationScope = "accounts, auth credentials, tenant members, and derived tenant directory projection"
 
 type legacyIdentityInventory struct {
 	Records []identity.LegacyIdentity `json:"records"`
@@ -116,6 +116,9 @@ func runIdentityV2Migration(args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := inspectIdentityV2RuntimeMigration(ctx, db, plan); err != nil {
+			return fmt.Errorf("identity-v2 migration plan is incomplete: %w", err)
+		}
 		if err := writeIdentityMigrationPlan(*planFile, plan); err != nil {
 			return err
 		}
@@ -131,17 +134,26 @@ func runIdentityV2Migration(args []string) error {
 	}
 	store := identity.PostgresMigrationStore{DB: db}
 	if *applyMode {
+		if err := inspectIdentityV2RuntimeMigration(ctx, db, plan); err != nil {
+			return fmt.Errorf("identity-v2 migration plan is incomplete: %w", err)
+		}
 		if err := identity.InstallSchema(ctx, db); err != nil {
 			return fmt.Errorf("install identity-v2 Control Plane schema: %w", err)
 		}
 		if err := identity.ApplyIdentityMigration(ctx, store, plan, *allowUnresolved); err != nil {
 			return err
 		}
+		if err := applyIdentityV2RuntimeSchema(ctx, db, plan); err != nil {
+			return fmt.Errorf("apply identity-v2 runtime schemas: %w", err)
+		}
 		return printIdentityMigrationResult(*jsonOutput, "apply", *planFile, plan, nil)
 	}
 
 	result, err := identity.VerifyIdentityMigration(ctx, store, plan)
 	if err != nil {
+		return err
+	}
+	if err := verifyIdentityV2RuntimeSchema(ctx, db, plan); err != nil {
 		return err
 	}
 	if err := printIdentityMigrationResult(*jsonOutput, "verify", *planFile, plan, &result); err != nil {

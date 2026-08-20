@@ -62,15 +62,10 @@ func intersectColumnSets(sets []map[string]bool) map[string]bool {
 }
 
 func migrationsFromManifest(current manifest.Manifest) ([]sqlmigration.Migration, error) {
-	var encodedFiles map[string]string
-	switch {
-	case current.Module != nil:
-		encodedFiles = current.Module.Files
-	case current.Bundle != nil:
-		encodedFiles = current.Bundle.Files
-	default:
+	if current.Module == nil {
 		return nil, nil
 	}
+	encodedFiles := current.Module.Files
 	files := map[string][]byte{}
 	for file, encoded := range encodedFiles {
 		if path.Dir(file) != "migrations" || !strings.HasSuffix(file, ".sql") {

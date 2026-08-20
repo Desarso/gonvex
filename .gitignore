@@ -16,6 +16,8 @@ coverage
 *.tgz
 tmp/
 packages/gonvex/templates/
+**/gonvex/_build/
+test-results/
 .DS_Store
 .ralph/
 .recovery/

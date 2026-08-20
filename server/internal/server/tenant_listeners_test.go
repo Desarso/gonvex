@@ -74,7 +74,7 @@ func TestTenantListenerReadinessResetsAcrossDisconnect(t *testing.T) {
 	runtime := New(config.Config{
 		TenantListenerLimit: 8,
 		TenantDatabases: map[string]string{
-			"tenant-a": "postgres://listener.test/database",
+			"project-a:tenant-a": "postgres://listener.test/database",
 		},
 	})
 	manager := runtime.subscriptions.listeners
@@ -107,14 +107,14 @@ func TestTenantListenerReadinessResetsAcrossDisconnect(t *testing.T) {
 	}
 	select {
 	case <-second:
-		t.Fatal("new syncs must wait while the tenant listener reconnects")
+		t.Fatal("new replicas must wait while the tenant listener reconnects")
 	default:
 	}
 	manager.markReady(listener)
 	select {
 	case <-second:
 	default:
-		t.Fatal("reconnected listener did not release waiting syncs")
+		t.Fatal("reconnected listener did not release waiting replicas")
 	}
 }
 
@@ -122,7 +122,7 @@ func TestFreshnessActionsAreSerializedWithListenerDisconnect(t *testing.T) {
 	runtime := New(config.Config{
 		TenantListenerLimit: 8,
 		TenantDatabases: map[string]string{
-			"tenant-a": "postgres://listener.test/database",
+			"project-a:tenant-a": "postgres://listener.test/database",
 		},
 	})
 	manager := runtime.subscriptions.listeners
@@ -149,20 +149,20 @@ func TestFreshnessActionsAreSerializedWithListenerDisconnect(t *testing.T) {
 func TestSyncAttachFailsClosedWithoutLiveListener(t *testing.T) {
 	runtime := New(config.Config{TenantListenerLimit: 0})
 	connection := &wsConn{
-		server:  runtime,
-		project: "project-a",
-		tenant:  "tenant-a",
-		syncs:   map[string]*syncSubscription{},
+		server:   runtime,
+		project:  "project-a",
+		tenant:   "tenant-a",
+		replicas: map[string]*replicaSubscription{},
 	}
-	subscription := &syncSubscription{
+	subscription := &replicaSubscription{
 		conn: connection, id: "sync-a", path: "tasks.sync",
 		project: connection.project, tenant: connection.tenant,
 	}
 
-	if err := connection.attachSync(context.Background(), subscription); err == nil {
+	if err := connection.attachReplica(context.Background(), subscription); err == nil {
 		t.Fatal("sync must remain non-authoritative when no live listener can close the handoff race")
 	}
-	if len(connection.syncs) != 0 || subscription.listenerAcquired {
+	if len(connection.replicas) != 0 || subscription.listenerAcquired {
 		t.Fatal("failed listener acquisition must not attach an apparently live subscription")
 	}
 }

@@ -144,17 +144,9 @@ export type Member = {
   readonly permissions: Readonly<Record<string, JsonValue>> | null;
 };
 
-/**
- * Authentication identity exposed to a module.
- *
- * `auth.account` is the v2 spelling. The top-level `account` field is retained
- * as a compatibility alias for early module examples and adapters. Both are
- * nullable because the V8 host always mirrors the ABI's optional identity
- * values into the context, including for anonymous/system invocations.
- */
+/** Authentication identity exposed to a module. */
 export type AuthContext = {
   readonly auth: { readonly account: Account | null };
-  readonly account: Account | null;
 };
 
 /** Tenant and tenant-local member identity, both nullable at the ABI boundary. */
@@ -175,11 +167,18 @@ export type ReducerActions = {
   readonly enqueue: (path: string, args: JsonValue) => Promise<string>;
 };
 
+/** One-shot work owned by the Gonvex scheduler. Timestamps are Unix milliseconds. */
+export type Scheduler = {
+  readonly runAfter: (delayMs: number, functionPath: string, args?: JsonValue) => Promise<string>;
+  readonly runAt: (unixMs: number, functionPath: string, args?: JsonValue) => Promise<string>;
+};
+
 export type QueryContext = AuthContext & TenantContext & { readonly db: ReadDB; readonly now: number };
 
 export type ReducerContext = AuthContext & TenantContext & {
   readonly db: WriteDB;
   readonly actions: ReducerActions;
+  readonly scheduler: Scheduler;
   readonly now: number;
 };
 
@@ -195,8 +194,10 @@ export type ActionStorage = {
 
 export type ActionContext = AuthContext & TenantContext & {
   readonly now: number;
+  readonly env: Readonly<Record<string, string>>;
   readonly fetch: (input: string | URL, init?: RequestInit) => Promise<Response>;
   readonly runReducer: <T = JsonValue>(path: string, args: JsonValue) => Promise<T>;
+  readonly scheduler: Scheduler;
   readonly storage?: ActionStorage;
 };
 
@@ -226,12 +227,8 @@ export type QueryOptions<Args, Result> = {
   readonly args?: PortableSchema;
   readonly result?: PortableSchema;
   readonly delivery?: "oneShot" | "live" | "replica";
-  readonly livePlan?: LiveQueryPlan;
-  /** Preferred v2 spelling; `livePlan` remains supported for compatibility. */
   readonly liveQueryPlan?: LiveQueryPlan;
   readonly replica?: ReplicaCollectionDefinition;
-  /** Alias accepted by the first-class replicaCollection builder. */
-  readonly replicaCollection?: ReplicaCollectionDefinition;
   readonly run?: Handler<QueryContext, Args, Result>;
 };
 
@@ -254,7 +251,7 @@ export type ReplicaCollectionDefinition = {
   readonly retentionMs?: number;
 };
 
-export type ReplicaCollectionOptions<Args, Result> = Omit<QueryOptions<Args, Result>, "delivery" | "replica" | "replicaCollection"> & {
+export type ReplicaCollectionOptions<Args, Result> = Omit<QueryOptions<Args, Result>, "delivery" | "replica"> & {
   readonly replica: ReplicaCollectionDefinition;
 };
 
@@ -276,19 +273,40 @@ export type InternalReducerOptions<Args, Result> = Omit<ReducerOptions<Args, Res
 };
 
 export type ActionOptions<Args, Result> = {
+  /** Optional explicit public path used by static module artifact extraction. */
+  readonly name?: string;
   readonly args?: PortableSchema;
   readonly result?: PortableSchema;
   readonly run?: Handler<ActionContext, Args, Result>;
+};
+
+export type LiveQueryValue = { readonly argument?: string; readonly literal?: JsonValue };
+export type FilterOperator = "contains" | "notContains" | "equals" | "notEquals" | "startsWith" | "endsWith" | "empty" | "notEmpty" | "oneOf" | "lessThan" | "lessThanOrEqual" | "greaterThan" | "greaterThanOrEqual" | "inRange";
+export type LiveQueryExpression = {
+  readonly operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "range" | "in" | "contains" | "containsInsensitive" | "and" | "or" | "not" | "server";
+  readonly column?: string;
+  readonly value?: LiveQueryValue;
+  readonly valueTo?: LiveQueryValue;
+  readonly children?: readonly LiveQueryExpression[];
 };
 
 export type LiveQueryPlan = {
   readonly table: string;
   readonly key: string;
   readonly columns?: readonly string[];
-  readonly where?: JsonValue;
+  readonly resultPath?: readonly string[];
+  readonly where?: LiveQueryExpression;
   readonly search?: { readonly argument: string; readonly columns: readonly string[] };
+  readonly filters?: { readonly argument: string; readonly allowedColumns: readonly string[]; readonly allowedOperators: readonly FilterOperator[] };
   readonly sort?: { readonly columnArgument?: string; readonly directionArgument?: string; readonly defaultColumn: string; readonly defaultDirection: "asc" | "desc"; readonly allowedColumns: readonly string[] };
-  readonly window?: { readonly offsetArgument: string; readonly limitArgument: string; readonly defaultLimit: number; readonly maxLimit: number };
+  readonly window?: {
+    readonly offsetArgument: string;
+    readonly limitArgument: string;
+    readonly defaultLimit: number;
+    readonly maxLimit: number;
+    /** Request exact total-count metadata alongside a shaped result window. */
+    readonly count?: "exact";
+  };
   readonly serverOnly?: boolean;
 };
 
@@ -332,6 +350,18 @@ export type VisibilityExpression = {
 
 export type ModuleFunctionKind = "query" | "reducer" | "action";
 
+export type CronScope = "project" | "tenant";
+export type CronSchedule =
+  | { readonly intervalMs: number; readonly expression?: never }
+  | { readonly expression: string; readonly intervalMs?: never };
+export type CronSpec = Readonly<{
+  name: string;
+  function: string;
+  args?: JsonValue;
+  scope: CronScope;
+} & CronSchedule>;
+export type CronOptions = Omit<CronSpec, "scope">;
+
 export type ModuleFunctionManifest = {
   readonly path: string;
   readonly kind: ModuleFunctionKind;
@@ -339,7 +369,7 @@ export type ModuleFunctionManifest = {
   readonly result?: PortableSchema;
   readonly internal?: boolean;
   readonly delivery?: "oneShot" | "live" | "replica";
-  readonly livePlan?: LiveQueryPlan;
+  readonly liveQueryPlan?: LiveQueryPlan;
   readonly replica?: ReplicaCollectionDefinition;
   readonly offline?: OfflinePolicy;
   readonly interactive?: boolean;
@@ -354,6 +384,7 @@ export type ModuleManifest = {
   readonly language: ModuleLanguage;
   readonly engine: ModuleEngine;
   readonly functions: Readonly<Record<string, ModuleFunctionManifest>>;
+  readonly crons?: readonly CronSpec[];
   readonly schema?: PortableSchema;
   readonly artifact?: { readonly hash: string; readonly mediaType: string; readonly entrypoint: string };
   readonly visibility?: Readonly<Record<string, VisibilityPlan>>;
@@ -483,6 +514,29 @@ const validateReplicaCollection: (value: unknown, path: string) => asserts value
   }
   if (value.orderDirection !== undefined && value.orderDirection !== "asc" && value.orderDirection !== "desc") {
     throw new Error(`replica collection ${path} has an invalid order direction`);
+  }
+};
+
+const validateStructuredQueryPlan: (value: unknown, path: string) => asserts value is LiveQueryPlan = (value, path) => {
+  if (!isRecord(value) || typeof value.table !== "string" || !value.table.trim() ||
+    typeof value.key !== "string" || !value.key.trim() || !Array.isArray(value.columns) ||
+    value.columns.length === 0 || value.columns.some((column) => typeof column !== "string" || !column.trim())) {
+    throw new Error(`one-shot query ${path} requires a structured live query plan with a table, key, and columns`);
+  }
+  if (!value.columns.includes(value.key)) {
+    throw new Error(`one-shot query ${path} live query plan columns must include its key`);
+  }
+  if (value.filters !== undefined) {
+    if (!isRecord(value.filters) || typeof value.filters.argument !== "string" || !value.filters.argument.trim() ||
+      !Array.isArray(value.filters.allowedColumns) || value.filters.allowedColumns.length === 0 ||
+      value.filters.allowedColumns.some((column) => typeof column !== "string" || !column.trim()) ||
+      !Array.isArray(value.filters.allowedOperators) || value.filters.allowedOperators.length === 0) {
+      throw new Error(`structured query plan ${path} filters must declare an argument, allowed columns, and allowed operators`);
+    }
+    const operators = new Set<FilterOperator>(["contains", "notContains", "equals", "notEquals", "startsWith", "endsWith", "empty", "notEmpty", "oneOf", "lessThan", "lessThanOrEqual", "greaterThan", "greaterThanOrEqual", "inRange"]);
+    if (value.filters.allowedOperators.some((operator) => typeof operator !== "string" || !operators.has(operator as FilterOperator))) {
+      throw new Error(`structured query plan ${path} filters contains an unsupported operator`);
+    }
   }
 };
 
@@ -651,13 +705,48 @@ const stableValue = (value: unknown): unknown => {
 export const stableJsonStringify = (value: unknown, space?: number): string =>
   JSON.stringify(stableValue(value), null, space);
 
+const validateCron = (options: CronSpec): CronSpec => {
+  const name = options.name.trim();
+  const functionPath = options.function.trim();
+  if (!name) throw new Error("cron name is required");
+  if (!functionPath) throw new Error(`cron ${JSON.stringify(name)} requires a function path`);
+  const hasInterval = options.intervalMs !== undefined;
+  const hasExpression = options.expression !== undefined;
+  if (hasInterval === hasExpression) {
+    throw new Error(`cron ${JSON.stringify(name)} requires exactly one of intervalMs or expression`);
+  }
+  if (hasInterval && (!Number.isSafeInteger(options.intervalMs) || options.intervalMs <= 0)) {
+    throw new Error(`cron ${JSON.stringify(name)} intervalMs must be a positive safe integer`);
+  }
+  const expression = options.expression?.trim();
+  if (hasExpression && !expression) throw new Error(`cron ${JSON.stringify(name)} expression must be non-empty`);
+  return freeze({
+    name,
+    function: functionPath,
+    scope: options.scope,
+    ...(options.args === undefined ? {} : { args: options.args }),
+    ...(hasInterval ? { intervalMs: options.intervalMs } : { expression: expression! }),
+  } as CronSpec);
+};
+
+/** Declare a project-wide recurring Reducer or Action. */
+export function cron(options: CronOptions): CronSpec {
+  return validateCron({ ...options, scope: "project" } as CronSpec);
+}
+
+/** Declare a recurring Reducer or Action once for every tenant. */
+export function tenantCron(options: CronOptions): CronSpec {
+  return validateCron({ ...options, scope: "tenant" } as CronSpec);
+}
+
 export class ModuleManifestCollector {
   private readonly entries = new Map<string, ModuleFunctionManifest>();
   private readonly visibilityEntries = new Map<string, VisibilityPlan>();
-  private readonly metadata: Omit<ModuleManifest, "functions" | "visibility">;
+  private readonly cronEntries = new Map<string, CronSpec>();
+  private readonly metadata: Omit<ModuleManifest, "functions" | "visibility" | "crons">;
 
   constructor(metadata: Omit<ModuleManifest, "functions">) {
-    const { visibility: initialVisibility, ...baseMetadata } = metadata;
+    const { visibility: initialVisibility, crons: initialCrons, ...baseMetadata } = metadata;
     this.metadata = baseMetadata;
     for (const sourceTable of Object.keys(initialVisibility ?? {}).sort()) {
       const plan = initialVisibility![sourceTable]!;
@@ -666,6 +755,7 @@ export class ModuleManifestCollector {
       }
       this.registerVisibility(plan);
     }
+    for (const spec of initialCrons ?? []) this.registerCron(spec);
   }
 
   register(path: string, entry: Omit<ModuleFunctionManifest, "path">): ModuleFunctionManifest {
@@ -683,14 +773,28 @@ export class ModuleManifestCollector {
     return plan;
   }
 
+  registerCron(options: CronSpec): CronSpec {
+    const spec = validateCron(options);
+    if (this.cronEntries.has(spec.name)) throw new Error(`duplicate cron: ${spec.name}`);
+    this.cronEntries.set(spec.name, spec);
+    return spec;
+  }
+
   manifest(): ModuleManifest {
     const functions: Record<string, ModuleFunctionManifest> = {};
     for (const path of [...this.entries.keys()].sort()) functions[path] = this.entries.get(path)!;
     const visibilityPlans: Record<string, VisibilityPlan> = {};
     for (const table of [...this.visibilityEntries.keys()].sort()) visibilityPlans[table] = this.visibilityEntries.get(table)!;
+    const crons = [...this.cronEntries.values()].sort((left, right) => left.name.localeCompare(right.name));
+    for (const spec of crons) {
+      const target = this.entries.get(spec.function);
+      if (!target) throw new Error(`cron ${JSON.stringify(spec.name)} targets unknown function ${JSON.stringify(spec.function)}`);
+      if (target.kind === "query") throw new Error(`cron ${JSON.stringify(spec.name)} must target a reducer or action`);
+    }
     return freeze({
       ...this.metadata,
       functions: freeze(functions),
+      crons: crons.length === 0 ? undefined : freeze(crons),
       visibility: this.visibilityEntries.size === 0 ? undefined : freeze(visibilityPlans),
     });
   }
@@ -719,7 +823,7 @@ export type ModuleDefinition<Kind extends ModuleFunctionKind, Options> = {
   readonly kind: Kind;
   readonly internal?: boolean;
   readonly delivery?: "oneShot" | "live" | "replica";
-  readonly livePlan?: LiveQueryPlan;
+  readonly liveQueryPlan?: LiveQueryPlan;
   readonly replica?: ReplicaCollectionDefinition;
   readonly options: Readonly<Options>;
   readonly handler?: Options extends { readonly run?: infer HandlerType } ? HandlerType : never;
@@ -735,10 +839,17 @@ const queryDefinition = <Args, Result>(
   options: QueryOptions<Args, Result>,
   deliveryOverride?: "live" | "replica",
 ): QueryDefinition<Args, Result> => {
-  const livePlan = options.liveQueryPlan ?? options.livePlan;
-  const replica = options.replicaCollection ?? options.replica;
-  const delivery = deliveryOverride ?? options.delivery ?? (replica ? "replica" : livePlan ? "live" : "oneShot");
-  if (delivery === "live" && !livePlan) throw new Error("live query requires a live query plan");
+  const liveQueryPlan = options.liveQueryPlan;
+  const replica = options.replica;
+  // `query()` is always a one-shot declaration. Live and replica delivery are
+  // selected only by the dedicated helpers below; a structured plan does not
+  // silently change the execution mode.
+  const delivery = deliveryOverride ?? options.delivery ?? "oneShot";
+  if (delivery === "live" && !liveQueryPlan) throw new Error("live query requires a live query plan");
+  if (delivery === "oneShot") {
+    if (!liveQueryPlan) throw new Error("one-shot query requires a structured live query plan");
+    validateStructuredQueryPlan(liveQueryPlan, "<export>");
+  }
   if (delivery === "replica") {
     if (!replica) throw new Error("replica collection requires a replica definition");
     validateReplicaCollection(replica, "<export>");
@@ -746,7 +857,7 @@ const queryDefinition = <Args, Result>(
   return freeze({
     kind: "query",
     delivery,
-    livePlan,
+    liveQueryPlan,
     replica,
     options: executableOptions(options),
     handler: options.run,
@@ -812,7 +923,7 @@ export class ModuleBuilder {
   readonly manifestCollector: ModuleManifestCollector;
   private readonly runtimeEntries = new Map<string, RuntimeFunctionRegistration>();
 
-  constructor(metadata: { name: string; version: string; language?: ModuleLanguage; engine?: ModuleEngine; schema?: PortableSchema; artifact?: ModuleManifest["artifact"]; visibility?: Readonly<Record<string, VisibilityPlan>> }) {
+  constructor(metadata: { name: string; version: string; language?: ModuleLanguage; engine?: ModuleEngine; schema?: PortableSchema; artifact?: ModuleManifest["artifact"]; visibility?: Readonly<Record<string, VisibilityPlan>>; crons?: readonly CronSpec[] }) {
     this.manifestCollector = new ModuleManifestCollector({
       format: "gonvex.module.v1",
       name: metadata.name,
@@ -822,6 +933,7 @@ export class ModuleBuilder {
       schema: metadata.schema,
       artifact: metadata.artifact,
       visibility: metadata.visibility,
+      crons: metadata.crons,
     });
   }
 
@@ -829,11 +941,25 @@ export class ModuleBuilder {
     return this.manifestCollector.registerVisibility(options);
   }
 
+  cron(options: CronOptions): CronSpec {
+    return this.manifestCollector.registerCron(cron(options));
+  }
+
+  tenantCron(options: CronOptions): CronSpec {
+    return this.manifestCollector.registerCron(tenantCron(options));
+  }
+
   query<Args = JsonValue, Result = JsonValue>(path: string, options: QueryOptions<Args, Result> = {}): RegisteredFunction<Args, Result> {
-    const livePlan = options.liveQueryPlan ?? options.livePlan;
-    const replica = options.replicaCollection ?? options.replica;
-    const delivery = options.delivery ?? (replica ? "replica" : livePlan ? "live" : "oneShot");
-    if (delivery === "live" && !livePlan) throw new Error(`live query ${normalizePath(path)} requires a live query plan`);
+    const liveQueryPlan = options.liveQueryPlan;
+    const replica = options.replica;
+    // `ModuleBuilder.query()` follows the same contract as the static artifact
+    // parser: a plan describes the SQL source, not the delivery mode.
+    const delivery = options.delivery ?? "oneShot";
+    if (delivery === "live" && !liveQueryPlan) throw new Error(`live query ${normalizePath(path)} requires a live query plan`);
+    if (delivery === "oneShot") {
+      if (!liveQueryPlan) throw new Error(`one-shot query ${normalizePath(path)} requires a structured live query plan`);
+      validateStructuredQueryPlan(liveQueryPlan, normalizePath(path));
+    }
     if (delivery === "replica") {
       if (!replica) throw new Error(`replica collection ${normalizePath(path)} requires a replica definition`);
       validateReplicaCollection(replica, normalizePath(path));
@@ -843,7 +969,7 @@ export class ModuleBuilder {
       args: options.args,
       result: options.result,
       delivery,
-      livePlan,
+      liveQueryPlan,
       replica,
     });
     const registration = freeze({ path: definition.path, kind: definition.kind, definition, handler: options.run as RegisteredFunction<Args, Result>["handler"] });
@@ -969,6 +1095,10 @@ export class ModuleRuntimeRegistry {
         throw new Error(`interactive reducer ${path} requires an optimistic transaction or nonOptimisticReason`);
       }
     }
+    if (registration.kind === "query" && (registration.definition.delivery ?? "oneShot") === "oneShot") {
+      if (!registration.definition.liveQueryPlan) throw new Error(`one-shot query ${path} requires a structured live query plan`);
+      validateStructuredQueryPlan(registration.definition.liveQueryPlan, path);
+    }
     if (registration.definition.delivery === "replica") {
       if (!registration.definition.replica) throw new Error(`replica query ${path} requires a replica definition`);
       validateReplicaCollection(registration.definition.replica, path);
@@ -1001,6 +1131,7 @@ export class ModuleRuntimeRegistry {
       engine: this.baseManifest.engine,
       schema: this.baseManifest.schema,
       artifact: this.baseManifest.artifact,
+      crons: this.baseManifest.crons,
       visibility: this.baseManifest.visibility,
       functions: freeze(functions),
     });

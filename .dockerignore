@@ -9,8 +9,13 @@ node_modules
 
 tmp
 dist
+**/dist
 build
+**/build
 coverage
+**/coverage
+rust/target
+**/gonvex/_build
 playwright-report
 test-results
 

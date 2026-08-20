@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { buildModuleArtifact, moduleManifestFunctions } from "../dist/module-artifact.js";
@@ -22,8 +23,17 @@ async function moduleProject(t, source, supportingFiles = {}) {
 test("TypeScript artifacts are self-contained ESM and preserve reducer and Live Query contracts", async (t) => {
   const project = await moduleProject(t, `
 import { suffix } from "./shared.ts";
+const schema = {
+  string: (options = {}) => ({ kind: "string", ...options }),
+  integer: (options = {}) => ({ kind: "number", integer: true, ...options }),
+  boolean: () => ({ kind: "boolean" }),
+  id: (entity) => ({ kind: "id", entity }),
+  array: (items) => ({ kind: "array", items }),
+  object: (fields, options = {}) => ({ kind: "object", fields, ...options }),
+};
 
 const liveQuery = (definition: unknown) => definition;
+const query = (definition: unknown) => definition;
 const reducer = (definition: unknown) => definition;
 const visibility = (definition: unknown) => definition;
 type GridArgs = { workspaceId: string };
@@ -39,6 +49,12 @@ export const taskVisibility = visibility({
 });
 
 export const grid = liveQuery<GridArgs, GridRow[]>({
+  args: schema.object({
+    workspaceId: schema.string(),
+    offset: schema.integer(),
+    limit: schema.integer(),
+  }),
+  result: schema.array(schema.object({ id: schema.id("tasks") })),
   liveQueryPlan: {
     table: "tasks",
     key: "id",
@@ -49,7 +65,16 @@ export const grid = liveQuery<GridArgs, GridRow[]>({
   run: async (_ctx: unknown, args: { workspaceId: string }) => [{ id: args.workspaceId + suffix }],
 });
 
+export const oneShot = query<GridArgs, GridRow[]>({
+  args: schema.object({ workspaceId: schema.string() }),
+  result: schema.array(schema.object({ id: schema.id("tasks") })),
+  liveQueryPlan: { table: "tasks", key: "id", columns: ["id", "workspaceId"] },
+  run: async () => [],
+});
+
 export const rename = reducer<RenameArgs, RenameResult>({
+  args: schema.object({ taskId: schema.id("tasks"), title: schema.string({ minLength: 1 }) }),
+  result: schema.object({ ok: schema.boolean() }),
   offline: { mode: "allowed", conflict: "expectedVersion" },
   optimistic: {
     effects: [{ operation: "patch", entity: "tasks", id: ["taskId"], fields: { title: "pending" } }],
@@ -75,6 +100,8 @@ export const rename = reducer<RenameArgs, RenameResult>({
   assert.equal(functions.grid.kind, "query");
   assert.equal(functions.grid.delivery, "live");
   assert.equal(functions.grid.dependencies.liveQueryPlan.table, "tasks");
+  assert.equal(functions.oneShot.delivery, "oneShot");
+  assert.equal(functions.oneShot.dependencies.liveQueryPlan.table, "tasks");
   assert.deepEqual(artifact.visibility.tasks, {
     table: "tasks",
     key: "id",
@@ -88,8 +115,66 @@ export const rename = reducer<RenameArgs, RenameResult>({
     id: ["taskId"],
     fields: { title: "pending" },
   });
-  assert.equal(functions.rename.args.type, "RenameArgs");
-  assert.equal(functions.rename.result.type, "RenameResult");
+  assert.deepEqual(functions.grid.args, {
+    kind: "object",
+    fields: {
+      workspaceId: { kind: "string" },
+      offset: { kind: "number", integer: true },
+      limit: { kind: "number", integer: true },
+    },
+  });
+  assert.deepEqual(functions.grid.result, {
+    kind: "array",
+    items: { kind: "object", fields: { id: { kind: "id", entity: "tasks" } } },
+  });
+  assert.deepEqual(functions.rename.args, {
+    kind: "object",
+    fields: {
+      taskId: { kind: "id", entity: "tasks" },
+      title: { kind: "string", minLength: 1 },
+    },
+  });
+  assert.deepEqual(functions.rename.result, { kind: "object", fields: { ok: { kind: "boolean" } } });
+});
+
+test("Replica delivery requires the canonical replica definition", async (t) => {
+  const project = await moduleProject(t, `
+const replicaCollection = (definition) => definition;
+const schema = {
+  object: (fields) => ({ kind: "object", fields }),
+  array: (items) => ({ kind: "array", items }),
+};
+export const broken = replicaCollection({
+  args: schema.object({}),
+  result: schema.array(schema.object({})),
+  run: async () => [],
+});
+`);
+  await assert.rejects(
+    buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }),
+    /requires a replica definition/,
+  );
+});
+
+test("TypeScript artifacts reject missing and non-static function schemas", async (t) => {
+  const missing = await moduleProject(t, `
+const query = (definition: unknown) => definition;
+export const list = query({ run: async () => [] });
+`);
+  await assert.rejects(
+    buildModuleArtifact({ root: missing.root, backendDir: missing.backendDir, files: [missing.entrypoint], migrations: [] }),
+    /must declare literal args and result schemas|must declare args: schema/,
+  );
+
+  const dynamic = await moduleProject(t, `
+const query = (definition: unknown) => definition;
+const args = { kind: "object" };
+export const list = query({ args, result: schema.string(), run: async () => "ok" });
+`);
+  await assert.rejects(
+    buildModuleArtifact({ root: dynamic.root, backendDir: dynamic.backendDir, files: [dynamic.entrypoint], migrations: [] }),
+    /must use a static schema/,
+  );
 });
 
 test("TypeScript artifacts reject Node built-ins", async (t) => {
@@ -106,5 +191,92 @@ export const unsafe = async () => readFile("secret");
       migrations: [],
     }),
     /Node runtime module.*node:fs\/promises.*unavailable/,
+  );
+});
+
+test("TypeScript artifacts extract literal project and tenant cron declarations", async (t) => {
+  const project = await moduleProject(t, `
+const schema = { object: (fields) => ({ kind: "object", fields }), boolean: () => ({ kind: "boolean" }) };
+const internalReducer = (definition) => definition;
+const cron = (definition) => definition;
+const tenantCron = (definition) => definition;
+export const heartbeat = internalReducer({
+  args: schema.object({}),
+  result: schema.object({ ok: schema.boolean() }),
+  run: async () => ({ ok: true }),
+});
+
+export const heartbeatSchedule = cron({ name: "heartbeat", function: "heartbeat", intervalMs: 15000 });
+export const tenantSchedule = tenantCron({ name: "tenant-heartbeat", function: "heartbeat", args: { reason: "test" }, expression: "*/5 * * * *" });
+`);
+
+  const artifact = await buildModuleArtifact({
+    root: project.root,
+    backendDir: project.backendDir,
+    files: [project.entrypoint],
+    migrations: [],
+  });
+
+  assert.deepEqual(artifact.crons, [
+    { name: "heartbeat", function: "heartbeat", scope: "project", intervalMs: 15000 },
+    { name: "tenant-heartbeat", function: "heartbeat", scope: "tenant", args: { reason: "test" }, expression: "*/5 * * * *" },
+  ]);
+});
+
+test("ModuleBuilder artifacts retain executable default registrations and builder crons", async (t) => {
+  const sdk = resolve(fileURLToPath(new URL("../../module-sdk/dist/index.js", import.meta.url)));
+  const project = await moduleProject(t, `
+import { createModule, schema } from ${JSON.stringify(pathToFileURL(sdk).href)};
+const app = createModule({ name: "builder-app", version: "1" });
+app.action("reports.daily", {
+  args: schema.object({}),
+  result: schema.object({ ok: schema.boolean() }),
+  run: async () => ({ ok: true }),
+});
+app.internalReducer("tasks.expire", {
+  args: schema.object({}),
+  result: schema.object({ ok: schema.boolean() }),
+  run: async () => ({ ok: true }),
+});
+app.cron({ name: "daily-report", intervalMs: 60_000, function: "reports.daily" });
+app.tenantCron({ name: "tenant-expiry", expression: "*/5 * * * *", function: "tasks.expire", args: { source: "cron" } });
+export default app;
+`);
+  const artifact = await buildModuleArtifact({
+    root: project.root,
+    backendDir: project.backendDir,
+    files: [project.entrypoint],
+    migrations: [],
+  });
+
+  assert.deepEqual(artifact.crons, [
+    { name: "daily-report", function: "reports.daily", scope: "project", intervalMs: 60_000 },
+    { name: "tenant-expiry", function: "tasks.expire", scope: "tenant", args: { source: "cron" }, expression: "*/5 * * * *" },
+  ]);
+  assert.deepEqual(Object.keys(artifact.functions), ["reports.daily", "tasks.expire"]);
+
+  const bundled = await import(`${pathToFileURL(join(project.backendDir, "_build", "module.js"))}?test=${Date.now()}`);
+  const registrations = bundled.default.runtimeRegistrations();
+  assert.equal(registrations.length, 2);
+  assert.equal(registrations.find((entry) => entry.path === "reports.daily").definition.kind, "action");
+  assert.deepEqual(await registrations.find((entry) => entry.path === "reports.daily").handler({}, {}), { ok: true });
+});
+
+test("TypeScript artifacts reject optional schemas outside object fields", async (t) => {
+  const project = await moduleProject(t, `
+const schema = {
+  optional: (value) => ({ kind: "optional", value }),
+  string: () => ({ kind: "string" }),
+};
+const action = (definition) => definition;
+export const broken = action({
+  args: schema.optional(schema.string()),
+  result: schema.string(),
+  run: async () => "ok",
+});
+`);
+  await assert.rejects(
+    buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }),
+    /uses schema\.optional outside an object field/,
   );
 });

@@ -119,9 +119,7 @@ run: async (ctx) => {
 ```
 
 `auth.account`, `member`, and `tenant` are nullable because they mirror the
-runtime ABI for anonymous or system invocations. The top-level `ctx.account`
-field is a temporary compatibility alias for `ctx.auth.account`; new modules
-should use the nested v2 spelling.
+runtime ABI for anonymous or system invocations.
 
 Application modules expose exactly three executable kinds: Query, Reducer, and
 Action. An infrastructure adapter that accepts an inbound webhook verifies and

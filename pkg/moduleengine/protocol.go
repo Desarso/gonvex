@@ -11,7 +11,7 @@ import (
 
 // ProtocolVersion must match the module host's. A host that speaks a different
 // version is refused at connect time rather than at the first invocation.
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 // DefaultMaxFrameBytes bounds one frame in either direction. It is large enough
 // for a sizeable module bundle and small enough that a corrupt length prefix
@@ -34,6 +34,8 @@ const (
 	codeModuleNotLoaded      = "module_not_loaded"
 	codeFunctionNotFound     = "function_not_found"
 	codeWrongFunctionKind    = "wrong_function_kind"
+	codeInvalidArgs          = "invalid_args"
+	codeInvalidResult        = "invalid_result"
 	codeDeadlineExceeded     = "deadline_exceeded"
 	codeBudgetExceeded       = "budget_exceeded"
 	codeExecutionFailed      = "execution_failed"
@@ -148,16 +150,17 @@ type invokeOp struct {
 // identity and scope, never a database URL or a credential: the module reaches
 // data only by asking the runtime, which already holds the transaction.
 type invocationContext struct {
-	ProjectID      string           `json:"projectId"`
-	TenantID       string           `json:"tenantId"`
-	OperationID    string           `json:"operationId,omitempty"`
-	Tenant         *tenantIdentity  `json:"tenant,omitempty"`
-	Account        *accountIdentity `json:"account,omitempty"`
-	Member         *memberIdentity  `json:"member,omitempty"`
-	Permissions    any              `json:"permissions,omitempty"`
-	Capabilities   capabilities     `json:"capabilities"`
-	NowUnixMS      int64            `json:"nowUnixMs"`
-	DeadlineUnixMS int64            `json:"deadlineUnixMs,omitempty"`
+	ProjectID      string            `json:"projectId"`
+	TenantID       string            `json:"tenantId"`
+	OperationID    string            `json:"operationId,omitempty"`
+	Tenant         *tenantIdentity   `json:"tenant,omitempty"`
+	Account        *accountIdentity  `json:"account,omitempty"`
+	Member         *memberIdentity   `json:"member,omitempty"`
+	Permissions    any               `json:"permissions,omitempty"`
+	Environment    map[string]string `json:"environment,omitempty"`
+	Capabilities   capabilities      `json:"capabilities"`
+	NowUnixMS      int64             `json:"nowUnixMs"`
+	DeadlineUnixMS int64             `json:"deadlineUnixMs,omitempty"`
 }
 
 type tenantIdentity struct {
@@ -189,19 +192,21 @@ type capabilities struct {
 	DBWrite      bool `json:"dbWrite"`
 	ActionOutbox bool `json:"actionOutbox"`
 	RunReducer   bool `json:"runReducer"`
+	Scheduler    bool `json:"scheduler"`
 	Network      bool `json:"network"`
 	Storage      bool `json:"storage"`
+	Environment  bool `json:"environment"`
 }
 
 // artifactPayload is the module as the runtime holds it. The host re-verifies
 // the JavaScript hash before it evaluates anything.
 type artifactPayload struct {
-	Language     string            `json:"language"`
-	Entrypoint   string            `json:"entrypoint,omitempty"`
-	ArtifactHash string            `json:"artifactHash,omitempty"`
-	JavaScript   javaScriptPayload `json:"javascript"`
-	Functions    []functionPayload `json:"functions"`
-	Metadata     map[string]any    `json:"metadata,omitempty"`
+	Language   string            `json:"language"`
+	Entrypoint string            `json:"entrypoint,omitempty"`
+	Hash       string            `json:"hash"`
+	JavaScript javaScriptPayload `json:"javascript"`
+	Functions  []functionPayload `json:"functions"`
+	Metadata   map[string]any    `json:"metadata,omitempty"`
 }
 
 type javaScriptPayload struct {
@@ -280,6 +285,8 @@ type hostCallPayload struct {
 	Patch      json.RawMessage `json:"patch"`
 	Function   string          `json:"function"`
 	Args       json.RawMessage `json:"args"`
+	DelayMS    int64           `json:"delayMs"`
+	AtUnixMS   int64           `json:"atUnixMs"`
 	Request    json.RawMessage `json:"request"`
 	Operation  string          `json:"operation"`
 	Payload    json.RawMessage `json:"payload"`
@@ -292,6 +299,8 @@ const (
 	hostCallDBDelete      = "dbDelete"
 	hostCallActionEnqueue = "actionEnqueue"
 	hostCallRunReducer    = "runReducer"
+	hostCallScheduleAfter = "scheduleAfter"
+	hostCallScheduleAt    = "scheduleAt"
 	hostCallFetch         = "fetch"
 	hostCallStorage       = "storage"
 )
@@ -336,8 +345,8 @@ func writeFrame(writer io.Writer, payload []byte, limit int) error {
 	return err
 }
 
-// normalizeKind maps the compatibility protocol spellings onto the public
-// Query/Reducer/Action vocabulary the host speaks.
+// normalizeKind canonicalizes the public Query/Reducer/Action vocabulary the
+// host speaks.
 func normalizeKind(kind Kind) string {
 	switch kind {
 	case KindQuery, KindReducer, KindAction:

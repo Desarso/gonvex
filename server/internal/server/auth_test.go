@@ -8,25 +8,19 @@ import (
 	"github.com/gonvex/gonvex/server/internal/config"
 )
 
-func TestAuthenticateSocketWithoutControlPlaneUsesDevJWTSubject(t *testing.T) {
+func TestAuthenticateSocketWithoutConfiguredProviderRejectsUnsignedToken(t *testing.T) {
 	server := New(config.Config{})
-	token := devJWT(`{"sub":"firebase-user-123","email":"malek.gabriel33@gmail.com"}`)
+	token := devJWT(`{"sub":"forged-user-123","email":"malek.gabriel33@gmail.com"}`)
 
-	user, _, project, tenant, err := server.authenticateSocket(context.Background(), "whagons-5", "whagons-5", token, "calaluna")
-	if err != nil {
-		t.Fatal(err)
+	if _, _, _, _, err := server.authenticateSocket(context.Background(), "whagons-5", "whagons-5", token, "calaluna"); err == nil {
+		t.Fatal("unconfigured authentication accepted an unsigned token")
 	}
-	if user.ID != "firebase-user-123" {
-		t.Fatalf("expected JWT subject user id, got %q", user.ID)
-	}
-	if user.Email != "malek.gabriel33@gmail.com" {
-		t.Fatalf("expected JWT email, got %q", user.Email)
-	}
-	if project != "whagons-5" {
-		t.Fatalf("expected requested project, got %q", project)
-	}
-	if tenant != "calaluna" {
-		t.Fatalf("expected requested tenant, got %q", tenant)
+}
+
+func TestAuthenticateSocketAlwaysRequiresCanonicalSession(t *testing.T) {
+	server := New(config.Config{})
+	if _, _, _, _, err := server.authenticateSocket(context.Background(), "project", "", "", "tenant"); err == nil {
+		t.Fatal("anonymous tenant entry was accepted")
 	}
 }
 

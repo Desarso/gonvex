@@ -162,14 +162,14 @@ describe("App", () => {
       metrics={{
         functions: {},
         cache: { hits: 0, misses: 0, bypasses: 0, requests: 0, hitRate: 0, series: [] },
-        logs: [{ time: now, project: "whagons-5", tenant: "tenant-a", userId: "user-a", userEmail: "ada@example.test", path: "tasks.update", kind: "mutation", outcome: "ok", durationMs: 18 }],
+        logs: [{ time: now, project: "whagons-5", tenant: "tenant-a", accountId: "account-a", accountEmail: "ada@example.test", path: "tasks.update", kind: "reducer", outcome: "ok", durationMs: 18 }],
         websocket: {
           connections: 2,
           subscriptions: 4,
-          users: 1,
+          accounts: 1,
           details: [
-            { id: "conn-000001", project: "whagons-5", tenant: "tenant-a", userId: "user-a", userEmail: "ada@example.test", authenticated: true, connectedAt: now, lastActiveAt: now, lastActivity: "query.subscribe", lastPath: "bulk.tasksByWorkspace", browser: "Chrome 126", platform: "macOS", deviceType: "desktop", subscriptions: ["bulk.tasksByWorkspace", "tasks.count", "tasks.count"] },
-            { id: "conn-000002", project: "whagons-5", tenant: "tenant-b", userId: "user-a", userEmail: "ada@example.test", authenticated: true, connectedAt: now, lastActiveAt: now, lastActivity: "mutation.call", lastPath: "tasks.update", browser: "Safari 18", platform: "iOS", deviceType: "mobile", subscriptions: ["notifications.list"] },
+            { id: "conn-000001", project: "whagons-5", tenant: "tenant-a", accountId: "account-a", accountEmail: "ada@example.test", authenticated: true, connectedAt: now, lastActiveAt: now, lastActivity: "query.subscribe", lastPath: "bulk.tasksByWorkspace", browser: "Chrome 126", platform: "macOS", deviceType: "desktop", subscriptions: ["bulk.tasksByWorkspace", "tasks.count", "tasks.count"] },
+            { id: "conn-000002", project: "whagons-5", tenant: "tenant-b", accountId: "account-a", accountEmail: "ada@example.test", authenticated: true, connectedAt: now, lastActiveAt: now, lastActivity: "reducer.call", lastPath: "tasks.update", browser: "Safari 18", platform: "iOS", deviceType: "mobile", subscriptions: ["notifications.list"] },
           ],
         },
       }}
@@ -214,8 +214,8 @@ describe("App", () => {
         executionId: "exec-425",
         project: "whagons-production",
         tenant: "tenant-a",
-        userId: "user-a",
-        userEmail: "user@example.test",
+        accountId: "account-a",
+        accountEmail: "user@example.test",
         kind: "query",
         path: "bulk.tasksByWorkspace",
         outcome: "ok",
@@ -306,8 +306,8 @@ describe("App", () => {
   it("copies only explicitly selected runtime log rows", () => {
     const logs = [
       { time: "2026-07-16T19:09:28Z", executionId: "exec-a", path: "tasks.list", kind: "query", outcome: "ok", durationMs: 10 },
-      { time: "2026-07-16T19:09:29Z", executionId: "exec-b", path: "tasks.update", kind: "mutation", outcome: "ok", durationMs: 20 },
-      { time: "2026-07-16T19:09:30Z", executionId: "exec-c", path: "tasks.remove", kind: "mutation", outcome: "error", durationMs: 30 },
+      { time: "2026-07-16T19:09:29Z", executionId: "exec-b", path: "tasks.update", kind: "reducer", outcome: "ok", durationMs: 20 },
+      { time: "2026-07-16T19:09:30Z", executionId: "exec-c", path: "tasks.remove", kind: "reducer", outcome: "error", durationMs: 30 },
     ];
 
     expect(runtimeLogsForCopy(logs, new Set(["exec-b", "exec-c"])).map((entry) => entry.executionId)).toEqual(["exec-b", "exec-c"]);
@@ -496,7 +496,7 @@ describe("App", () => {
       isLoading: true,
       signIn,
       signOut,
-      user: null,
+      account: null,
     } as never} />);
 
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/dev/projects"))).toBe(false);
@@ -508,7 +508,7 @@ describe("App", () => {
       isLoading: false,
       signIn,
       signOut,
-      user: { email: "gabriel@example.com", name: "Gabriel", picture: "https://example.test/avatar.png" },
+      account: { email: "gabriel@example.com", name: "Gabriel", picture: "https://example.test/avatar.png" },
     } as never} />);
 
     expect(await screen.findByText("Google-owned App")).toBeInTheDocument();
@@ -578,7 +578,7 @@ describe("App", () => {
       isLoading: false,
       signIn: vi.fn(async () => undefined),
       signOut: vi.fn(async () => undefined),
-      user: { email: "gabriel@example.com", name: "Gabriel", picture: "https://example.test/avatar.png" },
+      account: { email: "gabriel@example.com", name: "Gabriel", picture: "https://example.test/avatar.png" },
     } as never;
 
     render(<App nativeAuth={nativeAuth} />);
@@ -752,7 +752,7 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => expect(window.location.pathname).toBe("/projects/app/errors"));
-    expect(screen.getByRole("heading", { name: /errors affecting real users/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /errors affecting real accounts/i })).toBeInTheDocument();
   });
 
   it("uses a compact icon theme toggle and an uncluttered project switcher", async () => {
@@ -800,7 +800,7 @@ describe("App", () => {
       statusText: "OK",
       json: async () => ({ groups: [{
           fingerprint: "group-1", title: "Checkout failed", culprit: "at submitOrder (src/checkout.ts:40:3)", status: "unresolved", priority: "high",
-          count: 8, firstSeen: "2026-07-11T10:00:00Z", lastSeen: "2026-07-12T10:00:00Z", tenants: { acme: 5, beta: 3 }, users: { ada: 4 }, devices: { laptop: 5, phone: 3 }, releases: { "5.1.0": 8 }, environments: { production: 8 },
+          count: 8, firstSeen: "2026-07-11T10:00:00Z", lastSeen: "2026-07-12T10:00:00Z", tenants: { acme: 5, beta: 3 }, accounts: { ada: 4 }, devices: { laptop: 5, phone: 3 }, releases: { "5.1.0": 8 }, environments: { production: 8 },
           latest: {
             timestamp: "2026-07-12T10:00:00Z",
             stack: "TypeError: Checkout failed\n at submitOrder (src/checkout.ts:40:3)",
@@ -850,7 +850,7 @@ describe("App", () => {
             firstSeen: "2026-07-12T10:00:00Z",
             lastSeen: "2026-07-12T10:00:00Z",
             tenants: { acme: 1 },
-            users: { ada: 1 },
+            accounts: { ada: 1 },
             devices: { laptop: 1 },
             releases: { [selectedRelease || "5.1.0"]: 1 },
             environments: { production: 1 },
@@ -891,7 +891,7 @@ describe("App", () => {
             firstSeen: "2026-07-12T10:00:00Z",
             lastSeen: "2026-07-12T10:00:00Z",
             tenants: { acme: 1 },
-            users: { ada: 1 },
+            accounts: { ada: 1 },
             devices: { laptop: 1 },
             releases: { "5.2.0": 1 },
             environments: { production: 1 },

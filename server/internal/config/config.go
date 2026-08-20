@@ -35,16 +35,14 @@ const (
 
 type Config struct {
 	Addr string
-	// ControlPlaneURL is the control-plane database URL. Legacy landlord
-	// configuration is accepted only by the explicit identity migration command,
-	// never by the running server.
+	// ControlPlaneURL is the control-plane database URL. The running server only
+	// reads the canonical GONVEX_CONTROL_PLANE_DATABASE_URL setting; legacy
+	// landlord settings belong to the explicit identity migration command.
 	ControlPlaneURL             string
 	PostgresURL                 string
 	TenantDatabases             map[string]string
 	ProjectDatabases            map[string]string
 	ProjectKeys                 map[string]string
-	GonvexModuleRoot            string
-	PluginCacheDir              string
 	ValkeyURL                   string
 	RowsCacheTTL                time.Duration
 	TelemetryEnabled            bool
@@ -59,7 +57,6 @@ type Config struct {
 	DevSyncKey                  string
 	AdminKey                    string
 	RequireAuth                 bool
-	QueryCacheEnabled           bool
 	TenantListenerLimit         int
 	TenantListenerIdleTimeout   time.Duration
 	SharedResultMaxBytes        int
@@ -93,11 +90,6 @@ type Config struct {
 	GoogleAuthorizeURL string
 	GoogleTokenURL     string
 	GoogleJWKSURL      string
-	// FirebaseProjectID turns on verification of Firebase ID tokens presented as
-	// app credentials. Empty permits unsigned token decoding for local development
-	// only, so deployments that authenticate browsers with Firebase must set it.
-	FirebaseProjectID string
-	FirebaseJWKSURL   string
 	// Environment labels projects created/imported on this runtime instance in the
 	// dashboard ("local dev", "production", ...). Deployed runtimes set
 	// GONVEX_ENVIRONMENT so their projects stop claiming to be local dev.
@@ -107,11 +99,9 @@ type Config struct {
 	DropEmptyUndeclaredColumns bool
 
 	// ModuleHost* configure the out-of-process module host that executes
-	// TypeScript module artifacts. The whole group is opt-in: with none of it
-	// set the runtime looks for the host binary on PATH, and a deployment that
-	// has neither keeps serving compiled Go modules exactly as before. Only a
-	// project whose manifest ships a module artifact needs a host, and such a
-	// project fails its sync with a clear error rather than loading nothing.
+	// TypeScript module artifacts. With no explicit binary or endpoint, the
+	// runtime looks for the host binary on PATH. A project whose manifest ships
+	// a module artifact fails its sync clearly when no host is available.
 	ModuleHostEnabled bool
 	// ModuleHostBinary is the executable this runtime supervises. One process
 	// serves every project and every tenant.
@@ -142,14 +132,12 @@ func FromEnv() Config {
 
 	config := Config{
 		Addr:                         env("GONVEX_ADDR", ":8080"),
-		ControlPlaneURL:              env("GONVEX_CONTROL_PLANE_DATABASE_URL", env("GONVEX_CONTROL_PLANE_URL", env("CONTROL_PLANE_DATABASE_URL", env("CONTROL_PLANE_URL", "")))),
-		PostgresURL:                  env("DATABASE_URL", env("POSTGRES_URL", "")),
+		ControlPlaneURL:              env("GONVEX_CONTROL_PLANE_DATABASE_URL", ""),
+		PostgresURL:                  env("DATABASE_URL", ""),
 		TenantDatabases:              envStringMap("GONVEX_TENANT_DATABASE_URLS"),
 		ProjectDatabases:             envStringMap("GONVEX_PROJECT_DATABASE_URLS"),
 		ProjectKeys:                  envStringMap("GONVEX_PROJECT_KEYS"),
-		GonvexModuleRoot:             env("GONVEX_MODULE_ROOT", ""),
-		PluginCacheDir:               env("GONVEX_PLUGIN_CACHE_DIR", ""),
-		ValkeyURL:                    env("VALKEY_URL", env("REDIS_URL", "")),
+		ValkeyURL:                    env("VALKEY_URL", ""),
 		RowsCacheTTL:                 envDuration("GONVEX_ROWS_CACHE_TTL", defaultRowsCacheTTL),
 		TelemetryEnabled:             envBool("GONVEX_TELEMETRY_ENABLED", true),
 		TelemetryLogPath:             env("GONVEX_TELEMETRY_LOG", "tmp/gonvex-telemetry.jsonl"),
@@ -160,10 +148,9 @@ func FromEnv() Config {
 		S3SecretAccessKey:            env("S3_SECRET_ACCESS_KEY", ""),
 		S3ForcePathStyle:             envBool("S3_FORCE_PATH_STYLE", true),
 		StoragePublicURL:             env("GONVEX_PUBLIC_URL", ""),
-		DevSyncKey:                   env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
+		DevSyncKey:                   env("GONVEX_DEV_SYNC_KEY", ""),
 		AdminKey:                     env("GONVEX_ADMIN_KEY", ""),
 		RequireAuth:                  envBool("GONVEX_REQUIRE_AUTH", false),
-		QueryCacheEnabled:            envBool("GONVEX_BROWSER_QUERY_CACHE_ENABLED", true),
 		TenantListenerLimit:          envInt("GONVEX_TENANT_LISTENER_LIMIT", defaultTenantListenerLimit),
 		TenantListenerIdleTimeout:    envDuration("GONVEX_TENANT_LISTENER_IDLE_TIMEOUT", defaultTenantListenerIdleTimeout),
 		SharedResultMaxBytes:         envInt("GONVEX_SHARED_RESULT_MAX_BYTES", defaultSharedResultMaxBytes),
@@ -180,8 +167,6 @@ func FromEnv() Config {
 		GoogleAuthorizeURL:           env("GONVEX_GOOGLE_AUTHORIZE_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
 		GoogleTokenURL:               env("GONVEX_GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token"),
 		GoogleJWKSURL:                env("GONVEX_GOOGLE_JWKS_URL", "https://www.googleapis.com/oauth2/v3/certs"),
-		FirebaseProjectID:            strings.TrimSpace(env("GONVEX_FIREBASE_PROJECT_ID", "")),
-		FirebaseJWKSURL:              env("GONVEX_FIREBASE_JWKS_URL", "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"),
 		Environment:                  env("GONVEX_ENVIRONMENT", "local dev"),
 		DropEmptyUndeclaredColumns:   envBool("GONVEX_DROP_EMPTY_UNDECLARED_COLUMNS", false),
 

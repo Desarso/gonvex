@@ -1,0 +1,55 @@
+---
+title: Live Queries
+description: Exact indexed server windows over datasets too large to replicate.
+---
+
+# Live Queries
+
+Use a Live Query for an exact PostgreSQL-computed window over a large or
+unbounded dataset. The plan is structured so Gonvex knows the table, visibility
+scope, filters, search fields, sort fields, and window without executing
+arbitrary reactive application functions.
+
+```ts
+import { liveQuery, schema } from "@gonvex/module-sdk";
+
+export const grid = liveQuery({
+  args: schema.object({
+    workspaceId: schema.id("workspaces"),
+    search: schema.string(),
+    offset: schema.number(),
+    limit: schema.number(),
+  }),
+  result: schema.object({
+    rows: schema.array(schema.object({
+      id: schema.id("tasks"), title: schema.string(), deadline: schema.datetime(),
+    })),
+  }),
+  liveQueryPlan: {
+    table: "tasks",
+    key: "id",
+    resultPath: ["rows"],
+    columns: ["id", "title", "deadline"],
+    where: { operator: "eq", column: "workspaceId", value: { argument: "workspaceId" } },
+    search: { argument: "search", columns: ["title"] },
+    sort: {
+      columnArgument: "sort",
+      directionArgument: "direction",
+      defaultColumn: "deadline",
+      defaultDirection: "asc",
+      allowedColumns: ["deadline", "title"],
+    },
+    window: { offsetArgument: "offset", limitArgument: "limit", defaultLimit: 100, maxLimit: 250 },
+  },
+});
+```
+
+Gonvex combines the plan with the centralized visibility plan. A committed row
+change that cannot affect the window is ignored. A safe entity-only change is a
+small patch; a membership, ordering, or boundary change reruns one canonical
+SQL window and sends an ID/order delta.
+
+Live Query state stores IDs and ordering. The actual task entities are hydrated
+in the same normalized Local Replica used by Queries, Replica Collections, and
+other views. Portable operators can run over cached rows while offline; the
+result is labeled partial when the local dataset is incomplete.

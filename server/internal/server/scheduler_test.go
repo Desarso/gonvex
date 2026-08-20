@@ -426,7 +426,7 @@ func TestSchedulerReleasesInterruptedFailedJobForRecovery(t *testing.T) {
 }
 
 func TestSchedulerRetriesAndRecordsCompletionFailure(t *testing.T) {
-	store := &schedulerFinalizationStore{completeErr: errors.New("valkey unavailable")}
+	store := &schedulerFinalizationStore{completeErr: errors.New("database unavailable")}
 	sc := newScheduler(func(context.Context, scheduledJob) error { return nil })
 	sc.store = store
 	sc.running = 1
@@ -441,6 +441,22 @@ func TestSchedulerRetriesAndRecordsCompletionFailure(t *testing.T) {
 	}
 	if snapshot := sc.snapshot(); snapshot.Completed != 0 || snapshot.Failed != 1 {
 		t.Fatalf("completion failure recorded as %+v", snapshot)
+	}
+}
+
+func TestSchedulerRejectsInvalidTargetBeforePersistence(t *testing.T) {
+	sc := newScheduler(nil)
+	sc.validateTarget = func(projectID, functionPath string) error {
+		if projectID != "project-a" || functionPath != "reports.read" {
+			t.Fatalf("validation input = %q %q", projectID, functionPath)
+		}
+		return errors.New("query targets are forbidden")
+	}
+	if _, err := sc.For("project-a", "tenant-a").RunAfter(0, "reports.read", map[string]any{}); err == nil {
+		t.Fatal("expected target validation error")
+	}
+	if len(sc.jobs) != 0 {
+		t.Fatal("invalid target reached the scheduler queue")
 	}
 }
 

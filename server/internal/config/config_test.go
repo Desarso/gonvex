@@ -18,11 +18,11 @@ func TestDefaultSubscriptionRerunConcurrency(t *testing.T) {
 	}
 }
 
-func TestValkeyURLAcceptsRedisURLAlias(t *testing.T) {
+func TestValkeyURLRequiresCanonicalEnvironment(t *testing.T) {
 	t.Setenv("VALKEY_URL", "")
 	t.Setenv("REDIS_URL", "redis://redis.example:6379/4")
-	if got := FromEnv().ValkeyURL; got != "redis://redis.example:6379/4" {
-		t.Fatalf("ValkeyURL = %q", got)
+	if got := FromEnv().ValkeyURL; got != "" {
+		t.Fatalf("legacy REDIS_URL configured ValkeyURL: %q", got)
 	}
 
 	t.Setenv("VALKEY_URL", "redis://valkey.example:6379/1")

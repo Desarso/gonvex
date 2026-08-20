@@ -17,10 +17,6 @@ import (
 // committed revision instead of trusting data embedded in NOTIFY payloads.
 const ChangeFeedNotifyChannel = "gonvex_change_feed"
 
-// SyncNotifyChannel remains as an internal source-compatible name while the
-// sync implementation is renamed to Local Replica throughout the public API.
-const SyncNotifyChannel = ChangeFeedNotifyChannel
-
 // SyncStorageInstalled reports whether a database has the durable sync clock
 // and change log. Schema fingerprint equality is not sufficient: a restored
 // or partially provisioned database may have the expected application schema
@@ -247,7 +243,7 @@ CREATE TABLE IF NOT EXISTS _gonvex_sync_changes (
   transaction_id bigint NOT NULL,
   revision bigint,
   ordinal integer,
-  mutation_id text,
+  command_id text,
   table_name text NOT NULL,
   row_id text NOT NULL,
   operation text NOT NULL,
@@ -256,6 +252,28 @@ CREATE TABLE IF NOT EXISTS _gonvex_sync_changes (
   changed_columns text[] NOT NULL DEFAULT ARRAY[]::text[],
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = '_gonvex_sync_changes'
+      AND column_name = 'mutation_id'
+  ) THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = '_gonvex_sync_changes'
+        AND column_name = 'command_id'
+    ) THEN
+      ALTER TABLE _gonvex_sync_changes RENAME COLUMN mutation_id TO command_id;
+    ELSE
+      UPDATE _gonvex_sync_changes
+      SET command_id = COALESCE(command_id, mutation_id)
+      WHERE command_id IS NULL AND mutation_id IS NOT NULL;
+      ALTER TABLE _gonvex_sync_changes DROP COLUMN mutation_id;
+    END IF;
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS gonvex_sync_changes_revision
   ON _gonvex_sync_changes (revision, ordinal)
   WHERE revision IS NOT NULL;
@@ -287,7 +305,7 @@ BEGIN
     UPDATE _gonvex_sync_changes changes
     SET revision = next_revision,
         ordinal = ranked.row_ordinal,
-        mutation_id = NULLIF(current_setting('gonvex.mutation_id', true), '')
+        command_id = NULLIF(current_setting('gonvex.command_id', true), '')
     FROM ranked
     WHERE changes.event_id = ranked.event_id;
 

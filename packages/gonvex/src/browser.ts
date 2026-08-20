@@ -1,1 +1,1 @@
-export { ConvexReactClient, GonvexClient } from "@gonvex/client";
+export { GonvexClient } from "@gonvex/client";

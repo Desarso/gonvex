@@ -1,190 +1,52 @@
 ---
 title: Frontend Multitenancy
-description: How React apps choose an active Gonvex tenant and how that tenant reaches the runtime.
+description: Select a tenant while Gonvex enforces Account and Member access.
 ---
 
 # Frontend Multitenancy
 
-Gonvex generated bindings are project-level. A tenant is not a different generated API; it is runtime context.
-
-That means this stays the same for every tenant:
-
-```ts
-import { api } from "./gonvex/_generated/api";
-
-const tasks = useQuery(api.tasks.list, {});
-const createTask = useReducer(api.tasks.create);
-```
-
-What changes is the active tenant attached to the Gonvex client session.
-
-## Runtime Context
-
-Every frontend call resolves to this runtime context:
-
-```txt
-runtime URL
--> project id
--> auth token / user
--> active tenant id
--> tenant database route
--> function context
-```
-
-The frontend can choose a tenant, but it is not trusted as authority. The runtime verifies membership before executing Queries, Reducers, Actions, Live Queries, or Replica Collections.
-
-## Configure the Client
-
-For a Vite app, configure the runtime URL and project id in environment variables:
-
-```txt
-VITE_GONVEX_WS_URL=ws://localhost:8080/ws
-VITE_GONVEX_PROJECT_ID=whagons-5
-```
-
-Create the client once for the selected project:
+Generated bindings are project-level. A tenant is runtime context, not a
+different generated API.
 
 ```tsx
-import { ConvexReactClient, GonvexProvider } from "./gonvex/_generated/react";
+import { GonvexClient, GonvexProvider } from "./gonvex/_generated/react";
 
-const gonvex = new ConvexReactClient(import.meta.env.VITE_GONVEX_WS_URL, {
+const client = new GonvexClient(import.meta.env.VITE_GONVEX_WS_URL, {
   project: import.meta.env.VITE_GONVEX_PROJECT_ID,
 });
 
-export function AppRoot() {
-  return (
-    <GonvexProvider client={gonvex}>
-      <App />
-    </GonvexProvider>
-  );
+export function App() {
+  return <GonvexProvider client={client}>{/* app */}</GonvexProvider>;
 }
 ```
 
-The project id is sent as a `project` query parameter on the WebSocket URL.
-
-## Set the Active Tenant
-
-Today the client exposes tenant context through `setAuth`:
+The authenticated Account selects a tenant:
 
 ```ts
-gonvex.setAuth({
-  token: sessionToken,
-  tenant: activeTenantId,
-});
+client.setAuth({ token, tenant: tenantId });
 ```
 
-If you do not have auth wired yet in local development, you can still set only the tenant:
+The runtime resolves the tenant database and checks the Account's active
+tenant-local Member there. A client-provided tenant ID never grants access.
 
-```ts
-gonvex.setAuth({ tenant: "acme" });
-```
+## Local Replica scope
 
-For production apps, always send a real auth token too. The runtime rejects
-tenant access unless the authenticated user is a member of that tenant.
+The selected tenant, Account, Member, and visibility revision form the Local
+Replica scope. Switching tenants creates a new scope and reconciles cached
+entities, query memberships, pending commands, and cursor state before marking
+the connection current. Components read through generated hooks; they should
+not copy server data into React state or read the persistence adapter directly.
 
-## Safe Tenant Switching Pattern
+## Control Plane and tenant data
 
-When the active tenant changes, do not keep showing data from the previous tenant as if it belongs to the new tenant.
+Use Control Plane operations for project identity, tenant discovery, Account
+profile data, and membership routing. Use tenant-scoped Queries, Reducers,
+Replica Collections, and Live Queries for business data. Application code never
+connects directly to tenant databases or stores database URLs.
 
-Update the existing client:
+## Visibility
 
-```ts
-gonvex.setAuth({ token, tenant: nextTenantId });
-```
-
-The open socket reauthenticates. The runtime detaches and reattaches active live
-Live Queries with the new verified tenant, resets Replica Collections when the
-visibility scope changes, and issues a new cache scope. React query/sync hooks
-clear their previous scoped result until the new scope produces local or server
-data. Normalized server entities remain owned by the Local Replica rather than
-application React state.
-
-With native Gonvex auth, use the provider helper:
-
-```ts
-await auth.setActiveTenant(nextTenantId);
-```
-
-Remount or clear any additional tenant-specific state owned by your application;
-the Gonvex client can only clear the query/sync state it manages.
-
-## Control Plane Data vs Tenant Data
-
-Multi-tenant apps usually have two kinds of data:
-
-```txt
-Control Plane / project data
-  projects, tenants, memberships, billing, routing, global users
-
-Tenant data
-  tasks, workspaces, customers, files, domain tables
-```
-
-The frontend should normally query tenant data through generated functions after selecting a tenant. It should not connect directly to tenant databases or store tenant database URLs.
-
-Tenant list and membership screens should come from Control Plane/project-level functions or runtime endpoints. Tenant business screens should run under the active tenant context.
-
-## Generated Table Scopes
-
-The generated frontend folder separates Control Plane and tenant table metadata:
-
-```txt
-gonvex/_generated/
-  schema.ts
-  control-plane/tables.ts
-  tenant/tables.ts
-```
-
-Use the tenant metadata for business-data UI and the Control Plane metadata for app-owned project/control-plane UI:
-
-```ts
-import { controlPlane, tenant } from "./gonvex/_generated/schema";
-import { tables as controlPlaneTables } from "./gonvex/_generated/control-plane/tables";
-import { tables as tenantTables } from "./gonvex/_generated/tenant/tables";
-
-const tenantTableNames = Object.keys(tenantTables);
-const controlPlaneTableNames = Object.keys(controlPlaneTables);
-```
-
-All tenant databases for a project use the same `tenant.tables` schema. Switching tenants changes which database those tables target; it does not change the generated TypeScript bindings.
-
-## Dashboard Data Browser
-
-The dashboard Data tab mirrors the same idea for development:
-
-- `Control Plane / project DB` means no tenant id is attached.
-- A tenant DB selection sends the selected tenant id.
-- Row/table requests include `tenant=<tenantId>` and `x-gonvex-tenant-id: <tenantId>`.
-- The runtime resolves that tenant id to the configured tenant database.
-
-The rows in a `tenants` table are just rows in the currently selected database. They are not the same thing as the dashboard's active tenant database selector. Tenant databases must be created or configured through the runtime tenant registry.
-
-## Backend Function Context
-
-Backend functions read tenant context from Gonvex, not from user-provided args:
-
-```go
-func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
-  tenantID := ctx.TenantID
-
-  if ctx.User == nil || !can(ctx.Permissions, "tasks:read") {
-    return nil, errors.New("permission denied")
-  }
-
-  return queryTasks(ctx.Context, ctx.DB, tenantID, args)
-}
-```
-
-`can` is an application-defined helper over the membership-derived
-`ctx.Permissions` JSON object.
-
-For database-per-tenant projects, the database route already scopes the data. For shared-table projects, functions and generated DB helpers must also enforce tenant predicates such as `WHERE tenant_id = $1`.
-
-## Rules of Thumb
-
-- Generated bindings are shared by all tenants in a project.
-- The selected tenant belongs in client/runtime session state, not in every function argument.
-- Tenant IDs from the browser are inputs to verify, not security proof.
-- Clear or remount tenant-scoped UI state when switching tenants.
-- Never put tenant database URLs in frontend code.
-- Use Control Plane/project data only for routing, membership, and tenant selection; keep business data tenant-local.
+Visibility is declared once in the TypeScript module and enforced by Gonvex for
+initial delivery, Live Query SQL, Replica Collection changes, and revocation.
+The client can filter cached data for offline UX, but it is never the security
+authority.

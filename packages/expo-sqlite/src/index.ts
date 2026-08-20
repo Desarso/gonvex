@@ -1,5 +1,5 @@
 import type {
-  LiveQueryMembership,
+  ReplicaWindow,
   LocalReplicaStorage,
   ReplicaScope,
   ReplicaRow,
@@ -89,6 +89,12 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
            SELECT '${defaultReplicaScope}', key, value FROM _gonvex_replica_meta_legacy_v1`,
         );
       }
+      // The copy and cleanup share the same SQLite transaction. A failed
+      // migration rolls back both, so legacy rows cannot be lost before the
+      // scoped normalized tables are complete.
+      if (legacyEntities) await this.database.execAsync(`DROP TABLE _gonvex_replica_entities_legacy_v1`);
+      if (legacyQueries) await this.database.execAsync(`DROP TABLE _gonvex_replica_queries_legacy_v1`);
+      if (legacyMeta) await this.database.execAsync(`DROP TABLE _gonvex_replica_meta_legacy_v1`);
       await this.database.execAsync(`PRAGMA user_version = ${replicaSchemaVersion}`);
     });
   }
@@ -105,13 +111,13 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
     for (const row of entityRecords) {
       (entities[row.entity] ??= {})[row.id] = JSON.parse(row.value) as ReplicaRow;
     }
-    const liveQueries: Record<string, LiveQueryMembership> = {};
+    const liveQueries: Record<string, ReplicaWindow> = {};
     const queryRecords = await this.database.getAllAsync<QueryRecord>(
       `SELECT scope, signature, value FROM _gonvex_replica_queries WHERE scope = ? ORDER BY signature`,
       scope,
     );
     for (const row of queryRecords) {
-      liveQueries[row.signature] = JSON.parse(row.value) as LiveQueryMembership;
+      liveQueries[row.signature] = normalizeWindow(JSON.parse(row.value) as ReplicaWindow);
     }
     if (!cursor && entityRecords.length === 0 && queryRecords.length === 0) return undefined;
     return { cursor: cursor ? JSON.parse(cursor.value) : undefined, entities, liveQueries };
@@ -185,8 +191,76 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
       }
     });
   }
+
+  async replaceWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
+    await this.initialize();
+    await this.database.withTransactionAsync(async () => {
+      for (const [entity, rows] of Object.entries(snapshot.entities)) {
+        for (const [id, value] of Object.entries(rows)) {
+          await this.database.runAsync(
+            `INSERT INTO _gonvex_replica_entities (scope, entity, id, value) VALUES (?, ?, ?, ?)
+             ON CONFLICT(scope, entity, id) DO UPDATE SET value = excluded.value`,
+            scope, entity, id, JSON.stringify(value),
+          );
+        }
+      }
+      await this.database.runAsync(
+        `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)
+         ON CONFLICT(scope, signature) DO UPDATE SET value = excluded.value`,
+        scope, window.signature, JSON.stringify(normalizeWindow(window)),
+      );
+      if (snapshot.cursor) {
+        await this.database.runAsync(
+          `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
+           ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value`,
+          scope, JSON.stringify(snapshot.cursor),
+        );
+      }
+    });
+  }
+
+  async applyWindowDelta(window: ReplicaWindow, _delta: { upserts: ReplicaRow[]; deleted: string[] }, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
+    await this.replaceWindow(window, snapshot, scope);
+  }
+
+  async removeWindow(signature: string, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
+    await this.initialize();
+    await this.database.withTransactionAsync(async () => {
+      await this.database.runAsync(
+        `DELETE FROM _gonvex_replica_queries WHERE scope = ? AND signature = ?`,
+        scope, signature,
+      );
+      if (snapshot.cursor) {
+        await this.database.runAsync(
+          `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
+           ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value`,
+          scope, JSON.stringify(snapshot.cursor),
+        );
+      }
+    });
+  }
+
+  async clear(scope: ReplicaScope = defaultReplicaScope): Promise<void> {
+    await this.initialize();
+    await this.database.withTransactionAsync(async () => {
+      await this.database.runAsync(`DELETE FROM _gonvex_replica_entities WHERE scope = ?`, scope);
+      await this.database.runAsync(`DELETE FROM _gonvex_replica_queries WHERE scope = ?`, scope);
+      await this.database.runAsync(`DELETE FROM _gonvex_replica_meta WHERE scope = ?`, scope);
+    });
+  }
 }
 
 export function expoSQLite(database: ExpoSQLiteDatabase): LocalReplicaStorage {
   return new ExpoSQLiteLocalReplicaStorage(database);
+}
+
+function normalizeWindow(value: ReplicaWindow): ReplicaWindow {
+  return {
+    ...value,
+    kind: value.kind ?? "live",
+    key: value.key ?? "id",
+    ids: [...value.ids],
+    resultPath: value.resultPath ? [...value.resultPath] : undefined,
+    hashes: value.hashes ? { ...value.hashes } : undefined,
+  };
 }

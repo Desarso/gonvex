@@ -45,7 +45,7 @@
     {"path": "userLiveLocations.list", "args": {}},
     {"path": "users.me", "args": {}}
   ],
-  "mutations": [
+  "reducers": [
     {
       "path": "tasks.create",
       "args": {"workspaceId": "$workspace", "statusId": "$status", "title": "Gonvex load task"},

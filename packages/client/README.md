@@ -16,6 +16,7 @@ npm install @gonvex/client
 
 ```ts
 import { GonvexClient } from "@gonvex/client";
+import { api } from "./gonvex/_generated/api";
 
 const client = new GonvexClient("ws://localhost:8080/ws", {
   project: "my-project",
@@ -24,8 +25,8 @@ const client = new GonvexClient("ws://localhost:8080/ws", {
 
 client.connect();
 
-const unsubscribe = client.subscribeQuery(
-  { kind: "query", path: "tasks.list" },
+const unsubscribe = client.subscribeLiveQuery(
+  api.tasks.list,
   { status: "open" },
   (message) => {
     if (message.type === "query.result") {
@@ -43,28 +44,23 @@ unsubscribe();
 client.close();
 ```
 
-## Persistent Live Query Windows
+## Local Replica
 
-Live Query windows are persisted automatically in supported browsers when the
-runtime advertises a safe cache scope. A warm subscription can replay its last
-membership immediately while the server verifies it against the committed
-revision stream. Returned entities are materialized into the same normalized
-Local Replica used by Replica Collections.
+The Local Replica is the only client-side server-state store. It owns normalized
+entities, live-query/replica windows, revision metadata, and optimistic command
+patches. One-shot Query results are transient and are never persisted.
 
-Caching is isolated by runtime deployment, project, tenant, user, and current
-permissions. New clients connected to older runtimes stay server-only.
-
-No setup is required. To opt out or clear the disposable cache:
+Inject a durable adapter when desired; omit it for memory-only operation:
 
 ```ts
-const client = new GonvexClient(url, { queryCache: false });
-
-await client.clearQueryCache();
-await client.clearQueryCache({ allScopes: true });
+const client = new GonvexClient(url, {
+  localReplica: { storage: indexedDbReplicaStorage },
+});
 ```
 
-Dexie is loaded asynchronously only after a cache-capable session is confirmed,
-so IndexedDB setup does not delay the WebSocket query path.
+All window updates are applied atomically before listeners are notified. Live
+Query windows and Replica Collections reference the same normalized entities,
+so every view of an entity converges together.
 
 ## Replica Collections
 
@@ -73,7 +69,7 @@ IndexedDB storage and resume them from a durable Postgres revision:
 
 ```ts
 const watch = client.watchReplica<Task>(
-  { kind: "replica", path: "tasks.recent" },
+  api.tasks.recent,
   { workspaceId: "workspace-a" },
 );
 
@@ -83,42 +79,18 @@ const stop = watch.onUpdate(() => {
 });
 ```
 
-Configure or disable Local Replica persistence when constructing the client:
+Configure Local Replica persistence when constructing the client:
 
 ```ts
 const client = new GonvexClient(url, {
-  replica: {
-    databaseName: "my-product-sync",
-    maxBytes: 150 * 1024 * 1024,
-  },
+  localReplica: { storage: indexedDbReplicaStorage },
 });
-
-const memoryOnly = new GonvexClient(url, { replica: false });
 ```
-
-The default global IndexedDB budget is 100 MiB. Server-declared per-collection
-row/byte budgets still apply, and least-recently-used collections are evicted
-first. Storage is isolated by runtime, project, tenant, authenticated identity,
-and permissions.
 
 ## Optimistic Reducers
 
-Every public interactive Reducer declares its optimistic contract. The
-authoritative transaction remains separate from the optimistic overlay:
-
-```go
-app.Reducer(
-  "tasks.update",
-  updateTask,
-  gonvex.Optimistic("tasks").RowIDArg("taskId").FieldsArg("updates"),
-)
-
-app.Query(
-  "tasks.byWorkspace",
-  tasksByWorkspace,
-  gonvex.LiveTable("tasks").Key("_id").ResultRowsAt("page"),
-)
-```
+Every public interactive Reducer declares its optimistic transaction. The
+authoritative transaction and optimistic patches are reconciled in LocalReplica.
 
 Generated references carry this metadata, so a normal Reducer call is enough:
 
@@ -129,22 +101,35 @@ await client.reducer(api.tasks.update, {
 });
 ```
 
-The client persists the pending command, layers it over Local Replica selectors,
-and notifies watchers immediately. Reducer success includes an
+The client persists the pending command, applies it through LocalReplica, and
+notifies watchers immediately. Reducer success includes an
 `originCommandId` and committed revision. The overlay is removed only after the
 corresponding authoritative transaction has been applied locally, preventing an
 empty or stale frame between optimistic and committed state.
 
-Authoritative entity state stays separate from overlays. Durable pending state
-lives in the command outbox and is re-applied after reload. Outbox
+Authoritative entity state and optimistic entities are materialized by one
+LocalReplica graph. Durable pending state lives in the command outbox and is
+re-applied after reload. Outbox
 rows are isolated by project, tenant, and authenticated identity; an account
 switch removes the previous identity's overlay and can never replay its writes
 under the new session. Unscoped rows from the pre-isolation schema are removed
 during migration because their owner cannot be proven. If an opaque credential
 does not expose a stable identity (and no `identity` hint is supplied), its
-outbox is deliberately session-only rather than risking cross-user replay. For
-a complex projection that cannot be derived from one nested fields argument,
-callers can still provide explicit `optimistic` entity patches.
+outbox is deliberately session-only rather than risking cross-user replay.
+
+## Offline Live Queries
+
+Generated Live Query references include the same structured plan Gonvex
+compiles to PostgreSQL. While offline, the client executes that plan over the
+normalized cached corpus:
+
+```ts
+const result = client.offlineLiveQuery(api.tasks.grid, args);
+// { rows, completeness: "complete" | "partial", supported }
+```
+
+`supported: false` means the plan is explicitly server-only. A partial result
+must be labeled as cached data rather than presented as the full database.
 
 ## Lightweight Error Tracking
 
@@ -220,19 +205,17 @@ Reducer also declares optimistic UI metadata. Actions are never queued.
 Deterministic server errors are never queued and always roll an optimistic
 entity overlay back when one exists.
 
-Live queries keep last-good data at the React layer (`useQueryResult`) and
-resubscribe after reconnect. Call `client.retryQuery(ref, args)` to force a
-re-request after a server error or soft timeout.
+Live Queries persist their last verified window in the Local Replica and
+resubscribe after reconnect. Call `client.retryLiveQuery(ref, args)` to force a
+re-request after a server error. `useQueryResult` is for one-shot Queries.
 
 ## Exports
 
 The package exports:
 
 - `GonvexClient`
-- `ConvexReactClient` compatibility alias
 - `GonvexClientError`, `ConnectionState`, timeout defaults
-- transparent persistent query caching and lower-level experimental cache helpers
-- normalized Local Replica entities and Live Query memberships
+- normalized Local Replica entities and Live Query windows
 - durable optimistic Reducer overlays reconciled by command ID and revision
 - opt-in command outbox replay with stable idempotency keys
 - `subscribeReplica`, `watchReplica`, and persistent Replica storage

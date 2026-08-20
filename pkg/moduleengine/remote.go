@@ -26,6 +26,7 @@ type RemoteEngine struct {
 	identity    string
 	artifact    artifactPayload
 	descriptors map[string]Descriptor
+	crons       []gonvex.CronSpec
 
 	mu         sync.Mutex
 	epoch      uint64
@@ -42,7 +43,6 @@ func NewRemoteEngine(host *RemoteHost, projectID string, artifact manifest.Modul
 	if host == nil || !host.Available() {
 		return nil, fmt.Errorf("moduleengine: project %q ships a %s module but no module host is configured", projectID, artifact.NormalizedLanguage())
 	}
-	artifact = artifact.Normalize()
 	if err := artifact.Validate(); err != nil {
 		return nil, fmt.Errorf("moduleengine: project %q module artifact is not executable: %w", projectID, err)
 	}
@@ -83,9 +83,9 @@ func NewRemoteEngine(host *RemoteHost, projectID string, artifact manifest.Modul
 		moduleID: projectID,
 		identity: artifact.Identity(),
 		artifact: artifactPayload{
-			Language:     artifact.NormalizedLanguage(),
-			Entrypoint:   artifact.Entrypoint,
-			ArtifactHash: artifact.Identity(),
+			Language:   artifact.NormalizedLanguage(),
+			Entrypoint: artifact.Entrypoint,
+			Hash:       artifact.Identity(),
 			JavaScript: javaScriptPayload{
 				Path: artifact.JavaScript.Path,
 				Hash: strings.ToLower(strings.TrimSpace(artifact.JavaScript.Hash)),
@@ -96,7 +96,23 @@ func NewRemoteEngine(host *RemoteHost, projectID string, artifact manifest.Modul
 			Functions: functions,
 		},
 		descriptors: descriptors,
+		crons:       cronSpecsFromArtifact(artifact.Crons),
 	}, nil
+}
+
+func cronSpecsFromArtifact(crons []manifest.ModuleCron) []gonvex.CronSpec {
+	result := make([]gonvex.CronSpec, 0, len(crons))
+	for _, cron := range crons {
+		result = append(result, gonvex.CronSpec{
+			Name:         strings.TrimSpace(cron.Name),
+			FunctionPath: strings.TrimSpace(cron.Function),
+			Interval:     time.Duration(cron.IntervalMS) * time.Millisecond,
+			Expression:   strings.TrimSpace(cron.Expression),
+			Args:         append(json.RawMessage(nil), cron.Args...),
+			PerTenant:    cron.Scope == "tenant",
+		})
+	}
+	return result
 }
 
 func moduleFunctionMetadata(function manifest.ModuleFunction) map[string]any {
@@ -146,10 +162,18 @@ func (e *RemoteEngine) Descriptors() map[string]Descriptor {
 	return descriptors
 }
 
-// Crons returns nothing: the module artifact has no schedule surface yet, and
-// inventing one here would let the scheduler register jobs the module cannot
-// actually run.
-func (e *RemoteEngine) Crons() []gonvex.CronSpec { return nil }
+// Crons returns a defensive copy of the artifact's recurring declarations.
+func (e *RemoteEngine) Crons() []gonvex.CronSpec {
+	if e == nil {
+		return nil
+	}
+	result := make([]gonvex.CronSpec, len(e.crons))
+	copy(result, e.crons)
+	for index := range result {
+		result[index].Args = append(json.RawMessage(nil), result[index].Args...)
+	}
+	return result
+}
 
 // Activate publishes this engine's artifact to the module host and makes it the
 // generation new calls use. It is the operation a manifest sync must succeed at
@@ -279,8 +303,8 @@ func (e *RemoteEngine) InvokeAction(ctx *gonvex.ActionCtx, call Invocation) (Res
 	return Result{Value: value}, nil
 }
 
-// expect resolves a path and enforces the same visibility rules a compiled Go
-// module enforces: an unknown path, a wrong kind, and an internal reducer
+// expect resolves a path and enforces the same visibility rules every module
+// host enforces: an unknown path, a wrong kind, and an internal reducer
 // reached from the public entry point all fail before anything is dispatched.
 func (e *RemoteEngine) expect(path string, kind Kind, internal bool) (Descriptor, error) {
 	descriptor, ok := e.Describe(path)
@@ -385,8 +409,10 @@ func (e *RemoteEngine) dispatchError(path string, err error) error {
 		return &gonvex.DispatchError{Code: "not_found", Path: path, Message: hostErr.Message, Err: err}
 	case codeWrongFunctionKind:
 		return &gonvex.DispatchError{Code: "wrong_kind", Path: path, Message: hostErr.Message, Err: err}
-	case codeBadRequest, codeInvalidArtifact, codeArtifactHashMismatch:
+	case codeBadRequest, codeInvalidArtifact, codeArtifactHashMismatch, codeInvalidArgs:
 		return &gonvex.DispatchError{Code: "invalid_args", Path: path, Message: hostErr.Message, Err: err}
+	case codeInvalidResult:
+		return &gonvex.DispatchError{Code: "invalid_result", Path: path, Message: hostErr.Message, Err: err}
 	default:
 		return fmt.Errorf("moduleengine: %q failed: %w", path, err)
 	}
@@ -416,29 +442,6 @@ func dependenciesFromManifest(dependencies manifest.FunctionDependencies) gonvex
 		ShareResultField:    dependencies.ShareResultField,
 		NonOptimisticReason: dependencies.NonOptimisticReason,
 	}
-	for _, read := range dependencies.Reads {
-		converted.Reads = append(converted.Reads, gonvex.ReadDependency{
-			Table:    read.Table,
-			Columns:  append([]string(nil), read.Columns...),
-			Filters:  append([]string(nil), read.Filters...),
-			OrdersBy: append([]string(nil), read.OrdersBy...),
-			Windowed: read.Windowed,
-		})
-	}
-	if reducer := dependencies.OptimisticReducer; reducer != nil {
-		converted.OptimisticReducer = &gonvex.OptimisticReducerDefinition{
-			Entity:     reducer.Entity,
-			RowIDPath:  append([]string(nil), reducer.RowIDPath...),
-			FieldsPath: append([]string(nil), reducer.FieldsPath...),
-		}
-	}
-	if projection := dependencies.OptimisticProjection; projection != nil {
-		converted.OptimisticProjection = &gonvex.OptimisticProjectionDefinition{
-			Entity:     projection.Entity,
-			Key:        projection.Key,
-			ResultPath: append([]string(nil), projection.ResultPath...),
-		}
-	}
 	if plan := dependencies.LiveQueryPlan; plan != nil {
 		converted.LiveQueryPlan = liveQueryPlanFromManifest(*plan)
 	}
@@ -460,6 +463,19 @@ func liveQueryPlanFromManifest(plan manifest.LiveQueryPlan) *gonvex.LiveQueryPla
 			Columns:  append([]string(nil), plan.Search.Columns...),
 		}
 	}
+	if plan.Filters != nil {
+		converted.Filters = &gonvex.LiveFilters{
+			Argument:       plan.Filters.Argument,
+			AllowedColumns: append([]string(nil), plan.Filters.AllowedColumns...),
+			AllowedOperators: func() []gonvex.FilterOperator {
+				out := make([]gonvex.FilterOperator, len(plan.Filters.AllowedOperators))
+				for i, operator := range plan.Filters.AllowedOperators {
+					out[i] = gonvex.FilterOperator(operator)
+				}
+				return out
+			}(),
+		}
+	}
 	if plan.Sort != nil {
 		converted.Sort = &gonvex.LiveSort{
 			ColumnArgument:    plan.Sort.ColumnArgument,
@@ -475,6 +491,7 @@ func liveQueryPlanFromManifest(plan manifest.LiveQueryPlan) *gonvex.LiveQueryPla
 			LimitArgument:  plan.Window.LimitArgument,
 			DefaultLimit:   plan.Window.DefaultLimit,
 			MaxLimit:       plan.Window.MaxLimit,
+			Count:          plan.Window.Count,
 		}
 	}
 	return converted

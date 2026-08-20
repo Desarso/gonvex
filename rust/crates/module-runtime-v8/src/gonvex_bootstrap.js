@@ -88,6 +88,11 @@
 
   const optional = (value) => (value === undefined ? null : value);
 
+  const nonNegativeInteger = (name, value) => {
+    if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${name} must be a non-negative safe integer`);
+    return value;
+  };
+
   const parameterList = (parameters) => {
     if (parameters === undefined || parameters === null) return [];
     if (!Array.isArray(parameters)) throw new TypeError("query parameters must be an array");
@@ -149,11 +154,9 @@
       kind: request.kind,
       function: request.function,
       now: request.now,
-      account,
       auth: Object.freeze({ account }),
       tenant: identity.tenant ?? null,
       member: identity.member ?? null,
-      permissions: identity.permissions ?? null,
     };
 
     const db = {};
@@ -193,8 +196,27 @@
     if (granted.runReducer) {
       context.runReducer = (name, args) => hostCall({ kind: "runReducer", function: text("reducer", name), args: optional(args) });
     }
+    if (granted.scheduler) {
+      context.scheduler = Object.freeze({
+        runAfter: (delayMs, name, args) => hostCall({
+          kind: "scheduleAfter",
+          delayMs: nonNegativeInteger("scheduler delayMs", delayMs),
+          function: text("scheduled function", name),
+          args: optional(args),
+        }),
+        runAt: (atUnixMs, name, args) => hostCall({
+          kind: "scheduleAt",
+          atUnixMs: nonNegativeInteger("scheduler atUnixMs", atUnixMs),
+          function: text("scheduled function", name),
+          args: optional(args),
+        }),
+      });
+    }
     if (granted.network) {
       context.fetch = async (input, init) => createResponse(await hostCall({ kind: "fetch", request: requestInit(input, init) }));
+    }
+    if (granted.environment) {
+      context.env = Object.freeze({ ...(request.environment ?? {}) });
     }
     if (granted.storage) {
       const storage = (operation, payload) => hostCall({ kind: "storage", operation, payload: optional(payload) });
@@ -216,9 +238,23 @@
   // `export const list = query({ handler })` and `export async function list()`
   // are both legal module shapes, so unwrap one level before giving up. The
   // module SDK's declaration helpers park the executable handler on `run`.
-  const resolveHandler = (binding) => {
+  // A documented `createModule()` module exports its ModuleBuilder as the
+  // default binding; resolve its registered handler by public path so the
+  // builder form and the direct-export form share the same ABI.
+  const resolveHandler = (binding, functionPath) => {
     if (typeof binding === "function") return binding;
     if (binding !== null && typeof binding === "object") {
+      if (typeof binding.runtimeRegistrations === "function") {
+        try {
+          const registration = binding.runtimeRegistrations()
+            .find((candidate) => candidate && candidate.path === functionPath);
+          if (registration && typeof registration.handler === "function") return registration.handler;
+        } catch {
+          // Continue through the ordinary binding shapes below. The Rust
+          // resolver still reports a precise dispatch failure if no handler
+          // is exposed for this manifest entry.
+        }
+      }
       if (typeof binding.handler === "function") return binding.handler;
       if (typeof binding.run === "function") return binding.run;
       if (binding.options !== null && typeof binding.options === "object" && typeof binding.options.run === "function") {
@@ -235,7 +271,7 @@
   return async (binding, requestJson, argsJson) => {
     const request = JSON.parse(requestJson);
 
-    const handler = resolveHandler(binding);
+    const handler = resolveHandler(binding, request.function);
     if (handler === null) {
       return failure("dispatch", `module export for ${request.function} is not a callable ${request.kind} handler`);
     }

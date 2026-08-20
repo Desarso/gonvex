@@ -18,19 +18,11 @@ import {
   type ProjectLanguage,
 } from "./module-artifact.js";
 import type {
-  FunctionDependencies,
   FunctionEntry,
-  FunctionKind,
   JsonValue,
-  LiveExpression,
-  LiveQueryPlan,
-  LiveValue,
   Manifest,
-  OptimisticProjectionDefinition,
-  OptimisticReducerDefinition,
-  ReplicaCollectionDefinition,
+  ModuleSchema,
   SchemaDefinition,
-  SourceBundle,
   Table,
 } from "./manifest-types.js";
 
@@ -38,9 +30,6 @@ export type * from "./manifest-types.js";
 export type { ProjectLanguage } from "./module-artifact.js";
 
 type BackendSources = {
-  language: ProjectLanguage;
-  files: string[];
-  goFiles: string[];
   moduleFiles: string[];
   config: ProjectConfig;
 };
@@ -57,7 +46,7 @@ type ProjectConfig = {
   backendDir?: string;
   generatedDir?: string;
   tenantMode?: string;
-  /** Overrides backend language detection; "go" or "typescript". */
+  /** Gonvex v2 accepts only "typescript". */
   language?: string;
   module?: {
     /** Project-relative module entrypoint. */
@@ -93,7 +82,7 @@ type ProjectGoogleAuth = {
   databaseMode?: string;
 };
 
-type AppAuthUser = {
+type AppAuthAccount = {
   id: string;
   email?: string;
   name?: string;
@@ -634,7 +623,7 @@ async function runCodegen(argv: string[]) {
   const sources = await collectBackendSources(projectRoot);
   const manifest = await buildManifest(projectRoot, sources, settings.projectID);
   await writeBindings(projectRoot, manifest);
-  console.log(`[gonvex] generated ${Object.keys(manifest.functions).length} function binding(s) without runtime sync`);
+  console.log(`[gonvex] generated ${Object.keys(manifest.functions).length} TypeScript function binding(s)`);
   if (manifest.module) {
     const fileCount = Object.keys(manifest.module.files).length;
     console.log(`[gonvex] built ${manifest.module.language} module artifact ${manifest.module.hash.slice(0, 12)} from ${fileCount} file(s)`);
@@ -725,7 +714,7 @@ async function runEnv(argv: string[]) {
 }
 
 export async function runAuth(argv: string[]) {
-  const optionsWithValues = ["--project", "--runtime-url", "--project-id", "--key", "--origin", "--callback-path", "--signup-mode", "--tenant", "--email", "--owner", "--role", "--user"];
+  const optionsWithValues = ["--project", "--runtime-url", "--project-id", "--key", "--origin", "--callback-path", "--signup-mode", "--tenant", "--email", "--owner", "--role", "--member", "--account"];
   const positional = positionalArgs(argv, optionsWithValues);
   const action = positional[0];
   if (!action || action === "help") {
@@ -835,20 +824,20 @@ export async function runAuth(argv: string[]) {
     return;
   }
 
-  if (action === "users" || action === "accounts") {
-    const usersEndpoint = `${settings.runtimeURL}/dev/projects/${encodeURIComponent(settings.projectID)}/auth/users`;
-    const payload = await runtimeJSON<{ users?: AppAuthUser[] }>(await fetch(usersEndpoint, { headers: projectAuthHeaders(settings) }));
-    const users = payload.users ?? [];
+  if (action === "accounts") {
+    const accountsEndpoint = `${settings.runtimeURL}/dev/projects/${encodeURIComponent(settings.projectID)}/auth/accounts`;
+    const payload = await runtimeJSON<{ accounts?: AppAuthAccount[] }>(await fetch(accountsEndpoint, { headers: projectAuthHeaders(settings) }));
+    const accounts = payload.accounts ?? [];
     if (argv.includes("--json")) {
-      console.log(JSON.stringify(users, null, 2));
+      console.log(JSON.stringify(accounts, null, 2));
       return;
     }
-    if (users.length === 0) {
+    if (accounts.length === 0) {
       console.log(`[gonvex] no app accounts for ${settings.projectID}`);
       return;
     }
-    for (const user of users) {
-      console.log(`${user.id}\t${user.email ?? ""}\t${user.name ?? ""}\t${user.provider}`);
+    for (const account of accounts) {
+      console.log(`${account.id}\t${account.email ?? ""}\t${account.name ?? ""}\t${account.provider}`);
     }
     return;
   }
@@ -886,14 +875,14 @@ export async function runAuth(argv: string[]) {
     if (!tenant) throw new Error("--tenant is required for membership commands");
     const membershipEndpoint = `${settings.runtimeURL}/dev/projects/${encodeURIComponent(settings.projectID)}/auth/memberships?tenant=${encodeURIComponent(tenant)}`;
     if (operation === "list" || operation === "ls") {
-      const payload = await runtimeJSON<{ members?: Array<{ userId: string; email: string; name: string; role: string }>; invitations?: Array<{ email: string; role: string; expiresAt?: string }> }>(
+      const payload = await runtimeJSON<{ members?: Array<{ memberId: string; email: string; name: string; role: string }>; invitations?: Array<{ email: string; role: string; expiresAt?: string }> }>(
         await fetch(membershipEndpoint, { headers: projectAuthHeaders(settings) }),
       );
       if (argv.includes("--json")) {
         console.log(JSON.stringify(payload, null, 2));
         return;
       }
-      for (const member of payload.members ?? []) console.log(`${member.userId}\t${member.email}\t${member.role}\t${member.name}`);
+      for (const member of payload.members ?? []) console.log(`${member.memberId}\t${member.email}\t${member.role}\t${member.name}`);
       for (const invitation of payload.invitations ?? []) console.log(`invited\t${invitation.email}\t${invitation.role}\t${invitation.expiresAt ?? ""}`);
       return;
     }
@@ -909,40 +898,40 @@ export async function runAuth(argv: string[]) {
       return;
     }
     if (operation === "remove" || operation === "rm") {
-      const user = valueFor(argv, "--user");
+      const member = valueFor(argv, "--member");
       const email = valueFor(argv, "--email");
-      if (!user && !email) throw new Error("--user is required to remove a member, or --email to revoke an invitation");
-      const target = user ? `user=${encodeURIComponent(user)}` : `email=${encodeURIComponent(email!)}`;
+      if (!member && !email) throw new Error("--member is required to remove a member, or --email to revoke an invitation");
+      const target = member ? `member=${encodeURIComponent(member)}` : `email=${encodeURIComponent(email!)}`;
       await runtimeJSON(await fetch(`${membershipEndpoint}&${target}`, {
         method: "DELETE", headers: projectAuthHeaders(settings),
       }));
-      console.log(user
-        ? `[gonvex] removed ${user} from tenant ${tenant}`
+      console.log(member
+        ? `[gonvex] removed ${member} from tenant ${tenant}`
         : `[gonvex] revoked the invitation for ${email} from tenant ${tenant}`);
       return;
     }
     throw new Error(`unknown auth memberships command ${operation}`);
   }
 
-  if (action === "user") {
+  if (action === "account") {
     const operation = positional[1];
-    const user = valueFor(argv, "--user") ?? positional[2];
-    if (!operation || !user) throw new Error("usage: gonvex auth user <disable|enable|delete> <user-id>");
-    const userEndpoint = `${settings.runtimeURL}/dev/projects/${encodeURIComponent(settings.projectID)}/auth/users/${encodeURIComponent(user)}`;
+    const account = valueFor(argv, "--account") ?? positional[2];
+    if (!operation || !account) throw new Error("usage: gonvex auth account <disable|enable|delete> <account-id>");
+    const accountEndpoint = `${settings.runtimeURL}/dev/projects/${encodeURIComponent(settings.projectID)}/auth/accounts/${encodeURIComponent(account)}`;
     if (operation === "disable" || operation === "enable") {
-      await runtimeJSON(await fetch(userEndpoint, {
+      await runtimeJSON(await fetch(accountEndpoint, {
         method: "PATCH", headers: { ...projectAuthHeaders(settings), "content-type": "application/json" },
         body: JSON.stringify({ disabled: operation === "disable" }),
       }));
-      console.log(`[gonvex] ${operation}d app account ${user}`);
+      console.log(`[gonvex] ${operation}d app account ${account}`);
       return;
     }
     if (operation === "delete" || operation === "remove") {
-      await runtimeJSON(await fetch(userEndpoint, { method: "DELETE", headers: projectAuthHeaders(settings) }));
-      console.log(`[gonvex] deleted app account ${user}`);
+      await runtimeJSON(await fetch(accountEndpoint, { method: "DELETE", headers: projectAuthHeaders(settings) }));
+      console.log(`[gonvex] deleted app account ${account}`);
       return;
     }
-    throw new Error(`unknown auth user command ${operation}`);
+    throw new Error(`unknown auth account command ${operation}`);
   }
 
   printAuthHelp();
@@ -1074,7 +1063,7 @@ async function wireViteReactGoogleAuth(root: string) {
       "  const auth = useGonvexAuth();",
       '  const messages = useLiveQuery<Message[]>(api.messages.list, {}) ?? [];',
     ].join("\n"))
-    .replace('<div className="status">Connected to {props.runtimeURL}</div>', '<div className="status"><span>Connected to {props.runtimeURL} as {auth.user?.email}</span><GoogleSignInButton /></div>');
+    .replace('<div className="status">Connected to {props.runtimeURL}</div>', '<div className="status"><span>Connected to {props.runtimeURL} as {auth.account?.email}</span><GoogleSignInButton /></div>');
   await writeFile(mainPath, main);
   await writeFile(appPath, app);
   return true;
@@ -1092,12 +1081,12 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
   while (!signal?.aborted) {
     const sources = await collectBackendSources(root);
     // Watch migrations too: editing or adding one must trigger a re-sync,
-    // otherwise a new migration sits unapplied until an unrelated .go edit.
+    // otherwise a new migration sits unapplied until an unrelated module edit.
     // gonvex.json selects the TypeScript entrypoint and bundle destination. It
     // belongs in the fingerprint, while gonvex/_build is excluded from source
     // collection so writing the generated ESM cannot trigger a rebuild loop.
     const configPath = join(root, "gonvex.json");
-    const fingerprintFiles = [...sources.files, ...await migrationFiles(join(root, "migrations"))];
+    const fingerprintFiles = [...sources.moduleFiles, ...await migrationFiles(join(root, "migrations"))];
     if (existsSync(configPath)) fingerprintFiles.push(configPath);
     const fingerprint = await filesFingerprint(fingerprintFiles);
     const now = Date.now();
@@ -1122,7 +1111,12 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
       }
       lastSyncAttempt = now;
       try {
-        await syncRuntime(settings, manifest);
+        const observedSchema = await syncRuntime(settings, manifest);
+        if (observedSchema) {
+          manifest.schema = observedSchema;
+          lastManifest = manifest;
+          await writeBindings(root, manifest);
+        }
         lastSyncSucceeded = true;
         lastRuntimeCheck = now;
         console.log(`[gonvex] synced project ${settings.projectID || "(key-inferred)"} to ${settings.runtimeURL}`);
@@ -1130,7 +1124,7 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
         lastSyncSucceeded = false;
         const detail = error instanceof Error ? error.message : String(error);
         const valkeyHint = isLocalRuntimeURL(settings.runtimeURL)
-          ? " Local runtimes require a reachable VALKEY_URL (or REDIS_URL), for example VALKEY_URL=redis://127.0.0.1:6380/0."
+          ? " Local runtimes require a reachable VALKEY_URL, for example VALKEY_URL=redis://127.0.0.1:6380/0."
           : "";
         console.error(`[gonvex] runtime sync failed: ${detail}.${valkeyHint}`);
       }
@@ -1142,7 +1136,12 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
         const inSync = await runtimeHasManifest(settings, manifest);
         if (!inSync) {
           lastSyncAttempt = now;
-          await syncRuntime(settings, manifest);
+          const observedSchema = await syncRuntime(settings, manifest);
+          if (observedSchema) {
+            manifest.schema = observedSchema;
+            lastManifest = manifest;
+            await writeBindings(root, manifest);
+          }
           lastSyncSucceeded = true;
           console.log(`[gonvex] runtime state was missing; re-synced project ${settings.projectID || "(key-inferred)"}`);
         }
@@ -1164,531 +1163,31 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
 async function collectBackendSources(root: string): Promise<BackendSources> {
   const backendDir = join(root, "gonvex");
   const config = await loadConfig(root);
-  const [go, module] = await Promise.all([goFiles(backendDir), moduleSourceFiles(backendDir)]);
-  const language = await detectProjectLanguage(backendDir, config.language);
-  const sidecar = module.length > 0 && go.length > 0 && Boolean(config.module?.entrypoint);
-  if (go.length > 0 && module.length > 0 && !sidecar && language === "go") {
-    // A Go project may opt into a TypeScript sidecar only through an explicit
-    // module entrypoint; otherwise a stray .ts file must not alter its build.
-    return { language, files: go, goFiles: go, moduleFiles: [], config };
-  }
+  const module = await moduleSourceFiles(backendDir);
+  await detectProjectLanguage(backendDir, config.language);
   return {
-    language,
-    files: sidecar ? [...go, ...module].sort() : language === "typescript" ? module : go,
-    goFiles: go,
-    moduleFiles: sidecar || language === "typescript" ? module : [],
+    moduleFiles: module,
     config,
   };
 }
 
 async function buildManifest(root: string, sources: BackendSources, projectID: string): Promise<Manifest> {
-  const functions: Record<string, FunctionEntry> = {};
-  const schema = emptySchemaDefinition();
-  let packageName = "app";
-  for (const file of sources.goFiles) {
-    Object.assign(functions, await parseRegistrations(root, file));
-    mergeSchemaDefinition(schema, await parseSchema(file));
-    if (packageName === "app") {
-      packageName = await detectPackageName(file);
-    }
-  }
-  const bundle = sources.goFiles.length > 0
-    ? await buildSourceBundle(root, sources.goFiles, projectID, packageName)
-    : undefined;
-  const module = sources.moduleFiles.length > 0
-    ? await buildModuleArtifact({
+  const module = await buildModuleArtifact({
       root,
       backendDir: join(root, "gonvex"),
       files: sources.moduleFiles,
       migrations: await migrationFiles(join(root, "migrations")),
       entrypoint: sources.config.module?.entrypoint,
       bundle: sources.config.module?.bundle,
-    })
-    : undefined;
-  const moduleFunctions = module ? moduleManifestFunctions(module) : {};
-  for (const [path, entry] of Object.entries(moduleFunctions)) {
-    if (functions[path]) throw new Error(`duplicate module function path ${JSON.stringify(path)} between Go and TypeScript modules`);
-    functions[path] = entry;
-  }
-  if (!bundle && !module) {
-    throw new Error("Gonvex backend has no Go or TypeScript module sources");
-  }
+    });
   return {
     project: projectID,
     generatedAt: new Date().toISOString(),
-    functions,
-    schema,
-    ...(bundle ? { bundle } : {}),
-    ...(module ? { module } : {}),
-    ...(module && Object.keys(module.visibility).length > 0 ? { visibility: module.visibility } : {}),
-  };
-}
-
-// TypeScript projects ship the language-neutral artifact instead of the Go
-// source bundle. Table definitions still come from Go schema parsing, so the
-// manifest schema stays empty until a TypeScript schema surface exists; the
-// artifact carries the module sources the runtime needs in the meantime.
-async function buildModuleManifest(root: string, sources: BackendSources, projectID: string): Promise<Manifest> {
-  const artifact = await buildModuleArtifact({
-    root,
-    backendDir: join(root, "gonvex"),
-    files: sources.files,
-    migrations: await migrationFiles(join(root, "migrations")),
-    entrypoint: sources.config.module?.entrypoint,
-    bundle: sources.config.module?.bundle,
-  });
-  return {
-    project: projectID,
-    generatedAt: new Date().toISOString(),
-    functions: moduleManifestFunctions(artifact),
+    functions: moduleManifestFunctions(module),
     schema: emptySchemaDefinition(),
-    module: artifact,
-    ...(Object.keys(artifact.visibility).length > 0 ? { visibility: artifact.visibility } : {}),
+    module,
+    ...(Object.keys(module.visibility).length > 0 ? { visibility: module.visibility } : {}),
   };
-}
-
-async function buildSourceBundle(root: string, files: string[], projectID: string, packageName: string): Promise<SourceBundle> {
-  const backendDir = join(root, "gonvex");
-  const encodedFiles: Record<string, string> = {};
-  for (const file of files) {
-    const source = await readFile(file);
-    const rel = relative(backendDir, file).replace(/\\/g, "/");
-    encodedFiles[`app/${rel}`] = Buffer.from(source).toString("base64");
-  }
-  // Versioned SQL migrations ship in the bundle under migrations/, which is
-  // where the runtime looks for them. Without this the runtime sees no
-  // migrations at all and silently applies only the declarative schema.
-  for (const file of await migrationFiles(join(root, "migrations"))) {
-    const source = await readFile(file);
-    const rel = relative(join(root, "migrations"), file).replace(/\\/g, "/");
-    encodedFiles[`migrations/${rel}`] = Buffer.from(source).toString("base64");
-  }
-  const hash = createHash("sha256");
-  for (const path of Object.keys(encodedFiles).sort()) {
-    hash.update(`${path}:${encodedFiles[path]};`);
-  }
-  return {
-    hash: hash.digest("hex"),
-    modulePath: `gonvexapp/${sanitizeProjectID(projectID)}`,
-    packageName,
-    files: encodedFiles,
-  };
-}
-
-async function detectPackageName(file: string) {
-  const source = await readFile(file, "utf8");
-  const match = source.match(/^package\s+([A-Za-z_][A-Za-z0-9_]*)/m);
-  return match?.[1] ?? "app";
-}
-
-function sanitizeProjectID(projectID: string) {
-  const trimmed = projectID.trim();
-  if (!trimmed) return "project";
-  return trimmed.replace(/[^a-zA-Z0-9._-]+/g, "-");
-}
-
-async function parseRegistrations(root: string, file: string) {
-  const source = await readFile(file, "utf8");
-  const pattern = /app\.(Query|LiveQuery|ReplicaCollection|Reducer|Action|InternalReducer)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)/g;
-  const entries: Record<string, FunctionEntry> = {};
-  for (const match of source.matchAll(pattern)) {
-    const entry: FunctionEntry = {
-      kind: functionKind(match[1]!),
-      handler: match[3]!,
-      file: relative(root, file),
-      ...(match[1] === "InternalReducer" ? { internal: true } : {}),
-      ...(match[1] === "LiveQuery" ? { delivery: "live" as const } : {}),
-      ...(match[1] === "ReplicaCollection" ? { delivery: "replica" as const } : {}),
-      ...(match[1] === "Query" ? { delivery: "oneShot" as const } : {}),
-    };
-    const openParen = source.indexOf("(", match.index);
-    const closeParen = findClosingParen(source, openParen);
-    if (openParen >= 0 && closeParen > openParen) {
-      const dependencies = parseFunctionDependencies(source.slice(openParen + 1, closeParen));
-      if (Object.keys(dependencies).length > 0) entry.dependencies = dependencies;
-      if (match[1] === "ReplicaCollection") {
-        entry.replica = parseReplicaCollectionDefinition(source.slice(openParen + 1, closeParen));
-      }
-    }
-    entries[match[2]!] = entry;
-  }
-  return entries;
-}
-
-function parseReplicaCollectionDefinition(callBody: string): ReplicaCollectionDefinition | undefined {
-  const match = /(?:gonvex\.)?ReplicaTable\s*\(/.exec(callBody);
-  if (!match) return undefined;
-  const openParen = callBody.indexOf("(", match.index);
-  const closeParen = findClosingParen(callBody, openParen);
-  if (closeParen < 0) return undefined;
-  const table = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
-  if (!table) return undefined;
-  const definition: ReplicaCollectionDefinition = { table, key: "id", columns: [], mode: "eager" };
-  let cursor = closeParen + 1;
-  while (cursor < callBody.length) {
-    const chain = chainedGoMethod(
-      callBody,
-      cursor,
-      "Key|Columns|EqualArg|ExcludeWhenSet|VisibilityDependsOn|OrderBy|Eager|Progressive|Budget",
-    );
-    if (!chain) break;
-    const chainOpen = chain.openParen;
-    const chainClose = findClosingParen(callBody, chainOpen);
-    if (chainClose < 0) break;
-    const method = chain.method;
-    const body = callBody.slice(chainOpen + 1, chainClose);
-    const values = stringArgs(body);
-    if (method === "Key" && values[0]) definition.key = values[0];
-    if (method === "Columns") definition.columns = values;
-    if (method === "EqualArg" && values[0]) {
-      (definition.equalFilters ??= {})[values[0]] = values[1] ?? values[0];
-    }
-    if (method === "ExcludeWhenSet") definition.excludeWhenSet = values;
-    if (method === "VisibilityDependsOn") definition.visibilityTables = values;
-    if (method === "OrderBy" && values[0]) {
-      definition.orderBy = values[0];
-      definition.orderDirection = values[1]?.toLowerCase() === "asc" ? "asc" : "desc";
-    }
-    if (method === "Eager") definition.mode = "eager";
-    if (method === "Progressive") definition.mode = "progressive";
-    if (method === "Budget") {
-      const numbers = body.split(",").map((value) => Number(value.trim()));
-      if (Number.isFinite(numbers[0]) && numbers[0]! > 0) definition.maxRows = numbers[0];
-      if (Number.isFinite(numbers[1]) && numbers[1]! > 0) definition.maxBytes = numbers[1];
-    }
-    cursor = chainClose + 1;
-  }
-  if (!definition.columns.includes(definition.key)) definition.columns.push(definition.key);
-  return definition;
-}
-
-function parseFunctionDependencies(callBody: string): FunctionDependencies {
-  const dependencies: FunctionDependencies = {};
-  const pattern = /(?:gonvex\.)?(LivePlan|ShareByPermissions|ShareResultFrom|OptimisticReducer|OptimisticProjection|OnlineOnlyNonOptimistic)\s*\(/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(callBody)) !== null) {
-    const option = match[1]!;
-    const openParen = callBody.indexOf("(", match.index);
-    const closeParen = findClosingParen(callBody, openParen);
-    if (closeParen < 0) break;
-
-    if (option === "LivePlan") {
-      const planBody = callBody.slice(openParen + 1, closeParen);
-      const plan = parseLiveQueryPlan(planBody);
-      if (plan) {
-        dependencies.liveQueryPlan = plan;
-        (dependencies.reads ??= []).push({
-          table: plan.table,
-          columns: plan.columns,
-          filters: [...(plan.search?.columns ?? []), ...liveExpressionColumns(plan.where)],
-          ordersBy: plan.sort?.allowedColumns,
-          windowed: Boolean(plan.window),
-        });
-      }
-      pattern.lastIndex = closeParen + 1;
-      continue;
-    }
-
-
-    if (option === "OnlineOnlyNonOptimistic") {
-      dependencies.nonOptimisticReason = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
-      pattern.lastIndex = closeParen + 1;
-      continue;
-    }
-
-    if (option === "ShareByPermissions") {
-      dependencies.shareByPermissions = true;
-      pattern.lastIndex = closeParen + 1;
-      continue;
-    }
-
-		if (option === "ShareResultFrom") {
-			const values = stringArgs(callBody.slice(openParen + 1, closeParen));
-			dependencies.shareResultFrom = values[0];
-			dependencies.shareResultField = values[1];
-			pattern.lastIndex = closeParen + 1;
-			continue;
-		}
-
-    if (option === "OptimisticReducer") {
-      const entity = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
-      const definition: OptimisticReducerDefinition = { entity: entity?.trim() ?? "", rowIdPath: [], fieldsPath: [] };
-      let cursor = closeParen + 1;
-      while (cursor < callBody.length) {
-        const chain = chainedGoMethod(callBody, cursor, "RowIDArg|FieldsArg");
-        if (!chain) break;
-        const chainClose = findClosingParen(callBody, chain.openParen);
-        if (chainClose < 0) break;
-        const path = cleanParsedOptimisticPath(
-          stringArgs(callBody.slice(chain.openParen + 1, chainClose))[0] ?? "",
-        );
-        if (chain.method === "RowIDArg") definition.rowIdPath = path;
-        if (chain.method === "FieldsArg") definition.fieldsPath = path;
-        cursor = chainClose + 1;
-      }
-      if (definition.entity) dependencies.optimisticReducer = definition;
-      pattern.lastIndex = cursor;
-      continue;
-    }
-
-    if (option === "OptimisticProjection") {
-      const entity = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
-      const definition: OptimisticProjectionDefinition = { entity: entity?.trim() ?? "", key: "id", resultPath: [] };
-      let cursor = closeParen + 1;
-      while (cursor < callBody.length) {
-        const chain = chainedGoMethod(callBody, cursor, "Key|ResultPath");
-        if (!chain) break;
-        const chainClose = findClosingParen(callBody, chain.openParen);
-        if (chainClose < 0) break;
-        const value = stringArgs(callBody.slice(chain.openParen + 1, chainClose))[0] ?? "";
-        if (chain.method === "Key" && value.trim()) definition.key = value.trim();
-        if (chain.method === "ResultPath") definition.resultPath = cleanParsedOptimisticPath(value);
-        cursor = chainClose + 1;
-      }
-      if (definition.entity) dependencies.optimisticProjection = definition;
-      pattern.lastIndex = cursor;
-      continue;
-    }
-
-  }
-  return dependencies;
-}
-
-function liveExpressionColumns(expression: LiveExpression | undefined): string[] {
-  if (!expression) return [];
-  return [expression.column ?? "", ...(expression.children ?? []).flatMap(liveExpressionColumns)].filter(Boolean);
-}
-
-function parseLiveQueryPlan(body: string): LiveQueryPlan | undefined {
-  const match = /(?:gonvex\.)?LiveTable\s*\(/.exec(body);
-  if (!match) return undefined;
-  const openParen = body.indexOf("(", match.index);
-  const closeParen = findClosingParen(body, openParen);
-  if (closeParen < 0) return undefined;
-  const table = stringArgs(body.slice(openParen + 1, closeParen))[0];
-  if (!table) return undefined;
-  const plan: LiveQueryPlan = { table, key: "id" };
-  let cursor = closeParen + 1;
-  while (cursor < body.length) {
-    const chain = chainedGoMethod(body, cursor, "EntityKey|Select|ResultRowsAt|Filter|SearchArg|SortArgs|WindowArgs|OnlineOnly");
-    if (!chain) break;
-    const chainClose = findClosingParen(body, chain.openParen);
-    if (chainClose < 0) break;
-    const chainBody = body.slice(chain.openParen + 1, chainClose);
-    const values = stringArgs(chainBody);
-    if (chain.method === "EntityKey" && values[0]) plan.key = values[0];
-    if (chain.method === "Select") plan.columns = values;
-    if (chain.method === "ResultRowsAt") plan.resultPath = values;
-    if (chain.method === "Filter") plan.where = parseLiveExpressionSource(chainBody);
-    if (chain.method === "SearchArg" && values[0]) plan.search = { argument: values[0], columns: values.slice(1) };
-    if (chain.method === "SortArgs" && values.length >= 4) plan.sort = {
-      columnArgument: values[0]!, directionArgument: values[1]!, defaultColumn: values[2]!,
-      defaultDirection: values[3]!.toLowerCase() === "asc" ? "asc" : "desc", allowedColumns: values.slice(4),
-    };
-    if (chain.method === "WindowArgs" && values.length >= 2) {
-      const parts = chainBody.split(",").map((value) => value.trim());
-      plan.window = { offsetArgument: values[0]!, limitArgument: values[1]!, defaultLimit: Number(parts[2]) || 100, maxLimit: Number(parts[3]) || Number(parts[2]) || 100 };
-    }
-    if (chain.method === "OnlineOnly") plan.serverOnly = true;
-    cursor = chainClose + 1;
-  }
-  return plan;
-}
-
-function parseLiveExpressionSource(source: string): LiveExpression | undefined {
-  const trimmed = source.trim();
-  const match = /^(?:gonvex\.)?(Eq|Neq|GreaterThan|GreaterOrEqual|LessThan|LessOrEqual|In|Contains|ContainsInsensitive|Range|All|Any|Not|ServerExpression)\s*\(/.exec(trimmed);
-  if (!match) return undefined;
-  const openParen = trimmed.indexOf("(", match.index);
-  const closeParen = findClosingParen(trimmed, openParen);
-  if (closeParen < 0) return undefined;
-  const argumentsList = splitGoArguments(trimmed.slice(openParen + 1, closeParen));
-  const operators: Record<string, LiveExpression["operator"]> = {
-    Eq: "eq", Neq: "neq", GreaterThan: "gt", GreaterOrEqual: "gte", LessThan: "lt",
-    LessOrEqual: "lte", In: "in", Contains: "contains", ContainsInsensitive: "containsInsensitive",
-    Range: "range", All: "and", Any: "or", Not: "not", ServerExpression: "server",
-  };
-  const operator = operators[match[1]!]!;
-  if (operator === "and" || operator === "or" || operator === "not") {
-    return { operator, children: argumentsList.map(parseLiveExpressionSource).filter((value): value is LiveExpression => Boolean(value)) };
-  }
-  return {
-    operator,
-    column: stringArgs(argumentsList[0] ?? "")[0],
-    value: parseLiveValueSource(argumentsList[1]),
-    valueTo: parseLiveValueSource(argumentsList[2]),
-  };
-}
-
-function parseLiveValueSource(source: string | undefined): LiveValue | undefined {
-  if (!source) return undefined;
-  const argument = /^(?:gonvex\.)?Arg\s*\(/.exec(source.trim());
-  if (argument) return { argument: stringArgs(source)[0] };
-  const literal = /^(?:gonvex\.)?Literal\s*\(/.exec(source.trim());
-  if (!literal) return undefined;
-  const openParen = source.indexOf("(");
-  const closeParen = findClosingParen(source, openParen);
-  const raw = source.slice(openParen + 1, closeParen).trim();
-  if (raw === "nil" || raw === "null") return { literal: null };
-  if (raw === "true") return { literal: true };
-  if (raw === "false") return { literal: false };
-  const strings = stringArgs(raw);
-  if (strings.length > 0) return { literal: strings[0] };
-  const number = Number(raw);
-  return { literal: Number.isFinite(number) ? number : null };
-}
-
-function splitGoArguments(source: string): string[] {
-  const result: string[] = [];
-  let start = 0;
-  let depth = 0;
-  let quote = "";
-  let escaped = false;
-  for (let index = 0; index < source.length; index += 1) {
-    const char = source[index]!;
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === quote) quote = "";
-      continue;
-    }
-    if (char === '"' || char === "'" || char === "`") { quote = char; continue; }
-    if (char === "(" || char === "[" || char === "{") depth += 1;
-    if (char === ")" || char === "]" || char === "}") depth -= 1;
-    if (char === "," && depth === 0) {
-      result.push(source.slice(start, index).trim());
-      start = index + 1;
-    }
-  }
-  const tail = source.slice(start).trim();
-  if (tail) result.push(tail);
-  return result;
-}
-
-function chainedGoMethod(source: string, start: number, methods: string) {
-  let cursor = skipGoTrivia(source, start);
-  if (source[cursor] !== ".") return undefined;
-  cursor = skipGoTrivia(source, cursor + 1);
-  const match = new RegExp(`^(${methods})\\b`).exec(source.slice(cursor));
-  if (!match) return undefined;
-  const method = match[1]!;
-  cursor = skipGoTrivia(source, cursor + match[0].length);
-  if (source[cursor] !== "(") return undefined;
-  return { method, openParen: cursor };
-}
-
-function skipGoTrivia(source: string, start: number): number {
-  let cursor = start;
-  while (cursor < source.length) {
-    const char = source[cursor]!;
-    const next = source[cursor + 1] ?? "";
-    if (/\s/.test(char)) {
-      cursor += 1;
-      continue;
-    }
-    if (char === "/" && next === "/") {
-      const newline = source.indexOf("\n", cursor + 2);
-      return newline < 0 ? source.length : skipGoTrivia(source, newline + 1);
-    }
-    if (char === "/" && next === "*") {
-      const close = source.indexOf("*/", cursor + 2);
-      return close < 0 ? source.length : skipGoTrivia(source, close + 2);
-    }
-    break;
-  }
-  return cursor;
-}
-
-function findClosingParen(source: string, openParen: number) {
-  if (openParen < 0 || source[openParen] !== "(") return -1;
-  let depth = 0;
-  let quote = "";
-  let escaped = false;
-  let lineComment = false;
-  let blockComment = false;
-  for (let index = openParen; index < source.length; index += 1) {
-    const char = source[index]!;
-    const next = source[index + 1] ?? "";
-    if (lineComment) {
-      if (char === "\n") lineComment = false;
-      continue;
-    }
-    if (blockComment) {
-      if (char === "*" && next === "/") {
-        blockComment = false;
-        index += 1;
-      }
-      continue;
-    }
-    if (quote) {
-      if (quote !== "`" && escaped) {
-        escaped = false;
-        continue;
-      }
-      if (quote !== "`" && char === "\\") {
-        escaped = true;
-        continue;
-      }
-      if (char === quote) quote = "";
-      continue;
-    }
-    if (char === "/" && next === "/") {
-      lineComment = true;
-      index += 1;
-      continue;
-    }
-    if (char === "/" && next === "*") {
-      blockComment = true;
-      index += 1;
-      continue;
-    }
-    if (char === '"' || char === "'" || char === "`") {
-      quote = char;
-      continue;
-    }
-    if (char === "(") depth += 1;
-    if (char === ")") {
-      depth -= 1;
-      if (depth === 0) return index;
-    }
-  }
-  return -1;
-}
-
-async function parseSchema(file: string) {
-  const source = await readFile(file, "utf8");
-  const tablePattern = /s\.(Table|TenantTable|ControlPlaneTable)\(\s*"([^"]+)"\s*,\s*func\([^)]*\)\s*\{([\s\S]*?)\n\s*\}\s*\)/g;
-  const columnPattern = /t\.(ID|String|Text|Int|Int64|Float64|Bool|Time|JSON)\(\s*"([^"]+)"([^)]*)\)/g;
-  const indexPattern = /t\.(Index|UniqueIndex|TrigramIndex)\(\s*"([^"]+)"([^)]*)\)/g;
-  const schema = emptySchemaDefinition();
-  for (const tableMatch of source.matchAll(tablePattern)) {
-    const table: Table = { columns: {}, indexes: {} };
-    const scope = tableMatch[1]!;
-    const name = tableMatch[2]!;
-    const body = tableMatch[3]!;
-    for (const columnMatch of body.matchAll(columnPattern)) {
-      const kind = columnMatch[1]!;
-      table.columns[columnMatch[2]!] = {
-        type: columnType(kind),
-        nullable: columnMatch[3]!.includes("gonvex.Nullable"),
-        primaryKey: kind === "ID",
-      };
-    }
-    for (const indexMatch of body.matchAll(indexPattern)) {
-      table.indexes[indexMatch[2]!] = {
-        columns: stringArgs(indexMatch[3]!),
-        unique: indexMatch[1] === "UniqueIndex",
-        ...(indexMatch[1] === "TrigramIndex" ? { kind: "trigram" } : {}),
-      };
-    }
-    if (scope === "ControlPlaneTable") {
-      schema.controlPlaneTables[name] = table;
-    } else {
-      schema.tenantTables[name] = table;
-      schema.tables[name] = table;
-    }
-  }
-  return schema;
 }
 
 async function writeBindings(root: string, manifest: Manifest): Promise<BindingWriteResult> {
@@ -1699,8 +1198,8 @@ async function writeBindings(root: string, manifest: Manifest): Promise<BindingW
   if (await writeManifestIfChanged(join(dir, "manifest.json"), manifest)) changedFiles += 1;
   const outputs: Record<string, string> = {
     "api.ts": renderAPI(manifest),
-    "client.ts": '// Generated by gonvex dev. Do not edit.\nexport { GonvexClient, ConvexReactClient } from "@gonvex/client";\n',
-    "react.ts": '// Generated by gonvex dev. Do not edit.\nexport { ConvexProvider, ConvexProviderWithAuth, ConvexReactClient, createGonvexAuth, GonvexAuthProvider, GonvexGoogleAuthButton, GonvexProvider, useAction, useConvex, useConvexAuth, useConvexConnectionState, useEntity, useGonvexAuth, useLiveQuery, useLiveQueryState, usePaginatedQuery, useQuery, useReducer, useReplicaCollection, useReplicaSelector } from "@gonvex/react";\nexport type { GonvexAuthConfig, GonvexAuthTenant, GonvexAuthUser, GonvexAuthValue } from "@gonvex/react";\n',
+    "client.ts": '// Generated by gonvex dev. Do not edit.\nexport { GonvexClient } from "@gonvex/client";\n',
+    "react.ts": '// Generated by gonvex dev. Do not edit.\nexport { createGonvexAuth, GonvexAuthProvider, GonvexGoogleAuthButton, GonvexProvider, GonvexProviderWithAuth, useAction, useEntity, useGonvexAuth, useGonvexAuthState, useGonvexClient, useGonvexConnectionState, useLiveQuery, useLiveQueryState, useQuery, useReducer, useReplicaCollection, useReplicaSelector } from "@gonvex/react";\nexport type { GonvexAuthAccount, GonvexAuthConfig, GonvexAuthTenant, GonvexAuthValue } from "@gonvex/react";\n',
     "types.ts": "// Generated by gonvex dev. Do not edit.\nexport type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };\n",
     "schema.ts": renderSchemaIndex(manifest),
     "control-plane/schema.ts": renderScopedSchemaModule("control-plane", manifest.schema.controlPlaneTables),
@@ -1797,27 +1296,18 @@ function functionEntryChanged(previous: Manifest, current: Manifest, path: strin
   return sourceForFunction(previous, previousEntry) !== sourceForFunction(current, currentEntry);
 }
 
-// Bundles key sources by their package-relative path; module artifacts key them
-// by their project-relative path, which is what FunctionEntry.file already is.
 function sourceForFunction(manifest: Manifest, entry: FunctionEntry) {
-  if (manifest.module) return manifest.module.files[normalizedFunctionFile(entry)];
-  return manifest.bundle?.files[bundleFileForFunction(entry)];
+  return manifest.module.files[normalizedFunctionFile(entry)];
 }
 
 function normalizedFunctionFile(entry: FunctionEntry) {
   return entry.file.replace(/\\/g, "/").replace(/^\.?\//, "");
 }
 
-function bundleFileForFunction(entry: FunctionEntry) {
-  const normalized = normalizedFunctionFile(entry);
-  const withoutGonvexPrefix = normalized.startsWith("gonvex/") ? normalized.slice("gonvex/".length) : normalized;
-  return `app/${withoutGonvexPrefix}`;
-}
-
 function renderAPI(manifest: Manifest) {
   const root: Record<string, any> = {};
-  const optimisticReducers: Record<string, OptimisticReducerDefinition> = {};
   const optimisticTransactions: Record<string, JsonValue> = {};
+  const functionTypes: Array<{ path: string; args: string; result: string }> = [];
   for (const [path, entry] of Object.entries(manifest.functions).sort(([a], [b]) => a.localeCompare(b))) {
     const parts = path.split(".").filter(Boolean);
     if (parts.length === 0) continue;
@@ -1828,6 +1318,8 @@ function renderAPI(manifest: Manifest) {
     const reference: Record<string, unknown> = {
       kind: entry.kind,
       path,
+      __argsType: functionTypeName(path, "Args"),
+      __resultType: functionTypeName(path, "Result"),
       ...(entry.delivery ? { delivery: entry.delivery } : {}),
       ...(entry.offline !== undefined ? { offline: entry.offline } : {}),
       ...(isModuleSchema(entry.args) ? { args: entry.args } : {}),
@@ -1835,35 +1327,64 @@ function renderAPI(manifest: Manifest) {
     };
     if (entry.delivery === "live" && entry.dependencies?.liveQueryPlan) {
       const plan = entry.dependencies.liveQueryPlan;
-      reference.live = { entity: plan.table, key: plan.key, resultPath: plan.resultPath ?? [] };
+      reference.live = { entity: plan.table, key: plan.key, resultPath: plan.resultPath ?? [], plan };
     }
-    const projection = entry.delivery === "replica" && entry.replica
-      ? { entity: entry.replica.table, key: entry.replica.key, resultPath: [] }
-      : entry.dependencies?.optimisticProjection;
-    const reducer = entry.dependencies?.optimisticReducer;
     const transaction = entry.kind === "reducer" ? entry.optimistic : undefined;
-    if (projection || reducer || transaction !== undefined) {
-      reference.optimistic = {
-        ...(projection ? { projection } : {}),
-        ...(reducer ? { reducer } : {}),
-        ...(transaction === undefined ? {} : { transaction }),
-      };
+    if (transaction !== undefined) {
+      reference.optimistic = { transaction };
     }
     target[parts[parts.length - 1]!] = reference;
-    if (entry.kind === "reducer" && reducer) optimisticReducers[path] = reducer;
     if (entry.kind === "reducer" && transaction !== undefined) optimisticTransactions[path] = transaction;
+    functionTypes.push({
+      path,
+      args: functionTypeName(path, "Args"),
+      result: functionTypeName(path, "Result"),
+    });
   }
   const lines = [
     "// Generated by gonvex dev. Do not edit.",
+    "",
+    "import type { LiveQueryPlan } from \"@gonvex/client\";",
+    "",
+    "export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };",
+    "export type FunctionKind = \"query\" | \"reducer\" | \"action\";",
+    "export type OptimisticID = string | readonly string[];",
+    "export type OptimisticValue = JsonValue | { readonly $arg: string | readonly string[] } | readonly OptimisticValue[] | { readonly [key: string]: OptimisticValue };",
+    "export type OptimisticEffectDefinition =",
+    "  | { readonly operation: \"patch\"; readonly entity: string; readonly id: OptimisticID; readonly fields: Readonly<Record<string, OptimisticValue>> }",
+    "  | { readonly operation: \"upsert\"; readonly entity: string; readonly id: OptimisticID; readonly value: Readonly<Record<string, OptimisticValue>> }",
+    "  | { readonly operation: \"delete\"; readonly entity: string; readonly id: OptimisticID };",
+    "export type OptimisticTransactionDefinition = { readonly effects: readonly OptimisticEffectDefinition[]; readonly expectedRevision?: number };",
+    "export type FunctionReference<Kind extends FunctionKind = FunctionKind, Args = JsonValue, Result = JsonValue> = {",
+    "  readonly kind: Kind;",
+    "  readonly path: string;",
+    "  readonly delivery?: \"oneShot\" | \"live\" | \"replica\";",
+    "  readonly offline?: { readonly mode: \"forbidden\" | \"allowed\" | \"onlineOnly\"; readonly conflict?: \"reject\" | \"expectedVersion\" | \"merge\"; readonly reason?: string };",
+    "  readonly args?: Args;",
+    "  readonly result?: Result;",
+    "  readonly live?: { readonly entity: string; readonly key: string; readonly resultPath?: readonly string[]; readonly plan: LiveQueryPlan };",
+    "  readonly optimistic?: { readonly transaction?: OptimisticTransactionDefinition };",
+    "};",
+    "",
+    ...functionTypes.flatMap(({ path, args, result }) => [
+      `export type ${args} = ${renderSchemaType(manifest.functions[path]?.args)};`,
+      `export type ${result} = ${renderSchemaType(manifest.functions[path]?.result)};`,
+    ]),
     "",
     `export const api = ${renderObject(root, 0)} as const;`,
     "",
     "export const internal = api;",
     "export type Api = typeof api;",
     "",
-    `export const optimisticReducers: Record<string, { entity: string; rowIdPath: string[]; fieldsPath: string[] }> = ${renderObject(optimisticReducers, 0)};`,
+    `export const optimisticTransactions: Record<string, OptimisticTransactionDefinition> = ${renderObject(optimisticTransactions, 0)};`,
     "",
-    `export const optimisticTransactions: Record<string, { effects: readonly ({ operation: \"patch\"; entity: string; id: string | readonly string[]; fields: Record<string, unknown> } | { operation: \"upsert\"; entity: string; id: string | readonly string[]; value: Record<string, unknown> } | { operation: \"delete\"; entity: string; id: string | readonly string[] })[]; expectedRevision?: number }> = ${renderObject(optimisticTransactions, 0)};`,
+    "export type ApiArgs = {",
+    ...functionTypes.map(({ path, args }) => `  ${JSON.stringify(path)}: ${args};`),
+    "};",
+    "",
+    "export type ApiResults = {",
+    ...functionTypes.map(({ path, result }) => `  ${JSON.stringify(path)}: ${result};`),
+    "};",
     "",
     "export function optimisticPatchesFor(",
     "  path: string,",
@@ -1910,24 +1431,51 @@ function renderAPI(manifest: Manifest) {
     "    }",
     "    return patches;",
     "  }",
-    "  const reducer = Object.prototype.hasOwnProperty.call(optimisticReducers, path)",
-    "    ? optimisticReducers[path]",
-    "    : undefined;",
-    "  if (reducer) {",
-    "    const readPath = (value: unknown, segments: string[]): unknown =>",
-    "      segments.reduce<unknown>((current, segment) =>",
-    "        current && typeof current === \"object\" ? (current as Record<string, unknown>)[segment] : undefined, value);",
-    "    const rowId = String(readPath(args, reducer.rowIdPath) ?? args.id ?? args._id ?? \"\");",
-    "    const nested = readPath(args, reducer.fieldsPath);",
-    "    if (rowId && nested && typeof nested === \"object\" && !Array.isArray(nested)) {",
-    "      return [{ entity: reducer.entity, rowId, op: \"patch\" as const, fields: { ...(nested as Record<string, unknown>) } }];",
-    "    }",
-    "  }",
     "  return [];",
     "}",
     "",
   ];
   return lines.join("\n");
+}
+
+function functionTypeName(path: string, suffix: "Args" | "Result"): string {
+  const parts = path.split(/[^A-Za-z0-9_$]+/).filter(Boolean);
+  const stem = parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("") || "Function";
+  return `${/^[0-9]/.test(stem) ? "Fn" : ""}${stem}${suffix}`;
+}
+
+function renderSchemaType(schema: ModuleSchema | undefined): string {
+  if (!schema) return "JsonValue";
+  switch (schema.kind) {
+    case "string": return "string";
+    case "number": return "number";
+    case "boolean": return "boolean";
+    case "null": return "null";
+    case "any": return "JsonValue";
+    case "id": return "string";
+    case "literal": return renderLiteralType(schema.value);
+    case "array": return `Array<${renderSchemaType(schema.items)}>`;
+    case "record": return `Record<string, ${renderSchemaType(schema.values)}>`;
+    case "optional": return `${renderSchemaType(schema.value)} | undefined`;
+    case "object": {
+      const fields = Object.entries(schema.fields).map(([key, value]) => {
+        const property = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : JSON.stringify(key);
+        const optional = value.kind === "optional" ? "?" : "";
+        return `  ${property}${optional}: ${renderSchemaType(value)};`;
+      });
+      if (schema.allowUnknown) fields.push("  [key: string]: JsonValue;");
+      return fields.length === 0 ? "{ }" : `{\n${fields.join("\n")}\n}`;
+    }
+  }
+}
+
+function renderLiteralType(value: JsonValue): string {
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(renderLiteralType).join(", ")}]`;
+  const fields = Object.entries(value).map(([key, nested]) => `${JSON.stringify(key)}: ${renderLiteralType(nested)}`);
+  return fields.length === 0 ? "{ }" : `{ ${fields.join(", ")} }`;
 }
 
 function renderSchemaIndex(manifest: Manifest) {
@@ -1990,7 +1538,8 @@ function renderObject(value: any, depth: number): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) return JSON.stringify(value);
   const entries = Object.entries(value).sort(([a], [b]) => a.localeCompare(b));
   if (isFunctionRef(value)) {
-    return `{ kind: ${JSON.stringify(value.kind)}, path: ${JSON.stringify(value.path)} }`;
+    const visible = Object.fromEntries(entries.filter(([key]) => !key.startsWith("__")));
+    return `${renderObject(visible, depth)} as unknown as FunctionReference<${JSON.stringify(value.kind)}, ${value.__argsType}, ${value.__resultType}>`;
   }
   const indent = "  ".repeat(depth);
   const childIndent = "  ".repeat(depth + 1);
@@ -2003,7 +1552,10 @@ function renderObject(value: any, depth: number): string {
 }
 
 function isFunctionRef(value: any) {
-  return typeof value.kind === "string" && typeof value.path === "string" && Object.keys(value).length === 2;
+  return typeof value.kind === "string"
+    && typeof value.path === "string"
+    && typeof value.__argsType === "string"
+    && typeof value.__resultType === "string";
 }
 
 function propertyKey(key: string) {
@@ -2024,7 +1576,7 @@ function mergeSchemaDefinition(target: SchemaDefinition, source: SchemaDefinitio
   target.tables = target.tenantTables;
 }
 
-async function syncRuntime(settings: Settings, manifest: Manifest) {
+async function syncRuntime(settings: Settings, manifest: Manifest): Promise<SchemaDefinition | undefined> {
   const response = await fetch(`${settings.runtimeURL.replace(/\/$/, "")}/dev/sync`, {
     method: "POST",
     headers: {
@@ -2035,6 +1587,8 @@ async function syncRuntime(settings: Settings, manifest: Manifest) {
     body: JSON.stringify(manifest),
   });
   if (!response.ok) throw new Error(`runtime returned ${response.status} ${response.statusText}: ${await response.text()}`);
+  const payload = await response.json() as { schemaDefinition?: SchemaDefinition };
+  return payload.schemaDefinition;
 }
 
 async function fetchProjectEnv(settings: Settings): Promise<RuntimeEnvVariable[]> {
@@ -2158,7 +1712,7 @@ async function runtimeHasManifest(settings: Settings, manifest: Manifest) {
 }
 
 function deployedSourceHash(manifest: Manifest) {
-  return manifest.bundle?.hash ?? manifest.module?.hash;
+  return manifest.module.hash;
 }
 
 async function ensureProjectSettings(root: string, settings: Settings, options: { keyWasExplicit: boolean; runtimeWasExplicit: boolean }): Promise<Settings> {
@@ -2604,22 +2158,6 @@ function readFileSyncText(path: string) {
   return existsSync(path) ? readFileSync(path, "utf8") : "";
 }
 
-async function goFiles(root: string): Promise<string[]> {
-  if (!existsSync(root)) return [];
-  const entries = await readdir(root, { withFileTypes: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    const path = join(root, entry.name);
-    if (entry.isDirectory()) {
-      if (entry.name === "_generated") continue;
-      files.push(...await goFiles(path));
-    } else if (entry.isFile() && entry.name.endsWith(".go")) {
-      files.push(path);
-    }
-  }
-  return files.sort();
-}
-
 async function migrationFiles(root: string): Promise<string[]> {
   if (!existsSync(root)) return [];
   const entries = await readdir(root, { withFileTypes: true });
@@ -2653,6 +2191,7 @@ async function copyTemplate(template: string, target: string, options: { overwri
 async function copyDir(source: string, target: string, overwrite: boolean) {
   await mkdir(target, { recursive: true });
   for (const entry of await readdir(source, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === "dist" || entry.name === "_build") continue;
     const sourcePath = join(source, entry.name);
     const targetPath = join(target, entry.name === "_gitignore" ? ".gitignore" : entry.name);
     if (entry.isDirectory()) {
@@ -2701,39 +2240,6 @@ function templateDir(template: string) {
   const packageTemplate = resolve(dirname(fileURLToPath(import.meta.url)), "templates", template);
   if (existsSync(packageTemplate)) return packageTemplate;
   return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "templates", template);
-}
-
-function functionKind(raw: string): FunctionKind {
-  if (raw === "InternalReducer") return "reducer";
-  if (raw === "LiveQuery" || raw === "ReplicaCollection") return "query";
-  return raw.toLowerCase() as FunctionKind;
-}
-
-function columnType(kind: string) {
-  if (kind === "ID") return "id";
-  if (kind === "Int64") return "int64";
-  if (kind === "Float64") return "float64";
-  return kind.toLowerCase();
-}
-
-function stringArgs(input: string) {
-  const values: string[] = [];
-  for (const match of input.matchAll(/"((?:\\.|[^"\\])*)"|`([^`]*)`/g)) {
-    if (match[2] !== undefined) {
-      values.push(match[2]);
-      continue;
-    }
-    try {
-      values.push(JSON.parse(`"${match[1] ?? ""}"`) as string);
-    } catch {
-      values.push(match[1] ?? "");
-    }
-  }
-  return values;
-}
-
-function cleanParsedOptimisticPath(value: string) {
-  return value.split(".").map((segment) => segment.trim()).filter(Boolean);
 }
 
 function valueFor(args: string[], key: string) {
@@ -2802,13 +2308,13 @@ function printAuthHelp() {
   console.log("  gonvex auth remove google [--origin URL]... [--callback-path /]");
   console.log("  gonvex auth status [--json]");
   console.log("  gonvex auth doctor [--json]");
-  console.log("  gonvex auth users [--json]");
+  console.log("  gonvex auth accounts [--json]");
   console.log("  gonvex auth tenants list [--json]");
   console.log("  gonvex auth tenants create <name> [--owner <email>]");
   console.log("  gonvex auth memberships list --tenant <tenant-id> [--json]");
   console.log("  gonvex auth memberships add --tenant <tenant-id> --email <email> [--role member]");
-  console.log("  gonvex auth memberships remove --tenant <tenant-id> (--user <user-id> | --email <invited-email>)");
-  console.log("  gonvex auth user <disable|enable|delete> <user-id>");
+  console.log("  gonvex auth memberships remove --tenant <tenant-id> (--member <member-id> | --email <invited-email>)");
+  console.log("  gonvex auth account <disable|enable|delete> <account-id>");
 }
 
 function printEnvHelp() {

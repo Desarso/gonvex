@@ -53,7 +53,7 @@ type runtimeMetrics struct {
 	telemetryPath        string
 	logSubscribers       map[int]logSubscriber
 	nextLogSubID         int
-	mutationWrites       chan runtimeLogEntry
+	reducerLogWrites     chan runtimeLogEntry
 	// onFunctionError forwards failed log entries to the error store (see
 	// runtime_errors.go). Set once at server construction; nil in tests.
 	onFunctionError func(runtimeLogEntry)
@@ -114,8 +114,8 @@ type runtimeLogEntry struct {
 	CompletedAt      string          `json:"completedAt,omitempty"`
 	Project          string          `json:"project,omitempty"`
 	Tenant           string          `json:"tenant,omitempty"`
-	UserID           string          `json:"userId,omitempty"`
-	UserEmail        string          `json:"userEmail,omitempty"`
+	AccountID        string          `json:"accountId,omitempty"`
+	AccountEmail     string          `json:"accountEmail,omitempty"`
 	ConnectionID     string          `json:"connectionId,omitempty"`
 	Browser          string          `json:"browser,omitempty"`
 	DeviceType       string          `json:"deviceType,omitempty"`
@@ -373,8 +373,8 @@ func (m *runtimeMetrics) recordReactive(update func(*reactiveMetricState)) {
 	m.mu.Unlock()
 }
 
-func (m *runtimeMetrics) recordQueryCommitExecution(project, tenant, groupKey string, commitIDs map[string]struct{}) {
-	if m == nil || len(commitIDs) == 0 {
+func (m *runtimeMetrics) recordQueryCommitExecution(project, tenant, groupKey string, originCommandIDs map[string]struct{}) {
+	if m == nil || len(originCommandIDs) == 0 {
 		return
 	}
 	const retainedSubscriptionCommits = 10_000
@@ -383,11 +383,11 @@ func (m *runtimeMetrics) recordQueryCommitExecution(project, tenant, groupKey st
 		m.commitExecutions = map[string]uint64{}
 	}
 	m.reactive.CommitQueryExecutions++
-	for commitID := range commitIDs {
-		if strings.TrimSpace(commitID) == "" {
+	for originCommandID := range originCommandIDs {
+		if strings.TrimSpace(originCommandID) == "" {
 			continue
 		}
-		key := strings.Join([]string{project, tenant, groupKey, commitID}, "\x00")
+		key := strings.Join([]string{project, tenant, groupKey, originCommandID}, "\x00")
 		if m.commitExecutions[key] == 0 {
 			m.reactive.SubscriptionCommitsObserved++
 			m.commitExecutionOrder = append(m.commitExecutionOrder, key)
@@ -576,7 +576,7 @@ type transactionMetricPoint struct {
 // see it". ChangeToBrowserMS (browser-clock receive time) is the fallback for
 // entries without an ack measurement. The server leg (commit → result sent)
 // isolates backend fan-out delay from network/browser time. Only kind=query,
-// reason=invalidate events count: initial loads and the mutator's own round
+// reason=change events count: initial loads and the mutator's own round
 // trip are not propagation. Caveat: an ack delayed by reconnect buffering
 // inflates its sample; p95 is robust to those outliers, max is not.
 type propagationMetricsBucket struct {
@@ -615,7 +615,7 @@ type propagationMetricPoint struct {
 }
 
 func (m *runtimeMetrics) recordPropagationLocked(entry transactionTelemetryEntry, now time.Time) {
-	if entry.Kind != "query" || entry.Reason != "invalidate" {
+	if entry.Kind != "query" || entry.Reason != "change" {
 		return
 	}
 	browserMS := float64(0)
@@ -729,7 +729,7 @@ func percentile(values []float64, fraction float64) float64 {
 type loadMetricPoint struct {
 	Time          string  `json:"time"`
 	Connections   int     `json:"connections"`
-	Users         int     `json:"users"`
+	Accounts      int     `json:"accounts"`
 	Subscriptions int     `json:"subscriptions"`
 	CPUPercent    float64 `json:"cpuPercent"`
 	MemoryBytes   uint64  `json:"memoryBytes"`
@@ -764,7 +764,7 @@ func (m *runtimeMetrics) loadSnapshotLocked() loadMetricSnapshot {
 type websocketMetricSnapshot struct {
 	Connections      int                           `json:"connections"`
 	Subscriptions    int                           `json:"subscriptions"`
-	Users            int                           `json:"users"`
+	Accounts         int                           `json:"accounts"`
 	BytesReceived    uint64                        `json:"bytesReceived"`
 	BytesSent        uint64                        `json:"bytesSent"`
 	Details          []websocketConnectionSnapshot `json:"details"`
@@ -914,8 +914,8 @@ func newRuntimeFunctionLog(project string, tenant string, path string, kind stri
 		RequestSizeBytes: len(rawArgs),
 	}
 	if caller.user != nil {
-		entry.UserID = caller.user.ID
-		entry.UserEmail = caller.user.Email
+		entry.AccountID = caller.user.ID
+		entry.AccountEmail = caller.user.Email
 	}
 	return runtimeFunctionLog{entry: entry, started: started}
 }
@@ -1019,7 +1019,7 @@ func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
 	onFunctionError := m.onFunctionError
 	m.mu.Unlock()
 
-	m.persistMutationLog(log)
+	m.persistReducerLog(log)
 	if log.Outcome == "error" && onFunctionError != nil {
 		onFunctionError(log)
 	}
@@ -1034,7 +1034,7 @@ func (m *runtimeMetrics) recordOperationalLog(log runtimeLogEntry, now time.Time
 	onFunctionError := m.onFunctionError
 	m.mu.Unlock()
 
-	m.persistMutationLog(log)
+	m.persistReducerLog(log)
 	if log.Outcome == "error" && onFunctionError != nil {
 		onFunctionError(log)
 	}

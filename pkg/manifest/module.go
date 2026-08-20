@@ -1,19 +1,18 @@
 package manifest
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 )
 
-// Module languages carried on ModuleArtifact.Language. Go projects ship a
-// SourceBundle instead and never populate a module artifact.
-const (
-	LanguageTypeScript = "typescript"
-	LanguageGo         = "go"
-)
+const LanguageTypeScript = "typescript"
+const ModuleArtifactGeneration = 4
 
 // Language reports the artifact's normalized language, defaulting to
 // TypeScript because that is the only language the artifact pipeline emits.
@@ -25,26 +24,10 @@ func (a ModuleArtifact) NormalizedLanguage() string {
 	return language
 }
 
-// IsTypeScript reports whether this artifact is executed by the TypeScript
-// module host rather than by the compiled Go plugin loader.
+// IsTypeScript reports whether this artifact can execute in the TypeScript
+// module host.
 func (a ModuleArtifact) IsTypeScript() bool {
 	return a.NormalizedLanguage() == LanguageTypeScript
-}
-
-// ModuleLanguage reports which engine a manifest wants. A manifest with no
-// module artifact is a Go project, which keeps the Go bundle flow the default
-// for every project that has not opted into a module artifact.
-func (m Manifest) ModuleLanguage() string {
-	if m.Module == nil {
-		return LanguageGo
-	}
-	return m.Module.NormalizedLanguage()
-}
-
-// UsesModuleHost reports whether this manifest must be served by the module
-// host instead of by a compiled Go bundle.
-func (m Manifest) UsesModuleHost() bool {
-	return m.Module != nil && m.Module.IsTypeScript()
 }
 
 // DecodeJavaScript returns the artifact's bundled ESM source, verifying that it
@@ -82,6 +65,16 @@ func (a ModuleArtifact) Validate() error {
 	if _, err := a.DecodeJavaScript(); err != nil {
 		return err
 	}
+	if a.Generation != ModuleArtifactGeneration {
+		return fmt.Errorf("module artifact generation %d is unsupported; expected %d", a.Generation, ModuleArtifactGeneration)
+	}
+	expectedHash, err := a.ComputedHash()
+	if err != nil {
+		return err
+	}
+	if actual := strings.ToLower(strings.TrimSpace(a.Hash)); actual == "" || actual != expectedHash {
+		return fmt.Errorf("module artifact hash %q does not match canonical contract hash %q", actual, expectedHash)
+	}
 	for path, function := range a.Functions {
 		if strings.TrimSpace(path) == "" {
 			return fmt.Errorf("module declares a function with an empty path")
@@ -91,8 +84,211 @@ func (a ModuleArtifact) Validate() error {
 		default:
 			return fmt.Errorf("module function %q has unknown kind %q", path, function.Kind)
 		}
+		if strings.TrimSpace(function.Handler) == "" || strings.TrimSpace(function.File) == "" {
+			return fmt.Errorf("module function %q requires a handler and source file", path)
+		}
+		if err := validateModuleSchema(function.Args, fmt.Sprintf("module function %q args", path), false); err != nil {
+			return err
+		}
+		if err := validateModuleSchema(function.Result, fmt.Sprintf("module function %q result", path), false); err != nil {
+			return err
+		}
+		switch function.Delivery {
+		case "", DeliveryOneShot, DeliveryLive, DeliveryReplica:
+		default:
+			return fmt.Errorf("module function %q has unknown delivery %q", path, function.Delivery)
+		}
+		if function.Kind == FunctionKindQuery && (function.Delivery == "" || function.Delivery == DeliveryOneShot) {
+			plan := function.Dependencies.LiveQueryPlan
+			if plan == nil {
+				return fmt.Errorf("one-shot query %q requires a structured live query plan", path)
+			}
+			if err := validateStructuredQueryPlan(plan, path); err != nil {
+				return err
+			}
+		}
+		if function.Kind == FunctionKindQuery && function.Delivery == DeliveryLive && function.Dependencies.LiveQueryPlan == nil {
+			return fmt.Errorf("live query %q requires a structured live query plan", path)
+		}
+		if function.Kind == FunctionKindQuery && function.Delivery == DeliveryReplica && function.Replica == nil {
+			return fmt.Errorf("replica collection %q requires a replica definition", path)
+		}
+		if function.Kind != FunctionKindQuery && function.Delivery != "" {
+			return fmt.Errorf("module function %q uses query delivery on a %s", path, function.Kind)
+		}
+		if function.Kind == FunctionKindReducer {
+			if err := validateOfflinePolicy(function.Offline, path); err != nil {
+				return err
+			}
+			if function.Optimistic != nil {
+				if err := validateOptimisticTransaction(function.Optimistic, path); err != nil {
+					return err
+				}
+			}
+			if !function.Internal && function.Optimistic == nil && strings.TrimSpace(function.Dependencies.NonOptimisticReason) == "" {
+				return fmt.Errorf("interactive reducer %q requires an optimistic transaction or nonOptimisticReason", path)
+			}
+		} else if function.Offline != nil || function.Optimistic != nil {
+			return fmt.Errorf("module function %q declares reducer policy on a %s", path, function.Kind)
+		}
+	}
+	cronNames := make(map[string]struct{}, len(a.Crons))
+	for _, cron := range a.Crons {
+		name := strings.TrimSpace(cron.Name)
+		path := strings.TrimSpace(cron.Function)
+		if name == "" {
+			return fmt.Errorf("module declares a cron with an empty name")
+		}
+		if _, exists := cronNames[name]; exists {
+			return fmt.Errorf("module declares duplicate cron %q", name)
+		}
+		cronNames[name] = struct{}{}
+		if path == "" {
+			return fmt.Errorf("module cron %q requires a function path", name)
+		}
+		hasInterval := cron.IntervalMS != 0
+		hasExpression := strings.TrimSpace(cron.Expression) != ""
+		if hasInterval == hasExpression {
+			return fmt.Errorf("module cron %q requires exactly one intervalMs or expression", name)
+		}
+		const maxDurationMilliseconds = int64((1<<63 - 1) / 1_000_000)
+		if cron.IntervalMS < 0 || cron.IntervalMS > maxDurationMilliseconds {
+			return fmt.Errorf("module cron %q intervalMs is outside the supported duration", name)
+		}
+		if cron.Scope != "project" && cron.Scope != "tenant" {
+			return fmt.Errorf("module cron %q has unknown scope %q", name, cron.Scope)
+		}
+		if len(cron.Args) > 0 && !json.Valid(cron.Args) {
+			return fmt.Errorf("module cron %q args are not valid JSON", name)
+		}
+		target, exists := a.Functions[path]
+		if !exists {
+			return fmt.Errorf("module cron %q targets unknown function %q", name, path)
+		}
+		if target.Kind == FunctionKindQuery {
+			return fmt.Errorf("module cron %q must target a reducer or action", name)
+		}
 	}
 	return nil
+}
+
+// ComputedHash returns the canonical identity emitted by the TypeScript CLI.
+// It covers source/migration files and every executable/routing declaration,
+// while storing only the JavaScript bundle's verified digest rather than its
+// duplicate base64 payload.
+func (a ModuleArtifact) ComputedHash() (string, error) {
+	if a.JavaScript == nil {
+		return "", fmt.Errorf("module artifact has no JavaScript bundle")
+	}
+	files := a.Files
+	if files == nil {
+		files = map[string]string{}
+	}
+	functions := a.Functions
+	if functions == nil {
+		functions = map[string]ModuleFunction{}
+	}
+	hashFunctions := make(map[string]any, len(functions))
+	for path, function := range functions {
+		hashFunctions[path] = moduleFunctionHashContract(function)
+	}
+	visibility := a.Visibility
+	if visibility == nil {
+		visibility = map[string]VisibilityPlan{}
+	}
+	crons := a.Crons
+	if crons == nil {
+		crons = []ModuleCron{}
+	}
+	payload := map[string]any{
+		"generation": a.Generation,
+		"language":   a.NormalizedLanguage(),
+		"entrypoint": a.Entrypoint,
+		"files":      files,
+		"functions":  hashFunctions,
+		"visibility": visibility,
+		"crons":      crons,
+		"javascript": map[string]any{
+			"path": a.JavaScript.Path,
+			"hash": strings.ToLower(strings.TrimSpace(a.JavaScript.Hash)),
+		},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("encode module artifact hash contract: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var canonical any
+	if err := decoder.Decode(&canonical); err != nil {
+		return "", fmt.Errorf("normalize module artifact hash contract: %w", err)
+	}
+	normalized, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("encode canonical module artifact hash contract: %w", err)
+	}
+	digest := sha256.Sum256(normalized)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// moduleFunctionHashContract mirrors the JavaScript object's omitted optional
+// properties. encoding/json does not apply omitempty to a zero-value struct,
+// so hashing ModuleFunction directly would invent dependencies:{} that the
+// TypeScript artifact never emitted.
+func moduleFunctionHashContract(function ModuleFunction) map[string]any {
+	contract := map[string]any{
+		"kind":    function.Kind,
+		"handler": function.Handler,
+		"file":    function.File,
+	}
+	if function.Export != "" {
+		contract["export"] = function.Export
+	}
+	if function.Args != nil {
+		contract["args"] = function.Args
+	}
+	if function.Result != nil {
+		contract["result"] = function.Result
+	}
+	if !reflect.DeepEqual(function.Dependencies, FunctionDependencies{}) {
+		contract["dependencies"] = function.Dependencies
+	}
+	if function.Internal {
+		contract["internal"] = true
+	}
+	if function.Delivery != "" {
+		contract["delivery"] = function.Delivery
+	}
+	if function.Replica != nil {
+		contract["replica"] = function.Replica
+	}
+	if function.Offline != nil {
+		contract["offline"] = function.Offline
+	}
+	if function.Optimistic != nil {
+		contract["optimistic"] = function.Optimistic
+	}
+	return contract
+}
+
+func validateStructuredQueryPlan(plan *LiveQueryPlan, path string) error {
+	if strings.TrimSpace(plan.Table) == "" || strings.TrimSpace(plan.Key) == "" || len(plan.Columns) == 0 {
+		return fmt.Errorf("one-shot query %q requires a structured live query plan with a table, key, and columns", path)
+	}
+	for _, column := range plan.Columns {
+		if strings.TrimSpace(column) == "" {
+			return fmt.Errorf("one-shot query %q live query plan contains an empty column", path)
+		}
+	}
+	if plan.Window != nil && plan.Window.Count != "" && plan.Window.Count != "exact" {
+		return fmt.Errorf("one-shot query %q live query plan window count must be exact", path)
+	}
+	for _, column := range plan.Columns {
+		if column == plan.Key {
+			return nil
+		}
+	}
+	return fmt.Errorf("one-shot query %q live query plan columns must include its key", path)
 }
 
 // Identity is the artifact's stable content identity: the artifact hash when
@@ -100,9 +296,6 @@ func (a ModuleArtifact) Validate() error {
 // reloading an unchanged module.
 func (a ModuleArtifact) Identity() string {
 	if hash := strings.TrimSpace(a.Hash); hash != "" {
-		return hash
-	}
-	if hash := strings.TrimSpace(a.ArtifactHash); hash != "" {
 		return hash
 	}
 	if a.JavaScript != nil {

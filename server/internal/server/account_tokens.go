@@ -262,7 +262,7 @@ func (s *Server) verifyAccountAccessToken(ctx context.Context, accessToken strin
 func (s *Server) accountActorForEmail(ctx context.Context, db *sql.DB, email string) (dashboardActor, bool) {
 	email = normalizeDashboardEmail(email)
 	var actor dashboardActor
-	err := db.QueryRowContext(ctx, `SELECT email, name, role FROM gonvex_dashboard_users WHERE email = $1`, email).Scan(
+	err := db.QueryRowContext(ctx, `SELECT email, name, role FROM gonvex_dashboard_accounts WHERE email = $1`, email).Scan(
 		&actor.Email, &actor.Name, &actor.Role,
 	)
 	if err == nil {
@@ -271,7 +271,7 @@ func (s *Server) accountActorForEmail(ctx context.Context, db *sql.DB, email str
 	if err != sql.ErrNoRows {
 		return dashboardActor{}, false
 	}
-	bootstrapEmail := normalizeDashboardEmail(s.configDashboardUser())
+	bootstrapEmail := normalizeDashboardEmail(s.configDashboardAccount())
 	if bootstrapEmail != "" && email == bootstrapEmail {
 		return dashboardActor{Email: email, Name: displayNameFromEmail(email), Role: "admin"}, true
 	}
@@ -331,9 +331,9 @@ func (s *Server) createAccountAccessToken(ctx context.Context, actor dashboardAc
 	}
 	ownerRole := normalizedDashboardRole(actor.Role)
 	if ownerRole == "" {
-		ownerRole = "user"
+		ownerRole = "standard"
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO gonvex_dashboard_users (email, name, role, password_hash)
+	if _, err := db.ExecContext(ctx, `INSERT INTO gonvex_dashboard_accounts (email, name, role, password_hash)
 		VALUES ($1, $2, $3, '!external-provider')
 		ON CONFLICT (email) DO NOTHING`, normalizeDashboardEmail(actor.Email), ownerName, ownerRole); err != nil {
 		return accountAccessToken{}, "", err

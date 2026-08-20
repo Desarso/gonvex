@@ -40,6 +40,7 @@ func invocationFor(runtimeCtx *gonvex.RuntimeContext, granted capabilities) invo
 	invocation.ProjectID = runtimeCtx.ProjectID
 	invocation.TenantID = runtimeCtx.TenantID
 	invocation.OperationID = runtimeCtx.OperationID
+	invocation.Environment = runtimeCtx.Env
 	if runtimeCtx.Tenant != nil {
 		invocation.Tenant = &tenantIdentity{
 			ID:        runtimeCtx.Tenant.ID,
@@ -97,6 +98,7 @@ func reducerCapabilities(ctx *gonvex.ReducerCtx) capabilities {
 		DBRead:       inTransaction,
 		DBWrite:      inTransaction,
 		ActionOutbox: inTransaction && ctx.Outbox != nil,
+		Scheduler:    inTransaction && ctx.Scheduler != nil,
 	}
 }
 
@@ -105,9 +107,11 @@ func actionCapabilities(runtimeCtx *gonvex.RuntimeContext) capabilities {
 		return capabilities{}
 	}
 	return capabilities{
-		RunReducer: runtimeCtx.Reducers != nil,
-		Network:    true,
-		Storage:    runtimeCtx.Storage != nil,
+		RunReducer:  runtimeCtx.Reducers != nil,
+		Scheduler:   runtimeCtx.Scheduler != nil,
+		Network:     true,
+		Storage:     runtimeCtx.Storage != nil,
+		Environment: true,
 	}
 }
 
@@ -216,6 +220,8 @@ func (h *reducerHostCalls) dispatch(ctx context.Context, call hostCallPayload) (
 		return runDelete(ctx, tx, call)
 	case hostCallActionEnqueue:
 		return h.enqueueAction(ctx, call)
+	case hostCallScheduleAfter, hostCallScheduleAt:
+		return scheduleWork(h.ctx.Scheduler, call)
 	default:
 		return nil, fmt.Errorf("a reducer may not call %q", call.Kind)
 	}
@@ -267,6 +273,8 @@ func (h *actionHostCalls) dispatch(ctx context.Context, call hostCallPayload) (j
 	switch call.Kind {
 	case hostCallRunReducer:
 		return h.runReducer(ctx, call)
+	case hostCallScheduleAfter, hostCallScheduleAt:
+		return scheduleWork(h.ctx.Scheduler, call)
 	case hostCallFetch:
 		return runFetch(ctx, call.Request)
 	case hostCallStorage:
@@ -296,6 +304,40 @@ func (h *actionHostCalls) runReducer(ctx context.Context, call hostCallPayload) 
 }
 
 func (h *actionHostCalls) close() {}
+
+func scheduleWork(scheduler gonvex.Scheduler, call hostCallPayload) (json.RawMessage, error) {
+	if scheduler == nil {
+		return nil, fmt.Errorf("the scheduler is unavailable to this invocation")
+	}
+	path := strings.TrimSpace(call.Function)
+	if path == "" {
+		return nil, fmt.Errorf("scheduler requires a function path")
+	}
+	args, err := decodeJSONValue(call.Args)
+	if err != nil {
+		return nil, fmt.Errorf("scheduled function %q arguments are not valid JSON: %w", path, err)
+	}
+	var id string
+	switch call.Kind {
+	case hostCallScheduleAfter:
+		const maxDelayMilliseconds = int64((1<<63 - 1) / time.Millisecond)
+		if call.DelayMS < 0 || call.DelayMS > maxDelayMilliseconds {
+			return nil, fmt.Errorf("scheduler delayMs is outside the supported duration")
+		}
+		id, err = scheduler.RunAfter(time.Duration(call.DelayMS)*time.Millisecond, path, args)
+	case hostCallScheduleAt:
+		if call.AtUnixMS < 0 {
+			return nil, fmt.Errorf("scheduler atUnixMs must be non-negative")
+		}
+		id, err = scheduler.RunAt(time.UnixMilli(call.AtUnixMS), path, args)
+	default:
+		return nil, fmt.Errorf("unsupported scheduler operation %q", call.Kind)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return encodeJSONValue(id)
+}
 
 // sqlRunner is the subset of database/sql both a pool and a transaction expose.
 type sqlRunner interface {

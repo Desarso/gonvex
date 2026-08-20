@@ -6,12 +6,10 @@ import type { Account, Member, QueryContext, Tenant } from "./index.js";
 declare const context: QueryContext;
 
 const account: Account | null = context.auth.account;
-const compatibilityAccount: Account | null = context.account;
 const tenant: Tenant | null = context.tenant;
 const member: Member | null = context.member;
 
 void account;
-void compatibilityAccount;
 void tenant;
 void member;
 
@@ -26,4 +24,3 @@ if (context.member) {
   void memberID;
   void permissions;
 }
-

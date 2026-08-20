@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { ConvexReactClient, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient, type LiveQueryResult, type ReplicaRow } from "@gonvex/client";
+import { GonvexClient, GonvexClientError, type ConnectionState, type FunctionReference, type LiveQueryResult, type ReplicaRow } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
 export { GonvexClientError, type ConnectionState } from "@gonvex/client";
@@ -7,13 +7,9 @@ export { GonvexClientError, type ConnectionState } from "@gonvex/client";
 const GonvexContext = createContext<GonvexClient | null>(null);
 const GonvexAuthContext = createContext<AuthState>({ isLoading: false, isAuthenticated: true });
 
-export const ConvexProvider = GonvexProvider;
-
 export function GonvexProvider(props: { client: GonvexClient; children: ReactNode }) {
   return <GonvexContext.Provider value={props.client}>{props.children}</GonvexContext.Provider>;
 }
-
-export { ConvexReactClient };
 
 export type AuthState = {
   isLoading: boolean;
@@ -23,7 +19,7 @@ export type AuthState = {
   fetchAccessToken?: (args: { forceRefreshToken: boolean }) => Promise<string | null>;
 };
 
-export type GonvexAuthUser = {
+export type GonvexAuthAccount = {
   id: string;
   email?: string;
   emailVerified: boolean;
@@ -44,7 +40,7 @@ type GonvexAuthSession = {
   expiresAt: number;
   refreshToken: string;
   refreshExpiresAt: number;
-  user: GonvexAuthUser;
+  account: GonvexAuthAccount;
   tenants: GonvexAuthTenant[];
   activeTenantId?: string;
 };
@@ -62,7 +58,7 @@ class GonvexAuthRequestError extends Error {
 }
 
 export type GonvexAuthValue = AuthState & {
-  user: GonvexAuthUser | null;
+  account: GonvexAuthAccount | null;
   tenants: GonvexAuthTenant[];
   activeTenant: GonvexAuthTenant | null;
   error: string | null;
@@ -73,7 +69,7 @@ export type GonvexAuthValue = AuthState & {
   createTenant: (name: string) => Promise<GonvexAuthTenant>;
   inviteMember: (tenantId: string, email: string, options?: { role?: GonvexAuthTenant["role"]; permissions?: Record<string, unknown> }) => Promise<void>;
   revokeInvitation: (tenantId: string, email: string) => Promise<void>;
-  removeMember: (tenantId: string, userId: string) => Promise<void>;
+  removeMember: (tenantId: string, memberId: string) => Promise<void>;
 };
 
 export type GonvexAuthConfig = {
@@ -84,8 +80,8 @@ export type GonvexAuthConfig = {
 
 const ManagedAuthContext = createContext<GonvexAuthValue | null>(null);
 
-export function ConvexProviderWithAuth(props: {
-  client: ConvexReactClient;
+export function GonvexProviderWithAuth(props: {
+  client: GonvexClient;
   children: ReactNode;
   useAuth: () => AuthState;
 }) {
@@ -343,9 +339,9 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     const response = await fetch(`${runtimeUrl}/auth/me`, {
       headers: { authorization: `Bearer ${token}`, ...(current.activeTenantId ? { "x-gonvex-tenant-id": current.activeTenantId } : {}) },
     });
-    const payload = await response.json().catch(() => ({})) as { error?: string; user?: GonvexAuthUser; tenants?: GonvexAuthTenant[]; activeTenantId?: string };
-    if (!response.ok || !payload.user || !payload.tenants) throw new Error(payload.error ?? "Could not load tenant memberships.");
-    installSession({ ...current, user: payload.user, tenants: payload.tenants, activeTenantId: payload.activeTenantId });
+    const payload = await response.json().catch(() => ({})) as { error?: string; account?: GonvexAuthAccount; tenants?: GonvexAuthTenant[]; activeTenantId?: string };
+    if (!response.ok || !payload.account || !payload.tenants) throw new Error(payload.error ?? "Could not load tenant memberships.");
+    installSession({ ...current, account: payload.account, tenants: payload.tenants, activeTenantId: payload.activeTenantId });
     return payload.tenants;
   }, [fetchAccessToken, installSession, runtimeUrl]);
 
@@ -374,10 +370,10 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     if (!response.ok) throw new Error(payload.error ?? "Could not invite the member.");
   }, [fetchAccessToken, runtimeUrl]);
 
-  const removeMember = useCallback(async (tenantId: string, userId: string) => {
+  const removeMember = useCallback(async (tenantId: string, memberId: string) => {
     const token = await fetchAccessToken({ forceRefreshToken: false });
     if (!token) throw new Error("Sign in before removing a member.");
-    const response = await fetch(`${runtimeUrl}/auth/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(userId)}`, {
+    const response = await fetch(`${runtimeUrl}/auth/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(memberId)}`, {
       method: "DELETE", headers: { authorization: `Bearer ${token}` },
     });
     const payload = await response.json().catch(() => ({})) as { error?: string };
@@ -400,7 +396,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     isLoading,
     isAuthenticated: Boolean(session && session.refreshExpiresAt > Date.now()),
     fetchAccessToken,
-    user: session?.user ?? null,
+    account: session?.account ?? null,
     tenants: session?.tenants ?? [],
     activeTenant,
     error,
@@ -427,6 +423,11 @@ export function useGonvexAuth(): GonvexAuthValue {
   const value = useContext(ManagedAuthContext);
   if (!value) throw new Error("GonvexAuthProvider is required");
   return value;
+}
+
+/** Read the auth state installed by either auth provider. */
+export function useGonvexAuthState(): AuthState {
+  return useContext(GonvexAuthContext);
 }
 
 export function GonvexGoogleAuthButton(props: ButtonHTMLAttributes<HTMLButtonElement> & { signOutLabel?: string }) {
@@ -568,7 +569,7 @@ function isFatalRefreshError(cause: unknown) {
 function isGonvexAuthSession(value: Partial<GonvexAuthSession>): value is GonvexAuthSession {
   return Boolean(
     value.accessToken && value.expiresAt && value.refreshToken && value.refreshExpiresAt
-    && value.user?.id && Array.isArray(value.tenants),
+    && value.account?.id && Array.isArray(value.tenants),
   );
 }
 
@@ -634,7 +635,7 @@ function readAuthSession(key: string): GonvexAuthSession | null {
   if (typeof window === "undefined") return null;
   try {
     const parsed = JSON.parse(localStorage.getItem(key) ?? "null") as GonvexAuthSession | null;
-    if (!parsed?.accessToken || !parsed.refreshToken || !parsed.user?.id || !Array.isArray(parsed.tenants) || parsed.refreshExpiresAt <= Date.now()) {
+    if (!parsed?.accessToken || !parsed.refreshToken || !parsed.account?.id || !Array.isArray(parsed.tenants) || parsed.refreshExpiresAt <= Date.now()) {
       safeLocalStorageRemove(key);
       return null;
     }
@@ -675,7 +676,7 @@ function bytesToBase64Url(bytes: Uint8Array) {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export type QueryStatus = "skip" | "loading" | "success" | "error" | "timeout" | "disconnected";
+export type QueryStatus = "skip" | "loading" | "success" | "error" | "timeout";
 
 export type UseQueryResultOptions = {
   /**
@@ -714,12 +715,8 @@ type QueryResultState<T> = {
   isStale: boolean;
 };
 
-/**
- * Live query hook with an explicit status surface. Unlike `useQuery`, this
- * distinguishes loading / success / error / timeout / disconnected, keeps the
- * last good result while reconnecting, and exposes `retry()`.
- */
-export function useQueryResult<T = JsonValue>(
+/** One-shot Query hook with explicit loading/error/timeout status and retry. */
+export function useQueryResult<T extends JsonValue = JsonValue>(
   ref: FunctionReference,
   args: JsonValue | "skip" = {},
   options: UseQueryResultOptions = {},
@@ -731,6 +728,7 @@ export function useQueryResult<T = JsonValue>(
   const argsKey = JSON.stringify(args);
   const keepPreviousData = options.keepPreviousData !== false;
   const timeoutMs = options.timeoutMs ?? DEFAULT_LIVE_QUERY_SLOW_MS;
+  const [requestGeneration, setRequestGeneration] = useState(0);
   const [state, setState] = useState<QueryResultState<T>>({
     data: undefined,
     status: args === "skip" ? "skip" : "loading",
@@ -763,106 +761,72 @@ export function useQueryResult<T = JsonValue>(
       setState({ data: undefined, status: "skip", error: null, isStale: false });
       return;
     }
-    setState({ data: undefined, status: "loading", error: null, isStale: false });
+    setState((previous) => ({
+      data: keepPreviousData ? previous.data : undefined,
+      status: "loading",
+      error: null,
+      isStale: keepPreviousData && previous.data !== undefined,
+    }));
     startSlowTimer();
 
-    const unsubscribeScope = client.onSessionScopeChange(() => {
-      setState({ data: undefined, status: "loading", error: null, isStale: false });
-      startSlowTimer();
-    });
-    const unsubscribeQuery = client.subscribeQuery(ref, args, (message) => {
-      if (message.type === "query.result") {
+    let active = true;
+    void client.query<T>(ref, args).then(
+      (data) => {
+        if (!active) return;
         clearSlowTimer();
-        setState({ data: message.result as T, status: "success", error: null, isStale: false });
-      }
-      if (message.type === "query.error") {
+        setState({ data, status: "success", error: null, isStale: false });
+      },
+      (failure) => {
+        if (!active) return;
         clearSlowTimer();
-        const error = new GonvexClientError(message.error, { code: "server", path, operation: "query" });
+        const error = failure instanceof Error
+          ? failure
+          : new GonvexClientError(String(failure), { code: "server", path, operation: "query" });
         setState((previous) => ({
           data: keepPreviousData ? previous.data : undefined,
           status: "error",
           error,
           isStale: keepPreviousData && previous.data !== undefined,
         }));
-      }
-    });
-    const applyConnection = (connection: ConnectionState) => {
-      if (!connection.isWebSocketConnected) {
-        clearSlowTimer();
-        setState((previous) => {
-          if (previous.status === "skip") return previous;
-          return {
-            data: keepPreviousData ? previous.data : undefined,
-            status: "disconnected",
-            error: previous.error,
-            isStale: keepPreviousData && previous.data !== undefined,
-          };
-        });
-        return;
-      }
-      // The client resubscribes live queries itself on reconnect; report
-      // loading until the fresh result lands.
-      setState((previous) => {
-        if (previous.status !== "disconnected") return previous;
-        startSlowTimer();
-        return { ...previous, status: "loading" };
-      });
-    };
-    const unsubscribeConnection = typeof client.subscribeToConnectionState === "function"
-      ? (() => {
-        if (typeof client.connectionState === "function") {
-          applyConnection(client.connectionState());
-        }
-        return client.subscribeToConnectionState(applyConnection);
-      })()
-      : undefined;
+      },
+    );
     return () => {
+      active = false;
       clearSlowTimer();
-      unsubscribeScope();
-      unsubscribeQuery();
-      unsubscribeConnection?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, kind, path, optimisticKey, argsKey, keepPreviousData, startSlowTimer, clearSlowTimer]);
+  }, [client, kind, path, optimisticKey, argsKey, keepPreviousData, requestGeneration, startSlowTimer, clearSlowTimer]);
 
   const retry = useCallback(() => {
     if (args === "skip") return;
-    setState((previous) => ({
-      data: previous.data,
-      status: "loading",
-      error: null,
-      isStale: previous.data !== undefined,
-    }));
-    startSlowTimer();
-    if (typeof client.retryQuery === "function") {
-      client.retryQuery(ref, JSON.parse(argsKey) as JsonValue);
-    }
+    setRequestGeneration((generation) => generation + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, kind, path, optimisticKey, argsKey, startSlowTimer]);
+  }, [argsKey]);
 
   return {
     data: state.data,
     status: state.status,
     error: state.error,
     isLoading: state.status === "loading",
-    isError: state.status === "error" || state.status === "timeout" || state.status === "disconnected",
+    isError: state.status === "error" || state.status === "timeout",
     isSuccess: state.status === "success",
     isStale: state.isStale,
     retry,
   };
 }
 
-export function useLiveQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
+export function useLiveQuery<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
   const client = useGonvexClient();
-  const [result, setResult] = useState<T>();
-  const [error, setError] = useState<Error | null>(null);
+  if (ref.delivery !== "live" || !ref.live?.plan) {
+    throw new Error(`useLiveQuery requires a structured Live Query reference: ${ref.path}`);
+  }
   const path = ref.path;
   const kind = ref.kind;
   const optimisticKey = JSON.stringify(ref.optimistic ?? null);
   const argsKey = JSON.stringify(args);
   const liveKey = JSON.stringify(ref.live ?? null);
   const liveWatch = useMemo(
-    () => args === "skip" || !ref.live ? undefined : client.watchLiveQuery<T>(ref, args),
+    () => args === "skip" ? undefined : client.watchLiveQuery<T>(ref, args),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [client, kind, path, optimisticKey, argsKey, liveKey],
   );
@@ -872,39 +836,7 @@ export function useLiveQuery<T = JsonValue>(ref: FunctionReference, args: JsonVa
     () => undefined,
   );
 
-  useEffect(() => {
-    if (args === "skip" || ref.live) {
-      setResult(undefined);
-      setError(null);
-      return;
-    }
-    setResult(undefined);
-    setError(null);
-    const unsubscribeScope = client.onSessionScopeChange(() => {
-      setResult(undefined);
-      setError(null);
-    });
-    const unsubscribeQuery = client.subscribeQuery(ref, args, (message) => {
-      if (message.type === "query.result") {
-        setResult(message.result as T);
-        setError(null);
-      }
-      if (message.type === "query.error") {
-        setResult(undefined);
-        setError(new GonvexClientError(message.error, { code: "server", path, operation: "query" }));
-      }
-    });
-    return () => {
-      unsubscribeScope();
-      unsubscribeQuery();
-    };
-  }, [client, kind, path, optimisticKey, argsKey, liveKey]);
-
-  // Convex-compatible: a failed query throws during render so error
-  // boundaries can catch it, instead of being indistinguishable from loading.
-  if (error) throw error;
-
-  return ref.live ? liveResult : result;
+  return liveResult;
 }
 
 /** Read one normalized entity from the single Gonvex Local Replica. */
@@ -928,7 +860,7 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
   const signature = args === "skip" ? "" : client.replicaSignature(ref, args);
   useEffect(() => {
     if (args === "skip") return;
-    return client.subscribeQuery(ref, args, () => undefined);
+    return client.subscribeLiveQuery(ref, args, () => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, ref.kind, ref.path, argsKey]);
   useSyncExternalStore(
@@ -936,13 +868,27 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
     useCallback(() => client.localReplica.version(), [client]),
     () => 0,
   );
+  if (args !== "skip" && client.localReplica.freshness() === "offline") {
+    const offline = client.offlineLiveQuery<T>(ref, args);
+    return {
+      rows: offline.rows,
+      ...(offline.total === undefined ? {} : { total: offline.total }),
+      ...(offline.offset === undefined ? {} : { offset: offline.offset }),
+      ...(offline.limit === undefined ? {} : { limit: offline.limit }),
+      source: "cache",
+      completeness: offline.completeness,
+      freshness: "offline",
+      supported: offline.supported,
+      ...(offline.unsupportedOperator ? { unsupportedOperator: offline.unsupportedOperator } : {}),
+    };
+  }
   return signature
     ? client.localReplica.liveQuery<T>(signature)
     : { rows: [], source: "cache", completeness: "partial", freshness: client.localReplica.freshness() };
 }
 
 /** Execute a read-only Query once. Queries never subscribe or rerun. */
-export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
+export function useQuery<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
   const client = useGonvexClient();
   const [result, setResult] = useState<T>();
   const [error, setError] = useState<Error | null>(null);
@@ -1064,14 +1010,6 @@ export function useAction(ref: FunctionReference, options: UseReducerOptions = {
   return (args: JsonValue = {}) => client.action(ref, args, options);
 }
 
-export function useConvex() {
-  return useGonvexClient();
-}
-
-export function useConvexAuth() {
-  return useContext(GonvexAuthContext);
-}
-
 const FALLBACK_CONNECTION_STATE: ConnectionState = {
   isWebSocketConnected: false,
   hasEverConnected: false,
@@ -1083,7 +1021,7 @@ const FALLBACK_CONNECTION_STATE: ConnectionState = {
   inflightOneShotQueries: 0,
 };
 
-export function useConvexConnectionState(): ConnectionState {
+export function useGonvexConnectionState(): ConnectionState {
   const client = useGonvexClient();
   const [state, setState] = useState<ConnectionState>(() => (
     typeof client.connectionState === "function" ? client.connectionState() : FALLBACK_CONNECTION_STATE
@@ -1098,19 +1036,7 @@ export function useConvexConnectionState(): ConnectionState {
   return state;
 }
 
-export function usePaginatedQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}, options: { initialNumItems?: number } = {}) {
-  const pageArgs = args === "skip" ? "skip" : { ...(isRecord(args) ? args : { args }), paginationOpts: { numItems: options.initialNumItems ?? 25, cursor: null } };
-  const result = useQuery<any>(ref, pageArgs as JsonValue | "skip");
-  const page = Array.isArray(result) ? { page: result, isDone: true, continueCursor: null } : result;
-  return {
-    results: (page?.page ?? []) as T[],
-    status: args === "skip" ? "Exhausted" : result === undefined ? "LoadingFirstPage" : page?.isDone ? "Exhausted" : "CanLoadMore",
-    isLoading: args !== "skip" && result === undefined,
-    loadMore: (_numItems: number) => undefined,
-  };
-}
-
-function useGonvexClient() {
+export function useGonvexClient() {
   const client = useContext(GonvexContext);
   if (!client) throw new Error("GonvexProvider is required");
   return client;

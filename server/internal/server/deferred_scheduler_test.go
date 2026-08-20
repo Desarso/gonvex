@@ -12,6 +12,18 @@ type recordingScheduler struct {
 	failPaths map[string]error
 }
 
+type validatingRecordingScheduler struct {
+	recordingScheduler
+	rejectPath string
+}
+
+func (scheduler *validatingRecordingScheduler) ValidateTarget(functionPath string) error {
+	if functionPath == scheduler.rejectPath {
+		return errors.New("target is not schedulable")
+	}
+	return nil
+}
+
 func (scheduler *recordingScheduler) RunAfter(delay time.Duration, functionPath string, args any) (string, error) {
 	return scheduler.RunAt(time.Now().Add(delay), functionPath, args)
 }
@@ -60,6 +72,17 @@ func TestDeferredSchedulerRejectsUnencodableArgsBeforeCommit(t *testing.T) {
 	}
 	if len(scheduler.jobs) != 0 {
 		t.Fatal("invalid job should not be buffered")
+	}
+}
+
+func TestDeferredSchedulerRejectsInvalidTargetBeforeCommit(t *testing.T) {
+	base := &validatingRecordingScheduler{rejectPath: "reports.read"}
+	scheduler := newDeferredScheduler(base)
+	if _, err := scheduler.RunAfter(0, "reports.read", map[string]any{}); err == nil {
+		t.Fatal("expected target validation error")
+	}
+	if len(scheduler.jobs) != 0 || len(base.calls) != 0 {
+		t.Fatal("invalid target must not be buffered or dispatched")
 	}
 }
 

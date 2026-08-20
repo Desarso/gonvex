@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -23,11 +22,6 @@ type rowsCache struct {
 	// (even when Redis generation counters were not incremented).
 	bootEpoch string
 }
-
-// emptyResultTTL is used when we intentionally cache an empty/near-empty
-// payload. Keeping these short limits how long a transient poison result
-// (e.g. empty statuses from a schema-cache race) can stick in Valkey.
-const emptyResultTTL = 15 * time.Second
 
 func newRowsCache(rawURL string, ttl time.Duration) (*rowsCache, error) {
 	if rawURL == "" || ttl <= 0 {
@@ -46,23 +40,6 @@ func newValkeyClient(rawURL string) (*redis.Client, error) {
 		return nil, err
 	}
 	return redis.NewClient(options), nil
-}
-
-func openRequiredValkey(rawURL string) (*redis.Client, error) {
-	if strings.TrimSpace(rawURL) == "" {
-		return nil, fmt.Errorf("VALKEY_URL (or REDIS_URL) is required; set it to a Valkey/Redis URL such as redis://127.0.0.1:6380/0")
-	}
-	client, err := newValkeyClient(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("VALKEY_URL (or REDIS_URL) is invalid: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("cannot connect to Valkey using VALKEY_URL (or REDIS_URL): %w", err)
-	}
-	return client, nil
 }
 
 func newRowsCacheWithClient(client *redis.Client, ttl time.Duration) *rowsCache {
@@ -90,7 +67,7 @@ func (c *rowsCache) close() error {
 func (c *rowsCache) rowsKey(ctx context.Context, projectID string, tenantID string, table string, query url.Values) string {
 	hash := sha256.Sum256([]byte(query.Encode()))
 	generationHash := sha256.Sum256([]byte(c.rowsGeneration(ctx, projectID, tenantID, table)))
-	projectID, tenantID = cacheScope(projectID, tenantID)
+	projectID, tenantID = replicaScope(projectID, tenantID)
 	return "gonvex:rows:v2:" + projectID + ":" + tenantID + ":" + table + ":" +
 		hex.EncodeToString(generationHash[:12]) + ":" + hex.EncodeToString(hash[:])
 }
@@ -115,7 +92,7 @@ func (c *rowsCache) rowsGeneration(ctx context.Context, projectID string, tenant
 }
 
 func (c *rowsCache) rowsGenerationKey(projectID string, tenantID string, table string) string {
-	projectID, tenantID = cacheScope(projectID, tenantID)
+	projectID, tenantID = replicaScope(projectID, tenantID)
 	return "gonvex:rows:v2:generation:" + cacheKeyPart(projectID) + ":" + cacheKeyPart(tenantID) + ":" + cacheKeyPart(table)
 }
 
@@ -152,75 +129,6 @@ func (c *rowsCache) setWithTTL(ctx context.Context, key string, value []byte, tt
 	_ = c.client.Set(ctx, key, value, ttl).Err()
 }
 
-func (c *rowsCache) queryKey(projectID string, tenantID string, generation string, scope string, path string, args []byte) string {
-	projectID, tenantID = cacheScope(projectID, tenantID)
-	prefix := "gonvex:queries:v2:" + cacheKeyPart(projectID) + ":" + cacheKeyPart(tenantID) + ":"
-	hash := sha256.Sum256([]byte(strings.Join([]string{scope, path, string(args)}, "\x00")))
-	generationHash := sha256.Sum256([]byte(generation))
-	return prefix + hex.EncodeToString(generationHash[:12]) + ":" + hex.EncodeToString(hash[:])
-}
-
-func (c *rowsCache) queryGeneration(ctx context.Context, projectID string, tenantID string, tables []string) (string, bool) {
-	if !c.enabled() {
-		return "", false
-	}
-	tables = queryCacheTables(tables)
-	keys := make([]string, 0, len(tables)+1)
-	keys = append(keys, c.queryGenerationKey(projectID, tenantID, "*"))
-	for _, table := range tables {
-		keys = append(keys, c.queryGenerationKey(projectID, tenantID, table))
-	}
-	values, err := c.client.MGet(ctx, keys...).Result()
-	if err != nil {
-		return "", false
-	}
-	// bootEpoch first so a process restart always produces a new generation string
-	// and therefore a different cache key — even when Redis counters are unchanged.
-	parts := make([]string, 0, len(keys)+1)
-	parts = append(parts, "boot="+c.bootEpoch)
-	for index, value := range values {
-		parts = append(parts, keys[index]+"="+strings.TrimSpace(fmt.Sprint(value)))
-	}
-	return strings.Join(parts, "\x00"), true
-}
-
-func (c *rowsCache) invalidateQueries(ctx context.Context, projectID string, tenantID string, tables []string) {
-	if !c.enabled() {
-		return
-	}
-	tables = queryCacheTables(tables)
-	if len(tables) == 0 {
-		tables = []string{"*"}
-	}
-	pipeline := c.client.Pipeline()
-	for _, table := range tables {
-		pipeline.Incr(ctx, c.queryGenerationKey(projectID, tenantID, table))
-	}
-	_, _ = pipeline.Exec(ctx)
-}
-
-func (c *rowsCache) queryGenerationKey(projectID string, tenantID string, table string) string {
-	projectID, tenantID = cacheScope(projectID, tenantID)
-	return "gonvex:queries:v2:generation:" + cacheKeyPart(projectID) + ":" + cacheKeyPart(tenantID) + ":" + cacheKeyPart(table)
-}
-
-func queryCacheTables(tables []string) []string {
-	unique := map[string]bool{}
-	for _, table := range tables {
-		table = strings.TrimSpace(table)
-		if table == "" || table == "*" {
-			continue
-		}
-		unique[table] = true
-	}
-	result := make([]string, 0, len(unique))
-	for table := range unique {
-		result = append(result, table)
-	}
-	sort.Strings(result)
-	return result
-}
-
 func (c *rowsCache) invalidateRows(ctx context.Context, projectID string, tenantID string, table string) {
 	if !c.enabled() {
 		return
@@ -252,12 +160,10 @@ func (c *rowsCache) clearProject(ctx context.Context, projectID string) int64 {
 	if !c.enabled() {
 		return 0
 	}
-	projectID, _ = cacheScope(projectID, "")
+	projectID, _ = replicaScope(projectID, "")
 	patterns := []string{
 		"gonvex:rows:v2:" + projectID + ":*",
 		"gonvex:rows:v2:generation:" + cacheKeyPart(projectID) + ":*",
-		"gonvex:queries:v2:" + cacheKeyPart(projectID) + ":*",
-		"gonvex:queries:v2:generation:" + cacheKeyPart(projectID) + ":*",
 	}
 	var cleared int64
 	for _, pattern := range patterns {
@@ -286,7 +192,7 @@ func cacheKeyPart(value string) string {
 	return hex.EncodeToString(hash[:12])
 }
 
-func cacheScope(projectID string, tenantID string) (string, string) {
+func replicaScope(projectID string, tenantID string) (string, string) {
 	if projectID == "" {
 		projectID = "default"
 	}

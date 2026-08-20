@@ -76,7 +76,9 @@ func TestSyncInfrastructureAssignsOneRevisionPerTransaction(t *testing.T) {
 		`UPDATE _gonvex_sync_clock`,
 		`WHERE transaction_id = txid_current()::bigint AND revision IS NULL`,
 		`row_number() OVER (ORDER BY event_id)`,
-		`current_setting('gonvex.mutation_id', true)`,
+		`ALTER TABLE _gonvex_sync_changes RENAME COLUMN mutation_id TO command_id`,
+		`ALTER TABLE _gonvex_sync_changes DROP COLUMN mutation_id`,
+		`current_setting('gonvex.command_id', true)`,
 		`pg_notify(`,
 		`'gonvex_change_feed'`,
 		`array_agg(DISTINCT table_name ORDER BY table_name)`,
@@ -127,7 +129,7 @@ func TestSyncTriggerNotificationIncludesAllTransactionTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close(context.Background()) })
-	if _, err := listener.Exec(ctx, `LISTEN `+SyncNotifyChannel); err != nil {
+	if _, err := listener.Exec(ctx, `LISTEN `+ChangeFeedNotifyChannel); err != nil {
 		t.Fatal(err)
 	}
 

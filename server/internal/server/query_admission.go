@@ -7,7 +7,7 @@ import (
 )
 
 // admissionClass partitions database-backed query executions by why they run.
-// Reactive work (invalidation and recovery reruns, authoritative sync
+// Reactive work (change and recovery reruns, authoritative replica
 // recomputation) keeps TTLU low for already-connected clients; foreground work
 // answers an interactive request; bootstrap work hydrates newly attached
 // subscriptions and sync snapshots. Bootstrap bursts are the only class whose
@@ -26,7 +26,7 @@ const (
 // class. "initial" executions are bootstrap; everything triggered by committed
 // writes or listener recovery is reactive.
 func admissionClassForReason(reason string) admissionClass {
-	if reason == "invalidate" || reason == "recover" {
+	if reason == "change" || reason == "recover" {
 		return admissionReactive
 	}
 	return admissionBootstrap

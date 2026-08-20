@@ -110,8 +110,8 @@ Inspect the provider or list accounts created by successful sign-ins:
 npx gonvex auth status
 npx gonvex auth status --json
 npx gonvex auth doctor
-npx gonvex auth users
-npx gonvex auth users --json
+npx gonvex auth accounts
+npx gonvex auth accounts --json
 ```
 
 `auth doctor` checks the central broker configuration, provider state, exact
@@ -126,11 +126,11 @@ npx gonvex auth tenants list
 npx gonvex auth tenants create "Acme" --owner owner@acme.example
 npx gonvex auth memberships list --tenant <tenant-id>
 npx gonvex auth memberships add --tenant <tenant-id> --email user@example.com --role member
-npx gonvex auth memberships remove --tenant <tenant-id> --user <user-id>
+npx gonvex auth memberships remove --tenant <tenant-id> --member <member-id>
 npx gonvex auth memberships remove --tenant <tenant-id> --email pending@example.com
-npx gonvex auth user disable <user-id>
-npx gonvex auth user enable <user-id>
-npx gonvex auth user delete <user-id>
+npx gonvex auth account disable <account-id>
+npx gonvex auth account enable <account-id>
+npx gonvex auth account delete <account-id>
 ```
 
 Remove a retired callback with `gonvex auth remove google --origin <url>`; this
@@ -204,8 +204,8 @@ the newly created local directory and attempts to delete the new runtime project
 
 ## `gonvex dev`
 
-Build the backend manifest, regenerate TypeScript bindings, sync the runtime, and
-watch `gonvex/**/*.go`:
+Build the TypeScript module artifact, regenerate bindings, sync the runtime, and
+watch `gonvex/**/*.ts` plus versioned SQL migrations:
 
 ```bash
 npx gonvex dev
@@ -252,10 +252,12 @@ connection options as `dev`. A `GONVEX_PROJECT_KEY` or equivalent `--key` is req
 The CLI sends that key as both `Authorization: Bearer …` and `x-gonvex-key`; the
 runtime accepts it only when it is the key registered to the exact project ID in the
 request path. A different project's key, an arbitrary key, and an opaque runtime-wide
-`GONVEX_DEV_SYNC_KEY` cannot read or change project environment variables. A legacy
-single-project runtime may use its generated project key through that setting, but
-the key's encoded project ID must still match the request. Dashboard project owners
+`GONVEX_DEV_SYNC_KEY` cannot read or change project environment variables. Dashboard project owners
 and admins can manage the same variables with their signed-in session.
+
+TypeScript Actions read these values through the immutable `ctx.env` object.
+Queries and Reducers do not receive environment variables, keeping transactional
+code isolated from host secrets and external configuration.
 
 `env push FILE` (also available as `env upload FILE`) reads the file relative to the
 selected project root and atomically replaces the complete server-side variable set
@@ -263,15 +265,6 @@ for that project. You can use `--file FILE` instead of the positional path. Keep
 project connection settings in `.env.local` and upload a separate deployment env file;
 the CLI refuses files containing `GONVEX_PROJECT_KEY`, `GONVEX_DEPLOY_KEY`, or
 `GONVEX_KEY` so a project credential cannot be copied into function environments.
-
-### Runtime compatibility
-
-Project-key authentication for `/dev/projects/{project}/env` requires runtime
-v0.1.9 or newer. Updating `@gonvex/cli` does not update a separately deployed runtime.
-If `gonvex env list` returns `401` with `dashboard sign-in is required` while
-`gonvex dev --once` succeeds with the same project settings, the runtime is using the
-v0.1.8-or-earlier environment handler. Rebuild and replace the runtime from the
-current Gonvex source as described in [Self-hosting and Deployment](./deployment#upgrade-the-runtime).
 
 A reverse proxy must preserve the `Authorization` and `x-gonvex-key` request headers
 and route `/dev/projects/{project}/env` to the runtime without rewriting the path.

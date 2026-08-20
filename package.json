@@ -18,7 +18,7 @@
     "dev:docs": "pnpm --filter @gonvex/docs dev",
     "dev:packages": "pnpm --parallel --filter @gonvex/protocol --filter @gonvex/client --filter @gonvex/react --filter @gonvex/cli --filter create-gonvex dev",
     "dev:dashboard": "pnpm --filter @gonvex/dashboard dev",
-    "dev:cli": "go run ./cmd/gonvex dev --project apps/dashboard",
+    "dev:cli": "pnpm --filter @gonvex/cli exec gonvex dev --project apps/dashboard",
     "dev:runtime": "cargo build --locked --manifest-path rust/Cargo.toml -p gonvex-module-host && GONVEX_MODULE_HOST_BINARY=\"$PWD/rust/target/debug/gonvex-module-host\" air -c .air.toml",
     "dev:runtime:air": "air -c .air.toml",
     "seed:tasks": "go run ./cmd/seed-tasks",

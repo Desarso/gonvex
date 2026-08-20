@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,7 +10,7 @@ import (
 	"github.com/gonvex/gonvex/pkg/gonvex"
 )
 
-func (s *Server) authenticateSocket(ctx context.Context, projectID string, currentTenantID string, token string, requestedTenantID string) (*gonvex.User, map[string]any, string, string, error) {
+func (s *Server) authenticateSocket(ctx context.Context, projectID string, currentTenantID string, token string, requestedTenantID string) (*gonvex.Account, map[string]any, string, string, error) {
 	if err := s.requireProjectDatabase(projectID); err != nil {
 		return nil, nil, "", "", err
 	}
@@ -20,76 +19,16 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 		if err != nil {
 			return nil, nil, "", "", err
 		}
-		member, err := s.loadTenantMember(ctx, session.ProjectID, tenantID, session.User.accountID())
+		member, err := s.loadTenantMember(ctx, session.ProjectID, tenantID, session.Account.ID)
 		if err != nil {
 			return nil, nil, "", "", err
 		}
-		return &gonvex.User{ID: session.User.accountID(), Email: session.User.Email, Name: session.User.Name, AvatarURL: session.User.Picture}, member.Permissions, session.ProjectID, tenantID, nil
+		return &gonvex.Account{ID: session.Account.ID, Email: session.Account.Email, Name: session.Account.Name, AvatarURL: session.Account.Picture}, member.Permissions, session.ProjectID, tenantID, nil
 	}
-	if strings.TrimSpace(s.projectRegistryURL()) != "" {
-		nativeEnabled, err := s.nativeAppAuthEnabled(ctx, projectID)
-		if err != nil {
-			return nil, nil, "", "", fmt.Errorf("project authentication configuration is unavailable")
-		}
-		if nativeEnabled {
-			return nil, nil, "", "", fmt.Errorf("a Gonvex app session is required")
-		}
+	if strings.TrimSpace(token) != "" {
+		return nil, nil, "", "", fmt.Errorf("only Gonvex app sessions are accepted")
 	}
-	// Both fallbacks below hand the app an identity taken from the presented
-	// token rather than a Gonvex session. That identity is only trustworthy
-	// when the token's signature was checked, which firebaseIdentityFromToken
-	// does whenever the project declares Firebase configuration.
-	firebaseProjectID := s.firebaseProjectID(ctx, projectID)
-	appIdentity := func() (*gonvex.User, string, error) {
-		user, err := s.firebaseIdentityFromToken(ctx, firebaseProjectID, token)
-		if err != nil {
-			return nil, "", err
-		}
-		tenant := tenantIDFromRequest(projectID, requestedTenantID)
-		if requestedTenantID == "" {
-			tenant = tenantIDFromRequest(projectID, currentTenantID)
-		}
-		return user, tenant, nil
-	}
-	hasVerifiedAppIdentity := firebaseProjectID != ""
-
-	if s.config.RequireAuth && !hasVerifiedAppIdentity {
-		return nil, nil, "", "", fmt.Errorf("project %q has no supported application authentication provider", projectID)
-	}
-	user, tenant, err := appIdentity()
-	if err != nil {
-		return nil, nil, "", "", err
-	}
-	if s.config.RequireAuth && user == nil {
-		return nil, nil, "", "", fmt.Errorf("authentication is required")
-	}
-	return user, map[string]any{}, projectID, tenant, nil
-}
-
-func devUserFromJWT(token string) *gonvex.User {
-	user := &gonvex.User{ID: "dev"}
-	parts := strings.Split(token, ".")
-	if len(parts) < 2 {
-		return user
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return user
-	}
-	var claims map[string]any
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return user
-	}
-	for _, key := range []string{"sub", "user_id", "uid"} {
-		if value := strings.TrimSpace(fmt.Sprint(claims[key])); value != "" && value != "<nil>" {
-			user.ID = value
-			break
-		}
-	}
-	if email := strings.TrimSpace(fmt.Sprint(claims["email"])); email != "" && email != "<nil>" {
-		user.Email = email
-	}
-	return user
+	return nil, nil, "", "", fmt.Errorf("a Gonvex app session is required")
 }
 
 func (s *Server) loadTenantPermissions(ctx context.Context, projectID string, tenantID string, userID string) (map[string]any, error) {
@@ -112,10 +51,10 @@ func (s *Server) loadTenantMember(ctx context.Context, projectID string, tenantI
 	member := &gonvex.Member{}
 	var rawPermissions []byte
 	if err := db.QueryRowContext(ctx, `
-		SELECT COALESCE(NULLIF(id, ''), user_id), COALESCE(NULLIF(account_id, ''), user_id),
+		SELECT id, account_id,
 			status, display_name, avatar_url, role, permissions
 		FROM members
-		WHERE (account_id = $1 OR user_id = $1) AND status = 'active'
+		WHERE account_id = $1 AND status = 'active'
 	`, accountID).Scan(&member.ID, &member.AccountID, &member.Status, &member.DisplayName, &member.AvatarURL, &member.Role, &rawPermissions); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("active tenant member for account %q not found", accountID)

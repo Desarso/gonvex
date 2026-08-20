@@ -55,8 +55,8 @@ func TestAccountTokenPermissionWildcards(t *testing.T) {
 		t.Fatal("project key read permission unexpectedly granted rotation permission")
 	}
 
-	userSession := dashboardActor{Role: "user", credentialKind: "session"}
-	if userSession.canGrantAccountPermission(permissionAdminProjects) || userSession.canGrantAccountPermission("*") {
+	standardSession := dashboardActor{Role: "standard", credentialKind: "session"}
+	if standardSession.canGrantAccountPermission(permissionAdminProjects) || standardSession.canGrantAccountPermission("*") {
 		t.Fatal("non-admin dashboard session could grant global permissions")
 	}
 	adminSession := dashboardActor{Role: "admin", credentialKind: "session"}
@@ -121,12 +121,12 @@ func TestPostgresAccountTokenProjectProvisioning(t *testing.T) {
 		RequireAuth:     true,
 		DashboardSecret: "account-token-test-session-secret",
 	})
-	user, err := server.createDashboardUser(context.Background(), "cli-owner@example.test", "CLI Owner", "correct horse battery staple", "user")
+	account, err := server.createDashboardAccount(context.Background(), "cli-owner@example.test", "CLI Owner", "correct horse battery staple", "standard")
 	if err != nil {
-		t.Fatalf("create account user: %v", err)
+		t.Fatalf("create account: %v", err)
 	}
-	if _, err := server.createDashboardUser(context.Background(), "runtime-admin@example.test", "Runtime Admin", "admin horse battery staple", "admin"); err != nil {
-		t.Fatalf("create admin user: %v", err)
+	if _, err := server.createDashboardAccount(context.Background(), "runtime-admin@example.test", "Runtime Admin", "admin horse battery staple", "admin"); err != nil {
+		t.Fatalf("create admin account: %v", err)
 	}
 	runtime := httptest.NewServer(server.Handler())
 	t.Cleanup(runtime.Close)
@@ -188,7 +188,7 @@ func TestPostgresAccountTokenProjectProvisioning(t *testing.T) {
 	if err := json.Unmarshal(payload, &identity); err != nil {
 		t.Fatal(err)
 	}
-	if identity.Account.Email != user.Email || identity.Authentication != "personalAccessToken" {
+	if identity.Account.Email != account.Email || identity.Authentication != "personalAccessToken" {
 		t.Fatalf("unexpected token identity: %+v", identity)
 	}
 
@@ -200,7 +200,7 @@ func TestPostgresAccountTokenProjectProvisioning(t *testing.T) {
 	if err := json.Unmarshal(payload, &createdProject); err != nil {
 		t.Fatal(err)
 	}
-	if createdProject.Project.ID == "" || createdProject.ProjectKey == "" || createdProject.Project.OwnerEmail != user.Email {
+	if createdProject.Project.ID == "" || createdProject.ProjectKey == "" || createdProject.Project.OwnerEmail != account.Email {
 		t.Fatalf("incomplete or incorrectly owned project: %+v", createdProject)
 	}
 	t.Cleanup(func() {

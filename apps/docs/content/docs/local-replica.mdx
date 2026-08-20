@@ -1,0 +1,53 @@
+---
+title: Persistent Local Replica
+description: Instant cached windows, normalized entities, and honest offline results.
+---
+
+# Persistent Local Replica
+
+Gonvex persists normalized entities and Live Query ID memberships. IndexedDB
+is the default web adapter; `@gonvex/expo-sqlite` provides transactional mobile
+persistence.
+
+```ts
+const client = new GonvexClient(runtimeURL, {
+  localReplica: { storage: indexedDBLocalReplica("whagons") },
+});
+```
+
+On launch, cached entities and windows hydrate immediately with freshness
+`verifying`. After Gonvex resumes the committed revision and verifies a Live
+Query, freshness becomes `current`.
+
+```tsx
+const { rows, source, completeness, freshness, supported } =
+  useLiveQueryState(api.tasks.grid, args);
+```
+
+`rows` are resolved from one entity map. A query owns only membership and
+ordering, so a task displayed by several components cannot diverge into
+separate cached copies.
+
+## Offline contract
+
+Portable Live Query expressions can run over cached rows. Gonvex reports:
+
+- `source`: `server` or `cache`
+- `completeness`: `complete` or `partial`
+- `freshness`: `current`, `verifying`, or `offline`
+
+A partial cache must be labeled as partial in product UI. PostgreSQL-specific
+operators return `supported: false` instead of being approximated in JavaScript.
+The generated reference carries the exact expression tree used by the server,
+so Whagons does not implement a second filtering language for offline mode.
+
+## Atomicity
+
+Every server revision updates entities, memberships, and the cursor in one
+IndexedDB/SQLite transaction. Gonvex swaps the in-memory snapshot and notifies
+React only after persistence succeeds, so components cannot observe half a
+server transaction.
+
+One-shot `client.query()` remains server-only. Persistent windows belong to
+structured Live Queries; bounded durable entity sets belong to Replica
+Collections.

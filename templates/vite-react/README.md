@@ -15,7 +15,9 @@ npm run dev
 gonvex dev -- vite
 ```
 
-The Gonvex CLI watches `gonvex/*.go`, regenerates `gonvex/_generated/*`, syncs schema/function metadata to the runtime, and runs Vite.
+The Gonvex CLI watches the TypeScript modules in `gonvex/` and versioned SQL
+migrations, regenerates `gonvex/_generated/*`, builds the module artifact, syncs
+schema/function metadata to the runtime, and runs Vite.
 
 It does not start the runtime or its dependencies. Start the Gonvex reference
 stack separately with `make stack`, or point `.env.local` at an existing
@@ -35,4 +37,5 @@ Production should use the public origin of your self-hosted runtime:
 VITE_GONVEX_WS_URL=wss://gonvex.example.com/ws
 ```
 
-Users do not need Go installed for normal app development. Backend functions are written in Go and run in the Gonvex runtime/cloud.
+Application functions are written in TypeScript and run in Gonvex's module host.
+The starter does not require a separate backend language toolchain.

@@ -3,7 +3,10 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/server/internal/config"
 	"github.com/gorilla/websocket"
@@ -44,6 +46,90 @@ type registeredReducerResult struct {
 	ProjectID string `json:"projectId"`
 }
 
+func newTypeScriptTestServer(t *testing.T, cfg config.Config) *Server {
+	t.Helper()
+	baseURL := tenantRegistryTestPostgresURL(t)
+	suffix := tenantRegistryTestSuffix(t)
+	controlURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_ts_sync_control_"+suffix)
+	tenantURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_ts_sync_tenant_"+suffix)
+	// TypeScript module sync now intentionally requires a real tenant database:
+	// migrations are applied there, then the committed schema is introspected and
+	// enrolled in the authoritative change feed. Keep this fixture opt-in via
+	// GONVEX_TEST_POSTGRES_URL so ordinary unit runs remain hermetic.
+	cfg.ControlPlaneURL = controlURL
+	cfg.PostgresURL = controlURL
+	if cfg.TenantDatabases == nil {
+		cfg.TenantDatabases = map[string]string{}
+	}
+	for _, project := range []string{"test", "app", "header-project", "persisted-project", "artifact-version-project"} {
+		cfg.TenantDatabases[project+":tenant"] = tenantURL
+	}
+	binary, err := filepath.Abs("../../../rust/target/debug/gonvex-module-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(binary); err != nil || info.IsDir() {
+		t.Skip("build gonvex-module-host before running TypeScript runtime integration tests")
+	}
+	cfg.ModuleHostEnabled = true
+	cfg.ModuleHostBinary = binary
+	server := New(cfg)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func typeScriptTestManifest(project string, functions map[string]manifest.FunctionEntry) manifest.Manifest {
+	code := []byte("export function handler() { return null; }")
+	migration := []byte("-- gonvex:scope tenant\nCREATE TABLE IF NOT EXISTS gonvex_test_rows (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '');\n")
+	digest := sha256.Sum256(code)
+	hash := hex.EncodeToString(digest[:])
+	moduleFunctions := make(map[string]manifest.ModuleFunction, len(functions))
+	visibility := map[string]manifest.VisibilityPlan{}
+	for path, entry := range functions {
+		entry.Handler = "handler"
+		entry.File = "gonvex/index.ts"
+		entry.Args = manifest.ModuleSchema{"kind": "any"}
+		entry.Result = manifest.ModuleSchema{"kind": "any"}
+		functions[path] = entry
+		moduleFunctions[path] = manifest.ModuleFunction{
+			Kind: entry.Kind, Handler: "handler", Export: "handler", File: "gonvex/index.ts",
+			Args: entry.Args, Result: entry.Result, Dependencies: entry.Dependencies,
+			Internal: entry.Internal, Delivery: entry.Delivery, Replica: entry.Replica,
+		}
+		if plan := entry.Dependencies.LiveQueryPlan; plan != nil {
+			visibility[plan.Table] = manifest.VisibilityPlan{
+				Table: plan.Table,
+				Key:   plan.Key,
+				Sets:  map[string]manifest.VisibilitySet{},
+				Where: &manifest.VisibilityExpression{Operator: "public"},
+			}
+		}
+	}
+	result := manifest.Manifest{
+		Project: project, GeneratedAt: "now", Functions: functions, Schema: manifest.EmptySchema(), Visibility: visibility,
+		Module: &manifest.ModuleArtifact{
+			Language: manifest.LanguageTypeScript, Generation: manifest.ModuleArtifactGeneration, Entrypoint: "gonvex/index.ts",
+			Functions: moduleFunctions, Files: map[string]string{
+				"gonvex/index.ts":               base64.StdEncoding.EncodeToString(code),
+				"migrations/0001_test_rows.sql": base64.StdEncoding.EncodeToString(migration),
+			},
+			Visibility: visibility,
+			JavaScript: &manifest.ModuleJavaScript{Path: "gonvex/_build/module.js", Hash: hash, Code: base64.StdEncoding.EncodeToString(code)},
+		},
+	}
+	result.Module.Hash, _ = result.Module.ComputedHash()
+	return result
+}
+
+func typeScriptManifestBody(t *testing.T, project string, functions map[string]manifest.FunctionEntry) *bytes.Reader {
+	t.Helper()
+	payload, err := json.Marshal(typeScriptTestManifest(project, functions))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.NewReader(payload)
+}
+
 func TestHealth(t *testing.T) {
 	t.Setenv("SOURCE_COMMIT", "")
 	t.Setenv("GONVEX_RUNTIME_VERSION", "0123456789abcdef0123456789abcdef01234567")
@@ -63,6 +149,16 @@ func TestHealth(t *testing.T) {
 	}
 	if payload.Version != "0123456789abcdef0123456789abcdef01234567" {
 		t.Fatalf("health version = %q", payload.Version)
+	}
+}
+
+func TestLegacyDashboardUserRouteIsNotRegistered(t *testing.T) {
+	server := New(config.Config{})
+	t.Cleanup(server.Close)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/auth/users", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("legacy dashboard user route returned %d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }
 
@@ -96,7 +192,7 @@ func TestHealthIgnoresUnresolvedCoolifySourceCommit(t *testing.T) {
 }
 
 func TestHealthWaitsForRuntimeManifestHydration(t *testing.T) {
-	server := newServer(config.Config{}, nil, nil, nil)
+	server := newServer(config.Config{}, nil)
 	recorder := httptest.NewRecorder()
 
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -193,7 +289,7 @@ func TestInternalDataTablesAreHidden(t *testing.T) {
 		want  bool
 	}{
 		{name: "files metadata", table: "_gonvex_files", want: true},
-		{name: "dashboard users", table: "gonvex_dashboard_users", want: true},
+		{name: "dashboard accounts", table: "gonvex_dashboard_accounts", want: true},
 		{name: "account access tokens", table: "gonvex_account_access_tokens", want: true},
 		{name: "project members", table: "gonvex_project_members", want: true},
 		{name: "project invitations", table: "gonvex_project_invitations", want: true},
@@ -325,8 +421,13 @@ func TestDeleteDataRowRequiresRuntimeAdminKey(t *testing.T) {
 }
 
 func TestDevSyncStoresManifest(t *testing.T) {
-	server := New(config.Config{})
-	body := bytes.NewBufferString(`{"project":"test","generatedAt":"now","functions":{"tasks.list":{"kind":"query","handler":"List","file":"gonvex/tasks.go"}},"schema":{}}`)
+	server := newTypeScriptTestServer(t, config.Config{})
+	body := typeScriptManifestBody(t, "test", map[string]manifest.FunctionEntry{"tasks.list": {
+		Kind: manifest.FunctionKindQuery,
+		Dependencies: manifest.FunctionDependencies{LiveQueryPlan: &manifest.LiveQueryPlan{
+			Table: "gonvex_test_rows", Key: "id", Columns: []string{"id", "title"},
+		}},
+	}})
 
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", body))
@@ -338,6 +439,22 @@ func TestDevSyncStoresManifest(t *testing.T) {
 	manifest := server.runtime.Manifest()
 	if len(manifest.Functions) != 1 {
 		t.Fatalf("expected 1 function, got %d", len(manifest.Functions))
+	}
+	tenantURL := server.config.TenantDatabases["test:tenant"]
+	db, err := sql.Open("pgx", tenantURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var tableExists, changeFeedExists bool
+	if err := db.QueryRow(`SELECT to_regclass('gonvex_test_rows') IS NOT NULL`).Scan(&tableExists); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT to_regclass('_gonvex_sync_changes') IS NOT NULL`).Scan(&changeFeedExists); err != nil {
+		t.Fatal(err)
+	}
+	if !tableExists || !changeFeedExists {
+		t.Fatalf("TypeScript migration/change feed not installed: table=%t changeFeed=%t", tableExists, changeFeedExists)
 	}
 }
 
@@ -371,62 +488,12 @@ func TestManifestForUnknownProjectIsEmpty(t *testing.T) {
 	}
 }
 
-func TestExecuteRegisteredQuery(t *testing.T) {
-	app := gonvex.NewApp()
-	app.Query("custom.echo", func(ctx *gonvex.QueryCtx, args registeredQueryArgs) (map[string]any, error) {
-		return map[string]any{
-			"name":      args.Name,
-			"projectId": ctx.ProjectID,
-			"tenantId":  ctx.TenantID,
-			"hasDB":     ctx.DB != nil,
-		}, nil
-	})
-	server := NewWithApp(config.Config{}, app)
-
-	result, err := server.executeQuery(context.Background(), "project-a", "custom.echo", json.RawMessage(`{"name":"Ada"}`))
-	if err != nil {
-		t.Fatalf("execute registered query: %v", err)
-	}
-	payload, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map result, got %T", result)
-	}
-	if payload["name"] != "Ada" || payload["projectId"] != "project-a" || payload["tenantId"] != "project-a" || payload["hasDB"] != false {
-		t.Fatalf("unexpected payload: %#v", payload)
-	}
-}
-
-func TestExecuteRegisteredReducer(t *testing.T) {
-	app := gonvex.NewApp()
-	app.Reducer("custom.create", func(ctx *gonvex.ReducerCtx, args registeredReducerArgs) (registeredReducerResult, error) {
-		if ctx.Tx != nil {
-			t.Fatal("expected nil transaction without configured database")
-		}
-		return registeredReducerResult{Title: args.Title, ProjectID: ctx.ProjectID}, nil
-	}, gonvex.OnlineOnlyNonOptimistic("server dispatch test fixture"))
-	server := NewWithApp(config.Config{}, app)
-
-	result, err := server.executeReducer(context.Background(), "project-a", "custom.create", json.RawMessage(`{"title":"Ship"}`))
-	if err != nil {
-		t.Fatalf("execute registered reducer: %v", err)
-	}
-	payload, ok := result.(registeredReducerResult)
-	if !ok {
-		t.Fatalf("expected registeredReducerResult, got %T", result)
-	}
-	if payload.Title != "Ship" || payload.ProjectID != "project-a" {
-		t.Fatalf("unexpected payload: %#v", payload)
-	}
-}
-
 func TestMetricsTracksDataCacheAndFunctionCalls(t *testing.T) {
 	server := New(config.Config{})
 
 	server.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dev/data/tables/tasks/rows", nil))
-	if _, err := server.executeQuery(context.Background(), "", "tasks.grid", nil); err != nil {
-		t.Fatalf("execute query: %v", err)
-	}
-	if _, err := server.executeReducer(context.Background(), "", "missing.mutation", nil); err == nil {
+	_, _ = server.executeQuery(context.Background(), "", "tasks.grid", nil)
+	if _, err := server.executeReducer(context.Background(), "", "missing.reducer", nil); err == nil {
 		t.Fatal("expected missing reducer to fail")
 	}
 
@@ -449,11 +516,11 @@ func TestMetricsTracksDataCacheAndFunctionCalls(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if payload.Functions["tasks.grid"].Calls != 1 {
+	if payload.Functions["tasks.grid"].Calls != 1 || payload.Functions["tasks.grid"].Errors != 1 {
 		t.Fatalf("expected tasks.grid call to be tracked, got %+v", payload.Functions["tasks.grid"])
 	}
-	if payload.Functions["missing.mutation"].Errors != 1 {
-		t.Fatalf("expected missing mutation error to be tracked, got %+v", payload.Functions["missing.mutation"])
+	if payload.Functions["missing.reducer"].Errors != 1 {
+		t.Fatalf("expected missing reducer error to be tracked, got %+v", payload.Functions["missing.reducer"])
 	}
 	if payload.Cache.Bypasses != 1 {
 		t.Fatalf("expected cache bypass to be tracked, got %d", payload.Cache.Bypasses)
@@ -462,24 +529,6 @@ func TestMetricsTracksDataCacheAndFunctionCalls(t *testing.T) {
 
 func TestMetricsLogsAreProjectScoped(t *testing.T) {
 	server := New(config.Config{})
-	if err := server.runtime.SyncManifest(manifest.Manifest{
-		Project: "project-a",
-		Functions: map[string]manifest.FunctionEntry{
-			"tasks.list": {Kind: manifest.FunctionKindQuery, Handler: "ListTasks", File: "gonvex/tasks.go"},
-		},
-		Schema: manifest.EmptySchema(),
-	}); err != nil {
-		t.Fatalf("sync project-a manifest: %v", err)
-	}
-	if err := server.runtime.SyncManifest(manifest.Manifest{
-		Project: "project-b",
-		Functions: map[string]manifest.FunctionEntry{
-			"messages.list": {Kind: manifest.FunctionKindQuery, Handler: "ListMessages", File: "gonvex/messages.go"},
-		},
-		Schema: manifest.EmptySchema(),
-	}); err != nil {
-		t.Fatalf("sync project-b manifest: %v", err)
-	}
 	server.metrics.recordFunction("project-a", "tasks.list", "query", 25*time.Millisecond, nil)
 	server.metrics.recordFunction("project-a", "tasks.grid", "query", 25*time.Millisecond, fmt.Errorf("dashboard probe"))
 	server.metrics.recordFunction("project-b", "messages.list", "query", 25*time.Millisecond, fmt.Errorf("boom"))
@@ -622,9 +671,7 @@ func TestLogStreamReplayFlag(t *testing.T) {
 func TestMetricsExposesRunningAndScheduler(t *testing.T) {
 	server := New(config.Config{})
 
-	if _, err := server.executeQuery(context.Background(), "", "tasks.grid", nil); err != nil {
-		t.Fatalf("execute query: %v", err)
-	}
+	_, _ = server.executeQuery(context.Background(), "", "tasks.grid", nil)
 
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/dev/metrics", nil))
@@ -667,7 +714,7 @@ func TestMetricsTracksTransactionTelemetry(t *testing.T) {
 		Project:          "project-a",
 		Tenant:           "tenant-a",
 		OperationID:      "op-1",
-		Kind:             "mutation",
+		Kind:             "reducer",
 		Path:             "tasks.create",
 		Phase:            "server",
 		Outcome:          "ok",
@@ -683,7 +730,7 @@ func TestMetricsTracksTransactionTelemetry(t *testing.T) {
 		Kind:              "query",
 		Path:              "tasks.grid",
 		Phase:             "browser",
-		Reason:            "invalidate",
+		Reason:            "change",
 		Outcome:           "ok",
 		ClientRoundTripMS: 45,
 		ServerToBrowserMS: 7,
@@ -711,14 +758,14 @@ func TestMetricsTracksTransactionTelemetry(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if payload.Transactions["mutation:tasks.create"].ServerEvents != 1 {
-		t.Fatalf("expected mutation server event, got %+v", payload.Transactions["mutation:tasks.create"])
+	if payload.Transactions["reducer:tasks.create"].ServerEvents != 1 {
+		t.Fatalf("expected reducer server event, got %+v", payload.Transactions["reducer:tasks.create"])
 	}
-	if payload.Transactions["mutation:tasks.create"].AverageServerCommitMS != 20 {
-		t.Fatalf("expected commit average to be recorded, got %+v", payload.Transactions["mutation:tasks.create"])
+	if payload.Transactions["reducer:tasks.create"].AverageServerCommitMS != 20 {
+		t.Fatalf("expected commit average to be recorded, got %+v", payload.Transactions["reducer:tasks.create"])
 	}
-	if payload.Transactions["mutation:tasks.create"].AverageClientToCommitMS != 35 {
-		t.Fatalf("expected client-to-commit average to be recorded, got %+v", payload.Transactions["mutation:tasks.create"])
+	if payload.Transactions["reducer:tasks.create"].AverageClientToCommitMS != 35 {
+		t.Fatalf("expected client-to-commit average to be recorded, got %+v", payload.Transactions["reducer:tasks.create"])
 	}
 	if payload.Transactions["query:tasks.grid"].BrowserEvents != 1 {
 		t.Fatalf("expected query browser event, got %+v", payload.Transactions["query:tasks.grid"])
@@ -827,8 +874,8 @@ func TestSuccessfulServerSubscriptionTelemetryIsNotDurable(t *testing.T) {
 			t.Fatalf("server %s errors must remain durable", kind)
 		}
 	}
-	if !transactionTelemetryIsDurable(transactionTelemetryEntry{Kind: "mutation", Phase: "server", Outcome: "ok"}) {
-		t.Fatal("successful mutations must remain durable")
+	if !transactionTelemetryIsDurable(transactionTelemetryEntry{Kind: "reducer", Phase: "server", Outcome: "ok"}) {
+		t.Fatal("successful reducers must remain durable")
 	}
 	if !transactionTelemetryIsDurable(transactionTelemetryEntry{Kind: "query", Phase: "browser", Outcome: "ok"}) {
 		t.Fatal("browser telemetry must remain durable")
@@ -841,7 +888,7 @@ func TestClientTelemetryEntryIncludesBrowserDeviceInfo(t *testing.T) {
 		ID:                 "op-1",
 		Kind:               "query",
 		Path:               "tasks.grid",
-		Reason:             "invalidate",
+		Reason:             "change",
 		Outcome:            "ok",
 		ClientReceivedAtMS: 123.456,
 		Device:             json.RawMessage(`{"browserName":"Chrome","browserVersion":"126.0.0.0","deviceType":"desktop","platform":"Win32","userAgent":"Mozilla/5.0 Chrome/126.0.0.0","language":"en-US","timezone":"America/Los_Angeles","viewportWidth":1440,"viewportHeight":900}`),
@@ -895,8 +942,8 @@ func TestDevSyncRequiresConfiguredKey(t *testing.T) {
 }
 
 func TestDevSyncAcceptsBearerSyncKey(t *testing.T) {
-	server := New(config.Config{DevSyncKey: "secret"})
-	body := bytes.NewBufferString(`{"project":"app","generatedAt":"now","functions":{},"schema":{}}`)
+	server := newTypeScriptTestServer(t, config.Config{DevSyncKey: "secret"})
+	body := typeScriptManifestBody(t, "app", map[string]manifest.FunctionEntry{})
 	request := httptest.NewRequest(http.MethodPost, "/dev/sync", body)
 	request.Header.Set("authorization", "Bearer secret")
 
@@ -905,6 +952,33 @@ func TestDevSyncAcceptsBearerSyncKey(t *testing.T) {
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestDevSyncRejectsDivergentTypeScriptFunctionContract(t *testing.T) {
+	server := newTypeScriptTestServer(t, config.Config{})
+	next := typeScriptTestManifest("app", map[string]manifest.FunctionEntry{
+		"tasks.list": {
+			Kind: manifest.FunctionKindQuery,
+			Dependencies: manifest.FunctionDependencies{LiveQueryPlan: &manifest.LiveQueryPlan{
+				Table: "gonvex_test_rows", Key: "id", Columns: []string{"id", "title"},
+			}},
+		},
+	})
+	entry := next.Functions["tasks.list"]
+	entry.Kind = manifest.FunctionKindAction
+	next.Functions["tasks.list"] = entry
+	payload, err := json.Marshal(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", bytes.NewReader(payload)))
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusUnprocessableEntity, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "does not match") {
+		t.Fatalf("expected contract mismatch, got %s", recorder.Body.String())
 	}
 }
 
@@ -948,8 +1022,8 @@ func TestDevSyncRejectsUnregisteredProjectInsteadOfUsingControlDatabase(t *testi
 }
 
 func TestDevSyncUsesHeaderProjectWhenManifestProjectIsEmpty(t *testing.T) {
-	server := New(config.Config{})
-	body := bytes.NewBufferString(`{"generatedAt":"now","functions":{},"schema":{}}`)
+	server := newTypeScriptTestServer(t, config.Config{})
+	body := typeScriptManifestBody(t, "", map[string]manifest.FunctionEntry{})
 	request := httptest.NewRequest(http.MethodPost, "/dev/sync", body)
 	request.Header.Set("x-gonvex-project-id", "header-project")
 
@@ -965,8 +1039,13 @@ func TestDevSyncUsesHeaderProjectWhenManifestProjectIsEmpty(t *testing.T) {
 }
 
 func TestDevSyncKeepsProjectManifestAvailableAfterSync(t *testing.T) {
-	server := New(config.Config{})
-	body := bytes.NewBufferString(`{"project":"persisted-project","generatedAt":"now","functions":{"messages.list":{"kind":"query","handler":"ListMessages","file":"gonvex/messages.go"}},"schema":{"tables":{}}}`)
+	server := newTypeScriptTestServer(t, config.Config{})
+	body := typeScriptManifestBody(t, "persisted-project", map[string]manifest.FunctionEntry{"messages.list": {
+		Kind: manifest.FunctionKindQuery,
+		Dependencies: manifest.FunctionDependencies{LiveQueryPlan: &manifest.LiveQueryPlan{
+			Table: "gonvex_test_rows", Key: "id", Columns: []string{"id", "title"},
+		}},
+	}})
 
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", body))
@@ -984,8 +1063,14 @@ func TestDevSyncKeepsProjectManifestAvailableAfterSync(t *testing.T) {
 }
 
 func TestDevSyncAlwaysStampsRuntimeDatabaseArtifactVersion(t *testing.T) {
-	server := New(config.Config{})
-	body := bytes.NewBufferString(`{"project":"artifact-version-project","generatedAt":"now","functions":{},"schema":{"tables":{}},"notifySchemaVersion":"1"}`)
+	server := newTypeScriptTestServer(t, config.Config{})
+	requestManifest := typeScriptTestManifest("artifact-version-project", map[string]manifest.FunctionEntry{})
+	requestManifest.NotifySchemaVersion = "1"
+	payload, err := json.Marshal(requestManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.NewReader(payload)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", body))
 
@@ -998,18 +1083,14 @@ func TestDevSyncAlwaysStampsRuntimeDatabaseArtifactVersion(t *testing.T) {
 }
 
 func TestDevSyncSkipsSchemaLoadedFromPersistedManifest(t *testing.T) {
-	server := New(config.Config{})
-	persisted := manifest.Manifest{
-		Project:             "persisted-project",
-		Functions:           map[string]manifest.FunctionEntry{},
-		Schema:              manifest.EmptySchema(),
-		NotifySchemaVersion: manifest.NotifySchemaVersion,
-	}
+	server := newTypeScriptTestServer(t, config.Config{})
+	persisted := typeScriptTestManifest("persisted-project", map[string]manifest.FunctionEntry{})
+	persisted.NotifySchemaVersion = manifest.NotifySchemaVersion
 	if err := server.runtime.SyncManifest(persisted); err != nil {
 		t.Fatal(err)
 	}
 
-	body := bytes.NewBufferString(`{"project":"persisted-project","generatedAt":"now","functions":{},"schema":{"tables":{}}}`)
+	body := typeScriptManifestBody(t, "persisted-project", map[string]manifest.FunctionEntry{})
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", body))
 

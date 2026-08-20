@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConvexReactClient, GonvexClient, GonvexClientError, type FunctionReference } from "./index";
+import { GonvexClient, GonvexClientError, MemoryLocalReplicaStorage, type FunctionReference } from "./index";
 
 const captureReportedError = vi.hoisted(() => vi.fn());
 vi.mock("./error-reporter.js", () => ({
@@ -65,7 +65,26 @@ class FakeWebSocket {
   }
 }
 
-const ref: FunctionReference = { kind: "query", path: "tasks.list" };
+const ref: FunctionReference = {
+  kind: "query",
+  path: "tasks.list",
+  delivery: "live",
+  live: { entity: "tasks", key: "id", resultPath: [], plan: { table: "tasks", key: "id", columns: ["id"] } },
+};
+const testReplicaDirective = {
+  protocolVersion: 1 as const,
+  scope: "project:test:tenant:test",
+  visibilityScope: "visibility:test",
+  epoch: "epoch:test",
+};
+
+function authenticatedResult(result: Record<string, unknown>) {
+  return { ...result, replica: testReplicaDirective };
+}
+
+async function flushMicrotasks() {
+  for (let index = 0; index < 12; index += 1) await Promise.resolve();
+}
 
 beforeEach(() => {
   FakeWebSocket.instances = [];
@@ -95,10 +114,15 @@ describe("GonvexClient", () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const socket = (client.connect(), latestSocket());
 		socket.open();
-		socket.receive({ type: "session.ready", capabilities: { queryBatch: 1 } });
+		socket.receive({ type: "session.ready", capabilities: { queryBatch: 1 }, replica: testReplicaDirective });
 
-		client.subscribeQuery(ref, {}, vi.fn());
-		client.subscribeQuery({ kind: "query", path: "teams.list" }, {}, vi.fn());
+		client.subscribeLiveQuery(ref, {}, vi.fn());
+		client.subscribeLiveQuery({
+			kind: "query",
+			path: "teams.list",
+			delivery: "live",
+			live: { entity: "teams", key: "id", resultPath: [], plan: { table: "teams", key: "id", columns: ["id"] } },
+		}, {}, vi.fn());
 		await vi.advanceTimersByTimeAsync(0);
 
 		const frames = sentMessages(socket);
@@ -109,12 +133,27 @@ describe("GonvexClient", () => {
 			.toEqual(["tasks.list", "teams.list"]);
 	});
 
+	it("fails closed when the runtime omits the authoritative Local Replica scope", () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		const onAuthError = vi.fn();
+		client.onAuthError(onAuthError);
+		client.connect();
+		const socket = latestSocket();
+		socket.open();
+		socket.receive({ type: "session.ready", capabilities: {} });
+
+		expect(onAuthError).toHaveBeenCalledWith(
+			"Runtime did not provide an authoritative Local Replica visibility scope",
+		);
+		expect(client.localReplica.freshness()).toBe("verifying");
+	});
+
 	it("flushes reducerMany as one frame and settles entries independently", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		client.connect();
 		const socket = latestSocket();
 		socket.open();
-		socket.receive({ type: "session.ready", capabilities: { reducerBatch: 1 } });
+		socket.receive({ type: "session.ready", capabilities: { reducerBatch: 1 }, replica: testReplicaDirective });
 
 		const outcome = client.reducerMany([
 			{ ref: { kind: "reducer", path: "tasks.create" }, args: { name: "a" } },
@@ -140,7 +179,7 @@ describe("GonvexClient", () => {
 		client.connect();
 		const socket = latestSocket();
 		socket.open();
-		socket.receive({ type: "session.ready", capabilities: {} });
+		socket.receive({ type: "session.ready", capabilities: {}, replica: testReplicaDirective });
 
 		const outcome = client.reducerMany([
 			{ ref: { kind: "reducer", path: "tasks.create" }, args: { name: "a" } },
@@ -169,7 +208,8 @@ describe("GonvexClient", () => {
 		client.connect();
 		const socket = latestSocket();
 		socket.open();
-		socket.receive({ type: "session.ready", capabilities: {} });
+		socket.receive({ type: "session.ready", capabilities: {}, replica: testReplicaDirective });
+		await flushMicrotasks();
 
 		const optimistic = client.reducer(
 			{ kind: "reducer", path: "tasks.update" },
@@ -190,16 +230,17 @@ describe("GonvexClient", () => {
 		await expect(oneShot).resolves.toBe("id-x");
 	});
 
-	it("rejects stale revisions and advances progress without notifying listeners", () => {
+	it("rejects stale revisions and advances progress without notifying listeners", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const handler = vi.fn();
-		client.subscribeQuery(ref, {}, handler);
+		client.subscribeLiveQuery(ref, {}, handler);
 		const socket = latestSocket();
 		socket.open();
 		const [{ id }] = sentMessages(socket);
 		socket.receive({ type: "query.result", id, result: [{ id: "a", title: "new" }], subscriptionRevision: { epoch: "runtime-a", sequence: 2 } });
 		socket.receive({ type: "query.result", id, result: [{ id: "a", title: "old" }], subscriptionRevision: { epoch: "runtime-a", sequence: 1 } });
 		socket.receive({ type: "query.progress", id, throughRevision: { epoch: "runtime-a", sequence: 3 } });
+		await flushMicrotasks();
 		expect(handler).toHaveBeenCalledTimes(1);
 		expect(handler.mock.calls[0][0].result[0].title).toBe("new");
 	});
@@ -207,7 +248,7 @@ describe("GonvexClient", () => {
 	it("requests an authoritative snapshot when progress arrives without a local result", () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const handler = vi.fn();
-		client.subscribeQuery(ref, {}, handler);
+		client.subscribeLiveQuery(ref, {}, handler);
 		const socket = latestSocket();
 		socket.open();
 		const [{ id }] = sentMessages(socket);
@@ -230,10 +271,10 @@ describe("GonvexClient", () => {
 		});
 	});
 
-	it("applies keyed patches only to the matching base revision", () => {
+	it("applies keyed patches only to the matching base revision", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const handler = vi.fn();
-		client.subscribeQuery(ref, {}, handler);
+		client.subscribeLiveQuery(ref, {}, handler);
 		const socket = latestSocket();
 		socket.open();
 		const [{ id }] = sentMessages(socket);
@@ -251,6 +292,7 @@ describe("GonvexClient", () => {
 			deleted: ["b"],
 			order: ["c", "a"],
 		});
+		await flushMicrotasks();
 		expect(handler).toHaveBeenCalledTimes(2);
 		expect(handler.mock.calls[1][0]).toMatchObject({
 			type: "query.result",
@@ -269,10 +311,10 @@ describe("GonvexClient", () => {
 		expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", id });
 	});
 
-	it("atomically applies keyed patches to object collections", () => {
+	it("atomically applies keyed patches to object collections", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const handler = vi.fn();
-		client.subscribeQuery(ref, {}, handler);
+		client.subscribeLiveQuery(ref, {}, handler);
 		const socket = latestSocket();
 		socket.open();
 		const [{ id }] = sentMessages(socket);
@@ -297,6 +339,7 @@ describe("GonvexClient", () => {
 				},
 			},
 		});
+		await flushMicrotasks();
 		expect(handler).toHaveBeenCalledTimes(2);
 		expect(handler.mock.calls[1][0]).toMatchObject({
 			type: "query.result",
@@ -308,10 +351,10 @@ describe("GonvexClient", () => {
 		});
 	});
 
-	it("applies compact keyed prepend order deltas", () => {
+	it("applies compact keyed prepend order deltas", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const handler = vi.fn();
-		client.subscribeQuery(ref, {}, handler);
+		client.subscribeLiveQuery(ref, {}, handler);
 		const socket = latestSocket();
 		socket.open();
 		const [{ id }] = sentMessages(socket);
@@ -327,25 +370,12 @@ describe("GonvexClient", () => {
 			inserted: [{ id: "c" }],
 			prepend: ["c"],
 		});
+		await flushMicrotasks();
 		expect(handler.mock.calls[1][0]).toMatchObject({
 			type: "query.result",
 			result: [{ id: "c" }, { id: "b" }, { id: "a" }],
 		});
 	});
-
-  it("converts http runtime URLs to websocket URLs for ConvexReactClient compatibility", () => {
-    const client = new ConvexReactClient("https://runtime.example.com/");
-    client.connect();
-
-    expect(latestSocket().url).toBe("wss://runtime.example.com/ws");
-  });
-
-  it("keeps explicit websocket URLs unchanged", () => {
-    const client = new ConvexReactClient("ws://localhost:8080/ws");
-    client.connect();
-
-    expect(latestSocket().url).toBe("ws://localhost:8080/ws");
-  });
 
   it("reuses an existing connecting socket instead of opening duplicates", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
@@ -356,15 +386,16 @@ describe("GonvexClient", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
-  it("reconnects and restores live query subscriptions after a socket closes", () => {
+  it("reconnects and restores live query subscriptions after a socket closes", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const handler = vi.fn();
 
-    client.subscribeQuery(ref, { status: "open" }, handler);
+    client.subscribeLiveQuery(ref, { status: "open" }, handler);
     const firstSocket = latestSocket();
     firstSocket.open();
     const [firstSubscription] = sentMessages(firstSocket);
-    firstSocket.receive({ type: "query.result", id: firstSubscription.id, result: ["before"] });
+    firstSocket.receive({ type: "query.result", id: firstSubscription.id, result: [{ id: "before" }] });
+    await flushMicrotasks();
 
     firstSocket.disconnect();
     vi.advanceTimersByTime(249);
@@ -382,22 +413,23 @@ describe("GonvexClient", () => {
       args: { status: "open" },
     });
 
-    secondSocket.receive({ type: "query.result", id: firstSubscription.id, result: ["after"] });
+    secondSocket.receive({ type: "query.result", id: firstSubscription.id, result: [{ id: "after" }] });
+    await flushMicrotasks();
     expect(handler).toHaveBeenLastCalledWith({
       type: "query.result",
       id: firstSubscription.id,
-      result: ["after"],
+      result: [{ id: "after" }],
     });
   });
 
   it("reauthenticates before restoring subscriptions after reconnect", () => {
     const client = new GonvexClient("ws://runtime.test/ws", { token: "session-token", tenant: "tenant-a" });
 
-    client.subscribeQuery(ref, {}, () => undefined);
+    client.subscribeLiveQuery(ref, {}, () => undefined);
     const firstSocket = latestSocket();
     firstSocket.open();
     const [firstAuth] = sentMessages(firstSocket);
-    firstSocket.receive({ type: "auth.result", id: firstAuth.id, result: { userId: "user-a" } });
+    firstSocket.receive({ type: "auth.result", id: firstAuth.id, result: authenticatedResult({ accountId: "account-a" }) });
 
     firstSocket.disconnect();
     vi.advanceTimersByTime(250);
@@ -410,7 +442,7 @@ describe("GonvexClient", () => {
       token: "session-token",
       tenant: "tenant-a",
     });
-    secondSocket.receive({ type: "auth.result", id: sentMessages(secondSocket)[0].id, result: { userId: "user-a" } });
+    secondSocket.receive({ type: "auth.result", id: sentMessages(secondSocket)[0].id, result: authenticatedResult({ accountId: "account-a" }) });
     expect(sentMessages(secondSocket).filter((message) => message.type === "query.subscribe")).toHaveLength(1);
   });
 
@@ -429,7 +461,7 @@ describe("GonvexClient", () => {
   it("queues subscription messages until the socket opens", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
 
-    client.subscribeQuery(ref, { status: "open" }, () => undefined);
+    client.subscribeLiveQuery(ref, { status: "open" }, () => undefined);
     const socket = latestSocket();
     expect(socket.sent).toHaveLength(0);
 
@@ -443,7 +475,7 @@ describe("GonvexClient", () => {
   it("sends auth before queued messages when the socket opens", () => {
     const client = new GonvexClient("ws://runtime.test/ws", { token: "session-token", tenant: "tenant-a" });
 
-    client.subscribeQuery(ref, { status: "open" }, () => undefined);
+    client.subscribeLiveQuery(ref, { status: "open" }, () => undefined);
     const socket = latestSocket();
     socket.open();
 
@@ -452,12 +484,12 @@ describe("GonvexClient", () => {
         type: "auth",
         token: "session-token",
         tenant: "tenant-a",
-        capabilities: { syncReadyMany: 1, syncWatermark: 1 },
+        capabilities: { replicaReadyMany: 1, replicaWatermark: 1 },
       },
     ]);
 
     const [{ id: authID }] = sentMessages(socket);
-    socket.receive({ type: "auth.result", id: authID, result: { userId: "user-a", tenantId: "tenant-a" } });
+    socket.receive({ type: "auth.result", id: authID, result: authenticatedResult({ accountId: "account-a", tenantId: "tenant-a" }) });
 
     expect(sentMessages(socket)).toMatchObject([
       { type: "auth", token: "session-token", tenant: "tenant-a" },
@@ -468,7 +500,7 @@ describe("GonvexClient", () => {
   it("identifies a project before signed-out queries so project auth can be enforced", () => {
     const client = new GonvexClient("ws://runtime.test/ws", { project: "secure-app" });
 
-    client.subscribeQuery(ref, {}, () => undefined);
+    client.subscribeLiveQuery(ref, {}, () => undefined);
     const socket = latestSocket();
     socket.open();
 
@@ -486,23 +518,40 @@ describe("GonvexClient", () => {
       tenant: "tenant-a",
       token: "session-token",
     });
-    await client.localReplica.materializeWindow({
-      signature: "tasks",
-      entity: "tasks",
-      key: "id",
-      rows: [{ id: "task-a", title: "restricted" }],
-      completeness: "complete",
-      source: "server",
-    });
-    expect(client.localReplica.entity("tasks", "task-a")).toMatchObject({ title: "restricted" });
-
     client.connect();
     const socket = latestSocket();
     socket.open();
     const [{ id: authID }] = sentMessages(socket);
+    socket.receive({ type: "auth.result", id: authID, result: authenticatedResult({ accountId: "account-a", tenantId: "tenant-a" }) });
+    await flushMicrotasks();
+    socket.receive({
+      type: "replica.transaction",
+      cursor: { epoch: "runtime", revision: 1 },
+      changes: [{
+        entity: "tasks",
+        id: "task-a",
+        operation: "insert",
+        newValue: { id: "task-a", title: "restricted" },
+      }],
+    });
+    await flushMicrotasks();
+    expect(client.localReplica.entity("tasks", "task-a")).toMatchObject({ title: "restricted" });
+
     socket.receive({ type: "auth.error", id: authID, error: "tenant membership changed; authenticate again" });
 
     expect(client.localReplica.entity("tasks", "task-a")).toBeUndefined();
+  });
+
+  it("exposes a runtime read-only Local Replica facade", () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const replica = client.localReplica as unknown as Record<string, unknown>;
+
+    expect(Object.isFrozen(replica)).toBe(true);
+    expect(replica.applyTransaction).toBeUndefined();
+    expect(replica.applyOptimistic).toBeUndefined();
+    expect(replica.materializeWindow).toBeUndefined();
+    expect(replica.replaceWindow).toBeUndefined();
+    expect(replica.clear).toBeUndefined();
   });
 
   it("queues subscription messages while an auth update is in flight", () => {
@@ -512,14 +561,14 @@ describe("GonvexClient", () => {
     socket.open();
 
     client.setAuth({ token: "next-token", tenant: "tenant-b" });
-    client.subscribeQuery(ref, { status: "open" }, () => undefined);
+    client.subscribeLiveQuery(ref, { status: "open" }, () => undefined);
 
     expect(sentMessages(socket)).toMatchObject([
       { type: "auth", token: "next-token", tenant: "tenant-b" },
     ]);
 
     const [{ id: authID }] = sentMessages(socket);
-    socket.receive({ type: "auth.result", id: authID, result: { userId: "user-b", tenantId: "tenant-b" } });
+    socket.receive({ type: "auth.result", id: authID, result: authenticatedResult({ accountId: "account-b", tenantId: "tenant-b" }) });
 
     expect(sentMessages(socket)).toMatchObject([
       { type: "auth", token: "next-token", tenant: "tenant-b" },
@@ -542,7 +591,7 @@ describe("GonvexClient", () => {
     const fetchToken = vi.fn(async () => "fresh-token");
     const client = new GonvexClient("ws://runtime.test/ws", { tenant: "tenant-a", fetchToken });
 
-    client.subscribeQuery(ref, {}, vi.fn());
+    client.subscribeLiveQuery(ref, {}, vi.fn());
     const socket = latestSocket();
     socket.open();
 
@@ -556,7 +605,7 @@ describe("GonvexClient", () => {
     ]);
 
     const [{ id: authID }] = sentMessages(socket);
-    socket.receive({ type: "auth.result", id: authID, result: { userId: "user-a" } });
+    socket.receive({ type: "auth.result", id: authID, result: authenticatedResult({ accountId: "account-a" }) });
     expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", path: "tasks.list" });
   });
 
@@ -589,7 +638,7 @@ describe("GonvexClient", () => {
     });
     const client = new GonvexClient("ws://runtime.test/ws", { tenant: "tenant-a", fetchToken });
 
-    client.subscribeQuery(ref, {}, vi.fn());
+    client.subscribeLiveQuery(ref, {}, vi.fn());
     const socket = latestSocket();
     socket.open();
     await vi.advanceTimersByTimeAsync(0);
@@ -606,7 +655,7 @@ describe("GonvexClient", () => {
 
     // Subscriptions stay queued through the retry and flush once auth settles.
     expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(false);
-    socket.receive({ type: "auth.result", id: auths[1].id, result: { userId: "user-a" } });
+    socket.receive({ type: "auth.result", id: auths[1].id, result: authenticatedResult({ accountId: "account-a" }) });
     expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", path: "tasks.list" });
   });
 
@@ -616,7 +665,7 @@ describe("GonvexClient", () => {
     const onAuthError = vi.fn();
     client.onAuthError(onAuthError);
 
-    client.subscribeQuery(ref, {}, vi.fn());
+    client.subscribeLiveQuery(ref, {}, vi.fn());
     const socket = latestSocket();
     socket.open();
     await vi.advanceTimersByTimeAsync(0);
@@ -704,36 +753,38 @@ describe("GonvexClient", () => {
     expect(sentMessages(socket)[0]).toMatchObject({ type: "auth", token: "cached-token", tenant: "tenant-a" });
   });
 
-  it("routes query subscription results to the matching handler", () => {
+  it("routes Live Query results to the matching handler", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const handler = vi.fn();
 
-    client.subscribeQuery(ref, {}, handler);
+    client.subscribeLiveQuery(ref, {}, handler);
     const socket = latestSocket();
     socket.open();
     const [{ id }] = sentMessages(socket);
-    socket.receive({ type: "query.result", id, result: ["task"] });
+    socket.receive({ type: "query.result", id, result: [{ id: "task" }] });
+    await flushMicrotasks();
 
-    expect(handler).toHaveBeenCalledWith({ type: "query.result", id, result: ["task"] });
+    expect(handler).toHaveBeenCalledWith({ type: "query.result", id, result: [{ id: "task" }] });
   });
 
-  it("coalesces identical query subscriptions and fans out results", () => {
+  it("coalesces identical Live Queries and fans out results", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const first = vi.fn();
     const second = vi.fn();
 
-    client.subscribeQuery(ref, { status: "open" }, first);
-    client.subscribeQuery(ref, { status: "open" }, second);
+    client.subscribeLiveQuery(ref, { status: "open" }, first);
+    client.subscribeLiveQuery(ref, { status: "open" }, second);
     const socket = latestSocket();
     socket.open();
     const messages = sentMessages(socket);
 
     expect(messages.filter((message) => message.type === "query.subscribe")).toHaveLength(1);
     const [{ id }] = messages;
-    socket.receive({ type: "query.result", id, result: ["task"] });
+    socket.receive({ type: "query.result", id, result: [{ id: "task" }] });
+    await flushMicrotasks();
 
-    expect(first).toHaveBeenCalledWith({ type: "query.result", id, result: ["task"] });
-    expect(second).toHaveBeenCalledWith({ type: "query.result", id, result: ["task"] });
+    expect(first).toHaveBeenCalledWith({ type: "query.result", id, result: [{ id: "task" }] });
+    expect(second).toHaveBeenCalledWith({ type: "query.result", id, result: [{ id: "task" }] });
   });
 
   it("replays the latest result to a late joiner without resubscribing", async () => {
@@ -741,21 +792,22 @@ describe("GonvexClient", () => {
     const first = vi.fn();
     const second = vi.fn();
 
-    client.subscribeQuery(ref, { status: "open" }, first);
+    client.subscribeLiveQuery(ref, { status: "open" }, first);
     const socket = latestSocket();
     socket.open();
     const [{ id }] = sentMessages(socket);
-    socket.receive({ type: "query.result", id, result: ["task"], reason: "initial" });
-    expect(first).toHaveBeenCalledWith({ type: "query.result", id, result: ["task"], reason: "initial" });
+    socket.receive({ type: "query.result", id, result: [{ id: "task" }], reason: "initial" });
+    await flushMicrotasks();
+    expect(first).toHaveBeenCalledWith({ type: "query.result", id, result: [{ id: "task" }], reason: "initial" });
 
     // A component mounting after the initial result must still receive the cached value;
     // the coalesced subscription only gets `initial` once from the server.
-    client.subscribeQuery(ref, { status: "open" }, second);
+    client.subscribeLiveQuery(ref, { status: "open" }, second);
     expect(sentMessages(socket).filter((message) => message.type === "query.subscribe")).toHaveLength(1);
     expect(second).not.toHaveBeenCalled();
 
     await Promise.resolve();
-    expect(second).toHaveBeenCalledWith({ type: "query.result", id, result: ["task"], reason: "initial" });
+    expect(second).toHaveBeenCalledWith({ type: "query.result", id, result: [{ id: "task" }], reason: "initial" });
   });
 
   it("does not replay a stale result to a late joiner that unsubscribes synchronously", async () => {
@@ -763,25 +815,26 @@ describe("GonvexClient", () => {
     const first = vi.fn();
     const second = vi.fn();
 
-    client.subscribeQuery(ref, { status: "open" }, first);
+    client.subscribeLiveQuery(ref, { status: "open" }, first);
     const socket = latestSocket();
     socket.open();
     const [{ id }] = sentMessages(socket);
-    socket.receive({ type: "query.result", id, result: ["task"] });
+    socket.receive({ type: "query.result", id, result: [{ id: "task" }] });
+    await flushMicrotasks();
 
-    const unsubscribeSecond = client.subscribeQuery(ref, { status: "open" }, second);
+    const unsubscribeSecond = client.subscribeLiveQuery(ref, { status: "open" }, second);
     unsubscribeSecond();
     await Promise.resolve();
     expect(second).not.toHaveBeenCalled();
   });
 
-  it("keeps a coalesced query subscribed until the last listener leaves", () => {
+  it("keeps a coalesced Live Query subscribed until the last listener leaves", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const first = vi.fn();
     const second = vi.fn();
 
-    const unsubscribeFirst = client.subscribeQuery(ref, { status: "open" }, first);
-    const unsubscribeSecond = client.subscribeQuery(ref, { status: "open" }, second);
+    const unsubscribeFirst = client.subscribeLiveQuery(ref, { status: "open" }, first);
+    const unsubscribeSecond = client.subscribeLiveQuery(ref, { status: "open" }, second);
     const socket = latestSocket();
     socket.open();
     const [{ id }] = sentMessages(socket);
@@ -790,7 +843,8 @@ describe("GonvexClient", () => {
     vi.advanceTimersByTime(300);
     expect(sentMessages(socket).filter((message) => message.type === "query.unsubscribe")).toHaveLength(0);
 
-    socket.receive({ type: "query.result", id, result: ["task"] });
+    socket.receive({ type: "query.result", id, result: [{ id: "task" }] });
+    await flushMicrotasks();
     expect(first).not.toHaveBeenCalled();
     expect(second).toHaveBeenCalledTimes(1);
 
@@ -803,7 +857,7 @@ describe("GonvexClient", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const handler = vi.fn();
 
-    client.subscribeQuery(ref, {}, handler);
+    client.subscribeLiveQuery(ref, {}, handler);
     const socket = latestSocket();
     socket.open();
     const [{ id }] = sentMessages(socket);
@@ -812,45 +866,124 @@ describe("GonvexClient", () => {
     expect(sentMessages(socket).some((message) => message.type === "telemetry.event")).toBe(false);
   });
 
-  it("supports Convex-compatible watchQuery updates", () => {
-    const client = new GonvexClient("ws://runtime.test/ws");
-    const watch = client.watchQuery<string[]>(ref, { status: "open" });
-    const onUpdate = vi.fn();
-    const offUpdate = watch.onUpdate(onUpdate);
-    const socket = latestSocket();
-    socket.open();
-    const [{ id }] = sentMessages(socket);
+  it("renders a persisted Live Query window after the server confirms its visibility scope", async () => {
+    const storage = new MemoryLocalReplicaStorage();
+    const liveRef: FunctionReference<Record<string, never>, Array<{ id: string; title: string }>> = {
+      kind: "query",
+      path: "tasks.grid",
+      delivery: "live",
+      live: { entity: "tasks", key: "id", resultPath: [], plan: { table: "tasks", key: "id", columns: ["id", "title"] } },
+    };
+    const directive = {
+      protocolVersion: 1 as const,
+      scope: "deployment-scope",
+      visibilityScope: "visibility-scope",
+      epoch: "module-epoch",
+    };
 
-    socket.receive({ type: "query.result", id, result: ["task"] });
+    const first = new GonvexClient("ws://runtime.test/ws", { localReplica: { storage } });
+    const firstWatch = first.watchLiveQuery(liveRef, {});
+    const firstSocket = latestSocket();
+    firstSocket.open();
+    firstSocket.receive({ type: "session.ready", replica: directive });
+    await vi.waitFor(() => {
+      expect(sentMessages(firstSocket).filter((message) => message.type === "query.subscribe")).toHaveLength(2);
+    });
+    const firstSubscribe = sentMessages(firstSocket).filter((message) => message.type === "query.subscribe").at(-1);
+    expect(firstSubscribe).toBeDefined();
+    firstSocket.receive({
+      type: "query.result",
+      id: firstSubscribe!.id,
+      path: "tasks.grid",
+      result: [{ id: "task-1", title: "Persisted" }],
+      subscriptionRevision: { epoch: "runtime", sequence: 1 },
+      windowRevision: "window-1",
+    });
+    await flushMicrotasks();
+    expect(first.localReplica.snapshot().liveQueries).not.toEqual({});
+    expect(firstWatch.localLiveQueryResult()).toEqual([{ id: "task-1", title: "Persisted" }]);
+    first.close();
 
-    expect(onUpdate).toHaveBeenCalledTimes(1);
-    expect(watch.localQueryResult()).toEqual(["task"]);
+    const second = new GonvexClient("ws://runtime.test/ws", { localReplica: { storage } });
+    const secondWatch = second.watchLiveQuery(liveRef, {});
+    const secondSocket = latestSocket();
+    secondSocket.open();
+    secondSocket.receive({ type: "session.ready", replica: directive });
+    await vi.waitFor(() => {
+      expect(secondWatch.localLiveQueryResult()).toBeDefined();
+    });
 
-    offUpdate();
-    vi.advanceTimersByTime(250);
-    expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.unsubscribe", id });
+    expect(secondWatch.localLiveQueryResult()).toEqual([{ id: "task-1", title: "Persisted" }]);
+    second.close();
   });
 
-  it("throws the latest watchQuery error from localQueryResult", () => {
+  it("runs the generated Live Query plan against normalized cached entities while offline", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
-    const watch = client.watchQuery(ref);
-    const onUpdate = vi.fn();
-    watch.onUpdate(onUpdate);
+    const liveRef: FunctionReference = {
+      kind: "query",
+      path: "tasks.grid",
+      delivery: "live",
+      live: {
+        entity: "tasks",
+        key: "id",
+        resultPath: ["rows"],
+        plan: {
+          table: "tasks",
+          key: "id",
+          columns: ["id", "title", "priority"],
+          where: { operator: "eq", column: "priority", value: { argument: "priority" } },
+          search: { argument: "search", columns: ["title"] },
+          window: { offsetArgument: "offset", limitArgument: "limit", defaultLimit: 100, maxLimit: 100, count: "exact" },
+        },
+      },
+    };
+    const watch = client.watchLiveQuery(liveRef, { priority: "urgent", search: "FREEZER" });
     const socket = latestSocket();
     socket.open();
-    const [{ id }] = sentMessages(socket);
+    const subscription = sentMessages(socket).filter((message) => message.type === "query.subscribe").at(-1);
+    expect(subscription).toBeDefined();
+    socket.receive({
+      type: "query.result",
+      id: subscription!.id,
+      path: "tasks.grid",
+      result: {
+        rows: [
+          { id: "1", title: "Broken freezer", priority: "urgent" },
+          { id: "2", title: "Replace light", priority: "normal" },
+        ],
+        total: 2,
+        offset: 0,
+        limit: 2,
+      },
+      subscriptionRevision: { epoch: "runtime", sequence: 1 },
+      windowRevision: "window-1",
+    });
+    await flushMicrotasks();
+    socket.disconnect();
+    expect(client.localReplica.freshness()).toBe("offline");
 
-    socket.receive({ type: "query.error", id, error: "watch failed" });
-
-    expect(onUpdate).toHaveBeenCalledTimes(1);
-    expect(() => watch.localQueryResult()).toThrow("watch failed");
+    expect(client.offlineLiveQuery(liveRef, { priority: "urgent", search: "FREEZER" })).toEqual({
+      rows: [{ id: "1", title: "Broken freezer", priority: "urgent" }],
+      total: 1,
+      offset: 0,
+      limit: 100,
+      completeness: "partial",
+      supported: true,
+    });
+    expect(watch.localLiveQueryResult()).toEqual({
+      rows: [{ id: "1", title: "Broken freezer", priority: "urgent" }],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    client.close();
   });
 
   it("ignores invalid JSON messages from the socket", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const handler = vi.fn();
 
-    client.subscribeQuery(ref, {}, handler);
+    client.subscribeLiveQuery(ref, {}, handler);
     const socket = latestSocket();
     socket.open();
     socket.receive("{not json");
@@ -862,7 +995,7 @@ describe("GonvexClient", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const handler = vi.fn();
 
-    const unsubscribe = client.subscribeQuery(ref, {}, handler);
+    const unsubscribe = client.subscribeLiveQuery(ref, {}, handler);
     const socket = latestSocket();
     socket.open();
     const [{ id }] = sentMessages(socket);
@@ -888,7 +1021,7 @@ describe("GonvexClient", () => {
     const first = vi.fn();
     const second = vi.fn();
 
-    const unsubscribe = client.subscribeQuery(ref, { workspaceId: "workspace-a" }, first);
+    const unsubscribe = client.subscribeLiveQuery(ref, { workspaceId: "workspace-a" }, first);
     const socket = latestSocket();
     socket.open();
     const [{ id }] = sentMessages(socket);
@@ -898,7 +1031,7 @@ describe("GonvexClient", () => {
     vi.advanceTimersByTime(10_000);
     expect(sentMessages(socket).filter((message) => message.type === "query.unsubscribe")).toHaveLength(0);
 
-    client.subscribeQuery(ref, { workspaceId: "workspace-a" }, second);
+    client.subscribeLiveQuery(ref, { workspaceId: "workspace-a" }, second);
     await Promise.resolve();
 
     expect(sentMessages(socket).filter((message) => message.type === "query.subscribe")).toHaveLength(1);
@@ -909,7 +1042,7 @@ describe("GonvexClient", () => {
     const client = new GonvexClient("ws://runtime.test/ws", {
       querySubscriptionRetentionMs: 30_000,
     });
-    const unsubscribe = client.subscribeQuery(ref, { workspaceId: "workspace-a" }, vi.fn());
+    const unsubscribe = client.subscribeLiveQuery(ref, { workspaceId: "workspace-a" }, vi.fn());
     const socket = latestSocket();
     socket.open();
     const [{ id }] = sentMessages(socket);
@@ -925,7 +1058,7 @@ describe("GonvexClient", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const firstHandler = vi.fn();
 
-    const unsubscribe = client.subscribeQuery(ref, {}, firstHandler);
+    const unsubscribe = client.subscribeLiveQuery(ref, {}, firstHandler);
     const socket = latestSocket();
     socket.open();
     const [{ id }] = sentMessages(socket);
@@ -935,7 +1068,7 @@ describe("GonvexClient", () => {
 
     unsubscribe();
     const secondHandler = vi.fn();
-    client.subscribeQuery(ref, {}, secondHandler);
+    client.subscribeLiveQuery(ref, {}, secondHandler);
     await Promise.resolve();
 
     expect(sentMessages(socket).filter((message) => message.type === "query.subscribe")).toHaveLength(2);
@@ -1009,7 +1142,7 @@ describe("GonvexClient", () => {
     expect(secondAuth).toMatchObject({ type: "auth" });
     expect(sentMessages(secondSocket).some((message) => message.type === "query.call")).toBe(false);
 
-    secondSocket.receive({ type: "auth.result", id: secondAuth.id, result: { userId: "user-a" } });
+    secondSocket.receive({ type: "auth.result", id: secondAuth.id, result: authenticatedResult({ accountId: "account-a" }) });
     const calls = sentMessages(secondSocket).filter((message) => message.type === "query.call");
     expect(calls).toHaveLength(1);
     secondSocket.receive({ type: "query.result", id: calls[0].id, result: { count: 4 } });
@@ -1110,7 +1243,7 @@ describe("GonvexClient", () => {
     const socket = latestSocket();
     socket.open();
     const [auth] = sentMessages(socket);
-    socket.receive({ type: "auth.result", id: auth.id, result: { ok: true } });
+    socket.receive({ type: "auth.result", id: auth.id, result: authenticatedResult({ ok: true }) });
     const call = sentMessages(socket).at(-1)!;
     socket.receive({ type: "reducer.error", id: call.id, error: "permission denied" });
     await expect(reducer).rejects.toThrow("permission denied");
@@ -1244,7 +1377,7 @@ describe("GonvexClient", () => {
     const secondSocket = latestSocket();
     secondSocket.open();
     const [secondAuth] = sentMessages(secondSocket);
-    secondSocket.receive({ type: "auth.result", id: secondAuth.id, result: { userId: "user-a" } });
+    secondSocket.receive({ type: "auth.result", id: secondAuth.id, result: authenticatedResult({ accountId: "account-a" }) });
     expect(sentMessages(secondSocket).some((message) => message.type === "reducer.call")).toBe(false);
   });
 
@@ -1350,32 +1483,33 @@ describe("GonvexClient", () => {
     expect(client.connectionState()).toMatchObject({ hasInflightRequests: false, inflightReducers: 0 });
   });
 
-  it("re-requests an active live query via retryQuery", () => {
+  it("re-requests an active Live Query via retryLiveQuery", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const handler = vi.fn();
-    client.subscribeQuery(ref, { status: "open" }, handler);
+    client.subscribeLiveQuery(ref, { status: "open" }, handler);
     const socket = latestSocket();
     socket.open();
     const [subscribe] = sentMessages(socket);
     socket.receive({ type: "query.error", id: subscribe.id, error: "boom" });
 
-    client.retryQuery(ref, { status: "open" });
+    client.retryLiveQuery(ref, { status: "open" });
 
     const subscribes = sentMessages(socket).filter((message) => message.type === "query.subscribe");
     expect(subscribes).toHaveLength(2);
     expect(subscribes[1]).toMatchObject({ id: subscribe.id, path: "tasks.list", args: { status: "open" } });
 
-    socket.receive({ type: "query.result", id: subscribe.id, result: ["recovered"] });
-    expect(handler).toHaveBeenLastCalledWith({ type: "query.result", id: subscribe.id, result: ["recovered"] });
+    socket.receive({ type: "query.result", id: subscribe.id, result: [{ id: "recovered" }] });
+    await flushMicrotasks();
+    expect(handler).toHaveBeenLastCalledWith({ type: "query.result", id: subscribe.id, result: [{ id: "recovered" }] });
   });
 
-  it("ignores retryQuery for queries without subscribers", () => {
+  it("ignores retryLiveQuery for queries without subscribers", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     client.connect();
     const socket = latestSocket();
     socket.open();
 
-    client.retryQuery(ref, { status: "open" });
+    client.retryLiveQuery(ref, { status: "open" });
 
     expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(false);
   });
@@ -1384,7 +1518,7 @@ describe("GonvexClient", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const handler = vi.fn();
 
-    client.subscribeQuery(ref, {}, handler);
+    client.subscribeLiveQuery(ref, {}, handler);
     const socket = latestSocket();
     socket.open();
     const [{ id }] = sentMessages(socket);

@@ -3,8 +3,8 @@
 React bindings for Gonvex.
 
 This package provides the provider and hooks used by generated Gonvex bindings:
-`useQuery`, `useLiveQueryState`, `useReducer`, `useAction`, `useEntity`,
-`useReplicaCollection`, auth-aware providers, and compatibility exports.
+`useQuery`, `useQueryResult`, `useLiveQuery`, `useLiveQueryState`, `useReducer`, `useAction`, `useEntity`,
+`useReplicaCollection`, and auth-aware providers.
 
 ## Install
 
@@ -47,10 +47,10 @@ function Tasks() {
 windows use `useLiveQueryState`, which returns normalized rows plus `source`,
 `completeness`, and `freshness`.
 
-### `useQueryResult` (preferred for new UI)
+### `useQueryResult`
 
-Use when you need loading vs error vs timeout vs disconnected, last-good data,
-or a retry button:
+Use when a one-shot Query needs explicit loading, error, timeout, and retry
+state. A retry can retain its last successful value while verifying again:
 
 ```tsx
 const { data, status, error, isStale, retry } = useQueryResult(api.tasks.list, { status: "open" });
@@ -59,16 +59,16 @@ if (status === "loading" && !data) return <Spinner />;
 if (status === "error") {
   return <button onClick={retry}>Retry: {error?.message}</button>;
 }
-// status success | timeout | disconnected — data may still be last-good (isStale)
+// status success | timeout — data may still be last-good during a retry
 ```
 
-Statuses: `skip` | `loading` | `success` | `error` | `timeout` | `disconnected`.
+Statuses: `skip` | `loading` | `success` | `error` | `timeout`.
 Soft timeout default is 15s (subscription stays alive; does not reject).
 
 ### Connection state
 
 ```tsx
-const { isWebSocketConnected, hasEverConnected, connectionRetries } = useConvexConnectionState();
+const { isWebSocketConnected, hasEverConnected, connectionRetries } = useGonvexConnectionState();
 ```
 
 This reflects the real WebSocket lifecycle (not a stub). Reducers/Actions
@@ -118,8 +118,8 @@ function Root() {
 }
 
 function Account() {
-  const { activeTenant, user } = useGonvexAuth();
-  return <>{user?.email} · {activeTenant?.name}<GoogleSignInButton /></>;
+  const { account, activeTenant } = useGonvexAuth();
+  return <>{account?.email} · {activeTenant?.name}<GoogleSignInButton /></>;
 }
 ```
 
@@ -128,21 +128,6 @@ attaches the resulting project-scoped session to the realtime client. Access tok
 are short-lived and refresh tokens rotate across tabs. Multi-tenant memberships are
 verified by the runtime and switched with `setActiveTenant`. The provider does not
 load a Google browser SDK.
-
-## Convex Compatibility
-
-The package also exports Convex-style names for incremental migration:
-
-- `ConvexProvider`
-- `ConvexProviderWithAuth`
-- `ConvexReactClient`
-- `useConvex`
-- `useConvexAuth`
-- `useConvexConnectionState`
-- `usePaginatedQuery`
-- `useQueryResult`
-- `useMutation` (compatibility alias for `useReducer`)
-- `useSync` / `useSyncSelector` (compatibility aliases for Replica hooks)
 
 ## Related Packages
 

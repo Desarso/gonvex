@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/server/internal/config"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
 
 func TestNormalizeAppRedirectURI(t *testing.T) {
@@ -79,6 +80,41 @@ func TestAppAuthTokenInfrastructureFailureIsNotReportedAsInvalidCredentials(t *t
 	runtime.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("auth store failure returned %d instead of 500: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRuntimeRequiresExplicitIdentityV2Migration(t *testing.T) {
+	baseURL := tenantRegistryTestPostgresURL(t)
+	controlURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_identity_v2_required_"+tenantRegistryTestSuffix(t))
+	db, err := dbpool.Open(controlURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := ensureProjectRegistry(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE gonvex_auth_users (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureProjectRegistry(context.Background(), db); err == nil || !strings.Contains(err.Error(), "identity-v2 migration required") {
+		t.Fatalf("legacy identity schema did not produce a migration-required error: %v", err)
+	}
+}
+
+func TestTenantRuntimeRequiresCanonicalMembers(t *testing.T) {
+	baseURL := tenantRegistryTestPostgresURL(t)
+	tenantURL := createTenantRegistryTestDatabase(t, baseURL, "gonvex_identity_v2_tenant_required_"+tenantRegistryTestSuffix(t))
+	db, err := dbpool.Open(tenantURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE members (user_id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureTenantLocalTables(context.Background(), db); err == nil || !strings.Contains(err.Error(), "identity-v2 migration required") {
+		t.Fatalf("legacy tenant member schema did not produce a migration-required error: %v", err)
 	}
 }
 
@@ -199,7 +235,7 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 	if err != nil || len(redirects) != maxAppAuthRedirectURIs || successfulRegistrations != 1 {
 		t.Fatalf("concurrent callback cap failed: callbacks=%d successes=%d err=%v", len(redirects), successfulRegistrations, err)
 	}
-	user, err := runtime.upsertAppAuthUser(context.Background(), projectID, googleIdentity{
+	user, err := runtime.upsertAppAuthAccount(context.Background(), projectID, googleIdentity{
 		Subject: "google-subject", Email: "user@example.test", EmailVerified: true, Name: "Test User",
 	})
 	if err != nil {
@@ -223,21 +259,8 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session.ProjectID != projectID || session.User.ID != user.ID || tenantID != projectID {
+	if session.ProjectID != projectID || session.Account.ID != user.ID || tenantID != projectID {
 		t.Fatalf("unexpected validated session: %#v tenant=%q", session, tenantID)
-	}
-	cancelledSubscriptionContext, cancelSubscription := context.WithCancel(context.Background())
-	cancelSubscription()
-	liveConnection := &wsConn{
-		server: runtime, project: projectID, tenant: projectID, auth: true,
-		authToken: grant.AccessToken, authCheckedAt: time.Now().Add(-10 * time.Second),
-		subs: map[string]querySubscription{},
-	}
-	runtime.executeSubscription(cancelledSubscriptionContext, querySubscription{
-		conn: liveConnection, id: "cancelled-subscription", project: projectID, tenant: projectID,
-	}, "test", 0)
-	if !liveConnection.auth || liveConnection.authToken != grant.AccessToken {
-		t.Fatal("a cancelled subscription rerun cleared authentication for its live connection")
 	}
 	anonymousConnection := &wsConn{server: runtime, project: projectID, tenant: projectID}
 	if err := anonymousConnection.revalidateAppAuth(context.Background()); err == nil {
@@ -287,7 +310,7 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(), `INSERT INTO gonvex_dashboard_users (email, name, role, password_hash)
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO gonvex_dashboard_accounts (email, name, role, password_hash)
 		VALUES ($1, $2, 'admin', 'not-used')`, user.Email, user.Name); err != nil {
 		db.Close()
 		t.Fatal(err)
@@ -359,7 +382,7 @@ func TestAppAuthSingleDatabaseInviteOnlyRequiresCentralInvitation(t *testing.T) 
 	if err := runtime.inviteAppAuthMember(context.Background(), projectID, projectID, invitedEmail, "owner", nil, "project-admin"); err != nil {
 		t.Fatal(err)
 	}
-	invited, err := runtime.upsertAppAuthUser(context.Background(), projectID, googleIdentity{
+	invited, err := runtime.upsertAppAuthAccount(context.Background(), projectID, googleIdentity{
 		Subject: "private-owner-subject", Email: invitedEmail, EmailVerified: true, Name: "Private Owner",
 	})
 	if err != nil {
@@ -372,7 +395,7 @@ func TestAppAuthSingleDatabaseInviteOnlyRequiresCentralInvitation(t *testing.T) 
 	if err != nil || len(tenants) != 1 || tenants[0].ID != projectID || tenants[0].Role != "owner" {
 		t.Fatalf("single-database membership was not applied: tenants=%#v err=%v", tenants, err)
 	}
-	outsider, err := runtime.upsertAppAuthUser(context.Background(), projectID, googleIdentity{
+	outsider, err := runtime.upsertAppAuthAccount(context.Background(), projectID, googleIdentity{
 		Subject: "private-outsider-subject", Email: "private-outsider@example.test", EmailVerified: true, Name: "Outsider",
 	})
 	if err != nil {
@@ -411,11 +434,15 @@ func TestAppAuthMultiTenantPersonalWorkspaceInvitationsAndSwitching(t *testing.T
 			_ = dropProjectDatabase(context.Background(), baseURL, name)
 		}
 	})
+	// Stop projection goroutines before the cleanup below drops their tenant
+	// databases. This also exercises the runtime shutdown boundary that keeps
+	// asynchronous Control Plane work from outliving its database owner.
+	t.Cleanup(runtime.Close)
 	const redirectURI = "http://localhost:5173/"
 	if err := runtime.enableGoogleAuth(context.Background(), projectID, redirectURI, appAuthSignupPersonal); err != nil {
 		t.Fatal(err)
 	}
-	owner, err := runtime.upsertAppAuthUser(context.Background(), projectID, googleIdentity{
+	owner, err := runtime.upsertAppAuthAccount(context.Background(), projectID, googleIdentity{
 		Subject: "owner-google-subject", Email: "owner@example.test", EmailVerified: true, Name: "Owner",
 	})
 	if err != nil {
@@ -436,7 +463,7 @@ func TestAppAuthMultiTenantPersonalWorkspaceInvitationsAndSwitching(t *testing.T
 	if err := runtime.upsertAppAuthMembership(context.Background(), projectID, secondTenant.ID, owner.ID, "member", nil); err == nil || !strings.Contains(err.Error(), "at least one owner") {
 		t.Fatalf("last owner was demoted: %v", err)
 	}
-	admin, err := runtime.upsertAppAuthUser(context.Background(), projectID, googleIdentity{
+	admin, err := runtime.upsertAppAuthAccount(context.Background(), projectID, googleIdentity{
 		Subject: "admin-google-subject", Email: "admin@example.test", EmailVerified: true, Name: "Admin",
 	})
 	if err != nil {
@@ -464,7 +491,7 @@ func TestAppAuthMultiTenantPersonalWorkspaceInvitationsAndSwitching(t *testing.T
 	if err := runtime.deleteAppAuthInvitationAs(context.Background(), projectID, secondTenant.ID, pendingOwnerEmail, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	backupOwner, err := runtime.upsertAppAuthUser(context.Background(), projectID, googleIdentity{
+	backupOwner, err := runtime.upsertAppAuthAccount(context.Background(), projectID, googleIdentity{
 		Subject: "backup-owner-google-subject", Email: "backup-owner@example.test", EmailVerified: true, Name: "Backup Owner",
 	})
 	if err != nil {
@@ -477,8 +504,8 @@ func TestAppAuthMultiTenantPersonalWorkspaceInvitationsAndSwitching(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(), `UPDATE gonvex_auth_users SET disabled_at = now()
-		WHERE project_id = $1 AND id = $2`, projectID, backupOwner.ID); err != nil {
+	if _, err := db.ExecContext(context.Background(), `UPDATE accounts SET disabled_at = now()
+		WHERE auth_realm_id = $1 AND id = $2`, projectID, backupOwner.ID); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -494,7 +521,7 @@ func TestAppAuthMultiTenantPersonalWorkspaceInvitationsAndSwitching(t *testing.T
 	if err := runtime.inviteAppAuthMember(context.Background(), projectID, secondTenant.ID, invitedEmail, "viewer", map[string]any{"tasks:read": true, "role": "owner"}, owner.ID); err != nil {
 		t.Fatal(err)
 	}
-	invited, err := runtime.upsertAppAuthUser(context.Background(), projectID, googleIdentity{
+	invited, err := runtime.upsertAppAuthAccount(context.Background(), projectID, googleIdentity{
 		Subject: "invited-google-subject", Email: invitedEmail, EmailVerified: true, Name: "Invited",
 	})
 	if err != nil {
@@ -559,6 +586,42 @@ func TestAppAuthMultiTenantPersonalWorkspaceInvitationsAndSwitching(t *testing.T
 	if err != nil || invitedSession.Permissions["role"] != "viewer" || invitedSession.Permissions["tasks:read"] != true {
 		t.Fatalf("invited permissions were not applied: session=%#v err=%v", invitedSession, err)
 	}
+	memberDB, err := runtime.tenantMemberDB(context.Background(), projectID, secondTenant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memberDB.ExecContext(context.Background(), `UPDATE members
+		SET status = 'revoked', membership_revision = membership_revision + 1
+		WHERE account_id = $1`, invited.ID); err != nil {
+		t.Fatal(err)
+	}
+	db, err = runtime.openProjectRegistry(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE account_tenant_index SET status = 'active'
+		WHERE account_id = $1 AND tenant_id = $2`, invited.ID, secondTenant.ID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	var staleDirectoryStatus string
+	if err := db.QueryRowContext(context.Background(), `SELECT status FROM account_tenant_index
+		WHERE account_id = $1 AND tenant_id = $2`, invited.ID, secondTenant.ID).Scan(&staleDirectoryStatus); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+	if staleDirectoryStatus != "active" {
+		t.Fatalf("test did not establish a stale active directory entry: %q", staleDirectoryStatus)
+	}
+	if _, _, err := runtime.validateAppSession(context.Background(), projectID, invitedGrant.AccessToken, secondTenant.ID); err == nil {
+		t.Fatal("stale active Control Plane directory entry overrode tenant revocation")
+	}
+	if _, err := memberDB.ExecContext(context.Background(), `UPDATE members
+		SET status = 'active', membership_revision = membership_revision + 1
+		WHERE account_id = $1`, invited.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := runtime.removeAppAuthMembership(context.Background(), projectID, secondTenant.ID, invited.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +645,7 @@ func TestAppAuthMultiTenantPersonalWorkspaceInvitationsAndSwitching(t *testing.T
 		t.Fatal(err)
 	}
 	db.Close()
-	expiredInviteUser, err := runtime.upsertAppAuthUser(context.Background(), projectID, googleIdentity{
+	expiredInviteUser, err := runtime.upsertAppAuthAccount(context.Background(), projectID, googleIdentity{
 		Subject: "expired-google-subject", Email: expiredEmail, EmailVerified: true, Name: "Expired Invite",
 	})
 	if err != nil {
@@ -595,7 +658,7 @@ func TestAppAuthMultiTenantPersonalWorkspaceInvitationsAndSwitching(t *testing.T
 	if err != nil || len(activeInvitations) != 0 {
 		t.Fatalf("expired invitation was returned as active: invitations=%#v err=%v", activeInvitations, err)
 	}
-	outsider, err := runtime.upsertAppAuthUser(context.Background(), projectID, googleIdentity{
+	outsider, err := runtime.upsertAppAuthAccount(context.Background(), projectID, googleIdentity{
 		Subject: "outsider-google-subject", Email: "outsider@example.test", EmailVerified: true, Name: "Outsider",
 	})
 	if err != nil {

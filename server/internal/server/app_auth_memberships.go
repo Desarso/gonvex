@@ -122,8 +122,8 @@ type tenantMemberRecord struct {
 
 // tenantMemberMatch matches a member by either identity a caller may hold. The
 // account id is optional so callers that only know a member id can pass "".
-const tenantMemberMatch = `(id = $1 OR user_id = $1 OR account_id = $1
-	OR ($2 <> '' AND (id = $2 OR user_id = $2 OR account_id = $2)))`
+const tenantMemberMatch = `(id = $1 OR account_id = $1
+	OR ($2 <> '' AND (id = $2 OR account_id = $2)))`
 
 // loadTenantMemberRecord reads the authoritative membership row. found is false
 // when the tenant holds no active member for either identity.
@@ -133,7 +133,7 @@ func (s *Server) loadTenantMemberRecord(ctx context.Context, projectID string, t
 		return tenantMemberRecord{}, false, err
 	}
 	record := tenantMemberRecord{}
-	err = db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(id, ''), user_id), COALESCE(NULLIF(account_id, ''), user_id), role, permissions
+	err = db.QueryRowContext(ctx, `SELECT id, account_id, role, permissions
 		FROM members WHERE `+tenantMemberMatch+` AND status = 'active'`, memberID, accountID).Scan(
 		&record.memberID, &record.accountID, &record.role, &record.permissions,
 	)
@@ -155,11 +155,10 @@ func (s *Server) activateTenantMember(ctx context.Context, projectID string, ten
 		return err
 	}
 	_, err = db.ExecContext(ctx, `INSERT INTO members (
-		user_id, id, account_id, status, display_name, avatar_url, role, permissions, updated_at
+		id, account_id, status, display_name, avatar_url, role, permissions, updated_at
 	)
-		VALUES ($1, $1, $2, 'active', $3, $4, $5, $6, now())
-		ON CONFLICT (user_id) DO UPDATE SET
-			id = COALESCE(NULLIF(members.id, ''), EXCLUDED.id),
+		VALUES ($1, $2, 'active', $3, $4, $5, $6, now())
+		ON CONFLICT (id) DO UPDATE SET
 			account_id = EXCLUDED.account_id,
 			status = 'active',
 			display_name = EXCLUDED.display_name,
@@ -184,7 +183,7 @@ func (s *Server) revokeTenantMember(ctx context.Context, projectID string, tenan
 	err = db.QueryRowContext(ctx, `UPDATE members
 		SET status = 'revoked', membership_revision = membership_revision + 1, updated_at = now()
 		WHERE `+tenantMemberMatch+`
-		RETURNING COALESCE(NULLIF(id, ''), user_id), COALESCE(NULLIF(account_id, ''), user_id), role`,
+		RETURNING id, account_id, role`,
 		memberID, accountID).Scan(&record.memberID, &record.accountID, &record.role)
 	if err == sql.ErrNoRows {
 		return tenantMemberRecord{}, false, nil
@@ -203,10 +202,10 @@ func (s *Server) tenantHasOtherActiveOwner(ctx context.Context, projectID string
 	if err != nil {
 		return false, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT COALESCE(NULLIF(id, ''), user_id), COALESCE(NULLIF(account_id, ''), user_id)
+	rows, err := db.QueryContext(ctx, `SELECT id, account_id
 		FROM members
 		WHERE role = 'owner' AND status = 'active'
-		AND COALESCE(NULLIF(id, ''), user_id) <> $1 AND COALESCE(NULLIF(account_id, ''), user_id) <> $1`, excludedMemberID)
+		AND id <> $1 AND account_id <> $1`, excludedMemberID)
 	if err != nil {
 		return false, err
 	}
@@ -232,9 +231,9 @@ func (s *Server) tenantHasOtherActiveOwner(ctx context.Context, projectID string
 	for _, owner := range owners {
 		var enabled bool
 		if err := registry.QueryRowContext(ctx, `SELECT EXISTS (
-			SELECT 1 FROM gonvex_auth_users
-			WHERE project_id = $1 AND (id = $2 OR account_id = $3) AND disabled_at IS NULL
-		)`, projectID, owner.memberID, owner.accountID).Scan(&enabled); err != nil {
+			SELECT 1 FROM accounts
+			WHERE id = $2 AND auth_realm_id = $1 AND disabled_at IS NULL
+		)`, projectID, owner.accountID).Scan(&enabled); err != nil {
 			return false, err
 		}
 		if enabled {
@@ -280,13 +279,24 @@ func (s *Server) ensureSingleAppAuthTenant(ctx context.Context, projectID string
 	defer db.Close()
 	var mode string
 	var name string
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(database_mode, ''), 'single'), name
-		FROM gonvex_runtime_projects WHERE id = $1`, projectID).Scan(&mode, &name); err != nil {
+	var databaseURL string
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(database_mode, ''), 'single'), name, database_url
+		FROM gonvex_runtime_projects WHERE id = $1`, projectID).Scan(&mode, &name, &databaseURL); err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("project %q was not found", projectID)
 		}
 		return err
 	}
+	// Keep routing aligned with the persisted project target. Runtime-created
+	// projects may not yet have been copied into ProjectDatabases.
+	s.projectMu.Lock()
+	if s.config.ProjectDatabases == nil {
+		s.config.ProjectDatabases = map[string]string{}
+	}
+	if strings.TrimSpace(databaseURL) != "" {
+		s.config.ProjectDatabases[projectID] = databaseURL
+	}
+	s.projectMu.Unlock()
 	if normalizedDatabaseModeWithDefault(mode) != "single" {
 		return nil
 	}
@@ -298,18 +308,10 @@ func (s *Server) ensureSingleAppAuthTenant(ctx context.Context, projectID string
 	return err
 }
 
-// appAuthAccountID resolves the single canonical Account behind a project user
-// id. Every membership decision keys off that account so one person keeps one
-// identity across tenants, whatever id the caller happened to hold. A disabled
-// account still resolves: cleaning up its memberships needs the same mapping,
-// and being enabled is checked where it matters rather than here.
-func appAuthAccountID(ctx context.Context, db *sql.DB, projectID string, userID string) string {
-	accountID := strings.TrimSpace(userID)
-	_ = db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(account_id, ''), id)
-		FROM gonvex_auth_users
-		WHERE project_id = $1 AND (id = $2 OR account_id = $2)
-		ORDER BY CASE WHEN id = $2 THEN 0 ELSE 1 END LIMIT 1`, projectID, userID).Scan(&accountID)
-	return accountID
+// appAuthAccountID normalizes the canonical account id accepted by public
+// routes. Identity v2 has no project-user alias to resolve.
+func appAuthAccountID(_ context.Context, _ *sql.DB, _ string, accountID string) string {
+	return strings.TrimSpace(accountID)
 }
 
 // appAuthTenantCandidates lists the tenants that may hold a member row for an
@@ -350,6 +352,20 @@ func (s *Server) appAuthTenantCandidates(ctx context.Context, db *sql.DB, projec
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
+	}
+	// The index is an asynchronous directory projection. Enumerate the
+	// project's registered tenants as well, then confirm each candidate against
+	// its authoritative tenant-local Member row below. This makes newly-created
+	// workspaces visible immediately without granting access from the directory.
+	allTenants, err := appAuthAllTenantCandidates(ctx, db, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for _, tenant := range allTenants {
+		if !seen[tenant.ID] {
+			seen[tenant.ID] = true
+			candidates = append(candidates, tenant)
+		}
 	}
 	if normalizedDatabaseModeWithDefault(mode) == "single" && !seen[projectID] {
 		// A single-database project has exactly one membership scope, so probing
@@ -459,7 +475,7 @@ func (s *Server) resolveAppAuthTenant(ctx context.Context, projectID string, acc
 	return appAuthTenant{ID: requested, Name: name, Role: member.Role, Permissions: member.Permissions}, nil
 }
 
-func (s *Server) ensureAppAuthMemberships(ctx context.Context, projectID string, user appAuthUser) error {
+func (s *Server) ensureAppAuthMemberships(ctx context.Context, projectID string, user appAuthAccount) error {
 	mode, err := s.projectDatabaseMode(ctx, projectID)
 	if err != nil {
 		return err
@@ -505,7 +521,7 @@ type appAuthPendingInvitation struct {
 	expiresAt       time.Time
 }
 
-func (s *Server) claimAppAuthInvitations(ctx context.Context, projectID string, user appAuthUser) error {
+func (s *Server) claimAppAuthInvitations(ctx context.Context, projectID string, user appAuthAccount) error {
 	db, err := s.openProjectRegistry(ctx)
 	if err != nil || db == nil {
 		return fmt.Errorf("project auth store is unavailable")
@@ -563,7 +579,7 @@ func restoreAppAuthInvitations(ctx context.Context, db *sql.DB, projectID string
 	}
 }
 
-func (s *Server) ensurePersonalAppAuthTenant(ctx context.Context, projectID string, user appAuthUser) (appAuthTenant, error) {
+func (s *Server) ensurePersonalAppAuthTenant(ctx context.Context, projectID string, user appAuthAccount) (appAuthTenant, error) {
 	db, err := s.openProjectRegistry(ctx)
 	if err != nil || db == nil {
 		return appAuthTenant{}, fmt.Errorf("project auth store is unavailable")
@@ -643,7 +659,11 @@ func (s *Server) createAppAuthTenant(ctx context.Context, projectID string, user
 	for suffix := 2; s.tenantDatabaseAliasTakenLocked(projectID, databaseAlias, ""); suffix++ {
 		databaseAlias = fmt.Sprintf("%s-%d", baseAlias, suffix)
 	}
-	databaseName := tenantDatabaseNameWithAlias(projectID, tenantID, databaseAlias)
+	databaseName, err := generateTenantPhysicalDatabaseName()
+	if err != nil {
+		s.projectMu.Unlock()
+		return appAuthTenant{}, err
+	}
 	s.projectMu.Unlock()
 
 	tenantDatabaseURL, err := createProjectDatabase(ctx, s.config.PostgresURL, databaseName)
@@ -729,8 +749,8 @@ func (s *Server) upsertAppAuthMembershipAs(ctx context.Context, projectID string
 	var accountID string
 	var displayName string
 	var avatarURL string
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(account_id, ''), id), name, picture
-		FROM gonvex_auth_users WHERE project_id = $1 AND id = $2 AND disabled_at IS NULL`, projectID, userID).Scan(
+	if err := db.QueryRowContext(ctx, `SELECT id, name, avatar_url
+		FROM accounts WHERE auth_realm_id = $1 AND id = $2 AND disabled_at IS NULL`, projectID, userID).Scan(
 		&accountID, &displayName, &avatarURL,
 	); err != nil {
 		if err == sql.ErrNoRows {
@@ -754,12 +774,22 @@ func (s *Server) upsertAppAuthMembershipAs(ctx context.Context, projectID string
 			return fmt.Errorf("a tenant must keep at least one owner")
 		}
 	}
-	if err := s.activateTenantMember(ctx, projectID, tenantID, userID, accountID, displayName, avatarURL, role, permissionsJSON); err != nil {
+	memberID := accountID
+	if hadMembership {
+		memberID = previous.memberID
+	} else if generated, idErr := randomID("member"); idErr == nil {
+		memberID = generated
+	} else {
+		return idErr
+	}
+	if err := s.activateTenantMember(ctx, projectID, tenantID, memberID, accountID, displayName, avatarURL, role, permissionsJSON); err != nil {
 		return err
 	}
-	go s.projectTenantMemberDirectory(projectID, tenantID)
+	s.startMembershipProjection(func() {
+		s.projectTenantMemberDirectory(projectID, tenantID)
+	})
 	if hadMembership && (previous.role != role || !equalAppAuthPermissions(previous.permissions, permissionsJSON)) {
-		s.revokeAppAuthUserSessions(ctx, projectID, userID, accountID)
+		s.revokeAppAuthAccountSessions(ctx, projectID, accountID)
 	}
 	return nil
 }
@@ -810,29 +840,27 @@ func (s *Server) removeAppAuthMembership(ctx context.Context, projectID string, 
 	if !found {
 		return nil
 	}
-	s.revokeAppAuthUserSessions(ctx, projectID, userID, revoked.memberID, revoked.accountID)
-	go s.projectTenantMemberDirectory(projectID, tenantID)
+	s.revokeAppAuthAccountSessions(ctx, projectID, revoked.accountID)
+	s.startMembershipProjection(func() {
+		s.projectTenantMemberDirectory(projectID, tenantID)
+	})
 	return nil
 }
 
-// revokeAppAuthUserSessions invalidates stored credentials and live sockets for
-// every identity that can address the same account: a session is issued against
-// the project user id while a socket may carry the member or account id.
-func (s *Server) revokeAppAuthUserSessions(ctx context.Context, projectID string, identities ...string) {
+// revokeAppAuthAccountSessions invalidates stored credentials and live sockets
+// for a canonical Account and any tenant-local Member ids supplied by callers.
+func (s *Server) revokeAppAuthAccountSessions(ctx context.Context, projectID string, identities ...string) {
 	unique := distinctAppAuthIdentities(identities)
 	if len(unique) == 0 {
 		return
 	}
 	db, err := s.openProjectRegistry(ctx)
 	if err == nil && db != nil {
-		const scope = ` user_id IN (
-			SELECT id FROM gonvex_auth_users WHERE project_id = $1 AND (id = $2 OR account_id = $2)
-		)`
 		for _, identity := range unique {
 			_, _ = db.ExecContext(ctx, `UPDATE gonvex_auth_sessions SET revoked_at = COALESCE(revoked_at, now())
-				WHERE project_id = $1 AND`+scope, projectID, identity)
+				WHERE project_id = $1 AND account_id = $2`, projectID, identity)
 			_, _ = db.ExecContext(ctx, `UPDATE gonvex_auth_refresh_tokens SET revoked_at = COALESCE(revoked_at, now())
-				WHERE project_id = $1 AND`+scope, projectID, identity)
+				WHERE project_id = $1 AND account_id = $2`, projectID, identity)
 		}
 		db.Close()
 	}
@@ -867,12 +895,12 @@ func (s *Server) inviteAppAuthMemberAs(ctx context.Context, projectID string, te
 		return fmt.Errorf("project auth store is unavailable")
 	}
 	defer db.Close()
-	var userID string
-	err = db.QueryRowContext(ctx, `SELECT id FROM gonvex_auth_users
-		WHERE project_id = $1 AND lower(email) = $2 AND disabled_at IS NULL
-		ORDER BY created_at LIMIT 1`, projectID, email).Scan(&userID)
+	var accountID string
+	err = db.QueryRowContext(ctx, `SELECT id FROM accounts
+		WHERE auth_realm_id = $1 AND lower(email) = $2 AND disabled_at IS NULL
+		ORDER BY created_at LIMIT 1`, projectID, email).Scan(&accountID)
 	if err == nil {
-		return s.upsertAppAuthMembershipAs(ctx, projectID, tenantID, userID, role, sanitizedPermissions, actorRole)
+		return s.upsertAppAuthMembershipAs(ctx, projectID, tenantID, accountID, role, sanitizedPermissions, actorRole)
 	}
 	if err != sql.ErrNoRows {
 		return err
@@ -956,7 +984,7 @@ func (s *Server) handleAppAuthTenants(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		tenants, err := s.listAppAuthTenants(r.Context(), identity.ProjectID, identity.User.ID)
+		tenants, err := s.listAppAuthTenants(r.Context(), identity.ProjectID, identity.Account.ID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -984,7 +1012,7 @@ func (s *Server) handleAppAuthTenants(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid tenant request"})
 			return
 		}
-		tenant, err := s.createAppAuthTenant(r.Context(), identity.ProjectID, identity.User.ID, payload.Name)
+		tenant, err := s.createAppAuthTenant(r.Context(), identity.ProjectID, identity.Account.ID, payload.Name)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -1016,7 +1044,7 @@ func (s *Server) handleAppAuthMe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
-	tenants, err := s.listAppAuthTenants(r.Context(), identity.ProjectID, identity.User.ID)
+	tenants, err := s.listAppAuthTenants(r.Context(), identity.ProjectID, identity.Account.ID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1025,13 +1053,13 @@ func (s *Server) handleAppAuthMe(w http.ResponseWriter, r *http.Request) {
 	var member *gonvex.Member
 	requestedTenant := tenantID(r)
 	if len(tenants) > 0 {
-		active, err := s.resolveAppAuthTenant(r.Context(), identity.ProjectID, identity.User.accountID(), tenants, requestedTenant)
+		active, err := s.resolveAppAuthTenant(r.Context(), identity.ProjectID, identity.Account.canonicalID(), tenants, requestedTenant)
 		if err != nil {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
 		activeTenantID = active.ID
-		member, err = s.loadTenantMember(r.Context(), identity.ProjectID, activeTenantID, identity.User.accountID())
+		member, err = s.loadTenantMember(r.Context(), identity.ProjectID, activeTenantID, identity.Account.canonicalID())
 		if err != nil {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
@@ -1039,9 +1067,8 @@ func (s *Server) handleAppAuthMe(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"project": identity.ProjectID,
-		"account": gonvex.Account{ID: identity.User.accountID(), Email: identity.User.Email, Name: identity.User.Name, AvatarURL: identity.User.Picture},
+		"account": gonvex.Account{ID: identity.Account.canonicalID(), Email: identity.Account.Email, Name: identity.Account.Name, AvatarURL: identity.Account.Picture},
 		"member":  member,
-		"user":    identity.User,
 		"tenants": tenants, "activeTenantId": activeTenantID,
 	})
 }
@@ -1077,7 +1104,7 @@ func (s *Server) handleAppAuthTenantMembers(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "only an owner can grant owner access"})
 			return
 		}
-		if err := s.inviteAppAuthMemberAs(r.Context(), session.ProjectID, tenantID, email, role, permissions, session.User.ID, session.Tenant.Role); err != nil {
+		if err := s.inviteAppAuthMemberAs(r.Context(), session.ProjectID, tenantID, email, role, permissions, session.Account.ID, session.Tenant.Role); err != nil {
 			status := http.StatusBadRequest
 			if errors.Is(err, errAppAuthOwnerRequired) {
 				status = http.StatusForbidden
@@ -1162,7 +1189,7 @@ func (s *Server) appAuthMembershipRole(ctx context.Context, projectID string, te
 }
 
 type appAuthMemberView struct {
-	UserID      string         `json:"userId"`
+	MemberID    string         `json:"memberId"`
 	Email       string         `json:"email"`
 	Name        string         `json:"name"`
 	Role        string         `json:"role"`
@@ -1184,7 +1211,7 @@ func (s *Server) listTenantMemberViews(ctx context.Context, registry *sql.DB, pr
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tenantDB.QueryContext(ctx, `SELECT COALESCE(NULLIF(id, ''), user_id), COALESCE(NULLIF(account_id, ''), user_id),
+	rows, err := tenantDB.QueryContext(ctx, `SELECT id, account_id,
 		display_name, role, permissions
 		FROM members WHERE status = 'active'`)
 	if err != nil {
@@ -1196,7 +1223,7 @@ func (s *Server) listTenantMemberViews(ctx context.Context, registry *sql.DB, pr
 		var member appAuthMemberView
 		var accountID string
 		var raw []byte
-		if err := rows.Scan(&member.UserID, &accountID, &member.Name, &member.Role, &raw); err != nil {
+		if err := rows.Scan(&member.MemberID, &accountID, &member.Name, &member.Role, &raw); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -1208,7 +1235,7 @@ func (s *Server) listTenantMemberViews(ctx context.Context, registry *sql.DB, pr
 			}
 		}
 		delete(member.Permissions, "role")
-		accountIDs[member.UserID] = accountID
+		accountIDs[member.MemberID] = accountID
 		members = append(members, member)
 	}
 	if err := rows.Close(); err != nil {
@@ -1222,9 +1249,9 @@ func (s *Server) listTenantMemberViews(ctx context.Context, registry *sql.DB, pr
 		return nil, err
 	}
 	for index := range members {
-		contact, ok := contacts[members[index].UserID]
+		contact, ok := contacts[members[index].MemberID]
 		if !ok {
-			contact, ok = contacts[accountIDs[members[index].UserID]]
+			contact, ok = contacts[accountIDs[members[index].MemberID]]
 		}
 		if ok {
 			members[index].Email = contact.Email
@@ -1242,7 +1269,7 @@ func (s *Server) listTenantMemberViews(ctx context.Context, registry *sql.DB, pr
 		if leftEmail != rightEmail {
 			return leftEmail < rightEmail
 		}
-		return members[left].UserID < members[right].UserID
+		return members[left].MemberID < members[right].MemberID
 	})
 	return members, nil
 }
@@ -1253,17 +1280,17 @@ func appAuthMemberContacts(ctx context.Context, registry *sql.DB, projectID stri
 	arguments := []any{projectID}
 	placeholders := make([]string, 0, len(members)*2)
 	for _, member := range members {
-		arguments = append(arguments, member.UserID)
+		arguments = append(arguments, member.MemberID)
 		placeholders = append(placeholders, fmt.Sprintf("$%d", len(arguments)))
-		if accountID := accountIDs[member.UserID]; accountID != "" && accountID != member.UserID {
+		if accountID := accountIDs[member.MemberID]; accountID != "" && accountID != member.MemberID {
 			arguments = append(arguments, accountID)
 			placeholders = append(placeholders, fmt.Sprintf("$%d", len(arguments)))
 		}
 	}
 	identities := strings.Join(placeholders, ", ")
-	rows, err := registry.QueryContext(ctx, `SELECT id, COALESCE(NULLIF(account_id, ''), id), email, name
-		FROM gonvex_auth_users
-		WHERE project_id = $1 AND (id IN (`+identities+`) OR account_id IN (`+identities+`))`, arguments...)
+	rows, err := registry.QueryContext(ctx, `SELECT id, id, email, name
+		FROM accounts
+		WHERE auth_realm_id = $1 AND id IN (`+identities+`)`, arguments...)
 	if err != nil {
 		return nil, err
 	}
@@ -1355,10 +1382,10 @@ func (s *Server) handleProjectAuthMemberships(w http.ResponseWriter, r *http.Req
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case http.MethodDelete:
-		memberID := strings.TrimSpace(r.URL.Query().Get("user"))
+		memberID := strings.TrimSpace(r.URL.Query().Get("member"))
 		invitationEmail := strings.TrimSpace(r.URL.Query().Get("email"))
 		if memberID == "" && invitationEmail == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user or invitation email is required"})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "member or invitation email is required"})
 			return
 		}
 		var err error
@@ -1447,11 +1474,11 @@ func (s *Server) handleProjectAuthTenants(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusCreated, map[string]any{"tenant": tenant})
 }
 
-func (s *Server) handleProjectAuthUser(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleProjectAuthAccount(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.PathValue("project"))
-	userID := strings.TrimSpace(r.PathValue("user"))
-	if projectID == "" || userID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project and user are required"})
+	accountIDParam := strings.TrimSpace(r.PathValue("account"))
+	if projectID == "" || accountIDParam == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project and account are required"})
 		return
 	}
 	if !s.authorizeProjectAuthRequest(w, r, projectID, true) {
@@ -1480,16 +1507,16 @@ func (s *Server) handleProjectAuthUser(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid account request"})
 			return
 		}
-		accountID := appAuthAccountID(r.Context(), db, projectID, userID)
+		accountID := appAuthAccountID(r.Context(), db, projectID, accountIDParam)
 		if payload.Disabled {
-			if err := s.ensureAppAuthAccountCanBeDeactivated(r.Context(), db, projectID, userID); err != nil {
+			if err := s.ensureAppAuthAccountCanBeDeactivated(r.Context(), db, projectID, accountIDParam); err != nil {
 				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 				return
 			}
 		}
-		result, err := db.ExecContext(r.Context(), `UPDATE gonvex_auth_users
+		result, err := db.ExecContext(r.Context(), `UPDATE accounts
 			SET disabled_at = CASE WHEN $3 THEN COALESCE(disabled_at, now()) ELSE NULL END, updated_at = now()
-			WHERE project_id = $1 AND id = $2`, projectID, userID, payload.Disabled)
+			WHERE auth_realm_id = $1 AND id = $2`, projectID, accountIDParam, payload.Disabled)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -1500,18 +1527,18 @@ func (s *Server) handleProjectAuthUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if payload.Disabled {
-			s.revokeAppAuthUserSessions(r.Context(), projectID, userID, accountID)
+			s.revokeAppAuthAccountSessions(r.Context(), projectID, accountIDParam, accountID)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "disabled": payload.Disabled})
 	case http.MethodDelete:
-		if err := s.ensureAppAuthAccountCanBeDeactivated(r.Context(), db, projectID, userID); err != nil {
+		if err := s.ensureAppAuthAccountCanBeDeactivated(r.Context(), db, projectID, accountIDParam); err != nil {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
-		accountID := appAuthAccountID(r.Context(), db, projectID, userID)
+		accountID := appAuthAccountID(r.Context(), db, projectID, accountIDParam)
 		// Cut live access first so nothing that follows has to rely on how fresh
 		// the directory projection happens to be.
-		s.revokeAppAuthUserSessions(r.Context(), projectID, userID, accountID)
+		s.revokeAppAuthAccountSessions(r.Context(), projectID, accountIDParam, accountID)
 		candidates, err := appAuthAllTenantCandidates(r.Context(), db, projectID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -1520,7 +1547,7 @@ func (s *Server) handleProjectAuthUser(w http.ResponseWriter, r *http.Request) {
 		// The global account outlives any single tenant, so it may only be removed
 		// once every discoverable tenant has revoked its own member row.
 		for _, candidate := range candidates {
-			revoked, found, err := s.revokeTenantMember(r.Context(), projectID, candidate.ID, userID, accountID)
+			revoked, found, err := s.revokeTenantMember(r.Context(), projectID, candidate.ID, accountIDParam, accountID)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "account was not deleted because tenant membership revocation failed: " + err.Error()})
 				return
@@ -1528,10 +1555,12 @@ func (s *Server) handleProjectAuthUser(w http.ResponseWriter, r *http.Request) {
 			if !found {
 				continue
 			}
-			s.revokeAppAuthUserSessions(r.Context(), projectID, revoked.memberID, revoked.accountID)
-			go s.projectTenantMemberDirectory(projectID, candidate.ID)
+			s.revokeAppAuthAccountSessions(r.Context(), projectID, revoked.memberID, revoked.accountID)
+			s.startMembershipProjection(func() {
+				s.projectTenantMemberDirectory(projectID, candidate.ID)
+			})
 		}
-		result, err := db.ExecContext(r.Context(), `DELETE FROM gonvex_auth_users WHERE project_id = $1 AND id = $2`, projectID, userID)
+		result, err := db.ExecContext(r.Context(), `DELETE FROM accounts WHERE auth_realm_id = $1 AND id = $2`, projectID, accountIDParam)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -1541,7 +1570,7 @@ func (s *Server) handleProjectAuthUser(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "account not found"})
 			return
 		}
-		s.revokeAppAuthConnections(projectID, userID)
+		s.revokeAppAuthConnections(projectID, accountIDParam)
 		s.revokeAppAuthConnections(projectID, accountID)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:

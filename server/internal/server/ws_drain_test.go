@@ -59,7 +59,7 @@ func TestDrainWebSocketsSendsStaggered1012Closes(t *testing.T) {
 		case accepted := <-serverSide:
 			connection := &wsConn{
 				server: server, conn: accepted, id: name, project: "project-a", tenant: "tenant-a",
-				subs: map[string]querySubscription{}, syncs: map[string]*syncSubscription{},
+				subs: map[string]querySubscription{}, replicas: map[string]*replicaSubscription{},
 			}
 			server.addWSConn(connection)
 			return connection

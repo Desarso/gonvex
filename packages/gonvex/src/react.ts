@@ -1,21 +1,20 @@
 export {
-  ConvexProvider,
-  ConvexProviderWithAuth,
-  ConvexReactClient,
   createGonvexAuth,
   GonvexAuthProvider,
   GonvexGoogleAuthButton,
   GonvexProvider,
+  GonvexProviderWithAuth,
   useAction,
-  useConvex,
-  useConvexAuth,
-  useConvexConnectionState,
+  useEntity,
   useGonvexAuth,
+  useGonvexAuthState,
+  useGonvexClient,
+  useGonvexConnectionState,
   useLiveQuery,
-  usePaginatedQuery,
+  useLiveQueryState,
   useQuery,
   useReducer,
   useReplicaCollection,
   useReplicaSelector,
 } from "@gonvex/react";
-export type { GonvexAuthConfig, GonvexAuthTenant, GonvexAuthUser, GonvexAuthValue } from "@gonvex/react";
+export type { GonvexAuthAccount, GonvexAuthConfig, GonvexAuthTenant, GonvexAuthValue } from "@gonvex/react";

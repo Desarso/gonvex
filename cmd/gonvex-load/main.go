@@ -46,9 +46,9 @@ type cliOptions struct {
 	subscriptions           int
 	ramp                    time.Duration
 	hold                    time.Duration
-	mutationPath            string
-	mutationArgs            string
-	mutationRate            float64
+	reducerPath             string
+	reducerArgs             string
+	reducerRate             float64
 	connectTimeout          time.Duration
 	initialTimeout          time.Duration
 	authMode                string
@@ -101,9 +101,6 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	if connections == 0 {
 		connections = profile.connectionCount(users)
 	}
-	if profile.Version == 1 && options.users == 0 {
-		users = connections
-	}
 	mode := authMode(options.authMode)
 	tenants, err := parseTenantList(options.tenant)
 	if err != nil {
@@ -119,9 +116,9 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 			sharedToken = "dry-run-token"
 		}
 	}
-	mutationArgs, err := parseJSONObject(options.mutationArgs)
+	reducerArgs, err := parseJSONObject(options.reducerArgs)
 	if err != nil {
-		return fmt.Errorf("parse mutation args: %w", err)
+		return fmt.Errorf("parse reducer args: %w", err)
 	}
 	config := runConfig{
 		URL:                        options.runtimeURL,
@@ -133,9 +130,9 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		SubscriptionsPerConnection: options.subscriptions,
 		RampDuration:               options.ramp,
 		HoldDuration:               options.hold,
-		MutationPath:               strings.TrimSpace(options.mutationPath),
-		MutationArgs:               mutationArgs,
-		MutationRate:               options.mutationRate,
+		ReducerPath:                strings.TrimSpace(options.reducerPath),
+		ReducerArgs:                reducerArgs,
+		ReducerRate:                options.reducerRate,
 		ConnectTimeout:             options.connectTimeout,
 		InitialTimeout:             options.initialTimeout,
 		AuthMode:                   mode,
@@ -172,15 +169,15 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 			}
 			return total
 		}(),
-		"ramp":               config.RampDuration.String(),
-		"hold":               config.HoldDuration.String(),
-		"mutationPath":       config.MutationPath,
-		"mutationRatePerSec": requestedMutationRate(config, profile),
-		"mutationPaths":      requestedMutationRates(config, profile),
-		"authMode":           config.AuthMode,
-		"compression":        config.Compression,
-		"queryResultBatch":   config.QueryResultBatch,
-		"report":             options.reportPath,
+		"ramp":              config.RampDuration.String(),
+		"hold":              config.HoldDuration.String(),
+		"reducerPath":       config.ReducerPath,
+		"reducerRatePerSec": requestedReducerRate(config, profile),
+		"reducerPaths":      requestedReducerRates(config, profile),
+		"authMode":          config.AuthMode,
+		"compression":       config.Compression,
+		"queryResultBatch":  config.QueryResultBatch,
+		"report":            options.reportPath,
 	}
 	if options.dryRun {
 		return writeJSON(stdout, plan)
@@ -207,8 +204,8 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	if report.Subscriptions.ErrorRate > options.maximumErrorRate {
 		return fmt.Errorf("subscription error rate %.4f exceeded %.4f", report.Subscriptions.ErrorRate, options.maximumErrorRate)
 	}
-	if report.Mutations.ErrorRate > options.maximumErrorRate {
-		return fmt.Errorf("mutation error rate %.4f exceeded %.4f", report.Mutations.ErrorRate, options.maximumErrorRate)
+	if report.Reducers.ErrorRate > options.maximumErrorRate {
+		return fmt.Errorf("reducer error rate %.4f exceeded %.4f", report.Reducers.ErrorRate, options.maximumErrorRate)
 	}
 	return nil
 }
@@ -217,25 +214,25 @@ func writeHumanSummary(writer io.Writer, report RunReport, reportPath string) er
 	if _, err := fmt.Fprintf(writer,
 		"Gonvex load run complete (%d users, %d connections)\n"+
 			"Subscriptions: %d opened, %d initial results, %d errors\n"+
-			"Mutations: %.2f/s achieved vs %.2f/s requested (%d succeeded, %d errors)\n"+
+			"Reducers: %.2f/s achieved vs %.2f/s requested (%d succeeded, %d errors)\n"+
 			"TTLU: %d commits, p50 %.2fms, p95 %.2fms, max %.2fms; %d per-client samples\n",
 		report.Configuration.Users, report.Connections.Established,
 		report.Subscriptions.Sent, report.Subscriptions.InitialResults, report.Subscriptions.Errors,
-		report.Mutations.AchievedRatePerSec, report.Mutations.RequestedRatePerSec,
-		report.Mutations.Succeeded, report.Mutations.Errors,
+		report.Reducers.AchievedRatePerSec, report.Reducers.RequestedRatePerSec,
+		report.Reducers.Succeeded, report.Reducers.Errors,
 		report.TTLU.CommitsWithPropagation, report.TTLU.AcrossCommits.P50MS,
 		report.TTLU.AcrossCommits.P95MS, report.TTLU.AcrossCommits.MaxMS,
 		report.TTLU.PropagationSamples,
 	); err != nil {
 		return err
 	}
-	paths := make([]string, 0, len(report.TTLU.ByMutationPath))
-	for path := range report.TTLU.ByMutationPath {
+	paths := make([]string, 0, len(report.TTLU.ByReducerPath))
+	for path := range report.TTLU.ByReducerPath {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
 	for _, path := range paths {
-		pathReport := report.TTLU.ByMutationPath[path]
+		pathReport := report.TTLU.ByReducerPath[path]
 		if _, err := fmt.Fprintf(writer, "  %s TTLU: %d commits, p50 %.2fms, p95 %.2fms, max %.2fms\n",
 			path, pathReport.Commits, pathReport.TTLU.P50MS, pathReport.TTLU.P95MS, pathReport.TTLU.MaxMS); err != nil {
 			return err
@@ -256,7 +253,7 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 		subscriptions:           -1,
 		ramp:                    10 * time.Second,
 		hold:                    time.Minute,
-		mutationArgs:            "{}",
+		reducerArgs:             "{}",
 		connectTimeout:          10 * time.Second,
 		initialTimeout:          2 * time.Minute,
 		authMode:                string(authModeSynthetic),
@@ -282,9 +279,9 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 	flags.IntVar(&options.subscriptions, "subscriptions-per-connection", options.subscriptions, "profile subscriptions per connection; -1 uses all")
 	flags.DurationVar(&options.ramp, "ramp", options.ramp, "connection ramp duration")
 	flags.DurationVar(&options.hold, "hold", options.hold, "steady-state hold after initial results")
-	flags.StringVar(&options.mutationPath, "mutation-path", "", "mutation function path; requires --mutation-rate")
-	flags.StringVar(&options.mutationArgs, "mutation-args", options.mutationArgs, "mutation args JSON object; supports ${tenant}, ${userId}, ${sequence}, and ${mutationId}")
-	flags.Float64Var(&options.mutationRate, "mutation-rate", 0, "aggregate mutation calls per second across all connections")
+	flags.StringVar(&options.reducerPath, "reducer-path", "", "reducer function path; requires --reducer-rate")
+	flags.StringVar(&options.reducerArgs, "reducer-args", options.reducerArgs, "reducer args JSON object; supports ${tenant}, ${userId}, ${sequence}, and ${commandId}")
+	flags.Float64Var(&options.reducerRate, "reducer-rate", 0, "aggregate reducer calls per second across all connections")
 	flags.DurationVar(&options.connectTimeout, "connect-timeout", options.connectTimeout, "WebSocket/session timeout")
 	flags.DurationVar(&options.initialTimeout, "initial-timeout", options.initialTimeout, "maximum time for initial subscriptions")
 	flags.StringVar(&options.authMode, "auth-mode", options.authMode, "none, shared, or synthetic")
@@ -319,8 +316,8 @@ func parseCLI(args []string, stderr io.Writer) (cliOptions, error) {
 	if options.maximumErrorRate < 0 || options.maximumErrorRate > 1 {
 		return cliOptions{}, fmt.Errorf("max-error-rate must be between 0 and 1")
 	}
-	if options.mutationRate < 0 {
-		return cliOptions{}, fmt.Errorf("mutation-rate cannot be negative")
+	if options.reducerRate < 0 {
+		return cliOptions{}, fmt.Errorf("reducer-rate cannot be negative")
 	}
 	if options.targetPID == 0 {
 		options.maximumTargetRSSMiB = 0

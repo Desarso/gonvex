@@ -25,7 +25,7 @@ type pendingMemberProjection struct {
 // exclusively from committed tenant.members rows. It is deliberately outside
 // reducer execution: tenant Postgres is authoritative and projection failure
 // can never roll back a committed business transaction.
-func (s *Server) projectCommittedMemberChanges(projectID, tenantID string, batch syncChangeBatch) {
+func (s *Server) projectCommittedMemberChanges(projectID, tenantID string, batch replicaChangeBatch) {
 	for _, change := range batch.changes {
 		if change.table != "members" {
 			continue
@@ -40,11 +40,33 @@ func (s *Server) projectCommittedMemberChanges(projectID, tenantID string, batch
 			s.revokeAppAuthConnections(projectID, projection.AccountID)
 			s.revokeAppAuthConnections(projectID, projection.MemberID)
 		}
-		go s.retryMemberProjection(projectID, projection)
+		s.startMembershipProjection(func() {
+			s.retryMemberProjection(projectID, projection)
+		})
 	}
 }
 
-func memberProjectionFromChange(tenantID string, change syncLogChange, revision uint64) (controlidentity.AccountTenantIndex, bool) {
+// startMembershipProjection binds asynchronous directory work to the server
+// lifecycle. A projection must not outlive the runtime that owns its tenant
+// database, especially during shutdown or test database cleanup.
+func (s *Server) startMembershipProjection(work func()) {
+	if s == nil || work == nil {
+		return
+	}
+	s.membershipProjectorMu.Lock()
+	if s.membershipProjectorClosing {
+		s.membershipProjectorMu.Unlock()
+		return
+	}
+	s.membershipProjectorWG.Add(1)
+	s.membershipProjectorMu.Unlock()
+	go func() {
+		defer s.membershipProjectorWG.Done()
+		work()
+	}()
+}
+
+func memberProjectionFromChange(tenantID string, change replicaLogChange, revision uint64) (controlidentity.AccountTenantIndex, bool) {
 	raw := change.newValue
 	status := "active"
 	if change.operation == "delete" || len(raw) == 0 || string(raw) == "null" {
@@ -55,12 +77,8 @@ func memberProjectionFromChange(tenantID string, change syncLogChange, revision 
 	if len(raw) == 0 || json.Unmarshal(raw, &row) != nil {
 		return controlidentity.AccountTenantIndex{}, false
 	}
-	memberID := firstString(row, "id", "user_id", "userId")
+	memberID := firstString(row, "id")
 	accountID := firstString(row, "account_id", "accountId")
-	if accountID == "" {
-		// Compatibility rows used the same ID for global and tenant identity.
-		accountID = firstString(row, "user_id", "userId")
-	}
 	if value := firstString(row, "status"); value != "" {
 		status = strings.ToLower(value)
 	}
@@ -105,7 +123,11 @@ func firstInt64(row map[string]any, keys ...string) int64 {
 func (s *Server) retryMemberProjection(projectID string, projection controlidentity.AccountTenantIndex) {
 	backoff := 100 * time.Millisecond
 	for attempt := 1; attempt <= 8; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		projectionContext := s.ctx
+		if projectionContext == nil {
+			projectionContext = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(projectionContext, 5*time.Second)
 		db, err := s.pooledProjectRegistry(ctx)
 		if err == nil && db != nil {
 			err = (controlidentity.MembershipProjector{DB: db}).Upsert(ctx, projection)
@@ -121,7 +143,13 @@ func (s *Server) retryMemberProjection(projectID string, projection controlident
 				"revision", projection.TenantMembershipRevision, "error", fmt.Sprint(err))
 			return
 		}
-		time.Sleep(backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-projectionContext.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 		if backoff < 5*time.Second {
 			backoff *= 2
 		}
@@ -133,7 +161,11 @@ func (s *Server) retryMemberProjection(projectID string, projection controlident
 // so a directory failure leaves the outbox row for the change feed to retry and
 // can never turn a successful membership change into a business error.
 func (s *Server) projectTenantMemberDirectory(projectID, tenantID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), controlPlaneMembershipProjectionTimeout)
+	projectionContext := s.ctx
+	if projectionContext == nil {
+		projectionContext = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(projectionContext, controlPlaneMembershipProjectionTimeout)
 	defer cancel()
 	if err := s.drainControlPlaneMembershipOutboxContext(ctx, projectID, tenantID); err != nil {
 		slog.Warn("control-plane member directory projection deferred to the tenant outbox",
@@ -146,7 +178,11 @@ func (s *Server) projectTenantMemberDirectory(projectID, tenantID string) {
 // as members, so a process crash or unavailable Control Plane cannot lose the
 // directory update.
 func (s *Server) drainControlPlaneMembershipOutbox(projectID, tenantID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	projectionContext := s.ctx
+	if projectionContext == nil {
+		projectionContext = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(projectionContext, 30*time.Second)
 	defer cancel()
 	if err := s.drainControlPlaneMembershipOutboxContext(ctx, projectID, tenantID); err != nil {
 		slog.Debug("control-plane member outbox drain did not complete",

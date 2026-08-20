@@ -1,4 +1,4 @@
-export type ErrorUser = { id?: string; email?: string; name?: string };
+export type ErrorAccount = { id?: string; email?: string; name?: string };
 export type ErrorContext = Record<string, unknown>;
 
 export type ErrorReporterOptions = {
@@ -7,7 +7,7 @@ export type ErrorReporterOptions = {
   tenant?: string;
   release?: string;
   environment?: string;
-  user?: ErrorUser;
+  account?: ErrorAccount;
   tags?: Record<string, string>;
   sampleRate?: number;
   beforeSend?: (event: ErrorEventPayload) => ErrorEventPayload | null;
@@ -27,7 +27,7 @@ export type ErrorEventPayload = {
   tenant?: string;
   release?: string;
   environment?: string;
-  user?: ErrorUser;
+  account?: ErrorAccount;
   deviceId: string;
   sessionId: string;
   url?: string;
@@ -62,7 +62,7 @@ export class GonvexErrorReporter {
     if (this.queue.length) this.scheduleFlush();
   }
 
-  setUser(user?: ErrorUser) { this.options.user = user; }
+  setAccount(account?: ErrorAccount) { this.options.account = account; }
   setTenant(tenant?: string) { this.options.tenant = tenant; }
   setProject(project: string) {
     if (project === this.options.project) return;
@@ -83,7 +83,7 @@ export class GonvexErrorReporter {
       message: normalized.message, name: normalized.name, stack: normalized.stack,
       culprit: firstAppFrame(normalized.stack), project: this.options.project,
       tenant: this.options.tenant, release: this.options.release, environment: this.options.environment,
-      user: scrub(this.options.user) as ErrorUser, deviceId: this.deviceId, sessionId: this.sessionId,
+      account: scrub(this.options.account) as ErrorAccount, deviceId: this.deviceId, sessionId: this.sessionId,
       url: typeof location === "undefined" ? undefined : stripQuery(location.href),
       userAgent: typeof navigator === "undefined" ? undefined : navigator.userAgent,
       language: typeof navigator === "undefined" ? undefined : navigator.language,

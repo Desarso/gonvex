@@ -5,173 +5,78 @@ description: What is implemented today and what still needs product/runtime work
 
 # Current Limits
 
-Gonvex is beta software. The runtime exposes exactly three executable
-application kinds: Queries, Reducers, and Actions. Replica Collections and
-structured Live Queries are Query delivery modes. Remaining limits are
-primarily migration safety, fleet operations, richer conflict policies, and
-managed hosting.
+Gonvex is beta software. The active application model is TypeScript Query,
+Reducer, and Action modules delivered through a normalized Local Replica,
+Replica Collections, and structured Live Queries.
 
-## Implemented Today
+## Implemented today
 
-The current codebase includes:
-
-- app-local read-only Queries, transactional Reducers, external-work Actions,
-  Replica Collections, and structured Live Queries;
-- uploaded source bundles compiled and cached per project;
-- generated TypeScript API references and scoped schema metadata;
-- safe Postgres schema sync for project and tenant databases;
-- an authoritative `_gonvex_sync_changes` feed containing exact committed rows,
+- TypeScript modules bundled into a self-contained V8 artifact;
+- literal language-neutral argument and result schemas with typed codegen;
+- versioned SQL migrations and observed scoped schema metadata;
+- an authoritative `_gonvex_sync_changes` feed containing committed rows,
   transaction IDs, changed columns, command IDs, and revisions;
-- canonical Live Query groups with structured dependencies, revision-only
-  correctness, unchanged suppression, and adaptive window patches;
-- a normalized Local Replica with atomic transaction application, optimistic
-  overlays, Live Query ID membership, IndexedDB, and Expo SQLite persistence;
-- a durable Action outbox written inside Reducer transactions;
-- multi-project and database-per-tenant routing;
-- native Google OAuth, memberships, invitations, roles, account controls, and
-  live WebSocket session revocation;
-- browser query caching and lightweight error reporting;
-- recurring, per-tenant, and one-shot scheduled work;
-- optional S3-compatible files and uploaded CSV/XLS/XLSX analysis;
+- atomic Local Replica transactions with optimistic overlays, IndexedDB, and
+  Expo SQLite persistence;
+- structured Live Query groups and bounded Replica Collections;
+- centralized revisioned visibility with old/new row routing and revocation;
+- durable Action outbox and persisted one-shot/recurring scheduling;
+- multi-project and tenant-database routing;
+- native Google OAuth, Accounts, tenant-local Members, invitations, roles, and
+  live session revocation;
+- optional S3-compatible file storage and data-file analysis;
 - dashboard inspection for projects, tenants, schemas, functions, data, files,
   errors, logs, metrics, realtime connections, and scheduling.
 
-## Current CLI Boundary
-
-The npm CLI currently implements:
+## Current CLI boundary
 
 ```bash
 npm create gonvex@latest my-app
 npx gonvex init
 npx gonvex login
 npx gonvex project create my-app
-npx gonvex token create "Developer CLI"
 npx gonvex auth add google --origin http://localhost:5173
 npx gonvex auth doctor
-npx gonvex auth tenants list
 npx gonvex dev
 npx gonvex env list
-npx gonvex env push .env.production
 ```
 
-Top-level `tenant`, `deploy`, `generate`, and general runtime `doctor` remain
-roadmap commands. Tenant/membership operations live under `gonvex auth`, and
-project authentication has its own implemented `auth doctor`. See the
-[CLI Reference](./cli-reference) for current authentication and project-provisioning
-flags.
+Deployment records, immutable release artifacts, fleet rollout controls, and a
+generally available hosted service remain roadmap work.
 
-## Multi-Project Operations Are Early
+## Realtime and Local Replica limits
 
-The runtime and dashboard have project registry endpoints, rotatable project
-keys, account personal access tokens, project environment variables,
-per-project manifests, and database routing. There is no generally available
-hosted control plane.
+Arbitrary SQL remains available to one-shot Queries. Continuous delivery uses
+structured Live Queries or bounded Replica Collections.
 
-Needed work:
+- portable equality, range, membership, substring, boolean, sort, and window
+  operators can run against cached rows;
+- PostgreSQL-specific expressions are online-only;
+- Replica Collections are bounded structured entity sets, not an implicit copy
+  of an entire tenant database;
+- Live Query windows remain server-authoritative for large datasets;
+- offline results report `complete` or `partial` and never pretend a partial
+  cache is the complete server result;
+- every delivered table needs one centralized visibility plan;
+- interactive Reducers require an optimistic transaction or an explicit
+  reviewed non-optimistic reason;
+- complex nested windows may use a full replacement when a keyed delta is not
+  safe.
 
-- deployment records and immutable release artifacts
-- dashboard UI for personal-token lifecycle and more granular custom roles
-- automated zero-downtime upgrade and rollback workflows
+## Identity and tenancy limits
 
-## Multi-Tenant Auth and Routing
+The Control Plane directory is a routing projection, not the final security
+authority. Tenant access is checked against the active tenant database's
+Member record. Cross-tenant profile fields may be projected into Members, but
+business data remains tenant-local.
 
-Users can belong to multiple tenants with owner, admin, member, or viewer roles;
-each membership may carry additional JSON permissions. The central registry verifies
-membership before tenant routing, and runtime-created tenants receive separate
-PostgreSQL databases. Native auth supports personal-workspace and invite-only
-signup, tenant switching, invitation claiming, account disable/delete, and session
-revocation after membership changes.
+Backup/restore orchestration, staged schema rollouts, tenant moves, custom role
+editing, quotas, billing, additional identity providers, enterprise SSO, SCIM,
+recovery flows, and hosted-control-plane hardening remain incomplete.
 
-Remaining operational work is mostly fleet-level:
+## Production guidance
 
-- backup/restore orchestration across many tenant databases
-- staged schema rollouts and backfills
-- tenant move/export workflows
-- custom named-role editing and audit export in the dashboard
-- quota, billing, and organization policy
-
-## Realtime and Local Replica Limits
-
-Arbitrary SQL remains available to one-shot Queries, but continuous Live Query
-delivery requires a structured plan. This intentionally prevents dependency
-inference and broad invalidation fallbacks.
-
-Current boundaries:
-
-- common equality, range, membership, substring, boolean, sort, and window
-  operators are portable; PostgreSQL-specific expressions are online-only;
-- Replica Collections are single-table, equality-filtered, bounded entity sets;
-- every Live Query and Replica Collection table requires one structured
-  visibility plan; Gonvex injects it into SQL and routes old/new committed rows
-  through the same revisioned context;
-- partial offline datasets are labeled partial and never presented as global;
-- Reducer optimistic metadata currently supports generated entity patches;
-  richer generated multi-entity recipes and conflict-policy codegen remain work;
-- nested arbitrary Live Query JSON uses full replacements when it cannot be
-  represented as a keyed window patch.
-
-## Schema Migrations Are Early
-
-Schema sync applies safe, data-preserving changes and rejects changes that would
-break existing rows. Runtime startup persists schema state, batches catalog
-inspection, bounds tenant rollout concurrency, and skips unchanged trigger/index
-work.
-
-Production migrations need:
-
-- migration versioning
-- previews
-- explicit destructive-change confirmation
-- rollback strategy
-- per-tenant rollout control
-- large-table backfill strategy
-
-## Auth and Identity Boundaries
-
-Dashboard sessions, account personal access tokens, project memberships, and scoped
-project/token permissions are implemented. Native brokered Google OAuth is
-implemented for single-database and multi-tenant app projects with Authorization
-Code + PKCE, server-side Google ID-token validation, exact callback allowlists,
-short-lived access tokens, rotating refresh-token families, tenant memberships,
-invitations, role/permission propagation, account lifecycle controls, and live
-WebSocket revocation. Additional providers, device authorization, enterprise
-organization policy, recovery flows, audit export, and hosted-control-plane
-hardening are still incomplete.
-
-The runtime does not yet provide additional social providers, enterprise SSO,
-SCIM, recovery flows, organization policy, or complete audit export. Do not
-expose dashboard/data-browser management endpoints as application APIs.
-
-## Storage and Data Files
-
-File storage is optional. The runtime supports upload targets, signed/proxied
-downloads, metadata, deletion, direct storage, project buckets, and S3-compatible
-providers. The local MinIO service is a development example.
-
-Production operators still need bucket lifecycle policy, off-host backup,
-malware/content scanning when their product requires it, and tested restore
-procedures. Uploaded data-file analysis currently supports CSV, XLSX, and XLS
-through runtime-managed DuckDB artifacts; it is not a general warehouse.
-
-## Scheduler Durability
-
-One-shot jobs and deterministic cron occurrences are persisted in Postgres and
-claimed with renewable multi-replica leases. They survive runtime restarts and
-health-first rolling replacements. Registered cron definitions are reconstructed
-from the app bundle after startup or manifest sync.
-
-Interrupted executions are recoverable after their lease is released or
-expires. Normal function errors are terminal and recorded in runtime metrics;
-public cancellation, manual retry, retention controls, and dead-letter APIs are
-not implemented yet.
-
-## Production Guidance
-
-Treat Gonvex as beta and plan explicitly for:
-
-- production migrations
-- deployment/versioning and rollback
-- tenant fleet backup/restore
-- scheduler retention and dead-letter policies beyond the built-in durable queue
-- identity-provider and audit requirements beyond native Google auth
-- operating the self-hosted runtime, because no public managed service is available
+Plan explicitly for migration previews and backfills, deployment/versioning and
+rollback, tenant fleet backups, scheduler retention/dead letters, identity and
+audit requirements, and operating the self-hosted runtime. No public managed
+Gonvex service is generally available yet.

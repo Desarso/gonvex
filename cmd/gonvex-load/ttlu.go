@@ -9,15 +9,15 @@ import (
 )
 
 // TTLUReport separates individual client deliveries from time-to-last-user,
-// which is the slowest delivery observed for one committed mutation.
+// which is the slowest delivery observed for one committed reducer.
 type TTLUReport struct {
-	CommittedMutations        uint64                    `json:"committedMutations"`
+	CommittedReducers         uint64                    `json:"committedReducers"`
 	CommitsWithPropagation    uint64                    `json:"commitsWithPropagation"`
 	CommitsWithoutPropagation uint64                    `json:"commitsWithoutPropagation"`
 	PropagationSamples        uint64                    `json:"propagationSamples"`
 	PerClient                 HistogramReport           `json:"perClient"`
 	AcrossCommits             HistogramReport           `json:"acrossCommits"`
-	ByMutationPath            map[string]TTLUPathReport `json:"byMutationPath"`
+	ByReducerPath             map[string]TTLUPathReport `json:"byReducerPath"`
 }
 
 type TTLUPathReport struct {
@@ -67,14 +67,14 @@ func propagationCommitKey(epochMilliseconds float64) int64 {
 	return int64(math.Round(epochMilliseconds * 1000))
 }
 
-func (a *propagationAggregator) RecordCommit(epochMilliseconds float64, mutationPath string) {
+func (a *propagationAggregator) RecordCommit(epochMilliseconds float64, reducerPath string) {
 	if epochMilliseconds <= 0 {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	commit := a.commit(timestampCommitKey(epochMilliseconds))
-	commit.path = mutationPath
+	commit.path = reducerPath
 	commit.committedAtMS = epochMilliseconds
 }
 
@@ -109,17 +109,17 @@ func timestampCommitKey(epochMilliseconds float64) string {
 	return fmt.Sprintf("time:%d", propagationCommitKey(epochMilliseconds))
 }
 
-// RecordCommitID correlates a mutation result using its protocol request ID.
+// RecordCommandCommit correlates a reducer result using its command ID.
 // Unlike independently sampled timestamps, that identifier survives LISTEN
 // delivery and commit coalescing without precision or scheduling ambiguity.
-func (a *propagationAggregator) RecordCommitID(id string, epochMilliseconds float64, mutationPath string) {
-	if id == "" || epochMilliseconds <= 0 {
+func (a *propagationAggregator) RecordCommandCommit(commandID string, epochMilliseconds float64, reducerPath string) {
+	if commandID == "" || epochMilliseconds <= 0 {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	commit := a.commit("id:" + id)
-	commit.path = mutationPath
+	commit := a.commit("command:" + commandID)
+	commit.path = reducerPath
 	commit.committedAtMS = epochMilliseconds
 	for clientID, receivedAtMS := range commit.receivedAtMS {
 		a.recordReceiptLocked(commit, clientID, receivedAtMS)
@@ -127,18 +127,18 @@ func (a *propagationAggregator) RecordCommitID(id string, epochMilliseconds floa
 	commit.receivedAtMS = map[string]float64{}
 }
 
-func (a *propagationAggregator) RecordDeliveryIDs(ids []string, clientID string, receivedAtMS float64) {
+func (a *propagationAggregator) RecordOriginCommandDeliveries(originCommandIDs []string, clientID string, receivedAtMS float64) {
 	if clientID == "" || receivedAtMS <= 0 {
 		return
 	}
 	shard := &a.receipts[propagationReceiptShard(clientID)]
 	shard.Lock()
 	defer shard.Unlock()
-	for _, id := range ids {
-		if id == "" {
+	for _, originCommandID := range originCommandIDs {
+		if originCommandID == "" {
 			continue
 		}
-		key := "id:" + id
+		key := "command:" + originCommandID
 		clients := shard.byCommit[key]
 		if clients == nil {
 			clients = map[string]float64{}
@@ -190,7 +190,7 @@ func (a *propagationAggregator) Report() TTLUReport {
 		}
 		shard.Unlock()
 	}
-	report := TTLUReport{ByMutationPath: map[string]TTLUPathReport{}}
+	report := TTLUReport{ByReducerPath: map[string]TTLUPathReport{}}
 	perClient := []time.Duration{}
 	allCommitMaxima := []time.Duration{}
 	type pathValues struct {
@@ -200,12 +200,12 @@ func (a *propagationAggregator) Report() TTLUReport {
 	byPath := map[string]*pathValues{}
 	for _, commit := range a.commits {
 		if commit.path == "" {
-			// An invalidation from a mutation outside this load run can appear on
+			// An invalidation from a reducer outside this load run can appear on
 			// the same local runtime. It belongs in the legacy invalidation metrics,
 			// but not in TTLU for commits made by this harness.
 			continue
 		}
-		report.CommittedMutations++
+		report.CommittedReducers++
 		if len(commit.clients) == 0 {
 			report.CommitsWithoutPropagation++
 			continue
@@ -231,7 +231,7 @@ func (a *propagationAggregator) Report() TTLUReport {
 	report.PerClient = exactHistogramReport(perClient)
 	report.AcrossCommits = exactHistogramReport(allCommitMaxima)
 	for path, values := range byPath {
-		report.ByMutationPath[path] = TTLUPathReport{
+		report.ByReducerPath[path] = TTLUPathReport{
 			Commits: uint64(len(values.maxima)), PropagationSamples: values.samples,
 			TTLU: exactHistogramReport(values.maxima),
 		}

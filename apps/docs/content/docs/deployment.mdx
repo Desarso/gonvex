@@ -58,9 +58,9 @@ local Postgres, Valkey, MinIO, and runtime volumes.
 
 ## Upgrade the runtime
 
-The npm CLI and the Go runtime are separate artifacts. Installing a newer
+The npm CLI and the runtime host are separate artifacts. Installing a newer
 `@gonvex/cli` changes the client on your workstation, but it does not replace an
-already running runtime binary or container. The reference runtime image is compiled
+already running runtime binary or container. The reference runtime image is built
 from the source in the Docker build context.
 
 After updating the checkout, rebuild and recreate only the runtime service:
@@ -92,20 +92,17 @@ prefers a valid full SHA from that value over the legacy manually maintained
 `GONVEX_RUNTIME_VERSION`, so `/healthz.version` identifies the actual webhook
 checkout and the production promotion gate cannot pass on stale version metadata.
 
-Postgres and Valkey stay in the separate `docker-compose.coolify.yml` data-plane
-service. Runtime releases therefore do not restart either durable dependency.
+Postgres and the optional Valkey dashboard cache stay in the separate
+`docker-compose.coolify.yml` data-plane service. Runtime releases therefore do
+not restart either service.
 Source manifests live in Postgres and data files can rehydrate from object storage.
-An installation may persist `/var/lib/gonvex` for data files, plugins, and telemetry;
-the Go module cache, build cache, and compiler temporary directory live outside that
-tree so a volume mounted there cannot hide compiler-owned directories from the image.
+An installation may persist `/var/lib/gonvex` for module artifacts, data files,
+and telemetry. Build caches and temporary runtime state live outside that tree.
 
 The runtime does not report healthy until every persisted project manifest has
 hydrated. Scheduled jobs and deterministic cron occurrences live in Postgres and
-use renewable row leases for crash recovery. During upgrades from the earlier
-Valkey-only scheduler, Valkey claim keys remain as a compatibility fence and the
-new runtime drains old queued jobs into Postgres. HTTP and WebSocket traffic can
-therefore use both rolling containers while either version safely schedules or
-executes work without duplicating a cron fire.
+use renewable row leases for crash recovery. Valkey is optional and only caches
+dashboard data-explorer rows; realtime correctness remains entirely Postgres-backed.
 
 Production is a separate, manually approved promotion lane. Run **Promote Gonvex
 production** with the full SHA that is already healthy in development and a
@@ -255,7 +252,7 @@ Configure the runtime and dashboard build with the same project ID:
 ```dotenv
 # Runtime
 GONVEX_DASHBOARD_AUTH_PROJECT_ID=<dashboard-auth-project-id>
-DASHBOARD_AUTH_USER=admin@example.com
+DASHBOARD_AUTH_ACCOUNT=admin@example.com
 
 # apps/dashboard build-time values
 VITE_GONVEX_DASHBOARD_AUTH_PROJECT_ID=<dashboard-auth-project-id>
@@ -265,19 +262,19 @@ VITE_GONVEX_AUTH_ENABLED=true
 
 The runtime accepts a dashboard Google session only when it was minted for that
 exact project, contains a verified email, and the email is already a dashboard user
-or matches `DASHBOARD_AUTH_USER`. App sessions from every other project are rejected.
+or matches `DASHBOARD_AUTH_ACCOUNT`. App sessions from every other project are rejected.
 
 ## What each component does
 
 ```txt
 Runtime
-  Executes uploaded Go functions and serves HTTP and WebSocket traffic.
+  Loads TypeScript module artifacts and serves HTTP and WebSocket traffic.
 
 Postgres
   Stores runtime control data and application data in the reference stack.
 
 Valkey
-  Provides cache and realtime coordination.
+  Optionally caches dashboard data-explorer rows.
 
 Dashboard
   Inspects and manages the development runtime.
@@ -297,10 +294,10 @@ responsibility.
 Moneymaker installation. Unlike the reference development stack, it publishes no
 database, cache, or object-storage ports; pins third-party images by digest; enables
 durable Valkey persistence; requires dashboard/runtime authentication; persists the
-plugin, database, and object-storage state; and writes daily retained PostgreSQL
+module-artifact, database, and object-storage state; and writes daily retained PostgreSQL
 dumps to a separate volume. Coolify attaches domains only to the
 `gonvex-maker-runtime` and `gonvex-maker-dashboard` services and generates the
-`SERVICE_*` credentials referenced by the file. Runtime and dashboard image builds also bound Go/Rayon/libuv parallelism so
+`SERVICE_*` credentials referenced by the file. Runtime and dashboard image builds also bound build parallelism so
 an upgrade cannot consume every CPU on a shared host. The backup sidecar waits for
 the runtime health gate before its first dump, ensuring the initial retained backup
 contains the initialized control-plane schema rather than an empty new database.
@@ -348,7 +345,7 @@ a distributed edge/WAF limit as well.
 
 - Replace the Compose database, MinIO, and dashboard development credentials.
 - Use durable Postgres storage and test database restoration.
-- Persist `/var/lib/gonvex` for runtime plugin and telemetry data.
+- Persist `/var/lib/gonvex` for module artifacts and telemetry data.
 - Run Valkey/Redis with an appropriate durability and eviction policy for your load.
 - Back up every application database and object-storage bucket.
 - Restrict access to the dashboard and `/dev/*` management endpoints.

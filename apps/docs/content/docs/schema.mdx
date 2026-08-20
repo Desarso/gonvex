@@ -1,145 +1,59 @@
 ---
-title: Schema
-description: Define Postgres tables and indexes in your app-local Gonvex backend folder.
+title: Schema and Migrations
+description: Define Postgres tables and indexes with versioned SQL migrations.
 ---
 
-# Schema
+# Schema and Migrations
 
-Gonvex schemas are written in Go and live in your app-local `gonvex/` folder.
+Gonvex application schemas are versioned SQL migrations in the app's
+`migrations/` directory. TypeScript module declarations describe function
+arguments and results; they do not replace the database schema.
 
 ```txt
 my-app/
   gonvex/
-    schema.go
-    _generated/
+    tasks.ts
+  migrations/
+    0001_tasks.sql
 ```
 
-The schema describes the tables, columns, and indexes your project expects in Postgres.
+## Create tables and indexes
 
-## Example
+```sql
+-- migrations/0001_tasks.sql
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
-```go
-package backend
-
-import "github.com/gonvex/gonvex/pkg/gonvex"
-
-func Schema(s *gonvex.Schema) {
-  s.Table("tasks", func(t *gonvex.Table) {
-    t.ID("id")
-    t.String("title")
-    t.Text("description", gonvex.Nullable)
-    t.String("status")
-    t.String("priority", gonvex.Nullable)
-    t.Time("created_at")
-    t.Time("updated_at", gonvex.Nullable)
-
-    t.Index("by_status", "status")
-    t.Index("by_created_at", "created_at")
-    t.Index("by_status_created_at", "status", "created_at")
-  })
-}
+CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks (status);
+CREATE INDEX IF NOT EXISTS tasks_updated_at_idx ON tasks (updated_at DESC, id DESC);
 ```
 
-## Column Types
+Migrations are shipped with the TypeScript module artifact and applied by the
+runtime in version order. Keep each migration idempotent with `IF NOT EXISTS`
+or equivalent guards where appropriate. Use explicit, reviewed SQL for
+destructive changes and large backfills.
 
-The schema API covers common Postgres-backed application data:
+## Live Query indexes
 
-```go
-t.ID("id")
-t.String("title")
-t.Text("body", gonvex.Nullable)
-t.Int("count")
-t.Int64("size", gonvex.Nullable)
-t.Float64("price")
-t.Bool("published")
-t.Time("created_at")
-t.JSON("metadata", gonvex.Nullable)
-```
+Index the columns used by Live Query visibility predicates, filters, ordering,
+and search. PostgreSQL-specific search features remain available to the SQL
+migration and can be marked server-only in the Live Query plan.
 
-## Indexes
+## Generated schema metadata
 
-Indexes are declared near the table they support:
-
-```go
-t.Index("by_status", "status")
-t.Index("by_tenant_created_at", "tenant_id", "created_at")
-t.UniqueIndex("by_external_id", "external_id")
-```
-
-Use indexes for Queries and Live Query plans that filter, sort, search, or page through large tables.
-
-## Multi-Tenant Schemas
-
-How tenant scoping appears in application tables depends on the project’s tenant database strategy.
-
-```txt
-Database per tenant
-  Application tables usually do not need tenant_id because each tenant has its own database.
-
-Schema per tenant
-  Application tables usually do not need tenant_id because each tenant has its own Postgres schema.
-
-Shared tables
-  Application tables need tenant_id and all queries must be scoped by tenant.
-```
-
-The runtime resolves and verifies the active tenant before executing functions.
-Application code should read `ctx.TenantID` and `ctx.DB` instead of trusting a
-tenant ID sent in function arguments.
-
-## Schema Sync
-
-During development:
-
-```bash
-npx gonvex dev
-```
-
-Gonvex reads `gonvex/schema.go`, compares it to the project or tenant database,
-and applies safe changes. Multi-tenant schema sync runs in parallel with bounded
-concurrency and skips unchanged persisted schemas.
-
-Safe automatic changes include:
-
-- create tables
-- add columns
-- add indexes
-- add unique indexes when existing data satisfies the constraint
-- make a nullable column required only when no existing rows contain null
-- relax a required column to nullable
-
-Unsafe changes are rejected and shown in the CLI console:
-
-- rename columns
-- change column types
-- drop columns
-- drop tables
-- rewrite large tables
-- backfill production data
-
-The rule is Convex-like: apply changes that preserve existing data automatically, reject changes that could lose or invalidate existing data.
-
-## Generated Schema Types
-
-The CLI generates scoped schema metadata:
+After `gonvex dev` synchronizes the module and migrations, generated files under
+`gonvex/_generated/` expose the observed Control Plane and tenant schema to the
+frontend. They are build output and must not be edited manually.
 
 ```ts
 import { controlPlane, tenant } from "./gonvex/_generated/schema";
-
-tenant.tables.tasks;
-controlPlane.tables.projects;
 ```
 
-Generated schema modules currently expose table/column/index metadata and table
-name types. Full document-row type inference from Go structs is not implemented.
-
-## Production Direction
-
-Production migration tooling still needs:
-
-- preview migrations before applying
-- track migration versions
-- support rollbacks where possible
-- apply schema changes per tenant database route
-- prevent destructive changes without confirmation
-- expose schema status in the dashboard
+The runtime rejects schema changes that would silently lose existing data.
+Plan destructive changes as explicit migration work with backups and a tested
+rollback or restore procedure.

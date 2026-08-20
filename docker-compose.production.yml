@@ -131,7 +131,6 @@ services:
       GONVEX_CONTROL_PLANE_DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
       DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
       VALKEY_URL: redis://gonvex-maker-valkey:6379/0
-      GONVEX_PLUGIN_CACHE_DIR: /var/lib/gonvex/plugins
       GONVEX_DATA_DIR: /var/lib/gonvex/data
       GONVEX_TELEMETRY_LOG: /var/lib/gonvex/telemetry.jsonl
       GONVEX_ROWS_CACHE_TTL: 10m
@@ -147,7 +146,7 @@ services:
       GONVEX_AUTH_URL: https://gonvex-maker.whagons.com
       GONVEX_TRUSTED_PROXY_CIDRS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
       GONVEX_DASHBOARD_SESSION_SECRET: ${SERVICE_REALBASE64_64_GONVEX_DASHBOARD_SESSION}
-      DASHBOARD_AUTH_USER: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
+      DASHBOARD_AUTH_ACCOUNT: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
       DASHBOARD_AUTH_PASSWORD: ${SERVICE_PASSWORD_64_GONVEX_DASHBOARD}
       GONVEX_DASHBOARD_AUTH_PROJECT_ID: ${GONVEX_DASHBOARD_AUTH_PROJECT_ID:-}
       GONVEX_GOOGLE_CLIENT_ID: ${GONVEX_GOOGLE_CLIENT_ID:-}
@@ -158,7 +157,6 @@ services:
       S3_ACCESS_KEY_ID: ${GONVEX_MINIO_ROOT_USER:-gonvex}
       S3_SECRET_ACCESS_KEY: ${SERVICE_PASSWORD_64_GONVEX_MINIO}
       S3_FORCE_PATH_STYLE: "true"
-      GOCACHE: /var/cache/gonvex/go-build
     volumes:
       - gonvex-runtime-data:/var/lib/gonvex
     networks:
@@ -221,7 +219,7 @@ services:
       PORT: "80"
       DASHBOARD_AUTH_ENABLED: "true"
       DASHBOARD_COOKIE_SECURE: "true"
-      DASHBOARD_AUTH_USER: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
+      DASHBOARD_AUTH_ACCOUNT: ${GONVEX_BOOTSTRAP_EMAIL:-admin@whagons.com}
       DASHBOARD_AUTH_PASSWORD: ${SERVICE_PASSWORD_64_GONVEX_DASHBOARD}
       DASHBOARD_SESSION_SECRET: ${SERVICE_REALBASE64_64_GONVEX_DASHBOARD_SESSION}
       GONVEX_RUNTIME_URL: http://gonvex-maker-runtime:8080

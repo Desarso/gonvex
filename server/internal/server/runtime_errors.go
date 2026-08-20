@@ -14,10 +14,10 @@ import (
 // action was therefore invisible within a quarter of an hour of failing, and
 // invisible immediately in the one place people look for errors.
 //
-// Every errored query/mutation/action is now captured as an error event through
+// Every errored query/reducer/action is captured as an error event through
 // the same store, fingerprinting, and grouping the browser SDK feeds, so a
 // backend failure shows up beside the frontend ones with its own first/last
-// seen, tenant, and user breakdown.
+// seen, tenant, and Account breakdown.
 
 // The durable log restore is capped at metricsLogLimit, so this capacity lets a
 // restart replay every visible failed log without dropping the tail of the
@@ -104,10 +104,10 @@ func runtimeErrorEvent(entry runtimeLogEntry) (capturedError, bool) {
 	if strings.TrimSpace(entry.ExecutionID) == "" {
 		event.EventID = generatedEventID(event)
 	}
-	if user := strings.TrimSpace(entry.UserID); user != "" {
-		event.User = map[string]any{"id": user}
-		if email := strings.TrimSpace(entry.UserEmail); email != "" {
-			event.User["email"] = email
+	if account := strings.TrimSpace(entry.AccountID); account != "" {
+		event.Account = map[string]any{"id": account}
+		if email := strings.TrimSpace(entry.AccountEmail); email != "" {
+			event.Account["email"] = email
 		}
 	}
 	return sanitizeCapturedError(event), true

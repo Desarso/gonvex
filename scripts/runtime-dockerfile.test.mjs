@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import test from "node:test";
@@ -10,45 +10,33 @@ const packageJSON = JSON.parse(readFileSync(path.join(root, "package.json"), "ut
 const localCompose = readFileSync(path.join(root, "docker-compose.yml"), "utf8");
 const productionCompose = readFileSync(path.join(root, "docker-compose.production.yml"), "utf8");
 const persistentRoot = "/var/lib/gonvex";
-const moduleRoot = "/opt/gonvex/go";
-const moduleCache = `${moduleRoot}/pkg/mod`;
-const buildCache = "/var/cache/gonvex/go-build";
-const temporaryBuildRoot = "/var/cache/gonvex/tmp";
-
-test("runtime compiler state stays visible when persistent and tmpfs roots are mounted", () => {
+test("runtime image contains no application compiler or Go plugin state", () => {
   const stages = dockerfile.split(/(?=^FROM )/m).filter((stage) => stage.startsWith("FROM "));
   const build = stages.find((stage) => / AS build\s*$/m.test(stage));
   const runtime = stages.at(-1);
   assert.ok(build, "Go build stage must exist");
   assert.ok(runtime, "runtime stage must exist");
 
-  assert.match(build, new RegExp(`GOCACHE=${buildCache}`));
-  assert.match(build, new RegExp(`GOMODCACHE=${moduleCache}`));
-  assert.match(build, new RegExp(`GOPATH=${moduleRoot}`));
-  assert.match(runtime, new RegExp(`GOCACHE=${buildCache}`));
-  assert.match(runtime, new RegExp(`GOMODCACHE=${moduleCache}`));
-  assert.match(runtime, new RegExp(`GOPATH=${moduleRoot}`));
-  assert.match(runtime, new RegExp(`TMPDIR=${temporaryBuildRoot}(?:\\s|$)`));
-  assert.match(
-    runtime,
-    new RegExp(`COPY --from=build[^\\n]* ${moduleCache} ${moduleCache}`),
-  );
-  for (const compilerPath of [moduleRoot, moduleCache, buildCache, temporaryBuildRoot]) {
-    assert.equal(
-      compilerPath.startsWith(`${persistentRoot}/`),
-      false,
-      `${compilerPath} must not be hidden by the production volume`,
-    );
-  }
-  assert.equal(
-    temporaryBuildRoot === "/tmp" || temporaryBuildRoot.startsWith("/tmp/"),
-    false,
-    `${temporaryBuildRoot} must not live on the production noexec tmpfs`,
-  );
+  assert.match(build, /^FROM golang:[^\s]+-bookworm@sha256:[a-f0-9]{64} AS build$/m);
+  assert.match(build, /go build -o \/out\/gonvex-runtime/);
+  assert.match(runtime, /^FROM debian:bookworm-slim/m);
   assert.match(runtime, /GONVEX_DATA_DIR=\/var\/lib\/gonvex\/data/);
-  assert.doesNotMatch(dockerfile, /COPY --from=build[^\n]* \/go\/pkg\/mod/);
+  assert.doesNotMatch(runtime, /GOCACHE|GOMODCACHE|GOPATH|GONVEX_PLUGIN_CACHE_DIR|GONVEX_MODULE_ROOT/);
+  assert.doesNotMatch(runtime, /COPY --from=build[^\n]* \/src/);
+  assert.doesNotMatch(dockerfile, /buildmode=plugin|plugin\.Open|project bundle|synced project bundles/i);
   assert.match(runtime, /WORKDIR \/var\/lib\/gonvex\nUSER 0:0/);
   assert.doesNotMatch(runtime, /useradd|groupadd|chown/);
+});
+
+test("runtime has no Go sandbox runner or compiler dependency", () => {
+  assert.equal(
+    existsSync(path.join(root, "server/internal/sandbox/go_runner.go")),
+    false,
+    "the removed Go sandbox runner must not return",
+  );
+  const runtime = dockerfile.split(/(?=^FROM )/m).filter((stage) => stage.startsWith("FROM ")).at(-1);
+  assert.ok(runtime);
+  assert.doesNotMatch(runtime, /golang|\bgo\s+run\b|GOCACHE|GOMODCACHE|GOPATH/i);
 });
 
 test("runtime image always contains and supervises the Rust TypeScript module host", () => {
@@ -80,5 +68,6 @@ test("compose deployments use the canonical Control Plane configuration", () => 
   for (const [name, compose] of [["local", localCompose], ["production", productionCompose]]) {
     assert.match(compose, /GONVEX_CONTROL_PLANE_DATABASE_URL:/, `${name} compose must configure the Control Plane`);
     assert.doesNotMatch(compose, /GONVEX_LANDLORD_DATABASE_URL:/, `${name} compose must not configure the legacy landlord alias`);
+    assert.doesNotMatch(compose, /GOCACHE|GOMODCACHE|GONVEX_PLUGIN_CACHE_DIR/, `${name} compose must not configure removed Go application caches`);
   }
 });

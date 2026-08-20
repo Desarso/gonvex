@@ -114,12 +114,10 @@ func (s *Server) loadProjectEnv(ctx context.Context, project string) ([]projectE
 	return vars, rows.Err()
 }
 
-// acceptsProjectEnvKey is deliberately stricter than acceptsSyncKey. A sync key
-// may be runtime-wide for bootstrapping local projects, but environment values
-// are project-scoped secrets and require a credential bound to the exact project
-// in the route. Persisted/configured project keys are authoritative. The legacy
-// single-key runtime configuration remains supported only for generated Gonvex
-// keys, whose project identifier is encoded in the key itself.
+// acceptsProjectEnvKey is deliberately stricter than acceptsSyncKey. Environment
+// values are project-scoped secrets and require the exact persisted key for the
+// project in the route. Runtime-wide development credentials do not authorize
+// project environment access.
 func (s *Server) acceptsProjectEnvKey(project string, provided string) bool {
 	project = strings.TrimSpace(project)
 	provided = strings.TrimSpace(provided)
@@ -135,15 +133,12 @@ func (s *Server) acceptsProjectEnvKey(project string, provided string) bool {
 			expected = strings.TrimSpace(target.syncKey)
 		}
 	}
-	devKey := strings.TrimSpace(s.config.DevSyncKey)
 	s.projectMu.RUnlock()
 
 	if expected != "" {
 		return constantTimeString(provided, expected)
 	}
-	return devKey != "" &&
-		constantTimeString(provided, devKey) &&
-		projectIDFromProjectKey(provided) == project
+	return false
 }
 
 // authorizeProjectEnvRequest accepts either an owner/admin dashboard session or
@@ -194,8 +189,7 @@ func (s *Server) projectEnvDashboardActorFromRequest(r *http.Request) (dashboard
 	// accountActorFromRequest treats DevSyncKey as a local-development admin
 	// fallback when no explicit AdminKey is configured. Environment routes must
 	// not inherit that runtime-wide authority: they contain project-scoped
-	// secrets. A generated DevSyncKey may still pass acceptsProjectEnvKey above
-	// when its encoded project id matches the route.
+	// secrets.
 	provided := strings.TrimSpace(syncKey(r))
 	devKey := strings.TrimSpace(s.config.DevSyncKey)
 	adminKey := strings.TrimSpace(s.config.AdminKey)

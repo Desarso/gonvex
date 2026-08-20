@@ -27,14 +27,17 @@ fn structural_capabilities(kind: &FunctionKind) -> Capabilities {
             db_read: true,
             db_write: true,
             action_outbox: true,
+            scheduler: true,
             ..Capabilities::default()
         },
         // Actions run outside the transaction: they may reach the network and
         // storage, and mutate only by calling a reducer.
         FunctionKind::Action => Capabilities {
             run_reducer: true,
+            scheduler: true,
             network: true,
             storage: true,
+            environment: true,
             ..Capabilities::default()
         },
     }
@@ -48,8 +51,10 @@ pub(crate) fn effective_capabilities(kind: &FunctionKind, granted: &Capabilities
         db_write: structural.db_write && granted.db_write,
         action_outbox: structural.action_outbox && granted.action_outbox,
         run_reducer: structural.run_reducer && granted.run_reducer,
+        scheduler: structural.scheduler && granted.scheduler,
         network: structural.network && granted.network,
         storage: structural.storage && granted.storage,
+        environment: structural.environment && granted.environment,
     }
 }
 
@@ -68,8 +73,10 @@ pub(crate) struct CapabilityFlags {
     db_write: bool,
     action_outbox: bool,
     run_reducer: bool,
+    scheduler: bool,
     network: bool,
     storage: bool,
+    environment: bool,
 }
 
 impl From<&Capabilities> for CapabilityFlags {
@@ -79,8 +86,10 @@ impl From<&Capabilities> for CapabilityFlags {
             db_write: capabilities.db_write,
             action_outbox: capabilities.action_outbox,
             run_reducer: capabilities.run_reducer,
+            scheduler: capabilities.scheduler,
             network: capabilities.network,
             storage: capabilities.storage,
+            environment: capabilities.environment,
         }
     }
 }
@@ -117,6 +126,7 @@ pub(crate) struct DispatchRequest<'a> {
     pub(crate) kind: &'static str,
     pub(crate) capabilities: CapabilityFlags,
     pub(crate) identity: IdentityView<'a>,
+    pub(crate) environment: &'a std::collections::BTreeMap<String, String>,
     /// Wall-clock milliseconds the host stamped on the invocation, surfaced as
     /// `ctx.now` so a handler never reads a clock the host does not control.
     pub(crate) now: u64,
@@ -161,6 +171,20 @@ pub(crate) enum HostCallRequest {
         args: serde_json::Value,
     },
     RunReducer {
+        function: String,
+        #[serde(default)]
+        args: serde_json::Value,
+    },
+    ScheduleAfter {
+        #[serde(rename = "delayMs")]
+        delay_ms: u64,
+        function: String,
+        #[serde(default)]
+        args: serde_json::Value,
+    },
+    ScheduleAt {
+        #[serde(rename = "atUnixMs")]
+        at_unix_ms: u64,
         function: String,
         #[serde(default)]
         args: serde_json::Value,
@@ -218,6 +242,24 @@ impl HostCallRequest {
                 args: encode(args)?,
             },
             Self::RunReducer { function, args } => HostCall::RunReducer {
+                function,
+                args: encode(args)?,
+            },
+            Self::ScheduleAfter {
+                delay_ms,
+                function,
+                args,
+            } => HostCall::ScheduleAfter {
+                delay_ms,
+                function,
+                args: encode(args)?,
+            },
+            Self::ScheduleAt {
+                at_unix_ms,
+                function,
+                args,
+            } => HostCall::ScheduleAt {
+                at_unix_ms,
                 function,
                 args: encode(args)?,
             },
@@ -313,5 +355,41 @@ pub(crate) fn decode_result(envelope: &str) -> Result<Vec<u8>, ModuleError> {
             DispatchErrorKind::Result => ModuleError::Execution(message),
             DispatchErrorKind::ResultSize => ModuleError::BudgetExceeded(message),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_is_structurally_denied_to_queries() {
+        let granted = Capabilities {
+            scheduler: true,
+            ..Capabilities::default()
+        };
+        assert!(!effective_capabilities(&FunctionKind::Query, &granted).scheduler);
+        assert!(effective_capabilities(&FunctionKind::Reducer, &granted).scheduler);
+        assert!(effective_capabilities(&FunctionKind::Action, &granted).scheduler);
+    }
+
+    #[test]
+    fn scheduler_request_lowers_to_typed_host_call() {
+        let request: HostCallRequest = serde_json::from_value(serde_json::json!({
+            "kind": "scheduleAfter",
+            "delayMs": 2500,
+            "function": "reports.generate",
+            "args": {"workspaceId": "workspace-1"}
+        }))
+        .expect("scheduler request should decode");
+        let call = request
+            .into_host_call()
+            .expect("scheduler request should lower");
+        assert_eq!(call.capability(), "scheduler");
+        assert!(matches!(
+            call,
+            HostCall::ScheduleAfter { delay_ms: 2500, function, .. }
+                if function == "reports.generate"
+        ));
     }
 }

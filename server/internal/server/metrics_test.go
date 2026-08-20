@@ -13,13 +13,13 @@ import (
 	"github.com/gonvex/gonvex/pkg/manifest"
 )
 
-type memoryMutationLogStore struct {
+type memoryReducerLogStore struct {
 	mu       sync.Mutex
 	entries  []runtimeLogEntry
 	appended chan runtimeLogEntry
 }
 
-func (s *memoryMutationLogStore) LoadRecent(_ context.Context, limit int) ([]runtimeLogEntry, error) {
+func (s *memoryReducerLogStore) LoadRecent(_ context.Context, limit int) ([]runtimeLogEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	start := len(s.entries) - limit
@@ -29,7 +29,7 @@ func (s *memoryMutationLogStore) LoadRecent(_ context.Context, limit int) ([]run
 	return append([]runtimeLogEntry(nil), s.entries[start:]...), nil
 }
 
-func (s *memoryMutationLogStore) Append(_ context.Context, entry runtimeLogEntry) error {
+func (s *memoryReducerLogStore) Append(_ context.Context, entry runtimeLogEntry) error {
 	s.mu.Lock()
 	s.entries = append(s.entries, entry)
 	s.mu.Unlock()
@@ -40,9 +40,9 @@ func (s *memoryMutationLogStore) Append(_ context.Context, entry runtimeLogEntry
 }
 
 func TestRuntimeMetricsPersistsSuccessfulReducersAndFailures(t *testing.T) {
-	store := &memoryMutationLogStore{appended: make(chan runtimeLogEntry, 2)}
+	store := &memoryReducerLogStore{appended: make(chan runtimeLogEntry, 2)}
 	metrics := newRuntimeMetrics()
-	metrics.startMutationLogPersistence(store)
+	metrics.startReducerLogPersistence(store)
 	now := time.Now().UTC()
 	request := sanitizeRuntimeLogRequest(json.RawMessage(`{"title":"Test","accessToken":"secret"}`))
 	metrics.recordRuntimeLog(runtimeLogEntry{Time: now.Format(time.RFC3339Nano), Project: "project-a", Path: "tasks.create", Kind: "reducer", Outcome: "ok", Request: request}, now)
@@ -96,7 +96,7 @@ func TestProjectRegistrySchemaIncludesRuntimeReducerLogs(t *testing.T) {
 	}
 }
 
-func TestRuntimeMetricsRestoresLatestMutationLogsInOrder(t *testing.T) {
+func TestRuntimeMetricsRestoresLatestReducerLogsInOrder(t *testing.T) {
 	entries := make([]runtimeLogEntry, metricsLogLimit+5)
 	start := time.Date(2026, time.July, 17, 12, 0, 0, 0, time.UTC)
 	for index := range entries {
@@ -104,14 +104,14 @@ func TestRuntimeMetricsRestoresLatestMutationLogsInOrder(t *testing.T) {
 			Time:        start.Add(time.Duration(index) * time.Second).Format(time.RFC3339Nano),
 			ExecutionID: fmt.Sprintf("execution-%d", index),
 			Project:     "project-a",
-			Path:        fmt.Sprintf("tasks.mutation%d", index),
-			Kind:        "mutation",
+			Path:        fmt.Sprintf("tasks.reducer%d", index),
+			Kind:        "reducer",
 			Outcome:     "ok",
 		}
 	}
-	store := &memoryMutationLogStore{entries: entries}
+	store := &memoryReducerLogStore{entries: entries}
 	restarted := newRuntimeMetrics()
-	restarted.startMutationLogPersistence(store)
+	restarted.startReducerLogPersistence(store)
 
 	deadline := time.Now().Add(time.Second)
 	var snapshot runtimeMetricsSnapshot
@@ -166,7 +166,7 @@ func TestRuntimeFunctionLogIncludesExecutionContext(t *testing.T) {
 		"tenant-a",
 		"bulk.tasksByWorkspace",
 		"query",
-		callerContext{user: &gonvex.User{ID: "user-a", Email: "user@example.test"}},
+		callerContext{user: &gonvex.Account{ID: "user-a", Email: "user@example.test"}},
 		json.RawMessage(`{"workspaceId":"workspace-a"}`),
 	)
 	metrics.recordFunctionExecution(execution, nil)
@@ -181,7 +181,7 @@ func TestRuntimeFunctionLogIncludesExecutionContext(t *testing.T) {
 	if entry.ExecutionID == "" || entry.StartedAt == "" || entry.CompletedAt == "" {
 		t.Fatalf("execution timestamps/id missing: %+v", entry)
 	}
-	if entry.Tenant != "tenant-a" || entry.UserID != "user-a" || entry.UserEmail != "user@example.test" {
+	if entry.Tenant != "tenant-a" || entry.AccountID != "user-a" || entry.AccountEmail != "user@example.test" {
 		t.Fatalf("execution context missing: %+v", entry)
 	}
 	if string(entry.Request) != `{"workspaceId":"workspace-a"}` {
@@ -218,19 +218,19 @@ func TestWebsocketSnapshotScopesAndDescribesConnections(t *testing.T) {
 	server := &Server{wsConns: map[*wsConn]bool{}}
 	firstConnection := &wsConn{
 		id: "conn-000001", project: "project-a", tenant: "tenant-a", auth: true,
-		user: &gonvex.User{ID: "user-a", Email: "ada@example.test"}, connectedAt: now.Add(-time.Minute),
+		user: &gonvex.Account{ID: "user-a", Email: "ada@example.test"}, connectedAt: now.Add(-time.Minute),
 		lastActiveAt: now, lastActivity: "query.subscribe", lastPath: "tasks.list",
-		device: clientDeviceInfo{BrowserName: "Chrome", BrowserVersion: "126", DeviceType: "desktop", Platform: "macOS"},
-		subs:   map[string]querySubscription{"one": {path: "tasks.list"}, "two": {path: "notifications.list"}},
-		syncs:  map[string]*syncSubscription{"sync-one": {path: "tasks.recentSync"}},
+		device:   clientDeviceInfo{BrowserName: "Chrome", BrowserVersion: "126", DeviceType: "desktop", Platform: "macOS"},
+		subs:     map[string]querySubscription{"one": {path: "tasks.list"}, "two": {path: "notifications.list"}},
+		replicas: map[string]*replicaSubscription{"sync-one": {path: "tasks.recentSync"}},
 	}
 	firstConnection.bytesReceived.Store(1200)
 	firstConnection.bytesSent.Store(800)
 	server.addWSConn(firstConnection)
 	server.addWSConn(&wsConn{
 		id: "conn-000002", project: "project-a", tenant: "tenant-b", auth: true,
-		user: &gonvex.User{ID: "user-a", Email: "ada@example.test"}, connectedAt: now.Add(-2 * time.Minute),
-		lastActiveAt: now.Add(-time.Second), lastActivity: "mutation.call", lastPath: "tasks.update",
+		user: &gonvex.Account{ID: "user-a", Email: "ada@example.test"}, connectedAt: now.Add(-2 * time.Minute),
+		lastActiveAt: now.Add(-time.Second), lastActivity: "reducer.call", lastPath: "tasks.update",
 		subs: map[string]querySubscription{},
 	})
 	server.addWSConn(&wsConn{
@@ -239,7 +239,7 @@ func TestWebsocketSnapshotScopesAndDescribesConnections(t *testing.T) {
 	})
 
 	snapshot := server.websocketSnapshot("project-a")
-	if snapshot.Connections != 2 || snapshot.Subscriptions != 3 || snapshot.Users != 1 {
+	if snapshot.Connections != 2 || snapshot.Subscriptions != 3 || snapshot.Accounts != 1 {
 		t.Fatalf("unexpected websocket totals: %+v", snapshot)
 	}
 	if snapshot.BytesReceived != 1200 || snapshot.BytesSent != 800 {
@@ -249,7 +249,7 @@ func TestWebsocketSnapshotScopesAndDescribesConnections(t *testing.T) {
 		t.Fatalf("unexpected connection details/order: %+v", snapshot.Details)
 	}
 	first := snapshot.Details[0]
-	if first.UserEmail != "ada@example.test" || first.Tenant != "tenant-a" || first.Browser != "Chrome 126" {
+	if first.AccountEmail != "ada@example.test" || first.Tenant != "tenant-a" || first.Browser != "Chrome 126" {
 		t.Fatalf("connection identity/destination/device missing: %+v", first)
 	}
 	if strings.Join(first.Subscriptions, ",") != "notifications.list,tasks.list,tasks.recentSync" {
@@ -262,13 +262,13 @@ func TestLoadSamplerRecordsConnectionsAndTrimsHistory(t *testing.T) {
 	server := &Server{wsConns: map[*wsConn]bool{}, metrics: newRuntimeMetrics()}
 	server.addWSConn(&wsConn{
 		id: "conn-000001", project: "project-a", auth: true,
-		user: &gonvex.User{ID: "user-a"}, connectedAt: now, lastActiveAt: now,
-		subs:  map[string]querySubscription{"one": {path: "tasks.list"}},
-		syncs: map[string]*syncSubscription{"sync-one": {path: "tasks.recentSync"}},
+		user: &gonvex.Account{ID: "user-a"}, connectedAt: now, lastActiveAt: now,
+		subs:     map[string]querySubscription{"one": {path: "tasks.list"}},
+		replicas: map[string]*replicaSubscription{"sync-one": {path: "tasks.recentSync"}},
 	})
 	server.addWSConn(&wsConn{
 		id: "conn-000002", project: "project-b", auth: true,
-		user: &gonvex.User{ID: "user-a"}, connectedAt: now, lastActiveAt: now,
+		user: &gonvex.Account{ID: "user-a"}, connectedAt: now, lastActiveAt: now,
 		subs: map[string]querySubscription{"two": {path: "boards.list"}},
 	})
 	server.addWSConn(&wsConn{
@@ -287,8 +287,8 @@ func TestLoadSamplerRecordsConnectionsAndTrimsHistory(t *testing.T) {
 	}
 	point := snapshot.Load.Series[0]
 	// Load samples are process-global: 3 connections across both projects,
-	// user-a counted once plus the anonymous connection.
-	if point.Connections != 3 || point.Users != 2 || point.Subscriptions != 3 {
+	// account-a counted once plus the anonymous connection.
+	if point.Connections != 3 || point.Accounts != 2 || point.Subscriptions != 3 {
 		t.Fatalf("load point = %+v", point)
 	}
 	if point.Time != now.Format(time.RFC3339Nano) {
@@ -311,23 +311,23 @@ func TestLoadSamplerRecordsConnectionsAndTrimsHistory(t *testing.T) {
 	}
 }
 
-func TestPropagationTracksInvalidateFanoutOnly(t *testing.T) {
+func TestPropagationTracksChangeFanoutOnly(t *testing.T) {
 	metrics := newRuntimeMetrics()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	// Server leg: commit -> result sent, invalidation rerun.
+	// Server leg: commit -> result sent, change rerun.
 	metrics.recordTransaction(transactionTelemetryEntry{
-		Time: now, Kind: "query", Path: "tasks.list", Phase: "server", Reason: "invalidate",
+		Time: now, Kind: "query", Path: "tasks.list", Phase: "server", Reason: "change",
 		ChangeCommittedAtMS: 1000, ServerSentAtMS: 1450,
 	})
 	// Browser leg: two receiving clients applied the update. The server-clock
 	// ack measurement wins over the skew-prone browser-clock estimate.
 	metrics.recordTransaction(transactionTelemetryEntry{
-		Time: now, Kind: "query", Path: "tasks.list", Phase: "browser", Reason: "invalidate",
+		Time: now, Kind: "query", Path: "tasks.list", Phase: "browser", Reason: "change",
 		ChangeToAckMS: 120, ChangeToBrowserMS: 40,
 	})
 	metrics.recordTransaction(transactionTelemetryEntry{
-		Time: now, Kind: "query", Path: "tasks.list", Phase: "browser", Reason: "invalidate",
+		Time: now, Kind: "query", Path: "tasks.list", Phase: "browser", Reason: "change",
 		ChangeToBrowserMS: 900,
 	})
 	// Excluded: initial load and the mutator's own round trip.
@@ -336,7 +336,7 @@ func TestPropagationTracksInvalidateFanoutOnly(t *testing.T) {
 		ChangeToBrowserMS: 9999,
 	})
 	metrics.recordTransaction(transactionTelemetryEntry{
-		Time: now, Kind: "mutation", Path: "tasks.update", Phase: "browser", Reason: "invalidate",
+		Time: now, Kind: "reducer", Path: "tasks.update", Phase: "browser", Reason: "change",
 		ChangeToBrowserMS: 8888,
 	})
 

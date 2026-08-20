@@ -1,10 +1,9 @@
-// TypeScript server modules ship as a language-neutral module artifact rather
-// than the Go source bundle: the runtime receives declarative function metadata
-// plus the module sources and a required, self-contained JavaScript bundle
-// instead of a package it has to compile with the Go toolchain.
+// TypeScript server modules ship as a language-neutral module artifact: the
+// runtime receives declarative function metadata plus a required,
+// self-contained JavaScript bundle.
 //
-// Parsing stays regex- and scanner-based, matching how the Go registrations are
-// read in index.ts. Pulling the TypeScript compiler into the CLI at runtime
+// Parsing stays regex- and scanner-based. Pulling the TypeScript compiler into
+// the CLI at runtime
 // would cost more than the declarative metadata this pipeline needs.
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -18,11 +17,13 @@ import type {
   FunctionDependencies,
   FunctionEntry,
   FunctionKind,
+  FilterOperator,
   JsonValue,
   LiveExpression,
   LiveQueryPlan,
   LiveValue,
   ModuleArtifact,
+  ModuleCron,
   ModuleFunction,
   ModuleJavaScript,
   ModuleLanguage,
@@ -31,13 +32,10 @@ import type {
   VisibilityExpression,
   VisibilityPlan,
   VisibilitySet,
-  OptimisticProjectionDefinition,
-  OptimisticReducerDefinition,
-  ReadDependency,
 } from "./manifest-types.js";
 
 /** Bumped whenever the artifact layout changes; mixed into the hash. */
-export const moduleArtifactGeneration = 2;
+export const moduleArtifactGeneration = 4;
 
 /** Deterministic ESM output when gonvex.json does not name one. */
 const defaultBundlePath = join("_build", "module.js");
@@ -49,7 +47,7 @@ const nodeBuiltinImports = new Set(
   builtinModules.flatMap((name) => name.startsWith("node:") ? [name, name.slice(5)] : [name, `node:${name}`]),
 );
 // `gonvex auth add google` writes gonvex/auth.tsx for the browser; it is not a
-// server module, and it must not make a Go backend look like a TypeScript one.
+// server module and must not be treated as an executable backend module.
 const skippedSourceFiles = new Set(["auth.tsx", "auth.ts"]);
 
 type ModuleFunctionRegistration = {
@@ -78,6 +76,8 @@ const registrationPattern = new RegExp(
 );
 const visibilityDefinitionPattern = /export\s+(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=;]+)?=\s*visibility\s*\(/gi;
 const visibilityRegistrationPattern = /\b(?:app|server|gonvex)\s*\.\s*visibility\s*\(/gi;
+const cronDefinitionPattern = /export\s+(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=;]+)?=\s*(cron|tenantCron)\s*\(/gi;
+const cronRegistrationPattern = /\b(?:app|server|gonvex)\s*\.\s*(cron|tenantCron)\s*\(/gi;
 const identifierPattern = /[A-Za-z_$][A-Za-z0-9_$]*/y;
 const keywordPattern = /(?:true|false|null|undefined)\b/y;
 const numberPattern = /-?(?:0[xX][0-9a-fA-F_]+|\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?\d+)?)/y;
@@ -98,23 +98,22 @@ export type ModuleArtifactOptions = {
 };
 
 /**
- * Go remains the default so existing projects and empty backend directories
- * keep the bundle pipeline they have today. TypeScript is inferred only when a
- * backend has module sources and no Go sources at all; `language` in
- * gonvex.json overrides the inference either way.
+ * Gonvex v2 application modules are TypeScript-only.
  */
 export async function detectProjectLanguage(backendDir: string, declared?: string): Promise<ProjectLanguage> {
   const normalized = declared?.trim().toLowerCase();
-  if (normalized === "go" || normalized === "golang") return "go";
   if (normalized === "ts" || normalized === "typescript") return "typescript";
-  if (normalized) throw new Error(`unknown gonvex.json language ${JSON.stringify(declared)}; expected "go" or "typescript"`);
-  if (!existsSync(backendDir)) return "go";
+  if (normalized) throw new Error(`unknown gonvex.json language ${JSON.stringify(declared)}; expected "typescript"`);
+  if (!existsSync(backendDir)) return "typescript";
   const [goSources, moduleSources] = await Promise.all([
     walkFiles(backendDir, (name) => name.endsWith(".go")),
     moduleSourceFiles(backendDir),
   ]);
-  if (goSources.length > 0) return "go";
-  return moduleSources.length > 0 ? "typescript" : "go";
+  if (goSources.length > 0) {
+    throw new Error("Go application modules were removed in Gonvex v2; migrate gonvex/*.go to TypeScript");
+  }
+  if (moduleSources.length === 0) throw new Error("Gonvex backend has no TypeScript module sources");
+  return "typescript";
 }
 
 export async function moduleSourceFiles(backendDir: string): Promise<string[]> {
@@ -128,6 +127,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   const files: Record<string, string> = {};
   const functions: Record<string, ModuleFunction> = {};
   const visibilityPlans: Record<string, VisibilityPlan> = {};
+  const crons: ModuleCron[] = [];
   for (const file of sources) {
     const contents = await readFile(file);
     files[projectPath(options.root, file)] = contents.toString("base64");
@@ -139,24 +139,115 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
       if (visibilityPlans[plan.table]) throw new Error(`duplicate visibility plan for table ${JSON.stringify(plan.table)}`);
       visibilityPlans[plan.table] = plan;
     }
+    crons.push(...parseCronDefinitions(contents.toString("utf8")));
   }
-  // Versioned SQL migrations travel with the artifact for the same reason they
-  // travel with the Go bundle: without them the runtime applies only the
-  // declarative schema.
+  // Versioned SQL migrations travel with the artifact so the runtime applies
+  // the same schema changes as the source module.
   for (const file of [...options.migrations].sort()) {
     files[projectPath(options.root, file)] = (await readFile(file)).toString("base64");
   }
+  const cronNames = new Set<string>();
+  for (const cron of crons) {
+    if (cronNames.has(cron.name)) throw new Error(`duplicate cron: ${cron.name}`);
+    cronNames.add(cron.name);
+    const target = functions[cron.function];
+    if (!target) throw new Error(`cron ${JSON.stringify(cron.name)} targets unknown function ${JSON.stringify(cron.function)}`);
+    if (target.kind === "query") throw new Error(`cron ${JSON.stringify(cron.name)} must target a reducer or action`);
+  }
   const sortedFiles = sortedRecord(files);
+  const sortedFunctions = sortedRecord(functions);
+  const sortedVisibility = sortedRecord(visibilityPlans);
+  const sortedCrons = crons.sort((left, right) => left.name.localeCompare(right.name));
   return {
     language: "typescript",
     generation: moduleArtifactGeneration,
-    hash: artifactHash(sortedFiles, javascript),
+    hash: artifactHash({
+      entrypoint: entrypoint.projectPath,
+      files: sortedFiles,
+      functions: sortedFunctions,
+      visibility: sortedVisibility,
+      crons: sortedCrons,
+      javascript,
+    }),
     entrypoint: entrypoint.projectPath,
-    functions: sortedRecord(functions),
-    visibility: sortedRecord(visibilityPlans),
+    functions: sortedFunctions,
+    visibility: sortedVisibility,
     files: sortedFiles,
     javascript,
+    ...(sortedCrons.length > 0 ? { crons: sortedCrons } : {}),
   };
+}
+
+function parseCronDefinitions(source: string): ModuleCron[] {
+  const crons: ModuleCron[] = [];
+  cronDefinitionPattern.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = cronDefinitionPattern.exec(source)) !== null) {
+    const openParen = match.index + match[0].length - 1;
+    const call = readCallArguments(source, openParen);
+    cronDefinitionPattern.lastIndex = Math.max(call.end, openParen + 1);
+    const value = call.args[0]?.value;
+    const name = stringMember(value, "name");
+    const functionPath = stringMember(value, "function");
+    if (!isJsonObject(value) || !name || !functionPath) {
+      throw new Error(`cron export ${JSON.stringify(match[1])} must use a literal name and function`);
+    }
+    const intervalMs = numberMember(value, "intervalMs");
+    const expression = stringMember(value, "expression");
+    if ((intervalMs === undefined) === (expression === undefined)) {
+      throw new Error(`cron ${JSON.stringify(name)} requires exactly one intervalMs or expression`);
+    }
+    if (intervalMs !== undefined && (!Number.isSafeInteger(intervalMs) || intervalMs <= 0)) {
+      throw new Error(`cron ${JSON.stringify(name)} intervalMs must be a positive safe integer`);
+    }
+    if (expression !== undefined && !expression.trim()) {
+      throw new Error(`cron ${JSON.stringify(name)} expression must be non-empty`);
+    }
+    const args = readMember(value, "args");
+    crons.push({
+      name,
+      function: functionPath,
+      scope: match[2] === "tenantCron" ? "tenant" : "project",
+      ...(args === undefined ? {} : { args }),
+      ...(intervalMs === undefined ? { expression } : { intervalMs }),
+    });
+  }
+
+  // ModuleBuilder is the documented registration form (`app.cron(...)` and
+  // `app.tenantCron(...)`). Keep these declarations in the language-neutral
+  // artifact just like the exported helper form above.
+  cronRegistrationPattern.lastIndex = 0;
+  while ((match = cronRegistrationPattern.exec(source)) !== null) {
+    const openParen = match.index + match[0].length - 1;
+    const call = readCallArguments(source, openParen);
+    cronRegistrationPattern.lastIndex = Math.max(call.end, openParen + 1);
+    const value = call.args[0]?.value;
+    const name = stringMember(value, "name");
+    const functionPath = stringMember(value, "function");
+    if (!isJsonObject(value) || !name || !functionPath) {
+      throw new Error(`cron registration must use a literal name and function`);
+    }
+    const intervalMs = numberMember(value, "intervalMs");
+    const expression = stringMember(value, "expression");
+    if ((intervalMs === undefined) === (expression === undefined)) {
+      throw new Error(`cron ${JSON.stringify(name)} requires exactly one intervalMs or expression`);
+    }
+    if (intervalMs !== undefined && (!Number.isSafeInteger(intervalMs) || intervalMs <= 0)) {
+      throw new Error(`cron ${JSON.stringify(name)} intervalMs must be a positive safe integer`);
+    }
+    if (expression !== undefined && !expression.trim()) {
+      throw new Error(`cron ${JSON.stringify(name)} expression must be non-empty`);
+    }
+    const args = readMember(value, "args");
+    crons.push({
+      name,
+      function: functionPath,
+      scope: match[1] === "tenantCron" ? "tenant" : "project",
+      ...(args === undefined ? {} : { args }),
+      ...(intervalMs === undefined ? { expression } : { intervalMs }),
+    });
+  }
+  return crons;
 }
 
 function parseVisibilityDefinitions(source: string): VisibilityPlan[] {
@@ -275,14 +366,35 @@ export function moduleManifestFunctions(artifact: ModuleArtifact): Record<string
   return functions;
 }
 
-function artifactHash(files: Record<string, string>, javascript?: ModuleJavaScript) {
-  const hash = createHash("sha256");
-  hash.update(`generation:${moduleArtifactGeneration};language:typescript;`);
-  for (const path of Object.keys(files).sort()) {
-    hash.update(`${path}:${files[path]};`);
-  }
-  if (javascript) hash.update(`javascript:${javascript.path}:${javascript.hash};`);
-  return hash.digest("hex");
+function artifactHash(input: {
+  entrypoint: string;
+  files: Record<string, string>;
+  functions: Record<string, ModuleFunction>;
+  visibility: Record<string, VisibilityPlan>;
+  crons: ModuleCron[];
+  javascript: ModuleJavaScript;
+}) {
+  const contract = {
+    generation: moduleArtifactGeneration,
+    language: "typescript",
+    entrypoint: input.entrypoint,
+    files: input.files,
+    functions: input.functions,
+    visibility: input.visibility,
+    crons: input.crons,
+    javascript: { path: input.javascript.path, hash: input.javascript.hash },
+  };
+  return createHash("sha256").update(canonicalJson(contract)).digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .filter(([, child]) => child !== undefined)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+    .join(",")}}`;
 }
 
 async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint: string): Promise<ModuleJavaScript> {
@@ -411,18 +523,18 @@ function parseModuleFunctions(root: string, backendDir: string, file: string, so
       declaredPath ?? (prefix ? `${prefix}.${exportName}` : exportName),
       moduleFunction({
         ...registration,
+        path: declaredPath ?? (prefix ? `${prefix}.${exportName}` : exportName),
         file: relativeFile,
         handler: identifierText(handlerEntry?.text) ?? inlineHandler ?? exportName,
         exportName,
-        generics: match[3],
         signature: handlerEntry?.text,
         options,
       }),
     ]);
   }
 
-  // `app.query("messages.list", listMessages, { ... })` mirrors the Go
-  // registration form, so a module can name its own paths.
+  // The explicit registration form lets a module assign stable public paths
+  // independently from its exported binding names.
   registrationPattern.lastIndex = 0;
   while ((match = registrationPattern.exec(source)) !== null) {
     const registration = moduleFunctionKinds.get((match[1] ?? "").toLowerCase());
@@ -438,9 +550,9 @@ function parseModuleFunctions(root: string, backendDir: string, file: string, so
       path,
       moduleFunction({
         ...registration,
+        path,
         file: relativeFile,
         handler: identifierText(call.args[1]?.text) ?? path.split(".").pop() ?? path,
-        generics: match[2],
         signature: options?.get("handler")?.text,
         options,
       }),
@@ -456,24 +568,28 @@ function moduleFunction(input: {
   delivery?: ModuleFunction["delivery"];
   file: string;
   handler: string;
+  path: string;
   exportName?: string;
-  generics?: string;
   signature?: string;
   options?: ObjectEntries;
 }): ModuleFunction {
-  const schemas = callSchemas(input.generics, input.signature);
+  const schemas = callSchemas(input.options, input.path);
   const configuredDelivery = input.options?.get("delivery")?.value;
   const delivery = normalizeDelivery(configuredDelivery) ?? input.delivery;
-  const dependencies = dependenciesFromOptions(input.options, input.kind, delivery);
+  const dependencies = dependenciesFromOptions(input.options);
   const replica = delivery === "replica" ? replicaFromOptions(input.options) : undefined;
+  if (delivery === "replica" && !replica) {
+    throw new Error(`Replica Collection ${input.path} requires a replica definition`);
+  }
+  if (input.kind === "query" && (delivery ?? "oneShot") === "oneShot") {
+    const plan = dependencies?.liveQueryPlan;
+    if (!plan) throw new Error(`one-shot query ${input.path} requires a structured live query plan`);
+    if (!plan.table.trim() || !plan.key.trim() || !plan.columns?.length || !plan.columns.includes(plan.key)) {
+      throw new Error(`one-shot query ${input.path} requires a structured live query plan with a table, key, and columns including the key`);
+    }
+  }
   const offline = input.options?.get("offline")?.value;
-  const declaredOptimistic = input.options?.get("optimistic")?.value;
-  // The object-shaped optimisticReducer/projection contract predates v2
-  // transactions and is still read into dependenciesFromOptions below. Keep
-  // it there rather than mistaking it for a transaction.
-  const legacyOptimistic = isJsonObject(declaredOptimistic)
-    && ("reducer" in declaredOptimistic || "projection" in declaredOptimistic);
-  const optimistic = legacyOptimistic ? undefined : declaredOptimistic;
+  const optimistic = input.options?.get("optimistic")?.value;
   if (input.kind === "reducer" && optimistic !== undefined) {
     validateOptimisticTransaction(optimistic);
   }
@@ -535,33 +651,156 @@ function isJsonObject(value: unknown): value is Record<string, JsonValue> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function callSchemas(generics?: string, signature?: string): { args: ModuleSchema; result: ModuleSchema } {
-  const declared = generics ? splitTopLevel(generics.slice(1, -1)) : [];
-  const fromSignature = signature ? signatureTypes(signature) : {};
+function callSchemas(options: ObjectEntries | undefined, path: string): { args: ModuleSchema; result: ModuleSchema } {
+  if (!options) throw new Error(`TypeScript function ${JSON.stringify(path)} must declare literal args and result schemas`);
   return {
-    args: moduleSchema(declared.at(0) ?? fromSignature.args),
-    result: moduleSchema(declared.at(1) ?? fromSignature.result),
+    args: parseRequiredSchema(options, "args", path),
+    result: parseRequiredSchema(options, "result", path),
   };
 }
 
-function moduleSchema(type?: string): ModuleSchema {
-  const declared = type?.trim();
-  // Schemas stay placeholders until codegen can lower TypeScript types into
-  // JSON Schema; the declared type text is what the next generation resolves.
-  return { placeholder: true, ...(declared ? { type: declared } : {}) };
+function parseRequiredSchema(options: ObjectEntries, field: "args" | "result", path: string): ModuleSchema {
+  const entry = options.get(field);
+  if (!entry) throw new Error(`TypeScript function ${JSON.stringify(path)} must declare ${field}: schema.*(...)`);
+  const schema = parsePortableSchema(entry.text);
+  if (!schema) throw new Error(`TypeScript function ${JSON.stringify(path)} ${field} must use a static schema.*(...) declaration`);
+  if (!portableSchemaMatchesRuntime(schema)) {
+    throw new Error(`TypeScript function ${JSON.stringify(path)} ${field} uses schema.optional outside an object field, which the runtime does not support`);
+  }
+  return schema;
 }
 
-/**
- * Keep schema metadata opaque and language-neutral. A malformed artifact must
- * not make an unchecked value visible in the generated manifest; the runtime
- * remains responsible for any invocation validation it chooses to provide.
- */
+/** Keep static artifacts aligned with the Rust ABI's optional-field rule. */
+function portableSchemaMatchesRuntime(schema: ModuleSchema, optionalField = false): boolean {
+  switch (schema.kind) {
+    case "optional":
+      return optionalField && portableSchemaMatchesRuntime(schema.value);
+    case "array":
+      return portableSchemaMatchesRuntime(schema.items);
+    case "record":
+      return portableSchemaMatchesRuntime(schema.values);
+    case "object":
+      return Object.values(schema.fields).every((field) => portableSchemaMatchesRuntime(field, field.kind === "optional"));
+    default:
+      return true;
+  }
+}
+
+/** Parse only the module SDK's literal schema constructors; never evaluate source. */
+function parsePortableSchema(text: string): ModuleSchema | undefined {
+  const source = text.trim();
+  const match = /^schema\.([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/.exec(source);
+  if (!match) return undefined;
+  const openParen = source.indexOf("(", match.index + match[0].length - 1);
+  const call = readCallArguments(source, openParen);
+  if (call.end <= openParen || skipTrivia(source, call.end) !== source.length) return undefined;
+  const name = match[1]!;
+  const argument = call.args[0];
+  switch (name) {
+    case "string": {
+      if (call.args.length > 1) return undefined;
+      const options = schemaOptions(argument, ["format", "minLength", "maxLength"]);
+      if (options === undefined) return argument === undefined ? { kind: "string" } : undefined;
+      if (options.format !== undefined && !["email", "uri", "uuid", "datetime"].includes(String(options.format))) return undefined;
+      return { kind: "string", ...options };
+    }
+    case "email":
+    case "uri":
+    case "uuid":
+    case "datetime":
+      return call.args.length === 0 ? { kind: "string", format: name } : undefined;
+    case "number":
+    case "integer": {
+      if (call.args.length > 1) return undefined;
+      const options = schemaOptions(argument, ["minimum", "maximum"]);
+      if (options === undefined && argument !== undefined) return undefined;
+      return { kind: "number", ...(name === "integer" ? { integer: true } : {}), ...(options ?? {}) };
+    }
+    case "boolean": return call.args.length === 0 ? { kind: "boolean" } : undefined;
+    case "null": return call.args.length === 0 ? { kind: "null" } : undefined;
+    case "any": return call.args.length === 0 ? { kind: "any" } : undefined;
+    case "id": return call.args.length === 1 && typeof argument?.value === "string" && argument.value.trim() ? { kind: "id", entity: argument.value } : undefined;
+    case "literal": return call.args.length === 1 && argument?.value !== undefined ? { kind: "literal", value: argument.value } : undefined;
+    case "array":
+      return call.args.length === 1 ? schemaChild(argument) : undefined;
+    case "record":
+      return call.args.length === 1 ? schemaChild(argument, "record") : undefined;
+    case "optional":
+      return call.args.length === 1 ? schemaChild(argument, "optional") : undefined;
+    case "object": {
+      if ((call.args.length !== 1 && call.args.length !== 2) || !argument?.entries || argument.text.includes("...")) return undefined;
+      const fields: Record<string, ModuleSchema> = {};
+      for (const [key, entry] of argument.entries) {
+        const field = parsePortableSchema(entry.text);
+        if (!field) return undefined;
+        fields[key] = field;
+      }
+      const options = call.args.length === 2 ? schemaOptions(call.args[1], ["allowUnknown"]) : {};
+      if (options === undefined) return undefined;
+      return { kind: "object", fields, ...(options.allowUnknown === undefined ? {} : { allowUnknown: options.allowUnknown === true }) };
+    }
+    default: return undefined;
+  }
+}
+
+function schemaChild(argument?: LiteralValue, wrapper?: "record" | "optional"): ModuleSchema | undefined {
+  const child = argument && parsePortableSchema(argument.text);
+  if (!child) return undefined;
+  if (wrapper === "record") return { kind: "record", values: child };
+  if (wrapper === "optional") return { kind: "optional", value: child };
+  return { kind: "array", items: child };
+}
+
+function schemaOptions(argument: LiteralValue | undefined, allowed: readonly string[]): Record<string, JsonValue> | undefined {
+  if (!argument) return {};
+  if (!argument.entries || argument.text.includes("...")) return undefined;
+  const result: Record<string, JsonValue> = {};
+  for (const [key, entry] of argument.entries) {
+    if (!allowed.includes(key) || entry.value === undefined) return undefined;
+    result[key] = entry.value;
+  }
+  return result;
+}
+
+/** Validate a schema after JSON transport; used by manifest projections and tests. */
 export function isModuleSchema(value: unknown): value is ModuleSchema {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  if (record.placeholder !== true) return false;
-  if (record.type !== undefined && (typeof record.type !== "string" || !record.type.trim())) return false;
-  return Object.keys(record).every((key) => key === "placeholder" || key === "type");
+  if (typeof record.kind !== "string") return false;
+  switch (record.kind) {
+    case "string": return schemaKeys(record, ["kind", "format", "minLength", "maxLength"])
+      && (record.format === undefined || ["email", "uri", "uuid", "datetime"].includes(String(record.format)))
+      && positiveIntegerOrUndefined(record.minLength) && positiveIntegerOrUndefined(record.maxLength);
+    case "number": return schemaKeys(record, ["kind", "integer", "minimum", "maximum"])
+      && (record.integer === undefined || typeof record.integer === "boolean")
+      && numberOrUndefined(record.minimum) && numberOrUndefined(record.maximum);
+    case "boolean":
+    case "null":
+    case "any": return schemaKeys(record, ["kind"]);
+    case "id": return schemaKeys(record, ["kind", "entity"]) && typeof record.entity === "string" && record.entity.trim().length > 0;
+    case "literal": return schemaKeys(record, ["kind", "value"]) && isJsonValue(record.value);
+    case "array": return schemaKeys(record, ["kind", "items"]) && isModuleSchema(record.items);
+    case "record": return schemaKeys(record, ["kind", "values"]) && isModuleSchema(record.values);
+    case "optional": return schemaKeys(record, ["kind", "value"]) && isModuleSchema(record.value);
+    case "object": {
+      if (!schemaKeys(record, ["kind", "fields", "allowUnknown"]) || !record.fields || typeof record.fields !== "object" || Array.isArray(record.fields)) return false;
+      if (record.allowUnknown !== undefined && typeof record.allowUnknown !== "boolean") return false;
+      return Object.values(record.fields as Record<string, unknown>).every(isModuleSchema);
+    }
+    default: return false;
+  }
+}
+
+function schemaKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(record).every((key) => allowed.includes(key));
+}
+function numberOrUndefined(value: unknown): boolean { return value === undefined || (typeof value === "number" && Number.isFinite(value)); }
+function positiveIntegerOrUndefined(value: unknown): boolean { return value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0); }
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return typeof value === "object" && value !== null && Object.values(value).every(isJsonValue);
 }
 
 function signatureTypes(text: string): { args?: string; result?: string } {
@@ -569,8 +808,7 @@ function signatureTypes(text: string): { args?: string; result?: string } {
   if (openParen < 0) return {};
   const closeParen = findMatching(text, openParen);
   if (closeParen < 0) return {};
-  // Handlers take the context first and the arguments second, like Go's
-  // `func(ctx *gonvex.QueryCtx, args Args)`.
+  // Handlers take the context first and the arguments second.
   const parameter = splitTopLevel(text.slice(openParen + 1, closeParen)).at(1) ?? "";
   const colon = parameter.indexOf(":");
   const args = colon < 0 ? undefined : parameter.slice(colon + 1).trim();
@@ -592,24 +830,13 @@ function unwrapPromise(type?: string) {
 
 function dependenciesFromOptions(
   options: ObjectEntries | undefined,
-  kind: FunctionKind,
-  delivery: ModuleFunction["delivery"],
 ): FunctionDependencies | undefined {
   if (!options) return undefined;
   const dependencies: FunctionDependencies = {};
 
-  // Reads is retained only for legacy one-shot Query declarations. Reducers,
-  // Actions and structured Live Queries derive their behavior
-  // from the executable contract instead of hand-written dependency metadata.
-  if (kind === "query" && delivery === "oneShot") {
-    const reads = tableDependencies(options.get("reads")?.value);
-    if (reads.length > 0) dependencies.reads = reads;
-  }
-
   const liveQueryPlan = liveQueryPlanFromOptions(options);
   if (liveQueryPlan) {
     dependencies.liveQueryPlan = liveQueryPlan;
-    dependencies.reads = [readDependencyFromLiveQueryPlan(liveQueryPlan)];
   }
   if (options.get("shareByPermissions")?.value === true) dependencies.shareByPermissions = true;
   const shareResultFrom = stringEntry(options, "shareResultFrom");
@@ -617,75 +844,9 @@ function dependenciesFromOptions(
   const shareResultField = stringEntry(options, "shareResultField");
   if (shareResultField) dependencies.shareResultField = shareResultField;
   const optimistic = options.get("optimistic")?.value;
-  const reducer = optimisticReducer(options.get("optimisticReducer")?.value ?? readMember(optimistic, "reducer"));
-  if (reducer) dependencies.optimisticReducer = reducer;
-  const projection = optimisticProjection(options.get("optimisticProjection")?.value ?? readMember(optimistic, "projection"));
-  if (projection) dependencies.optimisticProjection = projection;
   const nonOptimisticReason = stringEntry(options, "nonOptimisticReason");
   if (nonOptimisticReason) dependencies.nonOptimisticReason = nonOptimisticReason;
   return Object.keys(dependencies).length > 0 ? dependencies : undefined;
-}
-
-function readDependencyFromLiveQueryPlan(plan: LiveQueryPlan): ReadDependency {
-  const filters = new Set<string>();
-  for (const column of plan.search?.columns ?? []) filters.add(column);
-  collectLiveExpressionColumns(plan.where, filters);
-  return {
-    table: plan.table,
-    ...(plan.columns && plan.columns.length > 0 ? { columns: [...plan.columns] } : {}),
-    ...(filters.size > 0 ? { filters: [...filters].sort() } : {}),
-    ...(plan.sort?.allowedColumns?.length ? { ordersBy: [...plan.sort.allowedColumns] } : {}),
-    ...(plan.window ? { windowed: true } : {}),
-  };
-}
-
-function collectLiveExpressionColumns(expression: LiveExpression | undefined, columns: Set<string>): void {
-  if (!expression) return;
-  if (expression.column) columns.add(expression.column);
-  for (const child of expression.children ?? []) collectLiveExpressionColumns(child, columns);
-}
-
-function tableDependencies(value: JsonValue | undefined): ReadDependency[] {
-  const items = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
-  const dependencies: ReadDependency[] = [];
-  for (const item of items) {
-    if (typeof item === "string") {
-      if (item.trim()) dependencies.push({ table: item.trim() });
-      continue;
-    }
-    const table = stringMember(item, "table");
-    if (!table) continue;
-    const dependency: ReadDependency = { table };
-    const columns = stringArray(readMember(item, "columns"));
-    if (columns) dependency.columns = columns;
-    const filters = stringArray(readMember(item, "filters"));
-    if (filters) dependency.filters = filters;
-    const ordersBy = stringArray(readMember(item, "ordersBy"));
-    if (ordersBy) dependency.ordersBy = ordersBy;
-    if (readMember(item, "windowed") === true) dependency.windowed = true;
-    dependencies.push(dependency);
-  }
-  return dependencies;
-}
-
-function optimisticReducer(value: JsonValue | undefined): OptimisticReducerDefinition | undefined {
-  const entity = stringMember(value, "entity");
-  if (!entity) return undefined;
-  return {
-    entity,
-    rowIdPath: pathArray(readMember(value, "rowIdPath")),
-    fieldsPath: pathArray(readMember(value, "fieldsPath")),
-  };
-}
-
-function optimisticProjection(value: JsonValue | undefined): OptimisticProjectionDefinition | undefined {
-  const entity = stringMember(value, "entity");
-  if (!entity) return undefined;
-  return {
-    entity,
-    key: stringMember(value, "key") ?? "id",
-    resultPath: pathArray(readMember(value, "resultPath")),
-  };
 }
 
 function normalizeDelivery(value: JsonValue | undefined): ModuleFunction["delivery"] | undefined {
@@ -694,11 +855,7 @@ function normalizeDelivery(value: JsonValue | undefined): ModuleFunction["delive
 }
 
 function liveQueryPlanFromOptions(options: ObjectEntries): LiveQueryPlan | undefined {
-  const value = options.get("liveQueryPlan")?.value
-    ?? options.get("livePlan")?.value
-    ?? options.get("LiveQueryPlan")?.value
-    ?? options.get("LivePlan")?.value;
-  return parseLiveQueryPlan(value);
+  return parseLiveQueryPlan(options.get("liveQueryPlan")?.value);
 }
 
 function parseLiveQueryPlan(value: JsonValue | undefined): LiveQueryPlan | undefined {
@@ -718,6 +875,13 @@ function parseLiveQueryPlan(value: JsonValue | undefined): LiveQueryPlan | undef
   const searchArgument = stringMember(searchValue, "argument");
   const searchColumns = stringArray(readMember(searchValue, "columns"));
   if (searchArgument && searchColumns) plan.search = { argument: searchArgument, columns: searchColumns };
+  const filtersValue = readMember(value, "filters");
+  const filtersArgument = stringMember(filtersValue, "argument");
+  const filtersColumns = stringArray(readMember(filtersValue, "allowedColumns"));
+  const filtersOperators = stringArray(readMember(filtersValue, "allowedOperators"));
+  if (filtersArgument && filtersColumns && filtersOperators) {
+    plan.filters = { argument: filtersArgument, allowedColumns: filtersColumns, allowedOperators: filtersOperators as FilterOperator[] };
+  }
   const sortValue = readMember(value, "sort");
   const sortDefaultColumn = stringMember(sortValue, "defaultColumn");
   const sortDefaultDirection = stringMember(sortValue, "defaultDirection");
@@ -737,7 +901,9 @@ function parseLiveQueryPlan(value: JsonValue | undefined): LiveQueryPlan | undef
   const defaultLimit = numberMember(windowValue, "defaultLimit");
   const maxLimit = numberMember(windowValue, "maxLimit");
   if (offsetArgument && limitArgument && defaultLimit !== undefined && maxLimit !== undefined) {
-    plan.window = { offsetArgument, limitArgument, defaultLimit, maxLimit };
+    const count = stringMember(windowValue, "count");
+    if (count !== undefined && count !== "exact") throw new Error("live query window count must be exact");
+    plan.window = { offsetArgument, limitArgument, defaultLimit, maxLimit, ...(count ? { count: "exact" as const } : {}) };
   }
   if (readMember(value, "serverOnly") === true) plan.serverOnly = true;
   return plan;
@@ -771,19 +937,8 @@ function parseLiveValue(value: JsonValue | undefined): LiveValue | undefined {
   return literal === undefined ? undefined : { literal };
 }
 
-function literalObject(options?: ObjectEntries): JsonValue | undefined {
-  if (!options) return undefined;
-  const object: Record<string, JsonValue> = {};
-  for (const [key, entry] of options) {
-    if (entry.value !== undefined) object[key] = entry.value;
-  }
-  return Object.keys(object).length > 0 ? object : undefined;
-}
-
 function replicaFromOptions(options?: ObjectEntries): ReplicaCollectionDefinition | undefined {
-  const value = options?.get("replica")?.value
-    ?? options?.get("replicaCollection")?.value
-    ?? literalObject(options);
+  const value = options?.get("replica")?.value;
   const table = stringMember(value, "table");
   if (!table) return undefined;
   const definition: ReplicaCollectionDefinition = {

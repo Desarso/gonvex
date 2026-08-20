@@ -10,6 +10,7 @@
 //! concurrent invocations and, while any of them is running, host calls in the
 //! opposite direction.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gonvex_module_runtime::{
@@ -20,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped when a frame's meaning changes in a way an older peer would
 /// misread. The Go client refuses a host whose protocol it does not know.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Precise, stable error codes. The Go host maps them onto its own dispatch
 /// errors, so a caller can tell "this function does not exist" from "the
@@ -37,6 +38,8 @@ pub mod codes {
     pub const MODULE_NOT_LOADED: &str = "module_not_loaded";
     pub const FUNCTION_NOT_FOUND: &str = "function_not_found";
     pub const WRONG_FUNCTION_KIND: &str = "wrong_function_kind";
+    pub const INVALID_ARGS: &str = "invalid_args";
+    pub const INVALID_RESULT: &str = "invalid_result";
     pub const BUDGET_EXCEEDED: &str = "budget_exceeded";
     pub const EXECUTION_FAILED: &str = "execution_failed";
     pub const CANCELLED: &str = "cancelled";
@@ -190,9 +193,13 @@ pub struct CapabilitiesWire {
     #[serde(default)]
     pub run_reducer: bool,
     #[serde(default)]
+    pub scheduler: bool,
+    #[serde(default)]
     pub network: bool,
     #[serde(default)]
     pub storage: bool,
+    #[serde(default)]
+    pub environment: bool,
 }
 
 impl From<CapabilitiesWire> for Capabilities {
@@ -202,8 +209,10 @@ impl From<CapabilitiesWire> for Capabilities {
             db_write: wire.db_write,
             action_outbox: wire.action_outbox,
             run_reducer: wire.run_reducer,
+            scheduler: wire.scheduler,
             network: wire.network,
             storage: wire.storage,
+            environment: wire.environment,
         }
     }
 }
@@ -225,6 +234,8 @@ pub struct InvocationContextWire {
     pub member: Option<MemberIdentity>,
     #[serde(default)]
     pub permissions: serde_json::Value,
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
     #[serde(default)]
     pub capabilities: CapabilitiesWire,
     #[serde(default)]
@@ -252,6 +263,7 @@ impl InvocationContextWire {
                 member: self.member,
                 permissions: self.permissions,
             },
+            environment: self.environment,
             generation,
             capabilities: self.capabilities.into(),
             now_unix_ms: match self.now_unix_ms {
@@ -302,7 +314,7 @@ pub struct ModuleArtifactWire {
     pub entrypoint: String,
     /// Hash of the whole artifact, carried for logging and cache identity.
     #[serde(default)]
-    pub artifact_hash: String,
+    pub hash: String,
     pub javascript: JavaScriptWire,
     #[serde(default)]
     pub functions: Vec<FunctionWire>,
@@ -453,6 +465,18 @@ pub enum HostCallFrame {
         function: String,
         args: serde_json::Value,
     },
+    ScheduleAfter {
+        #[serde(rename = "delayMs")]
+        delay_ms: u64,
+        function: String,
+        args: serde_json::Value,
+    },
+    ScheduleAt {
+        #[serde(rename = "atUnixMs")]
+        at_unix_ms: u64,
+        function: String,
+        args: serde_json::Value,
+    },
     Fetch {
         request: serde_json::Value,
     },
@@ -510,6 +534,24 @@ impl HostCallFrame {
                 function,
                 args: decode(args, "args")?,
             },
+            HostCall::ScheduleAfter {
+                delay_ms,
+                function,
+                args,
+            } => Self::ScheduleAfter {
+                delay_ms,
+                function,
+                args: decode(args, "args")?,
+            },
+            HostCall::ScheduleAt {
+                at_unix_ms,
+                function,
+                args,
+            } => Self::ScheduleAt {
+                at_unix_ms,
+                function,
+                args: decode(args, "args")?,
+            },
             HostCall::Fetch { request } => Self::Fetch {
                 request: decode(request, "request")?,
             },
@@ -538,5 +580,21 @@ mod tests {
         assert_eq!(encoded["function"], "notifications.send");
         assert_eq!(encoded["args"]["taskId"], "task-123");
         assert_eq!(encoded["args"]["kind"], "started");
+    }
+
+    #[test]
+    fn scheduler_host_call_is_encoded_for_the_wire() {
+        let frame = HostCallFrame::from_host_call(HostCall::ScheduleAfter {
+            delay_ms: 2500,
+            function: "reports.generate".to_owned(),
+            args: br#"{"workspaceId":"workspace-1"}"#.to_vec(),
+        })
+        .expect("scheduler payload should be valid JSON");
+
+        let encoded = serde_json::to_value(frame).expect("host call frame should serialize");
+        assert_eq!(encoded["kind"], "scheduleAfter");
+        assert_eq!(encoded["delayMs"], 2500);
+        assert_eq!(encoded["function"], "reports.generate");
+        assert_eq!(encoded["args"]["workspaceId"], "workspace-1");
     }
 }

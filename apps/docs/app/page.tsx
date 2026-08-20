@@ -9,12 +9,12 @@ const cards = [
   {
     href: '/docs/functions-and-bindings',
     title: 'Generated bindings',
-    body: 'Register Go queries, mutations, and live grids, then call them from React.',
+    body: 'Register TypeScript Queries, Reducers, Actions, and Live Queries, then call them from React.',
   },
   {
-    href: '/docs/live-grid',
+    href: '/docs/live-queries',
     title: 'Realtime grid',
-    body: 'Understand the Glide Data Grid test page, visible-window subscriptions, and row cache.',
+    body: 'Understand exact PostgreSQL result windows, persistent Local Replica state, and small result deltas.',
   },
 ];
 
@@ -22,12 +22,11 @@ export default function HomePage() {
   return (
     <main className="gonvex-home">
       <section className="gonvex-home__hero">
-        <p className="gonvex-home__eyebrow">App-local Go backend for React</p>
+        <p className="gonvex-home__eyebrow">TypeScript modules on a Rust-ready Gonvex host</p>
         <h1>Gonvex Docs</h1>
         <p className="gonvex-home__lede">
-          Gonvex is a Go + Postgres Convex-style backend with generated
-          TypeScript bindings, WebSocket subscriptions, realtime grid testing,
-          and local dev services.
+          Gonvex is a Postgres-backed realtime runtime with TypeScript modules,
+          generated bindings, WebSocket delivery, and a persistent Local Replica.
         </p>
         <div className="gonvex-home__actions">
           <Link href="/docs">Read the docs</Link>

@@ -27,7 +27,7 @@ type dashboardActor struct {
 	Role  string `json:"role"`
 
 	// credentialKind and tokenPermissions are request-local authentication
-	// metadata. They are deliberately not serialized into dashboard/user
+	// metadata. They are deliberately not serialized into dashboard/account
 	// responses.
 	credentialKind   string
 	tokenID          string
@@ -90,7 +90,7 @@ func (s *Server) handleDashboardLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"session": session})
 }
 
-func (s *Server) handleDashboardUsers(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleDashboardAccounts(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.dashboardActorFromRequest(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard sign-in is required"})
@@ -101,12 +101,12 @@ func (s *Server) handleDashboardUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		users, err := s.listDashboardUsers(r.Context())
+		accounts, err := s.listDashboardAccounts(r.Context())
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"users": users})
+		writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts})
 		return
 	}
 	defer r.Body.Close()
@@ -117,19 +117,19 @@ func (s *Server) handleDashboardUsers(w http.ResponseWriter, r *http.Request) {
 		Role     string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid user request"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid account request"})
 		return
 	}
-	user, err := s.createDashboardUser(r.Context(), payload.Email, payload.Name, payload.Password, payload.Role)
+	account, err := s.createDashboardAccount(r.Context(), payload.Email, payload.Name, payload.Password, payload.Role)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := s.acceptPendingProjectInvitations(r.Context(), user.Email); err != nil {
+	if err := s.acceptPendingProjectInvitations(r.Context(), account.Email); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"user": user})
+	writeJSON(w, http.StatusCreated, map[string]any{"account": account})
 }
 
 func (s *Server) handleProjectMembers(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +183,7 @@ func (s *Server) handleCreateProjectInvitation(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) authenticateDashboardPassword(ctx context.Context, email string, password string) (dashboardActor, bool, error) {
-	bootstrapEmail := normalizeDashboardEmail(s.configDashboardUser())
+	bootstrapEmail := normalizeDashboardEmail(s.configDashboardAccount())
 	if bootstrapEmail != "" && email == bootstrapEmail && constantTimeString(password, s.configDashboardPassword()) {
 		return dashboardActor{Email: bootstrapEmail, Name: displayNameFromEmail(bootstrapEmail), Role: "admin"}, true, nil
 	}
@@ -192,20 +192,20 @@ func (s *Server) authenticateDashboardPassword(ctx context.Context, email string
 		return dashboardActor{}, false, err
 	}
 	defer db.Close()
-	var user dashboardActor
+	var account dashboardActor
 	var passwordHash string
 	err = db.QueryRowContext(ctx, `
 		SELECT email, name, role, password_hash
-		FROM gonvex_dashboard_users
+		FROM gonvex_dashboard_accounts
 		WHERE email = $1
-	`, email).Scan(&user.Email, &user.Name, &user.Role, &passwordHash)
+	`, email).Scan(&account.Email, &account.Name, &account.Role, &passwordHash)
 	if err == sql.ErrNoRows {
 		return dashboardActor{}, false, nil
 	}
 	if err != nil {
 		return dashboardActor{}, false, err
 	}
-	return user, verifyDashboardPassword(password, passwordHash), nil
+	return account, verifyDashboardPassword(password, passwordHash), nil
 }
 
 func (s *Server) dashboardSessionForActor(actor dashboardActor) (dashboardSession, error) {
@@ -252,14 +252,14 @@ func (s *Server) dashboardActorFromNativeSession(ctx context.Context, token stri
 		return dashboardActor{}, false
 	}
 	session, err := s.loadAppSessionIdentity(ctx, token)
-	if err != nil || session.ProjectID != trustedProjectID || !session.User.EmailVerified || session.User.Email == "" {
+	if err != nil || session.ProjectID != trustedProjectID || !session.Account.EmailVerified || session.Account.Email == "" {
 		return dashboardActor{}, false
 	}
 	db, err := s.pooledProjectRegistry(ctx)
 	if err != nil || db == nil {
 		return dashboardActor{}, false
 	}
-	actor, ok := s.accountActorForEmail(ctx, db, session.User.Email)
+	actor, ok := s.accountActorForEmail(ctx, db, session.Account.Email)
 	if !ok {
 		return dashboardActor{}, false
 	}
@@ -271,7 +271,7 @@ func (s *Server) dashboardAuthOptional() bool {
 	if s.config.RequireAuth || strings.TrimSpace(s.config.DashboardAuthProjectID) != "" {
 		return false
 	}
-	return strings.TrimSpace(s.dashboardSecret()) == "" && s.configDashboardUser() == ""
+	return strings.TrimSpace(s.dashboardSecret()) == "" && s.configDashboardAccount() == ""
 }
 
 func (s *Server) signDashboardSession(session dashboardSession) (string, error) {
@@ -330,15 +330,15 @@ func (s *Server) dashboardSecret() string {
 	return strings.TrimSpace(s.config.AdminKey)
 }
 
-func (s *Server) configDashboardUser() string {
-	return strings.TrimSpace(os.Getenv("DASHBOARD_AUTH_USER"))
+func (s *Server) configDashboardAccount() string {
+	return strings.TrimSpace(os.Getenv("DASHBOARD_AUTH_ACCOUNT"))
 }
 
 func (s *Server) configDashboardPassword() string {
 	return os.Getenv("DASHBOARD_AUTH_PASSWORD")
 }
 
-func (s *Server) createDashboardUser(ctx context.Context, email string, name string, password string, role string) (dashboardActor, error) {
+func (s *Server) createDashboardAccount(ctx context.Context, email string, name string, password string, role string) (dashboardActor, error) {
 	email = normalizeDashboardEmail(email)
 	if email == "" {
 		return dashboardActor{}, fmt.Errorf("email is required")
@@ -348,7 +348,7 @@ func (s *Server) createDashboardUser(ctx context.Context, email string, name str
 	}
 	role = normalizedDashboardRole(role)
 	if role == "" {
-		role = "user"
+		role = "standard"
 	}
 	if name = strings.TrimSpace(name); name == "" {
 		name = displayNameFromEmail(email)
@@ -362,7 +362,7 @@ func (s *Server) createDashboardUser(ctx context.Context, email string, name str
 		return dashboardActor{}, err
 	}
 	defer db.Close()
-	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_dashboard_users (
+	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_dashboard_accounts (
 		email, name, role, password_hash, updated_at
 	) VALUES ($1, $2, $3, $4, now())
 	ON CONFLICT (email) DO UPDATE SET
@@ -377,26 +377,26 @@ func (s *Server) createDashboardUser(ctx context.Context, email string, name str
 	return dashboardActor{Email: email, Name: name, Role: role}, nil
 }
 
-func (s *Server) listDashboardUsers(ctx context.Context) ([]dashboardActor, error) {
+func (s *Server) listDashboardAccounts(ctx context.Context) ([]dashboardActor, error) {
 	db, err := s.openProjectRegistry(ctx)
 	if err != nil || db == nil {
 		return nil, err
 	}
 	defer db.Close()
-	rows, err := db.QueryContext(ctx, `SELECT email, name, role FROM gonvex_dashboard_users ORDER BY email`)
+	rows, err := db.QueryContext(ctx, `SELECT email, name, role FROM gonvex_dashboard_accounts ORDER BY email`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	users := []dashboardActor{}
+	accounts := []dashboardActor{}
 	for rows.Next() {
-		var user dashboardActor
-		if err := rows.Scan(&user.Email, &user.Name, &user.Role); err != nil {
+		var account dashboardActor
+		if err := rows.Scan(&account.Email, &account.Name, &account.Role); err != nil {
 			return nil, err
 		}
-		users = append(users, user)
+		accounts = append(accounts, account)
 	}
-	return users, rows.Err()
+	return accounts, rows.Err()
 }
 
 func (s *Server) canAccessProject(ctx context.Context, actor dashboardActor, projectID string) bool {
@@ -531,7 +531,7 @@ func (s *Server) inviteProjectMember(ctx context.Context, projectID string, emai
 
 func (s *Server) addProjectMemberIfUserExists(ctx context.Context, db *sql.DB, projectID string, email string, role string) error {
 	var name string
-	err := db.QueryRowContext(ctx, `SELECT name FROM gonvex_dashboard_users WHERE email = $1`, email).Scan(&name)
+	err := db.QueryRowContext(ctx, `SELECT name FROM gonvex_dashboard_accounts WHERE email = $1`, email).Scan(&name)
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -636,8 +636,8 @@ func normalizedDashboardRole(role string) string {
 	switch strings.TrimSpace(role) {
 	case "admin":
 		return "admin"
-	case "user", "":
-		return "user"
+	case "standard", "":
+		return "standard"
 	default:
 		return ""
 	}

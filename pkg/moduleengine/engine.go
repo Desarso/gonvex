@@ -1,31 +1,27 @@
 // Package moduleengine defines the seam between the Gonvex runtime host and the
 // modules that execute a project's functions.
 //
-// Every project today is a compiled Go plugin that registers handlers on a
-// *gonvex.App; GoAppEngine adapts that App to ModuleEngine so the host
-// dispatches against an interface instead of against the Go type. Future
-// language-neutral engines (an out-of-process Rust module host, a V8 isolate
-// pool) implement the same interface and coexist with compiled Go modules: the
-// host resolves one engine per project and never learns which language served
-// the call.
+// Projects execute through language-neutral module hosts. The current
+// production path is the TypeScript artifact host; future Rust/Wasm hosts can
+// implement this seam without coupling the server to an application language.
 //
 // Invocations are deliberately narrow — a registered function path plus its
 // JSON-encoded arguments — so an engine that crosses a process or language
 // boundary can forward them verbatim. Everything a handler needs from the host
-// (database handles, storage, ephemeral state, identity, scheduler) travels on
+// (database handles, storage, identity, scheduler) travels on
 // the *gonvex context types, which stay the host capability bundle no matter
 // which engine runs the handler.
 package moduleengine
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 )
 
-// Kind classifies a registered function. The values match gonvex.FunctionKind
-// and manifest.FunctionKind so a descriptor, an in-process Go registration and
-// a serialized manifest entry all share one vocabulary.
+// Kind classifies a module function. The values match manifest.FunctionKind so
+// a descriptor and a serialized module manifest share one vocabulary.
 type Kind string
 
 const (
@@ -36,7 +32,7 @@ const (
 
 // Descriptor is the language-neutral view of one registered function: the
 // routing facts the host needs before it invokes anything. Richer declarative
-// metadata (read/write tables, subscription sharing rules, sync definitions)
+// metadata (structured query plans, subscription sharing rules, sync definitions)
 // keeps travelling in the project manifest, which is already engine-agnostic.
 type Descriptor struct {
 	Path string
@@ -47,9 +43,9 @@ type Descriptor struct {
 	// Collections without inventing extra executable function kinds.
 	Delivery gonvex.DeliveryMode
 	// Dependencies and Replica are executable delivery contracts exposed by
-	// every engine. Keeping them on the descriptor lets the host route Live
-	// Queries and Replica Collections without reaching back into a compiled Go
-	// application.
+	// every engine. Live Query dependencies are derived from the structured
+	// plan; keeping the resulting plan on the descriptor lets the host route
+	// subscriptions without reaching back into application code.
 	Dependencies gonvex.FunctionDependencies
 	Replica      *gonvex.ReplicaCollectionDefinition
 }
@@ -62,9 +58,8 @@ type Invocation struct {
 	Args json.RawMessage
 }
 
-// Result carries a handler's return value. A Go module returns a live Go value;
-// an out-of-process engine decodes its response before returning, so the host
-// sees one shape regardless of the module's language.
+// Result carries a handler's decoded return value. The Rust/V8 module host
+// crosses a language-neutral wire boundary before returning this host shape.
 type Result struct {
 	Value any
 }
@@ -88,7 +83,7 @@ func ReducerExec(invoke ReducerInvoker) func(*gonvex.ReducerCtx, string, json.Ra
 // Implementations are long-lived and shared across requests: the host resolves
 // an engine per project and reuses it until the module is replaced.
 type ModuleEngine interface {
-	// Runtime names the implementation ("go" today, later "rust" or "v8") for
+	// Runtime names the implementation (for example "v8" or "wasm") for
 	// logs, metrics and debugging.
 	Runtime() string
 
@@ -111,4 +106,8 @@ type ModuleEngine interface {
 	InvokeReducer(ctx *gonvex.ReducerCtx, call Invocation) (Result, error)
 	InvokeInternalReducer(ctx *gonvex.ReducerCtx, call Invocation) (Result, error)
 	InvokeAction(ctx *gonvex.ActionCtx, call Invocation) (Result, error)
+}
+
+func notRegistered(path string) error {
+	return &gonvex.DispatchError{Code: "not_found", Path: path, Message: fmt.Sprintf("function %q is not registered", path)}
 }

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@gonvex/client": "latest",
+    "@gonvex/module-sdk": "latest",
     "@gonvex/react": "latest",
     "react": "latest",
     "react-dom": "latest"

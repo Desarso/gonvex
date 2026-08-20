@@ -65,14 +65,14 @@ func TestOfflineVisibilityChangeCannotResumeReadyWithoutReconciliation(t *testin
 	if _, err := db.Exec(`INSERT INTO ` + quoteIdent(tasksTable) + ` ("id", "title") VALUES ('task-a', 'before')`); err != nil {
 		t.Fatal(err)
 	}
-	before, err := currentSyncClock(ctx, databaseURL)
+	before, err := currentReplicaClock(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO ` + quoteIdent(readsTable) + ` ("id", "taskId") VALUES ('read-a', 'task-a')`); err != nil {
 		t.Fatal(err)
 	}
-	after, err := currentSyncClock(ctx, databaseURL)
+	after, err := currentReplicaClock(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,18 +80,18 @@ func TestOfflineVisibilityChangeCannotResumeReadyWithoutReconciliation(t *testin
 		t.Fatalf("dependency write did not advance the durable cursor: before=%d after=%d", before.Revision, after.Revision)
 	}
 
-	sourceOnly, err := readSyncChanges(ctx, databaseURL, before.Revision, after.Revision, tasksTable)
+	sourceOnly, err := readReplicaChanges(ctx, databaseURL, before.Revision, after.Revision, tasksTable)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(sourceOnly) != 0 {
 		t.Fatalf("test requires an offline dependency-only revision, got %#v", sourceOnly)
 	}
-	allRelevant, err := readSyncChanges(ctx, databaseURL, before.Revision, after.Revision, tasksTable, readsTable)
+	allRelevant, err := readReplicaChanges(ctx, databaseURL, before.Revision, after.Revision, tasksTable, readsTable)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !syncVisibilityChanged(allRelevant, tasksTable) {
+	if !replicaVisibilityChanged(allRelevant, tasksTable) {
 		t.Fatal("dependency-only reconnect must reconcile the authoritative computed collection")
 	}
 }

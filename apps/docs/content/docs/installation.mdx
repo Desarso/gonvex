@@ -1,49 +1,30 @@
 ---
 title: Installation
-description: Install the Gonvex CLI and add Gonvex to an existing frontend project.
+description: Install the Gonvex TypeScript CLI and frontend packages.
 ---
 
 # Installation
 
-Install the Gonvex CLI and browser SDKs through npm. The self-hosted Go runtime
-is a separate process or container.
+Gonvex application modules are TypeScript. Install the CLI, client, React
+bindings, and module SDK through npm.
 
-## New Project
+## New project
 
 ```bash
-npm create gonvex@latest my-app
+npm create gonvex@latest my-app -- --template vite-react
+cd my-app
+npm install
 ```
 
-Equivalent package-manager commands:
+The starter includes `@gonvex/module-sdk`, `@gonvex/client`, `@gonvex/react`,
+and `@gonvex/cli`.
+
+## Existing project
 
 ```bash
-pnpm create gonvex my-app
-yarn create gonvex my-app
-bun create gonvex my-app
-```
-
-The current initializer ships one TypeScript template: `vite-react`. It creates
-the app locally; pass `--runtime-url` to provision and connect it to a running
-runtime in the same command.
-
-## Existing Project
-
-```bash
-npm install @gonvex/client @gonvex/react
+npm install @gonvex/client @gonvex/react @gonvex/module-sdk
 npm install --save-dev @gonvex/cli
 npx gonvex init
-```
-
-`gonvex init` copies missing starter files without overwriting existing files:
-
-```txt
-gonvex/
-  schema.go
-  messages.go
-  _generated/
-gonvex.json
-.env.local entries
-package.json scripts
 ```
 
 Recommended scripts:
@@ -58,84 +39,53 @@ Recommended scripts:
 }
 ```
 
-## CLI Distribution
-
-`@gonvex/cli` exposes the `gonvex` binary. It scans app-local Go declarations,
-generates bindings, bundles the backend source, and syncs it to the runtime.
-The runtime compiles and loads the uploaded Go bundle, so application
-workstations do not need a local Go toolchain when using a remote or
-containerized runtime.
-
-## Runtime Options
-
-You can use Gonvex in three modes:
+## Project layout
 
 ```txt
-Local runtime
-  Best for development. Runtime, Postgres, and Valkey run locally.
-
-Self-hosted runtime
-  You run Gonvex runtime, Control Plane database, tenant databases, and optional object storage.
-
-Hosted runtime
-  A future managed service. There is no generally available public Gonvex Cloud today.
+gonvex/
+  index.ts
+  tasks.ts
+  _generated/
+migrations/
+  0001_initial.sql
+gonvex.json
+.env.local
 ```
 
-## Environment Variables
+`gonvex dev` scans TypeScript modules, requires literal argument and result
+schemas, builds a self-contained JavaScript artifact, applies versioned SQL
+migrations, and writes generated bindings. Application development uses the
+same TypeScript module workflow as the frontend.
 
-A local project typically needs:
+## Runtime options
 
 ```txt
-GONVEX_PROJECT_ID=prj_2x7k9...
+Local runtime       Runtime and Postgres run locally; Valkey is optional.
+Self-hosted runtime You operate the runtime, Control Plane, tenant databases,
+                    and optional object storage.
+Hosted runtime      No generally available public Gonvex Cloud service yet.
+```
+
+## Environment variables
+
+```txt
+GONVEX_PROJECT_ID=prj_...
 GONVEX_RUNTIME_URL=http://localhost:8080
-GONVEX_PROJECT_KEY=gvx_dev_...
-VITE_GONVEX_PROJECT_ID=prj_2x7k9...
+GONVEX_PROJECT_KEY=gvx_...
+VITE_GONVEX_PROJECT_ID=prj_...
 VITE_GONVEX_URL=http://localhost:8080
 VITE_GONVEX_WS_URL=ws://localhost:8080/ws
 ```
 
-The runtime needs Control Plane database configuration, tenant database connections,
-and a reachable `VALKEY_URL` (or `REDIS_URL`). Valkey is mandatory: startup
-fails before serving traffic when the variable is unset or the connection
-cannot be established. Application code should not hardcode tenant database
-URLs directly.
+The runtime needs Control Plane configuration and tenant database connections.
+Valkey is optional for dashboard row caching. Application code must not hardcode
+tenant database URLs.
 
-Local development services can be started from the monorepo with:
+## Generated files
 
-```bash
-make services
-```
-
-This starts Postgres and Valkey from `infra/docker-compose.dev.yml`. File storage is optional. If your app uses file APIs, attach any S3-compatible storage provider. For local testing only, this repo includes an example MinIO service:
-
-```bash
-make storage
-```
-
-Vite also needs a public WebSocket URL for the browser bundle:
-
-```txt
-VITE_GONVEX_WS_URL=ws://localhost:8080/ws
-```
-
-For a remote self-hosted runtime:
-
-```txt
-VITE_GONVEX_WS_URL=wss://gonvex.example.com/ws
-```
-
-## Generated Files
-
-Generated files belong in:
-
-```txt
-gonvex/_generated/
-```
-
-Frontend code imports from there:
+Generated files belong in `gonvex/_generated/`. Import them from the frontend
+and do not edit them manually:
 
 ```ts
 import { api } from "./gonvex/_generated/api";
 ```
-
-Do not edit generated files manually.

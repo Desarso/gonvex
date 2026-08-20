@@ -46,7 +46,7 @@ import type { GonvexAuthValue } from "@gonvex/react";
 import { Avatar, Button, Calendar, Card, Checkbox, Chip, DateField, DatePicker, ListBox, NumberField, SearchField, Select, Separator } from "@heroui/react";
 import { parseDate, type DateValue } from "@internationalized/date";
 import { Background, Controls, MarkerType, MiniMap, ReactFlow, applyNodeChanges, type Edge, type Node, type NodeChange } from "@xyflow/react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type Dispatch, type FormEvent, type MutableRefObject, type ReactNode, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type Dispatch, type FormEvent, type MutableRefObject, type ReactNode, type SetStateAction } from "react";
 import type { JsonValue } from "@gonvex/protocol";
 import { api } from "../gonvex/_generated/api";
 import {
@@ -84,6 +84,13 @@ type DataTableInfo = {
 type DataRowsResponse = {
   table: string;
   columns: string[];
+  rows: Record<string, unknown>[];
+  total?: number;
+  offset?: number;
+  limit?: number;
+};
+
+type TestGridResponse = {
   rows: Record<string, unknown>[];
   total?: number;
   offset?: number;
@@ -176,8 +183,8 @@ export type RuntimeLogEntry = {
   completedAt?: string;
   project?: string;
   tenant?: string;
-  userId?: string;
-  userEmail?: string;
+  accountId?: string;
+  accountEmail?: string;
   connectionId?: string;
   browser?: string;
   deviceType?: string;
@@ -205,7 +212,7 @@ type RuntimeRunningMetrics = {
 type RuntimeWebSocketMetrics = {
   connections: number;
   subscriptions: number;
-  users?: number;
+  accounts?: number;
   details?: RuntimeWebSocketConnection[];
 };
 
@@ -213,8 +220,8 @@ type RuntimeWebSocketConnection = {
   id: string;
   project: string;
   tenant: string;
-  userId?: string;
-  userEmail?: string;
+  accountId?: string;
+  accountEmail?: string;
   authenticated: boolean;
   connectedAt: string;
   lastActiveAt: string;
@@ -331,7 +338,7 @@ type RuntimeMetricsResponse = {
     series: Array<{
       time: string;
       connections: number;
-      users: number;
+      accounts: number;
       subscriptions: number;
       cpuPercent: number;
       memoryBytes: number;
@@ -372,7 +379,7 @@ type DashboardSession = {
   name: string;
   avatarUrl?: string;
   provider?: "dev" | "gonvex" | "google";
-  role?: "admin" | "user";
+  role?: "admin" | "standard";
   accessToken?: string;
   expiresAt?: number;
 };
@@ -396,10 +403,10 @@ type ProjectTarget = {
   role?: "owner" | "admin" | "dev" | "viewer";
 };
 
-type DashboardUser = {
+type DashboardAccount = {
   email: string;
   name: string;
-  role: "admin" | "user";
+  role: "admin" | "standard";
 };
 
 type AccountAccessToken = {
@@ -500,14 +507,10 @@ type TestSortState = {
 type TestTaskGridArgs = {
   offset: number;
   limit: number;
-  columns: string[];
-  count: "false" | "estimate";
   search?: string;
   sort?: string;
   direction?: SortDirection;
   filters?: DataFilter[];
-  cursorCreatedAt?: string;
-  cursorId?: string;
 };
 
 type FileSortKey = "id" | "size" | "contentType" | "uploadedAt";
@@ -620,8 +623,8 @@ const pages: Page[] = [
     id: "errors",
     label: "Errors",
     eyebrow: "Issue intelligence",
-    title: "User error inbox",
-    description: "Grouped frontend failures enriched with tenant, release, user, and device impact.",
+    title: "Account error inbox",
+    description: "Grouped frontend failures enriched with tenant, release, Account, and device impact.",
   },
   {
     id: "files",
@@ -667,8 +670,8 @@ const functionRows: GridRow[] = [
   ["tasks.create", "reducer", "atomic transaction", "—", "gonvex/tasks.ts", "ready"],
   ["tasks.randomizeStatusPriority", "reducer", "change feed", "—", "gonvex/tasks.ts", "ready"],
   ["files.createUploadUrl", "action", "external work", "—", "gonvex/files.ts", "ready"],
-  ["files.getUrl", "query", "one-shot", "—", "gonvex/files.ts", "ready"],
-  ["files.getMetadata", "query", "one-shot", "—", "gonvex/files.ts", "ready"],
+  ["files.getUrl", "action", "external work", "—", "gonvex/files.ts", "ready"],
+  ["files.getMetadata", "action", "external work", "—", "gonvex/files.ts", "ready"],
   ["files.delete", "action", "external work", "—", "gonvex/files.ts", "ready"],
   ["tasks.grid", "query", "Live Query", "tasks", "gonvex/tasks.ts", "ready"],
 ];
@@ -786,8 +789,8 @@ function logEntryText(entry: RuntimeLogEntry): string {
     entry.executionId ?? "",
     entry.operationId ?? "",
     entry.tenant ?? "",
-    entry.userId ?? "",
-    entry.userEmail ?? "",
+    entry.accountId ?? "",
+    entry.accountEmail ?? "",
     entry.connectionId ?? "",
     entry.browser ?? "",
     entry.path,
@@ -1219,12 +1222,12 @@ export function shouldRestoreDashboardCookieSession(session: DashboardSession | 
   return session?.provider !== "google";
 }
 
-async function validateNativeDashboardSession(accessToken: string, user: NonNullable<GonvexAuthValue["user"]>): Promise<DashboardSession> {
+async function validateNativeDashboardSession(accessToken: string, account: NonNullable<GonvexAuthValue["account"]>): Promise<DashboardSession> {
   const response = await fetch(`${runtimeBaseURL}/dev/auth/me`, {
     headers: { authorization: `Bearer ${accessToken}` },
   });
   const payload = await response.json().catch(() => ({})) as {
-    account?: { email?: string; name?: string; role?: "admin" | "user" };
+    account?: { email?: string; name?: string; role?: "admin" | "standard" };
     error?: string;
   };
   if (!response.ok || !payload.account?.email) {
@@ -1232,9 +1235,9 @@ async function validateNativeDashboardSession(accessToken: string, user: NonNull
   }
   return {
     accessToken,
-    avatarUrl: user.picture,
+    avatarUrl: account.picture,
     email: payload.account.email,
-    name: payload.account.name || user.name || payload.account.email,
+    name: payload.account.name || account.name || payload.account.email,
     provider: "google",
     role: payload.account.role,
   };
@@ -1255,10 +1258,10 @@ function loadProjectTargets(): ProjectTarget[] {
     }
   }
 
-  // In a hosted, multi-user deployment (dashboard auth enabled) the project
-  // list comes from the runtime API, already scoped per signed-in user by
+  // In a hosted, multi-account deployment (dashboard auth enabled) the project
+  // list comes from the runtime API, already scoped per signed-in Account by
   // canAccessProject. Seeding a bundled placeholder here would surface an
-  // ownerless phantom project to every user — e.g. a stale VITE_GONVEX_PROJECT_ID
+  // ownerless phantom project to every Account — e.g. a stale VITE_GONVEX_PROJECT_ID
   // baked into the build showing up as "<id> project" for invited members who
   // aren't actually on it. Only seed the template project in the local-dev/test
   // flow where there is no runtime-backed project list.
@@ -1553,15 +1556,15 @@ async function deleteRuntimeProject(projectID: string): Promise<void> {
   }
 }
 
-async function createDashboardUser(email: string, name: string, password: string, role: DashboardUser["role"]): Promise<DashboardUser> {
-  const response = await fetch(`${runtimeBaseURL}/dev/auth/users`, {
+async function createDashboardAccount(email: string, name: string, password: string, role: DashboardAccount["role"]): Promise<DashboardAccount> {
+  const response = await fetch(`${runtimeBaseURL}/dev/auth/accounts`, {
     body: JSON.stringify({ email, name, password, role }),
     headers: dashboardAuthHeaders({ "content-type": "application/json" }),
     method: "POST",
   });
-  const payload = await response.json().catch(() => ({} as { error?: string; user?: DashboardUser }));
-  if (!response.ok || !payload.user) throw new Error(payload.error ?? response.statusText);
-  return payload.user;
+  const payload = await response.json().catch(() => ({} as { error?: string; account?: DashboardAccount }));
+  if (!response.ok || !payload.account) throw new Error(payload.error ?? response.statusText);
+  return payload.account;
 }
 
 async function fetchAccountAccessTokens(): Promise<AccountAccessToken[]> {
@@ -3057,7 +3060,7 @@ function projectByID(projects: ProjectTarget[], id: string | null): ProjectTarge
 function visibleProjectsForSession(projects: ProjectTarget[], session: DashboardSession): ProjectTarget[] {
   const email = session.email.toLowerCase();
   return projects.filter((project) => {
-    // Runtime projects are already access-scoped per user by the server
+    // Runtime projects are already access-scoped per Account by the server
     // (canAccessProject covers ownership AND gonvex_project_members). The
     // /dev/projects response doesn't echo membership back as `sharedWith`, so
     // re-filtering on ownerEmail here would wrongly hide a project a member was
@@ -3476,10 +3479,10 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
     return { project: ownedProject, databaseMode, projectKey: createdProject.projectKey };
   };
 
-  const createUser = async (email: string, name: string, password: string, role: DashboardUser["role"]): Promise<DashboardUser> => {
-    const user = await createDashboardUser(email, name, password, role);
-    reportAction(`Created ${user.email}`);
-    return user;
+  const createAccount = async (email: string, name: string, password: string, role: DashboardAccount["role"]): Promise<DashboardAccount> => {
+    const account = await createDashboardAccount(email, name, password, role);
+    reportAction(`Created ${account.email}`);
+    return account;
   };
 
   const deleteProject = async (projectID: string) => {
@@ -3643,14 +3646,14 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
   }, []);
 
   useEffect(() => {
-    if (!nativeAuth || nativeAuth.isLoading || !nativeAuth.isAuthenticated || !nativeAuth.user) return;
+    if (!nativeAuth || nativeAuth.isLoading || !nativeAuth.isAuthenticated || !nativeAuth.account) return;
     let cancelled = false;
-    const user = nativeAuth.user;
+    const account = nativeAuth.account;
     setValidatedNativeAccessToken("");
     void nativeAuth.fetchAccessToken?.({ forceRefreshToken: false })
       .then(async (accessToken) => {
         if (!accessToken) throw new Error("The Gonvex Google session did not provide an access token.");
-        const nextSession = await validateNativeDashboardSession(accessToken, user);
+        const nextSession = await validateNativeDashboardSession(accessToken, account);
         if (cancelled) return;
         setNativeLoginError("");
         restoreSession(nextSession);
@@ -3759,7 +3762,7 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
     return (
       <ProjectsPage
         onCreateProject={createProject}
-        onCreateUser={createUser}
+        onCreateAccount={createAccount}
         onDeleteProject={deleteProject}
         onLogout={logout}
         onOpenProject={openProject}
@@ -4075,7 +4078,7 @@ function LoginPage(props: {
 
 function ProjectsPage(props: {
   onCreateProject: (name: string, databaseMode: DatabaseMode) => Promise<CreatedProject>;
-  onCreateUser: (email: string, name: string, password: string, role: DashboardUser["role"]) => Promise<DashboardUser>;
+  onCreateAccount: (email: string, name: string, password: string, role: DashboardAccount["role"]) => Promise<DashboardAccount>;
   onDeleteProject: (projectID: string) => Promise<void>;
   onLogout: () => void;
   onOpenProject: (projectID: string) => void;
@@ -4097,13 +4100,13 @@ function ProjectsPage(props: {
   const [createdProject, setCreatedProject] = useState<CreatedProject | null>(null);
   const [deletingProjectID, setDeletingProjectID] = useState<string | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
-  const [userOpen, setUserOpen] = useState(false);
-  const [userEmail, setUserEmail] = useState("");
-  const [userName, setUserName] = useState("");
-  const [userPassword, setUserPassword] = useState("");
-  const [userRole, setUserRole] = useState<DashboardUser["role"]>("user");
-  const [userStatus, setUserStatus] = useState("");
-  const [userSaving, setUserSaving] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountEmail, setAccountEmail] = useState("");
+  const [accountName, setAccountName] = useState("");
+  const [accountPassword, setAccountPassword] = useState("");
+  const [accountRole, setAccountRole] = useState<DashboardAccount["role"]>("standard");
+  const [accountStatus, setAccountStatus] = useState("");
+  const [accountSaving, setAccountSaving] = useState(false);
 
   const closeCreateModal = () => {
     setCreateOpen(false);
@@ -4112,13 +4115,13 @@ function ProjectsPage(props: {
     setDatabaseMode("single");
   };
 
-  const closeUserModal = () => {
-    setUserOpen(false);
-    setUserEmail("");
-    setUserName("");
-    setUserPassword("");
-    setUserRole("user");
-    setUserStatus("");
+  const closeAccountModal = () => {
+    setAccountOpen(false);
+    setAccountEmail("");
+    setAccountName("");
+    setAccountPassword("");
+    setAccountRole("standard");
+    setAccountStatus("");
   };
 
   const createProject = async (event: FormEvent<HTMLFormElement>) => {
@@ -4148,18 +4151,18 @@ function ProjectsPage(props: {
     }
   };
 
-  const createUser = async (event: FormEvent<HTMLFormElement>) => {
+  const createAccount = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!userEmail.trim() || !userPassword) return;
-    setUserSaving(true);
-    setUserStatus("");
+    if (!accountEmail.trim() || !accountPassword) return;
+    setAccountSaving(true);
+    setAccountStatus("");
     try {
-      await props.onCreateUser(userEmail, userName, userPassword, userRole);
-      closeUserModal();
+      await props.onCreateAccount(accountEmail, accountName, accountPassword, accountRole);
+      closeAccountModal();
     } catch (error) {
-      setUserStatus(error instanceof Error ? error.message : "Could not create user");
+      setAccountStatus(error instanceof Error ? error.message : "Could not create account");
     } finally {
-      setUserSaving(false);
+      setAccountSaving(false);
     }
   };
 
@@ -4187,7 +4190,7 @@ function ProjectsPage(props: {
               <small>{props.session.role === "admin" ? "Administrator" : "Account"}</small>
             </span>
           </Button>
-          {props.session.role === "admin" ? <Button size="sm" variant="secondary" onPress={() => setUserOpen(true)}>New user</Button> : null}
+          {props.session.role === "admin" ? <Button size="sm" variant="secondary" onPress={() => setAccountOpen(true)}>New account</Button> : null}
           <ThemeToggle themeLabel={props.themeLabel} onToggle={props.onToggleTheme} />
           {props.authEnabled ? <Button size="sm" variant="ghost" onPress={props.onLogout}>Sign out</Button> : null}
         </div>
@@ -4245,49 +4248,49 @@ function ProjectsPage(props: {
 
       {profileOpen ? <AccountProfileDialog onClose={() => setProfileOpen(false)} session={props.session} /> : null}
 
-      {userOpen ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={closeUserModal}>
+      {accountOpen ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={closeAccountModal}>
           <section
-            aria-labelledby="create-user-title"
+            aria-labelledby="create-account-title"
             className="document-modal project-create-modal"
             onMouseDown={(event) => event.stopPropagation()}
             role="dialog"
           >
             <header>
               <div>
-                <h2 id="create-user-title">Create user</h2>
-                <p>New users can sign in and create their own projects. They only see existing projects after an invite.</p>
+                <h2 id="create-account-title">Create account</h2>
+                <p>New accounts can sign in and create projects. They only see existing projects after an invite.</p>
               </div>
-              <Button size="sm" variant="ghost" onPress={closeUserModal}>Close</Button>
+              <Button size="sm" variant="ghost" onPress={closeAccountModal}>Close</Button>
             </header>
-            <form className="project-modal-form" onSubmit={createUser}>
+            <form className="project-modal-form" onSubmit={createAccount}>
               <label className="setting-field">
                 <span>Email</span>
-                <input className="table-search" onChange={(event) => setUserEmail(event.target.value)} type="email" value={userEmail} />
+                <input className="table-search" onChange={(event) => setAccountEmail(event.target.value)} type="email" value={accountEmail} />
               </label>
               <label className="setting-field">
                 <span>Name</span>
-                <input className="table-search" onChange={(event) => setUserName(event.target.value)} value={userName} />
+                <input className="table-search" onChange={(event) => setAccountName(event.target.value)} value={accountName} />
               </label>
               <label className="setting-field">
                 <span>Password</span>
-                <input className="table-search" onChange={(event) => setUserPassword(event.target.value)} type="password" value={userPassword} />
+                <input className="table-search" onChange={(event) => setAccountPassword(event.target.value)} type="password" value={accountPassword} />
               </label>
               <AppSelect
                 ariaLabel="Dashboard role"
                 className="setting-field"
                 label="Dashboard role"
-                selectedKey={userRole}
-                onChange={(value) => setUserRole(value as DashboardUser["role"])}
+                selectedKey={accountRole}
+                onChange={(value) => setAccountRole(value as DashboardAccount["role"])}
                 options={[
-                  { value: "user", label: "User", description: "Can create own projects and access invited projects" },
-                  { value: "admin", label: "Admin", description: "Can create users; project access still requires ownership or invite" },
+                  { value: "standard", label: "Standard", description: "Can create projects and access invited projects" },
+                  { value: "admin", label: "Admin", description: "Can create accounts; project access still requires ownership or invite" },
                 ]}
               />
-              {userStatus ? <p className="project-modal-error">{userStatus}</p> : null}
+              {accountStatus ? <p className="project-modal-error">{accountStatus}</p> : null}
               <footer>
-                <Button variant="ghost" onPress={closeUserModal}>Cancel</Button>
-                <Button isDisabled={userSaving} type="submit" variant="primary">{userSaving ? "Creating" : "Create user"}</Button>
+                <Button variant="ghost" onPress={closeAccountModal}>Cancel</Button>
+                <Button isDisabled={accountSaving} type="submit" variant="primary">{accountSaving ? "Creating" : "Create account"}</Button>
               </footer>
             </form>
           </section>
@@ -4811,14 +4814,14 @@ function OverviewPage(props: { project: ProjectTarget }) {
     const loadSeries = (metrics?.load?.series ?? []).map((point) => ({
       label: shortClockLabel(point.time),
       Connections: point.connections,
-      Users: point.users,
+      Accounts: point.accounts,
       Subscriptions: point.subscriptions,
       cpu: point.cpuPercent,
       memory: point.memoryBytes,
     }));
     const propagationSeries = (metrics?.propagation?.series ?? []).map((point) => ({
       label: shortClockLabel(point.time),
-      "Last user": point.maxMs,
+      "Last account": point.maxMs,
       p95: point.p95Ms,
       Average: point.averageMs,
       "Server max": point.serverMaxMs,
@@ -4978,7 +4981,7 @@ function OverviewPage(props: { project: ProjectTarget }) {
           </div>
           <div className="health-grid">
             <HealthChartCard
-              title="Time to last user"
+              title="Time to last account"
               value={derived.propagationNow ? formatDuration(derived.propagationNow.maxMs || derived.propagationNow.serverMaxMs) : "—"}
               tone={derived.propagationNow && (derived.propagationNow.maxMs || derived.propagationNow.serverMaxMs) > (metrics?.propagation?.targetMs ?? 200) ? "danger" : "success"}
               hint="max commit→browser-ack delay, measured on the server clock (skew-free upper bound); 'Server max' isolates backend fan-out from network/browser time"
@@ -4991,7 +4994,7 @@ function OverviewPage(props: { project: ProjectTarget }) {
                   <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} formatter={(value) => formatDuration(Number(value))} />
                   <Legend wrapperStyle={{ fontSize: 11 }} iconType="plainline" />
                   <ReferenceLine y={metrics?.propagation?.targetMs ?? 200} stroke="var(--success)" strokeDasharray="4 4" label={{ value: "target", fontSize: 10, fill: "var(--muted)", position: "insideTopRight" }} />
-                  <Line type="monotone" dataKey="Last user" stroke={HEALTH_COLORS.errors} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Last account" stroke={HEALTH_COLORS.errors} strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line type="monotone" dataKey="p95" stroke={HEALTH_COLORS.latency} strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line type="monotone" dataKey="Average" stroke={HEALTH_COLORS.query} strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line type="monotone" dataKey="Server max" stroke={HEALTH_COLORS.reducer} strokeWidth={1.5} strokeDasharray="5 3" dot={false} isAnimationActive={false} />
@@ -5010,7 +5013,7 @@ function OverviewPage(props: { project: ProjectTarget }) {
             <span>last 3 h · 30s samples · all projects</span>
           </div>
           <div className="health-grid">
-            <HealthChartCard title="Connections & Users" value={String(connections)} hint="live sockets and distinct users, sampled every 30s">
+            <HealthChartCard title="Connections & Accounts" value={String(connections)} hint="live sockets and distinct accounts, sampled every 30s">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={derived.loadSeries} margin={HEALTH_CHART_MARGIN}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
@@ -5019,7 +5022,7 @@ function OverviewPage(props: { project: ProjectTarget }) {
                   <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} />
                   <Legend wrapperStyle={{ fontSize: 11 }} iconType="plainline" />
                   <Line type="monotone" dataKey="Connections" stroke={HEALTH_COLORS.query} strokeWidth={2} dot={false} isAnimationActive={false} />
-                  <Line type="monotone" dataKey="Users" stroke={HEALTH_COLORS.reducer} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Accounts" stroke={HEALTH_COLORS.reducer} strokeWidth={2} dot={false} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
             </HealthChartCard>
@@ -5379,6 +5382,8 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   const [tenants, setTenants] = useState<TenantTarget[]>([]);
   const [selectedTenant, setSelectedTenant] = useState(() => dataSourceFromURL());
   const [selectedTable, setSelectedTable] = useState(() => dataStateFromURL().table);
+  // Administrative `/dev/data` pagination is an operator-facing REST view,
+  // not application state. App Live Queries below read only LocalReplica.
   const [rowCache, setRowCache] = useState<Record<number, Record<string, unknown>>>({});
   const [requestedOffset, setRequestedOffset] = useState(0);
   const [visibleOffset, setVisibleOffset] = useState(0);
@@ -6642,30 +6647,16 @@ const testSortColumns: Record<string, string> = {
   spot: "spot_name",
 };
 
-function taskGridCursor(rowCache: Record<number, Record<string, unknown>>, offset: number): Pick<TestTaskGridArgs, "cursorCreatedAt" | "cursorId"> {
-  if (offset <= 0) return {};
-  const anchor = rowCache[offset - 1];
-  if (!anchor) return {};
-  const cursorId = formatCellValue(anchor.id);
-  const cursorCreatedAt = formatCellValue(anchor.created_at);
-  if (!cursorId || !cursorCreatedAt) return {};
-  return { cursorCreatedAt, cursorId };
-}
-
 function testTaskGridArgs(
   offset: number,
   search: string,
   sort: TestSortState,
   filters: DataFilter[],
-  rowCache: Record<number, Record<string, unknown>>,
 ): TestTaskGridArgs {
   const trimmedSearch = search.trim();
   return {
     offset,
     limit: testTaskPageSize,
-    columns: testTaskDataColumns,
-    count: trimmedSearch ? "false" : "estimate",
-    ...taskGridCursor(rowCache, offset),
     ...(sort.direction !== "default" ? { sort: testSortColumns[sort.key] ?? sort.key, direction: sort.direction } : {}),
     ...(filters.length > 0 ? { filters } : {}),
     ...(trimmedSearch ? { search: trimmedSearch } : {}),
@@ -6674,24 +6665,6 @@ function testTaskGridArgs(
 
 function testTaskGridStateKey(search: string, sort: TestSortState, filters: DataFilter[]): string {
   return JSON.stringify({ search: search.trim(), sort, filters });
-}
-
-function taskGridSearchParams(args: TestTaskGridArgs): URLSearchParams {
-  const params = new URLSearchParams({
-    offset: String(args.offset),
-    limit: String(args.limit),
-    count: args.count,
-    columns: args.columns.join(","),
-  });
-  if (args.search) params.set("search", args.search);
-  if (args.sort) {
-    params.set("sort", args.sort);
-    if (args.direction) params.set("direction", args.direction);
-  }
-  if (args.filters?.length) params.set("filters", JSON.stringify(args.filters));
-  if (args.cursorCreatedAt) params.set("cursorCreatedAt", args.cursorCreatedAt);
-  if (args.cursorId) params.set("cursorId", args.cursorId);
-  return params;
 }
 
 const statusColors: Record<string, string> = {
@@ -7139,10 +7112,10 @@ function AssigneePickerCard(props: {
   return (
     <div className="grid-filter-layer" onMouseDown={props.onClose} role="presentation">
       <div className="assignee-editor assignee-editor--floating" style={{ left, top, width }} onMouseDown={(event) => event.stopPropagation()}>
-        <SearchField aria-label="Search users" className="assignee-editor-search" fullWidth onChange={setSearch} value={search}>
+        <SearchField aria-label="Search members" className="assignee-editor-search" fullWidth onChange={setSearch} value={search}>
           <SearchField.Group>
             <SearchField.SearchIcon />
-            <SearchField.Input autoFocus placeholder="Search users..." />
+            <SearchField.Input autoFocus placeholder="Search members..." />
             <SearchField.ClearButton />
           </SearchField.Group>
         </SearchField>
@@ -7181,7 +7154,7 @@ function AssigneeProfileCard(props: { menu: AssigneeProfileMenu; onClose: () => 
         </Avatar>
         <div>
           <strong>{props.menu.name}</strong>
-          <span>Assigned user</span>
+          <span>Assigned account</span>
         </div>
       </div>
     </div>
@@ -7189,7 +7162,9 @@ function AssigneeProfileCard(props: { menu: AssigneeProfileMenu; onClose: () => 
 }
 
 function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onAction: ActionHandler }) {
-  const [rowCache, setRowCache] = useState<Record<number, Record<string, unknown>>>({});
+  // React owns only requested window descriptors. Rows and memberships are
+  // always read from the normalized LocalReplica.
+  const [liveWindows, setLiveWindows] = useState<Record<number, { offset: number; signature: string; args: TestTaskGridArgs }>>({});
   const [visibleOffset, setVisibleOffset] = useState(0);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
@@ -7203,7 +7178,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   const [selectedRows, setSelectedRows] = useState<Set<number>>(() => new Set());
   const [selectedRowTimes, setSelectedRowTimes] = useState<Record<number, number>>({});
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState<number | undefined>();
   const [status, setStatus] = useState("Loading Whagons-style task rows...");
   const [queryLoading, setQueryLoading] = useState(true);
   const [randomizing, setRandomizing] = useState(false);
@@ -7223,25 +7198,50 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     .filter(([column, filter]) => isTestColumnFilterActive(filter, testColumnFilterKind(column)))
     .map(([column]) => column);
   const filterColumnValues = filterMenu ? filterValuesByColumn[filterMenu.column] ?? [] : [];
+  const subscribeReplica = useCallback((listener: () => void) => client?.localReplica.subscribe(listener) ?? (() => undefined), [client]);
+  const getReplicaVersion = useCallback(() => client?.localReplica.version() ?? 0, [client]);
+  const getServerReplicaVersion = useCallback(() => 0, []);
+  const replicaVersion = useSyncExternalStore(subscribeReplica, getReplicaVersion, getServerReplicaVersion);
+  const replicaRows = useMemo(() => {
+    const next: Record<number, Record<string, unknown>> = {};
+    if (!client) return next;
+    for (const descriptor of Object.values(liveWindows)) {
+      const rows = client.localReplica.windowRows(descriptor.signature) as Record<string, unknown>[];
+      rows.forEach((row, index) => {
+        next[descriptor.offset + index] = row;
+      });
+    }
+    return next;
+  }, [client, liveWindows, replicaVersion]);
+  const cachedTotal = useMemo(() => {
+    if (!client) return undefined;
+    const descriptor = liveWindows[liveOffset];
+    if (!descriptor) return undefined;
+    const skeleton = client.localReplica.getWindow(descriptor.signature)?.resultSkeleton;
+    if (!skeleton || typeof skeleton !== "object" || Array.isArray(skeleton)) return undefined;
+    const value = (skeleton as Record<string, unknown>).total;
+    return typeof value === "number" ? value : undefined;
+  }, [client, liveOffset, liveWindows, replicaVersion]);
+  const gridTotal = total ?? cachedTotal ?? 0;
   const assigneeAvatarByName: Record<string, string> = {};
-  for (const row of Object.values(rowCache)) {
+  for (const row of Object.values(replicaRows)) {
     const names = [...splitAllUserNames(row), ...splitAssigneeNames(row)];
     const urls = [...splitAllUserAvatarUrls(row), ...splitAssigneeAvatarUrls(row)];
     names.forEach((name, index) => {
       if (urls[index] && !assigneeAvatarByName[name]) assigneeAvatarByName[name] = urls[index];
     });
   }
-  const assigneeOptions = Array.from(new Set(Object.values(rowCache).flatMap((row) => [...splitAllUserNames(row), ...splitAssigneeNames(row)])))
+  const assigneeOptions = Array.from(new Set(Object.values(replicaRows).flatMap((row) => [...splitAllUserNames(row), ...splitAssigneeNames(row)])))
     .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
   const sortKeyRef = useRef(`${sort.key}:${sort.direction}`);
-  const rowCacheRef = useRef(rowCache);
+  const replicaRowsRef = useRef(replicaRows);
   const liveOffsetRef = useRef(liveOffset);
   const fetchTimersRef = useRef<ScrollFetchTimers>({ debounceTimer: null, stopTimer: null });
   const pendingScrollRef = useRef<ScrollFetchPending>({ startRow: 0, height: 1 });
   const gridStateKey = testTaskGridStateKey(search, sort, activeFilters);
   const gridStateKeyRef = useRef(gridStateKey);
 
-  rowCacheRef.current = rowCache;
+  replicaRowsRef.current = replicaRows;
   liveOffsetRef.current = liveOffset;
 
   useEffect(() => {
@@ -7303,7 +7303,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     clearScrollRowFetch(fetchTimersRef);
     setLiveOffset(0);
     setVisibleOffset(0);
-    setRowCache({});
+    setLiveWindows({});
     setTotal(0);
     setQueryLoading(true);
   }, [props.project.id, currentTenantID, search, activeFiltersKey]);
@@ -7313,7 +7313,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     if (sortKeyRef.current === nextSortKey) return;
     sortKeyRef.current = nextSortKey;
     clearScrollRowFetch(fetchTimersRef);
-    setRowCache({});
+    setLiveWindows({});
     setVisibleOffset(0);
     setLiveOffset(0);
     setQueryLoading(true);
@@ -7325,9 +7325,14 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     client.connect();
     const subscribedOffset = liveOffset;
     const subscribedStateKey = gridStateKeyRef.current;
-    const args = testTaskGridArgs(subscribedOffset, search, sort, activeFilters, rowCacheRef.current);
-    if (Object.keys(rowCacheRef.current).length === 0) setQueryLoading(true);
-    const unsubscribe = client.subscribeQuery(api.tasks.grid, args as unknown as JsonValue, (message) => {
+    const args = testTaskGridArgs(subscribedOffset, search, sort, activeFilters);
+    const signature = client.replicaSignature(api.tasks.grid, args as unknown as JsonValue);
+    setLiveWindows((current) => ({
+      ...current,
+      [subscribedOffset]: { offset: subscribedOffset, signature, args },
+    }));
+    if (Object.keys(replicaRowsRef.current).length === 0) setQueryLoading(true);
+    const unsubscribe = client.subscribeLiveQuery(api.tasks.grid, args as unknown as JsonValue, (message) => {
       if (cancelled) return;
       if (message.type === "query.error") {
         setQueryLoading(false);
@@ -7335,15 +7340,14 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
         return;
       }
       if (message.type !== "query.result") return;
-      const payload = message.result as DataRowsResponse;
+      const payload = message.result as TestGridResponse;
       const offset = payload.offset ?? subscribedOffset;
       if (offset !== subscribedOffset) return;
       if (liveOffsetRef.current !== subscribedOffset) return;
       if (gridStateKeyRef.current !== subscribedStateKey) return;
-      setRowCache((current) => mergeRowsIntoCache(current, payload.rows, offset));
       setTotal(payload.total ?? payload.rows.length);
       setQueryLoading(false);
-      setStatus(message.reason === "invalidate" ? "Live · updated" : "Live via Gonvex binding");
+      setStatus(message.reason === "change" ? "Live · updated" : "Live via Gonvex binding");
     });
     return () => {
       cancelled = true;
@@ -7363,7 +7367,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       const result = await client.reducer<RandomizeTasksResponse>(
         api.tasks.randomizeStatusPriority,
         { count: 3000 } as unknown as JsonValue,
-      );
+      ) as RandomizeTasksResponse;
       setStatus(`Randomized ${result.updated.toLocaleString()} tasks in ${result.durationMs.toLocaleString()}ms`);
       props.onAction(`Randomized ${result.updated.toLocaleString()} task rows`);
     } catch (error) {
@@ -7373,7 +7377,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     }
   };
 
-  const showInitialQueryLoading = queryLoading && Object.keys(rowCache).length === 0;
+  const showInitialQueryLoading = queryLoading && Object.keys(replicaRows).length === 0;
 
   return (
     <section className="test-table-shell">
@@ -7381,7 +7385,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
         <div>
           <p className="eyebrow">{status}</p>
           <h2>Task rendering lab</h2>
-          <span>{total} matching rows · Glide custom renderers · Whagons-like fields</span>
+          <span>{gridTotal} matching rows · Glide custom renderers · Whagons-like fields</span>
         </div>
         <div className="test-table-actions">
           <AppSelect
@@ -7437,9 +7441,9 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
             <span>{search.trim() ? `Searching "${search.trim()}"` : "Fetching task rows"}</span>
           </div>
         ) : null}
-        getCellContent={createWhagonsTaskCellGetter(rowCache, hoveredRow, selectedRows, selectedRowTimes)}
+        getCellContent={createWhagonsTaskCellGetter(replicaRows, hoveredRow, selectedRows, selectedRowTimes)}
         height="100%"
-        rowCount={total}
+        rowCount={gridTotal}
         rowHeight={64}
         themeMode={props.themeMode}
         onCellClick={(cell, event) => {
@@ -7468,7 +7472,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
           if (columnId === "assignee") {
             event.preventDefault();
             setFilterMenu(null);
-            const row = rowCache[cell[1]] ?? {};
+            const row = replicaRows[cell[1]] ?? {};
             const bounds = {
               x: event.bounds.x + event.localEventX,
               y: event.bounds.y + event.localEventY,
@@ -7483,7 +7487,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
               const names = splitAssigneeNames(row);
               const avatarUrls = splitAssigneeAvatarUrls(row);
               setAssigneeMenu(null);
-              setAssigneeProfileMenu({ name: names[target.index] ?? "User", avatarUrl: avatarUrls[target.index], bounds });
+              setAssigneeProfileMenu({ name: names[target.index] ?? "Account", avatarUrl: avatarUrls[target.index], bounds });
             } else {
               setAssigneeMenu(null);
               setAssigneeProfileMenu(null);
@@ -7500,15 +7504,9 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
         onCellEdited={(cell, newValue) => {
           const columnId = String(testTaskColumns[cell[0]]?.id ?? "");
           if (columnId !== "assignee" || newValue.kind !== GridCellKind.Custom) return;
-          const data = newValue.data as WhTaskCellData;
-          setRowCache((current) => ({
-            ...current,
-            [cell[1]]: {
-              ...current[cell[1]],
-              assignee_names: (data.names ?? []).join(", "),
-              assignee_avatar_urls: (data.avatarUrls ?? []).join(","),
-            },
-          }));
+          // Row edits must go through a Whagons Reducer. The normalized
+          // LocalReplica is never mutated by the dashboard.
+          setStatus("Assignee changes require a Whagons Reducer");
         }}
         onHeaderClick={(columnIndex) => {
           const columnConfig = testTaskColumns[columnIndex];
@@ -7521,7 +7519,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
           const columnConfig = testTaskColumns[columnIndex];
           const column = String(columnConfig?.id ?? "");
           if (!column || !columnConfig?.filterKind) return;
-          const values = sortedUniqueColumnValues(rowCache, column);
+          const values = sortedUniqueColumnValues(replicaRows, column);
           if (values.length > 0) {
             setFilterValuesByColumn((current) => ({
               ...current,
@@ -7564,18 +7562,11 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       {assigneeMenu ? (
         <AssigneePickerCard
           menu={assigneeMenu}
-          names={splitAssigneeNames(rowCache[assigneeMenu.rowIndex] ?? {})}
+          names={splitAssigneeNames(replicaRows[assigneeMenu.rowIndex] ?? {})}
           options={assigneeOptions}
           avatarUrls={assigneeAvatarByName}
           onApply={(names) => {
-            setRowCache((current) => ({
-              ...current,
-              [assigneeMenu.rowIndex]: {
-                ...current[assigneeMenu.rowIndex],
-                assignee_names: names.join(", "),
-                assignee_avatar_urls: names.map((name) => assigneeAvatarByName[name] ?? "").join(","),
-              },
-            }));
+            setStatus("Assignee changes require a Whagons Reducer");
             setAssigneeMenu(null);
           }}
           onClose={() => setAssigneeMenu(null)}
@@ -7942,7 +7933,7 @@ export function LogDetailsSheet(props: { entry: RuntimeLogEntry; onClose: () => 
     ["Duration", formatDuration(props.entry.durationMs)],
     ["Project", props.entry.project ?? "Not captured"],
     ["Tenant", props.entry.tenant ?? "Not captured"],
-    ["User", props.entry.userEmail || props.entry.userId || "Anonymous / not captured"],
+    ["Account", props.entry.accountEmail || props.entry.accountId || "Anonymous / not captured"],
     ["Connection", props.entry.connectionId || "Not captured"],
     ["Client", [props.entry.browser, props.entry.platform, props.entry.deviceType].filter(Boolean).join(" · ") || "Not captured"],
     ["Outcome", props.entry.outcome || "unknown"],
@@ -8056,7 +8047,7 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     formatDuration(entry.durationMs),
     entry.error
       ? entry.error
-      : [entry.reason, entry.connectionId, entry.browser, entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || ""].filter(Boolean).join(" · ") || "—",
+      : [entry.reason, entry.connectionId, entry.browser, entry.tenant ? `tenant ${entry.tenant}` : "", entry.accountEmail || entry.accountId || ""].filter(Boolean).join(" · ") || "—",
   ]);
 
   const logErrorTextColor = props.themeMode === "dark" ? "#ff6b78" : "#d93f45";
@@ -8115,7 +8106,7 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       formatDuration(entry.durationMs),
       entry.error
         ? entry.error
-        : [entry.reason, entry.connectionId, entry.browser, entry.tenant ? `tenant ${entry.tenant}` : "", entry.userEmail || entry.userId || ""].filter(Boolean).join(" · ") || "—",
+        : [entry.reason, entry.connectionId, entry.browser, entry.tenant ? `tenant ${entry.tenant}` : "", entry.accountEmail || entry.accountId || ""].filter(Boolean).join(" · ") || "—",
     ].join("\t")).join("\n");
     try {
       await navigator.clipboard.writeText(`${header}\n${body}`);
@@ -8284,11 +8275,11 @@ type DashboardErrorGroup = {
   count: number; firstSeen: string; lastSeen: string; tenants: Record<string, number>;
   // Optional: runtimes older than levels omit it, and those groups are errors.
   level?: "error" | "warning";
-  users: Record<string, number>; devices: Record<string, number>; releases: Record<string, number>;
+  accounts: Record<string, number>; devices: Record<string, number>; releases: Record<string, number>;
   environments: Record<string, number>; regression?: boolean; assignee?: string;
   latest: {
     timestamp: string; stack?: string; url?: string; userAgent?: string; release?: string; tenant?: string; environment?: string;
-    user?: Record<string, unknown>; tags?: Record<string, string>; context?: Record<string, unknown>; breadcrumbs?: Array<Record<string, unknown>>;
+    account?: Record<string, unknown>; tags?: Record<string, string>; context?: Record<string, unknown>; breadcrumbs?: Array<Record<string, unknown>>;
   };
 };
 
@@ -8302,8 +8293,8 @@ async function readErrorTrackingResponse<T>(
   let rawBody = "";
 
   try {
-    // Reading the body as text first lets us turn legacy runtime responses such
-    // as `404 page not found` into a useful compatibility message. Calling
+    // Reading the body as text first turns non-JSON proxy responses such as
+    // `404 page not found` into a useful runtime message. Calling
     // response.json() directly reports the confusing "non-whitespace" parser
     // error because the leading HTTP status happens to be a valid JSON number.
     if (typeof response.text === "function") {
@@ -8429,7 +8420,7 @@ function ErrorsPage(props: { project: ProjectTarget }) {
 
   return <section className="errors-inbox" aria-label="Error groups">
     <div className="errors-command-header">
-      <div><p className="eyebrow">Incident intelligence</p><h2>Errors affecting real users</h2><p>Grouped by root cause, enriched with tenant, release, user, and machine context.</p></div>
+      <div><p className="eyebrow">Incident intelligence</p><h2>Errors affecting real accounts</h2><p>Grouped by root cause, enriched with tenant, release, account, and machine context.</p></div>
       <div className="errors-live-indicator" data-state={runtimeState} aria-live="polite"><span aria-hidden="true" /><strong>{runtimeStatus.label}</strong><small>{runtimeStatus.detail}</small></div>
     </div>
     <div className="errors-stat-strip" aria-label="Error impact summary">
@@ -8475,7 +8466,7 @@ function ErrorsPage(props: { project: ProjectTarget }) {
         return <article className="error-group-card" data-expanded={expanded ? "true" : undefined} data-level={group.level ?? "error"} data-priority={group.priority} key={group.fingerprint}>
           <button className="error-group-summary" type="button" aria-expanded={expanded} onClick={() => setSelected(expanded ? null : group.fingerprint)}>
             <div className="error-group-main"><div className="error-group-title"><span className="error-priority">{group.priority}</span>{group.level === "warning" ? <span className="error-level">warning</span> : null}{group.regression ? <span className="error-regression">regression</span> : null}<strong>{group.title}</strong></div><code>{group.culprit || group.fingerprint}</code><span>Last seen {new Date(group.lastSeen).toLocaleString()} · first seen {new Date(group.firstSeen).toLocaleDateString()}</span></div>
-            <div className="error-impact"><div><strong>{group.count}</strong><span>events</span></div><div><strong>{Object.keys(group.tenants).length}</strong><span>tenants</span></div><div><strong>{Object.keys(group.users).length}</strong><span>users</span></div><div><strong>{Object.keys(group.devices).length}</strong><span>machines</span></div></div>
+            <div className="error-impact"><div><strong>{group.count}</strong><span>events</span></div><div><strong>{Object.keys(group.tenants).length}</strong><span>tenants</span></div><div><strong>{Object.keys(group.accounts).length}</strong><span>accounts</span></div><div><strong>{Object.keys(group.devices).length}</strong><span>machines</span></div></div>
             <span className="error-expand-mark" aria-hidden="true">{expanded ? "−" : "+"}</span>
           </button>
           {expanded ? <div className="error-group-detail">
@@ -8726,8 +8717,8 @@ export function RealtimeDashboard(props: {
   const visibleConnections = normalizedSearch
     ? details.filter((connection) => [
       connection.id,
-      connection.userEmail,
-      connection.userId,
+      connection.accountEmail,
+      connection.accountId,
       connection.tenant,
       connection.browser,
       connection.platform,
@@ -8736,14 +8727,14 @@ export function RealtimeDashboard(props: {
     ].some((value) => String(value ?? "").toLowerCase().includes(normalizedSearch)))
     : details;
 
-  const users = useMemo(() => {
+  const accounts = useMemo(() => {
     const grouped = new Map<string, RealtimeUserGroup>();
     for (const connection of visibleConnections) {
-      const key = connection.userId || "anonymous";
+      const key = connection.accountId || "anonymous";
       const current = grouped.get(key) ?? {
         key,
-        label: connection.userEmail || connection.userId || "Anonymous sessions",
-        secondary: connection.userEmail && connection.userId ? connection.userId : connection.authenticated ? "Authenticated user" : "Not authenticated",
+        label: connection.accountEmail || connection.accountId || "Anonymous sessions",
+        secondary: connection.accountEmail && connection.accountId ? connection.accountId : connection.authenticated ? "Authenticated account" : "Not authenticated",
         connections: [],
         subscriptions: 0,
         tenants: [],
@@ -8760,8 +8751,7 @@ export function RealtimeDashboard(props: {
   const activitySince = Date.now() - 5 * 60 * 1000;
   const recentEventCount = (props.metrics?.logs ?? []).filter((entry) => new Date(entry.time).getTime() >= activitySince).length;
   const reportedConnections = websocket?.connections ?? 0;
-  const reportedUsers = websocket?.users ?? users.length;
-  const hasLegacySummaryOnly = reportedConnections > 0 && details.length === 0;
+  const reportedAccounts = websocket?.accounts ?? accounts.length;
 
   return (
     <div className="realtime-shell">
@@ -8769,7 +8759,7 @@ export function RealtimeDashboard(props: {
         <div>
           <div className="realtime-kicker"><span className={`health-pulse ${props.reachable ? "is-live" : "is-down"}`} aria-hidden="true" /> Live presence</div>
           <h2>Who is connected right now?</h2>
-          <p>Trace each browser session from a user to its tenant, Live Queries, and Replica Collections.</p>
+        <p>Trace each browser session from an account to its tenant, Live Queries, and Replica Collections.</p>
         </div>
         <div className="realtime-refresh-state" data-state={props.reachable ? "live" : "offline"}>
           <strong>{props.reachable ? "Streaming" : "Runtime offline"}</strong>
@@ -8778,7 +8768,7 @@ export function RealtimeDashboard(props: {
       </header>
 
       <section className="realtime-stat-strip" aria-label="Realtime summary">
-        <div><span>Users online</span><strong>{reportedUsers}</strong></div>
+        <div><span>Accounts online</span><strong>{reportedAccounts}</strong></div>
         <div><span>Connections</span><strong>{reportedConnections}</strong></div>
         <div><span>Live streams</span><strong>{websocket?.subscriptions ?? 0}</strong></div>
         <div><span>Events · 5 min</span><strong>{recentEventCount}</strong></div>
@@ -8788,25 +8778,25 @@ export function RealtimeDashboard(props: {
         <main className="realtime-main">
           <section className="realtime-panel" aria-labelledby="online-users-title">
             <header className="realtime-panel-header">
-              <div><span>Presence</span><h3 id="online-users-title">Online users</h3></div>
-              <small>{users.length} {users.length === 1 ? "identity" : "identities"}</small>
+              <div><span>Presence</span><h3 id="online-users-title">Online accounts</h3></div>
+              <small>{accounts.length} {accounts.length === 1 ? "identity" : "identities"}</small>
             </header>
             <div className="realtime-user-list">
-              {users.map((user) => (
-                <article className="realtime-user" key={user.key}>
-                  <div className="realtime-avatar" aria-hidden="true">{realtimeInitials(user.label)}</div>
+              {accounts.map((account) => (
+                <article className="realtime-user" key={account.key}>
+                  <div className="realtime-avatar" aria-hidden="true">{realtimeInitials(account.label)}</div>
                   <span className="realtime-online-dot" aria-label="Online" />
-                  <div className="realtime-user-name"><strong>{user.label}</strong><code>{user.secondary}</code></div>
-                  <div className="realtime-user-destinations"><span>Tenants</span><strong>{user.tenants.join(", ") || props.project.id}</strong></div>
-                  <div className="realtime-user-count"><strong>{user.connections.length}</strong><span>{user.connections.length === 1 ? "connection" : "connections"}</span></div>
-                  <div className="realtime-user-count"><strong>{user.subscriptions}</strong><span>live streams</span></div>
+                  <div className="realtime-user-name"><strong>{account.label}</strong><code>{account.secondary}</code></div>
+                  <div className="realtime-user-destinations"><span>Tenants</span><strong>{account.tenants.join(", ") || props.project.id}</strong></div>
+                  <div className="realtime-user-count"><strong>{account.connections.length}</strong><span>{account.connections.length === 1 ? "connection" : "connections"}</span></div>
+                  <div className="realtime-user-count"><strong>{account.subscriptions}</strong><span>live streams</span></div>
                 </article>
               ))}
-              {users.length === 0 ? (
+              {accounts.length === 0 ? (
                 <div className="realtime-empty">
                   <span aria-hidden="true">○</span>
-                  <strong>{normalizedSearch ? "No connections match that search" : "No users online"}</strong>
-                  <p>{normalizedSearch ? "Try a user, tenant, browser, or function name." : "New WebSocket sessions will appear here as soon as a client connects."}</p>
+                  <strong>{normalizedSearch ? "No connections match that search" : "No accounts online"}</strong>
+                  <p>{normalizedSearch ? "Try an account, tenant, browser, or function name." : "New WebSocket sessions will appear here as soon as a client connects."}</p>
                 </div>
               ) : null}
             </div>
@@ -8816,17 +8806,12 @@ export function RealtimeDashboard(props: {
             <header className="realtime-panel-header realtime-panel-header--search">
               <div><span>Connection paths</span><h3 id="connections-title">Every connection</h3></div>
               <label className="realtime-search">
-                <input aria-label="Search connections" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search user, tenant, function…" type="search" />
+                <input aria-label="Search connections" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search account, tenant, function…" type="search" />
               </label>
             </header>
-            {hasLegacySummaryOnly ? (
-              <div className="realtime-compatibility" role="status">
-                This runtime reports {reportedConnections} live {reportedConnections === 1 ? "connection" : "connections"}, but it predates connection-level details. Restart it with this build to inspect destinations and users.
-              </div>
-            ) : null}
             <div className="realtime-connection-list">
               {visibleConnections.map((connection) => {
-                const identity = connection.userEmail || connection.userId || "Anonymous";
+                const identity = connection.accountEmail || connection.accountId || "Anonymous";
                 const subscriptionCounts = connection.subscriptions.reduce((counts, subscription) => {
                   counts.set(subscription, (counts.get(subscription) ?? 0) + 1);
                   return counts;
@@ -8882,7 +8867,7 @@ export function RealtimeDashboard(props: {
               <article className="realtime-event" key={`${entry.time}:${entry.executionId ?? entry.path}:${index}`} data-outcome={entry.outcome}>
                 <span className="realtime-event-line" aria-hidden="true" />
                 <div className="realtime-event-top"><strong>{entry.path}</strong><time dateTime={entry.time}>{realtimeRelativeTime(entry.time)}</time></div>
-                <p><span>{entry.kind}</span>{entry.userEmail || entry.userId ? ` by ${entry.userEmail || entry.userId}` : ""}</p>
+                <p><span>{entry.kind}</span>{entry.accountEmail || entry.accountId ? ` by ${entry.accountEmail || entry.accountId}` : ""}</p>
                 <div><code>{entry.tenant || props.project.id}</code><span>{formatDuration(entry.durationMs)} · {entry.outcome}</span></div>
               </article>
             ))}
@@ -9455,7 +9440,7 @@ function SettingsPage(props: {
         ) : null}
 
         {activeSection === "members" ? (
-          <SettingsCard title="Members" description="Invite users who may access this project. Users can sign in only after an admin creates their account.">
+          <SettingsCard title="Members" description="Invite accounts into this project. An Account must exist before it can become a project Member.">
             <form className="env-form" onSubmit={inviteMember}>
               <label className="setting-field">
                 <span>Email</span>
@@ -9509,7 +9494,7 @@ function SettingsPage(props: {
               {invitations.filter((invitation) => !invitation.accepted).map((invitation) => (
                 <div className="env-row" role="row" key={invitation.id}>
                   <code role="cell">{invitation.email}</code>
-                  <span role="cell">Pending user</span>
+                  <span role="cell">Pending account</span>
                   <span role="cell">{invitation.role}</span>
                   <span role="cell">invited</span>
                 </div>

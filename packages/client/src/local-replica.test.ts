@@ -10,12 +10,12 @@ describe("LocalReplica", () => {
       cursor: { epoch: "tenant-a", revision: 1 },
       changes: [
         { entity: "tasks", id: "task-1", operation: "insert", newValue: { id: "task-1", status: "started" } },
-        { entity: "taskUsers", id: "link-1", operation: "insert", newValue: { id: "link-1", taskId: "task-1", userId: "gabriel" } },
+        { entity: "taskMembers", id: "link-1", operation: "insert", newValue: { id: "link-1", taskId: "task-1", memberId: "gabriel" } },
       ],
     });
     expect(listener).toHaveBeenCalledTimes(1);
     expect(replica.entity("tasks", "task-1")).toMatchObject({ status: "started" });
-    expect(replica.entity("taskUsers", "link-1")).toMatchObject({ userId: "gabriel" });
+    expect(replica.entity("taskMembers", "link-1")).toMatchObject({ memberId: "gabriel" });
   });
 
   it("keeps optimistic state until its committed revision is applied", async () => {
@@ -44,7 +44,7 @@ describe("LocalReplica", () => {
         { entity: "tasks", id: "a", operation: "insert", newValue: { id: "a", title: "A" } },
         { entity: "tasks", id: "b", operation: "insert", newValue: { id: "b", title: "B" } },
       ],
-      memberships: [{ signature: "tasks:recent", entity: "tasks", ids: ["b", "a"], completeness: "partial", source: "server" }],
+      memberships: [{ kind: "live", signature: "tasks:recent", entity: "tasks", key: "id", ids: ["b", "a"], completeness: "partial", source: "server" }],
     });
     expect(replica.liveQuery("tasks:recent")).toMatchObject({
       rows: [{ id: "b", title: "B" }, { id: "a", title: "A" }],
@@ -64,6 +64,7 @@ describe("LocalReplica", () => {
       rows: [{ id: "b", title: "B" }, { id: "a", title: "A" }],
       completeness: "complete",
       source: "cache",
+      kind: "live",
     });
     expect(replica.entity("tasks", "a")).toEqual({ id: "a", title: "A" });
     expect(replica.liveQuery("tasks.grid:{}")).toMatchObject({
@@ -75,6 +76,87 @@ describe("LocalReplica", () => {
     const hydrated = new LocalReplica(storage);
     await hydrated.hydrate();
     expect(hydrated.liveQuery("tasks.grid:{}").rows).toHaveLength(2);
+  });
+
+  it("persists window metadata without duplicating row payloads", async () => {
+    const storage = new MemoryLocalReplicaStorage();
+    const replica = new LocalReplica(storage);
+    await replica.replaceWindow({
+      signature: "tasks:grid",
+      kind: "replica",
+      entity: "tasks",
+      key: "id",
+      rows: [{ id: "a", title: "A" }],
+      completeness: "partial",
+      source: "cache",
+      cursor: { epoch: "tenant-a", revision: 4 },
+      resultSkeleton: { page: [] },
+      resultPath: ["page"],
+      maxRows: 100,
+    });
+    expect(replica.getWindow("tasks:grid")).toMatchObject({
+      kind: "replica",
+      cursor: { epoch: "tenant-a", revision: 4 },
+      resultSkeleton: { page: [] },
+      resultPath: ["page"],
+    });
+    expect(replica.listWindows()).toHaveLength(1);
+    expect(replica.snapshot().liveQueries["tasks:grid"]).toMatchObject({ kind: "replica" });
+    expect(JSON.stringify(replica.snapshot().liveQueries["tasks:grid"])).not.toContain("title");
+    expect(replica.entity("tasks", "a")).toEqual({ id: "a", title: "A" });
+  });
+
+  it("applies a window delta and deletes revoked IDs from membership", async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({
+      signature: "tasks:grid",
+      kind: "live",
+      entity: "tasks",
+      key: "id",
+      rows: [{ id: "a" }, { id: "b" }],
+      completeness: "complete",
+      source: "server",
+      cursor: { epoch: "tenant-a", revision: 1 },
+    });
+    const listener = vi.fn();
+    replica.subscribe(listener);
+    await replica.applyWindowDelta({
+      signature: "tasks:grid",
+      entity: "tasks",
+      key: "id",
+      upserts: [{ id: "c", title: "C" }],
+      deleted: ["a"],
+      source: "server",
+      cursor: { epoch: "tenant-a", revision: 2 },
+    });
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(replica.windowRows("tasks:grid").map((row) => row.id)).toEqual(["b", "c"]);
+    expect(replica.entity("tasks", "a")).toBeUndefined();
+  });
+
+  it("removes a window atomically while retaining shared normalized rows", async () => {
+    const storage = new MemoryLocalReplicaStorage();
+    const replica = new LocalReplica(storage);
+    await replica.replaceWindow({
+      signature: "tasks:a",
+      entity: "tasks",
+      key: "id",
+      rows: [{ id: "shared" }],
+      completeness: "complete",
+      source: "server",
+    });
+    await replica.replaceWindow({
+      signature: "tasks:b",
+      entity: "tasks",
+      key: "id",
+      rows: [{ id: "shared" }],
+      completeness: "complete",
+      source: "server",
+    });
+    await replica.removeWindow("tasks:a");
+    expect(replica.getWindow("tasks:a")).toBeUndefined();
+    expect(replica.entity("tasks", "shared")).toEqual({ id: "shared" });
+    expect((await storage.load())?.liveQueries["tasks:b"]).toBeDefined();
   });
 
   it("persists and hydrates the same authoritative snapshot", async () => {
@@ -151,5 +233,33 @@ describe("LocalReplica", () => {
       changes: [{ entity: "tasks", id: "b", operation: "insert", newValue: { id: "b" } }],
     });
     expect(replica.entity("tasks", "b")).toEqual({ id: "b" });
+  });
+
+  it("exposes one normalized cached corpus and only claims completeness for a full Replica Collection", async () => {
+    const replica = new LocalReplica();
+    await replica.materializeWindow({
+      signature: "tasks:grid",
+      kind: "live",
+      entity: "tasks",
+      key: "id",
+      rows: [{ id: "a", title: "Grid" }],
+      completeness: "complete",
+      source: "server",
+    });
+    expect(replica.entityRows("tasks")).toEqual([{ id: "a", title: "Grid" }]);
+    expect(replica.entityCompleteness("tasks")).toBe("partial");
+
+    await replica.materializeWindow({
+      signature: "tasks:recent",
+      kind: "replica",
+      entity: "tasks",
+      key: "id",
+      rows: [{ id: "a", title: "Current" }, { id: "b", title: "Replica" }],
+      completeness: "complete",
+      source: "server",
+      truncated: false,
+    });
+    expect(replica.entityRows("tasks")).toEqual([{ id: "a", title: "Current" }, { id: "b", title: "Replica" }]);
+    expect(replica.entityCompleteness("tasks")).toBe("complete");
   });
 });

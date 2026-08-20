@@ -1,8 +1,8 @@
 //! Rust host-side module generation lifecycle.
 //!
 //! This crate is intentionally independent of HTTP, Postgres, and an engine
-//! implementation. It can be embedded beside the existing Go runtime first;
-//! the Go loader remains the default until the V8 engine is selected.
+//! implementation. The production module host embeds these primitives while
+//! the Go network/database host retains transaction ownership.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, RwLock};

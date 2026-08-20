@@ -16,10 +16,9 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
+	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/pkg/moduleengine"
-	"github.com/gonvex/gonvex/server/internal/data"
 	"github.com/gonvex/gonvex/server/internal/dbpool"
-	"github.com/gonvex/gonvex/server/internal/sandbox"
 	"github.com/gorilla/websocket"
 )
 
@@ -41,27 +40,27 @@ type clientMessage struct {
 	ClientReceivedAtMS float64                 `json:"clientReceivedAtMs,omitempty"`
 	ClientDurationMS   float64                 `json:"clientDurationMs,omitempty"`
 	Device             json.RawMessage         `json:"device,omitempty"`
-	Cursor             *syncCursor             `json:"cursor,omitempty"`
+	Cursor             *replicaCursor          `json:"cursor,omitempty"`
 	Keys               []string                `json:"keys,omitempty"`
 	Hashes             map[string]string       `json:"hashes,omitempty"`
 	Digest             string                  `json:"digest,omitempty"`
 	FullIntegrity      bool                    `json:"fullIntegrity,omitempty"`
-	Opens              []syncOpenRequest       `json:"opens,omitempty"`
-	CacheRevision      string                  `json:"cacheRevision,omitempty"`
+	Opens              []replicaOpenRequest    `json:"opens,omitempty"`
+	WindowRevision     string                  `json:"windowRevision,omitempty"`
 	Subscribes         []querySubscribeRequest `json:"subscribes,omitempty"`
 	Calls              []reducerCallRequest    `json:"calls,omitempty"`
 	Capabilities       *clientCapabilities     `json:"capabilities,omitempty"`
 }
 
-// maxBatchedClientRequests bounds every batched client frame (sync.openMany,
+// maxBatchedClientRequests bounds every batched client frame (replica.openMany,
 // query.subscribeMany, reducer.callMany).
 const maxBatchedClientRequests = 256
 
 type querySubscribeRequest struct {
-	ID            string          `json:"id"`
-	Path          string          `json:"path"`
-	Args          json.RawMessage `json:"args,omitempty"`
-	CacheRevision string          `json:"cacheRevision,omitempty"`
+	ID             string          `json:"id"`
+	Path           string          `json:"path"`
+	Args           json.RawMessage `json:"args,omitempty"`
+	WindowRevision string          `json:"windowRevision,omitempty"`
 }
 
 type reducerCallRequest struct {
@@ -75,11 +74,11 @@ type reducerCallRequest struct {
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
 
-type syncOpenRequest struct {
+type replicaOpenRequest struct {
 	ID            string            `json:"id"`
 	Path          string            `json:"path"`
 	Args          json.RawMessage   `json:"args,omitempty"`
-	Cursor        *syncCursor       `json:"cursor,omitempty"`
+	Cursor        *replicaCursor    `json:"cursor,omitempty"`
 	Keys          []string          `json:"keys,omitempty"`
 	Hashes        map[string]string `json:"hashes,omitempty"`
 	Digest        string            `json:"digest,omitempty"`
@@ -87,18 +86,18 @@ type syncOpenRequest struct {
 }
 
 type serverCapabilities struct {
-	ProtocolVersion int    `json:"protocolVersion,omitempty"`
-	RuntimeVersion  string `json:"runtimeVersion,omitempty"`
-	SyncBatch       int    `json:"syncBatch,omitempty"`
-	SyncIntegrity   int    `json:"syncIntegrity,omitempty"`
-	QueryBatch      int    `json:"queryBatch,omitempty"`
-	ReducerBatch    int    `json:"reducerBatch,omitempty"`
-	SyncWatermark   int    `json:"syncWatermark,omitempty"`
+	ProtocolVersion  int    `json:"protocolVersion,omitempty"`
+	RuntimeVersion   string `json:"runtimeVersion,omitempty"`
+	ReplicaBatch     int    `json:"replicaBatch,omitempty"`
+	ReplicaIntegrity int    `json:"replicaIntegrity,omitempty"`
+	QueryBatch       int    `json:"queryBatch,omitempty"`
+	ReducerBatch     int    `json:"reducerBatch,omitempty"`
+	ReplicaWatermark int    `json:"replicaWatermark,omitempty"`
 }
 
 type clientCapabilities struct {
-	SyncReadyMany    int `json:"syncReadyMany,omitempty"`
-	SyncWatermark    int `json:"syncWatermark,omitempty"`
+	ReplicaReadyMany int `json:"replicaReadyMany,omitempty"`
+	ReplicaWatermark int `json:"replicaWatermark,omitempty"`
 	QueryPagePatch   int `json:"queryPagePatch,omitempty"`
 	QueryObjectPatch int `json:"queryObjectPatch,omitempty"`
 	QueryOrderDelta  int `json:"queryOrderDelta,omitempty"`
@@ -115,13 +114,13 @@ type keyedCollectionPatch struct {
 	Append   []string          `json:"append,omitempty"`
 }
 
-type syncReadyMessage struct {
-	ID        string      `json:"id"`
-	Path      string      `json:"path,omitempty"`
-	Cursor    *syncCursor `json:"cursor"`
-	Mode      string      `json:"mode,omitempty"`
-	Digest    string      `json:"digest,omitempty"`
-	Truncated bool        `json:"truncated"`
+type replicaReadyMessage struct {
+	ID        string         `json:"id"`
+	Path      string         `json:"path,omitempty"`
+	Cursor    *replicaCursor `json:"cursor"`
+	Mode      string         `json:"mode,omitempty"`
+	Digest    string         `json:"digest,omitempty"`
+	Truncated bool           `json:"truncated"`
 }
 
 type replicaChangeMessage struct {
@@ -146,10 +145,10 @@ type serverMessage struct {
 	Reason               string                          `json:"reason,omitempty"`
 	Trace                any                             `json:"trace,omitempty"`
 	QueryPerf            json.RawMessage                 `json:"-"`
-	QueryCache           *queryCacheDirective            `json:"queryCache,omitempty"`
+	Replica              *replicaDirective               `json:"replica,omitempty"`
 	Capabilities         *serverCapabilities             `json:"capabilities,omitempty"`
-	CacheScope           string                          `json:"cacheScope,omitempty"`
-	CacheRevision        string                          `json:"cacheRevision,omitempty"`
+	ReplicaScope         string                          `json:"replicaScope,omitempty"`
+	WindowRevision       string                          `json:"windowRevision,omitempty"`
 	SubscriptionRevision *subscriptionRevision           `json:"subscriptionRevision,omitempty"`
 	BaseRevision         *subscriptionRevision           `json:"baseRevision,omitempty"`
 	ThroughRevision      *subscriptionRevision           `json:"throughRevision,omitempty"`
@@ -161,7 +160,7 @@ type serverMessage struct {
 	Append               []string                        `json:"append,omitempty"`
 	Collections          map[string]keyedCollectionPatch `json:"collections,omitempty"`
 	FullResult           json.RawMessage                 `json:"-"`
-	Cursor               *syncCursor                     `json:"cursor,omitempty"`
+	Cursor               *replicaCursor                  `json:"cursor,omitempty"`
 	Key                  string                          `json:"key,omitempty"`
 	OrderBy              string                          `json:"orderBy,omitempty"`
 	OrderDirection       string                          `json:"orderDirection,omitempty"`
@@ -173,7 +172,7 @@ type serverMessage struct {
 	Hashes               map[string]string               `json:"hashes,omitempty"`
 	Digest               string                          `json:"digest,omitempty"`
 	Truncated            *bool                           `json:"truncated,omitempty"`
-	Ready                []syncReadyMessage              `json:"ready,omitempty"`
+	Ready                []replicaReadyMessage           `json:"ready,omitempty"`
 	Messages             []serverMessage                 `json:"messages,omitempty"`
 	Revision             uint64                          `json:"revision,omitempty"`
 	OriginCommandID      string                          `json:"originCommandId,omitempty"`
@@ -223,23 +222,6 @@ type clientDeviceInfo struct {
 	EffectiveConnectionType string  `json:"effectiveConnectionType,omitempty"`
 }
 
-type taskGridArgs struct {
-	Offset          int               `json:"offset"`
-	Limit           int               `json:"limit"`
-	Columns         []string          `json:"columns"`
-	Search          string            `json:"search,omitempty"`
-	Sort            string            `json:"sort,omitempty"`
-	Direction       string            `json:"direction,omitempty"`
-	Count           string            `json:"count,omitempty"`
-	Filters         []data.RowsFilter `json:"filters,omitempty"`
-	CursorCreatedAt string            `json:"cursorCreatedAt,omitempty"`
-	CursorID        string            `json:"cursorId,omitempty"`
-}
-
-type randomizeStatusPriorityArgs struct {
-	Count int `json:"count"`
-}
-
 const (
 	tableChangeDebounce       = 75 * time.Millisecond
 	tableChangeTriggerBatch   = time.Millisecond
@@ -281,37 +263,37 @@ func isFullGitSHA(value string) bool {
 // zero-sized allocations the same address, which would collapse distinct
 // listeners when pointers are used as map keys.
 type subscriptionToken struct {
-	marker        byte
-	active        atomic.Bool
-	cacheRevision atomic.Value
+	marker         byte
+	active         atomic.Bool
+	windowRevision atomic.Value
 }
 
-func newSubscriptionToken(cacheRevisions ...string) *subscriptionToken {
-	cacheRevision := ""
-	if len(cacheRevisions) > 0 {
-		cacheRevision = cacheRevisions[0]
+func newSubscriptionToken(windowRevisions ...string) *subscriptionToken {
+	windowRevision := ""
+	if len(windowRevisions) > 0 {
+		windowRevision = windowRevisions[0]
 	}
 	token := &subscriptionToken{marker: 1}
 	token.active.Store(true)
-	token.cacheRevision.Store(cacheRevision)
+	token.windowRevision.Store(windowRevision)
 	return token
 }
 
 type querySubscription struct {
-	conn          *wsConn
-	id            string
-	project       string
-	tenant        string
-	path          string
-	args          json.RawMessage
-	rowIDs        map[string]bool
-	caller        callerContext
-	ctx           context.Context
-	cancel        context.CancelFunc
-	token         *subscriptionToken
-	cacheScope    string
-	cacheRevision string
-	visibilityKey string
+	conn           *wsConn
+	id             string
+	project        string
+	tenant         string
+	path           string
+	args           json.RawMessage
+	rowIDs         map[string]bool
+	caller         callerContext
+	ctx            context.Context
+	cancel         context.CancelFunc
+	token          *subscriptionToken
+	replicaScope   string
+	windowRevision string
+	visibilityKey  string
 }
 
 type tableChange struct {
@@ -335,9 +317,9 @@ type tableChange struct {
 	// triggerObserved identifies a table event received from the durable change
 	// feed. It is only meaningful while accumulating a pending commit.
 	triggerObserved bool
-	// commitID is the originating reducer command ID stored in
-	// gonvex.mutation_id for idempotency and optimistic reconciliation.
-	commitID string
+	// originCommandID is the originating reducer command ID stored in
+	// gonvex.command_id for optimistic reconciliation.
+	originCommandID string
 }
 
 type tableChangeDetail struct {
@@ -351,7 +333,7 @@ type tableChangeDetail struct {
 type pendingTableChange struct {
 	project                string
 	tenant                 string
-	commitID               string
+	originCommandID        string
 	observedDetails        map[string]tableChangeDetail
 	cacheInvalidatedTables map[string]bool
 	changedAtMS            float64
@@ -368,14 +350,14 @@ type wsConn struct {
 	// that finally names the project: it was derived before the project was
 	// known, so it is "default" rather than the project's own tenant.
 	tenantPinned      bool
-	user              *gonvex.User
+	user              *gonvex.Account
 	member            *gonvex.Member
 	perms             map[string]any
 	auth              bool
 	authToken         string
 	authCheckedAt     time.Time
-	cacheScope        string
-	syncScope         string
+	replicaScope      string
+	visibilityScope   string
 	connectedAt       time.Time
 	lastActiveAt      time.Time
 	lastActivity      string
@@ -383,9 +365,9 @@ type wsConn struct {
 	device            clientDeviceInfo
 	mu                sync.Mutex
 	subs              map[string]querySubscription
-	syncs             map[string]*syncSubscription
-	syncReadyMany     bool
-	syncWatermark     bool
+	replicas          map[string]*replicaSubscription
+	replicaReadyMany  bool
+	replicaWatermark  bool
 	queryPagePatch    bool
 	queryObjectPatch  bool
 	queryOrderDelta   bool
@@ -394,17 +376,17 @@ type wsConn struct {
 	pendingQueries    []serverMessage
 	queryBatchStarted time.Time
 	pendingReady      []serverMessage
-	pendingWatermarks []pendingSyncWatermark
+	pendingWatermarks []pendingReplicaWatermark
 	readyTimer        *time.Timer
 	bytesReceived     atomic.Uint64
 	bytesSent         atomic.Uint64
-	// writesInFlight counts mutation/action frames currently executing on this
+	// writesInFlight counts reducer/action frames currently executing on this
 	// connection's reader goroutine, so a worker drain can close idle sockets
 	// first and avoid interrupting an acknowledged-but-uncommitted write.
 	writesInFlight atomic.Int32
 }
 
-type pendingSyncWatermark struct {
+type pendingReplicaWatermark struct {
 	revision uint64
 	waiting  map[string]struct{}
 }
@@ -414,13 +396,13 @@ const queryResultFlushDelay = 2 * time.Millisecond
 const queryResultMaxBatchDelay = 50 * time.Millisecond
 
 type callerContext struct {
-	user        *gonvex.User
+	user        *gonvex.Account
 	member      *gonvex.Member
 	permissions map[string]any
 }
 
 // subject is the authenticated identity that idempotency claims are scoped
-// to, so one user's stored mutation result is never replayable by another.
+// to, so one user's stored reducer result is never replayable by another.
 func (caller callerContext) subject() string {
 	if caller.user == nil {
 		return ""
@@ -454,7 +436,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		lastActiveAt: connectedAt,
 		lastActivity: "connected",
 		subs:         map[string]querySubscription{},
-		syncs:        map[string]*syncSubscription{},
+		replicas:     map[string]*replicaSubscription{},
 	}
 	pingHandler := conn.PingHandler()
 	conn.SetPingHandler(func(message string) error {
@@ -472,27 +454,27 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.removeWSConn(client)
 		client.close()
 	}()
-	var initialCache *queryCacheDirective
+	var initialReplica *replicaDirective
 	if !s.projectRequiresAuthentication(r.Context(), client.project) {
-		initialCache = s.queryCacheDirective(client.project, client.tenant, callerContext{})
-		if initialCache != nil {
-			client.cacheScope = initialCache.Scope
-			client.syncScope = initialCache.SyncScope
+		initialReplica = s.replicaDirective(client.project, client.tenant, callerContext{})
+		if initialReplica != nil {
+			client.replicaScope = initialReplica.Scope
+			client.visibilityScope = initialReplica.VisibilityScope
 		}
 	}
 	client.write(serverMessage{
-		Type:       "session.ready",
-		Project:    client.project,
-		Tenant:     client.tenant,
-		QueryCache: initialCache,
+		Type:    "session.ready",
+		Project: client.project,
+		Tenant:  client.tenant,
+		Replica: initialReplica,
 		Capabilities: &serverCapabilities{
-			ProtocolVersion: websocketProtocolVersion,
-			RuntimeVersion:  runtimeBuildVersion(),
-			SyncBatch:       1,
-			SyncIntegrity:   1,
-			QueryBatch:      1,
-			ReducerBatch:    1,
-			SyncWatermark:   1,
+			ProtocolVersion:  websocketProtocolVersion,
+			RuntimeVersion:   runtimeBuildVersion(),
+			ReplicaBatch:     1,
+			ReplicaIntegrity: 1,
+			QueryBatch:       1,
+			ReducerBatch:     1,
+			ReplicaWatermark: 1,
 		},
 	})
 
@@ -549,17 +531,17 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			permissions = member.Permissions
 		}
 		caller := callerContext{user: user, member: member, permissions: permissions}
-		directive := c.server.queryCacheDirective(project, tenant, caller)
-		cacheScope := ""
-		connSyncScope := ""
+		directive := c.server.replicaDirective(project, tenant, caller)
+		replicaScope := ""
+		connVisibilityScope := ""
 		if directive != nil {
-			cacheScope = directive.Scope
-			connSyncScope = directive.SyncScope
+			replicaScope = directive.Scope
+			connVisibilityScope = directive.VisibilityScope
 		}
 		c.mu.Lock()
 		oldProject := c.project
 		oldTenant := c.tenant
-		oldSyncScope := c.syncScope
+		oldVisibilityScope := c.visibilityScope
 		oldSubs := make([]querySubscription, 0, len(c.subs))
 		c.user = user
 		c.member = member
@@ -569,10 +551,10 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.auth = true
 		c.authToken = message.Token
 		c.authCheckedAt = time.Now()
-		c.cacheScope = cacheScope
-		c.syncScope = connSyncScope
-		c.syncReadyMany = message.Capabilities != nil && message.Capabilities.SyncReadyMany == 1
-		c.syncWatermark = message.Capabilities != nil && message.Capabilities.SyncWatermark == 1
+		c.replicaScope = replicaScope
+		c.visibilityScope = connVisibilityScope
+		c.replicaReadyMany = message.Capabilities != nil && message.Capabilities.ReplicaReadyMany == 1
+		c.replicaWatermark = message.Capabilities != nil && message.Capabilities.ReplicaWatermark == 1
 		c.queryPagePatch = message.Capabilities != nil && message.Capabilities.QueryPagePatch == 1
 		c.queryObjectPatch = message.Capabilities != nil && message.Capabilities.QueryObjectPatch == 1
 		c.queryOrderDelta = message.Capabilities != nil && message.Capabilities.QueryOrderDelta == 1
@@ -595,7 +577,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			sub.caller = caller
 			sub.token.active.Store(false)
 			sub.token = newSubscriptionToken("")
-			sub.cacheScope = cacheScope
+			sub.replicaScope = replicaScope
 			c.subs[id] = sub
 			subs = append(subs, sub)
 		}
@@ -603,31 +585,31 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		for _, sub := range oldSubs {
 			c.server.subscriptions.detach(sub)
 		}
-		userID := ""
+		accountID := ""
 		if user != nil {
-			userID = user.ID
+			accountID = user.ID
 		}
-		authResult := map[string]any{"userId": userID, "projectId": project, "tenantId": tenant}
+		authResult := map[string]any{"accountId": accountID, "projectId": project, "tenantId": tenant}
 		if directive != nil {
-			authResult["queryCache"] = directive
+			authResult["replica"] = directive
 		}
 		c.write(serverMessage{Type: "auth.result", ID: message.ID, Result: authResult})
 		for _, sub := range subs {
 			c.server.subscriptions.attach(sub)
 		}
-		// Sync subscriptions are keyed by visibility (project/tenant/user/
-		// permissions), not by the code-bundle cache scope. A re-auth after a
+		// Replica subscriptions are keyed by visibility (project/tenant/user/
+		// permissions), not by the module-generation cache scope. A re-auth after a
 		// deploy keeps the same visibility and must not force every collection
 		// back through a full snapshot.
-		if oldProject != project || oldTenant != tenant || (oldSyncScope != "" && oldSyncScope != connSyncScope) {
-			c.resetSyncSubscriptions("visibility-changed")
+		if oldProject != project || oldTenant != tenant || (oldVisibilityScope != "" && oldVisibilityScope != connVisibilityScope) {
+			c.resetReplicaSubscriptions("visibility-changed")
 		}
 	case "query.subscribe":
 		if !c.requireAuth(ctx, "query.error", message.ID) {
 			return
 		}
 		c.subscribeQuery(ctx, querySubscribeRequest{
-			ID: message.ID, Path: message.Path, Args: message.Args, CacheRevision: message.CacheRevision,
+			ID: message.ID, Path: message.Path, Args: message.Args, WindowRevision: message.WindowRevision,
 		})
 	case "query.call":
 		if !c.requireAuth(ctx, "query.error", message.ID) {
@@ -662,18 +644,18 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			c.server.subscriptions.detach(sub)
 			sub.cancel()
 		}
-	case "sync.open":
-		if !c.requireAuth(ctx, "sync.error", message.ID) {
+	case "replica.open":
+		if !c.requireAuth(ctx, "replica.error", message.ID) {
 			return
 		}
-		c.openSync(ctx, message)
-	case "sync.openMany":
-		if !c.requireAuth(ctx, "sync.error", "") {
+		c.openReplica(ctx, message)
+	case "replica.openMany":
+		if !c.requireAuth(ctx, "replica.error", "") {
 			return
 		}
-		c.openSyncMany(ctx, message.Opens)
-	case "sync.close":
-		c.closeSync(message.ID)
+		c.openReplicaMany(ctx, message.Opens)
+	case "replica.close":
+		c.closeReplica(message.ID)
 	case "reducer.call":
 		if !c.requireAuth(ctx, "reducer.error", message.ID) {
 			return
@@ -730,7 +712,7 @@ func (c *wsConn) observeActivity(message clientMessage, observedAt time.Time) {
 	c.lastActiveAt = observedAt.UTC()
 	c.lastActivity = activity
 	lastPath := strings.TrimSpace(message.Path)
-	if message.Type == "sync.openMany" && len(message.Opens) > 0 {
+	if message.Type == "replica.openMany" && len(message.Opens) > 0 {
 		paths := make([]string, 0, min(len(message.Opens), 3))
 		for _, open := range message.Opens {
 			if path := strings.TrimSpace(open.Path); path != "" && len(paths) < 3 {
@@ -859,9 +841,6 @@ func transactionEntryFromClientTelemetry(project string, tenant string, message 
 }
 
 func (c *wsConn) requireAuth(ctx context.Context, errorType string, id string) bool {
-	if !c.server.projectRequiresAuthentication(ctx, c.project) {
-		return true
-	}
 	c.mu.Lock()
 	authenticated := c.auth
 	c.mu.Unlock()
@@ -883,38 +862,27 @@ func (c *wsConn) revalidateAppAuth(ctx context.Context) error {
 	checkedAt := c.authCheckedAt
 	authenticated := c.auth
 	c.mu.Unlock()
-	nativeEnabled := false
-	if strings.TrimSpace(c.server.projectRegistryURL()) != "" {
-		var err error
-		nativeEnabled, err = c.server.nativeAppAuthEnabled(ctx, project)
-		if err != nil {
-			return fmt.Errorf("project authentication configuration is unavailable")
-		}
-	}
-	if !c.server.config.RequireAuth && !nativeEnabled {
-		return nil
-	}
 	if !authenticated {
 		return fmt.Errorf("authentication is required")
 	}
 	nativeToken := strings.HasPrefix(strings.TrimSpace(token), "gvx_session_")
-	if nativeEnabled && !nativeToken {
+	if !nativeToken {
 		return fmt.Errorf("a Gonvex app session is required")
 	}
-	if !nativeToken || time.Since(checkedAt) < 5*time.Second {
+	if time.Since(checkedAt) < 5*time.Second {
 		return nil
 	}
 	session, _, err := c.server.validateAppSession(ctx, project, token, tenant)
 	if err != nil {
 		return err
 	}
-	member, err := c.server.loadTenantMember(ctx, project, tenant, session.User.accountID())
+	member, err := c.server.loadTenantMember(ctx, project, tenant, session.Account.canonicalID())
 	if err != nil {
 		return err
 	}
 	c.mu.Lock()
 	if c.authToken == token {
-		c.user = &gonvex.User{ID: session.User.accountID(), Email: session.User.Email, Name: session.User.Name, AvatarURL: session.User.Picture}
+		c.user = &gonvex.Account{ID: session.Account.canonicalID(), Email: session.Account.Email, Name: session.Account.Name, AvatarURL: session.Account.Picture}
 		c.member = member
 		c.perms = member.Permissions
 		c.authCheckedAt = time.Now()
@@ -938,15 +906,15 @@ func (c *wsConn) clearAuthentication() {
 	c.auth = false
 	c.authToken = ""
 	c.authCheckedAt = time.Time{}
-	c.cacheScope = ""
-	c.syncScope = ""
+	c.replicaScope = ""
+	c.visibilityScope = ""
 	for id, sub := range c.subs {
 		oldSubs = append(oldSubs, sub)
 		if sub.cancel != nil {
 			sub.cancel()
 		}
 		sub.caller = callerContext{}
-		sub.cacheScope = ""
+		sub.replicaScope = ""
 		sub.token.active.Store(false)
 		sub.token = newSubscriptionToken("")
 		c.subs[id] = sub
@@ -955,7 +923,7 @@ func (c *wsConn) clearAuthentication() {
 	for _, sub := range oldSubs {
 		c.server.subscriptions.detach(sub)
 	}
-	c.resetSyncSubscriptions("visibility-changed")
+	c.resetReplicaSubscriptions("visibility-changed")
 }
 
 func (c *wsConn) subscribeQuery(ctx context.Context, request querySubscribeRequest) {
@@ -963,12 +931,17 @@ func (c *wsConn) subscribeQuery(ctx context.Context, request querySubscribeReque
 		c.write(serverMessage{Type: "query.error", ID: request.ID, Error: "query id and path are required"})
 		return
 	}
-	if _, _, ok := c.server.liveQueryDependencies(ctx, c.project, request.Path); !ok {
+	_, livePlan, ok := c.server.liveQueryDependencies(ctx, c.project, request.Path)
+	if !ok || livePlan == nil {
 		c.write(serverMessage{Type: "query.error", ID: request.ID, Path: request.Path, Error: "Live Query is not registered with a structured plan"})
 		return
 	}
+	if _, err := c.server.requiredVisibilityPlan(c.project, livePlan.Table); err != nil {
+		c.write(serverMessage{Type: "query.error", ID: request.ID, Path: request.Path, Error: err.Error()})
+		return
+	}
 	subCtx, cancel := context.WithCancel(ctx)
-	sub := querySubscription{conn: c, id: request.ID, project: c.project, tenant: c.tenant, path: request.Path, args: request.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: newSubscriptionToken(request.CacheRevision), cacheScope: c.currentCacheScope(), cacheRevision: request.CacheRevision}
+	sub := querySubscription{conn: c, id: request.ID, project: c.project, tenant: c.tenant, path: request.Path, args: request.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: newSubscriptionToken(request.WindowRevision), replicaScope: c.currentReplicaScope(), windowRevision: request.WindowRevision}
 	c.mu.Lock()
 	previous, hadPrevious := c.subs[request.ID]
 	c.subs[request.ID] = sub
@@ -990,9 +963,9 @@ func (c *wsConn) callReducer(ctx context.Context, receivedAt time.Time, request 
 	trace.ServerReceivedAtMS = epochMillis(receivedAt)
 	trace.ServerReducerStartedAtMS = epochMillis(time.Now())
 	caller := c.caller()
-	reducerCtx := withMutationID(ctx, request.ID)
+	reducerCtx := withCommandID(ctx, request.ID)
 	if key := strings.TrimSpace(request.IdempotencyKey); key != "" {
-		reducerCtx = withMutationIdempotency(reducerCtx, key, caller.subject())
+		reducerCtx = withReducerIdempotency(reducerCtx, key, caller.subject())
 	}
 	result, err := c.server.executeTenantReducerForCaller(reducerCtx, c.project, c.tenant, caller, request.Path, request.Args)
 	committedAt := time.Now().UTC()
@@ -1032,7 +1005,7 @@ func (s *Server) commandCommittedRevision(ctx context.Context, projectID, tenant
 		err = db.QueryRowContext(ctx, `
 			SELECT COALESCE(MAX(revision), 0)
 			FROM _gonvex_sync_changes
-			WHERE mutation_id = $1
+			WHERE command_id = $1
 		`, commandID).Scan(&candidate)
 		db.Close()
 		if err == nil && candidate > revision {
@@ -1042,16 +1015,16 @@ func (s *Server) commandCommittedRevision(ctx context.Context, projectID, tenant
 	return revision
 }
 
-func (c *wsConn) currentCacheScope() string {
+func (c *wsConn) currentReplicaScope() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.cacheScope
+	return c.replicaScope
 }
 
-func (c *wsConn) currentSyncScope() string {
+func (c *wsConn) currentVisibilityScope() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.syncScope
+	return c.visibilityScope
 }
 
 func (c *wsConn) cancelSubscriptions() {
@@ -1069,7 +1042,7 @@ func (c *wsConn) cancelSubscriptions() {
 			sub.cancel()
 		}
 	}
-	c.closeAllSyncs()
+	c.closeAllReplicas()
 }
 
 func (c *wsConn) write(message serverMessage) {
@@ -1087,7 +1060,7 @@ func (c *wsConn) write(message serverMessage) {
 	}
 	c.flushPendingQueriesLocked()
 	c.writeLocked(message)
-	if message.Type == "sync.reset" || message.Type == "sync.error" {
+	if message.Type == "replica.reset" || message.Type == "replica.error" {
 		c.resolvePendingWatermarksLocked(message.ID, ^uint64(0))
 	}
 }
@@ -1123,7 +1096,7 @@ func (c *wsConn) flushPendingQueriesLocked() {
 
 // scheduleQueryBatch uses one short leading-edge timer for the entire runtime
 // rather than one trailing-edge timer per socket. Independent query paths from
-// the same commit still coalesce on each connection, while a steady mutation
+// the same commit still coalesce on each connection, while steady reducer
 // stream cannot postpone a flush beyond this fixed window.
 func (s *Server) scheduleQueryBatch(connection *wsConn) {
 	if s == nil || connection == nil {
@@ -1163,10 +1136,10 @@ func (s *Server) flushQueryBatches() {
 	workers.Wait()
 }
 
-func (c *wsConn) writeSyncReady(message serverMessage) {
+func (c *wsConn) writeReplicaReady(message serverMessage) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.syncReadyMany {
+	if !c.replicaReadyMany {
 		c.writeLocked(message)
 	} else if c.conn != nil {
 		c.pendingReady = append(c.pendingReady, message)
@@ -1177,15 +1150,15 @@ func (c *wsConn) writeSyncReady(message serverMessage) {
 	}
 }
 
-func (c *wsConn) writeSyncWatermark(revision uint64, waiting []string) {
+func (c *wsConn) writeReplicaWatermark(revision uint64, waiting []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.syncWatermark || c.conn == nil || revision == 0 {
+	if !c.replicaWatermark || c.conn == nil || revision == 0 {
 		return
 	}
-	pending := pendingSyncWatermark{revision: revision, waiting: make(map[string]struct{}, len(waiting))}
+	pending := pendingReplicaWatermark{revision: revision, waiting: make(map[string]struct{}, len(waiting))}
 	for _, id := range waiting {
-		if _, current := c.syncs[id]; id != "" && current {
+		if _, current := c.replicas[id]; id != "" && current {
 			pending.waiting[id] = struct{}{}
 		}
 	}
@@ -1216,7 +1189,7 @@ func (c *wsConn) releasePendingWatermarksLocked() {
 	for len(c.pendingWatermarks) > 0 && len(c.pendingWatermarks[0].waiting) == 0 {
 		pending := c.pendingWatermarks[0]
 		c.pendingWatermarks = c.pendingWatermarks[1:]
-		c.pendingReady = append(c.pendingReady, serverMessage{Type: "sync.watermark", Revision: pending.revision})
+		c.pendingReady = append(c.pendingReady, serverMessage{Type: "replica.watermark", Revision: pending.revision})
 		c.armReadyTimerLocked()
 	}
 }
@@ -1238,13 +1211,13 @@ func (c *wsConn) flushPendingReadiesLocked() {
 	pending := c.pendingReady
 	c.pendingReady = nil
 	for len(pending) > 0 {
-		if pending[0].Type != "sync.ready" {
+		if pending[0].Type != "replica.ready" {
 			c.writeLocked(pending[0])
 			pending = pending[1:]
 			continue
 		}
 		end := 1
-		for end < len(pending) && pending[end].Type == "sync.ready" {
+		for end < len(pending) && pending[end].Type == "replica.ready" {
 			end++
 		}
 		c.writePendingReadyGroupLocked(pending[:end])
@@ -1257,18 +1230,18 @@ func (c *wsConn) writePendingReadyGroupLocked(pending []serverMessage) {
 		c.writeLocked(pending[0])
 		return
 	}
-	ready := make([]syncReadyMessage, 0, len(pending))
+	ready := make([]replicaReadyMessage, 0, len(pending))
 	for _, message := range pending {
 		truncated := false
 		if message.Truncated != nil {
 			truncated = *message.Truncated
 		}
-		ready = append(ready, syncReadyMessage{
+		ready = append(ready, replicaReadyMessage{
 			ID: message.ID, Path: message.Path, Cursor: message.Cursor, Mode: message.Mode,
 			Digest: message.Digest, Truncated: truncated,
 		})
 	}
-	c.writeLocked(serverMessage{Type: "sync.readyMany", Ready: ready})
+	c.writeLocked(serverMessage{Type: "replica.readyMany", Ready: ready})
 }
 
 func (c *wsConn) writeLocked(message serverMessage) {
@@ -1354,9 +1327,8 @@ func (s *Server) revokeAppAuthTokenConnection(token string) {
 	}
 }
 
-// enforceNativeAppAuthConnections immediately cancels anonymous and legacy
-// subscriptions when a project transitions from public/legacy auth to native
-// app auth. Existing native sessions can remain and are revalidated normally.
+// enforceNativeAppAuthConnections immediately cancels connections without a
+// canonical Gonvex app session when project authentication is enabled.
 func (s *Server) enforceNativeAppAuthConnections(projectID string) {
 	s.wsMu.RLock()
 	connections := make([]*wsConn, 0, len(s.wsConns))
@@ -1379,8 +1351,8 @@ type websocketConnectionSnapshot struct {
 	ID             string   `json:"id"`
 	Project        string   `json:"project"`
 	Tenant         string   `json:"tenant"`
-	UserID         string   `json:"userId,omitempty"`
-	UserEmail      string   `json:"userEmail,omitempty"`
+	AccountID      string   `json:"accountId,omitempty"`
+	AccountEmail   string   `json:"accountEmail,omitempty"`
 	Authenticated  bool     `json:"authenticated"`
 	ConnectedAt    string   `json:"connectedAt"`
 	LastActiveAt   string   `json:"lastActiveAt"`
@@ -1396,7 +1368,7 @@ type websocketConnectionSnapshot struct {
 // websocketCounts is the cheap sibling of websocketSnapshot for the background
 // load sampler: connection/user/subscription totals across all projects,
 // without building per-connection detail records.
-func (s *Server) websocketCounts() (connections int, users int, subscriptions int) {
+func (s *Server) websocketCounts() (connections int, accounts int, subscriptions int) {
 	s.wsMu.RLock()
 	conns := make([]*wsConn, 0, len(s.wsConns))
 	for conn := range s.wsConns {
@@ -1407,7 +1379,7 @@ func (s *Server) websocketCounts() (connections int, users int, subscriptions in
 	seen := map[string]bool{}
 	for _, conn := range conns {
 		conn.mu.Lock()
-		subscriptions += len(conn.subs) + len(conn.syncs)
+		subscriptions += len(conn.subs) + len(conn.replicas)
 		identity := "anonymous"
 		if conn.user != nil && conn.user.ID != "" {
 			identity = conn.user.ID
@@ -1429,7 +1401,7 @@ func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot
 	s.wsMu.RUnlock()
 
 	snapshot := websocketMetricSnapshot{Details: []websocketConnectionSnapshot{}}
-	users := map[string]bool{}
+	accounts := map[string]bool{}
 	totalConnections := 0
 	for _, conn := range connections {
 		conn.mu.Lock()
@@ -1450,20 +1422,20 @@ func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot
 			DeviceType:     conn.device.DeviceType,
 			Platform:       conn.device.Platform,
 			ConnectionType: conn.device.EffectiveConnectionType,
-			Subscriptions:  make([]string, 0, len(conn.subs)+len(conn.syncs)),
+			Subscriptions:  make([]string, 0, len(conn.subs)+len(conn.replicas)),
 		}
 		if detail.ID == "" {
 			detail.ID = fmt.Sprintf("conn-%06d", len(snapshot.Details)+1)
 		}
 		if conn.user != nil {
-			detail.UserID = conn.user.ID
-			detail.UserEmail = conn.user.Email
+			detail.AccountID = conn.user.ID
+			detail.AccountEmail = conn.user.Email
 		}
 		for _, sub := range conn.subs {
 			detail.Subscriptions = append(detail.Subscriptions, sub.path)
 		}
-		for _, syncSubscription := range conn.syncs {
-			detail.Subscriptions = append(detail.Subscriptions, syncSubscription.path)
+		for _, replicaSubscription := range conn.replicas {
+			detail.Subscriptions = append(detail.Subscriptions, replicaSubscription.path)
 		}
 		conn.mu.Unlock()
 		sort.Strings(detail.Subscriptions)
@@ -1476,11 +1448,11 @@ func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot
 		} else {
 			snapshot.DetailsTruncated = true
 		}
-		identity := detail.UserID
+		identity := detail.AccountID
 		if identity == "" {
 			identity = "anonymous"
 		}
-		users[identity] = true
+		accounts[identity] = true
 	}
 	sort.Slice(snapshot.Details, func(left, right int) bool {
 		if snapshot.Details[left].LastActiveAt == snapshot.Details[right].LastActiveAt {
@@ -1489,15 +1461,15 @@ func (s *Server) websocketSnapshot(projectFilter string) websocketMetricSnapshot
 		return snapshot.Details[left].LastActiveAt > snapshot.Details[right].LastActiveAt
 	})
 	snapshot.Connections = totalConnections
-	snapshot.Users = len(users)
+	snapshot.Accounts = len(accounts)
 	return snapshot
 }
 
-// rerunProjectSubscriptions refreshes every live query after a project bundle
-// is installed. A client can connect while /dev/sync is still compiling the
-// bundle and receive an initial "not implemented" error; table-specific
-// invalidation is insufficient because reference-data queries do not depend on
-// the tasks table. The new bundle can also change any query's implementation,
+// rerunProjectSubscriptions refreshes every Live Query after a module generation
+// is installed. A client can connect while /dev/sync is still loading the
+// generation and receive an initial "not implemented" error; table-specific
+// change routing is insufficient because reference-data queries do not depend on
+// the tasks table. The new generation can also change any Query's implementation,
 // so all subscriptions for that project must be evaluated again.
 func (s *Server) projectSubscriptions(projectID string) []querySubscription {
 	s.wsMu.RLock()
@@ -1534,18 +1506,18 @@ func (s *Server) scheduleTableChange(change tableChange) {
 	}
 	s.tableChangeMu.Lock()
 	tableKey := strings.Join(changedTables, "\x1f")
-	if commitID := strings.TrimSpace(change.commitID); commitID != "" {
-		tableKey = "commit\x1f" + commitID
+	if originCommandID := strings.TrimSpace(change.originCommandID); originCommandID != "" {
+		tableKey = "commit\x1f" + originCommandID
 	}
 	key := strings.Join([]string{change.project, change.tenant, tableKey}, ":")
 	pending := s.tableChanges[key]
 	pending.project = change.project
 	pending.tenant = change.tenant
-	pending.commitID = strings.TrimSpace(change.commitID)
-	if pending.commitID != "" {
-		// The declared mutation event carries the actual commit timestamp; the
+	pending.originCommandID = strings.TrimSpace(change.originCommandID)
+	if pending.originCommandID != "" {
+		// The committed change-feed event carries the actual commit timestamp; the
 		// LISTEN event is observed slightly later. Keep the earliest positive
-		// timestamp so client TTLU frames correlate with the mutation result and
+		// timestamp so client TTLU frames correlate with the reducer result and
 		// measure from commit, regardless of which event reaches this merger first.
 		if pending.changedAtMS == 0 || (change.changedAtMS > 0 && change.changedAtMS < pending.changedAtMS) {
 			pending.changedAtMS = change.changedAtMS
@@ -1611,7 +1583,7 @@ func (s *Server) flushTableChange(key string) {
 	if !delivery.triggerObserved {
 		s.invalidateVisibilityContexts(delivery.project, delivery.tenant, changedTables)
 		s.subscriptions.rebindVisibilityForChange(delivery)
-		s.resetSyncsForVisibilityChange(delivery)
+		s.resetReplicasForVisibilityChange(delivery)
 	}
 	s.subscriptions.requestChange(delivery)
 }
@@ -1620,7 +1592,6 @@ func (s *Server) invalidateTableCaches(projectID string, tenantID string, tables
 	if len(tables) == 0 {
 		return
 	}
-	s.cache.invalidateQueries(context.Background(), projectID, tenantID, tables)
 	for _, table := range tables {
 		s.cache.invalidateRows(context.Background(), projectID, tenantID, table)
 	}
@@ -1657,7 +1628,7 @@ func mergeTableChangeDetail(current, next tableChangeDetail) tableChangeDetail {
 
 func pendingChangeForDelivery(pending pendingTableChange) tableChange {
 	change := tableChange{
-		project: pending.project, tenant: pending.tenant, commitID: pending.commitID,
+		project: pending.project, tenant: pending.tenant, originCommandID: pending.originCommandID,
 		changedAtMS: pending.changedAtMS,
 		tables:      map[string]bool{}, details: map[string]tableChangeDetail{},
 	}
@@ -1751,108 +1722,6 @@ func appendUniqueStrings(existing []string, values ...string) []string {
 	return existing
 }
 
-func (s *Server) queryDependencyTables(projectID, path string) []string {
-	reads := s.runtime.ManifestForProject(projectID).Functions[path].Dependencies.Reads
-	tables := make([]string, 0, len(reads))
-	for _, read := range reads {
-		tables = appendUniqueStrings(tables, read.Table)
-	}
-	if len(tables) == 0 {
-		engine := s.runtime.EngineForProject(projectID)
-		if engine == nil {
-			engine = s.appEngine
-		}
-		if descriptor, ok := engine.Describe(path); ok {
-			for _, read := range descriptor.Dependencies.Reads {
-				tables = appendUniqueStrings(tables, read.Table)
-			}
-		}
-	}
-	return tables
-}
-
-func (s *Server) rerunSubscriptions(subs []querySubscription, reason string, changeCommittedAtMS float64) {
-	for _, sub := range subs {
-		s.subscriptions.request(sub, reason, changeCommittedAtMS)
-	}
-}
-
-func (s *Server) executeSubscription(ctx context.Context, sub querySubscription, reason string, changeCommittedAtMS float64) {
-	// A subscription can be cancelled while a table-change fan-out is already
-	// queued. That stale rerun belongs to the subscription, not the connection,
-	// and must never clear authentication for every other live subscription.
-	if ctx.Err() != nil {
-		return
-	}
-	if err := sub.conn.revalidateAppAuth(ctx); err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		sub.conn.clearAuthentication()
-		sub.conn.write(serverMessage{Type: "query.error", ID: sub.id, Error: "authentication is required"})
-		return
-	}
-	startedAt := time.Now().UTC()
-	result, err := s.executeTenantQueryForCallerCached(ctx, sub.project, sub.tenant, sub.caller, sub.path, sub.args, sub.cacheScope, reason)
-	if ctx.Err() != nil {
-		return
-	}
-	if err != nil {
-		sub.conn.write(serverMessage{Type: "query.error", ID: sub.id, Error: err.Error()})
-		s.recordTransactionTelemetry(transactionTelemetryEntry{
-			Time:        time.Now().UTC().Format(time.RFC3339Nano),
-			Project:     sub.project,
-			Tenant:      sub.tenant,
-			OperationID: sub.id,
-			Kind:        "query",
-			Path:        sub.path,
-			Phase:       "server",
-			Reason:      reason,
-			Outcome:     "error",
-			Error:       err.Error(),
-		})
-		return
-	}
-	sub.rowIDs = resultRowIDs(result)
-	sub.conn.mu.Lock()
-	current, ok := sub.conn.subs[sub.id]
-	if ok && current.token == sub.token {
-		current.rowIDs = sub.rowIDs
-		sub.conn.subs[sub.id] = current
-	}
-	sub.conn.mu.Unlock()
-	if !ok || current.token != sub.token {
-		return
-	}
-	sentAt := time.Now().UTC()
-	trace := &messageTrace{
-		ServerChangeCommittedAtMS:     changeCommittedAtMS,
-		ServerSubscriptionStartedAtMS: epochMillis(startedAt),
-		ServerSubscriptionSentAtMS:    epochMillis(sentAt),
-		ServerDurationMS:              float64(sentAt.Sub(startedAt).Microseconds()) / 1000,
-	}
-	payload, marshalErr := json.Marshal(explicitNull(result))
-	if marshalErr != nil {
-		sub.conn.write(serverMessage{Type: "query.error", ID: sub.id, Path: sub.path, Error: marshalErr.Error()})
-		return
-	}
-	hash, queryPerf := queryResultSemantics(payload)
-	trace.QueryPerf = queryPerf
-	cacheRevision := s.nextQueryCacheRevision(hash)
-	if queryCacheRevisionMatchesHash(currentListenerCacheRevision(sub), hash) {
-		sub.conn.write(serverMessage{
-			Type: "query.progress", ID: sub.id, Path: sub.path, Reason: reason, Trace: trace,
-			ThroughRevision: &subscriptionRevision{Epoch: s.subscriptions.epoch, Sequence: s.subscriptions.sequence.Add(1)},
-		})
-	} else {
-		sub.conn.write(serverMessage{Type: "query.result", ID: sub.id, Path: sub.path, Result: json.RawMessage(payload), Reason: reason, Trace: trace, CacheScope: sub.cacheScope, CacheRevision: cacheRevision})
-		// Later unchanged-payload checks must compare against what was
-		// actually delivered, not the subscribe-time revision.
-		storeListenerCacheRevision(sub, cacheRevision)
-	}
-	s.recordTransactionTelemetry(transactionEntryFromTrace(sub.project, sub.tenant, sub.id, "query", sub.path, "server", reason, "ok", "", trace))
-}
-
 func resultRowIDs(result any) map[string]bool {
 	ids := map[string]bool{}
 	collect := func(row map[string]any) {
@@ -1869,10 +1738,6 @@ func resultRowIDs(result any) map[string]bool {
 			if id = strings.TrimSpace(id); id != "" {
 				ids[id] = true
 			}
-		}
-	case data.RowsResult:
-		for _, row := range rows.Rows {
-			collect(row)
 		}
 	case []map[string]any:
 		for _, row := range rows {
@@ -1920,14 +1785,13 @@ func (s *Server) executeTenantQueryForCaller(ctx context.Context, projectID stri
 		return nil, ctx.Err()
 	}
 	defer release()
-	return s.executeTenantQueryForCallerCached(ctx, projectID, tenantID, caller, path, rawArgs, "", "internal")
+	return s.executeTenantQueryForCallerTracked(ctx, projectID, tenantID, caller, path, rawArgs, "internal")
 }
 
-func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage, cacheScope string, reason string) (result any, err error) {
+func (s *Server) executeTenantQueryForCallerTracked(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage, reason string) (result any, err error) {
 	kind := s.functionKind(projectID, path, "query")
 	s.metrics.recordFunctionStart(kind)
 	execution := newRuntimeFunctionLog(projectID, tenantID, path, kind, caller, rawArgs)
-	execution.entry.Cache = "bypass"
 	execution.entry.Source = "database"
 	execution.entry.Reason = reason
 	defer func() {
@@ -1935,248 +1799,44 @@ func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectI
 		s.metrics.recordFunctionExecution(execution, err)
 	}()
 
-	cacheKey := ""
-	cacheGeneration := ""
-	queryTables := s.queryDependencyTables(projectID, path)
-	if strings.TrimSpace(cacheScope) != "" && s.cache.enabled() {
-		if generation, ok := s.cache.queryGeneration(ctx, projectID, tenantID, queryTables); ok {
-			cacheGeneration = generation
-			cacheKey = s.cache.queryKey(projectID, tenantID, generation, cacheScope, path, rawArgs)
-		} else {
-			execution.entry.Cache = "error"
-		}
-		// An invalidation-triggered rerun exists because a mutation just
-		// changed one of this query's tables. Serving it from the cache can
-		// replay the pre-mutation payload (observed: a delete's rerun answered
-		// "unchanged" and the subscribed grid never dropped the row). Always
-		// recompute for invalidations; the fresh result is still stored below.
-		if cacheKey != "" && reason == "invalidate" {
-			execution.entry.Cache = "bypass"
-			s.metrics.recordCache(projectID, "bypass")
-		} else if cacheKey != "" {
-			payload, outcome := s.cache.read(ctx, cacheKey)
-			if outcome == "hit" {
-				if decodeErr := json.Unmarshal(payload, &result); decodeErr == nil {
-					execution.entry.Cache = "hit"
-					execution.entry.Source = "redis"
-					s.metrics.recordCache(projectID, "hit")
-					return result, nil
-				}
-				execution.entry.Cache = "error"
-				s.metrics.recordCache(projectID, "bypass")
-			} else {
-				execution.entry.Cache = outcome
-				if outcome == "miss" {
-					s.metrics.recordCache(projectID, "miss")
-				} else {
-					s.metrics.recordCache(projectID, "bypass")
-				}
-			}
-		} else {
-			s.metrics.recordCache(projectID, "bypass")
-		}
-	} else if strings.TrimSpace(cacheScope) != "" {
-		s.metrics.recordCache(projectID, "bypass")
-	}
-
 	databaseStartedAt := time.Now()
 	result, err = s.executeTenantQueryForCallerUncached(ctx, projectID, tenantID, caller, path, rawArgs)
 	s.metrics.recordReactive(func(metric *reactiveMetricState) {
 		metric.DatabaseQueryCount++
 		metric.DatabaseQueryDurationMS += float64(time.Since(databaseStartedAt).Microseconds()) / 1000
 	})
-	// Reactive invalidations already publish and retain the committed result in
-	// the subscription manager. Encoding and synchronously writing the same large
-	// value to Valkey delays every subscriber without improving correctness; a
-	// later initial/one-shot query may refill the cache through the normal path.
-	if err == nil && cacheKey != "" && reason != "invalidate" {
-		currentGeneration, generationOK := s.cache.queryGeneration(ctx, projectID, tenantID, queryTables)
-		if payload, encodeErr := json.Marshal(result); encodeErr == nil && generationOK && currentGeneration == cacheGeneration {
-			if decision := queryCacheWriteDecision(path, result); decision.store {
-				s.cache.setWithTTL(ctx, cacheKey, payload, decision.ttl)
-			}
-		}
-	}
 	return result, err
 }
 
-// queryCacheWriteDecision decides whether a successful query result should be
-// stored in Valkey and for how long. The goal is "Valkey is never lastingly wrong":
-//   - normal hits keep the configured TTL
-//   - empty / near-empty payloads get a short TTL so a transient poison result
-//     (schema-cache race returning empty statuses while workspaces load) cannot
-//     stick for the full 10m window
-//   - bulk.allReferenceData with empty statuses+priorities while other reference
-//     data is present is refused entirely (known poison shape from this incident)
-type queryCacheWriteChoice struct {
-	store bool
-	ttl   time.Duration
-}
-
-func queryCacheWriteDecision(path string, result any) queryCacheWriteChoice {
-	// Default: store with the cache's configured TTL (caller passes 0 → rowsCache.ttl).
-	defaultChoice := queryCacheWriteChoice{store: true, ttl: 0}
-
-	if path == "bulk.allReferenceData" {
-		if isPoisonedAllReferenceData(result) {
-			return queryCacheWriteChoice{store: false}
-		}
-		if isEmptyAllReferenceData(result) {
-			return queryCacheWriteChoice{store: true, ttl: emptyResultTTL}
-		}
-		return defaultChoice
-	}
-
-	// Never cache nil / missing-row results. Existence lookups like
-	// tenants.getByDomain returning null during a schema/control-plane blip would
-	// otherwise stick for emptyResultTTL and bounce clients to missingTenant.
-	if result == nil {
-		return queryCacheWriteChoice{store: false}
-	}
-	if isEmptyQueryResult(result) {
-		return queryCacheWriteChoice{store: true, ttl: emptyResultTTL}
-	}
-	return defaultChoice
-}
-
-func isPoisonedAllReferenceData(result any) bool {
-	m, ok := result.(map[string]any)
-	if !ok || m == nil {
-		return false
-	}
-	// Poison: statuses and priorities both empty, but the tenant clearly has
-	// other reference data (workspaces/teams). A blank new tenant can have empty
-	// statuses — those still get a short TTL via isEmptyAllReferenceData.
-	if !isEmptyList(m["statuses"]) || !isEmptyList(m["priorities"]) {
-		return false
-	}
-	for _, key := range []string{"workspaces", "teams", "categories", "templates", "users"} {
-		if !isEmptyList(m[key]) {
-			return true
-		}
-	}
-	return false
-}
-
-func isEmptyAllReferenceData(result any) bool {
-	m, ok := result.(map[string]any)
-	if !ok || m == nil {
-		return true
-	}
-	// "Empty" for caching purposes: no statuses and no priorities.
-	return isEmptyList(m["statuses"]) && isEmptyList(m["priorities"])
-}
-
-func isEmptyQueryResult(result any) bool {
-	if result == nil {
-		return true
-	}
-	switch v := result.(type) {
-	case []any:
-		return len(v) == 0
-	case []map[string]any:
-		return len(v) == 0
-	case map[string]any:
-		if page, ok := v["page"]; ok {
-			return isEmptyList(page)
-		}
-		// Single-object payloads are never treated as empty just for being a map.
-		return false
-	default:
-		return false
-	}
-}
-
-func isEmptyList(value any) bool {
-	if value == nil {
-		return true
-	}
-	switch v := value.(type) {
-	case []any:
-		return len(v) == 0
-	case []map[string]any:
-		return len(v) == 0
-	default:
-		// Non-list values are not "empty lists".
-		return false
-	}
-}
-
 func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (any, error) {
-	if isLegacyTaskQuery(path) {
-		return s.executeLegacyQuery(ctx, projectID, tenantID, path, rawArgs)
-	}
 	engine := s.engineForProject(ctx, projectID)
 	if engine != nil {
-		if _, ok := engine.Describe(path); !ok {
+		descriptor, ok := engine.Describe(path)
+		if !ok {
 			return nil, fmt.Errorf("query %q is not implemented by the runtime", path)
 		}
-		queryCtx, err := s.queryContext(ctx, projectID, tenantID, caller)
-		if err != nil {
-			return nil, err
+		if descriptor.Kind != moduleengine.KindQuery {
+			return nil, fmt.Errorf("function %q is not a query", path)
 		}
-		if queryCtx.DB == nil {
-			result, err := engine.InvokeQuery(queryCtx, moduleengine.Invocation{Path: path, Args: rawArgs})
-			return result.Value, err
+		if descriptor.Delivery == "" || descriptor.Delivery == gonvex.DeliveryOneShot {
+			if descriptor.Dependencies.LiveQueryPlan == nil {
+				return nil, fmt.Errorf("one-shot query %q requires a structured live query plan", path)
+			}
+			// One-shot Queries use the exact same structured SQL and centralized
+			// visibility path as Live Queries. Never invoke arbitrary module SQL.
+			payload, marshalErr := json.Marshal(descriptor.Dependencies.LiveQueryPlan)
+			if marshalErr != nil {
+				return nil, fmt.Errorf("query %q live query plan: %w", path, marshalErr)
+			}
+			var plan manifest.LiveQueryPlan
+			if unmarshalErr := json.Unmarshal(payload, &plan); unmarshalErr != nil {
+				return nil, fmt.Errorf("query %q live query plan: %w", path, unmarshalErr)
+			}
+			return s.executeStructuredLiveQuery(ctx, projectID, tenantID, caller, plan, rawArgs)
 		}
-		tx, err := queryCtx.DB.BeginTx(queryCtx.Context, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-		if err != nil {
-			return nil, err
-		}
-		queryCtx.Tx = tx
-		queryCtx.DB = nil
-		queryCtx.TenantDB = nil
-		queryCtx.ControlPlaneDB = nil
-		result, err := engine.InvokeQuery(queryCtx, moduleengine.Invocation{Path: path, Args: rawArgs})
-		if err != nil {
-			_ = tx.Rollback()
-			return nil, err
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-		return result.Value, nil
+		return nil, fmt.Errorf("query %q is delivered as %s and cannot be called as a one-shot query", path, descriptor.Delivery)
 	}
 	return nil, fmt.Errorf("query %q is not implemented by the runtime", path)
-}
-
-func (s *Server) executeLegacyQuery(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (any, error) {
-	// Resolve the project/tenant database before reading. The registered-function
-	// path hydrates via appForProject + runtimeContext, but the legacy grid path
-	// skips both, so without this the first query after a (re)start hits the
-	// fallback control DB and fails with relation "tasks" does not exist.
-	s.hydrateRuntimeStateForProject(ctx, projectID)
-	s.hydrateProjectTenantDatabases(ctx, projectID)
-	databaseURL := s.databaseURLForTenant(projectID, tenantID)
-	var err error
-	databaseURL, err = s.ensureRuntimeTenantDatabase(ctx, projectID, tenantIDFromRequest(projectID, tenantID), databaseURL)
-	if err != nil {
-		return nil, err
-	}
-	switch path {
-	case "tasks.grid":
-		var args taskGridArgs
-		if len(rawArgs) > 0 {
-			if err := json.Unmarshal(rawArgs, &args); err != nil {
-				return nil, err
-			}
-		}
-		return data.ReadTaskGrid(ctx, databaseURL, data.RowsOptions{
-			Limit:           args.Limit,
-			Offset:          args.Offset,
-			Search:          args.Search,
-			SortColumn:      args.Sort,
-			SortDirection:   args.Direction,
-			Columns:         args.Columns,
-			Filters:         args.Filters,
-			ExactTotal:      args.Count != "false" && args.Count != "estimate",
-			EstimateTotal:   args.Count == "estimate",
-			CursorCreatedAt: args.CursorCreatedAt,
-			CursorID:        args.CursorID,
-		})
-	default:
-		return nil, fmt.Errorf("query %q is not implemented by the runtime", path)
-	}
 }
 
 func (s *Server) executeReducer(ctx context.Context, projectID string, path string, rawArgs json.RawMessage) (result any, err error) {
@@ -2196,10 +1856,10 @@ func (s *Server) executeTenantReducerForCaller(ctx context.Context, projectID st
 		s.metrics.recordFunctionExecution(execution, err)
 	}()
 
-	if isLegacyTaskReducer(path) {
-		return s.executeLegacyReducer(ctx, projectID, tenantID, path, rawArgs)
-	}
 	engine := s.engineForProject(ctx, projectID)
+	if engine == nil {
+		return nil, fmt.Errorf("project %q has no active TypeScript module", projectID)
+	}
 	if _, ok := engine.Describe(path); ok {
 		reducerCtx, err := s.reducerContext(ctx, projectID, tenantID, caller)
 		if err != nil {
@@ -2266,63 +1926,67 @@ func (s *Server) executeRegisteredReducer(engine moduleengine.ModuleEngine, redu
 // error. It is shared by client-triggered reducers and scheduled internal
 // reducers so both get the same transactional guarantees.
 func (s *Server) runReducerInTx(reducerCtx *gonvex.ReducerCtx, path string, rawArgs json.RawMessage, exec func(*gonvex.ReducerCtx, string, json.RawMessage) (any, error)) (any, error) {
-	if reducerCtx.DB == nil {
-		restrictReducerCapabilities(reducerCtx)
-		return exec(reducerCtx, path, rawArgs)
+	// Reducer execution intentionally receives a capability-restricted context,
+	// but do not mutate the caller's context while applying that restriction.
+	// A context may be reused for a replay (and tests do so); clearing DB on the
+	// first call would otherwise bypass the transaction and idempotency claim on
+	// the next call.
+	executionCtx := *reducerCtx
+	if executionCtx.DB == nil {
+		restrictReducerCapabilities(&executionCtx)
+		return exec(&executionCtx, path, rawArgs)
 	}
-	database := reducerCtx.DB
-	if reducerCtx.Context == nil {
-		reducerCtx.Context = context.Background()
+	database := executionCtx.DB
+	if executionCtx.Context == nil {
+		executionCtx.Context = context.Background()
 	}
-	claim, hasClaim := mutationIdempotencyFromContext(reducerCtx.Context)
+	claim, hasClaim := reducerIdempotencyFromContext(executionCtx.Context)
 	if hasClaim {
-		if err := s.ensureMutationIdempotencyStorage(reducerCtx.Context, database, reducerCtx.DatabaseURL); err != nil {
+		if err := s.ensureReducerIdempotencyStorage(executionCtx.Context, database, executionCtx.DatabaseURL); err != nil {
 			return nil, err
 		}
 	}
-	tx, err := database.BeginTx(reducerCtx.Context, nil)
+	tx, err := database.BeginTx(executionCtx.Context, nil)
 	if err != nil {
 		return nil, err
 	}
-	reducerCtx.Tx = tx
+	executionCtx.Tx = tx
 	if hasClaim {
-		claimed, err := claimMutationIdempotency(reducerCtx.Context, tx, claim, path)
+		claimed, err := claimReducerIdempotency(executionCtx.Context, tx, claim, path)
 		if err != nil {
 			_ = tx.Rollback()
-			reducerCtx.Tx = nil
 			return nil, err
 		}
 		if !claimed {
 			// A previous delivery of this write already committed. Serve its
 			// stored result instead of executing the handler a second time.
 			_ = tx.Rollback()
-			reducerCtx.Tx = nil
-			return replayMutationIdempotencyResult(reducerCtx.Context, database, claim, path)
+			return replayReducerIdempotencyResult(executionCtx.Context, database, claim, path)
 		}
 	}
-	if mutationID := mutationIDFromContext(reducerCtx.Context); mutationID != "" {
-		if _, err := tx.ExecContext(reducerCtx.Context, `SELECT set_config('gonvex.mutation_id', $1, true)`, mutationID); err != nil {
+	if commandID := commandIDFromContext(executionCtx.Context); commandID != "" {
+		if _, err := tx.ExecContext(executionCtx.Context, `SELECT set_config('gonvex.command_id', $1, true)`, commandID); err != nil {
 			_ = tx.Rollback()
 			return nil, err
 		}
 	}
-	originalScheduler := reducerCtx.Scheduler
+	originalScheduler := executionCtx.Scheduler
 	deferred := newDeferredScheduler(originalScheduler)
-	reducerCtx.Scheduler = deferred
-	reducerCtx.Outbox = postgresActionOutbox{tx: tx, user: reducerCtx.Auth.Account}
+	executionCtx.Scheduler = deferred
+	executionCtx.Outbox = postgresActionOutbox{tx: tx, user: executionCtx.Auth.Account}
 	// Reducer code receives only the transaction handle. Raw pools would allow
 	// an accidental write to commit outside the atomic business intent.
-	restrictReducerCapabilities(reducerCtx)
+	restrictReducerCapabilities(&executionCtx)
 	defer func() {
-		reducerCtx.Scheduler = originalScheduler
+		executionCtx.Scheduler = originalScheduler
 	}()
-	result, err := exec(reducerCtx, path, rawArgs)
+	result, err := exec(&executionCtx, path, rawArgs)
 	if err != nil {
 		_ = tx.Rollback()
 		return nil, err
 	}
 	if hasClaim {
-		if err := storeMutationIdempotencyResult(reducerCtx.Context, tx, claim, result); err != nil {
+		if err := storeReducerIdempotencyResult(executionCtx.Context, tx, claim, result); err != nil {
 			_ = tx.Rollback()
 			return nil, err
 		}
@@ -2330,14 +1994,13 @@ func (s *Server) runReducerInTx(reducerCtx *gonvex.ReducerCtx, path string, rawA
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	reducerCtx.Tx = nil
 	if hasClaim {
-		s.maybeSweepMutationIdempotency(database, reducerCtx.DatabaseURL)
+		s.maybeSweepReducerIdempotency(database, executionCtx.DatabaseURL)
 	}
 	if err := deferred.flush(); err != nil {
-		reducerCtx.Logger.Error("failed to publish committed scheduled work", "path", path, "error", err)
+		executionCtx.Logger.Error("failed to publish committed scheduled work", "path", path, "error", err)
 	}
-	go s.drainActionOutbox(reducerCtx.ProjectID, reducerCtx.TenantID)
+	go s.drainActionOutbox(executionCtx.ProjectID, executionCtx.TenantID)
 	return result, nil
 }
 
@@ -2346,34 +2009,6 @@ func restrictReducerCapabilities(ctx *gonvex.ReducerCtx) {
 	ctx.TenantDB = nil
 	ctx.ControlPlaneDB = nil
 	ctx.Storage = gonvex.UnavailableStorage()
-	ctx.Sandbox = gonvex.UnavailableSandbox()
-	ctx.Data = gonvex.UnavailableData()
-}
-
-func (s *Server) executeLegacyReducer(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (any, error) {
-	s.hydrateRuntimeStateForProject(ctx, projectID)
-	s.hydrateProjectTenantDatabases(ctx, projectID)
-	switch path {
-	case "tasks.randomizeStatusPriority":
-		var args randomizeStatusPriorityArgs
-		if len(rawArgs) > 0 {
-			if err := json.Unmarshal(rawArgs, &args); err != nil {
-				return nil, err
-			}
-		}
-		databaseURL := s.databaseURLForTenant(projectID, tenantID)
-		databaseURL, err := s.ensureRuntimeTenantDatabase(ctx, projectID, tenantIDFromRequest(projectID, tenantID), databaseURL)
-		if err != nil {
-			return nil, err
-		}
-		result, err := data.RandomizeTaskStatusPriority(ctx, databaseURL, args.Count)
-		if err != nil {
-			return nil, err
-		}
-		return result, nil
-	default:
-		return nil, fmt.Errorf("reducer %q is not implemented by the runtime", path)
-	}
 }
 
 func (s *Server) executeAction(ctx context.Context, projectID string, path string, rawArgs json.RawMessage) (result any, err error) {
@@ -2394,6 +2029,9 @@ func (s *Server) executeTenantActionForCaller(ctx context.Context, projectID str
 	}()
 
 	engine := s.engineForProject(ctx, projectID)
+	if engine == nil {
+		return nil, fmt.Errorf("project %q has no active TypeScript module", projectID)
+	}
 	if _, ok := engine.Describe(path); ok {
 		actionCtx, err := s.actionContext(ctx, projectID, tenantID, caller)
 		if err != nil {
@@ -2412,12 +2050,10 @@ func (s *Server) functionKind(projectID string, path string, fallback string) st
 	if entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]; ok && entry.Kind != "" {
 		return string(entry.Kind)
 	}
-	engine := s.runtime.EngineForProject(projectID)
-	if engine == nil {
-		engine = s.appEngine
-	}
-	if descriptor, ok := engine.Describe(path); ok && descriptor.Kind != "" {
-		return string(descriptor.Kind)
+	if engine := s.runtime.EngineForProject(projectID); engine != nil {
+		if descriptor, ok := engine.Describe(path); ok && descriptor.Kind != "" {
+			return string(descriptor.Kind)
+		}
 	}
 	return fallback
 }
@@ -2444,16 +2080,15 @@ func (s *Server) actionContext(ctx context.Context, projectID string, tenantID s
 		return nil, err
 	}
 	// Actions own external/non-transactional work. They cannot reach an
-	// application database handle or the raw Data API; durable state changes
+	// application database handle; durable state changes
 	// must re-enter through ctx.Reducers.Call.
 	runtimeCtx.DB = nil
 	runtimeCtx.TenantDB = nil
 	runtimeCtx.ControlPlaneDB = nil
 	runtimeCtx.Tx = nil
-	runtimeCtx.Data = gonvex.UnavailableData()
 	runtimeCtx.Reducers = &actionReducerCaller{
 		server: s, project: projectID, tenant: tenantID, caller: caller,
-		parent: mutationIDFromContext(ctx),
+		parent: commandIDFromContext(ctx),
 	}
 	return &gonvex.ActionCtx{RuntimeContext: runtimeCtx}, nil
 }
@@ -2489,157 +2124,23 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 	}
 	logger := slog.Default().With("project", projectID, "tenant", activeTenant)
 	storageAPI := s.storageForTenant(ctx, projectID, activeTenant, store.DB, caller, logger)
-	dataAPI := s.dataForTenant(projectID, activeTenant, storageAPI)
 	return gonvex.RuntimeContext{
-		Context:          ctx,
-		ProjectID:        projectID,
-		TenantID:         activeTenant,
-		OperationID:      mutationIDFromContext(ctx),
-		Auth:             gonvex.AuthContext{Account: caller.user},
-		Tenant:           &gonvex.TenantIdentity{ID: activeTenant, ProjectID: projectID},
-		Member:           caller.member,
-		DatabaseURL:      store.DatabaseURL,
-		DB:               store.DB,
-		ControlPlaneDB:   controlPlaneStore.DB,
-		TenantDB:         store.DB,
-		Storage:          storageAPI,
-		Sandbox:          s.sandboxForCaller(projectID, activeTenant, caller, dataAPI),
-		Data:             dataAPI,
-		Ephemeral:        newScopedEphemeralAPI(ctx, s.ephemeral, projectID, activeTenant),
-		ProjectEphemeral: newProjectScopedEphemeralAPI(ctx, s.ephemeral, projectID),
-		Scheduler:        s.scheduler.For(projectID, activeTenant),
-		Logger:           logger,
-		Env:              s.projectEnvValues(ctx, projectID),
+		Context:        ctx,
+		ProjectID:      projectID,
+		TenantID:       activeTenant,
+		OperationID:    commandIDFromContext(ctx),
+		Auth:           gonvex.AuthContext{Account: caller.user},
+		Tenant:         &gonvex.TenantIdentity{ID: activeTenant, ProjectID: projectID},
+		Member:         caller.member,
+		DatabaseURL:    store.DatabaseURL,
+		DB:             store.DB,
+		ControlPlaneDB: controlPlaneStore.DB,
+		TenantDB:       store.DB,
+		Storage:        storageAPI,
+		Scheduler:      s.scheduler.For(projectID, activeTenant),
+		Logger:         logger,
+		Env:            s.projectEnvValues(ctx, projectID),
 	}, nil
-}
-
-func (s *Server) sandboxForCaller(projectID string, tenantID string, caller callerContext, dataAPI gonvex.DataAPI) gonvex.SandboxAPI {
-	if dataAPI == nil {
-		dataAPI = gonvex.UnavailableData()
-	}
-	runner := sandbox.NewRunner("")
-	// Prefer identity injected into the RunGo context (e.g. assistant loop
-	// rebinding the thread owner after a scheduled empty-caller start). Fall
-	// back to the closed-over caller from RuntimeContext construction (browser
-	// WS sessions already have a real user here).
-	effectiveCaller := func(ctx context.Context) callerContext {
-		if user, permissions, ok := gonvex.SandboxIdentityFromContext(ctx); ok {
-			return callerContext{user: user, permissions: permissions}
-		}
-		return caller
-	}
-	// Same for tenant: scheduled loops / consent re-entry bind the thread
-	// tenant onto the RunGo context. Prefer that over the closed-over value so
-	// host RPCs open the right DB and inject the right tenantId.
-	effectiveTenant := func(ctx context.Context) string {
-		if tid := strings.TrimSpace(gonvex.SandboxTenantFromContext(ctx)); tid != "" {
-			return tid
-		}
-		return tenantID
-	}
-	runner.Host = sandbox.HostFunc(func(ctx context.Context, req sandbox.HostCallRequest) (any, error) {
-		hostCaller := effectiveCaller(ctx)
-		hostTenant := effectiveTenant(ctx)
-		args := injectSandboxHostTenantArgs(req.Args, hostTenant)
-		switch strings.TrimSpace(req.Kind) {
-		case "query":
-			path, resolvedArgs, err := s.resolveSandboxFunction(ctx, projectID, hostTenant, hostCaller, "query", strings.TrimSpace(req.Path), args)
-			if err != nil {
-				return nil, err
-			}
-			return s.executeTenantQueryForCaller(ctx, projectID, hostTenant, hostCaller, path, resolvedArgs)
-		case "action":
-			path := strings.TrimSpace(req.Path)
-			// Browser parity: api.whagons.action always goes through the curated
-			// SandboxClient surface. Prefer assistant.sandboxAction whenever it
-			// is registered so names like tasks.bulkDelete (which also exist as
-			// raw runtime Actions) get confirm gates + friendly args, not the
-			// bare runtime path that required a manual tenantId.
-			engine := s.engineForProject(ctx, projectID)
-			if path != "assistant.sandboxAction" {
-				if _, ok := engine.Describe("assistant.sandboxAction"); ok {
-					wrapped, wrapErr := json.Marshal(map[string]any{
-						"name":     path,
-						"args":     json.RawMessage(args),
-						"tenantId": hostTenant,
-					})
-					if wrapErr != nil {
-						return nil, wrapErr
-					}
-					result, err := s.executeTenantActionForCaller(ctx, projectID, hostTenant, hostCaller, "assistant.sandboxAction", wrapped)
-					if err == nil {
-						return result, nil
-					}
-					if !sandboxHostUnknownCuratedAction(err) {
-						return nil, err
-					}
-					// Unknown on the curated surface — fall through to a
-					// registered runtime Action with tenant-injected args.
-				}
-			}
-			return s.executeTenantActionForCaller(ctx, projectID, hostTenant, hostCaller, path, args)
-		case "mutation":
-			path, resolvedArgs, err := s.resolveSandboxFunction(ctx, projectID, hostTenant, hostCaller, "mutation", strings.TrimSpace(req.Path), args)
-			if err != nil {
-				return nil, err
-			}
-			return s.executeTenantReducerForCaller(ctx, projectID, hostTenant, hostCaller, path, resolvedArgs)
-		case "data.inspect":
-			var inspectReq gonvex.DataInspectRequest
-			if err := json.Unmarshal(args, &inspectReq); err != nil {
-				return nil, fmt.Errorf("invalid data.inspect args: %w", err)
-			}
-			return dataAPI.Inspect(ctx, inspectReq)
-		case "data.query":
-			var queryReq gonvex.DataQueryRequest
-			if err := json.Unmarshal(args, &queryReq); err != nil {
-				return nil, fmt.Errorf("invalid data.query args: %w", err)
-			}
-			return dataAPI.Query(ctx, queryReq)
-		case "data.profile":
-			var profileReq gonvex.DataProfileRequest
-			if err := json.Unmarshal(args, &profileReq); err != nil {
-				return nil, fmt.Errorf("invalid data.profile args: %w", err)
-			}
-			return dataAPI.Profile(ctx, profileReq)
-		default:
-			return nil, fmt.Errorf("unsupported sandbox host call kind %q", req.Kind)
-		}
-	})
-	return runner
-}
-
-// resolveSandboxFunction gates sandbox-originated query/mutation calls through
-// the app's assistant.sandboxResolve query when one is registered. The app
-// owns the policy (blocked modules, name aliases like tasks.list); the runtime
-// just executes whatever {name, args} the resolver returns. Apps without a
-// resolver keep the raw path — same behavior as before this hook existed.
-func (s *Server) resolveSandboxFunction(ctx context.Context, projectID string, tenantID string, caller callerContext, kind string, path string, args json.RawMessage) (string, json.RawMessage, error) {
-	engine := s.engineForProject(ctx, projectID)
-	if _, ok := engine.Describe("assistant.sandboxResolve"); !ok {
-		return path, args, nil
-	}
-	wrapped, err := json.Marshal(map[string]any{"kind": kind, "name": path, "args": args, "tenantId": tenantID})
-	if err != nil {
-		return "", nil, err
-	}
-	resolved, err := s.executeTenantQueryForCaller(ctx, projectID, tenantID, caller, "assistant.sandboxResolve", wrapped)
-	if err != nil {
-		return "", nil, err
-	}
-	resolvedMap, ok := resolved.(map[string]any)
-	if !ok {
-		return "", nil, fmt.Errorf("assistant.sandboxResolve returned an unexpected result for %q", path)
-	}
-	name, _ := resolvedMap["name"].(string)
-	if strings.TrimSpace(name) == "" {
-		return "", nil, fmt.Errorf("assistant.sandboxResolve returned no function name for %q", path)
-	}
-	resolvedArgs, err := json.Marshal(resolvedMap["args"])
-	if err != nil {
-		return "", nil, err
-	}
-	return name, resolvedArgs, nil
 }
 
 // storageForTenant builds the per-request storage handle bound to the active
@@ -2660,12 +2161,4 @@ func (s *Server) storageForTenant(ctx context.Context, projectID, tenantID strin
 		return nil
 	}
 	return tenant
-}
-
-func isLegacyTaskQuery(path string) bool {
-	return path == "tasks.grid"
-}
-
-func isLegacyTaskReducer(path string) bool {
-	return path == "tasks.randomizeStatusPriority"
 }
