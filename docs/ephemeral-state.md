@@ -82,7 +82,7 @@ There is deliberately no in-process fallback because it would break TTL and
 cross-instance presence semantics.
 
 Ephemeral operations do not write Postgres, advance the tenant sync clock, or
-invalidate reactive queries. Applications that display TTL-driven state over
-long-lived subscriptions should refresh that query on a suitable cadence so
-expiry becomes visible without turning high-frequency keepalives into global
-invalidations.
+publish query invalidations. TTL expiry is delivered by the Gonvex ephemeral
+subscription itself; applications should not add refetch timers or manual
+invalidation. This keeps high-frequency keepalives outside the durable change
+feed without giving UI code a second freshness mechanism.

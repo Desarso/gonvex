@@ -41,6 +41,22 @@ Gonvex is for developers who like Convex's product shape but want infrastructure
 - **Self-hostable runtime**: run Gonvex with Postgres, Valkey/Redis, and optional S3-compatible object storage.
 - **Open source core**: the runtime, CLI, client packages, dashboard, docs, and starter templates live in this repo.
 
+## Gonvex v2 model
+
+The v2 public execution model has three executable kinds: `Query`, `Reducer`,
+and `Action`. Reads are delivered through Replica Collections and Live Queries.
+The old declared `Writes` contract, manual invalidation hooks, and generic
+reactive-query API are removed; applications should use Reducers for durable
+writes, Actions for external work, Replica Collections for bounded local data,
+and Live Queries for indexed server-computed windows.
+
+The target identity model is Control Plane plus isolated tenant databases. The
+Control Plane owns Accounts, auth identities, the tenant directory and routing,
+and the `account_tenant_index` projection. A tenant database owns Members and
+tenant roles, teams, and permissions. This is the v2 architecture and migration
+target; deployments may still expose legacy landlord names and compatibility
+paths while the cutover completes.
+
 ## Quickstart
 
 First, start the local reference runtime in a separate checkout:

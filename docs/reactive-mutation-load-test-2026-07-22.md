@@ -1,5 +1,8 @@
 # Gonvex 100-user mutation and invalidation load test — 2026-07-22
 
+> Historical benchmark: “reactive” and declared write/invalidation behavior in
+> this report refers to the pre-v2 implementation, not the current public API.
+
 ## Result
 
 The local runtime completed a matched control run and a mutation run with 100
@@ -75,7 +78,7 @@ the full-run CPU peak.
 
 Runtime metrics recorded 29,588 PostgreSQL pool waits and 1,964 seconds of
 cumulative wait time. Gonvex deliberately enforces a hard process-wide budget
-of 20 physical PostgreSQL connections across the landlord and all tenant
+of 20 physical PostgreSQL connections across the Control Plane and all tenant
 pools. With 10 active tenants, concurrent mutation commits, and reactive query
 reruns, work queued behind that budget:
 
@@ -207,7 +210,7 @@ described below.
 
 Whagons now treats `userLiveLocations.list` as an identity-scoped query with
 explicit read dependencies. It loads the active tenant snapshot once per
-reactive change revision, batches landlord users, loads team memberships only
+reactive change revision, batches Control Plane users, loads team memberships only
 for team-scoped viewers, and applies the final permission/user/team filter for
 each caller. It does **not** opt into permission-shared subscriptions, because
 two users with the same permissions can still see different own/team rows.

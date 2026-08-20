@@ -37,6 +37,13 @@ There is no declared write set, table-change callback, or broad invalidation
 path. A transaction carries its `originCommandId`, allowing the Local Replica
 to replace an optimistic overlay only after the authoritative revision arrives.
 
+This is the v2 delivery contract: public reads are Queries delivered as Live
+Queries or Replica Collections, and public writes are Reducers. The former
+declared `Writes` metadata, manual invalidation API, and generic reactive-query
+API are not part of v2. This document describes the implemented sync path; the
+broader identity/control-plane migration remains a compatibility cutover for
+deployments that still use legacy landlord names.
+
 ## One normalized store
 
 The Local Replica owns authoritative entities, optimistic overlays, ordered

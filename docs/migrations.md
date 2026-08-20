@@ -16,7 +16,12 @@ Every file must begin with one of these header comments before its first SQL sta
 -- gonvex:scope landlord
 ```
 
-The parser's safe fallback is tenant scope, but sync rejects a missing directive so the intended database is reviewable. A tenant migration runs against every registered tenant database for the project. A landlord migration runs once against the project's landlord database.
+`landlord` is the legacy migration-scope spelling retained for compatibility;
+it refers to the Control Plane database. The parser's safe fallback is tenant
+scope, but sync rejects a missing directive so the intended database is
+reviewable. A tenant migration runs against every registered tenant database
+for the project. A Control Plane migration runs once against the project's
+Control Plane database.
 
 ## Tracking and edits
 
@@ -38,7 +43,7 @@ ON messages (created_at);
 
 In no-transaction mode Gonvex executes top-level statements individually and records the migration only after every statement succeeds. Earlier statements can remain after a later failure, so every statement in such a migration should be safely retryable (`IF EXISTS`/`IF NOT EXISTS` where PostgreSQL supports it). Gonvex's splitter understands quoted strings, quoted identifiers, comments, and dollar-quoted function bodies.
 
-Tenant rollout continues after an individual tenant fails so healthy tenant databases are not blocked. Gonvex collects every failure, identifies its tenant, and fails the overall sync. The runtime manifest is not activated when any migration fails. Landlord failure stops before tenant rollout.
+Tenant rollout continues after an individual tenant fails so healthy tenant databases are not blocked. Gonvex collects every failure, identifies its tenant, and fails the overall sync. The runtime manifest is not activated when any migration fails. Control Plane failure stops before tenant rollout.
 
 Applied migrations are logged and returned in the `/dev/sync` JSON response. To inspect pending migrations without applying SQL, schema changes, or a runtime bundle, run:
 
@@ -60,4 +65,4 @@ GONVEX_DROP_EMPTY_UNDECLARED_COLUMNS=true
 
 The opt-in is deliberately runtime-side: an older or rolled-back application bundle must not gain destructive behavior merely by being deployed. Operators should enable it only where deploy ordering and rollback policy make declarative cleanup acceptable. Explicit destructive or data-aware cleanup belongs in a versioned SQL migration.
 
-For tenant tables, Gonvex enumerates every registered tenant database and approves a drop only when the same undeclared column is empty in all of them. It then rechecks emptiness immediately before each physical drop. This fleet-wide rule avoids intentionally creating per-tenant schema drift. If any tenant has a non-NULL value, every tenant keeps the column. Landlord tables receive the same undeclared-and-empty checks against the single landlord database and are also protected by the opt-in flag.
+For tenant tables, Gonvex enumerates every registered tenant database and approves a drop only when the same undeclared column is empty in all of them. It then rechecks emptiness immediately before each physical drop. This fleet-wide rule avoids intentionally creating per-tenant schema drift. If any tenant has a non-NULL value, every tenant keeps the column. Control Plane tables receive the same undeclared-and-empty checks against the single Control Plane database and are also protected by the opt-in flag.

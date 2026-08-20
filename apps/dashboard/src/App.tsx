@@ -4468,7 +4468,7 @@ function AccountProfileDialog(props: { session: DashboardSession; onClose: () =>
               <Avatar.Fallback>{profileInitials(props.session.name)}</Avatar.Fallback>
             </Avatar>
             <div>
-              <p className="eyebrow">Account control plane</p>
+              <p className="eyebrow">Control Plane account</p>
               <h2 id="account-profile-title">{props.session.name}</h2>
               <span>{props.session.email}</span>
             </div>

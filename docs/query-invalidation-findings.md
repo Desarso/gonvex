@@ -1,5 +1,9 @@
 # Query invalidation findings
 
+> Historical note: this report describes the pre-v2 generic reactive-query
+> invalidation path and declared `Writes` metadata. Those APIs are removed from
+> the v2 public model; current reads use Live Queries or Replica Collections.
+
 Investigation date: 2026-08-07  
 App: `/home/gabriel/Desktop/coding/whagons/whagons5-client` (`gonvex`)  
 Framework: `/home/gabriel/Desktop/coding/gonvex` (`main`)

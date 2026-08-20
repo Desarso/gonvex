@@ -1,5 +1,8 @@
 # Gonvex multi-tenant reactive load test — 2026-07-22
 
+> Historical benchmark: “reactive” and invalidation behavior in this report
+> refers to the pre-v2 implementation, not the current public API.
+
 ## Result
 
 Gonvex sustained 10,000 distinct synthetic users across 10 physical tenant databases. Every user held one WebSocket connection and 50 Whagons workspace subscriptions.
