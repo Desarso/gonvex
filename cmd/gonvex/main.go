@@ -881,9 +881,8 @@ func writeBindings(root string, m manifest.Manifest) error {
 		return err
 	}
 
-	normalizedSchema := m.Schema.Normalize()
-	bindingManifest := m
-	bindingManifest.Schema = normalizedSchema
+	bindingManifest := m.Normalize()
+	normalizedSchema := bindingManifest.Schema
 	bindingManifest.Bundle = nil
 	manifestJSON, err := json.MarshalIndent(bindingManifest, "", "  ")
 	if err != nil {

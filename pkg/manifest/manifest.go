@@ -152,12 +152,53 @@ type Index struct {
 	Kind    string   `json:"kind,omitempty"`
 }
 
+// ModuleArtifact is the language-neutral module payload emitted by the
+// TypeScript CLI. The fields describe the artifact rather than a runtime
+// implementation so other module languages can use the same wire shape.
+type ModuleArtifact struct {
+	Language     string                    `json:"language"`
+	Generation   int                       `json:"generation"`
+	Hash         string                    `json:"hash,omitempty"`
+	// ArtifactHash is a compatibility alias accepted from older deployment
+	// payloads. Hash is the canonical wire name.
+	ArtifactHash string                    `json:"artifactHash,omitempty"`
+	Entrypoint   string                    `json:"entrypoint"`
+	Functions    map[string]ModuleFunction `json:"functions"`
+	Files        map[string]string         `json:"files"`
+	JavaScript   *ModuleJavaScript         `json:"javascript,omitempty"`
+}
+
+// ModuleFunction carries generated function metadata and opaque schema and
+// policy values. The Go CLI retains these values without interpreting them.
+type ModuleFunction struct {
+	Kind         FunctionKind                 `json:"kind"`
+	Handler      string                       `json:"handler"`
+	File         string                       `json:"file"`
+	Export       string                       `json:"export,omitempty"`
+	Args         any                          `json:"args,omitempty"`
+	Result       any                          `json:"result,omitempty"`
+	Dependencies FunctionDependencies         `json:"dependencies,omitempty"`
+	Internal     bool                         `json:"internal,omitempty"`
+	Delivery     DeliveryMode                 `json:"delivery,omitempty"`
+	Replica      *ReplicaCollectionDefinition `json:"replica,omitempty"`
+	Offline      any                          `json:"offline,omitempty"`
+	Optimistic   any                          `json:"optimistic,omitempty"`
+}
+
+type ModuleJavaScript struct {
+	Path      string `json:"path"`
+	Hash      string `json:"hash"`
+	Code      string `json:"code"`
+	SourceMap string `json:"sourceMap,omitempty"`
+}
+
 type Manifest struct {
 	Project             string                   `json:"project"`
 	GeneratedAt         string                   `json:"generatedAt"`
 	Functions           map[string]FunctionEntry `json:"functions"`
 	Schema              Schema                   `json:"schema"`
 	Bundle              *SourceBundle            `json:"bundle,omitempty"`
+	Module              *ModuleArtifact          `json:"module,omitempty"`
 	NotifySchemaVersion string                   `json:"notifySchemaVersion,omitempty"`
 }
 
@@ -205,6 +246,29 @@ func (s Schema) Normalize() Schema {
 	}
 	s.Tables = s.TenantTables
 	return s
+}
+
+// Normalize applies compatibility aliases to a module artifact while
+// retaining both spellings for callers that still consume artifactHash.
+func (a ModuleArtifact) Normalize() ModuleArtifact {
+	if a.Hash == "" {
+		a.Hash = a.ArtifactHash
+	}
+	if a.ArtifactHash == "" {
+		a.ArtifactHash = a.Hash
+	}
+	return a
+}
+
+// Normalize resolves schema and module compatibility aliases. It is safe to
+// call after JSON unmarshalling or before emitting a generated binding.
+func (m Manifest) Normalize() Manifest {
+	m.Schema = m.Schema.Normalize()
+	if m.Module != nil {
+		normalized := m.Module.Normalize()
+		m.Module = &normalized
+	}
+	return m
 }
 
 // ControlPlaneSchema returns the control-plane portion of the schema.
