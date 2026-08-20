@@ -1,242 +1,62 @@
 ---
-title: Functions and Bindings
-description: Define backend functions in Go and call them from the frontend through generated TypeScript bindings.
+title: Queries, Reducers, and Actions
+description: Gonvex's three executable function kinds and generated bindings.
 ---
 
-# Functions and Bindings
+Gonvex application code has three executable function kinds.
 
-Gonvex apps define backend functions in Go. The CLI reads those registrations and generates TypeScript references for the frontend.
+## Query
 
-## Register Functions
-
-```go
-package backend
-
-import "github.com/gonvex/gonvex/pkg/gonvex"
-
-func Register(app *gonvex.App) {
-  app.Query(
-    "tasks.list",
-    ListTasks,
-    gonvex.Reads("tasks").
-      Columns("id", "title", "status", "updated_at").
-      Filters("status").
-      OrdersBy("updated_at"),
-    gonvex.ShareByPermissions(),
-  )
-  app.Mutation("tasks.create", CreateTask, gonvex.Writes("tasks"))
-  app.Action("tasks.import", ImportTasks)
-  app.HTTP("/webhooks/stripe", StripeWebhook)
-  app.PublicHTTP("/health/public", PublicHealth)
-  app.InternalMutation("tasks.expire", ExpireTasks, gonvex.Writes("tasks"))
-  app.LiveGrid("tasks.grid", TasksGrid)
-  app.Sync(
-    "tasks.recent",
-    RecentTasks,
-    gonvex.SyncTable("tasks").
-      Columns("id", "title", "status", "updated_at").
-      OrderBy("updated_at", "desc").
-      Progressive().
-      Budget(500, 8388608),
-  )
-}
-```
-
-Dependency options are backward compatible. Registrations without them use
-conservative compatibility invalidation. `ShareByPermissions` is intentionally
-opt-in: use it only when the result depends on tenant, arguments, and the
-permission set, but not otherwise on `ctx.User`.
-
-## Function Kinds
-
-```txt
-Query
-  Read data. Can be subscribed to from the frontend.
-
-Mutation
-  Write data inside a transaction. Invalidates relevant live queries.
-
-Action
-  External side effects or long-running work.
-
-HTTP
-  HTTP route using the project's normal authentication boundary.
-
-PublicHTTP
-  Explicit anonymous HTTP route, often a webhook or public callback.
-
-InternalMutation
-  Transactional write callable by trusted runtime work such as the scheduler,
-  but not by browser mutation calls.
-
-LiveGrid
-  Structured realtime table/grid query for large interactive data surfaces.
-
-Sync
-  Authorized single-table snapshot plus durable change delivery to IndexedDB.
-```
-
-## Args and Results
-
-Use JSON-tagged Go structs:
+Queries are one-shot and read-only. Gonvex runs them in a repeatable-read,
+read-only Postgres transaction.
 
 ```go
-type CreateTaskArgs struct {
-  Title string `json:"title"`
-}
-
-type Task struct {
-  ID     string `json:"id"`
-  Title  string `json:"title"`
-  Status string `json:"status"`
-}
-
-func CreateTask(ctx *gonvex.MutationCtx, args CreateTaskArgs) (Task, error) {
-  // write to tenant-scoped database
-}
+app.Query("tasks.get", GetTask)
 ```
-
-## Generated Bindings
-
-The generated API exposes stable nested function references:
-
-```ts
-import { api } from "./gonvex/_generated/api";
-
-api.tasks.list
-api.tasks.create
-api.tasks.grid
-api.tasks.recent
-```
-
-Path-safe object references are preferred over stringly-typed calls.
-
-## React Usage
 
 ```tsx
-import { api } from "./gonvex/_generated/api";
-import { useMutation, useQuery } from "./gonvex/_generated/react";
-
-export function TasksPage() {
-  const tasks = useQuery(api.tasks.list, { status: "open" });
-  const createTask = useMutation(api.tasks.create);
-
-  return (
-    <TaskList
-      tasks={tasks ?? []}
-      onCreate={(title) => createTask({ title })}
-    />
-  );
-}
+const task = useQuery(api.tasks.get, { id });
 ```
 
-## Direct Client Usage
+## Reducer
 
-For lower-level surfaces like custom grids:
-
-```ts
-const unsubscribe = gonvexClient.subscribeQuery(
-  api.tasks.grid,
-  { offset: 0, limit: 300 },
-  (message) => {
-    if (message.type === "query.result") {
-      updateGrid(message.result);
-    }
-  },
-);
-```
-
-## Context
-
-Functions receive runtime context as fields on `QueryCtx`, `MutationCtx`,
-`ActionCtx`, and `HTTPContext`:
+Reducers are the only normal durable write path. Each call receives one
+`ctx.Tx`; raw database pools are unavailable so all application-table writes
+belong to the same transaction.
 
 ```go
-import "errors"
-
-func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
-  if ctx.User == nil {
-    return nil, errors.New("authentication required")
-  }
-
-  rows, err := ctx.DB.QueryContext(
-    ctx.Context,
-    `SELECT id, title, status FROM tasks WHERE status = $1`,
-    args.Status,
-  )
-  if err != nil {
-    return nil, err
-  }
-  defer rows.Close()
-
-  var tasks []Task
-  for rows.Next() {
-    var task Task
-    if err := rows.Scan(&task.ID, &task.Title, &task.Status); err != nil {
-      return nil, err
-    }
-    tasks = append(tasks, task)
-  }
-  return tasks, rows.Err()
-}
+app.Reducer(
+  "tasks.rename",
+  RenameTask,
+  gonvex.OptimisticReducer("tasks").RowIDArg("id").FieldsArg("patch"),
+)
 ```
 
-Available context includes:
+Every public Reducer needs optimistic metadata. A rare operation that cannot
+safely predict UI state must declare a reviewed reason with
+`OnlineOnlyNonOptimistic(reason)`.
 
-```txt
-ProjectID, TenantID, User, Permissions
-DB, LandlordDB, TenantDB, Tx
-Storage, Data, Sandbox, Scheduler, Ephemeral
-Logger, Env, Context
-```
+## Action
 
-Use `ctx.EnvValue("NAME")` for project-scoped environment variables with process
-environment fallback. Mutations run with `ctx.Tx`; jobs they enqueue through
-`ctx.Scheduler` are published only after the mutation commits. Long-running
-actions can call `ctx.NotifyTableChanged(...)` after committing intermediate
-writes.
-
-### Ephemeral state
-
-`ctx.Ephemeral` stores tenant-local JSON values in Valkey. Project and tenant
-namespaces are applied by the runtime, every write requires a positive TTL, and
-app code cannot select another scope:
+Actions perform HTTP, email, AI, file, and other external work. They do not
+receive application database handles. To change durable state, call a Reducer:
 
 ```go
-type Lease struct {
-  UserID string `json:"userId"`
-}
-
-func Beat(ctx *gonvex.MutationCtx, _ struct{}) (any, error) {
-  return nil, ctx.Ephemeral.Set("presence/lease/"+ctx.User.ID, Lease{
-    UserID: ctx.User.ID,
-  }, 2*time.Minute)
-}
+_, err := ctx.Reducers.Call(ctx, "tasks.markDelivered", args)
 ```
 
-The API is `Set(key, value, ttl)`, `Get(key, &target)`, `Delete(key)`, and
-`List(prefix)`. `List` uses a per-project/tenant sorted set ordered by expiry,
-then `MGET`s only that tenant's live values; it never scans the global Valkey
-keyspace. Mark queries that read it with `gonvex.ReadsEphemeral()` so their
-results bypass the durable query cache. Mark mutations that write only
-ephemeral state with `gonvex.WritesEphemeral()` so Gonvex opens no Postgres
-transaction, bumps no sync revision, and schedules no reactive invalidation.
+Reducers enqueue external work with `ctx.Outbox.Enqueue(...)`; the durable
+outbox worker invokes the Action after commit and retries failures.
 
-## Generated Types
+## Generated React surface
 
-Generated function references preserve function kind and path:
-
-```ts
-api.tasks.list;   // { kind: "query", path: "tasks.list" }
-api.tasks.create; // { kind: "mutation", path: "tasks.create" }
+```tsx
+useQuery(api.tasks.get, args)
+useLiveQuery(api.tasks.grid, args)
+useReplicaCollection(api.tasks.recent, args)
+useReducer(api.tasks.rename)
+useAction(api.mail.send)
 ```
 
-Use an explicit result type at the hook boundary today:
-
-```ts
-const tasks = useQuery<Task[]>(api.tasks.list, { status: "open" });
-```
-
-Full argument/result inference from Go structs is not implemented yet. The CLI
-does generate project API references plus landlord/tenant schema metadata and
-table-name types.
+`Writes`, manual invalidation, refetch-after-write, and raw subscription
+lifecycle APIs are not part of the application model.

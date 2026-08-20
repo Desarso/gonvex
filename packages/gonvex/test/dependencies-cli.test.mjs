@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const cli = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 
-test("codegen manifest preserves function dependency options without runtime sync", () => {
+test("codegen derives Live Query dependencies without runtime sync", () => {
   const project = mkdtempSync(join(tmpdir(), "gonvex-cli-dependencies-"));
   try {
     mkdirSync(join(project, "gonvex"));
@@ -20,16 +20,14 @@ test("codegen manifest preserves function dependency options without runtime syn
 import "github.com/gonvex/gonvex/pkg/gonvex"
 
 func Register(app *gonvex.App) {
-  app.Query(
+  app.LiveQuery(
     "locations.list",
     ListLocations,
-    gonvex.Reads("locations").Columns("tenantId", "updatedAt").Filters("tenantId").OrdersBy("updatedAt").Windowed().Predicate("active"),
-    gonvex.Reads("users"),
-    gonvex.ReadsEphemeral(),
+    gonvex.LivePlan(gonvex.LiveTable("locations").Select("tenantId", "updatedAt").Filter(gonvex.Eq("tenantId", gonvex.Arg("tenantId"))).SortArgs("sort", "direction", "updatedAt", "desc", "updatedAt").WindowArgs("offset", "limit", 100, 200)),
     gonvex.ShareByPermissions(),
   )
-  app.Mutation("locations.upsert", UpsertLocation, gonvex.Writes("locations").Columns("tenantId", "userId"))
-  app.Mutation("presence.beat", Beat, gonvex.WritesEphemeral())
+  app.Reducer("locations.upsert", UpsertLocation, gonvex.OnlineOnlyNonOptimistic("test fixture"))
+  app.Reducer("presence.beat", Beat, gonvex.OnlineOnlyNonOptimistic("test fixture"))
 }
 `,
     );
@@ -47,25 +45,21 @@ func Register(app *gonvex.App) {
 
     const manifest = JSON.parse(readFileSync(join(project, "gonvex", "_generated", "manifest.json"), "utf8"));
     assert.deepEqual(manifest.functions["locations.list"].dependencies, {
-      reads: [
-        {
-          table: "locations",
-          columns: ["tenantId", "updatedAt"],
-          filters: ["tenantId"],
-          ordersBy: ["updatedAt"],
-          windowed: true,
-          predicate: "active",
-        },
-        { table: "users" },
-      ],
-      readsEphemeral: true,
+      reads: [{ table: "locations", columns: ["tenantId", "updatedAt"], filters: ["tenantId"], ordersBy: ["updatedAt"], windowed: true }],
+      liveQueryPlan: {
+        table: "locations", key: "id", columns: ["tenantId", "updatedAt"],
+        where: { operator: "eq", column: "tenantId", value: { argument: "tenantId" } },
+        sort: { columnArgument: "sort", directionArgument: "direction", allowedColumns: ["updatedAt"], defaultColumn: "updatedAt", defaultDirection: "desc" },
+        window: { offsetArgument: "offset", limitArgument: "limit", defaultLimit: 100, maxLimit: 200 },
+      },
       shareByPermissions: true,
     });
+    assert.equal(manifest.functions["locations.upsert"].kind, "reducer");
     assert.deepEqual(manifest.functions["locations.upsert"].dependencies, {
-      writes: [{ table: "locations", columns: ["tenantId", "userId"] }],
+      nonOptimisticReason: "test fixture",
     });
     assert.deepEqual(manifest.functions["presence.beat"].dependencies, {
-      writesEphemeral: true,
+      nonOptimisticReason: "test fixture",
     });
   } finally {
     rmSync(project, { recursive: true, force: true });

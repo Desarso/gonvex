@@ -88,9 +88,16 @@ type RandomizeStatusPriorityResult struct {
 
 func Register(app *gonvex.App) {
 	app.Query("tasks.list", ListTasks)
-	app.Mutation("tasks.create", CreateTask)
-	app.Mutation("tasks.randomizeStatusPriority", RandomizeStatusPriority)
-	app.LiveGrid("tasks.grid", TasksGrid)
+	app.Reducer("tasks.create", CreateTask, gonvex.OnlineOnlyNonOptimistic("dashboard data-generator operation"))
+	app.Reducer("tasks.randomizeStatusPriority", RandomizeStatusPriority, gonvex.OnlineOnlyNonOptimistic("dashboard bulk benchmark operation"))
+	app.LiveQuery("tasks.grid", TasksGrid, gonvex.LivePlan(
+		gonvex.LiveTable("dashboard_demo_tasks").
+			ResultRowsAt("rows").
+			SearchArg("search", "title", "description", "status_name", "priority_name", "assignee_names").
+			SortArgs("sort", "direction", "created_at", "desc", "created_at", "updated_at", "due_date", "title", "status_name", "priority_name").
+			WindowArgs("offset", "limit", 100, 250).
+			OnlineOnly(), // the dashboard's arbitrary operator inspector is intentionally server-only
+	))
 	RegisterFiles(app)
 	RegisterSystem(app)
 }
@@ -99,11 +106,11 @@ func ListTasks(ctx *gonvex.QueryCtx, args struct{}) ([]Task, error) {
 	return []Task{}, nil
 }
 
-func CreateTask(ctx *gonvex.MutationCtx, args CreateTaskArgs) (Task, error) {
+func CreateTask(ctx *gonvex.ReducerCtx, args CreateTaskArgs) (Task, error) {
 	return Task{ID: "task_dev", Title: args.Title, Status: "todo"}, nil
 }
 
-func RandomizeStatusPriority(ctx *gonvex.MutationCtx, args RandomizeStatusPriorityArgs) (RandomizeStatusPriorityResult, error) {
+func RandomizeStatusPriority(ctx *gonvex.ReducerCtx, args RandomizeStatusPriorityArgs) (RandomizeStatusPriorityResult, error) {
 	return RandomizeStatusPriorityResult{}, nil
 }
 

@@ -11,7 +11,7 @@ import type {
   JsonValue,
   QueryCacheDirective,
   ServerMessage,
-  SyncCursor,
+  ReplicaCursor,
 } from "@gonvex/protocol";
 import type { StoredSyncCollection, SyncStore } from "./sync-store.js";
 
@@ -78,7 +78,7 @@ class WatermarkSyncStore implements SyncStore {
     _path: string,
     _args: JsonValue,
     _value: {
-      cursor: SyncCursor;
+      cursor: ReplicaCursor;
       keyField: string;
       upserts: JsonValue[];
       deleted: string[];
@@ -134,7 +134,7 @@ async function verifiedDigest(rows: JsonValue[]) {
 
 type TestSyncSubscription = {
   path: string;
-  cursor?: SyncCursor;
+  cursor?: ReplicaCursor;
   opening: boolean;
   forceFullIntegrity: boolean;
   integrityEpoch?: string;
@@ -175,7 +175,7 @@ describe("sync revision watermarks", () => {
     for (const path of paths) {
       const listener = vi.fn();
       listeners.set(path, listener);
-      client.subscribeSync({ kind: "sync", path } satisfies FunctionReference, {}, listener);
+      client.subscribeSync({ kind: "query", delivery: "replica", path } satisfies FunctionReference, {}, listener);
     }
 
     const socket = latestSocket();
@@ -242,7 +242,7 @@ describe("sync revision watermarks", () => {
       cursor: { epoch: "sync-epoch", revision: 3 },
       keyField: "id",
     });
-    const ref: FunctionReference = { kind: "sync", path };
+    const ref: FunctionReference = { kind: "query", delivery: "replica", path };
     const first = new GonvexClient("ws://runtime.test/ws", { sync: { store } });
     first.subscribeSync(ref, {}, vi.fn());
     const firstSocket = latestSocket();

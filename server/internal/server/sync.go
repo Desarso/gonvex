@@ -50,7 +50,7 @@ type syncSubscription struct {
 	project          string
 	tenant           string
 	args             json.RawMessage
-	definition       manifest.SyncDefinition
+	definition       manifest.ReplicaCollectionDefinition
 	cursor           syncCursor
 	listenerAcquired bool
 	visibleKeys      map[string]bool
@@ -69,14 +69,15 @@ type syncSubscription struct {
 }
 
 type syncLogChange struct {
-	revision   uint64
-	ordinal    int
-	mutationID string
-	table      string
-	rowID      string
-	operation  string
-	oldValue   json.RawMessage
-	newValue   json.RawMessage
+	revision       uint64
+	ordinal        int
+	mutationID     string
+	table          string
+	rowID          string
+	operation      string
+	changedColumns []string
+	oldValue       json.RawMessage
+	newValue       json.RawMessage
 }
 
 const (
@@ -91,13 +92,13 @@ const (
 
 var errSyncCursorExpired = errors.New("sync cursor is older than the retained change log")
 
-func manifestSyncDefinitions(current manifest.Manifest) map[string]manifest.SyncDefinition {
-	definitions := map[string]manifest.SyncDefinition{}
+func manifestReplicaCollectionDefinitions(current manifest.Manifest) map[string]manifest.ReplicaCollectionDefinition {
+	definitions := map[string]manifest.ReplicaCollectionDefinition{}
 	for _, entry := range current.Functions {
-		if entry.Kind != manifest.FunctionKindSync || entry.Sync == nil {
+		if entry.Delivery != manifest.DeliveryReplica || entry.Replica == nil {
 			continue
 		}
-		definition := effectiveSyncDefinition(entry)
+		definition := effectiveReplicaCollectionDefinition(entry)
 		table := strings.TrimSpace(definition.Table)
 		if table == "" {
 			continue
@@ -124,8 +125,8 @@ func manifestSyncDefinitions(current manifest.Manifest) map[string]manifest.Sync
 	return definitions
 }
 
-func effectiveSyncDefinition(entry manifest.FunctionEntry) manifest.SyncDefinition {
-	definition := *entry.Sync
+func effectiveReplicaCollectionDefinition(entry manifest.FunctionEntry) manifest.ReplicaCollectionDefinition {
+	definition := *entry.Replica
 	definition.VisibilityTables = appendUniqueStrings(nil, definition.VisibilityTables...)
 	for _, read := range entry.Dependencies.Reads {
 		table := strings.TrimSpace(read.Table)
@@ -137,14 +138,14 @@ func effectiveSyncDefinition(entry manifest.FunctionEntry) manifest.SyncDefiniti
 	return definition
 }
 
-func syncDefinitionsForSchema(definitions map[string]manifest.SyncDefinition, current manifest.Schema) (map[string]manifest.SyncDefinition, error) {
-	filtered := map[string]manifest.SyncDefinition{}
+func syncDefinitionsForSchema(definitions map[string]manifest.ReplicaCollectionDefinition, current manifest.Schema) (map[string]manifest.ReplicaCollectionDefinition, error) {
+	filtered := map[string]manifest.ReplicaCollectionDefinition{}
 	for table, definition := range definitions {
 		if _, ok := current.Tables[table]; ok {
 			filtered[table] = definition
 		}
 	}
-	sourceDefinitions := make([]manifest.SyncDefinition, 0, len(filtered))
+	sourceDefinitions := make([]manifest.ReplicaCollectionDefinition, 0, len(filtered))
 	for _, definition := range filtered {
 		sourceDefinitions = append(sourceDefinitions, definition)
 	}
@@ -170,7 +171,7 @@ func syncDefinitionsForSchema(definitions map[string]manifest.SyncDefinition, cu
 			if key == "" {
 				return nil, fmt.Errorf("sync visibility dependency %q has no primary key for durable invalidation", tableName)
 			}
-			filtered[tableName] = manifest.SyncDefinition{
+			filtered[tableName] = manifest.ReplicaCollectionDefinition{
 				Table:   tableName,
 				Key:     key,
 				Columns: []string{key},
@@ -181,14 +182,7 @@ func syncDefinitionsForSchema(definitions map[string]manifest.SyncDefinition, cu
 }
 
 func (s *Server) installTenantSyncLog(ctx context.Context, project, databaseURL string, current manifest.Schema) error {
-	definitions, err := syncDefinitionsForSchema(
-		manifestSyncDefinitions(s.runtime.ManifestForProject(project)),
-		current,
-	)
-	if err != nil {
-		return err
-	}
-	if len(definitions) == 0 {
+	if len(current.Tables) == 0 {
 		return nil
 	}
 	db, err := dbpool.Open(databaseURL)
@@ -196,7 +190,7 @@ func (s *Server) installTenantSyncLog(ctx context.Context, project, databaseURL 
 		return err
 	}
 	defer db.Close()
-	_, err = schemasync.InstallSyncLog(ctx, db, current, definitions)
+	_, err = schemasync.InstallSyncLog(ctx, db, current, nil)
 	return err
 }
 
@@ -275,12 +269,12 @@ func (c *wsConn) openSyncWithClock(
 	}
 	current := c.server.runtime.ManifestForProject(c.project)
 	entry, ok := current.Functions[message.Path]
-	if !ok || entry.Kind != manifest.FunctionKindSync || entry.Sync == nil {
+	if !ok || entry.Delivery != manifest.DeliveryReplica || entry.Replica == nil {
 		protocolErr = errors.New("sync function is not registered")
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: protocolErr.Error()})
 		return
 	}
-	definition := effectiveSyncDefinition(entry)
+	definition := effectiveReplicaCollectionDefinition(entry)
 	base := syncCursorForClock(clock, definition, c.currentSyncScope())
 
 	subscription := &syncSubscription{
@@ -408,10 +402,10 @@ func (s *Server) scheduleSyncLogPrune(project, tenant, databaseURL string) {
 func syncRetentionForManifest(current manifest.Manifest) time.Duration {
 	retention := defaultSyncRetention
 	for _, entry := range current.Functions {
-		if entry.Kind != manifest.FunctionKindSync || entry.Sync == nil || entry.Sync.RetentionMilliseconds <= 0 {
+		if entry.Delivery != manifest.DeliveryReplica || entry.Replica == nil || entry.Replica.RetentionMilliseconds <= 0 {
 			continue
 		}
-		candidate := time.Duration(entry.Sync.RetentionMilliseconds) * time.Millisecond
+		candidate := time.Duration(entry.Replica.RetentionMilliseconds) * time.Millisecond
 		if candidate > retention {
 			retention = candidate
 		}
@@ -459,7 +453,7 @@ func pruneSyncLog(ctx context.Context, databaseURL string, retention time.Durati
 	return tx.Commit()
 }
 
-func syncSnapshotRows(result any, definition manifest.SyncDefinition) ([]json.RawMessage, bool, error) {
+func syncSnapshotRows(result any, definition manifest.ReplicaCollectionDefinition) ([]json.RawMessage, bool, error) {
 	payload, err := json.Marshal(explicitNull(result))
 	if err != nil {
 		return nil, false, err
@@ -542,18 +536,18 @@ func currentSyncClock(ctx context.Context, databaseURL string) (syncClock, error
 // permissions). The code-bundle epoch is deliberately excluded: a resumed
 // cursor is never trusted blindly — deliverAuthoritativeSync re-runs the query
 // and repairs drift via deltas — so cursors may safely survive deploys.
-func syncCursorForClock(clock syncClock, definition manifest.SyncDefinition, visibilityScope string) syncCursor {
+func syncCursorForClock(clock syncClock, definition manifest.ReplicaCollectionDefinition, visibilityScope string) syncCursor {
 	payload, _ := json.Marshal(struct {
-		Semantics     int                     `json:"semantics"`
-		DatabaseEpoch string                  `json:"databaseEpoch"`
-		Definition    manifest.SyncDefinition `json:"definition"`
-		Scope         string                  `json:"scope"`
+		Semantics     int                                  `json:"semantics"`
+		DatabaseEpoch string                               `json:"databaseEpoch"`
+		Definition    manifest.ReplicaCollectionDefinition `json:"definition"`
+		Scope         string                               `json:"scope"`
 	}{syncCursorSemanticsVersion, clock.DatabaseEpoch, definition, visibilityScope})
 	hash := sha256.Sum256(payload)
 	return syncCursor{Epoch: hex.EncodeToString(hash[:16]), Revision: clock.Revision}
 }
 
-func currentSyncCursor(ctx context.Context, databaseURL string, definition manifest.SyncDefinition, visibilityScope string) (syncCursor, error) {
+func currentSyncCursor(ctx context.Context, databaseURL string, definition manifest.ReplicaCollectionDefinition, visibilityScope string) (syncCursor, error) {
 	clock, err := currentSyncClock(ctx, databaseURL)
 	if err != nil {
 		return syncCursor{}, err
@@ -674,7 +668,7 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		cursor := syncCursor{Epoch: latest.Epoch, Revision: batch.revision}
 		subscription.conn.write(serverMessage{
 			Type: "sync.delta", ID: subscription.id, Path: subscription.path, Cursor: &cursor,
-			Upserts: sortedSyncRows(upserts), Deleted: sortedSyncKeys(deleted), MutationIDs: sortedSyncKeys(mutationIDs),
+			Upserts: sortedSyncRows(upserts), Deleted: sortedSyncKeys(deleted), OriginCommandIDs: sortedSyncKeys(mutationIDs),
 			Digest: syncHashesDigest(subscription.visibleHashes),
 		})
 		subscription.cursor = cursor
@@ -783,7 +777,7 @@ func (s *Server) deliverAuthoritativeSync(
 	if len(upserts) > 0 || len(deleted) > 0 || len(mutationIDs) > 0 {
 		subscription.conn.write(serverMessage{
 			Type: "sync.delta", ID: subscription.id, Path: subscription.path, Cursor: &latest,
-			Upserts: sortedSyncRows(upserts), Deleted: sortedSyncKeys(deleted), MutationIDs: sortedSyncKeys(mutationIDs),
+			Upserts: sortedSyncRows(upserts), Deleted: sortedSyncKeys(deleted), OriginCommandIDs: sortedSyncKeys(mutationIDs),
 			Digest: currentDigest,
 		})
 	}
@@ -943,6 +937,79 @@ type syncChangeBatch struct {
 	changes  []syncLogChange
 }
 
+// routeReplicaTransaction projects one committed Postgres transaction through
+// the Replica Collections already authorized on each connection. It emits one
+// atomic client frame regardless of how many tables/collections changed.
+func (s *Server) routeReplicaTransaction(project, tenant, databaseEpoch string, batch syncChangeBatch) {
+	s.wsMu.RLock()
+	connections := make([]*wsConn, 0)
+	for connection := range s.wsConns {
+		if connection.project == project && connection.tenant == tenant {
+			connections = append(connections, connection)
+		}
+	}
+	s.wsMu.RUnlock()
+	for _, connection := range connections {
+		connection.mu.Lock()
+		subscriptions := make([]*syncSubscription, 0, len(connection.syncs))
+		for _, subscription := range connection.syncs {
+			subscriptions = append(subscriptions, subscription)
+		}
+		connection.mu.Unlock()
+		if len(subscriptions) == 0 {
+			continue
+		}
+		changes := make([]replicaChangeMessage, 0, len(batch.changes))
+		originCommandID := ""
+		for _, committed := range batch.changes {
+			oldVisible, newVisible := false, false
+			for _, subscription := range subscriptions {
+				if subscription.definition.Table != committed.table {
+					continue
+				}
+				subscription.mu.Lock()
+				if !subscription.closed && subscription.verified {
+					oldVisible = oldVisible || subscription.visibleKeys[committed.rowID]
+					args := map[string]json.RawMessage{}
+					_ = json.Unmarshal(subscription.args, &args)
+					newVisible = newVisible || syncValueMatches(committed.newValue, subscription.definition, args)
+				}
+				subscription.mu.Unlock()
+			}
+			if originCommandID == "" {
+				originCommandID = strings.TrimSpace(committed.mutationID)
+			}
+			if !oldVisible && !newVisible {
+				continue
+			}
+			operation := "update"
+			switch {
+			case !oldVisible && newVisible:
+				operation = "insert"
+			case oldVisible && !newVisible:
+				operation = "delete"
+			}
+			change := replicaChangeMessage{
+				Entity: committed.table, ID: committed.rowID, Operation: operation,
+				ChangedColumns: append([]string(nil), committed.changedColumns...),
+			}
+			if oldVisible {
+				change.OldValue = committed.oldValue
+			}
+			if newVisible {
+				change.NewValue = committed.newValue
+			}
+			changes = append(changes, change)
+		}
+		connection.write(serverMessage{
+			Type:            "replica.transaction",
+			Cursor:          &syncCursor{Epoch: databaseEpoch, Revision: batch.revision},
+			OriginCommandID: originCommandID,
+			Changes:         changes,
+		})
+	}
+}
+
 func groupSyncChanges(changes []syncLogChange) []syncChangeBatch {
 	batches := make([]syncChangeBatch, 0)
 	for _, change := range changes {
@@ -973,20 +1040,22 @@ func readSyncChanges(ctx context.Context, databaseURL string, after, through uin
 		return nil, errSyncCursorExpired
 	}
 	tables = appendUniqueStrings(nil, tables...)
-	if len(tables) == 0 {
-		return nil, errors.New("sync replay requires at least one table")
-	}
 	queryArgs := []any{after, through}
 	placeholders := make([]string, 0, len(tables))
 	for _, table := range tables {
 		queryArgs = append(queryArgs, table)
 		placeholders = append(placeholders, fmt.Sprintf("$%d", len(queryArgs)))
 	}
+	tablePredicate := ""
+	if len(placeholders) > 0 {
+		tablePredicate = " AND table_name IN (" + strings.Join(placeholders, ", ") + ")"
+	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT revision, ordinal, COALESCE(mutation_id, ''), table_name, row_id, operation,
+		       COALESCE(changed_columns, ARRAY[]::text[]),
 		       COALESCE(old_value, 'null'::jsonb), COALESCE(new_value, 'null'::jsonb)
 		FROM _gonvex_sync_changes
-		WHERE revision > $1 AND revision <= $2 AND table_name IN (`+strings.Join(placeholders, ", ")+`)
+		WHERE revision > $1 AND revision <= $2`+tablePredicate+`
 		ORDER BY revision, ordinal
 	`, queryArgs...)
 	if err != nil {
@@ -998,7 +1067,7 @@ func readSyncChanges(ctx context.Context, databaseURL string, after, through uin
 		var change syncLogChange
 		if err := rows.Scan(
 			&change.revision, &change.ordinal, &change.mutationID, &change.table,
-			&change.rowID, &change.operation, &change.oldValue, &change.newValue,
+			&change.rowID, &change.operation, &change.changedColumns, &change.oldValue, &change.newValue,
 		); err != nil {
 			return nil, err
 		}
@@ -1025,14 +1094,14 @@ func syncVisibilityChanged(changes []syncLogChange, sourceTable string) bool {
 	return false
 }
 
-func syncNeedsAuthoritativeReconcile(definition manifest.SyncDefinition, changes []syncLogChange) bool {
+func syncNeedsAuthoritativeReconcile(definition manifest.ReplicaCollectionDefinition, changes []syncLogChange) bool {
 	return definition.Mode == "progressive" ||
 		definition.MaxRows > 0 ||
 		definition.MaxBytes > 0 ||
 		syncVisibilityChanged(changes, definition.Table)
 }
 
-func syncValueMatches(value json.RawMessage, definition manifest.SyncDefinition, args map[string]json.RawMessage) bool {
+func syncValueMatches(value json.RawMessage, definition manifest.ReplicaCollectionDefinition, args map[string]json.RawMessage) bool {
 	if len(value) == 0 || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 		return false
 	}
@@ -1268,7 +1337,7 @@ func (s *Server) scheduleAllSyncDeliveries(connections []*wsConn) {
 	}
 }
 
-func syncDefinitionIntersectsTables(definition manifest.SyncDefinition, changedTables []string) bool {
+func syncDefinitionIntersectsTables(definition manifest.ReplicaCollectionDefinition, changedTables []string) bool {
 	return intersectsStrings(
 		append([]string{definition.Table}, definition.VisibilityTables...),
 		changedTables,

@@ -1,279 +1,135 @@
 {
   "project": "dashboard",
-  "generatedAt": "2026-08-12T19:32:34.240223135Z",
+  "generatedAt": "2026-08-20T05:10:15.774Z",
   "functions": {
     "files.createUploadUrl": {
-      "kind": "mutation",
+      "kind": "action",
       "handler": "CreateUploadURL",
-      "file": "gonvex/files.go",
-      "dependencies": {}
-    },
-    "files.delete": {
-      "kind": "mutation",
-      "handler": "DeleteFile",
-      "file": "gonvex/files.go",
-      "dependencies": {}
-    },
-    "files.getMetadata": {
-      "kind": "query",
-      "handler": "GetFileMetadata",
-      "file": "gonvex/files.go",
-      "dependencies": {}
+      "file": "gonvex/files.go"
     },
     "files.getUrl": {
       "kind": "query",
       "handler": "GetFileURL",
       "file": "gonvex/files.go",
-      "dependencies": {}
+      "delivery": "oneShot"
+    },
+    "files.getMetadata": {
+      "kind": "query",
+      "handler": "GetFileMetadata",
+      "file": "gonvex/files.go",
+      "delivery": "oneShot"
+    },
+    "files.delete": {
+      "kind": "action",
+      "handler": "DeleteFile",
+      "file": "gonvex/files.go"
     },
     "system.heartbeat": {
-      "kind": "internalMutation",
+      "kind": "reducer",
       "handler": "Heartbeat",
       "file": "gonvex/system.go",
-      "dependencies": {}
-    },
-    "tasks.create": {
-      "kind": "mutation",
-      "handler": "CreateTask",
-      "file": "gonvex/tasks.go",
-      "dependencies": {}
-    },
-    "tasks.grid": {
-      "kind": "liveGrid",
-      "handler": "TasksGrid",
-      "file": "gonvex/tasks.go",
-      "dependencies": {}
+      "internal": true
     },
     "tasks.list": {
       "kind": "query",
       "handler": "ListTasks",
       "file": "gonvex/tasks.go",
-      "dependencies": {}
+      "delivery": "oneShot"
+    },
+    "tasks.create": {
+      "kind": "reducer",
+      "handler": "CreateTask",
+      "file": "gonvex/tasks.go",
+      "dependencies": {
+        "nonOptimisticReason": "dashboard data-generator operation"
+      }
     },
     "tasks.randomizeStatusPriority": {
-      "kind": "mutation",
+      "kind": "reducer",
       "handler": "RandomizeStatusPriority",
       "file": "gonvex/tasks.go",
-      "dependencies": {}
+      "dependencies": {
+        "nonOptimisticReason": "dashboard bulk benchmark operation"
+      }
+    },
+    "tasks.grid": {
+      "kind": "query",
+      "handler": "TasksGrid",
+      "file": "gonvex/tasks.go",
+      "delivery": "live",
+      "dependencies": {
+        "liveQueryPlan": {
+          "table": "dashboard_demo_tasks",
+          "key": "id",
+          "resultPath": [
+            "rows"
+          ],
+          "search": {
+            "argument": "search",
+            "columns": [
+              "title",
+              "description",
+              "status_name",
+              "priority_name",
+              "assignee_names"
+            ]
+          },
+          "sort": {
+            "columnArgument": "sort",
+            "directionArgument": "direction",
+            "defaultColumn": "created_at",
+            "defaultDirection": "desc",
+            "allowedColumns": [
+              "created_at",
+              "updated_at",
+              "due_date",
+              "title",
+              "status_name",
+              "priority_name"
+            ]
+          },
+          "window": {
+            "offsetArgument": "offset",
+            "limitArgument": "limit",
+            "defaultLimit": 100,
+            "maxLimit": 250
+          },
+          "serverOnly": true
+        },
+        "reads": [
+          {
+            "table": "dashboard_demo_tasks",
+            "filters": [
+              "title",
+              "description",
+              "status_name",
+              "priority_name",
+              "assignee_names"
+            ],
+            "ordersBy": [
+              "created_at",
+              "updated_at",
+              "due_date",
+              "title",
+              "status_name",
+              "priority_name"
+            ],
+            "windowed": true
+          }
+        ]
+      }
     }
   },
   "schema": {
     "tables": {
-      "dashboard_demo_files": {
-        "columns": {
-          "content_type": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "created_at": {
-            "type": "time",
-            "nullable": false,
-            "primaryKey": false
-          },
-          "id": {
-            "type": "id",
-            "nullable": false,
-            "primaryKey": true
-          },
-          "key": {
-            "type": "string",
-            "nullable": false,
-            "primaryKey": false
-          },
-          "size": {
-            "type": "int64",
-            "nullable": true,
-            "primaryKey": false
-          }
-        },
-        "indexes": {
-          "by_key": {
-            "columns": [
-              "key"
-            ],
-            "unique": true
-          }
-        }
-      },
       "dashboard_demo_tasks": {
         "columns": {
-          "all_user_avatar_urls": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "all_user_names": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "approval_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "asset_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "assignee": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "assignee_avatar_urls": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "assignee_ids": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "assignee_names": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "attachment_count": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "audience": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "audience_team_ids": {
-            "type": "json",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "audience_user_ids": {
-            "type": "json",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "category_color": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "category_icon": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "category_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "category_name": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "completed": {
-            "type": "bool",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "completed_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "created_at": {
-            "type": "time",
-            "nullable": false,
-            "primaryKey": false
-          },
-          "created_by": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "deleted_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "description": {
-            "type": "text",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "due_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "due_date": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "estimate_minutes": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "expected_duration": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "first_viewed_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "flag_color": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "form_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
           "id": {
             "type": "id",
             "nullable": false,
             "primaryKey": true
           },
-          "label": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "latitude": {
-            "type": "float64",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "longitude": {
-            "type": "float64",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "name": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "notes_count": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "occurrence_date": {
+          "tenant_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
@@ -283,48 +139,38 @@
             "nullable": true,
             "primaryKey": false
           },
-          "priority": {
+          "name": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
           },
-          "priority_color": {
+          "title": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "status": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "description": {
+            "type": "text",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "audience": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
           },
-          "priority_id": {
-            "type": "string",
+          "audience_user_ids": {
+            "type": "json",
             "nullable": true,
             "primaryKey": false
           },
-          "priority_name": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "progress": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "project": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "recurrence_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "reported_by_team_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "reported_by_user_id": {
-            "type": "string",
+          "audience_team_ids": {
+            "type": "json",
             "nullable": true,
             "primaryKey": false
           },
@@ -333,112 +179,12 @@
             "nullable": true,
             "primaryKey": false
           },
-          "requires_signature": {
-            "type": "bool",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "row_hash": {
+          "workspace_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
           },
-          "sla_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_paused_duration": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_resolution_deadline": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_resolved_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_responded_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_response_deadline": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_started_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "spot_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "spot_name": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "start_date": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status": {
-            "type": "string",
-            "nullable": false,
-            "primaryKey": false
-          },
-          "status_action": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_color": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_icon": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_initial": {
-            "type": "bool",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_name": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_working_animation": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "tag_colors": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "tag_names": {
+          "category_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
@@ -453,18 +199,88 @@
             "nullable": true,
             "primaryKey": false
           },
-          "tenant_id": {
+          "spot_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
           },
-          "title": {
+          "status_id": {
             "type": "string",
-            "nullable": false,
+            "nullable": true,
             "primaryKey": false
           },
-          "updated_at": {
-            "type": "time",
+          "priority_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_name": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_action": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_icon": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_working_animation": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_initial": {
+            "type": "bool",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "priority_name": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "priority_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "category_name": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "category_icon": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "category_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "tag_names": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "tag_colors": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "attachment_count": {
+            "type": "int",
             "nullable": true,
             "primaryKey": false
           },
@@ -473,12 +289,52 @@
             "nullable": true,
             "primaryKey": false
           },
-          "workplan_id": {
+          "sla_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
           },
-          "workplan_instance_id": {
+          "approval_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "form_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "requires_signature": {
+            "type": "bool",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "asset_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "created_by": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "reported_by_team_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "reported_by_user_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "recurrence_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "workplan_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
@@ -488,7 +344,27 @@
             "nullable": true,
             "primaryKey": false
           },
-          "workspace_id": {
+          "workplan_instance_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "occurrence_date": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "expected_duration": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "flag_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "spot_name": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
@@ -497,44 +373,195 @@
             "type": "string",
             "nullable": true,
             "primaryKey": false
+          },
+          "assignee_names": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "assignee_ids": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "assignee_avatar_urls": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "all_user_names": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "all_user_avatar_urls": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "notes_count": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_started_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_response_deadline": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_resolution_deadline": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_responded_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_resolved_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_paused_duration": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "due_date": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "start_date": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "completed_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "latitude": {
+            "type": "float64",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "longitude": {
+            "type": "float64",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "first_viewed_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "deleted_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "row_hash": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "priority": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "assignee": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "project": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "label": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "due_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "completed": {
+            "type": "bool",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "estimate_minutes": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "progress": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "created_at": {
+            "type": "time",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "updated_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
           }
         },
         "indexes": {
-          "by_active_created_at": {
+          "by_status": {
             "columns": [
-              "deleted_at",
-              "created_at",
-              "id"
+              "status"
             ],
             "unique": false
           },
-          "by_active_pg_id": {
+          "by_pg_id": {
             "columns": [
-              "deleted_at",
-              "pg_id",
-              "id"
+              "pg_id"
             ],
             "unique": false
           },
-          "by_assignee": {
+          "by_name": {
             "columns": [
-              "assignee"
+              "name"
             ],
             "unique": false
           },
-          "by_assignee_created_at": {
+          "by_tenant_pg_id": {
             "columns": [
               "tenant_id",
-              "assignee",
-              "deleted_at",
-              "created_at",
-              "id"
+              "pg_id"
             ],
             "unique": false
           },
-          "by_assignee_names": {
+          "by_workspace": {
             "columns": [
-              "assignee_names"
+              "tenant_id",
+              "workspace_id"
+            ],
+            "unique": false
+          },
+          "by_status_id": {
+            "columns": [
+              "tenant_id",
+              "status_id"
             ],
             "unique": false
           },
@@ -545,79 +572,16 @@
             ],
             "unique": false
           },
-          "by_created_at": {
-            "columns": [
-              "created_at"
-            ],
-            "unique": false
-          },
-          "by_created_at_id": {
-            "columns": [
-              "created_at",
-              "id"
-            ],
-            "unique": false
-          },
-          "by_due_at": {
-            "columns": [
-              "due_at"
-            ],
-            "unique": false
-          },
-          "by_due_created_at": {
-            "columns": [
-              "tenant_id",
-              "due_at",
-              "deleted_at",
-              "created_at",
-              "id"
-            ],
-            "unique": false
-          },
-          "by_due_date": {
-            "columns": [
-              "due_date"
-            ],
-            "unique": false
-          },
-          "by_flag_color": {
-            "columns": [
-              "flag_color"
-            ],
-            "unique": false
-          },
-          "by_name": {
-            "columns": [
-              "name"
-            ],
-            "unique": false
-          },
-          "by_pg_id": {
-            "columns": [
-              "pg_id"
-            ],
-            "unique": false
-          },
-          "by_priority": {
-            "columns": [
-              "priority"
-            ],
-            "unique": false
-          },
-          "by_priority_created_at": {
-            "columns": [
-              "tenant_id",
-              "priority_id",
-              "deleted_at",
-              "created_at",
-              "id"
-            ],
-            "unique": false
-          },
           "by_priority_id": {
             "columns": [
               "tenant_id",
               "priority_id"
+            ],
+            "unique": false
+          },
+          "by_status_name": {
+            "columns": [
+              "status_name"
             ],
             "unique": false
           },
@@ -627,9 +591,10 @@
             ],
             "unique": false
           },
-          "by_project": {
+          "by_team": {
             "columns": [
-              "project"
+              "tenant_id",
+              "team_id"
             ],
             "unique": false
           },
@@ -646,46 +611,64 @@
             ],
             "unique": false
           },
-          "by_status": {
+          "by_workspace_name": {
             "columns": [
-              "status"
+              "workspace_name"
             ],
             "unique": false
           },
-          "by_status_created_at": {
+          "by_assignee_names": {
             "columns": [
-              "tenant_id",
-              "status_id",
-              "deleted_at",
+              "assignee_names"
+            ],
+            "unique": false
+          },
+          "by_flag_color": {
+            "columns": [
+              "flag_color"
+            ],
+            "unique": false
+          },
+          "by_priority": {
+            "columns": [
+              "priority"
+            ],
+            "unique": false
+          },
+          "by_assignee": {
+            "columns": [
+              "assignee"
+            ],
+            "unique": false
+          },
+          "by_project": {
+            "columns": [
+              "project"
+            ],
+            "unique": false
+          },
+          "by_due_date": {
+            "columns": [
+              "due_date"
+            ],
+            "unique": false
+          },
+          "by_due_at": {
+            "columns": [
+              "due_at"
+            ],
+            "unique": false
+          },
+          "by_created_at": {
+            "columns": [
+              "created_at"
+            ],
+            "unique": false
+          },
+          "by_created_at_id": {
+            "columns": [
               "created_at",
               "id"
-            ],
-            "unique": false
-          },
-          "by_status_id": {
-            "columns": [
-              "tenant_id",
-              "status_id"
-            ],
-            "unique": false
-          },
-          "by_status_name": {
-            "columns": [
-              "status_name"
-            ],
-            "unique": false
-          },
-          "by_team": {
-            "columns": [
-              "tenant_id",
-              "team_id"
-            ],
-            "unique": false
-          },
-          "by_tenant_pg_id": {
-            "columns": [
-              "tenant_id",
-              "pg_id"
             ],
             "unique": false
           },
@@ -695,10 +678,19 @@
             ],
             "unique": false
           },
-          "by_workspace": {
+          "by_active_created_at": {
             "columns": [
-              "tenant_id",
-              "workspace_id"
+              "deleted_at",
+              "created_at",
+              "id"
+            ],
+            "unique": false
+          },
+          "by_active_pg_id": {
+            "columns": [
+              "deleted_at",
+              "pg_id",
+              "id"
             ],
             "unique": false
           },
@@ -712,12 +704,6 @@
             ],
             "unique": false
           },
-          "by_workspace_name": {
-            "columns": [
-              "workspace_name"
-            ],
-            "unique": false
-          },
           "by_workspace_pg_id": {
             "columns": [
               "tenant_id",
@@ -728,16 +714,63 @@
             ],
             "unique": false
           },
-          "description_trgm": {
+          "by_status_created_at": {
             "columns": [
-              "description"
+              "tenant_id",
+              "status_id",
+              "deleted_at",
+              "created_at",
+              "id"
             ],
-            "unique": false,
-            "kind": "trigram"
+            "unique": false
+          },
+          "by_priority_created_at": {
+            "columns": [
+              "tenant_id",
+              "priority_id",
+              "deleted_at",
+              "created_at",
+              "id"
+            ],
+            "unique": false
+          },
+          "by_assignee_created_at": {
+            "columns": [
+              "tenant_id",
+              "assignee",
+              "deleted_at",
+              "created_at",
+              "id"
+            ],
+            "unique": false
+          },
+          "by_due_created_at": {
+            "columns": [
+              "tenant_id",
+              "due_at",
+              "deleted_at",
+              "created_at",
+              "id"
+            ],
+            "unique": false
           },
           "name_trgm": {
             "columns": [
               "name"
+            ],
+            "unique": false,
+            "kind": "trigram"
+          },
+          "title_trgm": {
+            "columns": [
+              "title"
+            ],
+            "unique": false,
+            "kind": "trigram"
+          },
+          "description_trgm": {
+            "columns": [
+              "description"
             ],
             "unique": false,
             "kind": "trigram"
@@ -756,233 +789,57 @@
             ],
             "unique": false,
             "kind": "trigram"
+          }
+        }
+      },
+      "dashboard_demo_files": {
+        "columns": {
+          "id": {
+            "type": "id",
+            "nullable": false,
+            "primaryKey": true
           },
-          "title_trgm": {
+          "key": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "content_type": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "size": {
+            "type": "int64",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "created_at": {
+            "type": "time",
+            "nullable": false,
+            "primaryKey": false
+          }
+        },
+        "indexes": {
+          "by_key": {
             "columns": [
-              "title"
+              "key"
             ],
-            "unique": false,
-            "kind": "trigram"
+            "unique": true
           }
         }
       }
     },
+    "landlordTables": {},
     "tenantTables": {
-      "dashboard_demo_files": {
-        "columns": {
-          "content_type": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "created_at": {
-            "type": "time",
-            "nullable": false,
-            "primaryKey": false
-          },
-          "id": {
-            "type": "id",
-            "nullable": false,
-            "primaryKey": true
-          },
-          "key": {
-            "type": "string",
-            "nullable": false,
-            "primaryKey": false
-          },
-          "size": {
-            "type": "int64",
-            "nullable": true,
-            "primaryKey": false
-          }
-        },
-        "indexes": {
-          "by_key": {
-            "columns": [
-              "key"
-            ],
-            "unique": true
-          }
-        }
-      },
       "dashboard_demo_tasks": {
         "columns": {
-          "all_user_avatar_urls": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "all_user_names": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "approval_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "asset_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "assignee": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "assignee_avatar_urls": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "assignee_ids": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "assignee_names": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "attachment_count": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "audience": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "audience_team_ids": {
-            "type": "json",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "audience_user_ids": {
-            "type": "json",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "category_color": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "category_icon": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "category_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "category_name": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "completed": {
-            "type": "bool",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "completed_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "created_at": {
-            "type": "time",
-            "nullable": false,
-            "primaryKey": false
-          },
-          "created_by": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "deleted_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "description": {
-            "type": "text",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "due_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "due_date": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "estimate_minutes": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "expected_duration": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "first_viewed_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "flag_color": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "form_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
           "id": {
             "type": "id",
             "nullable": false,
             "primaryKey": true
           },
-          "label": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "latitude": {
-            "type": "float64",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "longitude": {
-            "type": "float64",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "name": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "notes_count": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "occurrence_date": {
+          "tenant_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
@@ -992,48 +849,38 @@
             "nullable": true,
             "primaryKey": false
           },
-          "priority": {
+          "name": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
           },
-          "priority_color": {
+          "title": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "status": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "description": {
+            "type": "text",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "audience": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
           },
-          "priority_id": {
-            "type": "string",
+          "audience_user_ids": {
+            "type": "json",
             "nullable": true,
             "primaryKey": false
           },
-          "priority_name": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "progress": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "project": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "recurrence_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "reported_by_team_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "reported_by_user_id": {
-            "type": "string",
+          "audience_team_ids": {
+            "type": "json",
             "nullable": true,
             "primaryKey": false
           },
@@ -1042,112 +889,12 @@
             "nullable": true,
             "primaryKey": false
           },
-          "requires_signature": {
-            "type": "bool",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "row_hash": {
+          "workspace_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
           },
-          "sla_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_paused_duration": {
-            "type": "int",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_resolution_deadline": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_resolved_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_responded_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_response_deadline": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "sla_started_at": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "spot_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "spot_name": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "start_date": {
-            "type": "time",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status": {
-            "type": "string",
-            "nullable": false,
-            "primaryKey": false
-          },
-          "status_action": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_color": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_icon": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_id": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_initial": {
-            "type": "bool",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_name": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "status_working_animation": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "tag_colors": {
-            "type": "string",
-            "nullable": true,
-            "primaryKey": false
-          },
-          "tag_names": {
+          "category_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
@@ -1162,18 +909,88 @@
             "nullable": true,
             "primaryKey": false
           },
-          "tenant_id": {
+          "spot_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
           },
-          "title": {
+          "status_id": {
             "type": "string",
-            "nullable": false,
+            "nullable": true,
             "primaryKey": false
           },
-          "updated_at": {
-            "type": "time",
+          "priority_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_name": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_action": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_icon": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_working_animation": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "status_initial": {
+            "type": "bool",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "priority_name": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "priority_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "category_name": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "category_icon": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "category_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "tag_names": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "tag_colors": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "attachment_count": {
+            "type": "int",
             "nullable": true,
             "primaryKey": false
           },
@@ -1182,12 +999,52 @@
             "nullable": true,
             "primaryKey": false
           },
-          "workplan_id": {
+          "sla_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
           },
-          "workplan_instance_id": {
+          "approval_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "form_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "requires_signature": {
+            "type": "bool",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "asset_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "created_by": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "reported_by_team_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "reported_by_user_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "recurrence_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "workplan_id": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
@@ -1197,7 +1054,27 @@
             "nullable": true,
             "primaryKey": false
           },
-          "workspace_id": {
+          "workplan_instance_id": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "occurrence_date": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "expected_duration": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "flag_color": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "spot_name": {
             "type": "string",
             "nullable": true,
             "primaryKey": false
@@ -1206,44 +1083,195 @@
             "type": "string",
             "nullable": true,
             "primaryKey": false
+          },
+          "assignee_names": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "assignee_ids": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "assignee_avatar_urls": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "all_user_names": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "all_user_avatar_urls": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "notes_count": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_started_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_response_deadline": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_resolution_deadline": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_responded_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_resolved_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "sla_paused_duration": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "due_date": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "start_date": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "completed_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "latitude": {
+            "type": "float64",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "longitude": {
+            "type": "float64",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "first_viewed_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "deleted_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "row_hash": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "priority": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "assignee": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "project": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "label": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "due_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "completed": {
+            "type": "bool",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "estimate_minutes": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "progress": {
+            "type": "int",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "created_at": {
+            "type": "time",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "updated_at": {
+            "type": "time",
+            "nullable": true,
+            "primaryKey": false
           }
         },
         "indexes": {
-          "by_active_created_at": {
+          "by_status": {
             "columns": [
-              "deleted_at",
-              "created_at",
-              "id"
+              "status"
             ],
             "unique": false
           },
-          "by_active_pg_id": {
+          "by_pg_id": {
             "columns": [
-              "deleted_at",
-              "pg_id",
-              "id"
+              "pg_id"
             ],
             "unique": false
           },
-          "by_assignee": {
+          "by_name": {
             "columns": [
-              "assignee"
+              "name"
             ],
             "unique": false
           },
-          "by_assignee_created_at": {
+          "by_tenant_pg_id": {
             "columns": [
               "tenant_id",
-              "assignee",
-              "deleted_at",
-              "created_at",
-              "id"
+              "pg_id"
             ],
             "unique": false
           },
-          "by_assignee_names": {
+          "by_workspace": {
             "columns": [
-              "assignee_names"
+              "tenant_id",
+              "workspace_id"
+            ],
+            "unique": false
+          },
+          "by_status_id": {
+            "columns": [
+              "tenant_id",
+              "status_id"
             ],
             "unique": false
           },
@@ -1254,79 +1282,16 @@
             ],
             "unique": false
           },
-          "by_created_at": {
-            "columns": [
-              "created_at"
-            ],
-            "unique": false
-          },
-          "by_created_at_id": {
-            "columns": [
-              "created_at",
-              "id"
-            ],
-            "unique": false
-          },
-          "by_due_at": {
-            "columns": [
-              "due_at"
-            ],
-            "unique": false
-          },
-          "by_due_created_at": {
-            "columns": [
-              "tenant_id",
-              "due_at",
-              "deleted_at",
-              "created_at",
-              "id"
-            ],
-            "unique": false
-          },
-          "by_due_date": {
-            "columns": [
-              "due_date"
-            ],
-            "unique": false
-          },
-          "by_flag_color": {
-            "columns": [
-              "flag_color"
-            ],
-            "unique": false
-          },
-          "by_name": {
-            "columns": [
-              "name"
-            ],
-            "unique": false
-          },
-          "by_pg_id": {
-            "columns": [
-              "pg_id"
-            ],
-            "unique": false
-          },
-          "by_priority": {
-            "columns": [
-              "priority"
-            ],
-            "unique": false
-          },
-          "by_priority_created_at": {
-            "columns": [
-              "tenant_id",
-              "priority_id",
-              "deleted_at",
-              "created_at",
-              "id"
-            ],
-            "unique": false
-          },
           "by_priority_id": {
             "columns": [
               "tenant_id",
               "priority_id"
+            ],
+            "unique": false
+          },
+          "by_status_name": {
+            "columns": [
+              "status_name"
             ],
             "unique": false
           },
@@ -1336,9 +1301,10 @@
             ],
             "unique": false
           },
-          "by_project": {
+          "by_team": {
             "columns": [
-              "project"
+              "tenant_id",
+              "team_id"
             ],
             "unique": false
           },
@@ -1355,46 +1321,64 @@
             ],
             "unique": false
           },
-          "by_status": {
+          "by_workspace_name": {
             "columns": [
-              "status"
+              "workspace_name"
             ],
             "unique": false
           },
-          "by_status_created_at": {
+          "by_assignee_names": {
             "columns": [
-              "tenant_id",
-              "status_id",
-              "deleted_at",
+              "assignee_names"
+            ],
+            "unique": false
+          },
+          "by_flag_color": {
+            "columns": [
+              "flag_color"
+            ],
+            "unique": false
+          },
+          "by_priority": {
+            "columns": [
+              "priority"
+            ],
+            "unique": false
+          },
+          "by_assignee": {
+            "columns": [
+              "assignee"
+            ],
+            "unique": false
+          },
+          "by_project": {
+            "columns": [
+              "project"
+            ],
+            "unique": false
+          },
+          "by_due_date": {
+            "columns": [
+              "due_date"
+            ],
+            "unique": false
+          },
+          "by_due_at": {
+            "columns": [
+              "due_at"
+            ],
+            "unique": false
+          },
+          "by_created_at": {
+            "columns": [
+              "created_at"
+            ],
+            "unique": false
+          },
+          "by_created_at_id": {
+            "columns": [
               "created_at",
               "id"
-            ],
-            "unique": false
-          },
-          "by_status_id": {
-            "columns": [
-              "tenant_id",
-              "status_id"
-            ],
-            "unique": false
-          },
-          "by_status_name": {
-            "columns": [
-              "status_name"
-            ],
-            "unique": false
-          },
-          "by_team": {
-            "columns": [
-              "tenant_id",
-              "team_id"
-            ],
-            "unique": false
-          },
-          "by_tenant_pg_id": {
-            "columns": [
-              "tenant_id",
-              "pg_id"
             ],
             "unique": false
           },
@@ -1404,10 +1388,19 @@
             ],
             "unique": false
           },
-          "by_workspace": {
+          "by_active_created_at": {
             "columns": [
-              "tenant_id",
-              "workspace_id"
+              "deleted_at",
+              "created_at",
+              "id"
+            ],
+            "unique": false
+          },
+          "by_active_pg_id": {
+            "columns": [
+              "deleted_at",
+              "pg_id",
+              "id"
             ],
             "unique": false
           },
@@ -1421,12 +1414,6 @@
             ],
             "unique": false
           },
-          "by_workspace_name": {
-            "columns": [
-              "workspace_name"
-            ],
-            "unique": false
-          },
           "by_workspace_pg_id": {
             "columns": [
               "tenant_id",
@@ -1437,16 +1424,63 @@
             ],
             "unique": false
           },
-          "description_trgm": {
+          "by_status_created_at": {
             "columns": [
-              "description"
+              "tenant_id",
+              "status_id",
+              "deleted_at",
+              "created_at",
+              "id"
             ],
-            "unique": false,
-            "kind": "trigram"
+            "unique": false
+          },
+          "by_priority_created_at": {
+            "columns": [
+              "tenant_id",
+              "priority_id",
+              "deleted_at",
+              "created_at",
+              "id"
+            ],
+            "unique": false
+          },
+          "by_assignee_created_at": {
+            "columns": [
+              "tenant_id",
+              "assignee",
+              "deleted_at",
+              "created_at",
+              "id"
+            ],
+            "unique": false
+          },
+          "by_due_created_at": {
+            "columns": [
+              "tenant_id",
+              "due_at",
+              "deleted_at",
+              "created_at",
+              "id"
+            ],
+            "unique": false
           },
           "name_trgm": {
             "columns": [
               "name"
+            ],
+            "unique": false,
+            "kind": "trigram"
+          },
+          "title_trgm": {
+            "columns": [
+              "title"
+            ],
+            "unique": false,
+            "kind": "trigram"
+          },
+          "description_trgm": {
+            "columns": [
+              "description"
             ],
             "unique": false,
             "kind": "trigram"
@@ -1465,17 +1499,57 @@
             ],
             "unique": false,
             "kind": "trigram"
+          }
+        }
+      },
+      "dashboard_demo_files": {
+        "columns": {
+          "id": {
+            "type": "id",
+            "nullable": false,
+            "primaryKey": true
           },
-          "title_trgm": {
+          "key": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "content_type": {
+            "type": "string",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "size": {
+            "type": "int64",
+            "nullable": true,
+            "primaryKey": false
+          },
+          "created_at": {
+            "type": "time",
+            "nullable": false,
+            "primaryKey": false
+          }
+        },
+        "indexes": {
+          "by_key": {
             "columns": [
-              "title"
+              "key"
             ],
-            "unique": false,
-            "kind": "trigram"
+            "unique": true
           }
         }
       }
     }
   },
-  "notifySchemaVersion": "13"
+  "bundle": {
+    "hash": "a10ecba17f6174b2803fecadd84d763b7dfa1a83f6796ba96ea3ced40cd8548c",
+    "modulePath": "gonvexapp/dashboard",
+    "packageName": "gonvextest",
+    "files": {
+      "app/files.go": "cGFja2FnZSBnb252ZXh0ZXN0CgppbXBvcnQgKAoJInRpbWUiCgoJImdpdGh1Yi5jb20vZ29udmV4L2dvbnZleC9wa2cvZ29udmV4IgopCgovLyBGaWxlIHN0b3JhZ2UgaGFuZGxlcnMuIFRoZXNlIG1pcnJvciB0aGUgQ29udmV4IHN0b3JhZ2UgZmxvdzogdGhlIGNsaWVudCBhc2tzCi8vIGZvciBhbiB1cGxvYWQgVVJMLCBQVVRzIHRoZSBieXRlcyBkaXJlY3RseSB0byBvYmplY3Qgc3RvcmFnZSwgdGhlbiByZWZlcmVuY2VzCi8vIHRoZSByZXR1cm5lZCBmaWxlIGlkIGZyb20gYXBwIHJvd3MuCgp0eXBlIENyZWF0ZVVwbG9hZFVSTEFyZ3Mgc3RydWN0IHsKCUNvbnRlbnRUeXBlIHN0cmluZyBganNvbjoiY29udGVudFR5cGUiYAoJU2l6ZSAgICAgICAgaW50NjQgIGBqc29uOiJzaXplLG9taXRlbXB0eSJgCn0KCnR5cGUgQ3JlYXRlVXBsb2FkVVJMUmVzdWx0IHN0cnVjdCB7CglGaWxlSUQgIHN0cmluZyAgICAgICAgICAgIGBqc29uOiJmaWxlSWQiYAoJVVJMICAgICBzdHJpbmcgICAgICAgICAgICBganNvbjoidXJsImAKCU1ldGhvZCAgc3RyaW5nICAgICAgICAgICAgYGpzb246Im1ldGhvZCJgCglIZWFkZXJzIG1hcFtzdHJpbmddc3RyaW5nIGBqc29uOiJoZWFkZXJzLG9taXRlbXB0eSJgCn0KCnR5cGUgRmlsZUlEQXJncyBzdHJ1Y3QgewoJRmlsZUlEIHN0cmluZyBganNvbjoiZmlsZUlkImAKfQoKdHlwZSBHZXRGaWxlVVJMUmVzdWx0IHN0cnVjdCB7CglVUkwgc3RyaW5nIGBqc29uOiJ1cmwiYAp9Cgp0eXBlIERlbGV0ZUZpbGVSZXN1bHQgc3RydWN0IHsKCURlbGV0ZWQgYm9vbCBganNvbjoiZGVsZXRlZCJgCn0KCmZ1bmMgUmVnaXN0ZXJGaWxlcyhhcHAgKmdvbnZleC5BcHApIHsKCWFwcC5BY3Rpb24oImZpbGVzLmNyZWF0ZVVwbG9hZFVybCIsIENyZWF0ZVVwbG9hZFVSTCkKCWFwcC5RdWVyeSgiZmlsZXMuZ2V0VXJsIiwgR2V0RmlsZVVSTCkKCWFwcC5RdWVyeSgiZmlsZXMuZ2V0TWV0YWRhdGEiLCBHZXRGaWxlTWV0YWRhdGEpCglhcHAuQWN0aW9uKCJmaWxlcy5kZWxldGUiLCBEZWxldGVGaWxlKQp9CgovLyBDcmVhdGVVcGxvYWRVUkwgcmVjb3JkcyBhIHBlbmRpbmcgZmlsZSBhbmQgcmV0dXJucyBhIHNob3J0LWxpdmVkIHByZXNpZ25lZAovLyBQVVQgVVJMIHRoZSBjbGllbnQgdXBsb2FkcyB0aGUgYnl0ZXMgdG8uCmZ1bmMgQ3JlYXRlVXBsb2FkVVJMKGN0eCAqZ29udmV4LkFjdGlvbkN0eCwgYXJncyBDcmVhdGVVcGxvYWRVUkxBcmdzKSAoQ3JlYXRlVXBsb2FkVVJMUmVzdWx0LCBlcnJvcikgewoJdGFyZ2V0LCBlcnIgOj0gY3R4LlN0b3JhZ2UuR2VuZXJhdGVVcGxvYWRVUkwoZ29udmV4LlVwbG9hZE9wdGlvbnN7CgkJQ29udGVudFR5cGU6IGFyZ3MuQ29udGVudFR5cGUsCgkJU2l6ZTogICAgICAgIGFyZ3MuU2l6ZSwKCX0pCglpZiBlcnIgIT0gbmlsIHsKCQlyZXR1cm4gQ3JlYXRlVXBsb2FkVVJMUmVzdWx0e30sIGVycgoJfQoJcmV0dXJuIENyZWF0ZVVwbG9hZFVSTFJlc3VsdHsKCQlGaWxlSUQ6ICB0YXJnZXQuRmlsZUlELAoJCVVSTDogICAgIHRhcmdldC5VUkwsCgkJTWV0aG9kOiAgdGFyZ2V0Lk1ldGhvZCwKCQlIZWFkZXJzOiB0YXJnZXQuSGVhZGVycywKCX0sIG5pbAp9CgovLyBHZXRGaWxlVVJMIHJldHVybnMgYSBVUkwgdGhlIGNhbGxlciBjYW4gdXNlIHRvIGRvd25sb2FkIHRoZSBmaWxlLiBQcml2YXRlIGFuZAovLyB0ZW5hbnQgZmlsZXMgZ2V0IGEgc2hvcnQtbGl2ZWQgc2lnbmVkIFVSTDsgcHVibGljIGZpbGVzIGdldCBhIHN0YWJsZSBVUkwuCmZ1bmMgR2V0RmlsZVVSTChjdHggKmdvbnZleC5RdWVyeUN0eCwgYXJncyBGaWxlSURBcmdzKSAoR2V0RmlsZVVSTFJlc3VsdCwgZXJyb3IpIHsKCXVybCwgZXJyIDo9IGN0eC5TdG9yYWdlLkdlbmVyYXRlRG93bmxvYWRVUkwoYXJncy5GaWxlSUQsIDEwKnRpbWUuTWludXRlKQoJaWYgZXJyICE9IG5pbCB7CgkJcmV0dXJuIEdldEZpbGVVUkxSZXN1bHR7fSwgZXJyCgl9CglyZXR1cm4gR2V0RmlsZVVSTFJlc3VsdHtVUkw6IHVybH0sIG5pbAp9CgovLyBHZXRGaWxlTWV0YWRhdGEgcmV0dXJucyB0aGUgc3RvcmVkIG1ldGFkYXRhIHJlY29yZCwgZmluYWxpemluZyB0aGUgdXBsb2FkIGlmCi8vIHRoZSBieXRlcyBoYXZlIGFycml2ZWQgc2luY2UgdGhlIFVSTCB3YXMgaXNzdWVkLgpmdW5jIEdldEZpbGVNZXRhZGF0YShjdHggKmdvbnZleC5RdWVyeUN0eCwgYXJncyBGaWxlSURBcmdzKSAoZ29udmV4LkZpbGVNZXRhZGF0YSwgZXJyb3IpIHsKCXJldHVybiBjdHguU3RvcmFnZS5HZXRNZXRhZGF0YShhcmdzLkZpbGVJRCkKfQoKLy8gRGVsZXRlRmlsZSByZW1vdmVzIHRoZSBvYmplY3QgYW5kIGl0cyBtZXRhZGF0YSByZWNvcmQuCmZ1bmMgRGVsZXRlRmlsZShjdHggKmdvbnZleC5BY3Rpb25DdHgsIGFyZ3MgRmlsZUlEQXJncykgKERlbGV0ZUZpbGVSZXN1bHQsIGVycm9yKSB7CglpZiBlcnIgOj0gY3R4LlN0b3JhZ2UuRGVsZXRlKGFyZ3MuRmlsZUlEKTsgZXJyICE9IG5pbCB7CgkJcmV0dXJuIERlbGV0ZUZpbGVSZXN1bHR7fSwgZXJyCgl9CglyZXR1cm4gRGVsZXRlRmlsZVJlc3VsdHtEZWxldGVkOiB0cnVlfSwgbmlsCn0K",
+      "app/schema.go": "cGFja2FnZSBnb252ZXh0ZXN0CgppbXBvcnQgImdpdGh1Yi5jb20vZ29udmV4L2dvbnZleC9wa2cvZ29udmV4IgoKZnVuYyBTY2hlbWEocyAqZ29udmV4LlNjaGVtYSkgewoJcy5UYWJsZSgiZGFzaGJvYXJkX2RlbW9fdGFza3MiLCBmdW5jKHQgKmdvbnZleC5UYWJsZSkgewoJCXQuSUQoImlkIikKCQl0LlN0cmluZygidGVuYW50X2lkIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuSW50KCJwZ19pZCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygibmFtZSIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygidGl0bGUiKQoJCXQuU3RyaW5nKCJzdGF0dXMiKQoJCXQuVGV4dCgiZGVzY3JpcHRpb24iLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoImF1ZGllbmNlIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuSlNPTigiYXVkaWVuY2VfdXNlcl9pZHMiLCBnb252ZXguTnVsbGFibGUpCgkJdC5KU09OKCJhdWRpZW5jZV90ZWFtX2lkcyIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LkJvb2woInJlcXVpcmVzX2Fja25vd2xlZGdtZW50IiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJ3b3Jrc3BhY2VfaWQiLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoImNhdGVnb3J5X2lkIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJ0ZWFtX2lkIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJ0ZW1wbGF0ZV9pZCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygic3BvdF9pZCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygic3RhdHVzX2lkIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJwcmlvcml0eV9pZCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygic3RhdHVzX25hbWUiLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoInN0YXR1c19jb2xvciIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygic3RhdHVzX2FjdGlvbiIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygic3RhdHVzX2ljb24iLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoInN0YXR1c193b3JraW5nX2FuaW1hdGlvbiIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LkJvb2woInN0YXR1c19pbml0aWFsIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJwcmlvcml0eV9uYW1lIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJwcmlvcml0eV9jb2xvciIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygiY2F0ZWdvcnlfbmFtZSIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygiY2F0ZWdvcnlfaWNvbiIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygiY2F0ZWdvcnlfY29sb3IiLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoInRhZ19uYW1lcyIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygidGFnX2NvbG9ycyIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LkludCgiYXR0YWNobWVudF9jb3VudCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LkludCgidmlld19jb3VudCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygic2xhX2lkIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJhcHByb3ZhbF9pZCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygiZm9ybV9pZCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LkJvb2woInJlcXVpcmVzX3NpZ25hdHVyZSIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygiYXNzZXRfaWQiLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoImNyZWF0ZWRfYnkiLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoInJlcG9ydGVkX2J5X3RlYW1faWQiLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoInJlcG9ydGVkX2J5X3VzZXJfaWQiLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoInJlY3VycmVuY2VfaWQiLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoIndvcmtwbGFuX2lkIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJ3b3JrcGxhbl9pdGVtX2lkIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJ3b3JrcGxhbl9pbnN0YW5jZV9pZCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygib2NjdXJyZW5jZV9kYXRlIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuSW50KCJleHBlY3RlZF9kdXJhdGlvbiIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygiZmxhZ19jb2xvciIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygic3BvdF9uYW1lIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJ3b3Jrc3BhY2VfbmFtZSIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygiYXNzaWduZWVfbmFtZXMiLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoImFzc2lnbmVlX2lkcyIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygiYXNzaWduZWVfYXZhdGFyX3VybHMiLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoImFsbF91c2VyX25hbWVzIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJhbGxfdXNlcl9hdmF0YXJfdXJscyIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LkludCgibm90ZXNfY291bnQiLCBnb252ZXguTnVsbGFibGUpCgkJdC5UaW1lKCJzbGFfc3RhcnRlZF9hdCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlRpbWUoInNsYV9yZXNwb25zZV9kZWFkbGluZSIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlRpbWUoInNsYV9yZXNvbHV0aW9uX2RlYWRsaW5lIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuVGltZSgic2xhX3Jlc3BvbmRlZF9hdCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlRpbWUoInNsYV9yZXNvbHZlZF9hdCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LkludCgic2xhX3BhdXNlZF9kdXJhdGlvbiIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlRpbWUoImR1ZV9kYXRlIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuVGltZSgic3RhcnRfZGF0ZSIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlRpbWUoImNvbXBsZXRlZF9hdCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LkZsb2F0NjQoImxhdGl0dWRlIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuRmxvYXQ2NCgibG9uZ2l0dWRlIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuVGltZSgiZmlyc3Rfdmlld2VkX2F0IiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuVGltZSgiZGVsZXRlZF9hdCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygicm93X2hhc2giLCBnb252ZXguTnVsbGFibGUpCgkJdC5TdHJpbmcoInByaW9yaXR5IiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuU3RyaW5nKCJhc3NpZ25lZSIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygicHJvamVjdCIsIGdvbnZleC5OdWxsYWJsZSkKCQl0LlN0cmluZygibGFiZWwiLCBnb252ZXguTnVsbGFibGUpCgkJdC5UaW1lKCJkdWVfYXQiLCBnb252ZXguTnVsbGFibGUpCgkJdC5Cb29sKCJjb21wbGV0ZWQiLCBnb252ZXguTnVsbGFibGUpCgkJdC5JbnQoImVzdGltYXRlX21pbnV0ZXMiLCBnb252ZXguTnVsbGFibGUpCgkJdC5JbnQoInByb2dyZXNzIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuVGltZSgiY3JlYXRlZF9hdCIpCgkJdC5UaW1lKCJ1cGRhdGVkX2F0IiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuSW5kZXgoImJ5X3N0YXR1cyIsICJzdGF0dXMiKQoJCXQuSW5kZXgoImJ5X3BnX2lkIiwgInBnX2lkIikKCQl0LkluZGV4KCJieV9uYW1lIiwgIm5hbWUiKQoJCXQuSW5kZXgoImJ5X3RlbmFudF9wZ19pZCIsICJ0ZW5hbnRfaWQiLCAicGdfaWQiKQoJCXQuSW5kZXgoImJ5X3dvcmtzcGFjZSIsICJ0ZW5hbnRfaWQiLCAid29ya3NwYWNlX2lkIikKCQl0LkluZGV4KCJieV9zdGF0dXNfaWQiLCAidGVuYW50X2lkIiwgInN0YXR1c19pZCIpCgkJdC5JbmRleCgiYnlfY2F0ZWdvcnkiLCAidGVuYW50X2lkIiwgImNhdGVnb3J5X2lkIikKCQl0LkluZGV4KCJieV9wcmlvcml0eV9pZCIsICJ0ZW5hbnRfaWQiLCAicHJpb3JpdHlfaWQiKQoJCXQuSW5kZXgoImJ5X3N0YXR1c19uYW1lIiwgInN0YXR1c19uYW1lIikKCQl0LkluZGV4KCJieV9wcmlvcml0eV9uYW1lIiwgInByaW9yaXR5X25hbWUiKQoJCXQuSW5kZXgoImJ5X3RlYW0iLCAidGVuYW50X2lkIiwgInRlYW1faWQiKQoJCXQuSW5kZXgoImJ5X3Nwb3QiLCAidGVuYW50X2lkIiwgInNwb3RfaWQiKQoJCXQuSW5kZXgoImJ5X3Nwb3RfbmFtZSIsICJzcG90X25hbWUiKQoJCXQuSW5kZXgoImJ5X3dvcmtzcGFjZV9uYW1lIiwgIndvcmtzcGFjZV9uYW1lIikKCQl0LkluZGV4KCJieV9hc3NpZ25lZV9uYW1lcyIsICJhc3NpZ25lZV9uYW1lcyIpCgkJdC5JbmRleCgiYnlfZmxhZ19jb2xvciIsICJmbGFnX2NvbG9yIikKCQl0LkluZGV4KCJieV9wcmlvcml0eSIsICJwcmlvcml0eSIpCgkJdC5JbmRleCgiYnlfYXNzaWduZWUiLCAiYXNzaWduZWUiKQoJCXQuSW5kZXgoImJ5X3Byb2plY3QiLCAicHJvamVjdCIpCgkJdC5JbmRleCgiYnlfZHVlX2RhdGUiLCAiZHVlX2RhdGUiKQoJCXQuSW5kZXgoImJ5X2R1ZV9hdCIsICJkdWVfYXQiKQoJCXQuSW5kZXgoImJ5X2NyZWF0ZWRfYXQiLCAiY3JlYXRlZF9hdCIpCgkJdC5JbmRleCgiYnlfY3JlYXRlZF9hdF9pZCIsICJjcmVhdGVkX2F0IiwgImlkIikKCQl0LkluZGV4KCJieV91cGRhdGVkX2F0IiwgInVwZGF0ZWRfYXQiKQoJCXQuSW5kZXgoImJ5X2FjdGl2ZV9jcmVhdGVkX2F0IiwgImRlbGV0ZWRfYXQiLCAiY3JlYXRlZF9hdCIsICJpZCIpCgkJdC5JbmRleCgiYnlfYWN0aXZlX3BnX2lkIiwgImRlbGV0ZWRfYXQiLCAicGdfaWQiLCAiaWQiKQoJCXQuSW5kZXgoImJ5X3dvcmtzcGFjZV9jcmVhdGVkX2F0IiwgInRlbmFudF9pZCIsICJ3b3Jrc3BhY2VfaWQiLCAiZGVsZXRlZF9hdCIsICJjcmVhdGVkX2F0IiwgImlkIikKCQl0LkluZGV4KCJieV93b3Jrc3BhY2VfcGdfaWQiLCAidGVuYW50X2lkIiwgIndvcmtzcGFjZV9pZCIsICJkZWxldGVkX2F0IiwgInBnX2lkIiwgImlkIikKCQl0LkluZGV4KCJieV9zdGF0dXNfY3JlYXRlZF9hdCIsICJ0ZW5hbnRfaWQiLCAic3RhdHVzX2lkIiwgImRlbGV0ZWRfYXQiLCAiY3JlYXRlZF9hdCIsICJpZCIpCgkJdC5JbmRleCgiYnlfcHJpb3JpdHlfY3JlYXRlZF9hdCIsICJ0ZW5hbnRfaWQiLCAicHJpb3JpdHlfaWQiLCAiZGVsZXRlZF9hdCIsICJjcmVhdGVkX2F0IiwgImlkIikKCQl0LkluZGV4KCJieV9hc3NpZ25lZV9jcmVhdGVkX2F0IiwgInRlbmFudF9pZCIsICJhc3NpZ25lZSIsICJkZWxldGVkX2F0IiwgImNyZWF0ZWRfYXQiLCAiaWQiKQoJCXQuSW5kZXgoImJ5X2R1ZV9jcmVhdGVkX2F0IiwgInRlbmFudF9pZCIsICJkdWVfYXQiLCAiZGVsZXRlZF9hdCIsICJjcmVhdGVkX2F0IiwgImlkIikKCQl0LlRyaWdyYW1JbmRleCgibmFtZV90cmdtIiwgIm5hbWUiKQoJCXQuVHJpZ3JhbUluZGV4KCJ0aXRsZV90cmdtIiwgInRpdGxlIikKCQl0LlRyaWdyYW1JbmRleCgiZGVzY3JpcHRpb25fdHJnbSIsICJkZXNjcmlwdGlvbiIpCgkJdC5UcmlncmFtSW5kZXgoInNlYXJjaF90ZXh0X3RyZ20iLCAibmFtZSIsICJ0aXRsZSIsICJkZXNjcmlwdGlvbiIsICJzdGF0dXMiLCAicHJpb3JpdHkiLCAiYXNzaWduZWUiLCAicHJvamVjdCIsICJsYWJlbCIsICJmbGFnX2NvbG9yIikKCX0pCgoJcy5UYWJsZSgiZGFzaGJvYXJkX2RlbW9fZmlsZXMiLCBmdW5jKHQgKmdvbnZleC5UYWJsZSkgewoJCXQuSUQoImlkIikKCQl0LlN0cmluZygia2V5IikKCQl0LlN0cmluZygiY29udGVudF90eXBlIiwgZ29udmV4Lk51bGxhYmxlKQoJCXQuSW50NjQoInNpemUiLCBnb252ZXguTnVsbGFibGUpCgkJdC5UaW1lKCJjcmVhdGVkX2F0IikKCQl0LlVuaXF1ZUluZGV4KCJieV9rZXkiLCAia2V5IikKCX0pCn0K",
+      "app/system.go": "cGFja2FnZSBnb252ZXh0ZXN0CgppbXBvcnQgKAoJInRpbWUiCgoJImdpdGh1Yi5jb20vZ29udmV4L2dvbnZleC9wa2cvZ29udmV4IgopCgovLyBIZWFydGJlYXRSZXN1bHQgaXMgdGhlIChlbXB0eSkgcGF5bG9hZCByZXR1cm5lZCBieSB0aGUgZGVtbyBoZWFydGJlYXQgam9iLgp0eXBlIEhlYXJ0YmVhdFJlc3VsdCBzdHJ1Y3QgewoJT0sgYm9vbCBganNvbjoib2siYAp9CgovLyBSZWdpc3RlclN5c3RlbSB3aXJlcyBhIHNtYWxsIHJlY3VycmluZyBqb2Igc28gdGhlIGRhc2hib2FyZCBoZWFsdGggb3ZlcnZpZXcKLy8gc2hvd3MgbGl2ZSBzY2hlZHVsZXIgYWN0aXZpdHkgKHJ1bm5pbmcvcXVldWVkL2xhZywgdGhyb3VnaHB1dCkgb3V0IG9mIHRoZQovLyBib3guIFJlbW92ZSBvciByZXBsYWNlIGl0IHdpdGggcmVhbCBiYWNrZ3JvdW5kIHdvcmsgZm9yIHlvdXIgcHJvamVjdC4KZnVuYyBSZWdpc3RlclN5c3RlbShhcHAgKmdvbnZleC5BcHApIHsKCWFwcC5JbnRlcm5hbFJlZHVjZXIoInN5c3RlbS5oZWFydGJlYXQiLCBIZWFydGJlYXQpCglhcHAuQ3JvbigiaGVhcnRiZWF0IiwgMTUqdGltZS5TZWNvbmQsICJzeXN0ZW0uaGVhcnRiZWF0IiwgbmlsKQp9CgovLyBIZWFydGJlYXQgaXMgYSBuby1vcCBpbnRlcm5hbCBSZWR1Y2VyIHJ1biBvbiBhIHNjaGVkdWxlIGJ5IHRoZSBjcm9uIGFib3ZlLgpmdW5jIEhlYXJ0YmVhdChjdHggKmdvbnZleC5SZWR1Y2VyQ3R4LCBhcmdzIHN0cnVjdHt9KSAoSGVhcnRiZWF0UmVzdWx0LCBlcnJvcikgewoJcmV0dXJuIEhlYXJ0YmVhdFJlc3VsdHtPSzogdHJ1ZX0sIG5pbAp9Cg==",
+      "app/tasks.go": "cGFja2FnZSBnb252ZXh0ZXN0CgppbXBvcnQgImdpdGh1Yi5jb20vZ29udmV4L2dvbnZleC9wa2cvZ29udmV4IgoKdHlwZSBUYXNrIHN0cnVjdCB7CglJRCAgICAgICAgICAgICAgc3RyaW5nIGBqc29uOiJpZCJgCglQR0lEICAgICAgICAgICAgaW50ICAgIGBqc29uOiJwZ19pZCxvbWl0ZW1wdHkiYAoJTmFtZSAgICAgICAgICAgIHN0cmluZyBganNvbjoibmFtZSxvbWl0ZW1wdHkiYAoJVGl0bGUgICAgICAgICAgIHN0cmluZyBganNvbjoidGl0bGUiYAoJU3RhdHVzICAgICAgICAgIHN0cmluZyBganNvbjoic3RhdHVzImAKCVN0YXR1c05hbWUgICAgICBzdHJpbmcgYGpzb246InN0YXR1c19uYW1lLG9taXRlbXB0eSJgCglTdGF0dXNDb2xvciAgICAgc3RyaW5nIGBqc29uOiJzdGF0dXNfY29sb3Isb21pdGVtcHR5ImAKCVN0YXR1c0FjdGlvbiAgICBzdHJpbmcgYGpzb246InN0YXR1c19hY3Rpb24sb21pdGVtcHR5ImAKCVN0YXR1c0ljb24gICAgICBzdHJpbmcgYGpzb246InN0YXR1c19pY29uLG9taXRlbXB0eSJgCglTdGF0dXNBbmltYXRpb24gc3RyaW5nIGBqc29uOiJzdGF0dXNfd29ya2luZ19hbmltYXRpb24sb21pdGVtcHR5ImAKCVN0YXR1c0luaXRpYWwgICBib29sICAgYGpzb246InN0YXR1c19pbml0aWFsLG9taXRlbXB0eSJgCglEZXNjcmlwdGlvbiAgICAgc3RyaW5nIGBqc29uOiJkZXNjcmlwdGlvbixvbWl0ZW1wdHkiYAoJUHJpb3JpdHkgICAgICAgIHN0cmluZyBganNvbjoicHJpb3JpdHksb21pdGVtcHR5ImAKCVByaW9yaXR5TmFtZSAgICBzdHJpbmcgYGpzb246InByaW9yaXR5X25hbWUsb21pdGVtcHR5ImAKCVByaW9yaXR5Q29sb3IgICBzdHJpbmcgYGpzb246InByaW9yaXR5X2NvbG9yLG9taXRlbXB0eSJgCglDYXRlZ29yeU5hbWUgICAgc3RyaW5nIGBqc29uOiJjYXRlZ29yeV9uYW1lLG9taXRlbXB0eSJgCglDYXRlZ29yeUljb24gICAgc3RyaW5nIGBqc29uOiJjYXRlZ29yeV9pY29uLG9taXRlbXB0eSJgCglDYXRlZ29yeUNvbG9yICAgc3RyaW5nIGBqc29uOiJjYXRlZ29yeV9jb2xvcixvbWl0ZW1wdHkiYAoJVGFnTmFtZXMgICAgICAgIHN0cmluZyBganNvbjoidGFnX25hbWVzLG9taXRlbXB0eSJgCglUYWdDb2xvcnMgICAgICAgc3RyaW5nIGBqc29uOiJ0YWdfY29sb3JzLG9taXRlbXB0eSJgCglBdHRhY2htZW50Q291bnQgaW50ICAgIGBqc29uOiJhdHRhY2htZW50X2NvdW50LG9taXRlbXB0eSJgCglWaWV3Q291bnQgICAgICAgaW50ICAgIGBqc29uOiJ2aWV3X2NvdW50LG9taXRlbXB0eSJgCglBc3NpZ25lZSAgICAgICAgc3RyaW5nIGBqc29uOiJhc3NpZ25lZSxvbWl0ZW1wdHkiYAoJQXNzaWduZWVOYW1lcyAgIHN0cmluZyBganNvbjoiYXNzaWduZWVfbmFtZXMsb21pdGVtcHR5ImAKCUFzc2lnbmVlSURzICAgICBzdHJpbmcgYGpzb246ImFzc2lnbmVlX2lkcyxvbWl0ZW1wdHkiYAoJQXNzaWduZWVBdmF0YXJzIHN0cmluZyBganNvbjoiYXNzaWduZWVfYXZhdGFyX3VybHMsb21pdGVtcHR5ImAKCUFsbFVzZXJOYW1lcyAgICBzdHJpbmcgYGpzb246ImFsbF91c2VyX25hbWVzLG9taXRlbXB0eSJgCglBbGxVc2VyQXZhdGFycyAgc3RyaW5nIGBqc29uOiJhbGxfdXNlcl9hdmF0YXJfdXJscyxvbWl0ZW1wdHkiYAoJTm90ZXNDb3VudCAgICAgIGludCAgICBganNvbjoibm90ZXNfY291bnQsb21pdGVtcHR5ImAKCVByb2plY3QgICAgICAgICBzdHJpbmcgYGpzb246InByb2plY3Qsb21pdGVtcHR5ImAKCUxhYmVsICAgICAgICAgICBzdHJpbmcgYGpzb246ImxhYmVsLG9taXRlbXB0eSJgCglEdWVEYXRlICAgICAgICAgc3RyaW5nIGBqc29uOiJkdWVfZGF0ZSxvbWl0ZW1wdHkiYAoJRHVlQXQgICAgICAgICAgIHN0cmluZyBganNvbjoiZHVlX2F0LG9taXRlbXB0eSJgCglTdGFydERhdGUgICAgICAgc3RyaW5nIGBqc29uOiJzdGFydF9kYXRlLG9taXRlbXB0eSJgCglTcG90SUQgICAgICAgICAgc3RyaW5nIGBqc29uOiJzcG90X2lkLG9taXRlbXB0eSJgCglTcG90TmFtZSAgICAgICAgc3RyaW5nIGBqc29uOiJzcG90X25hbWUsb21pdGVtcHR5ImAKCVdvcmtzcGFjZU5hbWUgICBzdHJpbmcgYGpzb246IndvcmtzcGFjZV9uYW1lLG9taXRlbXB0eSJgCglGbGFnQ29sb3IgICAgICAgc3RyaW5nIGBqc29uOiJmbGFnX2NvbG9yLG9taXRlbXB0eSJgCglDb21wbGV0ZWQgICAgICAgYm9vbCAgIGBqc29uOiJjb21wbGV0ZWQsb21pdGVtcHR5ImAKCUVzdGltYXRlTWludXRlcyBpbnQgICAgYGpzb246ImVzdGltYXRlX21pbnV0ZXMsb21pdGVtcHR5ImAKCVByb2dyZXNzICAgICAgICBpbnQgICAgYGpzb246InByb2dyZXNzLG9taXRlbXB0eSJgCn0KCnR5cGUgVGFza3NHcmlkQXJncyBzdHJ1Y3QgewoJT2Zmc2V0ICAgIGludCAgICAgIGBqc29uOiJvZmZzZXQiYAoJTGltaXQgICAgIGludCAgICAgIGBqc29uOiJsaW1pdCJgCglDb2x1bW5zICAgW11zdHJpbmcgYGpzb246ImNvbHVtbnMiYAoJU2VhcmNoICAgIHN0cmluZyAgIGBqc29uOiJzZWFyY2gsb21pdGVtcHR5ImAKCVNvcnQgICAgICBzdHJpbmcgICBganNvbjoic29ydCxvbWl0ZW1wdHkiYAoJRGlyZWN0aW9uIHN0cmluZyAgIGBqc29uOiJkaXJlY3Rpb24sb21pdGVtcHR5ImAKCUNvdW50ICAgICBzdHJpbmcgICBganNvbjoiY291bnQsb21pdGVtcHR5ImAKCUZpbHRlcnMgICBbXXN0cnVjdCB7CgkJSUQgICAgICAgc3RyaW5nIGBqc29uOiJpZCxvbWl0ZW1wdHkiYAoJCUNvbHVtbiAgIHN0cmluZyBganNvbjoiY29sdW1uImAKCQlPcGVyYXRvciBzdHJpbmcgYGpzb246Im9wZXJhdG9yImAKCQlWYWx1ZSAgICBzdHJpbmcgYGpzb246InZhbHVlImAKCQlWYWx1ZVRvICBzdHJpbmcgYGpzb246InZhbHVlVG8sb21pdGVtcHR5ImAKCX0gYGpzb246ImZpbHRlcnMsb21pdGVtcHR5ImAKfQoKdHlwZSBUYXNrc0dyaWRSZXN1bHQgc3RydWN0IHsKCVRhYmxlICAgc3RyaW5nICAgICAgICAgICBganNvbjoidGFibGUiYAoJQ29sdW1ucyBbXXN0cmluZyAgICAgICAgIGBqc29uOiJjb2x1bW5zImAKCVJvd3MgICAgW11tYXBbc3RyaW5nXWFueSBganNvbjoicm93cyJgCglUb3RhbCAgIGludDY0ICAgICAgICAgICAgYGpzb246InRvdGFsImAKCU9mZnNldCAgaW50ICAgICAgICAgICAgICBganNvbjoib2Zmc2V0ImAKCUxpbWl0ICAgaW50ICAgICAgICAgICAgICBganNvbjoibGltaXQiYAp9Cgp0eXBlIENyZWF0ZVRhc2tBcmdzIHN0cnVjdCB7CglUaXRsZSBzdHJpbmcgYGpzb246InRpdGxlImAKfQoKdHlwZSBSYW5kb21pemVTdGF0dXNQcmlvcml0eUFyZ3Mgc3RydWN0IHsKCUNvdW50IGludCBganNvbjoiY291bnQiYAp9Cgp0eXBlIFJhbmRvbWl6ZVN0YXR1c1ByaW9yaXR5UmVzdWx0IHN0cnVjdCB7CglVcGRhdGVkICAgIGludDY0IGBqc29uOiJ1cGRhdGVkImAKCVJlcXVlc3RlZCAgaW50ICAgYGpzb246InJlcXVlc3RlZCJgCglEdXJhdGlvbk1TIGludDY0IGBqc29uOiJkdXJhdGlvbk1zImAKfQoKZnVuYyBSZWdpc3RlcihhcHAgKmdvbnZleC5BcHApIHsKCWFwcC5RdWVyeSgidGFza3MubGlzdCIsIExpc3RUYXNrcykKCWFwcC5SZWR1Y2VyKCJ0YXNrcy5jcmVhdGUiLCBDcmVhdGVUYXNrLCBnb252ZXguT25saW5lT25seU5vbk9wdGltaXN0aWMoImRhc2hib2FyZCBkYXRhLWdlbmVyYXRvciBvcGVyYXRpb24iKSkKCWFwcC5SZWR1Y2VyKCJ0YXNrcy5yYW5kb21pemVTdGF0dXNQcmlvcml0eSIsIFJhbmRvbWl6ZVN0YXR1c1ByaW9yaXR5LCBnb252ZXguT25saW5lT25seU5vbk9wdGltaXN0aWMoImRhc2hib2FyZCBidWxrIGJlbmNobWFyayBvcGVyYXRpb24iKSkKCWFwcC5MaXZlUXVlcnkoInRhc2tzLmdyaWQiLCBUYXNrc0dyaWQsIGdvbnZleC5MaXZlUGxhbigKCQlnb252ZXguTGl2ZVRhYmxlKCJkYXNoYm9hcmRfZGVtb190YXNrcyIpLgoJCQlSZXN1bHRSb3dzQXQoInJvd3MiKS4KCQkJU2VhcmNoQXJnKCJzZWFyY2giLCAidGl0bGUiLCAiZGVzY3JpcHRpb24iLCAic3RhdHVzX25hbWUiLCAicHJpb3JpdHlfbmFtZSIsICJhc3NpZ25lZV9uYW1lcyIpLgoJCQlTb3J0QXJncygic29ydCIsICJkaXJlY3Rpb24iLCAiY3JlYXRlZF9hdCIsICJkZXNjIiwgImNyZWF0ZWRfYXQiLCAidXBkYXRlZF9hdCIsICJkdWVfZGF0ZSIsICJ0aXRsZSIsICJzdGF0dXNfbmFtZSIsICJwcmlvcml0eV9uYW1lIikuCgkJCVdpbmRvd0FyZ3MoIm9mZnNldCIsICJsaW1pdCIsIDEwMCwgMjUwKS4KCQkJT25saW5lT25seSgpLCAvLyB0aGUgZGFzaGJvYXJkJ3MgYXJiaXRyYXJ5IG9wZXJhdG9yIGluc3BlY3RvciBpcyBpbnRlbnRpb25hbGx5IHNlcnZlci1vbmx5CgkpKQoJUmVnaXN0ZXJGaWxlcyhhcHApCglSZWdpc3RlclN5c3RlbShhcHApCn0KCmZ1bmMgTGlzdFRhc2tzKGN0eCAqZ29udmV4LlF1ZXJ5Q3R4LCBhcmdzIHN0cnVjdHt9KSAoW11UYXNrLCBlcnJvcikgewoJcmV0dXJuIFtdVGFza3t9LCBuaWwKfQoKZnVuYyBDcmVhdGVUYXNrKGN0eCAqZ29udmV4LlJlZHVjZXJDdHgsIGFyZ3MgQ3JlYXRlVGFza0FyZ3MpIChUYXNrLCBlcnJvcikgewoJcmV0dXJuIFRhc2t7SUQ6ICJ0YXNrX2RldiIsIFRpdGxlOiBhcmdzLlRpdGxlLCBTdGF0dXM6ICJ0b2RvIn0sIG5pbAp9CgpmdW5jIFJhbmRvbWl6ZVN0YXR1c1ByaW9yaXR5KGN0eCAqZ29udmV4LlJlZHVjZXJDdHgsIGFyZ3MgUmFuZG9taXplU3RhdHVzUHJpb3JpdHlBcmdzKSAoUmFuZG9taXplU3RhdHVzUHJpb3JpdHlSZXN1bHQsIGVycm9yKSB7CglyZXR1cm4gUmFuZG9taXplU3RhdHVzUHJpb3JpdHlSZXN1bHR7fSwgbmlsCn0KCmZ1bmMgVGFza3NHcmlkKGN0eCAqZ29udmV4LlF1ZXJ5Q3R4LCBhcmdzIFRhc2tzR3JpZEFyZ3MpIChUYXNrc0dyaWRSZXN1bHQsIGVycm9yKSB7CglyZXR1cm4gVGFza3NHcmlkUmVzdWx0e30sIG5pbAp9Cg=="
+    }
+  }
 }

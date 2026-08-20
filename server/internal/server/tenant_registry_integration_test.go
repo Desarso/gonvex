@@ -37,8 +37,8 @@ func TestProvisionExistingTenantRepairsDurableSyncStorage(t *testing.T) {
 		Schema:  desired,
 		Functions: map[string]manifest.FunctionEntry{
 			"sync.priorities": {
-				Kind: manifest.FunctionKindSync,
-				Sync: &manifest.SyncDefinition{
+				Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica,
+				Replica: &manifest.ReplicaCollectionDefinition{
 					Table: "priorities", Key: "id", Columns: []string{"id", "tenantId"},
 				},
 			},
@@ -76,8 +76,8 @@ func TestUnchangedDevSyncRepairsMissingDurableSyncStorage(t *testing.T) {
 		}},
 		Functions: map[string]manifest.FunctionEntry{
 			"sync.priorities": {
-				Kind: manifest.FunctionKindSync,
-				Sync: &manifest.SyncDefinition{Table: "priorities", Key: "id", Columns: []string{"id"}},
+				Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica,
+				Replica: &manifest.ReplicaCollectionDefinition{Table: "priorities", Key: "id", Columns: []string{"id"}},
 			},
 		},
 	}

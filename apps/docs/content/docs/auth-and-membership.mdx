@@ -272,7 +272,7 @@ Functions receive the verified user and permission payload in their runtime
 context. Apply the project's permission policy before accessing data:
 
 ```go
-func CreateTask(ctx *gonvex.MutationCtx, args CreateTaskArgs) (Task, error) {
+func CreateTask(ctx *gonvex.ReducerCtx, args CreateTaskArgs) (Task, error) {
   if ctx.User == nil {
     return Task{}, errors.New("authentication required")
   }

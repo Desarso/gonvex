@@ -6,7 +6,7 @@ export type OptimisticProjection = {
   resultPath: readonly string[];
 };
 
-export type OptimisticMutationDefinition = {
+export type OptimisticReducerDefinition = {
   entity: string;
   rowIdPath: readonly string[];
   fieldsPath: readonly string[];
@@ -32,7 +32,7 @@ type OptimisticDeletePatch = {
 export type OptimisticPatch = OptimisticRowPatch | OptimisticDeletePatch;
 
 type OverlayEntry = {
-  mutationId: string;
+  reducerId: string;
   patches: OptimisticPatch[];
   accepted: boolean;
   targets: Set<string>;
@@ -46,11 +46,11 @@ type CollectionCache = {
 };
 
 /**
- * Ordered pending entity mutations layered over immutable authoritative data.
+ * Ordered pending entity reducers layered over immutable authoritative data.
  *
  * A source is one concrete sync/query subscription (including its arguments).
- * Successful mutations remain pending until every source that exposed the
- * optimistic row reports that mutation id in an authoritative update. This
+ * Successful reducers remain pending until every source that exposed the
+ * optimistic row reports that reducer id in an authoritative update. This
  * prevents a fast RPC acknowledgement from revealing an older subscription
  * snapshot while its invalidation is still in flight.
  */
@@ -61,11 +61,11 @@ export class OptimisticOverlay {
   private version = 0;
   private settling = false;
 
-  add(mutationId: string, patches: OptimisticPatch[], options: { accepted?: boolean } = {}): void {
+  add(reducerId: string, patches: OptimisticPatch[], options: { accepted?: boolean } = {}): void {
     const normalized = patches.map(clonePatch).filter((patch) => patchEntity(patch) !== "");
     if (normalized.length === 0) return;
     this.entries.push({
-      mutationId,
+      reducerId,
       patches: normalized,
       accepted: options.accepted === true,
       targets: new Set(),
@@ -89,21 +89,21 @@ export class OptimisticOverlay {
   }
 
   /** Mark the transport result successful without dropping visible optimism. */
-  accept(mutationId: string): string[] {
-    const entry = this.entries.find((candidate) => candidate.mutationId === mutationId);
+  accept(reducerId: string): string[] {
+    const entry = this.entries.find((candidate) => candidate.reducerId === reducerId);
     if (!entry) return [];
     entry.accepted = true;
     return this.settleReadyEntries();
   }
 
   /** Compatibility alias. Prefer accept followed by authoritative acknowledge. */
-  settle(mutationId: string): void {
-    this.accept(mutationId);
+  settle(reducerId: string): void {
+    this.accept(reducerId);
   }
 
   /** Remove patches after a deterministic server rejection. */
-  reject(mutationId: string): void {
-    this.remove(mutationId);
+  reject(reducerId: string): void {
+    this.remove(reducerId);
   }
 
   /**
@@ -163,11 +163,11 @@ export class OptimisticOverlay {
   }
 
   /** Record authoritative delivery for a source; returns fully reconciled ids. */
-  acknowledge(source: string, mutationIds: readonly string[] | undefined): string[] {
-    if (!mutationIds?.length) return [];
-    const ids = new Set(mutationIds);
+  acknowledge(source: string, originCommandIds: readonly string[] | undefined): string[] {
+    if (!originCommandIds?.length) return [];
+    const ids = new Set(originCommandIds);
     for (const entry of this.entries) {
-      if (ids.has(entry.mutationId) && entry.targets.has(source)) {
+      if (ids.has(entry.reducerId) && entry.targets.has(source)) {
         entry.acknowledgedTargets.add(source);
       }
     }
@@ -230,7 +230,7 @@ export class OptimisticOverlay {
         if (!entry?.accepted) continue;
         if ([...entry.targets].some((target) => !entry.acknowledgedTargets.has(target))) continue;
         this.entries.splice(index, 1);
-        settled.push(entry.mutationId);
+        settled.push(entry.reducerId);
         this.changed(affectedEntities(entry.patches));
       }
       return settled.reverse();
@@ -239,8 +239,8 @@ export class OptimisticOverlay {
     }
   }
 
-  private remove(mutationId: string) {
-    const index = this.entries.findIndex((entry) => entry.mutationId === mutationId);
+  private remove(reducerId: string) {
+    const index = this.entries.findIndex((entry) => entry.reducerId === reducerId);
     if (index < 0) return;
     const [entry] = this.entries.splice(index, 1);
     this.changed(affectedEntities(entry!.patches));
@@ -254,7 +254,7 @@ export class OptimisticOverlay {
         try {
           listener(entity);
         } catch {
-          // A view listener must not be able to break mutation delivery.
+          // A view listener must not be able to break reducer delivery.
         }
       }
     }
@@ -262,7 +262,7 @@ export class OptimisticOverlay {
 }
 
 export function optimisticPatchesFromReference(
-  definition: OptimisticMutationDefinition | undefined,
+  definition: OptimisticReducerDefinition | undefined,
   args: unknown,
 ): OptimisticPatch[] {
   if (!definition?.entity) return [];

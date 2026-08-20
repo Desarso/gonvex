@@ -12,7 +12,14 @@ import (
 	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
 
-const SyncNotifyChannel = "gonvex_sync_change"
+// ChangeFeedNotifyChannel is deliberately only a wake-up signal. The durable
+// _gonvex_sync_changes rows are the source of truth; listeners always read the
+// committed revision instead of trusting data embedded in NOTIFY payloads.
+const ChangeFeedNotifyChannel = "gonvex_change_feed"
+
+// SyncNotifyChannel remains as an internal source-compatible name while the
+// sync implementation is renamed to Local Replica throughout the public API.
+const SyncNotifyChannel = ChangeFeedNotifyChannel
 
 // SyncStorageInstalled reports whether a database has the durable sync clock
 // and change log. Schema fingerprint equality is not sufficient: a restored
@@ -32,22 +39,23 @@ func SyncStorageInstalled(ctx context.Context, databaseURL string) (bool, error)
 	return installed, err
 }
 
-// InstallSyncLog installs the durable, transaction-ordered change log for
-// tables referenced by Sync functions. Ordinary tables pay no write overhead.
-func InstallSyncLog(ctx context.Context, db *sql.DB, schema manifest.Schema, definitions map[string]manifest.SyncDefinition) ([]string, error) {
-	if len(definitions) == 0 {
-		return nil, nil
-	}
+// InstallSyncLog installs the authoritative, transaction-ordered change feed
+// for every application table. Replica Collections and Live Queries consume
+// the same committed rows, so there is no second invalidation trigger system.
+func InstallSyncLog(ctx context.Context, db *sql.DB, schema manifest.Schema, _ map[string]manifest.ReplicaCollectionDefinition) ([]string, error) {
 	if _, err := db.ExecContext(ctx, syncInfrastructureSQL); err != nil {
 		return nil, err
 	}
+	if _, err := db.ExecContext(ctx, actionOutboxInfrastructureSQL); err != nil {
+		return nil, err
+	}
 	var applied []string
-	for _, tableName := range sortedSyncTableNames(definitions) {
-		table, ok := schema.Tables[tableName]
-		if !ok {
-			return applied, fmt.Errorf("sync table %q is not declared in the active schema", tableName)
+	for _, tableName := range sortedTableNames(schema.Tables) {
+		table := schema.Tables[tableName]
+		definition, err := changeFeedDefinition(tableName, table)
+		if err != nil {
+			return applied, err
 		}
-		definition := definitions[tableName]
 		columns, err := syncColumns(tableName, table, definition)
 		if err != nil {
 			return applied, err
@@ -59,21 +67,47 @@ func InstallSyncLog(ctx context.Context, db *sql.DB, schema manifest.Schema, def
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return applied, err
 		}
-		applied = append(applied, fmt.Sprintf("ensured durable sync log for %s", tableName))
+		applied = append(applied, fmt.Sprintf("ensured durable change feed for %s", tableName))
 	}
 	return applied, nil
 }
 
-func sortedSyncTableNames(definitions map[string]manifest.SyncDefinition) []string {
-	names := make([]string, 0, len(definitions))
-	for name := range definitions {
-		names = append(names, name)
+const actionOutboxInfrastructureSQL = `
+CREATE TABLE IF NOT EXISTS _gonvex_action_outbox (
+  id text PRIMARY KEY,
+  action_path text NOT NULL,
+  args jsonb NOT NULL,
+  actor_user_id text,
+  actor_email text,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing')),
+  attempts integer NOT NULL DEFAULT 0,
+  available_at timestamptz NOT NULL DEFAULT now(),
+  locked_at timestamptz,
+  last_error text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE _gonvex_action_outbox ADD COLUMN IF NOT EXISTS locked_at timestamptz;
+CREATE INDEX IF NOT EXISTS _gonvex_action_outbox_pending
+  ON _gonvex_action_outbox (available_at, created_at)
+  WHERE status = 'pending';`
+
+func changeFeedDefinition(tableName string, table manifest.Table) (manifest.ReplicaCollectionDefinition, error) {
+	key := ""
+	columns := make([]string, 0, len(table.Columns))
+	for columnName, column := range table.Columns {
+		columns = append(columns, columnName)
+		if column.PrimaryKey && (key == "" || columnName < key) {
+			key = columnName
+		}
 	}
-	sort.Strings(names)
-	return names
+	if key == "" {
+		return manifest.ReplicaCollectionDefinition{}, fmt.Errorf("change-feed table %q has no primary key", tableName)
+	}
+	sort.Strings(columns)
+	return manifest.ReplicaCollectionDefinition{Table: tableName, Key: key, Columns: columns}, nil
 }
 
-func syncColumns(tableName string, table manifest.Table, definition manifest.SyncDefinition) ([]string, error) {
+func syncColumns(tableName string, table manifest.Table, definition manifest.ReplicaCollectionDefinition) ([]string, error) {
 	values := append([]string{}, definition.Columns...)
 	values = append(values, definition.Key, definition.OrderBy)
 	values = append(values, definition.ExcludeWhenSet...)
@@ -276,7 +310,7 @@ BEGIN
     END IF;
 
     PERFORM pg_notify(
-      'gonvex_sync_change',
+      'gonvex_change_feed',
       notify_payload::text
     );
   END IF;

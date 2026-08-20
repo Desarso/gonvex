@@ -1,219 +1,30 @@
 ---
-title: Durable Sync Collections
-description: Keep bounded, authorized table collections in IndexedDB and resume them from a durable Postgres cursor.
+title: Replica Collections and Local Replica
+description: Bounded persistent collections, atomic transactions, and offline completeness.
 ---
 
-# Durable Sync Collections
-
-Sync collections keep entity-shaped data available in the browser without
-downloading a full snapshot on every reload. The browser renders the last
-authorized collection from IndexedDB, reconnects with its Postgres cursor, and
-receives only the changes it missed when that cursor is still retained.
-
-Use sync for a bounded collection from one table. Keep using live queries for
-joins, aggregates, search, computed results, and arbitrary SQL.
-
-## Declare a collection
-
-Register a sync function with the handler that produces its initial authorized
-snapshot and a declaration that describes later row changes:
+A Replica Collection keeps a bounded, authorized entity set in the Gonvex
+Local Replica.
 
 ```go
-package backend
-
-import "github.com/gonvex/gonvex/pkg/gonvex"
-
-type RecentTasksArgs struct {
-  WorkspaceID string `json:"workspaceId"`
-}
-
-func Register(app *gonvex.App) {
-  app.Sync(
-    "tasks.recent",
-    RecentTasks,
-    gonvex.SyncTable("tasks").
-      Key("id").
-      Columns(
-        "id",
-        "workspace_id",
-        "title",
-        "status",
-        "updated_at",
-        "deleted_at",
-      ).
-      EqualArg("workspace_id", "workspaceId").
-      ExcludeWhenSet("deleted_at").
-      VisibilityDependsOn("workspace_members").
-      OrderBy("updated_at", "desc").
-      Progressive().
-      Budget(500, 8388608),
-  )
-}
-
-func RecentTasks(
-  ctx *gonvex.QueryCtx,
-  args RecentTasksArgs,
-) ([]Task, error) {
-  // Return the authorized snapshot. The declaration above must describe the
-  // same filters, projection, ordering, and visibility dependencies.
-}
+app.ReplicaCollection(
+  "tasks.recent",
+  RecentTasks,
+  gonvex.ReplicaTable("tasks").
+    Columns("id", "title", "status", "updated_at").
+    OrderBy("updated_at", "desc").
+    Budget(10_000, 50<<20),
+)
 ```
 
-The row key and every filtered, projected, ordered, or exclusion column must be
-present in `Columns`. Only those declared columns enter Gonvex's durable change
-log.
+The Local Replica stores normalized authoritative entities, optimistic
+overlays, Live Query ID memberships, pending commands, and the applied server
+revision. A `replica.transaction` updates all affected entities and memberships
+before subscribers are notified once.
 
-## Declaration options
+Web persistence uses IndexedDB. Expo/mobile uses `@gonvex/expo-sqlite`, which
+updates normalized entity/query tables and the cursor in one SQLite
+transaction.
 
-| Option | Meaning |
-| --- | --- |
-| `Key(column)` | Stable row key. Defaults to `id`. |
-| `Columns(...)` | Columns captured for snapshots and deltas. |
-| `EqualArg(column, argument?)` | Keep rows where a column equals a sync argument. The argument defaults to the column name. |
-| `ExcludeWhenSet(...)` | Exclude rows whose named column is non-null, typically soft-deleted or archived rows. |
-| `VisibilityDependsOn(...)` | Add a dependency that can change handler-derived membership. Tables already declared with `Reads(...)` are included automatically. |
-| `OrderBy(column, direction)` | Stable client order; direction is `asc` or `desc`. |
-| `Eager()` | Keep the complete collection within its declared budgets. This is the default. |
-| `Progressive()` | Keep a bounded ordered top-N window and reconcile membership after changes. |
-| `Budget(rows, bytes)` | Cap the collection on both the server and client. |
-
-`Progressive` is useful for feeds and recent-item lists. When an insert,
-delete, or reorder crosses the window boundary, the runtime reconciles the
-current keys and sends only the necessary upserts/deletes.
-
-## React
-
-Generated React bindings export `useSync` and `useSyncSelector`:
-
-```tsx
-import { api } from "./gonvex/_generated/api";
-import { useSync, useSyncSelector } from "./gonvex/_generated/react";
-
-type Task = {
-  id: string;
-  workspace_id: string;
-  title: string;
-  status: string;
-  updated_at: string;
-};
-
-function TaskList({ workspaceId }: { workspaceId: string }) {
-  const tasks = useSync<Task>(api.tasks.recent, {
-    workspaceId,
-  });
-
-  const openCount = useSyncSelector<Task, number>(
-    api.tasks.recent,
-    { workspaceId },
-    (rows) => rows.filter((task) => task.status === "open").length,
-  );
-
-  if (!tasks) return <Spinner />;
-  return <Tasks rows={tasks} openCount={openCount ?? 0} />;
-}
-```
-
-Use a selector when a component only needs derived state. Its equality check
-prevents rerenders when unrelated rows change. Pass `"skip"` as the args value
-to temporarily disable either hook.
-
-## Direct client
-
-Lower-level clients can subscribe to protocol frames:
-
-```ts
-const unsubscribe = client.subscribeSync(
-  api.tasks.recent,
-  { workspaceId },
-  (message) => {
-    if (message.type === "sync.snapshot") {
-      render(message.result);
-    }
-  },
-);
-```
-
-`watchSync` exposes the current local result and whether it has caught up:
-
-```ts
-const watch = client.watchSync<Task>(api.tasks.recent, { workspaceId });
-
-watch.localSyncResult();
-watch.status(); // { isLoading, isUpToDate }
-
-const stop = watch.onUpdate(() => {
-  render(watch.localSyncResult() ?? []);
-});
-```
-
-## Browser storage
-
-The client creates a normalized Dexie store on supported browsers. The default
-global budget is 100 MiB and least-recently-used collections are evicted first:
-
-```ts
-const client = new GonvexClient(url, {
-  project: "my-project",
-  sync: {
-    databaseName: "my-product-sync",
-    maxBytes: 150 * 1024 * 1024,
-  },
-});
-```
-
-Set `sync: false` to disable persistent sync storage. The live connection still
-works, but reloads require a fresh snapshot.
-
-Storage is isolated by the server-issued cache scope, which includes the runtime
-deployment, project, tenant, authenticated identity, and current permissions.
-Auth, definition, or visibility changes reset and reauthorize the collection.
-Metadata and normalized rows are read in one IndexedDB transaction, and writes
-are serialized even across unsubscribe/resubscribe cycles.
-
-## Delivery and recovery
-
-```txt
-Postgres transaction commits
--> deferred trigger assigns one revision to its row changes
--> durable change rows are stored
--> NOTIFY wakes connected runtimes
--> runtime authorizes and sends matching deltas
--> browser updates memory and IndexedDB
--> browser verifies the runtime digest before accepting sync.ready
-```
-
-`NOTIFY` is only a wake-up hint. The Postgres change table is the source of
-truth. The runtime installs its database listener before it samples a ready
-cursor, and a listener failure revokes `isUpToDate` until durable replay has
-completed after reconnect.
-
-On reconnect, the client hashes the actual persisted rows and sends its
-`{epoch, revision}` cursor plus a collection digest. The runtime sends later
-deltas when possible, or a fresh snapshot when the cursor is too old or the
-collection must be reauthorized. Every `sync.ready` includes the authoritative
-digest; the client recomputes it over its final materialized rows and only then
-sets `isUpToDate`.
-
-For collections up to 256 rows, resume also includes keys and row hashes. Larger
-collections use one fixed-size digest on the normal unchanged path. Only when
-that digest differs does the runtime request row hashes and return the differing
-rows. This detects missing, extra, or corrupted rows without turning routine
-reloads into full snapshots.
-
-Bounded, progressive, or dependency-driven syncs rerun the authorized handler
-after relevant transactions and diff its current output against the browser's
-materialized view. This keeps computed membership and top-N window boundaries
-correct while still transmitting only upserts and deletes.
-
-The runtime retains changes for seven days by default and prunes at most once
-per hour.
-
-## Boundaries
-
-- One source table per sync definition.
-- Equality filters plus null/non-null exclusion predicates.
-- The handler remains responsible for authorization and initial snapshot shape.
-- Search, joins, aggregates, and scrolling beyond a progressive window remain
-  live-query use cases.
-- Sync does not queue or rebase offline mutations. Mutations and actions fail
-  closed on disconnect and are not silently replayed.
+Collections explicitly report `complete` or `partial`. Offline filters over a
+partial collection are labeled as cached partial results.

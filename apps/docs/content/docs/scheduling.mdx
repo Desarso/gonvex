@@ -1,17 +1,17 @@
 ---
 title: Scheduling and Background Jobs
-description: Register recurring jobs and enqueue mutations or actions for later execution.
+description: Register recurring jobs and enqueue Reducers or Actions for later execution.
 ---
 
 # Scheduling and Background Jobs
 
 Gonvex can run recurring project jobs and enqueue one-shot work from a backend
-function. Scheduled calls use the same mutation/action execution paths,
-project/tenant routing, metrics, and realtime invalidation as client calls.
+function. Scheduled calls use the same Reducer/Action execution paths,
+project/tenant routing, metrics, and committed change feed as client calls.
 
 ## Recurring jobs
 
-Register a mutation or action by interval:
+Register a Reducer or Action by interval:
 
 ```go
 package backend
@@ -45,7 +45,7 @@ app.CronExpr(
 ```
 
 The five fields are minute, hour, day of month, month, and day of week. The
-referenced function must be a mutation, internal mutation, or action, and the
+referenced function must be a Reducer, internal Reducer, or Action, and the
 arguments must be JSON-encodable.
 
 Cron names must be unique within an app. Manifest sync replaces the project's
@@ -80,7 +80,7 @@ Every runtime context exposes `ctx.Scheduler`. Enqueue work after a delay:
 
 ```go
 func CreateTask(
-  ctx *gonvex.MutationCtx,
+  ctx *gonvex.ReducerCtx,
   args CreateTaskArgs,
 ) (Task, error) {
   task, err := insertTask(ctx, args)
@@ -107,19 +107,16 @@ jobID, err := ctx.Scheduler.RunAt(
 )
 ```
 
-Jobs scheduled inside a mutation are held until that mutation commits. A failed
-or rolled-back mutation does not expose its queued work. The new call inherits
+Jobs scheduled inside a Reducer are held until that Reducer commits. A failed
+or rolled-back Reducer does not expose its queued work. The new call inherits
 the current project and tenant scope.
 
 ## Realtime and observability
 
-Successful scheduled mutations and actions invalidate live queries using their
-declared `gonvex.Writes(...)` dependencies. A long-running action that commits
-work before returning can notify subscribers immediately:
-
-```go
-ctx.NotifyTableChanged("tasks", "task_events")
-```
+Successful scheduled Reducers commit through the same transaction log as
+interactive calls. Gonvex routes their exact row changes automatically; there
+is no write declaration or manual notification API. Actions enqueue or call a
+Reducer when they need to change durable application state.
 
 The dashboard Health view reports registered cron schedules, recent runs,
 failures, scheduler lag, execution duration, queued work, and concurrency.

@@ -18,7 +18,7 @@ import (
 )
 
 func TestSyncValueMatchesEqualityArguments(t *testing.T) {
-	definition := manifest.SyncDefinition{
+	definition := manifest.ReplicaCollectionDefinition{
 		EqualFilters:   map[string]string{"workspaceId": "workspaceId"},
 		ExcludeWhenSet: []string{"deletedAt"},
 	}
@@ -46,7 +46,7 @@ func TestSyncSnapshotHonorsRowAndByteBudgets(t *testing.T) {
 		{"id": "b", "title": "also-small"},
 		{"id": "c", "title": "third"},
 	}
-	rows, truncated, err := syncSnapshotRows(result, manifest.SyncDefinition{
+	rows, truncated, err := syncSnapshotRows(result, manifest.ReplicaCollectionDefinition{
 		Key:      "id",
 		MaxRows:  2,
 		MaxBytes: 1_000,
@@ -61,7 +61,7 @@ func TestSyncSnapshotHonorsRowAndByteBudgets(t *testing.T) {
 		t.Fatal("expected row budget to report remaining rows as truncated")
 	}
 
-	rows, truncated, err = syncSnapshotRows(result, manifest.SyncDefinition{
+	rows, truncated, err = syncSnapshotRows(result, manifest.ReplicaCollectionDefinition{
 		Key:      "id",
 		MaxBytes: int64(len(rows[0])),
 	})
@@ -75,7 +75,7 @@ func TestSyncSnapshotHonorsRowAndByteBudgets(t *testing.T) {
 		t.Fatal("expected byte budget to report remaining rows as truncated")
 	}
 
-	rows, truncated, err = syncSnapshotRows(result[:2], manifest.SyncDefinition{
+	rows, truncated, err = syncSnapshotRows(result[:2], manifest.ReplicaCollectionDefinition{
 		Key:     "id",
 		MaxRows: 2,
 	})
@@ -86,7 +86,7 @@ func TestSyncSnapshotHonorsRowAndByteBudgets(t *testing.T) {
 		t.Fatalf("collection exactly at its row budget must be complete: rows=%d truncated=%t", len(rows), truncated)
 	}
 
-	rows, truncated, err = syncSnapshotRows(result[:1], manifest.SyncDefinition{
+	rows, truncated, err = syncSnapshotRows(result[:1], manifest.ReplicaCollectionDefinition{
 		Key:     "id",
 		MaxRows: 2,
 	})
@@ -99,7 +99,7 @@ func TestSyncSnapshotHonorsRowAndByteBudgets(t *testing.T) {
 }
 
 func TestSyncReadyReportsTruncationAndClearsAfterBoundedDelta(t *testing.T) {
-	definition := manifest.SyncDefinition{Table: "tasks", Key: "id", MaxRows: 2}
+	definition := manifest.ReplicaCollectionDefinition{Table: "tasks", Key: "id", MaxRows: 2}
 	subscription := &syncSubscription{
 		id:         "sync-a",
 		path:       "tasks.sync",
@@ -194,7 +194,7 @@ func TestSyncSnapshotRejectsDuplicateKeys(t *testing.T) {
 	_, _, err := syncSnapshotRows([]map[string]any{
 		{"id": "duplicate", "title": "first"},
 		{"id": "duplicate", "title": "second"},
-	}, manifest.SyncDefinition{Key: "id"})
+	}, manifest.ReplicaCollectionDefinition{Key: "id"})
 	if err == nil {
 		t.Fatal("duplicate keys would make the collection digest ambiguous")
 	}
@@ -217,12 +217,12 @@ func TestSyncRowKeyMatchesJavaScriptScalarStringification(t *testing.T) {
 func TestSyncRetentionUsesLongestDeclaredWindow(t *testing.T) {
 	current := manifest.Manifest{Functions: map[string]manifest.FunctionEntry{
 		"tasks.sync": {
-			Kind: manifest.FunctionKindSync,
-			Sync: &manifest.SyncDefinition{RetentionMilliseconds: (14 * 24 * time.Hour).Milliseconds()},
+			Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica,
+			Replica: &manifest.ReplicaCollectionDefinition{RetentionMilliseconds: (14 * 24 * time.Hour).Milliseconds()},
 		},
 		"statuses.sync": {
-			Kind: manifest.FunctionKindSync,
-			Sync: &manifest.SyncDefinition{RetentionMilliseconds: (2 * 24 * time.Hour).Milliseconds()},
+			Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica,
+			Replica: &manifest.ReplicaCollectionDefinition{RetentionMilliseconds: (2 * 24 * time.Hour).Milliseconds()},
 		},
 	}}
 
@@ -236,8 +236,8 @@ func TestSyncRetentionUsesLongestDeclaredWindow(t *testing.T) {
 
 func TestSyncCursorForClockSharesRevisionButIsolatesDefinitionsAndScopes(t *testing.T) {
 	clock := syncClock{DatabaseEpoch: "database-a", Revision: 42, RetainedRevision: 7}
-	tasks := manifest.SyncDefinition{Table: "tasks", Key: "id", Columns: []string{"id", "title"}}
-	statuses := manifest.SyncDefinition{Table: "statuses", Key: "id", Columns: []string{"id", "name"}}
+	tasks := manifest.ReplicaCollectionDefinition{Table: "tasks", Key: "id", Columns: []string{"id", "title"}}
+	statuses := manifest.ReplicaCollectionDefinition{Table: "statuses", Key: "id", Columns: []string{"id", "name"}}
 
 	taskCursor := syncCursorForClock(clock, tasks, "scope-a")
 	statusCursor := syncCursorForClock(clock, statuses, "scope-a")
@@ -254,8 +254,8 @@ func TestSyncCursorForClockSharesRevisionButIsolatesDefinitionsAndScopes(t *test
 	}
 }
 
-func TestSyncDefinitionTableIntersectionIncludesVisibilityDependencies(t *testing.T) {
-	definition := manifest.SyncDefinition{
+func TestReplicaCollectionDefinitionTableIntersectionIncludesVisibilityDependencies(t *testing.T) {
+	definition := manifest.ReplicaCollectionDefinition{
 		Table:            "tasks",
 		VisibilityTables: []string{"taskAcks", "memberships"},
 	}
@@ -269,8 +269,8 @@ func TestSyncDefinitionTableIntersectionIncludesVisibilityDependencies(t *testin
 	}
 }
 
-func TestSyncDefinitionsForSchemaDurablyLogsVisibilityDependencies(t *testing.T) {
-	definitions := map[string]manifest.SyncDefinition{
+func TestReplicaCollectionDefinitionsForSchemaDurablyLogsVisibilityDependencies(t *testing.T) {
+	definitions := map[string]manifest.ReplicaCollectionDefinition{
 		"tasks": {
 			Table:            "tasks",
 			Key:              "id",
@@ -303,9 +303,9 @@ func TestSyncDefinitionsForSchemaDurablyLogsVisibilityDependencies(t *testing.T)
 }
 
 func TestSyncReadDependenciesAutomaticallyBecomeVisibilityDependencies(t *testing.T) {
-	definition := effectiveSyncDefinition(manifest.FunctionEntry{
-		Kind: manifest.FunctionKindSync,
-		Sync: &manifest.SyncDefinition{
+	definition := effectiveReplicaCollectionDefinition(manifest.FunctionEntry{
+		Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica,
+		Replica: &manifest.ReplicaCollectionDefinition{
 			Table: "tasks", Key: "id", VisibilityTables: []string{"taskAcks"},
 		},
 		Dependencies: manifest.FunctionDependencies{Reads: []manifest.ReadDependency{
@@ -334,12 +334,12 @@ func TestSyncVisibilityChangesAreIncludedInReconnectReconciliation(t *testing.T)
 
 func TestBoundedEagerSyncReconcilesItsAuthoritativeWindow(t *testing.T) {
 	changes := []syncLogChange{{revision: 42, table: "statuses", rowID: "status-new"}}
-	if !syncNeedsAuthoritativeReconcile(manifest.SyncDefinition{
+	if !syncNeedsAuthoritativeReconcile(manifest.ReplicaCollectionDefinition{
 		Table: "statuses", Mode: "eager", MaxRows: 100,
 	}, changes) {
 		t.Fatal("direct replay cannot determine which row follows a full bounded window")
 	}
-	if syncNeedsAuthoritativeReconcile(manifest.SyncDefinition{
+	if syncNeedsAuthoritativeReconcile(manifest.ReplicaCollectionDefinition{
 		Table: "statuses", Mode: "eager",
 	}, changes) {
 		t.Fatal("an unbounded source-shaped eager collection should retain direct delta replay")
@@ -347,7 +347,7 @@ func TestBoundedEagerSyncReconcilesItsAuthoritativeWindow(t *testing.T) {
 }
 
 func TestSyncValueMatchesAppliesExclusionsWithoutEqualityFilters(t *testing.T) {
-	definition := manifest.SyncDefinition{ExcludeWhenSet: []string{"deletedAt"}}
+	definition := manifest.ReplicaCollectionDefinition{ExcludeWhenSet: []string{"deletedAt"}}
 	if syncValueMatches(json.RawMessage(`{"id":"deleted","deletedAt":123}`), definition, nil) {
 		t.Fatal("a soft-deleted row must not reappear merely because the sync has no equality filters")
 	}

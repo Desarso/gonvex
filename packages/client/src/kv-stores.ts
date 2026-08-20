@@ -1,5 +1,5 @@
 import type { JsonValue, QueryCacheDirective } from "@gonvex/protocol";
-import type { MutationOutboxEntry, OutboxStore } from "./outbox.js";
+import type { ReducerOutboxEntry, OutboxStore } from "./outbox.js";
 import {
   defaultQueryCacheMaxAgeMs,
   defaultQueryCacheMaxBytes,
@@ -37,7 +37,7 @@ export type GonvexKv = {
 export const kvQueryCacheTable = "query_cache";
 export const kvSyncCollectionTable = "sync_collections";
 export const kvSyncDirectiveTable = "sync_directives";
-export const kvMutationOutboxTable = "mutation_outbox";
+export const kvReducerOutboxTable = "reducer_outbox";
 
 /** An in-memory {@link GonvexKv} for tests and ephemeral sessions. */
 export function createMemoryGonvexKv(): GonvexKv {
@@ -425,33 +425,33 @@ async function evictSyncCollections(kv: GonvexKv, maxBytes: number): Promise<voi
 /**
  * An {@link OutboxStore} over an injected {@link GonvexKv}. Entries are
  * whole JSON records keyed by their queue id; ordering, causal barriers, and
- * inflight recovery stay in {@link StoreMutationOutbox}.
+ * inflight recovery stay in {@link StoreReducerOutbox}.
  */
 export function createKvOutboxStore(kv: GonvexKv): OutboxStore {
   return {
     async load() {
-      const entries: MutationOutboxEntry[] = [];
-      for (const { value } of await kv.list(kvMutationOutboxTable)) {
-        // A corrupt row must not strand every other queued mutation.
-        const entry = parseJson<MutationOutboxEntry>(value);
+      const entries: ReducerOutboxEntry[] = [];
+      for (const { value } of await kv.list(kvReducerOutboxTable)) {
+        // A corrupt row must not strand every other queued reducer.
+        const entry = parseJson<ReducerOutboxEntry>(value);
         if (entry && typeof entry.id === "number") entries.push(entry);
       }
       return entries.sort((left, right) => left.id - right.id);
     },
     async put(entry) {
-      await kv.set(kvMutationOutboxTable, String(entry.id), JSON.stringify(entry));
+      await kv.set(kvReducerOutboxTable, String(entry.id), JSON.stringify(entry));
     },
     async delete(id) {
-      await kv.delete(kvMutationOutboxTable, String(id));
+      await kv.delete(kvReducerOutboxTable, String(id));
     },
     async clear(scope) {
       if (scope === undefined) {
-        await kv.clear(kvMutationOutboxTable);
+        await kv.clear(kvReducerOutboxTable);
         return;
       }
-      for (const { key, value } of await kv.list(kvMutationOutboxTable)) {
-        if (parseJson<MutationOutboxEntry>(value)?.scope === scope) {
-          await kv.delete(kvMutationOutboxTable, key);
+      for (const { key, value } of await kv.list(kvReducerOutboxTable)) {
+        if (parseJson<ReducerOutboxEntry>(value)?.scope === scope) {
+          await kv.delete(kvReducerOutboxTable, key);
         }
       }
     },

@@ -11,8 +11,11 @@ export {
   useConvexAuth,
   useConvexConnectionState,
   useGonvexAuth,
-  useMutation,
+  useLiveQuery,
   usePaginatedQuery,
   useQuery,
+  useReducer,
+  useReplicaCollection,
+  useReplicaSelector,
 } from "@gonvex/react";
 export type { GonvexAuthConfig, GonvexAuthTenant, GonvexAuthUser, GonvexAuthValue } from "@gonvex/react";

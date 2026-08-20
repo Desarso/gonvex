@@ -1,7 +1,7 @@
 import type { Dexie as DexieDatabase, Table } from "dexie";
 import type { OptimisticPatch } from "./optimistic.js";
 
-export type MutationOutboxOptions = {
+export type ReducerOutboxOptions = {
   databaseName?: string;
   indexedDB?: IDBFactory;
   IDBKeyRange?: typeof IDBKeyRange;
@@ -15,24 +15,24 @@ export type MutationOutboxOptions = {
 };
 
 /**
- * A dumb durable record store backing {@link StoreMutationOutbox}. It holds
+ * A dumb durable record store backing {@link StoreReducerOutbox}. It holds
  * whole entries keyed by id and knows nothing about queue semantics — total
  * order, causal barriers, and inflight recovery all stay in the SDK.
  */
 export type OutboxStore = {
   /** Every persisted entry across all scopes; called once to hydrate. */
-  load(): Promise<MutationOutboxEntry[]>;
+  load(): Promise<ReducerOutboxEntry[]>;
   /** Insert or replace the entry with this id. */
-  put(entry: MutationOutboxEntry): Promise<void>;
+  put(entry: ReducerOutboxEntry): Promise<void>;
   delete(id: number): Promise<void>;
   clear(scope?: string): Promise<void>;
   close?(): void;
 };
 
-export type MutationOutboxEntry = {
+export type ReducerOutboxEntry = {
   /** Auto-incremented sequence number. Lower ids always happened first. */
   id: number;
-  /** Authenticated project/tenant/user identity that owns this mutation. */
+  /** Authenticated project/tenant/user identity that owns this reducer. */
   scope: string;
   path: string;
   args: unknown;
@@ -48,7 +48,7 @@ export type MutationOutboxEntry = {
   state: "pending" | "inflight" | "committed";
 };
 
-export type EnqueueMutation = {
+export type EnqueueReducer = {
   scope: string;
   path: string;
   args: unknown;
@@ -59,10 +59,10 @@ export type EnqueueMutation = {
   state?: "pending" | "inflight";
 };
 
-export type MutationOutbox = {
-  enqueue(mutation: EnqueueMutation): Promise<MutationOutboxEntry>;
-  loadAll(scope: string): Promise<MutationOutboxEntry[]>;
-  nextReady(scope: string, now: number): Promise<MutationOutboxEntry | undefined>;
+export type ReducerOutbox = {
+  enqueue(reducer: EnqueueReducer): Promise<ReducerOutboxEntry>;
+  loadAll(scope: string): Promise<ReducerOutboxEntry[]>;
+  nextReady(scope: string, now: number): Promise<ReducerOutboxEntry | undefined>;
   markInflight(id: number): Promise<void>;
   markCommitted(id: number): Promise<void>;
   ack(id: number): Promise<void>;
@@ -72,14 +72,14 @@ export type MutationOutbox = {
   subscribe(listener: () => void): () => void;
 };
 
-type NewMutationOutboxEntry = Omit<MutationOutboxEntry, "id"> & { id?: number };
+type NewReducerOutboxEntry = Omit<ReducerOutboxEntry, "id"> & { id?: number };
 
-type MutationOutboxDatabase = DexieDatabase & {
-  entries: Table<MutationOutboxEntry, number, NewMutationOutboxEntry>;
+type ReducerOutboxDatabase = DexieDatabase & {
+  entries: Table<ReducerOutboxEntry, number, NewReducerOutboxEntry>;
 };
 
 /**
- * A durable, totally ordered mutation queue.
+ * A durable, totally ordered reducer queue.
  *
  * The auto-incremented id is the enqueue order and is never reused while the
  * database exists. `nextReady` may skip unrelated writes, but it never skips a
@@ -88,21 +88,21 @@ type MutationOutboxDatabase = DexieDatabase & {
  * work after a crash by returning it to pending.
  *
  * IndexedDB is an optimization for durability, not a prerequisite for the
- * optimistic mutation path. Disabled or failed storage permanently degrades
+ * optimistic reducer path. Disabled or failed storage permanently degrades
  * this instance to the same queue semantics in memory for the current session.
  */
-export class DexieMutationOutbox implements MutationOutbox {
+export class DexieReducerOutbox implements ReducerOutbox {
   private readonly databaseName: string;
   private readonly indexedDB?: IDBFactory;
   private readonly keyRange?: typeof IDBKeyRange;
   private readonly listeners = new Set<() => void>();
-  private readonly memoryEntries = new Map<number, MutationOutboxEntry>();
-  private database?: MutationOutboxDatabase;
-  private databasePromise?: Promise<MutationOutboxDatabase>;
+  private readonly memoryEntries = new Map<number, ReducerOutboxEntry>();
+  private database?: ReducerOutboxDatabase;
+  private databasePromise?: Promise<ReducerOutboxDatabase>;
   private memoryOnly: boolean;
   private nextMemoryId = 1;
 
-  constructor(options: MutationOutboxOptions = {}) {
+  constructor(options: ReducerOutboxOptions = {}) {
     this.databaseName = options.databaseName ?? "gonvex-outbox";
     this.indexedDB = options.indexedDB;
     this.keyRange = options.IDBKeyRange;
@@ -111,26 +111,26 @@ export class DexieMutationOutbox implements MutationOutbox {
       || !(options.IDBKeyRange ?? globalThis.IDBKeyRange);
   }
 
-  async enqueue(mutation: EnqueueMutation): Promise<MutationOutboxEntry> {
+  async enqueue(reducer: EnqueueReducer): Promise<ReducerOutboxEntry> {
     const createdAt = Date.now();
-    const entry: NewMutationOutboxEntry = {
-      scope: mutation.scope,
-      path: mutation.path,
-      args: cloneValue(mutation.args),
-      idempotencyKey: mutation.idempotencyKey ?? createIdempotencyKey(),
-      entityKeys: [...(mutation.entityKeys ?? [])],
-      patches: mutation.patches?.map(clonePatch),
+    const entry: NewReducerOutboxEntry = {
+      scope: reducer.scope,
+      path: reducer.path,
+      args: cloneValue(reducer.args),
+      idempotencyKey: reducer.idempotencyKey ?? createIdempotencyKey(),
+      entityKeys: [...(reducer.entityKeys ?? [])],
+      patches: reducer.patches?.map(clonePatch),
       createdAt,
       attempts: 0,
       nextAttemptAt: createdAt,
-      state: mutation.state ?? "pending",
+      state: reducer.state ?? "pending",
     };
 
     if (this.memoryOnly) return this.enqueueInMemory(entry);
     try {
       const database = await this.open();
       const id = await database.entries.add(entry);
-      const stored = { ...entry, id } as MutationOutboxEntry;
+      const stored = { ...entry, id } as ReducerOutboxEntry;
       this.remember(stored);
       this.notify();
       return cloneEntry(stored);
@@ -140,12 +140,12 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
   }
 
-  async loadAll(scope: string): Promise<MutationOutboxEntry[]> {
+  async loadAll(scope: string): Promise<ReducerOutboxEntry[]> {
     if (this.memoryOnly) return this.loadAllFromMemory(scope);
     try {
       const database = await this.open();
       let changed = false;
-      let entries: MutationOutboxEntry[] = [];
+      let entries: ReducerOutboxEntry[] = [];
       await database.transaction("rw", database.entries, async () => {
         entries = await database.entries.where("scope").equals(scope).sortBy("id");
         entries = entries.map((entry) => {
@@ -164,7 +164,7 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
   }
 
-  async nextReady(scope: string, now: number): Promise<MutationOutboxEntry | undefined> {
+  async nextReady(scope: string, now: number): Promise<ReducerOutboxEntry | undefined> {
     if (this.memoryOnly) return cloneOptionalEntry(firstReady(this.sortedMemoryEntries(scope), now));
     try {
       const database = await this.open();
@@ -184,7 +184,7 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
     try {
       const database = await this.open();
-      let updated: MutationOutboxEntry | undefined;
+      let updated: ReducerOutboxEntry | undefined;
       await database.transaction("rw", database.entries, async () => {
         const entry = await database.entries.get(id);
         if (!entry || entry.state === "inflight") return;
@@ -207,7 +207,7 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
     try {
       const database = await this.open();
-      let updated: MutationOutboxEntry | undefined;
+      let updated: ReducerOutboxEntry | undefined;
       await database.transaction("rw", database.entries, async () => {
         const entry = await database.entries.get(id);
         if (!entry || entry.state === "committed") return;
@@ -248,7 +248,7 @@ export class DexieMutationOutbox implements MutationOutbox {
     }
     try {
       const database = await this.open();
-      let updated: MutationOutboxEntry | undefined;
+      let updated: ReducerOutboxEntry | undefined;
       await database.transaction("rw", database.entries, async () => {
         const entry = await database.entries.get(id);
         if (!entry) return;
@@ -296,14 +296,14 @@ export class DexieMutationOutbox implements MutationOutbox {
     return () => this.listeners.delete(listener);
   }
 
-  private enqueueInMemory(entry: NewMutationOutboxEntry): MutationOutboxEntry {
-    const stored = { ...entry, id: this.nextMemoryId++ } as MutationOutboxEntry;
+  private enqueueInMemory(entry: NewReducerOutboxEntry): ReducerOutboxEntry {
+    const stored = { ...entry, id: this.nextMemoryId++ } as ReducerOutboxEntry;
     this.remember(stored);
     this.notify();
     return cloneEntry(stored);
   }
 
-  private loadAllFromMemory(scope: string): MutationOutboxEntry[] {
+  private loadAllFromMemory(scope: string): ReducerOutboxEntry[] {
     let changed = false;
     for (const [id, entry] of this.memoryEntries) {
       if (entry.scope !== scope) continue;
@@ -347,12 +347,12 @@ export class DexieMutationOutbox implements MutationOutbox {
       .sort((left, right) => left.id - right.id);
   }
 
-  private remember(entry: MutationOutboxEntry) {
+  private remember(entry: ReducerOutboxEntry) {
     this.memoryEntries.set(entry.id, cloneEntry(entry));
     this.nextMemoryId = Math.max(this.nextMemoryId, entry.id + 1);
   }
 
-  private replaceMemoryEntriesForScope(scope: string, entries: MutationOutboxEntry[]) {
+  private replaceMemoryEntriesForScope(scope: string, entries: ReducerOutboxEntry[]) {
     for (const [id, entry] of this.memoryEntries) {
       if (entry.scope === scope) this.memoryEntries.delete(id);
     }
@@ -364,7 +364,7 @@ export class DexieMutationOutbox implements MutationOutbox {
       try {
         listener();
       } catch {
-        // A subscriber must not be able to break mutation delivery.
+        // A subscriber must not be able to break reducer delivery.
       }
     }
   }
@@ -376,7 +376,7 @@ export class DexieMutationOutbox implements MutationOutbox {
     this.databasePromise = undefined;
   }
 
-  private async open(): Promise<MutationOutboxDatabase> {
+  private async open(): Promise<ReducerOutboxDatabase> {
     if (!this.databasePromise) {
       this.databasePromise = this.createDatabase().catch((error) => {
         this.databasePromise = undefined;
@@ -386,7 +386,7 @@ export class DexieMutationOutbox implements MutationOutbox {
     return this.databasePromise;
   }
 
-  private async createDatabase(): Promise<MutationOutboxDatabase> {
+  private async createDatabase(): Promise<ReducerOutboxDatabase> {
     const indexedDBValue = this.indexedDB ?? globalThis.indexedDB;
     const keyRangeValue = this.keyRange ?? globalThis.IDBKeyRange;
     if (!indexedDBValue || !keyRangeValue) throw new Error("indexeddb-unavailable");
@@ -394,7 +394,7 @@ export class DexieMutationOutbox implements MutationOutbox {
     const database = new Dexie(this.databaseName, {
       indexedDB: indexedDBValue,
       IDBKeyRange: keyRangeValue,
-    }) as MutationOutboxDatabase;
+    }) as ReducerOutboxDatabase;
     database.version(1).stores({
       entries: "++id, state, nextAttemptAt",
     });
@@ -416,20 +416,20 @@ export class DexieMutationOutbox implements MutationOutbox {
 }
 
 /**
- * The same totally ordered queue semantics as {@link DexieMutationOutbox},
+ * The same totally ordered queue semantics as {@link DexieReducerOutbox},
  * run entirely in memory with every state transition written through an
  * injected {@link OutboxStore}. Hydration replays `store.load()` once and
  * seeds the auto-increment id from the highest persisted id, so replayed
  * entries keep their original ids, idempotency keys, and enqueue order.
  *
  * The store is an optimization for durability, not a prerequisite for the
- * optimistic mutation path. A failing store permanently degrades this
+ * optimistic reducer path. A failing store permanently degrades this
  * instance to the same queue semantics in memory for the current session.
  */
-export class StoreMutationOutbox implements MutationOutbox {
+export class StoreReducerOutbox implements ReducerOutbox {
   private readonly store: OutboxStore;
   private readonly listeners = new Set<() => void>();
-  private readonly entries = new Map<number, MutationOutboxEntry>();
+  private readonly entries = new Map<number, ReducerOutboxEntry>();
   private readonly ready: Promise<void>;
   private memoryOnly: boolean;
   private nextId = 1;
@@ -440,21 +440,21 @@ export class StoreMutationOutbox implements MutationOutbox {
     this.ready = this.memoryOnly ? Promise.resolve() : this.hydrate();
   }
 
-  async enqueue(mutation: EnqueueMutation): Promise<MutationOutboxEntry> {
+  async enqueue(reducer: EnqueueReducer): Promise<ReducerOutboxEntry> {
     await this.ready;
     const createdAt = Date.now();
-    const entry: MutationOutboxEntry = {
+    const entry: ReducerOutboxEntry = {
       id: this.nextId++,
-      scope: mutation.scope,
-      path: mutation.path,
-      args: cloneValue(mutation.args),
-      idempotencyKey: mutation.idempotencyKey ?? createIdempotencyKey(),
-      entityKeys: [...(mutation.entityKeys ?? [])],
-      patches: mutation.patches?.map(clonePatch),
+      scope: reducer.scope,
+      path: reducer.path,
+      args: cloneValue(reducer.args),
+      idempotencyKey: reducer.idempotencyKey ?? createIdempotencyKey(),
+      entityKeys: [...(reducer.entityKeys ?? [])],
+      patches: reducer.patches?.map(clonePatch),
       createdAt,
       attempts: 0,
       nextAttemptAt: createdAt,
-      state: mutation.state ?? "pending",
+      state: reducer.state ?? "pending",
     };
     this.entries.set(entry.id, entry);
     await this.persistPut(entry);
@@ -462,9 +462,9 @@ export class StoreMutationOutbox implements MutationOutbox {
     return cloneEntry(entry);
   }
 
-  async loadAll(scope: string): Promise<MutationOutboxEntry[]> {
+  async loadAll(scope: string): Promise<ReducerOutboxEntry[]> {
     await this.ready;
-    const recovered: MutationOutboxEntry[] = [];
+    const recovered: ReducerOutboxEntry[] = [];
     for (const [id, entry] of this.entries) {
       if (entry.scope !== scope || entry.state !== "inflight") continue;
       const pending = { ...entry, state: "pending" as const };
@@ -476,7 +476,7 @@ export class StoreMutationOutbox implements MutationOutbox {
     return this.sortedEntries(scope).map(cloneEntry);
   }
 
-  async nextReady(scope: string, now: number): Promise<MutationOutboxEntry | undefined> {
+  async nextReady(scope: string, now: number): Promise<ReducerOutboxEntry | undefined> {
     await this.ready;
     return cloneOptionalEntry(firstReady(this.sortedEntries(scope), now));
   }
@@ -553,7 +553,7 @@ export class StoreMutationOutbox implements MutationOutbox {
     }
   }
 
-  private async persistPut(entry: MutationOutboxEntry) {
+  private async persistPut(entry: ReducerOutboxEntry) {
     if (this.memoryOnly) return;
     try {
       await this.store.put(cloneEntry(entry));
@@ -582,7 +582,7 @@ export class StoreMutationOutbox implements MutationOutbox {
       try {
         listener();
       } catch {
-        // A subscriber must not be able to break mutation delivery.
+        // A subscriber must not be able to break reducer delivery.
       }
     }
   }
@@ -597,12 +597,12 @@ export class StoreMutationOutbox implements MutationOutbox {
   }
 }
 
-export function createMutationOutbox(options: MutationOutboxOptions = {}): MutationOutbox {
-  if (options.store) return new StoreMutationOutbox(options.store, { enabled: options.enabled });
-  return new DexieMutationOutbox(options);
+export function createReducerOutbox(options: ReducerOutboxOptions = {}): ReducerOutbox {
+  if (options.store) return new StoreReducerOutbox(options.store, { enabled: options.enabled });
+  return new DexieReducerOutbox(options);
 }
 
-function firstReady(entries: MutationOutboxEntry[], now: number) {
+function firstReady(entries: ReducerOutboxEntry[], now: number) {
   const blockedEntityKeys = new Set<string>();
   for (const entry of entries) {
     // The runtime already accepted committed entries. They remain only to
@@ -621,7 +621,7 @@ function firstReady(entries: MutationOutboxEntry[], now: number) {
   return undefined;
 }
 
-function failedEntry(entry: MutationOutboxEntry, error: string, now: number): MutationOutboxEntry {
+function failedEntry(entry: ReducerOutboxEntry, error: string, now: number): ReducerOutboxEntry {
   const attempts = entry.attempts + 1;
   return {
     ...entry,
@@ -637,7 +637,7 @@ function createIdempotencyKey() {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function cloneEntry(entry: MutationOutboxEntry): MutationOutboxEntry {
+function cloneEntry(entry: ReducerOutboxEntry): ReducerOutboxEntry {
   return {
     ...entry,
     args: cloneValue(entry.args),
@@ -646,7 +646,7 @@ function cloneEntry(entry: MutationOutboxEntry): MutationOutboxEntry {
   };
 }
 
-function cloneOptionalEntry(entry: MutationOutboxEntry | undefined) {
+function cloneOptionalEntry(entry: ReducerOutboxEntry | undefined) {
   return entry ? cloneEntry(entry) : undefined;
 }
 

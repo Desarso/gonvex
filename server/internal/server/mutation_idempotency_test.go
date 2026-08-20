@@ -44,7 +44,7 @@ func TestCallerContextSubject(t *testing.T) {
 	}
 }
 
-func mutationIdempotencyTestContext(t *testing.T) (*Server, *gonvex.MutationCtx) {
+func mutationIdempotencyTestContext(t *testing.T) (*Server, *gonvex.ReducerCtx) {
 	t.Helper()
 	baseURL := strings.TrimSpace(os.Getenv("GONVEX_TEST_POSTGRES_URL"))
 	if baseURL == "" {
@@ -58,7 +58,7 @@ func mutationIdempotencyTestContext(t *testing.T) (*Server, *gonvex.MutationCtx)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	server := &Server{}
-	mutationCtx := &gonvex.MutationCtx{RuntimeContext: gonvex.RuntimeContext{
+	mutationCtx := &gonvex.ReducerCtx{RuntimeContext: gonvex.RuntimeContext{
 		Context:     context.Background(),
 		DatabaseURL: databaseURL,
 		DB:          db,
@@ -70,7 +70,7 @@ func mutationIdempotencyTestContext(t *testing.T) (*Server, *gonvex.MutationCtx)
 func TestMutationIdempotencyExecutesOncePerKey(t *testing.T) {
 	server, mutationCtx := mutationIdempotencyTestContext(t)
 	var executions atomic.Int64
-	exec := func(*gonvex.MutationCtx, string, json.RawMessage) (any, error) {
+	exec := func(*gonvex.ReducerCtx, string, json.RawMessage) (any, error) {
 		return map[string]any{"value": executions.Add(1)}, nil
 	}
 
@@ -112,7 +112,7 @@ func TestMutationIdempotencyFailedMutationDoesNotClaim(t *testing.T) {
 	server, mutationCtx := mutationIdempotencyTestContext(t)
 	var executions atomic.Int64
 	failing := errors.New("handler failed")
-	exec := func(*gonvex.MutationCtx, string, json.RawMessage) (any, error) {
+	exec := func(*gonvex.ReducerCtx, string, json.RawMessage) (any, error) {
 		if executions.Add(1) == 1 {
 			return nil, failing
 		}
@@ -138,7 +138,7 @@ func TestMutationIdempotencyFailedMutationDoesNotClaim(t *testing.T) {
 func TestMutationIdempotencyConcurrentDuplicatesExecuteOnce(t *testing.T) {
 	server, mutationCtx := mutationIdempotencyTestContext(t)
 	var executions atomic.Int64
-	exec := func(*gonvex.MutationCtx, string, json.RawMessage) (any, error) {
+	exec := func(*gonvex.ReducerCtx, string, json.RawMessage) (any, error) {
 		return executions.Add(1), nil
 	}
 	mutationCtx.Context = withMutationIdempotency(context.Background(), "key-race", "user-1")
@@ -151,9 +151,9 @@ func TestMutationIdempotencyConcurrentDuplicatesExecuteOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Each goroutine needs its own MutationCtx: runMutationInTx
+			// Each goroutine needs its own ReducerCtx: runMutationInTx
 			// mutates the shared Tx/Scheduler fields.
-			ctx := &gonvex.MutationCtx{RuntimeContext: mutationCtx.RuntimeContext}
+			ctx := &gonvex.ReducerCtx{RuntimeContext: mutationCtx.RuntimeContext}
 			results[index], failures[index] = server.runMutationInTx(ctx, "tasks.create", nil, exec)
 		}()
 	}

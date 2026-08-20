@@ -139,6 +139,6 @@ const client = new GonvexClient("wss://runtime.example.com/ws", {
 client.setAuth({ token: sessionToken, tenant: "acme" });
 ```
 
-Then all queries/mutations execute against the verified active tenant.
+Then all Queries and Reducers execute against the verified active tenant.
 
 For the current React client wiring and safe tenant-switching pattern, see [Frontend Multitenancy](./frontend-multitenancy).

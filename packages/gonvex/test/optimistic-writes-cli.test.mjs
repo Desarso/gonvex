@@ -25,31 +25,27 @@ function generateBindings(source) {
   return project;
 }
 
-test("generated API exports mutation write metadata and derives optimistic patches", async () => {
+test("generated API derives optimistic patches only from an explicit reducer contract", async () => {
   const project = generateBindings(`package app
 
 import "github.com/gonvex/gonvex/pkg/gonvex"
 
 func Register(app *gonvex.App) {
-  app.Mutation(
+  app.Reducer(
     "tasks.update",
     UpdateTask,
-    gonvex.Writes("tasks").Columns("title", "done"),
-    gonvex.Writes("taskAudit"),
-    gonvex.OptimisticMutation(` + "` tasks `" + `).RowIDArg(` + "` taskId `" + `).FieldsArg(` + "` updates `" + `),
+    gonvex.OptimisticReducer(` + "` tasks `" + `).RowIDArg(` + "` taskId `" + `).FieldsArg(` + "` updates `" + `),
   )
   app.Query(
     "tasks.preview",
     PreviewTasks,
-    gonvex.Writes("queryWrites"),
     gonvex.OptimisticProjection(` + "` tasks `" + `).Key(` + "` _id `" + `).ResultPath(` + "` page `" + `),
   )
-  app.Action("tasks.reindex", ReindexTasks, gonvex.Writes("actionWrites"))
-  app.Sync(
+  app.Action("tasks.reindex", ReindexTasks)
+  app.ReplicaCollection(
     "tasks.sync",
     SyncTasks,
-    gonvex.SyncTable("tasks").Key("_id").Columns("_id", "title"),
-    gonvex.Writes("syncWrites"),
+    gonvex.ReplicaTable("tasks").Key("_id").Columns("_id", "title"),
   )
 }
 `);
@@ -57,14 +53,11 @@ func Register(app *gonvex.App) {
   try {
     const apiPath = join(project, "gonvex", "_generated", "api.ts");
     const generated = readFileSync(apiPath, "utf8");
-    assert.match(
-      generated,
-      /export const optimisticWrites: Record<string, Array<\{ table: string; columns\?: string\[\] \}>>/,
-    );
+    assert.match(generated, /export const optimisticReducers:/);
 
     const bindings = await import(`${pathToFileURL(apiPath).href}?test=${Date.now()}`);
     assert.deepEqual(bindings.api.tasks.update.optimistic, {
-      mutation: { entity: "tasks", rowIdPath: ["taskId"], fieldsPath: ["updates"] },
+      reducer: { entity: "tasks", rowIdPath: ["taskId"], fieldsPath: ["updates"] },
     });
     assert.deepEqual(bindings.api.tasks.preview.optimistic, {
       projection: { entity: "tasks", key: "_id", resultPath: ["page"] },
@@ -72,50 +65,9 @@ func Register(app *gonvex.App) {
     assert.deepEqual(bindings.api.tasks.sync.optimistic, {
       projection: { entity: "tasks", key: "_id", resultPath: [] },
     });
-    assert.deepEqual(bindings.optimisticWrites, {
-      "tasks.update": [
-        { table: "tasks", columns: ["title", "done"] },
-        { table: "taskAudit" },
-      ],
+    assert.deepEqual(bindings.optimisticReducers, {
+      "tasks.update": { entity: "tasks", rowIdPath: ["taskId"], fieldsPath: ["updates"] },
     });
-    assert.deepEqual(
-      bindings.optimisticPatchesFor("tasks.update", {
-        id: 42,
-        _id: "ignored-fallback",
-        tenantId: "tenant-1",
-        title: "Ship it",
-        done: true,
-        ignored: "not declared for tasks",
-      }),
-      [
-        {
-          collection: "tasks",
-          rowId: "42",
-          op: "patch",
-          fields: { title: "Ship it", done: true },
-        },
-        {
-          collection: "taskAudit",
-          rowId: "42",
-          op: "patch",
-          fields: { title: "Ship it", done: true, ignored: "not declared for tasks" },
-        },
-      ],
-    );
-    assert.deepEqual(bindings.optimisticPatchesFor("tasks.update", { _id: "task-2", done: false }), [
-      {
-        collection: "tasks",
-        rowId: "task-2",
-        op: "patch",
-        fields: { done: false },
-      },
-      {
-        collection: "taskAudit",
-        rowId: "task-2",
-        op: "patch",
-        fields: { done: false },
-      },
-    ]);
     assert.deepEqual(bindings.optimisticPatchesFor("tasks.update", {
       taskId: "task-3",
       updates: { title: "Nested", done: true },
@@ -131,21 +83,21 @@ func Register(app *gonvex.App) {
   }
 });
 
-test("generated API uses an empty optimistic write map when no mutation declares writes", async () => {
+test("generated API preserves an explicitly reviewed non-optimistic Reducer", async () => {
   const project = generateBindings(`package app
 
 import "github.com/gonvex/gonvex/pkg/gonvex"
 
 func Register(app *gonvex.App) {
   app.Query("tasks.list", ListTasks)
-  app.Mutation("tasks.create", CreateTask)
+  app.Reducer("tasks.create", CreateTask, gonvex.OnlineOnlyNonOptimistic("test fixture"))
 }
 `);
 
   try {
     const apiPath = join(project, "gonvex", "_generated", "api.ts");
     const bindings = await import(`${pathToFileURL(apiPath).href}?test=${Date.now()}`);
-    assert.deepEqual(bindings.optimisticWrites, {});
+    assert.deepEqual(bindings.optimisticReducers, {});
     assert.deepEqual(bindings.optimisticPatchesFor("tasks.create", { id: "task-1", title: "No writes" }), []);
     assert.deepEqual(bindings.optimisticPatchesFor("constructor", { id: "task-1" }), []);
   } finally {

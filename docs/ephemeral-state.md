@@ -54,12 +54,11 @@ namespaces are hashed separately and cannot collide.
 and list prefixes must be valid UTF-8, are length-limited, reject control
 characters, and are escaped before they become Valkey value keys.
 
-Queries whose results include ephemeral state declare
-`gonvex.ReadsEphemeral()`. This prevents the durable query-result cache from
-retaining a result after its ephemeral inputs expire. Mutations that write
-only ephemeral state declare `gonvex.WritesEphemeral()`; the runtime does not
-open a Postgres transaction and does not publish reactive or query-cache
-invalidations for those calls.
+Ephemeral state is intentionally outside the committed change feed. Read it
+from a one-shot Query, never a Live Query or Replica Collection. External or
+lease-style ephemeral writes belong in an Action. A Reducer remains reserved
+for durable Postgres state, and no manual invalidation is published for an
+ephemeral update.
 
 ## Listing design
 

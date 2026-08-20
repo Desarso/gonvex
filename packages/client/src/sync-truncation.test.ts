@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IDBKeyRange, indexedDB } from "fake-indexeddb";
-import type { JsonValue, QueryCacheDirective, SyncCursor } from "@gonvex/protocol";
+import type { JsonValue, QueryCacheDirective, ReplicaCursor } from "@gonvex/protocol";
 import {
   DexieSyncStore,
   GonvexClient,
@@ -73,7 +73,7 @@ class FakeSyncStore implements SyncStore {
     _path: string,
     _args: JsonValue,
     _value: {
-      cursor: SyncCursor;
+      cursor: ReplicaCursor;
       keyField: string;
       upserts: JsonValue[];
       deleted: string[];
@@ -96,7 +96,7 @@ class FakeSyncStore implements SyncStore {
 
 const clients: GonvexClient[] = [];
 const dexieStores: DexieSyncStore[] = [];
-const ref: FunctionReference = { kind: "sync", path: "tasks.recentSync" };
+const ref: FunctionReference = { kind: "query", delivery: "replica", path: "tasks.recentSync" };
 const directive: QueryCacheDirective = {
   protocolVersion: 1,
   scope: "scope-user-a-0000000000000000000000000000000000000000000000000000",

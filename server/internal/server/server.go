@@ -29,32 +29,32 @@ import (
 )
 
 type Server struct {
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	config                config.Config
-	runtime               *runtime.Runtime
-	app                   *gonvex.App
-	storage               *storage.Factory
-	dataFiles             *datafiles.Manager
-	tenantStores          *tenantStoreResolver
-	ephemeral             ephemeralBackend
-	cache                 *rowsCache
-	admission             *queryAdmission
-	metrics               *runtimeMetrics
-	scheduler             *scheduler
-	telemetryWrites       chan struct{}
-	telemetryDBMu         sync.Mutex
-	telemetryDBs          map[string]*sql.DB
+	ctx             context.Context
+	cancel          context.CancelFunc
+	config          config.Config
+	runtime         *runtime.Runtime
+	app             *gonvex.App
+	storage         *storage.Factory
+	dataFiles       *datafiles.Manager
+	tenantStores    *tenantStoreResolver
+	ephemeral       ephemeralBackend
+	cache           *rowsCache
+	admission       *queryAdmission
+	metrics         *runtimeMetrics
+	scheduler       *scheduler
+	telemetryWrites chan struct{}
+	telemetryDBMu   sync.Mutex
+	telemetryDBs    map[string]*sql.DB
 	// Lazily initialized under mutationIdempotencyMu; both maps key on the
 	// tenant database URL.
 	mutationIdempotencyMu       sync.Mutex
 	mutationIdempotencyReady    map[string]bool
 	mutationIdempotencySweptAt  map[string]time.Time
 	mutationIdempotencyInstalls singleflight.Group
-	subscriptionTelemetry chan []transactionTelemetryEntry
-	projectMu             sync.RWMutex
-	projects              map[string]projectTarget
-	tenants               map[string]tenantTarget
+	subscriptionTelemetry       chan []transactionTelemetryEntry
+	projectMu                   sync.RWMutex
+	projects                    map[string]projectTarget
+	tenants                     map[string]tenantTarget
 	// explicitTenantDatabases is the immutable deployment-level routing map.
 	// Registry hydration may enrich tenant metadata, but must not replace an
 	// operator-provided database endpoint for the same project/tenant key.
@@ -273,36 +273,24 @@ func (s *Server) runScheduledJob(ctx context.Context, job scheduledJob) error {
 	switch function.Kind {
 	case gonvex.FunctionKindAction:
 		_, err := s.executeTenantAction(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
-		// Scheduled work commits outside a client call, so nothing else tells
-		// subscribers about its writes — broadcast like ws.go does for
-		// client-initiated mutation.call/action.call.
-		if err == nil {
-			s.broadcastMutationInvalidationsForCommitAt(job.ProjectID, job.TenantID, job.FunctionPath, job.ID, time.Now().UTC())
-		}
 		return err
-	case gonvex.FunctionKindMutation:
+	case gonvex.FunctionKindReducer:
+		if function.Internal {
+			return s.executeScheduledInternalReducer(ctx, job)
+		}
 		_, err := s.executeTenantMutation(ctx, job.ProjectID, job.TenantID, job.FunctionPath, job.Args)
-		if err == nil {
-			s.broadcastMutationInvalidationsForCommitAt(job.ProjectID, job.TenantID, job.FunctionPath, job.ID, time.Now().UTC())
-		}
-		return err
-	case gonvex.FunctionKindInternalMutation:
-		err := s.executeScheduledInternalMutation(ctx, job)
-		if err == nil {
-			s.broadcastMutationInvalidationsForCommitAt(job.ProjectID, job.TenantID, job.FunctionPath, job.ID, time.Now().UTC())
-		}
 		return err
 	default:
 		return fmt.Errorf("scheduled function %q must be a mutation or action, got %s", job.FunctionPath, function.Kind)
 	}
 }
 
-// executeScheduledInternalMutation runs an internal mutation from the scheduler.
+// executeScheduledInternalReducer runs an internal mutation from the scheduler.
 // Internal mutations aren't reachable from clients, so they're dispatched here
 // rather than through executeTenantMutation, but still get metrics and a
 // surrounding transaction.
-func (s *Server) executeScheduledInternalMutation(ctx context.Context, job scheduledJob) (err error) {
-	const kind = "internalMutation"
+func (s *Server) executeScheduledInternalReducer(ctx context.Context, job scheduledJob) (err error) {
+	const kind = "reducer"
 	s.metrics.recordFunctionStart(kind)
 	started := time.Now()
 	defer func() {
@@ -315,7 +303,7 @@ func (s *Server) executeScheduledInternalMutation(ctx context.Context, job sched
 	if ctxErr != nil {
 		return ctxErr
 	}
-	_, err = s.runMutationInTx(mutationCtx, job.FunctionPath, job.Args, app.ExecuteInternalMutation)
+	_, err = s.runMutationInTx(mutationCtx, job.FunctionPath, job.Args, app.ExecuteInternalReducer)
 	return err
 }
 
@@ -652,7 +640,6 @@ func (s *Server) handleInsertDataRow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	s.broadcastTenantTableChange(projectID(r), tenantIDFromRequest(projectID(r), tenantID(r)), r.PathValue("table"))
 	writeJSON(w, http.StatusCreated, result)
 }
 
@@ -685,8 +672,6 @@ func (s *Server) handleUpdateDataRow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	project := projectID(r)
-	s.broadcastTenantTableChange(project, tenantIDFromRequest(project, tenantID(r)), table)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -735,8 +720,6 @@ func (s *Server) handleDeleteDataRow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	project := projectID(r)
-	s.broadcastTenantTableChange(project, tenantIDFromRequest(project, tenantID(r)), table)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -776,18 +759,6 @@ func (s *Server) handleReplaceDataReferences(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
-	}
-	if !payload.DryRun {
-		project := projectID(r)
-		tenant := tenantIDFromRequest(project, tenantID(r))
-		changedTables := map[string]bool{}
-		for _, column := range result.Columns {
-			if changedTables[column.Table] {
-				continue
-			}
-			changedTables[column.Table] = true
-			s.broadcastTenantTableChange(project, tenant, column.Table)
-		}
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -894,7 +865,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	fingerprint := schemaFingerprint(next.Schema, next.Functions)
 	loadedManifest := s.runtime.ManifestForProject(next.Project)
 	loadedFingerprint := schemaFingerprint(loadedManifest.Schema, loadedManifest.Functions)
-	syncDefinitions := manifestSyncDefinitions(next)
+	syncDefinitions := manifestReplicaCollectionDefinitions(next)
 	unchangedSchema := !s.config.DropEmptyUndeclaredColumns && fingerprint != "" && (s.schemaFingerprintApplied(next.Project, fingerprint) || (loadedFingerprint == fingerprint && loadedManifest.NotifySchemaVersion == next.NotifySchemaVersion))
 	if unchangedSchema {
 		storageInstalled, storageErr := s.projectSyncStorageInstalled(r.Context(), next.Project, next.Schema, syncDefinitions)
@@ -912,7 +883,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": optionErr.Error()})
 			return
 		}
-		landlordSyncDefinitions, definitionErr := syncDefinitionsForSchema(syncDefinitions, next.Schema.LandlordSchema())
+		landlordReplicaCollectionDefinitions, definitionErr := syncDefinitionsForSchema(syncDefinitions, next.Schema.LandlordSchema())
 		if definitionErr != nil {
 			syncErr = definitionErr
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": definitionErr.Error()})
@@ -922,7 +893,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 			r.Context(),
 			s.databaseURLForProject(next.Project),
 			next.Schema.LandlordSchema(),
-			landlordSyncDefinitions,
+			landlordReplicaCollectionDefinitions,
 			landlordApplyOptions,
 		)
 		if err != nil {
@@ -1014,10 +985,10 @@ func (s *Server) projectSyncLock(projectID string) *sync.Mutex {
 // DDL reapply. json.Marshal sorts map keys, so the output is deterministic.
 func schemaFingerprint(sc manifest.Schema, functions map[string]manifest.FunctionEntry) string {
 	data, err := json.Marshal(struct {
-		Schema              manifest.Schema                    `json:"schema"`
-		Sync                map[string]manifest.SyncDefinition `json:"sync,omitempty"`
-		NotifySchemaVersion string                             `json:"notifySchemaVersion"`
-	}{Schema: sc.Normalize(), Sync: manifestSyncDefinitions(manifest.Manifest{Functions: functions}), NotifySchemaVersion: schema.NotifySchemaVersion})
+		Schema              manifest.Schema                                 `json:"schema"`
+		Replica             map[string]manifest.ReplicaCollectionDefinition `json:"replica,omitempty"`
+		NotifySchemaVersion string                                          `json:"notifySchemaVersion"`
+	}{Schema: sc.Normalize(), Replica: manifestReplicaCollectionDefinitions(manifest.Manifest{Functions: functions}), NotifySchemaVersion: schema.NotifySchemaVersion})
 	if err != nil {
 		return ""
 	}

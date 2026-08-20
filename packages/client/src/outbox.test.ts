@@ -1,25 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 import { IDBKeyRange, indexedDB } from "fake-indexeddb";
-import { DexieMutationOutbox, createMutationOutbox } from "./outbox";
+import { DexieReducerOutbox, createReducerOutbox } from "./outbox";
 
 const scope = "project-a\u0000tenant-a\u0000user-a";
 
 function createOutbox(testName: string) {
-  return new DexieMutationOutbox({
+  return new DexieReducerOutbox({
     databaseName: `gonvex-outbox-test-${testName}-${crypto.randomUUID()}`,
     indexedDB,
     IDBKeyRange,
   });
 }
 
-describe("DexieMutationOutbox", () => {
+describe("DexieReducerOutbox", () => {
   it("enqueues and loads entries in id order", async () => {
     const outbox = createOutbox("ordering");
     const first = await outbox.enqueue({
       scope,
       path: "tasks.create",
       args: { title: "First" },
-      idempotencyKey: "mutation-first",
+      idempotencyKey: "reducer-first",
       entityKeys: ["task:first"],
       patches: [{
         collection: "tasks.list",
@@ -40,7 +40,7 @@ describe("DexieMutationOutbox", () => {
       {
         id: first.id,
         path: "tasks.create",
-        idempotencyKey: "mutation-first",
+        idempotencyKey: "reducer-first",
         patches: [{ rowId: "first", fields: { title: "Optimistic" } }],
       },
       { id: second.id, path: "tasks.update", state: "pending" },
@@ -118,7 +118,7 @@ describe("DexieMutationOutbox", () => {
     await expect(outbox.loadAll(scope)).resolves.not.toContainEqual(expect.objectContaining({ id: first.id }));
   });
 
-  it("never restores or drains another authenticated identity's mutations", async () => {
+  it("never restores or drains another authenticated identity's reducers", async () => {
     const outbox = createOutbox("scope-isolation");
     const otherScope = "project-a\u0000tenant-a\u0000user-b";
     const mine = await outbox.enqueue({ scope, path: "tasks.update", args: { priority: 1 } });
@@ -206,7 +206,7 @@ describe("DexieMutationOutbox", () => {
     now.mockRestore();
   });
 
-  it("notifies subscribers for each mutation and supports unsubscribe", async () => {
+  it("notifies subscribers for each reducer and supports unsubscribe", async () => {
     const outbox = createOutbox("subscribe");
     const listener = vi.fn();
     const unsubscribe = outbox.subscribe(listener);
@@ -222,7 +222,7 @@ describe("DexieMutationOutbox", () => {
   });
 
   it("keeps session-only queue semantics when persistence is disabled", async () => {
-    const outbox = createMutationOutbox({ enabled: false });
+    const outbox = createReducerOutbox({ enabled: false });
     const first = await outbox.enqueue({
       scope,
       path: "tasks.update",

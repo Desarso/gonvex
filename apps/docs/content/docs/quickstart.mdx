@@ -110,7 +110,7 @@ type ListTasksArgs struct {
 
 func Register(app *gonvex.App) {
   app.Query("tasks.list", ListTasks)
-  app.Mutation("tasks.create", CreateTask)
+  app.Reducer("tasks.create", CreateTask, gonvex.OptimisticReducer("tasks").RowIDArg("id").FieldsArg("task"))
 }
 
 func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
@@ -122,11 +122,11 @@ func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
 
 ```ts
 import { api } from "./gonvex/_generated/api";
-import { useMutation, useQuery } from "./gonvex/_generated/react";
+import { useQuery, useReducer } from "./gonvex/_generated/react";
 
 export function Tasks() {
   const tasks = useQuery(api.tasks.list, { status: "open" });
-  const createTask = useMutation(api.tasks.create);
+  const createTask = useReducer(api.tasks.create);
 
   return <TaskList tasks={tasks ?? []} onCreate={createTask} />;
 }
@@ -173,5 +173,5 @@ project's code and generated bindings.
 - [Initialize a Project](./init-project)
 - [Projects and Tenants](./projects-and-tenants)
 - [Auth and Membership](./auth-and-membership)
-- [Durable Sync Collections](./durable-sync)
+- [Replica Collections and Local Replica](./durable-sync)
 - [Scheduling and Background Jobs](./scheduling)

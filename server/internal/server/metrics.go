@@ -502,10 +502,10 @@ type runningMetricSnapshot struct {
 }
 
 type runningMetricPoint struct {
-	Time     string `json:"time"`
-	Query    int64  `json:"query"`
-	Mutation int64  `json:"mutation"`
-	Action   int64  `json:"action"`
+	Time    string `json:"time"`
+	Query   int64  `json:"query"`
+	Reducer int64  `json:"reducer"`
+	Action  int64  `json:"action"`
 }
 
 type functionMetricSnapshot struct {
@@ -797,11 +797,11 @@ func newRuntimeMetrics(telemetryPath ...string) *runtimeMetrics {
 }
 
 // normalizeRunningKind collapses the runtime's function kinds into the three
-// concurrency lanes the dashboard charts (queries, mutations, actions).
+// concurrency lanes the dashboard charts (Queries, Reducers, Actions).
 func normalizeRunningKind(kind string) string {
 	switch kind {
-	case "mutation", "internalMutation":
-		return "mutation"
+	case "reducer":
+		return "reducer"
 	case "action":
 		return "action"
 	default:
@@ -1347,7 +1347,7 @@ func (m *runtimeMetrics) runningSnapshot(now time.Time) runningMetricSnapshot {
 		point := runningMetricPoint{Time: bucketStart.Format(time.RFC3339Nano)}
 		if bucket != nil {
 			point.Query = bucket["query"]
-			point.Mutation = bucket["mutation"]
+			point.Reducer = bucket["reducer"]
 			point.Action = bucket["action"]
 		}
 		points = append(points, point)

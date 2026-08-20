@@ -64,15 +64,14 @@ func TestParseRegistrationsIncludesDependencyOptions(t *testing.T) {
 	source := `package app
 import "github.com/gonvex/gonvex/pkg/gonvex"
 func Register(app *gonvex.App) {
-	  app.Query("tasks.list", ListTasks,
-	    gonvex.Reads("tasks").Columns("id", "title").Filters("status").OrdersBy("updated_at").Windowed(),
-	    gonvex.ReadsEphemeral(),
+	  app.LiveQuery("tasks.list", ListTasks,
+	    gonvex.LivePlan(gonvex.LiveTable("tasks").Select("id", "title").Filter(gonvex.Eq("status", gonvex.Arg("status"))).SortArgs("sort", "direction", "updated_at", "desc", "updated_at").WindowArgs("offset", "limit", 100, 200)),
 	    gonvex.ShareByPermissions(),
 	    gonvex.ShareByVisibility("internal.taskVisibility"),
 	    gonvex.ShareResultFrom("internal.tasksShared", "query"),
 	  )
-  app.Mutation("tasks.update", UpdateTask, gonvex.Writes("tasks").Columns("title"))
-  app.Mutation("presence.beat", Beat, gonvex.WritesEphemeral())
+  app.Reducer("tasks.update", UpdateTask, gonvex.OnlineOnlyNonOptimistic("test fixture"))
+  app.Reducer("presence.beat", Beat, gonvex.OnlineOnlyNonOptimistic("test fixture"))
 }`
 	if err := os.WriteFile(file, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
@@ -82,36 +81,31 @@ func Register(app *gonvex.App) {
 		t.Fatal(err)
 	}
 	query := entries["tasks.list"]
-	if len(query.Dependencies.Reads) != 1 || !query.Dependencies.Reads[0].Windowed || !query.Dependencies.ReadsEphemeral || !query.Dependencies.ShareByPermissions {
+	if len(query.Dependencies.Reads) != 1 || !query.Dependencies.Reads[0].Windowed || !query.Dependencies.ShareByPermissions {
 		t.Fatalf("query dependencies = %#v", query.Dependencies)
 	}
 	if query.Dependencies.ShareByVisibility != "internal.taskVisibility" || query.Dependencies.ShareResultFrom != "internal.tasksShared" || query.Dependencies.ShareResultField != "query" {
 		t.Fatalf("query sharing dependencies = %#v", query.Dependencies)
 	}
-	mutation := entries["tasks.update"]
-	if len(mutation.Dependencies.Writes) != 1 || mutation.Dependencies.Writes[0].Table != "tasks" {
-		t.Fatalf("mutation dependencies = %#v", mutation.Dependencies)
-	}
-	if beat := entries["presence.beat"]; !beat.Dependencies.WritesEphemeral {
-		t.Fatalf("ephemeral mutation dependencies = %#v", beat.Dependencies)
+	if reducer := entries["tasks.update"]; reducer.Kind != manifest.FunctionKindReducer {
+		t.Fatalf("reducer registration = %#v", reducer)
 	}
 }
 
-func TestParseRegistrationsIncludesCompleteProgressiveSyncDefinition(t *testing.T) {
+func TestParseRegistrationsIncludesCompleteProgressiveReplicaCollectionDefinition(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "sync.go")
 	source := `package app
 import "github.com/gonvex/gonvex/pkg/gonvex"
 func Register(app *gonvex.App) {
-  app.Sync("sync.tasks", ListTasks,
-    gonvex.SyncTable("tasks").
+  app.ReplicaCollection("sync.tasks", ListTasks,
+    gonvex.ReplicaTable("tasks").
       Key("_id").
       EqualArg("tenantId").
       VisibilityDependsOn("taskAcks", "taskApprovalInstances", "taskWorkspaceContexts").
       OrderBy("id", "desc").
       Progressive().
       Budget(100, 4194304),
-    gonvex.Reads("tasks", "taskAcks"),
   )
 }`
 	if err := os.WriteFile(file, []byte(source), 0o600); err != nil {
@@ -122,17 +116,17 @@ func Register(app *gonvex.App) {
 		t.Fatal(err)
 	}
 	entry := entries["sync.tasks"]
-	if entry.Sync == nil {
+	if entry.Replica == nil {
 		t.Fatal("sync definition was not parsed")
 	}
-	if entry.Sync.Mode != "progressive" || entry.Sync.MaxRows != 100 || entry.Sync.MaxBytes != 4194304 {
-		t.Fatalf("progressive sync budget = %#v", entry.Sync)
+	if entry.Replica.Mode != "progressive" || entry.Replica.MaxRows != 100 || entry.Replica.MaxBytes != 4194304 {
+		t.Fatalf("progressive sync budget = %#v", entry.Replica)
 	}
-	if got := strings.Join(entry.Sync.VisibilityTables, ","); got != "taskAcks,taskApprovalInstances,taskWorkspaceContexts" {
+	if got := strings.Join(entry.Replica.VisibilityTables, ","); got != "taskAcks,taskApprovalInstances,taskWorkspaceContexts" {
 		t.Fatalf("visibility dependencies = %q", got)
 	}
-	if len(entry.Dependencies.Reads) != 2 {
-		t.Fatalf("sync reads = %#v", entry.Dependencies.Reads)
+	if len(entry.Dependencies.Reads) != 0 {
+		t.Fatalf("Replica Collection unexpectedly declared query reads = %#v", entry.Dependencies.Reads)
 	}
 }
 

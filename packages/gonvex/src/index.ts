@@ -9,17 +9,19 @@ import { dirname, join, relative, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
-type FunctionKind = "query" | "mutation" | "action" | "http" | "internalMutation" | "liveGrid" | "sync";
+type FunctionKind = "query" | "reducer" | "action" | "http";
 
 type FunctionEntry = {
   kind: FunctionKind;
   handler: string;
   file: string;
+  internal?: boolean;
+  delivery?: "oneShot" | "live" | "replica";
   dependencies?: FunctionDependencies;
-  sync?: SyncDefinition;
+  replica?: ReplicaCollectionDefinition;
 };
 
-type SyncDefinition = {
+type ReplicaCollectionDefinition = {
   table: string;
   key: string;
   columns: string[];
@@ -39,28 +41,43 @@ type ReadDependency = {
   filters?: string[];
   ordersBy?: string[];
   windowed?: boolean;
-  predicate?: string;
-};
-
-type WriteDependency = {
-  table: string;
-  columns?: string[];
 };
 
 type FunctionDependencies = {
   reads?: ReadDependency[];
-  writes?: WriteDependency[];
-  readsEphemeral?: boolean;
-  writesEphemeral?: boolean;
   shareByPermissions?: boolean;
+  liveQueryPlan?: LiveQueryPlan;
+  nonOptimisticReason?: string;
 	shareByVisibility?: string;
 	shareResultFrom?: string;
 	shareResultField?: string;
-	optimisticMutation?: OptimisticMutationDefinition;
+	optimisticReducer?: OptimisticReducerDefinition;
 	optimisticProjection?: OptimisticProjectionDefinition;
 };
 
-type OptimisticMutationDefinition = {
+type LiveQueryPlan = {
+  table: string;
+  key: string;
+  columns?: string[];
+  resultPath?: string[];
+  where?: LiveExpression;
+  search?: { argument: string; columns: string[] };
+  sort?: { columnArgument: string; directionArgument: string; defaultColumn: string; defaultDirection: string; allowedColumns: string[] };
+  window?: { offsetArgument: string; limitArgument: string; defaultLimit: number; maxLimit: number };
+  serverOnly?: boolean;
+};
+
+type LiveExpression = {
+  operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "contains" | "containsInsensitive" | "range" | "and" | "or" | "not" | "server";
+  column?: string;
+  value?: LiveValue;
+  valueTo?: LiveValue;
+  children?: LiveExpression[];
+};
+
+type LiveValue = { argument?: string; literal?: unknown };
+
+type OptimisticReducerDefinition = {
   entity: string;
   rowIdPath: string[];
   fieldsPath: string[];
@@ -1098,8 +1115,8 @@ async function wireViteReactGoogleAuth(root: string) {
   let app = await readFile(appPath, "utf8");
   if (main.includes('from "../gonvex/auth"') && app.includes("GoogleSignInButton")) return true;
   const providerImport = 'import { GonvexProvider } from "../gonvex/_generated/react";';
-  const reactImport = 'import { useMutation, useQuery } from "../gonvex/_generated/react";';
-  const appStart = 'export default function App(props: { runtimeURL: string }) {\n  const messages = useQuery<Message[]>(api.messages.list, {}) ?? [];';
+  const reactImport = 'import { useLiveQuery, useReducer } from "../gonvex/_generated/react";';
+  const appStart = 'export default function App(props: { runtimeURL: string }) {\n  const messages = useLiveQuery<Message[]>(api.messages.list, {}) ?? [];';
   if (!main.includes(providerImport) || !main.includes("<GonvexProvider client={gonvex}>") || !app.includes(reactImport) || !app.includes(appStart)) {
     return false;
   }
@@ -1120,7 +1137,7 @@ async function wireViteReactGoogleAuth(root: string) {
       "",
       "function AuthenticatedApp(props: { runtimeURL: string }) {",
       "  const auth = useGonvexAuth();",
-      '  const messages = useQuery<Message[]>(api.messages.list, {}) ?? [];',
+      '  const messages = useLiveQuery<Message[]>(api.messages.list, {}) ?? [];',
     ].join("\n"))
     .replace('<div className="status">Connected to {props.runtimeURL}</div>', '<div className="status"><span>Connected to {props.runtimeURL} as {auth.user?.email}</span><GoogleSignInButton /></div>');
   await writeFile(mainPath, main);
@@ -1264,21 +1281,25 @@ function sanitizeProjectID(projectID: string) {
 
 async function parseRegistrations(root: string, file: string) {
   const source = await readFile(file, "utf8");
-  const pattern = /app\.(Query|Mutation|Action|HTTP|PublicHTTP|InternalMutation|LiveGrid|Sync)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)/g;
+  const pattern = /app\.(Query|LiveQuery|ReplicaCollection|Reducer|Action|HTTP|PublicHTTP|InternalReducer)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)/g;
   const entries: Record<string, FunctionEntry> = {};
   for (const match of source.matchAll(pattern)) {
     const entry: FunctionEntry = {
       kind: functionKind(match[1]!),
       handler: match[3]!,
       file: relative(root, file),
+      ...(match[1] === "InternalReducer" ? { internal: true } : {}),
+      ...(match[1] === "LiveQuery" ? { delivery: "live" as const } : {}),
+      ...(match[1] === "ReplicaCollection" ? { delivery: "replica" as const } : {}),
+      ...(match[1] === "Query" ? { delivery: "oneShot" as const } : {}),
     };
     const openParen = source.indexOf("(", match.index);
     const closeParen = findClosingParen(source, openParen);
     if (openParen >= 0 && closeParen > openParen) {
       const dependencies = parseFunctionDependencies(source.slice(openParen + 1, closeParen));
       if (Object.keys(dependencies).length > 0) entry.dependencies = dependencies;
-      if (match[1] === "Sync") {
-        entry.sync = parseSyncDefinition(source.slice(openParen + 1, closeParen));
+      if (match[1] === "ReplicaCollection") {
+        entry.replica = parseReplicaCollectionDefinition(source.slice(openParen + 1, closeParen));
       }
     }
     entries[match[2]!] = entry;
@@ -1286,15 +1307,15 @@ async function parseRegistrations(root: string, file: string) {
   return entries;
 }
 
-function parseSyncDefinition(callBody: string): SyncDefinition | undefined {
-  const match = /(?:gonvex\.)?SyncTable\s*\(/.exec(callBody);
+function parseReplicaCollectionDefinition(callBody: string): ReplicaCollectionDefinition | undefined {
+  const match = /(?:gonvex\.)?ReplicaTable\s*\(/.exec(callBody);
   if (!match) return undefined;
   const openParen = callBody.indexOf("(", match.index);
   const closeParen = findClosingParen(callBody, openParen);
   if (closeParen < 0) return undefined;
   const table = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
   if (!table) return undefined;
-  const definition: SyncDefinition = { table, key: "id", columns: [], mode: "eager" };
+  const definition: ReplicaCollectionDefinition = { table, key: "id", columns: [], mode: "eager" };
   let cursor = closeParen + 1;
   while (cursor < callBody.length) {
     const chain = chainedGoMethod(
@@ -1335,7 +1356,7 @@ function parseSyncDefinition(callBody: string): SyncDefinition | undefined {
 
 function parseFunctionDependencies(callBody: string): FunctionDependencies {
   const dependencies: FunctionDependencies = {};
-  const pattern = /(?:gonvex\.)?(Reads|Writes|ReadsEphemeral|WritesEphemeral|ShareByPermissions|ShareByVisibility|ShareResultFrom|OptimisticMutation|OptimisticProjection)\s*\(/g;
+  const pattern = /(?:gonvex\.)?(LivePlan|ShareByPermissions|ShareByVisibility|ShareResultFrom|OptimisticReducer|OptimisticProjection|OnlineOnlyNonOptimistic)\s*\(/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(callBody)) !== null) {
     const option = match[1]!;
@@ -1343,14 +1364,26 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
     const closeParen = findClosingParen(callBody, openParen);
     if (closeParen < 0) break;
 
-    if (option === "ReadsEphemeral") {
-      dependencies.readsEphemeral = true;
+    if (option === "LivePlan") {
+      const planBody = callBody.slice(openParen + 1, closeParen);
+      const plan = parseLiveQueryPlan(planBody);
+      if (plan) {
+        dependencies.liveQueryPlan = plan;
+        (dependencies.reads ??= []).push({
+          table: plan.table,
+          columns: plan.columns,
+          filters: [...(plan.search?.columns ?? []), ...liveExpressionColumns(plan.where)],
+          ordersBy: plan.sort?.allowedColumns,
+          windowed: Boolean(plan.window),
+        });
+      }
       pattern.lastIndex = closeParen + 1;
       continue;
     }
 
-    if (option === "WritesEphemeral") {
-      dependencies.writesEphemeral = true;
+
+    if (option === "OnlineOnlyNonOptimistic") {
+      dependencies.nonOptimisticReason = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
       pattern.lastIndex = closeParen + 1;
       continue;
     }
@@ -1375,9 +1408,9 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
 			continue;
 		}
 
-    if (option === "OptimisticMutation") {
+    if (option === "OptimisticReducer") {
       const entity = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
-      const definition: OptimisticMutationDefinition = { entity: entity?.trim() ?? "", rowIdPath: [], fieldsPath: [] };
+      const definition: OptimisticReducerDefinition = { entity: entity?.trim() ?? "", rowIdPath: [], fieldsPath: [] };
       let cursor = closeParen + 1;
       while (cursor < callBody.length) {
         const chain = chainedGoMethod(callBody, cursor, "RowIDArg|FieldsArg");
@@ -1391,7 +1424,7 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
         if (chain.method === "FieldsArg") definition.fieldsPath = path;
         cursor = chainClose + 1;
       }
-      if (definition.entity) dependencies.optimisticMutation = definition;
+      if (definition.entity) dependencies.optimisticReducer = definition;
       pattern.lastIndex = cursor;
       continue;
     }
@@ -1415,43 +1448,119 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
       continue;
     }
 
-    const tables = stringArgs(callBody.slice(openParen + 1, closeParen));
-    const start = option === "Reads"
-      ? (dependencies.reads ??= []).push(...tables.map((table) => ({ table }))) - tables.length
-      : (dependencies.writes ??= []).push(...tables.map((table) => ({ table }))) - tables.length;
-
-    let cursor = closeParen + 1;
-    while (cursor < callBody.length) {
-      const chain = chainedGoMethod(
-        callBody,
-        cursor,
-        "Columns|Filters|OrdersBy|Windowed|Predicate",
-      );
-      if (!chain) break;
-      const chainOpen = chain.openParen;
-      const chainClose = findClosingParen(callBody, chainOpen);
-      if (chainClose < 0) break;
-      const method = chain.method;
-      const values = stringArgs(callBody.slice(chainOpen + 1, chainClose));
-
-      if (option === "Reads") {
-        for (const dependency of (dependencies.reads ?? []).slice(start)) {
-          if (method === "Columns" && values.length > 0) dependency.columns = values;
-          if (method === "Filters" && values.length > 0) dependency.filters = values;
-          if (method === "OrdersBy" && values.length > 0) dependency.ordersBy = values;
-          if (method === "Windowed") dependency.windowed = true;
-          if (method === "Predicate" && values[0]) dependency.predicate = values[0];
-        }
-      } else if (method === "Columns") {
-        for (const dependency of (dependencies.writes ?? []).slice(start)) {
-          if (values.length > 0) dependency.columns = values;
-        }
-      }
-      cursor = chainClose + 1;
-    }
-    pattern.lastIndex = cursor;
   }
   return dependencies;
+}
+
+function liveExpressionColumns(expression: LiveExpression | undefined): string[] {
+  if (!expression) return [];
+  return [expression.column ?? "", ...(expression.children ?? []).flatMap(liveExpressionColumns)].filter(Boolean);
+}
+
+function parseLiveQueryPlan(body: string): LiveQueryPlan | undefined {
+  const match = /(?:gonvex\.)?LiveTable\s*\(/.exec(body);
+  if (!match) return undefined;
+  const openParen = body.indexOf("(", match.index);
+  const closeParen = findClosingParen(body, openParen);
+  if (closeParen < 0) return undefined;
+  const table = stringArgs(body.slice(openParen + 1, closeParen))[0];
+  if (!table) return undefined;
+  const plan: LiveQueryPlan = { table, key: "id" };
+  let cursor = closeParen + 1;
+  while (cursor < body.length) {
+    const chain = chainedGoMethod(body, cursor, "EntityKey|Select|ResultRowsAt|Filter|SearchArg|SortArgs|WindowArgs|OnlineOnly");
+    if (!chain) break;
+    const chainClose = findClosingParen(body, chain.openParen);
+    if (chainClose < 0) break;
+    const chainBody = body.slice(chain.openParen + 1, chainClose);
+    const values = stringArgs(chainBody);
+    if (chain.method === "EntityKey" && values[0]) plan.key = values[0];
+    if (chain.method === "Select") plan.columns = values;
+    if (chain.method === "ResultRowsAt") plan.resultPath = values;
+    if (chain.method === "Filter") plan.where = parseLiveExpressionSource(chainBody);
+    if (chain.method === "SearchArg" && values[0]) plan.search = { argument: values[0], columns: values.slice(1) };
+    if (chain.method === "SortArgs" && values.length >= 4) plan.sort = {
+      columnArgument: values[0]!, directionArgument: values[1]!, defaultColumn: values[2]!,
+      defaultDirection: values[3]!.toLowerCase() === "asc" ? "asc" : "desc", allowedColumns: values.slice(4),
+    };
+    if (chain.method === "WindowArgs" && values.length >= 2) {
+      const parts = chainBody.split(",").map((value) => value.trim());
+      plan.window = { offsetArgument: values[0]!, limitArgument: values[1]!, defaultLimit: Number(parts[2]) || 100, maxLimit: Number(parts[3]) || Number(parts[2]) || 100 };
+    }
+    if (chain.method === "OnlineOnly") plan.serverOnly = true;
+    cursor = chainClose + 1;
+  }
+  return plan;
+}
+
+function parseLiveExpressionSource(source: string): LiveExpression | undefined {
+  const trimmed = source.trim();
+  const match = /^(?:gonvex\.)?(Eq|Neq|GreaterThan|GreaterOrEqual|LessThan|LessOrEqual|In|Contains|ContainsInsensitive|Range|All|Any|Not|ServerExpression)\s*\(/.exec(trimmed);
+  if (!match) return undefined;
+  const openParen = trimmed.indexOf("(", match.index);
+  const closeParen = findClosingParen(trimmed, openParen);
+  if (closeParen < 0) return undefined;
+  const argumentsList = splitGoArguments(trimmed.slice(openParen + 1, closeParen));
+  const operators: Record<string, LiveExpression["operator"]> = {
+    Eq: "eq", Neq: "neq", GreaterThan: "gt", GreaterOrEqual: "gte", LessThan: "lt",
+    LessOrEqual: "lte", In: "in", Contains: "contains", ContainsInsensitive: "containsInsensitive",
+    Range: "range", All: "and", Any: "or", Not: "not", ServerExpression: "server",
+  };
+  const operator = operators[match[1]!]!;
+  if (operator === "and" || operator === "or" || operator === "not") {
+    return { operator, children: argumentsList.map(parseLiveExpressionSource).filter((value): value is LiveExpression => Boolean(value)) };
+  }
+  return {
+    operator,
+    column: stringArgs(argumentsList[0] ?? "")[0],
+    value: parseLiveValueSource(argumentsList[1]),
+    valueTo: parseLiveValueSource(argumentsList[2]),
+  };
+}
+
+function parseLiveValueSource(source: string | undefined): LiveValue | undefined {
+  if (!source) return undefined;
+  const argument = /^(?:gonvex\.)?Arg\s*\(/.exec(source.trim());
+  if (argument) return { argument: stringArgs(source)[0] };
+  const literal = /^(?:gonvex\.)?Literal\s*\(/.exec(source.trim());
+  if (!literal) return undefined;
+  const openParen = source.indexOf("(");
+  const closeParen = findClosingParen(source, openParen);
+  const raw = source.slice(openParen + 1, closeParen).trim();
+  if (raw === "nil" || raw === "null") return { literal: null };
+  if (raw === "true") return { literal: true };
+  if (raw === "false") return { literal: false };
+  const strings = stringArgs(raw);
+  if (strings.length > 0) return { literal: strings[0] };
+  const number = Number(raw);
+  return { literal: Number.isFinite(number) ? number : null };
+}
+
+function splitGoArguments(source: string): string[] {
+  const result: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]!;
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") { quote = char; continue; }
+    if (char === "(" || char === "[" || char === "{") depth += 1;
+    if (char === ")" || char === "]" || char === "}") depth -= 1;
+    if (char === "," && depth === 0) {
+      result.push(source.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  const tail = source.slice(start).trim();
+  if (tail) result.push(tail);
+  return result;
 }
 
 function chainedGoMethod(source: string, start: number, methods: string) {
@@ -1588,7 +1697,7 @@ async function writeBindings(root: string, manifest: Manifest): Promise<BindingW
   const outputs: Record<string, string> = {
     "api.ts": renderAPI(manifest),
     "client.ts": '// Generated by gonvex dev. Do not edit.\nexport { GonvexClient, ConvexReactClient } from "@gonvex/client";\n',
-    "react.ts": '// Generated by gonvex dev. Do not edit.\nexport { ConvexProvider, ConvexProviderWithAuth, ConvexReactClient, createGonvexAuth, GonvexAuthProvider, GonvexGoogleAuthButton, GonvexProvider, useAction, useConvex, useConvexAuth, useConvexConnectionState, useGonvexAuth, useMutation, usePaginatedQuery, useQuery, useSync, useSyncSelector } from "@gonvex/react";\nexport type { GonvexAuthConfig, GonvexAuthTenant, GonvexAuthUser, GonvexAuthValue } from "@gonvex/react";\n',
+    "react.ts": '// Generated by gonvex dev. Do not edit.\nexport { ConvexProvider, ConvexProviderWithAuth, ConvexReactClient, createGonvexAuth, GonvexAuthProvider, GonvexGoogleAuthButton, GonvexProvider, useAction, useConvex, useConvexAuth, useConvexConnectionState, useEntity, useGonvexAuth, useLiveQuery, useLiveQueryState, usePaginatedQuery, useQuery, useReducer, useReplicaCollection, useReplicaSelector } from "@gonvex/react";\nexport type { GonvexAuthConfig, GonvexAuthTenant, GonvexAuthUser, GonvexAuthValue } from "@gonvex/react";\n',
     "types.ts": "// Generated by gonvex dev. Do not edit.\nexport type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };\n",
     "schema.ts": renderSchemaIndex(manifest),
     "landlord/schema.ts": renderScopedSchemaModule("landlord", manifest.schema.landlordTables),
@@ -1692,8 +1801,7 @@ function bundleFileForFunction(entry: FunctionEntry) {
 
 function renderAPI(manifest: Manifest) {
   const root: Record<string, any> = {};
-  const optimisticWrites: Record<string, WriteDependency[]> = {};
-  const optimisticMutations: Record<string, OptimisticMutationDefinition> = {};
+  const optimisticReducers: Record<string, OptimisticReducerDefinition> = {};
   for (const [path, entry] of Object.entries(manifest.functions).sort(([a], [b]) => a.localeCompare(b))) {
     const parts = path.split(".").filter(Boolean);
     if (parts.length === 0) continue;
@@ -1701,22 +1809,23 @@ function renderAPI(manifest: Manifest) {
     for (const part of parts.slice(0, -1)) {
       target = target[part] ??= {};
     }
-    const reference: Record<string, unknown> = { kind: entry.kind, path };
-    const projection = entry.kind === "sync" && entry.sync
-      ? { entity: entry.sync.table, key: entry.sync.key, resultPath: [] }
+    const reference: Record<string, unknown> = { kind: entry.kind, path, ...(entry.delivery ? { delivery: entry.delivery } : {}) };
+    if (entry.delivery === "live" && entry.dependencies?.liveQueryPlan) {
+      const plan = entry.dependencies.liveQueryPlan;
+      reference.live = { entity: plan.table, key: plan.key, resultPath: plan.resultPath ?? [] };
+    }
+    const projection = entry.delivery === "replica" && entry.replica
+      ? { entity: entry.replica.table, key: entry.replica.key, resultPath: [] }
       : entry.dependencies?.optimisticProjection;
-    const mutation = entry.dependencies?.optimisticMutation;
-    if (projection || mutation) {
+    const reducer = entry.dependencies?.optimisticReducer;
+    if (projection || reducer) {
       reference.optimistic = {
         ...(projection ? { projection } : {}),
-        ...(mutation ? { mutation } : {}),
+        ...(reducer ? { reducer } : {}),
       };
     }
     target[parts[parts.length - 1]!] = reference;
-    if (entry.kind === "mutation" && entry.dependencies?.writes?.length) {
-      optimisticWrites[path] = entry.dependencies.writes;
-    }
-    if (entry.kind === "mutation" && mutation) optimisticMutations[path] = mutation;
+    if (entry.kind === "reducer" && reducer) optimisticReducers[path] = reducer;
   }
   const lines = [
     "// Generated by gonvex dev. Do not edit.",
@@ -1726,42 +1835,26 @@ function renderAPI(manifest: Manifest) {
     "export const internal = api;",
     "export type Api = typeof api;",
     "",
-    `export const optimisticWrites: Record<string, Array<{ table: string; columns?: string[] }>> = ${renderObject(optimisticWrites, 0)};`,
-    `export const optimisticMutations: Record<string, { entity: string; rowIdPath: string[]; fieldsPath: string[] }> = ${renderObject(optimisticMutations, 0)};`,
+    `export const optimisticReducers: Record<string, { entity: string; rowIdPath: string[]; fieldsPath: string[] }> = ${renderObject(optimisticReducers, 0)};`,
     "",
     "export function optimisticPatchesFor(",
     "  path: string,",
     "  args: Record<string, unknown>,",
     "): Array<{ entity?: string; collection?: string; rowId: string; op: \"patch\"; fields: Record<string, unknown> }> {",
-    "  const mutation = Object.prototype.hasOwnProperty.call(optimisticMutations, path)",
-    "    ? optimisticMutations[path]",
+    "  const reducer = Object.prototype.hasOwnProperty.call(optimisticReducers, path)",
+    "    ? optimisticReducers[path]",
     "    : undefined;",
-    "  if (mutation) {",
+    "  if (reducer) {",
     "    const readPath = (value: unknown, segments: string[]): unknown =>",
     "      segments.reduce<unknown>((current, segment) =>",
     "        current && typeof current === \"object\" ? (current as Record<string, unknown>)[segment] : undefined, value);",
-    "    const rowId = String(readPath(args, mutation.rowIdPath) ?? args.id ?? args._id ?? \"\");",
-    "    const nested = readPath(args, mutation.fieldsPath);",
+    "    const rowId = String(readPath(args, reducer.rowIdPath) ?? args.id ?? args._id ?? \"\");",
+    "    const nested = readPath(args, reducer.fieldsPath);",
     "    if (rowId && nested && typeof nested === \"object\" && !Array.isArray(nested)) {",
-    "      return [{ entity: mutation.entity, rowId, op: \"patch\" as const, fields: { ...(nested as Record<string, unknown>) } }];",
+    "      return [{ entity: reducer.entity, rowId, op: \"patch\" as const, fields: { ...(nested as Record<string, unknown>) } }];",
     "    }",
     "  }",
-    "  const writes = optimisticWrites[path];",
-    "  const rowId = String(args.id ?? args._id ?? \"\");",
-    "  if (!Array.isArray(writes) || rowId === \"\") return [];",
-    "",
-    "  return writes.map(({ table, columns }) => ({",
-    "    collection: table,",
-    "    rowId,",
-    "    op: \"patch\" as const,",
-    "    fields: Object.fromEntries(",
-    "      Object.entries(args).filter(([key]) =>",
-    "        columns",
-    "          ? columns.includes(key)",
-    "          : key !== \"id\" && key !== \"_id\" && key !== \"tenantId\",",
-    "      ),",
-    "    ),",
-    "  }));",
+    "  return [];",
     "}",
     "",
   ];
@@ -2537,9 +2630,8 @@ function templateDir(template: string) {
 }
 
 function functionKind(raw: string): FunctionKind {
-  if (raw === "InternalMutation") return "internalMutation";
-  if (raw === "LiveGrid") return "liveGrid";
-  if (raw === "Sync") return "sync";
+  if (raw === "InternalReducer") return "reducer";
+  if (raw === "LiveQuery" || raw === "ReplicaCollection") return "query";
   if (raw === "PublicHTTP") return "http";
   return raw.toLowerCase() as FunctionKind;
 }

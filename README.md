@@ -4,16 +4,16 @@ Gonvex is an open source Convex-style backend for teams that want the same fast
 app-building loop with Go, Postgres, TypeScript, React, and realtime data.
 
 You write backend functions next to your app, Gonvex generates frontend API
-references, and your React UI calls queries and mutations over a realtime
-runtime.
+references, and your React UI calls Queries and Reducers through a persistent
+Local Replica.
 
 ```tsx
 import { api } from "./gonvex/_generated/api";
-import { useMutation, useQuery } from "./gonvex/_generated/react";
+import { useReducer, useQuery } from "./gonvex/_generated/react";
 
 export function Tasks() {
   const tasks = useQuery(api.tasks.list, { status: "open" });
-  const createTask = useMutation(api.tasks.create);
+  const createTask = useReducer(api.tasks.create);
 
   return <TaskList tasks={tasks ?? []} onCreate={createTask} />;
 }
@@ -22,20 +22,21 @@ export function Tasks() {
 Gonvex is for developers who like Convex's product shape but want infrastructure they can inspect, extend, and self-host.
 
 > **Status: beta.** The runtime, self-hosted stack, generic Go function
-> execution, native Google auth, multi-tenant routing, realtime subscriptions,
-> durable sync collections, scheduling, and dashboard are implemented. Migration
+> execution, native Google auth, multi-tenant routing, Live Queries,
+> Replica Collections, scheduling, and dashboard are implemented. Migration
 > rollouts, fleet backup/restore, deployment automation, and a public hosted
 > service are still stabilizing before 1.0.
 
 ## Why Gonvex
 
-- **Go backend functions**: define queries, mutations, actions, HTTP handlers, schema, and LiveGrid-style data views in Go.
+- **Three executable kinds**: define read-only Queries, transactional Reducers, and external-work Actions in Go.
 - **TypeScript client bindings**: generate stable API references, schema metadata, and React hook exports from your backend.
-- **Realtime by default**: subscribe to query results over WebSockets and refresh UI when data changes.
-- **Durable sync collections**: render authorized table collections from IndexedDB and resume from a Postgres change cursor.
+- **Committed realtime truth**: route exact Postgres transaction changes through one durable change feed.
+- **Local Replica**: render normalized entities from IndexedDB or SQLite and apply each server transaction atomically.
+- **Live Queries**: keep exact indexed server windows over datasets too large to replicate.
 - **Postgres underneath**: keep your data in a database you already know how to run, back up, inspect, and tune.
 - **Projects, tenants, and auth**: route isolated tenant databases, verify memberships, and add native Google OAuth without a per-app identity SDK.
-- **Background work**: register interval or cron jobs and schedule mutations/actions after a transaction commits.
+- **Background work**: commit Action outbox rows with business data and process external work after commit.
 - **Operational tooling**: inspect functions, data, files, errors, metrics, connections, and scheduler health in the dashboard.
 - **Self-hostable runtime**: run Gonvex with Postgres, Valkey/Redis, and optional S3-compatible object storage.
 - **Open source core**: the runtime, CLI, client packages, dashboard, docs, and starter templates live in this repo.
@@ -108,12 +109,10 @@ type ListTasksArgs struct {
 }
 
 func Register(app *gonvex.App) {
-  app.Query(
-    "tasks.list",
-    ListTasks,
-    gonvex.Reads("tasks").Filters("status").OrdersBy("created_at"),
+  app.Query("tasks.list", ListTasks)
+  app.Reducer("tasks.create", CreateTask,
+    gonvex.OptimisticReducer("tasks").RowIDArg("id").FieldsArg("task"),
   )
-  app.Mutation("tasks.create", CreateTask, gonvex.Writes("tasks"))
 }
 
 func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
@@ -125,21 +124,30 @@ During development, `gonvex dev` watches the `gonvex/` folder, regenerates
 TypeScript bindings, uploads the Go source bundle and manifest, applies safe
 schema changes, and optionally runs your app dev server.
 
-## Realtime Queries and Durable Sync
+## Live Queries and Replica Collections
 
-Use a live query for computed results, joins, search, aggregates, and dynamic
-windows. Gonvex coalesces matching subscriptions, uses declared read/write
-dependencies to avoid unrelated reruns, suppresses unchanged results, and can
-send keyed-list patches.
+Use a Live Query for indexed search, filters, sorting, and dynamic windows over
+unbounded data. Every Live Query has a structured plan, so Gonvex derives its
+dependencies and never needs declared writes or broad invalidation.
 
-Use a sync collection when the browser should keep a bounded, authorized
+```go
+app.LiveQuery("tasks.grid", TasksGrid, gonvex.LivePlan(
+  gonvex.LiveTable("tasks").
+    Filter(gonvex.Eq("workspace_id", gonvex.Arg("workspaceId"))).
+    SearchArg("search", "title").
+    SortArgs("sort", "direction", "created_at", "desc", "created_at", "title").
+    WindowArgs("offset", "limit", 100, 250),
+))
+```
+
+Use a Replica Collection when the browser should keep a bounded, authorized
 single-table collection locally:
 
 ```go
-app.Sync(
+app.ReplicaCollection(
   "tasks.recent",
   RecentTasks,
-  gonvex.SyncTable("tasks").
+  gonvex.ReplicaTable("tasks").
     Columns("id", "title", "status", "updated_at", "deleted_at").
     ExcludeWhenSet("deleted_at").
     OrderBy("updated_at", "desc").
@@ -149,21 +157,20 @@ app.Sync(
 ```
 
 ```tsx
-import { useSync, useSyncSelector } from "./gonvex/_generated/react";
+import { useReplicaCollection, useReplicaSelector } from "./gonvex/_generated/react";
 
-const tasks = useSync<Task>(api.tasks.recent, {});
-const openCount = useSyncSelector<Task, number>(
+const tasks = useReplicaCollection<Task>(api.tasks.recent, {});
+const openCount = useReplicaSelector<Task, number>(
   api.tasks.recent,
   {},
   (rows) => rows.filter((task) => task.status === "open").length,
 );
 ```
 
-Sync collections render from a scope-isolated IndexedDB store, then resume with
-delta-only delivery when the retained Postgres cursor is still valid. Writes
-still go through mutations. Mutations with generated optimistic metadata are
-durably overlaid onto every matching sync or query projection and reconcile on
-the authoritative mutation id; callers can opt into disconnect replay with
+Replica Collections render from a scope-isolated Local Replica, then resume
+from the retained Postgres revision. Writes go through Reducers. Optimistic
+transactions are overlaid on normalized entities and reconcile through the
+origin command ID plus committed revision; callers can opt into offline replay with
 `{ offline: "queue" }`.
 
 ## Native Google Login
@@ -238,16 +245,16 @@ or unreachable; there is no in-memory fallback.
 
 Gonvex currently includes:
 
-- generic uploaded Go function execution for queries, mutations, actions, HTTP
-  handlers, internal mutations, LiveGrid functions, and sync collections
+- uploaded Go execution for Queries, Reducers, Actions, HTTP handlers, structured
+  Live Queries, and Replica Collections
 - safe Postgres schema sync with project and tenant scopes
 - generated TypeScript API and schema references
-- React hooks for queries, mutations, actions, auth, connection state, and sync
+- React hooks for Queries, Reducers, Actions, auth, connection state, Live Queries, and Replica Collections
 - reconnecting WebSocket client with typed failures and operation timeouts
-- dependency-aware realtime invalidation, shared subscription runners, result
-  revisions, unchanged suppression, and adaptive list patches
+- exact committed-change routing, canonical Live Query groups, revision-only
+  freshness, unchanged suppression, and adaptive window diffs
 - transparent, scope-isolated browser query cache
-- durable delta sync backed by Postgres and IndexedDB
+- a normalized Local Replica backed by Postgres revisions and IndexedDB or SQLite
 - multi-project and database-per-tenant routing
 - native Google OAuth with PKCE, memberships, invitations, roles, and live
   session revocation
@@ -273,7 +280,7 @@ Still in progress before a stable production release:
 - Installation: https://desarso.github.io/gonvex/docs/installation/
 - Deployment model: https://desarso.github.io/gonvex/docs/deployment/
 - Current limits: https://desarso.github.io/gonvex/docs/current-limits/
-- Durable sync: https://desarso.github.io/gonvex/docs/durable-sync/
+- Replica Collections and Local Replica: https://desarso.github.io/gonvex/docs/durable-sync/
 - Scheduling: https://desarso.github.io/gonvex/docs/scheduling/
 
 Run the docs locally:
@@ -298,7 +305,7 @@ pkg/gonvex/              Public Go function SDK
 pkg/manifest/            Runtime manifest model
 templates/vite-react/    Default starter template
 cmd/gonvex/              Go manifest/code-generation CLI
-cmd/gonvex-load/         Persistent WebSocket and mutation load runner
+cmd/gonvex-load/         Persistent WebSocket and Reducer load runner
 server/                  Go runtime server
 infra/                   Local infrastructure helpers
 releases/                Versioned release notes

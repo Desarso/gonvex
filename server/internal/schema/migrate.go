@@ -47,11 +47,11 @@ func Apply(ctx context.Context, databaseURL string, desired manifest.Schema) (Re
 	return ApplyWithSync(ctx, databaseURL, desired, nil)
 }
 
-func ApplyWithSync(ctx context.Context, databaseURL string, desired manifest.Schema, syncDefinitions map[string]manifest.SyncDefinition) (Result, error) {
+func ApplyWithSync(ctx context.Context, databaseURL string, desired manifest.Schema, syncDefinitions map[string]manifest.ReplicaCollectionDefinition) (Result, error) {
 	return ApplyWithOptions(ctx, databaseURL, desired, syncDefinitions, ApplyOptions{})
 }
 
-func ApplyWithOptions(ctx context.Context, databaseURL string, desired manifest.Schema, syncDefinitions map[string]manifest.SyncDefinition, options ApplyOptions) (Result, error) {
+func ApplyWithOptions(ctx context.Context, databaseURL string, desired manifest.Schema, syncDefinitions map[string]manifest.ReplicaCollectionDefinition, options ApplyOptions) (Result, error) {
 	if databaseURL == "" || len(desired.Tables) == 0 {
 		return Result{}, nil
 	}
@@ -116,7 +116,7 @@ func ApplyWithOptions(ctx context.Context, databaseURL string, desired manifest.
 		result.Applied = append(result.Applied, applied...)
 	}
 
-	applied, err := InstallNotifyTriggers(ctx, db, desired.Tables)
+	applied, err := RemoveLegacyNotifyTriggers(ctx, db, desired.Tables)
 	if err != nil {
 		return result, err
 	}

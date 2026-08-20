@@ -35,7 +35,7 @@ describe("OptimisticOverlay", () => {
 
   it("ignores missing patches and inserts whose id already exists", () => {
     const overlay = new OptimisticOverlay();
-    overlay.add("mutation", [
+    overlay.add("reducer", [
       { collection: "tasks.list", rowId: "missing", op: "patch", fields: { title: "No row" } },
       { collection: "tasks.list", rowId: "a", op: "insert", fields: { title: "Duplicate" } },
     ]);
@@ -66,12 +66,12 @@ describe("OptimisticOverlay", () => {
     const overlay = new OptimisticOverlay();
     const listener = vi.fn();
     const unsubscribe = overlay.subscribe(listener);
-    overlay.add("mutation", [
+    overlay.add("reducer", [
       { collection: "tasks.list", rowId: "a", op: "delete" },
       { collection: "teams.list", rowId: "b", op: "delete" },
       { collection: "tasks.list", rowId: "c", op: "delete" },
     ]);
-    overlay.settle("mutation");
+    overlay.settle("reducer");
 
     expect(listener.mock.calls.map(([collection]) => collection)).toEqual([
       "tasks.list", "teams.list", "tasks.list", "teams.list",
@@ -85,18 +85,18 @@ describe("OptimisticOverlay", () => {
     const overlay = new OptimisticOverlay();
     const listener = vi.fn();
     overlay.subscribe(listener);
-    overlay.add("mutation", [
+    overlay.add("reducer", [
       { collection: "tasks.list", rowId: "a", op: "patch", fields: { done: true } },
     ]);
 
     expect(overlay.pendingFor("tasks.list", "a")).toBe(true);
     expect(overlay.pendingFor("tasks.list", "b")).toBe(false);
-    overlay.reject("mutation");
+    overlay.reject("reducer");
     expect(overlay.pendingFor("tasks.list", "a")).toBe(false);
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
-  it("uses id fallbacks when generated mutation metadata omits a row-id path", () => {
+  it("uses id fallbacks when generated reducer metadata omits a row-id path", () => {
     expect(optimisticPatchesFromReference({
       entity: "tasks",
       rowIdPath: [],
@@ -112,9 +112,9 @@ describe("OptimisticOverlay", () => {
     }]);
   });
 
-  it("reconciles a restored multi-row mutation against only rows a source exposes", () => {
+  it("reconciles a restored multi-row reducer against only rows a source exposes", () => {
     const overlay = new OptimisticOverlay();
-    overlay.add("mutation", [
+    overlay.add("reducer", [
       { entity: "tasks", rowId: "a", op: "patch", fields: { done: true } },
       { entity: "tasks", rowId: "b", op: "patch", fields: { done: true } },
     ], { accepted: true });
@@ -125,11 +125,11 @@ describe("OptimisticOverlay", () => {
       "tasks",
       [{ id: "a", done: true }],
       "id",
-    )).toEqual(["mutation"]);
+    )).toEqual(["reducer"]);
     expect(overlay.pendingFor("tasks", "a")).toBe(false);
   });
 
-  it("settles multiple accepted mutations safely when snapshot emission re-enters reconciliation", () => {
+  it("settles multiple accepted reducers safely when snapshot emission re-enters reconciliation", () => {
     const overlay = new OptimisticOverlay();
     const authoritative = [{ id: "a", done: true }];
     overlay.add("first", [

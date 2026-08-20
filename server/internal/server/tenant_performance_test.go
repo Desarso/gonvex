@@ -186,7 +186,7 @@ func TestProjectSyncStorageCheckReturnsTenantDiscoveryFailure(t *testing.T) {
 			"id": {Type: "string", PrimaryKey: true},
 		}},
 	}}
-	definitions := map[string]manifest.SyncDefinition{
+	definitions := map[string]manifest.ReplicaCollectionDefinition{
 		"tasks": {Table: "tasks", Key: "id", Columns: []string{"id"}},
 	}
 

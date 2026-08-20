@@ -7,7 +7,7 @@ import {
   type StoredSyncCollection,
   type SyncStore,
 } from "./index";
-import type { JsonValue, SyncCursor } from "@gonvex/protocol";
+import type { JsonValue, ReplicaCursor } from "@gonvex/protocol";
 import type { QueryCacheDirective } from "@gonvex/protocol";
 
 type Listener = (event: { data?: string }) => void;
@@ -62,7 +62,7 @@ class FakeSyncStore implements SyncStore {
   stored: StoredSyncCollection | undefined;
   readonly loads: Array<{ scope: string; path: string; args: JsonValue }> = [];
   readonly replacements: StoredSyncCollection[] = [];
-  readonly deltas: Array<{ cursor: SyncCursor; upserts: JsonValue[]; deleted: string[] }> = [];
+  readonly deltas: Array<{ cursor: ReplicaCursor; upserts: JsonValue[]; deleted: string[] }> = [];
   readonly deletes: Array<{ scope: string; path: string; args: JsonValue }> = [];
   directive: QueryCacheDirective | undefined;
 
@@ -80,7 +80,7 @@ class FakeSyncStore implements SyncStore {
     _path: string,
     _args: JsonValue,
     value: {
-      cursor: SyncCursor;
+      cursor: ReplicaCursor;
       keyField: string;
       upserts: JsonValue[];
       deleted: string[];
@@ -137,7 +137,7 @@ class DelayedSyncStore extends FakeSyncStore {
     path: string,
     args: JsonValue,
     value: {
-      cursor: SyncCursor;
+      cursor: ReplicaCursor;
       keyField: string;
       upserts: JsonValue[];
       deleted: string[];
@@ -155,7 +155,7 @@ class DelayedSyncStore extends FakeSyncStore {
   }
 }
 
-const ref: FunctionReference = { kind: "sync", path: "tasks.recentSync" };
+const ref: FunctionReference = { kind: "query", delivery: "replica", path: "tasks.recentSync" };
 const scope = "scope-user-a-0000000000000000000000000000000000000000000000000000";
 const directive = {
   protocolVersion: 1 as const,
@@ -558,7 +558,7 @@ describe("durable sync integration", () => {
 
     client.subscribeSync(ref, { workspaceId: "workspace-a" }, () => undefined);
     client.subscribeSync(
-      { kind: "sync", path: "statuses.sync" },
+      { kind: "query", delivery: "replica", path: "statuses.sync" },
       { workspaceId: "workspace-a" },
       () => undefined,
     );
@@ -646,7 +646,7 @@ describe("durable sync integration", () => {
 
     handlers.forEach((handler, index) => {
       client.subscribeSync(
-        { kind: "sync", path: `references.collection${index}` },
+        { kind: "query", delivery: "replica", path: `references.collection${index}` },
         { tenantId: "tenant-a" },
         handler,
       );
@@ -695,7 +695,7 @@ describe("durable sync integration", () => {
 
     for (let index = 0; index < 513; index += 1) {
       client.subscribeSync(
-        { kind: "sync", path: `references.oversizedCollection${index}` },
+        { kind: "query", delivery: "replica", path: `references.oversizedCollection${index}` },
         { tenantId: "tenant-a" },
         () => undefined,
       );
@@ -795,7 +795,7 @@ describe("durable sync integration", () => {
       path: ref.path,
       upserts: [{ id: "a", title: "new" }, { id: "c", title: "added" }],
       deleted: ["b"],
-      mutationIds: ["mutation-a"],
+      originCommandIds: ["reducer-a"],
       cursor: { epoch: "sync-a", revision: 11 },
     });
     await flushAsyncWork();
@@ -1184,7 +1184,7 @@ describe("durable sync integration", () => {
             type: "sync.syncing",
             id: syncID,
             path: ref.path,
-            reason: "chaos-mutation",
+            reason: "chaos-reducer",
           });
           const id = `row-${random() % 12}`;
           const deleted = authoritative.has(id) && random() % 4 === 0;

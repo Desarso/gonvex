@@ -109,25 +109,25 @@ describe("GonvexClient", () => {
 			.toEqual(["tasks.list", "teams.list"]);
 	});
 
-	it("flushes mutationMany as one frame and settles entries independently", async () => {
+	it("flushes reducerMany as one frame and settles entries independently", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		client.connect();
 		const socket = latestSocket();
 		socket.open();
-		socket.receive({ type: "session.ready", capabilities: { mutationBatch: 1 } });
+		socket.receive({ type: "session.ready", capabilities: { reducerBatch: 1 } });
 
-		const outcome = client.mutationMany([
-			{ ref: { kind: "mutation", path: "tasks.create" }, args: { name: "a" } },
-			{ ref: { kind: "mutation", path: "tasks.create" }, args: { name: "b" } },
+		const outcome = client.reducerMany([
+			{ ref: { kind: "reducer", path: "tasks.create" }, args: { name: "a" } },
+			{ ref: { kind: "reducer", path: "tasks.create" }, args: { name: "b" } },
 		]);
 		await vi.advanceTimersByTimeAsync(0);
 
-		const batches = sentMessages(socket).filter((frame) => frame.type === "mutation.callMany");
+		const batches = sentMessages(socket).filter((frame) => frame.type === "reducer.callMany");
 		expect(batches).toHaveLength(1);
 		expect(batches[0].calls).toHaveLength(2);
 		const [first, second] = batches[0].calls;
-		socket.receive({ type: "mutation.result", id: first.id, path: first.path, result: "id-a" });
-		socket.receive({ type: "mutation.error", id: second.id, path: second.path, error: "boom" });
+		socket.receive({ type: "reducer.result", id: first.id, path: first.path, result: "id-a" });
+		socket.receive({ type: "reducer.error", id: second.id, path: second.path, error: "boom" });
 
 		const results = await outcome;
 		expect(results[0]).toEqual({ status: "ok", result: "id-a" });
@@ -135,27 +135,27 @@ describe("GonvexClient", () => {
 		expect((results[1] as { error: GonvexClientError }).error.message).toBe("boom");
 	});
 
-	it("falls back to sequential mutations when mutationBatch is not advertised", async () => {
+	it("falls back to sequential reducers when reducerBatch is not advertised", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		client.connect();
 		const socket = latestSocket();
 		socket.open();
 		socket.receive({ type: "session.ready", capabilities: {} });
 
-		const outcome = client.mutationMany([
-			{ ref: { kind: "mutation", path: "tasks.create" }, args: { name: "a" } },
-			{ ref: { kind: "mutation", path: "tasks.create" }, args: { name: "b" } },
+		const outcome = client.reducerMany([
+			{ ref: { kind: "reducer", path: "tasks.create" }, args: { name: "a" } },
+			{ ref: { kind: "reducer", path: "tasks.create" }, args: { name: "b" } },
 		]);
 		await vi.advanceTimersByTimeAsync(0);
 
-		let calls = sentMessages(socket).filter((frame) => frame.type === "mutation.call");
+		let calls = sentMessages(socket).filter((frame) => frame.type === "reducer.call");
 		expect(calls).toHaveLength(1);
-		socket.receive({ type: "mutation.result", id: calls[0].id, path: calls[0].path, result: "id-a" });
+		socket.receive({ type: "reducer.result", id: calls[0].id, path: calls[0].path, result: "id-a" });
 		await vi.advanceTimersByTimeAsync(0);
 
-		calls = sentMessages(socket).filter((frame) => frame.type === "mutation.call");
+		calls = sentMessages(socket).filter((frame) => frame.type === "reducer.call");
 		expect(calls).toHaveLength(2);
-		socket.receive({ type: "mutation.result", id: calls[1].id, path: calls[1].path, result: "id-b" });
+		socket.receive({ type: "reducer.result", id: calls[1].id, path: calls[1].path, result: "id-b" });
 
 		const results = await outcome;
 		expect(results).toEqual([
@@ -164,29 +164,29 @@ describe("GonvexClient", () => {
 		]);
 	});
 
-	it("sends the outbox idempotency key on replayable mutations and omits it on one-shots", async () => {
+	it("sends the outbox idempotency key on replayable reducers and omits it on one-shots", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		client.connect();
 		const socket = latestSocket();
 		socket.open();
 		socket.receive({ type: "session.ready", capabilities: {} });
 
-		const optimistic = client.mutation(
-			{ kind: "mutation", path: "tasks.update" },
+		const optimistic = client.reducer(
+			{ kind: "reducer", path: "tasks.update" },
 			{ id: "a", title: "T" },
 			{ optimistic: [{ collection: "tasks.list", rowId: "a", op: "patch", fields: { title: "T" } }] },
 		);
 		await vi.advanceTimersByTimeAsync(0);
-		const [replayable] = sentMessages(socket).filter((frame) => frame.type === "mutation.call");
+		const [replayable] = sentMessages(socket).filter((frame) => frame.type === "reducer.call");
 		expect(replayable.idempotencyKey).toBe(replayable.id);
-		socket.receive({ type: "mutation.result", id: replayable.id, path: replayable.path, result: null });
+		socket.receive({ type: "reducer.result", id: replayable.id, path: replayable.path, result: null });
 		await optimistic;
 
-		const oneShot = client.mutation({ kind: "mutation", path: "tasks.create" }, { title: "x" });
+		const oneShot = client.reducer({ kind: "reducer", path: "tasks.create" }, { title: "x" });
 		await vi.advanceTimersByTimeAsync(0);
-		const oneShotCall = sentMessages(socket).filter((frame) => frame.type === "mutation.call").at(-1);
+		const oneShotCall = sentMessages(socket).filter((frame) => frame.type === "reducer.call").at(-1);
 		expect(oneShotCall.idempotencyKey).toBeUndefined();
-		socket.receive({ type: "mutation.result", id: oneShotCall.id, path: oneShotCall.path, result: "id-x" });
+		socket.receive({ type: "reducer.result", id: oneShotCall.id, path: oneShotCall.path, result: "id-x" });
 		await expect(oneShot).resolves.toBe("id-x");
 	});
 
@@ -917,7 +917,7 @@ describe("GonvexClient", () => {
     expect(secondHandler).not.toHaveBeenCalled();
   });
 
-  it("resolves one-shot queries and unsubscribes after the first result", async () => {
+  it("resolves a one-shot query without creating a subscription", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const promise = client.query(ref, { status: "open" });
     const socket = latestSocket();
@@ -927,7 +927,8 @@ describe("GonvexClient", () => {
     socket.receive({ type: "query.result", id, result: { count: 2 } });
 
     await expect(promise).resolves.toEqual({ count: 2 });
-    expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.unsubscribe", id });
+    expect(sentMessages(socket)).toHaveLength(1);
+    expect(sentMessages(socket)[0]).toMatchObject({ type: "query.call", id });
   });
 
   it("rejects one-shot queries on query errors", async () => {
@@ -940,7 +941,8 @@ describe("GonvexClient", () => {
     socket.receive({ type: "query.error", id, error: "boom" });
 
     await expect(promise).rejects.toThrow("boom");
-    expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.unsubscribe", id });
+    expect(sentMessages(socket)).toHaveLength(1);
+    expect(sentMessages(socket)[0]).toMatchObject({ type: "query.call", id });
   });
 
   it("replays an in-flight one-shot query after reconnect", async () => {
@@ -957,7 +959,7 @@ describe("GonvexClient", () => {
 
     const [secondSubscription] = sentMessages(secondSocket);
     expect(secondSubscription).toMatchObject({
-      type: "query.subscribe",
+      type: "query.call",
       id: firstSubscription.id,
       path: "tasks.list",
       args: { status: "open" },
@@ -980,12 +982,12 @@ describe("GonvexClient", () => {
     secondSocket.open();
     const [secondAuth] = sentMessages(secondSocket);
     expect(secondAuth).toMatchObject({ type: "auth" });
-    expect(sentMessages(secondSocket).some((message) => message.type === "query.subscribe")).toBe(false);
+    expect(sentMessages(secondSocket).some((message) => message.type === "query.call")).toBe(false);
 
     secondSocket.receive({ type: "auth.result", id: secondAuth.id, result: { userId: "user-a" } });
-    const subscriptions = sentMessages(secondSocket).filter((message) => message.type === "query.subscribe");
-    expect(subscriptions).toHaveLength(1);
-    secondSocket.receive({ type: "query.result", id: subscriptions[0].id, result: { count: 4 } });
+    const calls = sentMessages(secondSocket).filter((message) => message.type === "query.call");
+    expect(calls).toHaveLength(1);
+    secondSocket.receive({ type: "query.result", id: calls[0].id, result: { count: 4 } });
     await expect(promise).resolves.toEqual({ count: 4 });
   });
 
@@ -998,25 +1000,25 @@ describe("GonvexClient", () => {
     await expect(promise).rejects.toThrow("Gonvex client was closed");
   });
 
-  it("resolves mutations and actions from matching response types", async () => {
+  it("resolves reducers and actions from matching response types", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
-    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" }, { title: "Ship" });
+    const reducer = client.reducer({ kind: "reducer", path: "tasks.create" }, { title: "Ship" });
     const action = client.action({ kind: "action", path: "jobs.run" }, { id: "job_1" });
     const socket = latestSocket();
     socket.open();
     const messages = sentMessages(socket);
 
-    expect(messages[0]).toMatchObject({ type: "mutation.call", path: "tasks.create", args: { title: "Ship" } });
+    expect(messages[0]).toMatchObject({ type: "reducer.call", path: "tasks.create", args: { title: "Ship" } });
     expect(messages[1]).toMatchObject({ type: "action.call", path: "jobs.run", args: { id: "job_1" } });
 
-    socket.receive({ type: "mutation.result", id: messages[0].id, result: { id: "task_1" } });
+    socket.receive({ type: "reducer.result", id: messages[0].id, result: { id: "task_1" } });
     socket.receive({ type: "action.result", id: messages[1].id, result: "queued" });
 
-    await expect(mutation).resolves.toEqual({ id: "task_1" });
+    await expect(reducer).resolves.toEqual({ id: "task_1" });
     await expect(action).resolves.toBe("queued");
   });
 
-  it("reports browser and device telemetry for received mutation results", async () => {
+  it("reports browser and device telemetry for received reducer results", async () => {
     vi.stubGlobal("performance", { timeOrigin: 1_000, now: vi.fn(() => 25.5) });
     vi.stubGlobal("navigator", {
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36",
@@ -1028,26 +1030,26 @@ describe("GonvexClient", () => {
     vi.stubGlobal("innerWidth", 1440);
     vi.stubGlobal("innerHeight", 900);
     const client = new GonvexClient("ws://runtime.test/ws", { telemetry: true });
-    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" }, { title: "Ship" });
+    const reducer = client.reducer({ kind: "reducer", path: "tasks.create" }, { title: "Ship" });
     const socket = latestSocket();
     socket.open();
     const [call] = sentMessages(socket);
 
     socket.receive({
-      type: "mutation.result",
+      type: "reducer.result",
       id: call.id,
       result: { id: "task_1" },
       trace: {
         clientSentAtMs: call.trace.clientSentAtMs,
-        serverMutationCommittedAtMs: 1_010.25,
+        serverReducerCommittedAtMs: 1_010.25,
         serverCompletedAtMs: 1_012.5,
       },
     });
 
-    await expect(mutation).resolves.toEqual({ id: "task_1" });
+    await expect(reducer).resolves.toEqual({ id: "task_1" });
     const telemetry = sentMessages(socket).find((message) => message.type === "telemetry.event");
     expect(telemetry).toMatchObject({
-      kind: "mutation",
+      kind: "reducer",
       path: "tasks.create",
       outcome: "ok",
       clientReceivedAtMs: 1_025.5,
@@ -1062,33 +1064,33 @@ describe("GonvexClient", () => {
     });
   });
 
-  it("rejects mutations and actions from matching error response types", async () => {
+  it("rejects reducers and actions from matching error response types", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
-    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const reducer = client.reducer({ kind: "reducer", path: "tasks.create" });
     const action = client.action({ kind: "action", path: "jobs.run" });
     const socket = latestSocket();
     socket.open();
     const messages = sentMessages(socket);
 
-    socket.receive({ type: "mutation.error", id: messages[0].id, error: "mutation failed" });
+    socket.receive({ type: "reducer.error", id: messages[0].id, error: "reducer failed" });
     socket.receive({ type: "action.error", id: messages[1].id, error: "action failed" });
 
-    await expect(mutation).rejects.toThrow("mutation failed");
+    await expect(reducer).rejects.toThrow("reducer failed");
     await expect(action).rejects.toThrow("action failed");
   });
 
   it("automatically reports failed Gonvex operations when error reporting is enabled", async () => {
     const client = new GonvexClient("ws://runtime.test/ws", { project: "shop", tenant: "acme", errorReporting: { release: "1.2.3", captureGlobalErrors: false } });
-    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const reducer = client.reducer({ kind: "reducer", path: "tasks.create" });
     const socket = latestSocket();
     socket.open();
     const [auth] = sentMessages(socket);
     socket.receive({ type: "auth.result", id: auth.id, result: { ok: true } });
     const call = sentMessages(socket).at(-1)!;
-    socket.receive({ type: "mutation.error", id: call.id, error: "permission denied" });
-    await expect(mutation).rejects.toThrow("permission denied");
+    socket.receive({ type: "reducer.error", id: call.id, error: "permission denied" });
+    await expect(reducer).rejects.toThrow("permission denied");
     expect(captureReportedError).toHaveBeenCalledWith(expect.objectContaining({ message: "permission denied" }), expect.objectContaining({
-      gonvexOperation: expect.objectContaining({ type: "mutation", path: "tasks.create" }),
+      gonvexOperation: expect.objectContaining({ type: "reducer", path: "tasks.create" }),
     }));
   });
 
@@ -1124,22 +1126,22 @@ describe("GonvexClient", () => {
     await expect(promise).rejects.toMatchObject({ code: "timeout" });
   });
 
-  it("rejects mutations that never receive a response with a typed timeout error", async () => {
+  it("rejects reducers that never receive a response with a typed timeout error", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
-    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" }, { title: "Ship" });
+    const reducer = client.reducer({ kind: "reducer", path: "tasks.create" }, { title: "Ship" });
     latestSocket().open();
 
     vi.advanceTimersByTime(20_000);
 
-    await expect(mutation).rejects.toMatchObject({
+    await expect(reducer).rejects.toMatchObject({
       name: "GonvexClientError",
       code: "timeout",
-      operation: "mutation",
+      operation: "reducer",
       path: "tasks.create",
     });
   });
 
-  it("gives actions a longer default timeout than mutations", async () => {
+  it("gives actions a longer default timeout than reducers", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const action = client.action({ kind: "action", path: "jobs.run" });
     latestSocket().open();
@@ -1158,37 +1160,37 @@ describe("GonvexClient", () => {
 
   it("ignores late responses after an operation timed out", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
-    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const reducer = client.reducer({ kind: "reducer", path: "tasks.create" });
     const socket = latestSocket();
     socket.open();
     const [call] = sentMessages(socket);
 
     vi.advanceTimersByTime(20_000);
-    await expect(mutation).rejects.toMatchObject({ code: "timeout" });
+    await expect(reducer).rejects.toMatchObject({ code: "timeout" });
 
-    expect(() => socket.receive({ type: "mutation.result", id: call.id, result: { id: "task_1" } })).not.toThrow();
+    expect(() => socket.receive({ type: "reducer.result", id: call.id, result: { id: "task_1" } })).not.toThrow();
   });
 
-  it("fails pending mutations closed when the socket disconnects and never replays them", async () => {
+  it("fails pending reducers closed when the socket disconnects and never replays them", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
-    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" }, { title: "Ship" });
+    const reducer = client.reducer({ kind: "reducer", path: "tasks.create" }, { title: "Ship" });
     const firstSocket = latestSocket();
     firstSocket.open();
-    expect(sentMessages(firstSocket)[0]).toMatchObject({ type: "mutation.call", path: "tasks.create" });
+    expect(sentMessages(firstSocket)[0]).toMatchObject({ type: "reducer.call", path: "tasks.create" });
 
     firstSocket.disconnect();
 
-    await expect(mutation).rejects.toMatchObject({
+    await expect(reducer).rejects.toMatchObject({
       name: "GonvexClientError",
       code: "disconnected",
-      operation: "mutation",
+      operation: "reducer",
       path: "tasks.create",
     });
 
     vi.advanceTimersByTime(250);
     const secondSocket = latestSocket();
     secondSocket.open();
-    expect(sentMessages(secondSocket).some((message) => message.type === "mutation.call")).toBe(false);
+    expect(sentMessages(secondSocket).some((message) => message.type === "reducer.call")).toBe(false);
   });
 
   it("fails pending actions closed when the socket disconnects", async () => {
@@ -1202,52 +1204,52 @@ describe("GonvexClient", () => {
     await expect(action).rejects.toMatchObject({ code: "disconnected", operation: "action" });
   });
 
-  it("fails auth-queued mutations closed on disconnect instead of firing them after reconnect", async () => {
+  it("fails auth-queued reducers closed on disconnect instead of firing them after reconnect", async () => {
     const client = new GonvexClient("ws://runtime.test/ws", { token: "session-token" });
-    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const reducer = client.reducer({ kind: "reducer", path: "tasks.create" });
     const firstSocket = latestSocket();
     firstSocket.open();
-    // Only auth was sent; the mutation is still queued behind authentication.
+    // Only auth was sent; the reducer is still queued behind authentication.
     expect(sentMessages(firstSocket)).toMatchObject([{ type: "auth" }]);
 
     firstSocket.disconnect();
-    await expect(mutation).rejects.toMatchObject({ code: "disconnected", operation: "mutation" });
+    await expect(reducer).rejects.toMatchObject({ code: "disconnected", operation: "reducer" });
 
     vi.advanceTimersByTime(250);
     const secondSocket = latestSocket();
     secondSocket.open();
     const [secondAuth] = sentMessages(secondSocket);
     secondSocket.receive({ type: "auth.result", id: secondAuth.id, result: { userId: "user-a" } });
-    expect(sentMessages(secondSocket).some((message) => message.type === "mutation.call")).toBe(false);
+    expect(sentMessages(secondSocket).some((message) => message.type === "reducer.call")).toBe(false);
   });
 
-  it("rejects pending mutations with a typed closed error on explicit close", async () => {
+  it("rejects pending reducers with a typed closed error on explicit close", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
-    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const reducer = client.reducer({ kind: "reducer", path: "tasks.create" });
     latestSocket().open();
 
     client.close();
 
-    await expect(mutation).rejects.toMatchObject({ code: "closed", operation: "mutation" });
+    await expect(reducer).rejects.toMatchObject({ code: "closed", operation: "reducer" });
   });
 
-  it("rejects server mutation errors with a typed server error", async () => {
+  it("rejects server reducer errors with a typed server error", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
-    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const reducer = client.reducer({ kind: "reducer", path: "tasks.create" });
     const socket = latestSocket();
     socket.open();
     const [call] = sentMessages(socket);
 
-    socket.receive({ type: "mutation.error", id: call.id, error: "permission denied" });
+    socket.receive({ type: "reducer.error", id: call.id, error: "permission denied" });
 
-    const error = await mutation.then(
+    const error = await reducer.then(
       () => {
         throw new Error("expected rejection");
       },
       (cause: unknown) => cause,
     );
     expect(error).toBeInstanceOf(GonvexClientError);
-    expect(error).toMatchObject({ code: "server", operation: "mutation", message: "permission denied" });
+    expect(error).toMatchObject({ code: "server", operation: "reducer", message: "permission denied" });
   });
 
   it("tracks connection state across connect, disconnect, and reconnect", () => {
@@ -1308,19 +1310,19 @@ describe("GonvexClient", () => {
     expect(states).toHaveLength(count);
   });
 
-  it("reports inflight requests while mutations are pending", async () => {
+  it("reports inflight requests while reducers are pending", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
-    const mutation = client.mutation({ kind: "mutation", path: "tasks.create" });
+    const reducer = client.reducer({ kind: "reducer", path: "tasks.create" });
     const socket = latestSocket();
     socket.open();
 
-    expect(client.connectionState()).toMatchObject({ hasInflightRequests: true, inflightMutations: 1 });
+    expect(client.connectionState()).toMatchObject({ hasInflightRequests: true, inflightReducers: 1 });
 
     const [call] = sentMessages(socket);
-    socket.receive({ type: "mutation.result", id: call.id, result: { id: "task_1" } });
-    await mutation;
+    socket.receive({ type: "reducer.result", id: call.id, result: { id: "task_1" } });
+    await reducer;
 
-    expect(client.connectionState()).toMatchObject({ hasInflightRequests: false, inflightMutations: 0 });
+    expect(client.connectionState()).toMatchObject({ hasInflightRequests: false, inflightReducers: 0 });
   });
 
   it("re-requests an active live query via retryQuery", () => {

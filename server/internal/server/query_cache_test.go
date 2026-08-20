@@ -24,10 +24,10 @@ func TestWebSocketQueryLogsRedisAndDatabaseSources(t *testing.T) {
 	redisServer := miniredis.RunT(t)
 	var executions atomic.Int32
 	app := gonvex.NewApp()
-	app.Query("bulk.tasksByWorkspace", func(_ *gonvex.QueryCtx, args queryCacheTestArgs) (map[string]string, error) {
+	app.LiveQuery("bulk.tasksByWorkspace", func(_ *gonvex.QueryCtx, args queryCacheTestArgs) (map[string]string, error) {
 		executions.Add(1)
 		return map[string]string{"value": args.Value}, nil
-	})
+	}, gonvex.LivePlan(gonvex.LiveTable("tasks")))
 	runtime := NewWithApp(config.Config{
 		QueryCacheEnabled: true,
 		ValkeyURL:         "redis://" + redisServer.Addr(),
@@ -222,7 +222,7 @@ func TestSyncScopeTracksVisibilityNotBundle(t *testing.T) {
 	// visibility must yield the same epoch across bundles, different
 	// visibility must not resume another user's cursor.
 	clock := syncClock{DatabaseEpoch: "db-epoch", Revision: 7}
-	definition := manifest.SyncDefinition{Table: "tasks", Key: "id"}
+	definition := manifest.ReplicaCollectionDefinition{Table: "tasks", Key: "id"}
 	sameVisibility := syncCursorForClock(clock, definition, base.SyncScope)
 	if again := syncCursorForClock(clock, definition, base.SyncScope); again != sameVisibility {
 		t.Fatalf("expected deterministic cursor epoch, got %#v and %#v", sameVisibility, again)
@@ -292,9 +292,9 @@ func TestQueryCacheDirectiveCanBeDisabled(t *testing.T) {
 
 func TestWebSocketAdvertisesAndReturnsQueryCacheMetadata(t *testing.T) {
 	app := gonvex.NewApp()
-	app.Query("cache.echo", func(_ *gonvex.QueryCtx, args queryCacheTestArgs) (map[string]string, error) {
+	app.LiveQuery("cache.echo", func(_ *gonvex.QueryCtx, args queryCacheTestArgs) (map[string]string, error) {
 		return map[string]string{"value": args.Value}, nil
-	})
+	}, gonvex.LivePlan(gonvex.LiveTable("cache_rows")))
 	runtime := NewWithApp(config.Config{QueryCacheEnabled: true}, app)
 	httpServer := httptest.NewServer(runtime.Handler())
 	defer httpServer.Close()

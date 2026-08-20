@@ -5,25 +5,27 @@ description: What is implemented today and what still needs product/runtime work
 
 # Current Limits
 
-Gonvex is beta software. The current runtime executes arbitrary registered app
-functions from uploaded Go bundles and includes the major local/self-hosted
-product surfaces. The remaining limits are primarily migration safety, durable
-operations, fleet management, and managed hosting.
+Gonvex is beta software. The runtime executes uploaded Go applications with a
+deliberately narrow data model: Queries, Reducers, Actions, Replica Collections,
+and structured Live Queries. Remaining limits are primarily migration safety,
+fleet operations, richer conflict policies, and managed hosting.
 
 ## Implemented Today
 
 The current codebase includes:
 
-- app-local Go queries, mutations, actions, HTTP handlers, internal mutations,
-  LiveGrid functions, and sync collections;
+- app-local read-only Queries, transactional Reducers, external-work Actions,
+  HTTP handlers, Replica Collections, and structured Live Queries;
 - uploaded source bundles compiled and cached per project;
 - generated TypeScript API references and scoped schema metadata;
 - safe Postgres schema sync for project and tenant databases;
-- realtime queries with declared dependency filtering, serialized/coalesced
-  reruns, shared runners, revisions, unchanged suppression, and adaptive list
-  patches;
-- durable sync collections with Postgres cursors and normalized IndexedDB
-  storage;
+- an authoritative `_gonvex_sync_changes` feed containing exact committed rows,
+  transaction IDs, changed columns, command IDs, and revisions;
+- canonical Live Query groups with structured dependencies, revision-only
+  correctness, unchanged suppression, and adaptive window patches;
+- a normalized Local Replica with atomic transaction application, optimistic
+  overlays, Live Query ID membership, IndexedDB, and Expo SQLite persistence;
+- a durable Action outbox written inside Reducer transactions;
 - multi-project and database-per-tenant routing;
 - native Google OAuth, memberships, invitations, roles, account controls, and
   live WebSocket session revocation;
@@ -87,28 +89,24 @@ Remaining operational work is mostly fleet-level:
 - custom named-role editing and audit export in the dashboard
 - quota, billing, and organization policy
 
-## Realtime Invalidation
+## Realtime and Local Replica Limits
 
-The runtime implements declared table/column dependencies, a tenant/table reverse
-index, serialized/coalesced runners, result revisions, unchanged suppression,
-adaptive keyed-list patches, safe shared subscriptions, and supervised active-
-tenant PostgreSQL listeners.
+Arbitrary SQL remains available to one-shot Queries, but continuous Live Query
+delivery requires a structured plan. This intentionally prevents dependency
+inference and broad invalidation fallbacks.
 
-Current live-query limits:
+Current boundaries:
 
-- dependencies are explicit declarations; arbitrary raw SQL is not automatically traced
-- permission-level sharing is opt-in because user-dependent handlers cannot safely share
-- nested arbitrary JSON uses full replacements rather than patches
-- live queries recover a PostgreSQL `NOTIFY` gap with a fresh snapshot rather
-  than replaying every intermediate event
-
-Durable sync collections add a transactional Postgres change log and resume
-cursor for declared single-table collections. Their v1 limits are equality
-filters, null/non-null exclusions, bounded eager/progressive collections, and
-handler-defined authorization. They do not support joins, aggregates, search,
-or offline mutation queues. The public Go API includes `RetainFor`, but the npm
-CLI does not yet emit custom retention into the uploaded manifest; the effective
-retention is currently the seven-day runtime default.
+- common equality, range, membership, substring, boolean, sort, and window
+  operators are portable; PostgreSQL-specific expressions are online-only;
+- Replica Collections are single-table, equality-filtered, bounded entity sets;
+- custom handler authorization still participates in initial collection
+  snapshots; central visibility-context caching is not yet a full policy DSL;
+- partial offline datasets are labeled partial and never presented as global;
+- Reducer optimistic metadata currently supports generated entity patches;
+  richer generated multi-entity recipes and conflict-policy codegen remain work;
+- nested arbitrary Live Query JSON uses full replacements when it cannot be
+  represented as a keyed window patch.
 
 ## Schema Migrations Are Early
 

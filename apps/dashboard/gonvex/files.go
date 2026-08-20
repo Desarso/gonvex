@@ -35,15 +35,15 @@ type DeleteFileResult struct {
 }
 
 func RegisterFiles(app *gonvex.App) {
-	app.Mutation("files.createUploadUrl", CreateUploadURL)
+	app.Action("files.createUploadUrl", CreateUploadURL)
 	app.Query("files.getUrl", GetFileURL)
 	app.Query("files.getMetadata", GetFileMetadata)
-	app.Mutation("files.delete", DeleteFile)
+	app.Action("files.delete", DeleteFile)
 }
 
 // CreateUploadURL records a pending file and returns a short-lived presigned
 // PUT URL the client uploads the bytes to.
-func CreateUploadURL(ctx *gonvex.MutationCtx, args CreateUploadURLArgs) (CreateUploadURLResult, error) {
+func CreateUploadURL(ctx *gonvex.ActionCtx, args CreateUploadURLArgs) (CreateUploadURLResult, error) {
 	target, err := ctx.Storage.GenerateUploadURL(gonvex.UploadOptions{
 		ContentType: args.ContentType,
 		Size:        args.Size,
@@ -76,7 +76,7 @@ func GetFileMetadata(ctx *gonvex.QueryCtx, args FileIDArgs) (gonvex.FileMetadata
 }
 
 // DeleteFile removes the object and its metadata record.
-func DeleteFile(ctx *gonvex.MutationCtx, args FileIDArgs) (DeleteFileResult, error) {
+func DeleteFile(ctx *gonvex.ActionCtx, args FileIDArgs) (DeleteFileResult, error) {
 	if err := ctx.Storage.Delete(args.FileID); err != nil {
 		return DeleteFileResult{}, err
 	}

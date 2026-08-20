@@ -2,12 +2,7 @@ package server
 
 import (
 	"context"
-	"database/sql"
-	"database/sql/driver"
-	"encoding/json"
-	"fmt"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,84 +147,5 @@ func TestRuntimeRequiresReachableValkeyAtStartup(t *testing.T) {
 	}
 	if _, err := NewRequired(config.Config{ValkeyURL: "redis://127.0.0.1:1/0"}); err == nil || !strings.Contains(err.Error(), "VALKEY_URL (or REDIS_URL)") {
 		t.Fatalf("unreachable Valkey error = %v", err)
-	}
-}
-
-var ephemeralSQLDriverSequence atomic.Uint64
-
-type countingSQLDriver struct{ begins *atomic.Int64 }
-
-func (driverImpl countingSQLDriver) Open(string) (driver.Conn, error) {
-	return &countingSQLConn{begins: driverImpl.begins}, nil
-}
-
-type countingSQLConn struct{ begins *atomic.Int64 }
-
-func (*countingSQLConn) Prepare(string) (driver.Stmt, error) {
-	return nil, fmt.Errorf("unexpected Prepare")
-}
-func (*countingSQLConn) Close() error { return nil }
-func (conn *countingSQLConn) Begin() (driver.Tx, error) {
-	conn.begins.Add(1)
-	return nil, fmt.Errorf("unexpected transaction")
-}
-
-func TestEphemeralWriteDoesNotTouchPostgresSyncClockOrReactiveCache(t *testing.T) {
-	redisServer := miniredis.RunT(t)
-	app := gonvex.NewApp()
-	app.Mutation("leases.beat", func(ctx *gonvex.MutationCtx, _ map[string]any) (any, error) {
-		return nil, ctx.Ephemeral.Set("leases/user-1", map[string]any{"live": true}, time.Minute)
-	}, gonvex.WritesEphemeral())
-
-	runtime := NewWithApp(config.Config{
-		ValkeyURL:    "redis://" + redisServer.Addr(),
-		RowsCacheTTL: time.Minute,
-	}, app)
-	t.Cleanup(func() {
-		if runtime.cache != nil {
-			_ = runtime.cache.close()
-		}
-	})
-
-	beforeGeneration, ok := runtime.cache.queryGeneration(context.Background(), "project", "tenant", []string{"userPresence"})
-	if !ok {
-		t.Fatal("query cache generation unavailable")
-	}
-
-	var begins atomic.Int64
-	driverName := fmt.Sprintf("gonvex-ephemeral-no-sql-%d", ephemeralSQLDriverSequence.Add(1))
-	sql.Register(driverName, countingSQLDriver{begins: &begins})
-	db, err := sql.Open(driverName, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	notifications := 0
-	mutationCtx := &gonvex.MutationCtx{RuntimeContext: gonvex.RuntimeContext{
-		Context:   context.Background(),
-		DB:        db,
-		Ephemeral: runtime.ephemeral.ForTenant(context.Background(), "project", "tenant"),
-		NotifyTableChange: func(string) {
-			notifications++
-		},
-	}}
-	if _, err := runtime.executeRegisteredMutation(app, mutationCtx, "leases.beat", json.RawMessage(`{}`)); err != nil {
-		t.Fatal(err)
-	}
-	if begins.Load() != 0 {
-		t.Fatalf("ephemeral write opened %d Postgres transactions; sync clock could be bumped", begins.Load())
-	}
-	if notifications != 0 {
-		t.Fatalf("ephemeral write emitted %d reactive notifications", notifications)
-	}
-
-	runtime.broadcastMutationInvalidationsForCommitAt("project", "tenant", "leases.beat", "mutation-id", time.Now())
-	afterGeneration, ok := runtime.cache.queryGeneration(context.Background(), "project", "tenant", []string{"userPresence"})
-	if !ok {
-		t.Fatal("query cache generation unavailable after write")
-	}
-	if afterGeneration != beforeGeneration {
-		t.Fatalf("ephemeral write invalidated reactive query generation:\n before %q\n  after %q", beforeGeneration, afterGeneration)
 	}
 }

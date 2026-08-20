@@ -1,4 +1,4 @@
-import type { JsonValue, QueryCacheDirective, SyncCursor } from "@gonvex/protocol";
+import type { JsonValue, QueryCacheDirective, ReplicaCursor } from "@gonvex/protocol";
 import type { Dexie as DexieDatabase, Table } from "dexie";
 
 export const defaultSyncStoreMaxBytes = 100 * 1024 * 1024;
@@ -15,7 +15,7 @@ export type SyncStoreOptions = {
 
 export type StoredSyncCollection = {
   rows: JsonValue[];
-  cursor: SyncCursor;
+  cursor: ReplicaCursor;
   keyField: string;
   mode?: "eager" | "progressive";
   /** Whether the server budget-cut the materialized collection. */
@@ -47,7 +47,7 @@ export type SyncStore = {
     path: string,
     args: JsonValue,
     value: {
-      cursor: SyncCursor;
+      cursor: ReplicaCursor;
       keyField: string;
       mode?: "eager" | "progressive";
       truncated?: boolean;
@@ -72,7 +72,7 @@ type CollectionRecord = {
   scope: string;
   path: string;
   argsHash: string;
-  cursor: SyncCursor;
+  cursor: ReplicaCursor;
   keyField: string;
   mode?: "eager" | "progressive";
   truncated?: boolean;
@@ -253,7 +253,7 @@ export class DexieSyncStore implements SyncStore {
     path: string,
     args: JsonValue,
     value: {
-      cursor: SyncCursor;
+      cursor: ReplicaCursor;
       keyField: string;
       mode?: "eager" | "progressive";
       truncated?: boolean;

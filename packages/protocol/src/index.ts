@@ -1,11 +1,8 @@
 export type FunctionKind =
   | "query"
-  | "mutation"
+  | "reducer"
   | "action"
-  | "http"
-  | "internalMutation"
-  | "liveGrid"
-  | "sync";
+  | "http";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -13,11 +10,13 @@ export type FunctionManifestEntry = {
   kind: FunctionKind;
   handler: string;
   file: string;
+  internal?: boolean;
+  delivery?: "oneShot" | "live" | "replica";
   dependencies?: FunctionDependencies;
-  sync?: SyncDefinition;
+  replica?: ReplicaCollectionDefinition;
 };
 
-export type SyncDefinition = {
+export type ReplicaCollectionDefinition = {
   table: string;
   key: string;
   columns: string[];
@@ -32,29 +31,59 @@ export type SyncDefinition = {
   retentionMs?: number;
 };
 
-export type SyncCursor = {
+export type ReplicaCursor = {
   epoch: string;
   revision: number;
 };
 
+export type ReplicaChange = {
+  entity: string;
+  id: string;
+  operation: "insert" | "update" | "delete";
+  oldValue?: JsonValue;
+  newValue?: JsonValue;
+  changedColumns?: string[];
+};
+
 export type FunctionDependencies = {
-  reads?: Array<{ table: string; columns?: string[]; filters?: string[]; ordersBy?: string[]; windowed?: boolean; predicate?: string }>;
-  writes?: Array<{ table: string; columns?: string[] }>;
-  readsEphemeral?: boolean;
-  writesEphemeral?: boolean;
+  reads?: Array<{ table: string; columns?: string[]; filters?: string[]; ordersBy?: string[]; windowed?: boolean }>;
   shareByPermissions?: boolean;
+	liveQueryPlan?: LiveQueryPlan;
+	nonOptimisticReason?: string;
 	shareByVisibility?: string;
 	shareResultFrom?: string;
 	shareResultField?: string;
 };
+
+export type LiveQueryPlan = {
+  table: string;
+  key: string;
+  columns?: string[];
+  resultPath?: string[];
+  where?: LiveExpression;
+  search?: { argument: string; columns: string[] };
+  sort?: { columnArgument: string; directionArgument: string; defaultColumn: string; defaultDirection: "asc" | "desc"; allowedColumns: string[] };
+  window?: { offsetArgument: string; limitArgument: string; defaultLimit: number; maxLimit: number };
+  serverOnly?: boolean;
+};
+
+export type LiveExpression = {
+  operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "contains" | "containsInsensitive" | "range" | "and" | "or" | "not" | "server";
+  column?: string;
+  value?: LiveValue;
+  valueTo?: LiveValue;
+  children?: LiveExpression[];
+};
+
+export type LiveValue = { argument?: string; literal?: JsonValue };
 
 export type SubscriptionRevision = { epoch: string; sequence: number };
 
 export type MessageTrace = {
   clientSentAtMs?: number;
   serverReceivedAtMs?: number;
-  serverMutationStartedAtMs?: number;
-  serverMutationCommittedAtMs?: number;
+  serverReducerStartedAtMs?: number;
+  serverReducerCommittedAtMs?: number;
   serverCompletedAtMs?: number;
   serverBroadcastScheduledAtMs?: number;
   serverChangeCommittedAtMs?: number;
@@ -108,8 +137,8 @@ export type ServerCapabilities = {
   queryBatch?: 1;
 	/** Server emits several independent query updates in one WebSocket frame. */
 	queryResultBatch?: 1;
-  /** Server accepts `mutation.callMany` batched offline-queue flushes. */
-  mutationBatch?: 1;
+  /** Server accepts `reducer.callMany` batched command-outbox flushes. */
+  reducerBatch?: 1;
   /** Server emits connection-level sync revision watermarks. */
   syncWatermark?: 1;
 };
@@ -121,12 +150,12 @@ export type QuerySubscribeRequest = {
   cacheRevision?: string;
 };
 
-export type MutationCallRequest = {
+export type ReducerCallRequest = {
   id: string;
   path: string;
   args: JsonValue;
   trace?: MessageTrace;
-  /** Stable key for a replayable write; see the `mutation.call` message. */
+  /** Stable key for a replayable command; see the `reducer.call` message. */
   idempotencyKey?: string;
 };
 
@@ -134,7 +163,7 @@ export type SyncOpenRequest = {
   id: string;
   path: string;
   args: JsonValue;
-  cursor?: SyncCursor;
+  cursor?: ReplicaCursor;
   keys?: string[];
   hashes?: Record<string, string>;
   digest?: string;
@@ -144,7 +173,7 @@ export type SyncOpenRequest = {
 export type SyncReady = {
   id: string;
   path?: string;
-  cursor: SyncCursor;
+  cursor: ReplicaCursor;
   mode?: "eager" | "progressive";
   digest?: string;
   truncated?: boolean;
@@ -185,6 +214,7 @@ export type GonvexManifest = {
 
 export type ClientMessage =
   | { type: "auth"; id: string; token?: string; project?: string; tenant?: string; device?: BrowserTelemetryInfo; capabilities?: ClientCapabilities }
+  | { type: "query.call"; id: string; path: string; args: JsonValue }
   | { type: "query.subscribe"; id: string; path: string; args: JsonValue; cacheRevision?: string }
   | { type: "query.unsubscribe"; id: string }
   | {
@@ -192,7 +222,7 @@ export type ClientMessage =
     id: string;
     path: string;
     args: JsonValue;
-    cursor?: SyncCursor;
+    cursor?: ReplicaCursor;
     keys?: string[];
     hashes?: Record<string, string>;
     digest?: string;
@@ -202,24 +232,24 @@ export type ClientMessage =
   | { type: "query.subscribeMany"; subscribes: QuerySubscribeRequest[] }
   | { type: "sync.close"; id: string }
   | {
-    type: "mutation.call";
+    type: "reducer.call";
     id: string;
     path: string;
     args: JsonValue;
     trace?: MessageTrace;
     /**
-     * Stable key for a replayable write from the client outbox. The runtime
-     * executes the mutation once per key and serves the stored result to
+     * Stable key for a replayable command from the client outbox. The runtime
+     * executes the reducer once per key and serves the stored result to
      * every duplicate delivery.
      */
     idempotencyKey?: string;
   }
-  | { type: "mutation.callMany"; calls: MutationCallRequest[] }
+  | { type: "reducer.callMany"; calls: ReducerCallRequest[] }
   | { type: "action.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }
   | {
     type: "telemetry.event";
     id: string;
-    kind: "query" | "mutation" | "action";
+    kind: "query" | "reducer" | "action";
     path: string;
     reason?: "initial" | "invalidate" | "recover";
     outcome: "ok" | "error";
@@ -256,8 +286,14 @@ export type ServerMessage =
 		prepend?: string[];
 		append?: string[];
 		collections?: Record<string, KeyedCollectionPatch>;
-		mutationIds?: string[];
+		originCommandIds?: string[];
 	}
+  | {
+    type: "replica.transaction";
+    cursor: ReplicaCursor;
+    originCommandId?: string;
+    changes: ReplicaChange[];
+  }
   | {
     type: "session.ready";
     project?: string;
@@ -278,7 +314,7 @@ export type ServerMessage =
     cacheScope?: string;
     cacheRevision?: string;
     subscriptionRevision?: SubscriptionRevision;
-    mutationIds?: string[];
+    originCommandIds?: string[];
   }
   | {
     type: "query.progress";
@@ -287,7 +323,7 @@ export type ServerMessage =
     reason?: "initial" | "invalidate" | "recover";
     throughRevision: SubscriptionRevision;
     trace?: MessageTrace;
-    mutationIds?: string[];
+    originCommandIds?: string[];
   }
   | {
     type: "query.patch";
@@ -305,7 +341,7 @@ export type ServerMessage =
     cacheScope?: string;
     cacheRevision?: string;
     trace?: MessageTrace;
-    mutationIds?: string[];
+    originCommandIds?: string[];
   }
 	| {
 		type: "query.pagePatch";
@@ -324,7 +360,7 @@ export type ServerMessage =
 		cacheScope?: string;
 		cacheRevision?: string;
 		trace?: MessageTrace;
-		mutationIds?: string[];
+		originCommandIds?: string[];
 	}
 	| {
 		type: "query.objectPatch";
@@ -337,14 +373,14 @@ export type ServerMessage =
 		cacheScope?: string;
 		cacheRevision?: string;
 		trace?: MessageTrace;
-		mutationIds?: string[];
+		originCommandIds?: string[];
 	}
   | {
     type: "sync.snapshot";
     id: string;
     path?: string;
     result: JsonValue[];
-    cursor: SyncCursor;
+    cursor: ReplicaCursor;
     key: string;
     orderBy?: string;
     orderDirection?: "asc" | "desc";
@@ -357,10 +393,10 @@ export type ServerMessage =
     type: "sync.delta";
     id: string;
     path?: string;
-    cursor: SyncCursor;
+    cursor: ReplicaCursor;
     upserts?: JsonValue[];
     deleted?: string[];
-    mutationIds?: string[];
+    originCommandIds?: string[];
     hashes?: Record<string, string>;
     digest?: string;
   }
@@ -384,8 +420,8 @@ export type ServerMessage =
   }
   | { type: "sync.error"; id: string; path?: string; error: string }
   | { type: "query.error"; id: string; path?: string; error: string }
-  | { type: "mutation.result"; id: string; path?: string; result: JsonValue; trace?: MessageTrace }
-  | { type: "mutation.error"; id: string; path?: string; error: string; trace?: MessageTrace }
+  | { type: "reducer.result"; id: string; path?: string; result: JsonValue; originCommandId: string; committedRevision?: number; trace?: MessageTrace }
+  | { type: "reducer.error"; id: string; path?: string; error: string; trace?: MessageTrace }
   | { type: "action.result"; id: string; path?: string; result: JsonValue; trace?: MessageTrace }
   | { type: "action.error"; id: string; path?: string; error: string; trace?: MessageTrace }
   | { type: "system.reload"; reason: string };

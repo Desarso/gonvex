@@ -4,9 +4,9 @@ import {
   GonvexClient,
   GonvexClientError,
   type FunctionReference,
-  type QueuedMutationOutcome,
+  type QueuedReducerOutcome,
 } from "./index";
-import { DexieMutationOutbox } from "./outbox";
+import { DexieReducerOutbox } from "./outbox";
 
 type Listener = (event: { data?: string }) => void;
 
@@ -61,9 +61,9 @@ class FakeWebSocket {
   }
 }
 
-const syncRef: FunctionReference = { kind: "sync", path: "tasks.list" };
+const syncRef: FunctionReference = { kind: "query", delivery: "replica", path: "tasks.list" };
 const entitySyncRef: FunctionReference = {
-  kind: "sync",
+  kind: "query", delivery: "replica",
   path: "tasks.byWorkspaceSync",
   optimistic: { projection: { entity: "tasks", key: "id", resultPath: [] } },
 };
@@ -77,12 +77,12 @@ const objectQueryRef: FunctionReference = {
   path: "tasks.get",
   optimistic: { projection: { entity: "tasks", key: "id", resultPath: [] } },
 };
-const mutationRef: FunctionReference = { kind: "mutation", path: "tasks.update" };
-const generatedMutationRef: FunctionReference = {
-  kind: "mutation",
+const reducerRef: FunctionReference = { kind: "reducer", path: "tasks.update" };
+const generatedReducerRef: FunctionReference = {
+  kind: "reducer",
   path: "tasks.generatedUpdate",
   optimistic: {
-    mutation: { entity: "tasks", rowIdPath: ["taskId"], fieldsPath: ["updates"] },
+    reducer: { entity: "tasks", rowIdPath: ["taskId"], fieldsPath: ["updates"] },
   },
 };
 const directive = {
@@ -175,8 +175,8 @@ function optimisticEntityPatch(title: string) {
   }];
 }
 
-describe("optimistic mutation integration", () => {
-  it("does not reconnect or retain a mutation whose enqueue finishes after close", async () => {
+describe("optimistic reducer integration", () => {
+  it("does not reconnect or retain a reducer whose enqueue finishes after close", async () => {
     let releaseEnqueue!: () => void;
     const enqueueGate = new Promise<void>((resolve) => {
       releaseEnqueue = resolve;
@@ -185,47 +185,47 @@ describe("optimistic mutation integration", () => {
     const started = new Promise<void>((resolve) => {
       enqueueStarted = resolve;
     });
-    const originalEnqueue = DexieMutationOutbox.prototype.enqueue;
-    vi.spyOn(DexieMutationOutbox.prototype, "enqueue").mockImplementation(async function (mutation) {
+    const originalEnqueue = DexieReducerOutbox.prototype.enqueue;
+    vi.spyOn(DexieReducerOutbox.prototype, "enqueue").mockImplementation(async function (reducer) {
       enqueueStarted();
       await enqueueGate;
-      return originalEnqueue.call(this, mutation);
+      return originalEnqueue.call(this, reducer);
     });
 
     const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
-    const mutation = client.mutation(mutationRef, { id: "task-a" }, {
+    const reducer = client.reducer(reducerRef, { id: "task-a" }, {
       optimistic: optimisticPatch("Never sent"),
     });
     await started;
     client.close();
     releaseEnqueue();
 
-    await expect(mutation).rejects.toMatchObject<GonvexClientError>({ code: "closed" });
+    await expect(reducer).rejects.toMatchObject<GonvexClientError>({ code: "closed" });
     await expect(client.outboxCount()).resolves.toBe(0);
     expect(FakeWebSocket.instances).toHaveLength(0);
     expect(client.optimisticOverlay.pendingFor(syncRef.path, "task-a")).toBe(false);
   });
 
-  it("routes optimistic mutationMany calls through the standard durable mutation path", async () => {
+  it("routes optimistic reducerMany calls through the standard durable reducer path", async () => {
     const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
     client.connect();
     const socket = latestSocket();
     socket.open();
-    socket.receive({ type: "session.ready", capabilities: { mutationBatch: 1 } });
+    socket.receive({ type: "session.ready", capabilities: { reducerBatch: 1 } });
 
-    const outcomes = client.mutationMany([{ ref: generatedMutationRef, args: {
+    const outcomes = client.reducerMany([{ ref: generatedReducerRef, args: {
       taskId: "task-a",
       updates: { priorityId: "priority-high" },
     } }]);
     await flushAsyncWork();
 
-    expect(sentMessages(socket).some((message) => message.type === "mutation.callMany")).toBe(false);
-    const call = sentMessages(socket).find((message) => message.type === "mutation.call");
-    expect(call).toMatchObject({ path: generatedMutationRef.path });
+    expect(sentMessages(socket).some((message) => message.type === "reducer.callMany")).toBe(false);
+    const call = sentMessages(socket).find((message) => message.type === "reducer.call");
+    expect(call).toMatchObject({ path: generatedReducerRef.path });
     socket.receive({
-      type: "mutation.result",
+      type: "reducer.result",
       id: call.id,
-      path: generatedMutationRef.path,
+      path: generatedReducerRef.path,
       result: "ok",
     });
 
@@ -238,7 +238,7 @@ describe("optimistic mutation integration", () => {
     const handler = vi.fn();
     const socket = openSync(client, handler);
 
-    const mutation = client.mutation<string>(mutationRef, { id: "task-a" }, {
+    const reducer = client.reducer<string>(reducerRef, { id: "task-a" }, {
       optimistic: optimisticPatch("Optimistic title"),
     });
     await flushAsyncWork();
@@ -247,7 +247,7 @@ describe("optimistic mutation integration", () => {
       result: [{ id: "task-a", title: "Optimistic title" }],
     });
 
-    const call = sentMessages(socket).find((message) => message.type === "mutation.call");
+    const call = sentMessages(socket).find((message) => message.type === "reducer.call");
     const callsBeforeDelta = handler.mock.calls.length;
     socket.receive({
       type: "sync.delta",
@@ -255,11 +255,11 @@ describe("optimistic mutation integration", () => {
       path: syncRef.path,
       cursor: { epoch: "sync-a", revision: 2 },
       upserts: [{ id: "task-a", title: "Server confirmed" }],
-      mutationIds: [call.id],
+      originCommandIds: [call.id],
     });
-    socket.receive({ type: "mutation.result", id: call.id, path: mutationRef.path, result: "ok" });
+    socket.receive({ type: "reducer.result", id: call.id, path: reducerRef.path, result: "ok" });
 
-    await expect(mutation).resolves.toBe("ok");
+    await expect(reducer).resolves.toBe("ok");
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Server confirmed" }],
     });
@@ -270,19 +270,19 @@ describe("optimistic mutation integration", () => {
     expect(client.optimisticOverlay.pendingFor(syncRef.path, "task-a")).toBe(false);
   });
 
-  it("does not reveal stale sync rows when the mutation result arrives before its delta", async () => {
+  it("does not reveal stale sync rows when the reducer result arrives before its delta", async () => {
     const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
     const handler = vi.fn();
     const socket = openSync(client, handler);
 
-    const mutation = client.mutation<string>(mutationRef, { id: "task-a" }, {
+    const reducer = client.reducer<string>(reducerRef, { id: "task-a" }, {
       optimistic: optimisticPatch("Optimistic title"),
     });
     await flushAsyncWork();
-    const call = sentMessages(socket).find((message) => message.type === "mutation.call");
-    socket.receive({ type: "mutation.result", id: call.id, path: mutationRef.path, result: "ok" });
+    const call = sentMessages(socket).find((message) => message.type === "reducer.call");
+    socket.receive({ type: "reducer.result", id: call.id, path: reducerRef.path, result: "ok" });
 
-    await expect(mutation).resolves.toBe("ok");
+    await expect(reducer).resolves.toBe("ok");
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       type: "sync.snapshot",
       result: [{ id: "task-a", title: "Optimistic title" }],
@@ -295,7 +295,7 @@ describe("optimistic mutation integration", () => {
       path: syncRef.path,
       cursor: { epoch: "sync-a", revision: 2 },
       upserts: [{ id: "task-a", title: "Server confirmed" }],
-      mutationIds: [call.id],
+      originCommandIds: [call.id],
     });
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Server confirmed" }],
@@ -323,7 +323,7 @@ describe("optimistic mutation integration", () => {
       subscriptionRevision: { epoch: "query-a", sequence: 1 },
     });
 
-    const mutation = client.mutation<string>(mutationRef, { id: "task-a" }, {
+    const reducer = client.reducer<string>(reducerRef, { id: "task-a" }, {
       optimistic: optimisticEntityPatch("Optimistic title"),
     });
     await flushAsyncWork();
@@ -332,9 +332,9 @@ describe("optimistic mutation integration", () => {
       result: { page: [{ id: "task-a", title: "Optimistic title" }] },
     });
 
-    const call = sentMessages(socket).find((message) => message.type === "mutation.call");
-    socket.receive({ type: "mutation.result", id: call.id, path: mutationRef.path, result: "ok" });
-    await expect(mutation).resolves.toBe("ok");
+    const call = sentMessages(socket).find((message) => message.type === "reducer.call");
+    socket.receive({ type: "reducer.result", id: call.id, path: reducerRef.path, result: "ok" });
+    await expect(reducer).resolves.toBe("ok");
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: { page: [{ id: "task-a", title: "Optimistic title" }] },
     });
@@ -345,7 +345,7 @@ describe("optimistic mutation integration", () => {
       path: pageQueryRef.path,
       result: { page: [{ id: "task-a", title: "Server confirmed" }], isDone: true },
       subscriptionRevision: { epoch: "query-a", sequence: 2 },
-      mutationIds: [call.id],
+      originCommandIds: [call.id],
     });
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: { page: [{ id: "task-a", title: "Server confirmed" }] },
@@ -369,7 +369,7 @@ describe("optimistic mutation integration", () => {
       subscriptionRevision: { epoch: "query-object", sequence: 1 },
     });
 
-    const mutation = client.mutation<string>(mutationRef, { id: "task-a" }, {
+    const reducer = client.reducer<string>(reducerRef, { id: "task-a" }, {
       optimistic: optimisticEntityPatch("Optimistic title"),
     });
     await flushAsyncWork();
@@ -377,16 +377,16 @@ describe("optimistic mutation integration", () => {
       result: { id: "task-a", title: "Optimistic title" },
     });
 
-    const call = sentMessages(socket).find((message) => message.type === "mutation.call");
-    socket.receive({ type: "mutation.result", id: call.id, path: mutationRef.path, result: "ok" });
-    await expect(mutation).resolves.toBe("ok");
+    const call = sentMessages(socket).find((message) => message.type === "reducer.call");
+    socket.receive({ type: "reducer.result", id: call.id, path: reducerRef.path, result: "ok" });
+    await expect(reducer).resolves.toBe("ok");
     socket.receive({
       type: "query.result",
       id: subscribe.id,
       path: objectQueryRef.path,
       result: { id: "task-a", title: "Server confirmed" },
       subscriptionRevision: { epoch: "query-object", sequence: 2 },
-      mutationIds: [call.id],
+      originCommandIds: [call.id],
     });
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: { id: "task-a", title: "Server confirmed" },
@@ -402,13 +402,13 @@ describe("optimistic mutation integration", () => {
     socket.receive({ type: "session.ready", queryCache: directive });
     const subscribe = sentMessages(socket).find((message) => message.type === "query.subscribe");
 
-    const mutation = client.mutation<string>(mutationRef, { id: "task-a" }, {
+    const reducer = client.reducer<string>(reducerRef, { id: "task-a" }, {
       optimistic: optimisticEntityPatch("Optimistic title"),
     });
     await flushAsyncWork();
-    const call = sentMessages(socket).find((message) => message.type === "mutation.call");
-    socket.receive({ type: "mutation.result", id: call.id, path: mutationRef.path, result: "ok" });
-    await expect(mutation).resolves.toBe("ok");
+    const call = sentMessages(socket).find((message) => message.type === "reducer.call");
+    socket.receive({ type: "reducer.result", id: call.id, path: reducerRef.path, result: "ok" });
+    await expect(reducer).resolves.toBe("ok");
 
     socket.receive({
       type: "query.result",
@@ -427,7 +427,7 @@ describe("optimistic mutation integration", () => {
       path: pageQueryRef.path,
       result: { page: [{ id: "task-a", title: "Server confirmed" }], isDone: true },
       subscriptionRevision: { epoch: "query-late", sequence: 2 },
-      mutationIds: [call.id],
+      originCommandIds: [call.id],
     });
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: { page: [{ id: "task-a", title: "Server confirmed" }] },
@@ -443,13 +443,13 @@ describe("optimistic mutation integration", () => {
     socket.receive({ type: "session.ready", queryCache: directive });
     const open = sentMessages(socket).find((message) => message.type === "sync.open");
 
-    const mutation = client.mutation<string>(mutationRef, { id: "task-a" }, {
+    const reducer = client.reducer<string>(reducerRef, { id: "task-a" }, {
       optimistic: optimisticEntityPatch("Optimistic title"),
     });
     await flushAsyncWork();
-    const call = sentMessages(socket).find((message) => message.type === "mutation.call");
-    socket.receive({ type: "mutation.result", id: call.id, path: mutationRef.path, result: "ok" });
-    await expect(mutation).resolves.toBe("ok");
+    const call = sentMessages(socket).find((message) => message.type === "reducer.call");
+    socket.receive({ type: "reducer.result", id: call.id, path: reducerRef.path, result: "ok" });
+    await expect(reducer).resolves.toBe("ok");
 
     socket.receive({
       type: "sync.snapshot",
@@ -469,47 +469,47 @@ describe("optimistic mutation integration", () => {
       path: entitySyncRef.path,
       cursor: { epoch: "sync-late", revision: 2 },
       upserts: [{ id: "task-a", title: "Server confirmed" }],
-      mutationIds: [call.id],
+      originCommandIds: [call.id],
     });
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Server confirmed" }],
     });
   });
 
-  it("reverts optimistic rows when the server rejects the mutation", async () => {
+  it("reverts optimistic rows when the server rejects the reducer", async () => {
     const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
     const handler = vi.fn();
     const socket = openSync(client, handler);
-    const mutation = client.mutation(mutationRef, { id: "task-a" }, {
+    const reducer = client.reducer(reducerRef, { id: "task-a" }, {
       optimistic: optimisticPatch("Rejected title"),
     });
     await flushAsyncWork();
-    const call = sentMessages(socket).find((message) => message.type === "mutation.call");
+    const call = sentMessages(socket).find((message) => message.type === "reducer.call");
 
-    socket.receive({ type: "mutation.error", id: call.id, path: mutationRef.path, error: "not allowed" });
+    socket.receive({ type: "reducer.error", id: call.id, path: reducerRef.path, error: "not allowed" });
 
-    await expect(mutation).rejects.toMatchObject<GonvexClientError>({ code: "server" });
+    await expect(reducer).rejects.toMatchObject<GonvexClientError>({ code: "server" });
     await expect(client.outboxCount()).resolves.toBe(0);
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Server title" }],
     });
   });
 
-  it("queues a disconnected mutation, drains it on reconnect, and settles the overlay", async () => {
+  it("queues a disconnected reducer, drains it on reconnect, and settles the overlay", async () => {
     const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
     const handler = vi.fn();
     const firstSocket = openSync(client, handler);
-    const mutation = client.mutation(mutationRef, { id: "task-a" }, {
+    const reducer = client.reducer(reducerRef, { id: "task-a" }, {
       optimistic: optimisticPatch("Queued title"),
       offline: "queue",
     });
     await flushAsyncWork();
-    const firstCall = sentMessages(firstSocket).find((message) => message.type === "mutation.call");
+    const firstCall = sentMessages(firstSocket).find((message) => message.type === "reducer.call");
 
     firstSocket.disconnect();
-    await expect(mutation).resolves.toEqual<QueuedMutationOutcome>({
+    await expect(reducer).resolves.toEqual<QueuedReducerOutcome>({
       status: "queued",
-      mutationId: firstCall.id,
+      reducerId: firstCall.id,
     });
     await expect(client.outboxCount()).resolves.toBe(1);
     expect(client.optimisticOverlay.pendingFor(syncRef.path, "task-a")).toBe(true);
@@ -518,17 +518,17 @@ describe("optimistic mutation integration", () => {
     const secondSocket = latestSocket();
     secondSocket.open();
     await flushAsyncWork();
-    const replay = sentMessages(secondSocket).find((message) => message.type === "mutation.call");
-    expect(replay).toMatchObject({ id: firstCall.id, path: mutationRef.path, args: { id: "task-a" } });
+    const replay = sentMessages(secondSocket).find((message) => message.type === "reducer.call");
+    expect(replay).toMatchObject({ id: firstCall.id, path: reducerRef.path, args: { id: "task-a" } });
 
-    secondSocket.receive({ type: "mutation.result", id: replay.id, path: mutationRef.path, result: "ok" });
+    secondSocket.receive({ type: "reducer.result", id: replay.id, path: reducerRef.path, result: "ok" });
     secondSocket.receive({
       type: "sync.delta",
       id: sentMessages(firstSocket).find((message) => message.type === "sync.open").id,
       path: syncRef.path,
       cursor: { epoch: "sync-a", revision: 2 },
       upserts: [{ id: "task-a", title: "Server confirmed" }],
-      mutationIds: [replay.id],
+      originCommandIds: [replay.id],
     });
     await flushAsyncWork();
     await expect(client.outboxCount()).resolves.toBe(0);
@@ -538,21 +538,21 @@ describe("optimistic mutation integration", () => {
     });
   });
 
-  it("queues and acknowledges offline mutations without optimistic UI metadata", async () => {
+  it("queues and acknowledges offline reducers without optimistic UI metadata", async () => {
     const client = new GonvexClient("ws://runtime.test/ws", { sync: false, outbox: { enabled: false } });
-    const mutation = client.mutation(mutationRef, { id: "task-a" }, { offline: "queue" });
+    const reducer = client.reducer(reducerRef, { id: "task-a" }, { offline: "queue" });
     await flushAsyncWork();
     const firstSocket = latestSocket();
     firstSocket.disconnect();
-    await expect(mutation).resolves.toMatchObject({ status: "queued" });
+    await expect(reducer).resolves.toMatchObject({ status: "queued" });
     await expect(client.outboxCount()).resolves.toBe(1);
 
     await vi.advanceTimersByTimeAsync(2_500);
     const secondSocket = latestSocket();
     secondSocket.open();
     await flushAsyncWork();
-    const replay = sentMessages(secondSocket).find((message) => message.type === "mutation.call");
-    secondSocket.receive({ type: "mutation.result", id: replay.id, path: mutationRef.path, result: "ok" });
+    const replay = sentMessages(secondSocket).find((message) => message.type === "reducer.call");
+    secondSocket.receive({ type: "reducer.result", id: replay.id, path: reducerRef.path, result: "ok" });
     await flushAsyncWork();
 
     await expect(client.outboxCount()).resolves.toBe(0);
@@ -567,11 +567,11 @@ describe("optimistic mutation integration", () => {
       outbox: { databaseName },
     });
     const firstSocket = openSync(firstClient, vi.fn());
-    const queued = firstClient.mutation(mutationRef, { id: "task-a" }, {
+    const queued = firstClient.reducer(reducerRef, { id: "task-a" }, {
       optimistic: optimisticPatch("Restored title"),
       offline: "queue",
     });
-    await waitForSentMessage(firstSocket, "mutation.call");
+    await waitForSentMessage(firstSocket, "reducer.call");
     firstSocket.disconnect();
     await expect(queued).resolves.toMatchObject({ status: "queued" });
     await expect(firstClient.outboxCount()).resolves.toBe(1);
@@ -605,7 +605,7 @@ describe("optimistic mutation integration", () => {
     });
 
     const firstClient = new GonvexClient("ws://runtime.test/ws", clientOptions("user-a"));
-    const queued = firstClient.mutation(mutationRef, { id: "task-a" }, {
+    const queued = firstClient.reducer(reducerRef, { id: "task-a" }, {
       optimistic: optimisticEntityPatch("User A title"),
       offline: "queue",
     });
@@ -632,7 +632,7 @@ describe("optimistic mutation integration", () => {
     restoredClient.close();
   });
 
-  it("never restores opaque-token mutations without a provable identity", async () => {
+  it("never restores opaque-token reducers without a provable identity", async () => {
     vi.useRealTimers();
     vi.stubGlobal("window", { setTimeout: globalThis.setTimeout });
     const databaseName = `gonvex-optimistic-opaque-${crypto.randomUUID()}`;
@@ -644,7 +644,7 @@ describe("optimistic mutation integration", () => {
       outbox: { databaseName },
     };
     const firstClient = new GonvexClient("ws://runtime.test/ws", options);
-    const queued = firstClient.mutation(mutationRef, { id: "task-a" }, {
+    const queued = firstClient.reducer(reducerRef, { id: "task-a" }, {
       optimistic: optimisticEntityPatch("Opaque session title"),
       offline: "queue",
     });
@@ -659,7 +659,7 @@ describe("optimistic mutation integration", () => {
     reloadedClient.close();
   });
 
-  it("persists an online optimistic mutation before transport and restores it until reconciliation", async () => {
+  it("persists an online optimistic reducer before transport and restores it until reconciliation", async () => {
     vi.useRealTimers();
     vi.stubGlobal("window", { setTimeout: globalThis.setTimeout });
     const databaseName = `gonvex-optimistic-online-${crypto.randomUUID()}`;
@@ -668,12 +668,12 @@ describe("optimistic mutation integration", () => {
       outbox: { databaseName },
     });
     const firstSocket = openSync(firstClient, vi.fn());
-    const mutation = firstClient.mutation<string>(mutationRef, { id: "task-a" }, {
+    const reducer = firstClient.reducer<string>(reducerRef, { id: "task-a" }, {
       optimistic: optimisticPatch("Durable online title"),
     });
-    const call = await waitForSentMessage(firstSocket, "mutation.call");
-    firstSocket.receive({ type: "mutation.result", id: call.id, path: mutationRef.path, result: "ok" });
-    await expect(mutation).resolves.toBe("ok");
+    const call = await waitForSentMessage(firstSocket, "reducer.call");
+    firstSocket.receive({ type: "reducer.result", id: call.id, path: reducerRef.path, result: "ok" });
+    await expect(reducer).resolves.toBe("ok");
     await expect(firstClient.outboxCount()).resolves.toBe(1);
     firstClient.close();
 
@@ -696,7 +696,7 @@ describe("optimistic mutation integration", () => {
       path: syncRef.path,
       cursor: { epoch: "sync-a", revision: 2 },
       upserts: [{ id: "task-a", title: "Server confirmed" }],
-      mutationIds: [call.id],
+      originCommandIds: [call.id],
     });
     expect(secondClient.optimisticOverlay.pendingFor(syncRef.path, "task-a")).toBe(false);
     await waitForOutboxCount(secondClient, 0);

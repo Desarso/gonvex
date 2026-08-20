@@ -13,7 +13,7 @@ That means this stays the same for every tenant:
 import { api } from "./gonvex/_generated/api";
 
 const tasks = useQuery(api.tasks.list, {});
-const createTask = useMutation(api.tasks.create);
+const createTask = useReducer(api.tasks.create);
 ```
 
 What changes is the active tenant attached to the Gonvex client session.
@@ -31,7 +31,7 @@ runtime URL
 -> function context
 ```
 
-The frontend can choose a tenant, but it is not trusted as authority. The runtime must verify that the authenticated user belongs to that tenant before executing queries, mutations, actions, or subscriptions.
+The frontend can choose a tenant, but it is not trusted as authority. The runtime verifies membership before executing Queries, Reducers, Actions, Live Queries, or Replica Collections.
 
 ## Configure the Client
 
@@ -93,10 +93,11 @@ gonvex.setAuth({ token, tenant: nextTenantId });
 ```
 
 The open socket reauthenticates. The runtime detaches and reattaches active live
-queries with the new verified tenant, resets durable sync collections when the
+Live Queries with the new verified tenant, resets Replica Collections when the
 visibility scope changes, and issues a new cache scope. React query/sync hooks
 clear their previous scoped result until the new scope produces local or server
-data.
+data. Normalized server entities remain owned by the Local Replica rather than
+application React state.
 
 With native Gonvex auth, use the provider helper:
 

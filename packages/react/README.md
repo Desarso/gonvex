@@ -3,8 +3,8 @@
 React bindings for Gonvex.
 
 This package provides the provider and hooks used by generated Gonvex bindings:
-`useQuery`, `useQueryResult`, `useMutation`, `useAction`, `useSync`,
-`useSyncSelector`, auth-aware providers, and Convex-style compatibility exports.
+`useQuery`, `useLiveQueryState`, `useReducer`, `useAction`, `useEntity`,
+`useReplicaCollection`, auth-aware providers, and compatibility exports.
 
 ## Install
 
@@ -16,7 +16,7 @@ npm install @gonvex/react @gonvex/client
 
 ```tsx
 import { GonvexClient } from "@gonvex/client";
-import { GonvexProvider, useMutation, useQuery } from "@gonvex/react";
+import { GonvexProvider, useReducer, useQuery } from "@gonvex/react";
 import { api } from "./gonvex/_generated/api";
 
 const client = new GonvexClient("ws://localhost:8080/ws", {
@@ -33,7 +33,7 @@ export function AppRoot() {
 
 function Tasks() {
   const tasks = useQuery(api.tasks.list, { status: "open" });
-  const createTask = useMutation(api.tasks.create);
+  const createTask = useReducer(api.tasks.create);
 
   return (
     <button onClick={() => void createTask({ title: "New task" })}>
@@ -43,11 +43,9 @@ function Tasks() {
 }
 ```
 
-`useQuery` automatically benefits from the browser query-result cache. On a
-warm load it may receive the last scoped snapshot first, followed by the
-authoritative server result. Its signature remains `T | undefined`, but a
-server `query.error` now **throws** during render (Convex-compatible) so error
-boundaries can catch it instead of looking like an endless loading state.
+`useQuery` executes a read-only Query once. Persistent, continuously verified
+windows use `useLiveQueryState`, which returns normalized rows plus `source`,
+`completeness`, and `freshness`.
 
 ### `useQueryResult` (preferred for new UI)
 
@@ -73,23 +71,23 @@ Soft timeout default is 15s (subscription stays alive; does not reject).
 const { isWebSocketConnected, hasEverConnected, connectionRetries } = useConvexConnectionState();
 ```
 
-This reflects the real WebSocket lifecycle (not a stub). Mutations/actions
+This reflects the real WebSocket lifecycle (not a stub). Reducers/Actions
 reject with `GonvexClientError` on timeout or disconnect and never hang forever.
 
-## Durable sync collections
+## Replica Collections
 
-`useSync` reads a bounded entity collection from the client's normalized
+`useReplicaCollection` reads a bounded entity collection from the client's normalized
 IndexedDB store, then updates it as the server resumes or snapshots the durable
 Postgres cursor:
 
 ```tsx
-const tasks = useSync<Task>(api.tasks.recent, { workspaceId });
+const tasks = useReplicaCollection<Task>(api.tasks.recent, { workspaceId });
 ```
 
-Use `useSyncSelector` when a component needs only derived state:
+Use `useReplicaSelector` when a component needs only derived state:
 
 ```tsx
-const openCount = useSyncSelector<Task, number>(
+const openCount = useReplicaSelector<Task, number>(
   api.tasks.recent,
   { workspaceId },
   (tasks) => tasks.filter((task) => task.status === "open").length,
@@ -143,8 +141,8 @@ The package also exports Convex-style names for incremental migration:
 - `useConvexConnectionState`
 - `usePaginatedQuery`
 - `useQueryResult`
-- `useSync`
-- `useSyncSelector`
+- `useMutation` (compatibility alias for `useReducer`)
+- `useSync` / `useSyncSelector` (compatibility aliases for Replica hooks)
 
 ## Related Packages
 

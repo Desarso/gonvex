@@ -421,11 +421,22 @@ func parseRegistrations(root string, file string) (map[string]manifest.FunctionE
 			return true
 		}
 		entry := manifest.FunctionEntry{Kind: functionKind(selector.Sel.Name), Handler: handler.Name, File: rel}
+		entry.Internal = selector.Sel.Name == "InternalReducer"
+		switch selector.Sel.Name {
+		case "LiveQuery":
+			entry.Delivery = manifest.DeliveryLive
+		case "ReplicaCollection":
+			entry.Delivery = manifest.DeliveryReplica
+		default:
+			if entry.Kind == manifest.FunctionKindQuery {
+				entry.Delivery = manifest.DeliveryOneShot
+			}
+		}
 		optionStart := 2
-		if selector.Sel.Name == "Sync" && len(call.Args) >= 3 {
-			definition := &manifest.SyncDefinition{}
-			if parseSyncOption(call.Args[2], definition) {
-				entry.Sync = definition
+		if selector.Sel.Name == "ReplicaCollection" && len(call.Args) >= 3 {
+			definition := &manifest.ReplicaCollectionDefinition{}
+			if parseReplicaOption(call.Args[2], definition) {
+				entry.Replica = definition
 			}
 			optionStart = 3
 		}
@@ -441,14 +452,14 @@ func parseRegistrations(root string, file string) (map[string]manifest.FunctionE
 
 func registrationKind(name string) bool {
 	switch name {
-	case "Query", "Mutation", "Action", "HTTP", "PublicHTTP", "InternalMutation", "LiveGrid", "Sync":
+	case "Query", "LiveQuery", "ReplicaCollection", "Reducer", "Action", "HTTP", "PublicHTTP", "InternalReducer":
 		return true
 	default:
 		return false
 	}
 }
 
-func parseSyncOption(expression ast.Expr, definition *manifest.SyncDefinition) bool {
+func parseReplicaOption(expression ast.Expr, definition *manifest.ReplicaCollectionDefinition) bool {
 	call, ok := expression.(*ast.CallExpr)
 	if !ok {
 		return false
@@ -457,7 +468,7 @@ func parseSyncOption(expression ast.Expr, definition *manifest.SyncDefinition) b
 	if !ok {
 		return false
 	}
-	if receiver, ok := selector.X.(*ast.Ident); ok && receiver.Name == "gonvex" && selector.Sel.Name == "SyncTable" {
+	if receiver, ok := selector.X.(*ast.Ident); ok && receiver.Name == "gonvex" && selector.Sel.Name == "ReplicaTable" {
 		values := stringArguments(call.Args)
 		if len(values) == 0 {
 			return false
@@ -468,7 +479,7 @@ func parseSyncOption(expression ast.Expr, definition *manifest.SyncDefinition) b
 		definition.EqualFilters = map[string]string{}
 		return true
 	}
-	if !parseSyncOption(selector.X, definition) {
+	if !parseReplicaOption(selector.X, definition) {
 		return false
 	}
 	values := stringArguments(call.Args)
@@ -537,40 +548,39 @@ func stringLiteral(expression ast.Expr) (string, bool) {
 	return value, true
 }
 
-type dependencyOptionTarget struct {
-	kind  string
-	start int
-}
-
-func parseDependencyOption(expression ast.Expr, dependencies *manifest.FunctionDependencies) dependencyOptionTarget {
+func parseDependencyOption(expression ast.Expr, dependencies *manifest.FunctionDependencies) {
 	call, ok := expression.(*ast.CallExpr)
 	if !ok {
-		return dependencyOptionTarget{}
+		return
 	}
 	selector, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
-		return dependencyOptionTarget{}
+		return
 	}
 	if receiver, ok := selector.X.(*ast.Ident); ok && receiver.Name == "gonvex" {
 		switch selector.Sel.Name {
-		case "Reads":
-			start := len(dependencies.Reads)
-			for _, value := range stringArguments(call.Args) {
-				dependencies.Reads = append(dependencies.Reads, manifest.ReadDependency{Table: value})
+		case "LivePlan":
+			if len(call.Args) > 0 {
+				if plan := parseLiveQueryPlan(call.Args[0]); plan != nil {
+					dependencies.LiveQueryPlan = plan
+					read := manifest.ReadDependency{Table: plan.Table, Columns: append([]string(nil), plan.Columns...), Windowed: plan.Window != nil}
+					if plan.Search != nil {
+						read.Filters = append(read.Filters, plan.Search.Columns...)
+					}
+					read.Filters = append(read.Filters, manifestExpressionColumns(plan.Where)...)
+					if plan.Sort != nil {
+						read.OrdersBy = append(read.OrdersBy, plan.Sort.AllowedColumns...)
+					}
+					dependencies.Reads = append(dependencies.Reads, read)
+				}
 			}
-			return dependencyOptionTarget{kind: "read", start: start}
-		case "Writes":
-			start := len(dependencies.Writes)
-			for _, value := range stringArguments(call.Args) {
-				dependencies.Writes = append(dependencies.Writes, manifest.WriteDependency{Table: value})
-			}
-			return dependencyOptionTarget{kind: "write", start: start}
-		case "ReadsEphemeral":
-			dependencies.ReadsEphemeral = true
-		case "WritesEphemeral":
-			dependencies.WritesEphemeral = true
 		case "ShareByPermissions":
 			dependencies.ShareByPermissions = true
+		case "OnlineOnlyNonOptimistic":
+			values := stringArguments(call.Args)
+			if len(values) > 0 {
+				dependencies.NonOptimisticReason = values[0]
+			}
 		case "ShareByVisibility":
 			values := stringArguments(call.Args)
 			if len(values) > 0 {
@@ -585,37 +595,163 @@ func parseDependencyOption(expression ast.Expr, dependencies *manifest.FunctionD
 				dependencies.ShareResultField = values[1]
 			}
 		}
-		return dependencyOptionTarget{}
+		return
 	}
+}
 
-	target := parseDependencyOption(selector.X, dependencies)
+func manifestExpressionColumns(expression *manifest.LiveExpression) []string {
+	if expression == nil {
+		return nil
+	}
+	columns := []string{}
+	if strings.TrimSpace(expression.Column) != "" {
+		columns = append(columns, expression.Column)
+	}
+	for _, child := range expression.Children {
+		columns = append(columns, manifestExpressionColumns(child)...)
+	}
+	return columns
+}
+
+func parseLiveQueryPlan(expression ast.Expr) *manifest.LiveQueryPlan {
+	call, ok := expression.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return nil
+	}
+	if receiver, ok := selector.X.(*ast.Ident); ok && receiver.Name == "gonvex" && selector.Sel.Name == "LiveTable" {
+		values := stringArguments(call.Args)
+		if len(values) == 0 {
+			return nil
+		}
+		return &manifest.LiveQueryPlan{Table: values[0], Key: "id"}
+	}
+	plan := parseLiveQueryPlan(selector.X)
+	if plan == nil {
+		return nil
+	}
 	values := stringArguments(call.Args)
-	switch target.kind {
-	case "read":
-		for index := target.start; index < len(dependencies.Reads); index++ {
-			switch selector.Sel.Name {
-			case "Columns":
-				dependencies.Reads[index].Columns = values
-			case "Filters":
-				dependencies.Reads[index].Filters = values
-			case "OrdersBy":
-				dependencies.Reads[index].OrdersBy = values
-			case "Windowed":
-				dependencies.Reads[index].Windowed = true
-			case "Predicate":
-				if len(values) > 0 {
-					dependencies.Reads[index].Predicate = values[0]
-				}
+	switch selector.Sel.Name {
+	case "EntityKey":
+		if len(values) > 0 {
+			plan.Key = values[0]
+		}
+	case "Select":
+		plan.Columns = values
+	case "ResultRowsAt":
+		plan.ResultPath = values
+	case "Filter":
+		if len(call.Args) > 0 {
+			plan.Where = parseLiveExpression(call.Args[0])
+		}
+	case "SearchArg":
+		if len(values) > 0 {
+			plan.Search = &manifest.LiveSearch{Argument: values[0], Columns: append([]string(nil), values[1:]...)}
+		}
+	case "SortArgs":
+		if len(values) >= 4 {
+			plan.Sort = &manifest.LiveSort{ColumnArgument: values[0], DirectionArgument: values[1], DefaultColumn: values[2], DefaultDirection: strings.ToLower(values[3]), AllowedColumns: append([]string(nil), values[4:]...)}
+		}
+	case "WindowArgs":
+		if len(values) >= 2 {
+			plan.Window = &manifest.LiveWindow{OffsetArgument: values[0], LimitArgument: values[1]}
+			if len(call.Args) > 2 {
+				plan.Window.DefaultLimit = intLiteral(call.Args[2])
+			}
+			if len(call.Args) > 3 {
+				plan.Window.MaxLimit = intLiteral(call.Args[3])
 			}
 		}
-	case "write":
-		if selector.Sel.Name == "Columns" {
-			for index := target.start; index < len(dependencies.Writes); index++ {
-				dependencies.Writes[index].Columns = values
+	case "OnlineOnly":
+		plan.ServerOnly = true
+	}
+	return plan
+}
+
+func parseLiveExpression(expression ast.Expr) *manifest.LiveExpression {
+	call, ok := expression.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return nil
+	}
+	operators := map[string]string{
+		"Eq": "eq", "Neq": "neq", "GreaterThan": "gt", "GreaterOrEqual": "gte",
+		"LessThan": "lt", "LessOrEqual": "lte", "In": "in", "Contains": "contains",
+		"ContainsInsensitive": "containsInsensitive", "Range": "range", "All": "and",
+		"Any": "or", "Not": "not", "ServerExpression": "server",
+	}
+	operator := operators[selector.Sel.Name]
+	if operator == "" {
+		return nil
+	}
+	result := &manifest.LiveExpression{Operator: operator}
+	if operator == "and" || operator == "or" || operator == "not" {
+		for _, argument := range call.Args {
+			if child := parseLiveExpression(argument); child != nil {
+				result.Children = append(result.Children, child)
+			}
+		}
+		return result
+	}
+	if len(call.Args) > 0 {
+		if value, ok := stringLiteral(call.Args[0]); ok {
+			result.Column = value
+		}
+	}
+	if len(call.Args) > 1 {
+		result.Value = parseLiveValue(call.Args[1])
+	}
+	if len(call.Args) > 2 {
+		result.ValueTo = parseLiveValue(call.Args[2])
+	}
+	return result
+}
+
+func parseLiveValue(expression ast.Expr) *manifest.LiveValue {
+	if call, ok := expression.(*ast.CallExpr); ok {
+		if selector, ok := call.Fun.(*ast.SelectorExpr); ok && len(call.Args) > 0 {
+			switch selector.Sel.Name {
+			case "Arg":
+				if value, ok := stringLiteral(call.Args[0]); ok {
+					return &manifest.LiveValue{Argument: value}
+				}
+			case "Literal":
+				return &manifest.LiveValue{Literal: goLiteralValue(call.Args[0])}
 			}
 		}
 	}
-	return target
+	return nil
+}
+
+func goLiteralValue(expression ast.Expr) any {
+	switch value := expression.(type) {
+	case *ast.BasicLit:
+		switch value.Kind {
+		case token.STRING:
+			decoded, _ := strconv.Unquote(value.Value)
+			return decoded
+		case token.INT:
+			decoded, _ := strconv.ParseInt(value.Value, 0, 64)
+			return decoded
+		case token.FLOAT:
+			decoded, _ := strconv.ParseFloat(value.Value, 64)
+			return decoded
+		}
+	case *ast.Ident:
+		if value.Name == "true" {
+			return true
+		}
+		if value.Name == "false" {
+			return false
+		}
+	}
+	return nil
 }
 
 func stringArguments(arguments []ast.Expr) []string {
@@ -724,18 +860,16 @@ func functionKind(raw string) manifest.FunctionKind {
 	switch raw {
 	case "Query":
 		return manifest.FunctionKindQuery
-	case "Mutation":
-		return manifest.FunctionKindMutation
+	case "Reducer":
+		return manifest.FunctionKindReducer
 	case "Action":
 		return manifest.FunctionKindAction
 	case "HTTP", "PublicHTTP":
 		return manifest.FunctionKindHTTP
-	case "InternalMutation":
-		return manifest.FunctionKindInternalMutation
-	case "LiveGrid":
-		return manifest.FunctionKindLiveGrid
-	case "Sync":
-		return manifest.FunctionKindSync
+	case "InternalReducer":
+		return manifest.FunctionKindReducer
+	case "LiveQuery", "ReplicaCollection":
+		return manifest.FunctionKindQuery
 	default:
 		return manifest.FunctionKind(raw)
 	}
@@ -758,7 +892,7 @@ func writeBindings(root string, m manifest.Manifest) error {
 		"manifest.json": string(manifestJSON) + "\n",
 		"api.ts":        renderAPI(m),
 		"client.ts":     "// Generated by gonvex dev. Do not edit.\nexport { GonvexClient } from \"@gonvex/client\";\n",
-		"react.ts":      "// Generated by gonvex dev. Do not edit.\nexport { GonvexProvider, useMutation, useQuery, useSync, useSyncSelector } from \"@gonvex/react\";\n",
+		"react.ts":      "// Generated by gonvex dev. Do not edit.\nexport { GonvexProvider, useLiveQuery, useQuery, useReducer, useReplicaCollection, useReplicaSelector } from \"@gonvex/react\";\n",
 		"types.ts":      "// Generated by gonvex dev. Do not edit.\nexport type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };\n",
 		"schema.ts":     renderSchemaBinding(m.Schema.Normalize()),
 	}

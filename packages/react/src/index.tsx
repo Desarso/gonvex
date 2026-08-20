@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { ConvexReactClient, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient } from "@gonvex/client";
+import { ConvexReactClient, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient, type LiveQueryResult, type ReplicaRow } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
 export { GonvexClientError, type ConnectionState } from "@gonvex/client";
@@ -852,7 +852,7 @@ export function useQueryResult<T = JsonValue>(
   };
 }
 
-export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
+export function useLiveQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
   const client = useGonvexClient();
   const [result, setResult] = useState<T>();
   const [error, setError] = useState<Error | null>(null);
@@ -896,7 +896,69 @@ export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue 
   return result;
 }
 
-export function useSync<T extends JsonValue = JsonValue>(
+/** Read one normalized entity from the single Gonvex Local Replica. */
+export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): T | undefined {
+  const client = useGonvexClient();
+  useSyncExternalStore(
+    useCallback((notify) => client.localReplica.subscribe(notify), [client]),
+    useCallback(() => client.localReplica.version(), [client]),
+    () => 0,
+  );
+  return client.localReplica.entity<T>(entity, id);
+}
+
+/** Structured Live Query state backed by normalized Local Replica entities. */
+export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
+  ref: FunctionReference,
+  args: JsonValue | "skip" = {},
+): LiveQueryResult<T> {
+  const client = useGonvexClient();
+  const argsKey = JSON.stringify(args);
+  const signature = args === "skip" ? "" : client.replicaSignature(ref, args);
+  useEffect(() => {
+    if (args === "skip") return;
+    return client.subscribeQuery(ref, args, () => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, ref.kind, ref.path, argsKey]);
+  useSyncExternalStore(
+    useCallback((notify) => client.localReplica.subscribe(notify), [client]),
+    useCallback(() => client.localReplica.version(), [client]),
+    () => 0,
+  );
+  return signature
+    ? client.localReplica.liveQuery<T>(signature)
+    : { rows: [], source: "cache", completeness: "partial", freshness: client.localReplica.freshness() };
+}
+
+/** Execute a read-only Query once. Queries never subscribe or rerun. */
+export function useQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
+  const client = useGonvexClient();
+  const [result, setResult] = useState<T>();
+  const [error, setError] = useState<Error | null>(null);
+  const argsKey = JSON.stringify(args);
+
+  useEffect(() => {
+    let active = true;
+    if (args === "skip") {
+      setResult(undefined);
+      setError(null);
+      return () => { active = false; };
+    }
+    setResult(undefined);
+    setError(null);
+    void client.query<T>(ref, args).then(
+      (value) => { if (active) setResult(value); },
+      (failure) => { if (active) setError(failure instanceof Error ? failure : new Error(String(failure))); },
+    );
+    return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, ref.kind, ref.path, argsKey]);
+
+  if (error) throw error;
+  return result;
+}
+
+export function useReplicaCollection<T extends JsonValue = JsonValue>(
   ref: FunctionReference,
   args: JsonValue | "skip" = {},
 ): T[] | undefined {
@@ -917,7 +979,7 @@ export function useSync<T extends JsonValue = JsonValue>(
   );
 }
 
-export function useSyncSelector<T extends JsonValue = JsonValue, Selected = unknown>(
+export function useReplicaSelector<T extends JsonValue = JsonValue, Selected = unknown>(
   ref: FunctionReference,
   args: JsonValue | "skip",
   selector: (rows: T[]) => Selected,
@@ -976,17 +1038,17 @@ export function useSyncSelector<T extends JsonValue = JsonValue, Selected = unkn
   return useSyncExternalStore(subscribe, getSnapshot, () => undefined);
 }
 
-export type UseMutationOptions = {
+export type UseReducerOptions = {
   /** Per-call timeout override forwarded to the client. `0` disables. */
   timeoutMs?: number;
 };
 
-export function useMutation(ref: FunctionReference, options: UseMutationOptions = {}) {
+export function useReducer(ref: FunctionReference, options: UseReducerOptions = {}) {
   const client = useGonvexClient();
-  return (args: JsonValue = {}) => client.mutation(ref, args, options);
+  return (args: JsonValue = {}) => client.reducer(ref, args, options);
 }
 
-export function useAction(ref: FunctionReference, options: UseMutationOptions = {}) {
+export function useAction(ref: FunctionReference, options: UseReducerOptions = {}) {
   const client = useGonvexClient();
   return (args: JsonValue = {}) => client.action(ref, args, options);
 }
@@ -1005,7 +1067,7 @@ const FALLBACK_CONNECTION_STATE: ConnectionState = {
   connectionCount: 0,
   connectionRetries: 0,
   hasInflightRequests: false,
-  inflightMutations: 0,
+  inflightReducers: 0,
   inflightActions: 0,
   inflightOneShotQueries: 0,
 };

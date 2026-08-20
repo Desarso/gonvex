@@ -96,9 +96,9 @@ func TestAppDispatchRejectsUnknownArgFields(t *testing.T) {
 
 func TestAppDispatchRejectsWrongKind(t *testing.T) {
 	app := NewApp()
-	app.Mutation("hello.echo", func(ctx *MutationCtx, args echoArgs) (string, error) {
+	app.Reducer("hello.echo", func(ctx *ReducerCtx, args echoArgs) (string, error) {
 		return args.Name, nil
-	})
+	}, OnlineOnlyNonOptimistic("wrong-kind test fixture"))
 
 	_, err := app.ExecuteQuery(&QueryCtx{}, "hello.echo", json.RawMessage(`{"name":"Ada"}`))
 	if err == nil {

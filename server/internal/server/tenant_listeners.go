@@ -199,13 +199,14 @@ func (m *tenantListenerManager) run(ctx context.Context, listener *tenantListene
 		connection, err := pgx.Connect(connectCtx, databaseURL)
 		cancel()
 		if err == nil {
-			_, err = connection.Exec(ctx, "LISTEN "+schema.NotifyChannel)
-		}
-		if err == nil {
 			_, err = connection.Exec(ctx, "LISTEN "+schema.SyncNotifyChannel)
 		}
 		if err == nil {
 			needsRecovery := m.markReady(listener)
+			// A committed outbox row may predate this process (for example a
+			// crash immediately after Reducer commit). Drain whenever the tenant
+			// becomes active, independent of a new application-table revision.
+			go m.server.drainActionOutbox(listener.key.project, listener.key.tenant)
 			if connectedBefore {
 				m.server.metrics.recordReactive(func(metric *reactiveMetricState) { metric.ListenerReconnects++ })
 			}
@@ -219,7 +220,7 @@ func (m *tenantListenerManager) run(ctx context.Context, listener *tenantListene
 			}
 			connectedBefore = true
 			backoff = 250 * time.Millisecond
-			err = m.wait(ctx, connection, listener.key)
+			err = m.wait(ctx, connection, listener)
 			if err != nil && ctx.Err() == nil {
 				m.markDisconnected(listener)
 			}
@@ -252,51 +253,62 @@ func (m *tenantListenerManager) run(ctx context.Context, listener *tenantListene
 	}
 }
 
-func (m *tenantListenerManager) wait(ctx context.Context, connection *pgx.Conn, key tenantListenerKey) error {
+func (m *tenantListenerManager) wait(ctx context.Context, connection *pgx.Conn, listener *tenantListener) error {
+	key := listener.key
 	for {
 		notification, err := connection.WaitForNotification(ctx)
 		if err != nil {
 			return err
 		}
-		if notification.Channel == schema.SyncNotifyChannel {
-			payload := parseSyncNotifyPayload(notification.Payload)
-			m.server.notifySyncRevision(key.project, key.tenant, payload.Tables, payload.Epoch, payload.Revision)
-			continue
-		}
-		payload := tableNotifyPayload{}
-		if notification.Payload != "" && notification.Payload[0] != '{' {
-			payload.Table = notification.Payload
-			payload.Broad = true
-		} else if json.Unmarshal([]byte(notification.Payload), &payload) != nil || payload.Table == "" {
-			// A malformed/empty table notification means this LISTEN stream can no
-			// longer prove that its observed table set is complete. Keep declared
-			// write invalidations authoritative until a reconnect recovery clears
-			// this uncertainty.
+		payload := parseSyncNotifyPayload(notification.Payload)
+		if payload.Revision == 0 {
 			m.markNeedsRecovery(key.project, key.tenant)
 			continue
 		}
-		rowIDs := map[string]bool{}
-		for _, id := range payload.IDs {
-			rowIDs[id] = true
+		m.server.notifySyncRevision(key.project, key.tenant, payload.Tables, payload.Epoch, payload.Revision)
+		go m.server.drainActionOutbox(key.project, key.tenant)
+		m.dispatchCommittedRevision(ctx, listener, payload)
+	}
+}
+
+func (m *tenantListenerManager) dispatchCommittedRevision(ctx context.Context, listener *tenantListener, payload syncNotifyPayload) {
+	changes, err := readSyncChanges(ctx, listener.databaseURL, payload.Revision-1, payload.Revision)
+	if err != nil {
+		m.markNeedsRecovery(listener.key.project, listener.key.tenant)
+		m.server.subscriptions.refreshTenant(listener.key.project, listener.key.tenant)
+		return
+	}
+	for _, batch := range groupSyncChanges(changes) {
+		m.server.routeReplicaTransaction(listener.key.project, listener.key.tenant, payload.Epoch, batch)
+		byTable := map[string]*tableChange{}
+		for _, committed := range batch.changes {
+			change := byTable[committed.table]
+			if change == nil {
+				change = &tableChange{
+					project: listener.key.project, tenant: listener.key.tenant, table: committed.table,
+					requiredRevision: batch.revision,
+					rowIDs:           map[string]bool{},
+					changedAtMS:      epochMillis(time.Now().UTC()), commitID: strings.TrimSpace(committed.mutationID), triggerObserved: true,
+				}
+				byTable[committed.table] = change
+			}
+			change.rowIDs[committed.rowID] = true
+			if len(committed.oldValue) > 0 && string(committed.oldValue) != "null" {
+				change.oldValues = append(change.oldValues, append(json.RawMessage(nil), committed.oldValue...))
+			}
+			if len(committed.newValue) > 0 && string(committed.newValue) != "null" {
+				change.newValues = append(change.newValues, append(json.RawMessage(nil), committed.newValue...))
+			}
+			change.changedColumns = appendUniqueStrings(change.changedColumns, committed.changedColumns...)
+			if change.operation == "" {
+				change.operation = committed.operation
+			} else if change.operation != committed.operation {
+				change.operation = "mixed"
+			}
 		}
-		taskIDs := map[string]bool{}
-		for _, id := range payload.TaskIDs {
-			taskIDs[id] = true
+		for _, change := range byTable {
+			m.server.scheduleTableChange(*change)
 		}
-		userIDs := map[string]bool{}
-		for _, id := range payload.UserIDs {
-			userIDs[id] = true
-		}
-		workspaceIDs := map[string]bool{}
-		for _, id := range payload.WorkspaceIDs {
-			workspaceIDs[id] = true
-		}
-		m.server.scheduleTableChange(tableChange{
-			project: key.project, tenant: key.tenant, table: payload.Table,
-			broad: payload.Broad, rowIDs: rowIDs, taskIDs: taskIDs, userIDs: userIDs, workspaceIDs: workspaceIDs, operation: payload.Operation,
-			changedColumns: normalizedColumns(payload.ChangedColumns), changedAtMS: epochMillis(time.Now().UTC()),
-			commitID: strings.TrimSpace(payload.MutationID), triggerObserved: true,
-		})
 	}
 }
 

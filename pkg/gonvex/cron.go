@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Scheduler lets mutations and actions enqueue follow-up work that the runtime
+// Scheduler lets Reducers and Actions enqueue follow-up work that the runtime
 // runs later, equivalent to the Convex scheduler. It is available on every
 // RuntimeContext as ctx.Scheduler.
 type Scheduler interface {
@@ -31,7 +31,7 @@ type CronSpec struct {
 }
 
 // Cron registers a recurring job that runs functionPath every interval. The
-// referenced function must be a mutation or action. args is encoded once at
+// referenced function must be a Reducer or Action. args is encoded once at
 // registration time and replayed on every run.
 func (a *App) Cron(name string, interval time.Duration, functionPath string, args any) {
 	a.registerCron(CronSpec{Name: name, Interval: interval, FunctionPath: functionPath, Args: encodeCronArgs(name, args)})

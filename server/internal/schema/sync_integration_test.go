@@ -43,7 +43,7 @@ func TestDurableSyncLogOrdersConcurrentTransactionsAndProjectsColumns(t *testing
 			"deletedAt":   {Type: "int64", Nullable: true},
 		},
 	}
-	definition := manifest.SyncDefinition{
+	definition := manifest.ReplicaCollectionDefinition{
 		Table:          tableName,
 		Key:            "id",
 		Columns:        []string{"id", "workspaceId", "title", "updatedAt", "deletedAt"},
@@ -58,7 +58,7 @@ func TestDurableSyncLogOrdersConcurrentTransactionsAndProjectsColumns(t *testing
 		context.Background(),
 		databaseURL,
 		manifest.Schema{Tables: map[string]manifest.Table{tableName: table}},
-		map[string]manifest.SyncDefinition{tableName: definition},
+		map[string]manifest.ReplicaCollectionDefinition{tableName: definition},
 	); err != nil {
 		t.Fatal(err)
 	}

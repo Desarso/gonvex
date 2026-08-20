@@ -1,137 +1,20 @@
 ---
-title: Query Invalidation
-description: How Gonvex decides which live queries should refresh after writes.
+title: Committed Change Feed
+description: Exact Postgres changes replace declared writes and invalidation.
 ---
 
-# Query Invalidation
+Gonvex does not ask application code what a Reducer might write.
 
-Query invalidation decides whether a committed write can affect a live subscription.
+Every application table appends committed row changes to
+`_gonvex_sync_changes`. Postgres emits `gonvex_change_feed` only as a wake-up
+signal; Gonvex reads the durable transaction revision before routing it.
 
-The target behavior:
+Live Query freshness is:
 
-```txt
-affected subscription -> refresh
-unaffected subscription -> skip
-unknown impact -> refresh
+```text
+computedRevision >= requiredRevision
 ```
 
-## Why It Matters
-
-Realtime apps become expensive if every write refreshes every query. They become incorrect if a write changes visible data but the frontend never gets a fresh result.
-
-Gonvex uses a safe-first rule:
-
-```txt
-Refreshing too much is a performance issue.
-Missing a required refresh is a correctness issue.
-```
-
-## Generic Dependencies
-
-Invalidation is based on generic query metadata, not app-specific concepts.
-
-Useful dependency metadata includes:
-
-- table names read
-- columns read
-- filters applied
-- indexes or ranges scanned
-- sort order
-- limit/window information
-- returned primary row IDs
-- tenant database route
-
-For example, the runtime treats `workspace_id`, `organization_id`, or
-`account_id` as ordinary predicates. Those names are not hardcoded into Gonvex
-core.
-
-Declare dependencies when registering a function:
-
-```go
-app.Query(
-  "tasks.list",
-  ListTasks,
-  gonvex.Reads("tasks").
-    Columns("id", "title", "status", "updated_at").
-    Filters("status").
-    OrdersBy("updated_at"),
-)
-
-app.Mutation("tasks.update", UpdateTask, gonvex.Writes("tasks"))
-```
-
-The runtime maintains a reverse `(project, tenant, table)` index, so an update
-does not scan unrelated connections or tenants. Undeclared dependencies retain
-the compatibility fallback and broad tenant-scoped behavior when impact is
-unknown.
-
-## Write Sets
-
-Mutations declare write metadata:
-
-- table changed
-- operation type: insert, update, delete
-- changed primary row IDs where practical
-- changed columns
-- old and new indexed values where needed
-- tenant database route
-
-The runtime compares write metadata to query dependencies.
-
-## Conservative Cases
-
-Some writes require broad refreshes because result membership may change:
-
-- insert into a sorted or filtered result set
-- delete from a paginated result set
-- update to a column used by filtering
-- update to a column used by sorting
-- large write where changed IDs are too expensive to enumerate
-- query with dependencies the runtime did not capture precisely
-
-Broad refresh only affects active subscriptions in the relevant
-project/tenant/database scope.
-
-## Row-Aware Cases
-
-When a query result contains primary row IDs and a small update only changes rows outside that result, the runtime can often skip refresh.
-
-Example:
-
-```txt
-subscription result ids: [a, b, c]
-mutation changed ids: [x, y]
-intersection: none
-safe action: skip, unless filters/sort/window membership can change
-```
-
-If a changed row could enter or leave the result because of filters, sorting, or pagination, refresh instead.
-
-## Tenant Scope
-
-Invalidation must respect tenant routing.
-
-Writes in tenant `acme` do not refresh subscriptions in tenant `globex`.
-Landlord/project data uses a separate scope.
-
-## Runtime Behavior
-
-```txt
-Postgres statement trigger
--> bounded table/operation/row-id/changed-column notification
--> tenant/table reverse index
--> column and row intersection
--> mark matching shared runners dirty
--> serialized rerun and result comparison
-```
-
-Insert/delete and large statements remain broad within the relevant table.
-Notifications cap row IDs at 500 and changed columns at 100 to stay within
-PostgreSQL notification limits.
-
-One listener is acquired per active tenant database, subject to a configurable
-cap. It closes after the tenant becomes idle. On first connection or reconnect,
-Gonvex broadly refreshes that tenant because PostgreSQL `NOTIFY` is not durable.
-
-Durable sync collections use their own transactional change log rather than this
-snapshot-only recovery path. See [Durable Sync Collections](./durable-sync).
+If a newer revision arrives during execution, the older result cannot become
+current. Retention timers have no correctness role. Unknown-dependency and
+broad invalidation fallbacks do not exist.

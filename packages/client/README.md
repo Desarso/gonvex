@@ -1,7 +1,7 @@
 # @gonvex/client
 
-Browser client for Gonvex realtime queries, mutations, actions, telemetry, and
-local cache helpers.
+Browser client for Gonvex Queries, Reducers, Actions, Live Queries, the
+persistent Local Replica, and telemetry.
 
 Most React apps should use `@gonvex/react`, which wraps this package with hooks.
 Use `@gonvex/client` directly when you want lower-level control.
@@ -34,8 +34,8 @@ const unsubscribe = client.subscribeQuery(
   },
 );
 
-await client.mutation(
-  { kind: "mutation", path: "tasks.create" },
+await client.reducer(
+  { kind: "reducer", path: "tasks.create" },
   { title: "Ship Gonvex" },
 );
 
@@ -43,13 +43,13 @@ unsubscribe();
 client.close();
 ```
 
-## Transparent Browser Cache
+## Persistent Live Query Windows
 
-Live query results are persisted automatically in supported browsers when the
-runtime advertises a safe cache scope. A warm `subscribeQuery`, `watchQuery`, or
-React `useQuery` can replay its last result while the normal server subscription
-runs in parallel. The server result always wins and refreshes the snapshot,
-including results produced by realtime invalidation.
+Live Query windows are persisted automatically in supported browsers when the
+runtime advertises a safe cache scope. A warm subscription can replay its last
+membership immediately while the server verifies it against the committed
+revision stream. Returned entities are materialized into the same normalized
+Local Replica used by Replica Collections.
 
 Caching is isolated by runtime deployment, project, tenant, user, and current
 permissions. New clients connected to older runtimes stay server-only.
@@ -66,34 +66,34 @@ await client.clearQueryCache({ allScopes: true });
 Dexie is loaded asynchronously only after a cache-capable session is confirmed,
 so IndexedDB setup does not delay the WebSocket query path.
 
-## Durable Sync Collections
+## Replica Collections
 
-Sync functions materialize bounded, authorized single-table collections in a
-normalized IndexedDB store and resume them from a durable Postgres cursor:
+Replica Collections materialize bounded, authorized entity sets in normalized
+IndexedDB storage and resume them from a durable Postgres revision:
 
 ```ts
-const watch = client.watchSync<Task>(
-  { kind: "sync", path: "tasks.recent" },
+const watch = client.watchReplica<Task>(
+  { kind: "replica", path: "tasks.recent" },
   { workspaceId: "workspace-a" },
 );
 
 const stop = watch.onUpdate(() => {
-  render(watch.localSyncResult() ?? []);
+  render(watch.localReplicaResult() ?? []);
   console.log(watch.status()); // { isLoading, isUpToDate }
 });
 ```
 
-Configure or disable the sync store when constructing the client:
+Configure or disable Local Replica persistence when constructing the client:
 
 ```ts
 const client = new GonvexClient(url, {
-  sync: {
+  replica: {
     databaseName: "my-product-sync",
     maxBytes: 150 * 1024 * 1024,
   },
 });
 
-const memoryOnly = new GonvexClient(url, { sync: false });
+const memoryOnly = new GonvexClient(url, { replica: false });
 ```
 
 The default global IndexedDB budget is 100 MiB. Server-declared per-collection
@@ -101,44 +101,42 @@ row/byte budgets still apply, and least-recently-used collections are evicted
 first. Storage is isolated by runtime, project, tenant, authenticated identity,
 and permissions.
 
-## Entity-level optimistic mutations
+## Optimistic Reducers
 
-Declare how a mutation maps its arguments to an entity row and how each live
-read projects that entity:
+Every public interactive Reducer declares its optimistic contract. The
+authoritative transaction remains separate from the optimistic overlay:
 
 ```go
-app.Mutation(
+app.Reducer(
   "tasks.update",
   updateTask,
-  gonvex.OptimisticMutation("tasks").RowIDArg("taskId").FieldsArg("updates"),
+  gonvex.Optimistic("tasks").RowIDArg("taskId").FieldsArg("updates"),
 )
 
 app.Query(
   "tasks.byWorkspace",
   tasksByWorkspace,
-  gonvex.OptimisticProjection("tasks").Key("_id").ResultPath("page"),
+  gonvex.LiveTable("tasks").Key("_id").ResultRowsAt("page"),
 )
 ```
 
-Generated references carry this metadata, so a normal mutation call is enough:
+Generated references carry this metadata, so a normal Reducer call is enough:
 
 ```ts
-await client.mutation(api.tasks.update, {
+await client.reducer(api.tasks.update, {
   taskId,
   updates: { priority_id: priorityId },
 });
 ```
 
-The client persists the pending mutation before exposing it, layers it over
-every matching sync and query subscription, and notifies watchers immediately.
-An RPC result marks the write accepted but does not remove it; the overlay is
-retired only when every source that displayed it reports the mutation id (or a
-restored committed snapshot already matches). Deterministic server errors
-remove the overlay and repaint the authoritative rows. This keeps stale query
-or sync frames from briefly reverting the UI.
+The client persists the pending command, layers it over Local Replica selectors,
+and notifies watchers immediately. Reducer success includes an
+`originCommandId` and committed revision. The overlay is removed only after the
+corresponding authoritative transaction has been applied locally, preventing an
+empty or stale frame between optimistic and committed state.
 
-The authoritative sync/query cache stays immutable. Durable pending state lives
-in the mutation outbox and is re-applied to cached rows after reload. Outbox
+Authoritative entity state stays separate from overlays. Durable pending state
+lives in the command outbox and is re-applied after reload. Outbox
 rows are isolated by project, tenant, and authenticated identity; an account
 switch removes the previous identity's overlay and can never replay its writes
 under the new session. Unscoped rows from the pre-isolation schema are removed
@@ -180,7 +178,7 @@ reconnect.
 client.connectionState();
 // {
 //   isWebSocketConnected, hasEverConnected, connectionCount, connectionRetries,
-//   hasInflightRequests, inflightMutations, inflightActions, inflightOneShotQueries
+//   hasInflightRequests, inflightReducers, inflightActions, inflightOneShotQueries
 // }
 
 const stop = client.subscribeToConnectionState((state) => {
@@ -193,7 +191,7 @@ const stop = client.subscribeToConnectionState((state) => {
 | Operation | Default |
 | --- | --- |
 | One-shot `query()` | 20s |
-| `mutation()` | 20s |
+| `reducer()` | 20s |
 | `action()` | 60s |
 
 Override per client (`timeouts` option) or per call (`{ timeoutMs }`). Use `0` to disable.
@@ -208,17 +206,17 @@ Rejected operations throw `GonvexClientError` with `code`:
 - `closed` — client was explicitly closed
 - `auth` — authentication rejected
 
-### Mutation / action disconnect policy
+### Reducer / Action disconnect policy
 
-Actions and mutations without `{ offline: "queue" }` fail closed after a
+Actions and Reducers without `{ offline: "queue" }` fail closed after a
 disconnect. They reject with `code: "disconnected"` (or `timeout` / `closed`).
-Optimistic mutations are persisted before transport even in fail-closed mode,
+Optimistic Reducers are persisted before transport even in fail-closed mode,
 so a process reload cannot expose an older cached row while an accepted write
 is still waiting for its authoritative subscription update.
 
-Pass `{ offline: "queue" }` to a mutation to durably accept a transport failure
+Pass `{ offline: "queue" }` to a Reducer to durably accept a transport failure
 and replay the same idempotency key after reconnect, whether or not that
-mutation also declares optimistic UI metadata. Actions are never queued.
+Reducer also declares optimistic UI metadata. Actions are never queued.
 Deterministic server errors are never queued and always roll an optimistic
 entity overlay back when one exists.
 
@@ -234,9 +232,10 @@ The package exports:
 - `ConvexReactClient` compatibility alias
 - `GonvexClientError`, `ConnectionState`, timeout defaults
 - transparent persistent query caching and lower-level experimental cache helpers
-- durable entity-level optimistic overlays for query and sync projections
-- opt-in mutation outbox replay with stable idempotency keys
-- `subscribeSync`, `watchSync`, and normalized persistent sync storage
+- normalized Local Replica entities and Live Query memberships
+- durable optimistic Reducer overlays reconciled by command ID and revision
+- opt-in command outbox replay with stable idempotency keys
+- `subscribeReplica`, `watchReplica`, and persistent Replica storage
 - browser capability and telemetry helpers
 - `GonvexErrorReporter` and automatic operation error reporting
 

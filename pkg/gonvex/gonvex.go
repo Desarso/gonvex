@@ -18,13 +18,18 @@ import (
 type FunctionKind string
 
 const (
-	FunctionKindQuery            FunctionKind = "query"
-	FunctionKindMutation         FunctionKind = "mutation"
-	FunctionKindAction           FunctionKind = "action"
-	FunctionKindHTTP             FunctionKind = "http"
-	FunctionKindInternalMutation FunctionKind = "internalMutation"
-	FunctionKindLiveGrid         FunctionKind = "liveGrid"
-	FunctionKindSync             FunctionKind = "sync"
+	FunctionKindQuery   FunctionKind = "query"
+	FunctionKindReducer FunctionKind = "reducer"
+	FunctionKindAction  FunctionKind = "action"
+	FunctionKindHTTP    FunctionKind = "http"
+)
+
+type DeliveryMode string
+
+const (
+	DeliveryOneShot DeliveryMode = "oneShot"
+	DeliveryLive    DeliveryMode = "live"
+	DeliveryReplica DeliveryMode = "replica"
 )
 
 type App struct {
@@ -37,19 +42,21 @@ type Function struct {
 	Path         string
 	Kind         FunctionKind
 	Public       bool
+	Internal     bool
+	Delivery     DeliveryMode
 	Dependencies FunctionDependencies
 	Handler      any
 	ArgType      reflect.Type
 	ResultType   reflect.Type
-	Sync         *SyncDefinition
+	Replica      *ReplicaCollectionDefinition
 
 	handlerValue reflect.Value
 }
 
-// SyncDefinition describes a durable entity collection. Sync handlers return
+// ReplicaCollectionDefinition describes a bounded, durable entity collection. Its handler returns
 // the initial authorized snapshot; subsequent inserts, updates, and deletes are
 // delivered from Gonvex's transactional change log.
-type SyncDefinition struct {
+type ReplicaCollectionDefinition struct {
 	Table            string
 	Key              string
 	Columns          []string
@@ -64,13 +71,13 @@ type SyncDefinition struct {
 	Retention        time.Duration
 }
 
-type SyncTableOption struct {
-	definition SyncDefinition
+type ReplicaTableOption struct {
+	definition ReplicaCollectionDefinition
 }
 
-// SyncTable begins a single-table sync definition. Key defaults to "id".
-func SyncTable(table string) *SyncTableOption {
-	return &SyncTableOption{definition: SyncDefinition{
+// ReplicaTable begins a single-table replica definition. Key defaults to "id".
+func ReplicaTable(table string) *ReplicaTableOption {
+	return &ReplicaTableOption{definition: ReplicaCollectionDefinition{
 		Table:        strings.TrimSpace(table),
 		Key:          "id",
 		Mode:         "eager",
@@ -78,18 +85,18 @@ func SyncTable(table string) *SyncTableOption {
 	}}
 }
 
-func (o *SyncTableOption) Key(column string) *SyncTableOption {
+func (o *ReplicaTableOption) Key(column string) *ReplicaTableOption {
 	o.definition.Key = strings.TrimSpace(column)
 	return o
 }
 
-func (o *SyncTableOption) Columns(columns ...string) *SyncTableOption {
+func (o *ReplicaTableOption) Columns(columns ...string) *ReplicaTableOption {
 	o.definition.Columns = cleanDependencyNames(columns)
 	return o
 }
 
-// EqualArg binds a table column to a same-named or explicit sync argument.
-func (o *SyncTableOption) EqualArg(column string, argument ...string) *SyncTableOption {
+// EqualArg binds a table column to a same-named or explicit collection argument.
+func (o *ReplicaTableOption) EqualArg(column string, argument ...string) *ReplicaTableOption {
 	if o.definition.EqualFilters == nil {
 		o.definition.EqualFilters = map[string]string{}
 	}
@@ -106,17 +113,17 @@ func (o *SyncTableOption) EqualArg(column string, argument ...string) *SyncTable
 
 // ExcludeWhenSet removes rows whose named column is non-null. It is intended
 // for soft-delete and archive markers that the snapshot handler excludes too.
-func (o *SyncTableOption) ExcludeWhenSet(columns ...string) *SyncTableOption {
+func (o *ReplicaTableOption) ExcludeWhenSet(columns ...string) *ReplicaTableOption {
 	o.definition.ExcludeWhenSet = cleanDependencyNames(columns)
 	return o
 }
 
-func (o *SyncTableOption) VisibilityDependsOn(tables ...string) *SyncTableOption {
+func (o *ReplicaTableOption) VisibilityDependsOn(tables ...string) *ReplicaTableOption {
 	o.definition.VisibilityTables = cleanDependencyNames(tables)
 	return o
 }
 
-func (o *SyncTableOption) OrderBy(column, direction string) *SyncTableOption {
+func (o *ReplicaTableOption) OrderBy(column, direction string) *ReplicaTableOption {
 	o.definition.OrderBy = strings.TrimSpace(column)
 	direction = strings.ToLower(strings.TrimSpace(direction))
 	if direction != "asc" {
@@ -126,48 +133,46 @@ func (o *SyncTableOption) OrderBy(column, direction string) *SyncTableOption {
 	return o
 }
 
-func (o *SyncTableOption) Eager() *SyncTableOption {
+func (o *ReplicaTableOption) Eager() *ReplicaTableOption {
 	o.definition.Mode = "eager"
 	return o
 }
 
-func (o *SyncTableOption) Progressive() *SyncTableOption {
+func (o *ReplicaTableOption) Progressive() *ReplicaTableOption {
 	o.definition.Mode = "progressive"
 	return o
 }
 
-func (o *SyncTableOption) Budget(maxRows int, maxBytes int64) *SyncTableOption {
+func (o *ReplicaTableOption) Budget(maxRows int, maxBytes int64) *ReplicaTableOption {
 	o.definition.MaxRows = maxRows
 	o.definition.MaxBytes = maxBytes
 	return o
 }
 
-func (o *SyncTableOption) RetainFor(duration time.Duration) *SyncTableOption {
+func (o *ReplicaTableOption) RetainFor(duration time.Duration) *ReplicaTableOption {
 	o.definition.Retention = duration
 	return o
 }
 
-// FunctionDependencies are explicit invalidation and sharing declarations for
-// a registered function. ShareByPermissions is opt-in: without it the runtime
-// includes the user identity in a shared-subscription key, which is the safe
-// default for handlers that inspect ctx.User.
+// FunctionDependencies are generated, inspectable delivery contracts. Live
+// Query reads are derived from LiveQueryPlan; application code never declares
+// write sets or broad invalidations.
 type FunctionDependencies struct {
 	Reads                []ReadDependency
-	Writes               []WriteDependency
-	ReadsEphemeral       bool
-	WritesEphemeral      bool
 	ShareByPermissions   bool
 	ShareByVisibility    string
 	ShareResultFrom      string
 	ShareResultField     string
-	OptimisticMutation   *OptimisticMutationDefinition
+	OptimisticReducer    *OptimisticReducerDefinition
 	OptimisticProjection *OptimisticProjectionDefinition
+	LiveQueryPlan        *LiveQueryPlan
+	NonOptimisticReason  string
 }
 
-// OptimisticMutationDefinition tells generated clients how mutation arguments
+// OptimisticReducerDefinition tells generated clients how mutation arguments
 // identify and patch one entity. It is client metadata only; authorization and
 // authoritative writes remain entirely server-side.
-type OptimisticMutationDefinition struct {
+type OptimisticReducerDefinition struct {
 	Entity     string
 	RowIDPath  []string
 	FieldsPath []string
@@ -183,46 +188,40 @@ type OptimisticProjectionDefinition struct {
 }
 
 type ReadDependency struct {
-	Table     string
-	Columns   []string
-	Filters   []string
-	OrdersBy  []string
-	Windowed  bool
-	Predicate string
-}
-
-type WriteDependency struct {
-	Table   string
-	Columns []string
+	Table    string
+	Columns  []string
+	Filters  []string
+	OrdersBy []string
+	Windowed bool
 }
 
 type FunctionOption interface {
 	applyFunctionOption(*FunctionDependencies)
 }
 
-type optimisticMutationOption struct{ definition OptimisticMutationDefinition }
+type optimisticReducerOption struct{ definition OptimisticReducerDefinition }
 
-// OptimisticMutation declares the entity patched by a mutation. RowIDArg and
+// OptimisticReducer declares the entity patched by a mutation. RowIDArg and
 // FieldsArg accept dotted paths for nested argument objects.
-func OptimisticMutation(entity string) *optimisticMutationOption {
-	return &optimisticMutationOption{definition: OptimisticMutationDefinition{Entity: strings.TrimSpace(entity)}}
+func OptimisticReducer(entity string) *optimisticReducerOption {
+	return &optimisticReducerOption{definition: OptimisticReducerDefinition{Entity: strings.TrimSpace(entity)}}
 }
 
-func (o *optimisticMutationOption) RowIDArg(path string) *optimisticMutationOption {
+func (o *optimisticReducerOption) RowIDArg(path string) *optimisticReducerOption {
 	o.definition.RowIDPath = cleanOptimisticPath(path)
 	return o
 }
 
-func (o *optimisticMutationOption) FieldsArg(path string) *optimisticMutationOption {
+func (o *optimisticReducerOption) FieldsArg(path string) *optimisticReducerOption {
 	o.definition.FieldsPath = cleanOptimisticPath(path)
 	return o
 }
 
-func (o *optimisticMutationOption) applyFunctionOption(target *FunctionDependencies) {
+func (o *optimisticReducerOption) applyFunctionOption(target *FunctionDependencies) {
 	definition := o.definition
 	definition.RowIDPath = append([]string(nil), definition.RowIDPath...)
 	definition.FieldsPath = append([]string(nil), definition.FieldsPath...)
-	target.OptimisticMutation = &definition
+	target.OptimisticReducer = &definition
 }
 
 type optimisticProjectionOption struct {
@@ -259,106 +258,22 @@ func cleanOptimisticPath(path string) []string {
 	return cleanDependencyNames(parts)
 }
 
-type readOption struct{ dependencies []ReadDependency }
+type onlineOnlyNonOptimisticOption struct{ reason string }
 
-// Reads declares one or more tenant tables read by a query.
-func Reads(tables ...string) *readOption {
-	option := &readOption{}
-	for _, table := range tables {
-		if table = strings.TrimSpace(table); table != "" {
-			option.dependencies = append(option.dependencies, ReadDependency{Table: table})
-		}
+// OnlineOnlyNonOptimistic is the explicit, reviewable escape hatch for a
+// public Reducer that cannot safely predict a user-visible local transaction.
+func OnlineOnlyNonOptimistic(reason string) FunctionOption {
+	return onlineOnlyNonOptimisticOption{reason: strings.TrimSpace(reason)}
+}
+
+func (option onlineOnlyNonOptimisticOption) applyFunctionOption(target *FunctionDependencies) {
+	if option.reason == "" {
+		panic("gonvex: OnlineOnlyNonOptimistic requires an approved reason")
 	}
-	return option
-}
-
-func (o *readOption) Columns(columns ...string) *readOption {
-	for index := range o.dependencies {
-		o.dependencies[index].Columns = cleanDependencyNames(columns)
-	}
-	return o
-}
-
-func (o *readOption) Filters(columns ...string) *readOption {
-	for index := range o.dependencies {
-		o.dependencies[index].Filters = cleanDependencyNames(columns)
-	}
-	return o
-}
-
-func (o *readOption) OrdersBy(columns ...string) *readOption {
-	for index := range o.dependencies {
-		o.dependencies[index].OrdersBy = cleanDependencyNames(columns)
-	}
-	return o
-}
-
-func (o *readOption) Windowed() *readOption {
-	for index := range o.dependencies {
-		o.dependencies[index].Windowed = true
-	}
-	return o
-}
-
-func (o *readOption) Predicate(name string) *readOption {
-	for index := range o.dependencies {
-		o.dependencies[index].Predicate = strings.TrimSpace(name)
-	}
-	return o
-}
-
-func (o *readOption) applyFunctionOption(target *FunctionDependencies) {
-	target.Reads = append(target.Reads, o.dependencies...)
-}
-
-type writeOption struct{ dependencies []WriteDependency }
-
-// Writes declares one or more tenant tables changed by a mutation or action.
-func Writes(tables ...string) *writeOption {
-	option := &writeOption{}
-	for _, table := range tables {
-		if table = strings.TrimSpace(table); table != "" {
-			option.dependencies = append(option.dependencies, WriteDependency{Table: table})
-		}
-	}
-	return option
-}
-
-func (o *writeOption) Columns(columns ...string) *writeOption {
-	for index := range o.dependencies {
-		o.dependencies[index].Columns = cleanDependencyNames(columns)
-	}
-	return o
-}
-
-func (o *writeOption) applyFunctionOption(target *FunctionDependencies) {
-	target.Writes = append(target.Writes, o.dependencies...)
+	target.NonOptimisticReason = option.reason
 }
 
 type shareByPermissionsOption struct{}
-
-type readsEphemeralOption struct{}
-
-type writesEphemeralOption struct{}
-
-// ReadsEphemeral declares that a query result observes ctx.Ephemeral. The
-// runtime uses this to bypass its durable query-result cache: ephemeral values
-// expire independently of Postgres table generations.
-func ReadsEphemeral() FunctionOption { return readsEphemeralOption{} }
-
-func (readsEphemeralOption) applyFunctionOption(target *FunctionDependencies) {
-	target.ReadsEphemeral = true
-}
-
-// WritesEphemeral declares that a mutation or action writes only
-// ctx.Ephemeral and performs no durable database writes. The runtime therefore
-// does not open a Postgres transaction or invalidate reactive query caches
-// after the function returns.
-func WritesEphemeral() FunctionOption { return writesEphemeralOption{} }
-
-func (writesEphemeralOption) applyFunctionOption(target *FunctionDependencies) {
-	target.WritesEphemeral = true
-}
 
 // ShareByPermissions allows callers with the same permission fingerprint to
 // share one server-side subscription execution and result. Only use it when a
@@ -414,6 +329,7 @@ type RuntimeContext struct {
 
 	ProjectID   string
 	TenantID    string
+	OperationID string
 	User        *User
 	Permissions map[string]any
 	DatabaseURL string
@@ -430,13 +346,9 @@ type RuntimeContext struct {
 	// live-session registry; ordinary app presence belongs in Ephemeral.
 	ProjectEphemeral EphemeralAPI
 	Scheduler        Scheduler
+	Reducers         ReducerAPI
+	Outbox           ActionOutbox
 	Logger           *slog.Logger
-
-	// NotifyTableChange, when set by the host server, broadcasts a table
-	// invalidation to live query subscribers. Long-running actions call
-	// NotifyTableChanged after committing writes so subscribed clients refresh
-	// mid-run instead of only when the function returns.
-	NotifyTableChange func(table string)
 
 	// Env holds the project-scoped environment variables (the dashboard's
 	// per-project env store), wired by the host server. Read through EnvValue
@@ -453,8 +365,6 @@ type QueryChangeInfo struct {
 }
 
 type QueryChangeDetails struct {
-	Tables        []string
-	TaskIDs       []string
 	VisibilityKey string
 }
 
@@ -465,18 +375,13 @@ func WithQueryChange(ctx context.Context, reason string, changedAtMS float64) co
 	return WithQueryChangeDetails(ctx, reason, changedAtMS, nil, nil)
 }
 
-// WithQueryChangeDetails attaches the committed table/task keys that selected
-// a reactive query. Applications may use these only as an optimization hint;
-// an empty set means precision was unavailable and requires a full refresh.
+// WithQueryChangeDetails is retained for host compatibility. Structured Live
+// Query planning owns dependency routing; handlers do not receive row hints.
 func WithQueryChangeDetails(ctx context.Context, reason string, changedAtMS float64, tables, taskIDs []string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	var details *QueryChangeDetails
-	if len(tables) > 0 || len(taskIDs) > 0 {
-		details = &QueryChangeDetails{Tables: append([]string(nil), tables...), TaskIDs: append([]string(nil), taskIDs...)}
-	}
-	return context.WithValue(ctx, queryChangeContextKey{}, QueryChangeInfo{Reason: reason, ChangedAtMS: changedAtMS, Details: details})
+	return context.WithValue(ctx, queryChangeContextKey{}, QueryChangeInfo{Reason: reason, ChangedAtMS: changedAtMS})
 }
 
 func WithQueryVisibilityKey(ctx context.Context, key string) context.Context {
@@ -513,22 +418,11 @@ func (rc *RuntimeContext) EnvValue(name string) string {
 	return os.Getenv(name)
 }
 
-// NotifyTableChanged pushes a live-query invalidation for each table. It is a
-// no-op when the host has not wired NotifyTableChange (tests, offline tools).
-func (rc *RuntimeContext) NotifyTableChanged(tables ...string) {
-	if rc == nil || rc.NotifyTableChange == nil {
-		return
-	}
-	for _, table := range tables {
-		rc.NotifyTableChange(table)
-	}
-}
-
 type QueryCtx struct {
 	RuntimeContext
 }
 
-type MutationCtx struct {
+type ReducerCtx struct {
 	RuntimeContext
 }
 
@@ -611,10 +505,25 @@ func NewApp() *App {
 
 func (a *App) Query(path string, handler any, options ...FunctionOption) {
 	a.register(FunctionKindQuery, path, handler, options...)
+	a.setDelivery(path, DeliveryOneShot)
 }
 
-func (a *App) Mutation(path string, handler any, options ...FunctionOption) {
-	a.register(FunctionKindMutation, path, handler, options...)
+// LiveQuery is a Query with a server-maintained delivery window.
+func (a *App) LiveQuery(path string, handler any, options ...FunctionOption) {
+	a.register(FunctionKindQuery, path, handler, options...)
+	a.setDelivery(path, DeliveryLive)
+	function, _ := a.Lookup(path)
+	if function.Dependencies.LiveQueryPlan == nil {
+		panic(fmt.Sprintf("gonvex: Live Query %q requires gonvex.LivePlan(...) metadata", path))
+	}
+}
+
+func (a *App) Reducer(path string, handler any, options ...FunctionOption) {
+	a.register(FunctionKindReducer, path, handler, options...)
+	function, _ := a.Lookup(path)
+	if function.Dependencies.OptimisticReducer == nil && function.Dependencies.NonOptimisticReason == "" {
+		panic(fmt.Sprintf("gonvex: public Reducer %q requires an optimistic specification or OnlineOnlyNonOptimistic(reason)", path))
+	}
 }
 
 func (a *App) Action(path string, handler any, options ...FunctionOption) {
@@ -633,30 +542,32 @@ func (a *App) PublicHTTP(path string, handler any, options ...FunctionOption) {
 	a.registerWithVisibility(FunctionKindHTTP, path, handler, true, options...)
 }
 
-func (a *App) InternalMutation(path string, handler any, options ...FunctionOption) {
-	a.register(FunctionKindInternalMutation, path, handler, options...)
-}
-
-func (a *App) LiveGrid(path string, handler any, options ...FunctionOption) {
-	a.register(FunctionKindLiveGrid, path, handler, options...)
-}
-
-func (a *App) Sync(path string, handler any, sync *SyncTableOption, options ...FunctionOption) {
-	if sync == nil || strings.TrimSpace(sync.definition.Table) == "" {
-		panic("gonvex: sync table is required")
-	}
-	if strings.TrimSpace(sync.definition.Key) == "" {
-		panic("gonvex: sync key is required")
-	}
-	if len(sync.definition.Columns) == 0 {
-		panic("gonvex: sync columns are required")
-	}
-	a.register(FunctionKindSync, path, handler, options...)
+func (a *App) InternalReducer(path string, handler any, options ...FunctionOption) {
+	a.register(FunctionKindReducer, path, handler, options...)
 	a.mu.Lock()
 	function := a.functions[path]
-	definition := sync.definition
+	function.Internal = true
+	a.functions[path] = function
+	a.mu.Unlock()
+}
+
+func (a *App) ReplicaCollection(path string, handler any, replica *ReplicaTableOption, options ...FunctionOption) {
+	if replica == nil || strings.TrimSpace(replica.definition.Table) == "" {
+		panic("gonvex: replica table is required")
+	}
+	if strings.TrimSpace(replica.definition.Key) == "" {
+		panic("gonvex: replica key is required")
+	}
+	if len(replica.definition.Columns) == 0 {
+		panic("gonvex: replica columns are required")
+	}
+	a.register(FunctionKindQuery, path, handler, options...)
+	a.mu.Lock()
+	function := a.functions[path]
+	function.Delivery = DeliveryReplica
+	definition := replica.definition
 	definition.Columns = cleanDependencyNames(append(definition.Columns, definition.Key))
-	function.Sync = &definition
+	function.Replica = &definition
 	a.functions[path] = function
 	a.mu.Unlock()
 }
@@ -682,28 +593,40 @@ func (a *App) ExecuteQuery(ctx *QueryCtx, path string, rawArgs json.RawMessage) 
 	if ctx == nil {
 		ctx = &QueryCtx{}
 	}
-	return a.execute(path, rawArgs, ctx, FunctionKindQuery, FunctionKindLiveGrid, FunctionKindSync)
+	return a.execute(path, rawArgs, ctx, FunctionKindQuery)
 }
 
-func (a *App) ExecuteSync(ctx *QueryCtx, path string, rawArgs json.RawMessage) (any, error) {
+func (a *App) ExecuteReplicaCollection(ctx *QueryCtx, path string, rawArgs json.RawMessage) (any, error) {
 	if ctx == nil {
 		ctx = &QueryCtx{}
 	}
-	return a.execute(path, rawArgs, ctx, FunctionKindSync)
+	function, ok := a.Lookup(path)
+	if !ok || function.Delivery != DeliveryReplica {
+		return nil, &DispatchError{Code: "wrong_delivery", Path: path, Message: fmt.Sprintf("query %q is not a Replica Collection", path)}
+	}
+	return a.execute(path, rawArgs, ctx, FunctionKindQuery)
 }
 
-func (a *App) ExecuteMutation(ctx *MutationCtx, path string, rawArgs json.RawMessage) (any, error) {
+func (a *App) ExecuteReducer(ctx *ReducerCtx, path string, rawArgs json.RawMessage) (any, error) {
 	if ctx == nil {
-		ctx = &MutationCtx{}
+		ctx = &ReducerCtx{}
 	}
-	return a.execute(path, rawArgs, ctx, FunctionKindMutation)
+	function, ok := a.Lookup(path)
+	if ok && function.Internal {
+		return nil, &DispatchError{Code: "not_found", Path: path, Message: fmt.Sprintf("reducer %q is internal", path)}
+	}
+	return a.execute(path, rawArgs, ctx, FunctionKindReducer)
 }
 
-func (a *App) ExecuteInternalMutation(ctx *MutationCtx, path string, rawArgs json.RawMessage) (any, error) {
+func (a *App) ExecuteInternalReducer(ctx *ReducerCtx, path string, rawArgs json.RawMessage) (any, error) {
 	if ctx == nil {
-		ctx = &MutationCtx{}
+		ctx = &ReducerCtx{}
 	}
-	return a.execute(path, rawArgs, ctx, FunctionKindInternalMutation)
+	function, ok := a.Lookup(path)
+	if !ok || !function.Internal {
+		return nil, &DispatchError{Code: "not_found", Path: path, Message: fmt.Sprintf("internal reducer %q is not registered", path)}
+	}
+	return a.execute(path, rawArgs, ctx, FunctionKindReducer)
 }
 
 func (a *App) ExecuteAction(ctx *ActionCtx, path string, rawArgs json.RawMessage) (any, error) {
@@ -734,6 +657,14 @@ func (a *App) ExecuteHTTP(ctx *HTTPContext, path string, request HTTPRequest) (H
 
 func (a *App) register(kind FunctionKind, path string, handler any, options ...FunctionOption) {
 	a.registerWithVisibility(kind, path, handler, false, options...)
+}
+
+func (a *App) setDelivery(path string, delivery DeliveryMode) {
+	a.mu.Lock()
+	function := a.functions[path]
+	function.Delivery = delivery
+	a.functions[path] = function
+	a.mu.Unlock()
 }
 
 func (a *App) registerWithVisibility(kind FunctionKind, path string, handler any, public bool, options ...FunctionOption) {
@@ -821,8 +752,8 @@ func newFunction(kind FunctionKind, path string, handler any) (Function, error) 
 
 func ctxTypeForKind(kind FunctionKind) reflect.Type {
 	switch kind {
-	case FunctionKindMutation, FunctionKindInternalMutation:
-		return reflect.TypeOf((*MutationCtx)(nil))
+	case FunctionKindReducer:
+		return reflect.TypeOf((*ReducerCtx)(nil))
 	case FunctionKindAction:
 		return reflect.TypeOf((*ActionCtx)(nil))
 	case FunctionKindHTTP:
@@ -910,6 +841,12 @@ func (c *RuntimeContext) normalize() {
 	if c.Scheduler == nil {
 		c.Scheduler = schedulerUnavailable{}
 	}
+	if c.Reducers == nil {
+		c.Reducers = UnavailableReducers()
+	}
+	if c.Outbox == nil {
+		c.Outbox = UnavailableActionOutbox()
+	}
 	if c.Ephemeral == nil {
 		c.Ephemeral = ephemeralUnavailable{}
 	}
@@ -922,7 +859,7 @@ func (c *QueryCtx) normalize() {
 	c.RuntimeContext.normalize()
 }
 
-func (c *MutationCtx) normalize() {
+func (c *ReducerCtx) normalize() {
 	c.RuntimeContext.normalize()
 }
 

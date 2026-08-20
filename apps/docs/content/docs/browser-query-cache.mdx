@@ -1,95 +1,51 @@
 ---
-title: Browser Query Cache
-description: How Gonvex transparently replays scoped query snapshots and revalidates them against the runtime.
+title: Persistent Local Replica
+description: Instant cached windows, normalized entities, and honest offline results.
 ---
 
-# Browser Query Cache
+# Persistent Local Replica
 
-Gonvex automatically persists exact live-query results in IndexedDB. Existing
-application code does not change:
-
-```tsx
-const tasks = useQuery(api.tasks.list, { status: "open" });
-```
-
-On a warm load, the SDK races the local snapshot against the normal WebSocket
-subscription. If IndexedDB wins, the hook renders the snapshot. The runtime
-still executes the query, and its authoritative result silently replaces the
-snapshot and refreshes the cache.
-
-```txt
-useQuery
-  ├─ read scoped snapshot from IndexedDB
-  └─ subscribe to the runtime
-
-first valid result renders
-runtime result always replaces it
-invalidation results update both UI and IndexedDB
-```
-
-## Safety and Scoping
-
-The runtime—not the browser—issues an opaque cache scope after it confirms the
-session. The scope changes when any of these change:
-
-- runtime manifest or function bundle
-- project
-- tenant
-- authenticated user
-- role or permissions
-- cache protocol version
-
-The SDK does not persist auth tokens or raw query arguments. Authenticated
-snapshots are not read until the matching scope is confirmed by the runtime.
-Changing auth or tenant context immediately clears the active hook state while
-the new scope is established.
-
-An older runtime does not advertise a cache scope, so a newer SDK simply uses
-the existing server-only behavior.
-
-## Defaults
-
-- snapshots expire after 24 hours
-- individual results larger than 2 MiB are skipped
-- each scope keeps at most 100 entries and 20 MiB
-- the global Gonvex cache is capped at 50 MiB
-- older revisions cannot overwrite newer results from another tab
-- quota, private-mode, IndexedDB, or migration failures fall back silently
-
-Dexie is loaded as a separate asynchronous module only when caching is
-available. It is not part of the initial application path.
-
-## Controls
-
-Caching is enabled by default. Applications can opt out without changing query
-code:
+Gonvex persists normalized entities and Live Query ID memberships. IndexedDB
+is the default web adapter; `@gonvex/expo-sqlite` provides transactional mobile
+persistence.
 
 ```ts
-const gonvex = new ConvexReactClient(runtimeURL, {
-  project: projectID,
-  queryCache: false,
+const client = new GonvexClient(runtimeURL, {
+  localReplica: { storage: indexedDBLocalReplica("whagons") },
 });
 ```
 
-Clear the current confirmed scope or every Gonvex scope stored by the origin:
+On launch, cached entities and windows hydrate immediately with freshness
+`verifying`. After Gonvex resumes the committed revision and verifies a Live
+Query, freshness becomes `current`.
 
-```ts
-await gonvex.clearQueryCache();
-await gonvex.clearQueryCache({ allScopes: true });
+```tsx
+const { rows, source, completeness, freshness } =
+  useLiveQueryState(api.tasks.grid, args);
 ```
 
-Runtime operators can disable cache advertisement with:
+`rows` are resolved from one entity map. A query owns only membership and
+ordering, so a task displayed by several components cannot diverge into
+separate cached copies.
 
-```txt
-GONVEX_BROWSER_QUERY_CACHE_ENABLED=false
-```
+## Offline contract
 
-## Current Limits
+Portable Live Query expressions can run over cached rows. Gonvex reports:
 
-- `client.query()` remains server-only because a one-shot promise cannot be
-  silently updated after it resolves.
-- This cache does not make authenticated applications work offline; establishing
-  the authorized scope still requires the runtime.
-- Gonvex stores exact query results. It does not mirror tables or execute SQL in
-  the browser.
-- Mutations and optimistic writes are not persisted in this version.
+- `source`: `server` or `cache`
+- `completeness`: `complete` or `partial`
+- `freshness`: `current`, `verifying`, or `offline`
+
+A partial cache must be labeled as partial in product UI. PostgreSQL-specific
+operators are marked online-only instead of being approximated in JavaScript.
+
+## Atomicity
+
+Every server revision updates entities, memberships, and the cursor in one
+IndexedDB/SQLite transaction. Gonvex swaps the in-memory snapshot and notifies
+React only after persistence succeeds, so components cannot observe half a
+server transaction.
+
+One-shot `client.query()` remains server-only. Persistent windows belong to
+structured Live Queries; bounded durable entity sets belong to Replica
+Collections.

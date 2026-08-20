@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../gonvex/_generated/api";
-import { useMutation, useQuery } from "../gonvex/_generated/react";
+import { useLiveQuery, useReducer } from "../gonvex/_generated/react";
 
 type Message = {
   id: string;
@@ -10,8 +10,8 @@ type Message = {
 };
 
 export default function App(props: { runtimeURL: string }) {
-  const messages = useQuery<Message[]>(api.messages.list, {}) ?? [];
-  const sendMessage = useMutation(api.messages.send);
+  const messages = useLiveQuery<Message[]>(api.messages.list, {}) ?? [];
+  const sendMessage = useReducer(api.messages.send);
   const [body, setBody] = useState("");
 
   async function submit() {

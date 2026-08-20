@@ -41,7 +41,7 @@ func TestOfflineVisibilityChangeCannotResumeReadyWithoutReconciliation(t *testin
 			"taskId": {Type: "id"},
 		}},
 	}}
-	definitions, err := syncDefinitionsForSchema(map[string]manifest.SyncDefinition{
+	definitions, err := syncDefinitionsForSchema(map[string]manifest.ReplicaCollectionDefinition{
 		tasksTable: {
 			Table:            tasksTable,
 			Key:              "id",

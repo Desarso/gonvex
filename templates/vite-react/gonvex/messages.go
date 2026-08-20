@@ -21,14 +21,14 @@ type Message struct {
 
 func Register(app *gonvex.App) {
 	app.Query("messages.list", ListMessages)
-	app.Mutation("messages.send", SendMessage)
+	app.Reducer("messages.send", SendMessage, gonvex.OnlineOnlyNonOptimistic("server assigns the message id"))
 }
 
 func ListMessages(ctx *gonvex.QueryCtx, args ListMessagesArgs) ([]Message, error) {
 	return []Message{}, nil
 }
 
-func SendMessage(ctx *gonvex.MutationCtx, args SendMessageArgs) (Message, error) {
+func SendMessage(ctx *gonvex.ReducerCtx, args SendMessageArgs) (Message, error) {
 	return Message{
 		ID:        "pending",
 		Body:      args.Body,

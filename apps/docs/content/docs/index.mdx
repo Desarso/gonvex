@@ -7,7 +7,7 @@ description: Build realtime Go + Postgres backends with generated TypeScript bin
 
 Gonvex is a Convex-style backend for teams that want to write backend logic in
 Go while keeping the frontend developer experience tight: generated TypeScript
-bindings, realtime subscriptions, durable local sync, schema sync, and a
+bindings, transactional realtime delivery, a persistent Local Replica, schema sync, and a
 self-hosted runtime that knows about projects, tenants, users, and roles.
 
 The application workflow is:
@@ -37,18 +37,19 @@ Your React app imports generated bindings:
 ```ts
 import { api } from "./gonvex/_generated/api";
 
-const tasks = useQuery(api.tasks.list, { status: "open" });
-const createTask = useMutation(api.tasks.create);
+const tasks = useLiveQueryState(api.tasks.grid, { status: "open" });
+const createTask = useReducer(api.tasks.create);
 ```
 
 ## What Gonvex Provides
 
-- **Go backend functions**: queries, mutations, actions, HTTP handlers, internal mutations, LiveGrid functions, and sync collections.
+- **Three function kinds**: read-only Queries, transactional Reducers, and external-work Actions.
 - **Generated TypeScript bindings**: frontend-safe references to your app backend functions.
 - **Postgres schema management**: define tables and indexes in Go.
-- **Realtime subscriptions**: declared dependencies refresh only relevant query results when writes commit.
-- **Durable sync collections**: keep authorized, bounded table data in IndexedDB and resume from a Postgres change cursor.
-- **Browser query cache**: replay safe scoped snapshots while the server revalidates them.
+- **Committed change feed**: Postgres changes, not declared write guesses, drive realtime delivery.
+- **Replica Collections**: keep authorized, bounded entities in IndexedDB or SQLite and resume from a revision cursor.
+- **Structured Live Queries**: exact indexed server windows over arbitrarily large datasets.
+- **Local Replica**: one normalized authoritative/optimistic client store shared by every view.
 - **Multi-project runtime**: one runtime can host many projects.
 - **Multi-tenant projects**: route verified members to isolated tenant databases.
 - **User and membership model**: users can belong to multiple tenants with roles and permissions.
@@ -87,8 +88,8 @@ Generated bindings
 6. [Auth and Membership](./auth-and-membership)
 7. [Schema](./schema)
 8. [Functions and Bindings](./functions-and-bindings)
-9. [Realtime Subscriptions](./realtime-subscriptions)
-10. [Durable Sync Collections](./durable-sync)
+9. [Realtime Delivery](./realtime-subscriptions)
+10. [Replica Collections and Local Replica](./durable-sync)
 11. [Scheduling and Background Jobs](./scheduling)
 
 ## Current Status

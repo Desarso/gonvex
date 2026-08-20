@@ -185,6 +185,7 @@ export type RuntimeLogEntry = {
   cache?: string;
   source?: string;
   reason?: string;
+  delivery?: "oneShot" | "live" | "replica";
   request?: unknown;
   requestSizeBytes?: number;
   resultCount?: number;
@@ -193,7 +194,7 @@ export type RuntimeLogEntry = {
 type RuntimeRunningMetrics = {
   current: Record<string, number>;
   total: number;
-  series: { time: string; query: number; mutation: number; action: number }[];
+  series: { time: string; query: number; reducer: number; action: number }[];
 };
 
 type RuntimeWebSocketMetrics = {
@@ -580,19 +581,19 @@ const pages: Page[] = [
     label: "Overview",
     eyebrow: "Runtime pulse",
     title: "Realtime control room",
-    description: "Watch the local project runtime, generated bindings, schema sync, and grid surface from one place.",
+    description: "Watch reducers, the committed change feed, generated bindings, and Live Query delivery from one place.",
   },
   {
     id: "functions",
     label: "Functions",
     eyebrow: "Function manifest",
     title: "Live backend surface",
-    description: "Queries, mutations, storage helpers, and LiveGrid registrations extracted from app-local Go files.",
+    description: "Queries, Reducers, Actions, Replica Collections, and Live Queries extracted from app-local Go files.",
   },
   {
     id: "data",
     label: "Data",
-    eyebrow: "Schema sync",
+    eyebrow: "Schema apply",
     title: "Postgres project schema",
     description: "Tables, columns, and indexes defined in gonvex/schema.go and applied safely by the Gonvex Runtime.",
   },
@@ -657,13 +658,13 @@ const functionColumns: GridColumn[] = [
 
 const functionRows: GridRow[] = [
   ["tasks.list", "query", "live", "gonvex/tasks.go", "ready"],
-  ["tasks.create", "mutation", "invalidates", "gonvex/tasks.go", "ready"],
-  ["tasks.randomizeStatusPriority", "mutation", "coalesced", "gonvex/tasks.go", "ready"],
-  ["files.createUploadUrl", "mutation", "storage", "gonvex/files.go", "ready"],
+  ["tasks.create", "reducer", "atomic commit", "gonvex/tasks.go", "ready"],
+  ["tasks.randomizeStatusPriority", "reducer", "change feed", "gonvex/tasks.go", "ready"],
+  ["files.createUploadUrl", "action", "storage", "gonvex/files.go", "ready"],
   ["files.getUrl", "query", "storage", "gonvex/files.go", "ready"],
   ["files.getMetadata", "query", "storage", "gonvex/files.go", "ready"],
-  ["files.delete", "mutation", "storage", "gonvex/files.go", "ready"],
-  ["tasks.grid", "liveGrid", "patch stream", "gonvex/tasks.go", "ready"],
+  ["files.delete", "action", "storage", "gonvex/files.go", "ready"],
+  ["tasks.grid", "liveQuery", "exact window", "gonvex/tasks.go", "ready"],
 ];
 
 const functions: FunctionInfo[] = functionRows.map(([name, kind, realtime, source, status]) => ({
@@ -678,15 +679,15 @@ function realtimeLabel(kind: string): string {
   switch (kind) {
     case "query":
       return "live";
-    case "mutation":
+    case "reducer":
       return "invalidates";
-    case "liveGrid":
+    case "liveQuery":
       return "patch stream";
     case "action":
       return "async";
     case "http":
       return "route";
-    case "internalMutation":
+    case "internalReducer":
       return "internal";
     default:
       return "registered";
@@ -815,7 +816,7 @@ export function runtimeLogSourceSummary(entry: RuntimeLogEntry): RuntimeLogSourc
     return { key: "database", group: "database", label: "Database", tableLabel: "DB", detail: "Database executed" };
   }
   if (source === "websocket") {
-    return { key: "websocket", group: "websocket", label: "WebSocket", tableLabel: "WebSocket", detail: "Durable sync protocol" };
+    return { key: "websocket", group: "websocket", label: "WebSocket", tableLabel: "WebSocket", detail: "Replica transaction stream" };
   }
   return {
     key: "unknown",
@@ -4585,7 +4586,7 @@ const HEALTH_COLORS = {
   cache: "var(--success)",
   latency: "var(--warning)",
   query: "#4f7cff",
-  mutation: "var(--success)",
+  reducer: "var(--success)",
   action: "var(--warning)",
   lag: "var(--accent)",
   completed: "var(--success)",
@@ -4791,7 +4792,7 @@ function OverviewPage(props: { project: ProjectTarget }) {
     const runningSeries = (metrics?.running?.series ?? []).map((point) => ({
       label: shortClockLabel(point.time),
       Queries: point.query,
-      Mutations: point.mutation,
+      Reducers: point.reducer,
       Actions: point.action,
     }));
     const schedulerSeries = (metrics?.scheduler?.series ?? []).map((point) => ({
@@ -4874,7 +4875,7 @@ function OverviewPage(props: { project: ProjectTarget }) {
           <HealthStat label="Function calls" value={formatCount(derived.totalCalls)} sub={`${formatCount(derived.totalErrors)} errors`} />
           <HealthStat label="Failure rate" value={`${derived.failureRate.toFixed(1)}%`} tone={derived.failureRate > 0 ? "danger" : "success"} />
           <HealthStat label="Cache hit rate" value={`${cacheHitRate.toFixed(0)}%`} tone="success" />
-          <HealthStat label="Connections" value={String(connections)} sub={`${subscriptions} subscriptions`} />
+          <HealthStat label="Connections" value={String(connections)} sub={`${subscriptions} live streams`} />
           <HealthStat label="Running now" value={String(runningNow)} tone={runningNow > 0 ? "warning" : "default"} />
           <HealthStat label="Scheduler lag" value={formatDuration(lagMs)} sub={`${queued} queued`} tone={lagMs > 1000 ? "danger" : "default"} />
         </section>
@@ -4986,7 +4987,7 @@ function OverviewPage(props: { project: ProjectTarget }) {
                   <Line type="monotone" dataKey="Last user" stroke={HEALTH_COLORS.errors} strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line type="monotone" dataKey="p95" stroke={HEALTH_COLORS.latency} strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line type="monotone" dataKey="Average" stroke={HEALTH_COLORS.query} strokeWidth={2} dot={false} isAnimationActive={false} />
-                  <Line type="monotone" dataKey="Server max" stroke={HEALTH_COLORS.mutation} strokeWidth={1.5} strokeDasharray="5 3" dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Server max" stroke={HEALTH_COLORS.reducer} strokeWidth={1.5} strokeDasharray="5 3" dot={false} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
             </HealthChartCard>
@@ -5011,12 +5012,12 @@ function OverviewPage(props: { project: ProjectTarget }) {
                   <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} />
                   <Legend wrapperStyle={{ fontSize: 11 }} iconType="plainline" />
                   <Line type="monotone" dataKey="Connections" stroke={HEALTH_COLORS.query} strokeWidth={2} dot={false} isAnimationActive={false} />
-                  <Line type="monotone" dataKey="Users" stroke={HEALTH_COLORS.mutation} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Users" stroke={HEALTH_COLORS.reducer} strokeWidth={2} dot={false} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
             </HealthChartCard>
 
-            <HealthChartCard title="Subscriptions" value={String(subscriptions)} hint="open query + sync subscriptions across all connections">
+            <HealthChartCard title="Live streams" value={String(subscriptions)} hint="Live Queries and Replica Collections across all connections">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={derived.loadSeries} margin={HEALTH_CHART_MARGIN}>
                   <defs>
@@ -5081,7 +5082,7 @@ function OverviewPage(props: { project: ProjectTarget }) {
                   <Tooltip contentStyle={HEALTH_TOOLTIP_STYLE} labelStyle={{ color: "var(--muted)" }} />
                   <Legend wrapperStyle={{ fontSize: 11 }} iconType="plainline" />
                   <Line type="monotone" dataKey="Queries" stroke={HEALTH_COLORS.query} strokeWidth={2} dot={false} isAnimationActive={false} />
-                  <Line type="monotone" dataKey="Mutations" stroke={HEALTH_COLORS.mutation} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="Reducers" stroke={HEALTH_COLORS.reducer} strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Line type="monotone" dataKey="Actions" stroke={HEALTH_COLORS.action} strokeWidth={2} dot={false} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
@@ -5284,7 +5285,7 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
               variant={item.name === selectedName ? "secondary" : "ghost"}
             >
               <span className="function-kind" aria-hidden="true">
-                {item.kind === "mutation" ? "fn" : "q"}
+                {item.kind === "reducer" ? "r" : "q"}
               </span>
               <span>{item.name}</span>
             </Button>
@@ -6192,7 +6193,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
                 {!activeTable
                   ? "Connect a project and push its schema before tables appear here."
                   : runtimeAvailable
-                  ? "Create a document or run a mutation to start storing data."
+                  ? "Create a document or run a Reducer to start storing data."
                   : "Start Gonvex Runtime with `pnpm dev:runtime` to read and insert real database rows."}
               </span>
               <Button size="sm" variant="primary" onPress={openAddDocument} isDisabled={!runtimeAvailable || !activeTable}>
@@ -7323,7 +7324,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     const subscribedStateKey = gridStateKeyRef.current;
     const args = testTaskGridArgs(subscribedOffset, search, sort, activeFilters, rowCacheRef.current);
     if (Object.keys(rowCacheRef.current).length === 0) setQueryLoading(true);
-    const unsubscribe = client.subscribeQuery(api["tasks.grid"], args as unknown as JsonValue, (message) => {
+    const unsubscribe = client.subscribeQuery(api.tasks.grid, args as unknown as JsonValue, (message) => {
       if (cancelled) return;
       if (message.type === "query.error") {
         setQueryLoading(false);
@@ -7356,14 +7357,14 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     setRandomizing(true);
     setStatus("Randomizing 3k task statuses/priorities...");
     try {
-      const result = await client.mutation<RandomizeTasksResponse>(
-        api["tasks.randomizeStatusPriority"],
+      const result = await client.reducer<RandomizeTasksResponse>(
+        api.tasks.randomizeStatusPriority,
         { count: 3000 } as unknown as JsonValue,
       );
       setStatus(`Randomized ${result.updated.toLocaleString()} tasks in ${result.durationMs.toLocaleString()}ms`);
       props.onAction(`Randomized ${result.updated.toLocaleString()} task rows`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Randomize mutation failed");
+      setStatus(error instanceof Error ? error.message : "Randomize Reducer failed");
     } finally {
       setRandomizing(false);
     }
@@ -7845,7 +7846,7 @@ function FilesPage(props: {
 type LogBadgeCellData = {
   kind: "logBadge";
   label: string;
-  tone: "neutral" | "query" | "mutation" | "action" | "success" | "error";
+  tone: "neutral" | "query" | "reducer" | "action" | "success" | "error";
 };
 
 const logBadgeRenderer: CustomRenderer = {
@@ -7856,7 +7857,7 @@ const logBadgeRenderer: CustomRenderer = {
     const palette: Record<LogBadgeCellData["tone"], { background: string; foreground: string }> = {
       neutral: { background: "rgba(120, 120, 120, 0.13)", foreground: theme.textMedium },
       query: { background: "rgba(59, 130, 246, 0.15)", foreground: "#3b82f6" },
-      mutation: { background: "rgba(168, 85, 247, 0.15)", foreground: "#a855f7" },
+      reducer: { background: "rgba(168, 85, 247, 0.15)", foreground: "#a855f7" },
       action: { background: "rgba(234, 179, 8, 0.16)", foreground: "#b58100" },
       success: { background: "rgba(34, 197, 94, 0.15)", foreground: "#219653" },
       error: { background: "rgba(239, 68, 68, 0.16)", foreground: "#e5484d" },
@@ -7930,7 +7931,7 @@ export function LogDetailsSheet(props: { entry: RuntimeLogEntry; onClose: () => 
 
   const fields: Array<[string, string]> = [
     ["Execution ID", executionID],
-    ["Sync subscription ID", props.entry.operationId || "Not captured"],
+    ["Replica stream ID", props.entry.operationId || "Not captured"],
     ["Function", props.entry.path || "runtime"],
     ["Type", props.entry.kind || "unknown"],
     ["Started", formatLogDateTime(runtimeLogStart(props.entry))],
@@ -8062,7 +8063,7 @@ function LogsPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
     const isError = (entry?.outcome || "unknown") === "error";
     if (column === 2) {
       const entryKind = entry?.kind || "unknown";
-      const tone = entryKind === "query" || entryKind === "mutation" || entryKind === "action" ? entryKind : "neutral";
+      const tone = entryKind === "query" || entryKind === "reducer" || entryKind === "action" ? entryKind : "neutral";
       return logBadgeCell(value, tone);
     }
     if (column === 3) {
@@ -8682,10 +8683,10 @@ function realtimeActivityLabel(activity: string): string {
     auth: "Authenticated",
     "query.subscribe": "Subscribed",
     "query.unsubscribe": "Unsubscribed",
-    "mutation.call": "Called mutation",
+    "reducer.call": "Called Reducer",
     "action.call": "Called action",
     query: "Received query update",
-    mutation: "Received mutation result",
+    reducer: "Received Reducer result",
     action: "Received action result",
   };
   return labels[activity] ?? activity.replaceAll(".", " ");
@@ -8765,7 +8766,7 @@ export function RealtimeDashboard(props: {
         <div>
           <div className="realtime-kicker"><span className={`health-pulse ${props.reachable ? "is-live" : "is-down"}`} aria-hidden="true" /> Live presence</div>
           <h2>Who is connected right now?</h2>
-          <p>Trace each browser session from a user to its tenant and active query subscriptions.</p>
+          <p>Trace each browser session from a user to its tenant, Live Queries, and Replica Collections.</p>
         </div>
         <div className="realtime-refresh-state" data-state={props.reachable ? "live" : "offline"}>
           <strong>{props.reachable ? "Streaming" : "Runtime offline"}</strong>
@@ -8776,7 +8777,7 @@ export function RealtimeDashboard(props: {
       <section className="realtime-stat-strip" aria-label="Realtime summary">
         <div><span>Users online</span><strong>{reportedUsers}</strong></div>
         <div><span>Connections</span><strong>{reportedConnections}</strong></div>
-        <div><span>Subscriptions</span><strong>{websocket?.subscriptions ?? 0}</strong></div>
+        <div><span>Live streams</span><strong>{websocket?.subscriptions ?? 0}</strong></div>
         <div><span>Events · 5 min</span><strong>{recentEventCount}</strong></div>
       </section>
 
@@ -8795,7 +8796,7 @@ export function RealtimeDashboard(props: {
                   <div className="realtime-user-name"><strong>{user.label}</strong><code>{user.secondary}</code></div>
                   <div className="realtime-user-destinations"><span>Tenants</span><strong>{user.tenants.join(", ") || props.project.id}</strong></div>
                   <div className="realtime-user-count"><strong>{user.connections.length}</strong><span>{user.connections.length === 1 ? "connection" : "connections"}</span></div>
-                  <div className="realtime-user-count"><strong>{user.subscriptions}</strong><span>subscriptions</span></div>
+                  <div className="realtime-user-count"><strong>{user.subscriptions}</strong><span>live streams</span></div>
                 </article>
               ))}
               {users.length === 0 ? (
@@ -8839,12 +8840,12 @@ export function RealtimeDashboard(props: {
                       <b aria-hidden="true">→</b>
                       <div><span>Destination</span><strong>{connection.tenant || connection.project}</strong></div>
                       <b aria-hidden="true">→</b>
-                      <div><span>Watching</span><strong>{connection.subscriptions.length} {connection.subscriptions.length === 1 ? "query" : "queries"}</strong></div>
+                      <div><span>Watching</span><strong>{connection.subscriptions.length} {connection.subscriptions.length === 1 ? "stream" : "streams"}</strong></div>
                     </div>
                     <div className="realtime-connection-foot">
                       <details className="realtime-subscription-disclosure">
                         <summary aria-label={`Show ${connection.subscriptions.length} subscriptions for ${connection.id}`}>
-                          <span>Subscriptions</span>
+                          <span>Live streams</span>
                           <strong>{connection.subscriptions.length}</strong>
                           <em>{connection.subscriptions.length === 0 ? "None active" : "View paths"}</em>
                         </summary>
@@ -8884,7 +8885,7 @@ export function RealtimeDashboard(props: {
             ))}
             {recentActivity.length === 0 ? (
               <div className="realtime-empty realtime-empty--activity">
-                <span aria-hidden="true">↯</span><strong>No project activity yet</strong><p>Queries, mutations, and actions will stream into this timeline.</p>
+                <span aria-hidden="true">↯</span><strong>No project activity yet</strong><p>Queries, Reducers, and Actions will stream into this timeline.</p>
               </div>
             ) : null}
           </div>

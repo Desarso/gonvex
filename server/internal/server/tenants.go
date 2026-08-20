@@ -895,7 +895,7 @@ func (s *Server) provisionTenantDatabaseWithSync(ctx context.Context, project st
 	}
 	current := s.runtime.ManifestForProject(project)
 	desiredSchema := current.Schema.TenantSchema()
-	syncDefinitions, err := syncDefinitionsForSchema(manifestSyncDefinitions(current), desiredSchema)
+	syncDefinitions, err := syncDefinitionsForSchema(manifestReplicaCollectionDefinitions(current), desiredSchema)
 	if err != nil {
 		return err
 	}
@@ -1096,7 +1096,7 @@ func (s *Server) applyTenantSchemasForProject(
 	ctx context.Context,
 	project string,
 	desiredSchema manifest.Schema,
-	syncDefinitions map[string]manifest.SyncDefinition,
+	syncDefinitions map[string]manifest.ReplicaCollectionDefinition,
 	options schema.ApplyOptions,
 ) (schema.Result, error) {
 	if err := s.hydrateProjectTenantDatabasesWithError(ctx, project, s.hydrateProjectTenantDatabasesUncachedWithError); err != nil {
@@ -1113,12 +1113,12 @@ func (s *Server) applyTenantSchemasForProject(
 	}
 	s.projectMu.RUnlock()
 
-	tenantSyncDefinitions, err := syncDefinitionsForSchema(syncDefinitions, desiredSchema)
+	tenantReplicaCollectionDefinitions, err := syncDefinitionsForSchema(syncDefinitions, desiredSchema)
 	if err != nil {
 		return schema.Result{}, err
 	}
 	return applyTenantSchemas(ctx, tenants, desiredSchema, func(ctx context.Context, databaseURL string, desired manifest.Schema) (schema.Result, error) {
-		return schema.ApplyWithOptions(ctx, databaseURL, desired, tenantSyncDefinitions, options)
+		return schema.ApplyWithOptions(ctx, databaseURL, desired, tenantReplicaCollectionDefinitions, options)
 	})
 }
 
@@ -1126,24 +1126,18 @@ func (s *Server) projectSyncStorageInstalled(
 	ctx context.Context,
 	project string,
 	desiredSchema manifest.Schema,
-	syncDefinitions map[string]manifest.SyncDefinition,
+	_ map[string]manifest.ReplicaCollectionDefinition,
 ) (bool, error) {
-	landlordDefinitions, err := syncDefinitionsForSchema(syncDefinitions, desiredSchema.LandlordSchema())
-	if err != nil {
-		return false, err
-	}
-	if len(landlordDefinitions) > 0 {
+	landlordSchema := desiredSchema.LandlordSchema()
+	if len(landlordSchema.Tables) > 0 {
 		installed, err := schema.SyncStorageInstalled(ctx, s.databaseURLForProject(project))
 		if err != nil || !installed {
 			return installed, err
 		}
 	}
 
-	tenantDefinitions, err := syncDefinitionsForSchema(syncDefinitions, desiredSchema.TenantSchema())
-	if err != nil {
-		return false, err
-	}
-	if len(tenantDefinitions) == 0 {
+	tenantSchema := desiredSchema.TenantSchema()
+	if len(tenantSchema.Tables) == 0 {
 		return true, nil
 	}
 	if err := s.hydrateProjectTenantDatabasesWithError(ctx, project, s.hydrateProjectTenantDatabasesUncachedWithError); err != nil {

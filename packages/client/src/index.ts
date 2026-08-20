@@ -7,7 +7,7 @@ import type {
   ServerCapabilities,
   ServerMessage,
   SubscriptionRevision,
-  SyncCursor,
+  ReplicaCursor,
   SyncOpenRequest,
 } from "@gonvex/protocol";
 import {
@@ -28,16 +28,17 @@ import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter
 import {
   OptimisticOverlay,
   optimisticPatchesFromReference,
-  type OptimisticMutationDefinition,
+  type OptimisticReducerDefinition,
   type OptimisticPatch,
   type OptimisticProjection,
   type Row,
 } from "./optimistic.js";
 import {
-  createMutationOutbox,
-  type MutationOutbox,
+  createReducerOutbox,
+  type ReducerOutbox,
   type OutboxStore,
 } from "./outbox.js";
+import { LocalReplica, type LocalReplicaStorage, type ReplicaRow } from "./local-replica.js";
 export * from "./cache.js";
 export * from "./cache-coordinator.js";
 export * from "./browser-cache.js";
@@ -52,7 +53,16 @@ export * from "./optimistic.js";
 export * from "./outbox.js";
 export * from "./kv-stores.js";
 export * from "./signals.js";
+export * from "./local-replica.js";
+export * from "./query-expression.js";
+export * from "./indexeddb-replica.js";
 export type { QueryCacheDirective } from "@gonvex/protocol";
+
+function asReplicaRow(value: JsonValue | undefined): ReplicaRow | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as ReplicaRow
+    : undefined;
+}
 
 type SubscriptionHandler = (message: ServerMessage) => void;
 export type SyncReadyMessage = Extract<ServerMessage, { type: "sync.ready" }> & {
@@ -71,6 +81,8 @@ export type SyncMessage =
   }>
   | SyncReadyMessage;
 export type SyncSubscriptionHandler = (message: SyncMessage) => void;
+/** Public Replica Collection name; `SyncSubscriptionHandler` remains as a compatibility alias. */
+export type ReplicaSubscriptionHandler = SyncSubscriptionHandler;
 type WatchUpdateHandler = () => void;
 type TelemetryHandler = (event: GonvexTelemetryEvent) => void;
 type ConnectionStateHandler = (state: ConnectionState) => void;
@@ -79,6 +91,7 @@ type QuerySubscription = {
   key: string;
   path: string;
   projection?: OptimisticProjection;
+  live?: { entity: string; key: string; resultPath: string[] };
   args: JsonValue;
   listeners: Set<SubscriptionHandler>;
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
@@ -101,12 +114,12 @@ type SyncSubscription = {
   listeners: Set<SyncSubscriptionHandler>;
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
   rows: JsonValue[];
-  cursor?: SyncCursor;
+  cursor?: ReplicaCursor;
   // Keep the newest cursor seen in the current epoch even while an integrity
   // reset clears `cursor` to force a fresh snapshot. Without this floor, a
   // delayed pre-reset snapshot can be accepted during the reopen and become
   // current again.
-  cursorFloor?: SyncCursor;
+  cursorFloor?: ReplicaCursor;
   retiredEpochs: Set<string>;
   keyField: string;
   mode?: "eager" | "progressive";
@@ -138,13 +151,13 @@ type SyncSubscription = {
   persistedRows?: JsonValue[];
 };
 
-function syncCursorIsStale(subscription: SyncSubscription, cursor: SyncCursor) {
+function syncCursorIsStale(subscription: SyncSubscription, cursor: ReplicaCursor) {
   if (subscription.retiredEpochs.has(cursor.epoch)) return true;
   const floor = subscription.cursorFloor;
   return floor?.epoch === cursor.epoch && cursor.revision < floor.revision;
 }
 
-function raiseSyncCursorFloor(subscription: SyncSubscription, cursor: SyncCursor) {
+function raiseSyncCursorFloor(subscription: SyncSubscription, cursor: ReplicaCursor) {
   if (subscription.cursorFloor && subscription.cursorFloor.epoch !== cursor.epoch) {
     subscription.retiredEpochs.add(subscription.cursorFloor.epoch);
   }
@@ -166,7 +179,7 @@ type OneShotQuery = {
 };
 type PendingCall = {
   id: string;
-  kind: "mutation" | "action";
+  kind: "reducer" | "action";
   path: string;
   reject: (error: Error) => void;
   timeoutTimer?: ReturnType<typeof setTimeout>;
@@ -175,9 +188,11 @@ type PendingCall = {
 export type FunctionReference = {
   kind: string;
   path: string;
+  delivery?: "oneShot" | "live" | "replica";
+  live?: { entity: string; key: string; resultPath?: readonly string[] };
   optimistic?: {
     projection?: OptimisticProjection;
-    mutation?: OptimisticMutationDefinition;
+    reducer?: OptimisticReducerDefinition;
   };
 };
 
@@ -190,18 +205,18 @@ export type GonvexClientErrorCode = "server" | "timeout" | "disconnected" | "clo
  *
  * - `server`: the runtime executed the function and returned an error.
  * - `timeout`: no response arrived within the operation timeout. For
- *   mutations/actions the write may or may not have been applied.
+ *   reducers/actions the write may or may not have been applied.
  * - `disconnected`: the socket dropped while the operation was pending.
- *   Mutations/actions fail closed unless a mutation opted into the outbox.
+ *   Reducers/actions fail closed unless a reducer opted into the outbox.
  * - `closed`: the client was explicitly closed.
  * - `auth`: authentication was rejected.
  */
 export class GonvexClientError extends Error {
   readonly code: GonvexClientErrorCode;
   readonly path?: string;
-  readonly operation?: "query" | "mutation" | "action";
+  readonly operation?: "query" | "reducer" | "action";
 
-  constructor(message: string, options: { code: GonvexClientErrorCode; path?: string; operation?: "query" | "mutation" | "action" }) {
+  constructor(message: string, options: { code: GonvexClientErrorCode; path?: string; operation?: "query" | "reducer" | "action" }) {
     super(message);
     this.name = "GonvexClientError";
     this.code = options.code;
@@ -216,7 +231,7 @@ export type ConnectionState = {
   connectionCount: number;
   connectionRetries: number;
   hasInflightRequests: boolean;
-  inflightMutations: number;
+  inflightReducers: number;
   inflightActions: number;
   inflightOneShotQueries: number;
 };
@@ -224,8 +239,8 @@ export type ConnectionState = {
 export type GonvexTimeoutOptions = {
   /** One-shot `client.query()` timeout. Default 20s. `0` disables. */
   queryTimeoutMs?: number;
-  /** `client.mutation()` timeout. Default 20s. `0` disables. */
-  mutationTimeoutMs?: number;
+  /** `client.reducer()` timeout. Default 20s. `0` disables. */
+  reducerTimeoutMs?: number;
   /** `client.action()` timeout. Default 60s. `0` disables. */
   actionTimeoutMs?: number;
 };
@@ -237,16 +252,16 @@ export const DEFAULT_ACTION_TIMEOUT_MS = 60_000;
 export type CallOptions = {
   /** Per-call override of the operation timeout. `0` disables. */
   timeoutMs?: number;
-  /** Ordered row changes to expose until the mutation settles. */
+  /** Ordered row changes to expose until the reducer settles. */
   optimistic?: OptimisticPatch[];
   /** Queue transport failures durably instead of rejecting. Default `reject`. */
   offline?: "queue" | "reject";
 };
 
-/** Returned when an offline mutation has been accepted by the local outbox. */
-export type QueuedMutationOutcome = {
+/** Returned when an offline reducer has been accepted by the local outbox. */
+export type QueuedReducerOutcome = {
   status: "queued";
-  mutationId: string;
+  reducerId: string;
 };
 
 export type GonvexAuthTokenFetcher = (args: {
@@ -296,20 +311,27 @@ export type GonvexClientOptions = GonvexClientAuth & {
    * Defaults to 250ms, preventing close/open/snapshot churn in StrictMode.
    */
   syncSubscriptionRetentionMs?: number;
+  /** Keep listenerless Replica Collections open briefly across remounts. */
+  replicaSubscriptionRetentionMs?: number;
+  /** Persistent storage for bounded Replica Collections. */
+  replica?: false | SyncStoreOptions;
+  /** @deprecated Use `replica`. */
   sync?: false | SyncStoreOptions;
   /**
-   * Durable mutation queue settings. Every replay keeps its original
+   * Durable reducer queue settings. Every replay keeps its original
    * idempotency key, making an accidental cross-tab double-send server-safe.
-   * Runtimes without IndexedDB inject `store` to keep queued mutations
+   * Runtimes without IndexedDB inject `store` to keep queued reducers
    * durable; queue semantics always stay in the SDK.
    */
   outbox?: { databaseName?: string; enabled?: boolean; store?: OutboxStore };
+  /** Transactional normalized store used by Replica Collections and Live Queries. */
+  localReplica?: { storage?: LocalReplicaStorage };
   errorReporting?: false | Omit<ErrorReporterOptions, "endpoint" | "project" | "tenant">;
   timeouts?: GonvexTimeoutOptions;
 };
 
 export type GonvexTelemetryEvent = {
-  type: "mutation" | "action" | "query";
+  type: "reducer" | "action" | "query";
   id: string;
   path: string;
   reason?: "initial" | "invalidate" | "recover";
@@ -373,9 +395,10 @@ export class GonvexClient {
   private readonly querySubscriptionRetentionMs: number;
   private readonly syncSubscriptionRetentionMs: number;
   private readonly syncStore: SyncStore | undefined;
-  private readonly mutationOutbox: MutationOutbox;
+  private readonly reducerOutbox: ReducerOutbox;
   private readonly overlay = new OptimisticOverlay();
-  private readonly optimisticMutationIds = new Set<string>();
+  private readonly replica: LocalReplica;
+  private readonly optimisticReducerIds = new Set<string>();
   private readonly optimisticOutboxEntryIds = new Map<string, number>();
   private outboxReady: Promise<void>;
   private outboxScope = "";
@@ -417,11 +440,13 @@ export class GonvexClient {
       options.querySubscriptionRetentionMs,
     );
     this.syncSubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
-      options.syncSubscriptionRetentionMs,
+      options.replicaSubscriptionRetentionMs ?? options.syncSubscriptionRetentionMs,
     );
-    this.syncStore = createSyncStore(options.sync);
-    this.mutationOutbox = createMutationOutbox(options.outbox);
-    this.unsubscribeOutbox = this.mutationOutbox.subscribe(() => {
+    this.syncStore = createSyncStore(options.replica ?? options.sync);
+    this.reducerOutbox = createReducerOutbox(options.outbox);
+    this.replica = new LocalReplica(options.localReplica?.storage);
+    void this.replica.hydrate();
+    this.unsubscribeOutbox = this.reducerOutbox.subscribe(() => {
       void this.drainOutbox();
     });
     this.unsubscribeOverlay = this.overlay.subscribe((entity) => {
@@ -434,7 +459,7 @@ export class GonvexClient {
     this.outboxReady = Promise.resolve().then(() => this.activateOutboxScope());
     this.timeouts = {
       queryTimeoutMs: options.timeouts?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
-      mutationTimeoutMs: options.timeouts?.mutationTimeoutMs ?? DEFAULT_MUTATION_TIMEOUT_MS,
+      reducerTimeoutMs: options.timeouts?.reducerTimeoutMs ?? DEFAULT_MUTATION_TIMEOUT_MS,
       actionTimeoutMs: options.timeouts?.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS,
     };
     if (options.errorReporting && options.project) {
@@ -448,14 +473,23 @@ export class GonvexClient {
     return this.overlay;
   }
 
-  /** Number of mutations waiting for a definitive server result. */
+  /** The single normalized authoritative + optimistic application data store. */
+  get localReplica(): LocalReplica {
+    return this.replica;
+  }
+
+  replicaSignature(ref: FunctionReference, args: JsonValue = {}) {
+    return querySubscriptionKey(ref, args);
+  }
+
+  /** Number of reducers waiting for a definitive server result. */
   async outboxCount(): Promise<number> {
     await this.outboxReady;
-    return this.mutationOutbox.count(this.outboxScope);
+    return this.reducerOutbox.count(this.outboxScope);
   }
 
   connectionState(): ConnectionState {
-    const inflightMutations = countPendingCalls(this.pendingCalls, "mutation");
+    const inflightReducers = countPendingCalls(this.pendingCalls, "reducer");
     const inflightActions = countPendingCalls(this.pendingCalls, "action");
     const inflightOneShotQueries = this.oneShotQueries.size;
     return {
@@ -463,8 +497,8 @@ export class GonvexClient {
       hasEverConnected: this.hasEverConnected,
       connectionCount: this.connectionCount,
       connectionRetries: this.reconnectAttempt,
-      hasInflightRequests: inflightMutations + inflightActions + inflightOneShotQueries > 0,
-      inflightMutations,
+      hasInflightRequests: inflightReducers + inflightActions + inflightOneShotQueries > 0,
+      inflightReducers,
       inflightActions,
       inflightOneShotQueries,
     };
@@ -558,6 +592,7 @@ export class GonvexClient {
       }
       this.reconnectAttempt = 0;
       this.isWebSocketConnected = true;
+      this.replica.setFreshness("verifying");
       this.hasEverConnected = true;
       this.connectionCount += 1;
       this.sendAuth(false);
@@ -568,6 +603,7 @@ export class GonvexClient {
     socket.addEventListener("close", () => {
       if (this.socket !== socket || this.manuallyClosed) return;
       this.isWebSocketConnected = false;
+      this.replica.setFreshness("offline");
       this.markSyncSubscriptionsOutOfDate();
       this.authInFlight = false;
       if (this.authWatchdogTimer) {
@@ -575,11 +611,11 @@ export class GonvexClient {
         this.authWatchdogTimer = undefined;
       }
       // A subscription queued for the old socket is superseded by the complete
-      // resubscribe below. Queued mutations/actions are rejected below, so
+      // resubscribe below. Queued reducers/actions are rejected below, so
       // drop them too — flushing them after reconnect would fire writes whose
       // callers already saw a rejection.
       this.pendingMessages.length = 0;
-      // Mutations/actions must fail closed on transport loss: silently
+      // Reducers/actions must fail closed on transport loss: silently
       // replaying a non-idempotent write after reconnect is unsafe, and
       // leaving the promise pending hangs the caller forever.
       this.rejectPendingCalls((call) => new GonvexClientError(
@@ -648,6 +684,18 @@ export class GonvexClient {
         }
         return;
       }
+      if (message.type === "replica.transaction") {
+        void this.replica.applyTransaction({
+          cursor: message.cursor,
+          originCommandId: message.originCommandId,
+          changes: message.changes.map((change) => ({
+            ...change,
+            oldValue: asReplicaRow(change.oldValue),
+            newValue: asReplicaRow(change.newValue),
+          })),
+        }).catch(() => this.replica.setFreshness("verifying"));
+        return;
+      }
       if (message.type === "sync.watermark") {
         if (this.serverCapabilities.syncWatermark === 1) {
           this.handleSyncWatermark(message.revision);
@@ -685,7 +733,7 @@ export class GonvexClient {
   close() {
     this.manuallyClosed = true;
     if (isEphemeralOutboxScope(this.outboxScope)) {
-      void this.mutationOutbox.clear(this.outboxScope);
+      void this.reducerOutbox.clear(this.outboxScope);
     }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -744,6 +792,7 @@ export class GonvexClient {
     const socket = this.socket;
     this.socket = undefined;
     this.isWebSocketConnected = false;
+    this.replica.setFreshness("offline");
     this.notifyConnectionState();
     this.connectionStateHandlers.clear();
     if (!socket) return;
@@ -829,6 +878,7 @@ export class GonvexClient {
       key,
       path: ref.path,
       projection: ref.optimistic?.projection,
+      live: ref.live ? { ...ref.live, resultPath: [...(ref.live.resultPath ?? [])] } : undefined,
       args,
       listeners: new Set([onMessage]),
       serverSettled: false,
@@ -874,7 +924,8 @@ export class GonvexClient {
         listener(outgoing);
       }
       if (message.type === "query.result") {
-        this.acknowledgeOptimisticSource(subscription.key, message.mutationIds);
+        this.materializeLiveQuery(subscription, message.result, Boolean(message.subscriptionRevision));
+        this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
         this.acknowledgeOptimisticQuerySnapshot(subscription, message.result);
       }
       if (message.type === "query.result") {
@@ -887,6 +938,24 @@ export class GonvexClient {
     this.startQueryCacheRead(subscription);
 
     return () => this.unsubscribeQueryListener(key, onMessage);
+  }
+
+  private materializeLiveQuery(subscription: QuerySubscription, result: JsonValue, authoritative: boolean) {
+    const live = subscription.live;
+    if (!live) return;
+    const projected = rowsAtPath(result, live.resultPath);
+    if (!projected) return;
+    const rows = projected.rows.filter((row): row is ReplicaRow => (
+      row !== null && typeof row === "object" && !Array.isArray(row)
+    ));
+    void this.replica.materializeWindow({
+      signature: subscription.key,
+      entity: live.entity,
+      key: live.key,
+      rows,
+      completeness: "complete",
+      source: authoritative ? "server" : "cache",
+    }).catch(() => this.replica.setFreshness("verifying"));
   }
 
   private normalizeSubscriptionMessage(subscription: QuerySubscription, message: ServerMessage): ServerMessage | undefined {
@@ -902,7 +971,7 @@ export class GonvexClient {
       subscription.lastRevision = message.throughRevision;
       subscription.revisionSocketGeneration = this.socketGeneration;
       subscription.serverSettled = true;
-      this.acknowledgeOptimisticSource(subscription.key, message.mutationIds);
+      this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
       // Progress advances freshness without waking React/query listeners.
       return undefined;
     }
@@ -936,7 +1005,7 @@ export class GonvexClient {
         cacheScope: message.cacheScope,
         cacheRevision: message.cacheRevision,
         subscriptionRevision: message.subscriptionRevision,
-        mutationIds: message.mutationIds,
+        originCommandIds: message.originCommandIds,
       };
     }
 		if (message.type === "query.pagePatch") {
@@ -958,7 +1027,7 @@ export class GonvexClient {
 			const metadata = isJsonRecord(message.result) ? message.result : {};
 			subscription.lastRevision = message.subscriptionRevision;
 			subscription.revisionSocketGeneration = this.socketGeneration;
-			return { ...message, type: "query.result", result: { ...previous.result, ...metadata, page }, mutationIds: message.mutationIds };
+			return { ...message, type: "query.result", result: { ...previous.result, ...metadata, page }, originCommandIds: message.originCommandIds };
 		}
 		if (message.type === "query.objectPatch") {
 			if (!sameRevision(message.baseRevision, subscription.lastRevision)) {
@@ -987,7 +1056,7 @@ export class GonvexClient {
 			}
 			subscription.lastRevision = message.subscriptionRevision;
 			subscription.revisionSocketGeneration = this.socketGeneration;
-			return { ...message, type: "query.result", result, mutationIds: message.mutationIds };
+			return { ...message, type: "query.result", result, originCommandIds: message.originCommandIds };
 		}
     if (message.type === "query.result" && message.subscriptionRevision) {
       if (!this.acceptRevision(subscription, message.subscriptionRevision)) return undefined;
@@ -1092,6 +1161,11 @@ export class GonvexClient {
     return () => this.unsubscribeSyncListener(key, onMessage);
   }
 
+  /** Subscribe to a bounded Replica Collection. */
+  subscribeReplica(ref: FunctionReference, args: JsonValue = {}, onMessage: ReplicaSubscriptionHandler) {
+    return this.subscribeSync(ref, args, onMessage);
+  }
+
   watchSync<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue = {}) {
     let latest: T[] | undefined;
     let latestError: Error | undefined;
@@ -1145,6 +1219,16 @@ export class GonvexClient {
     };
   }
 
+  /** Watch a bounded Replica Collection through the normalized Local Replica. */
+  watchReplica<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue = {}) {
+    const watch = this.watchSync<T>(ref, args);
+    return {
+      localReplicaResult: watch.localSyncResult,
+      status: watch.status,
+      onUpdate: watch.onUpdate,
+    };
+  }
+
   private handleSyncMessage(subscription: SyncSubscription, message: SyncMessage) {
     if (message.type === "sync.snapshot") {
       // Snapshots are only valid responses to an outstanding sync.open. Live
@@ -1182,6 +1266,7 @@ export class GonvexClient {
       subscription.integrityEpoch = undefined;
       const snapshot: SyncMessage = { ...message, result: subscription.rows };
       subscription.lastMessage = snapshot;
+      this.materializeReplicaCollection(subscription, "cache");
       this.emitSyncMessage(subscription, snapshot);
       this.persistSyncSnapshot(subscription);
       return;
@@ -1230,8 +1315,9 @@ export class GonvexClient {
         maxBytes: subscription.maxBytes,
       };
       subscription.lastMessage = snapshot;
+      this.materializeReplicaCollection(subscription, "cache");
       this.emitSyncMessage(subscription, snapshot);
-      this.acknowledgeOptimisticSource(subscription.key, message.mutationIds);
+      this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
       this.persistSyncDelta(subscription, message.upserts ?? [], message.deleted ?? []);
       return;
     }
@@ -1375,6 +1461,7 @@ export class GonvexClient {
     subscription.integrityRows = subscription.rows;
     subscription.integrityEpoch = message.cursor.epoch;
     subscription.forceFullIntegrity = false;
+    this.materializeReplicaCollection(subscription, "server");
     this.persistSyncSnapshot(subscription);
     // Every emitted ready frame is self-describing: when a legacy runtime
     // omitted the digest, the locally verified one is stamped in so consumers
@@ -1383,6 +1470,21 @@ export class GonvexClient {
       subscription,
       message.digest === verifiedDigest ? message : { ...message, digest: verifiedDigest },
     );
+  }
+
+  private materializeReplicaCollection(subscription: SyncSubscription, source: "server" | "cache") {
+    const rows = subscription.rows.filter((row): row is ReplicaRow => (
+      row !== null && typeof row === "object" && !Array.isArray(row)
+    ));
+    void this.replica.materializeWindow({
+      signature: subscription.key,
+      entity: subscription.entity,
+      key: subscription.keyField,
+      rows,
+      completeness: subscription.truncated ? "partial" : "complete",
+      source,
+      cursor: subscription.cursor,
+    }).catch(() => this.replica.setFreshness("verifying"));
   }
 
   private handleSyncWatermark(revision: number) {
@@ -1424,7 +1526,7 @@ export class GonvexClient {
         message.result as unknown as readonly Row[],
         message.key,
       );
-      for (const mutationId of settled) void this.ackOptimisticMutation(mutationId);
+      for (const reducerId of settled) void this.ackOptimisticReducer(reducerId);
     }
   }
 
@@ -1475,9 +1577,9 @@ export class GonvexClient {
     }
   }
 
-  private acknowledgeOptimisticSource(source: string, mutationIds: readonly string[] | undefined) {
-    const settled = this.overlay.acknowledge(source, mutationIds);
-    for (const mutationId of settled) void this.ackOptimisticMutation(mutationId);
+  private acknowledgeOptimisticSource(source: string, originCommandIds: readonly string[] | undefined) {
+    const settled = this.overlay.acknowledge(source, originCommandIds);
+    for (const reducerId of settled) void this.ackOptimisticReducer(reducerId);
   }
 
   private acknowledgeOptimisticQuerySnapshot(subscription: QuerySubscription, result: JsonValue) {
@@ -1491,7 +1593,7 @@ export class GonvexClient {
       projected.rows as unknown as readonly Row[],
       projection.key,
     );
-    for (const mutationId of settled) void this.ackOptimisticMutation(mutationId);
+    for (const reducerId of settled) void this.ackOptimisticReducer(reducerId);
   }
 
   private markSyncSubscriptionsOutOfDate() {
@@ -1696,7 +1798,7 @@ export class GonvexClient {
       this.clearSyncRetry(latest);
       this.pendingSyncOpens.delete(latest);
       this.syncSubscriptions.delete(key);
-      for (const mutationId of this.overlay.removeSource(key)) void this.ackOptimisticMutation(mutationId);
+      for (const reducerId of this.overlay.removeSource(key)) void this.ackOptimisticReducer(reducerId);
       this.handlers.delete(latest.id);
       this.send({ type: "sync.close", id: latest.id });
     }, this.syncSubscriptionRetentionMs);
@@ -1769,7 +1871,7 @@ export class GonvexClient {
   }
 
   private activateOutboxScope(): Promise<void> {
-    const scope = mutationOutboxScope(this.url, this.auth, this.outboxEphemeralScope);
+    const scope = reducerOutboxScope(this.url, this.auth, this.outboxEphemeralScope);
     if (scope === this.outboxScope) return this.outboxReady ?? Promise.resolve();
 
     const previousScope = this.outboxScope;
@@ -1777,11 +1879,11 @@ export class GonvexClient {
     // Pending state from the previous authenticated identity must disappear
     // from every live projection immediately. Its durable rows remain scoped
     // in IndexedDB and can be resumed only if that identity returns.
-    for (const mutationId of this.optimisticMutationIds) this.overlay.reject(mutationId);
-    this.optimisticMutationIds.clear();
+    for (const reducerId of this.optimisticReducerIds) this.overlay.reject(reducerId);
+    this.optimisticReducerIds.clear();
     this.optimisticOutboxEntryIds.clear();
     if (isEphemeralOutboxScope(previousScope)) {
-      void this.mutationOutbox.clear(previousScope);
+      void this.reducerOutbox.clear(previousScope);
     }
     this.outboxScope = scope;
     const ready = this.restoreOutbox(scope, generation);
@@ -1790,7 +1892,7 @@ export class GonvexClient {
   }
 
   private async restoreOutbox(scope: string, generation: number) {
-    const entries = await this.mutationOutbox.loadAll(scope);
+    const entries = await this.reducerOutbox.loadAll(scope);
     if (
       this.manuallyClosed
       || generation !== this.outboxScopeGeneration
@@ -1798,11 +1900,11 @@ export class GonvexClient {
     ) return;
     for (const entry of entries) {
       if (entry.state === "committed" && (entry.patches?.length ?? 0) === 0) {
-        await this.mutationOutbox.ack(entry.id);
+        await this.reducerOutbox.ack(entry.id);
         continue;
       }
       this.optimisticOutboxEntryIds.set(entry.idempotencyKey, entry.id);
-      this.addOptimisticMutation(entry.idempotencyKey, entry.patches ?? [], entry.state === "committed");
+      this.addOptimisticReducer(entry.idempotencyKey, entry.patches ?? [], entry.state === "committed");
     }
     const nextAttemptAt = Math.min(
       ...entries
@@ -1818,29 +1920,31 @@ export class GonvexClient {
     void this.drainOutbox();
   }
 
-  private addOptimisticMutation(mutationId: string, patches: OptimisticPatch[], accepted = false) {
-    if (patches.length === 0 || this.optimisticMutationIds.has(mutationId)) return;
-    this.optimisticMutationIds.add(mutationId);
-    this.overlay.add(mutationId, patches, { accepted });
+  private addOptimisticReducer(reducerId: string, patches: OptimisticPatch[], accepted = false) {
+    if (patches.length === 0 || this.optimisticReducerIds.has(reducerId)) return;
+    this.optimisticReducerIds.add(reducerId);
+    this.overlay.add(reducerId, patches, { accepted });
+    this.replica.applyOptimistic(reducerId, patches);
   }
 
-  private async settleOptimisticMutation(mutationId: string) {
+  private async settleOptimisticReducer(reducerId: string) {
     await Promise.all(
-      this.overlay.accept(mutationId).map((settledId) => this.ackOptimisticMutation(settledId)),
+      this.overlay.accept(reducerId).map((settledId) => this.ackOptimisticReducer(settledId)),
     );
   }
 
-  private async rejectOptimisticMutation(mutationId: string, knownEntryId?: number) {
-    this.optimisticMutationIds.delete(mutationId);
-    this.overlay.reject(mutationId);
-    await this.ackOptimisticMutation(mutationId, knownEntryId);
+  private async rejectOptimisticReducer(reducerId: string, knownEntryId?: number) {
+    this.optimisticReducerIds.delete(reducerId);
+    this.overlay.reject(reducerId);
+    this.replica.rejectCommand(reducerId);
+    await this.ackOptimisticReducer(reducerId, knownEntryId);
   }
 
-  private async ackOptimisticMutation(mutationId: string, knownEntryId?: number) {
-    const entryId = knownEntryId ?? this.optimisticOutboxEntryIds.get(mutationId);
-    this.optimisticOutboxEntryIds.delete(mutationId);
-    this.optimisticMutationIds.delete(mutationId);
-    if (entryId !== undefined) await this.mutationOutbox.ack(entryId);
+  private async ackOptimisticReducer(reducerId: string, knownEntryId?: number) {
+    const entryId = knownEntryId ?? this.optimisticOutboxEntryIds.get(reducerId);
+    this.optimisticOutboxEntryIds.delete(reducerId);
+    this.optimisticReducerIds.delete(reducerId);
+    if (entryId !== undefined) await this.reducerOutbox.ack(entryId);
   }
 
   private async drainOutbox() {
@@ -1856,32 +1960,32 @@ export class GonvexClient {
     try {
       while (!this.manuallyClosed && this.socket?.readyState === WebSocket.OPEN) {
         const scope = this.outboxScope;
-        const entry = await this.mutationOutbox.nextReady(scope, Date.now());
+        const entry = await this.reducerOutbox.nextReady(scope, Date.now());
         if (!entry) return;
         if (scope !== this.outboxScope) return;
-        await this.mutationOutbox.markInflight(entry.id);
+        await this.reducerOutbox.markInflight(entry.id);
         if (scope !== this.outboxScope) return;
         try {
           await this.call(
-            "mutation",
-            { kind: "mutation", path: entry.path },
+            "reducer",
+            { kind: "reducer", path: entry.path },
             entry.args as JsonValue,
-            this.timeouts.mutationTimeoutMs,
+            this.timeouts.reducerTimeoutMs,
             entry.idempotencyKey,
             entry.idempotencyKey,
           );
-          await this.mutationOutbox.markCommitted(entry.id);
+          await this.reducerOutbox.markCommitted(entry.id);
           if ((entry.patches?.length ?? 0) > 0) {
-            await this.settleOptimisticMutation(entry.idempotencyKey);
+            await this.settleOptimisticReducer(entry.idempotencyKey);
           } else {
-            await this.ackOptimisticMutation(entry.idempotencyKey, entry.id);
+            await this.ackOptimisticReducer(entry.idempotencyKey, entry.id);
           }
         } catch (error) {
           if (error instanceof GonvexClientError && error.code === "server") {
-            await this.rejectOptimisticMutation(entry.idempotencyKey, entry.id);
+            await this.rejectOptimisticReducer(entry.idempotencyKey, entry.id);
             continue;
           }
-          await this.mutationOutbox.fail(entry.id, mutationErrorMessage(error));
+          await this.reducerOutbox.fail(entry.id, reducerErrorMessage(error));
           this.scheduleOutboxDrain(Math.min(30_000, 1_000 * (2 ** (entry.attempts + 1))));
           return;
         }
@@ -1903,100 +2007,100 @@ export class GonvexClient {
     }, delay);
   }
 
-  mutation<T = JsonValue>(
+  reducer<T = JsonValue>(
     ref: FunctionReference,
     args: JsonValue,
     options: CallOptions & { offline: "queue" },
-  ): Promise<T | QueuedMutationOutcome>;
-  mutation<T = JsonValue>(ref: FunctionReference, args?: JsonValue, options?: CallOptions): Promise<T>;
-  mutation<T = JsonValue>(
+  ): Promise<T | QueuedReducerOutcome>;
+  reducer<T = JsonValue>(ref: FunctionReference, args?: JsonValue, options?: CallOptions): Promise<T>;
+  reducer<T = JsonValue>(
     ref: FunctionReference,
     args: JsonValue = {},
     options: CallOptions = {},
-  ): Promise<T | QueuedMutationOutcome> {
-    const mutationId = randomID();
+  ): Promise<T | QueuedReducerOutcome> {
+    const reducerId = randomID();
     const patches = options.optimistic
-      ?? optimisticPatchesFromReference(ref.optimistic?.mutation, args);
+      ?? optimisticPatchesFromReference(ref.optimistic?.reducer, args);
     if (patches.length === 0 && options.offline !== "queue") {
       return this.call<T>(
-        "mutation",
+        "reducer",
         ref,
         args,
-        options.timeoutMs ?? this.timeouts.mutationTimeoutMs,
-        mutationId,
+        options.timeoutMs ?? this.timeouts.reducerTimeoutMs,
+        reducerId,
       );
     }
-    return this.runOptimisticMutation<T>(ref, args, options, mutationId, patches);
+    return this.runOptimisticReducer<T>(ref, args, options, reducerId, patches);
   }
 
-  private async runOptimisticMutation<T>(
+  private async runOptimisticReducer<T>(
     ref: FunctionReference,
     args: JsonValue,
     options: CallOptions,
-    mutationId: string,
+    reducerId: string,
     patches: OptimisticPatch[],
-  ): Promise<T | QueuedMutationOutcome> {
+  ): Promise<T | QueuedReducerOutcome> {
     // The startup recovery transaction converts abandoned inflight entries to
     // pending. Finish it before inserting a brand-new direct send, otherwise
-    // recovery can mistake that live entry for a crashed mutation and race the
+    // recovery can mistake that live entry for a crashed reducer and race the
     // direct call through the background drain.
     await this.outboxReady;
     if (this.manuallyClosed) {
       throw new GonvexClientError(
-        `Gonvex client was closed before mutation ${ref.path} could be sent.`,
-        { code: "closed", path: ref.path, operation: "mutation" },
+        `Gonvex client was closed before reducer ${ref.path} could be sent.`,
+        { code: "closed", path: ref.path, operation: "reducer" },
       );
     }
     const scope = this.outboxScope;
-    const entry = await this.mutationOutbox.enqueue({
+    const entry = await this.reducerOutbox.enqueue({
       scope,
       path: ref.path,
       args,
-      idempotencyKey: mutationId,
+      idempotencyKey: reducerId,
       entityKeys: patches.map((patch) => `${patch.entity ?? patch.collection ?? ""}:${patch.rowId}`),
       patches,
       state: "inflight",
     });
     if (this.manuallyClosed) {
-      await this.mutationOutbox.ack(entry.id);
+      await this.reducerOutbox.ack(entry.id);
       throw new GonvexClientError(
-        `Gonvex client was closed before mutation ${ref.path} could be sent.`,
-        { code: "closed", path: ref.path, operation: "mutation" },
+        `Gonvex client was closed before reducer ${ref.path} could be sent.`,
+        { code: "closed", path: ref.path, operation: "reducer" },
       );
     }
     if (scope !== this.outboxScope) {
-      await this.mutationOutbox.ack(entry.id);
+      await this.reducerOutbox.ack(entry.id);
       throw new GonvexClientError(
-        `Authentication changed before mutation ${ref.path} could be sent.`,
-        { code: "disconnected", path: ref.path, operation: "mutation" },
+        `Authentication changed before reducer ${ref.path} could be sent.`,
+        { code: "disconnected", path: ref.path, operation: "reducer" },
       );
     }
-    this.optimisticOutboxEntryIds.set(mutationId, entry.id);
-    this.addOptimisticMutation(mutationId, patches);
+    this.optimisticOutboxEntryIds.set(reducerId, entry.id);
+    this.addOptimisticReducer(reducerId, patches);
     try {
       // The direct send is outbox-managed: a crash here replays the entry
       // with the same idempotency key, so the server must dedupe it.
       const result = await this.call<T>(
-        "mutation",
+        "reducer",
         ref,
         args,
-        options.timeoutMs ?? this.timeouts.mutationTimeoutMs,
-        mutationId,
-        mutationId,
+        options.timeoutMs ?? this.timeouts.reducerTimeoutMs,
+        reducerId,
+        reducerId,
       );
-      await this.mutationOutbox.markCommitted(entry.id);
+      await this.reducerOutbox.markCommitted(entry.id);
       if (patches.length > 0) {
-        await this.settleOptimisticMutation(mutationId);
+        await this.settleOptimisticReducer(reducerId);
       } else {
-        await this.ackOptimisticMutation(mutationId, entry.id);
+        await this.ackOptimisticReducer(reducerId, entry.id);
       }
       return result;
     } catch (error: unknown) {
-      if (isQueueableMutationError(error) && options.offline === "queue") {
-        await this.mutationOutbox.fail(entry.id, mutationErrorMessage(error));
-        return { status: "queued", mutationId };
+      if (isQueueableReducerError(error) && options.offline === "queue") {
+        await this.reducerOutbox.fail(entry.id, reducerErrorMessage(error));
+        return { status: "queued", reducerId };
       }
-      await this.rejectOptimisticMutation(mutationId, entry.id);
+      await this.rejectOptimisticReducer(reducerId, entry.id);
       throw error;
     }
   }
@@ -2020,7 +2124,6 @@ export class GonvexClient {
       if (timeoutMs > 0) {
         query.timeoutTimer = setTimeout(() => {
           settle();
-          this.send({ type: "query.unsubscribe", id });
           reject(new GonvexClientError(
             `Query ${ref.path} timed out after ${timeoutMs}ms`,
             { code: "timeout", path: ref.path, operation: "query" },
@@ -2040,7 +2143,6 @@ export class GonvexClient {
             clientReceivedAtMs: nowMs(),
             serverTrace: message.trace,
           });
-          this.send({ type: "query.unsubscribe", id });
           resolve(message.result as T);
         }
         if (message.type === "query.error") {
@@ -2053,7 +2155,6 @@ export class GonvexClient {
             error: message.error,
             clientReceivedAtMs: nowMs(),
           });
-          this.send({ type: "query.unsubscribe", id });
           reject(new GonvexClientError(message.error, { code: "server", path: ref.path, operation: "query" }));
         }
       });
@@ -2077,45 +2178,45 @@ export class GonvexClient {
   }
 
   /**
-   * Flush a queue of mutations in one `mutation.callMany` frame (queue order,
+   * Flush a queue of reducers in one `reducer.callMany` frame (queue order,
    * one websocket round trip). Each entry settles independently — a failed
    * call does not reject the batch — so offline queues can apply per-row
-   * outcomes. Falls back to the standard per-mutation path when the runtime
+   * outcomes. Falls back to the standard per-reducer path when the runtime
    * lacks batching or when a call needs generated/explicit optimism or durable
-   * offline queuing, so there is never a second mutation-state implementation.
+   * offline queuing, so there is never a second reducer-state implementation.
    */
-  async mutationMany<T = JsonValue>(
+  async reducerMany<T = JsonValue>(
     calls: Array<{ ref: FunctionReference; args?: JsonValue }>,
     options: CallOptions = {},
   ): Promise<Array<{ status: "ok"; result: T } | { status: "error"; error: GonvexClientError }>> {
     if (calls.length === 0) return [];
     this.connect();
-    const timeoutMs = options.timeoutMs ?? this.timeouts.mutationTimeoutMs;
+    const timeoutMs = options.timeoutMs ?? this.timeouts.reducerTimeoutMs;
     const settle = (promise: Promise<T>, path: string) => promise
       .then((result) => ({ status: "ok" as const, result }))
       .catch((error: unknown) => ({
         status: "error" as const,
         error: error instanceof GonvexClientError
           ? error
-          : new GonvexClientError(String(error), { code: "server", path, operation: "mutation" }),
+          : new GonvexClientError(String(error), { code: "server", path, operation: "reducer" }),
       }));
-    const requiresStandardMutationPath = options.offline === "queue"
+    const requiresStandardReducerPath = options.offline === "queue"
       || options.optimistic !== undefined
-      || calls.some((call) => call.ref.optimistic?.mutation !== undefined);
-    if (this.serverCapabilities.mutationBatch !== 1 || requiresStandardMutationPath) {
+      || calls.some((call) => call.ref.optimistic?.reducer !== undefined);
+    if (this.serverCapabilities.reducerBatch !== 1 || requiresStandardReducerPath) {
       const outcomes: Array<{ status: "ok"; result: T } | { status: "error"; error: GonvexClientError }> = [];
       for (const call of calls) {
-        outcomes.push(await settle(this.mutation<T>(call.ref, call.args ?? {}, options), call.ref.path));
+        outcomes.push(await settle(this.reducer<T>(call.ref, call.args ?? {}, options), call.ref.path));
       }
       return outcomes;
     }
     const registered = calls.map((call) => {
-      const entry = this.registerCall<T>("mutation", call.ref, call.args ?? {}, timeoutMs);
+      const entry = this.registerCall<T>("reducer", call.ref, call.args ?? {}, timeoutMs);
       return { ...entry, path: call.ref.path, args: call.args ?? {} };
     });
     for (let offset = 0; offset < registered.length; offset += maxSyncBatchOpens) {
       this.send({
-        type: "mutation.callMany",
+        type: "reducer.callMany",
         calls: registered.slice(offset, offset + maxSyncBatchOpens).map((entry) => ({
           id: entry.id,
           path: entry.path,
@@ -2129,7 +2230,7 @@ export class GonvexClient {
   }
 
   private call<T>(
-    kind: "mutation" | "action",
+    kind: "reducer" | "action",
     ref: FunctionReference,
     args: JsonValue,
     timeoutMs: number,
@@ -2138,10 +2239,10 @@ export class GonvexClient {
   ): Promise<T> {
     this.connect();
     const entry = this.registerCall<T>(kind, ref, args, timeoutMs, id);
-    if (kind === "mutation") {
-      try { const w=(globalThis as any); if (w && w.__wsTapLog) w.__wsTapLog.push({ dir:"mut-args", type:"mutation.call", path: ref.path, argTenant: ((args as any)&&(args as any).tenantId)||null, authTenant: (this as any).auth?.tenant||null, authProject:(this as any).auth?.project||null, href: (w.location&&w.location.href)||null }); } catch(e){}
+    if (kind === "reducer") {
+      try { const w=(globalThis as any); if (w && w.__wsTapLog) w.__wsTapLog.push({ dir:"mut-args", type:"reducer.call", path: ref.path, argTenant: ((args as any)&&(args as any).tenantId)||null, authTenant: (this as any).auth?.tenant||null, authProject:(this as any).auth?.project||null, href: (w.location&&w.location.href)||null }); } catch(e){}
       this.send({
-        type: "mutation.call",
+        type: "reducer.call",
         id: entry.id,
         path: ref.path,
         args,
@@ -2155,7 +2256,7 @@ export class GonvexClient {
     return entry.promise;
   }
 
-  private registerCall<T>(kind: "mutation" | "action", ref: FunctionReference, args: JsonValue, timeoutMs: number, callId = randomID()): { id: string; clientSentAtMs: number; promise: Promise<T> } {
+  private registerCall<T>(kind: "reducer" | "action", ref: FunctionReference, args: JsonValue, timeoutMs: number, callId = randomID()): { id: string; clientSentAtMs: number; promise: Promise<T> } {
     const id = callId;
     const clientSentAtMs = nowMs();
     const promise = new Promise<T>((resolve, reject) => {
@@ -2170,19 +2271,20 @@ export class GonvexClient {
         pending.timeoutTimer = setTimeout(() => {
           settle();
           reject(new GonvexClientError(
-            `${kind === "mutation" ? "Mutation" : "Action"} ${ref.path} timed out after ${timeoutMs}ms. The operation may or may not have been applied.`,
+            `${kind === "reducer" ? "Reducer" : "Action"} ${ref.path} timed out after ${timeoutMs}ms. The operation may or may not have been applied.`,
             { code: "timeout", path: ref.path, operation: kind },
           ));
         }, timeoutMs);
       }
       this.pendingCalls.set(id, pending);
       this.handlers.set(id, (message) => {
-        if (kind === "mutation" && message.type === "mutation.result") {
+        if (kind === "reducer" && message.type === "reducer.result") {
           settle();
+          this.replica.acknowledgeCommand(message.originCommandId, message.committedRevision);
           this.emitTelemetryFromCall(kind, id, ref.path, "ok", clientSentAtMs, message.trace);
           resolve(message.result as T);
         }
-        if (kind === "mutation" && message.type === "mutation.error") {
+        if (kind === "reducer" && message.type === "reducer.error") {
           settle();
           this.emitTelemetryFromCall(kind, id, ref.path, "error", clientSentAtMs, message.trace, message.error);
           reject(new GonvexClientError(message.error, { code: "server", path: ref.path, operation: kind }));
@@ -2216,7 +2318,7 @@ export class GonvexClient {
       const latest = this.querySubscriptions.get(key);
       if (!latest || latest.listeners.size > 0) return;
       this.querySubscriptions.delete(key);
-      for (const mutationId of this.overlay.removeSource(key)) void this.ackOptimisticMutation(mutationId);
+      for (const reducerId of this.overlay.removeSource(key)) void this.ackOptimisticReducer(reducerId);
       this.send({ type: "query.unsubscribe", id: latest.id });
       setTimeout(() => this.handlers.delete(latest.id), 500);
     }, this.querySubscriptionRetentionMs);
@@ -2342,7 +2444,7 @@ export class GonvexClient {
   private sendOneShotQuery(query: OneShotQuery) {
     if (query.socketGeneration === this.socketGeneration) return;
     query.socketGeneration = this.socketGeneration;
-    this.send({ type: "query.subscribe", id: query.id, path: query.path, args: query.args });
+    this.send({ type: "query.call", id: query.id, path: query.path, args: query.args });
   }
 
   private resubscribeQueries(generation: number) {
@@ -2577,7 +2679,7 @@ export class GonvexClient {
   }
 
   private emitTelemetryFromCall(
-    kind: "mutation" | "action",
+    kind: "reducer" | "action",
     id: string,
     path: string,
     outcome: "ok" | "error",
@@ -2727,7 +2829,7 @@ export class GonvexClient {
 
   // A lost auth reply (e.g. the server swapped its app plugin and dropped
   // in-flight responses while the socket stayed up) used to leave
-  // authInFlight stuck true forever: every later mutation/subscription
+  // authInFlight stuck true forever: every later reducer/subscription
   // queued into pendingMessages and was never sent — no error, no timeout,
   // and the server never saw the call. Re-issue auth if no reply arrives.
   private armAuthWatchdog() {
@@ -2822,7 +2924,7 @@ function querySubscriptionKey(ref: FunctionReference, args: JsonValue) {
   return `${ref.path}\u0000${stableStringify(args)}`;
 }
 
-function countPendingCalls(calls: Map<string, PendingCall>, kind: "mutation" | "action") {
+function countPendingCalls(calls: Map<string, PendingCall>, kind: "reducer" | "action") {
   let count = 0;
   for (const call of calls.values()) {
     if (call.kind === kind) count += 1;
@@ -2830,12 +2932,12 @@ function countPendingCalls(calls: Map<string, PendingCall>, kind: "mutation" | "
   return count;
 }
 
-function isQueueableMutationError(error: unknown) {
+function isQueueableReducerError(error: unknown) {
   return error instanceof GonvexClientError
     && (error.code === "disconnected" || error.code === "timeout");
 }
 
-function mutationErrorMessage(error: unknown) {
+function reducerErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -3071,7 +3173,7 @@ function sameAuthTokenIdentity(left: GonvexClientAuth, right: GonvexClientAuth) 
   return leftIdentity !== "" && leftIdentity === rightIdentity;
 }
 
-function mutationOutboxScope(url: string, auth: GonvexClientAuth, ephemeralScope: string) {
+function reducerOutboxScope(url: string, auth: GonvexClientAuth, ephemeralScope: string) {
   const identity = authIdentityKey(auth);
   if (identity) return ["identity", url, identity].join("\u0000");
   if (auth.token || auth.identity || auth.fetchToken) {
@@ -3083,7 +3185,7 @@ function mutationOutboxScope(url: string, auth: GonvexClientAuth, ephemeralScope
   // Anonymous/dev-auth clients still need a stable namespace, but it must be
   // isolated by deployment and tenant. Once an authenticated identity is
   // installed, applyAuth switches away from this scope before restoring or
-  // sending its durable mutations.
+  // sending its durable reducers.
   return ["anonymous", url, auth.project ?? "", auth.tenant ?? ""].join("\u0000");
 }
 

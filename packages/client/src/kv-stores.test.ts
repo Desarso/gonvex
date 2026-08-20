@@ -4,9 +4,9 @@ import {
   createKvQueryCacheStore,
   createKvSyncStore,
   createMemoryGonvexKv,
-  kvMutationOutboxTable,
+  kvReducerOutboxTable,
 } from "./kv-stores";
-import { StoreMutationOutbox, createMutationOutbox, type OutboxStore } from "./outbox";
+import { StoreReducerOutbox, createReducerOutbox, type OutboxStore } from "./outbox";
 
 const scope = "project-a::tenant-a::user-a";
 const otherScope = "project-a::tenant-a::user-b";
@@ -18,15 +18,15 @@ function throwingStore(overrides: Partial<OutboxStore> = {}): OutboxStore {
   return { load: boom, put: boom, delete: boom, clear: boom, ...overrides };
 }
 
-describe("StoreMutationOutbox", () => {
+describe("StoreReducerOutbox", () => {
   it("survives a restart with ids, states, idempotency keys, and order intact", async () => {
     const kv = createMemoryGonvexKv();
-    const before = new StoreMutationOutbox(createKvOutboxStore(kv));
+    const before = new StoreReducerOutbox(createKvOutboxStore(kv));
     const first = await before.enqueue({
       scope,
       path: "tasks.create",
       args: { title: "First" },
-      idempotencyKey: "mutation-first",
+      idempotencyKey: "reducer-first",
       entityKeys: ["task:first"],
       patches: [{
         collection: "tasks.list",
@@ -39,23 +39,23 @@ describe("StoreMutationOutbox", () => {
       scope,
       path: "tasks.update",
       args: { title: "Second" },
-      idempotencyKey: "mutation-second",
+      idempotencyKey: "reducer-second",
       entityKeys: ["task:second"],
     });
     await before.fail(second.id, "offline");
 
-    const after = new StoreMutationOutbox(createKvOutboxStore(kv));
+    const after = new StoreReducerOutbox(createKvOutboxStore(kv));
     await expect(after.loadAll(scope)).resolves.toMatchObject([
       {
         id: first.id,
         path: "tasks.create",
-        idempotencyKey: "mutation-first",
+        idempotencyKey: "reducer-first",
         state: "pending",
         patches: [{ rowId: "first", fields: { title: "Optimistic" } }],
       },
       {
         id: second.id,
-        idempotencyKey: "mutation-second",
+        idempotencyKey: "reducer-second",
         state: "pending",
         attempts: 1,
         lastError: "offline",
@@ -67,24 +67,24 @@ describe("StoreMutationOutbox", () => {
 
   it("recovers inflight entries as pending after a restart", async () => {
     const kv = createMemoryGonvexKv();
-    const before = new StoreMutationOutbox(createKvOutboxStore(kv));
+    const before = new StoreReducerOutbox(createKvOutboxStore(kv));
     const entry = await before.enqueue({ scope, path: "tasks.update", args: {} });
     await before.markInflight(entry.id);
 
-    const after = new StoreMutationOutbox(createKvOutboxStore(kv));
+    const after = new StoreReducerOutbox(createKvOutboxStore(kv));
     await expect(after.loadAll(scope)).resolves.toMatchObject([
       { id: entry.id, state: "pending" },
     ]);
     // The recovery itself is persisted: a further restart must not see
     // inflight either.
-    const again = new StoreMutationOutbox(createKvOutboxStore(kv));
+    const again = new StoreReducerOutbox(createKvOutboxStore(kv));
     await expect(again.loadAll(scope)).resolves.toMatchObject([
       { id: entry.id, state: "pending" },
     ]);
   });
 
   it("blocks later writes to the same entity but allows independent writes", async () => {
-    const outbox = new StoreMutationOutbox(createKvOutboxStore(createMemoryGonvexKv()));
+    const outbox = new StoreReducerOutbox(createKvOutboxStore(createMemoryGonvexKv()));
     const first = await outbox.enqueue({
       scope,
       path: "tasks.update",
@@ -111,7 +111,7 @@ describe("StoreMutationOutbox", () => {
   });
 
   it("does not let an accepted committed row block a newer write", async () => {
-    const outbox = new StoreMutationOutbox(createKvOutboxStore(createMemoryGonvexKv()));
+    const outbox = new StoreReducerOutbox(createKvOutboxStore(createMemoryGonvexKv()));
     const committed = await outbox.enqueue({
       scope,
       path: "tasks.update",
@@ -131,7 +131,7 @@ describe("StoreMutationOutbox", () => {
 
   it("keeps causal barriers across a restart", async () => {
     const kv = createMemoryGonvexKv();
-    const before = new StoreMutationOutbox(createKvOutboxStore(kv));
+    const before = new StoreReducerOutbox(createKvOutboxStore(kv));
     const first = await before.enqueue({
       scope,
       path: "tasks.update",
@@ -146,14 +146,14 @@ describe("StoreMutationOutbox", () => {
     });
     await before.markInflight(first.id);
 
-    const after = new StoreMutationOutbox(createKvOutboxStore(kv));
+    const after = new StoreReducerOutbox(createKvOutboxStore(kv));
     await after.loadAll(scope);
     await expect(after.nextReady(scope, Date.now())).resolves.toMatchObject({ id: first.id });
   });
 
   it("clears only the requested scope, in memory and in the store", async () => {
     const kv = createMemoryGonvexKv();
-    const outbox = new StoreMutationOutbox(createKvOutboxStore(kv));
+    const outbox = new StoreReducerOutbox(createKvOutboxStore(kv));
     await outbox.enqueue({ scope, path: "tasks.update", args: {} });
     const theirs = await outbox.enqueue({ scope: otherScope, path: "tasks.update", args: {} });
 
@@ -161,13 +161,13 @@ describe("StoreMutationOutbox", () => {
 
     await expect(outbox.count(scope)).resolves.toBe(0);
     await expect(outbox.count(otherScope)).resolves.toBe(1);
-    const restarted = new StoreMutationOutbox(createKvOutboxStore(kv));
+    const restarted = new StoreReducerOutbox(createKvOutboxStore(kv));
     await expect(restarted.loadAll(scope)).resolves.toEqual([]);
     await expect(restarted.loadAll(otherScope)).resolves.toMatchObject([{ id: theirs.id }]);
   });
 
   it("keeps queue semantics when hydration fails", async () => {
-    const outbox = new StoreMutationOutbox(throwingStore());
+    const outbox = new StoreReducerOutbox(throwingStore());
     const first = await outbox.enqueue({
       scope,
       path: "tasks.update",
@@ -188,7 +188,7 @@ describe("StoreMutationOutbox", () => {
     await expect(outbox.nextReady(scope, Date.now())).resolves.toMatchObject({ id: second.id });
   });
 
-  it("degrades to memory when a write-through fails without failing the mutation", async () => {
+  it("degrades to memory when a write-through fails without failing the reducer", async () => {
     const kv = createMemoryGonvexKv();
     const working = createKvOutboxStore(kv);
     let failPuts = false;
@@ -199,7 +199,7 @@ describe("StoreMutationOutbox", () => {
         return working.put(entry);
       },
     };
-    const outbox = new StoreMutationOutbox(flaky);
+    const outbox = new StoreReducerOutbox(flaky);
     const durable = await outbox.enqueue({ scope, path: "tasks.update", args: { value: 1 } });
     failPuts = true;
     const memoryOnlyEntry = await outbox.enqueue({ scope, path: "tasks.update", args: { value: 2 } });
@@ -212,18 +212,18 @@ describe("StoreMutationOutbox", () => {
     ]);
   });
 
-  it("is selected by createMutationOutbox when a store is injected", async () => {
-    const outbox = createMutationOutbox({ store: createKvOutboxStore(createMemoryGonvexKv()) });
-    expect(outbox).toBeInstanceOf(StoreMutationOutbox);
+  it("is selected by createReducerOutbox when a store is injected", async () => {
+    const outbox = createReducerOutbox({ store: createKvOutboxStore(createMemoryGonvexKv()) });
+    expect(outbox).toBeInstanceOf(StoreReducerOutbox);
   });
 
   it("skips corrupt persisted rows instead of stranding the queue", async () => {
     const kv = createMemoryGonvexKv();
-    const before = new StoreMutationOutbox(createKvOutboxStore(kv));
+    const before = new StoreReducerOutbox(createKvOutboxStore(kv));
     const entry = await before.enqueue({ scope, path: "tasks.update", args: {} });
-    await kv.set(kvMutationOutboxTable, "corrupt", "{not json");
+    await kv.set(kvReducerOutboxTable, "corrupt", "{not json");
 
-    const after = new StoreMutationOutbox(createKvOutboxStore(kv));
+    const after = new StoreReducerOutbox(createKvOutboxStore(kv));
     await expect(after.loadAll(scope)).resolves.toMatchObject([{ id: entry.id }]);
   });
 });

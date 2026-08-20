@@ -237,9 +237,9 @@ func newSyncFanoutHarness(t *testing.T) *syncFanoutHarness {
 			"id": {Type: "id", PrimaryKey: true}, "value": {Type: "string"},
 		}},
 	}}
-	definitionA := manifest.SyncDefinition{Table: harness.tableA, Key: "id", Columns: []string{"id", "value"}, Mode: "eager"}
-	definitionB := manifest.SyncDefinition{Table: harness.tableB, Key: "id", Columns: []string{"id", "value"}, Mode: "eager"}
-	if _, err := schemasync.ApplyWithSync(harness.ctx, databaseURL, schema, map[string]manifest.SyncDefinition{
+	definitionA := manifest.ReplicaCollectionDefinition{Table: harness.tableA, Key: "id", Columns: []string{"id", "value"}, Mode: "eager"}
+	definitionB := manifest.ReplicaCollectionDefinition{Table: harness.tableB, Key: "id", Columns: []string{"id", "value"}, Mode: "eager"}
+	if _, err := schemasync.ApplyWithSync(harness.ctx, databaseURL, schema, map[string]manifest.ReplicaCollectionDefinition{
 		harness.tableA: definitionA,
 		harness.tableB: definitionB,
 	}); err != nil {
@@ -262,14 +262,14 @@ func newSyncFanoutHarness(t *testing.T) *syncFanoutHarness {
 	})
 
 	app := gonvex.NewApp()
-	app.Sync(harness.pathA, func(*gonvex.QueryCtx, struct{}) ([]map[string]any, error) {
+	app.ReplicaCollection(harness.pathA, func(*gonvex.QueryCtx, struct{}) ([]map[string]any, error) {
 		harness.callsA.Add(1)
 		return []map[string]any{}, nil
-	}, gonvex.SyncTable(harness.tableA).Columns("id", "value"))
-	app.Sync(harness.pathB, func(*gonvex.QueryCtx, struct{}) ([]map[string]any, error) {
+	}, gonvex.ReplicaTable(harness.tableA).Columns("id", "value"))
+	app.ReplicaCollection(harness.pathB, func(*gonvex.QueryCtx, struct{}) ([]map[string]any, error) {
 		harness.callsB.Add(1)
 		return []map[string]any{}, nil
-	}, gonvex.SyncTable(harness.tableB).Columns("id", "value"))
+	}, gonvex.ReplicaTable(harness.tableB).Columns("id", "value"))
 	harness.runtime = NewWithApp(config.Config{
 		ProjectDatabases:          map[string]string{harness.project: databaseURL},
 		TenantListenerLimit:       1,
@@ -278,8 +278,8 @@ func newSyncFanoutHarness(t *testing.T) *syncFanoutHarness {
 	if err := harness.runtime.runtime.SyncManifest(manifest.Manifest{
 		Project: harness.project,
 		Functions: map[string]manifest.FunctionEntry{
-			harness.pathA: {Kind: manifest.FunctionKindSync, Sync: &definitionA},
-			harness.pathB: {Kind: manifest.FunctionKindSync, Sync: &definitionB},
+			harness.pathA: {Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica, Replica: &definitionA},
+			harness.pathB: {Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica, Replica: &definitionB},
 		},
 		Schema: schema,
 	}); err != nil {

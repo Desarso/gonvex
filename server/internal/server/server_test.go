@@ -398,12 +398,12 @@ func TestExecuteRegisteredQuery(t *testing.T) {
 
 func TestExecuteRegisteredMutation(t *testing.T) {
 	app := gonvex.NewApp()
-	app.Mutation("custom.create", func(ctx *gonvex.MutationCtx, args registeredMutationArgs) (registeredMutationResult, error) {
+	app.Reducer("custom.create", func(ctx *gonvex.ReducerCtx, args registeredMutationArgs) (registeredMutationResult, error) {
 		if ctx.Tx != nil {
 			t.Fatal("expected nil transaction without configured database")
 		}
 		return registeredMutationResult{Title: args.Title, ProjectID: ctx.ProjectID}, nil
-	})
+	}, gonvex.OnlineOnlyNonOptimistic("server dispatch test fixture"))
 	server := NewWithApp(config.Config{}, app)
 
 	result, err := server.executeMutation(context.Background(), "project-a", "custom.create", json.RawMessage(`{"title":"Ship"}`))
@@ -1087,165 +1087,6 @@ func TestProjectIDPrefersHeaderThenQuery(t *testing.T) {
 	request = httptest.NewRequest(http.MethodGet, "/dev/manifest", nil)
 	if got := projectID(request); got != "" {
 		t.Fatalf("expected empty project, got %q", got)
-	}
-}
-
-func TestSubscriptionTableUsesPathPrefix(t *testing.T) {
-	tests := map[string]string{
-		"tasks.grid":    "tasks",
-		"messages.list": "messages",
-		"users.profile": "users",
-		"badpath":       "",
-		".missing":      "",
-	}
-	for path, want := range tests {
-		if got := subscriptionTable(path); got != want {
-			t.Fatalf("subscriptionTable(%q) = %q, want %q", path, got, want)
-		}
-	}
-}
-
-func TestMutationInvalidationTableUsesFocusedTable(t *testing.T) {
-	tests := map[string]string{
-		"tasks.create":                "tasks",
-		"roles.update":                "roles",
-		"techSupport.recordHeartbeat": "supportSessions",
-		"chat.sendWorkspaceChat":      "workspaceChat",
-		"chat.sendMessage":            "directMessages",
-		"chat.addReaction":            "messageReactions",
-		"calls.sendSignal":            "callSignals",
-		"badpath":                     "",
-	}
-	for path, want := range tests {
-		if got := mutationInvalidationTable(path); got != want {
-			t.Fatalf("mutationInvalidationTable(%q) = %q, want %q", path, got, want)
-		}
-	}
-}
-
-func TestAppRealtimeFunctionTables(t *testing.T) {
-	tests := []struct {
-		path string
-		want []string
-	}{
-		{path: "chat.listWorkspaceChat", want: []string{"workspaceChat"}},
-		{path: "chat.listAllMessages", want: []string{"directMessages"}},
-		{path: "chat.listAllParticipants", want: []string{"conversationParticipants"}},
-		{path: "chat.listAllReactions", want: []string{"messageReactions"}},
-		{path: "chat.workspaceChatUnreadSummary", want: []string{"notifications"}},
-		{path: "calls.listForUser", want: []string{"callSignals"}},
-		{path: "taskFindings.listNotes", want: []string{"taskFindings", "findingNotes", "taskLogs", "taskWorkspaceContexts", "tasks"}},
-		{path: "users.myPermissions", want: []string{"roles", "rolePermissions", "permissions", "userTeams", "users"}},
-		{path: "settings.getByKey", want: []string{"globalSettings"}},
-		{path: "settings.listNotifications", want: []string{"notifications"}},
-		{path: "settings.listPlugins", want: []string{"plugins"}},
-		{path: "taskResources.listTaskNotes", want: []string{"taskNotes", "tasks", "users"}},
-		{path: "taskResources.listTaskViewsByTaskId", want: []string{"taskViews", "tasks", "users"}},
-		{path: "taskResources.listTaskSignatures", want: []string{"taskSignatures", "tasks", "users"}},
-		{path: "taskResources.listTaskShares", want: []string{"taskShares", "taskAcks", "tasks", "users"}},
-	}
-	for _, test := range tests {
-		got := subscriptionTables(test.path)
-		if strings.Join(got, ",") != strings.Join(test.want, ",") {
-			t.Fatalf("subscriptionTables(%q) = %v, want %v", test.path, got, test.want)
-		}
-	}
-}
-
-func TestAppRealtimeMutationInvalidationTables(t *testing.T) {
-	tests := []struct {
-		path string
-		want []string
-	}{
-		{path: "chat.createConversation", want: []string{"conversations", "conversationParticipants"}},
-		{path: "chat.sendMessage", want: []string{"directMessages", "conversations", "notifications", "linkPreviews"}},
-		{path: "chat.markAsRead", want: []string{"conversationParticipants", "directMessages"}},
-		{path: "chat.sendWorkspaceChat", want: []string{"workspaceChat", "notifications", "linkPreviews"}},
-		{path: "chat.addReaction", want: []string{"messageReactions"}},
-		{path: "calls.sendSignal", want: []string{"callSignals"}},
-		{path: "taskFindings.createNote", want: []string{"taskFindings", "findingNotes", "taskLogs", "taskWorkspaceContexts", "tasks"}},
-		{path: "taskResources.assignUser", want: []string{"taskUsers", "tasks", "taskLogs", "notifications"}},
-		{path: "taskResources.createNote", want: []string{"taskNotes", "tasks", "taskLogs"}},
-		{path: "taskResources.createSignature", want: []string{"taskSignatures", "tasks", "taskLogs"}},
-		{path: "taskResources.recordTaskViewByTaskId", want: []string{"taskViews", "tasks"}},
-		{path: "taskResources.addTagByTaskId", want: []string{"taskTags", "tasks", "taskLogs"}},
-		{path: "scheduling.processWorkspaceChatMessage", want: []string{"scheduleAvailabilitySubmissions", "scheduleAvailabilityItems", "scheduleRosterEntries"}},
-		{path: "settings.set", want: []string{"globalSettings"}},
-		{path: "settings.togglePlugin", want: []string{"plugins"}},
-		{path: "settings.markAllRead", want: []string{"notifications"}},
-		{path: "tasks.update", want: []string{"tasks", "taskUsers", "taskTags", "taskLogs", "taskCustomFieldValues", "taskApprovalInstances"}},
-	}
-	for _, test := range tests {
-		got := mutationInvalidationTables(test.path)
-		if strings.Join(got, ",") != strings.Join(test.want, ",") {
-			t.Fatalf("mutationInvalidationTables(%q) = %v, want %v", test.path, got, test.want)
-		}
-	}
-}
-
-func TestTableChangeMatchesSubscription(t *testing.T) {
-	sub := querySubscription{path: "bulk.allReferenceData"}
-	if tableChangeMatchesSubscription(sub, tableChange{table: "tasks"}) {
-		t.Fatal("expected task changes not to invalidate reference data")
-	}
-	if !tableChangeMatchesSubscription(sub, tableChange{table: "users"}) {
-		t.Fatal("expected user changes to invalidate reference data")
-	}
-	if !tableChangeMatchesSubscription(sub, tableChange{table: ""}) {
-		t.Fatal("expected broad table change to invalidate subscription")
-	}
-	if !tableChangeMatchesSubscription(sub, tableChange{tables: map[string]bool{"tasks": true, "users": true}}) {
-		t.Fatal("expected any matching table in a coalesced mutation change to invalidate subscription")
-	}
-	if tableChangeMatchesSubscription(sub, tableChange{tables: map[string]bool{"tasks": true, "taskTags": true}}) {
-		t.Fatal("expected unrelated coalesced mutation tables not to invalidate reference data")
-	}
-}
-
-func TestTableChangeTablesAreStableAndDeduplicated(t *testing.T) {
-	got := tableChangeTables(tableChange{tables: map[string]bool{"users": true, "tasks": true}})
-	if strings.Join(got, ",") != "tasks,users" {
-		t.Fatalf("tableChangeTables() = %v, want [tasks users]", got)
-	}
-}
-
-func TestMutationRuntimeContextSuppressesPreCommitInvalidations(t *testing.T) {
-	called := 0
-	runtimeCtx := mutationRuntimeContext(gonvex.RuntimeContext{
-		NotifyTableChange: func(string) { called++ },
-	})
-	runtimeCtx.NotifyTableChanged("tasks", "taskUsers", "taskTags")
-	if called != 0 {
-		t.Fatalf("mutation handler scheduled %d pre-commit invalidations, want 0", called)
-	}
-}
-
-func TestTableChangeMatchesDerivedTaskSubscriptions(t *testing.T) {
-	tests := []struct {
-		path  string
-		table string
-		want  bool
-	}{
-		{path: "bulk.tasksByWorkspace", table: "tasks", want: true},
-		{path: "bulk.tasksByWorkspace", table: "taskTags", want: true},
-		{path: "bulk.taskPivotData", table: "taskCustomFieldValues", want: true},
-		{path: "bulk.tasksByWorkspace", table: "users", want: false},
-		{path: "tasks.tasksPage", table: "tasks", want: true},
-		{path: "tasks.tasksPage", table: "users", want: false},
-		{path: "chat.listWorkspaceChat", table: "workspaceChat", want: true},
-		{path: "chat.listWorkspaceChat", table: "directMessages", want: false},
-		{path: "chat.listAllMessages", table: "directMessages", want: true},
-		{path: "calls.listForUser", table: "callSignals", want: true},
-		{path: "taskFindings.listNotes", table: "findingNotes", want: true},
-		{path: "bulk.taskPivotData", table: "taskUsers", want: true},
-		{path: "taskResources.listTaskNotes", table: "taskNotes", want: true},
-		{path: "taskResources.listTaskNotes", table: "taskUsers", want: false},
-	}
-	for _, test := range tests {
-		got := tableChangeMatchesSubscription(querySubscription{path: test.path}, tableChange{table: test.table})
-		if got != test.want {
-			t.Fatalf("tableChangeMatchesSubscription(%q, %q) = %v, want %v", test.path, test.table, got, test.want)
-		}
 	}
 }
 

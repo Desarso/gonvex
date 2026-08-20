@@ -60,9 +60,9 @@ frontend dev server:
 npx gonvex dev -- vite
 ```
 
-The manifest supports queries, mutations, actions, authenticated and public HTTP
-handlers, internal mutations, LiveGrid functions, declared read/write
-dependencies, and durable sync definitions. The uploaded source bundle is
+The manifest supports Queries, Reducers, Actions, authenticated and public HTTP
+handlers, structured Live Queries, and bounded Replica Collections. Live Query
+dependencies are derived from their plans; declared write sets do not exist. The uploaded source bundle is
 compiled and cached by the runtime. Registered `app.Cron`, `app.CronExpr`,
 `app.TenantCron`, and `app.TenantCronExpr` schedules are loaded from that
 compiled app.
@@ -74,7 +74,7 @@ npx gonvex dev --once
 ```
 
 By default, `gonvex dev` streams only runtime warnings and errors to the
-terminal. To tail every query, mutation, and action:
+terminal. To tail every Query, Reducer, and Action:
 
 ```bash
 npx gonvex dev --verbose-logs -- vite

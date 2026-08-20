@@ -268,12 +268,12 @@ describe("App", () => {
     expect(runtimeLogSourceSummary({
       time: "2026-07-16T19:09:30Z",
       path: "tasks.recentSync",
-      kind: "sync",
+      kind: "query", delivery: "replica",
       outcome: "ok",
       durationMs: 12,
       source: "websocket",
       reason: "snapshot",
-    })).toMatchObject({ label: "WebSocket", detail: "Durable sync protocol", key: "websocket" });
+    })).toMatchObject({ label: "WebSocket", detail: "Replica transaction stream", key: "websocket" });
   });
 
   it("shows the frontend responsible for a durable sync snapshot", () => {
@@ -282,7 +282,7 @@ describe("App", () => {
         time: "2026-07-16T19:09:28Z",
         executionId: "sync-1",
         path: "tasks.recentSync",
-        kind: "sync",
+        kind: "query", delivery: "replica",
         outcome: "ok",
         durationMs: 12,
         source: "websocket",

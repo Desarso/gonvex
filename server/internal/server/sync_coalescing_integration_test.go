@@ -54,9 +54,9 @@ func testSyncRevisionReadyFanout(
 			"id": {Type: "id", PrimaryKey: true}, "value": {Type: "string"},
 		}},
 	}}
-	changedDefinition := manifest.SyncDefinition{Table: changedTable, Key: "id", Columns: []string{"id", "value"}, Mode: "eager"}
-	unchangedDefinition := manifest.SyncDefinition{Table: unchangedTable, Key: "id", Columns: []string{"id", "value"}, Mode: "eager"}
-	if _, err := schemasync.ApplyWithSync(ctx, databaseURL, schema, map[string]manifest.SyncDefinition{
+	changedDefinition := manifest.ReplicaCollectionDefinition{Table: changedTable, Key: "id", Columns: []string{"id", "value"}, Mode: "eager"}
+	unchangedDefinition := manifest.ReplicaCollectionDefinition{Table: unchangedTable, Key: "id", Columns: []string{"id", "value"}, Mode: "eager"}
+	if _, err := schemasync.ApplyWithSync(ctx, databaseURL, schema, map[string]manifest.ReplicaCollectionDefinition{
 		changedTable: changedDefinition, unchangedTable: unchangedDefinition,
 	}); err != nil {
 		t.Fatal(err)
@@ -85,9 +85,9 @@ func testSyncRevisionReadyFanout(
 		if index == 0 {
 			definition = changedDefinition
 		}
-		app.Sync(path, emptySnapshot, gonvex.SyncTable(definition.Table).Columns("id", "value"))
+		app.ReplicaCollection(path, emptySnapshot, gonvex.ReplicaTable(definition.Table).Columns("id", "value"))
 		definitionCopy := definition
-		functions[path] = manifest.FunctionEntry{Kind: manifest.FunctionKindSync, Sync: &definitionCopy}
+		functions[path] = manifest.FunctionEntry{Kind: manifest.FunctionKindQuery, Delivery: manifest.DeliveryReplica, Replica: &definitionCopy}
 		paths = append(paths, path)
 	}
 	runtime := NewWithApp(config.Config{

@@ -17,14 +17,14 @@ const storageAppSource = `package app
 import "github.com/gonvex/gonvex/pkg/gonvex"
 
 func Register(app *gonvex.App) {
-	app.Mutation("files.createUploadUrl", CreateUploadURL)
+	app.Reducer("files.createUploadUrl", CreateUploadURL, gonvex.OnlineOnlyNonOptimistic("test fixture"))
 }
 
 type uploadArgs struct {
 	ContentType string ` + "`json:\"contentType\"`" + `
 }
 
-func CreateUploadURL(ctx *gonvex.MutationCtx, args uploadArgs) (gonvex.UploadTarget, error) {
+func CreateUploadURL(ctx *gonvex.ReducerCtx, args uploadArgs) (gonvex.UploadTarget, error) {
 	return ctx.Storage.GenerateUploadURL(gonvex.UploadOptions{
 		ContentType: args.ContentType,
 		Visibility:  gonvex.FileVisibilityPrivate,
@@ -64,7 +64,7 @@ func TestInterpretedStorageHandler(t *testing.T) {
 
 	// No Storage set on the context -> normalize installs the not-configured
 	// fallback, so the interpreted handler should return ErrStorageNotConfigured.
-	_, err = app.ExecuteMutation(&gonvex.MutationCtx{}, "files.createUploadUrl", json.RawMessage(`{"contentType":"text/plain"}`))
+	_, err = app.ExecuteReducer(&gonvex.ReducerCtx{}, "files.createUploadUrl", json.RawMessage(`{"contentType":"text/plain"}`))
 	if !errors.Is(err, gonvex.ErrStorageNotConfigured) {
 		t.Fatalf("expected ErrStorageNotConfigured, got %v", err)
 	}

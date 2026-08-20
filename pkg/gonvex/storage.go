@@ -112,6 +112,11 @@ type StorageAPI interface {
 // a clean, branchable error instead of a nil-pointer panic.
 type storageUnavailable struct{}
 
+// UnavailableStorage returns a capability that rejects every storage call.
+// The runtime uses it for Reducers so object-store effects cannot escape the
+// Reducer's Postgres transaction; enqueue an Action through ctx.Outbox instead.
+func UnavailableStorage() StorageAPI { return storageUnavailable{} }
+
 func (storageUnavailable) GenerateUploadURL(UploadOptions) (UploadTarget, error) {
 	return UploadTarget{}, ErrStorageNotConfigured
 }

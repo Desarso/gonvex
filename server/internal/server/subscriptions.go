@@ -35,11 +35,6 @@ type dependencyKey struct {
 	table   string
 }
 
-type subscriptionScope struct {
-	project string
-	tenant  string
-}
-
 type subscriptionManager struct {
 	server *Server
 	epoch  string
@@ -47,7 +42,6 @@ type subscriptionManager struct {
 	mu      sync.Mutex
 	groups  map[string]*sharedSubscription
 	byTable map[dependencyKey]map[*sharedSubscription]struct{}
-	broad   map[subscriptionScope]map[*sharedSubscription]struct{}
 	// listenerCount is maintained while mu is held. Recomputing it by walking
 	// every group makes distinct-user subscription startup O(n²).
 	listenerCount    int
@@ -112,36 +106,30 @@ type visibilityPartitionBaseline struct {
 }
 
 type sharedSubscription struct {
-	manager             *subscriptionManager
-	key                 string
-	project             string
-	tenant              string
-	path                string
-	args                json.RawMessage
-	caller              callerContext
-	cacheScope          string
-	reads               []manifest.ReadDependency
-	unknownDependencies bool
-	retainSnapshot      bool
+	manager        *subscriptionManager
+	key            string
+	project        string
+	tenant         string
+	path           string
+	args           json.RawMessage
+	caller         callerContext
+	cacheScope     string
+	reads          []manifest.ReadDependency
+	livePlan       *manifest.LiveQueryPlan
+	retainSnapshot bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu               sync.Mutex
-	listeners        map[*subscriptionToken]querySubscription
-	running          bool
-	coalescing       bool
-	awaitingListener bool
-	dirty            bool
-	// staleWhileIdle records an invalidation that arrived while the group had
-	// no listeners (grace window). The retained snapshot predates that commit,
-	// so a joining listener must trigger a fresh execution instead of being
-	// served the stale replay — one-shot consumers (the legacy bridge, HTTP
-	// queries) treat the first result as authoritative and would otherwise
-	// read pre-mutation state forever.
-	staleWhileIdle          bool
-	requested               uint64
-	completed               uint64
+	mu        sync.Mutex
+	listeners map[*subscriptionToken]querySubscription
+	running   bool
+	// Correctness is expressed only by these two revisions. Retention timers,
+	// listeners, and whether an execution is currently running never make a
+	// result current. A snapshot is authoritative exactly when computedRevision
+	// has caught up to requiredRevision.
+	requiredRevision        uint64
+	computedRevision        uint64
 	revision                uint64
 	pendingReason           string
 	pendingChangedAtMS      float64
@@ -149,10 +137,6 @@ type sharedSubscription struct {
 	activeCommitIDs         map[string]struct{}
 	pendingRequestIDs       map[string]struct{}
 	activeRequestIDs        map[string]struct{}
-	pendingTables           map[string]struct{}
-	activeTables            map[string]struct{}
-	pendingTaskIDs          map[string]struct{}
-	activeTaskIDs           map[string]struct{}
 	completedCommitIDs      map[string]struct{}
 	completedCommits        []string
 	lastResult              json.RawMessage
@@ -175,7 +159,6 @@ func newSubscriptionManager(server *Server) *subscriptionManager {
 		epoch:            hex.EncodeToString(epochBytes[:8]),
 		groups:           map[string]*sharedSubscription{},
 		byTable:          map[dependencyKey]map[*sharedSubscription]struct{}{},
-		broad:            map[subscriptionScope]map[*sharedSubscription]struct{}{},
 		visibilityRuns:   map[string]*visibilityExecution{},
 		visibilityAttach: map[string]visibilityAttachEntry{},
 	}
@@ -188,7 +171,7 @@ func newSubscriptionManager(server *Server) *subscriptionManager {
 
 func (m *subscriptionManager) attach(sub querySubscription) {
 	sub.visibilityKey = m.resolveAttachVisibilityKey(sub)
-	key, reads, unknown := m.groupKeyAndDependencies(sub)
+	key, reads, livePlan := m.groupKeyAndDependencies(sub)
 	m.mu.Lock()
 	baseKey := key
 	group := m.groups[key]
@@ -212,8 +195,8 @@ func (m *subscriptionManager) attach(sub querySubscription) {
 		group = &sharedSubscription{
 			manager: m, key: key, project: sub.project, tenant: sub.tenant,
 			path: sub.path, args: append(json.RawMessage(nil), sub.args...), caller: sub.caller,
-			cacheScope: m.executionCacheScope(sub), reads: reads, unknownDependencies: unknown, retainSnapshot: retainSnapshot,
-			ctx: ctx, cancel: cancel, listeners: map[*subscriptionToken]querySubscription{}, awaitingListener: true,
+			cacheScope: m.executionCacheScope(sub), reads: reads, livePlan: livePlan, retainSnapshot: retainSnapshot,
+			ctx: ctx, cancel: cancel, listeners: map[*subscriptionToken]querySubscription{}, running: true,
 		}
 		m.groups[key] = group
 		m.indexGroupLocked(group)
@@ -230,10 +213,9 @@ func (m *subscriptionManager) attach(sub querySubscription) {
 	group.listeners[sub.token] = sub
 	group.visibilityUsers = nil
 	group.visibilityUsersRevision++
-	hasSnapshot := len(group.lastResult) > 0 && !group.staleWhileIdle
+	hasSnapshot := len(group.lastResult) > 0 && group.computedRevision >= group.requiredRevision
 	lastError := group.lastError
 	running := group.running
-	awaitingListener := group.awaitingListener
 	revision := group.revision
 	snapshot := append(json.RawMessage(nil), group.lastResult...)
 	group.mu.Unlock()
@@ -260,15 +242,18 @@ func (m *subscriptionManager) attach(sub querySubscription) {
 		}
 		return
 	}
-	if !created && (running || awaitingListener) {
+	if !created && running {
 		// The active execution broadcasts its first authoritative snapshot to
 		// every listener, including this one. A newly created group may also be
 		// waiting for its tenant LISTEN connection before that execution starts.
 		return
 	}
 	if listenerReady == nil {
-		group.markListenerReady()
-		group.request("initial", 0)
+		if created {
+			go group.run()
+		} else {
+			group.request("initial", 0)
+		}
 		return
 	}
 	go func() {
@@ -276,21 +261,13 @@ func (m *subscriptionManager) attach(sub querySubscription) {
 		defer timer.Stop()
 		select {
 		case <-listenerReady:
-			group.markListenerReady()
-			group.request("initial", 0)
+			go group.run()
 		case <-timer.C:
 			m.listeners.markNeedsRecovery(sub.project, sub.tenant)
-			group.markListenerReady()
-			group.request("initial", 0)
+			go group.run()
 		case <-group.ctx.Done():
 		}
 	}()
-}
-
-func (group *sharedSubscription) markListenerReady() {
-	group.mu.Lock()
-	group.awaitingListener = false
-	group.mu.Unlock()
 }
 
 func (m *subscriptionManager) detach(sub querySubscription) {
@@ -394,22 +371,7 @@ func (m *subscriptionManager) request(sub querySubscription, reason string, chan
 func (m *subscriptionManager) requestChange(change tableChange) {
 	m.mu.Lock()
 	candidates := map[*sharedSubscription]struct{}{}
-	scope := subscriptionScope{project: change.project, tenant: change.tenant}
-	for group := range m.broad[scope] {
-		candidates[group] = struct{}{}
-	}
-	// pendingChangeForDelivery already unions declared tables into change.tables
-	// when the listener is unavailable. With an authoritative LISTEN batch,
-	// declaredTables is accounting-only: selecting it here would rerun queries
-	// for tables that provably had no committed row change.
-	candidateTables := append(tableChangeTables(change), tableMapKeys(change.declaredTables)...)
-	if change.broad && effectiveTableCount(change) == 0 {
-		for _, group := range m.groups {
-			if group.project == change.project && group.tenant == change.tenant {
-				candidates[group] = struct{}{}
-			}
-		}
-	}
+	candidateTables := tableChangeTables(change)
 	for _, table := range appendUniqueStrings(nil, candidateTables...) {
 		for group := range m.byTable[dependencyKey{project: change.project, tenant: change.tenant, table: table}] {
 			candidates[group] = struct{}{}
@@ -466,16 +428,12 @@ func (m *subscriptionManager) rebindProject(subs []querySubscription) {
 	}
 }
 
-func (m *subscriptionManager) groupKeyAndDependencies(sub querySubscription) (string, []manifest.ReadDependency, bool) {
+func (m *subscriptionManager) groupKeyAndDependencies(sub querySubscription) (string, []manifest.ReadDependency, *manifest.LiveQueryPlan) {
 	current := m.server.runtime.ManifestForProject(sub.project)
-	entry, exists := current.Functions[sub.path]
-	reads := entry.Dependencies.Reads
-	unknown := !exists || len(reads) == 0
-	if unknown {
-		for _, table := range subscriptionTables(sub.path) {
-			reads = append(reads, manifest.ReadDependency{Table: table})
-		}
-		unknown = len(reads) == 0
+	entry := current.Functions[sub.path]
+	reads, plan, registered := m.server.liveQueryDependencies(sub.ctx, sub.project, sub.path)
+	if !registered || len(reads) == 0 {
+		return "", nil, nil
 	}
 	bundleHash := ""
 	if current.Bundle != nil {
@@ -509,7 +467,30 @@ func (m *subscriptionManager) groupKeyAndDependencies(sub querySubscription) (st
 		executionCacheScope,
 	})
 	sum := sha256.Sum256(keyPayload)
-	return hex.EncodeToString(sum[:]), reads, unknown
+	return hex.EncodeToString(sum[:]), reads, plan
+}
+
+func (s *Server) liveQueryDependencies(ctx context.Context, project, path string) ([]manifest.ReadDependency, *manifest.LiveQueryPlan, bool) {
+	entry, exists := s.runtime.ManifestForProject(project).Functions[path]
+	if exists && entry.Kind == manifest.FunctionKindQuery && entry.Delivery == manifest.DeliveryLive && entry.Dependencies.LiveQueryPlan != nil {
+		return append([]manifest.ReadDependency(nil), entry.Dependencies.Reads...), entry.Dependencies.LiveQueryPlan, true
+	}
+	app := s.appForProject(ctx, project)
+	function, exists := app.Lookup(path)
+	if !exists || function.Kind != gonvex.FunctionKindQuery || function.Delivery != gonvex.DeliveryLive || function.Dependencies.LiveQueryPlan == nil {
+		return nil, nil, false
+	}
+	reads := make([]manifest.ReadDependency, 0, len(function.Dependencies.Reads))
+	for _, read := range function.Dependencies.Reads {
+		reads = append(reads, manifest.ReadDependency{
+			Table: read.Table, Columns: append([]string(nil), read.Columns...), Filters: append([]string(nil), read.Filters...),
+			OrdersBy: append([]string(nil), read.OrdersBy...), Windowed: read.Windowed,
+		})
+	}
+	encoded, _ := json.Marshal(function.Dependencies.LiveQueryPlan)
+	plan := &manifest.LiveQueryPlan{}
+	_ = json.Unmarshal(encoded, plan)
+	return reads, plan, true
 }
 
 func (m *subscriptionManager) resolveAttachVisibilityKey(sub querySubscription) string {
@@ -581,14 +562,6 @@ func compactJSON(raw json.RawMessage) json.RawMessage {
 }
 
 func (m *subscriptionManager) indexGroupLocked(group *sharedSubscription) {
-	if group.unknownDependencies {
-		scope := subscriptionScope{project: group.project, tenant: group.tenant}
-		if m.broad[scope] == nil {
-			m.broad[scope] = map[*sharedSubscription]struct{}{}
-		}
-		m.broad[scope][group] = struct{}{}
-		return
-	}
 	for _, read := range group.reads {
 		key := dependencyKey{project: group.project, tenant: group.tenant, table: read.Table}
 		if m.byTable[key] == nil {
@@ -605,12 +578,6 @@ func (m *subscriptionManager) unindexGroupLocked(group *sharedSubscription) {
 			delete(m.byTable, key)
 		}
 	}
-	for key, groups := range m.broad {
-		delete(groups, group)
-		if len(groups) == 0 {
-			delete(m.broad, key)
-		}
-	}
 }
 
 func (group *sharedSubscription) matches(change tableChange) bool {
@@ -619,12 +586,6 @@ func (group *sharedSubscription) matches(change tableChange) bool {
 }
 
 func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
-	if group.unknownDependencies {
-		return true, false
-	}
-	if change.broad && effectiveTableCount(change) == 0 {
-		return true, false
-	}
 	group.mu.Lock()
 	rowIDs := group.rowIDs
 	group.mu.Unlock()
@@ -635,10 +596,10 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 		}
 		intersected = true
 		detail := tableDetail(change, read.Table)
-		if detail.precise && !readPredicateMatches(read.Predicate, group.args, group.caller, detail) {
+		if group.livePlan != nil && group.livePlan.Table == read.Table && !livePlanCouldMatchChange(group.livePlan, group.args, detail) {
 			continue
 		}
-		if !detail.precise || detail.broad || detail.operation == "insert" || detail.operation == "delete" {
+		if detail.operation == "insert" || detail.operation == "delete" || detail.operation == "mixed" {
 			return true, false
 		}
 		if detail.operation == "update" && len(detail.changedColumns) > 0 {
@@ -666,97 +627,173 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 	return false, !intersected
 }
 
-// readPredicateMatches implements predicates whose safety can be proven
-// from the trigger's canonical row IDs and the subscription arguments. Unknown
-// predicates remain conservative. "idArg:<name>" means the query reads exactly
-// the row whose primary ID is supplied by that JSON argument.
-func readPredicateMatches(predicate string, args json.RawMessage, caller callerContext, detail tableChangeDetail) bool {
-	predicate = strings.TrimSpace(predicate)
-	if predicate == "" {
+func livePlanCouldMatchChange(plan *manifest.LiveQueryPlan, rawArgs json.RawMessage, detail tableChangeDetail) bool {
+	if plan == nil || plan.ServerOnly {
 		return true
 	}
-	if strings.HasPrefix(predicate, "callerIdColumn:") {
-		// The column suffix documents the manifest/trigger contract. userIds is
-		// populated only when that physical column exists; missing metadata must
-		// remain conservative for old triggers and broad recovery events.
-		if strings.TrimSpace(strings.TrimPrefix(predicate, "callerIdColumn:")) != "userId" || len(detail.userIDs) == 0 {
+	args := map[string]any{}
+	if len(rawArgs) > 0 && json.Unmarshal(rawArgs, &args) != nil {
+		return true
+	}
+	rows := []json.RawMessage{}
+	switch detail.operation {
+	case "insert":
+		rows = detail.newValues
+	case "delete":
+		rows = detail.oldValues
+	default:
+		rows = append(rows, detail.oldValues...)
+		rows = append(rows, detail.newValues...)
+	}
+	if len(rows) == 0 {
+		return true
+	}
+	for _, raw := range rows {
+		row := map[string]any{}
+		if json.Unmarshal(raw, &row) != nil {
 			return true
 		}
-		if caller.user == nil || strings.TrimSpace(caller.user.ID) == "" {
+		if livePlanRowMatches(plan, args, row) {
 			return true
 		}
-		return detail.userIDs[strings.TrimSpace(caller.user.ID)]
 	}
-	if strings.HasPrefix(predicate, "columnArg:") {
-		column := strings.TrimSpace(strings.TrimPrefix(predicate, "columnArg:"))
-		if column != "workspaceId" || len(detail.workspaceIDs) == 0 {
+	return false
+}
+
+func livePlanRowMatches(plan *manifest.LiveQueryPlan, args, row map[string]any) bool {
+	if plan.Where != nil && !liveExpressionMatches(plan.Where, args, row) {
+		return false
+	}
+	if plan.Search == nil {
+		return true
+	}
+	search := strings.ToLower(strings.TrimSpace(fmt.Sprint(args[plan.Search.Argument])))
+	if search == "" || search == "<nil>" {
+		return true
+	}
+	for _, column := range plan.Search.Columns {
+		if strings.Contains(strings.ToLower(fmt.Sprint(row[column])), search) {
 			return true
 		}
-		values := map[string]json.RawMessage{}
-		if json.Unmarshal(args, &values) != nil {
-			return true
-		}
-		raw, ok := values[column]
-		if !ok {
-			return true
-		}
-		var value any
-		if json.Unmarshal(raw, &value) != nil {
-			return true
-		}
-		id := strings.TrimSpace(fmt.Sprint(value))
-		if id == "" || id == "<nil>" || id == "all" {
-			return true
-		}
-		return detail.workspaceIDs[id]
 	}
-	prefix := "idArg:"
-	changedIDs := detail.rowIDs
-	requireArgument := false
-	if strings.HasPrefix(predicate, "requiredIdArg:") {
-		prefix = "requiredIdArg:"
-		requireArgument = true
-	} else if strings.HasPrefix(predicate, "requiredTaskIdArg:") {
-		prefix = "requiredTaskIdArg:"
-		changedIDs = detail.taskIDs
-		requireArgument = true
-	} else if strings.HasPrefix(predicate, "taskIdArg:") {
-		prefix = "taskIdArg:"
-		changedIDs = detail.taskIDs
-	}
-	if !strings.HasPrefix(predicate, prefix) {
+	return false
+}
+
+func liveExpressionMatches(expression *manifest.LiveExpression, args, row map[string]any) bool {
+	if expression == nil {
 		return true
 	}
-	if len(changedIDs) == 0 {
-		return true
-	}
-	argument := strings.TrimSpace(strings.TrimPrefix(predicate, prefix))
-	if argument == "" {
-		return true
-	}
-	values := map[string]json.RawMessage{}
-	if json.Unmarshal(args, &values) != nil {
-		return true
-	}
-	raw, ok := values[argument]
-	if !ok {
-		if requireArgument {
-			return false
+	switch expression.Operator {
+	case "and":
+		for _, child := range expression.Children {
+			if !liveExpressionMatches(child, args, row) {
+				return false
+			}
 		}
 		return true
-	}
-	var value any
-	if json.Unmarshal(raw, &value) != nil {
-		return true
-	}
-	id := strings.TrimSpace(fmt.Sprint(value))
-	if id == "" || id == "<nil>" {
-		if requireArgument {
-			return false
+	case "or":
+		for _, child := range expression.Children {
+			if liveExpressionMatches(child, args, row) {
+				return true
+			}
 		}
+		return false
+	case "not":
+		return len(expression.Children) == 0 || !liveExpressionMatches(expression.Children[0], args, row)
+	case "server":
 		return true
 	}
-	return changedIDs[id]
+	left := row[expression.Column]
+	right := liveManifestValue(expression.Value, args)
+	switch expression.Operator {
+	case "eq":
+		return liveValuesEqual(left, right)
+	case "neq":
+		return !liveValuesEqual(left, right)
+	case "gt", "gte", "lt", "lte":
+		comparison := compareLiveValues(left, right)
+		if expression.Operator == "gt" {
+			return comparison > 0
+		}
+		if expression.Operator == "gte" {
+			return comparison >= 0
+		}
+		if expression.Operator == "lt" {
+			return comparison < 0
+		}
+		return comparison <= 0
+	case "range":
+		return compareLiveValues(left, right) >= 0 && compareLiveValues(left, liveManifestValue(expression.ValueTo, args)) <= 0
+	case "contains", "containsInsensitive":
+		haystack, needle := fmt.Sprint(left), fmt.Sprint(right)
+		if expression.Operator == "containsInsensitive" {
+			haystack, needle = strings.ToLower(haystack), strings.ToLower(needle)
+		}
+		return strings.Contains(haystack, needle)
+	case "in":
+		if values, ok := right.([]any); ok {
+			for _, value := range values {
+				if liveValuesEqual(left, value) {
+					return true
+				}
+			}
+		}
+		return false
+	default:
+		return true
+	}
+}
+
+func liveManifestValue(value *manifest.LiveValue, args map[string]any) any {
+	if value == nil {
+		return nil
+	}
+	if value.Argument != "" {
+		return args[value.Argument]
+	}
+	return value.Literal
+}
+
+func liveValuesEqual(left, right any) bool {
+	leftNumber, leftOK := liveNumber(left)
+	rightNumber, rightOK := liveNumber(right)
+	if leftOK && rightOK {
+		return leftNumber == rightNumber
+	}
+	return fmt.Sprint(left) == fmt.Sprint(right)
+}
+
+func compareLiveValues(left, right any) int {
+	leftNumber, leftOK := liveNumber(left)
+	rightNumber, rightOK := liveNumber(right)
+	if leftOK && rightOK {
+		if leftNumber < rightNumber {
+			return -1
+		}
+		if leftNumber > rightNumber {
+			return 1
+		}
+		return 0
+	}
+	return strings.Compare(fmt.Sprint(left), fmt.Sprint(right))
+}
+
+func liveNumber(value any) (float64, bool) {
+	switch current := value.(type) {
+	case float64:
+		return current, true
+	case float32:
+		return float64(current), true
+	case int:
+		return float64(current), true
+	case int64:
+		return float64(current), true
+	case json.Number:
+		parsed, err := current.Float64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func tableDetail(change tableChange, table string) tableChangeDetail {
@@ -764,8 +801,8 @@ func tableDetail(change tableChange, table string) tableChangeDetail {
 		return detail
 	}
 	return tableChangeDetail{
-		operation: change.operation, changedColumns: change.changedColumns, rowIDs: change.rowIDs, taskIDs: change.taskIDs, userIDs: change.userIDs, workspaceIDs: change.workspaceIDs,
-		precise: !change.broad, broad: change.broad,
+		operation: change.operation, changedColumns: change.changedColumns, rowIDs: change.rowIDs,
+		oldValues: change.oldValues, newValues: change.newValues,
 	}
 }
 
@@ -812,36 +849,10 @@ func (group *sharedSubscription) requestForCommitBatch(reason string, changedAtM
 	commitID = strings.TrimSpace(commitID)
 	requestID = strings.TrimSpace(requestID)
 	group.mu.Lock()
+	targetRevision := uint64(0)
 	for _, change := range changes {
-		if group.pendingTables == nil {
-			group.pendingTables = map[string]struct{}{}
-		}
-		for _, table := range tableChangeTables(change) {
-			if table != "" {
-				group.pendingTables[table] = struct{}{}
-			}
-		}
-		if group.pendingTaskIDs == nil {
-			group.pendingTaskIDs = map[string]struct{}{}
-		}
-		for taskID := range change.taskIDs {
-			if taskID != "" {
-				group.pendingTaskIDs[taskID] = struct{}{}
-			}
-		}
-		for table, detail := range change.details {
-			for taskID := range detail.taskIDs {
-				if taskID != "" {
-					group.pendingTaskIDs[taskID] = struct{}{}
-				}
-			}
-			if table == "tasks" {
-				for taskID := range detail.rowIDs {
-					if taskID != "" {
-						group.pendingTaskIDs[taskID] = struct{}{}
-					}
-				}
-			}
+		if change.requiredRevision > targetRevision {
+			targetRevision = change.requiredRevision
 		}
 	}
 	if requestID != "" && group.commitAlreadyRequestedLocked(requestID) {
@@ -852,7 +863,13 @@ func (group *sharedSubscription) requestForCommitBatch(reason string, changedAtM
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) { metric.RerunsCoalesced++ })
 		return
 	}
-	group.requested++
+	if targetRevision > group.requiredRevision {
+		group.requiredRevision = targetRevision
+	} else if targetRevision == 0 && reason != "initial" {
+		// Recovery and legacy/test callers do not carry a database revision. Give
+		// them a new local requirement without weakening feed-revision semantics.
+		group.requiredRevision++
+	}
 	group.pendingReason = reason
 	if commitID != "" {
 		if group.pendingCommitIDs == nil {
@@ -870,12 +887,6 @@ func (group *sharedSubscription) requestForCommitBatch(reason string, changedAtM
 		group.pendingChangedAtMS = changedAtMS
 	}
 	if group.running {
-		// Requests arriving during the pre-run window are part of the execution
-		// that is already scheduled. Requests arriving during an active query
-		// need one serialized trailing execution unless they name the same commit.
-		if !group.coalescing {
-			group.dirty = true
-		}
 		group.mu.Unlock()
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) { metric.RerunsCoalesced++ })
 		return
@@ -888,8 +899,7 @@ func (group *sharedSubscription) requestForCommitBatch(reason string, changedAtM
 func (group *sharedSubscription) run() {
 	for {
 		group.mu.Lock()
-		group.coalescing = false
-		requested := group.requested
+		targetRevision := group.requiredRevision
 		reason := group.pendingReason
 		changedAtMS := group.pendingChangedAtMS
 		commitIDs := group.pendingCommitIDs
@@ -898,35 +908,21 @@ func (group *sharedSubscription) run() {
 		requestIDs := group.pendingRequestIDs
 		group.pendingRequestIDs = nil
 		group.activeRequestIDs = requestIDs
-		tables := group.pendingTables
-		group.pendingTables = nil
-		group.activeTables = tables
-		taskIDs := group.pendingTaskIDs
-		group.pendingTaskIDs = nil
-		group.activeTaskIDs = taskIDs
 		listeners := group.listenerSnapshotLocked()
-		group.dirty = false
 		group.mu.Unlock()
 		if len(listeners) == 0 || group.ctx.Err() != nil {
-			if len(listeners) == 0 && group.ctx.Err() == nil && reason == "invalidate" {
-				// The commit that requested this run is now unrepresented in the
-				// retained snapshot. Serve no replays until a fresh execution.
-				group.mu.Lock()
-				group.staleWhileIdle = true
-				group.mu.Unlock()
-			}
-			group.finishRun(requested)
+			group.finishRun()
 			return
 		}
 
 		representative, ok := group.firstAuthorizedListener(listeners)
 		if !ok {
-			group.finishRun(requested)
+			group.finishRun()
 			return
 		}
 		startedAt := time.Now().UTC()
 		group.manager.server.metrics.recordQueryCommitExecution(group.project, group.tenant, group.key, commitIDs)
-		executionCtx := gonvex.WithQueryChangeDetails(group.ctx, reason, changedAtMS, sortedStringSet(tables), sortedStringSet(taskIDs))
+		executionCtx := gonvex.WithQueryChange(group.ctx, reason, changedAtMS)
 		result, err := group.manager.executeVisibilityShared(executionCtx, group, representative, reason, changedAtMS)
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
 			metric.QueriesRerun++
@@ -934,10 +930,11 @@ func (group *sharedSubscription) run() {
 			metric.ReactiveExecutionDurationMS += float64(time.Since(startedAt).Microseconds()) / 1000
 		})
 		if group.ctx.Err() != nil {
-			group.finishRun(requested)
+			group.finishRun()
 			return
 		}
 		completionStarted := time.Now()
+		succeeded := err == nil
 		if err != nil {
 			group.completeError(err.Error())
 		} else if partitioned, ok := result.(*visibilityPartitionedResult); ok {
@@ -953,11 +950,10 @@ func (group *sharedSubscription) run() {
 		group.rememberCompletedCommitsLocked(requestIDs)
 		group.activeCommitIDs = nil
 		group.activeRequestIDs = nil
-		group.activeTables = nil
-		group.activeTaskIDs = nil
-		group.completed = requested
-		if group.dirty || group.requested > requested {
-			group.coalescing = true
+		if succeeded && targetRevision > group.computedRevision {
+			group.computedRevision = targetRevision
+		}
+		if succeeded && group.requiredRevision > group.computedRevision {
 			group.mu.Unlock()
 			if subscriptionRerunCooldown > 0 {
 				time.AfterFunc(subscriptionRerunCooldown, group.run)
@@ -1337,14 +1333,11 @@ func (group *sharedSubscription) rememberCompletedCommitsLocked(commitIDs map[st
 	}
 }
 
-func (group *sharedSubscription) finishRun(requested uint64) {
+func (group *sharedSubscription) finishRun() {
 	group.mu.Lock()
 	group.rememberCompletedCommitsLocked(group.activeRequestIDs)
 	group.activeCommitIDs = nil
 	group.activeRequestIDs = nil
-	group.activeTables = nil
-	group.activeTaskIDs = nil
-	group.completed = requested
 	group.running = false
 	group.mu.Unlock()
 }
@@ -1432,7 +1425,6 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 	}
 	revision := group.manager.sequence.Add(1)
 	group.revision = revision
-	group.staleWhileIdle = false
 	group.lastHash = hash
 	group.hasHash = true
 	group.lastError = ""
@@ -1462,7 +1454,7 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 
 	revisionValue := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: revision}
 	if unchanged && (len(previous) > 0 || sameSingleListener) {
-		message := serverMessage{Type: "query.progress", Path: group.path, Reason: reason, ThroughRevision: revisionValue, MutationIDs: mutationIDs, QueryPerf: queryPerf}
+		message := serverMessage{Type: "query.progress", Path: group.path, Reason: reason, ThroughRevision: revisionValue, OriginCommandIDs: mutationIDs, QueryPerf: queryPerf}
 		group.broadcastTo(listeners, message, changedAtMS, startedAt)
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
 			metric.UnchangedResultsSuppressed++
@@ -1473,7 +1465,7 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 	}
 
 	cacheRevision := group.manager.server.nextQueryCacheRevision(hash)
-	message := serverMessage{Type: "query.result", Path: group.path, Result: json.RawMessage(payload), Reason: reason, CacheScope: group.cacheScope, CacheRevision: cacheRevision, SubscriptionRevision: revisionValue, MutationIDs: mutationIDs, QueryPerf: queryPerf}
+	message := serverMessage{Type: "query.result", Path: group.path, Result: json.RawMessage(payload), Reason: reason, CacheScope: group.cacheScope, CacheRevision: cacheRevision, SubscriptionRevision: revisionValue, OriginCommandIDs: mutationIDs, QueryPerf: queryPerf}
 	encodedSize := len(payload)
 	patched := false
 	if len(previous) >= minimumPatchResultBytes {
@@ -1492,7 +1484,7 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 			patch.BaseRevision = &subscriptionRevision{Epoch: group.manager.epoch, Sequence: previousRevision}
 			patch.Path = group.path
 			patch.Reason = reason
-			patch.MutationIDs = mutationIDs
+			patch.OriginCommandIDs = mutationIDs
 			patch.CacheScope = group.cacheScope
 			patch.CacheRevision = cacheRevision
 			patch.FullResult = payload
@@ -1558,7 +1550,6 @@ func (group *sharedSubscription) completePartitionedResult(result *visibilityPar
 	sharedPreviousRevision := group.revision
 	previousPartitions := group.partitionBaselines
 	group.revision = group.manager.sequence.Add(1)
-	group.staleWhileIdle = false
 	revision := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: group.revision}
 	// A partitioned result proves that the old shared baseline is no longer
 	// valid. Send full results now and force the next converged execution to
@@ -1594,7 +1585,7 @@ func (group *sharedSubscription) completePartitionedResult(result *visibilityPar
 		message := serverMessage{
 			Type: "query.result", Path: group.path, Result: json.RawMessage(payload), Reason: reason,
 			CacheScope: group.cacheScope, CacheRevision: group.manager.server.nextQueryCacheRevision(hash),
-			SubscriptionRevision: revision, MutationIDs: mutationIDs, QueryPerf: queryPerf,
+			SubscriptionRevision: revision, OriginCommandIDs: mutationIDs, QueryPerf: queryPerf,
 		}
 		encodedSize := len(payload)
 		patched := false
@@ -1626,7 +1617,7 @@ func (group *sharedSubscription) completePartitionedResult(result *visibilityPar
 				patch.BaseRevision = &subscriptionRevision{Epoch: group.manager.epoch, Sequence: previousRevision}
 				patch.Path = group.path
 				patch.Reason = reason
-				patch.MutationIDs = mutationIDs
+				patch.OriginCommandIDs = mutationIDs
 				patch.CacheScope = group.cacheScope
 				patch.CacheRevision = message.CacheRevision
 				patch.FullResult = payload
@@ -1687,7 +1678,6 @@ func (group *sharedSubscription) completeConvergedPartitionResult(shared *visibi
 	listeners := group.listenerSnapshotLocked()
 	mutationIDs := sortedStringSet(group.activeCommitIDs)
 	group.revision = group.manager.sequence.Add(1)
-	group.staleWhileIdle = false
 	revision := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: group.revision}
 	group.lastHash = shared.hash
 	group.hasHash = true
@@ -1716,7 +1706,7 @@ func (group *sharedSubscription) completeConvergedPartitionResult(shared *visibi
 		message := serverMessage{
 			Type: "query.result", Path: group.path, Result: shared.payload, Reason: reason,
 			CacheScope: group.cacheScope, CacheRevision: cacheRevision,
-			SubscriptionRevision: revision, MutationIDs: mutationIDs, QueryPerf: shared.queryPerf,
+			SubscriptionRevision: revision, OriginCommandIDs: mutationIDs, QueryPerf: shared.queryPerf,
 		}
 		encodedSize := len(shared.payload)
 		patched := false
@@ -1726,7 +1716,7 @@ func (group *sharedSubscription) completeConvergedPartitionResult(shared *visibi
 				patch.SubscriptionRevision = revision
 				patch.BaseRevision = &subscriptionRevision{Epoch: group.manager.epoch, Sequence: baseline.revision}
 				patch.Path, patch.Reason = group.path, reason
-				patch.MutationIDs, patch.CacheScope, patch.CacheRevision = mutationIDs, group.cacheScope, cacheRevision
+				patch.OriginCommandIDs, patch.CacheScope, patch.CacheRevision = mutationIDs, group.cacheScope, cacheRevision
 				patch.FullResult = shared.payload
 				message, encodedSize, patched = patch, cached.encodedSize, true
 			}
@@ -1834,13 +1824,13 @@ func (group *sharedSubscription) broadcastTo(listeners []querySubscription, mess
 		// the grid then stayed stale forever.
 		if copy.Type == "query.result" && copy.SubscriptionRevision != nil && queryCacheRevisionMatchesHash(currentListenerCacheRevision(listener), group.lastHash) {
 			copy = serverMessage{
-				Type:            "query.progress",
-				ID:              listener.id,
-				Path:            group.path,
-				Reason:          message.Reason,
-				ThroughRevision: copy.SubscriptionRevision,
-				MutationIDs:     message.MutationIDs,
-				QueryPerf:       message.QueryPerf,
+				Type:             "query.progress",
+				ID:               listener.id,
+				Path:             group.path,
+				Reason:           message.Reason,
+				ThroughRevision:  copy.SubscriptionRevision,
+				OriginCommandIDs: message.OriginCommandIDs,
+				QueryPerf:        message.QueryPerf,
 			}
 		}
 		if copy.Type == "query.result" || copy.Type == "query.patch" || copy.Type == "query.pagePatch" || copy.Type == "query.objectPatch" {

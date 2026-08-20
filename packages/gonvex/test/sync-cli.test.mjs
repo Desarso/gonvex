@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const cli = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 
-test("dev manifest preserves sync chains separated by Go comments", () => {
+test("dev manifest preserves Replica Collection chains separated by Go comments", () => {
   const project = mkdtempSync(join(tmpdir(), "gonvex-cli-sync-chain-"));
   try {
     mkdirSync(join(project, "gonvex"));
@@ -20,10 +20,10 @@ test("dev manifest preserves sync chains separated by Go comments", () => {
 import "github.com/gonvex/gonvex/pkg/gonvex"
 
 func Register(app *gonvex.App) {
-  app.Sync(
+  app.ReplicaCollection(
     "sync.tasks",
     Tasks,
-    gonvex.SyncTable("tasks").
+    gonvex.ReplicaTable("tasks").
       Key("_id").
       Columns("_id", "tenantId", "workspaceId").
       EqualArg("tenantId").
@@ -34,9 +34,6 @@ func Register(app *gonvex.App) {
       OrderBy("id", "desc").
       Progressive().
       Budget(100, 4194304),
-    gonvex.Reads("tasks").
-      // Dependency chain comments must be harmless too.
-      Columns("_id", "tenantId").Filters("tenantId").Windowed(),
   )
 }
 `,
@@ -52,7 +49,7 @@ func Register(app *gonvex.App) {
     );
 
     const manifest = JSON.parse(readFileSync(join(project, "gonvex", "_generated", "manifest.json"), "utf8"));
-    assert.deepEqual(manifest.functions["sync.tasks"].sync, {
+    assert.deepEqual(manifest.functions["sync.tasks"].replica, {
       table: "tasks",
       key: "_id",
       columns: ["_id", "tenantId", "workspaceId"],
@@ -65,14 +62,7 @@ func Register(app *gonvex.App) {
       maxRows: 100,
       maxBytes: 4194304,
     });
-    assert.deepEqual(manifest.functions["sync.tasks"].dependencies, {
-      reads: [{
-        table: "tasks",
-        columns: ["_id", "tenantId"],
-        filters: ["tenantId"],
-        windowed: true,
-      }],
-    });
+    assert.equal(manifest.functions["sync.tasks"].dependencies, undefined);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

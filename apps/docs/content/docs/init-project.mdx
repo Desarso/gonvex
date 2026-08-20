@@ -253,11 +253,11 @@ Import the generated API references and React hooks from your app:
 
 ```tsx
 import { api } from "./gonvex/_generated/api";
-import { useMutation, useQuery } from "./gonvex/_generated/react";
+import { useQuery, useReducer } from "./gonvex/_generated/react";
 
 export function Messages() {
   const messages = useQuery(api.messages.list, {});
-  const send = useMutation(api.messages.send);
+  const send = useReducer(api.messages.send);
 
   return (
     <button onClick={() => send({ body: "Hello from Gonvex" })}>
@@ -296,5 +296,5 @@ is accessed as `api.messages.list`.
 ## Next steps
 
 - Define your data model in [Schema](./schema).
-- Add queries and mutations in [Functions and Bindings](./functions-and-bindings).
+- Add Queries and Reducers in [Functions and Bindings](./functions-and-bindings).
 - Understand the current command surface in [CLI Reference](./cli-reference).

@@ -17,6 +17,7 @@ import (
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/server/internal/data"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 	"github.com/gonvex/gonvex/server/internal/sandbox"
 	"github.com/gorilla/websocket"
 )
@@ -47,12 +48,12 @@ type clientMessage struct {
 	Opens              []syncOpenRequest       `json:"opens,omitempty"`
 	CacheRevision      string                  `json:"cacheRevision,omitempty"`
 	Subscribes         []querySubscribeRequest `json:"subscribes,omitempty"`
-	Calls              []mutationCallRequest   `json:"calls,omitempty"`
+	Calls              []reducerCallRequest    `json:"calls,omitempty"`
 	Capabilities       *clientCapabilities     `json:"capabilities,omitempty"`
 }
 
 // maxBatchedClientRequests bounds every batched client frame (sync.openMany,
-// query.subscribeMany, mutation.callMany).
+// query.subscribeMany, reducer.callMany).
 const maxBatchedClientRequests = 256
 
 type querySubscribeRequest struct {
@@ -62,13 +63,13 @@ type querySubscribeRequest struct {
 	CacheRevision string          `json:"cacheRevision,omitempty"`
 }
 
-type mutationCallRequest struct {
+type reducerCallRequest struct {
 	ID    string          `json:"id"`
 	Path  string          `json:"path"`
 	Args  json.RawMessage `json:"args,omitempty"`
 	Trace *messageTrace   `json:"trace,omitempty"`
-	// IdempotencyKey marks a replayable write from the client outbox. Replays
-	// reuse the key, so the runtime executes the mutation once and serves the
+	// IdempotencyKey marks a replayable command from the client outbox. Replays
+	// reuse the key, so the runtime executes the reducer once and serves the
 	// stored result to every duplicate delivery.
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
@@ -90,7 +91,7 @@ type serverCapabilities struct {
 	SyncBatch       int    `json:"syncBatch,omitempty"`
 	SyncIntegrity   int    `json:"syncIntegrity,omitempty"`
 	QueryBatch      int    `json:"queryBatch,omitempty"`
-	MutationBatch   int    `json:"mutationBatch,omitempty"`
+	ReducerBatch    int    `json:"reducerBatch,omitempty"`
 	SyncWatermark   int    `json:"syncWatermark,omitempty"`
 }
 
@@ -120,6 +121,15 @@ type syncReadyMessage struct {
 	Mode      string      `json:"mode,omitempty"`
 	Digest    string      `json:"digest,omitempty"`
 	Truncated bool        `json:"truncated"`
+}
+
+type replicaChangeMessage struct {
+	Entity         string          `json:"entity"`
+	ID             string          `json:"id"`
+	Operation      string          `json:"operation"`
+	OldValue       json.RawMessage `json:"oldValue,omitempty"`
+	NewValue       json.RawMessage `json:"newValue,omitempty"`
+	ChangedColumns []string        `json:"changedColumns,omitempty"`
 }
 
 type serverMessage struct {
@@ -158,13 +168,16 @@ type serverMessage struct {
 	MaxRows              int                             `json:"maxRows,omitempty"`
 	MaxBytes             int64                           `json:"maxBytes,omitempty"`
 	Upserts              []json.RawMessage               `json:"upserts,omitempty"`
-	MutationIDs          []string                        `json:"mutationIds,omitempty"`
+	OriginCommandIDs     []string                        `json:"originCommandIds,omitempty"`
 	Hashes               map[string]string               `json:"hashes,omitempty"`
 	Digest               string                          `json:"digest,omitempty"`
 	Truncated            *bool                           `json:"truncated,omitempty"`
 	Ready                []syncReadyMessage              `json:"ready,omitempty"`
 	Messages             []serverMessage                 `json:"messages,omitempty"`
 	Revision             uint64                          `json:"revision,omitempty"`
+	OriginCommandID      string                          `json:"originCommandId,omitempty"`
+	CommittedRevision    uint64                          `json:"committedRevision,omitempty"`
+	Changes              []replicaChangeMessage          `json:"changes,omitempty"`
 }
 
 // explicitNull makes a nil handler result serialize as an explicit JSON null
@@ -181,8 +194,8 @@ func explicitNull(result any) any {
 type messageTrace struct {
 	ClientSentAtMS                float64         `json:"clientSentAtMs,omitempty"`
 	ServerReceivedAtMS            float64         `json:"serverReceivedAtMs,omitempty"`
-	ServerMutationStartedAtMS     float64         `json:"serverMutationStartedAtMs,omitempty"`
-	ServerMutationCommittedAtMS   float64         `json:"serverMutationCommittedAtMs,omitempty"`
+	ServerReducerStartedAtMS      float64         `json:"serverReducerStartedAtMs,omitempty"`
+	ServerReducerCommittedAtMS    float64         `json:"serverReducerCommittedAtMs,omitempty"`
 	ServerCompletedAtMS           float64         `json:"serverCompletedAtMs,omitempty"`
 	ServerBroadcastScheduledAtMS  float64         `json:"serverBroadcastScheduledAtMs,omitempty"`
 	ServerChangeCommittedAtMS     float64         `json:"serverChangeCommittedAtMs,omitempty"`
@@ -301,32 +314,28 @@ type querySubscription struct {
 }
 
 type tableChange struct {
-	project        string
-	tenant         string
-	table          string
-	tables         map[string]bool
-	broad          bool
-	rowIDs         map[string]bool
-	taskIDs        map[string]bool
-	userIDs        map[string]bool
-	workspaceIDs   map[string]bool
-	operation      string
-	changedColumns []string
-	changedAtMS    float64
+	project string
+	tenant  string
+	// requiredRevision is the authoritative revision assigned to the committed
+	// Postgres transaction that produced this change.
+	requiredRevision uint64
+	table            string
+	tables           map[string]bool
+	rowIDs           map[string]bool
+	oldValues        []json.RawMessage
+	newValues        []json.RawMessage
+	operation        string
+	changedColumns   []string
+	changedAtMS      float64
 	// details retains filtering precision independently for every physical
 	// table in a merged commit batch. Legacy producers may leave it nil and use
 	// the singular fields above.
 	details map[string]tableChangeDetail
-	// declaredTables is the mutation manifest's conservative write superset.
-	// It is retained for candidate/metric accounting even when a healthy
-	// listener makes details authoritative for subscription delivery.
-	declaredTables map[string]bool
-	// triggerObserved identifies a table event received from PostgreSQL LISTEN.
-	// It is only meaningful while accumulating a pending commit.
+	// triggerObserved identifies a table event received from the durable change
+	// feed. It is only meaningful while accumulating a pending commit.
 	triggerObserved bool
-	// commitID joins the broad declared-write invalidation emitted by the
-	// mutation caller with the precise PostgreSQL notifications emitted by the
-	// same transaction. It is the mutation ID stored in gonvex.mutation_id.
+	// commitID is the originating reducer command ID stored in
+	// gonvex.mutation_id for idempotency and optimistic reconciliation.
 	commitID string
 }
 
@@ -334,23 +343,16 @@ type tableChangeDetail struct {
 	operation      string
 	changedColumns []string
 	rowIDs         map[string]bool
-	taskIDs        map[string]bool
-	userIDs        map[string]bool
-	workspaceIDs   map[string]bool
-	// precise means the table was observed by the trigger (or another precise
-	// source). broad only disables column/row pruning for this table.
-	precise bool
-	broad   bool
+	oldValues      []json.RawMessage
+	newValues      []json.RawMessage
 }
 
 type pendingTableChange struct {
 	project                string
 	tenant                 string
 	commitID               string
-	declaredTables         map[string]bool
 	observedDetails        map[string]tableChangeDetail
 	cacheInvalidatedTables map[string]bool
-	otherDetails           map[string]tableChangeDetail
 	changedAtMS            float64
 }
 
@@ -486,7 +488,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			SyncBatch:       1,
 			SyncIntegrity:   1,
 			QueryBatch:      1,
-			MutationBatch:   1,
+			ReducerBatch:    1,
 			SyncWatermark:   1,
 		},
 	})
@@ -509,7 +511,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 	receivedAt := time.Now()
 	c.observeActivity(message, receivedAt)
 	switch message.Type {
-	case "mutation.call", "mutation.callMany", "action.call":
+	case "reducer.call", "reducer.callMany", "action.call":
 		c.writesInFlight.Add(1)
 		defer c.writesInFlight.Add(-1)
 	}
@@ -609,6 +611,16 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.subscribeQuery(ctx, querySubscribeRequest{
 			ID: message.ID, Path: message.Path, Args: message.Args, CacheRevision: message.CacheRevision,
 		})
+	case "query.call":
+		if !c.requireAuth(ctx, "query.error", message.ID) {
+			return
+		}
+		result, err := c.server.executeTenantQueryForCaller(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
+		if err != nil {
+			c.write(serverMessage{Type: "query.error", ID: message.ID, Path: message.Path, Error: err.Error()})
+			return
+		}
+		c.write(serverMessage{Type: "query.result", ID: message.ID, Path: message.Path, Result: explicitNull(result), Reason: "initial"})
 	case "query.subscribeMany":
 		if !c.requireAuth(ctx, "query.error", "") {
 			return
@@ -644,28 +656,28 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.openSyncMany(ctx, message.Opens)
 	case "sync.close":
 		c.closeSync(message.ID)
-	case "mutation.call":
-		if !c.requireAuth(ctx, "mutation.error", message.ID) {
+	case "reducer.call":
+		if !c.requireAuth(ctx, "reducer.error", message.ID) {
 			return
 		}
-		c.callMutation(ctx, receivedAt, mutationCallRequest{
+		c.callReducer(ctx, receivedAt, reducerCallRequest{
 			ID: message.ID, Path: message.Path, Args: message.Args, Trace: message.Trace,
 			IdempotencyKey: message.IdempotencyKey,
 		})
-	case "mutation.callMany":
+	case "reducer.callMany":
 		// Offline queues flush their backlog in one frame on reconnect. Calls
 		// execute sequentially in queue order; each gets its own result/error
 		// frame so the client settles them individually, and one failure does
 		// not abandon the writes queued after it.
-		if !c.requireAuth(ctx, "mutation.error", "") {
+		if !c.requireAuth(ctx, "reducer.error", "") {
 			return
 		}
 		if len(message.Calls) > maxBatchedClientRequests {
-			c.write(serverMessage{Type: "mutation.error", Error: "mutation batch cannot contain more than 256 calls"})
+			c.write(serverMessage{Type: "reducer.error", Error: "reducer batch cannot contain more than 256 calls"})
 			return
 		}
 		for _, call := range message.Calls {
-			c.callMutation(ctx, receivedAt, call)
+			c.callReducer(ctx, receivedAt, call)
 		}
 	case "action.call":
 		if !c.requireAuth(ctx, "action.error", message.ID) {
@@ -684,11 +696,6 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		}
 		c.write(serverMessage{Type: "action.result", ID: message.ID, Path: message.Path, Result: explicitNull(result), Trace: trace})
 		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "action", message.Path, "server", "", "ok", "", trace))
-		// Actions write rows too (assistant.processThread appends the reply,
-		// tasks.bulkDelete soft-deletes, ...). Without a broadcast their writes
-		// never invalidate live queries, so clients sit on stale results until a
-		// reload. Mirror the mutation path's completion broadcast.
-		c.server.broadcastMutationInvalidationsForCommitAt(c.project, c.tenant, message.Path, message.ID, completedAt)
 	case "telemetry.event":
 		c.server.recordTransactionTelemetry(transactionEntryFromClientTelemetry(c.project, c.tenant, message))
 	default:
@@ -755,18 +762,18 @@ func transactionEntryFromTrace(project string, tenant string, operationID string
 	}
 	entry.ClientSentAtMS = trace.ClientSentAtMS
 	entry.ServerReceivedAtMS = trace.ServerReceivedAtMS
-	entry.ServerCommittedAtMS = trace.ServerMutationCommittedAtMS
+	entry.ServerCommittedAtMS = trace.ServerReducerCommittedAtMS
 	entry.ServerCompletedAtMS = trace.ServerCompletedAtMS
 	entry.ServerSentAtMS = trace.ServerSubscriptionSentAtMS
 	entry.ChangeCommittedAtMS = trace.ServerChangeCommittedAtMS
 	entry.ServerDurationMS = trace.ServerDurationMS
-	if trace.ServerMutationStartedAtMS > 0 && trace.ServerMutationCommittedAtMS > 0 {
-		entry.ServerCommitMS = float64(trace.ServerMutationCommittedAtMS - trace.ServerMutationStartedAtMS)
-	} else if trace.ServerReceivedAtMS > 0 && trace.ServerMutationCommittedAtMS > 0 {
-		entry.ServerCommitMS = float64(trace.ServerMutationCommittedAtMS - trace.ServerReceivedAtMS)
+	if trace.ServerReducerStartedAtMS > 0 && trace.ServerReducerCommittedAtMS > 0 {
+		entry.ServerCommitMS = float64(trace.ServerReducerCommittedAtMS - trace.ServerReducerStartedAtMS)
+	} else if trace.ServerReceivedAtMS > 0 && trace.ServerReducerCommittedAtMS > 0 {
+		entry.ServerCommitMS = float64(trace.ServerReducerCommittedAtMS - trace.ServerReceivedAtMS)
 	}
-	if trace.ClientSentAtMS > 0 && trace.ServerMutationCommittedAtMS > 0 {
-		entry.ClientToCommitMS = float64(trace.ServerMutationCommittedAtMS - trace.ClientSentAtMS)
+	if trace.ClientSentAtMS > 0 && trace.ServerReducerCommittedAtMS > 0 {
+		entry.ClientToCommitMS = float64(trace.ServerReducerCommittedAtMS - trace.ClientSentAtMS)
 	}
 	if trace.ServerSubscriptionStartedAtMS > 0 && trace.ServerSubscriptionSentAtMS > 0 {
 		entry.SubscriptionDurationMS = float64(trace.ServerSubscriptionSentAtMS - trace.ServerSubscriptionStartedAtMS)
@@ -932,6 +939,10 @@ func (c *wsConn) subscribeQuery(ctx context.Context, request querySubscribeReque
 		c.write(serverMessage{Type: "query.error", ID: request.ID, Error: "query id and path are required"})
 		return
 	}
+	if _, _, ok := c.server.liveQueryDependencies(ctx, c.project, request.Path); !ok {
+		c.write(serverMessage{Type: "query.error", ID: request.ID, Path: request.Path, Error: "Live Query is not registered with a structured plan"})
+		return
+	}
 	subCtx, cancel := context.WithCancel(ctx)
 	sub := querySubscription{conn: c, id: request.ID, project: c.project, tenant: c.tenant, path: request.Path, args: request.Args, caller: c.caller(), ctx: subCtx, cancel: cancel, token: newSubscriptionToken(request.CacheRevision), cacheScope: c.currentCacheScope(), cacheRevision: request.CacheRevision}
 	c.mu.Lock()
@@ -950,10 +961,10 @@ func (c *wsConn) subscribeQuery(ctx context.Context, request querySubscribeReque
 	c.server.subscriptions.attach(sub)
 }
 
-func (c *wsConn) callMutation(ctx context.Context, receivedAt time.Time, request mutationCallRequest) {
+func (c *wsConn) callReducer(ctx context.Context, receivedAt time.Time, request reducerCallRequest) {
 	trace := traceFromClient(request.Trace)
 	trace.ServerReceivedAtMS = epochMillis(receivedAt)
-	trace.ServerMutationStartedAtMS = epochMillis(time.Now())
+	trace.ServerReducerStartedAtMS = epochMillis(time.Now())
 	caller := c.caller()
 	mutationCtx := withMutationID(ctx, request.ID)
 	if key := strings.TrimSpace(request.IdempotencyKey); key != "" {
@@ -961,18 +972,50 @@ func (c *wsConn) callMutation(ctx context.Context, receivedAt time.Time, request
 	}
 	result, err := c.server.executeTenantMutationForCaller(mutationCtx, c.project, c.tenant, caller, request.Path, request.Args)
 	committedAt := time.Now().UTC()
-	trace.ServerMutationCommittedAtMS = epochMillis(committedAt)
+	trace.ServerReducerCommittedAtMS = epochMillis(committedAt)
 	trace.ServerCompletedAtMS = epochMillis(committedAt)
 	trace.ServerDurationMS = float64(committedAt.Sub(receivedAt).Microseconds()) / 1000
 	if err != nil {
-		c.write(serverMessage{Type: "mutation.error", ID: request.ID, Path: request.Path, Error: err.Error(), Trace: trace})
-		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, request.ID, "mutation", request.Path, "server", "", "error", err.Error(), trace))
+		c.write(serverMessage{Type: "reducer.error", ID: request.ID, Path: request.Path, Error: err.Error(), Trace: trace})
+		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, request.ID, "reducer", request.Path, "server", "", "error", err.Error(), trace))
 		return
 	}
 	trace.ServerBroadcastScheduledAtMS = epochMillis(time.Now())
-	c.write(serverMessage{Type: "mutation.result", ID: request.ID, Path: request.Path, Result: explicitNull(result), Trace: trace})
-	c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, request.ID, "mutation", request.Path, "server", "", "ok", "", trace))
-	c.server.broadcastMutationInvalidationsForCommitAt(c.project, c.tenant, request.Path, request.ID, committedAt)
+	committedRevision := c.server.commandCommittedRevision(ctx, c.project, c.tenant, request.ID)
+	c.write(serverMessage{Type: "reducer.result", ID: request.ID, Path: request.Path, Result: explicitNull(result), OriginCommandID: request.ID, CommittedRevision: committedRevision, Trace: trace})
+	c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, request.ID, "reducer", request.Path, "server", "", "ok", "", trace))
+}
+
+func (s *Server) commandCommittedRevision(ctx context.Context, projectID, tenantID, commandID string) uint64 {
+	commandID = strings.TrimSpace(commandID)
+	if commandID == "" {
+		return 0
+	}
+	urls := appendUniqueStrings(nil,
+		s.databaseURLForTenant(projectID, tenantIDFromRequest(projectID, tenantID)),
+		s.databaseURLForProject(projectID),
+	)
+	var revision uint64
+	for _, databaseURL := range urls {
+		if strings.TrimSpace(databaseURL) == "" {
+			continue
+		}
+		db, err := dbpool.Open(databaseURL)
+		if err != nil {
+			continue
+		}
+		var candidate uint64
+		err = db.QueryRowContext(ctx, `
+			SELECT COALESCE(MAX(revision), 0)
+			FROM _gonvex_sync_changes
+			WHERE mutation_id = $1
+		`, commandID).Scan(&candidate)
+		db.Close()
+		if err == nil && candidate > revision {
+			revision = candidate
+		}
+	}
+	return revision
 }
 
 func (c *wsConn) currentCacheScope() string {
@@ -1453,69 +1496,6 @@ func (s *Server) rerunProjectSubscriptions(projectID string) {
 	s.subscriptions.rebindProject(s.projectSubscriptions(projectID))
 }
 
-func (s *Server) broadcastTableChange(projectID string, table string) {
-	s.broadcastTenantTableChange(projectID, tenantIDFromRequest(projectID, ""), table)
-}
-
-func (s *Server) broadcastTenantTableChange(projectID string, tenantID string, table string) {
-	s.broadcastTenantTableChangeAt(projectID, tenantID, table, time.Now().UTC())
-}
-
-func (s *Server) broadcastTenantTableChangeAt(projectID string, tenantID string, table string, changedAt time.Time) {
-	s.scheduleTableChange(tableChange{project: projectID, tenant: tenantIDFromRequest(projectID, tenantID), table: table, broad: true, changedAtMS: epochMillis(changedAt)})
-}
-
-// broadcastMutationInvalidationsAt translates a public function path into the
-// physical tables its handler can change. App modules do not always share a
-// name with their tables (for example chat.sendWorkspaceChat writes
-// workspaceChat), so invalidating only the path prefix leaves both the row
-// cache and live queries stale after a successful mutation.
-func (s *Server) broadcastMutationInvalidationsAt(projectID string, tenantID string, path string, changedAt time.Time) {
-	s.broadcastMutationInvalidationsForCommitAt(projectID, tenantID, path, "", changedAt)
-}
-
-func (s *Server) broadcastMutationInvalidationsForCommitAt(projectID string, tenantID string, path string, commitID string, changedAt time.Time) {
-	if s.functionWritesEphemeral(projectID, path) {
-		return
-	}
-	tables := s.declaredWriteTables(projectID, path)
-	if len(tables) == 0 {
-		tables = mutationInvalidationTables(path)
-	}
-	if len(tables) == 0 {
-		s.cache.invalidateQueries(context.Background(), projectID, tenantIDFromRequest(projectID, tenantID), nil)
-		return
-	}
-	changedTables := make(map[string]bool, len(tables))
-	for _, table := range tables {
-		changedTables[table] = true
-	}
-	s.scheduleTableChange(tableChange{
-		project:     projectID,
-		tenant:      tenantIDFromRequest(projectID, tenantID),
-		tables:      changedTables,
-		broad:       true,
-		changedAtMS: epochMillis(changedAt),
-		commitID:    strings.TrimSpace(commitID),
-	})
-}
-
-func (s *Server) broadcastMutationInvalidations(projectID string, tenantID string, path string) {
-	s.broadcastMutationInvalidationsAt(projectID, tenantID, path, time.Now().UTC())
-}
-
-func (s *Server) broadcastRowIDChange(projectID string, table string, rowIDs []string) {
-	s.broadcastTenantRowIDChange(projectID, tenantIDFromRequest(projectID, ""), table, rowIDs)
-}
-
-func (s *Server) broadcastTenantRowIDChange(projectID string, tenantID string, table string, rowIDs []string) {
-	ids := map[string]bool{}
-	for _, id := range rowIDs {
-		ids[id] = true
-	}
-	s.scheduleTableChange(tableChange{project: projectID, tenant: tenantIDFromRequest(projectID, tenantID), table: table, rowIDs: ids, changedAtMS: epochMillis(time.Now())})
-}
-
 func (s *Server) scheduleTableChange(change tableChange) {
 	changedTables := tableChangeTables(change)
 	if change.triggerObserved {
@@ -1550,41 +1530,23 @@ func (s *Server) scheduleTableChange(change tableChange) {
 		if table == "" {
 			continue
 		}
-		if change.triggerObserved {
-			if pending.observedDetails == nil {
-				pending.observedDetails = map[string]tableChangeDetail{}
-			}
-			pending.observedDetails[table] = mergeTableChangeDetail(pending.observedDetails[table], detailForTable(change, table, true))
-			if pending.cacheInvalidatedTables == nil {
-				pending.cacheInvalidatedTables = map[string]bool{}
-			}
-			pending.cacheInvalidatedTables[table] = true
-			continue
+		if pending.observedDetails == nil {
+			pending.observedDetails = map[string]tableChangeDetail{}
 		}
-		if pending.commitID != "" && change.broad {
-			if pending.declaredTables == nil {
-				pending.declaredTables = map[string]bool{}
-			}
-			pending.declaredTables[table] = true
-			continue
+		pending.observedDetails[table] = mergeTableChangeDetail(pending.observedDetails[table], detailForTable(change, table))
+		if pending.cacheInvalidatedTables == nil {
+			pending.cacheInvalidatedTables = map[string]bool{}
 		}
-		if pending.otherDetails == nil {
-			pending.otherDetails = map[string]tableChangeDetail{}
-		}
-		pending.otherDetails[table] = mergeTableChangeDetail(pending.otherDetails[table], detailForTable(change, table, !change.broad))
+		pending.cacheInvalidatedTables[table] = true
 	}
 	s.tableChanges[key] = pending
 	if timer := s.tableChangeWait[key]; timer != nil {
 		timer.Stop()
 	}
 	delay := tableChangeDebounce
-	// PostgreSQL notifications are emitted only after commit and contain the
-	// authoritative physical table/row details. Deliver the first observed
-	// change immediately; retain the debounce only while waiting for that
-	// notification to refine a mutation's declared write superset.
-	if change.triggerObserved || pending.commitID == "" {
-		delay = tableChangeTriggerBatch
-	}
+	// Change-feed notifications arrive only after commit. The short batch window
+	// merges tables from one revision; it has no correctness meaning.
+	delay = tableChangeTriggerBatch
 	s.tableChangeWait[key] = time.AfterFunc(delay, func() {
 		s.flushTableChange(key)
 	})
@@ -1604,20 +1566,11 @@ func (s *Server) flushTableChange(key string) {
 		return
 	}
 
-	listenerHealthy := s.subscriptions.listeners.healthy(change.project, change.tenant)
-	if change.commitID != "" && listenerHealthy && len(change.observedDetails) == 0 && !s.changeTouchesLandlordTable(change) {
-		// A successful handler may be a no-op. With a healthy LISTEN connection,
-		// the absence of a trigger notification means there is no committed row
-		// change to propagate. A delayed notification remains safe: it creates a
-		// new immediate precise batch. Listener failure uses the declared broad
-		// fallback below, and recovery refreshes every tenant subscription.
-		return
-	}
-	delivery := pendingChangeForDelivery(change, listenerHealthy)
+	delivery := pendingChangeForDelivery(change)
 	if len(tableChangeTables(delivery)) == 0 || (len(delivery.tables) == 0 && strings.TrimSpace(delivery.table) == "") {
-		// An empty table set is never authoritative. Preserve the legacy
-		// tenant-wide correctness backstop for malformed/unknown changes.
-		delivery.broad = true
+		// A malformed wake-up is not converted into a guessed invalidation.
+		// The listener's revision recovery path supplies an authoritative refresh.
+		return
 	}
 	changedTables := tableChangeTables(delivery)
 	cacheTables := make([]string, 0, len(changedTables))
@@ -1626,13 +1579,7 @@ func (s *Server) flushTableChange(key string) {
 			cacheTables = append(cacheTables, table)
 		}
 	}
-	if len(changedTables) == 0 {
-		// Preserve the tenant-wide query-generation backstop for malformed or
-		// unknown changes that do not identify any physical table.
-		s.cache.invalidateQueries(context.Background(), delivery.project, delivery.tenant, nil)
-	} else {
-		s.invalidateTableCaches(delivery.project, delivery.tenant, cacheTables)
-	}
+	s.invalidateTableCaches(delivery.project, delivery.tenant, cacheTables)
 	s.subscriptions.requestChange(delivery)
 	s.resetSyncsForVisibilityChange(delivery)
 }
@@ -1647,39 +1594,22 @@ func (s *Server) invalidateTableCaches(projectID string, tenantID string, tables
 	}
 }
 
-// changeTouchesLandlordTable reports whether a declared mutation write can be
-// committed outside the active tenant database. The tenant listener cannot
-// observe landlord triggers, so absence of a tenant notification is not proof
-// that such a mutation was a no-op.
-func (s *Server) changeTouchesLandlordTable(change pendingTableChange) bool {
-	landlordTables := s.runtime.ManifestForProject(change.project).Schema.LandlordTables
-	for table := range change.declaredTables {
-		if _, ok := landlordTables[table]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func detailForTable(change tableChange, table string, precise bool) tableChangeDetail {
+func detailForTable(change tableChange, table string) tableChangeDetail {
 	if detail, ok := change.details[table]; ok {
-		detail.precise = detail.precise || precise
 		return detail
 	}
 	return tableChangeDetail{
 		operation: change.operation, changedColumns: append([]string(nil), change.changedColumns...),
-		rowIDs: cloneBoolMap(change.rowIDs), taskIDs: cloneBoolMap(change.taskIDs), userIDs: cloneBoolMap(change.userIDs), workspaceIDs: cloneBoolMap(change.workspaceIDs), precise: precise, broad: change.broad,
+		rowIDs:    cloneBoolMap(change.rowIDs),
+		oldValues: cloneRawMessages(change.oldValues), newValues: cloneRawMessages(change.newValues),
 	}
 }
 
 func mergeTableChangeDetail(current, next tableChangeDetail) tableChangeDetail {
-	current.precise = current.precise || next.precise
-	current.broad = current.broad || next.broad
 	if current.operation == "" {
 		current.operation = next.operation
 	} else if next.operation != "" && current.operation != next.operation {
-		current.operation = ""
-		current.broad = true
+		current.operation = "mixed"
 	}
 	current.changedColumns = appendUniqueStrings(current.changedColumns, next.changedColumns...)
 	if current.rowIDs == nil && len(next.rowIDs) > 0 {
@@ -1688,63 +1618,20 @@ func mergeTableChangeDetail(current, next tableChangeDetail) tableChangeDetail {
 	for id := range next.rowIDs {
 		current.rowIDs[id] = true
 	}
-	if current.taskIDs == nil && len(next.taskIDs) > 0 {
-		current.taskIDs = map[string]bool{}
-	}
-	for id := range next.taskIDs {
-		current.taskIDs[id] = true
-	}
-	if current.userIDs == nil && len(next.userIDs) > 0 {
-		current.userIDs = map[string]bool{}
-	}
-	for id := range next.userIDs {
-		current.userIDs[id] = true
-	}
-	if current.workspaceIDs == nil && len(next.workspaceIDs) > 0 {
-		current.workspaceIDs = map[string]bool{}
-	}
-	for id := range next.workspaceIDs {
-		current.workspaceIDs[id] = true
-	}
+	current.oldValues = append(current.oldValues, cloneRawMessages(next.oldValues)...)
+	current.newValues = append(current.newValues, cloneRawMessages(next.newValues)...)
 	return current
 }
 
-func pendingChangeForDelivery(pending pendingTableChange, listenerHealthy bool) tableChange {
+func pendingChangeForDelivery(pending pendingTableChange) tableChange {
 	change := tableChange{
 		project: pending.project, tenant: pending.tenant, commitID: pending.commitID,
-		changedAtMS: pending.changedAtMS, declaredTables: cloneBoolMap(pending.declaredTables),
-		tables: map[string]bool{}, details: map[string]tableChangeDetail{},
+		changedAtMS: pending.changedAtMS,
+		tables:      map[string]bool{}, details: map[string]tableChangeDetail{},
 	}
-	authoritative := len(pending.observedDetails) > 0 && (pending.commitID == "" || listenerHealthy)
-	if authoritative {
-		for table, detail := range pending.observedDetails {
-			change.tables[table] = true
-			change.details[table] = detail
-		}
-	} else {
-		// If listener authority is unavailable, every table mentioned by either
-		// source is delivered broadly. The declared manifest set remains the
-		// primary superset; observed/other tables are unioned in case no manifest
-		// declaration exists.
-		for table := range pending.declaredTables {
-			change.tables[table] = true
-		}
-		for table := range pending.observedDetails {
-			change.tables[table] = true
-		}
-		for table := range pending.otherDetails {
-			change.tables[table] = true
-		}
-		for table := range change.tables {
-			change.details[table] = tableChangeDetail{broad: true}
-		}
-		change.broad = true
-	}
-	if pending.commitID == "" {
-		for table, detail := range pending.otherDetails {
-			change.tables[table] = true
-			change.details[table] = detail
-		}
+	for table, detail := range pending.observedDetails {
+		change.tables[table] = true
+		change.details[table] = detail
 	}
 	if len(change.tables) == 1 {
 		for table := range change.tables {
@@ -1753,10 +1640,8 @@ func pendingChangeForDelivery(pending pendingTableChange, listenerHealthy bool) 
 			change.operation = detail.operation
 			change.changedColumns = append([]string(nil), detail.changedColumns...)
 			change.rowIDs = cloneBoolMap(detail.rowIDs)
-			change.taskIDs = cloneBoolMap(detail.taskIDs)
-			change.userIDs = cloneBoolMap(detail.userIDs)
-			change.workspaceIDs = cloneBoolMap(detail.workspaceIDs)
-			change.broad = detail.broad
+			change.oldValues = cloneRawMessages(detail.oldValues)
+			change.newValues = cloneRawMessages(detail.newValues)
 		}
 	}
 	return change
@@ -1773,16 +1658,12 @@ func cloneBoolMap(source map[string]bool) map[string]bool {
 	return copy
 }
 
-func tableChangeMatchesSubscription(sub querySubscription, change tableChange) bool {
-	if len(change.tables) == 0 {
-		return change.table == "" || subscriptionDependsOnTable(sub.path, change.table)
+func cloneRawMessages(source []json.RawMessage) []json.RawMessage {
+	cloned := make([]json.RawMessage, 0, len(source))
+	for _, value := range source {
+		cloned = append(cloned, append(json.RawMessage(nil), value...))
 	}
-	for table := range change.tables {
-		if table == "" || subscriptionDependsOnTable(sub.path, table) {
-			return true
-		}
-	}
-	return false
+	return cloned
 }
 
 func tableChangeTables(change tableChange) []string {
@@ -1838,79 +1719,26 @@ func appendUniqueStrings(existing []string, values ...string) []string {
 	return existing
 }
 
-func (s *Server) declaredWriteTables(projectID, path string) []string {
-	entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]
-	if !ok || len(entry.Dependencies.Writes) == 0 {
-		return nil
-	}
-	tables := make([]string, 0, len(entry.Dependencies.Writes))
-	for _, write := range entry.Dependencies.Writes {
-		tables = appendUniqueStrings(tables, write.Table)
-	}
-	return tables
-}
-
 func (s *Server) queryDependencyTables(projectID, path string) []string {
-	entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]
-	if !ok || len(entry.Dependencies.Reads) == 0 {
-		return subscriptionTables(path)
-	}
-	tables := make([]string, 0, len(entry.Dependencies.Reads))
-	for _, read := range entry.Dependencies.Reads {
+	reads := s.runtime.ManifestForProject(projectID).Functions[path].Dependencies.Reads
+	tables := make([]string, 0, len(reads))
+	for _, read := range reads {
 		tables = appendUniqueStrings(tables, read.Table)
 	}
+	if len(tables) == 0 {
+		if function, ok := s.app.Lookup(path); ok {
+			for _, read := range function.Dependencies.Reads {
+				tables = appendUniqueStrings(tables, read.Table)
+			}
+		}
+	}
 	return tables
-}
-
-func (s *Server) queryReadsEphemeral(projectID, path string) bool {
-	if entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]; ok {
-		return entry.Dependencies.ReadsEphemeral
-	}
-	if function, ok := s.app.Lookup(path); ok {
-		return function.Dependencies.ReadsEphemeral
-	}
-	return false
-}
-
-func (s *Server) functionWritesEphemeral(projectID, path string) bool {
-	if entry, ok := s.runtime.ManifestForProject(projectID).Functions[path]; ok {
-		return entry.Dependencies.WritesEphemeral
-	}
-	if function, ok := s.app.Lookup(path); ok {
-		return function.Dependencies.WritesEphemeral
-	}
-	return false
 }
 
 func (s *Server) rerunSubscriptions(subs []querySubscription, reason string, changeCommittedAtMS float64) {
 	for _, sub := range subs {
 		s.subscriptions.request(sub, reason, changeCommittedAtMS)
 	}
-}
-
-func subscriptionIntersectsChange(sub querySubscription, change tableChange) bool {
-	if change.broad || subscriptionCanChangeMembership(sub) || len(change.rowIDs) == 0 || len(sub.rowIDs) == 0 {
-		return true
-	}
-	for id := range change.rowIDs {
-		if sub.rowIDs[id] {
-			return true
-		}
-	}
-	return false
-}
-
-func subscriptionCanChangeMembership(sub querySubscription) bool {
-	if sub.path != "tasks.grid" {
-		return true
-	}
-	var args taskGridArgs
-	if len(sub.args) > 0 {
-		if err := json.Unmarshal(sub.args, &args); err != nil {
-			return true
-		}
-	}
-	return strings.TrimSpace(args.Search) != "" || args.Sort != "" || len(args.Filters) > 0
 }
 
 func (s *Server) executeSubscription(ctx context.Context, sub querySubscription, reason string, changeCommittedAtMS float64) {
@@ -2074,7 +1902,7 @@ func (s *Server) executeTenantQueryForCallerCached(ctx context.Context, projectI
 	cacheKey := ""
 	cacheGeneration := ""
 	queryTables := s.queryDependencyTables(projectID, path)
-	if strings.TrimSpace(cacheScope) != "" && s.cache.enabled() && !s.queryReadsEphemeral(projectID, path) {
+	if strings.TrimSpace(cacheScope) != "" && s.cache.enabled() {
 		if generation, ok := s.cache.queryGeneration(ctx, projectID, tenantID, queryTables); ok {
 			cacheGeneration = generation
 			cacheKey = s.cache.queryKey(projectID, tenantID, generation, cacheScope, path, rawArgs)
@@ -2248,7 +2076,26 @@ func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projec
 		if err != nil {
 			return nil, err
 		}
-		return app.ExecuteQuery(queryCtx, path, rawArgs)
+		if queryCtx.DB == nil {
+			return app.ExecuteQuery(queryCtx, path, rawArgs)
+		}
+		tx, err := queryCtx.DB.BeginTx(queryCtx.Context, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+		if err != nil {
+			return nil, err
+		}
+		queryCtx.Tx = tx
+		queryCtx.DB = nil
+		queryCtx.TenantDB = nil
+		queryCtx.LandlordDB = nil
+		result, err := app.ExecuteQuery(queryCtx, path, rawArgs)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 	return nil, fmt.Errorf("query %q is not implemented by the runtime", path)
 }
@@ -2350,7 +2197,7 @@ func (s *Server) runTenantsOnProvisioned(ctx context.Context, projectID string, 
 	}
 	app := s.appForProject(ctx, projectID)
 	function, ok := app.Lookup("tenants.onProvisioned")
-	if !ok || function.Kind != gonvex.FunctionKindInternalMutation {
+	if !ok || function.Kind != gonvex.FunctionKindReducer || !function.Internal {
 		return nil
 	}
 	mutationCtx, err := s.mutationContext(ctx, projectID, tenantID, caller)
@@ -2361,37 +2208,36 @@ func (s *Server) runTenantsOnProvisioned(ctx context.Context, projectID string, 
 	if err != nil {
 		return fmt.Errorf("tenants.onProvisioned args: %w", err)
 	}
-	if _, err := s.runMutationInTx(mutationCtx, "tenants.onProvisioned", rawArgs, app.ExecuteInternalMutation); err != nil {
+	if _, err := s.runMutationInTx(mutationCtx, "tenants.onProvisioned", rawArgs, app.ExecuteInternalReducer); err != nil {
 		return fmt.Errorf("tenants.onProvisioned: %w", err)
 	}
 	return nil
 }
 
-func (s *Server) executeRegisteredMutation(app *gonvex.App, mutationCtx *gonvex.MutationCtx, path string, rawArgs json.RawMessage) (any, error) {
-	if function, ok := app.Lookup(path); ok && function.Dependencies.WritesEphemeral {
-		return app.ExecuteMutation(mutationCtx, path, rawArgs)
-	}
-	return s.runMutationInTx(mutationCtx, path, rawArgs, app.ExecuteMutation)
+func (s *Server) executeRegisteredMutation(app *gonvex.App, mutationCtx *gonvex.ReducerCtx, path string, rawArgs json.RawMessage) (any, error) {
+	return s.runMutationInTx(mutationCtx, path, rawArgs, app.ExecuteReducer)
 }
 
 // runMutationInTx runs a mutation-style handler inside a database transaction
 // when a database is configured, committing on success and rolling back on
 // error. It is shared by client-triggered mutations and scheduled internal
 // mutations so both get the same transactional guarantees.
-func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, rawArgs json.RawMessage, exec func(*gonvex.MutationCtx, string, json.RawMessage) (any, error)) (any, error) {
+func (s *Server) runMutationInTx(mutationCtx *gonvex.ReducerCtx, path string, rawArgs json.RawMessage, exec func(*gonvex.ReducerCtx, string, json.RawMessage) (any, error)) (any, error) {
 	if mutationCtx.DB == nil {
+		restrictReducerCapabilities(mutationCtx)
 		return exec(mutationCtx, path, rawArgs)
 	}
+	database := mutationCtx.DB
 	if mutationCtx.Context == nil {
 		mutationCtx.Context = context.Background()
 	}
 	claim, hasClaim := mutationIdempotencyFromContext(mutationCtx.Context)
 	if hasClaim {
-		if err := s.ensureMutationIdempotencyStorage(mutationCtx.Context, mutationCtx.DB, mutationCtx.DatabaseURL); err != nil {
+		if err := s.ensureMutationIdempotencyStorage(mutationCtx.Context, database, mutationCtx.DatabaseURL); err != nil {
 			return nil, err
 		}
 	}
-	tx, err := mutationCtx.DB.BeginTx(mutationCtx.Context, nil)
+	tx, err := database.BeginTx(mutationCtx.Context, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2408,7 +2254,7 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 			// stored result instead of executing the handler a second time.
 			_ = tx.Rollback()
 			mutationCtx.Tx = nil
-			return replayMutationIdempotencyResult(mutationCtx.Context, mutationCtx.DB, claim, path)
+			return replayMutationIdempotencyResult(mutationCtx.Context, database, claim, path)
 		}
 	}
 	if mutationID := mutationIDFromContext(mutationCtx.Context); mutationID != "" {
@@ -2420,6 +2266,10 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 	originalScheduler := mutationCtx.Scheduler
 	deferred := newDeferredScheduler(originalScheduler)
 	mutationCtx.Scheduler = deferred
+	mutationCtx.Outbox = postgresActionOutbox{tx: tx, user: mutationCtx.User}
+	// Reducer code receives only the transaction handle. Raw pools would allow
+	// an accidental write to commit outside the atomic business intent.
+	restrictReducerCapabilities(mutationCtx)
 	defer func() {
 		mutationCtx.Scheduler = originalScheduler
 	}()
@@ -2439,12 +2289,22 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 	}
 	mutationCtx.Tx = nil
 	if hasClaim {
-		s.maybeSweepMutationIdempotency(mutationCtx.DB, mutationCtx.DatabaseURL)
+		s.maybeSweepMutationIdempotency(database, mutationCtx.DatabaseURL)
 	}
 	if err := deferred.flush(); err != nil {
 		mutationCtx.Logger.Error("failed to publish committed scheduled work", "path", path, "error", err)
 	}
+	go s.drainActionOutbox(mutationCtx.ProjectID, mutationCtx.TenantID)
 	return result, nil
+}
+
+func restrictReducerCapabilities(ctx *gonvex.ReducerCtx) {
+	ctx.DB = nil
+	ctx.TenantDB = nil
+	ctx.LandlordDB = nil
+	ctx.Storage = gonvex.UnavailableStorage()
+	ctx.Sandbox = gonvex.UnavailableSandbox()
+	ctx.Data = gonvex.UnavailableData()
 }
 
 func (s *Server) executeLegacyMutation(ctx context.Context, projectID string, tenantID string, path string, rawArgs json.RawMessage) (any, error) {
@@ -2467,7 +2327,6 @@ func (s *Server) executeLegacyMutation(ctx context.Context, projectID string, te
 		if err != nil {
 			return nil, err
 		}
-		go s.broadcastTenantTableChange(projectID, tenantID, "tasks")
 		return result, nil
 	default:
 		return nil, fmt.Errorf("mutation %q is not implemented by the runtime", path)
@@ -2520,29 +2379,30 @@ func (s *Server) queryContext(ctx context.Context, projectID string, tenantID st
 	return &gonvex.QueryCtx{RuntimeContext: runtimeCtx}, nil
 }
 
-func (s *Server) mutationContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (*gonvex.MutationCtx, error) {
+func (s *Server) mutationContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (*gonvex.ReducerCtx, error) {
 	runtimeCtx, err := s.runtimeContext(ctx, projectID, tenantID, caller)
 	if err != nil {
 		return nil, err
 	}
-	runtimeCtx = mutationRuntimeContext(runtimeCtx)
-	return &gonvex.MutationCtx{RuntimeContext: runtimeCtx}, nil
-}
-
-// mutationRuntimeContext prevents handlers from broadcasting table changes
-// while their transaction is still open. Client and scheduled mutation paths
-// publish one dependency-mapped invalidation batch after a successful commit;
-// allowing handler notifications here causes stale pre-commit reruns and one
-// duplicate rerun per notified table.
-func mutationRuntimeContext(runtimeCtx gonvex.RuntimeContext) gonvex.RuntimeContext {
-	runtimeCtx.NotifyTableChange = nil
-	return runtimeCtx
+	return &gonvex.ReducerCtx{RuntimeContext: runtimeCtx}, nil
 }
 
 func (s *Server) actionContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (*gonvex.ActionCtx, error) {
 	runtimeCtx, err := s.runtimeContext(ctx, projectID, tenantID, caller)
 	if err != nil {
 		return nil, err
+	}
+	// Actions own external/non-transactional work. They cannot reach an
+	// application database handle or the raw Data API; durable state changes
+	// must re-enter through ctx.Reducers.Call.
+	runtimeCtx.DB = nil
+	runtimeCtx.TenantDB = nil
+	runtimeCtx.LandlordDB = nil
+	runtimeCtx.Tx = nil
+	runtimeCtx.Data = gonvex.UnavailableData()
+	runtimeCtx.Reducers = &actionReducerCaller{
+		server: s, project: projectID, tenant: tenantID, caller: caller,
+		parent: mutationIDFromContext(ctx),
 	}
 	return &gonvex.ActionCtx{RuntimeContext: runtimeCtx}, nil
 }
@@ -2575,6 +2435,7 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		Context:          ctx,
 		ProjectID:        projectID,
 		TenantID:         activeTenant,
+		OperationID:      mutationIDFromContext(ctx),
 		DatabaseURL:      store.DatabaseURL,
 		DB:               store.DB,
 		LandlordDB:       landlordStore.DB,
@@ -2588,10 +2449,7 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		User:             caller.user,
 		Permissions:      caller.permissions,
 		Logger:           logger,
-		NotifyTableChange: func(table string) {
-			s.broadcastTenantTableChange(projectID, activeTenant, table)
-		},
-		Env: s.projectEnvValues(ctx, projectID),
+		Env:              s.projectEnvValues(ctx, projectID),
 	}, nil
 }
 
@@ -2650,7 +2508,6 @@ func (s *Server) sandboxForCaller(projectID string, tenantID string, caller call
 					}
 					result, err := s.executeTenantActionForCaller(ctx, projectID, hostTenant, hostCaller, "assistant.sandboxAction", wrapped)
 					if err == nil {
-						s.broadcastMutationInvalidations(projectID, hostTenant, path)
 						return result, nil
 					}
 					if !sandboxHostUnknownCuratedAction(err) {
@@ -2660,21 +2517,13 @@ func (s *Server) sandboxForCaller(projectID string, tenantID string, caller call
 					// registered runtime Action with tenant-injected args.
 				}
 			}
-			result, err := s.executeTenantActionForCaller(ctx, projectID, hostTenant, hostCaller, path, args)
-			if err == nil {
-				s.broadcastMutationInvalidations(projectID, hostTenant, req.Path)
-			}
-			return result, err
+			return s.executeTenantActionForCaller(ctx, projectID, hostTenant, hostCaller, path, args)
 		case "mutation":
 			path, resolvedArgs, err := s.resolveSandboxFunction(ctx, projectID, hostTenant, hostCaller, "mutation", strings.TrimSpace(req.Path), args)
 			if err != nil {
 				return nil, err
 			}
-			result, err := s.executeTenantMutationForCaller(ctx, projectID, hostTenant, hostCaller, path, resolvedArgs)
-			if err == nil {
-				s.broadcastMutationInvalidations(projectID, hostTenant, path)
-			}
-			return result, err
+			return s.executeTenantMutationForCaller(ctx, projectID, hostTenant, hostCaller, path, resolvedArgs)
 		case "data.inspect":
 			var inspectReq gonvex.DataInspectRequest
 			if err := json.Unmarshal(args, &inspectReq); err != nil {
@@ -2759,197 +2608,4 @@ func isLegacyTaskQuery(path string) bool {
 
 func isLegacyTaskMutation(path string) bool {
 	return path == "tasks.randomizeStatusPriority"
-}
-
-func subscriptionTable(path string) string {
-	prefix, _, ok := strings.Cut(path, ".")
-	if !ok || prefix == "" {
-		return ""
-	}
-	return prefix
-}
-
-func subscriptionDependsOnTable(path string, table string) bool {
-	table = strings.TrimSpace(table)
-	if table == "" {
-		return true
-	}
-	for _, dep := range subscriptionTables(path) {
-		if dep == table {
-			return true
-		}
-	}
-	return false
-}
-
-func subscriptionTables(path string) []string {
-	switch path {
-	case "calls.listForUser":
-		return []string{"callSignals"}
-	case "chat.listConversations":
-		return []string{"conversations"}
-	case "chat.listAllParticipants":
-		return []string{"conversationParticipants"}
-	case "chat.listAllMessages":
-		return []string{"directMessages"}
-	case "chat.listAllReactions":
-		return []string{"messageReactions"}
-	case "chat.listAllLinkPreviews":
-		return []string{"linkPreviews"}
-	case "chat.listWorkspaceChat":
-		return []string{"workspaceChat"}
-	case "chat.workspaceChatUnreadSummary":
-		return []string{"notifications"}
-	case "bulk.allReferenceData":
-		return []string{
-			"approvalApprovers",
-			"approvals",
-			"audienceTeams",
-			"audienceUserTeams",
-			"categories",
-			"categoryCustomFields",
-			"categoryPriorities",
-			"cleaningStatuses",
-			"customFields",
-			"employeeProfiles",
-			"fieldUpdatePermissions",
-			"formFields",
-			"formVersions",
-			"forms",
-			"invitations",
-			"jobPositions",
-			"notificationSoundRules",
-			"priorities",
-			"properties",
-			"roles",
-			"slaPolicies",
-			"slas",
-			"spotTypes",
-			"spots",
-			"statuses",
-			"statusTransitionGroups",
-			"statusTransitions",
-			"tags",
-			"taskApprovalInstances",
-			"taskForms",
-			"teamSettingsWorkspaces",
-			"teams",
-			"templates",
-			"userTeams",
-			"users",
-			"workspaceGroups",
-			"workspaces",
-		}
-	case "bulk.tasksByWorkspace", "bulk.taskSummaryCounts", "bulk.workspaceTaskCounts", "bulk.cachedWorkspaceTaskCounts":
-		return []string{"tasks", "taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances"}
-	case "bulk.taskPivotData":
-		return []string{"taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances", "tasks"}
-	case "roles.effectivePermissions":
-		return []string{"roles", "rolePermissions", "userTeams", "users"}
-	case "users.myPermissions":
-		return []string{"roles", "rolePermissions", "permissions", "userTeams", "users"}
-	case "users.myTenants":
-		return []string{"tenants", "userTenantMap", "users"}
-	case "settings.getByKey", "settings.getPublicAuthSettings":
-		return []string{"globalSettings"}
-	case "settings.listNotifications":
-		return []string{"notifications"}
-	case "settings.listPlugins", "settings.getPlugin":
-		return []string{"plugins"}
-	case "taskResources.listTaskNotes", "taskResources.listTaskNotesPaged", "taskResources.noteSummariesByTenant", "taskResources.noteCountsByTenant", "taskResources.attachmentCountsByTenant", "taskResources.listTaskIdsWithAttachments", "taskResources.listWorkspaceAttachments":
-		return []string{"taskNotes", "tasks", "users"}
-	case "taskResources.listTaskViewsByTaskId", "taskResources.listTaskViewsByTaskPgId":
-		return []string{"taskViews", "tasks", "users"}
-	case "taskResources.listTaskHistory", "taskResources.listTaskLogs":
-		return []string{"taskLogs", "tasks", "users"}
-	case "taskResources.listTaskSignatures", "taskResources.listTaskIdsWithSignatures":
-		return []string{"taskSignatures", "tasks", "users"}
-	case "taskResources.listSharedToMe", "taskResources.listTaskShares", "taskResources.sharedWithMeCount":
-		return []string{"taskShares", "taskAcks", "tasks", "users"}
-	case "taskResources.getTaskAcknowledgmentProgressForTask":
-		return []string{"taskAcks", "taskAckReads", "taskShares", "tasks"}
-	}
-	if strings.HasPrefix(path, "tasks.") {
-		return []string{"tasks", "taskUsers", "taskTags", "taskCustomFieldValues", "taskApprovalInstances"}
-	}
-	if strings.HasPrefix(path, "taskFindings.") {
-		return []string{"taskFindings", "findingNotes", "taskLogs", "taskWorkspaceContexts", "tasks"}
-	}
-	if strings.HasPrefix(path, "settings.") {
-		return []string{"settings", "plugins", "envVars"}
-	}
-	if table := subscriptionTable(path); table != "" {
-		return []string{table}
-	}
-	return nil
-}
-
-func mutationInvalidationTable(path string) string {
-	tables := mutationInvalidationTables(path)
-	if len(tables) > 0 {
-		return tables[0]
-	}
-	return ""
-}
-
-func mutationInvalidationTables(path string) []string {
-	switch path {
-	case "calls.sendSignal", "calls.acknowledgeSignals", "calls.acknowledgeRoomSignals":
-		return []string{"callSignals"}
-	case "chat.createConversation":
-		return []string{"conversations", "conversationParticipants"}
-	case "chat.sendMessage":
-		return []string{"directMessages", "conversations", "notifications", "linkPreviews"}
-	case "chat.updateMessage", "chat.deleteMessage", "chat.markMessagesDelivered":
-		return []string{"directMessages"}
-	case "chat.markAsRead":
-		return []string{"conversationParticipants", "directMessages"}
-	case "chat.sendWorkspaceChat":
-		return []string{"workspaceChat", "notifications", "linkPreviews"}
-	case "chat.updateWorkspaceChatMessage", "chat.deleteWorkspaceChatMessage":
-		return []string{"workspaceChat"}
-	case "chat.addReaction", "chat.removeReaction":
-		return []string{"messageReactions"}
-	case "chat.markWorkspaceChatRead":
-		return []string{"notifications"}
-	case "chat.generateUploadUrl":
-		return []string{"files"}
-	case "taskResources.assignUser", "taskResources.unassignUser":
-		return []string{"taskUsers", "tasks", "taskLogs", "notifications"}
-	case "taskResources.createNote", "taskResources.updateNote", "taskResources.removeNote", "taskResources.markVoiceMemoListened", "taskResources.removeNoteAttachment":
-		return []string{"taskNotes", "tasks", "taskLogs"}
-	case "taskResources.createSignature":
-		return []string{"taskSignatures", "tasks", "taskLogs"}
-	case "taskResources.shareTask", "taskResources.revokeShare":
-		return []string{"taskShares", "taskAcks", "tasks", "notifications"}
-	case "taskResources.acknowledgeTaskShare":
-		return []string{"taskShares", "taskAcks", "taskAckReads", "tasks", "notifications"}
-	case "taskResources.recordTaskViewByTaskId", "taskResources.recordTaskViewByTaskPgId":
-		return []string{"taskViews", "tasks"}
-	case "taskResources.addTagByTaskId", "taskResources.addTagByPgId", "taskResources.addTagByTaskPgId", "taskResources.removeTagByTaskId", "taskResources.removeTagByPgId", "taskResources.removeTagByTaskPgId":
-		return []string{"taskTags", "tasks", "taskLogs"}
-	case "taskResources.generateUploadUrl":
-		return []string{"files"}
-	case "scheduling.processWorkspaceChatMessage":
-		return []string{"scheduleAvailabilitySubmissions", "scheduleAvailabilityItems", "scheduleRosterEntries"}
-	case "settings.set":
-		return []string{"globalSettings"}
-	case "settings.togglePlugin", "settings.upsertPlugin", "settings.ensureDefaultPlugins":
-		return []string{"plugins"}
-	case "settings.markRead", "settings.markAllRead", "settings.clearAllNotifications":
-		return []string{"notifications"}
-	}
-	if strings.HasPrefix(path, "techSupport.") {
-		return []string{"supportSessions"}
-	}
-	if strings.HasPrefix(path, "taskFindings.") {
-		return []string{"taskFindings", "findingNotes", "taskLogs", "taskWorkspaceContexts", "tasks"}
-	}
-	if strings.HasPrefix(path, "tasks.") {
-		return []string{"tasks", "taskUsers", "taskTags", "taskLogs", "taskCustomFieldValues", "taskApprovalInstances"}
-	}
-	if table := subscriptionTable(path); table != "" {
-		return []string{table}
-	}
-	return []string{""}
 }

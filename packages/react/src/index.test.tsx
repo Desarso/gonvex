@@ -3,7 +3,7 @@ import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionState, FunctionReference, GonvexClient } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { ConvexProviderWithAuth, GonvexProvider, useConvexAuth, useConvexConnectionState, useMutation, useQuery, useQueryResult, useSync } from "./index";
+import { ConvexProviderWithAuth, GonvexProvider, useConvexAuth, useConvexConnectionState, useReducer, useQuery, useQueryResult, useReplicaCollection } from "./index";
 
 const ref: FunctionReference = { kind: "query", path: "tasks.list" };
 
@@ -13,7 +13,24 @@ class FakeGonvexClient {
   readonly connectionHandlers = new Set<(state: ConnectionState) => void>();
   readonly authErrorHandlers = new Set<(error: string) => void>();
   readonly retryQuery = vi.fn();
-  readonly mutation = vi.fn(() => Promise.resolve(null));
+  readonly query = vi.fn((ref: FunctionReference, args: unknown) => {
+    this.subscribedRefs.push(ref);
+    this.subscribedArgs.push(args);
+    return new Promise<unknown>((resolve, reject) => {
+      const handler = (message: ServerMessage) => {
+        if (message.type === "query.result") {
+          this.queryListeners.delete(handler);
+          resolve(message.result);
+        }
+        if (message.type === "query.error") {
+          this.queryListeners.delete(handler);
+          reject(new Error(message.error));
+        }
+      };
+      this.queryListeners.add(handler);
+    });
+  });
+  readonly reducer = vi.fn(() => Promise.resolve(null));
   readonly action = vi.fn(() => Promise.resolve(null));
   readonly setAuth = vi.fn();
   subscribedArgs: unknown[] = [];
@@ -26,7 +43,7 @@ class FakeGonvexClient {
     connectionCount: 1,
     connectionRetries: 0,
     hasInflightRequests: false,
-    inflightMutations: 0,
+    inflightReducers: 0,
     inflightActions: 0,
     inflightOneShotQueries: 0,
   };
@@ -219,17 +236,17 @@ describe("useQuery", () => {
     expect(client.subscribedRefs.at(-1)).toBe(projectedRef);
   });
 
-  it("returns undefined while loading and the result once it arrives", () => {
+  it("returns undefined while loading and the result once it arrives", async () => {
     const client = new FakeGonvexClient();
     const { result } = renderHook(() => useQuery<string[]>(ref, {}), { wrapper: wrapperFor(client) });
 
     expect(result.current).toBeUndefined();
 
-    act(() => client.emitQuery({ type: "query.result", id: "q1", result: ["task"] }));
+    await act(async () => client.emitQuery({ type: "query.result", id: "q1", result: ["task"] }));
     expect(result.current).toEqual(["task"]);
   });
 
-  it("throws server query errors so error boundaries can catch them", () => {
+  it("throws server query errors so error boundaries can catch them", async () => {
     const client = new FakeGonvexClient();
     const caught: Error[] = [];
 
@@ -265,7 +282,7 @@ describe("useQuery", () => {
         </Wrapper>,
       );
 
-      act(() => client.emitQuery({ type: "query.error", id: "q1", error: "permission denied" }));
+      await act(async () => client.emitQuery({ type: "query.error", id: "q1", error: "permission denied" }));
 
       expect(view.getByTestId("failed")).toBeTruthy();
       expect(caught[0]?.message).toBe("permission denied");
@@ -275,16 +292,16 @@ describe("useQuery", () => {
   });
 });
 
-describe("useSync", () => {
+describe("useReplicaCollection", () => {
   it("preserves generated optimistic projection metadata", () => {
     const client = new FakeGonvexClient();
     const projectedRef: FunctionReference = {
-      kind: "sync",
+      kind: "query", delivery: "replica",
       path: "sync.recentWorkspaceTasks",
       optimistic: { projection: { entity: "tasks", key: "_id", resultPath: [] } },
     };
 
-    renderHook(() => useSync(projectedRef, {}), { wrapper: wrapperFor(client) });
+    renderHook(() => useReplicaCollection(projectedRef, {}), { wrapper: wrapperFor(client) });
 
     expect(client.watchedSyncRefs.at(-1)).toBe(projectedRef);
   });
@@ -305,11 +322,11 @@ describe("useConvexConnectionState", () => {
   });
 });
 
-describe("useMutation", () => {
+describe("useReducer", () => {
   it("forwards per-call timeout options to the client", async () => {
     const client = new FakeGonvexClient();
     const { result } = renderHook(
-      () => useMutation({ kind: "mutation", path: "tasks.create" }, { timeoutMs: 5_000 }),
+      () => useReducer({ kind: "reducer", path: "tasks.create" }, { timeoutMs: 5_000 }),
       { wrapper: wrapperFor(client) },
     );
 
@@ -317,7 +334,7 @@ describe("useMutation", () => {
       await result.current({ title: "Ship" });
     });
 
-    expect(client.mutation).toHaveBeenCalledWith({ kind: "mutation", path: "tasks.create" }, { title: "Ship" }, { timeoutMs: 5_000 });
+    expect(client.reducer).toHaveBeenCalledWith({ kind: "reducer", path: "tasks.create" }, { title: "Ship" }, { timeoutMs: 5_000 });
   });
 });
 

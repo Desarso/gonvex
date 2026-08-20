@@ -23,7 +23,7 @@ func TestSyncTriggerProjectsOnlyDeclaredColumnsAndFinalizesAtCommit(t *testing.T
 		"secret":      {Type: "text"},
 		"updatedAt":   {Type: "number"},
 	}}
-	definition := manifest.SyncDefinition{
+	definition := manifest.ReplicaCollectionDefinition{
 		Table:        "tasks",
 		Key:          "id",
 		Columns:      []string{"id", "workspaceId", "title"},
@@ -60,7 +60,7 @@ func TestSyncTriggerProjectsOnlyDeclaredColumnsAndFinalizesAtCommit(t *testing.T
 func TestSyncColumnsRejectMissingFilterColumn(t *testing.T) {
 	_, err := syncColumns("tasks", manifest.Table{Columns: map[string]manifest.Column{
 		"id": {Type: "id", PrimaryKey: true},
-	}}, manifest.SyncDefinition{
+	}}, manifest.ReplicaCollectionDefinition{
 		Table:        "tasks",
 		Key:          "id",
 		Columns:      []string{"id"},
@@ -78,7 +78,7 @@ func TestSyncInfrastructureAssignsOneRevisionPerTransaction(t *testing.T) {
 		`row_number() OVER (ORDER BY event_id)`,
 		`current_setting('gonvex.mutation_id', true)`,
 		`pg_notify(`,
-		`'gonvex_sync_change'`,
+		`'gonvex_change_feed'`,
 		`array_agg(DISTINCT table_name ORDER BY table_name)`,
 		`'tables', changed_tables`,
 		`octet_length(notify_payload::text) > 7000`,
@@ -108,7 +108,7 @@ func TestSyncTriggerNotificationIncludesAllTransactionTables(t *testing.T) {
 		tableX: {Columns: map[string]manifest.Column{"id": {Type: "id", PrimaryKey: true}}},
 		tableY: {Columns: map[string]manifest.Column{"id": {Type: "id", PrimaryKey: true}}},
 	}
-	definitions := map[string]manifest.SyncDefinition{
+	definitions := map[string]manifest.ReplicaCollectionDefinition{
 		tableX: {Table: tableX, Key: "id", Columns: []string{"id"}},
 		tableY: {Table: tableY, Key: "id", Columns: []string{"id"}},
 	}
