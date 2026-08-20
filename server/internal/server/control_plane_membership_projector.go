@@ -1,0 +1,177 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strconv"
+	"strings"
+	"time"
+
+	controlidentity "github.com/gonvex/gonvex/server/internal/controlplane/identity"
+)
+
+type pendingMemberProjection struct {
+	controlidentity.AccountTenantIndex
+}
+
+// projectCommittedMemberChanges derives the Control Plane tenant directory
+// exclusively from committed tenant.members rows. It is deliberately outside
+// reducer execution: tenant Postgres is authoritative and projection failure
+// can never roll back a committed business transaction.
+func (s *Server) projectCommittedMemberChanges(projectID, tenantID string, batch syncChangeBatch) {
+	for _, change := range batch.changes {
+		if change.table != "members" {
+			continue
+		}
+		projection, ok := memberProjectionFromChange(tenantID, change, batch.revision)
+		if !ok {
+			continue
+		}
+		if projection.Status != "active" {
+			// Existing sockets carry both Account and Member identity, so tenant
+			// revocation takes effect without waiting for directory projection.
+			s.revokeAppAuthConnections(projectID, projection.AccountID)
+			s.revokeAppAuthConnections(projectID, projection.MemberID)
+		}
+		go s.retryMemberProjection(projectID, projection)
+	}
+}
+
+func memberProjectionFromChange(tenantID string, change syncLogChange, revision uint64) (controlidentity.AccountTenantIndex, bool) {
+	raw := change.newValue
+	status := "active"
+	if change.operation == "delete" || len(raw) == 0 || string(raw) == "null" {
+		raw = change.oldValue
+		status = "revoked"
+	}
+	row := map[string]any{}
+	if len(raw) == 0 || json.Unmarshal(raw, &row) != nil {
+		return controlidentity.AccountTenantIndex{}, false
+	}
+	memberID := firstString(row, "id", "user_id", "userId")
+	accountID := firstString(row, "account_id", "accountId")
+	if accountID == "" {
+		// Compatibility rows used the same ID for global and tenant identity.
+		accountID = firstString(row, "user_id", "userId")
+	}
+	if value := firstString(row, "status"); value != "" {
+		status = strings.ToLower(value)
+	}
+	memberRevision := firstInt64(row, "membership_revision", "membershipRevision")
+	if memberRevision <= 0 {
+		memberRevision = int64(revision)
+	}
+	if strings.TrimSpace(tenantID) == "" || memberID == "" || accountID == "" {
+		return controlidentity.AccountTenantIndex{}, false
+	}
+	return controlidentity.AccountTenantIndex{
+		AccountID: accountID, TenantID: tenantID, MemberID: memberID,
+		Status: status, TenantMembershipRevision: memberRevision,
+	}, true
+}
+
+func firstString(row map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := row[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func firstInt64(row map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		switch value := row[key].(type) {
+		case float64:
+			return int64(value)
+		case json.Number:
+			parsed, _ := value.Int64()
+			return parsed
+		case string:
+			parsed, _ := strconv.ParseInt(value, 10, 64)
+			return parsed
+		}
+	}
+	return 0
+}
+
+func (s *Server) retryMemberProjection(projectID string, projection controlidentity.AccountTenantIndex) {
+	backoff := 100 * time.Millisecond
+	for attempt := 1; attempt <= 8; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		db, err := s.pooledProjectRegistry(ctx)
+		if err == nil && db != nil {
+			err = (controlidentity.MembershipProjector{DB: db}).Upsert(ctx, projection)
+		}
+		cancel()
+		if err == nil {
+			return
+		}
+		if attempt == 8 {
+			slog.Error("control-plane member projection exhausted retries",
+				"project", projectID, "tenant", projection.TenantID,
+				"account", projection.AccountID, "member", projection.MemberID,
+				"revision", projection.TenantMembershipRevision, "error", fmt.Sprint(err))
+			return
+		}
+		time.Sleep(backoff)
+		if backoff < 5*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+// drainControlPlaneMembershipOutbox retries the tenant-local transactional
+// outbox. The trigger that writes this table runs in the same Postgres commit
+// as members, so a process crash or unavailable Control Plane cannot lose the
+// directory update.
+func (s *Server) drainControlPlaneMembershipOutbox(projectID, tenantID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	databaseURL := s.databaseURLForTenant(projectID, tenantID)
+	if strings.TrimSpace(databaseURL) == "" {
+		return
+	}
+	store, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, tenantID), databaseURL)
+	if err != nil || store.DB == nil {
+		return
+	}
+	if err := ensureTenantLocalTables(ctx, store.DB); err != nil {
+		return
+	}
+	rows, err := store.DB.QueryContext(ctx, `SELECT account_id, member_id, status, membership_revision
+		FROM _gonvex_control_plane_membership_outbox
+		ORDER BY membership_revision, account_id LIMIT 1000`)
+	if err != nil {
+		return
+	}
+	pending := []pendingMemberProjection{}
+	for rows.Next() {
+		item := pendingMemberProjection{}
+		item.TenantID = tenantID
+		if err := rows.Scan(&item.AccountID, &item.MemberID, &item.Status, &item.TenantMembershipRevision); err != nil {
+			rows.Close()
+			return
+		}
+		pending = append(pending, item)
+	}
+	if err := rows.Close(); err != nil {
+		return
+	}
+	controlDB, err := s.pooledProjectRegistry(ctx)
+	if err != nil || controlDB == nil {
+		return
+	}
+	projector := controlidentity.MembershipProjector{DB: controlDB}
+	for _, item := range pending {
+		if err := projector.Upsert(ctx, item.AccountTenantIndex); err != nil {
+			return
+		}
+		if _, err := store.DB.ExecContext(ctx, `DELETE FROM _gonvex_control_plane_membership_outbox
+			WHERE account_id = $1 AND membership_revision <= $2`, item.AccountID, item.TenantMembershipRevision); err != nil {
+			return
+		}
+	}
+}

@@ -124,6 +124,9 @@ type ManifestTable = {
 };
 
 type ManifestSchema = {
+  /** Preferred Control Plane schema key. */
+  controlPlaneTables?: Record<string, ManifestTable>;
+  /** Legacy manifest key retained for older runtimes. */
   landlordTables?: Record<string, ManifestTable>;
   tenantTables?: Record<string, ManifestTable>;
   tables?: Record<string, ManifestTable>;
@@ -927,7 +930,8 @@ const dashboardDatabaseModesKey = "gonvex-dashboard-database-modes";
 const dashboardDetectedTenantsKey = "gonvex-dashboard-detected-tenants";
 const dashboardHideTestTenantsKey = "gonvex-dashboard-hide-test-tenants";
 const logsColumnWidthsKey = "gonvex-logs-column-widths";
-const landlordDataSourceID = "__gonvex_landlord__";
+// Internal source ID remains stable for older runtime responses and bookmarks.
+const controlPlaneDataSourceID = "__gonvex_landlord__";
 const dataDatabaseQueryParam = "db";
 const dataTableQueryParam = "table";
 const dataSearchQueryParam = "q";
@@ -2794,9 +2798,10 @@ function pathForProjectPage(projectID: string, id: PageID): string {
 }
 
 function dataSourceFromURL(): string {
-  if (typeof window === "undefined") return landlordDataSourceID;
+  if (typeof window === "undefined") return controlPlaneDataSourceID;
   const raw = new URLSearchParams(window.location.search).get(dataDatabaseQueryParam)?.trim() ?? "";
-  return raw && raw !== "landlord" ? raw : landlordDataSourceID;
+  // `landlord` is the legacy URL value; keep accepting it during the cutover.
+  return raw && raw !== "landlord" ? raw : controlPlaneDataSourceID;
 }
 
 function dataStateFromURL(): {
@@ -2809,7 +2814,7 @@ function dataStateFromURL(): {
   view: DataViewMode;
 } {
   if (typeof window === "undefined") {
-    return { filters: [], rowSearch: "", sort: null, sourceID: landlordDataSourceID, table: "", tableSearch: "", view: "rows" };
+    return { filters: [], rowSearch: "", sort: null, sourceID: controlPlaneDataSourceID, table: "", tableSearch: "", view: "rows" };
   }
   const params = new URLSearchParams(window.location.search);
   const sortKey = params.get(dataSortQueryParam)?.trim() ?? "";
@@ -2897,7 +2902,8 @@ function setDataStateInURL(update: {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
   if (update.sourceID !== undefined) {
-    url.searchParams.set(dataDatabaseQueryParam, update.sourceID && update.sourceID !== landlordDataSourceID ? update.sourceID : "landlord");
+    // Preserve the legacy `db=landlord` URL contract for existing bookmarks.
+    url.searchParams.set(dataDatabaseQueryParam, update.sourceID && update.sourceID !== controlPlaneDataSourceID ? update.sourceID : "landlord");
   }
   if (update.table !== undefined) {
     if (update.table) url.searchParams.set(dataTableQueryParam, update.table);
@@ -3510,7 +3516,7 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
       window.localStorage.setItem(dashboardDatabaseModesKey, JSON.stringify(next));
       return next;
     });
-    reportAction(mode === "multiTenant" ? "Using landlord and tenant databases" : "Using a single project database");
+    reportAction(mode === "multiTenant" ? "Using Control Plane and tenant databases" : "Using a single project database");
     void updateRuntimeProject(previousProject, { databaseMode: mode })
       .then((savedProject) => {
         setProjects((current) => current.map((project) => (
@@ -4307,7 +4313,7 @@ function ProjectsPage(props: {
                 <div className="project-key-block">
                   <span>{createdProject.project.id}</span>
                   <output data-muted="true">
-                    {createdProject.databaseMode === "multiTenant" ? "Landlord + tenant databases" : "Single project database"}
+                    {createdProject.databaseMode === "multiTenant" ? "Control Plane + tenant databases" : "Single project database"}
                   </output>
                   <textarea
                     readOnly
@@ -4336,7 +4342,7 @@ function ProjectsPage(props: {
                   onChange={(value) => setDatabaseMode(value as DatabaseMode)}
                   options={[
                     { value: "single", label: "Single project database", description: "One database for project data" },
-                    { value: "multiTenant", label: "Landlord + tenant databases", description: "Project DB plus tenant DBs" },
+                    { value: "multiTenant", label: "Control Plane + tenant databases", description: "Project DB plus tenant DBs" },
                   ]}
                 />
                 {createError ? <p className="project-modal-error">{createError}</p> : null}
@@ -5415,7 +5421,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   rowCacheRef.current = rowCache;
   requestedOffsetRef.current = requestedOffset;
   const multiTenantMode = props.databaseMode === "multiTenant" || detectedMultiTenant;
-  const currentTenantID = multiTenantMode && selectedTenant !== landlordDataSourceID ? selectedTenant : "";
+  const currentTenantID = multiTenantMode && selectedTenant !== controlPlaneDataSourceID ? selectedTenant : "";
   const activeTenant = tenants.find((tenant) => tenant.id === currentTenantID) ?? null;
   const visibleTenants = useMemo(
     () => props.hideTestTenants ? tenants.filter((tenant) => !tenantLooksInternalOrTest(tenant)) : tenants,
@@ -5429,7 +5435,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
 
   useEffect(() => {
     const state = dataStateFromURL();
-    setSelectedTenant(props.databaseMode === "multiTenant" ? state.sourceID : landlordDataSourceID);
+    setSelectedTenant(props.databaseMode === "multiTenant" ? state.sourceID : controlPlaneDataSourceID);
     setSelectedTable(state.table);
     setTableSearch(state.tableSearch);
     setRowSearchInput(state.rowSearch);
@@ -5444,8 +5450,8 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
 
   useEffect(() => {
     if (multiTenantMode) return;
-    setSelectedTenant(landlordDataSourceID);
-    setDataSourceInURL(landlordDataSourceID, true);
+    setSelectedTenant(controlPlaneDataSourceID);
+    setDataSourceInURL(controlPlaneDataSourceID, true);
     setTenants([]);
     setSelectedTable("");
     setRowCache({});
@@ -5456,7 +5462,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   useEffect(() => {
     const onPopState = () => {
       const state = dataStateFromURL();
-      setSelectedTenant(multiTenantMode ? state.sourceID : landlordDataSourceID);
+      setSelectedTenant(multiTenantMode ? state.sourceID : controlPlaneDataSourceID);
       setSelectedTable(state.table);
       setTableSearch(state.tableSearch);
       setRowSearchInput(state.rowSearch);
@@ -5515,9 +5521,9 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
         if (hasTenants) setDetectedMultiTenant(true);
         props.onTenantsDetected?.(hasTenants);
         setSelectedTenant((current) => {
-          const nextSource = current === landlordDataSourceID || selectableTenants.some((tenant) => tenant.id === current)
+          const nextSource = current === controlPlaneDataSourceID || selectableTenants.some((tenant) => tenant.id === current)
             ? current
-            : landlordDataSourceID;
+            : controlPlaneDataSourceID;
           if (nextSource !== current) setDataSourceInURL(nextSource, true);
           return nextSource;
         });
@@ -5535,8 +5541,8 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
     if (!props.hideTestTenants || !currentTenantID) return;
     const selected = tenants.find((tenant) => tenant.id === currentTenantID);
     if (!selected || !tenantLooksInternalOrTest(selected)) return;
-    setSelectedTenant(landlordDataSourceID);
-    setDataSourceInURL(landlordDataSourceID, true);
+    setSelectedTenant(controlPlaneDataSourceID);
+    setDataSourceInURL(controlPlaneDataSourceID, true);
     setSelectedTable("");
     setRowCache({});
     setRequestedOffset(0);
@@ -5576,7 +5582,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
           props.onTenantsDetected?.(true);
         }
         setTables(nextTables);
-        setStatus(currentTenantID ? `Viewing tenant database: ${activeTenantDisplay}` : "Viewing landlord / project database");
+        setStatus(currentTenantID ? `Viewing tenant database: ${activeTenantDisplay}` : "Viewing Control Plane / project database");
         setRuntimeAvailable(true);
         setSelectedTable((current) => (nextTables.some((table) => table.name === current) ? current : nextTables[0]?.name ?? ""));
       })
@@ -5652,7 +5658,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
         setMatchingRows(payload.total ?? (rowSearch.trim() || filtersKey !== "[]" ? payload.rows.length : activeTable.rowCount));
         setStatus(payload.total === undefined
           ? "Connected to Gonvex Runtime (restart needed for server sort)"
-          : currentTenantID ? `Viewing tenant database: ${activeTenantDisplay}` : "Viewing landlord / project database");
+          : currentTenantID ? `Viewing tenant database: ${activeTenantDisplay}` : "Viewing Control Plane / project database");
         setRuntimeAvailable(true);
       })
       .catch(() => {
@@ -5699,6 +5705,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
   const editingRow = editingRowIndex === null ? undefined : rowCache[editingRowIndex];
   const editingRowID = dataRowIdentity(editingRow);
   const erdGraph = useMemo(() => createERDGraph(tables), [tables]);
+  // Preserve the legacy storage suffix so existing ERD layouts remain available.
   const erdLayoutKey = `${erdLayoutStoragePrefix}:${props.project.id}:${currentTenantID || "landlord"}`;
   const selectedERDTableInfo = tables.find((table) => table.name === selectedERDTable) ?? null;
   const selectedERDRelations = erdGraph.edges.filter((edge) => edge.source === selectedERDTable || edge.target === selectedERDTable);
@@ -5963,8 +5970,8 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
         throw new Error(payload.error ?? response.statusText);
       }
       setTenants((current) => current.filter((tenant) => tenant.id !== currentTenantID));
-      setSelectedTenant(landlordDataSourceID);
-      setDataSourceInURL(landlordDataSourceID);
+      setSelectedTenant(controlPlaneDataSourceID);
+      setDataSourceInURL(controlPlaneDataSourceID);
       setSelectedTable("");
       setRowCache({});
       setRequestedOffset(0);
@@ -6049,10 +6056,10 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
                   setRequestedOffset(0);
                   setVisibleOffset(0);
                   const tenant = tenants.find((item) => item.id === value) ?? null;
-                  props.onAction(value === landlordDataSourceID ? "Viewing landlord / project database" : `Viewing tenant database ${tenantDisplayLabel(tenant, value)}`);
+                  props.onAction(value === controlPlaneDataSourceID ? "Viewing Control Plane / project database" : `Viewing tenant database ${tenantDisplayLabel(tenant, value)}`);
                 }}
                 options={[
-                  { value: landlordDataSourceID, label: "Landlord" },
+                  { value: controlPlaneDataSourceID, label: "Control Plane" },
                   ...visibleTenants.map((tenant) => tenantDropdownOption(tenant)),
                 ]}
               />
@@ -6380,7 +6387,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
             <div className="delete-tenant-body">
               <p>
                 This permanently drops the tenant database <strong>{activeTenantDatabase}</strong> and removes its
-                landlord references from <code>tenants</code>, <code>users</code>, and <code>userTenantMap</code>. This cannot be undone.
+                Control Plane references from <code>tenants</code>, <code>users</code>, and <code>userTenantMap</code>. This cannot be undone.
               </p>
               <label className="delete-tenant-field">
                 <span>Type <strong>{activeTenantDatabase}</strong> to confirm</span>
@@ -7206,8 +7213,8 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   const [randomizing, setRandomizing] = useState(false);
   const [liveOffset, setLiveOffset] = useState(0);
   const [tenants, setTenants] = useState<TenantTarget[]>([]);
-  const [selectedTenant, setSelectedTenant] = useState<string>(landlordDataSourceID);
-  const currentTenantID = selectedTenant !== landlordDataSourceID ? selectedTenant : "";
+  const [selectedTenant, setSelectedTenant] = useState<string>(controlPlaneDataSourceID);
+  const currentTenantID = selectedTenant !== controlPlaneDataSourceID ? selectedTenant : "";
   const activeTenant = tenants.find((tenant) => tenant.id === currentTenantID) ?? null;
   const [client, setClient] = useState(() => projectIsProvisioned(props.project) ? gonvexClientForProject(props.project) : null);
   const viewportHeight = useViewportHeight();
@@ -7255,7 +7262,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
   }, [searchInput]);
 
   useEffect(() => {
-    setSelectedTenant(landlordDataSourceID);
+    setSelectedTenant(controlPlaneDataSourceID);
     let cancelled = false;
     const baseURL = runtimeURLForProject(props.project);
     if (!projectIsProvisioned(props.project) || !baseURL) {
@@ -7270,7 +7277,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
         const nextTenants = payload.tenants ?? [];
         setTenants(nextTenants);
         // Default to the first real tenant so the lab shows live data instead of
-        // the typically empty landlord database.
+        // the typically empty Control Plane database.
         const firstReal = nextTenants.find((tenant) => !tenantLooksInternalOrTest(tenant));
         if (firstReal) setSelectedTenant(firstReal.id);
       })
@@ -7391,10 +7398,10 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
             onChange={(value) => {
               setSelectedTenant(value);
               const tenant = tenants.find((item) => item.id === value) ?? null;
-              props.onAction(value === landlordDataSourceID ? "Viewing landlord tasks" : `Viewing ${tenantDisplayLabel(tenant, value)} tasks`);
+              props.onAction(value === controlPlaneDataSourceID ? "Viewing Control Plane tasks" : `Viewing ${tenantDisplayLabel(tenant, value)} tasks`);
             }}
             options={[
-              { value: landlordDataSourceID, label: "Landlord" },
+              { value: controlPlaneDataSourceID, label: "Control Plane" },
               ...tenants.map((tenant) => tenantDropdownOption(tenant)),
             ]}
           />
@@ -9302,7 +9309,7 @@ function SettingsPage(props: {
         ) : null}
 
         {activeSection === "database" ? (
-          <SettingsCard title="Database Structure" description="Choose whether this project stores app data in one project database or splits it across landlord and tenant databases.">
+          <SettingsCard title="Database Structure" description="Choose whether this project stores app data in one project database or splits it across the Control Plane and tenant databases.">
             <div className="settings-grid">
               <AppSelect
                 ariaLabel="Database structure"
@@ -9312,12 +9319,12 @@ function SettingsPage(props: {
                 onChange={(value) => props.onDatabaseModeChange(value as DatabaseMode)}
                 options={[
                   { value: "single", label: "Single project database" },
-                  { value: "multiTenant", label: "Landlord + tenant databases" },
+                  { value: "multiTenant", label: "Control Plane + tenant databases" },
                 ]}
               />
               <SettingField
                 label="Data browser"
-                value={props.databaseMode === "multiTenant" ? "Shows landlord/project DB plus tenant DB selector" : "Shows project DB only"}
+                value={props.databaseMode === "multiTenant" ? "Shows Control Plane/project DB plus tenant DB selector" : "Shows project DB only"}
               />
               <label className="setting-field setting-checkbox-field">
                 <span>Tenant selector</span>
@@ -9330,7 +9337,7 @@ function SettingsPage(props: {
                   <Checkbox.Content>Hide test and internal tenant DBs</Checkbox.Content>
                 </Checkbox.Root>
               </label>
-              <SettingField label="Landlord DB" value={props.project.database} />
+              <SettingField label="Control Plane DB" value={props.project.database} />
             </div>
             <p className="settings-note">
               Tenant databases are created and listed by the runtime. The Data tab sends the selected tenant id to the runtime when browsing rows.

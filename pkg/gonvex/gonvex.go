@@ -319,9 +319,43 @@ func cleanDependencyNames(values []string) []string {
 	return clean
 }
 
-type User struct {
-	ID    string
-	Email string
+// Account is the global human identity authenticated by the Gonvex Control
+// Plane. Tenant-specific roles, teams, permissions, and business profile data
+// never belong here; they belong to Member.
+type Account struct {
+	ID        string `json:"id"`
+	Email     string `json:"email,omitempty"`
+	Name      string `json:"name,omitempty"`
+	AvatarURL string `json:"avatarUrl,omitempty"`
+}
+
+// User is retained as a source-compatible alias during the identity-v2
+// cutover. New modules use ctx.Auth.Account and ctx.Member explicitly.
+type User = Account
+
+type AuthContext struct {
+	Account *Account `json:"account,omitempty"`
+}
+
+// TenantIdentity identifies the active tenant selected through the Control
+// Plane. It intentionally contains no database URL.
+type TenantIdentity struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"projectId"`
+	Name      string `json:"name,omitempty"`
+}
+
+// Member is the tenant-local identity and authorization subject. ID is the
+// stable tenant member ID referenced by tasks, approvals, teams, and logs;
+// AccountID links it to the one global Account.
+type Member struct {
+	ID          string         `json:"id"`
+	AccountID   string         `json:"accountId"`
+	Status      string         `json:"status"`
+	DisplayName string         `json:"displayName,omitempty"`
+	AvatarURL   string         `json:"avatarUrl,omitempty"`
+	Role        string         `json:"role,omitempty"`
+	Permissions map[string]any `json:"permissions,omitempty"`
 }
 
 type RuntimeContext struct {
@@ -330,10 +364,19 @@ type RuntimeContext struct {
 	ProjectID   string
 	TenantID    string
 	OperationID string
+	Auth        AuthContext
+	Tenant      *TenantIdentity
+	Member      *Member
+	// User and Permissions are compatibility views of Auth.Account and Member.
+	// New application modules must use the explicit identity objects above.
 	User        *User
 	Permissions map[string]any
 	DatabaseURL string
 	DB          *sql.DB
+	// ControlPlaneDB is the global identity, directory, and routing database.
+	// Application business state must remain in the selected tenant DB.
+	ControlPlaneDB *sql.DB
+	// LandlordDB is a compatibility alias removed after identity-v2 cutover.
 	LandlordDB  *sql.DB
 	TenantDB    *sql.DB
 	Tx          *sql.Tx
@@ -834,6 +877,24 @@ func (c *RuntimeContext) normalize() {
 	}
 	if c.TenantID == "" {
 		c.TenantID = c.ProjectID
+	}
+	if c.Auth.Account == nil && c.User != nil {
+		c.Auth.Account = c.User
+	}
+	if c.User == nil && c.Auth.Account != nil {
+		c.User = c.Auth.Account
+	}
+	if c.Tenant == nil {
+		c.Tenant = &TenantIdentity{ID: c.TenantID, ProjectID: c.ProjectID}
+	}
+	if c.Permissions == nil && c.Member != nil {
+		c.Permissions = c.Member.Permissions
+	}
+	if c.ControlPlaneDB == nil {
+		c.ControlPlaneDB = c.LandlordDB
+	}
+	if c.LandlordDB == nil {
+		c.LandlordDB = c.ControlPlaneDB
 	}
 	if c.Storage == nil {
 		c.Storage = storageUnavailable{}

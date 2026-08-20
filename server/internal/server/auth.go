@@ -21,7 +21,11 @@ func (s *Server) authenticateSocket(ctx context.Context, projectID string, curre
 		if err != nil {
 			return nil, nil, "", "", err
 		}
-		return &gonvex.User{ID: session.User.ID, Email: session.User.Email}, session.Permissions, session.ProjectID, tenantID, nil
+		member, err := s.loadTenantMember(ctx, session.ProjectID, tenantID, session.User.accountID())
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		return &gonvex.User{ID: session.User.accountID(), Email: session.User.Email, Name: session.User.Name, AvatarURL: session.User.Picture}, member.Permissions, session.ProjectID, tenantID, nil
 	}
 	if strings.TrimSpace(s.projectRegistryURL()) != "" {
 		nativeEnabled, err := s.nativeAppAuthEnabled(ctx, projectID)
@@ -107,6 +111,17 @@ func devUserFromJWT(token string) *gonvex.User {
 }
 
 func (s *Server) loadTenantPermissions(ctx context.Context, projectID string, tenantID string, userID string) (map[string]any, error) {
+	member, err := s.loadTenantMember(ctx, projectID, tenantID, userID)
+	if err != nil {
+		return nil, err
+	}
+	return member.Permissions, nil
+}
+
+// loadTenantMember is the final authorization check for entering a tenant.
+// Control-plane directory/index rows can locate a database, but only an active
+// member row in that tenant database grants access.
+func (s *Server) loadTenantMember(ctx context.Context, projectID string, tenantID string, accountID string) (*gonvex.Member, error) {
 	s.hydrateProjectTenantDatabases(ctx, projectID)
 	databaseURL := s.databaseURLForTenant(projectID, tenantID)
 	var err error
@@ -119,18 +134,22 @@ func (s *Server) loadTenantPermissions(ctx context.Context, projectID string, te
 		return nil, err
 	}
 	if store.DB == nil {
-		return map[string]any{}, nil
+		return nil, fmt.Errorf("tenant database is unavailable")
+	}
+	if err := ensureTenantLocalTables(ctx, store.DB); err != nil {
+		return nil, err
 	}
 
-	var role string
+	member := &gonvex.Member{}
 	var rawPermissions []byte
 	if err := store.DB.QueryRowContext(ctx, `
-		SELECT role, permissions
+		SELECT COALESCE(NULLIF(id, ''), user_id), COALESCE(NULLIF(account_id, ''), user_id),
+			status, display_name, avatar_url, role, permissions
 		FROM members
-		WHERE user_id = $1
-	`, userID).Scan(&role, &rawPermissions); err != nil {
+		WHERE (account_id = $1 OR user_id = $1) AND status = 'active'
+	`, accountID).Scan(&member.ID, &member.AccountID, &member.Status, &member.DisplayName, &member.AvatarURL, &member.Role, &rawPermissions); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("tenant member %q not found", userID)
+			return nil, fmt.Errorf("active tenant member for account %q not found", accountID)
 		}
 		return nil, err
 	}
@@ -145,6 +164,7 @@ func (s *Server) loadTenantPermissions(ctx context.Context, projectID string, te
 			permissions[key] = value
 		}
 	}
-	permissions["role"] = role
-	return permissions, nil
+	permissions["role"] = member.Role
+	member.Permissions = permissions
+	return member, nil
 }

@@ -1576,12 +1576,74 @@ func ensureTenantLocalTables(ctx context.Context, db *sql.DB) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS members (
 			user_id TEXT PRIMARY KEY,
+			id TEXT,
+			account_id TEXT,
+			status TEXT NOT NULL DEFAULT 'active',
+			display_name TEXT NOT NULL DEFAULT '',
+			avatar_url TEXT NOT NULL DEFAULT '',
 			role TEXT NOT NULL DEFAULT 'member',
 			permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
+			membership_revision BIGINT NOT NULL DEFAULT 1,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
+		`ALTER TABLE members ADD COLUMN IF NOT EXISTS id TEXT`,
+		`ALTER TABLE members ADD COLUMN IF NOT EXISTS account_id TEXT`,
+		`ALTER TABLE members ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'`,
+		`ALTER TABLE members ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE members ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE members ADD COLUMN IF NOT EXISTS membership_revision BIGINT NOT NULL DEFAULT 1`,
+		`UPDATE members SET id = user_id WHERE id IS NULL OR id = ''`,
+		`UPDATE members SET account_id = user_id WHERE account_id IS NULL OR account_id = ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS members_by_id ON members (id) WHERE id IS NOT NULL AND id <> ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS members_by_account ON members (account_id) WHERE account_id IS NOT NULL AND account_id <> ''`,
 		`CREATE INDEX IF NOT EXISTS members_by_role ON members (role)`,
+		`CREATE INDEX IF NOT EXISTS members_by_status ON members (status, id)`,
+		`CREATE TABLE IF NOT EXISTS _gonvex_control_plane_membership_outbox (
+			account_id TEXT PRIMARY KEY,
+			member_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			membership_revision BIGINT NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE OR REPLACE FUNCTION _gonvex_queue_control_plane_membership()
+		RETURNS trigger LANGUAGE plpgsql AS $$
+		DECLARE
+			projected_account_id TEXT;
+			projected_member_id TEXT;
+			projected_status TEXT;
+			projected_revision BIGINT;
+		BEGIN
+			IF TG_OP = 'DELETE' THEN
+				projected_account_id := COALESCE(NULLIF(OLD.account_id, ''), OLD.user_id);
+				projected_member_id := COALESCE(NULLIF(OLD.id, ''), OLD.user_id);
+				projected_status := 'revoked';
+				projected_revision := OLD.membership_revision + 1;
+			ELSE
+				projected_account_id := COALESCE(NULLIF(NEW.account_id, ''), NEW.user_id);
+				projected_member_id := COALESCE(NULLIF(NEW.id, ''), NEW.user_id);
+				projected_status := NEW.status;
+				projected_revision := NEW.membership_revision;
+			END IF;
+			INSERT INTO _gonvex_control_plane_membership_outbox (
+				account_id, member_id, status, membership_revision, updated_at
+			) VALUES (projected_account_id, projected_member_id, projected_status, projected_revision, now())
+			ON CONFLICT (account_id) DO UPDATE SET
+				member_id = EXCLUDED.member_id,
+				status = EXCLUDED.status,
+				membership_revision = EXCLUDED.membership_revision,
+				updated_at = now()
+			WHERE EXCLUDED.membership_revision >= _gonvex_control_plane_membership_outbox.membership_revision;
+			IF TG_OP = 'DELETE' THEN
+				RETURN OLD;
+			END IF;
+			RETURN NEW;
+		END;
+		$$`,
+		`DROP TRIGGER IF EXISTS gonvex_queue_control_plane_membership ON members`,
+		`CREATE TRIGGER gonvex_queue_control_plane_membership
+			AFTER INSERT OR UPDATE OR DELETE ON members
+			FOR EACH ROW EXECUTE FUNCTION _gonvex_queue_control_plane_membership()`,
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {

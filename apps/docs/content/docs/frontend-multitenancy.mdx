@@ -108,12 +108,12 @@ await auth.setActiveTenant(nextTenantId);
 Remount or clear any additional tenant-specific state owned by your application;
 the Gonvex client can only clear the query/sync state it manages.
 
-## Landlord Data vs Tenant Data
+## Control Plane Data vs Tenant Data
 
 Multi-tenant apps usually have two kinds of data:
 
 ```txt
-Landlord / project data
+Control Plane / project data
   projects, tenants, memberships, billing, routing, global users
 
 Tenant data
@@ -122,28 +122,28 @@ Tenant data
 
 The frontend should normally query tenant data through generated functions after selecting a tenant. It should not connect directly to tenant databases or store tenant database URLs.
 
-Tenant list and membership screens should come from landlord/project-level functions or runtime endpoints. Tenant business screens should run under the active tenant context.
+Tenant list and membership screens should come from Control Plane/project-level functions or runtime endpoints. Tenant business screens should run under the active tenant context.
 
 ## Generated Table Scopes
 
-The generated frontend folder separates landlord and tenant table metadata:
+The generated frontend folder separates Control Plane and tenant table metadata:
 
 ```txt
 gonvex/_generated/
   schema.ts
-  landlord/tables.ts
+  control-plane/tables.ts
   tenant/tables.ts
 ```
 
-Use the tenant metadata for business-data UI and the landlord metadata for app-owned project/control-plane UI:
+Use the tenant metadata for business-data UI and the Control Plane metadata for app-owned project/control-plane UI:
 
 ```ts
-import { landlord, tenant } from "./gonvex/_generated/schema";
-import { tables as landlordTables } from "./gonvex/_generated/landlord/tables";
+import { controlPlane, tenant } from "./gonvex/_generated/schema";
+import { tables as controlPlaneTables } from "./gonvex/_generated/control-plane/tables";
 import { tables as tenantTables } from "./gonvex/_generated/tenant/tables";
 
 const tenantTableNames = Object.keys(tenantTables);
-const landlordTableNames = Object.keys(landlordTables);
+const controlPlaneTableNames = Object.keys(controlPlaneTables);
 ```
 
 All tenant databases for a project use the same `tenant.tables` schema. Switching tenants changes which database those tables target; it does not change the generated TypeScript bindings.
@@ -152,7 +152,7 @@ All tenant databases for a project use the same `tenant.tables` schema. Switchin
 
 The dashboard Data tab mirrors the same idea for development:
 
-- `Landlord / project DB` means no tenant id is attached.
+- `Control Plane / project DB` means no tenant id is attached.
 - A tenant DB selection sends the selected tenant id.
 - Row/table requests include `tenant=<tenantId>` and `x-gonvex-tenant-id: <tenantId>`.
 - The runtime resolves that tenant id to the configured tenant database.
@@ -187,4 +187,4 @@ For database-per-tenant projects, the database route already scopes the data. Fo
 - Tenant IDs from the browser are inputs to verify, not security proof.
 - Clear or remount tenant-scoped UI state when switching tenants.
 - Never put tenant database URLs in frontend code.
-- Use landlord/project data only for routing, membership, and tenant selection; keep business data tenant-local.
+- Use Control Plane/project data only for routing, membership, and tenant selection; keep business data tenant-local.

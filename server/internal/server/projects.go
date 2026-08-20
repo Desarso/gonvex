@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	controlidentity "github.com/gonvex/gonvex/server/internal/controlplane/identity"
 	"github.com/gonvex/gonvex/server/internal/dbpool"
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -589,6 +590,12 @@ type projectRegistryExecer interface {
 }
 
 func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error {
+	// Identity v2 lives in the Control Plane. These tables are additive during
+	// cutover: legacy auth rows remain readable until the explicit migration has
+	// verified every account and tenant-member reference.
+	if err := controlidentity.InstallSchema(ctx, db); err != nil {
+		return fmt.Errorf("install control-plane identity schema: %w", err)
+	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_projects (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -838,6 +845,41 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_auth_users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ`); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_auth_users ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE gonvex_auth_users SET account_id = id WHERE account_id = ''`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO accounts (id, email, name, avatar_url, disabled_at, created_at, updated_at)
+		SELECT account_id, email, name, picture, disabled_at, created_at, updated_at
+		FROM gonvex_auth_users
+		WHERE account_id <> ''
+		ON CONFLICT (id) DO UPDATE SET
+			email = EXCLUDED.email, name = EXCLUDED.name, avatar_url = EXCLUDED.avatar_url,
+			disabled_at = EXCLUDED.disabled_at, updated_at = GREATEST(accounts.updated_at, EXCLUDED.updated_at)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO account_identities (
+		account_id, provider, issuer, subject, email, verified_email, created_at, updated_at
+	)
+	SELECT DISTINCT ON (provider, CASE WHEN provider = 'google' THEN 'https://accounts.google.com' ELSE '' END, provider_subject)
+		account_id, provider,
+		CASE WHEN provider = 'google' THEN 'https://accounts.google.com' ELSE '' END,
+		provider_subject, email, email_verified, created_at, updated_at
+	FROM gonvex_auth_users
+	WHERE account_id <> '' AND provider <> '' AND provider_subject <> ''
+	ORDER BY provider, CASE WHEN provider = 'google' THEN 'https://accounts.google.com' ELSE '' END,
+		provider_subject, created_at, account_id
+	ON CONFLICT (provider, issuer, subject) DO UPDATE SET
+		email = EXCLUDED.email, verified_email = EXCLUDED.verified_email,
+		updated_at = GREATEST(account_identities.updated_at, EXCLUDED.updated_at)`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS gonvex_auth_users_project_account
+		ON gonvex_auth_users (project_id, account_id) WHERE account_id <> ''`); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS gonvex_auth_users_project_id
 		ON gonvex_auth_users (project_id, id)`); err != nil {
 		return err
@@ -958,6 +1000,18 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	}
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS gonvex_auth_memberships_by_tenant
 		ON gonvex_auth_memberships (project_id, tenant_id, role, user_id)`); err != nil {
+		return err
+	}
+	// Compatibility bootstrap only. Once tenant change-feed projection is
+	// current, account_tenant_index is maintained from committed tenant member
+	// revisions and gonvex_auth_memberships can be removed.
+	if _, err := db.ExecContext(ctx, `INSERT INTO account_tenant_index (
+		account_id, tenant_id, member_id, status, tenant_membership_revision, updated_at
+	)
+	SELECT COALESCE(NULLIF(u.account_id, ''), u.id), m.tenant_id, m.user_id, 'active', 0, now()
+	FROM gonvex_auth_memberships m
+	JOIN gonvex_auth_users u ON u.project_id = m.project_id AND u.id = m.user_id
+	ON CONFLICT (account_id, tenant_id) DO NOTHING`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_auth_membership_invitations (

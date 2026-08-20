@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gonvex/gonvex/pkg/gonvex"
 )
 
 const (
@@ -41,6 +43,7 @@ var pkceValuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43,128}$`)
 
 type appAuthUser struct {
 	ID             string    `json:"id"`
+	AccountID      string    `json:"accountId"`
 	Email          string    `json:"email,omitempty"`
 	EmailVerified  bool      `json:"emailVerified"`
 	Name           string    `json:"name,omitempty"`
@@ -49,6 +52,13 @@ type appAuthUser struct {
 	Disabled       bool      `json:"disabled"`
 	CreatedAt      time.Time `json:"createdAt,omitempty"`
 	LastSignedInAt time.Time `json:"lastSignedInAt,omitempty"`
+}
+
+func (u appAuthUser) accountID() string {
+	if strings.TrimSpace(u.AccountID) != "" {
+		return u.AccountID
+	}
+	return u.ID
 }
 
 type appAuthTenant struct {
@@ -260,7 +270,7 @@ func (s *Server) handleProjectAuthUsers(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer db.Close()
-	rows, err := db.QueryContext(r.Context(), `SELECT id, email, email_verified, name, picture, provider, disabled_at IS NOT NULL, created_at, last_signed_in_at
+	rows, err := db.QueryContext(r.Context(), `SELECT id, COALESCE(NULLIF(account_id, ''), id), email, email_verified, name, picture, provider, disabled_at IS NOT NULL, created_at, last_signed_in_at
 		FROM gonvex_auth_users WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -270,7 +280,7 @@ func (s *Server) handleProjectAuthUsers(w http.ResponseWriter, r *http.Request) 
 	users := []appAuthUser{}
 	for rows.Next() {
 		var user appAuthUser
-		if err := rows.Scan(&user.ID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.Disabled, &user.CreatedAt, &user.LastSignedInAt); err != nil {
+		if err := rows.Scan(&user.ID, &user.AccountID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.Disabled, &user.CreatedAt, &user.LastSignedInAt); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -927,15 +937,76 @@ func (s *Server) upsertAppAuthUser(ctx context.Context, projectID string, identi
 		return appAuthUser{}, fmt.Errorf("auth account store is unavailable")
 	}
 	defer db.Close()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return appAuthUser{}, err
+	}
+	defer tx.Rollback()
+
+	// Resolve the global Account independently of this project. Exact provider
+	// identity wins; a single verified-email account may be reused. Ambiguous
+	// email matches intentionally create no silent merge.
+	const googleIssuer = "https://accounts.google.com"
+	accountID := ""
+	err = tx.QueryRowContext(ctx, `SELECT account_id FROM account_identities
+		WHERE provider = $1 AND issuer = $2 AND subject = $3`, googleProvider, googleIssuer, identity.Subject).Scan(&accountID)
+	if err != nil && err != sql.ErrNoRows {
+		return appAuthUser{}, err
+	}
+	if accountID == "" && identity.EmailVerified && strings.TrimSpace(identity.Email) != "" {
+		rows, queryErr := tx.QueryContext(ctx, `SELECT DISTINCT account_id FROM account_identities
+			WHERE verified_email AND lower(email) = lower($1) ORDER BY account_id LIMIT 2`, identity.Email)
+		if queryErr != nil {
+			return appAuthUser{}, queryErr
+		}
+		matches := []string{}
+		for rows.Next() {
+			var candidate string
+			if scanErr := rows.Scan(&candidate); scanErr != nil {
+				rows.Close()
+				return appAuthUser{}, scanErr
+			}
+			matches = append(matches, candidate)
+		}
+		if rowsErr := rows.Close(); rowsErr != nil {
+			return appAuthUser{}, rowsErr
+		}
+		if len(matches) == 1 {
+			accountID = matches[0]
+		}
+	}
+	if accountID == "" {
+		accountID, err = randomID("acct")
+		if err != nil {
+			return appAuthUser{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO accounts (id, email, name, avatar_url, updated_at)
+		VALUES ($1, $2, $3, $4, now())
+		ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name,
+			avatar_url = EXCLUDED.avatar_url, updated_at = now()`,
+		accountID, identity.Email, identity.Name, identity.Picture); err != nil {
+		return appAuthUser{}, err
+	}
+	if err := tx.QueryRowContext(ctx, `INSERT INTO account_identities (
+		account_id, provider, issuer, subject, email, verified_email, updated_at
+	) VALUES ($1, $2, $3, $4, $5, $6, now())
+	ON CONFLICT (provider, issuer, subject) DO UPDATE SET
+		email = EXCLUDED.email, verified_email = EXCLUDED.verified_email, updated_at = now()
+	RETURNING account_id`, accountID, googleProvider, googleIssuer, identity.Subject, identity.Email, identity.EmailVerified).Scan(&accountID); err != nil {
+		return appAuthUser{}, err
+	}
+
 	userID, err := randomID("user")
 	if err != nil {
 		return appAuthUser{}, err
 	}
 	var user appAuthUser
-	err = db.QueryRowContext(ctx, `INSERT INTO gonvex_auth_users (
-		id, project_id, provider, provider_subject, email, email_verified, name, picture, last_signed_in_at, updated_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
+	err = tx.QueryRowContext(ctx, `INSERT INTO gonvex_auth_users (
+		id, project_id, account_id, provider, provider_subject, email, email_verified, name, picture, last_signed_in_at, updated_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now())
 	ON CONFLICT (project_id, provider, provider_subject) DO UPDATE SET
+		account_id = EXCLUDED.account_id,
 		email = EXCLUDED.email,
 		email_verified = EXCLUDED.email_verified,
 		name = EXCLUDED.name,
@@ -943,11 +1014,17 @@ func (s *Server) upsertAppAuthUser(ctx context.Context, projectID string, identi
 		last_signed_in_at = now(),
 		updated_at = now()
 	WHERE gonvex_auth_users.disabled_at IS NULL
-	RETURNING id, email, email_verified, name, picture, provider, created_at, last_signed_in_at`,
-		userID, projectID, googleProvider, identity.Subject, identity.Email, identity.EmailVerified, identity.Name, identity.Picture).Scan(
-		&user.ID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
+	RETURNING id, account_id, email, email_verified, name, picture, provider, created_at, last_signed_in_at`,
+		userID, projectID, accountID, googleProvider, identity.Subject, identity.Email, identity.EmailVerified, identity.Name, identity.Picture).Scan(
+		&user.ID, &user.AccountID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
 	)
-	return user, err
+	if err != nil {
+		return appAuthUser{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return appAuthUser{}, err
+	}
+	return user, nil
 }
 
 func (s *Server) createAppAuthCode(ctx context.Context, transaction authTransaction, userID string) (string, error) {
@@ -1106,9 +1183,9 @@ func (s *Server) exchangeAppAuthCode(ctx context.Context, projectID string, code
 		return appAuthSessionGrant{}, appAuthUser{}, err
 	}
 	var user appAuthUser
-	if err := tx.QueryRowContext(ctx, `SELECT id, email, email_verified, name, picture, provider, created_at, last_signed_in_at
+	if err := tx.QueryRowContext(ctx, `SELECT id, COALESCE(NULLIF(account_id, ''), id), email, email_verified, name, picture, provider, created_at, last_signed_in_at
 		FROM gonvex_auth_users WHERE id = $1 AND project_id = $2 AND disabled_at IS NULL`, userID, projectID).Scan(
-		&user.ID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
+		&user.ID, &user.AccountID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("account is unavailable")
@@ -1217,9 +1294,9 @@ func (s *Server) refreshAppSession(ctx context.Context, projectID string, refres
 		}
 	}
 	var user appAuthUser
-	if err := tx.QueryRowContext(ctx, `SELECT id, email, email_verified, name, picture, provider, created_at, last_signed_in_at
+	if err := tx.QueryRowContext(ctx, `SELECT id, COALESCE(NULLIF(account_id, ''), id), email, email_verified, name, picture, provider, created_at, last_signed_in_at
 		FROM gonvex_auth_users WHERE id = $1 AND project_id = $2 AND disabled_at IS NULL`, userID, projectID).Scan(
-		&user.ID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
+		&user.ID, &user.AccountID, &user.Email, &user.EmailVerified, &user.Name, &user.Picture, &user.Provider, &user.CreatedAt, &user.LastSignedInAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return appAuthSessionGrant{}, appAuthUser{}, invalidAppAuthGrant("account is unavailable")
@@ -1256,17 +1333,21 @@ func (s *Server) writeAppAuthSession(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 	activeTenantID := ""
+	var activeMember *gonvex.Member
 	if len(tenants) > 0 {
 		active, selectErr := selectAppAuthTenant(tenants, requestedTenant)
 		if selectErr != nil {
 			active = tenants[0]
 		}
 		activeTenantID = active.ID
+		activeMember, _ = s.loadTenantMember(r.Context(), projectID, activeTenantID, user.accountID())
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accessToken": grant.AccessToken, "tokenType": "Bearer",
 		"expiresIn": int(appSessionTTL.Seconds()), "expiresAt": grant.AccessExpiresAt.UnixMilli(),
 		"refreshToken": grant.RefreshToken, "refreshExpiresAt": grant.RefreshExpiresAt.UnixMilli(),
+		"account": gonvex.Account{ID: user.accountID(), Email: user.Email, Name: user.Name, AvatarURL: user.Picture},
+		"member": activeMember,
 		"user": user, "tenants": tenants, "activeTenantId": activeTenantID,
 	})
 }
@@ -1363,10 +1444,10 @@ func (s *Server) loadAppSessionIdentity(ctx context.Context, token string) (vali
 		return validatedAppSession{}, fmt.Errorf("auth session store is unavailable")
 	}
 	var session validatedAppSession
-	err = db.QueryRowContext(ctx, `SELECT s.project_id, u.id, u.email, u.email_verified, u.name, u.picture, u.provider, u.created_at, u.last_signed_in_at
+	err = db.QueryRowContext(ctx, `SELECT s.project_id, u.id, COALESCE(NULLIF(u.account_id, ''), u.id), u.email, u.email_verified, u.name, u.picture, u.provider, u.created_at, u.last_signed_in_at
 		FROM gonvex_auth_sessions s JOIN gonvex_auth_users u ON u.id = s.user_id AND u.project_id = s.project_id
 		WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.disabled_at IS NULL`, sha256Hex(token)).Scan(
-		&session.ProjectID, &session.User.ID, &session.User.Email, &session.User.EmailVerified, &session.User.Name,
+		&session.ProjectID, &session.User.ID, &session.User.AccountID, &session.User.Email, &session.User.EmailVerified, &session.User.Name,
 		&session.User.Picture, &session.User.Provider, &session.User.CreatedAt, &session.User.LastSignedInAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1396,6 +1477,12 @@ func (s *Server) validateAppSession(ctx context.Context, requestedProjectID stri
 	if err != nil {
 		return validatedAppSession{}, "", err
 	}
+	member, err := s.loadTenantMember(ctx, session.ProjectID, tenant.ID, session.User.accountID())
+	if err != nil {
+		return validatedAppSession{}, "", err
+	}
+	tenant.Role = member.Role
+	tenant.Permissions = member.Permissions
 	session.Tenant = tenant
 	session.Permissions = map[string]any{}
 	for key, value := range tenant.Permissions {

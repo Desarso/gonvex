@@ -54,7 +54,18 @@ func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		project = authenticatedProject
 		tenant = authenticatedTenant
-		caller = callerContext{user: user, permissions: permissions}
+		var member *gonvex.Member
+		if user != nil {
+			member, err = s.loadTenantMember(r.Context(), project, tenant, user.ID)
+			if err != nil {
+				opErr = err
+				w.Header().Set("www-authenticate", "Bearer")
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+				return
+			}
+			permissions = member.Permissions
+		}
+		caller = callerContext{user: user, member: member, permissions: permissions}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRegisteredHTTPBodyBytes+1))

@@ -368,6 +368,7 @@ type wsConn struct {
 	// known, so it is "default" rather than the project's own tenant.
 	tenantPinned      bool
 	user              *gonvex.User
+	member            *gonvex.Member
 	perms             map[string]any
 	auth              bool
 	authToken         string
@@ -413,6 +414,7 @@ const queryResultMaxBatchDelay = 50 * time.Millisecond
 
 type callerContext struct {
 	user        *gonvex.User
+	member      *gonvex.Member
 	permissions map[string]any
 }
 
@@ -535,7 +537,17 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			c.write(serverMessage{Type: "auth.error", ID: message.ID, Error: err.Error()})
 			return
 		}
-		caller := callerContext{user: user, permissions: permissions}
+		var member *gonvex.Member
+		if user != nil {
+			member, err = c.server.loadTenantMember(ctx, project, tenant, user.ID)
+			if err != nil {
+				c.clearAuthentication()
+				c.write(serverMessage{Type: "auth.error", ID: message.ID, Error: err.Error()})
+				return
+			}
+			permissions = member.Permissions
+		}
+		caller := callerContext{user: user, member: member, permissions: permissions}
 		directive := c.server.queryCacheDirective(project, tenant, caller)
 		cacheScope := ""
 		connSyncScope := ""
@@ -549,6 +561,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		oldSyncScope := c.syncScope
 		oldSubs := make([]querySubscription, 0, len(c.subs))
 		c.user = user
+		c.member = member
 		c.perms = permissions
 		c.project = project
 		c.tenant = tenant
@@ -890,10 +903,15 @@ func (c *wsConn) revalidateAppAuth(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	member, err := c.server.loadTenantMember(ctx, project, tenant, session.User.accountID())
+	if err != nil {
+		return err
+	}
 	c.mu.Lock()
 	if c.authToken == token {
-		c.user = &gonvex.User{ID: session.User.ID, Email: session.User.Email}
-		c.perms = session.Permissions
+		c.user = &gonvex.User{ID: session.User.accountID(), Email: session.User.Email, Name: session.User.Name, AvatarURL: session.User.Picture}
+		c.member = member
+		c.perms = member.Permissions
 		c.authCheckedAt = time.Now()
 	}
 	c.mu.Unlock()
@@ -903,13 +921,14 @@ func (c *wsConn) revalidateAppAuth(ctx context.Context) error {
 func (c *wsConn) caller() callerContext {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return callerContext{user: c.user, permissions: c.perms}
+	return callerContext{user: c.user, member: c.member, permissions: c.perms}
 }
 
 func (c *wsConn) clearAuthentication() {
 	c.mu.Lock()
 	oldSubs := make([]querySubscription, 0, len(c.subs))
 	c.user = nil
+	c.member = nil
 	c.perms = nil
 	c.auth = false
 	c.authToken = ""
@@ -1296,7 +1315,11 @@ func (s *Server) revokeAppAuthConnections(projectID string, userID string) {
 	s.wsMu.RUnlock()
 	for _, connection := range connections {
 		connection.mu.Lock()
-		matches := connection.project == projectID && connection.user != nil && connection.user.ID == userID && strings.HasPrefix(connection.authToken, "gvx_session_")
+		identityMatches := connection.user != nil && connection.user.ID == userID
+		if connection.member != nil {
+			identityMatches = identityMatches || connection.member.ID == userID || connection.member.AccountID == userID
+		}
+		matches := connection.project == projectID && identityMatches && strings.HasPrefix(connection.authToken, "gvx_session_")
 		connection.mu.Unlock()
 		if matches {
 			connection.clearAuthentication()
@@ -2086,6 +2109,7 @@ func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projec
 		queryCtx.Tx = tx
 		queryCtx.DB = nil
 		queryCtx.TenantDB = nil
+		queryCtx.ControlPlaneDB = nil
 		queryCtx.LandlordDB = nil
 		result, err := app.ExecuteQuery(queryCtx, path, rawArgs)
 		if err != nil {
@@ -2301,6 +2325,7 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.ReducerCtx, path string, ra
 func restrictReducerCapabilities(ctx *gonvex.ReducerCtx) {
 	ctx.DB = nil
 	ctx.TenantDB = nil
+	ctx.ControlPlaneDB = nil
 	ctx.LandlordDB = nil
 	ctx.Storage = gonvex.UnavailableStorage()
 	ctx.Sandbox = gonvex.UnavailableSandbox()
@@ -2397,6 +2422,7 @@ func (s *Server) actionContext(ctx context.Context, projectID string, tenantID s
 	// must re-enter through ctx.Reducers.Call.
 	runtimeCtx.DB = nil
 	runtimeCtx.TenantDB = nil
+	runtimeCtx.ControlPlaneDB = nil
 	runtimeCtx.LandlordDB = nil
 	runtimeCtx.Tx = nil
 	runtimeCtx.Data = gonvex.UnavailableData()
@@ -2412,6 +2438,14 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		return gonvex.RuntimeContext{}, err
 	}
 	activeTenant := tenantIDFromRequest(projectID, tenantID)
+	if caller.user != nil && caller.member == nil {
+		member, err := s.loadTenantMember(ctx, projectID, activeTenant, caller.user.ID)
+		if err != nil {
+			return gonvex.RuntimeContext{}, err
+		}
+		caller.member = member
+		caller.permissions = member.Permissions
+	}
 	s.hydrateProjectTenantDatabases(ctx, projectID)
 	databaseURL := s.databaseURLForTenant(projectID, activeTenant)
 	var err error
@@ -2436,8 +2470,12 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		ProjectID:        projectID,
 		TenantID:         activeTenant,
 		OperationID:      mutationIDFromContext(ctx),
+		Auth:             gonvex.AuthContext{Account: caller.user},
+		Tenant:           &gonvex.TenantIdentity{ID: activeTenant, ProjectID: projectID},
+		Member:           caller.member,
 		DatabaseURL:      store.DatabaseURL,
 		DB:               store.DB,
+		ControlPlaneDB:   landlordStore.DB,
 		LandlordDB:       landlordStore.DB,
 		TenantDB:         store.DB,
 		Storage:          storageAPI,

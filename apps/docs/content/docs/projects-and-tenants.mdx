@@ -17,18 +17,18 @@ Project
 Tenant
   One customer/account/workspace inside a project. A tenant can have isolated data.
 
-Landlord database
+Control Plane database
   Runtime control database. Stores projects, tenants, users, memberships, roles, routes, and tenant DB connections.
 
 Tenant database
   App data database for one tenant or a shard/group of tenants.
 ```
 
-## Why A Landlord Database Exists
+## Why A Control Plane Database Exists
 
 The runtime cannot route requests by reading the app database first, because it needs to know which app database to connect to.
 
-The landlord database answers:
+The Control Plane database answers:
 
 ```txt
 Which project is this request for?

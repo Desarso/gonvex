@@ -75,7 +75,7 @@ Local runtime
   Best for development. Runtime, Postgres, and Valkey run locally.
 
 Self-hosted runtime
-  You run Gonvex runtime, landlord database, tenant databases, and optional object storage.
+  You run Gonvex runtime, Control Plane database, tenant databases, and optional object storage.
 
 Hosted runtime
   A future managed service. There is no generally available public Gonvex Cloud today.
@@ -94,7 +94,7 @@ VITE_GONVEX_URL=http://localhost:8080
 VITE_GONVEX_WS_URL=ws://localhost:8080/ws
 ```
 
-The runtime needs landlord database configuration, tenant database connections,
+The runtime needs Control Plane database configuration, tenant database connections,
 and a reachable `VALKEY_URL` (or `REDIS_URL`). Valkey is mandatory: startup
 fails before serving traffic when the variable is unset or the connection
 cannot be established. Application code should not hardcode tenant database

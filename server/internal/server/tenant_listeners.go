@@ -207,6 +207,7 @@ func (m *tenantListenerManager) run(ctx context.Context, listener *tenantListene
 			// crash immediately after Reducer commit). Drain whenever the tenant
 			// becomes active, independent of a new application-table revision.
 			go m.server.drainActionOutbox(listener.key.project, listener.key.tenant)
+			go m.server.drainControlPlaneMembershipOutbox(listener.key.project, listener.key.tenant)
 			if connectedBefore {
 				m.server.metrics.recordReactive(func(metric *reactiveMetricState) { metric.ListenerReconnects++ })
 			}
@@ -267,6 +268,7 @@ func (m *tenantListenerManager) wait(ctx context.Context, connection *pgx.Conn, 
 		}
 		m.server.notifySyncRevision(key.project, key.tenant, payload.Tables, payload.Epoch, payload.Revision)
 		go m.server.drainActionOutbox(key.project, key.tenant)
+		go m.server.drainControlPlaneMembershipOutbox(key.project, key.tenant)
 		m.dispatchCommittedRevision(ctx, listener, payload)
 	}
 }
@@ -279,6 +281,7 @@ func (m *tenantListenerManager) dispatchCommittedRevision(ctx context.Context, l
 		return
 	}
 	for _, batch := range groupSyncChanges(changes) {
+		m.server.projectCommittedMemberChanges(listener.key.project, listener.key.tenant, batch)
 		m.server.routeReplicaTransaction(listener.key.project, listener.key.tenant, payload.Epoch, batch)
 		byTable := map[string]*tableChange{}
 		for _, committed := range batch.changes {

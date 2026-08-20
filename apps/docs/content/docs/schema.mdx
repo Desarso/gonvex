@@ -124,10 +124,10 @@ The rule is Convex-like: apply changes that preserve existing data automatically
 The CLI generates scoped schema metadata:
 
 ```ts
-import { landlord, tenant } from "./gonvex/_generated/schema";
+import { controlPlane, tenant } from "./gonvex/_generated/schema";
 
 tenant.tables.tasks;
-landlord.tables.projects;
+controlPlane.tables.projects;
 ```
 
 Generated schema modules currently expose table/column/index metadata and table

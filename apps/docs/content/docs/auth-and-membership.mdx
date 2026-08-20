@@ -218,7 +218,7 @@ user: gabriel@example.com
   tenant: demo     role: viewer
 ```
 
-If every tenant has a separate database, the runtime still needs a central place to know that the same user can access all three tenants. That belongs in the landlord database.
+If every tenant has a separate database, the runtime still needs a central place to know that the same user can access all three tenants. That belongs in the Control Plane database.
 
 ## Request Auth Flow
 
@@ -239,7 +239,7 @@ The CLI supports two account authentication modes:
 - an expiring dashboard account session obtained with email/password
 - a revocable account personal access token beginning with `gvx_pat_`
 
-Personal access tokens are stored hashed in the landlord database, belong to one
+Personal access tokens are stored hashed in the Control Plane database, belong to one
 account email, can expire, and carry an explicit permission list. `projects:*` grants
 broad project lifecycle access while still applying the owner's project membership.
 Dashboard administrators can add `admin:projects` to make a token runtime-wide; the
@@ -303,7 +303,7 @@ The runtime and CLI expose:
 
 ## Data Placement
 
-The landlord database stores:
+The Control Plane database stores:
 
 ```txt
 users

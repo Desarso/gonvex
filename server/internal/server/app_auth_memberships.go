@@ -11,6 +11,9 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/gonvex/gonvex/pkg/gonvex"
+	controlidentity "github.com/gonvex/gonvex/server/internal/controlplane/identity"
 )
 
 var appAuthMembershipRoles = map[string]bool{
@@ -107,6 +110,47 @@ func (s *Server) listAppAuthTenants(ctx context.Context, projectID string, userI
 		}
 		return nil, err
 	}
+	accountID := strings.TrimSpace(userID)
+	_ = db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(account_id, ''), id)
+		FROM gonvex_auth_users
+		WHERE project_id = $1 AND (id = $2 OR account_id = $2) AND disabled_at IS NULL
+		ORDER BY CASE WHEN id = $2 THEN 0 ELSE 1 END LIMIT 1`, projectID, userID).Scan(&accountID)
+	rows, indexErr := db.QueryContext(ctx, `SELECT i.tenant_id, t.name
+		FROM account_tenant_index i
+		JOIN gonvex_runtime_tenants t ON t.tenant_id = i.tenant_id
+		WHERE t.project_id = $1 AND i.account_id = $2 AND i.status = 'active'
+		ORDER BY lower(t.name), i.tenant_id`, projectID, accountID)
+	if indexErr == nil {
+		indexed := []appAuthTenant{}
+		for rows.Next() {
+			var tenant appAuthTenant
+			if err := rows.Scan(&tenant.ID, &tenant.Name); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			indexed = append(indexed, tenant)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		verified := make([]appAuthTenant, 0, len(indexed))
+		for _, tenant := range indexed {
+			member, err := s.loadTenantMember(ctx, projectID, tenant.ID, accountID)
+			if err != nil {
+				// The index is a discovery projection, never admission authority.
+				continue
+			}
+			tenant.Role = member.Role
+			tenant.Permissions = member.Permissions
+			verified = append(verified, tenant)
+		}
+		if len(verified) > 0 {
+			return verified, nil
+		}
+	}
+	// Compatibility fallback for rows not yet covered by identity-v2's
+	// account_tenant_index backfill. Tenant admission still performs the final
+	// tenant-local Member lookup.
 	if normalizedDatabaseModeWithDefault(mode) == "single" {
 		tenant := appAuthTenant{ID: projectID, Name: projectName}
 		var permissionsJSON []byte
@@ -132,7 +176,7 @@ func (s *Server) listAppAuthTenants(ctx context.Context, projectID string, userI
 		}
 		return []appAuthTenant{{ID: projectID, Name: projectName, Role: "member", Permissions: map[string]any{}}}, nil
 	}
-	rows, err := db.QueryContext(ctx, `SELECT m.tenant_id, t.name, m.role, m.permissions
+	rows, err = db.QueryContext(ctx, `SELECT m.tenant_id, t.name, m.role, m.permissions
 		FROM gonvex_auth_memberships m
 		JOIN gonvex_runtime_tenants t ON t.project_id = m.project_id AND t.tenant_id = m.tenant_id
 		WHERE m.project_id = $1 AND m.user_id = $2
@@ -203,7 +247,10 @@ func (s *Server) ensureAppAuthMemberships(ctx context.Context, projectID string,
 		return nil
 	}
 	if mode == "single" {
-		return nil
+		if err := s.ensureSingleAppAuthTenant(ctx, projectID); err != nil {
+			return err
+		}
+		return s.upsertAppAuthMembership(ctx, projectID, projectID, user.ID, "member", map[string]any{})
 	}
 	_, err = s.ensurePersonalAppAuthTenant(ctx, projectID, user)
 	return err
@@ -440,6 +487,18 @@ func (s *Server) upsertAppAuthMembershipAs(ctx context.Context, projectID string
 	if !exists {
 		return fmt.Errorf("tenant %q is not registered for project %q", tenantID, projectID)
 	}
+	var accountID string
+	var displayName string
+	var avatarURL string
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(account_id, ''), id), name, picture
+		FROM gonvex_auth_users WHERE project_id = $1 AND id = $2 AND disabled_at IS NULL`, projectID, userID).Scan(
+		&accountID, &displayName, &avatarURL,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("account %q is unavailable", userID)
+		}
+		return err
+	}
 	var previousRole string
 	var previousPermissions []byte
 	previousErr := db.QueryRowContext(ctx, `SELECT role, permissions FROM gonvex_auth_memberships
@@ -464,22 +523,30 @@ func (s *Server) upsertAppAuthMembershipAs(ctx context.Context, projectID string
 			return fmt.Errorf("a tenant must keep at least one owner")
 		}
 	}
-	if err := s.syncAppAuthMembershipToTenant(ctx, projectID, tenantID, userID, role, permissionsJSON); err != nil {
+	projection, err := s.syncAppAuthMembershipToTenant(ctx, projectID, tenantID, userID, accountID, displayName, avatarURL, role, permissionsJSON)
+	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_auth_memberships (project_id, user_id, tenant_id, role, permissions, updated_at)
+	projectionTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("tenant member committed; start control-plane projection: %w", err)
+	}
+	defer projectionTx.Rollback()
+	_, err = projectionTx.ExecContext(ctx, `INSERT INTO gonvex_auth_memberships (project_id, user_id, tenant_id, role, permissions, updated_at)
 		VALUES ($1, $2, $3, $4, $5, now())
 		ON CONFLICT (project_id, user_id, tenant_id) DO UPDATE SET
 			role = EXCLUDED.role, permissions = EXCLUDED.permissions, updated_at = now()`,
 		projectID, userID, tenantID, role, string(permissionsJSON))
 	if err != nil {
-		if previousErr == nil {
-			_ = s.syncAppAuthMembershipToTenant(context.Background(), projectID, tenantID, userID, previousRole, previousPermissions)
-		} else {
-			_ = s.deleteAppAuthTenantMember(context.Background(), projectID, tenantID, userID)
-		}
-		return err
+		return fmt.Errorf("tenant member committed; update compatibility projection: %w", err)
 	}
+	if err := (controlidentity.MembershipProjector{DB: projectionTx}).Upsert(ctx, projection); err != nil {
+		return fmt.Errorf("tenant member committed; update control-plane tenant index: %w", err)
+	}
+	if err := projectionTx.Commit(); err != nil {
+		return fmt.Errorf("tenant member committed; commit control-plane projection: %w", err)
+	}
+	go s.drainControlPlaneMembershipOutbox(projectID, tenantID)
 	if previousErr == nil && (previousRole != role || !equalAppAuthPermissions(previousPermissions, permissionsJSON)) {
 		s.revokeAppAuthUserSessions(ctx, projectID, userID)
 	}
@@ -494,42 +561,76 @@ func equalAppAuthPermissions(left []byte, right []byte) bool {
 	return reflect.DeepEqual(leftValue, rightValue)
 }
 
-func (s *Server) syncAppAuthMembershipToTenant(ctx context.Context, projectID string, tenantID string, userID string, role string, permissionsJSON []byte) error {
+func (s *Server) syncAppAuthMembershipToTenant(ctx context.Context, projectID string, tenantID string, memberID string, accountID string, displayName string, avatarURL string, role string, permissionsJSON []byte) (controlidentity.AccountTenantIndex, error) {
 	s.hydrateProjectTenantDatabases(ctx, projectID)
 	databaseURL := s.databaseURLForTenant(projectID, tenantID)
 	databaseURL, err := s.ensureRuntimeTenantDatabase(ctx, projectID, tenantID, databaseURL)
 	if err != nil {
-		return err
+		return controlidentity.AccountTenantIndex{}, err
 	}
 	store, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, tenantID), databaseURL)
 	if err != nil {
-		return err
+		return controlidentity.AccountTenantIndex{}, err
 	}
 	if store.DB == nil {
-		return fmt.Errorf("tenant database is unavailable")
+		return controlidentity.AccountTenantIndex{}, fmt.Errorf("tenant database is unavailable")
 	}
 	if err := ensureTenantLocalTables(ctx, store.DB); err != nil {
-		return err
+		return controlidentity.AccountTenantIndex{}, err
 	}
-	_, err = store.DB.ExecContext(ctx, `INSERT INTO members (user_id, role, permissions, updated_at)
-		VALUES ($1, $2, $3, now())
-		ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role, permissions = EXCLUDED.permissions, updated_at = now()`,
-		userID, role, string(permissionsJSON))
-	return err
+	var membershipRevision int64
+	err = store.DB.QueryRowContext(ctx, `INSERT INTO members (
+		user_id, id, account_id, status, display_name, avatar_url, role, permissions, updated_at
+	)
+		VALUES ($1, $1, $2, 'active', $3, $4, $5, $6, now())
+		ON CONFLICT (user_id) DO UPDATE SET
+			id = COALESCE(NULLIF(members.id, ''), EXCLUDED.id),
+			account_id = EXCLUDED.account_id,
+			status = 'active',
+			display_name = EXCLUDED.display_name,
+			avatar_url = EXCLUDED.avatar_url,
+			role = EXCLUDED.role,
+			permissions = EXCLUDED.permissions,
+			membership_revision = members.membership_revision + 1,
+			updated_at = now()
+		RETURNING membership_revision`,
+		memberID, accountID, displayName, avatarURL, role, string(permissionsJSON)).Scan(&membershipRevision)
+	if err != nil {
+		return controlidentity.AccountTenantIndex{}, err
+	}
+	return controlidentity.AccountTenantIndex{
+		AccountID: accountID, TenantID: tenantID, MemberID: memberID,
+		Status: "active", TenantMembershipRevision: membershipRevision,
+	}, nil
 }
 
-func (s *Server) deleteAppAuthTenantMember(ctx context.Context, projectID string, tenantID string, userID string) error {
+func (s *Server) revokeAppAuthTenantMember(ctx context.Context, projectID string, tenantID string, memberID string) (controlidentity.AccountTenantIndex, error) {
 	s.hydrateProjectTenantDatabases(ctx, projectID)
 	databaseURL := s.databaseURLForTenant(projectID, tenantID)
 	if databaseURL == "" {
-		return nil
+		return controlidentity.AccountTenantIndex{}, fmt.Errorf("tenant database is unavailable")
 	}
 	store, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, tenantID), databaseURL)
-	if err != nil || store.DB == nil {
-		return err
+	if err != nil {
+		return controlidentity.AccountTenantIndex{}, err
 	}
-	_, err = store.DB.ExecContext(ctx, `DELETE FROM members WHERE user_id = $1`, userID)
-	return err
+	if store.DB == nil {
+		return controlidentity.AccountTenantIndex{}, fmt.Errorf("tenant database is unavailable")
+	}
+	if err := ensureTenantLocalTables(ctx, store.DB); err != nil {
+		return controlidentity.AccountTenantIndex{}, err
+	}
+	projection := controlidentity.AccountTenantIndex{TenantID: tenantID, MemberID: memberID, Status: "revoked"}
+	err = store.DB.QueryRowContext(ctx, `UPDATE members
+		SET status = 'revoked', membership_revision = membership_revision + 1, updated_at = now()
+		WHERE id = $1 OR user_id = $1
+		RETURNING COALESCE(NULLIF(account_id, ''), user_id), COALESCE(NULLIF(id, ''), user_id), membership_revision`, memberID).Scan(
+		&projection.AccountID, &projection.MemberID, &projection.TenantMembershipRevision,
+	)
+	if err == sql.ErrNoRows {
+		return controlidentity.AccountTenantIndex{}, fmt.Errorf("tenant member %q not found", memberID)
+	}
+	return projection, err
 }
 
 func (s *Server) removeAppAuthMembership(ctx context.Context, projectID string, tenantID string, userID string) error {
@@ -566,15 +667,32 @@ func (s *Server) removeAppAuthMembership(ctx context.Context, projectID string, 
 			return fmt.Errorf("a tenant must keep at least one owner")
 		}
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM gonvex_auth_memberships
-		WHERE project_id = $1 AND tenant_id = $2 AND user_id = $3`, projectID, tenantID, userID); err != nil {
+	projection, err := s.revokeAppAuthTenantMember(ctx, projectID, tenantID, userID)
+	if err != nil {
 		return err
 	}
-	cleanupErr := s.deleteAppAuthTenantMember(ctx, projectID, tenantID, userID)
-	// Central membership is authoritative. Revoke immediately even when the
-	// best-effort tenant-local mirror cleanup needs operator attention.
+	projectionTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		s.revokeAppAuthUserSessions(ctx, projectID, userID)
+		return fmt.Errorf("tenant membership revoked; start control-plane projection: %w", err)
+	}
+	defer projectionTx.Rollback()
+	if _, err := projectionTx.ExecContext(ctx, `DELETE FROM gonvex_auth_memberships
+		WHERE project_id = $1 AND tenant_id = $2 AND user_id = $3`, projectID, tenantID, userID); err != nil {
+		s.revokeAppAuthUserSessions(ctx, projectID, userID)
+		return fmt.Errorf("tenant membership revoked; remove compatibility projection: %w", err)
+	}
+	if err := (controlidentity.MembershipProjector{DB: projectionTx}).Upsert(ctx, projection); err != nil {
+		s.revokeAppAuthUserSessions(ctx, projectID, userID)
+		return fmt.Errorf("tenant membership revoked; update control-plane tenant index: %w", err)
+	}
+	if err := projectionTx.Commit(); err != nil {
+		s.revokeAppAuthUserSessions(ctx, projectID, userID)
+		return fmt.Errorf("tenant membership revoked; commit control-plane projection: %w", err)
+	}
+	go s.drainControlPlaneMembershipOutbox(projectID, tenantID)
 	s.revokeAppAuthUserSessions(ctx, projectID, userID)
-	return cleanupErr
+	return nil
 }
 
 func (s *Server) revokeAppAuthUserSessions(ctx context.Context, projectID string, userID string) {
@@ -775,6 +893,7 @@ func (s *Server) handleAppAuthMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	activeTenantID := ""
+	var member *gonvex.Member
 	requestedTenant := tenantID(r)
 	if len(tenants) > 0 {
 		active, err := selectAppAuthTenant(tenants, requestedTenant)
@@ -783,9 +902,17 @@ func (s *Server) handleAppAuthMe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		activeTenantID = active.ID
+		member, err = s.loadTenantMember(r.Context(), identity.ProjectID, activeTenantID, identity.User.accountID())
+		if err != nil {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"project": identity.ProjectID, "user": identity.User,
+		"project": identity.ProjectID,
+		"account": gonvex.Account{ID: identity.User.accountID(), Email: identity.User.Email, Name: identity.User.Name, AvatarURL: identity.User.Picture},
+		"member": member,
+		"user": identity.User,
 		"tenants": tenants, "activeTenantId": activeTenantID,
 	})
 }
@@ -1184,6 +1311,17 @@ func (s *Server) handleProjectAuthUser(w http.ResponseWriter, r *http.Request) {
 			tenantIDs = append(tenantIDs, tenantID)
 		}
 		rows.Close()
+		for _, tenantID := range tenantIDs {
+			projection, err := s.revokeAppAuthTenantMember(r.Context(), projectID, tenantID, userID)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "account was not deleted because tenant membership revocation failed: " + err.Error()})
+				return
+			}
+			if err := (controlidentity.MembershipProjector{DB: db}).Upsert(r.Context(), projection); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tenant membership was revoked, but its control-plane projection is pending: " + err.Error()})
+				return
+			}
+		}
 		result, err := db.ExecContext(r.Context(), `DELETE FROM gonvex_auth_users WHERE project_id = $1 AND id = $2`, projectID, userID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -1195,12 +1333,6 @@ func (s *Server) handleProjectAuthUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.revokeAppAuthConnections(projectID, userID)
-		for _, tenantID := range tenantIDs {
-			if err := s.deleteAppAuthTenantMember(r.Context(), projectID, tenantID, userID); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "account was deleted, but tenant membership cleanup failed: " + err.Error()})
-				return
-			}
-		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)

@@ -1,0 +1,9 @@
+[package]
+name = "gonvex-module-runtime-v8"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gonvex-module-runtime = { path = "../module-runtime" }
+serde.workspace = true
