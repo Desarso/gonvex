@@ -6,10 +6,18 @@ export type FunctionKind =
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
+/** Opaque, language-neutral function argument/result metadata. */
+export type ModuleSchema = {
+  placeholder: true;
+  type?: string;
+};
+
 export type FunctionManifestEntry = {
   kind: FunctionKind;
   handler: string;
   file: string;
+  args?: ModuleSchema;
+  result?: ModuleSchema;
   internal?: boolean;
   delivery?: "oneShot" | "live" | "replica";
   dependencies?: FunctionDependencies;

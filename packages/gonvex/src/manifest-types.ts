@@ -10,6 +10,10 @@ export type FunctionEntry = {
   kind: FunctionKind;
   handler: string;
   file: string;
+  /** Language-neutral argument metadata from a TypeScript module artifact. */
+  args?: ModuleSchema;
+  /** Language-neutral result metadata from a TypeScript module artifact. */
+  result?: ModuleSchema;
   internal?: boolean;
   delivery?: "oneShot" | "live" | "replica";
   dependencies?: FunctionDependencies;

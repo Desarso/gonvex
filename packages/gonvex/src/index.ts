@@ -14,6 +14,7 @@ import {
   detectProjectLanguage,
   moduleManifestFunctions,
   moduleSourceFiles,
+  isModuleSchema,
   type ProjectLanguage,
 } from "./module-artifact.js";
 import type {
@@ -1794,7 +1795,13 @@ function renderAPI(manifest: Manifest) {
     for (const part of parts.slice(0, -1)) {
       target = target[part] ??= {};
     }
-    const reference: Record<string, unknown> = { kind: entry.kind, path, ...(entry.delivery ? { delivery: entry.delivery } : {}) };
+    const reference: Record<string, unknown> = {
+      kind: entry.kind,
+      path,
+      ...(entry.delivery ? { delivery: entry.delivery } : {}),
+      ...(isModuleSchema(entry.args) ? { args: entry.args } : {}),
+      ...(isModuleSchema(entry.result) ? { result: entry.result } : {}),
+    };
     if (entry.delivery === "live" && entry.dependencies?.liveQueryPlan) {
       const plan = entry.dependencies.liveQueryPlan;
       reference.live = { entity: plan.table, key: plan.key, resultPath: plan.resultPath ?? [] };

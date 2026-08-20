@@ -157,6 +157,8 @@ export function moduleManifestFunctions(artifact: ModuleArtifact): Record<string
       kind: entry.kind,
       handler: entry.handler,
       file: entry.file,
+      ...(isModuleSchema(entry.args) ? { args: entry.args } : {}),
+      ...(isModuleSchema(entry.result) ? { result: entry.result } : {}),
       ...(entry.internal ? { internal: true } : {}),
       ...(entry.delivery ? { delivery: entry.delivery } : {}),
       ...(entry.dependencies ? { dependencies: entry.dependencies } : {}),
@@ -442,6 +444,19 @@ function moduleSchema(type?: string): ModuleSchema {
   // Schemas stay placeholders until codegen can lower TypeScript types into
   // JSON Schema; the declared type text is what the next generation resolves.
   return { placeholder: true, ...(declared ? { type: declared } : {}) };
+}
+
+/**
+ * Keep schema metadata opaque and language-neutral. A malformed artifact must
+ * not make an unchecked value visible in the generated manifest; the runtime
+ * remains responsible for any invocation validation it chooses to provide.
+ */
+export function isModuleSchema(value: unknown): value is ModuleSchema {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.placeholder !== true) return false;
+  if (record.type !== undefined && (typeof record.type !== "string" || !record.type.trim())) return false;
+  return Object.keys(record).every((key) => key === "placeholder" || key === "type");
 }
 
 function signatureTypes(text: string): { args?: string; result?: string } {
