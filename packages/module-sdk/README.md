@@ -27,6 +27,25 @@ app.reducer("tasks.start", {
 export default app;
 ```
 
+For TypeScript modules, the top-level helpers are executable declarations. The
+V8 runtime executes exported bindings (and calls their `handler`), so a module
+can export a reducer directly:
+
+```ts
+import { reducer, schema } from "@gonvex/module-sdk";
+
+export const startTask = reducer({
+  args: schema.object({ taskId: schema.id("tasks") }),
+  offline: { mode: "allowed", conflict: "expectedVersion" },
+  optimistic: {
+    effects: [
+      { operation: "patch", entity: "tasks", id: ["taskId"], fields: { status: "in_progress" } },
+    ],
+  },
+  run: async ({ db }, { taskId }) => db.update("tasks", taskId, { status: "in_progress" }),
+});
+```
+
 The host-specific implementation is intentionally separate from this SDK.
 The same manifest shape can describe a V8 TypeScript module or a Wasm module.
 

@@ -455,6 +455,107 @@ export type RegisteredFunction<Args, Result> = {
   readonly handler?: Handler<QueryContext, Args, Result> | Handler<ReducerContext, Args, Result> | Handler<ActionContext, Args, Result>;
 };
 
+/**
+ * Executable definition returned by the top-level declaration helpers.
+ *
+ * The module loader uses the exported binding itself as the declaration and
+ * invokes `handler` when a V8 request arrives. `options` retains the
+ * declarative input so hosts can project it into a manifest without needing
+ * to evaluate TypeScript source again.
+ */
+export type ModuleDefinition<Kind extends ModuleFunctionKind, Options> = {
+  readonly kind: Kind;
+  readonly internal?: boolean;
+  readonly delivery?: "oneShot" | "live" | "replica";
+  readonly livePlan?: LiveQueryPlan;
+  readonly replica?: ReplicaCollectionDefinition;
+  readonly options: Readonly<Options>;
+  readonly handler?: Options extends { readonly run?: infer HandlerType } ? HandlerType : never;
+};
+
+export type QueryDefinition<Args, Result> = ModuleDefinition<"query", QueryOptions<Args, Result>>;
+export type ReducerDefinition<Args, Result> = ModuleDefinition<"reducer", ReducerOptions<Args, Result>>;
+export type ActionDefinition<Args, Result> = ModuleDefinition<"action", ActionOptions<Args, Result>>;
+
+const executableOptions = <T extends object>(options: T): Readonly<T> => freeze({ ...options });
+
+const queryDefinition = <Args, Result>(
+  options: QueryOptions<Args, Result>,
+  deliveryOverride?: "live" | "replica",
+): QueryDefinition<Args, Result> => {
+  const livePlan = options.liveQueryPlan ?? options.livePlan;
+  const replica = options.replicaCollection ?? options.replica;
+  const delivery = deliveryOverride ?? options.delivery ?? (replica ? "replica" : livePlan ? "live" : "oneShot");
+  if (delivery === "live" && !livePlan) throw new Error("live query requires a live query plan");
+  if (delivery === "replica") {
+    if (!replica) throw new Error("replica collection requires a replica definition");
+    validateReplicaCollection(replica, "<export>");
+  }
+  return freeze({
+    kind: "query",
+    delivery,
+    livePlan,
+    replica,
+    options: executableOptions(options),
+    handler: options.run,
+  });
+};
+
+/** Declare an executable one-shot, live, or replica query export. */
+export function query<Args = JsonValue, Result = JsonValue>(options: QueryOptions<Args, Result> = {}): QueryDefinition<Args, Result> {
+  return queryDefinition(options);
+}
+
+/** Declare an executable live query export with a structured live plan. */
+export function liveQuery<Args = JsonValue, Result = JsonValue>(options: Omit<QueryOptions<Args, Result>, "delivery"> = {}): QueryDefinition<Args, Result> {
+  return queryDefinition({ ...options, delivery: "live" }, "live");
+}
+
+/** Declare an executable bounded replica collection export. */
+export function replicaCollection<Args = JsonValue, Result = JsonValue>(options: ReplicaCollectionOptions<Args, Result>): QueryDefinition<Args, Result> {
+  return queryDefinition({ ...options, delivery: "replica", replica: options.replica }, "replica");
+}
+
+const reducerDefinition = <Args, Result>(
+  options: ReducerOptions<Args, Result>,
+  internal = false,
+): ReducerDefinition<Args, Result> => {
+  validateOfflinePolicy(options.offline, "<export>");
+  if (options.optimistic !== undefined) validateOptimisticTransaction(options.optimistic, "<export>");
+  if (options.interactive === false && options.optimistic !== undefined) {
+    throw new Error("non-interactive reducer <export> cannot declare optimistic metadata");
+  }
+  if (options.interactive !== false && options.optimistic === undefined && !options.nonOptimisticReason?.trim()) {
+    throw new Error("interactive reducer <export> requires an optimistic transaction or nonOptimisticReason");
+  }
+  return freeze({
+    kind: "reducer",
+    internal: internal || options.internal,
+    options: executableOptions(options),
+    handler: options.run,
+  });
+};
+
+/** Declare an executable public reducer export. */
+export function reducer<Args = JsonValue, Result = JsonValue>(options: ReducerOptions<Args, Result>): ReducerDefinition<Args, Result> {
+  return reducerDefinition(options);
+}
+
+/** Declare an executable non-interactive internal reducer export. */
+export function internalReducer<Args = JsonValue, Result = JsonValue>(options: InternalReducerOptions<Args, Result>): ReducerDefinition<Args, Result> {
+  return reducerDefinition({
+    ...options,
+    offline: options.offline ?? { mode: "forbidden" },
+    interactive: false,
+    internal: true,
+  }, true);
+}
+
+/** Declare an executable action export. */
+export function action<Args = JsonValue, Result = JsonValue>(options: ActionOptions<Args, Result> = {}): ActionDefinition<Args, Result> {
+  return freeze({ kind: "action", options: executableOptions(options), handler: options.run });
+}
+
 export class ModuleBuilder {
   readonly manifestCollector: ModuleManifestCollector;
   private readonly runtimeEntries = new Map<string, RuntimeFunctionRegistration>();
