@@ -24,13 +24,13 @@ type legacyIdentityInventory struct {
 }
 
 type identityMigrationSummary struct {
-	LegacyRows          int    `json:"legacyRows"`
-	UniqueAccounts      int    `json:"uniqueAccounts"`
-	ProviderMatches     int    `json:"providerMatches"`
-	VerifiedEmailMatches int   `json:"verifiedEmailMatches"`
-	NewAccounts         int    `json:"newAccounts"`
-	AmbiguousCollisions int    `json:"ambiguousCollisions"`
-	PlanChecksum        string `json:"planChecksum"`
+	LegacyRows           int    `json:"legacyRows"`
+	UniqueAccounts       int    `json:"uniqueAccounts"`
+	ProviderMatches      int    `json:"providerMatches"`
+	VerifiedEmailMatches int    `json:"verifiedEmailMatches"`
+	NewAccounts          int    `json:"newAccounts"`
+	AmbiguousCollisions  int    `json:"ambiguousCollisions"`
+	PlanChecksum         string `json:"planChecksum"`
 }
 
 type identityMigrationOutput struct {
@@ -317,18 +317,18 @@ func matchIdentityPlanFlags(plan identity.MigrationPlan, runID, source string) e
 func printIdentityMigrationResult(jsonOutput bool, operation, planFile string, plan identity.MigrationPlan, verification *identity.VerificationResult) error {
 	output := identityMigrationOutput{
 		Operation: operation,
-		RunID: plan.RunID,
-		Source: plan.Source,
-		PlanFile: planFile,
-		Scope: identityMigrationScope,
+		RunID:     plan.RunID,
+		Source:    plan.Source,
+		PlanFile:  planFile,
+		Scope:     identityMigrationScope,
 		Summary: identityMigrationSummary{
-			LegacyRows: plan.LegacyRows,
-			UniqueAccounts: plan.UniqueAccounts,
-			ProviderMatches: plan.ProviderMatches,
+			LegacyRows:           plan.LegacyRows,
+			UniqueAccounts:       plan.UniqueAccounts,
+			ProviderMatches:      plan.ProviderMatches,
 			VerifiedEmailMatches: plan.EmailMatches,
-			NewAccounts: plan.NewAccounts,
-			AmbiguousCollisions: plan.AmbiguousCollisions,
-			PlanChecksum: plan.Checksum,
+			NewAccounts:          plan.NewAccounts,
+			AmbiguousCollisions:  plan.AmbiguousCollisions,
+			PlanChecksum:         plan.Checksum,
 		},
 		Verification: verification,
 	}

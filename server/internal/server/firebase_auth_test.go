@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
+	"github.com/gonvex/gonvex/pkg/moduleengine"
 	"github.com/gonvex/gonvex/server/internal/config"
 )
 
@@ -164,7 +165,7 @@ func TestPublicHTTPPassesOpaqueBearerToApplicationAuth(t *testing.T) {
 			Body:   []byte(credential[0]),
 		}, nil
 	})
-	runtime.app = app
+	runtime.appEngine = moduleengine.NewGoAppEngine(app)
 
 	request := httptest.NewRequest(http.MethodGet, "/external-api", nil)
 	request.Header.Set("x-gonvex-project-id", "whagons-project")
@@ -198,7 +199,7 @@ func TestPublicHTTPPassesOpaqueBearerWithoutFirebaseConfiguration(t *testing.T) 
 			Body:   []byte(request.Headers["authorization"][0]),
 		}, nil
 	})
-	runtime.app = app
+	runtime.appEngine = moduleengine.NewGoAppEngine(app)
 
 	request := httptest.NewRequest(http.MethodGet, "/external-api", nil)
 	request.Header.Set("authorization", "Bearer whg_live_test_credential")
@@ -221,7 +222,7 @@ func TestPublicHTTPStillRejectsMalformedFirebaseJWT(t *testing.T) {
 	app.PublicHTTP("/external-api", func(_ *gonvex.HTTPContext, _ gonvex.HTTPRequest) (gonvex.HTTPResponse, error) {
 		return gonvex.HTTPResponse{Status: http.StatusOK}, nil
 	})
-	runtime.app = app
+	runtime.appEngine = moduleengine.NewGoAppEngine(app)
 
 	request := httptest.NewRequest(http.MethodGet, "/external-api", nil)
 	request.Header.Set("authorization", "Bearer not-base64.not-base64.not-base64")
@@ -247,7 +248,7 @@ func TestPublicHTTPReceivesVerifiedFirebaseCaller(t *testing.T) {
 		}
 		return gonvex.HTTPResponse{Status: http.StatusOK, Body: []byte(ctx.User.ID)}, nil
 	})
-	runtime.app = app
+	runtime.appEngine = moduleengine.NewGoAppEngine(app)
 
 	request := httptest.NewRequest(http.MethodGet, "/optional-user", nil)
 	request.Header.Set("authorization", "Bearer "+signer.token(t, validFirebaseClaims("whagons-5")))
@@ -270,7 +271,7 @@ func TestProtectedHTTPRejectsOpaqueApplicationBearer(t *testing.T) {
 	app.HTTP("/protected", func(_ *gonvex.HTTPContext, _ gonvex.HTTPRequest) (gonvex.HTTPResponse, error) {
 		return gonvex.HTTPResponse{Status: http.StatusOK}, nil
 	})
-	runtime.app = app
+	runtime.appEngine = moduleengine.NewGoAppEngine(app)
 
 	request := httptest.NewRequest(http.MethodGet, "/protected", nil)
 	request.Header.Set("authorization", "Bearer whg_live_test_credential")

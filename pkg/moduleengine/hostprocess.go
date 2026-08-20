@@ -86,11 +86,11 @@ type RemoteHost struct {
 	options HostOptions
 	managed bool
 
-	mu       sync.Mutex
-	session  *session
-	process  *hostProcess
-	epoch    uint64
-	closed   bool
+	mu          sync.Mutex
+	session     *session
+	process     *hostProcess
+	epoch       uint64
+	closed      bool
 	socketOwned string
 }
 

@@ -352,7 +352,7 @@ const normalizePath = (path: string): string => {
   return normalized;
 };
 
-const validateOfflinePolicy = (value: unknown, path: string): asserts value is OfflinePolicy => {
+const validateOfflinePolicy: (value: unknown, path: string) => asserts value is OfflinePolicy = (value, path) => {
   if (!isRecord(value) || (value.mode !== "forbidden" && value.mode !== "allowed" && value.mode !== "onlineOnly")) {
     throw new Error(`reducer ${path} must declare a valid offline policy`);
   }
@@ -365,7 +365,7 @@ const validateOfflinePolicy = (value: unknown, path: string): asserts value is O
   }
 };
 
-const validateOptimisticTransaction = (value: unknown, path: string): asserts value is OptimisticTransaction => {
+const validateOptimisticTransaction: (value: unknown, path: string) => asserts value is OptimisticTransaction = (value, path) => {
   if (!isRecord(value) || !Array.isArray(value.effects) || value.effects.length === 0) {
     throw new Error(`reducer ${path} optimistic metadata must contain a non-empty effects array`);
   }
@@ -391,7 +391,7 @@ const validateOptimisticTransaction = (value: unknown, path: string): asserts va
   }
 };
 
-const validateReplicaCollection = (value: unknown, path: string): asserts value is ReplicaCollectionDefinition => {
+const validateReplicaCollection: (value: unknown, path: string) => asserts value is ReplicaCollectionDefinition = (value, path) => {
   if (!isRecord(value) || typeof value.table !== "string" || !value.table.trim() ||
     typeof value.key !== "string" || !value.key.trim() || !Array.isArray(value.columns) ||
     value.columns.some((column) => typeof column !== "string" || !column.trim())) {

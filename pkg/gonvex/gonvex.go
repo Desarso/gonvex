@@ -377,13 +377,13 @@ type RuntimeContext struct {
 	// Application business state must remain in the selected tenant DB.
 	ControlPlaneDB *sql.DB
 	// LandlordDB is a compatibility alias removed after identity-v2 cutover.
-	LandlordDB  *sql.DB
-	TenantDB    *sql.DB
-	Tx          *sql.Tx
-	Storage     StorageAPI
-	Sandbox     SandboxAPI
-	Data        DataAPI
-	Ephemeral   EphemeralAPI
+	LandlordDB *sql.DB
+	TenantDB   *sql.DB
+	Tx         *sql.Tx
+	Storage    StorageAPI
+	Sandbox    SandboxAPI
+	Data       DataAPI
+	Ephemeral  EphemeralAPI
 	// ProjectEphemeral is shared by every tenant in this project. Use it only
 	// for deliberately cross-tenant transient state such as an operator-facing
 	// live-session registry; ordinary app presence belongs in Ephemeral.

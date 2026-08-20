@@ -619,7 +619,7 @@ function parseLiveQueryPlan(value: JsonValue | undefined): LiveQueryPlan | undef
   const sortDefaultColumn = stringMember(sortValue, "defaultColumn");
   const sortDefaultDirection = stringMember(sortValue, "defaultDirection");
   const sortAllowedColumns = stringArray(readMember(sortValue, "allowedColumns"));
-  if (sortDefaultColumn && sortDefaultDirection && sortAllowedColumns) {
+  if (sortDefaultColumn && (sortDefaultDirection === "asc" || sortDefaultDirection === "desc") && sortAllowedColumns) {
     plan.sort = {
       columnArgument: stringMember(sortValue, "columnArgument"),
       directionArgument: stringMember(sortValue, "directionArgument"),

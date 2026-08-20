@@ -35,7 +35,7 @@ class FakeGonvexClient {
   readonly setAuth = vi.fn();
   subscribedArgs: unknown[] = [];
   subscribedRefs: FunctionReference[] = [];
-  watchedSyncRefs: FunctionReference[] = [];
+  watchedReplicaRefs: FunctionReference[] = [];
   readonly syncRows: unknown[] = [];
   state: ConnectionState = {
     isWebSocketConnected: true,
@@ -57,10 +57,10 @@ class FakeGonvexClient {
     };
   }
 
-  watchSync(ref: FunctionReference) {
-    this.watchedSyncRefs.push(ref);
+  watchReplica(ref: FunctionReference) {
+    this.watchedReplicaRefs.push(ref);
     return {
-      localSyncResult: () => this.syncRows,
+      localReplicaResult: () => this.syncRows,
       onUpdate: () => () => undefined,
     };
   }
@@ -303,7 +303,7 @@ describe("useReplicaCollection", () => {
 
     renderHook(() => useReplicaCollection(projectedRef, {}), { wrapper: wrapperFor(client) });
 
-    expect(client.watchedSyncRefs.at(-1)).toBe(projectedRef);
+    expect(client.watchedReplicaRefs.at(-1)).toBe(projectedRef);
   });
 });
 

@@ -139,6 +139,10 @@ async function flushAsyncWork() {
   await vi.advanceTimersByTimeAsync(0);
 }
 
+async function flushReplicaWork() {
+  for (let index = 0; index < 10; index += 1) await Promise.resolve();
+}
+
 function openSync(client: GonvexClient, handler: ReturnType<typeof vi.fn>) {
   client.subscribeSync(syncRef, {}, handler);
   const socket = latestSocket();
@@ -297,6 +301,7 @@ describe("optimistic reducer integration", () => {
       upserts: [{ id: "task-a", title: "Server confirmed" }],
       originCommandIds: [call.id],
     });
+    await flushReplicaWork();
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Server confirmed" }],
     });
@@ -459,6 +464,7 @@ describe("optimistic reducer integration", () => {
       cursor: { epoch: "sync-late", revision: 1 },
       key: "id",
     });
+    await flushReplicaWork();
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Optimistic title" }],
     });
@@ -471,6 +477,7 @@ describe("optimistic reducer integration", () => {
       upserts: [{ id: "task-a", title: "Server confirmed" }],
       originCommandIds: [call.id],
     });
+    await flushReplicaWork();
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Server confirmed" }],
     });
@@ -587,6 +594,7 @@ describe("optimistic reducer integration", () => {
 
     const handler = vi.fn();
     openSync(secondClient, handler);
+    await flushReplicaWork();
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Restored title" }],
     });
@@ -687,6 +695,7 @@ describe("optimistic reducer integration", () => {
 
     const handler = vi.fn();
     const secondSocket = openSync(secondClient, handler);
+    await flushReplicaWork();
     expect(handler.mock.calls.at(-1)?.[0]).toMatchObject({
       result: [{ id: "task-a", title: "Durable online title" }],
     });
@@ -698,6 +707,7 @@ describe("optimistic reducer integration", () => {
       upserts: [{ id: "task-a", title: "Server confirmed" }],
       originCommandIds: [call.id],
     });
+    await flushReplicaWork();
     expect(secondClient.optimisticOverlay.pendingFor(syncRef.path, "task-a")).toBe(false);
     await waitForOutboxCount(secondClient, 0);
     expect(secondClient.optimisticOverlay.pendingFor(syncRef.path, "task-a")).toBe(false);

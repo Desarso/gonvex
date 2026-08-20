@@ -10,9 +10,7 @@
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use gonvex_module_runtime::{
-    FunctionContract, ModuleArtifact, ModuleLanguage, ModuleManifest,
-};
+use gonvex_module_runtime::{FunctionContract, ModuleArtifact, ModuleLanguage, ModuleManifest};
 use sha2::{Digest, Sha256};
 
 use crate::protocol::{codes, parse_kind, FunctionSummary, ModuleArtifactWire, WireError};
@@ -35,12 +33,14 @@ pub fn decode(
         ));
     }
 
-    let code = BASE64.decode(wire.javascript.code.as_bytes()).map_err(|err| {
-        WireError::new(
-            codes::INVALID_ARTIFACT,
-            format!("module {module_id} JavaScript is not valid base64: {err}"),
-        )
-    })?;
+    let code = BASE64
+        .decode(wire.javascript.code.as_bytes())
+        .map_err(|err| {
+            WireError::new(
+                codes::INVALID_ARTIFACT,
+                format!("module {module_id} JavaScript is not valid base64: {err}"),
+            )
+        })?;
     if code.is_empty() {
         return Err(WireError::new(
             codes::INVALID_ARTIFACT,
@@ -85,7 +85,10 @@ pub fn decode(
         let kind = parse_kind(function.kind.trim()).ok_or_else(|| {
             WireError::new(
                 codes::INVALID_ARTIFACT,
-                format!("module {module_id} function {path} has unknown kind {}", function.kind),
+                format!(
+                    "module {module_id} function {path} has unknown kind {}",
+                    function.kind
+                ),
             )
         })?;
 
@@ -117,7 +120,11 @@ pub fn decode(
 
     let mut metadata = wire.metadata;
     insert_text(&mut metadata, "entrypoint", Some(wire.entrypoint.as_str()));
-    insert_text(&mut metadata, "javascriptPath", Some(wire.javascript.path.as_str()));
+    insert_text(
+        &mut metadata,
+        "javascriptPath",
+        Some(wire.javascript.path.as_str()),
+    );
 
     let artifact_hash = if wire.artifact_hash.trim().is_empty() {
         actual

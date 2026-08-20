@@ -40,6 +40,14 @@ use crate::dispatch::effective_capabilities;
 use crate::isolate::{CallSpec, HostRequest, ModuleSource, WorkerCall};
 use crate::pool::IsolatePool;
 
+/// Initialize V8 on the process's common parent thread before any isolate
+/// workers are spawned. Since V8 11.6, allowing the first worker to perform
+/// lazy initialization makes later generations created by sibling threads
+/// abort the process instead of loading alongside the active generation.
+pub fn initialize_v8_platform() {
+    deno_core::JsRuntime::init_platform(None, false);
+}
+
 #[derive(Clone, Debug)]
 pub struct V8Config {
     /// Ceiling on one isolate's V8 heap. Crossing it terminates the running
@@ -90,7 +98,9 @@ impl V8ModuleEngine {
             ));
         }
         if artifact.payload.is_empty() {
-            return Err(ModuleError::InvalidArtifact("empty JavaScript artifact".to_owned()));
+            return Err(ModuleError::InvalidArtifact(
+                "empty JavaScript artifact".to_owned(),
+            ));
         }
         let code = String::from_utf8(artifact.payload).map_err(|_| {
             ModuleError::InvalidArtifact("JavaScript artifact is not valid UTF-8".to_owned())
@@ -98,7 +108,10 @@ impl V8ModuleEngine {
 
         let mut functions = HashMap::with_capacity(artifact.manifest.functions.len());
         for contract in &artifact.manifest.functions {
-            if functions.insert(contract.path.clone(), contract.clone()).is_some() {
+            if functions
+                .insert(contract.path.clone(), contract.clone())
+                .is_some()
+            {
                 return Err(ModuleError::InvalidArtifact(format!(
                     "module declares function {} twice",
                     contract.path

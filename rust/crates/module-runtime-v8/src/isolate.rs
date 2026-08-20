@@ -18,8 +18,8 @@ use deno_core::{
     extension, op2, v8, JsRuntime, ModuleSpecifier, OpState, PollEventLoopOptions, RuntimeOptions,
 };
 use gonvex_module_runtime::{
-    Capabilities, FunctionContract, HostCall, HostError, HostResponse, Invocation, InvocationResult,
-    ModuleError,
+    Capabilities, FunctionContract, HostCall, HostError, HostResponse, Invocation,
+    InvocationResult, ModuleError,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -41,12 +41,25 @@ impl ModuleSource {
     pub(crate) fn new(module_id: &str, code: String) -> Result<Self, ModuleError> {
         let slug: String = module_id
             .chars()
-            .map(|character| if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') { character } else { '_' })
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                    character
+                } else {
+                    '_'
+                }
+            })
             .collect();
-        let slug = if slug.is_empty() { "module".to_owned() } else { slug };
-        let specifier = ModuleSpecifier::parse(&format!("file:///gonvex/{slug}/module.js")).map_err(|err| {
-            ModuleError::InvalidArtifact(format!("module id {module_id} is not a usable module specifier: {err}"))
-        })?;
+        let slug = if slug.is_empty() {
+            "module".to_owned()
+        } else {
+            slug
+        };
+        let specifier = ModuleSpecifier::parse(&format!("file:///gonvex/{slug}/module.js"))
+            .map_err(|err| {
+                ModuleError::InvalidArtifact(format!(
+                    "module id {module_id} is not a usable module specifier: {err}"
+                ))
+            })?;
         Ok(Self { specifier, code })
     }
 }
@@ -101,7 +114,9 @@ impl IsolateWorker {
         thread::Builder::new()
             .name("gonvex-module-isolate".to_owned())
             .spawn(move || worker_main(source, config, ready, call_receiver))
-            .map_err(|err| ModuleError::Execution(format!("failed to start module isolate thread: {err}")))?;
+            .map_err(|err| {
+                ModuleError::Execution(format!("failed to start module isolate thread: {err}"))
+            })?;
         Ok((Self { calls }, ready_receiver))
     }
 
@@ -122,7 +137,10 @@ fn worker_main(
     ready: oneshot::Sender<Result<(), ModuleError>>,
     calls: mpsc::UnboundedReceiver<WorkerCall>,
 ) {
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(err) => {
             let _ = ready.send(Err(ModuleError::Execution(format!(
@@ -217,12 +235,16 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
         };
         if let Err(err) = call.check_capability(&active.capabilities) {
             let message = err.to_string();
-            active.violation.get_or_insert(Violation::Denied(message.clone()));
+            active
+                .violation
+                .get_or_insert(Violation::Denied(message.clone()));
             return HostCallOutcome::denied(message);
         }
         if active.remaining_host_calls == 0 {
             let message = "module exhausted its host call budget".to_owned();
-            active.violation.get_or_insert(Violation::Budget(message.clone()));
+            active
+                .violation
+                .get_or_insert(Violation::Budget(message.clone()));
             return HostCallOutcome::failed(message);
         }
         active.remaining_host_calls -= 1;
@@ -230,7 +252,9 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
         let (reply, response) = oneshot::channel();
         if active.host.send(HostRequest { call, reply }).is_err() {
             let message = "module host bridge closed".to_owned();
-            active.violation.get_or_insert(Violation::Bridge(message.clone()));
+            active
+                .violation
+                .get_or_insert(Violation::Bridge(message.clone()));
             return HostCallOutcome::failed(message);
         }
         response
@@ -250,7 +274,9 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
             let message = "module host bridge closed before responding".to_owned();
             let mut op_state = state.borrow_mut();
             if let Some(active) = op_state.borrow_mut::<InvocationSlot>().active.as_mut() {
-                active.violation.get_or_insert(Violation::Bridge(message.clone()));
+                active
+                    .violation
+                    .get_or_insert(Violation::Bridge(message.clone()));
             }
             HostCallOutcome::failed(message)
         }
@@ -275,14 +301,17 @@ struct ModuleIsolate {
 impl ModuleIsolate {
     async fn create(source: &ModuleSource, config: V8Config) -> Result<Self, ModuleError> {
         let mut runtime = JsRuntime::new(RuntimeOptions {
-            extensions: vec![gonvex_host::init()],
+            extensions: vec![gonvex_host::init_ops()],
             // No module loader is installed: the artifact must be one
             // self-contained ESM bundle, so nothing the isolate runs can be
             // fetched at call time.
             create_params: Some(v8::CreateParams::default().heap_limits(0, config.max_heap_bytes)),
             ..Default::default()
         });
-        runtime.op_state().borrow_mut().put(InvocationSlot::default());
+        runtime
+            .op_state()
+            .borrow_mut()
+            .put(InvocationSlot::default());
 
         let terminated = Arc::new(AtomicBool::new(false));
         let heap_exhausted = Arc::new(AtomicBool::new(false));
@@ -295,7 +324,9 @@ impl ModuleIsolate {
                 handle.terminate_execution();
                 // Raising the limit gives V8 the headroom to unwind the
                 // terminated call; the isolate is retired straight after.
-                current.saturating_add(current / 2).max(current.saturating_add(1024 * 1024))
+                current
+                    .saturating_add(current / 2)
+                    .max(current.saturating_add(1024 * 1024))
             });
         }
 
@@ -307,26 +338,35 @@ impl ModuleIsolate {
         let dispatch = {
             let scope = &mut runtime.handle_scope();
             let value = v8::Local::new(scope, &dispatch);
-            let function = v8::Local::<v8::Function>::try_from(value)
-                .map_err(|_| ModuleError::Execution("module bootstrap did not evaluate to a dispatcher".to_owned()))?;
+            let function = v8::Local::<v8::Function>::try_from(value).map_err(|_| {
+                ModuleError::Execution(
+                    "module bootstrap did not evaluate to a dispatcher".to_owned(),
+                )
+            })?;
             v8::Global::new(scope, function)
         };
 
         let module = runtime
             .load_main_es_module_from_code(&source.specifier, source.code.clone())
             .await
-            .map_err(|err| ModuleError::InvalidArtifact(format!("failed to load JavaScript bundle: {err}")))?;
+            .map_err(|err| {
+                ModuleError::InvalidArtifact(format!("failed to load JavaScript bundle: {err}"))
+            })?;
         let evaluated = runtime.mod_evaluate(module);
         runtime
             .run_event_loop(PollEventLoopOptions::default())
             .await
-            .map_err(|err| ModuleError::InvalidArtifact(format!("JavaScript bundle failed to initialize: {err}")))?;
-        evaluated
-            .await
-            .map_err(|err| ModuleError::InvalidArtifact(format!("JavaScript bundle failed to evaluate: {err}")))?;
-        let namespace = runtime
-            .get_module_namespace(module)
-            .map_err(|err| ModuleError::InvalidArtifact(format!("JavaScript bundle exposes no exports: {err}")))?;
+            .map_err(|err| {
+                ModuleError::InvalidArtifact(format!(
+                    "JavaScript bundle failed to initialize: {err}"
+                ))
+            })?;
+        evaluated.await.map_err(|err| {
+            ModuleError::InvalidArtifact(format!("JavaScript bundle failed to evaluate: {err}"))
+        })?;
+        let namespace = runtime.get_module_namespace(module).map_err(|err| {
+            ModuleError::InvalidArtifact(format!("JavaScript bundle exposes no exports: {err}"))
+        })?;
 
         let watchdog = Watchdog::spawn(handle, Arc::clone(&terminated))?;
         Ok(Self {
@@ -343,7 +383,12 @@ impl ModuleIsolate {
     async fn run(&mut self, spec: CallSpec) -> WorkerReply {
         let handler = match self.resolve_handler(&spec.contract) {
             Ok(handler) => handler,
-            Err(err) => return WorkerReply { result: Err(err), healthy: true },
+            Err(err) => {
+                return WorkerReply {
+                    result: Err(err),
+                    healthy: true,
+                }
+            }
         };
         let args = match std::str::from_utf8(&spec.invocation.args) {
             Ok(args) => args,
@@ -369,7 +414,9 @@ impl ModuleIsolate {
             Ok(request) => request,
             Err(err) => {
                 return WorkerReply {
-                    result: Err(ModuleError::Execution(format!("failed to encode the invocation: {err}"))),
+                    result: Err(ModuleError::Execution(format!(
+                        "failed to encode the invocation: {err}"
+                    ))),
                     healthy: true,
                 }
             }
@@ -383,7 +430,11 @@ impl ModuleIsolate {
                 (Some(request), Some(args)) => {
                     let request: v8::Local<v8::Value> = request.into();
                     let args: v8::Local<v8::Value> = args.into();
-                    vec![handler, v8::Global::new(scope, request), v8::Global::new(scope, args)]
+                    vec![
+                        handler,
+                        v8::Global::new(scope, request),
+                        v8::Global::new(scope, args),
+                    ]
                 }
                 // V8 refuses strings past its own maximum length.
                 _ => {
@@ -397,7 +448,11 @@ impl ModuleIsolate {
             }
         };
 
-        self.runtime.op_state().borrow_mut().borrow_mut::<InvocationSlot>().active = Some(ActiveCall {
+        self.runtime
+            .op_state()
+            .borrow_mut()
+            .borrow_mut::<InvocationSlot>()
+            .active = Some(ActiveCall {
             capabilities: spec.capabilities,
             host: spec.host,
             remaining_host_calls: spec.max_host_calls,
@@ -460,14 +515,20 @@ impl ModuleIsolate {
                     // The dispatcher answers handler failures with an envelope,
                     // so a rejected call means the isolate itself is suspect.
                     healthy = false;
-                    Err(ModuleError::Execution(format!("module dispatch failed: {err}")))
+                    Err(ModuleError::Execution(format!(
+                        "module dispatch failed: {err}"
+                    )))
                 }
             }
         };
         WorkerReply { result, healthy }
     }
 
-    fn decode(&mut self, value: v8::Global<v8::Value>, max_result_bytes: usize) -> Result<InvocationResult, ModuleError> {
+    fn decode(
+        &mut self,
+        value: v8::Global<v8::Value>,
+        max_result_bytes: usize,
+    ) -> Result<InvocationResult, ModuleError> {
         let envelope = {
             let scope = &mut self.runtime.handle_scope();
             let value = v8::Local::new(scope, &value);
@@ -497,7 +558,10 @@ impl ModuleIsolate {
     /// namespaces (`messages.list`), name an export after the full path, or
     /// export handlers flat; the manifest's `export`/`handler` metadata wins
     /// over all of it when the pipeline records one.
-    fn resolve_handler(&mut self, contract: &FunctionContract) -> Result<v8::Global<v8::Value>, ModuleError> {
+    fn resolve_handler(
+        &mut self,
+        contract: &FunctionContract,
+    ) -> Result<v8::Global<v8::Value>, ModuleError> {
         let candidates = handler_candidates(contract);
         let exports = &self.namespace;
         let scope = &mut self.runtime.handle_scope();
@@ -589,7 +653,9 @@ impl Watchdog {
         thread::Builder::new()
             .name("gonvex-module-watchdog".to_owned())
             .spawn(move || watchdog_main(handle, terminated, inbox))
-            .map_err(|err| ModuleError::Execution(format!("failed to start module watchdog thread: {err}")))?;
+            .map_err(|err| {
+                ModuleError::Execution(format!("failed to start module watchdog thread: {err}"))
+            })?;
         Ok(Self { signals })
     }
 
@@ -599,7 +665,11 @@ impl Watchdog {
 
     fn disarm(&self) {
         let (acknowledge, acknowledged) = sync_mpsc::channel();
-        if self.signals.send(WatchdogSignal::Disarm(acknowledge)).is_ok() {
+        if self
+            .signals
+            .send(WatchdogSignal::Disarm(acknowledge))
+            .is_ok()
+        {
             // Errors here mean the watchdog thread is gone, which disarms it
             // just as effectively.
             let _ = acknowledged.recv();

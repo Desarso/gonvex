@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
+	"github.com/gonvex/gonvex/pkg/moduleengine"
 	"github.com/gonvex/gonvex/server/internal/config"
 )
 
@@ -294,7 +295,7 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 		}
 		return gonvex.HTTPResponse{Status: http.StatusAccepted}, nil
 	})
-	runtime.app = app
+	runtime.appEngine = moduleengine.NewGoAppEngine(app)
 	anonymousHTTPRequest := httptest.NewRequest(http.MethodGet, "/protected-account", nil)
 	anonymousHTTPRequest.Header.Set("x-gonvex-project-id", projectID)
 	anonymousHTTPResponse := httptest.NewRecorder()

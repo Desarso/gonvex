@@ -603,7 +603,11 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		for _, sub := range oldSubs {
 			c.server.subscriptions.detach(sub)
 		}
-		authResult := map[string]any{"userId": user.ID, "projectId": project, "tenantId": tenant}
+		userID := ""
+		if user != nil {
+			userID = user.ID
+		}
+		authResult := map[string]any{"userId": userID, "projectId": project, "tenantId": tenant}
 		if directive != nil {
 			authResult["queryCache"] = directive
 		}

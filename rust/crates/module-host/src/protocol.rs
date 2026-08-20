@@ -37,11 +37,9 @@ pub mod codes {
     pub const MODULE_NOT_LOADED: &str = "module_not_loaded";
     pub const FUNCTION_NOT_FOUND: &str = "function_not_found";
     pub const WRONG_FUNCTION_KIND: &str = "wrong_function_kind";
-    pub const DEADLINE_EXCEEDED: &str = "deadline_exceeded";
     pub const BUDGET_EXCEEDED: &str = "budget_exceeded";
     pub const EXECUTION_FAILED: &str = "execution_failed";
     pub const CANCELLED: &str = "cancelled";
-    pub const OVERLOADED: &str = "overloaded";
     pub const SHUTTING_DOWN: &str = "shutting_down";
     pub const HOST_CALL_FAILED: &str = "host_call_failed";
 }
@@ -77,6 +75,9 @@ impl WireError {
 /// Frames the Go runtime sends.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
+// Frames are decoded once and dispatched immediately; boxing individual wire
+// variants would add protocol plumbing without reducing retained host memory.
+#[allow(clippy::large_enum_variant)]
 pub enum ClientFrame {
     // `rename_all` on the enum names the variants; struct-variant fields need
     // their own annotation, which is why every multi-word field carries one.
@@ -106,6 +107,7 @@ pub enum ClientFrame {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)]
 pub enum RequestOp {
     Ping,
     Load(LoadRequest),

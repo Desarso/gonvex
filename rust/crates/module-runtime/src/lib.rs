@@ -298,5 +298,7 @@ pub trait ModuleEngine: Send + Sync {
 }
 
 pub fn remaining_budget(context: &InvocationContext) -> Option<Duration> {
-    context.deadline.and_then(|deadline| deadline.duration_since(SystemTime::now()).ok())
+    context
+        .deadline
+        .and_then(|deadline| deadline.duration_since(SystemTime::now()).ok())
 }

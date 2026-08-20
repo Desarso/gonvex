@@ -171,7 +171,8 @@ pub(crate) enum HostCallRequest {
 impl HostCallRequest {
     pub(crate) fn into_host_call(self) -> Result<HostCall, String> {
         let encode = |value: serde_json::Value| {
-            serde_json::to_vec(&value).map_err(|err| format!("host call payload is not encodable: {err}"))
+            serde_json::to_vec(&value)
+                .map_err(|err| format!("host call payload is not encodable: {err}"))
         };
         // An empty key column means "the host's default", which keeps the
         // module from having to know the primary key of every table.
@@ -284,7 +285,9 @@ enum DispatchOutcome {
 /// engine failure never look alike.
 pub(crate) fn decode_result(envelope: &str) -> Result<Vec<u8>, ModuleError> {
     let outcome: DispatchOutcome = serde_json::from_str(envelope).map_err(|err| {
-        ModuleError::Execution(format!("module dispatcher returned an unreadable envelope: {err}"))
+        ModuleError::Execution(format!(
+            "module dispatcher returned an unreadable envelope: {err}"
+        ))
     })?;
     match outcome {
         DispatchOutcome::Ok { value } => Ok(value.into_bytes()),

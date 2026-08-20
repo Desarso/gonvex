@@ -1040,8 +1040,8 @@ func (s *Server) handleAppAuthMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"project": identity.ProjectID,
 		"account": gonvex.Account{ID: identity.User.accountID(), Email: identity.User.Email, Name: identity.User.Name, AvatarURL: identity.User.Picture},
-		"member": member,
-		"user": identity.User,
+		"member":  member,
+		"user":    identity.User,
 		"tenants": tenants, "activeTenantId": activeTenantID,
 	})
 }

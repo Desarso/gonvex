@@ -32,7 +32,7 @@ impl GenerationEntry {
     }
 
     fn acquire(self: &Arc<Self>) -> Option<GenerationLease> {
-        let mut retiring = self.retiring.lock().expect("generation retirement lock");
+        let retiring = self.retiring.lock().expect("generation retirement lock");
         if *retiring {
             return None;
         }
@@ -166,7 +166,7 @@ impl GenerationRegistry {
             current.retire();
         }
         let next = Arc::new(GenerationEntry::new(engine));
-        let previous = std::mem::replace(&mut *active, Some(Arc::clone(&next)));
+        let previous = active.replace(Arc::clone(&next));
         self.generations
             .lock()
             .expect("generation registry lock")
@@ -245,7 +245,10 @@ impl GenerationRegistry {
             drained &= entry.wait_for_drain(timeout);
         }
         if drained {
-            self.generations.lock().expect("generation registry lock").clear();
+            self.generations
+                .lock()
+                .expect("generation registry lock")
+                .clear();
         }
         drained
     }
@@ -321,7 +324,11 @@ impl ModuleRegistry {
     /// builds an engine, because the generation is part of the engine's own
     /// manifest, and a caller that supplies its own generation must still be
     /// strictly ahead of everything this process has issued or activated.
-    pub fn reserve_generation(&self, module_id: &str, requested: Option<u64>) -> Result<u64, RegistryError> {
+    pub fn reserve_generation(
+        &self,
+        module_id: &str,
+        requested: Option<u64>,
+    ) -> Result<u64, RegistryError> {
         let slot = self.slot(module_id);
         let mut issued = slot.issued.lock().expect("module generation lock");
         let floor = (*issued).max(slot.registry.active_generation().unwrap_or(0));
@@ -389,7 +396,11 @@ impl ModuleRegistry {
 
     /// Retires a module entirely, waiting for its calls within `timeout`.
     pub fn unload(&self, module_id: &str, timeout: Option<Duration>) -> bool {
-        let slot = self.modules.lock().expect("module registry lock").remove(module_id);
+        let slot = self
+            .modules
+            .lock()
+            .expect("module registry lock")
+            .remove(module_id);
         match slot {
             Some(slot) => {
                 slot.staged.lock().expect("module staging lock").clear();

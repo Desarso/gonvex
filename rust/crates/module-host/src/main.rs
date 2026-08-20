@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gonvex_module_runtime_v8::V8Config;
+use gonvex_module_runtime_v8::{initialize_v8_platform, V8Config};
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -77,7 +77,6 @@ impl Endpoint {
             _ => Ok(Self::Tcp(rest.to_owned())),
         }
     }
-
 }
 
 #[cfg(unix)]
@@ -87,7 +86,10 @@ fn unix_endpoint(path: &str) -> Result<Endpoint, String> {
 
 #[cfg(not(unix))]
 fn unix_endpoint(_path: &str) -> Result<Endpoint, String> {
-    Err("unix domain sockets are not available on this platform; use tcp:127.0.0.1:<port>".to_owned())
+    Err(
+        "unix domain sockets are not available on this platform; use tcp:127.0.0.1:<port>"
+            .to_owned(),
+    )
 }
 
 enum Listener {
@@ -154,8 +156,26 @@ fn number<T: std::str::FromStr>(value: &str) -> Result<T, String> {
         .map_err(|_| format!("{value} is not a valid number"))
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // Every isolate thread must share the V8 platform initialized by this
+    // process thread. It must happen before Tokio creates its worker threads;
+    // otherwise isolate threads spawned by different workers do not have the
+    // common initialized parent V8 11.6 requires.
+    initialize_v8_platform();
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("gonvex-module-host: failed to start async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(run())
+}
+
+async fn run() -> ExitCode {
     let options = match parse_options() {
         Ok(Some(options)) => options,
         Ok(None) => {

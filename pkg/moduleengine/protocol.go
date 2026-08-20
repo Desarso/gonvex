@@ -23,24 +23,24 @@ const frameHeaderBytes = 4
 // Wire error codes. They are the host's vocabulary, mapped onto Go dispatch
 // errors by the engine so callers keep the error surface they already handle.
 const (
-	codeBadRequest          = "bad_request"
-	codeUnsupported         = "unsupported"
-	codeFrameTooLarge       = "frame_too_large"
-	codeInvalidArtifact     = "invalid_artifact"
+	codeBadRequest           = "bad_request"
+	codeUnsupported          = "unsupported"
+	codeFrameTooLarge        = "frame_too_large"
+	codeInvalidArtifact      = "invalid_artifact"
 	codeArtifactHashMismatch = "artifact_hash_mismatch"
-	codeModuleLoadFailed    = "module_load_failed"
-	codeGenerationConflict  = "generation_conflict"
-	codeUnknownGeneration   = "unknown_generation"
-	codeModuleNotLoaded     = "module_not_loaded"
-	codeFunctionNotFound    = "function_not_found"
-	codeWrongFunctionKind   = "wrong_function_kind"
-	codeDeadlineExceeded    = "deadline_exceeded"
-	codeBudgetExceeded      = "budget_exceeded"
-	codeExecutionFailed     = "execution_failed"
-	codeCancelled           = "cancelled"
-	codeOverloaded          = "overloaded"
-	codeShuttingDown        = "shutting_down"
-	codeHostCallFailed      = "host_call_failed"
+	codeModuleLoadFailed     = "module_load_failed"
+	codeGenerationConflict   = "generation_conflict"
+	codeUnknownGeneration    = "unknown_generation"
+	codeModuleNotLoaded      = "module_not_loaded"
+	codeFunctionNotFound     = "function_not_found"
+	codeWrongFunctionKind    = "wrong_function_kind"
+	codeDeadlineExceeded     = "deadline_exceeded"
+	codeBudgetExceeded       = "budget_exceeded"
+	codeExecutionFailed      = "execution_failed"
+	codeCancelled            = "cancelled"
+	codeOverloaded           = "overloaded"
+	codeShuttingDown         = "shutting_down"
+	codeHostCallFailed       = "host_call_failed"
 )
 
 // ErrFrameTooLarge is returned when either side would exceed the frame budget.
@@ -105,10 +105,10 @@ type pingOp struct {
 }
 
 type loadOp struct {
-	Op         string           `json:"op"`
-	ModuleID   string           `json:"moduleId"`
-	Generation *uint64          `json:"generation,omitempty"`
-	Artifact   artifactPayload  `json:"artifact"`
+	Op         string          `json:"op"`
+	ModuleID   string          `json:"moduleId"`
+	Generation *uint64         `json:"generation,omitempty"`
+	Artifact   artifactPayload `json:"artifact"`
 }
 
 type activateOp struct {
@@ -148,16 +148,16 @@ type invokeOp struct {
 // identity and scope, never a database URL or a credential: the module reaches
 // data only by asking the runtime, which already holds the transaction.
 type invocationContext struct {
-	ProjectID      string          `json:"projectId"`
-	TenantID       string          `json:"tenantId"`
-	OperationID    string          `json:"operationId,omitempty"`
-	Tenant         *tenantIdentity `json:"tenant,omitempty"`
+	ProjectID      string           `json:"projectId"`
+	TenantID       string           `json:"tenantId"`
+	OperationID    string           `json:"operationId,omitempty"`
+	Tenant         *tenantIdentity  `json:"tenant,omitempty"`
 	Account        *accountIdentity `json:"account,omitempty"`
-	Member         *memberIdentity `json:"member,omitempty"`
-	Permissions    any             `json:"permissions,omitempty"`
-	Capabilities   capabilities    `json:"capabilities"`
-	NowUnixMS      int64           `json:"nowUnixMs"`
-	DeadlineUnixMS int64           `json:"deadlineUnixMs,omitempty"`
+	Member         *memberIdentity  `json:"member,omitempty"`
+	Permissions    any              `json:"permissions,omitempty"`
+	Capabilities   capabilities     `json:"capabilities"`
+	NowUnixMS      int64            `json:"nowUnixMs"`
+	DeadlineUnixMS int64            `json:"deadlineUnixMs,omitempty"`
 }
 
 type tenantIdentity struct {
@@ -195,12 +195,12 @@ type capabilities struct {
 // artifactPayload is the module as the runtime holds it. The host re-verifies
 // the JavaScript hash before it evaluates anything.
 type artifactPayload struct {
-	Language     string             `json:"language"`
-	Entrypoint   string             `json:"entrypoint,omitempty"`
-	ArtifactHash string             `json:"artifactHash,omitempty"`
-	JavaScript   javaScriptPayload  `json:"javascript"`
-	Functions    []functionPayload  `json:"functions"`
-	Metadata     map[string]any     `json:"metadata,omitempty"`
+	Language     string            `json:"language"`
+	Entrypoint   string            `json:"entrypoint,omitempty"`
+	ArtifactHash string            `json:"artifactHash,omitempty"`
+	JavaScript   javaScriptPayload `json:"javascript"`
+	Functions    []functionPayload `json:"functions"`
+	Metadata     map[string]any    `json:"metadata,omitempty"`
 }
 
 type javaScriptPayload struct {

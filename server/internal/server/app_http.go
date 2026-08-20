@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -57,7 +58,10 @@ func (s *Server) handleRegisteredHTTP(w http.ResponseWriter, r *http.Request) {
 		project = authenticatedProject
 		tenant = authenticatedTenant
 		var member *gonvex.Member
-		if user != nil {
+		// A public endpoint may accept an optional verified global Account
+		// without entering a tenant. Once a tenant is requested (or the route is
+		// protected), its own active Member row remains the final authority.
+		if user != nil && (!descriptor.Public || strings.TrimSpace(tenantID(r)) != "") {
 			member, err = s.loadTenantMember(r.Context(), project, tenant, user.ID)
 			if err != nil {
 				opErr = err
@@ -136,31 +140,38 @@ func jwtShaped(token string) bool {
 }
 
 func (s *Server) httpContext(ctx context.Context, projectID string, tenantID string, caller callerContext) (*gonvex.HTTPContext, error) {
-	runtimeCtx, err := s.runtimeContext(ctx, projectID, tenantID, caller)
-	if err != nil {
-		return nil, err
-	}
-
 	// HTTP handlers are an application-facing capability boundary. They may
-	// use safe runtime services such as storage, scheduling, and ephemeral
-	// state, but durable application state must be reached through Reducers;
+	// use safe runtime services such as scheduling and ephemeral state, but
+	// durable application state and file metadata must be reached through
+	// Reducers/Actions;
 	// no database pool, transaction, database URL, or environment secret is
 	// part of the handler context.
-	runtimeCtx.DB = nil
-	runtimeCtx.ControlPlaneDB = nil
-	runtimeCtx.LandlordDB = nil
-	runtimeCtx.TenantDB = nil
-	runtimeCtx.Tx = nil
-	runtimeCtx.DatabaseURL = ""
-	runtimeCtx.Env = nil
+	activeTenant := tenantIDFromRequest(projectID, tenantID)
+	logger := slog.Default().With("project", projectID, "tenant", activeTenant)
+	runtimeCtx := gonvex.RuntimeContext{
+		Context:          ctx,
+		ProjectID:        projectID,
+		TenantID:         activeTenant,
+		OperationID:      "http:" + uuid.NewString(),
+		Auth:             gonvex.AuthContext{Account: caller.user},
+		Tenant:           &gonvex.TenantIdentity{ID: activeTenant, ProjectID: projectID},
+		Member:           caller.member,
+		User:             caller.user,
+		Permissions:      caller.permissions,
+		Storage:          gonvex.UnavailableStorage(),
+		Data:             gonvex.UnavailableData(),
+		Ephemeral:        newScopedEphemeralAPI(ctx, s.ephemeral, projectID, activeTenant),
+		ProjectEphemeral: newProjectScopedEphemeralAPI(ctx, s.ephemeral, projectID),
+		Scheduler:        s.scheduler.For(projectID, activeTenant),
+		Logger:           logger,
+	}
+	runtimeCtx.Sandbox = s.sandboxForCaller(projectID, activeTenant, caller, runtimeCtx.Data)
 	runtimeCtx.DisableProcessEnv()
-	runtimeCtx.Data = gonvex.UnavailableData()
-	runtimeCtx.OperationID = "http:" + uuid.NewString()
 	reducerCaller := callerContext{
 		user: runtimeCtx.User, member: runtimeCtx.Member, permissions: runtimeCtx.Permissions,
 	}
 	runtimeCtx.Reducers = &actionReducerCaller{
-		server: s, project: projectID, tenant: runtimeCtx.TenantID, caller: reducerCaller,
+		server: s, project: projectID, tenant: activeTenant, caller: reducerCaller,
 		parent: runtimeCtx.OperationID,
 	}
 	return &gonvex.HTTPContext{RuntimeContext: runtimeCtx}, nil

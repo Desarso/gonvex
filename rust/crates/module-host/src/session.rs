@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use gonvex_module_runtime::{
-    BoxFuture, HostCall, HostError, HostResponse, Invocation, InvocationContext, ModuleEngine,
-    ModuleError, ModuleHost,
+    BoxFuture, HostCall, HostError, HostResponse, Invocation, InvocationContext, ModuleError,
+    ModuleHost,
 };
 use gonvex_module_runtime_v8::{V8Config, V8ModuleEngine};
 use gonvex_server_host::{ModuleRegistry, RegistryError};
@@ -122,7 +122,10 @@ impl Connection {
             .await
             .is_err()
         {
-            self.pending.lock().expect("host call ledger lock").remove(&id);
+            self.pending
+                .lock()
+                .expect("host call ledger lock")
+                .remove(&id);
             return Err(HostError::Failed(
                 "module host connection closed before the host call was sent".to_owned(),
             ));
@@ -144,7 +147,11 @@ impl Connection {
     }
 
     fn resolve_host_call(&self, id: u64, outcome: Result<serde_json::Value, WireError>) {
-        let reply = self.pending.lock().expect("host call ledger lock").remove(&id);
+        let reply = self
+            .pending
+            .lock()
+            .expect("host call ledger lock")
+            .remove(&id);
         match reply {
             Some(reply) => {
                 let _ = reply.send(outcome);
@@ -394,13 +401,14 @@ async fn handle_load(
         .map_err(|err| registry_error(&module_id, err))?;
 
     let decoded = artifact::decode(&module_id, generation, request.artifact)?;
-    let engine = V8ModuleEngine::from_artifact(decoded.artifact, state.config.v8.clone())
-        .map_err(|err| {
+    let engine = V8ModuleEngine::from_artifact(decoded.artifact, state.config.v8.clone()).map_err(
+        |err| {
             WireError::new(
                 codes::MODULE_LOAD_FAILED,
                 format!("module {module_id} generation {generation} failed to load: {err}"),
             )
-        })?;
+        },
+    )?;
     // Warming here is what makes activation safe to do atomically: a bundle
     // that throws while it evaluates fails the load instead of failing the
     // first user call after the swap.
@@ -411,7 +419,9 @@ async fn handle_load(
         )
     })?;
 
-    state.modules.stage(&module_id, generation, Arc::new(engine));
+    state
+        .modules
+        .stage(&module_id, generation, Arc::new(engine));
     log(&format!(
         "loaded module {module_id} generation {generation} with {} functions",
         decoded.summaries.len()

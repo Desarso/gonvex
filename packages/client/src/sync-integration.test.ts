@@ -448,6 +448,7 @@ describe("durable sync integration", () => {
       cursor: { epoch: "sync-a", revision: 1 },
       key: "id",
     });
+    await flushAsyncWork();
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({
       type: "sync.snapshot",
       result: [{ id: "task-a", title: "cold but alive" }],

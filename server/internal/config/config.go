@@ -34,7 +34,7 @@ const (
 )
 
 type Config struct {
-	Addr             string
+	Addr string
 	// ControlPlaneURL is the canonical control-plane database URL. LandlordURL
 	// is retained as a compatibility alias for existing embedders and config
 	// literals.
@@ -131,8 +131,8 @@ type Config struct {
 	ModuleHostShutdownTimeout time.Duration
 	// ModuleHostDrainTimeout bounds how long a retired module generation may
 	// keep finishing its in-flight calls after a newer one is activated.
-	ModuleHostDrainTimeout time.Duration
-	ModuleHostMaxFrameBytes int
+	ModuleHostDrainTimeout       time.Duration
+	ModuleHostMaxFrameBytes      int
 	ModuleHostMaxConcurrentCalls int
 	ModuleHostIsolatePoolSize    int
 	ModuleHostExecutionTimeout   time.Duration

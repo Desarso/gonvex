@@ -130,7 +130,7 @@ type ReadDependency struct {
 }
 
 type Schema struct {
-	Tables            map[string]Table `json:"tables"`
+	Tables             map[string]Table `json:"tables"`
 	ControlPlaneTables map[string]Table `json:"controlPlaneTables,omitempty"`
 	// LandlordTables is the legacy wire/source name for ControlPlaneTables.
 	// Normalize aliases both fields to the same map so callers cannot observe
@@ -160,9 +160,9 @@ type Index struct {
 // TypeScript CLI. The fields describe the artifact rather than a runtime
 // implementation so other module languages can use the same wire shape.
 type ModuleArtifact struct {
-	Language     string                    `json:"language"`
-	Generation   int                       `json:"generation"`
-	Hash         string                    `json:"hash,omitempty"`
+	Language   string `json:"language"`
+	Generation int    `json:"generation"`
+	Hash       string `json:"hash,omitempty"`
 	// ArtifactHash is a compatibility alias accepted from older deployment
 	// payloads. Hash is the canonical wire name.
 	ArtifactHash string                    `json:"artifactHash,omitempty"`
@@ -210,10 +210,10 @@ func EmptySchema() Schema {
 	controlPlaneTables := map[string]Table{}
 	tenantTables := map[string]Table{}
 	return Schema{
-		Tables:            tenantTables,
+		Tables:             tenantTables,
 		ControlPlaneTables: controlPlaneTables,
-		LandlordTables:    controlPlaneTables,
-		TenantTables:      tenantTables,
+		LandlordTables:     controlPlaneTables,
+		TenantTables:       tenantTables,
 	}
 }
 

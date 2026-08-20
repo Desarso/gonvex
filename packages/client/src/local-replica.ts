@@ -77,20 +77,19 @@ export class LocalReplica {
   private freshnessValue: ReplicaFreshness = "verifying";
   private versionValue = 0;
   private scopeValue: ReplicaScope = defaultReplicaScope;
-  private scopeLoaded = false;
+  // The default scope starts as an immediately usable empty in-memory store.
+  // Persistence is restored only by hydrate()/activateScope(), so direct
+  // callers can still materialize before an async adapter is consulted.
+  private scopeLoaded = true;
   private scopeActivation?: Promise<void>;
   private scopeActivationName?: ReplicaScope;
   private scopeActivationGeneration = 0;
 
-  constructor(private readonly storage?: LocalReplicaStorage) {
-    // A memory-only direct user has no asynchronous scope to hydrate and can
-    // continue using the historical immediate APIs under the safe default.
-    if (!storage) this.scopeLoaded = true;
-  }
+  constructor(private readonly storage?: LocalReplicaStorage) {}
 
   hydrate(): Promise<void> {
     if (this.hydration) return this.hydration;
-    this.hydration = this.activateScope(defaultReplicaScope);
+    this.hydration = this.activateScope(defaultReplicaScope, true);
     return this.hydration;
   }
 
@@ -99,9 +98,9 @@ export class LocalReplica {
    * A newer request supersedes an older one even if the older storage read is
    * slow (or resolves after auth has already changed again).
    */
-  activateScope(scope: ReplicaScope = defaultReplicaScope): Promise<void> {
+  activateScope(scope: ReplicaScope = defaultReplicaScope, forceReload = false): Promise<void> {
     const nextScope = normalizeReplicaScope(scope);
-    if (this.scopeLoaded && this.scopeValue === nextScope) return this.application;
+    if (!forceReload && this.scopeLoaded && this.scopeValue === nextScope) return this.application;
     if (this.scopeActivation && this.scopeActivationName === nextScope) return this.scopeActivation;
     // Fail closed immediately while the async read is in flight. This keeps a
     // synchronous auth change from exposing the prior identity's rows.

@@ -6387,7 +6387,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
             <div className="delete-tenant-body">
               <p>
                 This permanently drops the tenant database <strong>{activeTenantDatabase}</strong> and removes its
-                Control Plane references from <code>tenants</code>, <code>users</code>, and <code>userTenantMap</code>. This cannot be undone.
+                tenant-directory and account-membership projections from the Control Plane. This cannot be undone.
               </p>
               <label className="delete-tenant-field">
                 <span>Type <strong>{activeTenantDatabase}</strong> to confirm</span>

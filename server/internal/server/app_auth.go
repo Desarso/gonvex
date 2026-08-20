@@ -1351,8 +1351,8 @@ func (s *Server) writeAppAuthSession(w http.ResponseWriter, r *http.Request, pro
 		"expiresIn": int(appSessionTTL.Seconds()), "expiresAt": grant.AccessExpiresAt.UnixMilli(),
 		"refreshToken": grant.RefreshToken, "refreshExpiresAt": grant.RefreshExpiresAt.UnixMilli(),
 		"account": gonvex.Account{ID: user.accountID(), Email: user.Email, Name: user.Name, AvatarURL: user.Picture},
-		"member": activeMember,
-		"user": user, "tenants": tenants, "activeTenantId": activeTenantID,
+		"member":  activeMember,
+		"user":    user, "tenants": tenants, "activeTenantId": activeTenantID,
 	})
 }
 

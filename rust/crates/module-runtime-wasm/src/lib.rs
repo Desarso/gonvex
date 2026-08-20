@@ -5,8 +5,8 @@
 //! while leaving a clear adapter boundary for Rust/C++/C# components.
 
 use gonvex_module_runtime::{
-    BoxFuture, Invocation, InvocationResult, ModuleArtifact, ModuleEngine, ModuleError,
-    ModuleHost, ModuleLanguage, ModuleManifest,
+    BoxFuture, Invocation, InvocationResult, ModuleArtifact, ModuleEngine, ModuleError, ModuleHost,
+    ModuleLanguage, ModuleManifest,
 };
 
 #[derive(Clone, Debug)]
@@ -36,14 +36,22 @@ pub struct WasmModuleEngine {
 }
 
 impl WasmModuleEngine {
-    pub fn from_artifact(artifact: ModuleArtifact, config: WasmConfig) -> Result<Self, ModuleError> {
-        if !matches!(artifact.manifest.language, ModuleLanguage::Rust | ModuleLanguage::Wasm) {
+    pub fn from_artifact(
+        artifact: ModuleArtifact,
+        config: WasmConfig,
+    ) -> Result<Self, ModuleError> {
+        if !matches!(
+            artifact.manifest.language,
+            ModuleLanguage::Rust | ModuleLanguage::Wasm
+        ) {
             return Err(ModuleError::InvalidArtifact(
                 "Wasmtime adapter requires a Rust/Wasm component artifact".to_owned(),
             ));
         }
         if artifact.payload.is_empty() {
-            return Err(ModuleError::InvalidArtifact("empty Wasm component".to_owned()));
+            return Err(ModuleError::InvalidArtifact(
+                "empty Wasm component".to_owned(),
+            ));
         }
         Ok(Self {
             manifest: artifact.manifest,

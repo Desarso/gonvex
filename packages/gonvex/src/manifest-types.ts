@@ -65,7 +65,7 @@ export type LiveQueryPlan = {
   resultPath?: string[];
   where?: LiveExpression;
   search?: { argument: string; columns: string[] };
-  sort?: { columnArgument: string; directionArgument: string; defaultColumn: string; defaultDirection: string; allowedColumns: string[] };
+  sort?: { columnArgument?: string; directionArgument?: string; defaultColumn: string; defaultDirection: "asc" | "desc"; allowedColumns: string[] };
   window?: { offsetArgument: string; limitArgument: string; defaultLimit: number; maxLimit: number };
   serverOnly?: boolean;
 };

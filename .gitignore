@@ -19,3 +19,4 @@ packages/gonvex/templates/
 .DS_Store
 .ralph/
 .recovery/
+rust/target/

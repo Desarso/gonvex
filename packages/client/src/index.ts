@@ -457,11 +457,16 @@ export class GonvexClient {
     this.unsubscribeOverlay = this.overlay.subscribe((entity) => {
       this.emitOptimisticEntity(entity);
     });
-    // Defer the first restore by one microtask. Apps commonly construct the
-    // client and immediately install a cached token/identity; waiting lets the
-    // durable queue select that authenticated scope instead of briefly
-    // restoring an anonymous user's entries.
-    this.outboxReady = Promise.resolve().then(() => this.activateOutboxScope());
+    // Select the initial identity scope synchronously so subscriptions created
+    // immediately after the client cannot capture an empty placeholder scope.
+    // A same-tick setAuth supersedes this activation by generation before its
+    // snapshot can publish, so anonymous rows still cannot flash on screen.
+    const initialScope = reducerOutboxScope(this.url, this.auth, this.outboxEphemeralScope);
+    this.outboxScope = initialScope;
+    this.replicaScope = initialScope;
+    const initialGeneration = ++this.outboxScopeGeneration;
+    this.replicaReady = this.replica.activateScope(initialScope);
+    this.outboxReady = Promise.resolve().then(() => this.restoreOutbox(initialScope, initialGeneration));
     this.timeouts = {
       queryTimeoutMs: options.timeouts?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
       reducerTimeoutMs: options.timeouts?.reducerTimeoutMs ?? DEFAULT_MUTATION_TIMEOUT_MS,
@@ -941,7 +946,7 @@ export class GonvexClient {
           clientReceivedAtMs: nowMs(),
         });
       }
-      if (message.type === "query.result") {
+      if (message.type === "query.result" && subscription.live) {
         // Local Replica is the source of truth for normalized Live Query
         // reads. Publish the query callback only after its entity/membership
         // window has been durably committed and atomically swapped.
@@ -951,6 +956,8 @@ export class GonvexClient {
           this.replica.setFreshness("verifying");
         }
         if (scope !== this.replicaScope || subscription.scope !== scope) return;
+      }
+      if (message.type === "query.result") {
         this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
         this.acknowledgeOptimisticQuerySnapshot(subscription, message.result);
       }
@@ -1428,13 +1435,17 @@ export class GonvexClient {
       subscription.integrityEpoch = undefined;
       const snapshot: SyncMessage = { ...message, result: subscription.rows };
       subscription.lastMessage = snapshot;
+      // Queue transport persistence before awaiting Local Replica I/O. Later
+      // delta/reset frames can arrive in the same task; enqueueing here keeps
+      // their durable operations in wire order while UI publication still
+      // waits for canonical materialization.
+      this.persistSyncSnapshot(subscription);
       try {
         await this.materializeReplicaCollection(subscription, "cache", scope);
       } catch {
         this.replica.setFreshness("verifying");
       }
       this.emitSyncMessage(subscription, snapshot, scope);
-      this.persistSyncSnapshot(subscription);
       return;
     }
     if (message.type === "sync.delta") {
@@ -1481,14 +1492,14 @@ export class GonvexClient {
         maxBytes: subscription.maxBytes,
       };
       subscription.lastMessage = snapshot;
+      this.persistSyncDelta(subscription, message.upserts ?? [], message.deleted ?? []);
       try {
         await this.materializeReplicaCollection(subscription, "cache", scope);
       } catch {
         this.replica.setFreshness("verifying");
       }
-      this.emitSyncMessage(subscription, snapshot, scope);
       this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
-      this.persistSyncDelta(subscription, message.upserts ?? [], message.deleted ?? []);
+      this.emitSyncMessage(subscription, snapshot, scope);
       return;
     }
     if (message.type === "sync.reset") {

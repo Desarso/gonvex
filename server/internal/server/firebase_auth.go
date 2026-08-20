@@ -65,6 +65,9 @@ func firebaseProjectIDFromServiceAccount(raw string) string {
 // preserves the legacy local-development behavior of trusting token claims.
 func (s *Server) firebaseIdentityFromToken(ctx context.Context, firebaseProjectID string, token string) (*gonvex.User, error) {
 	if firebaseProjectID == "" {
+		if strings.TrimSpace(token) == "" {
+			return nil, nil
+		}
 		return devUserFromJWT(token), nil
 	}
 	if strings.TrimSpace(token) == "" {
