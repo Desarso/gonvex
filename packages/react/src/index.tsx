@@ -860,9 +860,20 @@ export function useLiveQuery<T = JsonValue>(ref: FunctionReference, args: JsonVa
   const kind = ref.kind;
   const optimisticKey = JSON.stringify(ref.optimistic ?? null);
   const argsKey = JSON.stringify(args);
+  const liveKey = JSON.stringify(ref.live ?? null);
+  const liveWatch = useMemo(
+    () => args === "skip" || !ref.live ? undefined : client.watchLiveQuery<T>(ref, args),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, kind, path, optimisticKey, argsKey, liveKey],
+  );
+  const liveResult = useSyncExternalStore(
+    useCallback((notify) => liveWatch?.onUpdate(notify) ?? (() => undefined), [liveWatch]),
+    useCallback(() => liveWatch?.localLiveQueryResult(), [liveWatch]),
+    () => undefined,
+  );
 
   useEffect(() => {
-    if (args === "skip") {
+    if (args === "skip" || ref.live) {
       setResult(undefined);
       setError(null);
       return;
@@ -887,13 +898,13 @@ export function useLiveQuery<T = JsonValue>(ref: FunctionReference, args: JsonVa
       unsubscribeScope();
       unsubscribeQuery();
     };
-  }, [client, kind, path, optimisticKey, argsKey]);
+  }, [client, kind, path, optimisticKey, argsKey, liveKey]);
 
   // Convex-compatible: a failed query throws during render so error
   // boundaries can catch it, instead of being indistinguishable from loading.
   if (error) throw error;
 
-  return result;
+  return ref.live ? liveResult : result;
 }
 
 /** Read one normalized entity from the single Gonvex Local Replica. */
@@ -968,13 +979,13 @@ export function useReplicaCollection<T extends JsonValue = JsonValue>(
   const optimisticKey = JSON.stringify(ref.optimistic ?? null);
   const argsKey = JSON.stringify(args);
   const watch = useMemo(
-    () => args === "skip" ? undefined : client.watchSync<T>(ref, args),
+    () => args === "skip" ? undefined : client.watchReplica<T>(ref, args),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [client, kind, path, optimisticKey, argsKey],
   );
   return useSyncExternalStore(
     useCallback((onStoreChange) => watch?.onUpdate(onStoreChange) ?? (() => undefined), [watch]),
-    useCallback(() => watch?.localSyncResult(), [watch]),
+    useCallback(() => watch?.localReplicaResult(), [watch]),
     () => undefined,
   );
 }
@@ -995,7 +1006,7 @@ export function useReplicaSelector<T extends JsonValue = JsonValue, Selected = u
   selectorRef.current = selector;
   equalityRef.current = isEqual;
   const watch = useMemo(
-    () => args === "skip" ? undefined : client.watchSync<T>(ref, args),
+    () => args === "skip" ? undefined : client.watchReplica<T>(ref, args),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [client, kind, path, optimisticKey, argsKey],
   );
@@ -1007,7 +1018,7 @@ export function useReplicaSelector<T extends JsonValue = JsonValue, Selected = u
     selectedRef.current = { initialized: false, value: undefined };
   }, [watch]);
   const getSnapshot = useCallback(() => {
-    const rows = watch?.localSyncResult();
+    const rows = watch?.localReplicaResult();
     const next = rows === undefined ? undefined : selectorRef.current(rows);
     if (
       !selectedRef.current.initialized
@@ -1023,7 +1034,7 @@ export function useReplicaSelector<T extends JsonValue = JsonValue, Selected = u
     if (!watch) return () => undefined;
     return watch.onUpdate(() => {
       const previous = selectedRef.current.value;
-      const rows = watch.localSyncResult();
+      const rows = watch.localReplicaResult();
       const next = rows === undefined ? undefined : selectorRef.current(rows);
       if (
         selectedRef.current.initialized

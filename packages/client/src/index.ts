@@ -890,6 +890,15 @@ export class GonvexClient {
     }
     this.querySubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => {
+      void this.handleQueryMessage(subscription, message).catch(() => this.replica.setFreshness("verifying"));
+    });
+    this.sendSubscription(subscription);
+    this.startQueryCacheRead(subscription);
+
+    return () => this.unsubscribeQueryListener(key, onMessage);
+  }
+
+  private async handleQueryMessage(subscription: QuerySubscription, message: ServerMessage) {
       const normalized = this.normalizeSubscriptionMessage(subscription, message);
       if (!normalized) return;
       message = normalized;
@@ -921,43 +930,45 @@ export class GonvexClient {
           clientReceivedAtMs: nowMs(),
         });
       }
+      if (message.type === "query.result") {
+        // Local Replica is the source of truth for normalized Live Query
+        // reads. Publish the query callback only after its entity/membership
+        // window has been durably committed and atomically swapped.
+        try {
+          await this.materializeLiveQuery(subscription, message.result, Boolean(message.subscriptionRevision));
+        } catch {
+          this.replica.setFreshness("verifying");
+        }
+        this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
+        this.acknowledgeOptimisticQuerySnapshot(subscription, message.result);
+      }
       const outgoing = this.materializeQueryMessage(subscription, message);
       for (const listener of Array.from(subscription.listeners)) {
         listener(outgoing);
-      }
-      if (message.type === "query.result") {
-        this.materializeLiveQuery(subscription, message.result, Boolean(message.subscriptionRevision));
-        this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
-        this.acknowledgeOptimisticQuerySnapshot(subscription, message.result);
       }
       if (message.type === "query.result") {
         this.persistQueryResult(subscription, message);
       } else if (message.type === "query.error") {
         this.deleteCachedQuery(subscription);
       }
-    });
-    this.sendSubscription(subscription);
-    this.startQueryCacheRead(subscription);
-
-    return () => this.unsubscribeQueryListener(key, onMessage);
   }
 
-  private materializeLiveQuery(subscription: QuerySubscription, result: JsonValue, authoritative: boolean) {
+  private materializeLiveQuery(subscription: QuerySubscription, result: JsonValue, authoritative: boolean): Promise<void> {
     const live = subscription.live;
-    if (!live) return;
+    if (!live) return Promise.resolve();
     const projected = rowsAtPath(result, live.resultPath);
-    if (!projected) return;
+    if (!projected) return Promise.resolve();
     const rows = projected.rows.filter((row): row is ReplicaRow => (
       row !== null && typeof row === "object" && !Array.isArray(row)
     ));
-    void this.replica.materializeWindow({
+    return this.replica.materializeWindow({
       signature: subscription.key,
       entity: live.entity,
       key: live.key,
       rows,
       completeness: "complete",
       source: authoritative ? "server" : "cache",
-    }).catch(() => this.replica.setFreshness("verifying"));
+    });
   }
 
   private normalizeSubscriptionMessage(subscription: QuerySubscription, message: ServerMessage): ServerMessage | undefined {
@@ -1158,7 +1169,10 @@ export class GonvexClient {
     };
     this.overlay.expectSource(subscription.key, subscription.entity);
     this.syncSubscriptions.set(key, subscription);
-    this.handlers.set(subscription.id, (message) => this.handleSyncMessage(subscription, message as SyncMessage));
+    this.handlers.set(subscription.id, (message) => {
+      void this.handleSyncMessage(subscription, message as SyncMessage)
+        .catch(() => this.replica.setFreshness("verifying"));
+    });
     this.startSync(subscription);
     return () => this.unsubscribeSyncListener(key, onMessage);
   }
@@ -1223,15 +1237,145 @@ export class GonvexClient {
 
   /** Watch a bounded Replica Collection through the normalized Local Replica. */
   watchReplica<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue = {}) {
-    const watch = this.watchSync<T>(ref, args);
+    const key = querySubscriptionKey(ref, args);
+    const updateHandlers = new Set<WatchUpdateHandler>();
+    let latestError: Error | undefined;
+    let snapshotVersion = -1;
+    let snapshotRows: T[] | undefined;
+    const notify = () => {
+      for (const handler of updateHandlers) handler();
+    };
+    // Keep the SyncSubscription as transport/reconciliation state only. The
+    // value returned by this watch always comes from normalized LocalReplica.
+    const unsubscribeSync = this.subscribeSync(ref, args, (message) => {
+      if (message.type === "sync.error") {
+        latestError = new Error(message.error);
+        notify();
+      } else if (message.type === "sync.syncing" || message.type === "sync.reset") {
+        latestError = undefined;
+        notify();
+      } else if (message.type === "sync.snapshot" || message.type === "sync.ready") {
+        latestError = undefined;
+      }
+    });
+    const unsubscribeReplica = this.replica.subscribe(notify);
+    const unsubscribeScope = this.onSessionScopeChange(() => {
+      latestError = undefined;
+      notify();
+    });
     return {
-      localReplicaResult: watch.localSyncResult,
-      status: watch.status,
-      onUpdate: watch.onUpdate,
+      localReplicaResult: () => {
+        if (latestError) throw latestError;
+        if (!this.replica.hasLiveQuery(key)) return undefined;
+        const version = this.replica.version();
+        if (snapshotVersion === version) return snapshotRows;
+        snapshotVersion = version;
+        snapshotRows = this.replica.liveQuery(key).rows as unknown as T[];
+        return snapshotRows;
+      },
+      status: () => ({
+        isLoading: !this.replica.hasLiveQuery(key),
+        isUpToDate: this.syncSubscriptions.get(key)?.isUpToDate === true,
+      }),
+      onUpdate(handler: WatchUpdateHandler) {
+        updateHandlers.add(handler);
+        return () => {
+          updateHandlers.delete(handler);
+          if (updateHandlers.size === 0) {
+            unsubscribeSync();
+            unsubscribeReplica();
+            unsubscribeScope();
+          }
+        };
+      },
     };
   }
 
-  private handleSyncMessage(subscription: SyncSubscription, message: SyncMessage) {
+  /**
+   * Watch a structured Live Query through normalized LocalReplica rows. The
+   * latest query result is retained only as the transport-shaped skeleton;
+   * its row window is always rebuilt from LocalReplica membership/entities.
+   */
+  watchLiveQuery<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}) {
+    const key = querySubscriptionKey(ref, args);
+    const updateHandlers = new Set<WatchUpdateHandler>();
+    let transportResult: JsonValue | undefined;
+    let transportGeneration = 0;
+    let snapshotToken = "";
+    let snapshotResult: T | undefined;
+    let latestError: Error | undefined;
+    let notifyQueued = false;
+    const notify = () => {
+      if (notifyQueued) return;
+      notifyQueued = true;
+      queueMicrotask(() => {
+        notifyQueued = false;
+        for (const handler of updateHandlers) handler();
+      });
+    };
+    const unsubscribeQuery = this.subscribeQuery(ref, args, (message) => {
+      if (message.type === "query.result") {
+        transportResult = message.result;
+        transportGeneration += 1;
+        latestError = undefined;
+        // LocalReplica has already published its atomic window swap before
+        // this callback is emitted, so this is the single initial UI wake-up.
+        notify();
+      } else if (message.type === "query.error") {
+        latestError = new GonvexClientError(message.error, {
+          code: "server", path: ref.path, operation: "query",
+        });
+        notify();
+      }
+    });
+    // During the initial query result, LocalReplica notifies before the
+    // transport-shaped skeleton is installed above. Suppress that empty
+    // intermediate wake-up; later transactions notify directly from the
+    // normalized store.
+    const unsubscribeReplica = this.replica.subscribe(() => {
+      if (transportResult !== undefined) notify();
+    });
+    const unsubscribeScope = this.onSessionScopeChange(() => {
+      transportResult = undefined;
+      transportGeneration += 1;
+      snapshotToken = "";
+      snapshotResult = undefined;
+      latestError = undefined;
+      notify();
+    });
+    return {
+      localLiveQueryResult: () => {
+        if (latestError) throw latestError;
+        if (transportResult === undefined || !ref.live || !this.replica.hasLiveQuery(key)) return undefined;
+        const nextToken = `${this.replica.version()}:${transportGeneration}`;
+        if (snapshotToken === nextToken) return snapshotResult;
+        const projected = rowsAtPath(transportResult, ref.live.resultPath ?? []);
+        snapshotResult = !projected
+          ? transportResult as T
+          : replaceRowsAtPath(
+            transportResult,
+            ref.live.resultPath ?? [],
+            this.replica.liveQuery(key).rows as unknown as JsonValue[],
+            projected.scalar,
+          ) as T;
+        snapshotToken = nextToken;
+        return snapshotResult;
+      },
+      onUpdate(handler: WatchUpdateHandler) {
+        updateHandlers.add(handler);
+        return () => {
+          updateHandlers.delete(handler);
+          if (updateHandlers.size === 0) {
+            unsubscribeQuery();
+            unsubscribeReplica();
+            unsubscribeScope();
+          }
+        };
+      },
+    };
+  }
+
+  private async handleSyncMessage(subscription: SyncSubscription, message: SyncMessage) {
     if (message.type === "sync.snapshot") {
       // Snapshots are only valid responses to an outstanding sync.open. Live
       // subscriptions advance through deltas; accepting an unsolicited or
@@ -1268,7 +1412,11 @@ export class GonvexClient {
       subscription.integrityEpoch = undefined;
       const snapshot: SyncMessage = { ...message, result: subscription.rows };
       subscription.lastMessage = snapshot;
-      this.materializeReplicaCollection(subscription, "cache");
+      try {
+        await this.materializeReplicaCollection(subscription, "cache");
+      } catch {
+        this.replica.setFreshness("verifying");
+      }
       this.emitSyncMessage(subscription, snapshot);
       this.persistSyncSnapshot(subscription);
       return;
@@ -1317,7 +1465,11 @@ export class GonvexClient {
         maxBytes: subscription.maxBytes,
       };
       subscription.lastMessage = snapshot;
-      this.materializeReplicaCollection(subscription, "cache");
+      try {
+        await this.materializeReplicaCollection(subscription, "cache");
+      } catch {
+        this.replica.setFreshness("verifying");
+      }
       this.emitSyncMessage(subscription, snapshot);
       this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
       this.persistSyncDelta(subscription, message.upserts ?? [], message.deleted ?? []);
@@ -1351,6 +1503,14 @@ export class GonvexClient {
           subscription.path,
           subscription.args,
         ));
+      }
+      // Clear this collection's canonical LocalReplica membership before the
+      // compatibility reset callback. The transport scratch rows are already
+      // empty, but watchReplica must never continue exposing the old window.
+      try {
+        await this.materializeReplicaCollection(subscription, "cache");
+      } catch {
+        this.replica.setFreshness("verifying");
       }
       this.emitSyncMessage(subscription, message);
       queueMicrotask(() => this.sendSyncOpen(subscription));
@@ -1403,13 +1563,13 @@ export class GonvexClient {
           // integrity failure. The memo may be stale even though row identity
           // says the collection has not changed.
         } else {
-          this.acceptSyncReady(subscription, message, subscription.integrityDigest);
+          await this.acceptSyncReady(subscription, message, subscription.integrityDigest);
           return;
         }
       }
       void syncRowsHashes(subscription.rows, subscription.keyField).then((hashes) => (
         syncHashesDigest(hashes).then((digest) => ({ digest, hashes }))
-      )).then(({ digest, hashes }) => {
+      )).then(async ({ digest, hashes }) => {
           if (
             generation !== subscription.verificationGeneration
             || this.syncSubscriptions.get(subscription.key) !== subscription
@@ -1426,7 +1586,7 @@ export class GonvexClient {
           subscription.hashes = hashes;
           subscription.integrityDigest = digest;
           subscription.integrityRows = subscription.rows;
-          this.acceptSyncReady(subscription, message, digest);
+          await this.acceptSyncReady(subscription, message, digest);
         }).catch(() => {
           if (generation !== subscription.verificationGeneration) return;
           this.handleSyncMessage(subscription, {
@@ -1447,7 +1607,7 @@ export class GonvexClient {
     this.emitSyncMessage(subscription, message);
   }
 
-  private acceptSyncReady(
+  private async acceptSyncReady(
     subscription: SyncSubscription,
     message: SyncReadyMessage,
     verifiedDigest = message.digest,
@@ -1463,7 +1623,11 @@ export class GonvexClient {
     subscription.integrityRows = subscription.rows;
     subscription.integrityEpoch = message.cursor.epoch;
     subscription.forceFullIntegrity = false;
-    this.materializeReplicaCollection(subscription, "server");
+    try {
+      await this.materializeReplicaCollection(subscription, "server");
+    } catch {
+      this.replica.setFreshness("verifying");
+    }
     this.persistSyncSnapshot(subscription);
     // Every emitted ready frame is self-describing: when a legacy runtime
     // omitted the digest, the locally verified one is stamped in so consumers
@@ -1474,11 +1638,11 @@ export class GonvexClient {
     );
   }
 
-  private materializeReplicaCollection(subscription: SyncSubscription, source: "server" | "cache") {
+  private materializeReplicaCollection(subscription: SyncSubscription, source: "server" | "cache"): Promise<void> {
     const rows = subscription.rows.filter((row): row is ReplicaRow => (
       row !== null && typeof row === "object" && !Array.isArray(row)
     ));
-    void this.replica.materializeWindow({
+    return this.replica.materializeWindow({
       signature: subscription.key,
       entity: subscription.entity,
       key: subscription.keyField,
@@ -1486,7 +1650,7 @@ export class GonvexClient {
       completeness: subscription.truncated ? "partial" : "complete",
       source,
       cursor: subscription.cursor,
-    }).catch(() => this.replica.setFreshness("verifying"));
+    });
   }
 
   private handleSyncWatermark(revision: number) {
@@ -1639,7 +1803,7 @@ export class GonvexClient {
       ) return;
       this.sendSyncOpen(subscription);
     }, syncStoreReadTimeoutMs);
-    void store.load(scope, subscription.path, subscription.args).then((cached) => {
+    void store.load(scope, subscription.path, subscription.args).then(async (cached) => {
       clearTimeout(cacheReadTimer);
       if (cacheReadSettled) return;
       cacheReadSettled = true;
@@ -1686,6 +1850,11 @@ export class GonvexClient {
           maxBytes: cached.maxBytes,
         };
         subscription.lastMessage = message;
+        try {
+          await this.materializeReplicaCollection(subscription, "cache");
+        } catch {
+          this.replica.setFreshness("verifying");
+        }
         this.emitSyncMessage(subscription, message);
       }
       this.sendSyncOpen(subscription);
@@ -2595,7 +2764,7 @@ export class GonvexClient {
     const generation = this.queryCacheGeneration;
     if (subscription.cacheReadGeneration === generation) return;
     subscription.cacheReadGeneration = generation;
-    const read = store.read(directive.scope, subscription.path, subscription.args, directive.maxAgeMs).then((cached) => {
+    const read = store.read(directive.scope, subscription.path, subscription.args, directive.maxAgeMs).then(async (cached) => {
       const current = this.querySubscriptions.get(subscription.key);
       if (
         current !== subscription
@@ -2618,6 +2787,11 @@ export class GonvexClient {
         cacheRevision: cached.revision,
       };
       subscription.lastMessage = message;
+      try {
+        await this.materializeLiveQuery(subscription, message.result, false);
+      } catch {
+        this.replica.setFreshness("verifying");
+      }
       const outgoing = this.materializeQueryMessage(subscription, message);
       for (const listener of Array.from(subscription.listeners)) {
         listener(outgoing);

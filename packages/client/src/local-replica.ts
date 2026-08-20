@@ -274,6 +274,10 @@ export class LocalReplica {
     };
   }
 
+  hasLiveQuery(signature: string) {
+    return this.liveQueries.has(signature);
+  }
+
   snapshot(): ReplicaSnapshot {
     return snapshotFrom(this.cursorValue, this.entities, this.liveQueries);
   }
