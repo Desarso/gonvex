@@ -4,23 +4,17 @@ The public guide lives in
 [`apps/docs/content/docs/durable-sync.mdx`](../apps/docs/content/docs/durable-sync.mdx).
 This file records the contributor-level contract.
 
-```go
-app.ReplicaCollection(
-    "tasks.recent",
-    RecentTasks,
-    gonvex.ReplicaTable("tasks").
-        Key("id").
-        Columns("id", "workspace_id", "title", "updated_at").
-        EqualArg("workspace_id", "workspaceId").
-        OrderBy("updated_at", "desc").
-        Progressive().
-        Budget(10_000, 50<<20),
-)
-```
-
 Replica Collections are authorized, bounded entity sets. They complement
 structured Live Queries, which own exact PostgreSQL-computed membership and
 ordering for datasets too large to replicate.
+
+Each source table has one required TypeScript `visibility(...)` declaration.
+The runtime resolves a revisioned tenant-local context, compiles the rule into
+Postgres SQL for snapshots and Live Queries, and evaluates the same rule over
+the change feed's old/new rows. Dependency tables are derived from the plan;
+role, team, workspace, or audience changes invalidate the context and regroup
+Live Queries before results can fan out. `{ operator: "public" }` is the only
+way to declare that every tenant entrant may receive a table.
 
 ## Commit and resume model
 

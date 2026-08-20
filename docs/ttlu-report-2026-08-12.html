@@ -130,7 +130,7 @@ client's UI reflects it. Not the average client. The last one.</p>
   was <strong>not</strong> reached. What remains is a workload-size-dependent floor in database reads,
   result construction and physical fan-out — not a fixed delay, not GC, not queueing; each of those was
   eliminated and measured. Crossing 100 ms needs an application-level data/projection redesign or process
-  sharding, and must not be bought by weakening visibility partitioning, digest verification, subscription
+  sharding, and must not be bought by weakening structured visibility grouping, digest verification, subscription
   revisions, or committed-state-only delivery.</p>
 </div>
 
@@ -191,13 +191,12 @@ task-ID and caller-ID predicates prune further; unchanged results now emit nothi
 <strong>Why it worked:</strong> the cheapest query is the one that never runs. Unrelated task inserts stopped
 waking note/log/view subscriptions; the final run skips 91 tables per propagating commit.</p>
 
-<h3>3 · One execution per user → visibility-fingerprint sharing</h3>
+<h3>3 · One execution per user → structured visibility sharing</h3>
 <p><strong>Problem:</strong> 30 users watching the same workspace ran the same expensive query 30 times,
 because results can legally differ per user, so the runtime keyed executions by user ID.
-<strong>Fix:</strong> <code>ShareByVisibility</code> / <code>ShareResultFrom</code> — the app computes an exact
-fingerprint of what a caller can actually see; identical fingerprint means provably identical results, so one
-execution serves the whole set, and its serialization and patch templates are reused too. Any uncertainty
-fails closed to per-identity execution.
+<strong>Fix:</strong> Gonvex computes an exact fingerprint from the query's structured visibility plan.
+Identical fingerprints mean identical visibility inputs, so one execution serves the whole set. Serialization
+and patch templates are reused too. Any uncertainty fails closed to per-identity execution.
 <strong>Why it worked:</strong> it broke the link between "how many people are watching" and "how much work a
 change costs" — the property that makes 1,000 users viable. Iteration 9 alone: 1,020 ms → 53 ms on the probe.</p>
 
@@ -334,7 +333,7 @@ const DATA = [
   {i:5,  ms:79914, scale:50,  cert:false, note:"First valid baseline — task-query fan-out, 591M ms of queue wait"},
   {i:7,  ms:2299,  scale:5,   cert:false, note:"Precise FK invalidation + keyed patches; payload 4.44 GB → 402 MB"},
   {i:8,  ms:1020,  scale:5,   cert:false, note:"Targeted visibility eviction + connection-local fan-out (36 MB)"},
-  {i:9,  ms:52.98, scale:5,   cert:false, note:"ShareByVisibility: one execution serves all equivalent viewers"},
+  {i:9,  ms:52.98, scale:5,   cert:false, note:"Structured visibility: one execution serves all equivalent viewers"},
   {i:10, ms:137.79,scale:50,  cert:false, note:"Canonical cross-path source; rerun queue wait → 0"},
   {i:12, ms:73.96, scale:50,  cert:false, note:"Bounded 32-worker delivery pool"},
   {i:14, ms:117.19,scale:50,  cert:false, note:"Restored sharing metadata in codegen (had been silently dropped)"},
@@ -342,7 +341,7 @@ const DATA = [
   {i:17, ms:97.94, scale:50,  cert:false, note:"Committed caller-ID predicate prunes to affected caller"},
   {i:18, ms:75.45, scale:50,  cert:false, note:"Committed workspace routing — 250-user gate passed"},
   {i:20, ms:284.92,scale:1000,cert:true,  note:"First full 1,000-user certification"},
-  {i:21, ms:134.62,scale:1000,cert:false, note:"Exact visibility partition recovery — zero full-result recoveries"},
+  {i:21, ms:134.62,scale:1000,cert:false, note:"Exact visibility-group recovery — zero full-result recoveries"},
   {i:22, ms:119.56,scale:1000,cert:false, note:"1 ms trigger merge; immediate delivery beats batching"},
   {i:25, ms:188.68,scale:1000,cert:true,  note:"Full certification; growth exposed full pivot objects"},
   {i:26, ms:129.55,scale:1000,cert:false, note:"Omit stable keyed order from patches"},

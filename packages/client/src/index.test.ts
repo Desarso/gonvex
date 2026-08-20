@@ -480,6 +480,31 @@ describe("GonvexClient", () => {
     expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", path: "tasks.list" });
   });
 
+  it("hides the Local Replica immediately when tenant authorization is revoked", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      project: "secure-app",
+      tenant: "tenant-a",
+      token: "session-token",
+    });
+    await client.localReplica.materializeWindow({
+      signature: "tasks",
+      entity: "tasks",
+      key: "id",
+      rows: [{ id: "task-a", title: "restricted" }],
+      completeness: "complete",
+      source: "server",
+    });
+    expect(client.localReplica.entity("tasks", "task-a")).toMatchObject({ title: "restricted" });
+
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    const [{ id: authID }] = sentMessages(socket);
+    socket.receive({ type: "auth.error", id: authID, error: "tenant membership changed; authenticate again" });
+
+    expect(client.localReplica.entity("tasks", "task-a")).toBeUndefined();
+  });
+
   it("queues subscription messages while an auth update is in flight", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     client.connect();

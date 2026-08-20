@@ -89,12 +89,15 @@ A Gonvex app keeps backend code beside the frontend:
 ```txt
 my-app/
   gonvex/
-    schema.go
-    tasks.go
+    index.ts
+    tasks.ts
     _generated/
       api.ts
       client.ts
       react.ts
+  migrations/
+    tenant/
+      001_initial.sql
   src/
   gonvex.json
   package.json
@@ -102,42 +105,25 @@ my-app/
 
 ## Define Your Backend
 
-Schema and functions are written in Go:
+Application functions are TypeScript. Versioned SQL migrations own the tenant
+schema:
 
-```go
-package backend
+```ts
+import { reducer, schema } from "@gonvex/module-sdk";
 
-import "github.com/gonvex/gonvex/pkg/gonvex"
-
-func Schema(s *gonvex.Schema) {
-  s.Table("tasks", func(t *gonvex.Table) {
-    t.ID("id")
-    t.String("title")
-    t.String("status")
-    t.Time("created_at")
-    t.Index("by_status", "status")
-  })
-}
-
-type ListTasksArgs struct {
-  Status string `json:"status,omitempty"`
-}
-
-func Register(app *gonvex.App) {
-  app.Query("tasks.list", ListTasks)
-  app.Reducer("tasks.create", CreateTask,
-    gonvex.OptimisticReducer("tasks").RowIDArg("id").FieldsArg("task"),
-  )
-}
-
-func ListTasks(ctx *gonvex.QueryCtx, args ListTasksArgs) ([]Task, error) {
-  // Query Postgres through Gonvex APIs.
-}
+export const create = reducer({
+  args: schema.object({ id: schema.id("tasks"), title: schema.string() }),
+  offline: { mode: "allowed", conflict: "expectedVersion" },
+  optimistic: {
+    effects: [{ operation: "upsert", entity: "tasks", id: ["id"], value: { id: { $arg: "id" }, title: { $arg: "title" } } }],
+  },
+  run: ({ db }, task) => db.insert("tasks", task),
+});
 ```
 
 During development, `gonvex dev` watches the `gonvex/` folder, regenerates
-TypeScript bindings, uploads the Go source bundle and manifest, applies safe
-schema changes, and optionally runs your app dev server.
+client bindings, bundles the TypeScript module for the bounded V8 host, applies
+versioned SQL migrations, and optionally runs your app dev server.
 
 ## Live Queries and Replica Collections
 
@@ -145,31 +131,80 @@ Use a Live Query for indexed search, filters, sorting, and dynamic windows over
 unbounded data. Every Live Query has a structured plan, so Gonvex derives its
 dependencies and never needs declared writes or broad invalidation.
 
-```go
-app.LiveQuery("tasks.grid", TasksGrid, gonvex.LivePlan(
-  gonvex.LiveTable("tasks").
-    Filter(gonvex.Eq("workspace_id", gonvex.Arg("workspaceId"))).
-    SearchArg("search", "title").
-    SortArgs("sort", "direction", "created_at", "desc", "created_at", "title").
-    WindowArgs("offset", "limit", 100, 250),
-))
+```ts
+import { liveQuery } from "@gonvex/module-sdk";
+
+export const grid = liveQuery({
+  liveQueryPlan: {
+    table: "tasks",
+    key: "id",
+    columns: ["id", "workspaceId", "title", "status", "createdAt"],
+    where: { operator: "eq", column: "workspaceId", value: { argument: "workspaceId" } },
+    search: { argument: "search", columns: ["title"] },
+    sort: {
+      columnArgument: "sort",
+      directionArgument: "direction",
+      defaultColumn: "createdAt",
+      defaultDirection: "desc",
+      allowedColumns: ["createdAt", "title"],
+    },
+    window: { offsetArgument: "offset", limitArgument: "limit", defaultLimit: 100, maxLimit: 250 },
+  },
+});
 ```
 
 Use a Replica Collection when the browser should keep a bounded, authorized
 single-table collection locally:
 
-```go
-app.ReplicaCollection(
-  "tasks.recent",
-  RecentTasks,
-  gonvex.ReplicaTable("tasks").
-    Columns("id", "title", "status", "updated_at", "deleted_at").
-    ExcludeWhenSet("deleted_at").
-    OrderBy("updated_at", "desc").
-    Progressive().
-    Budget(500, 8388608),
-)
+```ts
+import { replicaCollection } from "@gonvex/module-sdk";
+
+export const recent = replicaCollection({
+  replica: {
+    table: "tasks",
+    key: "id",
+    columns: ["id", "workspaceId", "title", "status", "updatedAt", "deletedAt"],
+    excludeWhenSet: ["deletedAt"],
+    orderBy: "updatedAt",
+    orderDirection: "desc",
+    mode: "progressive",
+    maxRows: 500,
+    maxBytes: 8_388_608,
+  },
+});
 ```
+
+Both delivery modes require one explicit, centralized visibility plan for the
+source table. Gonvex injects it into snapshot and Live Query SQL and evaluates
+the same plan over committed old/new rows before routing Replica changes:
+
+```ts
+import { visibility } from "@gonvex/module-sdk";
+
+export const taskVisibility = visibility({
+  table: "tasks",
+  key: "id",
+  sets: {
+    workspaces: {
+      table: "workspaceMembers",
+      select: "workspaceId",
+      joins: [],
+      where: [{ table: "workspaceMembers", column: "memberId", context: "member.id" }],
+    },
+  },
+  where: {
+    operator: "or",
+    children: [
+      { operator: "permission", value: "tasks.viewAll" },
+      { operator: "inSet", column: "workspaceId", set: "workspaces" },
+    ],
+  },
+});
+```
+
+Use `{ operator: "public" }` only for intentionally public tables such as
+status definitions. A module update that exposes Live or Replica delivery
+without a visibility plan is rejected.
 
 ```tsx
 import { useReplicaCollection, useReplicaSelector } from "./gonvex/_generated/react";

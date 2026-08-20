@@ -54,13 +54,12 @@ export type ReplicaChange = {
 };
 
 export type FunctionDependencies = {
-  reads?: Array<{ table: string; columns?: string[]; filters?: string[]; ordersBy?: string[]; windowed?: boolean }>;
-  shareByPermissions?: boolean;
+	reads?: Array<{ table: string; columns?: string[]; filters?: string[]; ordersBy?: string[]; windowed?: boolean }>;
+	shareByPermissions?: boolean;
 	liveQueryPlan?: LiveQueryPlan;
 	nonOptimisticReason?: string;
 	optimisticReducer?: OptimisticReducerDefinition;
 	optimisticProjection?: OptimisticProjectionDefinition;
-	shareByVisibility?: string;
 	shareResultFrom?: string;
 	shareResultField?: string;
 };

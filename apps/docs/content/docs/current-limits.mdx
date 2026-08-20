@@ -101,8 +101,9 @@ Current boundaries:
 - common equality, range, membership, substring, boolean, sort, and window
   operators are portable; PostgreSQL-specific expressions are online-only;
 - Replica Collections are single-table, equality-filtered, bounded entity sets;
-- custom handler authorization still participates in initial collection
-  snapshots; central visibility-context caching is not yet a full policy DSL;
+- every Live Query and Replica Collection table requires one structured
+  visibility plan; Gonvex injects it into SQL and routes old/new committed rows
+  through the same revisioned context;
 - partial offline datasets are labeled partial and never presented as global;
 - Reducer optimistic metadata currently supports generated entity patches;
   richer generated multi-entity recipes and conflict-policy codegen remain work;

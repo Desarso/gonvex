@@ -25,10 +25,18 @@ import { suffix } from "./shared.ts";
 
 const liveQuery = (definition: unknown) => definition;
 const reducer = (definition: unknown) => definition;
+const visibility = (definition: unknown) => definition;
 type GridArgs = { workspaceId: string };
 type GridRow = { id: string };
 type RenameArgs = { taskId: string; title: string };
 type RenameResult = { ok: boolean };
+
+export const taskVisibility = visibility({
+  table: "tasks",
+  key: "id",
+  sets: {},
+  where: { operator: "public" },
+});
 
 export const grid = liveQuery<GridArgs, GridRow[]>({
   liveQueryPlan: {
@@ -67,6 +75,12 @@ export const rename = reducer<RenameArgs, RenameResult>({
   assert.equal(functions.grid.kind, "query");
   assert.equal(functions.grid.delivery, "live");
   assert.equal(functions.grid.dependencies.liveQueryPlan.table, "tasks");
+  assert.deepEqual(artifact.visibility.tasks, {
+    table: "tasks",
+    key: "id",
+    sets: {},
+    where: { operator: "public" },
+  });
   assert.deepEqual(functions.rename.offline, { mode: "allowed", conflict: "expectedVersion" });
   assert.deepEqual(functions.rename.optimistic.effects[0], {
     operation: "patch",

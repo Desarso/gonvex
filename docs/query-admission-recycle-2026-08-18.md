@@ -5,7 +5,7 @@ deploy) degraded TTLU on the shared dev runtime. Two runtime defects composed:
 
 1. The 32-slot rerun limiter only covered `invalidate`/`recover` executions.
    Initial subscription executions, initial sync snapshots, and attach-time
-   visibility resolvers all hit the database at unbounded concurrency, so a
+   visibility-context reads all hit the database at unbounded concurrency, so a
    reconnect burst starved the DB admission budget (12 total/8 per-pool in the
    certified configuration) and reactive work queued behind the pileup.
 2. Every successful `/dev/sync` recycled the runtime worker — even when the
@@ -23,7 +23,7 @@ controller:
 - **Classes**: reactive (invalidate/recover reruns, authoritative sync
   recomputation), foreground (internal/sandbox one-shot queries), bootstrap
   (initial subscription executions, initial sync snapshots, attach-time
-  visibility resolvers).
+  visibility-context reads).
 - **Global cap**: `GONVEX_SUBSCRIPTION_RERUN_CONCURRENCY` (default 32; `0`
   still disables limiting entirely, preserving embedded/test behavior).
 - **Bootstrap share**: `GONVEX_QUERY_BOOTSTRAP_CONCURRENCY` (default a quarter

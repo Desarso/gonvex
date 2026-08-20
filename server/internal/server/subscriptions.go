@@ -49,61 +49,38 @@ type subscriptionManager struct {
 	listeners        *tenantListenerManager
 	sequence         atomic.Uint64
 	execute          func(context.Context, *sharedSubscription, querySubscription, string, float64) (any, error)
-	visibilityMu     sync.Mutex
-	visibilityRuns   map[string]*visibilityExecution
-	visibilityAttach map[string]visibilityAttachEntry
+	sharedResultMu   sync.Mutex
+	sharedResultRuns map[string]*sharedResultExecution
 }
 
-type visibilityAttachEntry struct {
-	key string
-	at  time.Time
-}
-
-type visibilityExecution struct {
+type sharedResultExecution struct {
 	done      chan struct{}
 	result    any
 	err       error
 	prepareMu sync.Mutex
-	prepared  map[string]visibilityPreparedResult
+	prepared  map[string]sharedPreparedResult
 }
 
-type visibilityPreparedResult struct {
+type sharedPreparedResult struct {
 	result any
 	err    error
 }
 
-// visibilitySharedResult carries immutable work that is identical for every
-// identity group admitted by the visibility proof. Delivery state (revision,
-// cache scope, patch baseline, listeners) deliberately remains group-local.
-type visibilitySharedResult struct {
+// canonicalSharedResult carries immutable work reused by subscriptions that
+// share the same canonical result source. Delivery state remains group-local.
+type canonicalSharedResult struct {
 	payload   json.RawMessage
 	hash      [sha256.Size]byte
 	queryPerf json.RawMessage
 	rowIDs    map[string]bool
 	patchMu   sync.Mutex
-	patches   map[[sha256.Size]byte]visibilitySharedPatch
+	patches   map[[sha256.Size]byte]canonicalSharedPatch
 }
 
-type visibilitySharedPatch struct {
+type canonicalSharedPatch struct {
 	message     serverMessage
 	encodedSize int
 	ok          bool
-}
-
-type visibilityResultPartition struct {
-	key       string
-	listeners []querySubscription
-	result    any
-}
-
-type visibilityPartitionedResult struct {
-	partitions []visibilityResultPartition
-}
-
-type visibilityPartitionBaseline struct {
-	payload  json.RawMessage
-	hash     [sha256.Size]byte
-	revision uint64
 }
 
 type sharedSubscription struct {
@@ -129,28 +106,24 @@ type sharedSubscription struct {
 	// listeners, and whether an execution is currently running never make a
 	// result current. A snapshot is authoritative exactly when computedRevision
 	// has caught up to requiredRevision.
-	requiredRevision        uint64
-	computedRevision        uint64
-	revision                uint64
-	pendingReason           string
-	pendingChangedAtMS      float64
-	pendingCommitIDs        map[string]struct{}
-	activeCommitIDs         map[string]struct{}
-	pendingRequestIDs       map[string]struct{}
-	activeRequestIDs        map[string]struct{}
-	completedCommitIDs      map[string]struct{}
-	completedCommits        []string
-	lastResult              json.RawMessage
-	lastError               string
-	lastHash                [sha256.Size]byte
-	hasHash                 bool
-	lastSingleListener      *subscriptionToken
-	rowIDs                  map[string]bool
-	partitionBaselines      map[string]visibilityPartitionBaseline
-	listenerPartitions      map[*subscriptionToken]string
-	visibilityUsers         []map[string]string
-	visibilityUsersRevision uint64
-	idleTimer               *time.Timer
+	requiredRevision   uint64
+	computedRevision   uint64
+	revision           uint64
+	pendingReason      string
+	pendingChangedAtMS float64
+	pendingCommitIDs   map[string]struct{}
+	activeCommitIDs    map[string]struct{}
+	pendingRequestIDs  map[string]struct{}
+	activeRequestIDs   map[string]struct{}
+	completedCommitIDs map[string]struct{}
+	completedCommits   []string
+	lastResult         json.RawMessage
+	lastError          string
+	lastHash           [sha256.Size]byte
+	hasHash            bool
+	lastSingleListener *subscriptionToken
+	rowIDs             map[string]bool
+	idleTimer          *time.Timer
 }
 
 func newSubscriptionManager(server *Server) *subscriptionManager {
@@ -160,11 +133,16 @@ func newSubscriptionManager(server *Server) *subscriptionManager {
 		epoch:            hex.EncodeToString(epochBytes[:8]),
 		groups:           map[string]*sharedSubscription{},
 		byTable:          map[dependencyKey]map[*sharedSubscription]struct{}{},
-		visibilityRuns:   map[string]*visibilityExecution{},
-		visibilityAttach: map[string]visibilityAttachEntry{},
+		sharedResultRuns: map[string]*sharedResultExecution{},
 	}
 	manager.listeners = newTenantListenerManager(server)
 	manager.execute = func(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string, changedAtMS float64) (any, error) {
+		if group.livePlan != nil {
+			if _, ok := server.visibilityPlan(group.project, group.livePlan.Table); !ok {
+				return server.executeTenantQueryForCallerCached(ctx, group.project, group.tenant, listener.caller, group.path, group.args, group.cacheScope, reason)
+			}
+			return server.executeStructuredLiveQuery(ctx, group.project, group.tenant, listener.caller, *group.livePlan, group.args)
+		}
 		return server.executeTenantQueryForCallerCached(ctx, group.project, group.tenant, listener.caller, group.path, group.args, group.cacheScope, reason)
 	}
 	return manager
@@ -212,8 +190,6 @@ func (m *subscriptionManager) attach(sub querySubscription) {
 		m.listenerCount++
 	}
 	group.listeners[sub.token] = sub
-	group.visibilityUsers = nil
-	group.visibilityUsersRevision++
 	hasSnapshot := len(group.lastResult) > 0 && group.computedRevision >= group.requiredRevision
 	lastError := group.lastError
 	running := group.running
@@ -298,8 +274,6 @@ func (m *subscriptionManager) detach(sub querySubscription) {
 	group.mu.Lock()
 	if _, exists := group.listeners[sub.token]; exists {
 		delete(group.listeners, sub.token)
-		group.visibilityUsers = nil
-		group.visibilityUsersRevision++
 		m.listenerCount--
 	}
 	empty := len(group.listeners) == 0
@@ -408,6 +382,7 @@ func (m *subscriptionManager) requestChange(change tableChange) {
 }
 
 func (m *subscriptionManager) refreshTenant(project, tenant string) {
+	m.server.invalidateAllVisibilityContexts(project, tenant)
 	m.mu.Lock()
 	groups := make([]*sharedSubscription, 0)
 	for _, group := range m.groups {
@@ -426,6 +401,34 @@ func (m *subscriptionManager) rebindProject(subs []querySubscription) {
 	for _, sub := range subs {
 		m.detach(sub)
 		m.attach(sub)
+	}
+}
+
+// rebindVisibilityForChange recomputes canonical group fingerprints before a
+// visibility dependency can fan a result out. A group that was equivalent at
+// revision N may split at N+1 when one member changes team, role, or workspace.
+func (m *subscriptionManager) rebindVisibilityForChange(change tableChange) {
+	changedTables := tableChangeTables(change)
+	m.mu.Lock()
+	byToken := map[*subscriptionToken]querySubscription{}
+	for _, group := range m.groups {
+		if group.project != change.project || group.tenant != change.tenant || group.livePlan == nil {
+			continue
+		}
+		plan, ok := m.server.visibilityPlan(group.project, group.livePlan.Table)
+		if !ok || !intersectsStrings(visibilityPlanDependencies(plan), changedTables) {
+			continue
+		}
+		group.mu.Lock()
+		for token, subscription := range group.listeners {
+			byToken[token] = subscription
+		}
+		group.mu.Unlock()
+	}
+	m.mu.Unlock()
+	for _, subscription := range byToken {
+		m.detach(subscription)
+		m.attach(subscription)
 	}
 }
 
@@ -474,7 +477,13 @@ func (m *subscriptionManager) groupKeyAndDependencies(sub querySubscription) (st
 func (s *Server) liveQueryDependencies(ctx context.Context, project, path string) ([]manifest.ReadDependency, *manifest.LiveQueryPlan, bool) {
 	entry, exists := s.runtime.ManifestForProject(project).Functions[path]
 	if exists && entry.Kind == manifest.FunctionKindQuery && entry.Delivery == manifest.DeliveryLive && entry.Dependencies.LiveQueryPlan != nil {
-		return append([]manifest.ReadDependency(nil), entry.Dependencies.Reads...), entry.Dependencies.LiveQueryPlan, true
+		reads := append([]manifest.ReadDependency(nil), entry.Dependencies.Reads...)
+		if plan, ok := s.runtime.ManifestForProject(project).Visibility[entry.Dependencies.LiveQueryPlan.Table]; ok {
+			for _, table := range visibilityPlanDependencies(plan) {
+				reads = append(reads, manifest.ReadDependency{Table: table})
+			}
+		}
+		return dedupeReadDependencies(reads), entry.Dependencies.LiveQueryPlan, true
 	}
 	descriptor, exists := s.engineForProject(ctx, project).Describe(path)
 	if !exists || descriptor.Kind != moduleengine.KindQuery || descriptor.Delivery != gonvex.DeliveryLive || descriptor.Dependencies.LiveQueryPlan == nil {
@@ -490,45 +499,51 @@ func (s *Server) liveQueryDependencies(ctx context.Context, project, path string
 	encoded, _ := json.Marshal(descriptor.Dependencies.LiveQueryPlan)
 	plan := &manifest.LiveQueryPlan{}
 	_ = json.Unmarshal(encoded, plan)
-	return reads, plan, true
+	if visibility, ok := s.runtime.ManifestForProject(project).Visibility[plan.Table]; ok {
+		for _, table := range visibilityPlanDependencies(visibility) {
+			reads = append(reads, manifest.ReadDependency{Table: table})
+		}
+	}
+	return dedupeReadDependencies(reads), plan, true
+}
+
+func dedupeReadDependencies(reads []manifest.ReadDependency) []manifest.ReadDependency {
+	byTable := map[string]manifest.ReadDependency{}
+	order := []string{}
+	for _, read := range reads {
+		if strings.TrimSpace(read.Table) == "" {
+			continue
+		}
+		existing, ok := byTable[read.Table]
+		if !ok {
+			order = append(order, read.Table)
+		}
+		existing.Table = read.Table
+		existing.Columns = appendUniqueStrings(existing.Columns, read.Columns...)
+		existing.Filters = appendUniqueStrings(existing.Filters, read.Filters...)
+		existing.OrdersBy = appendUniqueStrings(existing.OrdersBy, read.OrdersBy...)
+		existing.Windowed = existing.Windowed || read.Windowed
+		byTable[read.Table] = existing
+	}
+	result := make([]manifest.ReadDependency, 0, len(order))
+	for _, table := range order {
+		result = append(result, byTable[table])
+	}
+	return result
 }
 
 func (m *subscriptionManager) resolveAttachVisibilityKey(sub querySubscription) string {
 	entry := m.server.runtime.ManifestForProject(sub.project).Functions[sub.path]
-	resolver := strings.TrimSpace(entry.Dependencies.ShareByVisibility)
-	if resolver == "" || sub.caller.user == nil || strings.TrimSpace(sub.caller.user.ID) == "" {
-		return ""
+	if entry.Dependencies.LiveQueryPlan != nil {
+		if plan, ok := m.server.visibilityPlan(sub.project, entry.Dependencies.LiveQueryPlan.Table); ok {
+			resolved, err := m.server.resolveVisibilityContext(sub.ctx, sub.project, sub.tenant, sub.caller, plan, 0)
+			if err != nil {
+				return "denied:" + visibilityAccountID(sub.caller)
+			}
+			return resolved.Fingerprint
+		}
 	}
-	payload, _ := json.Marshal([]any{sub.project, sub.tenant, resolver, compactJSON(sub.args), sub.caller.user.ID, sub.caller.user.Email})
-	sum := sha256.Sum256(payload)
-	cacheKey := hex.EncodeToString(sum[:])
-	m.visibilityMu.Lock()
-	if cached, ok := m.visibilityAttach[cacheKey]; ok && time.Since(cached.at) < time.Second {
-		m.visibilityMu.Unlock()
-		return cached.key
-	}
-	m.visibilityMu.Unlock()
-	values := map[string]any{}
-	_ = json.Unmarshal(sub.args, &values)
-	values["__gonvexVisibilityUsers"] = []map[string]string{{"id": sub.caller.user.ID, "email": sub.caller.user.Email}}
-	resolverArgs, _ := json.Marshal(values)
-	release, acquired := m.server.acquireQueryAdmission(sub.ctx, admissionBootstrap, sub.project, sub.tenant)
-	if !acquired {
-		return ""
-	}
-	result, err := m.server.executeTenantQueryForCallerUncached(sub.ctx, sub.project, sub.tenant, sub.caller, resolver, resolverArgs)
-	release()
-	if err != nil {
-		return ""
-	}
-	key := visibilityKeyForUser(result, sub.caller.user.ID)
-	if key == "" || key == "<nil>" {
-		return ""
-	}
-	m.visibilityMu.Lock()
-	m.visibilityAttach[cacheKey] = visibilityAttachEntry{key: key, at: time.Now()}
-	m.visibilityMu.Unlock()
-	return key
+	return ""
 }
 
 func (m *subscriptionManager) executionCacheScope(sub querySubscription) string {
@@ -537,8 +552,10 @@ func (m *subscriptionManager) executionCacheScope(sub querySubscription) string 
 }
 
 func (m *subscriptionManager) executionCacheScopeForEntry(sub querySubscription, entry manifest.FunctionEntry) string {
-	if sub.visibilityKey != "" && strings.TrimSpace(entry.Dependencies.ShareByVisibility) != "" {
-		return "visibility:" + sub.visibilityKey
+	if entry.Dependencies.LiveQueryPlan != nil {
+		if _, ok := m.server.visibilityPlan(sub.project, entry.Dependencies.LiveQueryPlan.Table); ok && sub.visibilityKey != "" {
+			return "visibility:" + sub.visibilityKey
+		}
 	}
 	if entry.Dependencies.ShareByPermissions {
 		// The result-equivalence contract explicitly excludes identity. Use a
@@ -923,7 +940,7 @@ func (group *sharedSubscription) run() {
 		startedAt := time.Now().UTC()
 		group.manager.server.metrics.recordQueryCommitExecution(group.project, group.tenant, group.key, commitIDs)
 		executionCtx := gonvex.WithQueryChange(group.ctx, reason, changedAtMS)
-		result, err := group.manager.executeVisibilityShared(executionCtx, group, representative, reason, changedAtMS)
+		result, err := group.manager.executeSharedResultSource(executionCtx, group, representative, reason, changedAtMS)
 		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
 			metric.QueriesRerun++
 			metric.ReactiveExecutionPasses++
@@ -937,8 +954,6 @@ func (group *sharedSubscription) run() {
 		succeeded := err == nil
 		if err != nil {
 			group.completeError(err.Error())
-		} else if partitioned, ok := result.(*visibilityPartitionedResult); ok {
-			group.completePartitionedResult(partitioned, reason, changedAtMS, startedAt)
 		} else {
 			group.completeResult(result, reason, changedAtMS, startedAt)
 		}
@@ -968,158 +983,44 @@ func (group *sharedSubscription) run() {
 	}
 }
 
-func (m *subscriptionManager) executeVisibilityShared(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string, changedAtMS float64) (any, error) {
-	entry := m.server.runtime.ManifestForProject(group.project).Functions[group.path]
-	resolver := strings.TrimSpace(entry.Dependencies.ShareByVisibility)
-	if resolver == "" {
-		return m.executeWithRerunSlot(ctx, group, listener, reason, changedAtMS)
-	}
-	resolverSnapshot := any(changedAtMS)
-	if commitIDs := sortedStringSet(group.activeCommitIDs); len(commitIDs) > 0 {
-		resolverSnapshot = commitIDs
-	} else {
-		resolverSnapshot = group.key
-	}
-	// Resolve exactly the identities this group is about to partition. The
-	// canonical user set is part of the singleflight key, so cross-path reuse is
-	// allowed only when both groups have the same audience.
-	users := m.visibilityUsers(group)
-	resolverPayload, _ := json.Marshal([]any{group.project, group.tenant, json.RawMessage(group.args), resolver, resolverSnapshot, users})
-	resolverSum := sha256.Sum256(resolverPayload)
-	resolverKey := "resolver:" + hex.EncodeToString(resolverSum[:])
-	m.visibilityMu.Lock()
-	resolverRun := m.visibilityRuns[resolverKey]
-	leader := resolverRun == nil
-	if leader {
-		resolverRun = &visibilityExecution{done: make(chan struct{})}
-		m.visibilityRuns[resolverKey] = resolverRun
-	}
-	m.visibilityMu.Unlock()
-	if leader {
-		resolverStarted := time.Now()
-		values := map[string]any{}
-		_ = json.Unmarshal(group.args, &values)
-		values["__gonvexVisibilityUsers"] = users
-		resolverArgs, _ := json.Marshal(values)
-		releaseSlot, acquired := m.acquireExecutionSlot(ctx, reason, group.project, group.tenant)
-		if !acquired {
-			resolverRun.err = ctx.Err()
-		} else {
-			resolverRun.result, resolverRun.err = m.server.executeTenantQueryForCallerUncached(ctx, group.project, group.tenant, listener.caller, resolver, resolverArgs)
-			releaseSlot()
-		}
-		resolverDurationMS := float64(time.Since(resolverStarted).Microseconds()) / 1000
-		m.server.metrics.recordReactive(func(metric *reactiveMetricState) {
-			metric.VisibilityResolverExecutions++
-			metric.VisibilityResolverDurationMS += resolverDurationMS
-		})
-		m.visibilityMu.Lock()
-		close(resolverRun.done)
-		m.visibilityMu.Unlock()
-		time.AfterFunc(time.Second, func() {
-			m.visibilityMu.Lock()
-			if m.visibilityRuns[resolverKey] == resolverRun {
-				delete(m.visibilityRuns, resolverKey)
-			}
-			m.visibilityMu.Unlock()
-		})
-	} else {
-		select {
-		case <-resolverRun.done:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	if resolverRun.err != nil {
-		return m.executeWithRerunSlot(ctx, group, listener, reason, changedAtMS)
-	}
-	group.mu.Lock()
-	currentListeners := group.listenerSnapshotLocked()
-	group.mu.Unlock()
-	partitions := map[string][]querySubscription{}
-	for _, candidate := range currentListeners {
-		userID := ""
-		if candidate.caller.user != nil {
-			userID = strings.TrimSpace(candidate.caller.user.ID)
-		}
-		key := visibilityKeyForUser(resolverRun.result, userID)
-		if key == "" || key == "<nil>" {
-			key = "identity:" + userID
-		}
-		partitions[key] = append(partitions[key], candidate)
-	}
-	if len(partitions) > 1 {
-		keys := make([]string, 0, len(partitions))
-		for key := range partitions {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		result := &visibilityPartitionedResult{partitions: make([]visibilityResultPartition, len(keys))}
-		errs := make([]error, len(keys))
-		workerCount := min(32, len(keys))
-		var workers sync.WaitGroup
-		for worker := range workerCount {
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				for index := worker; index < len(keys); index += workerCount {
-					key := keys[index]
-					listeners := partitions[key]
-					value, err := m.executeVisibilityPartition(ctx, group, listeners[0], reason, changedAtMS, key)
-					result.partitions[index] = visibilityResultPartition{key: key, listeners: listeners, result: value}
-					errs[index] = err
-				}
-			}()
-		}
-		workers.Wait()
-		for _, err := range errs {
-			if err != nil {
-				return nil, err
-			}
-		}
-		return result, nil
-	}
-	userID := "anonymous"
-	if listener.caller.user != nil && strings.TrimSpace(listener.caller.user.ID) != "" {
-		userID = strings.TrimSpace(listener.caller.user.ID)
-	}
-	visibilityKey := visibilityKeyForUser(resolverRun.result, userID)
-	if visibilityKey == "" || visibilityKey == "<nil>" {
-		return m.executeWithRerunSlot(ctx, group, listener, reason, changedAtMS)
-	}
-	return m.executeVisibilityPartition(ctx, group, listener, reason, changedAtMS, visibilityKey)
-}
-
-func (m *subscriptionManager) executeVisibilityPartition(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string, changedAtMS float64, visibilityKey string) (any, error) {
-	if strings.HasPrefix(visibilityKey, "identity:") {
-		return m.executeWithRerunSlot(ctx, group, listener, reason, changedAtMS)
-	}
-	ctx = gonvex.WithQueryVisibilityKey(ctx, visibilityKey)
+func (m *subscriptionManager) executeSharedResultSource(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string, changedAtMS float64) (any, error) {
 	entry := m.server.runtime.ManifestForProject(group.project).Functions[group.path]
 	resultSource := strings.TrimSpace(entry.Dependencies.ShareResultFrom)
 	resultField := strings.TrimSpace(entry.Dependencies.ShareResultField)
-	executionPath := group.path
-	if resultSource != "" && resultField != "" {
-		executionPath = resultSource
+	if resultSource == "" || resultField == "" {
+		return m.executeWithRerunSlot(ctx, group, listener, reason, changedAtMS)
 	}
+
 	snapshotKey := any(changedAtMS)
 	if commitIDs := sortedStringSet(group.activeCommitIDs); len(commitIDs) > 0 {
-		// Every trigger notification carrying one mutation ID is observed only
-		// after that transaction committed. Subscriber groups selected by later
-		// tables can therefore reuse the path-specific result computed for an
-		// earlier table from the same committed mutation.
 		snapshotKey = commitIDs
 	}
+	resultScope := strings.TrimSpace(group.cacheScope)
+	if resultScope == "" {
+		switch {
+		case listener.visibilityKey != "":
+			resultScope = "visibility:" + listener.visibilityKey
+		case entry.Dependencies.ShareByPermissions:
+			resultScope = "permissions:" + hashQueryCacheValue(listener.caller.permissions)
+		default:
+			resultScope = "identity:" + visibilityAccountID(listener.caller)
+		}
+	}
 	payload, _ := json.Marshal([]any{
-		group.project, group.tenant, executionPath, json.RawMessage(group.args),
-		visibilityKey, snapshotKey,
+		group.project,
+		group.tenant,
+		resultSource,
+		json.RawMessage(group.args),
+		resultScope,
+		hashQueryCacheValue(listener.caller.permissions),
+		snapshotKey,
 	})
 	sum := sha256.Sum256(payload)
 	key := hex.EncodeToString(sum[:])
 
-	m.visibilityMu.Lock()
-	if active := m.visibilityRuns[key]; active != nil {
-		m.visibilityMu.Unlock()
+	m.sharedResultMu.Lock()
+	if active := m.sharedResultRuns[key]; active != nil {
+		m.sharedResultMu.Unlock()
 		select {
 		case <-active.done:
 			return active.prepareResult(resultField)
@@ -1127,125 +1028,77 @@ func (m *subscriptionManager) executeVisibilityPartition(ctx context.Context, gr
 			return nil, ctx.Err()
 		}
 	}
-	active := &visibilityExecution{done: make(chan struct{})}
-	m.visibilityRuns[key] = active
-	m.visibilityMu.Unlock()
+	active := &sharedResultExecution{done: make(chan struct{})}
+	m.sharedResultRuns[key] = active
+	m.sharedResultMu.Unlock()
 
 	executionStarted := time.Now()
 	releaseSlot, acquired := m.acquireExecutionSlot(ctx, reason, group.project, group.tenant)
 	if !acquired {
 		active.err = ctx.Err()
 	} else {
-		var value any
-		var executeErr error
-		if executionPath == group.path {
-			value, executeErr = m.execute(ctx, group, listener, reason, changedAtMS)
-		} else {
-			value, executeErr = m.server.executeTenantQueryForCallerCached(ctx, group.project, group.tenant, listener.caller, executionPath, group.args, group.cacheScope, reason)
-		}
+		active.result, active.err = m.server.executeTenantQueryForCallerCached(
+			ctx,
+			group.project,
+			group.tenant,
+			listener.caller,
+			resultSource,
+			group.args,
+			group.cacheScope,
+			reason,
+		)
 		releaseSlot()
-		active.err = executeErr
-		active.result = value
 	}
 	executionDurationMS := float64(time.Since(executionStarted).Microseconds()) / 1000
 	m.server.metrics.recordReactive(func(metric *reactiveMetricState) {
-		metric.VisibilitySharedExecutions++
-		metric.VisibilitySharedDurationMS += executionDurationMS
+		metric.SharedResultSourceExecutions++
+		metric.SharedResultSourceDurationMS += executionDurationMS
 	})
-	m.visibilityMu.Lock()
+	m.sharedResultMu.Lock()
 	close(active.done)
-	m.visibilityMu.Unlock()
+	m.sharedResultMu.Unlock()
 	time.AfterFunc(time.Second, func() {
-		m.visibilityMu.Lock()
-		if m.visibilityRuns[key] == active {
-			delete(m.visibilityRuns, key)
+		m.sharedResultMu.Lock()
+		if m.sharedResultRuns[key] == active {
+			delete(m.sharedResultRuns, key)
 		}
-		m.visibilityMu.Unlock()
+		m.sharedResultMu.Unlock()
 	})
 	return active.prepareResult(resultField)
 }
 
-func (execution *visibilityExecution) prepareResult(field string) (any, error) {
+func (execution *sharedResultExecution) prepareResult(field string) (any, error) {
 	execution.prepareMu.Lock()
 	defer execution.prepareMu.Unlock()
 	if prepared, ok := execution.prepared[field]; ok {
 		return prepared.result, prepared.err
 	}
-	result, err := prepareVisibilityResult(execution.result, field, execution.err)
+	result, err := prepareSharedResult(execution.result, field, execution.err)
 	if execution.prepared == nil {
-		execution.prepared = map[string]visibilityPreparedResult{}
+		execution.prepared = map[string]sharedPreparedResult{}
 	}
-	execution.prepared[field] = visibilityPreparedResult{result: result, err: err}
+	execution.prepared[field] = sharedPreparedResult{result: result, err: err}
 	return result, err
 }
 
-func prepareVisibilityResult(value any, field string, executionErr error) (any, error) {
+func prepareSharedResult(value any, field string, executionErr error) (any, error) {
 	if executionErr != nil {
 		return nil, executionErr
 	}
-	if field != "" {
-		object, ok := value.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("shared result source returned %T, want object containing %q", value, field)
-		}
-		projected, exists := object[field]
-		if !exists {
-			return nil, fmt.Errorf("shared result source omitted projection %q", field)
-		}
-		value = projected
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("shared result source returned %T, want object containing %q", value, field)
 	}
-	encoded, err := json.Marshal(explicitNull(value))
+	projected, exists := object[field]
+	if !exists {
+		return nil, fmt.Errorf("shared result source omitted projection %q", field)
+	}
+	encoded, err := json.Marshal(explicitNull(projected))
 	if err != nil {
 		return nil, err
 	}
 	hash, queryPerf := queryResultSemantics(encoded)
-	return &visibilitySharedResult{payload: encoded, hash: hash, queryPerf: queryPerf, rowIDs: resultRowIDs(value)}, nil
-}
-
-func (m *subscriptionManager) visibilityUsers(group *sharedSubscription) []map[string]string {
-	group.mu.Lock()
-	if group.visibilityUsers != nil {
-		result := group.visibilityUsers
-		group.mu.Unlock()
-		return result
-	}
-	revision := group.visibilityUsersRevision
-	users := map[string]string{}
-	for _, listener := range group.listeners {
-		if listener.caller.user != nil && strings.TrimSpace(listener.caller.user.ID) != "" {
-			users[strings.TrimSpace(listener.caller.user.ID)] = strings.TrimSpace(listener.caller.user.Email)
-		}
-	}
-	group.mu.Unlock()
-	ids := make([]string, 0, len(users))
-	for user := range users {
-		ids = append(ids, user)
-	}
-	sort.Strings(ids)
-	result := make([]map[string]string, 0, len(ids))
-	for _, id := range ids {
-		result = append(result, map[string]string{"id": id, "email": users[id]})
-	}
-	group.mu.Lock()
-	// An attach/detach may have invalidated the cache while this canonical list
-	// was being sorted. Only publish it if no newer list already won the race;
-	// callers still use this exact snapshot in their singleflight key.
-	if group.visibilityUsers == nil && group.visibilityUsersRevision == revision {
-		group.visibilityUsers = result
-	}
-	group.mu.Unlock()
-	return result
-}
-
-func visibilityKeyForUser(result any, userID string) string {
-	switch values := result.(type) {
-	case map[string]string:
-		return strings.TrimSpace(values[userID])
-	case map[string]any:
-		return strings.TrimSpace(fmt.Sprint(values[userID]))
-	default:
-		return strings.TrimSpace(fmt.Sprint(result))
-	}
+	return &canonicalSharedResult{payload: encoded, hash: hash, queryPerf: queryPerf, rowIDs: resultRowIDs(projected)}, nil
 }
 
 func (m *subscriptionManager) executeWithRerunSlot(ctx context.Context, group *sharedSubscription, listener querySubscription, reason string, changedAtMS float64) (any, error) {
@@ -1370,12 +1223,12 @@ func (group *sharedSubscription) firstAuthorizedListener(listeners []querySubscr
 }
 
 func (group *sharedSubscription) completeResult(result any, reason string, changedAtMS float64, startedAt time.Time) {
-	var sharedResult *visibilitySharedResult
+	var sharedResult *canonicalSharedResult
 	var payload json.RawMessage
 	var hash [sha256.Size]byte
 	var queryPerf json.RawMessage
 	var rowIDs map[string]bool
-	if shared, ok := result.(*visibilitySharedResult); ok {
+	if shared, ok := result.(*canonicalSharedResult); ok {
 		sharedResult = shared
 		payload, hash, queryPerf, rowIDs = shared.payload, shared.hash, shared.queryPerf, shared.rowIDs
 	} else {
@@ -1387,9 +1240,6 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 		payload = encoded
 		hash, queryPerf = queryResultSemantics(payload)
 		rowIDs = resultRowIDs(result)
-	}
-	if sharedResult != nil && group.completeConvergedPartitionResult(sharedResult, reason, changedAtMS, startedAt) {
-		return
 	}
 	group.mu.Lock()
 	mutationIDs := make([]string, 0, len(group.activeCommitIDs))
@@ -1513,229 +1363,7 @@ func (group *sharedSubscription) completeResult(result any, reason string, chang
 	})
 }
 
-func (group *sharedSubscription) completePartitionedResult(result *visibilityPartitionedResult, reason string, changedAtMS float64, startedAt time.Time) {
-	// Independently proven visibility scopes can still converge to the same
-	// result. Collapse them only after comparing the actual committed payload;
-	// this preserves identity isolation while avoiding duplicate delivery.
-	if len(result.partitions) > 1 {
-		var common *visibilitySharedResult
-		converged := true
-		for _, partition := range result.partitions {
-			shared, ok := partition.result.(*visibilitySharedResult)
-			if !ok {
-				converged = false
-				break
-			}
-			if common == nil {
-				common = shared
-				continue
-			}
-			if common.hash != shared.hash || !bytes.Equal(common.payload, shared.payload) {
-				converged = false
-				break
-			}
-		}
-		if converged && common != nil {
-			if group.completeConvergedPartitionResult(common, reason, changedAtMS, startedAt) {
-				return
-			}
-			group.completeResult(common, reason, changedAtMS, startedAt)
-			return
-		}
-	}
-	group.mu.Lock()
-	mutationIDs := sortedStringSet(group.activeCommitIDs)
-	sharedPrevious := append(json.RawMessage(nil), group.lastResult...)
-	sharedPreviousHash := group.lastHash
-	sharedPreviousRevision := group.revision
-	previousPartitions := group.partitionBaselines
-	group.revision = group.manager.sequence.Add(1)
-	revision := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: group.revision}
-	// A partitioned result proves that the old shared baseline is no longer
-	// valid. Send full results now and force the next converged execution to
-	// establish a fresh common baseline before keyed patches resume.
-	group.lastResult = nil
-	group.hasHash = false
-	group.rowIDs = nil
-	group.lastSingleListener = nil
-	group.partitionBaselines = nil
-	group.listenerPartitions = nil
-	group.mu.Unlock()
-	nextPartitions := map[string]visibilityPartitionBaseline{}
-	nextListeners := map[*subscriptionToken]string{}
-	retainedBytes := 0
-	retainPartitions := len(result.partitions) <= 64
-	for _, partition := range result.partitions {
-		var sharedResult *visibilitySharedResult
-		var payload json.RawMessage
-		var hash [sha256.Size]byte
-		var queryPerf json.RawMessage
-		if shared, ok := partition.result.(*visibilitySharedResult); ok {
-			sharedResult = shared
-			payload, hash, queryPerf = shared.payload, shared.hash, shared.queryPerf
-		} else {
-			encoded, err := json.Marshal(explicitNull(partition.result))
-			if err != nil {
-				group.broadcastError(err.Error())
-				return
-			}
-			payload = encoded
-			hash, queryPerf = queryResultSemantics(payload)
-		}
-		message := serverMessage{
-			Type: "query.result", Path: group.path, Result: json.RawMessage(payload), Reason: reason,
-			CacheScope: group.cacheScope, CacheRevision: group.manager.server.nextQueryCacheRevision(hash),
-			SubscriptionRevision: revision, OriginCommandIDs: mutationIDs, QueryPerf: queryPerf,
-		}
-		encodedSize := len(payload)
-		patched := false
-		previous := sharedPrevious
-		previousHash := sharedPreviousHash
-		previousRevision := sharedPreviousRevision
-		if baseline, ok := previousPartitions[partition.key]; ok {
-			previous = baseline.payload
-			previousHash = baseline.hash
-			previousRevision = baseline.revision
-		}
-		// Every listener in the old group acknowledged the same committed
-		// baseline. When a visibility change splits that group, each new result
-		// can therefore use the ordinary keyed-patch protocol from that baseline.
-		// The client validates BaseRevision and requests recovery on any mismatch,
-		// so a lagging listener can never apply a patch to the wrong snapshot.
-		if len(previous) >= minimumPatchResultBytes {
-			var patch serverMessage
-			var patchOK bool
-			patchEncodedSize := 0
-			if sharedResult != nil {
-				cached := sharedResult.keyedPatch(previousHash, previous)
-				patch, patchOK, patchEncodedSize = cached.message, cached.ok, cached.encodedSize
-			} else {
-				patch, patchOK = keyedResultPatch(previous, payload)
-			}
-			if patchOK {
-				patch.SubscriptionRevision = revision
-				patch.BaseRevision = &subscriptionRevision{Epoch: group.manager.epoch, Sequence: previousRevision}
-				patch.Path = group.path
-				patch.Reason = reason
-				patch.OriginCommandIDs = mutationIDs
-				patch.CacheScope = group.cacheScope
-				patch.CacheRevision = message.CacheRevision
-				patch.FullResult = payload
-				if sharedResult != nil {
-					message = patch
-					encodedSize = patchEncodedSize
-					patched = true
-				} else if encoded, encodeErr := json.Marshal(patch); encodeErr == nil && len(encoded) < len(payload)*7/10 {
-					message = patch
-					encodedSize = len(encoded)
-					patched = true
-				}
-			}
-		}
-		group.broadcastTo(partition.listeners, message, changedAtMS, startedAt)
-		if retainPartitions {
-			retainedBytes += len(payload)
-			if retainedBytes <= group.manager.server.config.SharedResultMaxBytes {
-				nextPartitions[partition.key] = visibilityPartitionBaseline{payload: payload, hash: hash, revision: revision.Sequence}
-				for _, listener := range partition.listeners {
-					nextListeners[listener.token] = partition.key
-				}
-			} else {
-				retainPartitions = false
-				nextPartitions = nil
-				nextListeners = nil
-			}
-		}
-		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
-			if patched {
-				metric.Patches++
-			} else {
-				metric.FullResults++
-			}
-			metric.ResultBytesBefore += uint64(len(payload))
-			metric.ResultBytesAfter += uint64(encodedSize)
-		})
-	}
-	if retainPartitions {
-		group.mu.Lock()
-		group.partitionBaselines = nextPartitions
-		group.listenerPartitions = nextListeners
-		group.mu.Unlock()
-	}
-}
-
-// completeConvergedPartitionResult patches each listener from the exact
-// visibility partition it last acknowledged, then restores the compact shared
-// baseline. It returns false when there is no retained partition state.
-func (group *sharedSubscription) completeConvergedPartitionResult(shared *visibilitySharedResult, reason string, changedAtMS float64, startedAt time.Time) bool {
-	group.mu.Lock()
-	if len(group.partitionBaselines) == 0 {
-		group.mu.Unlock()
-		return false
-	}
-	baselines := group.partitionBaselines
-	listenerPartitions := group.listenerPartitions
-	listeners := group.listenerSnapshotLocked()
-	mutationIDs := sortedStringSet(group.activeCommitIDs)
-	group.revision = group.manager.sequence.Add(1)
-	revision := &subscriptionRevision{Epoch: group.manager.epoch, Sequence: group.revision}
-	group.lastHash = shared.hash
-	group.hasHash = true
-	group.lastError = ""
-	group.rowIDs = shared.rowIDs
-	if len(shared.payload) <= group.manager.server.config.SharedResultMaxBytes {
-		group.lastResult = shared.payload
-	} else {
-		group.lastResult = nil
-	}
-	if len(listeners) == 1 {
-		group.lastSingleListener = listeners[0].token
-	} else {
-		group.lastSingleListener = nil
-	}
-	group.partitionBaselines = nil
-	group.listenerPartitions = nil
-	group.mu.Unlock()
-
-	partitionListeners := map[string][]querySubscription{}
-	for _, listener := range listeners {
-		partitionListeners[listenerPartitions[listener.token]] = append(partitionListeners[listenerPartitions[listener.token]], listener)
-	}
-	cacheRevision := group.manager.server.nextQueryCacheRevision(shared.hash)
-	for key, selected := range partitionListeners {
-		message := serverMessage{
-			Type: "query.result", Path: group.path, Result: shared.payload, Reason: reason,
-			CacheScope: group.cacheScope, CacheRevision: cacheRevision,
-			SubscriptionRevision: revision, OriginCommandIDs: mutationIDs, QueryPerf: shared.queryPerf,
-		}
-		encodedSize := len(shared.payload)
-		patched := false
-		if baseline, ok := baselines[key]; ok && len(baseline.payload) >= minimumPatchResultBytes {
-			cached := shared.keyedPatch(baseline.hash, baseline.payload)
-			if patch, ok := cached.message, cached.ok; ok {
-				patch.SubscriptionRevision = revision
-				patch.BaseRevision = &subscriptionRevision{Epoch: group.manager.epoch, Sequence: baseline.revision}
-				patch.Path, patch.Reason = group.path, reason
-				patch.OriginCommandIDs, patch.CacheScope, patch.CacheRevision = mutationIDs, group.cacheScope, cacheRevision
-				patch.FullResult = shared.payload
-				message, encodedSize, patched = patch, cached.encodedSize, true
-			}
-		}
-		group.broadcastTo(selected, message, changedAtMS, startedAt)
-		group.manager.server.metrics.recordReactive(func(metric *reactiveMetricState) {
-			if patched {
-				metric.Patches++
-			} else {
-				metric.FullResults++
-			}
-			metric.ResultBytesBefore += uint64(len(shared.payload))
-			metric.ResultBytesAfter += uint64(encodedSize)
-		})
-	}
-	return true
-}
-
-func (shared *visibilitySharedResult) keyedPatch(previousHash [sha256.Size]byte, previous json.RawMessage) visibilitySharedPatch {
+func (shared *canonicalSharedResult) keyedPatch(previousHash [sha256.Size]byte, previous json.RawMessage) canonicalSharedPatch {
 	shared.patchMu.Lock()
 	defer shared.patchMu.Unlock()
 	if cached, ok := shared.patches[previousHash]; ok {
@@ -1750,9 +1378,9 @@ func (shared *visibilitySharedResult) keyedPatch(previousHash [sha256.Size]byte,
 			encodedSize = len(encoded)
 		}
 	}
-	cached := visibilitySharedPatch{message: patch, encodedSize: encodedSize, ok: ok}
+	cached := canonicalSharedPatch{message: patch, encodedSize: encodedSize, ok: ok}
 	if shared.patches == nil {
-		shared.patches = map[[sha256.Size]byte]visibilitySharedPatch{}
+		shared.patches = map[[sha256.Size]byte]canonicalSharedPatch{}
 	}
 	shared.patches[previousHash] = cached
 	return cached

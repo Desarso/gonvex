@@ -158,7 +158,6 @@ func (o *ReplicaTableOption) RetainFor(duration time.Duration) *ReplicaTableOpti
 type FunctionDependencies struct {
 	Reads                []ReadDependency
 	ShareByPermissions   bool
-	ShareByVisibility    string
 	ShareResultFrom      string
 	ShareResultField     string
 	OptimisticReducer    *OptimisticReducerDefinition
@@ -282,19 +281,6 @@ func (shareByPermissionsOption) applyFunctionOption(target *FunctionDependencies
 	target.ShareByPermissions = true
 }
 
-type shareByVisibilityOption struct{ resolver string }
-
-// ShareByVisibility shares invalidation execution only when resolver returns
-// the same non-empty result for both callers. The resolver contract is strict:
-// equal keys must imply equal query results for the committed state.
-func ShareByVisibility(resolver string) FunctionOption {
-	return shareByVisibilityOption{resolver: strings.TrimSpace(resolver)}
-}
-
-func (option shareByVisibilityOption) applyFunctionOption(target *FunctionDependencies) {
-	target.ShareByVisibility = option.resolver
-}
-
 type shareResultFromOption struct{ source, field string }
 
 // ShareResultFrom executes one canonical query and returns the named field of
@@ -397,11 +383,6 @@ type processEnvDisabledContextKey struct{}
 type QueryChangeInfo struct {
 	Reason      string
 	ChangedAtMS float64
-	Details     *QueryChangeDetails
-}
-
-type QueryChangeDetails struct {
-	VisibilityKey string
 }
 
 // WithQueryChange attaches the table-change revision that caused a reactive
@@ -418,18 +399,6 @@ func WithQueryChangeDetails(ctx context.Context, reason string, changedAtMS floa
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, queryChangeContextKey{}, QueryChangeInfo{Reason: reason, ChangedAtMS: changedAtMS})
-}
-
-func WithQueryVisibilityKey(ctx context.Context, key string) context.Context {
-	info := QueryChange(ctx)
-	if info.Details == nil {
-		info.Details = &QueryChangeDetails{}
-	} else {
-		copy := *info.Details
-		info.Details = &copy
-	}
-	info.Details.VisibilityKey = key
-	return context.WithValue(ctx, queryChangeContextKey{}, info)
 }
 
 // QueryChange returns the reactive invalidation revision attached by the host.

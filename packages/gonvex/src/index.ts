@@ -1220,6 +1220,7 @@ async function buildManifest(root: string, sources: BackendSources, projectID: s
     schema,
     ...(bundle ? { bundle } : {}),
     ...(module ? { module } : {}),
+    ...(module && Object.keys(module.visibility).length > 0 ? { visibility: module.visibility } : {}),
   };
 }
 
@@ -1242,6 +1243,7 @@ async function buildModuleManifest(root: string, sources: BackendSources, projec
     functions: moduleManifestFunctions(artifact),
     schema: emptySchemaDefinition(),
     module: artifact,
+    ...(Object.keys(artifact.visibility).length > 0 ? { visibility: artifact.visibility } : {}),
   };
 }
 
@@ -1362,7 +1364,7 @@ function parseReplicaCollectionDefinition(callBody: string): ReplicaCollectionDe
 
 function parseFunctionDependencies(callBody: string): FunctionDependencies {
   const dependencies: FunctionDependencies = {};
-  const pattern = /(?:gonvex\.)?(LivePlan|ShareByPermissions|ShareByVisibility|ShareResultFrom|OptimisticReducer|OptimisticProjection|OnlineOnlyNonOptimistic)\s*\(/g;
+  const pattern = /(?:gonvex\.)?(LivePlan|ShareByPermissions|ShareResultFrom|OptimisticReducer|OptimisticProjection|OnlineOnlyNonOptimistic)\s*\(/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(callBody)) !== null) {
     const option = match[1]!;
@@ -1399,12 +1401,6 @@ function parseFunctionDependencies(callBody: string): FunctionDependencies {
       pattern.lastIndex = closeParen + 1;
       continue;
     }
-
-		if (option === "ShareByVisibility") {
-			dependencies.shareByVisibility = stringArgs(callBody.slice(openParen + 1, closeParen))[0];
-			pattern.lastIndex = closeParen + 1;
-			continue;
-		}
 
 		if (option === "ShareResultFrom") {
 			const values = stringArgs(callBody.slice(openParen + 1, closeParen));

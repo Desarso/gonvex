@@ -98,7 +98,7 @@ func manifestReplicaCollectionDefinitions(current manifest.Manifest) map[string]
 		if entry.Delivery != manifest.DeliveryReplica || entry.Replica == nil {
 			continue
 		}
-		definition := effectiveReplicaCollectionDefinition(entry)
+		definition := replicaCollectionDefinitionWithVisibility(current, entry)
 		table := strings.TrimSpace(definition.Table)
 		if table == "" {
 			continue
@@ -134,6 +134,17 @@ func effectiveReplicaCollectionDefinition(entry manifest.FunctionEntry) manifest
 			continue
 		}
 		definition.VisibilityTables = appendUniqueStrings(definition.VisibilityTables, table)
+	}
+	return definition
+}
+
+func replicaCollectionDefinitionWithVisibility(current manifest.Manifest, entry manifest.FunctionEntry) manifest.ReplicaCollectionDefinition {
+	definition := effectiveReplicaCollectionDefinition(entry)
+	if plan, ok := current.Visibility[definition.Table]; ok {
+		definition.VisibilityTables = appendUniqueStrings(definition.VisibilityTables, visibilityPlanDependencies(plan)...)
+		payload, _ := json.Marshal(plan)
+		sum := sha256.Sum256(payload)
+		definition.VisibilityPlanHash = hex.EncodeToString(sum[:])
 	}
 	return definition
 }
@@ -274,7 +285,7 @@ func (c *wsConn) openSyncWithClock(
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: protocolErr.Error()})
 		return
 	}
-	definition := effectiveReplicaCollectionDefinition(entry)
+	definition := replicaCollectionDefinitionWithVisibility(current, entry)
 	base := syncCursorForClock(clock, definition, c.currentSyncScope())
 
 	subscription := &syncSubscription{
@@ -310,7 +321,17 @@ func (c *wsConn) openSyncWithClock(
 		c.write(serverMessage{Type: "sync.error", ID: message.ID, Path: message.Path, Error: protocolErr.Error()})
 		return
 	}
-	result, err := c.server.executeTenantQueryForCallerUncached(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
+	var (
+		result any
+		err    error
+	)
+	if _, ok := c.server.visibilityPlan(c.project, definition.Table); ok {
+		result, err = c.server.executeStructuredReplicaQuery(ctx, c.project, c.tenant, c.caller(), definition, message.Args)
+	} else {
+		// Persisted pre-v2 manifests remain readable only until their next
+		// deployment. /dev/sync requires the explicit plan on every update.
+		result, err = c.server.executeTenantQueryForCallerUncached(ctx, c.project, c.tenant, c.caller(), message.Path, message.Args)
+	}
 	release()
 	if err != nil {
 		protocolErr = err
@@ -608,8 +629,19 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		}
 		return err
 	}
+	s.invalidateVisibilityContexts(subscription.project, subscription.tenant, syncLogChangeTables(changes))
 	args := map[string]json.RawMessage{}
 	_ = json.Unmarshal(subscription.args, &args)
+	visibilityPlan, hasVisibilityPlan := s.visibilityPlan(subscription.project, subscription.definition.Table)
+	var visibilityContext *resolvedVisibilityContext
+	if hasVisibilityPlan {
+		visibilityContext, err = s.resolveVisibilityContext(
+			ctx, subscription.project, subscription.tenant, subscription.conn.caller(), visibilityPlan, 0,
+		)
+		if err != nil {
+			return err
+		}
+	}
 	if len(changes) == 0 && subscription.verified {
 		subscription.cursor = latest
 		s.writeSyncReady(subscription, syncReadyServerMessage(subscription, latest))
@@ -649,6 +681,9 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		mutationIDs := map[string]bool{}
 		for _, change := range batch.changes {
 			newMatches := syncValueMatches(change.newValue, subscription.definition, args)
+			if hasVisibilityPlan {
+				newMatches = newMatches && visibilityRawRowMatches(change.newValue, visibilityPlan, visibilityContext)
+			}
 			switch {
 			case newMatches:
 				upserts[change.rowID] = change.newValue
@@ -720,14 +755,17 @@ func (s *Server) deliverAuthoritativeSync(
 	if !admitted {
 		return false, ctx.Err()
 	}
-	result, err := s.executeTenantQueryForCallerUncached(
-		ctx,
-		subscription.project,
-		subscription.tenant,
-		subscription.conn.caller(),
-		subscription.path,
-		subscription.args,
-	)
+	var result any
+	var err error
+	if _, ok := s.visibilityPlan(subscription.project, subscription.definition.Table); ok {
+		result, err = s.executeStructuredReplicaQuery(
+			ctx, subscription.project, subscription.tenant, subscription.conn.caller(), subscription.definition, subscription.args,
+		)
+	} else {
+		result, err = s.executeTenantQueryForCallerUncached(
+			ctx, subscription.project, subscription.tenant, subscription.conn.caller(), subscription.path, subscription.args,
+		)
+	}
 	release()
 	if err != nil {
 		return false, err
@@ -950,6 +988,9 @@ func (s *Server) routeReplicaTransaction(project, tenant, databaseEpoch string, 
 	}
 	s.wsMu.RUnlock()
 	for _, connection := range connections {
+		caller := connection.caller()
+		visibilityContexts := map[string]*resolvedVisibilityContext{}
+		visibilityPlans := map[string]manifest.VisibilityPlan{}
 		connection.mu.Lock()
 		subscriptions := make([]*syncSubscription, 0, len(connection.syncs))
 		for _, subscription := range connection.syncs {
@@ -963,6 +1004,19 @@ func (s *Server) routeReplicaTransaction(project, tenant, databaseEpoch string, 
 		originCommandID := ""
 		for _, committed := range batch.changes {
 			oldVisible, newVisible := false, false
+			plan, planned := visibilityPlans[committed.table]
+			if !planned {
+				plan, planned = s.visibilityPlan(project, committed.table)
+				if planned {
+					visibilityPlans[committed.table] = plan
+					ctx, cancel := context.WithTimeout(context.Background(), syncDeliveryTimeout)
+					resolved, resolveErr := s.resolveVisibilityContext(ctx, project, tenant, caller, plan, 0)
+					cancel()
+					if resolveErr == nil {
+						visibilityContexts[committed.table] = resolved
+					}
+				}
+			}
 			for _, subscription := range subscriptions {
 				if subscription.definition.Table != committed.table {
 					continue
@@ -972,22 +1026,21 @@ func (s *Server) routeReplicaTransaction(project, tenant, databaseEpoch string, 
 					oldVisible = oldVisible || subscription.visibleKeys[committed.rowID]
 					args := map[string]json.RawMessage{}
 					_ = json.Unmarshal(subscription.args, &args)
-					newVisible = newVisible || syncValueMatches(committed.newValue, subscription.definition, args)
+					matches := syncValueMatches(committed.newValue, subscription.definition, args)
+					if planned {
+						resolved := visibilityContexts[committed.table]
+						matches = matches && resolved != nil && visibilityRawRowMatches(committed.newValue, plan, resolved)
+					}
+					newVisible = newVisible || matches
 				}
 				subscription.mu.Unlock()
 			}
 			if originCommandID == "" {
 				originCommandID = strings.TrimSpace(committed.mutationID)
 			}
-			if !oldVisible && !newVisible {
+			operation, visible := visibilityTransitionOperation(oldVisible, newVisible)
+			if !visible {
 				continue
-			}
-			operation := "update"
-			switch {
-			case !oldVisible && newVisible:
-				operation = "insert"
-			case oldVisible && !newVisible:
-				operation = "delete"
 			}
 			change := replicaChangeMessage{
 				Entity: committed.table, ID: committed.rowID, Operation: operation,
@@ -1008,6 +1061,22 @@ func (s *Server) routeReplicaTransaction(project, tenant, databaseEpoch string, 
 			Changes:         changes,
 		})
 	}
+}
+
+func syncBatchTables(batch syncChangeBatch) []string {
+	tables := make([]string, 0, len(batch.changes))
+	for _, change := range batch.changes {
+		tables = append(tables, change.table)
+	}
+	return appendUniqueStrings(nil, tables...)
+}
+
+func syncLogChangeTables(changes []syncLogChange) []string {
+	tables := make([]string, 0, len(changes))
+	for _, change := range changes {
+		tables = append(tables, change.table)
+	}
+	return appendUniqueStrings(nil, tables...)
 }
 
 func groupSyncChanges(changes []syncLogChange) []syncChangeBatch {
@@ -1493,7 +1562,37 @@ func (s *Server) resetSyncsForVisibilityChange(change tableChange) {
 			connection.write(serverMessage{Type: "sync.reset", ID: subscription.id, Path: subscription.path, Reason: "visibility-changed"})
 		}
 		for _, subscription := range reconcile {
+			connection.write(serverMessage{
+				Type: "sync.syncing", ID: subscription.id, Path: subscription.path, Reason: "visibility-changed",
+			})
 			s.scheduleSyncDelivery(subscription)
+		}
+	}
+}
+
+func (s *Server) resetProjectReplicaCollections(project, reason string) {
+	s.wsMu.RLock()
+	connections := make([]*wsConn, 0)
+	for connection := range s.wsConns {
+		if connection.project == project {
+			connections = append(connections, connection)
+		}
+	}
+	s.wsMu.RUnlock()
+	for _, connection := range connections {
+		connection.mu.Lock()
+		reset := make([]*syncSubscription, 0, len(connection.syncs))
+		for id, subscription := range connection.syncs {
+			delete(connection.syncs, id)
+			reset = append(reset, subscription)
+		}
+		connection.mu.Unlock()
+		for _, subscription := range reset {
+			subscription.mu.Lock()
+			subscription.closed = true
+			subscription.mu.Unlock()
+			connection.releaseSyncListener(subscription)
+			connection.write(serverMessage{Type: "sync.reset", ID: subscription.id, Path: subscription.path, Reason: reason})
 		}
 	}
 }

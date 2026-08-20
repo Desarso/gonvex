@@ -583,11 +583,6 @@ func parseDependencyOption(expression ast.Expr, dependencies *manifest.FunctionD
 			if len(values) > 0 {
 				dependencies.NonOptimisticReason = values[0]
 			}
-		case "ShareByVisibility":
-			values := stringArguments(call.Args)
-			if len(values) > 0 {
-				dependencies.ShareByVisibility = values[0]
-			}
 		case "ShareResultFrom":
 			values := stringArguments(call.Args)
 			if len(values) > 0 {

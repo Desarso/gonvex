@@ -266,10 +266,8 @@ type reactiveMetricState struct {
 	ResultBytesAfter                   uint64
 	DatabaseQueryCount                 uint64
 	DatabaseQueryDurationMS            float64
-	VisibilityResolverExecutions       uint64
-	VisibilityResolverDurationMS       float64
-	VisibilitySharedExecutions         uint64
-	VisibilitySharedDurationMS         float64
+	SharedResultSourceExecutions       uint64
+	SharedResultSourceDurationMS       float64
 	ReactiveExecutionPasses            uint64
 	ReactiveExecutionDurationMS        float64
 	ResultCompletionPasses             uint64
@@ -310,10 +308,8 @@ type reactiveMetricSnapshot struct {
 	ResultBytesAfter                   uint64  `json:"resultBytesAfter"`
 	DatabaseQueryCount                 uint64  `json:"databaseQueryCount"`
 	DatabaseQueryDurationMS            float64 `json:"databaseQueryDurationMs"`
-	VisibilityResolverExecutions       uint64  `json:"visibilityResolverExecutions"`
-	VisibilityResolverDurationMS       float64 `json:"visibilityResolverDurationMs"`
-	VisibilitySharedExecutions         uint64  `json:"visibilitySharedExecutions"`
-	VisibilitySharedDurationMS         float64 `json:"visibilitySharedDurationMs"`
+	SharedResultSourceExecutions       uint64  `json:"sharedResultSourceExecutions"`
+	SharedResultSourceDurationMS       float64 `json:"sharedResultSourceDurationMs"`
 	ReactiveExecutionPasses            uint64  `json:"reactiveExecutionPasses"`
 	ReactiveExecutionDurationMS        float64 `json:"reactiveExecutionDurationMs"`
 	ResultCompletionPasses             uint64  `json:"resultCompletionPasses"`
@@ -445,10 +441,8 @@ func (state reactiveMetricState) snapshot() reactiveMetricSnapshot {
 		ResultBytesAfter:                   state.ResultBytesAfter,
 		DatabaseQueryCount:                 state.DatabaseQueryCount,
 		DatabaseQueryDurationMS:            state.DatabaseQueryDurationMS,
-		VisibilityResolverExecutions:       state.VisibilityResolverExecutions,
-		VisibilityResolverDurationMS:       state.VisibilityResolverDurationMS,
-		VisibilitySharedExecutions:         state.VisibilitySharedExecutions,
-		VisibilitySharedDurationMS:         state.VisibilitySharedDurationMS,
+		SharedResultSourceExecutions:       state.SharedResultSourceExecutions,
+		SharedResultSourceDurationMS:       state.SharedResultSourceDurationMS,
 		ReactiveExecutionPasses:            state.ReactiveExecutionPasses,
 		ReactiveExecutionDurationMS:        state.ReactiveExecutionDurationMS,
 		ResultCompletionPasses:             state.ResultCompletionPasses,

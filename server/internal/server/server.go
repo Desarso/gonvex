@@ -106,6 +106,10 @@ type Server struct {
 	appAuthRequirements   map[string]appAuthRequirementCacheEntry
 	appAuthLookups        map[string]*appAuthRequirementLookup
 	appAuthVersions       map[string]uint64
+	visibilityMu          sync.Mutex
+	visibilityContexts    map[string]*resolvedVisibilityContext
+	visibilityEpochs      map[string]uint64
+	visibilityLoads       singleflight.Group
 	syncPruneMu           sync.Mutex
 	syncPrunedAt          map[string]time.Time
 	runtimeHydrationMu    sync.RWMutex
@@ -239,6 +243,8 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 		appAuthRequirements:   map[string]appAuthRequirementCacheEntry{},
 		appAuthLookups:        map[string]*appAuthRequirementLookup{},
 		appAuthVersions:       map[string]uint64{},
+		visibilityContexts:    map[string]*resolvedVisibilityContext{},
+		visibilityEpochs:      map[string]uint64{},
 		syncPrunedAt:          map[string]time.Time{},
 		runtimeHydrationFails: map[string]struct{}{},
 		provisionTenant:       provisionTenantDatabase,
@@ -830,6 +836,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	if next.Functions == nil {
 		next.Functions = map[string]manifest.FunctionEntry{}
 	}
+	next = next.Normalize()
 	if next.Project == "" {
 		next.Project = r.Header.Get("x-gonvex-project-id")
 	}
@@ -854,6 +861,13 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	// version so an older client cannot accidentally suppress a required trigger
 	// upgrade.
 	next.NotifySchemaVersion = manifest.NotifySchemaVersion
+	if next.Module != nil {
+		if err := s.requireVisibilityPlans(next); err != nil {
+			syncErr = err
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+	}
 
 	// Serialize per project: schema.Apply reinstalls NOTIFY triggers via
 	// DROP/CREATE TRIGGER + CREATE OR REPLACE FUNCTION, which update pg_catalog
@@ -890,9 +904,9 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	// Skip the DDL reapply when the schema is byte-identical to what we last
 	// applied. This is the common dev case (editing a handler, not the schema)
 	// and avoids reinstalling every table's trigger against live traffic.
-	fingerprint := schemaFingerprint(next.Schema, next.Functions)
+	fingerprint := schemaFingerprint(next)
 	loadedManifest := s.runtime.ManifestForProject(next.Project)
-	loadedFingerprint := schemaFingerprint(loadedManifest.Schema, loadedManifest.Functions)
+	loadedFingerprint := schemaFingerprint(loadedManifest)
 	syncDefinitions := manifestReplicaCollectionDefinitions(next)
 	unchangedSchema := !s.config.DropEmptyUndeclaredColumns && fingerprint != "" && (s.schemaFingerprintApplied(next.Project, fingerprint) || (loadedFingerprint == fingerprint && loadedManifest.NotifySchemaVersion == next.NotifySchemaVersion))
 	if unchangedSchema {
@@ -997,6 +1011,8 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	// GET /dev/projects stayed empty even though the app was healthy.
 	s.ensureSyncedProjectListed(r.Context(), next.Project, syncKey(r))
 	s.cache.invalidateRows(r.Context(), next.Project, tenantIDFromRequest(next.Project, ""), "")
+	s.invalidateProjectVisibilityContexts(next.Project)
+	s.resetProjectReplicaCollections(next.Project, "manifest-changed")
 	s.rerunProjectSubscriptions(next.Project)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":              true,
@@ -1024,12 +1040,16 @@ func (s *Server) projectSyncLock(projectID string) *sync.Mutex {
 
 // schemaFingerprint hashes the desired schema so an unchanged sync can skip the
 // DDL reapply. json.Marshal sorts map keys, so the output is deterministic.
-func schemaFingerprint(sc manifest.Schema, functions map[string]manifest.FunctionEntry) string {
+func schemaFingerprint(current manifest.Manifest) string {
 	data, err := json.Marshal(struct {
 		Schema              manifest.Schema                                 `json:"schema"`
 		Replica             map[string]manifest.ReplicaCollectionDefinition `json:"replica,omitempty"`
+		Visibility          map[string]manifest.VisibilityPlan              `json:"visibility,omitempty"`
 		NotifySchemaVersion string                                          `json:"notifySchemaVersion"`
-	}{Schema: sc.Normalize(), Replica: manifestReplicaCollectionDefinitions(manifest.Manifest{Functions: functions}), NotifySchemaVersion: schema.NotifySchemaVersion})
+	}{
+		Schema: current.Schema.Normalize(), Replica: manifestReplicaCollectionDefinitions(current),
+		Visibility: current.Visibility, NotifySchemaVersion: schema.NotifySchemaVersion,
+	})
 	if err != nil {
 		return ""
 	}
@@ -1271,7 +1291,7 @@ func (s *Server) hydrateRuntimeState(ctx context.Context) {
 		// database-artifact version was installed. A runtime upgrade may need to
 		// redefine sync infrastructure even when schema and functions are unchanged.
 		if next.NotifySchemaVersion == manifest.NotifySchemaVersion {
-			s.markSchemaFingerprint(next.Project, schemaFingerprint(next.Schema, next.Functions))
+			s.markSchemaFingerprint(next.Project, schemaFingerprint(next))
 		}
 		s.registerProjectCrons(next.Project)
 	}
@@ -1312,7 +1332,7 @@ func (s *Server) hydrateRuntimeStateForProject(ctx context.Context, projectID st
 		return
 	}
 	if next.NotifySchemaVersion == manifest.NotifySchemaVersion {
-		s.markSchemaFingerprint(projectID, schemaFingerprint(next.Schema, next.Functions))
+		s.markSchemaFingerprint(projectID, schemaFingerprint(next))
 	}
 	s.registerProjectCrons(projectID)
 }

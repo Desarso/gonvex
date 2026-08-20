@@ -243,6 +243,8 @@ export type ReplicaCollectionDefinition = {
   readonly equalFilters?: Readonly<Record<string, string>>;
   readonly excludeWhenSet?: readonly string[];
   readonly visibilityTables?: readonly string[];
+  /** Assigned by the runtime; module authors do not set this. */
+  readonly visibilityPlanHash?: string;
   readonly orderBy?: string;
   readonly orderDirection?: "asc" | "desc";
   /** `eager` is complete at initial delivery; `progressive` may fill incrementally. */
@@ -290,6 +292,44 @@ export type LiveQueryPlan = {
   readonly serverOnly?: boolean;
 };
 
+export type VisibilityOperator = "public" | "permission" | "role" | "eqContext" | "inSet" | "and" | "or" | "not";
+export type VisibilityContextKey = "account.id" | "member.id" | "tenant.id";
+
+export type VisibilityPlan = {
+  readonly table: string;
+  readonly key: string;
+  readonly sets: Readonly<Record<string, VisibilitySet>>;
+  readonly where: VisibilityExpression;
+};
+
+export type VisibilitySet = {
+  readonly table: string;
+  readonly select: string;
+  readonly joins: readonly VisibilityJoin[];
+  readonly where: readonly VisibilityConstraint[];
+};
+
+export type VisibilityJoin = {
+  readonly table: string;
+  readonly leftColumn: string;
+  readonly rightColumn: string;
+};
+
+export type VisibilityConstraint = {
+  readonly table: string;
+  readonly column: string;
+  readonly context: VisibilityContextKey;
+};
+
+export type VisibilityExpression = {
+  readonly operator: VisibilityOperator;
+  readonly column?: string;
+  readonly context?: VisibilityContextKey;
+  readonly set?: string;
+  readonly value?: string;
+  readonly children?: readonly VisibilityExpression[];
+};
+
 export type ModuleFunctionKind = "query" | "reducer" | "action";
 
 export type ModuleFunctionManifest = {
@@ -316,6 +356,7 @@ export type ModuleManifest = {
   readonly functions: Readonly<Record<string, ModuleFunctionManifest>>;
   readonly schema?: PortableSchema;
   readonly artifact?: { readonly hash: string; readonly mediaType: string; readonly entrypoint: string };
+  readonly visibility?: Readonly<Record<string, VisibilityPlan>>;
 };
 
 export type ModuleArtifact = {
@@ -445,6 +486,157 @@ const validateReplicaCollection: (value: unknown, path: string) => asserts value
   }
 };
 
+const visibilityOperators = new Set<VisibilityOperator>(["public", "permission", "role", "eqContext", "inSet", "and", "or", "not"]);
+const visibilityContexts = new Set<VisibilityContextKey>(["account.id", "member.id", "tenant.id"]);
+
+const validateExactObject: (
+  value: unknown,
+  path: string,
+  fields: readonly string[],
+) => asserts value is Record<string, unknown> = (value, path, fields) => {
+  if (!isRecord(value)) throw new Error(`${path} must be an object`);
+  const allowed = new Set(fields);
+  const unexpected = Object.keys(value).find((field) => !allowed.has(field));
+  if (unexpected !== undefined) throw new Error(`${path} has unsupported field ${unexpected}`);
+};
+
+const requireVisibilityString = (value: unknown, path: string): string => {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${path} must be a non-empty string`);
+  return value;
+};
+
+const validateVisibilityContext = (value: unknown, path: string): VisibilityContextKey => {
+  if (typeof value !== "string" || !visibilityContexts.has(value as VisibilityContextKey)) {
+    throw new Error(`${path} must be account.id, member.id, or tenant.id`);
+  }
+  return value as VisibilityContextKey;
+};
+
+type VisibilityExpressionValidator = (
+  value: unknown,
+  path: string,
+  sets: Readonly<Record<string, VisibilitySet>>,
+  ancestors?: ReadonlySet<object>,
+) => asserts value is VisibilityExpression;
+
+const validateVisibilityExpression: VisibilityExpressionValidator = (
+  value,
+  path,
+  sets,
+  ancestors = new Set(),
+) => {
+  validateExactObject(value, path, ["operator", "column", "context", "set", "value", "children"]);
+  if (ancestors.has(value)) throw new Error(`${path} contains a cycle`);
+  const operator = value.operator;
+  if (typeof operator !== "string" || !visibilityOperators.has(operator as VisibilityOperator)) {
+    throw new Error(`${path}.operator is unsupported`);
+  }
+  const nested = new Set(ancestors);
+  nested.add(value);
+
+  switch (operator as VisibilityOperator) {
+    case "public":
+      validateExactObject(value, path, ["operator"]);
+      return;
+    case "permission":
+    case "role":
+      validateExactObject(value, path, ["operator", "value"]);
+      requireVisibilityString(value.value, `${path}.value`);
+      return;
+    case "eqContext":
+      validateExactObject(value, path, ["operator", "column", "context"]);
+      requireVisibilityString(value.column, `${path}.column`);
+      validateVisibilityContext(value.context, `${path}.context`);
+      return;
+    case "inSet": {
+      validateExactObject(value, path, ["operator", "column", "set"]);
+      requireVisibilityString(value.column, `${path}.column`);
+      const set = requireVisibilityString(value.set, `${path}.set`);
+      if (!Object.prototype.hasOwnProperty.call(sets, set)) throw new Error(`${path}.set references unknown visibility set ${set}`);
+      return;
+    }
+    case "and":
+    case "or":
+      validateExactObject(value, path, ["operator", "children"]);
+      if (!Array.isArray(value.children) || value.children.length === 0) {
+        throw new Error(`${path}.${operator} requires children`);
+      }
+      value.children.forEach((child, index) => validateVisibilityExpression(child, `${path}.children[${index}]`, sets, nested));
+      return;
+    case "not":
+      validateExactObject(value, path, ["operator", "children"]);
+      if (!Array.isArray(value.children) || value.children.length !== 1) {
+        throw new Error(`${path}.not requires exactly one child`);
+      }
+      validateVisibilityExpression(value.children[0], `${path}.children[0]`, sets, nested);
+      return;
+  }
+};
+
+const validateVisibilityPlan: (value: unknown, path: string) => asserts value is VisibilityPlan = (value, path) => {
+  validateExactObject(value, path, ["table", "key", "sets", "where"]);
+  requireVisibilityString(value.table, `${path}.table`);
+  requireVisibilityString(value.key, `${path}.key`);
+  if (!isRecord(value.sets)) throw new Error(`${path}.sets must be an object`);
+
+  for (const [name, candidate] of Object.entries(value.sets)) {
+    requireVisibilityString(name, `${path}.sets key`);
+    const setPath = `${path}.sets.${name}`;
+    validateExactObject(candidate, setPath, ["table", "select", "joins", "where"]);
+    requireVisibilityString(candidate.table, `${setPath}.table`);
+    requireVisibilityString(candidate.select, `${setPath}.select`);
+    if (!Array.isArray(candidate.joins)) throw new Error(`${setPath}.joins must be an array`);
+    candidate.joins.forEach((join, index) => {
+      const joinPath = `${setPath}.joins[${index}]`;
+      validateExactObject(join, joinPath, ["table", "leftColumn", "rightColumn"]);
+      requireVisibilityString(join.table, `${joinPath}.table`);
+      requireVisibilityString(join.leftColumn, `${joinPath}.leftColumn`);
+      requireVisibilityString(join.rightColumn, `${joinPath}.rightColumn`);
+    });
+    if (!Array.isArray(candidate.where)) throw new Error(`${setPath}.where must be an array`);
+    candidate.where.forEach((constraint, index) => {
+      const constraintPath = `${setPath}.where[${index}]`;
+      validateExactObject(constraint, constraintPath, ["table", "column", "context"]);
+      requireVisibilityString(constraint.table, `${constraintPath}.table`);
+      requireVisibilityString(constraint.column, `${constraintPath}.column`);
+      validateVisibilityContext(constraint.context, `${constraintPath}.context`);
+    });
+  }
+
+  validateVisibilityExpression(value.where, `${path}.where`, value.sets as Record<string, VisibilitySet>);
+};
+
+const freezeVisibilityExpression = (expression: VisibilityExpression): VisibilityExpression =>
+  freeze({
+    ...expression,
+    children: expression.children === undefined
+      ? undefined
+      : freeze(expression.children.map(freezeVisibilityExpression)),
+  });
+
+const freezeVisibilityPlan = (plan: VisibilityPlan): VisibilityPlan => {
+  const sets: Record<string, VisibilitySet> = {};
+  for (const name of Object.keys(plan.sets).sort()) {
+    const set = plan.sets[name]!;
+    sets[name] = freeze({
+      ...set,
+      joins: freeze(set.joins.map((join) => freeze({ ...join }))),
+      where: freeze(set.where.map((constraint) => freeze({ ...constraint }))),
+    });
+  }
+  return freeze({
+    ...plan,
+    sets: freeze(sets),
+    where: freezeVisibilityExpression(plan.where),
+  });
+};
+
+/** Declare and validate one source table's language-neutral visibility plan. */
+export function visibility(options: VisibilityPlan): VisibilityPlan {
+  validateVisibilityPlan(options, "visibility");
+  return freezeVisibilityPlan(options);
+}
+
 const stableValue = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(stableValue);
   if (isRecord(value)) {
@@ -461,8 +653,20 @@ export const stableJsonStringify = (value: unknown, space?: number): string =>
 
 export class ModuleManifestCollector {
   private readonly entries = new Map<string, ModuleFunctionManifest>();
+  private readonly visibilityEntries = new Map<string, VisibilityPlan>();
+  private readonly metadata: Omit<ModuleManifest, "functions" | "visibility">;
 
-  constructor(private readonly metadata: Omit<ModuleManifest, "functions">) {}
+  constructor(metadata: Omit<ModuleManifest, "functions">) {
+    const { visibility: initialVisibility, ...baseMetadata } = metadata;
+    this.metadata = baseMetadata;
+    for (const sourceTable of Object.keys(initialVisibility ?? {}).sort()) {
+      const plan = initialVisibility![sourceTable]!;
+      if (sourceTable !== plan.table) {
+        throw new Error(`visibility map key ${sourceTable} does not match source table ${plan.table}`);
+      }
+      this.registerVisibility(plan);
+    }
+  }
 
   register(path: string, entry: Omit<ModuleFunctionManifest, "path">): ModuleFunctionManifest {
     const normalized = normalizePath(path);
@@ -472,10 +676,23 @@ export class ModuleManifestCollector {
     return result;
   }
 
+  registerVisibility(options: VisibilityPlan): VisibilityPlan {
+    const plan = visibility(options);
+    if (this.visibilityEntries.has(plan.table)) throw new Error(`duplicate visibility plan: ${plan.table}`);
+    this.visibilityEntries.set(plan.table, plan);
+    return plan;
+  }
+
   manifest(): ModuleManifest {
     const functions: Record<string, ModuleFunctionManifest> = {};
     for (const path of [...this.entries.keys()].sort()) functions[path] = this.entries.get(path)!;
-    return freeze({ ...this.metadata, functions: freeze(functions) });
+    const visibilityPlans: Record<string, VisibilityPlan> = {};
+    for (const table of [...this.visibilityEntries.keys()].sort()) visibilityPlans[table] = this.visibilityEntries.get(table)!;
+    return freeze({
+      ...this.metadata,
+      functions: freeze(functions),
+      visibility: this.visibilityEntries.size === 0 ? undefined : freeze(visibilityPlans),
+    });
   }
 
   serialize(space?: number): string {
@@ -595,7 +812,7 @@ export class ModuleBuilder {
   readonly manifestCollector: ModuleManifestCollector;
   private readonly runtimeEntries = new Map<string, RuntimeFunctionRegistration>();
 
-  constructor(metadata: { name: string; version: string; language?: ModuleLanguage; engine?: ModuleEngine; schema?: PortableSchema; artifact?: ModuleManifest["artifact"] }) {
+  constructor(metadata: { name: string; version: string; language?: ModuleLanguage; engine?: ModuleEngine; schema?: PortableSchema; artifact?: ModuleManifest["artifact"]; visibility?: Readonly<Record<string, VisibilityPlan>> }) {
     this.manifestCollector = new ModuleManifestCollector({
       format: "gonvex.module.v1",
       name: metadata.name,
@@ -604,7 +821,12 @@ export class ModuleBuilder {
       engine: metadata.engine ?? "v8",
       schema: metadata.schema,
       artifact: metadata.artifact,
+      visibility: metadata.visibility,
     });
+  }
+
+  visibility(options: VisibilityPlan): VisibilityPlan {
+    return this.manifestCollector.registerVisibility(options);
   }
 
   query<Args = JsonValue, Result = JsonValue>(path: string, options: QueryOptions<Args, Result> = {}): RegisteredFunction<Args, Result> {
@@ -779,6 +1001,7 @@ export class ModuleRuntimeRegistry {
       engine: this.baseManifest.engine,
       schema: this.baseManifest.schema,
       artifact: this.baseManifest.artifact,
+      visibility: this.baseManifest.visibility,
       functions: freeze(functions),
     });
   }

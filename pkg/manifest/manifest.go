@@ -42,6 +42,7 @@ type ReplicaCollectionDefinition struct {
 	EqualFilters          map[string]string `json:"equalFilters,omitempty"`
 	ExcludeWhenSet        []string          `json:"excludeWhenSet,omitempty"`
 	VisibilityTables      []string          `json:"visibilityTables,omitempty"`
+	VisibilityPlanHash    string            `json:"visibilityPlanHash,omitempty"`
 	OrderBy               string            `json:"orderBy,omitempty"`
 	OrderDirection        string            `json:"orderDirection,omitempty"`
 	Mode                  string            `json:"mode,omitempty"`
@@ -56,7 +57,6 @@ type ReplicaCollectionDefinition struct {
 type FunctionDependencies struct {
 	Reads                []ReadDependency                `json:"reads,omitempty"`
 	ShareByPermissions   bool                            `json:"shareByPermissions,omitempty"`
-	ShareByVisibility    string                          `json:"shareByVisibility,omitempty"`
 	ShareResultFrom      string                          `json:"shareResultFrom,omitempty"`
 	ShareResultField     string                          `json:"shareResultField,omitempty"`
 	OptimisticReducer    *OptimisticReducerDefinition    `json:"optimisticReducer,omitempty"`
@@ -151,6 +151,44 @@ type Index struct {
 	Kind    string   `json:"kind,omitempty"`
 }
 
+// VisibilityPlan describes how rows from one source table are authorized.
+// The manifest carries this language-neutral plan; runtime interpretation is
+// deliberately separate from artifact declaration and normalization.
+type VisibilityPlan struct {
+	Table string                   `json:"table"`
+	Key   string                   `json:"key"`
+	Sets  map[string]VisibilitySet `json:"sets"`
+	Where *VisibilityExpression    `json:"where"`
+}
+
+type VisibilitySet struct {
+	Table  string                 `json:"table"`
+	Select string                 `json:"select"`
+	Joins  []VisibilityJoin       `json:"joins"`
+	Where  []VisibilityConstraint `json:"where"`
+}
+
+type VisibilityJoin struct {
+	Table       string `json:"table"`
+	LeftColumn  string `json:"leftColumn"`
+	RightColumn string `json:"rightColumn"`
+}
+
+type VisibilityConstraint struct {
+	Table   string `json:"table"`
+	Column  string `json:"column"`
+	Context string `json:"context"`
+}
+
+type VisibilityExpression struct {
+	Operator string                  `json:"operator"`
+	Column   string                  `json:"column,omitempty"`
+	Context  string                  `json:"context,omitempty"`
+	Set      string                  `json:"set,omitempty"`
+	Value    string                  `json:"value,omitempty"`
+	Children []*VisibilityExpression `json:"children,omitempty"`
+}
+
 // ModuleArtifact is the language-neutral module payload emitted by the
 // TypeScript CLI. The fields describe the artifact rather than a runtime
 // implementation so other module languages can use the same wire shape.
@@ -165,6 +203,7 @@ type ModuleArtifact struct {
 	Functions    map[string]ModuleFunction `json:"functions"`
 	Files        map[string]string         `json:"files"`
 	JavaScript   *ModuleJavaScript         `json:"javascript,omitempty"`
+	Visibility   map[string]VisibilityPlan `json:"visibility,omitempty"`
 }
 
 // ModuleFunction carries generated function metadata and opaque schema and
@@ -192,13 +231,14 @@ type ModuleJavaScript struct {
 }
 
 type Manifest struct {
-	Project             string                   `json:"project"`
-	GeneratedAt         string                   `json:"generatedAt"`
-	Functions           map[string]FunctionEntry `json:"functions"`
-	Schema              Schema                   `json:"schema"`
-	Bundle              *SourceBundle            `json:"bundle,omitempty"`
-	Module              *ModuleArtifact          `json:"module,omitempty"`
-	NotifySchemaVersion string                   `json:"notifySchemaVersion,omitempty"`
+	Project             string                    `json:"project"`
+	GeneratedAt         string                    `json:"generatedAt"`
+	Functions           map[string]FunctionEntry  `json:"functions"`
+	Schema              Schema                    `json:"schema"`
+	Bundle              *SourceBundle             `json:"bundle,omitempty"`
+	Module              *ModuleArtifact           `json:"module,omitempty"`
+	Visibility          map[string]VisibilityPlan `json:"visibility,omitempty"`
+	NotifySchemaVersion string                    `json:"notifySchemaVersion,omitempty"`
 }
 
 func EmptySchema() Schema {
@@ -245,6 +285,12 @@ func (m Manifest) Normalize() Manifest {
 	m.Schema = m.Schema.Normalize()
 	if m.Module != nil {
 		normalized := m.Module.Normalize()
+		if m.Visibility == nil {
+			m.Visibility = normalized.Visibility
+		}
+		if normalized.Visibility == nil {
+			normalized.Visibility = m.Visibility
+		}
 		m.Module = &normalized
 	}
 	return m

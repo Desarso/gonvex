@@ -412,7 +412,6 @@ func descriptorFromModuleFunction(path string, function manifest.ModuleFunction)
 func dependenciesFromManifest(dependencies manifest.FunctionDependencies) gonvex.FunctionDependencies {
 	converted := gonvex.FunctionDependencies{
 		ShareByPermissions:  dependencies.ShareByPermissions,
-		ShareByVisibility:   dependencies.ShareByVisibility,
 		ShareResultFrom:     dependencies.ShareResultFrom,
 		ShareResultField:    dependencies.ShareResultField,
 		NonOptimisticReason: dependencies.NonOptimisticReason,

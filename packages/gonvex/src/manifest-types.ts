@@ -31,6 +31,7 @@ export type ReplicaCollectionDefinition = {
   equalFilters?: Record<string, string>;
   excludeWhenSet?: string[];
   visibilityTables?: string[];
+  visibilityPlanHash?: string;
   orderBy?: string;
   orderDirection?: "asc" | "desc";
   mode?: "eager" | "progressive";
@@ -49,7 +50,6 @@ export type ReadDependency = {
 export type FunctionDependencies = {
   reads?: ReadDependency[];
   shareByPermissions?: boolean;
-  shareByVisibility?: string;
   shareResultFrom?: string;
   shareResultField?: string;
   liveQueryPlan?: LiveQueryPlan;
@@ -109,6 +109,44 @@ export type SchemaDefinition = {
   tenantTables: Record<string, Table>;
 };
 
+export type VisibilityPlan = {
+  table: string;
+  key: string;
+  sets: Record<string, VisibilitySet>;
+  where: VisibilityExpression;
+};
+
+export type VisibilitySet = {
+  table: string;
+  select: string;
+  joins: VisibilityJoin[];
+  where: VisibilityConstraint[];
+};
+
+export type VisibilityJoin = {
+  table: string;
+  leftColumn: string;
+  rightColumn: string;
+};
+
+export type VisibilityConstraint = {
+  table: string;
+  column: string;
+  context: VisibilityContextKey;
+};
+
+export type VisibilityOperator = "public" | "permission" | "role" | "eqContext" | "inSet" | "and" | "or" | "not";
+export type VisibilityContextKey = "account.id" | "member.id" | "tenant.id";
+
+export type VisibilityExpression = {
+  operator: VisibilityOperator;
+  column?: string;
+  context?: VisibilityContextKey;
+  set?: string;
+  value?: string;
+  children?: VisibilityExpression[];
+};
+
 export type Manifest = {
   project: string;
   generatedAt: string;
@@ -118,6 +156,7 @@ export type Manifest = {
   // Emitted for module-artifact projects (TypeScript today). Go projects keep
   // shipping `bundle` alone so the runtime sees the exact payload it does now.
   module?: ModuleArtifact;
+  visibility?: Record<string, VisibilityPlan>;
 };
 
 export type SourceBundle = {
@@ -184,4 +223,5 @@ export type ModuleArtifact = {
   /** Project-relative POSIX path to base64 contents, in sorted key order. */
   files: Record<string, string>;
   javascript?: ModuleJavaScript;
+  visibility: Record<string, VisibilityPlan>;
 };

@@ -106,6 +106,7 @@ type FunctionInfo = {
   name: string;
   kind: string;
   realtime: string;
+  visibility: string;
   source: string;
   status: string;
 };
@@ -115,8 +116,12 @@ type ManifestResponse = {
     kind: string;
     handler: string;
     file: string;
+    delivery?: "oneShot" | "live" | "replica";
+    replica?: { table?: string };
+    dependencies?: { liveQueryPlan?: { table?: string } };
   }>;
   schema?: ManifestSchema;
+  visibility?: Record<string, unknown>;
 };
 
 type ManifestTable = {
@@ -588,14 +593,14 @@ const pages: Page[] = [
     label: "Functions",
     eyebrow: "Function manifest",
     title: "Live backend surface",
-    description: "Queries, Reducers, Actions, Replica Collections, and Live Queries extracted from app-local Go files.",
+    description: "Queries, Reducers, and Actions declared by the TypeScript module, including Replica Collection and Live Query delivery.",
   },
   {
     id: "data",
     label: "Data",
-    eyebrow: "Schema apply",
-    title: "Postgres project schema",
-    description: "Tables, columns, and indexes defined in gonvex/schema.go and applied safely by the Gonvex Runtime.",
+    eyebrow: "Tenant Postgres",
+    title: "Committed application schema",
+    description: "Tables, columns, indexes, and authoritative change-feed coverage installed from TypeScript module migrations.",
   },
   {
     id: "test",
@@ -652,43 +657,41 @@ const functionColumns: GridColumn[] = [
   { title: "Function", id: "function", width: 180 },
   { title: "Kind", id: "kind", width: 120 },
   { title: "Realtime", id: "realtime", width: 120 },
+  { title: "Visibility", id: "visibility", width: 150 },
   { title: "Source", id: "source", width: 220 },
   { title: "Status", id: "status", width: 160 },
 ];
 
 const functionRows: GridRow[] = [
-  ["tasks.list", "query", "live", "gonvex/tasks.go", "ready"],
-  ["tasks.create", "reducer", "atomic commit", "gonvex/tasks.go", "ready"],
-  ["tasks.randomizeStatusPriority", "reducer", "change feed", "gonvex/tasks.go", "ready"],
-  ["files.createUploadUrl", "action", "storage", "gonvex/files.go", "ready"],
-  ["files.getUrl", "query", "storage", "gonvex/files.go", "ready"],
-  ["files.getMetadata", "query", "storage", "gonvex/files.go", "ready"],
-  ["files.delete", "action", "storage", "gonvex/files.go", "ready"],
-  ["tasks.grid", "liveQuery", "exact window", "gonvex/tasks.go", "ready"],
+  ["tasks.list", "query", "Replica Collection", "tasks", "gonvex/tasks.ts", "ready"],
+  ["tasks.create", "reducer", "atomic transaction", "—", "gonvex/tasks.ts", "ready"],
+  ["tasks.randomizeStatusPriority", "reducer", "change feed", "—", "gonvex/tasks.ts", "ready"],
+  ["files.createUploadUrl", "action", "external work", "—", "gonvex/files.ts", "ready"],
+  ["files.getUrl", "query", "one-shot", "—", "gonvex/files.ts", "ready"],
+  ["files.getMetadata", "query", "one-shot", "—", "gonvex/files.ts", "ready"],
+  ["files.delete", "action", "external work", "—", "gonvex/files.ts", "ready"],
+  ["tasks.grid", "query", "Live Query", "tasks", "gonvex/tasks.ts", "ready"],
 ];
 
-const functions: FunctionInfo[] = functionRows.map(([name, kind, realtime, source, status]) => ({
+const functions: FunctionInfo[] = functionRows.map(([name, kind, realtime, visibility, source, status]) => ({
   name,
   kind,
   realtime,
+  visibility,
   source,
   status,
 }));
 
-function realtimeLabel(kind: string): string {
+function realtimeLabel(kind: string, delivery?: "oneShot" | "live" | "replica"): string {
+  if (kind === "query" && delivery === "live") return "Live Query";
+  if (kind === "query" && delivery === "replica") return "Replica Collection";
   switch (kind) {
     case "query":
-      return "live";
+      return "one-shot";
     case "reducer":
-      return "invalidates";
-    case "liveQuery":
-      return "patch stream";
+      return "atomic transaction";
     case "action":
-      return "async";
-    case "http":
-      return "route";
-    case "internalReducer":
-      return "internal";
+      return "external work";
     default:
       return "registered";
   }
@@ -700,14 +703,19 @@ function manifestFunctionsToRows(payload: ManifestResponse): FunctionInfo[] {
     .map(([name, entry]) => ({
       name,
       kind: entry.kind,
-      realtime: realtimeLabel(entry.kind),
+      realtime: realtimeLabel(entry.kind, entry.delivery),
+      visibility: (() => {
+        const table = entry.replica?.table ?? entry.dependencies?.liveQueryPlan?.table;
+        if (!table) return "—";
+        return payload.visibility?.[table] ? table : "missing plan";
+      })(),
       source: entry.file || entry.handler,
       status: "ready",
     }));
 }
 
 function functionInfosToRows(items: FunctionInfo[]): GridRow[] {
-  return items.map((item) => [item.name, item.kind, item.realtime, item.source, item.status]);
+  return items.map((item) => [item.name, item.kind, item.realtime, item.visibility, item.source, item.status]);
 }
 
 function formatDuration(ms: number): string {
@@ -5226,7 +5234,7 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
   const functionStats = buildFunctionStats(selectedFunction ? runtimeMetrics?.functions[selectedFunction.name] : undefined, runtimeMetrics?.cache);
   const recentLogs = (runtimeMetrics?.logs ?? []).slice(0, 20);
   const visibleFunctions = runtimeFunctions.filter((item) =>
-    [item.name, item.kind, item.source].some((value) => value.toLowerCase().includes(search.toLowerCase())),
+    [item.name, item.kind, item.realtime, item.visibility, item.source].some((value) => value.toLowerCase().includes(search.toLowerCase())),
   );
   const runtimeFunctionRows = functionInfosToRows(runtimeFunctions);
 
@@ -5302,7 +5310,7 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
                   {selectedFunction.kind}
                 </Chip>
               </div>
-              <p>{selectedFunction.source}</p>
+              <p>{selectedFunction.realtime} · visibility {selectedFunction.visibility} · {selectedFunction.source}</p>
             </div>
             <Button size="sm" variant="primary" onPress={() => props.onAction(`${selectedFunction.name} queued for local execution MVP`)}>
               Run Function

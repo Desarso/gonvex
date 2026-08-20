@@ -1608,8 +1608,12 @@ func (s *Server) flushTableChange(key string) {
 		}
 	}
 	s.invalidateTableCaches(delivery.project, delivery.tenant, cacheTables)
+	if !delivery.triggerObserved {
+		s.invalidateVisibilityContexts(delivery.project, delivery.tenant, changedTables)
+		s.subscriptions.rebindVisibilityForChange(delivery)
+		s.resetSyncsForVisibilityChange(delivery)
+	}
 	s.subscriptions.requestChange(delivery)
-	s.resetSyncsForVisibilityChange(delivery)
 }
 
 func (s *Server) invalidateTableCaches(projectID string, tenantID string, tables []string) {

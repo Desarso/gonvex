@@ -57,6 +57,35 @@ deliveries from the durable outbox.
 The host-specific implementation is intentionally separate from this SDK.
 The manifest describes a TypeScript module executed by the bounded V8 host.
 
+Replica Collections and Live Queries must reference a table with one exported
+visibility plan. Rules are structured so the host can compile them into SQL,
+cache equivalent contexts, and route committed old/new rows with the same
+semantics:
+
+```ts
+import { visibility } from "@gonvex/module-sdk";
+
+export const taskVisibility = visibility({
+  table: "tasks",
+  key: "id",
+  sets: {
+    assignedTasks: {
+      table: "taskUsers",
+      select: "taskId",
+      joins: [],
+      where: [{ table: "taskUsers", column: "memberId", context: "member.id" }],
+    },
+  },
+  where: {
+    operator: "or",
+    children: [
+      { operator: "permission", value: "tasks.viewAll" },
+      { operator: "inSet", column: "id", set: "assignedTasks" },
+    ],
+  },
+});
+```
+
 Executable handlers stay in a host-side registry. The registry dispatches only
 when both the path and function kind match; it never creates database or
 network capabilities itself:

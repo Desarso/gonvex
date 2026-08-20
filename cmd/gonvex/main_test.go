@@ -45,7 +45,6 @@ func Register(app *gonvex.App) {
 	  app.LiveQuery("tasks.list", ListTasks,
 	    gonvex.LivePlan(gonvex.LiveTable("tasks").Select("id", "title").Filter(gonvex.Eq("status", gonvex.Arg("status"))).SortArgs("sort", "direction", "updated_at", "desc", "updated_at").WindowArgs("offset", "limit", 100, 200)),
 	    gonvex.ShareByPermissions(),
-	    gonvex.ShareByVisibility("internal.taskVisibility"),
 	    gonvex.ShareResultFrom("internal.tasksShared", "query"),
 	  )
   app.Reducer("tasks.update", UpdateTask, gonvex.OnlineOnlyNonOptimistic("test fixture"))
@@ -62,7 +61,7 @@ func Register(app *gonvex.App) {
 	if len(query.Dependencies.Reads) != 1 || !query.Dependencies.Reads[0].Windowed || !query.Dependencies.ShareByPermissions {
 		t.Fatalf("query dependencies = %#v", query.Dependencies)
 	}
-	if query.Dependencies.ShareByVisibility != "internal.taskVisibility" || query.Dependencies.ShareResultFrom != "internal.tasksShared" || query.Dependencies.ShareResultField != "query" {
+	if query.Dependencies.ShareResultFrom != "internal.tasksShared" || query.Dependencies.ShareResultField != "query" {
 		t.Fatalf("query sharing dependencies = %#v", query.Dependencies)
 	}
 	if reducer := entries["tasks.update"]; reducer.Kind != manifest.FunctionKindReducer {

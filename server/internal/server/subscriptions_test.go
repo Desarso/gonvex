@@ -829,49 +829,20 @@ func TestWindowedSingleListenerRetainsSnapshotForKeyedPatches(t *testing.T) {
 	}
 }
 
-func TestVisibilityReconvergencePatchesFromEachPartitionBaseline(t *testing.T) {
-	server := New(config.Config{TenantListenerLimit: 0, SharedResultMaxBytes: 1 << 20})
-	firstToken, secondToken := newSubscriptionToken(), newSubscriptionToken()
-	first := querySubscription{token: firstToken, ctx: context.Background()}
-	second := querySubscription{token: secondToken, ctx: context.Background()}
-	group := &sharedSubscription{
-		manager: server.subscriptions, path: "tasks.window", ctx: context.Background(), retainSnapshot: true,
-		listeners: map[*subscriptionToken]querySubscription{firstToken: first, secondToken: second},
+func TestPrepareSharedResultProjectsNamedField(t *testing.T) {
+	result, err := prepareSharedResult(map[string]any{
+		"query": []map[string]any{{"id": "task-1", "title": "Shared"}},
+		"total": 1,
+	}, "query", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	result := func(title string) *visibilitySharedResult {
-		rows := make([]map[string]any, 10)
-		for index := range rows {
-			rowTitle := "stable"
-			if index == 0 {
-				rowTitle = title
-			}
-			rows[index] = map[string]any{"id": fmt.Sprintf("task-%d", index), "title": rowTitle, "body": strings.Repeat("x", minimumPatchResultBytes)}
-		}
-		payload, err := json.Marshal(rows)
-		if err != nil {
-			t.Fatal(err)
-		}
-		hash, perf := queryResultSemantics(payload)
-		return &visibilitySharedResult{payload: payload, hash: hash, queryPerf: perf}
+	shared, ok := result.(*canonicalSharedResult)
+	if !ok {
+		t.Fatalf("shared result = %T", result)
 	}
-
-	group.completeResult(result("shared"), "initial", 0, time.Now())
-	group.completePartitionedResult(&visibilityPartitionedResult{partitions: []visibilityResultPartition{
-		{key: "scope-a", listeners: []querySubscription{first}, result: result("first")},
-		{key: "scope-b", listeners: []querySubscription{second}, result: result("second")},
-	}}, "invalidate", 1, time.Now())
-	afterSplit := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive
-	if afterSplit.Patches != 2 || afterSplit.FullResults != 1 {
-		t.Fatalf("split metrics = %+v, want two patches after initial full result", afterSplit)
-	}
-
-	group.completeResult(result("shared-again"), "invalidate", 2, time.Now())
-	afterConvergence := server.metrics.snapshot(manifest.Manifest{}, 0, 0, "").Reactive
-	if afterConvergence.Patches != 4 || afterConvergence.FullResults != 1 {
-		t.Fatalf("reconvergence metrics = %+v, want one patch per prior partition and no recovery full result", afterConvergence)
-	}
-	if len(group.partitionBaselines) != 0 || !group.hasHash || len(group.lastResult) == 0 {
-		t.Fatal("reconvergence did not restore the shared baseline")
+	if string(shared.payload) != `[{"id":"task-1","title":"Shared"}]` || !shared.rowIDs["task-1"] {
+		t.Fatalf("unexpected shared projection: payload=%s rowIDs=%v", shared.payload, shared.rowIDs)
 	}
 }
 

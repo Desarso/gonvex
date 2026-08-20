@@ -672,6 +672,7 @@ export class GonvexClient {
         }
         if (message.type === "auth.result") {
           this.authRetriedAfterError = false;
+          void this.activateOutboxScope();
           this.installQueryCacheDirective(queryCacheDirectiveFromAuthResult(message.result));
           this.queryCacheNegotiatedSocketGeneration = this.socketGeneration;
           this.resumeQuerySubscriptions();
@@ -688,6 +689,7 @@ export class GonvexClient {
             return;
           }
           this.authRetriedAfterError = false;
+          this.quarantineReplicaScope();
           this.resetQueryCacheScope();
           this.notifyAuthError(message.error);
         }
@@ -2085,7 +2087,13 @@ export class GonvexClient {
 
   private activateOutboxScope(): Promise<void> {
     const scope = reducerOutboxScope(this.url, this.auth, this.outboxEphemeralScope);
-    if (scope === this.outboxScope) return this.outboxReady ?? this.replicaReady;
+    if (scope === this.outboxScope) {
+      if (this.replicaScope !== scope) {
+        this.replicaScope = scope;
+        this.replicaReady = this.replica.activateScope(scope, true);
+      }
+      return this.outboxReady ?? this.replicaReady;
+    }
 
     const previousScope = this.outboxScope;
     const generation = ++this.outboxScopeGeneration;
@@ -2104,6 +2112,15 @@ export class GonvexClient {
     const ready = this.restoreOutbox(scope, generation);
     this.outboxReady = ready;
     return ready;
+  }
+
+  private quarantineReplicaScope() {
+    // Keep the durable prior identity scope intact for an authorized future
+    // login, but make every synchronous selector fail closed immediately.
+    // The random suffix prevents a denied scope from ever restoring rows.
+    const scope = ["auth-denied", this.url, this.outboxEphemeralScope, randomID()].join("\u0000");
+    this.replicaScope = scope;
+    this.replicaReady = this.replica.activateScope(scope, true);
   }
 
   private async restoreOutbox(scope: string, generation: number) {
@@ -3082,6 +3099,7 @@ export class GonvexClient {
       clearTimeout(this.authWatchdogTimer);
       this.authWatchdogTimer = undefined;
     }
+    this.quarantineReplicaScope();
     this.resetQueryCacheScope();
     this.notifyAuthError(error);
     this.flushPendingMessages();

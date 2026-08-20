@@ -11,5 +11,12 @@ Gonvex has two continuous read-delivery modes:
 Both feed the same normalized Local Replica. A server transaction is persisted
 and applied atomically before React or signal subscribers are notified.
 
+Both also use the same table visibility declaration. Gonvex adds the rule below
+application filters for initial SQL, groups Live Queries only when resolved
+visibility fingerprints are identical, and emits a DELETE when a committed row
+moves out of the caller's visibility. Team, role, workspace, audience, and
+membership dependency changes invalidate the context and reconcile cached
+memberships from the committed revision.
+
 Normal application code uses `useLiveQuery` and `useReplicaCollection`; it does
 not construct WebSocket messages or own reconnect/subscription state.

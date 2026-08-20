@@ -282,6 +282,19 @@ func (m *tenantListenerManager) dispatchCommittedRevision(ctx context.Context, l
 	}
 	for _, batch := range groupSyncChanges(changes) {
 		m.server.projectCommittedMemberChanges(listener.key.project, listener.key.tenant, batch)
+		m.server.refreshCommittedMemberConnections(listener.key.project, listener.key.tenant, batch)
+		changedTables := syncBatchTables(batch)
+		m.server.invalidateVisibilityContexts(listener.key.project, listener.key.tenant, changedTables)
+		visibilityChange := tableChange{
+			project: listener.key.project,
+			tenant:  listener.key.tenant,
+			tables:  map[string]bool{},
+		}
+		for _, table := range changedTables {
+			visibilityChange.tables[table] = true
+		}
+		m.server.subscriptions.rebindVisibilityForChange(visibilityChange)
+		m.server.resetSyncsForVisibilityChange(visibilityChange)
 		m.server.routeReplicaTransaction(listener.key.project, listener.key.tenant, payload.Epoch, batch)
 		byTable := map[string]*tableChange{}
 		for _, committed := range batch.changes {

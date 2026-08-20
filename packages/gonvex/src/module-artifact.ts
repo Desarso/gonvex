@@ -28,13 +28,16 @@ import type {
   ModuleLanguage,
   ModuleSchema,
   ReplicaCollectionDefinition,
+  VisibilityExpression,
+  VisibilityPlan,
+  VisibilitySet,
   OptimisticProjectionDefinition,
   OptimisticReducerDefinition,
   ReadDependency,
 } from "./manifest-types.js";
 
 /** Bumped whenever the artifact layout changes; mixed into the hash. */
-export const moduleArtifactGeneration = 1;
+export const moduleArtifactGeneration = 2;
 
 /** Deterministic ESM output when gonvex.json does not name one. */
 const defaultBundlePath = join("_build", "module.js");
@@ -73,6 +76,8 @@ const registrationPattern = new RegExp(
   `\\b(?:app|server|gonvex)\\s*\\.\\s*(${kindAlternation})\\s*(<[^(){};]*>)?\\s*\\(`,
   "gi",
 );
+const visibilityDefinitionPattern = /export\s+(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=;]+)?=\s*visibility\s*\(/gi;
+const visibilityRegistrationPattern = /\b(?:app|server|gonvex)\s*\.\s*visibility\s*\(/gi;
 const identifierPattern = /[A-Za-z_$][A-Za-z0-9_$]*/y;
 const keywordPattern = /(?:true|false|null|undefined)\b/y;
 const numberPattern = /-?(?:0[xX][0-9a-fA-F_]+|\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?\d+)?)/y;
@@ -122,12 +127,17 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   const javascript = await bundleModuleJavaScript(options, entrypoint.absolute);
   const files: Record<string, string> = {};
   const functions: Record<string, ModuleFunction> = {};
+  const visibilityPlans: Record<string, VisibilityPlan> = {};
   for (const file of sources) {
     const contents = await readFile(file);
     files[projectPath(options.root, file)] = contents.toString("base64");
     for (const [path, entry] of parseModuleFunctions(options.root, options.backendDir, file, contents.toString("utf8"))) {
       if (functions[path]) throw new Error(`duplicate module function path ${JSON.stringify(path)}`);
       functions[path] = entry;
+    }
+    for (const plan of parseVisibilityDefinitions(contents.toString("utf8"))) {
+      if (visibilityPlans[plan.table]) throw new Error(`duplicate visibility plan for table ${JSON.stringify(plan.table)}`);
+      visibilityPlans[plan.table] = plan;
     }
   }
   // Versioned SQL migrations travel with the artifact for the same reason they
@@ -143,9 +153,105 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     hash: artifactHash(sortedFiles, javascript),
     entrypoint: entrypoint.projectPath,
     functions: sortedRecord(functions),
+    visibility: sortedRecord(visibilityPlans),
     files: sortedFiles,
     javascript,
   };
+}
+
+function parseVisibilityDefinitions(source: string): VisibilityPlan[] {
+  const plans: VisibilityPlan[] = [];
+  visibilityDefinitionPattern.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = visibilityDefinitionPattern.exec(source)) !== null) {
+    const openParen = match.index + match[0].length - 1;
+    const call = readCallArguments(source, openParen);
+    visibilityDefinitionPattern.lastIndex = Math.max(call.end, openParen + 1);
+    const value = call.args[0]?.value;
+    const plan = parseVisibilityPlan(value);
+    if (!plan) throw new Error(`visibility export ${JSON.stringify(match[1])} must use a literal visibility plan`);
+    plans.push(plan);
+  }
+
+  visibilityRegistrationPattern.lastIndex = 0;
+  while ((match = visibilityRegistrationPattern.exec(source)) !== null) {
+    const openParen = match.index + match[0].length - 1;
+    const call = readCallArguments(source, openParen);
+    visibilityRegistrationPattern.lastIndex = Math.max(call.end, openParen + 1);
+    const plan = parseVisibilityPlan(call.args[0]?.value);
+    if (!plan) throw new Error("module visibility registration must use a literal visibility plan");
+    plans.push(plan);
+  }
+  return plans;
+}
+
+function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | undefined {
+  const table = stringMember(value, "table");
+  const key = stringMember(value, "key");
+  const rawSets = readMember(value, "sets");
+  const where = parseVisibilityExpression(readMember(value, "where"));
+  if (!table || !key || !isJsonObject(rawSets) || !where) return undefined;
+  const sets: Record<string, VisibilitySet> = {};
+  for (const name of Object.keys(rawSets).sort()) {
+    const candidate = rawSets[name];
+    const setTable = stringMember(candidate, "table");
+    const select = stringMember(candidate, "select");
+    const rawJoins = readMember(candidate, "joins");
+    const rawWhere = readMember(candidate, "where");
+    if (!setTable || !select || !Array.isArray(rawJoins) || !Array.isArray(rawWhere)) return undefined;
+    const joins = rawJoins.map((join) => ({
+      table: stringMember(join, "table") ?? "",
+      leftColumn: stringMember(join, "leftColumn") ?? "",
+      rightColumn: stringMember(join, "rightColumn") ?? "",
+    }));
+    const constraints = rawWhere.map((constraint) => ({
+      table: stringMember(constraint, "table") ?? "",
+      column: stringMember(constraint, "column") ?? "",
+      context: stringMember(constraint, "context") as "account.id" | "member.id" | "tenant.id",
+    }));
+    if (joins.some((join) => !join.table || !join.leftColumn || !join.rightColumn) ||
+      constraints.some((constraint) => !constraint.table || !constraint.column || !["account.id", "member.id", "tenant.id"].includes(constraint.context))) {
+      return undefined;
+    }
+    sets[name] = { table: setTable, select, joins, where: constraints };
+  }
+  if (!visibilityExpressionSetsExist(where, sets)) return undefined;
+  return { table, key, sets, where };
+}
+
+function parseVisibilityExpression(value: JsonValue | undefined): VisibilityExpression | undefined {
+  const operator = stringMember(value, "operator");
+  if (!operator || !["public", "permission", "role", "eqContext", "inSet", "and", "or", "not"].includes(operator)) return undefined;
+  const result: VisibilityExpression = { operator: operator as VisibilityExpression["operator"] };
+  const column = stringMember(value, "column");
+  const context = stringMember(value, "context");
+  const set = stringMember(value, "set");
+  const expressionValue = stringMember(value, "value");
+  if (column) result.column = column;
+  if (context === "account.id" || context === "member.id" || context === "tenant.id") result.context = context;
+  if (set) result.set = set;
+  if (expressionValue) result.value = expressionValue;
+  const rawChildren = readMember(value, "children");
+  if (Array.isArray(rawChildren)) {
+    const children = rawChildren.map(parseVisibilityExpression);
+    if (children.some((child) => child === undefined)) return undefined;
+    result.children = children as VisibilityExpression[];
+  }
+  switch (result.operator) {
+    case "public": return Object.keys(result).length === 1 ? result : undefined;
+    case "permission":
+    case "role": return result.value ? result : undefined;
+    case "eqContext": return result.column && result.context ? result : undefined;
+    case "inSet": return result.column && result.set ? result : undefined;
+    case "and":
+    case "or": return result.children?.length ? result : undefined;
+    case "not": return result.children?.length === 1 ? result : undefined;
+  }
+}
+
+function visibilityExpressionSetsExist(expression: VisibilityExpression, sets: Record<string, VisibilitySet>): boolean {
+  if (expression.operator === "inSet" && (!expression.set || !(expression.set in sets))) return false;
+  return (expression.children ?? []).every((child) => visibilityExpressionSetsExist(child, sets));
 }
 
 /** Projects the artifact functions onto the language-neutral manifest shape. */
@@ -506,8 +612,6 @@ function dependenciesFromOptions(
     dependencies.reads = [readDependencyFromLiveQueryPlan(liveQueryPlan)];
   }
   if (options.get("shareByPermissions")?.value === true) dependencies.shareByPermissions = true;
-  const shareByVisibility = stringEntry(options, "shareByVisibility");
-  if (shareByVisibility) dependencies.shareByVisibility = shareByVisibility;
   const shareResultFrom = stringEntry(options, "shareResultFrom");
   if (shareResultFrom) dependencies.shareResultFrom = shareResultFrom;
   const shareResultField = stringEntry(options, "shareResultField");

@@ -6,15 +6,35 @@ description: Bounded persistent collections, atomic transactions, and offline co
 A Replica Collection keeps a bounded, authorized entity set in the Gonvex
 Local Replica.
 
-```go
-app.ReplicaCollection(
-  "tasks.recent",
-  RecentTasks,
-  gonvex.ReplicaTable("tasks").
-    Columns("id", "title", "status", "updated_at").
-    OrderBy("updated_at", "desc").
-    Budget(10_000, 50<<20),
-)
+```ts
+import { replicaCollection, visibility } from "@gonvex/module-sdk";
+
+export const taskVisibility = visibility({
+  table: "tasks",
+  key: "id",
+  sets: {
+    workspaces: {
+      table: "workspaceMembers",
+      select: "workspaceId",
+      joins: [],
+      where: [{ table: "workspaceMembers", column: "memberId", context: "member.id" }],
+    },
+  },
+  where: { operator: "inSet", column: "workspaceId", set: "workspaces" },
+});
+
+export const recent = replicaCollection({
+  replica: {
+    table: "tasks",
+    key: "id",
+    columns: ["id", "workspaceId", "title", "status", "updatedAt"],
+    orderBy: "updatedAt",
+    orderDirection: "desc",
+    mode: "progressive",
+    maxRows: 10_000,
+    maxBytes: 50 * 1024 * 1024,
+  },
+});
 ```
 
 The Local Replica stores normalized authoritative entities, optimistic
@@ -28,3 +48,9 @@ transaction.
 
 Collections explicitly report `complete` or `partial`. Offline filters over a
 partial collection are labeled as cached partial results.
+
+The visibility plan is mandatory on the next module update. Gonvex compiles it
+into snapshot and Live Query SQL, caches its revisioned context, derives its
+dependency tables, and evaluates committed old/new rows before sending INSERT,
+PATCH, or visibility DELETE changes. Equivalent resolved contexts share one
+Live Query group; fingerprints are an optimization and never an authority.
