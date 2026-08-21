@@ -113,6 +113,7 @@ type Server struct {
 	runtimeHydrationMu         sync.RWMutex
 	runtimeHydrationFails      map[string]struct{}
 	runtimeHydrationReady      atomic.Bool
+	agentActionAdmission       chan struct{}
 }
 
 func New(cfg config.Config) *Server {
@@ -167,10 +168,11 @@ func newServer(cfg config.Config, cache *rowsCache) *Server {
 	cfg.Normalize()
 	serverContext, cancel := context.WithCancel(context.Background())
 	server := &Server{
-		ctx:     serverContext,
-		cancel:  cancel,
-		config:  cfg,
-		runtime: runtime.NewWithModuleHost(moduleHostFor(cfg)),
+		ctx:                  serverContext,
+		cancel:               cancel,
+		config:               cfg,
+		runtime:              runtime.NewWithModuleHost(moduleHostFor(cfg)),
+		agentActionAdmission: make(chan struct{}, max(1, cfg.AgentActionConcurrency)),
 		storage: storage.NewFactory(storage.Config{
 			Endpoint:        cfg.S3Endpoint,
 			Region:          cfg.S3Region,
@@ -247,17 +249,19 @@ func moduleHostFor(cfg config.Config) *moduleengine.RemoteHost {
 	if !cfg.ModuleHostEnabled {
 		return nil
 	}
+	executionTimeout := max(cfg.ModuleHostExecutionTimeout, cfg.AgentActionTimeout)
+	requestTimeout := max(cfg.ModuleHostRequestTimeout, executionTimeout+5*time.Second)
 	return moduleengine.NewRemoteHost(moduleengine.HostOptions{
 		Endpoint:           cfg.ModuleHostEndpoint,
 		Binary:             cfg.ModuleHostBinary,
 		StartTimeout:       cfg.ModuleHostStartTimeout,
-		RequestTimeout:     cfg.ModuleHostRequestTimeout,
+		RequestTimeout:     requestTimeout,
 		ShutdownTimeout:    cfg.ModuleHostShutdownTimeout,
 		DrainTimeout:       cfg.ModuleHostDrainTimeout,
 		MaxFrameBytes:      cfg.ModuleHostMaxFrameBytes,
 		MaxConcurrentCalls: cfg.ModuleHostMaxConcurrentCalls,
 		IsolatePoolSize:    cfg.ModuleHostIsolatePoolSize,
-		ExecutionTimeout:   cfg.ModuleHostExecutionTimeout,
+		ExecutionTimeout:   executionTimeout,
 		Logger:             slog.Default().With("component", "module-host"),
 	})
 }

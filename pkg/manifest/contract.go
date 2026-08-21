@@ -29,17 +29,19 @@ func (m Manifest) ValidateTypeScriptContract() error {
 			return fmt.Errorf("manifest function %q exists only in the TypeScript module artifact", path)
 		}
 		expected := FunctionEntry{
-			Kind:         moduleFunction.Kind,
-			Handler:      moduleFunction.Handler,
-			File:         moduleFunction.File,
-			Args:         moduleFunction.Args,
-			Result:       moduleFunction.Result,
-			Internal:     moduleFunction.Internal,
-			Delivery:     moduleFunction.Delivery,
-			Dependencies: moduleFunction.Dependencies,
-			Replica:      moduleFunction.Replica,
-			Offline:      moduleFunction.Offline,
-			Optimistic:   moduleFunction.Optimistic,
+			Kind:               moduleFunction.Kind,
+			Handler:            moduleFunction.Handler,
+			File:               moduleFunction.File,
+			Args:               moduleFunction.Args,
+			Result:             moduleFunction.Result,
+			Internal:           moduleFunction.Internal,
+			Delivery:           moduleFunction.Delivery,
+			Dependencies:       moduleFunction.Dependencies,
+			Replica:            moduleFunction.Replica,
+			Offline:            moduleFunction.Offline,
+			Optimistic:         moduleFunction.Optimistic,
+			ActionProfile:      moduleFunction.ActionProfile,
+			ActionCapabilities: moduleFunction.ActionCapabilities,
 		}
 		if !reflect.DeepEqual(entry, expected) {
 			return fmt.Errorf("manifest function %q does not match the TypeScript module artifact", path)

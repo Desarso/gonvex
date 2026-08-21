@@ -31,6 +31,8 @@ const (
 	defaultModuleHostConcurrency      = 32
 	defaultModuleHostIsolatePool      = 4
 	defaultModuleHostExecutionTimeout = 10 * time.Second
+	defaultAgentActionTimeout         = 2 * time.Minute
+	defaultAgentActionConcurrency     = 4
 )
 
 type Config struct {
@@ -103,6 +105,11 @@ type Config struct {
 	// runtime looks for the host binary on PATH. A project whose manifest ships
 	// a module artifact fails its sync clearly when no host is available.
 	ModuleHostEnabled bool
+	// AgentActionsEnabled is the deployment-level opt-in for Actions declaring
+	// profile "agent". Standard Actions cannot enable this surface themselves.
+	AgentActionsEnabled    bool
+	AgentActionTimeout     time.Duration
+	AgentActionConcurrency int
 	// ModuleHostBinary is the executable this runtime supervises. One process
 	// serves every project and every tenant.
 	ModuleHostBinary string
@@ -171,6 +178,9 @@ func FromEnv() Config {
 		DropEmptyUndeclaredColumns:   envBool("GONVEX_DROP_EMPTY_UNDECLARED_COLUMNS", false),
 
 		ModuleHostEnabled:            envBool("GONVEX_MODULE_HOST_ENABLED", true),
+		AgentActionsEnabled:          envBool("GONVEX_AGENT_ACTIONS_ENABLED", false),
+		AgentActionTimeout:           envDuration("GONVEX_AGENT_ACTION_TIMEOUT", defaultAgentActionTimeout),
+		AgentActionConcurrency:       envInt("GONVEX_AGENT_ACTION_CONCURRENCY", defaultAgentActionConcurrency),
 		ModuleHostBinary:             strings.TrimSpace(env("GONVEX_MODULE_HOST_BINARY", "")),
 		ModuleHostEndpoint:           strings.TrimSpace(env("GONVEX_MODULE_HOST_ENDPOINT", "")),
 		ModuleHostStartTimeout:       envDuration("GONVEX_MODULE_HOST_START_TIMEOUT", defaultModuleHostStartTimeout),

@@ -280,3 +280,31 @@ export const broken = action({
     /uses schema\.optional outside an object field/,
   );
 });
+
+test("TypeScript artifacts sign internal Query and agent Action capabilities", async (t) => {
+  const project = await moduleProject(t, `
+const schema = { string: () => ({ kind: "string" }), any: () => ({ kind: "any" }), object: (fields) => ({ kind: "object", fields }) };
+const internalQuery = (definition) => definition;
+const action = (definition) => definition;
+export const searchTasks = internalQuery({
+  args: schema.object({ search: schema.string() }), result: schema.any(),
+  liveQueryPlan: { table: "tasks", key: "id", columns: ["id", "title"] },
+  run: async () => [],
+});
+export const run = action({
+  profile: "agent",
+  capabilities: {
+    networkOrigins: ["https://api.openai.com"],
+    secrets: ["OPENAI_API_KEY"],
+    tools: { searchTasks: { kind: "query", function: "searchTasks" } },
+  },
+  args: schema.object({ prompt: schema.string() }), result: schema.any(), run: async () => null,
+});
+`);
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  assert.equal(artifact.generation, 5);
+  assert.equal(artifact.functions.searchTasks.internal, true);
+  assert.equal(artifact.functions.run.actionProfile, "agent");
+  assert.deepEqual(artifact.functions.run.actionCapabilities.tools.searchTasks, { kind: "query", function: "searchTasks" });
+  assert.deepEqual(moduleManifestFunctions(artifact).run.actionCapabilities.networkOrigins, ["https://api.openai.com"]);
+});

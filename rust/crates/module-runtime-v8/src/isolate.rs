@@ -7,6 +7,7 @@
 //! never needs the host to be `'static`.
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as sync_mpsc;
@@ -21,6 +22,8 @@ use gonvex_module_runtime::{
     Capabilities, FunctionContract, HostCall, HostError, HostResponse, Invocation,
     InvocationResult, ModuleError,
 };
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::dispatch::{
@@ -191,6 +194,7 @@ struct InvocationSlot {
 
 struct ActiveCall {
     capabilities: Capabilities,
+    action_tools: BTreeSet<String>,
     host: mpsc::UnboundedSender<HostRequest>,
     remaining_host_calls: usize,
     violation: Option<Violation>,
@@ -240,6 +244,15 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
                 .get_or_insert(Violation::Denied(message.clone()));
             return HostCallOutcome::denied(message);
         }
+        if let HostCall::ToolInvoke { tool, .. } = &call {
+            if !active.action_tools.contains(tool) {
+                let message = format!("Action tool {tool:?} is not declared for this invocation");
+                active
+                    .violation
+                    .get_or_insert(Violation::Denied(message.clone()));
+                return HostCallOutcome::denied(message);
+            }
+        }
         if active.remaining_host_calls == 0 {
             let message = "module exhausted its host call budget".to_owned();
             active
@@ -283,7 +296,67 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
     }
 }
 
-extension!(gonvex_host, ops = [op_gonvex_host_call]);
+#[op2]
+#[string]
+fn op_gonvex_random_bytes(#[smi] length: u32) -> String {
+    let mut bytes = vec![0_u8; length.min(65_536) as usize];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    serde_json::to_string(&bytes).unwrap_or_else(|_| "[]".to_owned())
+}
+
+#[op2]
+#[string]
+fn op_gonvex_sha256(#[string] input: String) -> String {
+    let bytes: Vec<u8> = serde_json::from_str(&input).unwrap_or_default();
+    serde_json::to_string(&Sha256::digest(bytes).as_slice()).unwrap_or_else(|_| "[]".to_owned())
+}
+
+#[op2]
+#[string]
+fn op_gonvex_parse_url(#[string] input: String) -> String {
+    let request: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
+    let raw = request
+        .get("input")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let base = request
+        .get("base")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| url::Url::parse(value).ok());
+    let parsed = url::Url::options().base_url(base.as_ref()).parse(raw);
+    match parsed {
+        Ok(value) => serde_json::json!({
+            "href": value.as_str(),
+            "origin": value.origin().ascii_serialization(),
+            "protocol": format!("{}:", value.scheme()),
+            "username": value.username(),
+            "password": value.password().unwrap_or_default(),
+            "host": match value.port() { Some(port) => format!("{}:{port}", value.host_str().unwrap_or_default()), None => value.host_str().unwrap_or_default().to_owned() },
+            "hostname": value.host_str().unwrap_or_default(),
+            "port": value.port().map(|port| port.to_string()).unwrap_or_default(),
+            "pathname": value.path(),
+            "search": value.query().map(|query| format!("?{query}")).unwrap_or_default(),
+            "hash": value.fragment().map(|fragment| format!("#{fragment}")).unwrap_or_default(),
+        }).to_string(),
+        Err(error) => serde_json::json!({"error": error.to_string()}).to_string(),
+    }
+}
+
+#[op2(async)]
+async fn op_gonvex_sleep(#[smi] delay_ms: u32) {
+    tokio::time::sleep(Duration::from_millis(delay_ms as u64)).await;
+}
+
+extension!(
+    gonvex_host,
+    ops = [
+        op_gonvex_host_call,
+        op_gonvex_random_bytes,
+        op_gonvex_sha256,
+        op_gonvex_parse_url,
+        op_gonvex_sleep
+    ]
+);
 
 /// Field order is drop order: the watchdog stops before the V8 handles and the
 /// runtime go away, so it can never terminate an isolate that is being torn
@@ -408,6 +481,7 @@ impl ModuleIsolate {
             capabilities: CapabilityFlags::from(&spec.capabilities),
             identity: IdentityView::from(&spec.invocation.context),
             environment: &spec.invocation.context.environment,
+            action_tools: &spec.invocation.context.action_tools,
             now: spec.now_unix_ms,
             max_result_bytes: spec.max_result_bytes,
         };
@@ -455,6 +529,13 @@ impl ModuleIsolate {
             .borrow_mut::<InvocationSlot>()
             .active = Some(ActiveCall {
             capabilities: spec.capabilities,
+            action_tools: spec
+                .invocation
+                .context
+                .action_tools
+                .iter()
+                .cloned()
+                .collect(),
             host: spec.host,
             remaining_host_calls: spec.max_host_calls,
             violation: None,

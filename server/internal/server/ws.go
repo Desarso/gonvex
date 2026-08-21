@@ -1800,7 +1800,7 @@ func (s *Server) executeTenantQueryForCallerTracked(ctx context.Context, project
 	}()
 
 	databaseStartedAt := time.Now()
-	result, err = s.executeTenantQueryForCallerUncached(ctx, projectID, tenantID, caller, path, rawArgs)
+	result, err = s.executeTenantQueryForCallerUncached(ctx, projectID, tenantID, caller, path, rawArgs, false)
 	s.metrics.recordReactive(func(metric *reactiveMetricState) {
 		metric.DatabaseQueryCount++
 		metric.DatabaseQueryDurationMS += float64(time.Since(databaseStartedAt).Microseconds()) / 1000
@@ -1808,7 +1808,7 @@ func (s *Server) executeTenantQueryForCallerTracked(ctx context.Context, project
 	return result, err
 }
 
-func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (any, error) {
+func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage, allowInternal bool) (any, error) {
 	engine := s.engineForProject(ctx, projectID)
 	if engine != nil {
 		descriptor, ok := engine.Describe(path)
@@ -1817,6 +1817,12 @@ func (s *Server) executeTenantQueryForCallerUncached(ctx context.Context, projec
 		}
 		if descriptor.Kind != moduleengine.KindQuery {
 			return nil, fmt.Errorf("function %q is not a query", path)
+		}
+		if descriptor.Internal != allowInternal {
+			if descriptor.Internal {
+				return nil, fmt.Errorf("query %q is internal", path)
+			}
+			return nil, fmt.Errorf("Action Query tool %q must target an internal Query", path)
 		}
 		if descriptor.Delivery == "" || descriptor.Delivery == gonvex.DeliveryOneShot {
 			if descriptor.Dependencies.LiveQueryPlan == nil {
@@ -2032,10 +2038,21 @@ func (s *Server) executeTenantActionForCaller(ctx context.Context, projectID str
 	if engine == nil {
 		return nil, fmt.Errorf("project %q has no active TypeScript module", projectID)
 	}
-	if _, ok := engine.Describe(path); ok {
+	if descriptor, ok := engine.Describe(path); ok {
+		if descriptor.ActionProfile == "agent" {
+			select {
+			case s.agentActionAdmission <- struct{}{}:
+				defer func() { <-s.agentActionAdmission }()
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		actionCtx, err := s.actionContext(ctx, projectID, tenantID, caller)
 		if err != nil {
 			return nil, err
+		}
+		if descriptor.ActionProfile == "agent" {
+			actionCtx.ExecutionTimeout = s.config.AgentActionTimeout
 		}
 		result, err := engine.InvokeAction(actionCtx, moduleengine.Invocation{Path: path, Args: rawArgs})
 		if err != nil {
@@ -2090,6 +2107,9 @@ func (s *Server) actionContext(ctx context.Context, projectID string, tenantID s
 		server: s, project: projectID, tenant: tenantID, caller: caller,
 		parent: commandIDFromContext(ctx),
 	}
+	runtimeCtx.Queries = &actionQueryCaller{server: s, project: projectID, tenant: tenantID, caller: caller}
+	runtimeCtx.AgentActionsEnabled = s.config.AgentActionsEnabled
+	runtimeCtx.ExecutionTimeout = s.config.ModuleHostExecutionTimeout
 	return &gonvex.ActionCtx{RuntimeContext: runtimeCtx}, nil
 }
 
@@ -2125,21 +2145,22 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 	logger := slog.Default().With("project", projectID, "tenant", activeTenant)
 	storageAPI := s.storageForTenant(ctx, projectID, activeTenant, store.DB, caller, logger)
 	return gonvex.RuntimeContext{
-		Context:        ctx,
-		ProjectID:      projectID,
-		TenantID:       activeTenant,
-		OperationID:    commandIDFromContext(ctx),
-		Auth:           gonvex.AuthContext{Account: caller.user},
-		Tenant:         &gonvex.TenantIdentity{ID: activeTenant, ProjectID: projectID},
-		Member:         caller.member,
-		DatabaseURL:    store.DatabaseURL,
-		DB:             store.DB,
-		ControlPlaneDB: controlPlaneStore.DB,
-		TenantDB:       store.DB,
-		Storage:        storageAPI,
-		Scheduler:      s.scheduler.For(projectID, activeTenant),
-		Logger:         logger,
-		Env:            s.projectEnvValues(ctx, projectID),
+		Context:          ctx,
+		ProjectID:        projectID,
+		TenantID:         activeTenant,
+		OperationID:      commandIDFromContext(ctx),
+		Auth:             gonvex.AuthContext{Account: caller.user},
+		Tenant:           &gonvex.TenantIdentity{ID: activeTenant, ProjectID: projectID},
+		Member:           caller.member,
+		DatabaseURL:      store.DatabaseURL,
+		DB:               store.DB,
+		ControlPlaneDB:   controlPlaneStore.DB,
+		TenantDB:         store.DB,
+		Storage:          storageAPI,
+		Scheduler:        s.scheduler.For(projectID, activeTenant),
+		Logger:           logger,
+		Env:              s.projectEnvValues(ctx, projectID),
+		ExecutionTimeout: s.config.ModuleHostExecutionTimeout,
 	}, nil
 }
 

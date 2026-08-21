@@ -33,11 +33,11 @@ fn structural_capabilities(kind: &FunctionKind) -> Capabilities {
         // Actions run outside the transaction: they may reach the network and
         // storage, and mutate only by calling a reducer.
         FunctionKind::Action => Capabilities {
-            run_reducer: true,
+            action_tools: true,
             scheduler: true,
             network: true,
             storage: true,
-            environment: true,
+            secrets: true,
             ..Capabilities::default()
         },
     }
@@ -50,11 +50,11 @@ pub(crate) fn effective_capabilities(kind: &FunctionKind, granted: &Capabilities
         db_read: structural.db_read && granted.db_read,
         db_write: structural.db_write && granted.db_write,
         action_outbox: structural.action_outbox && granted.action_outbox,
-        run_reducer: structural.run_reducer && granted.run_reducer,
+        action_tools: structural.action_tools && granted.action_tools,
         scheduler: structural.scheduler && granted.scheduler,
         network: structural.network && granted.network,
         storage: structural.storage && granted.storage,
-        environment: structural.environment && granted.environment,
+        secrets: structural.secrets && granted.secrets,
     }
 }
 
@@ -72,11 +72,11 @@ pub(crate) struct CapabilityFlags {
     db_read: bool,
     db_write: bool,
     action_outbox: bool,
-    run_reducer: bool,
+    action_tools: bool,
     scheduler: bool,
     network: bool,
     storage: bool,
-    environment: bool,
+    secrets: bool,
 }
 
 impl From<&Capabilities> for CapabilityFlags {
@@ -85,11 +85,11 @@ impl From<&Capabilities> for CapabilityFlags {
             db_read: capabilities.db_read,
             db_write: capabilities.db_write,
             action_outbox: capabilities.action_outbox,
-            run_reducer: capabilities.run_reducer,
+            action_tools: capabilities.action_tools,
             scheduler: capabilities.scheduler,
             network: capabilities.network,
             storage: capabilities.storage,
-            environment: capabilities.environment,
+            secrets: capabilities.secrets,
         }
     }
 }
@@ -127,6 +127,7 @@ pub(crate) struct DispatchRequest<'a> {
     pub(crate) capabilities: CapabilityFlags,
     pub(crate) identity: IdentityView<'a>,
     pub(crate) environment: &'a std::collections::BTreeMap<String, String>,
+    pub(crate) action_tools: &'a [String],
     /// Wall-clock milliseconds the host stamped on the invocation, surfaced as
     /// `ctx.now` so a handler never reads a clock the host does not control.
     pub(crate) now: u64,
@@ -170,8 +171,8 @@ pub(crate) enum HostCallRequest {
         #[serde(default)]
         args: serde_json::Value,
     },
-    RunReducer {
-        function: String,
+    ToolInvoke {
+        tool: String,
         #[serde(default)]
         args: serde_json::Value,
     },
@@ -241,8 +242,8 @@ impl HostCallRequest {
                 function,
                 args: encode(args)?,
             },
-            Self::RunReducer { function, args } => HostCall::RunReducer {
-                function,
+            Self::ToolInvoke { tool, args } => HostCall::ToolInvoke {
+                tool,
                 args: encode(args)?,
             },
             Self::ScheduleAfter {

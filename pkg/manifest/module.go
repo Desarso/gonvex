@@ -7,12 +7,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 )
 
 const LanguageTypeScript = "typescript"
-const ModuleArtifactGeneration = 4
+const ModuleArtifactGeneration = 5
 
 // Language reports the artifact's normalized language, defaulting to
 // TypeScript because that is the only language the artifact pipeline emits.
@@ -113,6 +115,9 @@ func (a ModuleArtifact) Validate() error {
 		if function.Kind == FunctionKindQuery && function.Delivery == DeliveryReplica && function.Replica == nil {
 			return fmt.Errorf("replica collection %q requires a replica definition", path)
 		}
+		if function.Kind == FunctionKindQuery && function.Internal && function.Delivery != "" && function.Delivery != DeliveryOneShot {
+			return fmt.Errorf("internal Query %q must use one-shot delivery", path)
+		}
 		if function.Kind != FunctionKindQuery && function.Delivery != "" {
 			return fmt.Errorf("module function %q uses query delivery on a %s", path, function.Kind)
 		}
@@ -130,6 +135,34 @@ func (a ModuleArtifact) Validate() error {
 			}
 		} else if function.Offline != nil || function.Optimistic != nil {
 			return fmt.Errorf("module function %q declares reducer policy on a %s", path, function.Kind)
+		}
+		if function.Kind == FunctionKindAction {
+			if err := validateActionCapabilities(function.ActionProfile, function.ActionCapabilities, path); err != nil {
+				return err
+			}
+		} else if function.ActionProfile != "" || function.ActionCapabilities != nil {
+			return fmt.Errorf("module function %q declares Action capabilities on a %s", path, function.Kind)
+		}
+	}
+	for path, function := range a.Functions {
+		if function.Kind != FunctionKindAction || function.ActionCapabilities == nil {
+			continue
+		}
+		for name, binding := range function.ActionCapabilities.Tools {
+			targetPath := strings.TrimSpace(binding.Function)
+			target, ok := a.Functions[targetPath]
+			if !ok {
+				return fmt.Errorf("action %q tool %q targets unknown function %q", path, name, targetPath)
+			}
+			if target.Kind != binding.Kind {
+				return fmt.Errorf("action %q tool %q declares %s but %q is %s", path, name, binding.Kind, targetPath, target.Kind)
+			}
+			if binding.Kind == FunctionKindQuery && (!target.Internal || (target.Delivery != "" && target.Delivery != DeliveryOneShot)) {
+				return fmt.Errorf("action %q tool %q must target an internal one-shot Query", path, name)
+			}
+			if binding.Kind == FunctionKindReducer && target.Internal {
+				return fmt.Errorf("action %q tool %q must target a public business-intent Reducer", path, name)
+			}
 		}
 	}
 	cronNames := make(map[string]struct{}, len(a.Crons))
@@ -268,7 +301,58 @@ func moduleFunctionHashContract(function ModuleFunction) map[string]any {
 	if function.Optimistic != nil {
 		contract["optimistic"] = function.Optimistic
 	}
+	if function.ActionProfile != "" {
+		contract["actionProfile"] = function.ActionProfile
+	}
+	if function.ActionCapabilities != nil {
+		contract["actionCapabilities"] = function.ActionCapabilities
+	}
 	return contract
+}
+
+var actionToolNamePattern = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
+var secretNamePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+
+func validateActionCapabilities(profile string, capabilities *ActionCapabilities, path string) error {
+	if profile == "" {
+		profile = "standard"
+	}
+	if profile != "standard" && profile != "agent" {
+		return fmt.Errorf("action %q profile must be standard or agent", path)
+	}
+	if capabilities == nil {
+		return nil
+	}
+	seenOrigins := map[string]struct{}{}
+	for _, origin := range capabilities.NetworkOrigins {
+		parsed, err := url.Parse(origin)
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Scheme+"://"+parsed.Host != origin {
+			return fmt.Errorf("action %q network origin %q must be an exact HTTP(S) origin", path, origin)
+		}
+		if _, duplicate := seenOrigins[origin]; duplicate {
+			return fmt.Errorf("action %q declares duplicate network origin %q", path, origin)
+		}
+		seenOrigins[origin] = struct{}{}
+	}
+	seenSecrets := map[string]struct{}{}
+	for _, name := range capabilities.Secrets {
+		if !secretNamePattern.MatchString(name) {
+			return fmt.Errorf("action %q secret %q must be an uppercase environment name", path, name)
+		}
+		if _, duplicate := seenSecrets[name]; duplicate {
+			return fmt.Errorf("action %q declares duplicate secret %q", path, name)
+		}
+		seenSecrets[name] = struct{}{}
+	}
+	if len(capabilities.Tools) > 0 && profile != "agent" {
+		return fmt.Errorf("action %q tools require profile agent", path)
+	}
+	for name, binding := range capabilities.Tools {
+		if !actionToolNamePattern.MatchString(name) || strings.TrimSpace(binding.Function) == "" || (binding.Kind != FunctionKindQuery && binding.Kind != FunctionKindReducer) {
+			return fmt.Errorf("action %q has invalid tool binding %q", path, name)
+		}
+	}
+	return nil
 }
 
 func validateStructuredQueryPlan(plan *LiveQueryPlan, path string) error {

@@ -22,6 +22,7 @@ test("codegen serializes only the structured Live Query plan", () => {
   boolean: () => ({ kind: "boolean" }),
 };
 const liveQuery = (options) => options;
+const internalQuery = (options) => options;
 const reducer = (options) => options;
 export const locations = liveQuery({
   name: "locations.list",
@@ -46,6 +47,13 @@ export const beat = reducer({
   args: schema.object({}), result: schema.object({ ok: schema.boolean() }),
   offline: { mode: "onlineOnly", reason: "test fixture" },
   nonOptimisticReason: "test fixture", run: async () => ({ ok: true }),
+});
+export const agentLookup = internalQuery({
+  name: "agents.lookup",
+  args: schema.object({ tenantId: schema.string() }),
+  result: schema.array(schema.object({ tenantId: schema.string() })),
+  liveQueryPlan: { table: "locations", key: "id", columns: ["id", "tenantId"] },
+  run: async () => [],
 });
 `,
     );
@@ -81,6 +89,10 @@ export const beat = reducer({
     assert.match(apiSource, /plan:\s*\{/);
     assert.match(apiSource, /table:\s*"locations"/);
     assert.match(apiSource, /import type \{ LiveQueryPlan \} from "@gonvex\/client"/);
+    const publicSection = apiSource.slice(apiSource.indexOf("export const api ="), apiSource.indexOf("export const internal ="));
+    const internalSection = apiSource.slice(apiSource.indexOf("export const internal ="), apiSource.indexOf("export type Api ="));
+    assert.doesNotMatch(publicSection, /agents/);
+    assert.match(internalSection, /lookup/);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

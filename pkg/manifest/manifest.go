@@ -21,17 +21,32 @@ const (
 const NotifySchemaVersion = "15"
 
 type FunctionEntry struct {
-	Kind         FunctionKind                 `json:"kind"`
-	Handler      string                       `json:"handler"`
-	File         string                       `json:"file"`
-	Args         ModuleSchema                 `json:"args,omitempty"`
-	Result       ModuleSchema                 `json:"result,omitempty"`
-	Internal     bool                         `json:"internal,omitempty"`
-	Delivery     DeliveryMode                 `json:"delivery,omitempty"`
-	Dependencies FunctionDependencies         `json:"dependencies,omitempty"`
-	Replica      *ReplicaCollectionDefinition `json:"replica,omitempty"`
-	Offline      any                          `json:"offline,omitempty"`
-	Optimistic   any                          `json:"optimistic,omitempty"`
+	Kind               FunctionKind                 `json:"kind"`
+	Handler            string                       `json:"handler"`
+	File               string                       `json:"file"`
+	Args               ModuleSchema                 `json:"args,omitempty"`
+	Result             ModuleSchema                 `json:"result,omitempty"`
+	Internal           bool                         `json:"internal,omitempty"`
+	Delivery           DeliveryMode                 `json:"delivery,omitempty"`
+	Dependencies       FunctionDependencies         `json:"dependencies,omitempty"`
+	Replica            *ReplicaCollectionDefinition `json:"replica,omitempty"`
+	Offline            any                          `json:"offline,omitempty"`
+	Optimistic         any                          `json:"optimistic,omitempty"`
+	ActionProfile      string                       `json:"actionProfile,omitempty"`
+	ActionCapabilities *ActionCapabilities          `json:"actionCapabilities,omitempty"`
+}
+
+type ActionCapabilities struct {
+	NetworkOrigins []string                     `json:"networkOrigins,omitempty"`
+	Secrets        []string                     `json:"secrets,omitempty"`
+	Tools          map[string]ActionToolBinding `json:"tools,omitempty"`
+	Scheduler      bool                         `json:"scheduler,omitempty"`
+	Storage        bool                         `json:"storage,omitempty"`
+}
+
+type ActionToolBinding struct {
+	Kind     FunctionKind `json:"kind"`
+	Function string       `json:"function"`
 }
 
 // ModuleSchema is the JSON representation of the recursive PortableSchema
@@ -213,18 +228,20 @@ type ModuleCron struct {
 // ModuleFunction carries generated function metadata and portable schema and
 // reducer-policy values. The runtime validates them before activation.
 type ModuleFunction struct {
-	Kind         FunctionKind                 `json:"kind"`
-	Handler      string                       `json:"handler"`
-	File         string                       `json:"file"`
-	Export       string                       `json:"export,omitempty"`
-	Args         ModuleSchema                 `json:"args,omitempty"`
-	Result       ModuleSchema                 `json:"result,omitempty"`
-	Dependencies FunctionDependencies         `json:"dependencies,omitempty"`
-	Internal     bool                         `json:"internal,omitempty"`
-	Delivery     DeliveryMode                 `json:"delivery,omitempty"`
-	Replica      *ReplicaCollectionDefinition `json:"replica,omitempty"`
-	Offline      any                          `json:"offline,omitempty"`
-	Optimistic   any                          `json:"optimistic,omitempty"`
+	Kind               FunctionKind                 `json:"kind"`
+	Handler            string                       `json:"handler"`
+	File               string                       `json:"file"`
+	Export             string                       `json:"export,omitempty"`
+	Args               ModuleSchema                 `json:"args,omitempty"`
+	Result             ModuleSchema                 `json:"result,omitempty"`
+	Dependencies       FunctionDependencies         `json:"dependencies,omitempty"`
+	Internal           bool                         `json:"internal,omitempty"`
+	Delivery           DeliveryMode                 `json:"delivery,omitempty"`
+	Replica            *ReplicaCollectionDefinition `json:"replica,omitempty"`
+	Offline            any                          `json:"offline,omitempty"`
+	Optimistic         any                          `json:"optimistic,omitempty"`
+	ActionProfile      string                       `json:"actionProfile,omitempty"`
+	ActionCapabilities *ActionCapabilities          `json:"actionCapabilities,omitempty"`
 }
 
 type ModuleJavaScript struct {

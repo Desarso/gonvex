@@ -158,6 +158,7 @@ type invocationContext struct {
 	Member         *memberIdentity   `json:"member,omitempty"`
 	Permissions    any               `json:"permissions,omitempty"`
 	Environment    map[string]string `json:"environment,omitempty"`
+	ActionTools    []string          `json:"actionTools,omitempty"`
 	Capabilities   capabilities      `json:"capabilities"`
 	NowUnixMS      int64             `json:"nowUnixMs"`
 	DeadlineUnixMS int64             `json:"deadlineUnixMs,omitempty"`
@@ -191,11 +192,11 @@ type capabilities struct {
 	DBRead       bool `json:"dbRead"`
 	DBWrite      bool `json:"dbWrite"`
 	ActionOutbox bool `json:"actionOutbox"`
-	RunReducer   bool `json:"runReducer"`
+	ActionTools  bool `json:"actionTools"`
 	Scheduler    bool `json:"scheduler"`
 	Network      bool `json:"network"`
 	Storage      bool `json:"storage"`
-	Environment  bool `json:"environment"`
+	Secrets      bool `json:"secrets"`
 }
 
 // artifactPayload is the module as the runtime holds it. The host re-verifies
@@ -284,6 +285,7 @@ type hostCallPayload struct {
 	ID         json.RawMessage `json:"id"`
 	Patch      json.RawMessage `json:"patch"`
 	Function   string          `json:"function"`
+	Tool       string          `json:"tool"`
 	Args       json.RawMessage `json:"args"`
 	DelayMS    int64           `json:"delayMs"`
 	AtUnixMS   int64           `json:"atUnixMs"`
@@ -298,7 +300,7 @@ const (
 	hostCallDBUpdate      = "dbUpdate"
 	hostCallDBDelete      = "dbDelete"
 	hostCallActionEnqueue = "actionEnqueue"
-	hostCallRunReducer    = "runReducer"
+	hostCallToolInvoke    = "toolInvoke"
 	hostCallScheduleAfter = "scheduleAfter"
 	hostCallScheduleAt    = "scheduleAt"
 	hostCallFetch         = "fetch"

@@ -53,23 +53,33 @@ export const rename = reducer({
 ## Action
 
 Actions perform external work such as HTTP, email, AI, files, or long-running
-computation. They do not receive an application database handle. To change
-durable state, call a Reducer. Reducers record external work in the durable
-outbox so it runs after commit.
+computation. They receive no capabilities by default and never receive an
+application database handle. Declare exact network origins, secrets, and named
+Query/Reducer tools. Reducers record external work in the durable outbox so it
+runs after commit.
 
 ```ts
 import { action, schema } from "@gonvex/module-sdk";
 
 export const send = action({
+  capabilities: {
+    networkOrigins: ["https://example.test"],
+    tools: { markNotified: { kind: "reducer", function: "tasks.markNotified" } },
+  },
   args: schema.object({ taskId: schema.id("tasks") }),
   result: schema.object({ queued: schema.boolean() }),
-  run: async ({ runReducer, fetch }, args) => {
+  run: async ({ tools, fetch }, args) => {
     await fetch("https://example.test/notify", { method: "POST", body: JSON.stringify(args) });
-    await runReducer("tasks.markNotified", args);
+    await tools.markNotified(args);
     return { queued: true };
   },
 });
 ```
+
+Agent-only reads use `internalQuery(...)` and an Action with `profile: "agent"`.
+The runtime must also enable `GONVEX_AGENT_ACTIONS_ENABLED=true`. The Query runs
+through the normal read-only, admission-controlled, visibility-injected Query
+executor; the Action cannot select SQL or choose an arbitrary function path.
 
 ## Generated React surface
 

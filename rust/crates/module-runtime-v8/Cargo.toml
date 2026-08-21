@@ -9,4 +9,7 @@ gonvex-module-runtime = { path = "../module-runtime" }
 deno_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+rand.workspace = true
+url.workspace = true
 tokio.workspace = true

@@ -63,11 +63,12 @@ func TestRemoteEngineExecutesV8AndSwapsGenerationWithoutReconnect(t *testing.T) 
 	}
 
 	runtimeContext := gonvex.RuntimeContext{
-		Context: context.Background(),
-		Env:     map[string]string{"MAIL_API_KEY": "test-secret"},
-		Auth:    gonvex.AuthContext{Account: &gonvex.Account{ID: "acct-gabriel", Email: "gabriel@example.test"}},
-		Tenant:  &gonvex.TenantIdentity{ID: "tenant-el-rey", ProjectID: "runtime-bridge-test"},
-		Member:  &gonvex.Member{ID: "member-gabriel", AccountID: "acct-gabriel", Status: "active"},
+		Context:             context.Background(),
+		Env:                 map[string]string{"MAIL_API_KEY": "test-secret"},
+		Auth:                gonvex.AuthContext{Account: &gonvex.Account{ID: "acct-gabriel", Email: "gabriel@example.test"}},
+		Tenant:              &gonvex.TenantIdentity{ID: "tenant-el-rey", ProjectID: "runtime-bridge-test"},
+		Member:              &gonvex.Member{ID: "member-gabriel", AccountID: "acct-gabriel", Status: "active"},
+		AgentActionsEnabled: true,
 	}
 	queryResult, err := first.InvokeQuery(
 		&gonvex.QueryCtx{RuntimeContext: runtimeContext},
@@ -105,8 +106,22 @@ func TestRemoteEngineExecutesV8AndSwapsGenerationWithoutReconnect(t *testing.T) 
 		t.Fatalf("invoke action capability probe: %v", err)
 	}
 	assertRemoteResult(t, actionResult.Value, map[string]any{
-		"hasDb": false, "hasFetch": true, "hasStorage": false, "mailKey": "test-secret",
+		"hasDb": false, "hasFetch": true, "hasStorage": false, "mailKey": "test-secret", "hasRunReducer": false,
+		"hasStreams": true, "hasAbort": true, "digest": "ba7816bf", "responseText": "ready",
 	})
+	queries := &recordingQueryAPI{}
+	runtimeContext.Queries = queries
+	agentResult, err := first.InvokeAction(
+		&gonvex.ActionCtx{RuntimeContext: runtimeContext},
+		Invocation{Path: "system.agent", Args: json.RawMessage(`{"search":"freezer"}`)},
+	)
+	if err != nil {
+		t.Fatalf("invoke declared agent tool: %v", err)
+	}
+	assertRemoteResult(t, agentResult.Value, map[string]any{"ok": true})
+	if queries.path != "system.internalLookup" {
+		t.Fatalf("agent Query tool called %q", queries.path)
+	}
 
 	outbox := &recordingActionOutbox{}
 	reducerResult, err := first.InvokeReducer(
@@ -200,13 +215,21 @@ export async function echo(ctx, args) {
   };
 }
 export async function capabilities(ctx) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("abc")));
   return {
     hasDb: Object.prototype.hasOwnProperty.call(ctx, "db"),
     hasFetch: typeof ctx.fetch === "function",
     hasStorage: Object.prototype.hasOwnProperty.call(ctx, "storage"),
-    mailKey: ctx.env.MAIL_API_KEY,
+    mailKey: ctx.secrets.MAIL_API_KEY,
+    hasRunReducer: Object.prototype.hasOwnProperty.call(ctx, "runReducer"),
+    hasStreams: typeof ReadableStream === "function" && typeof TransformStream === "function",
+    hasAbort: typeof AbortController === "function" && new AbortController().signal instanceof AbortSignal,
+    digest: [...digest.slice(0, 4)].map((value) => value.toString(16).padStart(2, "0")).join(""),
+    responseText: await new Response("ready").text(),
   };
 }
+export async function agent(ctx, args) { return await ctx.tools.searchTasks(args); }
+export async function internalLookup() { throw new Error("internal Query handler must not execute"); }
 export async function badResult() { return "not-a-boolean"; }
 export async function enqueue(ctx, args) {
   return { outboxId: await ctx.actions.enqueue("notifications.deliver", args) };
@@ -239,8 +262,30 @@ export async function enqueue(ctx, args) {
 				Args: moduleObjectSchema(nil),
 				Result: moduleObjectSchema(map[string]manifest.ModuleSchema{
 					"hasDb": {"kind": "boolean"}, "hasFetch": {"kind": "boolean"}, "hasStorage": {"kind": "boolean"},
-					"mailKey": {"kind": "string"},
+					"mailKey": {"kind": "string"}, "hasRunReducer": {"kind": "boolean"},
+					"hasStreams": {"kind": "boolean"}, "hasAbort": {"kind": "boolean"},
+					"digest": {"kind": "string"}, "responseText": {"kind": "string"},
 				}),
+				ActionProfile: "standard",
+				ActionCapabilities: &manifest.ActionCapabilities{
+					NetworkOrigins: []string{"https://example.test"},
+					Secrets:        []string{"MAIL_API_KEY"},
+				},
+			},
+			"system.agent": {
+				Kind: manifest.FunctionKindAction, Handler: "agent", Export: "agent", File: "gonvex/index.ts",
+				Args:          moduleObjectSchema(map[string]manifest.ModuleSchema{"search": {"kind": "string"}}),
+				Result:        moduleObjectSchema(map[string]manifest.ModuleSchema{"ok": {"kind": "boolean"}}),
+				ActionProfile: "agent",
+				ActionCapabilities: &manifest.ActionCapabilities{Tools: map[string]manifest.ActionToolBinding{
+					"searchTasks": {Kind: manifest.FunctionKindQuery, Function: "system.internalLookup"},
+				}},
+			},
+			"system.internalLookup": {
+				Kind: manifest.FunctionKindQuery, Handler: "internalLookup", Export: "internalLookup", File: "gonvex/index.ts", Internal: true,
+				Args:         moduleObjectSchema(map[string]manifest.ModuleSchema{"search": {"kind": "string"}}),
+				Result:       moduleObjectSchema(map[string]manifest.ModuleSchema{"ok": {"kind": "boolean"}}),
+				Dependencies: manifest.FunctionDependencies{LiveQueryPlan: &manifest.LiveQueryPlan{Table: "system_results", Key: "id", Columns: []string{"id"}}},
 			},
 			"system.enqueue": {
 				Kind: manifest.FunctionKindReducer, Handler: "enqueue", Export: "enqueue", File: "gonvex/index.ts",
@@ -310,11 +355,19 @@ func TestRemoteEngineExecutesBundledModuleBuilderArtifact(t *testing.T) {
 	}
 	cliArtifact := filepath.Join(root, "packages", "gonvex", "dist", "module-artifact.js")
 	sdk := filepath.Join(root, "packages", "module-sdk", "dist", "index.js")
+	aiSDK := filepath.Join(root, "node_modules", "ai", "dist", "index.js")
+	openAIProvider := filepath.Join(root, "node_modules", "@ai-sdk", "openai", "dist", "index.js")
 	if _, err := os.Stat(cliArtifact); err != nil {
 		t.Skip("build @gonvex/cli before running bundled artifact integration")
 	}
 	if _, err := os.Stat(sdk); err != nil {
 		t.Skip("build @gonvex/module-sdk before running bundled artifact integration")
+	}
+	if _, err := os.Stat(aiSDK); err != nil {
+		t.Skip("install the pinned ai compatibility dependencies before running bundled artifact integration")
+	}
+	if _, err := os.Stat(openAIProvider); err != nil {
+		t.Skip("install the pinned OpenAI provider compatibility dependency before running bundled artifact integration")
 	}
 	project, err := os.MkdirTemp("", "gonvex-builder-runtime-")
 	if err != nil {
@@ -327,14 +380,22 @@ func TestRemoteEngineExecutesBundledModuleBuilderArtifact(t *testing.T) {
 	}
 	sdkURL := "file://" + filepath.ToSlash(sdk)
 	source := fmt.Sprintf(`import { createModule, schema } from %q;
+import { ToolLoopAgent } from %q;
+import { createOpenAI } from %q;
 const app = createModule({ name: "builder-runtime", version: "1" });
 app.action("reports.daily", {
+  profile: "agent",
+  capabilities: { networkOrigins: ["https://api.openai.com"], secrets: ["OPENAI_API_KEY"] },
   args: schema.object({}),
   result: schema.object({ ok: schema.boolean() }),
-  run: async () => ({ ok: true }),
+  run: async (ctx) => {
+    const provider = createOpenAI({ apiKey: ctx.secrets.OPENAI_API_KEY, fetch: ctx.fetch });
+    const agent = new ToolLoopAgent({ model: provider("gpt-5-mini"), instructions: "Compatibility probe" });
+    return { ok: typeof agent.generate === "function" && typeof crypto.randomUUID() === "string" };
+  },
 });
 export default app;
-`, sdkURL)
+`, sdkURL, "file://"+filepath.ToSlash(aiSDK), "file://"+filepath.ToSlash(openAIProvider))
 	entrypoint := filepath.Join(backend, "index.ts")
 	if err := os.WriteFile(entrypoint, []byte(source), 0o644); err != nil {
 		t.Fatal(err)
@@ -377,7 +438,9 @@ process.stdout.write(JSON.stringify(artifact));
 	if err := engine.Activate(context.Background()); err != nil {
 		t.Fatalf("activate bundled ModuleBuilder artifact: %v", err)
 	}
-	result, err := engine.InvokeAction(&gonvex.ActionCtx{RuntimeContext: gonvex.RuntimeContext{Context: context.Background()}}, Invocation{
+	result, err := engine.InvokeAction(&gonvex.ActionCtx{RuntimeContext: gonvex.RuntimeContext{
+		Context: context.Background(), AgentActionsEnabled: true, Env: map[string]string{"OPENAI_API_KEY": "test-key"},
+	}}, Invocation{
 		Path: "reports.daily", Args: json.RawMessage(`{}`),
 	})
 	if err != nil {

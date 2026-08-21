@@ -46,8 +46,23 @@ type Descriptor struct {
 	// every engine. Live Query dependencies are derived from the structured
 	// plan; keeping the resulting plan on the descriptor lets the host route
 	// subscriptions without reaching back into application code.
-	Dependencies gonvex.FunctionDependencies
-	Replica      *gonvex.ReplicaCollectionDefinition
+	Dependencies       gonvex.FunctionDependencies
+	Replica            *gonvex.ReplicaCollectionDefinition
+	ActionProfile      string
+	ActionCapabilities ActionCapabilities
+}
+
+type ActionCapabilities struct {
+	NetworkOrigins []string
+	Secrets        []string
+	Tools          map[string]ActionToolBinding
+	Scheduler      bool
+	Storage        bool
+}
+
+type ActionToolBinding struct {
+	Kind     Kind
+	Function string
 }
 
 // Invocation is one call into a module: which function to run and its

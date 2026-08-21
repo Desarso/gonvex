@@ -98,8 +98,15 @@ type RuntimeContext struct {
 	Storage        StorageAPI
 	Scheduler      Scheduler
 	Reducers       ReducerAPI
+	Queries        QueryAPI
 	Outbox         ActionOutbox
-	Logger         *slog.Logger
+	// AgentActionsEnabled is an operator gate. A module declaration can narrow
+	// capabilities but cannot turn the agent runtime on by itself.
+	AgentActionsEnabled bool
+	// ExecutionTimeout is the host-approved budget for this invocation. Module
+	// declarations cannot raise it.
+	ExecutionTimeout time.Duration
+	Logger           *slog.Logger
 
 	// Env holds only project-scoped variables resolved by the host. Raw runtime
 	// process environment is never exposed to application modules.
@@ -160,6 +167,9 @@ func (c *RuntimeContext) normalize() {
 	}
 	if c.Reducers == nil {
 		c.Reducers = UnavailableReducers()
+	}
+	if c.Queries == nil {
+		c.Queries = UnavailableQueries()
 	}
 	if c.Outbox == nil {
 		c.Outbox = UnavailableActionOutbox()

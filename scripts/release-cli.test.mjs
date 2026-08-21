@@ -17,6 +17,12 @@ test("release builds workspace declarations before typechecking consumers", () =
   assert.ok(typecheck > build, "consumer typechecks must run after dependency declarations are built");
 });
 
+test("release includes every public Gonvex SDK needed by TypeScript modules and mobile replicas", () => {
+  const source = readFileSync(resolve(ROOT, "scripts/release-cli.mjs"), "utf8");
+  assert.match(source, /"module-sdk"/);
+  assert.match(source, /"expo-sqlite"/);
+});
+
 test("selects a version above every package when the release tag is stale", () => {
   const selection = selectReleaseVersion({
     latestTag: "v0.1.0",

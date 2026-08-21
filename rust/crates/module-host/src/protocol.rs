@@ -191,7 +191,7 @@ pub struct CapabilitiesWire {
     #[serde(default)]
     pub action_outbox: bool,
     #[serde(default)]
-    pub run_reducer: bool,
+    pub action_tools: bool,
     #[serde(default)]
     pub scheduler: bool,
     #[serde(default)]
@@ -199,7 +199,7 @@ pub struct CapabilitiesWire {
     #[serde(default)]
     pub storage: bool,
     #[serde(default)]
-    pub environment: bool,
+    pub secrets: bool,
 }
 
 impl From<CapabilitiesWire> for Capabilities {
@@ -208,11 +208,11 @@ impl From<CapabilitiesWire> for Capabilities {
             db_read: wire.db_read,
             db_write: wire.db_write,
             action_outbox: wire.action_outbox,
-            run_reducer: wire.run_reducer,
+            action_tools: wire.action_tools,
             scheduler: wire.scheduler,
             network: wire.network,
             storage: wire.storage,
-            environment: wire.environment,
+            secrets: wire.secrets,
         }
     }
 }
@@ -236,6 +236,8 @@ pub struct InvocationContextWire {
     pub permissions: serde_json::Value,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
+    #[serde(default)]
+    pub action_tools: Vec<String>,
     #[serde(default)]
     pub capabilities: CapabilitiesWire,
     #[serde(default)]
@@ -264,6 +266,7 @@ impl InvocationContextWire {
                 permissions: self.permissions,
             },
             environment: self.environment,
+            action_tools: self.action_tools,
             generation,
             capabilities: self.capabilities.into(),
             now_unix_ms: match self.now_unix_ms {
@@ -461,8 +464,8 @@ pub enum HostCallFrame {
         function: String,
         args: serde_json::Value,
     },
-    RunReducer {
-        function: String,
+    ToolInvoke {
+        tool: String,
         args: serde_json::Value,
     },
     ScheduleAfter {
@@ -530,8 +533,8 @@ impl HostCallFrame {
                 function,
                 args: decode(args, "args")?,
             },
-            HostCall::RunReducer { function, args } => Self::RunReducer {
-                function,
+            HostCall::ToolInvoke { tool, args } => Self::ToolInvoke {
+                tool,
                 args: decode(args, "args")?,
             },
             HostCall::ScheduleAfter {

@@ -18,6 +18,19 @@ func TestDefaultSubscriptionRerunConcurrency(t *testing.T) {
 	}
 }
 
+func TestAgentActionsAreOptInAndSeparatelyBounded(t *testing.T) {
+	t.Setenv("GONVEX_AGENT_ACTIONS_ENABLED", "")
+	t.Setenv("GONVEX_AGENT_ACTION_TIMEOUT", "")
+	t.Setenv("GONVEX_AGENT_ACTION_CONCURRENCY", "")
+	cfg := FromEnv()
+	if cfg.AgentActionsEnabled {
+		t.Fatal("agent Actions defaulted on")
+	}
+	if cfg.AgentActionTimeout != 2*time.Minute || cfg.AgentActionConcurrency != 4 {
+		t.Fatalf("agent Action defaults = %s / %d", cfg.AgentActionTimeout, cfg.AgentActionConcurrency)
+	}
+}
+
 func TestValkeyURLRequiresCanonicalEnvironment(t *testing.T) {
 	t.Setenv("VALKEY_URL", "")
 	t.Setenv("REDIS_URL", "redis://redis.example:6379/4")

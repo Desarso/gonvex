@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -102,17 +103,38 @@ func reducerCapabilities(ctx *gonvex.ReducerCtx) capabilities {
 	}
 }
 
-func actionCapabilities(runtimeCtx *gonvex.RuntimeContext) capabilities {
+func actionCapabilities(runtimeCtx *gonvex.RuntimeContext, descriptor Descriptor) (capabilities, map[string]string, []string, error) {
 	if runtimeCtx == nil {
-		return capabilities{}
+		return capabilities{}, nil, nil, nil
 	}
+	profile := descriptor.ActionProfile
+	if profile == "" {
+		profile = "standard"
+	}
+	if profile == "agent" && !runtimeCtx.AgentActionsEnabled {
+		return capabilities{}, nil, nil, fmt.Errorf("agent action %q is disabled by runtime policy", descriptor.Path)
+	}
+	declared := descriptor.ActionCapabilities
+	environment := make(map[string]string, len(declared.Secrets))
+	for _, name := range declared.Secrets {
+		value, ok := runtimeCtx.Env[name]
+		if !ok {
+			return capabilities{}, nil, nil, fmt.Errorf("action %q requires unconfigured secret %q", descriptor.Path, name)
+		}
+		environment[name] = value
+	}
+	tools := make([]string, 0, len(declared.Tools))
+	for name := range declared.Tools {
+		tools = append(tools, name)
+	}
+	sort.Strings(tools)
 	return capabilities{
-		RunReducer:  runtimeCtx.Reducers != nil,
-		Scheduler:   runtimeCtx.Scheduler != nil,
-		Network:     true,
-		Storage:     runtimeCtx.Storage != nil,
-		Environment: true,
-	}
+		ActionTools: len(tools) > 0,
+		Scheduler:   declared.Scheduler && runtimeCtx.Scheduler != nil,
+		Network:     len(declared.NetworkOrigins) > 0,
+		Storage:     declared.Storage && runtimeCtx.Storage != nil,
+		Secrets:     len(declared.Secrets) > 0,
+	}, environment, tools, nil
 }
 
 // queryHostCalls serves a Query's reads. It opens one read-only transaction
@@ -259,11 +281,12 @@ func (h *reducerHostCalls) close() {}
 // and storage. An Action never reaches an application table directly, so there
 // is deliberately no database branch here at all.
 type actionHostCalls struct {
-	ctx *gonvex.RuntimeContext
+	ctx          *gonvex.RuntimeContext
+	capabilities ActionCapabilities
 }
 
-func newActionHostCalls(ctx *gonvex.RuntimeContext) *actionHostCalls {
-	return &actionHostCalls{ctx: ctx}
+func newActionHostCalls(ctx *gonvex.RuntimeContext, capabilities ActionCapabilities) *actionHostCalls {
+	return &actionHostCalls{ctx: ctx, capabilities: capabilities}
 }
 
 func (h *actionHostCalls) dispatch(ctx context.Context, call hostCallPayload) (json.RawMessage, error) {
@@ -271,32 +294,53 @@ func (h *actionHostCalls) dispatch(ctx context.Context, call hostCallPayload) (j
 		return nil, fmt.Errorf("this action has no host context")
 	}
 	switch call.Kind {
-	case hostCallRunReducer:
-		return h.runReducer(ctx, call)
+	case hostCallToolInvoke:
+		return h.invokeTool(ctx, call)
 	case hostCallScheduleAfter, hostCallScheduleAt:
+		if !h.capabilities.Scheduler {
+			return nil, fmt.Errorf("scheduler is not declared for this Action")
+		}
 		return scheduleWork(h.ctx.Scheduler, call)
 	case hostCallFetch:
-		return runFetch(ctx, call.Request)
+		if len(h.capabilities.NetworkOrigins) == 0 {
+			return nil, fmt.Errorf("network access is not declared for this Action")
+		}
+		return runFetch(ctx, call.Request, h.capabilities.NetworkOrigins)
 	case hostCallStorage:
+		if !h.capabilities.Storage {
+			return nil, fmt.Errorf("storage is not declared for this Action")
+		}
 		return runStorage(h.ctx.Storage, call.Operation, call.Payload)
 	default:
 		return nil, fmt.Errorf("an action may not call %q", call.Kind)
 	}
 }
 
-func (h *actionHostCalls) runReducer(ctx context.Context, call hostCallPayload) (json.RawMessage, error) {
-	if h.ctx.Reducers == nil {
-		return nil, fmt.Errorf("reducers are not available to this action")
-	}
-	path := strings.TrimSpace(call.Function)
-	if path == "" {
-		return nil, fmt.Errorf("runReducer requires a reducer path")
+func (h *actionHostCalls) invokeTool(ctx context.Context, call hostCallPayload) (json.RawMessage, error) {
+	name := strings.TrimSpace(call.Tool)
+	binding, ok := h.capabilities.Tools[name]
+	if !ok {
+		return nil, fmt.Errorf("Action tool %q is not declared", name)
 	}
 	args, err := decodeJSONValue(call.Args)
 	if err != nil {
-		return nil, fmt.Errorf("runReducer arguments are not valid JSON: %w", err)
+		return nil, fmt.Errorf("Action tool %q arguments are not valid JSON: %w", name, err)
 	}
-	value, err := h.ctx.Reducers.Call(ctx, path, args)
+	var value any
+	switch binding.Kind {
+	case KindQuery:
+		if h.ctx.Queries == nil {
+			return nil, fmt.Errorf("Queries are unavailable to Action tool %q", name)
+		}
+		value, err = h.ctx.Queries.Call(ctx, binding.Function, args)
+	case KindReducer:
+		if h.ctx.Reducers == nil {
+			return nil, fmt.Errorf("Reducers are unavailable to Action tool %q", name)
+		}
+		value, err = h.ctx.Reducers.Call(ctx, binding.Function, args)
+	default:
+		return nil, fmt.Errorf("Action tool %q has unsupported kind %q", name, binding.Kind)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -824,7 +868,7 @@ type fetchRequest struct {
 // runFetch performs an Action's outbound request. It is bounded on time and on
 // response size, and it refuses anything that is not plain HTTP: a module's
 // network reach must not become a way to read the host's filesystem.
-func runFetch(ctx context.Context, payload json.RawMessage) (json.RawMessage, error) {
+func runFetch(ctx context.Context, payload json.RawMessage, allowedOrigins []string) (json.RawMessage, error) {
 	var request fetchRequest
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return nil, fmt.Errorf("fetch requires a request")
@@ -832,9 +876,18 @@ func runFetch(ctx context.Context, payload json.RawMessage) (json.RawMessage, er
 	if err := json.Unmarshal(payload, &request); err != nil {
 		return nil, fmt.Errorf("fetch request is not valid JSON: %w", err)
 	}
-	url := strings.TrimSpace(request.URL)
-	if !strings.HasPrefix(strings.ToLower(url), "http://") && !strings.HasPrefix(strings.ToLower(url), "https://") {
+	requestURL := strings.TrimSpace(request.URL)
+	parsed, err := url.Parse(requestURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return nil, fmt.Errorf("fetch only supports http and https URLs")
+	}
+	allowed := make(map[string]struct{}, len(allowedOrigins))
+	for _, origin := range allowedOrigins {
+		allowed[origin] = struct{}{}
+	}
+	origin := parsed.Scheme + "://" + parsed.Host
+	if _, ok := allowed[origin]; !ok {
+		return nil, fmt.Errorf("fetch origin %q is not declared for this Action", origin)
 	}
 	method := strings.ToUpper(strings.TrimSpace(request.Method))
 	if method == "" {
@@ -847,14 +900,21 @@ func runFetch(ctx context.Context, payload json.RawMessage) (json.RawMessage, er
 	if request.Body != nil {
 		body = strings.NewReader(*request.Body)
 	}
-	outbound, err := http.NewRequestWithContext(call, method, url, body)
+	outbound, err := http.NewRequestWithContext(call, method, requestURL, body)
 	if err != nil {
 		return nil, fmt.Errorf("fetch request is not usable: %w", err)
 	}
 	for name, value := range request.Headers {
 		outbound.Header.Set(name, value)
 	}
-	response, err := http.DefaultClient.Do(outbound)
+	client := &http.Client{CheckRedirect: func(request *http.Request, _ []*http.Request) error {
+		redirectOrigin := request.URL.Scheme + "://" + request.URL.Host
+		if _, ok := allowed[redirectOrigin]; !ok {
+			return fmt.Errorf("redirect origin %q is not declared for this Action", redirectOrigin)
+		}
+		return nil
+	}}
+	response, err := client.Do(outbound)
 	if err != nil {
 		return nil, err
 	}
@@ -875,7 +935,7 @@ func runFetch(ctx context.Context, payload json.RawMessage) (json.RawMessage, er
 	return json.Marshal(map[string]any{
 		"status":     response.StatusCode,
 		"statusText": response.Status,
-		"url":        url,
+		"url":        requestURL,
 		"headers":    headers,
 		"body":       string(content),
 	})

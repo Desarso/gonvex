@@ -255,9 +255,9 @@ request path. A different project's key, an arbitrary key, and an opaque runtime
 `GONVEX_DEV_SYNC_KEY` cannot read or change project environment variables. Dashboard project owners
 and admins can manage the same variables with their signed-in session.
 
-TypeScript Actions read these values through the immutable `ctx.env` object.
-Queries and Reducers do not receive environment variables, keeping transactional
-code isolated from host secrets and external configuration.
+TypeScript Actions cannot read the project environment wholesale. An Action
+declares exact secret names in `capabilities.secrets`; only those values appear
+in its immutable `ctx.secrets` object. Queries and Reducers receive no secrets.
 
 `env push FILE` (also available as `env upload FILE`) reads the file relative to the
 selected project root and atomically replaces the complete server-side variable set

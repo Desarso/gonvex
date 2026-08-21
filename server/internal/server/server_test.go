@@ -95,6 +95,7 @@ func typeScriptTestManifest(project string, functions map[string]manifest.Functi
 			Kind: entry.Kind, Handler: "handler", Export: "handler", File: "gonvex/index.ts",
 			Args: entry.Args, Result: entry.Result, Dependencies: entry.Dependencies,
 			Internal: entry.Internal, Delivery: entry.Delivery, Replica: entry.Replica,
+			ActionProfile: entry.ActionProfile, ActionCapabilities: entry.ActionCapabilities,
 		}
 		if plan := entry.Dependencies.LiveQueryPlan; plan != nil {
 			visibility[plan.Table] = manifest.VisibilityPlan{

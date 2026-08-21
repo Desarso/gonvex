@@ -133,6 +133,8 @@ pub struct InvocationContext {
     pub identity: IdentityContext,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
+    #[serde(default)]
+    pub action_tools: Vec<String>,
     pub generation: ModuleGeneration,
     #[serde(default)]
     pub capabilities: Capabilities,
@@ -149,11 +151,11 @@ pub struct Capabilities {
     pub db_read: bool,
     pub db_write: bool,
     pub action_outbox: bool,
-    pub run_reducer: bool,
+    pub action_tools: bool,
     pub scheduler: bool,
     pub network: bool,
     pub storage: bool,
-    pub environment: bool,
+    pub secrets: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -209,8 +211,8 @@ pub enum HostCall {
         function: String,
         args: Vec<u8>,
     },
-    RunReducer {
-        function: String,
+    ToolInvoke {
+        tool: String,
         args: Vec<u8>,
     },
     ScheduleAfter {
@@ -253,7 +255,7 @@ impl HostCall {
             Self::DbQuery { .. } => "db_read",
             Self::DbInsert { .. } | Self::DbUpdate { .. } | Self::DbDelete { .. } => "db_write",
             Self::ActionEnqueue { .. } => "action_outbox",
-            Self::RunReducer { .. } => "run_reducer",
+            Self::ToolInvoke { .. } => "action_tools",
             Self::ScheduleAfter { .. } | Self::ScheduleAt { .. } => "scheduler",
             Self::Fetch { .. } => "network",
             Self::Storage { .. } => "storage",
@@ -266,7 +268,7 @@ impl HostCall {
             "db_read" => capabilities.db_read,
             "db_write" => capabilities.db_write,
             "action_outbox" => capabilities.action_outbox,
-            "run_reducer" => capabilities.run_reducer,
+            "action_tools" => capabilities.action_tools,
             "scheduler" => capabilities.scheduler,
             "network" => capabilities.network,
             _ => capabilities.storage,

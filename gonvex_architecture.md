@@ -52,12 +52,17 @@ the API. `_gonvex_sync_changes` records what actually committed.
 ### Action
 
 An Action performs external or long-running work such as HTTP, email, AI,
-push, and files. Its database handles are unavailable. Durable state must
-re-enter through:
+push, and files. It starts with no ambient capabilities and never receives a
+database handle. Network origins, secret names, storage, scheduling, and named
+Query/Reducer tools must be declared in its signed module contract. Durable
+state re-enters through an exact Reducer tool binding:
 
 ```ts
-await ctx.runReducer("tasks.markDelivered", args);
+await ctx.tools.markDelivered(args);
 ```
+
+There is no generic `runQuery(path)`, `runReducer(path)`, `ctx.db`, or complete
+environment object in an Action.
 
 Business rows and external-work requests should be committed together through
 a durable outbox. The Action worker processes the outbox idempotently.

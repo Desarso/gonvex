@@ -116,6 +116,8 @@ type FunctionInfo = {
   visibility: string;
   source: string;
   status: string;
+  actionProfile?: "standard" | "agent";
+  capabilities?: string;
 };
 
 type ManifestResponse = {
@@ -126,6 +128,14 @@ type ManifestResponse = {
     delivery?: "oneShot" | "live" | "replica";
     replica?: { table?: string };
     dependencies?: { liveQueryPlan?: { table?: string } };
+    actionProfile?: "standard" | "agent";
+    actionCapabilities?: {
+      networkOrigins?: string[];
+      secrets?: string[];
+      tools?: Record<string, { kind: "query" | "reducer"; function: string }>;
+      scheduler?: boolean;
+      storage?: boolean;
+    };
   }>;
   schema?: ManifestSchema;
   visibility?: Record<string, unknown>;
@@ -685,7 +695,7 @@ const functions: FunctionInfo[] = functionRows.map(([name, kind, realtime, visib
   status,
 }));
 
-function realtimeLabel(kind: string, delivery?: "oneShot" | "live" | "replica"): string {
+function realtimeLabel(kind: string, delivery?: "oneShot" | "live" | "replica", actionProfile?: "standard" | "agent"): string {
   if (kind === "query" && delivery === "live") return "Live Query";
   if (kind === "query" && delivery === "replica") return "Replica Collection";
   switch (kind) {
@@ -694,7 +704,7 @@ function realtimeLabel(kind: string, delivery?: "oneShot" | "live" | "replica"):
     case "reducer":
       return "atomic transaction";
     case "action":
-      return "external work";
+      return actionProfile === "agent" ? "Agent Action" : "external work";
     default:
       return "registered";
   }
@@ -706,7 +716,7 @@ function manifestFunctionsToRows(payload: ManifestResponse): FunctionInfo[] {
     .map(([name, entry]) => ({
       name,
       kind: entry.kind,
-      realtime: realtimeLabel(entry.kind, entry.delivery),
+      realtime: realtimeLabel(entry.kind, entry.delivery, entry.actionProfile),
       visibility: (() => {
         const table = entry.replica?.table ?? entry.dependencies?.liveQueryPlan?.table;
         if (!table) return "—";
@@ -714,6 +724,19 @@ function manifestFunctionsToRows(payload: ManifestResponse): FunctionInfo[] {
       })(),
       source: entry.file || entry.handler,
       status: "ready",
+      actionProfile: entry.actionProfile,
+      capabilities: (() => {
+        const declared = entry.actionCapabilities;
+        if (!declared) return "none";
+        const values = [
+          ...(Object.keys(declared.tools ?? {}).length ? [`${Object.keys(declared.tools ?? {}).length} tools`] : []),
+          ...(declared.networkOrigins?.length ? [`${declared.networkOrigins.length} origins`] : []),
+          ...(declared.secrets?.length ? [`${declared.secrets.length} secrets`] : []),
+          ...(declared.scheduler ? ["scheduler"] : []),
+          ...(declared.storage ? ["storage"] : []),
+        ];
+        return values.join(", ") || "none";
+      })(),
     }));
 }
 
@@ -5295,7 +5318,7 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
               variant={item.name === selectedName ? "secondary" : "ghost"}
             >
               <span className="function-kind" aria-hidden="true">
-                {item.kind === "reducer" ? "r" : "q"}
+                {item.kind === "reducer" ? "r" : item.kind === "action" ? "a" : "q"}
               </span>
               <span>{item.name}</span>
             </Button>
@@ -5313,7 +5336,7 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
                   {selectedFunction.kind}
                 </Chip>
               </div>
-              <p>{selectedFunction.realtime} · visibility {selectedFunction.visibility} · {selectedFunction.source}</p>
+              <p>{selectedFunction.realtime} · visibility {selectedFunction.visibility} · capabilities {selectedFunction.capabilities ?? "none"} · {selectedFunction.source}</p>
             </div>
             <Button size="sm" variant="primary" onPress={() => props.onAction(`${selectedFunction.name} queued for local execution MVP`)}>
               Run Function

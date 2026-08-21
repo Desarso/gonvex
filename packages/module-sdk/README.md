@@ -105,6 +105,28 @@ handler-free payloads for a host loader. `QueryContext`, `ReducerContext`, and
 `ActionContext` remain separate types, so capability boundaries are visible to
 module authors and adapters.
 
+Actions start without network, secrets, storage, scheduling, or function-call
+authority. Declare the exact surface on the Action:
+
+```ts
+export const run = action({
+  profile: "agent",
+  capabilities: {
+    networkOrigins: ["https://api.openai.com"],
+    secrets: ["OPENAI_API_KEY"],
+    tools: {
+      searchTasks: { kind: "query", function: "agents.searchTasks" },
+      renameTask: { kind: "reducer", function: "tasks.rename" },
+    },
+  },
+  run: async (ctx) => ctx.tools.searchTasks({ search: "freezer" }),
+});
+```
+
+Query tools must target `internalQuery(...)` declarations. Actions never
+receive `ctx.db`, a generic function dispatcher, or the full project
+environment.
+
 Module identity follows the v2 account/member split:
 
 ```ts

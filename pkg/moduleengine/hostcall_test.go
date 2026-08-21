@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -110,12 +112,14 @@ func TestReducerHostCallsUseCurrentTransactionalScheduler(t *testing.T) {
 func TestActionHostCallsCanScheduleAt(t *testing.T) {
 	scheduler := &recordingScheduler{}
 	runtimeCtx := &gonvex.RuntimeContext{Scheduler: scheduler}
-	if granted := actionCapabilities(runtimeCtx); !granted.Scheduler {
+	declared := ActionCapabilities{Scheduler: true}
+	granted, _, _, err := actionCapabilities(runtimeCtx, Descriptor{Path: "reports.run", Kind: KindAction, ActionCapabilities: declared})
+	if err != nil || !granted.Scheduler {
 		t.Fatal("action was not granted the scheduler")
 	}
 
 	const atUnixMS int64 = 1_800_000_000_123
-	result, err := newActionHostCalls(runtimeCtx).dispatch(context.Background(), hostCallPayload{
+	result, err := newActionHostCalls(runtimeCtx, declared).dispatch(context.Background(), hostCallPayload{
 		Kind:     hostCallScheduleAt,
 		AtUnixMS: atUnixMS,
 		Function: "reports.generate",
@@ -126,6 +130,74 @@ func TestActionHostCallsCanScheduleAt(t *testing.T) {
 	}
 	if string(result) != `"scheduled-at"` || scheduler.at.UnixMilli() != atUnixMS {
 		t.Fatalf("scheduled result = %s at %d", result, scheduler.at.UnixMilli())
+	}
+}
+
+type recordingQueryAPI struct {
+	path string
+	args any
+}
+
+func (q *recordingQueryAPI) Call(_ context.Context, path string, args any) (any, error) {
+	q.path, q.args = path, args
+	return map[string]any{"ok": true}, nil
+}
+
+func TestAgentActionInvokesOnlyDeclaredQueryTool(t *testing.T) {
+	queries := &recordingQueryAPI{}
+	runtimeCtx := &gonvex.RuntimeContext{Queries: queries, AgentActionsEnabled: true}
+	declared := ActionCapabilities{Tools: map[string]ActionToolBinding{
+		"searchTasks": {Kind: KindQuery, Function: "agents.searchTasks"},
+	}}
+	result, err := newActionHostCalls(runtimeCtx, declared).dispatch(context.Background(), hostCallPayload{
+		Kind: hostCallToolInvoke,
+		Tool: "searchTasks",
+		Args: json.RawMessage(`{"search":"freezer"}`),
+	})
+	if err != nil {
+		t.Fatalf("invoke declared tool: %v", err)
+	}
+	if queries.path != "agents.searchTasks" || string(result) != `{"ok":true}` {
+		t.Fatalf("query call = %q %#v, result = %s", queries.path, queries.args, result)
+	}
+	if _, err := newActionHostCalls(runtimeCtx, declared).dispatch(context.Background(), hostCallPayload{Kind: hostCallToolInvoke, Tool: "anythingElse"}); err == nil {
+		t.Fatal("undeclared tool unexpectedly succeeded")
+	}
+}
+
+func TestAgentActionRequiresOperatorEnablement(t *testing.T) {
+	_, _, _, err := actionCapabilities(&gonvex.RuntimeContext{}, Descriptor{Path: "agents.run", Kind: KindAction, ActionProfile: "agent"})
+	if err == nil {
+		t.Fatal("agent action was enabled without operator opt-in")
+	}
+}
+
+func TestActionFetchRequiresAnExactDeclaredOrigin(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(server.Close)
+	payload, _ := json.Marshal(map[string]any{"url": server.URL + "/v1/test", "method": "GET"})
+	if _, err := runFetch(context.Background(), payload, nil); err == nil {
+		t.Fatal("fetch without a declared origin unexpectedly succeeded")
+	}
+	if _, err := runFetch(context.Background(), payload, []string{server.URL}); err != nil {
+		t.Fatalf("fetch to declared origin: %v", err)
+	}
+}
+
+func TestActionHostCallsRecheckDeclaredCapabilities(t *testing.T) {
+	dispatcher := newActionHostCalls(&gonvex.RuntimeContext{
+		Scheduler: &recordingScheduler{},
+	}, ActionCapabilities{})
+	for _, call := range []hostCallPayload{
+		{Kind: hostCallScheduleAfter, Function: "jobs.run", DelayMS: 1},
+		{Kind: hostCallFetch, Request: json.RawMessage(`{"url":"https://example.test"}`)},
+		{Kind: hostCallStorage, Operation: "getMetadata", Payload: json.RawMessage(`{}`)},
+	} {
+		if _, err := dispatcher.dispatch(context.Background(), call); err == nil {
+			t.Fatalf("undeclared Action capability %q unexpectedly reached its host service", call.Kind)
+		}
 	}
 }
 

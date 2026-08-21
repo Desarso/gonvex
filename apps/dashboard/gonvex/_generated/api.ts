@@ -198,25 +198,6 @@ export const api = {
       },
     } as unknown as FunctionReference<"action", FilesGetUrlArgs, FilesGetUrlResult>,
   },
-  system: {
-    heartbeat: {
-      args: {
-        fields: {
-        },
-        kind: "object",
-      },
-      kind: "reducer",
-      path: "system.heartbeat",
-      result: {
-        fields: {
-          ok: {
-            kind: "boolean",
-          },
-        },
-        kind: "object",
-      },
-    } as unknown as FunctionReference<"reducer", SystemHeartbeatArgs, SystemHeartbeatResult>,
-  },
   tasks: {
     create: {
       args: {
@@ -442,7 +423,27 @@ export const api = {
   },
 } as const;
 
-export const internal = api;
+export const internal = {
+  system: {
+    heartbeat: {
+      args: {
+        fields: {
+        },
+        kind: "object",
+      },
+      kind: "reducer",
+      path: "system.heartbeat",
+      result: {
+        fields: {
+          ok: {
+            kind: "boolean",
+          },
+        },
+        kind: "object",
+      },
+    } as unknown as FunctionReference<"reducer", SystemHeartbeatArgs, SystemHeartbeatResult>,
+  },
+} as const;
 export type Api = typeof api;
 
 export const optimisticTransactions: Record<string, OptimisticTransactionDefinition> = {

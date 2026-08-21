@@ -14,6 +14,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { rolldown, type OutputChunk, type RolldownPlugin } from "rolldown";
 
 import type {
+  ActionCapabilities,
   FunctionDependencies,
   FunctionEntry,
   FunctionKind,
@@ -35,7 +36,7 @@ import type {
 } from "./manifest-types.js";
 
 /** Bumped whenever the artifact layout changes; mixed into the hash. */
-export const moduleArtifactGeneration = 4;
+export const moduleArtifactGeneration = 5;
 
 /** Deterministic ESM output when gonvex.json does not name one. */
 const defaultBundlePath = join("_build", "module.js");
@@ -58,6 +59,7 @@ type ModuleFunctionRegistration = {
 
 const moduleFunctionKinds = new Map<string, ModuleFunctionRegistration>([
   ["query", { kind: "query", delivery: "oneShot" }],
+  ["internalquery", { kind: "query", internal: true, delivery: "oneShot" }],
   ["livequery", { kind: "query", delivery: "live" }],
   ["replicacollection", { kind: "query", delivery: "replica" }],
   ["reducer", { kind: "reducer" }],
@@ -65,7 +67,7 @@ const moduleFunctionKinds = new Map<string, ModuleFunctionRegistration>([
   ["action", { kind: "action" }],
 ]);
 
-const kindAlternation = "query|liveQuery|replicaCollection|reducer|internalReducer|action";
+const kindAlternation = "query|internalQuery|liveQuery|replicaCollection|reducer|internalReducer|action";
 const definitionPattern = new RegExp(
   `export\\s+(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?::[^=;]+)?=\\s*(?:await\\s+)?(${kindAlternation})\\s*(<[^(){};]*>)?\\s*\\(`,
   "gi",
@@ -153,6 +155,15 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     const target = functions[cron.function];
     if (!target) throw new Error(`cron ${JSON.stringify(cron.name)} targets unknown function ${JSON.stringify(cron.function)}`);
     if (target.kind === "query") throw new Error(`cron ${JSON.stringify(cron.name)} must target a reducer or action`);
+  }
+  for (const [path, definition] of Object.entries(functions)) {
+    for (const [name, binding] of Object.entries(definition.actionCapabilities?.tools ?? {})) {
+      const target = functions[binding.function];
+      if (!target) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} targets unknown function ${JSON.stringify(binding.function)}`);
+      if (target.kind !== binding.kind) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} kind does not match ${JSON.stringify(binding.function)}`);
+      if (binding.kind === "query" && (!target.internal || (target.delivery ?? "oneShot") !== "oneShot")) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target an internal one-shot Query`);
+      if (binding.kind === "reducer" && target.internal) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target a public business-intent Reducer`);
+    }
   }
   const sortedFiles = sortedRecord(files);
   const sortedFunctions = sortedRecord(functions);
@@ -361,6 +372,8 @@ export function moduleManifestFunctions(artifact: ModuleArtifact): Record<string
       ...(entry.replica ? { replica: entry.replica } : {}),
       ...(entry.offline === undefined ? {} : { offline: entry.offline }),
       ...(entry.optimistic === undefined ? {} : { optimistic: entry.optimistic }),
+      ...(entry.actionProfile === undefined ? {} : { actionProfile: entry.actionProfile }),
+      ...(entry.actionCapabilities === undefined ? {} : { actionCapabilities: entry.actionCapabilities }),
     };
   }
   return functions;
@@ -416,8 +429,10 @@ async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint
       tsconfig: false,
       external: () => false,
       resolve: {
-        conditionNames: ["import", "default"],
-        mainFields: ["module", "main"],
+        // The isolate implements Web APIs, not Node. Prefer packages' browser
+        // branches so optional Node-only helpers never enter the signed bundle.
+        conditionNames: ["browser", "import", "default"],
+        mainFields: ["browser", "module", "main"],
       },
       plugins: [rejectNodeBuiltinsPlugin()],
     });
@@ -578,6 +593,9 @@ function moduleFunction(input: {
   const delivery = normalizeDelivery(configuredDelivery) ?? input.delivery;
   const dependencies = dependenciesFromOptions(input.options);
   const replica = delivery === "replica" ? replicaFromOptions(input.options) : undefined;
+  if (input.internal && input.kind === "query" && delivery !== "oneShot") {
+    throw new Error(`internal Query ${input.path} must use one-shot delivery`);
+  }
   if (delivery === "replica" && !replica) {
     throw new Error(`Replica Collection ${input.path} requires a replica definition`);
   }
@@ -590,14 +608,26 @@ function moduleFunction(input: {
   }
   const offline = input.options?.get("offline")?.value;
   const optimistic = input.options?.get("optimistic")?.value;
+  const internal = input.internal || input.options?.get("internal")?.value === true;
+  const actionProfileValue = input.options?.get("profile")?.value;
+  const actionProfile: "standard" | "agent" = actionProfileValue === "agent" ? "agent" : "standard";
+  const actionCapabilities = input.options?.get("capabilities")?.value;
   if (input.kind === "reducer" && optimistic !== undefined) {
     validateOptimisticTransaction(optimistic);
+  }
+  if (input.kind === "action") {
+    if (actionProfileValue !== undefined && actionProfileValue !== "standard" && actionProfileValue !== "agent") {
+      throw new Error(`action ${input.path} profile must be "standard" or "agent"`);
+    }
+    validateActionCapabilities(actionProfile, actionCapabilities, input.path);
+  } else if (actionProfileValue !== undefined || actionCapabilities !== undefined) {
+    throw new Error(`${input.kind} ${input.path} cannot declare Action capabilities`);
   }
   return {
     kind: input.kind,
     handler: input.handler,
     file: input.file,
-    ...(input.internal ? { internal: true } : {}),
+    ...(internal ? { internal: true } : {}),
     ...(input.exportName ? { export: input.exportName } : {}),
     args: schemas.args,
     result: schemas.result,
@@ -606,7 +636,49 @@ function moduleFunction(input: {
     ...(replica ? { replica } : {}),
     ...(offline === undefined ? {} : { offline }),
     ...(optimistic === undefined ? {} : { optimistic }),
+    ...(input.kind === "action" ? { actionProfile, ...(actionCapabilities === undefined ? {} : { actionCapabilities: actionCapabilities as ActionCapabilities }) } : {}),
   };
+}
+
+function validateActionCapabilities(profile: "standard" | "agent", value: JsonValue | undefined, path: string): void {
+  if (value === undefined) return;
+  if (!isJsonObject(value)) throw new Error(`action ${path} capabilities must be an object literal`);
+  const allowed = new Set(["networkOrigins", "secrets", "tools", "scheduler", "storage"]);
+  for (const field of Object.keys(value)) {
+    if (!allowed.has(field)) throw new Error(`action ${path} capabilities has unsupported field ${field}`);
+  }
+  const origins = value.networkOrigins;
+  if (origins !== undefined) {
+    if (!Array.isArray(origins) || origins.length === 0) throw new Error(`action ${path} networkOrigins must be a non-empty array`);
+    const seen = new Set<string>();
+    for (const origin of origins) {
+      if (typeof origin !== "string") throw new Error(`action ${path} networkOrigins must contain strings`);
+      let parsed: URL;
+      try { parsed = new URL(origin); } catch { throw new Error(`action ${path} network origin ${JSON.stringify(origin)} is invalid`); }
+      if ((parsed.protocol !== "https:" && parsed.protocol !== "http:") || parsed.origin !== origin || parsed.username || parsed.password) {
+        throw new Error(`action ${path} network origin ${JSON.stringify(origin)} must be an exact HTTP(S) origin`);
+      }
+      if (seen.has(origin)) throw new Error(`action ${path} declares duplicate network origin ${origin}`);
+      seen.add(origin);
+    }
+  }
+  const secrets = value.secrets;
+  if (secrets !== undefined && (!Array.isArray(secrets) || secrets.some((name) => typeof name !== "string" || !/^[A-Z][A-Z0-9_]*$/.test(name)))) {
+    throw new Error(`action ${path} secrets must be uppercase environment names`);
+  }
+  const tools = value.tools;
+  if (tools !== undefined) {
+    if (profile !== "agent") throw new Error(`action ${path} tools require profile "agent"`);
+    if (!isJsonObject(tools) || Object.keys(tools).length === 0) throw new Error(`agent action ${path} tools must be a non-empty object`);
+    for (const [name, binding] of Object.entries(tools)) {
+      if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) || !isJsonObject(binding) ||
+        (binding.kind !== "query" && binding.kind !== "reducer") || typeof binding.function !== "string" || !binding.function.trim()) {
+        throw new Error(`agent action ${path} has an invalid tool binding ${JSON.stringify(name)}`);
+      }
+    }
+  }
+  if (value.scheduler !== undefined && value.scheduler !== true) throw new Error(`action ${path} scheduler must be true when declared`);
+  if (value.storage !== undefined && value.storage !== true) throw new Error(`action ${path} storage must be true when declared`);
 }
 
 /**

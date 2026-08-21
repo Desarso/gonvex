@@ -1305,13 +1305,14 @@ function normalizedFunctionFile(entry: FunctionEntry) {
 }
 
 function renderAPI(manifest: Manifest) {
-  const root: Record<string, any> = {};
+  const publicRoot: Record<string, any> = {};
+  const internalRoot: Record<string, any> = {};
   const optimisticTransactions: Record<string, JsonValue> = {};
   const functionTypes: Array<{ path: string; args: string; result: string }> = [];
   for (const [path, entry] of Object.entries(manifest.functions).sort(([a], [b]) => a.localeCompare(b))) {
     const parts = path.split(".").filter(Boolean);
     if (parts.length === 0) continue;
-    let target = root;
+    let target = entry.internal ? internalRoot : publicRoot;
     for (const part of parts.slice(0, -1)) {
       target = target[part] ??= {};
     }
@@ -1371,9 +1372,9 @@ function renderAPI(manifest: Manifest) {
       `export type ${result} = ${renderSchemaType(manifest.functions[path]?.result)};`,
     ]),
     "",
-    `export const api = ${renderObject(root, 0)} as const;`,
+    `export const api = ${renderObject(publicRoot, 0)} as const;`,
     "",
-    "export const internal = api;",
+    `export const internal = ${renderObject(internalRoot, 0)} as const;`,
     "export type Api = typeof api;",
     "",
     `export const optimisticTransactions: Record<string, OptimisticTransactionDefinition> = ${renderObject(optimisticTransactions, 0)};`,

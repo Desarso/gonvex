@@ -18,6 +18,38 @@ type actionReducerCaller struct {
 	sequence uint64
 }
 
+type actionQueryCaller struct {
+	server  *Server
+	project string
+	tenant  string
+	caller  callerContext
+}
+
+func (q *actionQueryCaller) Call(ctx context.Context, path string, args any) (any, error) {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("encode Query %q arguments: %w", path, err)
+	}
+	release, admitted := q.server.acquireQueryAdmission(ctx, admissionForeground, q.project, q.tenant)
+	if !admitted {
+		return nil, ctx.Err()
+	}
+	defer release()
+
+	kind := q.server.functionKind(q.project, path, "query")
+	q.server.metrics.recordFunctionStart(kind)
+	execution := newRuntimeFunctionLog(q.project, q.tenant, path, kind, q.caller, raw)
+	execution.entry.Source = "agent-tool"
+	execution.entry.Reason = "declared-internal-query"
+	var result any
+	defer func() {
+		q.server.metrics.recordFunctionEnd(kind)
+		q.server.metrics.recordFunctionExecution(execution, err)
+	}()
+	result, err = q.server.executeTenantQueryForCallerUncached(ctx, q.project, q.tenant, q.caller, path, raw, true)
+	return result, err
+}
+
 func (r *actionReducerCaller) Call(ctx context.Context, path string, args any) (any, error) {
 	raw, err := json.Marshal(args)
 	if err != nil {

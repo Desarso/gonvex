@@ -247,7 +247,9 @@ func (e *RemoteEngine) InvokeQuery(ctx *gonvex.QueryCtx, call Invocation) (Resul
 	}
 	dispatcher := newQueryHostCalls(ctx)
 	defer dispatcher.close()
-	value, err := e.invoke(ctx.Context, invocationFor(&ctx.RuntimeContext, queryCapabilities(ctx)), descriptor, call.Args, dispatcher)
+	callCtx, cancel := executionContext(&ctx.RuntimeContext)
+	defer cancel()
+	value, err := e.invoke(callCtx, invocationFor(&ctx.RuntimeContext, queryCapabilities(ctx)), descriptor, call.Args, dispatcher)
 	if err != nil {
 		return Result{}, err
 	}
@@ -279,7 +281,9 @@ func (e *RemoteEngine) InvokeInternalReducer(ctx *gonvex.ReducerCtx, call Invoca
 func (e *RemoteEngine) invokeReducer(ctx *gonvex.ReducerCtx, descriptor Descriptor, call Invocation) (Result, error) {
 	dispatcher := newReducerHostCalls(ctx)
 	defer dispatcher.close()
-	value, err := e.invoke(ctx.Context, invocationFor(&ctx.RuntimeContext, reducerCapabilities(ctx)), descriptor, call.Args, dispatcher)
+	callCtx, cancel := executionContext(&ctx.RuntimeContext)
+	defer cancel()
+	value, err := e.invoke(callCtx, invocationFor(&ctx.RuntimeContext, reducerCapabilities(ctx)), descriptor, call.Args, dispatcher)
 	if err != nil {
 		return Result{}, err
 	}
@@ -294,13 +298,33 @@ func (e *RemoteEngine) InvokeAction(ctx *gonvex.ActionCtx, call Invocation) (Res
 	if err != nil {
 		return Result{}, err
 	}
-	dispatcher := newActionHostCalls(&ctx.RuntimeContext)
+	dispatcher := newActionHostCalls(&ctx.RuntimeContext, descriptor.ActionCapabilities)
 	defer dispatcher.close()
-	value, err := e.invoke(ctx.Context, invocationFor(&ctx.RuntimeContext, actionCapabilities(&ctx.RuntimeContext)), descriptor, call.Args, dispatcher)
+	granted, environment, tools, err := actionCapabilities(&ctx.RuntimeContext, descriptor)
+	if err != nil {
+		return Result{}, err
+	}
+	invocation := invocationFor(&ctx.RuntimeContext, granted)
+	invocation.Environment = environment
+	invocation.ActionTools = tools
+	callCtx, cancel := executionContext(&ctx.RuntimeContext)
+	defer cancel()
+	value, err := e.invoke(callCtx, invocation, descriptor, call.Args, dispatcher)
 	if err != nil {
 		return Result{}, err
 	}
 	return Result{Value: value}, nil
+}
+
+func executionContext(runtimeCtx *gonvex.RuntimeContext) (context.Context, context.CancelFunc) {
+	parent := context.Background()
+	if runtimeCtx != nil && runtimeCtx.Context != nil {
+		parent = runtimeCtx.Context
+	}
+	if runtimeCtx != nil && runtimeCtx.ExecutionTimeout > 0 {
+		return context.WithTimeout(parent, runtimeCtx.ExecutionTimeout)
+	}
+	return context.WithCancel(parent)
 }
 
 // expect resolves a path and enforces the same visibility rules every module
@@ -420,10 +444,11 @@ func (e *RemoteEngine) dispatchError(path string, err error) error {
 
 func descriptorFromModuleFunction(path string, function manifest.ModuleFunction) Descriptor {
 	descriptor := Descriptor{
-		Path:     path,
-		Kind:     Kind(function.Kind),
-		Internal: function.Internal,
-		Delivery: gonvex.DeliveryMode(function.Delivery),
+		Path:          path,
+		Kind:          Kind(function.Kind),
+		Internal:      function.Internal,
+		Delivery:      gonvex.DeliveryMode(function.Delivery),
+		ActionProfile: function.ActionProfile,
 	}
 	if descriptor.Delivery == "" && descriptor.Kind == KindQuery {
 		descriptor.Delivery = gonvex.DeliveryOneShot
@@ -431,6 +456,18 @@ func descriptorFromModuleFunction(path string, function manifest.ModuleFunction)
 	descriptor.Dependencies = dependenciesFromManifest(function.Dependencies)
 	if function.Replica != nil {
 		descriptor.Replica = replicaFromManifest(*function.Replica)
+	}
+	if function.ActionCapabilities != nil {
+		descriptor.ActionCapabilities = ActionCapabilities{
+			NetworkOrigins: append([]string(nil), function.ActionCapabilities.NetworkOrigins...),
+			Secrets:        append([]string(nil), function.ActionCapabilities.Secrets...),
+			Tools:          make(map[string]ActionToolBinding, len(function.ActionCapabilities.Tools)),
+			Scheduler:      function.ActionCapabilities.Scheduler,
+			Storage:        function.ActionCapabilities.Storage,
+		}
+		for name, binding := range function.ActionCapabilities.Tools {
+			descriptor.ActionCapabilities.Tools[name] = ActionToolBinding{Kind: Kind(binding.Kind), Function: binding.Function}
+		}
 	}
 	return descriptor
 }

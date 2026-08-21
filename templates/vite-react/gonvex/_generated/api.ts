@@ -128,7 +128,7 @@ export const api = {
   },
 } as const;
 
-export const internal = api;
+export const internal = {} as const;
 export type Api = typeof api;
 
 export const optimisticTransactions: Record<string, OptimisticTransactionDefinition> = {

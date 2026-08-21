@@ -192,14 +192,41 @@ export type ActionStorage = {
   readonly call: (operation: string, payload?: JsonValue) => Promise<JsonValue>;
 };
 
-export type ActionContext = AuthContext & TenantContext & {
-  readonly now: number;
-  readonly env: Readonly<Record<string, string>>;
-  readonly fetch: (input: string | URL, init?: RequestInit) => Promise<Response>;
-  readonly runReducer: <T = JsonValue>(path: string, args: JsonValue) => Promise<T>;
-  readonly scheduler: Scheduler;
-  readonly storage?: ActionStorage;
+export type ActionToolBinding = {
+  readonly kind: "query" | "reducer";
+  readonly function: string;
 };
+
+export type ActionToolBindings = Readonly<Record<string, ActionToolBinding>>;
+
+export type ActionCapabilities<Tools extends ActionToolBindings = ActionToolBindings> = {
+  /** Exact URL origins this Action may call. No network access is granted when omitted. */
+  readonly networkOrigins?: readonly string[];
+  /** Exact project secret names copied into this invocation. No other environment values are exposed. */
+  readonly secrets?: readonly string[];
+  /** Named, statically bound Query and Reducer tools. Arbitrary function paths are never accepted. */
+  readonly tools?: Tools;
+  readonly scheduler?: true;
+  readonly storage?: true;
+};
+
+type ActionToolFunctions<Tools extends ActionToolBindings> = {
+  readonly [Name in keyof Tools]: <Result = JsonValue>(args?: JsonValue) => Promise<Result>;
+};
+
+export type ActionContext<Capabilities extends ActionCapabilities = ActionCapabilities> = AuthContext & TenantContext & {
+  readonly now: number;
+} & (Capabilities extends { readonly networkOrigins: readonly string[] }
+  ? { readonly fetch: (input: string | URL, init?: RequestInit) => Promise<Response> }
+  : {})
+  & (Capabilities extends { readonly secrets: readonly string[] }
+    ? { readonly secrets: Readonly<Record<Capabilities["secrets"][number], string>> }
+    : {})
+  & (Capabilities extends { readonly tools: infer Tools extends ActionToolBindings }
+    ? { readonly tools: ActionToolFunctions<Tools> }
+    : {})
+  & (Capabilities extends { readonly scheduler: true } ? { readonly scheduler: Scheduler } : {})
+  & (Capabilities extends { readonly storage: true } ? { readonly storage: ActionStorage } : {});
 
 export type Handler<Context, Args, Result> = (context: Context, args: Args) => Result | Promise<Result>;
 
@@ -229,6 +256,8 @@ export type QueryOptions<Args, Result> = {
   readonly delivery?: "oneShot" | "live" | "replica";
   readonly liveQueryPlan?: LiveQueryPlan;
   readonly replica?: ReplicaCollectionDefinition;
+  /** Internal Queries are callable only through a declared Action tool. */
+  readonly internal?: boolean;
   readonly run?: Handler<QueryContext, Args, Result>;
 };
 
@@ -272,12 +301,15 @@ export type InternalReducerOptions<Args, Result> = Omit<ReducerOptions<Args, Res
   readonly offline?: OfflinePolicy;
 };
 
-export type ActionOptions<Args, Result> = {
+export type ActionOptions<Args, Result, Capabilities extends ActionCapabilities = ActionCapabilities> = {
   /** Optional explicit public path used by static module artifact extraction. */
   readonly name?: string;
   readonly args?: PortableSchema;
   readonly result?: PortableSchema;
-  readonly run?: Handler<ActionContext, Args, Result>;
+  /** Agent Actions are disabled unless the runtime operator explicitly enables them. */
+  readonly profile?: "standard" | "agent";
+  readonly capabilities?: Capabilities;
+  readonly run?: Handler<ActionContext<Capabilities>, Args, Result>;
 };
 
 export type LiveQueryValue = { readonly argument?: string; readonly literal?: JsonValue };
@@ -375,6 +407,8 @@ export type ModuleFunctionManifest = {
   readonly interactive?: boolean;
   readonly optimistic?: OptimisticTransaction;
   readonly nonOptimisticReason?: string;
+  readonly actionProfile?: "standard" | "agent";
+  readonly actionCapabilities?: ActionCapabilities;
 };
 
 export type ModuleManifest = {
@@ -515,6 +549,50 @@ const validateReplicaCollection: (value: unknown, path: string) => asserts value
   if (value.orderDirection !== undefined && value.orderDirection !== "asc" && value.orderDirection !== "desc") {
     throw new Error(`replica collection ${path} has an invalid order direction`);
   }
+};
+
+const validateActionCapabilities = (profile: "standard" | "agent", value: ActionCapabilities | undefined, path: string): void => {
+  if (value === undefined) return;
+  if (!isRecord(value)) throw new Error(`action ${path} capabilities must be an object`);
+  const allowed = new Set(["networkOrigins", "secrets", "tools", "scheduler", "storage"]);
+  for (const field of Object.keys(value)) {
+    if (!allowed.has(field)) throw new Error(`action ${path} capabilities has unsupported field ${field}`);
+  }
+  if (value.networkOrigins !== undefined) {
+    if (!Array.isArray(value.networkOrigins) || value.networkOrigins.length === 0) {
+      throw new Error(`action ${path} networkOrigins must be a non-empty array`);
+    }
+    const seen = new Set<string>();
+    for (const origin of value.networkOrigins) {
+      if (typeof origin !== "string") throw new Error(`action ${path} networkOrigins must contain strings`);
+      let parsed: URL;
+      try { parsed = new URL(origin); } catch { throw new Error(`action ${path} network origin ${JSON.stringify(origin)} is invalid`); }
+      if ((parsed.protocol !== "https:" && parsed.protocol !== "http:") || parsed.origin !== origin || parsed.username || parsed.password) {
+        throw new Error(`action ${path} network origin ${JSON.stringify(origin)} must be an exact HTTP(S) origin`);
+      }
+      if (seen.has(origin)) throw new Error(`action ${path} declares duplicate network origin ${origin}`);
+      seen.add(origin);
+    }
+  }
+  if (value.secrets !== undefined) {
+    if (!Array.isArray(value.secrets) || value.secrets.some((name) => typeof name !== "string" || !/^[A-Z][A-Z0-9_]*$/.test(name))) {
+      throw new Error(`action ${path} secrets must be uppercase environment names`);
+    }
+  }
+  if (value.tools !== undefined) {
+    if (profile !== "agent") throw new Error(`action ${path} tools require profile "agent"`);
+    if (!isRecord(value.tools) || Object.keys(value.tools).length === 0) {
+      throw new Error(`agent action ${path} tools must be a non-empty object`);
+    }
+    for (const [name, binding] of Object.entries(value.tools)) {
+      if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) || !isRecord(binding) ||
+        (binding.kind !== "query" && binding.kind !== "reducer") || typeof binding.function !== "string" || !binding.function.trim()) {
+        throw new Error(`agent action ${path} has an invalid tool binding ${JSON.stringify(name)}`);
+      }
+    }
+  }
+  if (value.scheduler !== undefined && value.scheduler !== true) throw new Error(`action ${path} scheduler must be true when declared`);
+  if (value.storage !== undefined && value.storage !== true) throw new Error(`action ${path} storage must be true when declared`);
 };
 
 const validateStructuredQueryPlan: (value: unknown, path: string) => asserts value is LiveQueryPlan = (value, path) => {
@@ -791,6 +869,15 @@ export class ModuleManifestCollector {
       if (!target) throw new Error(`cron ${JSON.stringify(spec.name)} targets unknown function ${JSON.stringify(spec.function)}`);
       if (target.kind === "query") throw new Error(`cron ${JSON.stringify(spec.name)} must target a reducer or action`);
     }
+    for (const [path, definition] of this.entries) {
+      for (const [name, binding] of Object.entries(definition.actionCapabilities?.tools ?? {})) {
+        const target = this.entries.get(binding.function);
+        if (!target) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} targets unknown function ${JSON.stringify(binding.function)}`);
+        if (target.kind !== binding.kind) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} kind does not match ${JSON.stringify(binding.function)}`);
+        if (binding.kind === "query" && (!target.internal || target.delivery !== "oneShot")) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target an internal one-shot Query`);
+        if (binding.kind === "reducer" && target.internal) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target a public business-intent Reducer`);
+      }
+    }
     return freeze({
       ...this.metadata,
       functions: freeze(functions),
@@ -831,7 +918,7 @@ export type ModuleDefinition<Kind extends ModuleFunctionKind, Options> = {
 
 export type QueryDefinition<Args, Result> = ModuleDefinition<"query", QueryOptions<Args, Result>>;
 export type ReducerDefinition<Args, Result> = ModuleDefinition<"reducer", ReducerOptions<Args, Result>>;
-export type ActionDefinition<Args, Result> = ModuleDefinition<"action", ActionOptions<Args, Result>>;
+export type ActionDefinition<Args, Result, Capabilities extends ActionCapabilities = ActionCapabilities> = ModuleDefinition<"action", ActionOptions<Args, Result, Capabilities>>;
 
 const executableOptions = <T extends object>(options: T): Readonly<T> => freeze({ ...options });
 
@@ -856,6 +943,7 @@ const queryDefinition = <Args, Result>(
   }
   return freeze({
     kind: "query",
+    internal: options.internal,
     delivery,
     liveQueryPlan,
     replica,
@@ -867,6 +955,11 @@ const queryDefinition = <Args, Result>(
 /** Declare an executable one-shot, live, or replica query export. */
 export function query<Args = JsonValue, Result = JsonValue>(options: QueryOptions<Args, Result> = {}): QueryDefinition<Args, Result> {
   return queryDefinition(options);
+}
+
+/** Declare a one-shot Query that is unreachable from clients and may be bound to an Action tool. */
+export function internalQuery<Args = JsonValue, Result = JsonValue>(options: Omit<QueryOptions<Args, Result>, "internal" | "delivery" | "replica"> = {}): QueryDefinition<Args, Result> {
+  return queryDefinition({ ...options, internal: true, delivery: "oneShot" });
 }
 
 /** Declare an executable live query export with a structured live plan. */
@@ -915,7 +1008,8 @@ export function internalReducer<Args = JsonValue, Result = JsonValue>(options: I
 }
 
 /** Declare an executable action export. */
-export function action<Args = JsonValue, Result = JsonValue>(options: ActionOptions<Args, Result> = {}): ActionDefinition<Args, Result> {
+export function action<Args = JsonValue, Result = JsonValue, const Capabilities extends ActionCapabilities = ActionCapabilities>(options: ActionOptions<Args, Result, Capabilities> = {}): ActionDefinition<Args, Result, Capabilities> {
+  validateActionCapabilities(options.profile ?? "standard", options.capabilities, options.name?.trim() || "<export>");
   return freeze({ kind: "action", options: executableOptions(options), handler: options.run });
 }
 
@@ -971,6 +1065,7 @@ export class ModuleBuilder {
       delivery,
       liveQueryPlan,
       replica,
+      internal: options.internal,
     });
     const registration = freeze({ path: definition.path, kind: definition.kind, definition, handler: options.run as RegisteredFunction<Args, Result>["handler"] });
     this.runtimeEntries.set(definition.path, registration as RuntimeFunctionRegistration);
@@ -1022,11 +1117,15 @@ export class ModuleBuilder {
     });
   }
 
-  action<Args = JsonValue, Result = JsonValue>(path: string, options: ActionOptions<Args, Result> = {}): RegisteredFunction<Args, Result> {
+  action<Args = JsonValue, Result = JsonValue, const Capabilities extends ActionCapabilities = ActionCapabilities>(path: string, options: ActionOptions<Args, Result, Capabilities> = {}): RegisteredFunction<Args, Result> {
+    const profile = options.profile ?? "standard";
+    validateActionCapabilities(profile, options.capabilities, normalizePath(path));
     const definition = this.manifestCollector.register(path, {
       kind: "action",
       args: options.args,
       result: options.result,
+      actionProfile: profile,
+      actionCapabilities: options.capabilities,
     });
     const registration = freeze({ path: definition.path, kind: definition.kind, definition, handler: options.run as RegisteredFunction<Args, Result>["handler"] });
     this.runtimeEntries.set(definition.path, registration as RuntimeFunctionRegistration);
