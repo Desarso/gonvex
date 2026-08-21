@@ -52,6 +52,9 @@ func (s *Server) Close() {
 		}
 		cancel()
 	}
+	if s.sandboxes != nil {
+		s.sandboxes.Close()
+	}
 
 	if s.tenantStores != nil {
 		s.tenantStores.Close()

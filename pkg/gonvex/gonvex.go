@@ -99,6 +99,7 @@ type RuntimeContext struct {
 	Scheduler      Scheduler
 	Reducers       ReducerAPI
 	Queries        QueryAPI
+	Sandbox        SandboxAPI
 	Outbox         ActionOutbox
 	// AgentActionsEnabled is an operator gate. A module declaration can narrow
 	// capabilities but cannot turn the agent runtime on by itself.

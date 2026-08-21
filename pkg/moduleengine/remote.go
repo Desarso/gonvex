@@ -465,6 +465,9 @@ func descriptorFromModuleFunction(path string, function manifest.ModuleFunction)
 			Scheduler:      function.ActionCapabilities.Scheduler,
 			Storage:        function.ActionCapabilities.Storage,
 		}
+		if function.ActionCapabilities.Sandbox != nil {
+			descriptor.ActionCapabilities.Sandbox = &SandboxCapability{DuckDB: function.ActionCapabilities.Sandbox.DuckDB}
+		}
 		for name, binding := range function.ActionCapabilities.Tools {
 			descriptor.ActionCapabilities.Tools[name] = ActionToolBinding{Kind: Kind(binding.Kind), Function: binding.Function}
 		}

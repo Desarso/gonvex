@@ -115,6 +115,9 @@ func actionCapabilities(runtimeCtx *gonvex.RuntimeContext, descriptor Descriptor
 		return capabilities{}, nil, nil, fmt.Errorf("agent action %q is disabled by runtime policy", descriptor.Path)
 	}
 	declared := descriptor.ActionCapabilities
+	if declared.Sandbox != nil && runtimeCtx.Sandbox == nil {
+		return capabilities{}, nil, nil, fmt.Errorf("action %q requires the sandbox, but the deployment has it disabled", descriptor.Path)
+	}
 	environment := make(map[string]string, len(declared.Secrets))
 	for _, name := range declared.Secrets {
 		value, ok := runtimeCtx.Env[name]
@@ -133,6 +136,7 @@ func actionCapabilities(runtimeCtx *gonvex.RuntimeContext, descriptor Descriptor
 		Scheduler:   declared.Scheduler && runtimeCtx.Scheduler != nil,
 		Network:     len(declared.NetworkOrigins) > 0,
 		Storage:     declared.Storage && runtimeCtx.Storage != nil,
+		Sandbox:     declared.Sandbox != nil && runtimeCtx.Sandbox != nil,
 		Secrets:     len(declared.Secrets) > 0,
 	}, environment, tools, nil
 }
@@ -311,6 +315,21 @@ func (h *actionHostCalls) dispatch(ctx context.Context, call hostCallPayload) (j
 			return nil, fmt.Errorf("storage is not declared for this Action")
 		}
 		return runStorage(h.ctx.Storage, call.Operation, call.Payload)
+	case hostCallSandbox:
+		if h.capabilities.Sandbox == nil {
+			return nil, fmt.Errorf("sandbox is not declared for this Action")
+		}
+		if h.ctx.Sandbox == nil {
+			return nil, fmt.Errorf("sandbox is unavailable to this Action")
+		}
+		if call.Operation == "importFile" && !h.capabilities.Storage {
+			return nil, fmt.Errorf("sandbox importFile also requires the storage capability")
+		}
+		value, err := h.ctx.Sandbox.Call(ctx, call.Operation, call.Payload, h.capabilities.Sandbox.DuckDB)
+		if err != nil {
+			return nil, err
+		}
+		return encodeJSONValue(value)
 	default:
 		return nil, fmt.Errorf("an action may not call %q", call.Kind)
 	}

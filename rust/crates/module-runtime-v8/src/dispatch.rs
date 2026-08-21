@@ -37,6 +37,7 @@ fn structural_capabilities(kind: &FunctionKind) -> Capabilities {
             scheduler: true,
             network: true,
             storage: true,
+            sandbox: true,
             secrets: true,
             ..Capabilities::default()
         },
@@ -54,6 +55,7 @@ pub(crate) fn effective_capabilities(kind: &FunctionKind, granted: &Capabilities
         scheduler: structural.scheduler && granted.scheduler,
         network: structural.network && granted.network,
         storage: structural.storage && granted.storage,
+        sandbox: structural.sandbox && granted.sandbox,
         secrets: structural.secrets && granted.secrets,
     }
 }
@@ -76,6 +78,7 @@ pub(crate) struct CapabilityFlags {
     scheduler: bool,
     network: bool,
     storage: bool,
+    sandbox: bool,
     secrets: bool,
 }
 
@@ -89,6 +92,7 @@ impl From<&Capabilities> for CapabilityFlags {
             scheduler: capabilities.scheduler,
             network: capabilities.network,
             storage: capabilities.storage,
+            sandbox: capabilities.sandbox,
             secrets: capabilities.secrets,
         }
     }
@@ -199,6 +203,11 @@ pub(crate) enum HostCallRequest {
         #[serde(default)]
         payload: serde_json::Value,
     },
+    Sandbox {
+        operation: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
 }
 
 impl HostCallRequest {
@@ -268,6 +277,10 @@ impl HostCallRequest {
                 request: encode(request)?,
             },
             Self::Storage { operation, payload } => HostCall::Storage {
+                operation,
+                payload: encode(payload)?,
+            },
+            Self::Sandbox { operation, payload } => HostCall::Sandbox {
                 operation,
                 payload: encode(payload)?,
             },
@@ -392,5 +405,16 @@ mod tests {
             HostCall::ScheduleAfter { delay_ms: 2500, function, .. }
                 if function == "reports.generate"
         ));
+    }
+
+    #[test]
+    fn sandbox_is_structurally_available_only_to_actions() {
+        let granted = Capabilities {
+            sandbox: true,
+            ..Capabilities::default()
+        };
+        assert!(!effective_capabilities(&FunctionKind::Query, &granted).sandbox);
+        assert!(!effective_capabilities(&FunctionKind::Reducer, &granted).sandbox);
+        assert!(effective_capabilities(&FunctionKind::Action, &granted).sandbox);
     }
 }

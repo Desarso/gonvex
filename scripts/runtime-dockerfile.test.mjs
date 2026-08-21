@@ -48,19 +48,22 @@ test("runtime image always contains and supervises the Rust TypeScript module ho
 
   assert.match(rustBuild, /COPY rust\/Cargo\.toml rust\/Cargo\.lock \.\//);
   assert.match(rustBuild, /COPY rust\/crates \.\/crates/);
-  assert.match(rustBuild, /cargo build --locked --release -p gonvex-module-host/);
+  assert.match(rustBuild, /cargo build --locked --release -p gonvex-module-host -p gonvex-sandbox-worker/);
   assert.match(
     runtime,
     /COPY --from=module-host-build \/src\/rust\/target\/release\/gonvex-module-host \/usr\/local\/bin\/gonvex-module-host/,
   );
   assert.match(runtime, /GONVEX_MODULE_HOST_ENABLED=true/);
   assert.match(runtime, /GONVEX_MODULE_HOST_BINARY=\/usr\/local\/bin\/gonvex-module-host/);
+  assert.match(runtime, /COPY --from=module-host-build \/src\/rust\/target\/release\/gonvex-sandbox-worker \/usr\/local\/bin\/gonvex-sandbox-worker/);
+  assert.match(runtime, /GONVEX_SANDBOX_WORKER_BINARY=\/usr\/local\/bin\/gonvex-sandbox-worker/);
 });
 
 test("local runtime development builds and selects the debug Rust module host", () => {
   const command = packageJSON.scripts?.["dev:runtime"] ?? "";
-  assert.match(command, /cargo build --locked --manifest-path rust\/Cargo\.toml -p gonvex-module-host/);
+  assert.match(command, /cargo build --locked --manifest-path rust\/Cargo\.toml -p gonvex-module-host -p gonvex-sandbox-worker/);
   assert.match(command, /GONVEX_MODULE_HOST_BINARY=.*rust\/target\/debug\/gonvex-module-host/);
+  assert.match(command, /GONVEX_SANDBOX_WORKER_BINARY=.*rust\/target\/debug\/gonvex-sandbox-worker/);
   assert.match(command, /air -c \.air\.toml/);
 });
 
@@ -69,5 +72,7 @@ test("compose deployments use the canonical Control Plane configuration", () => 
     assert.match(compose, /GONVEX_CONTROL_PLANE_DATABASE_URL:/, `${name} compose must configure the Control Plane`);
     assert.doesNotMatch(compose, /GONVEX_LANDLORD_DATABASE_URL:/, `${name} compose must not configure the legacy landlord alias`);
     assert.doesNotMatch(compose, /GOCACHE|GOMODCACHE|GONVEX_PLUGIN_CACHE_DIR/, `${name} compose must not configure removed Go application caches`);
+    assert.match(compose, /GONVEX_SANDBOX_ENABLED: \$\{GONVEX_SANDBOX_ENABLED:-false\}/, `${name} sandbox must be opt-in`);
+    assert.match(compose, /cap_add:\s*\n\s*- CHOWN\s*\n\s*- SYS_CHROOT\s*\n\s*- SETUID\s*\n\s*- SETGID/, `${name} must let the runtime prepare the workspace and let the worker chroot and drop privileges`);
   }
 });

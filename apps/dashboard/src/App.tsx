@@ -135,6 +135,7 @@ type ManifestResponse = {
       tools?: Record<string, { kind: "query" | "reducer"; function: string }>;
       scheduler?: boolean;
       storage?: boolean;
+      sandbox?: { duckdb?: boolean };
     };
   }>;
   schema?: ManifestSchema;
@@ -734,6 +735,7 @@ function manifestFunctionsToRows(payload: ManifestResponse): FunctionInfo[] {
           ...(declared.secrets?.length ? [`${declared.secrets.length} secrets`] : []),
           ...(declared.scheduler ? ["scheduler"] : []),
           ...(declared.storage ? ["storage"] : []),
+          ...(declared.sandbox ? [declared.sandbox.duckdb ? "sandbox + DuckDB" : "sandbox"] : []),
         ];
         return values.join(", ") || "none";
       })(),

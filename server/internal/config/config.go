@@ -33,6 +33,11 @@ const (
 	defaultModuleHostExecutionTimeout = 10 * time.Second
 	defaultAgentActionTimeout         = 2 * time.Minute
 	defaultAgentActionConcurrency     = 4
+	defaultSandboxConcurrency         = 2
+	defaultSandboxTTL                 = 30 * time.Minute
+	defaultSandboxMaxTTL              = 2 * time.Hour
+	defaultSandboxTimeout             = 30 * time.Second
+	defaultSandboxMaxTimeout          = 2 * time.Minute
 )
 
 type Config struct {
@@ -110,6 +115,27 @@ type Config struct {
 	AgentActionsEnabled    bool
 	AgentActionTimeout     time.Duration
 	AgentActionConcurrency int
+	// Sandbox is a separate process capability for Agent Actions. It stays off
+	// unless the operator enables it and supplies the Rust worker binary.
+	SandboxEnabled           bool
+	SandboxWorkerBinary      string
+	SandboxRoot              string
+	SandboxAllowUnconfined   bool
+	SandboxConcurrency       int
+	SandboxMaxPerAccount     int
+	SandboxMaxTotal          int
+	SandboxMaxExecutions     int
+	SandboxDefaultTTL        time.Duration
+	SandboxMaxTTL            time.Duration
+	SandboxDefaultTimeout    time.Duration
+	SandboxMaxTimeout        time.Duration
+	SandboxMaxCodeBytes      int
+	SandboxMaxFileBytes      int64
+	SandboxMaxWorkspaceBytes int64
+	SandboxMaxOutputBytes    int
+	SandboxMaxRows           int
+	SandboxMaxHeapBytes      int64
+	SandboxDuckDBMemoryBytes int64
 	// ModuleHostBinary is the executable this runtime supervises. One process
 	// serves every project and every tenant.
 	ModuleHostBinary string
@@ -181,6 +207,25 @@ func FromEnv() Config {
 		AgentActionsEnabled:          envBool("GONVEX_AGENT_ACTIONS_ENABLED", false),
 		AgentActionTimeout:           envDuration("GONVEX_AGENT_ACTION_TIMEOUT", defaultAgentActionTimeout),
 		AgentActionConcurrency:       envInt("GONVEX_AGENT_ACTION_CONCURRENCY", defaultAgentActionConcurrency),
+		SandboxEnabled:               envBool("GONVEX_SANDBOX_ENABLED", false),
+		SandboxWorkerBinary:          strings.TrimSpace(env("GONVEX_SANDBOX_WORKER_BINARY", "")),
+		SandboxRoot:                  strings.TrimSpace(env("GONVEX_SANDBOX_ROOT", "")),
+		SandboxAllowUnconfined:       envBool("GONVEX_SANDBOX_ALLOW_UNCONFINED", false),
+		SandboxConcurrency:           envInt("GONVEX_SANDBOX_CONCURRENCY", defaultSandboxConcurrency),
+		SandboxMaxPerAccount:         envInt("GONVEX_SANDBOX_MAX_PER_ACCOUNT", 4),
+		SandboxMaxTotal:              envInt("GONVEX_SANDBOX_MAX_TOTAL", 128),
+		SandboxMaxExecutions:         envInt("GONVEX_SANDBOX_MAX_EXECUTIONS", 16),
+		SandboxDefaultTTL:            envDuration("GONVEX_SANDBOX_DEFAULT_TTL", defaultSandboxTTL),
+		SandboxMaxTTL:                envDuration("GONVEX_SANDBOX_MAX_TTL", defaultSandboxMaxTTL),
+		SandboxDefaultTimeout:        envDuration("GONVEX_SANDBOX_DEFAULT_TIMEOUT", defaultSandboxTimeout),
+		SandboxMaxTimeout:            envDuration("GONVEX_SANDBOX_MAX_TIMEOUT", defaultSandboxMaxTimeout),
+		SandboxMaxCodeBytes:          envInt("GONVEX_SANDBOX_MAX_CODE_BYTES", 512<<10),
+		SandboxMaxFileBytes:          int64(envInt("GONVEX_SANDBOX_MAX_FILE_BYTES", 64<<20)),
+		SandboxMaxWorkspaceBytes:     int64(envInt("GONVEX_SANDBOX_MAX_WORKSPACE_BYTES", 256<<20)),
+		SandboxMaxOutputBytes:        envInt("GONVEX_SANDBOX_MAX_OUTPUT_BYTES", 8<<20),
+		SandboxMaxRows:               envInt("GONVEX_SANDBOX_MAX_ROWS", 500),
+		SandboxMaxHeapBytes:          int64(envInt("GONVEX_SANDBOX_MAX_HEAP_BYTES", 64<<20)),
+		SandboxDuckDBMemoryBytes:     int64(envInt("GONVEX_SANDBOX_DUCKDB_MEMORY_BYTES", 128<<20)),
 		ModuleHostBinary:             strings.TrimSpace(env("GONVEX_MODULE_HOST_BINARY", "")),
 		ModuleHostEndpoint:           strings.TrimSpace(env("GONVEX_MODULE_HOST_ENDPOINT", "")),
 		ModuleHostStartTimeout:       envDuration("GONVEX_MODULE_HOST_START_TIMEOUT", defaultModuleHostStartTimeout),

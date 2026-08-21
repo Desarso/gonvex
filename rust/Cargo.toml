@@ -5,6 +5,7 @@ members = [
   "crates/module-runtime-v8",
   "crates/module-host",
   "crates/server",
+  "crates/sandbox-worker",
 ]
 
 [workspace.package]
@@ -24,6 +25,8 @@ sha2 = "0.10"
 rand = "0.8"
 url = "2"
 thiserror = "2"
+deno_ast = { version = "0.53.3", features = ["transpiling"] }
+duckdb = { version = "=1.4.1", features = ["bundled"] }
 tokio = { version = "1", features = [
   "io-util",
   "macros",

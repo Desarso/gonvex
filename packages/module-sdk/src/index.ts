@@ -199,6 +199,51 @@ export type ActionToolBinding = {
 
 export type ActionToolBindings = Readonly<Record<string, ActionToolBinding>>;
 
+export type SandboxStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "timedOut";
+
+export type SandboxHandle = {
+  readonly sandboxId: string;
+  readonly expiresAt: number;
+  readonly duckdb: boolean;
+};
+
+export type SandboxExecution = {
+  readonly sandboxId: string;
+  readonly executionId: string;
+  readonly status: SandboxStatus;
+};
+
+export type SandboxExecutionStatus = SandboxExecution & {
+  readonly startedAt?: number;
+  readonly finishedAt?: number;
+  readonly result?: JsonValue;
+  readonly error?: string;
+  readonly logs: readonly { readonly level: "log" | "warn" | "error"; readonly message: string }[];
+};
+
+export type ActionSandbox = {
+  /** Create one caller-owned, tenant-scoped ephemeral TypeScript workspace. */
+  readonly create: (options?: { readonly ttlMs?: number }) => Promise<SandboxHandle>;
+  /** Start TypeScript code asynchronously. The code returns its JSON result with a top-level return statement. */
+  readonly run: (sandboxId: string, options: { readonly code: string; readonly timeoutMs?: number }) => Promise<SandboxExecution>;
+  readonly cancel: (sandboxId: string, executionId: string) => Promise<SandboxExecutionStatus>;
+  readonly status: (sandboxId: string, executionId: string) => Promise<SandboxExecutionStatus>;
+  readonly readFile: (sandboxId: string, path: string) => Promise<{ readonly contentBase64: string; readonly size: number }>;
+  readonly writeFile: (sandboxId: string, path: string, contentBase64: string) => Promise<{ readonly path: string; readonly size: number }>;
+  readonly readText: (sandboxId: string, path: string) => Promise<string>;
+  readonly writeText: (sandboxId: string, path: string, content: string) => Promise<{ readonly path: string; readonly size: number }>;
+  /** Ingest an authorized Gonvex storage file into DuckDB without placing its bytes in model context. */
+  readonly importFile: (sandboxId: string, options: { readonly fileId: string; readonly filename: string }) => Promise<{
+    readonly alias: string;
+    readonly tables: readonly { readonly tableName: string; readonly rowCount: number; readonly columns: readonly string[] }[];
+  }>;
+};
+
+export type SandboxCapability = {
+  /** Bind a private DuckDB database into the TypeScript worker. */
+  readonly duckdb?: true;
+};
+
 export type ActionCapabilities<Tools extends ActionToolBindings = ActionToolBindings> = {
   /** Exact URL origins this Action may call. No network access is granted when omitted. */
   readonly networkOrigins?: readonly string[];
@@ -208,6 +253,8 @@ export type ActionCapabilities<Tools extends ActionToolBindings = ActionToolBind
   readonly tools?: Tools;
   readonly scheduler?: true;
   readonly storage?: true;
+  /** Run untrusted TypeScript in an out-of-process, tenant-scoped sandbox. Agent Actions only. */
+  readonly sandbox?: SandboxCapability;
 };
 
 type ActionToolFunctions<Tools extends ActionToolBindings> = {
@@ -226,7 +273,8 @@ export type ActionContext<Capabilities extends ActionCapabilities = ActionCapabi
     ? { readonly tools: ActionToolFunctions<Tools> }
     : {})
   & (Capabilities extends { readonly scheduler: true } ? { readonly scheduler: Scheduler } : {})
-  & (Capabilities extends { readonly storage: true } ? { readonly storage: ActionStorage } : {});
+  & (Capabilities extends { readonly storage: true } ? { readonly storage: ActionStorage } : {})
+  & (Capabilities extends { readonly sandbox: SandboxCapability } ? { readonly sandbox: ActionSandbox } : {});
 
 export type Handler<Context, Args, Result> = (context: Context, args: Args) => Result | Promise<Result>;
 
@@ -554,7 +602,7 @@ const validateReplicaCollection: (value: unknown, path: string) => asserts value
 const validateActionCapabilities = (profile: "standard" | "agent", value: ActionCapabilities | undefined, path: string): void => {
   if (value === undefined) return;
   if (!isRecord(value)) throw new Error(`action ${path} capabilities must be an object`);
-  const allowed = new Set(["networkOrigins", "secrets", "tools", "scheduler", "storage"]);
+  const allowed = new Set(["networkOrigins", "secrets", "tools", "scheduler", "storage", "sandbox"]);
   for (const field of Object.keys(value)) {
     if (!allowed.has(field)) throw new Error(`action ${path} capabilities has unsupported field ${field}`);
   }
@@ -593,6 +641,16 @@ const validateActionCapabilities = (profile: "standard" | "agent", value: Action
   }
   if (value.scheduler !== undefined && value.scheduler !== true) throw new Error(`action ${path} scheduler must be true when declared`);
   if (value.storage !== undefined && value.storage !== true) throw new Error(`action ${path} storage must be true when declared`);
+  if (value.sandbox !== undefined) {
+    if (profile !== "agent") throw new Error(`action ${path} sandbox requires profile "agent"`);
+    if (!isRecord(value.sandbox)) throw new Error(`action ${path} sandbox must be an object`);
+    for (const field of Object.keys(value.sandbox)) {
+      if (field !== "duckdb") throw new Error(`action ${path} sandbox has unsupported field ${field}`);
+    }
+    if (value.sandbox.duckdb !== undefined && value.sandbox.duckdb !== true) {
+      throw new Error(`action ${path} sandbox.duckdb must be true when declared`);
+    }
+  }
 };
 
 const validateStructuredQueryPlan: (value: unknown, path: string) => asserts value is LiveQueryPlan = (value, path) => {

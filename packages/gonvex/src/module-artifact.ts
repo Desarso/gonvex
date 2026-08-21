@@ -36,7 +36,7 @@ import type {
 } from "./manifest-types.js";
 
 /** Bumped whenever the artifact layout changes; mixed into the hash. */
-export const moduleArtifactGeneration = 5;
+export const moduleArtifactGeneration = 6;
 
 /** Deterministic ESM output when gonvex.json does not name one. */
 const defaultBundlePath = join("_build", "module.js");
@@ -643,7 +643,7 @@ function moduleFunction(input: {
 function validateActionCapabilities(profile: "standard" | "agent", value: JsonValue | undefined, path: string): void {
   if (value === undefined) return;
   if (!isJsonObject(value)) throw new Error(`action ${path} capabilities must be an object literal`);
-  const allowed = new Set(["networkOrigins", "secrets", "tools", "scheduler", "storage"]);
+  const allowed = new Set(["networkOrigins", "secrets", "tools", "scheduler", "storage", "sandbox"]);
   for (const field of Object.keys(value)) {
     if (!allowed.has(field)) throw new Error(`action ${path} capabilities has unsupported field ${field}`);
   }
@@ -679,6 +679,16 @@ function validateActionCapabilities(profile: "standard" | "agent", value: JsonVa
   }
   if (value.scheduler !== undefined && value.scheduler !== true) throw new Error(`action ${path} scheduler must be true when declared`);
   if (value.storage !== undefined && value.storage !== true) throw new Error(`action ${path} storage must be true when declared`);
+  if (value.sandbox !== undefined) {
+    if (profile !== "agent") throw new Error(`action ${path} sandbox requires profile "agent"`);
+    if (!isJsonObject(value.sandbox)) throw new Error(`action ${path} sandbox must be an object literal`);
+    for (const field of Object.keys(value.sandbox)) {
+      if (field !== "duckdb") throw new Error(`action ${path} sandbox has unsupported field ${field}`);
+    }
+    if (value.sandbox.duckdb !== undefined && value.sandbox.duckdb !== true) {
+      throw new Error(`action ${path} sandbox.duckdb must be true when declared`);
+    }
+  }
 }
 
 /**

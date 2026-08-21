@@ -196,6 +196,7 @@ type capabilities struct {
 	Scheduler    bool `json:"scheduler"`
 	Network      bool `json:"network"`
 	Storage      bool `json:"storage"`
+	Sandbox      bool `json:"sandbox"`
 	Secrets      bool `json:"secrets"`
 }
 
@@ -305,6 +306,7 @@ const (
 	hostCallScheduleAt    = "scheduleAt"
 	hostCallFetch         = "fetch"
 	hostCallStorage       = "storage"
+	hostCallSandbox       = "sandbox"
 )
 
 // readFrame reads one length-prefixed JSON frame. The prefix is what bounds the

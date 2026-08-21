@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/gonvex/gonvex/server/internal/data"
 	"github.com/gonvex/gonvex/server/internal/datafiles"
 	"github.com/gonvex/gonvex/server/internal/runtime"
+	gonvexsandbox "github.com/gonvex/gonvex/server/internal/sandbox"
 	"github.com/gonvex/gonvex/server/internal/schema"
 	"golang.org/x/sync/singleflight"
 )
@@ -114,6 +116,8 @@ type Server struct {
 	runtimeHydrationFails      map[string]struct{}
 	runtimeHydrationReady      atomic.Bool
 	agentActionAdmission       chan struct{}
+	sandboxes                  *gonvexsandbox.Manager
+	sandboxInitErr             error
 }
 
 func New(cfg config.Config) *Server {
@@ -147,6 +151,10 @@ func NewRequired(cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 	server := newServer(cfg, cache)
+	if server.sandboxInitErr != nil {
+		server.Close()
+		return nil, server.sandboxInitErr
+	}
 	if postgresScheduler := server.postgresScheduledJobStore(); postgresScheduler != nil {
 		server.scheduler.store = postgresScheduler
 	}
@@ -208,6 +216,24 @@ func newServer(cfg config.Config, cache *rowsCache) *Server {
 		provisionTenant:       provisionTenantDatabase,
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
+	sandboxRoot := cfg.SandboxRoot
+	if strings.TrimSpace(sandboxRoot) == "" {
+		dataRoot := strings.TrimSpace(os.Getenv("GONVEX_DATA_DIR"))
+		if dataRoot == "" {
+			dataRoot = filepath.Join(os.TempDir(), "gonvex-data")
+		}
+		sandboxRoot = filepath.Join(dataRoot, "sandboxes")
+	}
+	server.sandboxes, server.sandboxInitErr = gonvexsandbox.New(gonvexsandbox.Config{
+		Enabled: cfg.SandboxEnabled, Root: sandboxRoot, WorkerBinary: cfg.SandboxWorkerBinary,
+		AllowUnconfined: cfg.SandboxAllowUnconfined, MaxConcurrent: cfg.SandboxConcurrency,
+		MaxSandboxes: cfg.SandboxMaxPerAccount, MaxTotalSandboxes: cfg.SandboxMaxTotal, MaxExecutions: cfg.SandboxMaxExecutions,
+		DefaultTTL: cfg.SandboxDefaultTTL, MaxTTL: cfg.SandboxMaxTTL,
+		DefaultTimeout: cfg.SandboxDefaultTimeout, MaxTimeout: cfg.SandboxMaxTimeout,
+		MaxCodeBytes: cfg.SandboxMaxCodeBytes, MaxFileBytes: cfg.SandboxMaxFileBytes,
+		MaxWorkspaceBytes: cfg.SandboxMaxWorkspaceBytes, MaxOutputBytes: cfg.SandboxMaxOutputBytes,
+		MaxRows: cfg.SandboxMaxRows, MaxHeapBytes: cfg.SandboxMaxHeapBytes, DuckDBMemoryBytes: cfg.SandboxDuckDBMemoryBytes,
+	})
 	server.admission = newQueryAdmission(cfg.SubscriptionRerunConcurrency, cfg.QueryBootstrapConcurrency)
 	server.metrics.admissionSource = server.admission.snapshot
 	server.subscriptions = newSubscriptionManager(server)
@@ -425,7 +451,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	failedManifests := s.runtimeHydrationFailureCount()
 	hydrated := s.runtimeHydrationReady.Load()
 	moduleHost := s.runtime.ModuleHostHealth()
-	ready := hydrated && failedManifests == 0 && moduleHost.Ready
+	sandboxReady := !s.config.SandboxEnabled || (s.sandboxInitErr == nil && s.sandboxes != nil && s.sandboxes.Enabled())
+	ready := hydrated && failedManifests == 0 && moduleHost.Ready && sandboxReady
 	status := http.StatusOK
 	if !ready {
 		status = http.StatusServiceUnavailable
@@ -447,6 +474,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			"failedProjects": failedManifests,
 		},
 		"moduleHost": moduleHost,
+		"sandbox": map[string]any{
+			"enabled": s.config.SandboxEnabled,
+			"ready":   sandboxReady,
+			"error": func() string {
+				if s.sandboxInitErr != nil {
+					return s.sandboxInitErr.Error()
+				}
+				return ""
+			}(),
+		},
 	})
 }
 

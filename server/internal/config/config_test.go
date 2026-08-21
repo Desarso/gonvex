@@ -31,6 +31,18 @@ func TestAgentActionsAreOptInAndSeparatelyBounded(t *testing.T) {
 	}
 }
 
+func TestSandboxIsAnIndependentOptIn(t *testing.T) {
+	t.Setenv("GONVEX_SANDBOX_ENABLED", "")
+	t.Setenv("GONVEX_SANDBOX_ALLOW_UNCONFINED", "")
+	cfg := FromEnv()
+	if cfg.SandboxEnabled || cfg.SandboxAllowUnconfined {
+		t.Fatal("sandbox or unconfined execution defaulted on")
+	}
+	if cfg.SandboxConcurrency != 2 || cfg.SandboxMaxTotal != 128 || cfg.SandboxMaxExecutions != 16 || cfg.SandboxDefaultTimeout != 30*time.Second || cfg.SandboxMaxRows != 500 {
+		t.Fatalf("unexpected sandbox defaults: concurrency=%d total=%d executions=%d timeout=%s rows=%d", cfg.SandboxConcurrency, cfg.SandboxMaxTotal, cfg.SandboxMaxExecutions, cfg.SandboxDefaultTimeout, cfg.SandboxMaxRows)
+	}
+}
+
 func TestValkeyURLRequiresCanonicalEnvironment(t *testing.T) {
 	t.Setenv("VALKEY_URL", "")
 	t.Setenv("REDIS_URL", "redis://redis.example:6379/4")

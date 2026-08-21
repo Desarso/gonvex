@@ -38,6 +38,25 @@ type recordingActionOutbox struct {
 	args any
 }
 
+type recordingSandbox struct{ operation string }
+
+func (sandbox *recordingSandbox) Call(_ context.Context, operation string, _ json.RawMessage, _ bool) (any, error) {
+	sandbox.operation = operation
+	return map[string]any{"ok": true}, nil
+}
+
+func TestSandboxImportAlsoRequiresStorageDeclaration(t *testing.T) {
+	sandbox := &recordingSandbox{}
+	dispatcher := newActionHostCalls(&gonvex.RuntimeContext{Sandbox: sandbox}, ActionCapabilities{Sandbox: &SandboxCapability{DuckDB: true}})
+	_, err := dispatcher.dispatch(context.Background(), hostCallPayload{Kind: hostCallSandbox, Operation: "importFile", Payload: json.RawMessage(`{}`)})
+	if err == nil {
+		t.Fatal("importFile ran without a storage declaration")
+	}
+	if sandbox.operation != "" {
+		t.Fatal("sandbox bridge was reached after capability denial")
+	}
+}
+
 func (o *recordingActionOutbox) Enqueue(_ context.Context, path string, args any) (string, error) {
 	o.path = path
 	o.args = args

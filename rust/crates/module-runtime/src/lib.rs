@@ -155,6 +155,7 @@ pub struct Capabilities {
     pub scheduler: bool,
     pub network: bool,
     pub storage: bool,
+    pub sandbox: bool,
     pub secrets: bool,
 }
 
@@ -232,6 +233,10 @@ pub enum HostCall {
         operation: String,
         payload: Vec<u8>,
     },
+    Sandbox {
+        operation: String,
+        payload: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -259,6 +264,7 @@ impl HostCall {
             Self::ScheduleAfter { .. } | Self::ScheduleAt { .. } => "scheduler",
             Self::Fetch { .. } => "network",
             Self::Storage { .. } => "storage",
+            Self::Sandbox { .. } => "sandbox",
         }
     }
 
@@ -271,7 +277,9 @@ impl HostCall {
             "action_tools" => capabilities.action_tools,
             "scheduler" => capabilities.scheduler,
             "network" => capabilities.network,
-            _ => capabilities.storage,
+            "storage" => capabilities.storage,
+            "sandbox" => capabilities.sandbox,
+            _ => false,
         };
         if allowed {
             Ok(())

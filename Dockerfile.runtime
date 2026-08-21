@@ -6,7 +6,7 @@ FROM rust:1.94-bookworm AS module-host-build
 WORKDIR /src/rust
 COPY rust/Cargo.toml rust/Cargo.lock ./
 COPY rust/crates ./crates
-RUN cargo build --locked --release -p gonvex-module-host
+RUN cargo build --locked --release -p gonvex-module-host -p gonvex-sandbox-worker
 
 # Build the CGO-enabled runtime against the same Debian release as the final
 # image. The unqualified Go tag may advance to a newer glibc and produce a
@@ -31,6 +31,7 @@ COPY --from=build /out/gonvex-runtime /usr/local/bin/gonvex-runtime
 # The Go runtime supervises this one process lazily when the first TypeScript
 # artifact is synced; keeping the path explicit avoids PATH-dependent fallback.
 COPY --from=module-host-build /src/rust/target/release/gonvex-module-host /usr/local/bin/gonvex-module-host
+COPY --from=module-host-build /src/rust/target/release/gonvex-sandbox-worker /usr/local/bin/gonvex-sandbox-worker
 # Data-file artifacts (DuckDB databases for assistant-uploaded CSV/XLSX/XLS)
 # live here; mount a volume to keep them across deploys. Artifacts re-ingest
 # from object storage on miss, so an ephemeral dir also works (just slower on
@@ -38,6 +39,7 @@ COPY --from=module-host-build /src/rust/target/release/gonvex-module-host /usr/l
 ENV GONVEX_ADDR=0.0.0.0:8080 \
     GONVEX_MODULE_HOST_ENABLED=true \
     GONVEX_MODULE_HOST_BINARY=/usr/local/bin/gonvex-module-host \
+    GONVEX_SANDBOX_WORKER_BINARY=/usr/local/bin/gonvex-sandbox-worker \
     GONVEX_DATA_DIR=/var/lib/gonvex/data \
     GONVEX_TELEMETRY_LOG=/var/lib/gonvex/telemetry.jsonl \
     TMPDIR=/var/lib/gonvex/tmp \

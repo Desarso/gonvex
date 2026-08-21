@@ -142,6 +142,8 @@ services:
       GONVEX_DB_MAX_IDLE_CONNS: "1"
       GONVEX_ENVIRONMENT: production
       GONVEX_REQUIRE_AUTH: "true"
+      GONVEX_AGENT_ACTIONS_ENABLED: ${GONVEX_AGENT_ACTIONS_ENABLED:-false}
+      GONVEX_SANDBOX_ENABLED: ${GONVEX_SANDBOX_ENABLED:-false}
       GONVEX_PUBLIC_URL: https://gonvex-maker.whagons.com
       GONVEX_AUTH_URL: https://gonvex-maker.whagons.com
       GONVEX_TRUSTED_PROXY_CIDRS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
@@ -170,6 +172,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - SYS_CHROOT
+      - SETUID
+      - SETGID
     labels:
       - traefik.enable=true
       - "traefik.http.routers.gonvex-maker-runtime-lehttp.rule=Host(`gonvex-maker.whagons.com`) && PathPrefix(`/`)"

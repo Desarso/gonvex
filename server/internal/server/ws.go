@@ -19,6 +19,7 @@ import (
 	"github.com/gonvex/gonvex/pkg/manifest"
 	"github.com/gonvex/gonvex/pkg/moduleengine"
 	"github.com/gonvex/gonvex/server/internal/dbpool"
+	gonvexsandbox "github.com/gonvex/gonvex/server/internal/sandbox"
 	"github.com/gorilla/websocket"
 )
 
@@ -2110,6 +2111,12 @@ func (s *Server) actionContext(ctx context.Context, projectID string, tenantID s
 	runtimeCtx.Queries = &actionQueryCaller{server: s, project: projectID, tenant: tenantID, caller: caller}
 	runtimeCtx.AgentActionsEnabled = s.config.AgentActionsEnabled
 	runtimeCtx.ExecutionTimeout = s.config.ModuleHostExecutionTimeout
+	if s.sandboxes != nil && s.sandboxes.Enabled() && caller.user != nil {
+		runtimeCtx.Sandbox = &actionSandbox{
+			manager: s.sandboxes, dataFiles: s.dataFiles, storage: runtimeCtx.Storage,
+			scope: gonvexsandbox.Scope{ProjectID: projectID, TenantID: tenantIDFromRequest(projectID, tenantID), AccountID: caller.user.ID},
+		}
+	}
 	return &gonvex.ActionCtx{RuntimeContext: runtimeCtx}, nil
 }
 

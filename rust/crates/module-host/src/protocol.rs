@@ -199,6 +199,8 @@ pub struct CapabilitiesWire {
     #[serde(default)]
     pub storage: bool,
     #[serde(default)]
+    pub sandbox: bool,
+    #[serde(default)]
     pub secrets: bool,
 }
 
@@ -212,6 +214,7 @@ impl From<CapabilitiesWire> for Capabilities {
             scheduler: wire.scheduler,
             network: wire.network,
             storage: wire.storage,
+            sandbox: wire.sandbox,
             secrets: wire.secrets,
         }
     }
@@ -487,6 +490,10 @@ pub enum HostCallFrame {
         operation: String,
         payload: serde_json::Value,
     },
+    Sandbox {
+        operation: String,
+        payload: serde_json::Value,
+    },
 }
 
 impl HostCallFrame {
@@ -562,6 +569,10 @@ impl HostCallFrame {
                 operation,
                 payload: decode(payload, "payload")?,
             },
+            HostCall::Sandbox { operation, payload } => Self::Sandbox {
+                operation,
+                payload: decode(payload, "payload")?,
+            },
         })
     }
 }
@@ -599,5 +610,18 @@ mod tests {
         assert_eq!(encoded["delayMs"], 2500);
         assert_eq!(encoded["function"], "reports.generate");
         assert_eq!(encoded["args"]["workspaceId"], "workspace-1");
+    }
+
+    #[test]
+    fn sandbox_host_call_is_encoded_for_the_wire() {
+        let frame = HostCallFrame::from_host_call(HostCall::Sandbox {
+            operation: "create".to_owned(),
+            payload: br#"{"ttlMs":30000}"#.to_vec(),
+        })
+        .expect("sandbox payload should be valid JSON");
+        let encoded = serde_json::to_value(frame).expect("host call frame should serialize");
+        assert_eq!(encoded["kind"], "sandbox");
+        assert_eq!(encoded["operation"], "create");
+        assert_eq!(encoded["payload"]["ttlMs"], 30000);
     }
 }

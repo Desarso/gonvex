@@ -70,4 +70,17 @@ test("capability declarations reject ambient network and secret access", () => {
   assert.throws(() => action({ capabilities: { networkOrigins: ["https://api.openai.com/v1"] } }), /exact HTTP\(S\) origin/);
   assert.throws(() => action({ capabilities: { secrets: ["openai-key"] } }), /uppercase environment names/);
   assert.throws(() => action({ capabilities: { tools: { search: { kind: "query", function: "tasks.search" } } } }), /profile "agent"/);
+  assert.throws(() => action({ capabilities: { sandbox: {} } }), /sandbox requires profile "agent"/);
+});
+
+test("agent Actions may opt into the isolated TypeScript sandbox and DuckDB", () => {
+  const definition = action({
+    profile: "agent",
+    capabilities: { sandbox: { duckdb: true }, storage: true },
+    run: async (ctx) => {
+      const handle = await ctx.sandbox.create();
+      return { sandboxId: handle.sandboxId, hasStorage: typeof ctx.storage.store === "function" };
+    },
+  });
+  assert.deepEqual(definition.options.capabilities.sandbox, { duckdb: true });
 });

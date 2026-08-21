@@ -45,7 +45,7 @@ func validAgentArtifact(t *testing.T) ModuleArtifact {
 			"agents.run": {
 				Kind: FunctionKindAction, Handler: "run", File: "gonvex/index.ts", ActionProfile: "agent",
 				Args: ModuleSchema{"kind": "object", "fields": map[string]any{}}, Result: ModuleSchema{"kind": "any"},
-				ActionCapabilities: &ActionCapabilities{Tools: map[string]ActionToolBinding{
+				ActionCapabilities: &ActionCapabilities{Sandbox: &SandboxCapability{DuckDB: true}, Tools: map[string]ActionToolBinding{
 					"searchTasks": {Kind: FunctionKindQuery, Function: "agents.searchTasks"},
 				}},
 			},

@@ -548,6 +548,30 @@
         call: (operation, payload) => storage(text("operation", operation), payload),
       });
     }
+    if (granted.sandbox) {
+      const sandbox = (operation, payload) => hostCall({ kind: "sandbox", operation, payload: optional(payload) });
+      context.sandbox = Object.freeze({
+        create: (options = {}) => sandbox("create", options),
+        run: (sandboxId, options) => sandbox("run", { sandboxId: text("sandbox id", sandboxId), ...(options ?? {}) }),
+        cancel: (sandboxId, executionId) => sandbox("cancel", { sandboxId: text("sandbox id", sandboxId), executionId: text("execution id", executionId) }),
+        status: (sandboxId, executionId) => sandbox("status", { sandboxId: text("sandbox id", sandboxId), executionId: text("execution id", executionId) }),
+        readFile: (sandboxId, path) => sandbox("readFile", { sandboxId: text("sandbox id", sandboxId), path: text("sandbox path", path) }),
+        writeFile: (sandboxId, path, contentBase64) => sandbox("writeFile", { sandboxId: text("sandbox id", sandboxId), path: text("sandbox path", path), contentBase64: text("sandbox file contents", contentBase64) }),
+        readText: (sandboxId, path) => sandbox("readText", { sandboxId: text("sandbox id", sandboxId), path: text("sandbox path", path) }),
+        writeText: (sandboxId, path, content) => sandbox("writeText", { sandboxId: text("sandbox id", sandboxId), path: text("sandbox path", path), content: String(content) }),
+        importFile: (sandboxId, options) => sandbox("importFile", { sandboxId: text("sandbox id", sandboxId), ...(options ?? {}) }),
+        // Used only by the separate sandbox-worker process. The ordinary Go
+        // Action host rejects these operations, so this does not expand an
+        // application module's authority.
+        __worker: Object.freeze({
+          readText: (path) => sandbox("worker.readText", { path: text("sandbox path", path) }),
+          writeText: (path, content) => sandbox("worker.writeText", { path: text("sandbox path", path), content: String(content) }),
+          listFiles: () => sandbox("worker.listFiles", {}),
+          query: (statement, parameters) => sandbox("worker.query", { statement: text("DuckDB statement", statement), parameters: parameterList(parameters) }),
+          register: (name, rows) => sandbox("worker.register", { name: text("DuckDB table", name), rows }),
+        }),
+      });
+    }
     return Object.freeze(context);
   };
 

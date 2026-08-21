@@ -14,7 +14,7 @@ import (
 )
 
 const LanguageTypeScript = "typescript"
-const ModuleArtifactGeneration = 5
+const ModuleArtifactGeneration = 6
 
 // Language reports the artifact's normalized language, defaulting to
 // TypeScript because that is the only language the artifact pipeline emits.
@@ -346,6 +346,9 @@ func validateActionCapabilities(profile string, capabilities *ActionCapabilities
 	}
 	if len(capabilities.Tools) > 0 && profile != "agent" {
 		return fmt.Errorf("action %q tools require profile agent", path)
+	}
+	if capabilities.Sandbox != nil && profile != "agent" {
+		return fmt.Errorf("action %q sandbox requires profile agent", path)
 	}
 	for name, binding := range capabilities.Tools {
 		if !actionToolNamePattern.MatchString(name) || strings.TrimSpace(binding.Function) == "" || (binding.Kind != FunctionKindQuery && binding.Kind != FunctionKindReducer) {

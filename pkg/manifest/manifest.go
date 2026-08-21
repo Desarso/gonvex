@@ -42,6 +42,11 @@ type ActionCapabilities struct {
 	Tools          map[string]ActionToolBinding `json:"tools,omitempty"`
 	Scheduler      bool                         `json:"scheduler,omitempty"`
 	Storage        bool                         `json:"storage,omitempty"`
+	Sandbox        *SandboxCapability           `json:"sandbox,omitempty"`
+}
+
+type SandboxCapability struct {
+	DuckDB bool `json:"duckdb,omitempty"`
 }
 
 type ActionToolBinding struct {

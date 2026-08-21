@@ -122,6 +122,19 @@ func TestRemoteEngineExecutesV8AndSwapsGenerationWithoutReconnect(t *testing.T) 
 	if queries.path != "system.internalLookup" {
 		t.Fatalf("agent Query tool called %q", queries.path)
 	}
+	sandbox := &recordingSandbox{}
+	runtimeContext.Sandbox = sandbox
+	sandboxResult, err := first.InvokeAction(
+		&gonvex.ActionCtx{RuntimeContext: runtimeContext},
+		Invocation{Path: "system.sandbox", Args: json.RawMessage(`{}`)},
+	)
+	if err != nil {
+		t.Fatalf("invoke declared sandbox: %v", err)
+	}
+	assertRemoteResult(t, sandboxResult.Value, map[string]any{"hasSandbox": true})
+	if sandbox.operation != "create" {
+		t.Fatalf("sandbox operation = %q, want create", sandbox.operation)
+	}
 
 	outbox := &recordingActionOutbox{}
 	reducerResult, err := first.InvokeReducer(
@@ -229,6 +242,7 @@ export async function capabilities(ctx) {
   };
 }
 export async function agent(ctx, args) { return await ctx.tools.searchTasks(args); }
+export async function sandbox(ctx) { return { hasSandbox: typeof ctx.sandbox?.create === "function", value: await ctx.sandbox.create() }; }
 export async function internalLookup() { throw new Error("internal Query handler must not execute"); }
 export async function badResult() { return "not-a-boolean"; }
 export async function enqueue(ctx, args) {
@@ -280,6 +294,11 @@ export async function enqueue(ctx, args) {
 				ActionCapabilities: &manifest.ActionCapabilities{Tools: map[string]manifest.ActionToolBinding{
 					"searchTasks": {Kind: manifest.FunctionKindQuery, Function: "system.internalLookup"},
 				}},
+			},
+			"system.sandbox": {
+				Kind: manifest.FunctionKindAction, Handler: "sandbox", Export: "sandbox", File: "gonvex/index.ts",
+				Args: moduleObjectSchema(nil), Result: moduleObjectSchema(map[string]manifest.ModuleSchema{"hasSandbox": {"kind": "boolean"}, "value": {"kind": "any"}}),
+				ActionProfile: "agent", ActionCapabilities: &manifest.ActionCapabilities{Sandbox: &manifest.SandboxCapability{DuckDB: true}},
 			},
 			"system.internalLookup": {
 				Kind: manifest.FunctionKindQuery, Handler: "internalLookup", Export: "internalLookup", File: "gonvex/index.ts", Internal: true,

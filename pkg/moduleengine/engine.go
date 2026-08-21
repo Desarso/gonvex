@@ -58,6 +58,11 @@ type ActionCapabilities struct {
 	Tools          map[string]ActionToolBinding
 	Scheduler      bool
 	Storage        bool
+	Sandbox        *SandboxCapability
+}
+
+type SandboxCapability struct {
+	DuckDB bool
 }
 
 type ActionToolBinding struct {

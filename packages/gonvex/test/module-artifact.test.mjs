@@ -296,15 +296,18 @@ export const run = action({
   capabilities: {
     networkOrigins: ["https://api.openai.com"],
     secrets: ["OPENAI_API_KEY"],
+    storage: true,
+    sandbox: { duckdb: true },
     tools: { searchTasks: { kind: "query", function: "searchTasks" } },
   },
   args: schema.object({ prompt: schema.string() }), result: schema.any(), run: async () => null,
 });
 `);
   const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
-  assert.equal(artifact.generation, 5);
+  assert.equal(artifact.generation, 6);
   assert.equal(artifact.functions.searchTasks.internal, true);
   assert.equal(artifact.functions.run.actionProfile, "agent");
   assert.deepEqual(artifact.functions.run.actionCapabilities.tools.searchTasks, { kind: "query", function: "searchTasks" });
   assert.deepEqual(moduleManifestFunctions(artifact).run.actionCapabilities.networkOrigins, ["https://api.openai.com"]);
+  assert.deepEqual(moduleManifestFunctions(artifact).run.actionCapabilities.sandbox, { duckdb: true });
 });

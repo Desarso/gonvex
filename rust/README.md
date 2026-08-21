@@ -31,6 +31,8 @@ before its isolates are destroyed.
 - `module-host`: process protocol, artifact verification, generation lifecycle,
   and host-call forwarding.
 - `server`: generation-registry primitives shared by the Rust components.
+- `sandbox-worker`: disposable TypeScript code-execution process with a
+  workspace-only file API and an optional, locked-down DuckDB binding.
 
 The HTTP/WebSocket server, Postgres pools and transaction ownership currently
 remain in Go. Rust owns TypeScript evaluation and module lifecycle. That is a
@@ -42,8 +44,9 @@ already moved to Rust.
 ```bash
 cargo fmt --check
 cargo test --workspace
-cargo build -p gonvex-module-host
+cargo build -p gonvex-module-host -p gonvex-sandbox-worker
 ```
 
-The production runtime image builds and installs `gonvex-module-host`; local
-development selects it with `GONVEX_MODULE_HOST_BINARY`.
+The production runtime image installs both binaries. The sandbox remains off
+until the operator enables `GONVEX_SANDBOX_ENABLED`; the module host remains
+selected through `GONVEX_MODULE_HOST_BINARY`.

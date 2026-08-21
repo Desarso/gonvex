@@ -96,12 +96,19 @@ services:
       GONVEX_GOOGLE_CLIENT_SECRET: ${GONVEX_GOOGLE_CLIENT_SECRET:-}
       GONVEX_DASHBOARD_AUTH_PROJECT_ID: ${GONVEX_DASHBOARD_AUTH_PROJECT_ID:-}
       GONVEX_TRUSTED_PROXY_CIDRS: ${GONVEX_TRUSTED_PROXY_CIDRS:-}
+      GONVEX_AGENT_ACTIONS_ENABLED: ${GONVEX_AGENT_ACTIONS_ENABLED:-false}
+      GONVEX_SANDBOX_ENABLED: ${GONVEX_SANDBOX_ENABLED:-false}
     ports:
       - "8080:8080"
     volumes:
       - runtime-data:/var/lib/gonvex
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - SYS_CHROOT
+      - SETUID
+      - SETGID
     healthcheck:
       test:
         - CMD-SHELL

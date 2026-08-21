@@ -31,6 +31,7 @@ export type ActionCapabilities = {
   tools?: Record<string, ActionToolBinding>;
   scheduler?: true;
   storage?: true;
+  sandbox?: { duckdb?: true };
 };
 
 export type ReplicaCollectionDefinition = {
