@@ -1,92 +1,76 @@
-# Cached startup handoff
+# Cached startup
 
-The SDK now exposes `restoreSession(auth): Promise<boolean>`, `localSessionReady`,
-`localSessionState()` and `onLocalSessionChange(listener)`. The states are
-`unavailable`, `restored` and `authenticated`. A true local-ready result means the
-matching replica and durable outbox have finished activation. It does not grant
-server access. `authenticate()` keeps its existing server-only contract.
+`restoreSession(auth): Promise<boolean>`, `localSessionReady`,
+`localSessionState()` and `onLocalSessionChange(listener)` expose local
+readability independently of server acceptance. States are `unavailable`,
+`restored` and `authenticated`. A true local-ready result means the matching
+replica and durable outbox have finished activation. It does not grant server
+access. `authenticate()` keeps its server-only contract.
 
-## Audit findings
+## Storage and startup
 
-Against staging 95da6c9, `packages/client/src/index.ts` restored saved directives
-at lines 1046–1055 but required `localBinding`. It also required that binding to
-save a session after `auth.result`. Whagons' `GonvexClientProvider.tsx` constructs
-its app client without `localRuntime`, so the audit's assumption that this client
-could already hydrate offline was incomplete. The SDK now persists and restores
-read-only replicas too. Previously deployed read-only clients must complete one
-successful online auth with this SDK before they have a saved directive.
+The audit against staging 95da6c9 found that saved-session persistence and
+restoration required a local reducer runtime. Read-only replica clients now
+persist and restore sessions when `localReplica.storage` is configured. Clients
+without replica storage never restore a replica. Existing read-only clients
+need one successful online authentication with this SDK to save a directive.
 
-The constructor at lines 772–774 loaded an empty placeholder before the real
-visibility partition. Empty startup and quarantined partitions now activate
-without storage reads. The focused test observes exactly one `loadWorkingSet`
-call, for the saved visibility scope, and no second load for same-scope accepted
-auth. The old two-pass count comes from the audited code path, not a timing
-benchmark. No latency or battery benchmark was run.
+Empty startup and quarantined partitions activate without storage reads. The
+focused test observes one `loadWorkingSet` call for the saved visibility scope,
+with no second load when server authentication accepts the same scope. The old
+two-pass count comes from the audited code path. No timing or battery benchmark
+was run.
 
-Whagons' `DeveloperSession.restore()` awaited token fetching and server-only
-`authenticate()`, and `GonvexSessionProvider.tsx:105` held children for both
-`pending` and `!ready`. React previously reused warm external sessions only.
-Native sessions can now also render while reconnecting; `isLocalSessionReady`
-reports actual replica availability. Terminal account-session rejection signs
-out and invalidates pending bootstrap/refresh work.
+## Auth failures
 
-## Exact Whagons change
+Network failure, token-fetch failure, missing or unchanged refresh tokens, and
+socket closure preserve cached sessions and rows. Membership-change events still
+invalidate the old visibility partition while the server verifies new permissions.
+The client retries through its existing reconnect backoff. Server operations and outbox replay still
+require accepted server authentication.
 
-Apply [whagons-cached-startup.patch](./whagons-cached-startup.patch) in
-`Whagons-International/whagons5-client` after the SDK release. The patch was
-produced against the two files in `/home/gabriel/.t3/worktrees/whagons5-client/t3-fe644a9e`.
-No files in that worktree were edited. The patch applies cleanly to copies of
-those sources. It has not been built or run in the Whagons app.
+`onAuthError((message, details) => ...)` supplies optional rejection details.
+Only `details?.definitive` authorizes signing out or deleting an account session.
+A server rejection followed by a fresh forced token that is also rejected is
+terminal, unless the server reports a transient failure. Explicit `revoked`,
+`member_removed` or `account_disabled` codes are also terminal. Explicit app
+sign-out still clears the saved directive and immediately hides its rows.
 
-The patch starts local restore with the canonical account and tenant hint before
-awaiting a token. It publishes `ready: true, reconnecting: true` on successful
-local activation, while server `authenticate()` continues in the background.
-The provider allows children during that specific pending restore and exposes
-`sessionState: 'reconnecting'`. Account/tenant changes immediately clear the old
-application principal and invalidate stale transitions. Terminal own-account
-rejection clears both the app and native session. A rejected developer grant
-still recovers the original account.
+The runtime sends an optional `code` on `auth.error`. Database credential
+rejections use `credential_rejected`, missing membership uses `member_removed`,
+and infrastructure failures use `transient`. Its session lookup combines invalid,
+expired, revoked and disabled credentials into one error, so those cannot safely
+be labeled revoked without refreshing first. Session revalidation errors also
+remain transient because the existing runtime check does not distinguish
+expiry from database failure.
 
-`GonvexClientProvider.tsx` needs no change. Its existing replica storage and outbox
-configuration are sufficient. No local reducer runtime or client-contract bump
-is needed. No cached admission is added to developer entry, impersonation,
-membership changes, or grant recovery.
+Generic integration:
 
-After applying the patch, the app should verify: offline reload after accepted
-online auth, cached shell mounting while token fetching stalls, runtime rejection
-routing to sign-in, account/tenant changes during pending token fetch or server
-auth, and developer-grant rejection recovering the actor. The patch deliberately
-forgets the prior saved directive when clearing the principal on account/tenant
-changes; returning to that scope requires accepted online auth to save it again.
+```ts
+client.onAuthError((_message, details) => {
+  if (details?.definitive) clearApplicationSession();
+});
+const ready = await client.restoreSession({
+  project, tenant, identity: { sub: accountId, iss: project }, fetchToken,
+});
+if (ready) showCachedApplication();
+```
 
-## Validation
-
-- `pnpm install --frozen-lockfile` succeeded. CLI-bin warnings occurred because
-  the unrelated CLI package was not built.
-- `pnpm --filter @gonvex/client exec vitest run src/cached-startup.test.ts src/local-reducers.test.ts` passed, 70 tests.
-- `pnpm --filter @gonvex/react exec vitest run src/index.test.tsx src/cached-startup.test.tsx` passed, 78 tests.
-- Client and React package typechecks and builds passed.
-- Protocol, module-sdk and local-runtime builds passed to supply dependency artifacts.
-- `git diff --check` and applying the Whagons patch with `git apply --check` to source copies passed.
-
-The tests cover cold online auth, cached offline reads, actual React rendering
-with the real client, server rejection clearing the provider and replica,
-account/tenant isolation, conflicting JWT/hint accounts, sign-out, delayed
-hydration after rejection, refresh-callback installation during accepted auth,
-and durable local reducer admission/replay. No full suites or Rust tests ran.
+Keep developer-grant recovery separate from account sign-out. Account or tenant
+changes must invalidate prior application state immediately.
 
 ## Compatibility and limits
 
-There are no wire changes, capabilities, runtime changes, storage-schema changes,
-package-version changes, or client-contract changes. Old clients and runtimes
-keep their existing protocol behavior. Durable queued intents remain scoped and
-are retained on sign-out/rejection; server replay still requires accepted auth.
+The auth error code is optional. Old clients ignore it and new clients accept
+legacy frames. No capabilities negotiation is required for an optional response
+field. No storage schema, package version or client-contract changes are made.
+Durable intents remain isolated and retained after sign-out or rejection.
 
-Warm React admission still requires a current access token with the existing
-30-second safety window and an unexpired refresh credential. An expired-token
-bootstrap can still wait for refresh. Opaque tokens depend on the caller's
-canonical account hint, since they cannot be decoded client-side. Offline
-visibility uses the last accepted server scope until a rejection can be learned
-from the server. This preserves the existing offline model.
+Warm React admission requires a current access token with the existing 30-second
+safety window and an unexpired refresh credential. Expired-token bootstrap still
+follows refresh policy. Opaque tokens require a canonical account hint. Offline
+visibility uses the last accepted server scope until rejection can be learned.
 
-The PR is for review only. Nothing was merged and no npm packages were published.
+Targeted tests cover cached offline reads, transient token failures, repeated
+socket closure, accepted forced refresh, definitive rejection, scope isolation,
+explicit sign-out, stale hydration, actual React rendering and durable replay.

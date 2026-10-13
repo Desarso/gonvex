@@ -65,7 +65,7 @@ it("renders persisted rows while offline, then signs out and hides them on termi
   await act(async () => { socket.open(); });
   const auth = socket.sent.find(message => message.type === "auth");
   expect(auth).toBeDefined();
-  act(() => { socket.receive({ type: "auth.error", id: auth.id, error: "revoked" }); vi.advanceTimersToNextFrame(); });
+  act(() => { socket.receive({ type: "auth.error", id: auth.id, error: "revoked", code: "revoked" }); vi.advanceTimersToNextFrame(); });
   expect(rendered.getByTestId("app").textContent).toBe("signedOut");
   expect(client.localReplica.entity("tasks", "task")).toBeUndefined();
   expect(localStorage.getItem(storageKey)).toBeNull();
@@ -95,4 +95,43 @@ it("forgets cached local authority on explicit provider sign-out", async () => {
   expect(await storage.loadSession(owner)).toBeUndefined();
   await expect(client.restoreSession({ project: "project", tenant: "tenant", token: "access", identity: { sub: "account", iss: "project" } })).resolves.toBe(false);
   expect(client.localReplica.entity("tasks", "task")).toBeUndefined();
+});
+
+it("keeps the restored provider session through refresh failure and repeated startup closes", async () => {
+  const { client, rendered, storage, owner } = await fixture();
+  client.setAuth({ fetchToken: async () => { throw new Error("network unavailable"); } });
+  const socket = Socket.all.at(-1)!;
+  await act(async () => { socket.open(); });
+  const frame = socket.sent.find(message => message.type === "auth");
+  await act(async () => {
+    socket.receive({ type: "auth.error", id: frame.id, error: "expired", code: "credential_rejected" });
+  });
+  for (let i = 0; i < 3; i += 1) {
+    await act(async () => { vi.advanceTimersByTime(300); });
+    const next = Socket.all.at(-1)!;
+    await act(async () => { next.open(); next.close(); });
+  }
+  act(() => { vi.advanceTimersToNextFrame(); });
+  expect(rendered.getByTestId("app").textContent).toBe("reconnecting:cached task");
+  expect(client.localSessionState()).toBe("restored");
+  expect(await storage.loadSession(owner)).toBeDefined();
+  expect(localStorage.getItem(storageKey)).not.toBeNull();
+});
+
+it("signs out when a forced fresh credential is rejected again", async () => {
+  const { client, rendered, storage, owner } = await fixture();
+  client.setAuth({ fetchToken: async ({ forceRefreshToken }) => forceRefreshToken ? "fresh-access" : "access" });
+  const socket = Socket.all.at(-1)!;
+  await act(async () => { socket.open(); });
+  await act(async () => {
+    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "expired", code: "credential_rejected" });
+  });
+  expect(socket.sent[1].token).toBe("fresh-access");
+  await act(async () => {
+    socket.receive({ type: "auth.error", id: socket.sent[1].id, error: "invalid", code: "credential_rejected" });
+  });
+  act(() => { vi.advanceTimersToNextFrame(); });
+  expect(rendered.getByTestId("app").textContent).toBe("signedOut");
+  expect(await storage.loadSession(owner)).toBeUndefined();
+  expect(localStorage.getItem(storageKey)).toBeNull();
 });

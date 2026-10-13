@@ -22,7 +22,7 @@ class FakeGonvexClient {
   readonly queryListeners = new Set<(message: ServerMessage) => void>();
   readonly scopeHandlers = new Set<() => void>();
   readonly connectionHandlers = new Set<(state: ConnectionState) => void>();
-  readonly authErrorHandlers = new Set<(error: string) => void>();
+  readonly authErrorHandlers = new Set<(error: string, details?: { definitive: boolean }) => void>();
   readonly query = vi.fn((ref: FunctionReference, args: unknown) => {
     this.subscribedRefs.push(ref);
     this.subscribedArgs.push(args);
@@ -143,8 +143,8 @@ class FakeGonvexClient {
     return () => this.authErrorHandlers.delete(handler);
   }
 
-  emitAuthError(error: string) {
-    for (const handler of Array.from(this.authErrorHandlers)) handler(error);
+  emitAuthError(error: string, details?: { definitive: boolean }) {
+    for (const handler of Array.from(this.authErrorHandlers)) handler(error, details);
   }
 
   readonly developerCredentialHandlers = new Set<(token: string) => void>();
@@ -2333,6 +2333,9 @@ describe("GonvexAuthProvider developer mode across reloads", () => {
 
     // A later auth error belongs to the account session, not developer mode.
     act(()=>client.emitAuthError("account token rejected"));
+    expect(auth).toMatchObject({ isAuthenticated: true, sessionState: "current" });
+    expect(localStorage.getItem(storageKey)).not.toBeNull();
+    act(()=>client.emitAuthError("account token rejected", { definitive: true }));
     expect(auth).toMatchObject({ isAuthenticated: false, sessionState: "signedOut" });
     expect(localStorage.getItem(storageKey)).toBeNull();
     expect(auth!.developerMode).toEqual({active:false});
@@ -2427,7 +2430,7 @@ describe("restored native auth", () => {
     expect(auth).toMatchObject({ isLocalSessionReady: true, sessionState: "current" });
     act(() => {
       client.setLocalState("unavailable");
-      for (const listener of client.authErrorHandlers) listener("revoked");
+      for (const listener of client.authErrorHandlers) listener("revoked", { definitive: true });
     });
     expect(auth).toMatchObject({ isAuthenticated: false, sessionState: "signedOut", isLocalSessionReady: false });
     expect(rendered.getByTestId("cached-shell").textContent).toBe("");
@@ -2447,7 +2450,7 @@ describe("restored native auth", () => {
     let auth: ReturnType<typeof useGonvexAuth> | undefined;
     function Consumer() { auth = useGonvexAuth(); return null; }
     render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://native-rejected.test" projectId="shop"><Consumer /></GonvexAuthProvider>);
-    act(() => { for (const listener of client.authErrorHandlers) listener("revoked"); });
+    act(() => { for (const listener of client.authErrorHandlers) listener("revoked", { definitive: true }); });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(auth).toMatchObject({ isAuthenticated: false, sessionState: "signedOut" });
     expect(auth?.account).toBeNull();

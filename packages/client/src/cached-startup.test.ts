@@ -107,13 +107,181 @@ describe("cached session startup", () => {
     const rejected = vi.fn();
     client.onAuthError(rejected);
     const socket = socketFor(client);
-    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "revoked" });
+    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "revoked", code: "revoked" });
     expect(client.localSessionState()).toBe("unavailable");
     expect(client.localReplica.entity("tasks", "task")).toBeUndefined();
     await expect(client.localSessionReady).resolves.toBe(false);
-    expect(rejected).toHaveBeenCalledWith("revoked");
+    expect(rejected).toHaveBeenCalledWith("revoked", { definitive: true, code: "revoked" });
     expect(await storage.loadSession(owner)).toBeUndefined();
     expect(storage.loadWorkingSet).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["throws", "missing", "null", "unchanged"])("keeps restored rows and session when forced refresh %s", async (failure) => {
+    const fetchToken = vi.fn(async ({ forceRefreshToken }: { forceRefreshToken: boolean }) => {
+      if (!forceRefreshToken) return auth.token;
+      if (failure === "throws") throw new Error("offline");
+      return failure === "missing" ? undefined : failure === "null" ? null : auth.token;
+    });
+    const { client, storage } = await fixture({ ...auth, fetchToken });
+    await client.localSessionReady;
+    const rejected = vi.fn();
+    client.onAuthError(rejected);
+    const socket = socketFor(client);
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "expired", code: "credential_rejected" });
+    await vi.waitFor(() => expect(socket.readyState).toBe(Socket.CLOSED));
+    expect(client.localSessionState()).toBe("restored");
+    expect(client.localReplica.entity("tasks", "task")?.title).toBe("cached");
+    expect(await storage.loadSession(owner)).toBeDefined();
+    expect(rejected).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("force-refreshes a rejected credential and handles accepted=%s", async (accepted) => {
+    const fetchToken = vi.fn(async ({ forceRefreshToken }: { forceRefreshToken: boolean }) => forceRefreshToken ? "fresh-token" : auth.token);
+    const { client, storage } = await fixture({ ...auth, fetchToken });
+    await client.localSessionReady;
+    const rejected = vi.fn();
+    client.onAuthError(rejected);
+    const socket = socketFor(client);
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "expired", code: "credential_rejected" });
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(2));
+    expect(socket.sent[1].token).toBe("fresh-token");
+    socket.receive(accepted
+      ? { type: "auth.result", id: socket.sent[1].id, result: { replica: directive, localIdentity: identity } }
+      : { type: "auth.error", id: socket.sent[1].id, error: "invalid", code: "credential_rejected" });
+    await vi.waitFor(() => expect(client.localSessionState()).toBe(accepted ? "authenticated" : "unavailable"));
+    expect(Boolean(await storage.loadSession(owner))).toBe(accepted);
+    expect(rejected).toHaveBeenCalledTimes(accepted ? 0 : 1);
+  });
+
+  it("recognizes a forced token installed by its provider before the fetch resolves", async () => {
+    const { client, storage } = await fixture();
+    await client.localSessionReady;
+    client.setAuth({ fetchToken: async ({ forceRefreshToken }) => {
+      if (!forceRefreshToken) return auth.token;
+      client.setAuth({ token: "fresh-token" });
+      return "fresh-token";
+    } });
+    const rejected = vi.fn();
+    client.onAuthError(rejected);
+    const socket = socketFor(client);
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "expired", code: "credential_rejected" });
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(2));
+    await Promise.resolve();
+    socket.receive({ type: "auth.error", id: socket.sent[1].id, error: "invalid", code: "credential_rejected" });
+    expect(client.localSessionState()).toBe("unavailable");
+    expect(await storage.loadSession(owner)).toBeUndefined();
+    expect(rejected).toHaveBeenCalledOnce();
+  });
+
+  it("does not sign out when the server has a transient failure after forced refresh", async () => {
+    const { client, storage } = await fixture({ ...auth, fetchToken: async ({ forceRefreshToken }) => forceRefreshToken ? "fresh-token" : auth.token });
+    await client.localSessionReady;
+    const rejected = vi.fn();
+    client.onAuthError(rejected);
+    const socket = socketFor(client);
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "expired", code: "credential_rejected" });
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(2));
+    socket.receive({ type: "auth.error", id: socket.sent[1].id, error: "database admission timeout", code: "transient" });
+    expect(client.localSessionState()).toBe("restored");
+    expect(client.localReplica.entity("tasks", "task")?.title).toBe("cached");
+    expect(await storage.loadSession(owner)).toBeDefined();
+    expect(rejected).not.toHaveBeenCalled();
+  });
+
+  it("does not mark an already accepted provider token as a pending forced refresh", async () => {
+    const { client } = await fixture();
+    await client.localSessionReady;
+    let finish: (token: string) => void = () => undefined;
+    let refreshes = 0;
+    client.setAuth({ fetchToken: async ({ forceRefreshToken }) => {
+      if (!forceRefreshToken) return refreshes ? "fresh-token" : auth.token;
+      refreshes += 1;
+      if (refreshes > 1) return "newer-token";
+      client.setAuth({ token: "fresh-token" });
+      return new Promise<string>(resolve => { finish = resolve; });
+    } });
+    const rejected = vi.fn();
+    client.onAuthError(rejected);
+    const socket = socketFor(client);
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "expired", code: "credential_rejected" });
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(2));
+    socket.receive({ type: "auth.result", id: socket.sent[1].id, result: { replica: directive, localIdentity: identity } });
+    await vi.waitFor(() => expect(client.localSessionState()).toBe("authenticated"));
+    finish("fresh-token");
+    await Promise.resolve();
+    socket.receive({ type: "auth.error", id: socket.sent[1].id, error: "expired again", code: "credential_rejected" });
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(3));
+    expect(socket.sent[2].token).toBe("newer-token");
+    expect(rejected).not.toHaveBeenCalled();
+  });
+
+  it("preserves startup across repeated socket closures", async () => {
+    const { client, storage } = await fixture();
+    await client.localSessionReady;
+    const rejected = vi.fn();
+    client.onAuthError(rejected);
+    for (let i = 0; i < 3; i += 1) {
+      socketFor(client).close();
+      expect(client.localSessionState()).toBe("restored");
+      expect(client.localReplica.entity("tasks", "task")?.title).toBe("cached");
+      expect(await storage.loadSession(owner)).toBeDefined();
+    }
+    expect(rejected).not.toHaveBeenCalled();
+  });
+
+  it("keeps restored rows when session revalidation and forced refresh are unavailable", async () => {
+    const { client, storage } = await fixture({ ...auth, fetchToken: async () => { throw new Error("offline"); } });
+    await client.localSessionReady;
+    const rejected = vi.fn();
+    client.onAuthError(rejected);
+    const socket = socketFor(client);
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+    socket.receive({ type: "auth.result", id: socket.sent[0].id, result: { replica: directive, localIdentity: identity } });
+    await vi.waitFor(() => expect(client.localSessionState()).toBe("authenticated"));
+    socket.receive({ type: "auth.error", id: "session-expired", error: "authentication expired or was revoked", code: "transient" });
+    await vi.waitFor(() => expect(socket.readyState).toBe(Socket.CLOSED));
+    expect(client.localSessionState()).toBe("restored");
+    expect(client.localReplica.entity("tasks", "task")?.title).toBe("cached");
+    expect(await storage.loadSession(owner)).toBeDefined();
+    expect(rejected).not.toHaveBeenCalled();
+  });
+
+  it("keeps restored access for a legacy rejection without a refreshed credential", async () => {
+    const { client, storage } = await fixture();
+    await client.localSessionReady;
+    const socket = socketFor(client);
+    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "authentication unavailable" });
+    expect(client.localSessionState()).toBe("restored");
+    expect(client.localReplica.entity("tasks", "task")?.title).toBe("cached");
+    expect(await storage.loadSession(owner)).toBeDefined();
+  });
+
+  it("does not restore a control client without replica storage", async () => {
+    const client = new GonvexClient(url, auth);
+    clients.push(client);
+    await expect(client.localSessionReady).resolves.toBe(false);
+    expect(client.localSessionState()).toBe("unavailable");
+  });
+
+  it("ignores pending auth results after an unsolicited definitive rejection", async () => {
+    const { client, storage } = await fixture();
+    await client.localSessionReady;
+    const rejected = vi.fn();
+    client.onAuthError(rejected);
+    const socket = socketFor(client);
+    const frame = socket.sent[0];
+    socket.receive({ type: "auth.error", id: "session-expired", error: "revoked", code: "revoked" });
+    socket.receive({ type: "auth.result", id: frame.id, result: { replica: directive, localIdentity: identity } });
+    await Promise.resolve();
+    expect(client.localSessionState()).toBe("unavailable");
+    expect(client.localReplica.entity("tasks", "task")).toBeUndefined();
+    expect(await storage.loadSession(owner)).toBeUndefined();
+    expect(rejected).toHaveBeenCalledOnce();
   });
 
   it("does not expose the previous account or tenant while switching", async () => {
@@ -163,7 +331,7 @@ describe("cached session startup", () => {
     await vi.waitFor(() => expect(storage.loadWorkingSet).toHaveBeenCalledTimes(1));
     const snapshot = await storage.load("visible");
     const socket = socketFor(client);
-    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "revoked" });
+    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "revoked", code: "revoked" });
     finish(snapshot);
     await expect(ready).resolves.toBe(false);
     expect(client.localSessionState()).toBe("unavailable");

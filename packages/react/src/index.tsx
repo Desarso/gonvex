@@ -457,9 +457,10 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     installSession(current ? { ...current, activeTenantId } : null);
   }, [installSession, storageKey]);
 
-  useEffect(() => props.client.onAuthError((message) => {
+  useEffect(() => props.client.onAuthError((message, details) => {
     const developer = developerModeRef.current;
     if (!developer) {
+      if (!details?.definitive) return;
       authInvalidationVersionRef.current += 1;
       installSession(null);
       setSessionState("signedOut");

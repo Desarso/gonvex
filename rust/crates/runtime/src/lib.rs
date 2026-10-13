@@ -1396,7 +1396,7 @@ async fn websocket(
                 break;
             }
             _ = async { if let Some(admission) = &public_admission { admission.changed.notified().await; } else { std::future::pending::<()>().await; } } => {
-                let _ = send_json(&mut socket, &ServerMessage::AuthError { id: "session-expired".into(), error: "public tenant session is unavailable".into() }).await;
+                let _ = send_json(&mut socket, &ServerMessage::AuthError { code: Some("transient".into()), id: "session-expired".into(), error: "public tenant session is unavailable".into() }).await;
                 break;
             }
             _ = auth_revalidation.tick(), if !control_connection.auth_token.is_empty() => {
@@ -1422,6 +1422,7 @@ async fn websocket(
                         .metrics
                         .subscriptions(&connection_id, std::iter::empty::<&str>());
                     let response = ServerMessage::AuthError {
+                        code: Some("transient".into()),
                         id: "session-expired".to_owned(),
                         error: "authentication expired or was revoked".to_owned(),
                     };
@@ -1697,6 +1698,7 @@ async fn websocket(
                         let _ = send_json(
                             &mut socket,
                             &ServerMessage::AuthError {
+                                code: Some("transient".into()),
                                 id: id.clone(),
                                 error:
                                     "public authentication requires the public WebSocket transport"
@@ -1711,6 +1713,7 @@ async fn websocket(
                     let _ = send_json(
                         &mut socket,
                         &ServerMessage::AuthError {
+                            code: Some("transient".into()),
                             id: "session-expired".into(),
                             error: "public tenant session is unavailable".into(),
                         },
@@ -1867,6 +1870,7 @@ async fn websocket(
                             let _ = send_json(
                                 &mut socket,
                                 &ServerMessage::AuthError {
+                                    code: Some("transient".into()),
                                     id: match &response {
                                         ServerMessage::AuthResult { id, .. } => id.clone(),
                                         _ => String::new(),
@@ -2920,6 +2924,7 @@ fn call_watermark_after_sent_replica_work(
 /// completes: the next session's feed starts after this revision.
 fn membership_changed_frames(transaction_watermark: Option<ServerMessage>) -> Vec<ServerMessage> {
     let mut frames = vec![ServerMessage::AuthError {
+        code: Some("transient".into()),
         id: "membership-changed".to_owned(),
         error: "tenant membership changed; authenticate again".to_owned(),
     }];
@@ -3018,7 +3023,7 @@ async fn send_all(socket: &mut WebSocket, messages: &[ServerMessage]) -> Result<
 fn public_limit_errors(frame: ClientMessage) -> Vec<ServerMessage> {
     let error = "public call rate limit exceeded".to_owned();
     match frame {
-        ClientMessage::Auth { id, .. } => vec![ServerMessage::AuthError { id, error }],
+        ClientMessage::Auth { id, .. } => vec![ServerMessage::AuthError { code: Some("transient".into()), id, error }],
         ClientMessage::QueryCall { id, path, .. }
         | ClientMessage::QuerySubscribe { id, path, .. } => vec![ServerMessage::QueryError {
             id,
@@ -3067,6 +3072,7 @@ fn public_limit_errors(frame: ClientMessage) -> Vec<ServerMessage> {
             trace: None,
         }],
         _ => vec![ServerMessage::AuthError {
+            code: Some("transient".into()),
             id: "public-rate-limit".into(),
             error,
         }],
@@ -3077,6 +3083,15 @@ fn public_limit_errors(frame: ClientMessage) -> Vec<ServerMessage> {
 struct AuthMode {
     control_only: bool,
     public: bool,
+}
+
+fn database_auth_error_code(error: &gonvex_postgres::DatabaseError) -> &'static str {
+    use gonvex_postgres::DatabaseError;
+    match error {
+        DatabaseError::InvalidSession | DatabaseError::SessionProjectMismatch => "credential_rejected",
+        DatabaseError::MemberNotFound(_) | DatabaseError::NoTenantMembership => "member_removed",
+        _ => "transient",
+    }
 }
 
 async fn authenticate(
@@ -3096,6 +3111,7 @@ async fn authenticate(
     let Some(control) = control else {
         return (
             ServerMessage::AuthError {
+                code: Some("transient".into()),
                 id,
                 error: "auth session store is unavailable".to_owned(),
             },
@@ -3122,6 +3138,7 @@ async fn authenticate(
         let Some(route) = route else {
             return (
                 ServerMessage::AuthError {
+                    code: Some("transient".into()),
                     id,
                     error: "public tenant session is unavailable".to_owned(),
                 },
@@ -3150,6 +3167,7 @@ async fn authenticate(
         let Some(project) = requested_project else {
             return (
                 ServerMessage::AuthError {
+                    code: Some("transient".into()),
                     id,
                     error: "project is required for public Control Plane calls".to_owned(),
                 },
@@ -3174,6 +3192,7 @@ async fn authenticate(
             ),
             Err(error) => (
                 ServerMessage::AuthError {
+                    code: Some(database_auth_error_code(&error).into()),
                     id,
                     error: error.to_string(),
                 },
@@ -3184,6 +3203,7 @@ async fn authenticate(
     let Some(token) = token else {
         return (
             ServerMessage::AuthError {
+                code: Some("transient".into()),
                 id,
                 error: "a Gonvex app session is required".to_owned(),
             },
@@ -3194,6 +3214,7 @@ async fn authenticate(
         if control_only {
             return (
                 ServerMessage::AuthError {
+                    code: Some("transient".into()),
                     id,
                     error: "developer grants require an active tenant".to_owned(),
                 },
@@ -3250,6 +3271,7 @@ async fn authenticate(
             }
             Err(error) => (
                 ServerMessage::AuthError {
+                    code: Some(database_auth_error_code(&error).into()),
                     id,
                     error: format!(
                         "impersonation grant is invalid, expired, revoked, or already used: {error}"
@@ -3296,6 +3318,7 @@ async fn authenticate(
             }
             Err(error) => (
                 ServerMessage::AuthError {
+                    code: Some(database_auth_error_code(&error).into()),
                     id,
                     error: error.to_string(),
                 },
@@ -3366,6 +3389,7 @@ async fn authenticate(
         }
         Err(error) => (
             ServerMessage::AuthError {
+                code: Some(database_auth_error_code(&error).into()),
                 id,
                 error: error.to_string(),
             },
@@ -3596,6 +3620,23 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cached_startup_auth_error_codes() {
+        use gonvex_postgres::DatabaseError;
+        assert_eq!(
+            super::database_auth_error_code(&DatabaseError::InvalidSession),
+            "credential_rejected"
+        );
+        assert_eq!(
+            super::database_auth_error_code(&DatabaseError::MemberNotFound("account".into())),
+            "member_removed"
+        );
+        assert_eq!(
+            super::database_auth_error_code(&DatabaseError::AdmissionTimeout),
+            "transient"
+        );
+    }
+
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -3806,6 +3847,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             assert_eq!(
                 message,
                 ServerMessage::AuthError {
+                    code: Some("transient".into()),
                     id: "auth".into(),
                     error: "public tenant session is unavailable".into()
                 }
