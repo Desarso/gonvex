@@ -1,5 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { median, quantile, summary, comparison, bootstrap } from './statistics.mjs';
 import { evaluate } from './gates.mjs';
 
@@ -21,7 +25,7 @@ test('gate boundaries use confidence intervals and missing cases never pass', ()
   assert.deepEqual(evaluate(result(cases)).slice(0, 2).map(gate => gate.verdict), ['FAIL', 'FAIL']);
   cases[1].engine.p95CI = [9, 12];
   assert.equal(evaluate(result(cases))[0].verdict, 'NOISY');
-  cases[1].status = 'NOISY';
+  cases[1].status = 'NOISY'; cases[1].engine.cv = .2;
   assert.equal(evaluate(result(cases))[1].verdict, 'NOISY');
   assert.ok(evaluate(result([])).every(gate => gate.verdict === 'NOISY'));
   const partial = result(cases); partial.complete = false;
@@ -29,4 +33,26 @@ test('gate boundaries use confidence intervals and missing cases never pass', ()
   const busy = result(cases); busy.browsers[0].quiescent = false;
   assert.ok(evaluate(busy).every(gate => gate.verdict === 'NOISY'));
   assert.throws(() => evaluate({ kind: 'emulator', browsers: [] }), /native browser/);
+});
+
+test('engine-only gates do not inherit irrelevant legacy CV noise', () => {
+  const cases = [values('single-row-10000', 10, 1), values('single-row-50000', 100, 1)];
+  for (const value of cases) { value.legacy.cv = .5; value.status = 'NOISY'; }
+  assert.deepEqual(evaluate(result(cases)).slice(0, 2).map(gate => gate.verdict), ['PASS', 'PASS']);
+  const startup = values('startup-working-set-10000', 1, 2); startup.legacy.cv = .5;
+  cases.push(startup);
+  assert.equal(evaluate(result(cases))[2].verdict, 'NOISY');
+});
+
+test('gate CLI exits nonzero only for clear FAIL, and rejects empty results', () => {
+  const directory = mkdtempSync(tmpdir() + '/sync-gate-check-');
+  try {
+    const data = result([values('single-row-10000', 10, 1), values('single-row-50000', 100, 11)]);
+    const path = directory + '/results.json';
+    const run = () => { writeFileSync(path, JSON.stringify(data)); return spawnSync(process.execPath, [fileURLToPath(new URL('./gates.mjs', import.meta.url)), path], { encoding: 'utf8' }); };
+    assert.equal(run().status, 1);
+    data.browsers[0].quiescent = false;
+    const noisy = run(); assert.equal(noisy.status, 0); assert.match(noisy.stdout, /NOISY/);
+    data.browsers = []; assert.equal(run().status, 1);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });

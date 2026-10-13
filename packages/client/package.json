@@ -18,7 +18,8 @@
     "bench:sync-engine:chromium": "pnpm build && node bench/sync-engine/chromium.mjs",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "test": "pnpm build && vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "bench:sync-engine:check": "node --test bench/sync-engine/statistics.checks.mjs"
   },
   "dependencies": {
     "@gonvex/protocol": "workspace:*",

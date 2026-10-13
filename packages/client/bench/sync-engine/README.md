@@ -7,13 +7,15 @@ module-sdk and local-runtime dependencies:
 export TMPDIR=/home/gabriel/.cache/sdk-wave1/tmp
 mkdir -p "$TMPDIR"
 pnpm exec playwright install chromium firefox webkit
+pnpm --filter @gonvex/client bench:sync-engine:check
 pnpm --filter @gonvex/client bench:sync-engine
 node packages/client/bench/sync-engine/gates.mjs packages/client/bench/sync-engine/results.json
 ```
 
 Install Playwright's OS dependencies on a supported host as needed. WebKit is an
 approximation of Safari, not a physical Safari/iOS certification. Benchmarks are
-manual and excluded from normal tests and CI. The command builds the client,
+manual and excluded from normal tests and CI. The Node statistical checks use an
+explicit command and a filename outside Vitest discovery. The command builds the client,
 then runs browsers sequentially with serial operations in separate adapter
 profiles under `$TMPDIR`. Persistent profiles put writes in native disk-backed
 IndexedDB. This does not promise a hardware fsync per transaction.
@@ -82,7 +84,9 @@ gates NOISY. After retries are exhausted the run continues visibly uncertified.
 The gate script rejects emulator files. Storage gates cover 50k durable apply
 p95 <= 10 ms, 50k/10k engine p95 <= 1.25x, and startup/delete p95 no slower than
 legacy. PASS requires the CI upper bound at or below the threshold. FAIL requires
-the lower bound above it. Overlap, excessive CV, missing cases or non-quiescence
+the lower bound above it. Engine-only gates use engine CV; comparisons use both
+adapters. A noisy legacy case cannot invalidate a stable absolute engine measurement.
+Overlap, excessive required-adapter CV, missing cases or non-quiescence
 produce NOISY. FAIL exits nonzero; NOISY is not acceptance even though it does not
 fail the command. Broader design-doc gates require later end-to-end fixtures.
 
