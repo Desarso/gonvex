@@ -502,6 +502,8 @@ export type GonvexClientAuth = {
 };
 
 export type GonvexClientOptions = GonvexClientAuth & {
+  /** Control Plane only, including tenant-scoped control calls. Disables local data and outbox. */
+  role?: "control";
   /** Anonymous, online-only connection scoped to one tenant ID or routing domain. */
   public?: { tenant: string };
   clientContract?: import("./client-upgrades.js").ClientContract;
@@ -643,6 +645,11 @@ export class GonvexClient {
     reject: (error: Error) => void;
   } | undefined;
   private telemetryEnabled = false;
+  private readonly controlOnly: boolean;
+  private readonly telemetryDevice = browserTelemetryInfo();
+  private readonly telemetryEvents: Array<Omit<Extract<ClientMessage, { type: "telemetry.event" }>, "type">> = [];
+  private telemetryTimer?: ReturnType<typeof setTimeout>;
+  private unsubscribeTelemetryLifecycle?: () => void;
   private readonly querySubscriptionRetentionMs: number;
   private readonly replicaSubscriptionRetentionMs: number;
   private readonly reducerOutbox: ReducerOutbox;
@@ -701,6 +708,11 @@ export class GonvexClient {
   private lastOnlineAtMs = 0;
 
   constructor(private readonly url: string, options: GonvexClientOptions = {}) {
+    this.controlOnly = options.role === "control";
+    if (this.controlOnly && options.public) throw new Error("Control connections cannot be public tenant connections");
+    if (this.controlOnly) {
+      options = { ...options, clientContract: options.clientContract ?? options.localRuntime?.clientContract, localRuntime: undefined, localReplica: undefined, outbox: { enabled: false } };
+    }
     if (options.public) {
       if (!options.public.tenant.trim() || !options.project?.trim()) throw new Error("Public connections require project and tenant");
       if (options.token || options.fetchToken || options.identity || options.tenant) throw new Error("Public connections cannot include session credentials or a separate tenant");
@@ -754,6 +766,16 @@ export class GonvexClient {
       this.refreshIntents();
       void this.drainOutbox();
     });
+    if (typeof document !== "undefined" && typeof globalThis.addEventListener === "function") {
+      const onPageHide = () => this.flushTelemetry();
+      const onVisibilityChange = () => { if (document.hidden) this.flushTelemetry(); };
+      globalThis.addEventListener("pagehide", onPageHide);
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      this.unsubscribeTelemetryLifecycle = () => {
+        globalThis.removeEventListener("pagehide", onPageHide);
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      };
+    }
     if (typeof globalThis.addEventListener === "function") {
       const onBrowserOnline = () => {
         if (this.manuallyClosed) return;
@@ -1620,6 +1642,7 @@ export class GonvexClient {
   }
 
   private applyAuth(auth: GonvexClientAuth) {
+    this.flushTelemetry();
     if (this.publicTenant && (auth.token || auth.fetchToken || auth.identity || auth.tenant !== undefined && auth.tenant !== this.publicTenant || auth.project !== undefined && auth.project !== this.auth.project)) {
       throw new Error("Public connection scope is fixed; create another client to sign in or change tenants");
     }
@@ -1672,6 +1695,7 @@ export class GonvexClient {
     if (this.updateRequired) return;
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
 
+    this.flushTelemetry();
     const isReconnect = this.socket !== undefined;
     this.manuallyClosed = false;
     const generation = ++this.socketGeneration;
@@ -1683,6 +1707,7 @@ export class GonvexClient {
     }
     const socket = new WebSocket(transportUrl);
     this.socket = socket;
+    this.serverCapabilities = {};
     socket.addEventListener("open", () => {
       if (this.socket !== socket) return;
       if (this.reconnectTimer) {
@@ -1702,6 +1727,7 @@ export class GonvexClient {
     });
     socket.addEventListener("close", () => {
       if (this.socket !== socket || this.manuallyClosed) return;
+      this.flushTelemetry();
       this.isWebSocketConnected = false;
       this.replica.setFreshness("offline");
       this.markReplicaSubscriptionsOutOfDate();
@@ -1739,6 +1765,10 @@ export class GonvexClient {
       }
       if (message.type === "session.ready") {
         this.serverCapabilities = message.capabilities ?? {};
+        if (this.controlOnly) {
+          this.flushPendingMessages();
+          return;
+        }
         if (!message.replica) {
           if (this.hasControlPlaneWork() || (!!this.auth.token && !this.auth.tenant)) {
             this.flushPendingMessages();
@@ -1855,15 +1885,15 @@ export class GonvexClient {
             for (const handler of Array.from(this.developerCredentialHandlers)) handler(developerSessionToken);
           }
           this.authRetriedAfterError = false;
-          const directive = replicaDirectiveFromAuthResult(message.result);
-          const localIdentity = localIdentityFromAuthResult(message.result);
+          const directive = this.controlOnly ? undefined : replicaDirectiveFromAuthResult(message.result);
+          const localIdentity = this.controlOnly ? undefined : localIdentityFromAuthResult(message.result);
           if (localIdentity) {
             this.localIdentity = localIdentity;
             void this.localExecutor?.ready.catch(() => undefined);
           }
           if (!directive) {
             this.authInFlight = false;
-            if (!this.auth.tenant || this.publicTenant) {
+            if (this.controlOnly || !this.auth.tenant || this.publicTenant) {
               this.resumeQuerySubscriptions(reauthenticatedSameSocket);
               this.settleManagedAuthAttempt(message.id);
             } else {
@@ -1999,6 +2029,8 @@ export class GonvexClient {
   }
 
   close() {
+    this.flushTelemetry();
+    this.unsubscribeTelemetryLifecycle?.();
     this.manuallyClosed = true;
     this.unsubscribeLocal?.();
     for (const close of this.localCollectionClosers.splice(0)) close();
@@ -2200,6 +2232,7 @@ export class GonvexClient {
 
   private async handleQueryMessage(subscription: QuerySubscription, message: ServerMessage, scope = this.replicaScope) {
       if (scope !== this.replicaScope || (subscription.scope !== undefined && subscription.scope !== scope)) return;
+      const serverResult = message.type === "query.result";
       const normalized = this.normalizeSubscriptionMessage(subscription, message);
       if (!normalized) return;
       message = normalized;
@@ -2214,7 +2247,7 @@ export class GonvexClient {
           outcome: "ok",
           clientReceivedAtMs: nowMs(),
           serverTrace: message.trace,
-        });
+        }, serverResult);
       }
       if (message.type === "query.error") {
         subscription.serverSettled = true;
@@ -2398,6 +2431,7 @@ export class GonvexClient {
   }
 
   private subscribeReplicaTransport<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue>(ref: FunctionReference<Args, Result>, args: Args = {} as Args, onMessage: ReplicaSubscriptionHandler, metadataOnly = false) {
+    if (this.controlOnly) throw new Error("Control connections cannot subscribe to Replica Collections");
     if (metadataOnly) this.replicaMetadataListeners.add(onMessage);
     this.connect();
     const key = querySubscriptionKey(ref, args);
@@ -3160,6 +3194,7 @@ export class GonvexClient {
   }
 
   private async activateReplicaDirective(directive: ReplicaDirective): Promise<void> {
+    if (this.controlOnly) return;
     if (
       directive.protocolVersion !== 1
       || !directive.visibilityScope.trim()
@@ -4211,7 +4246,7 @@ export class GonvexClient {
     });
   }
 
-  private recordTelemetry(event: GonvexTelemetryEvent) {
+  private recordTelemetry(event: GonvexTelemetryEvent, report = true) {
     this.emitTelemetry(event);
     if (event.outcome === "error") {
       this.errorReporter?.captureException(new Error(event.error || `${event.type} failed`), {
@@ -4219,7 +4254,7 @@ export class GonvexClient {
         serverTrace: event.serverTrace,
       });
     }
-    if (this.telemetryEnabled) {
+    if (this.telemetryEnabled && report) {
       this.reportTelemetry(event);
     }
   }
@@ -4231,7 +4266,7 @@ export class GonvexClient {
   }
 
   private reportTelemetry(event: GonvexTelemetryEvent) {
-    this.send({
+    const frame: Extract<ClientMessage, { type: "telemetry.event" }> = {
       type: "telemetry.event",
       id: event.id,
       kind: event.type,
@@ -4243,8 +4278,31 @@ export class GonvexClient {
       clientReceivedAtMs: event.clientReceivedAtMs,
       clientDurationMs: event.clientDurationMs,
       trace: event.serverTrace,
-      device: event.device ?? browserTelemetryInfo(),
+      device: event.device,
+    };
+    if (this.serverCapabilities.telemetryBatch !== 1 || this.authInFlight) {
+      this.send({ ...frame, device: event.device ?? this.telemetryDevice });
+      return;
+    }
+    // Performance telemetry is best effort; never retain it across socket scopes.
+    if (this.socket?.readyState !== WebSocket.OPEN) return;
+    const { type: _, ...entry } = frame;
+    this.telemetryEvents.push({
+      ...entry,
+      trace: entry.trace ? { ...entry.trace } : undefined,
+      device: entry.device ? { ...entry.device } : undefined,
     });
+    if (this.telemetryEvents.length >= 50) this.flushTelemetry();
+    else this.telemetryTimer ??= setTimeout(() => this.flushTelemetry(), 5_000);
+  }
+
+  private flushTelemetry() {
+    if (this.telemetryTimer) clearTimeout(this.telemetryTimer);
+    this.telemetryTimer = undefined;
+    const events = this.telemetryEvents.splice(0);
+    if (events.length && this.socket?.readyState === WebSocket.OPEN) {
+      this.sendNow({ type: "telemetry.batch", events });
+    }
   }
 
   /** Send a bounded native error-telemetry frame using authenticated connection attribution. */
@@ -4299,6 +4357,7 @@ export class GonvexClient {
   }
 
   private sendAuth(force: boolean, options: { useFetcher?: boolean } = {}) {
+    this.flushTelemetry();
     if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project && !this.auth.fetchToken) return;
     this.authInFlight = true;
     this.authRetriedAfterError = false;
@@ -4322,10 +4381,10 @@ export class GonvexClient {
       token: this.auth.token,
       project: this.auth.project,
       tenant: this.auth.tenant,
-      controlOnly: !this.auth.tenant,
+      controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
-      device: browserTelemetryInfo(),
-		capabilities: { replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1 },
+      device: this.telemetryDevice,
+		capabilities: { tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1 },
     });
   }
 

@@ -27,6 +27,22 @@ The references include argument/result schemas and their authorization class.
 They never accept database URLs. Tenant-admin references always operate on the
 active, authoritatively admitted tenant.
 
+For a separate auth/control connection, pass `role: "control"`:
+
+```ts
+const controlClient = new GonvexClient(socketUrl, {
+  project: projectId,
+  tenant: selectedTenantId,
+  role: "control",
+});
+```
+
+This disables generated local execution, Replica Collections, replica storage,
+and the offline outbox. The selected tenant still scopes Control Plane calls.
+Deploy a runtime supporting the `tenantControl` auth capability before enabling
+this mode for tenant-scoped calls. Older runtimes treat control-only sessions as
+account-scoped and reject developer-grant authentication.
+
 Control Plane live Queries resubscribe on reconnect and refresh after an
 authorized Control Plane Reducer. Use `watchControlQuery` instead of refetching
 after a write.
@@ -172,6 +188,20 @@ const result = client.offlineLiveQuery(api.tasks.grid, args);
 
 `supported: false` means the plan is explicitly server-only. A partial result
 must be labeled as cached data rather than presented as the full database.
+
+## Performance telemetry
+
+`telemetry: true` reports operation timing. Device information is captured once
+per client and sent with authentication. Runtimes advertising `telemetryBatch: 1`
+receive up to 50 events per frame, flushed every five seconds while events are
+pending, on page hide, when the document becomes hidden, and before auth changes
+or close. Older runtimes receive individual events with cached device information.
+Buffered performance events are dropped on transport loss rather than replayed
+under a different session. This does not affect the durable reducer outbox.
+
+Live Query patches still update state and notify `onTelemetry` listeners. Only
+initial/full server results and errors are reported over the network, avoiding
+an extra telemetry frame for each normalized patch.
 
 ## Lightweight Error Tracking
 

@@ -174,6 +174,8 @@ export type ReplicaDirective = {
 };
 
 export type ServerCapabilities = {
+  /** Server accepts up to 50 performance events per frame, using auth.device by default. */
+  telemetryBatch?: 1;
   /** WebSocket protocol generation implemented by this runtime. */
   protocolVersion?: number;
   /** Exact runtime build identifier, normally the deployed Git commit SHA. */
@@ -236,6 +238,9 @@ export type ReplicaReady = {
 };
 
 export type ClientCapabilities = {
+  /** Preserve selected tenant authentication on control-only sockets. */
+  tenantControl?: 1;
+  telemetryBatch?: 1;
   /** Client accepts coalesced `replica.readyMany` server frames. */
   replicaReadyMany?: 1;
   /** Client accepts connection-level `replica.watermark` server frames. */
@@ -310,6 +315,7 @@ export type ClientMessage =
   | { type: "error.register"; id: string; release?: string; environment?: string }
   | { type: "error.envelope"; id: string; events: JsonValue[] }
   | { type: "error.heartbeat"; id: string }
+  | { type: "telemetry.batch"; events: Array<Omit<Extract<ClientMessage, { type: "telemetry.event" }>, "type">> }
   | {
     type: "telemetry.event";
     id: string;
