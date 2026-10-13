@@ -190,7 +190,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
 
   private async writeWindows(scope: string, windows: readonly ReplicaWindow[], sequence: number) {
     let accepted = true;
-    for (const window of windows) {
+    for (const window of new Map(windows.map(window => [window.signature, window])).values()) {
       const check = await this.acceptsWindow(scope, window);
       if (!check.accepted) {
         accepted = false;

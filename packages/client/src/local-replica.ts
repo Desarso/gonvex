@@ -1501,14 +1501,18 @@ export class LocalReplica implements LocalReplicaView {
   private async acceptStorageCommit(receipt: void | ReplicaMetadataCommit | ReplicaStorageCommit, scope: ReplicaScope,
     entities: Map<string, Map<string, ReplicaRow>>, windows: Map<string, ReplicaWindow>): Promise<boolean> {
     const previous = this.storageSequence;
-    if (!this.acceptMetadataCommit(receipt, scope)) return false;
-    if (receipt && 'changes' in receipt) {
-      // Apply committed authority corrections before publishing, at the sequence
-      // we had before this write. The disk receipt is visible only after COMMIT.
+    const adjacent = this.acceptMetadataCommit(receipt, scope);
+    if (receipt && 'changes' in receipt && receipt.scope === scope && scope === this.scopeValue
+      && Number.isSafeInteger(receipt.previousSequence) && receipt.previousSequence >= previous
+      && Number.isSafeInteger(receipt.sequence) && receipt.sequence === receipt.previousSequence + 1) {
+      // A rejected stale write may leave the disk row at an older sequence.
+      // Apply that authority correction before peer catch-up; later disk changes
+      // still win, and a gap must not advance our reconciled sequence.
       this.storageSequence = previous;
       await this.mergeStoredChanges(entities, windows, receipt.changes);
+      if (!adjacent) this.storageSequence = previous;
     }
-    return true;
+    return adjacent;
   }
 
   private acceptMetadataCommit(receipt: void | ReplicaMetadataCommit, scope: ReplicaScope): boolean {

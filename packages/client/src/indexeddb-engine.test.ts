@@ -262,3 +262,30 @@ it('preserves ordered deltas through the original storage call shape', async () 
     { upserts: [{ id: 'a', rank: 3 }, { id: 'c', rank: 2 }], deleted: [] }, empty);
   expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['b', 'c', 'a']);
 });
+
+it('activates only the final replacement when a transaction repeats a window signature', async () => {
+  const storage = store(); await seed(storage);
+  await storage.applyTransaction({ cursor: { epoch: 'e', revision: 2 }, changes: [],
+    memberships: [window(['a'], 'tasks', 2), window(['b'], 'tasks', 2)] }, empty);
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['b']);
+  await storage.cleanupRetiredMemberships();
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['b']);
+});
+
+it('keeps rejected stale-write corrections when a peer commit creates a sequence gap', async () => {
+  const name = 'stale-peer-gap'; const storage = store(name), peer = store(name);
+  await seed(storage, 'tasks', 10);
+  await storage.replaceWindow({ ...window(['s'], 'statuses', 1), entity: 'statuses' }, empty, 'default', [{ id: 's', title: 'before' }]);
+  const local = replica(storage); await local.hydrate();
+  await peer.applyTransaction({ cursor: { epoch: 'e', revision: 2 }, changes: [
+    { entity: 'statuses', id: 's', operation: 'update', newValue: { title: 'peer' } },
+  ] }, empty);
+  const reads = vi.spyOn(storage, 'readChanges');
+  await local.applyTransaction({ cursor: { epoch: 'e', revision: 9 }, changes: [
+    { entity: 'tasks', id: 'b', operation: 'delete' },
+  ] });
+  expect(reads).toHaveBeenCalled();
+  expect(local.entity('tasks', 'b')).toEqual({ id: 'b', title: 'B' });
+  expect(local.getWindow('tasks')?.ids).toEqual(['a', 'b']);
+  expect(local.entity('statuses', 's')?.title).toBe('peer');
+});

@@ -15,6 +15,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "bench:sync-engine": "node --expose-gc bench/sync-engine/run.mjs",
+    "bench:sync-engine:chromium": "node bench/sync-engine/chromium.mjs",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "test": "pnpm build && vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
