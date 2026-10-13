@@ -3052,7 +3052,11 @@ async fn send_all(socket: &mut WebSocket, messages: &[ServerMessage]) -> Result<
 fn public_limit_errors(frame: ClientMessage) -> Vec<ServerMessage> {
     let error = "public call rate limit exceeded".to_owned();
     match frame {
-        ClientMessage::Auth { id, .. } => vec![ServerMessage::AuthError { code: Some("transient".into()), id, error }],
+        ClientMessage::Auth { id, .. } => vec![ServerMessage::AuthError {
+            code: Some("transient".into()),
+            id,
+            error,
+        }],
         ClientMessage::QueryCall { id, path, .. }
         | ClientMessage::QuerySubscribe { id, path, .. } => vec![ServerMessage::QueryError {
             id,
@@ -3152,7 +3156,9 @@ struct AuthMode {
 fn database_auth_error_code(error: &gonvex_postgres::DatabaseError) -> &'static str {
     use gonvex_postgres::DatabaseError;
     match error {
-        DatabaseError::InvalidSession | DatabaseError::SessionProjectMismatch => "credential_rejected",
+        DatabaseError::InvalidSession | DatabaseError::SessionProjectMismatch => {
+            "credential_rejected"
+        }
         DatabaseError::MemberNotFound(_) | DatabaseError::NoTenantMembership => "member_removed",
         _ => "transient",
     }
