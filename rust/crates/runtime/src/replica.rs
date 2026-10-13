@@ -176,7 +176,7 @@ impl Runtime {
                         &snapshot.resolved,
                     )?
                 };
-                if let Err(message) =
+                if let Some(message) =
                     verify_resume_hashes(&request, prior_hashes.as_ref(), aggregate)
                 {
                     messages.push(message);
@@ -888,7 +888,7 @@ fn verify_resume_hashes(
     request: &ReplicaOpenRequest,
     hashes: Option<&BTreeMap<String, String>>,
     aggregate: bool,
-) -> Result<(), ServerMessage> {
+) -> Option<ServerMessage> {
     if hashes.is_some_and(|hashes| {
         request.digest.as_deref()
             == Some(
@@ -900,9 +900,9 @@ fn verify_resume_hashes(
                 .as_str(),
             )
     }) {
-        Ok(())
+        None
     } else {
-        Err(ServerMessage::ReplicaNeedHashes {
+        Some(ServerMessage::ReplicaNeedHashes {
             id: request.id.clone(),
             path: Some(request.path.clone()),
         })
@@ -1304,15 +1304,15 @@ mod tests {
             "id":"r", "path":"tasks.list", "args":{}, "digest":aggregate_digest(&original)
         }))
         .unwrap();
-        assert!(verify_resume_hashes(&request, Some(&prior), true).is_ok());
+        assert!(verify_resume_hashes(&request, Some(&prior), true).is_none());
         request.digest = Some(aggregate_digest(&BTreeMap::new()));
         assert!(matches!(
             verify_resume_hashes(&request, Some(&prior), true),
-            Err(ServerMessage::ReplicaNeedHashes { .. })
+            Some(ServerMessage::ReplicaNeedHashes { .. })
         ));
         assert!(matches!(
             verify_resume_hashes(&request, None, true),
-            Err(ServerMessage::ReplicaNeedHashes { .. })
+            Some(ServerMessage::ReplicaNeedHashes { .. })
         ));
         let (upserts, deleted) = diff_rows(
             &BTreeMap::from([("1".into(), new.clone()), ("2".into(), inserted.clone())]),
@@ -1328,7 +1328,7 @@ mod tests {
         request.digest = Some(aggregate_digest(&original));
         assert!(matches!(
             verify_resume_hashes(&request, Some(&bounded_prior), true),
-            Err(ServerMessage::ReplicaNeedHashes { .. })
+            Some(ServerMessage::ReplicaNeedHashes { .. })
         ));
         let dependency = visibility_with_task_dependency("tasks");
         assert!(resume_hashes(

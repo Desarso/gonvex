@@ -3672,7 +3672,7 @@ fn preserve_subscription_scope(
     new: &control::ControlConnection,
     capabilities: Option<&gonvex_protocol::ClientCapabilities>,
 ) -> bool {
-    if !capabilities.is_some_and(|caps| caps.preserve_subscriptions == Some(1)) {
+    if capabilities.is_none_or(|caps| caps.preserve_subscriptions != Some(1)) {
         return false;
     }
     let (Some(old_session), Some(new_session)) = (&old.tenant, &new.tenant) else {
