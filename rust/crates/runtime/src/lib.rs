@@ -1325,6 +1325,7 @@ async fn websocket(
     let mut tenant_session: Option<TenantSession> = None;
     let mut telemetry_device = None;
     let mut telemetry_batch_enabled = false;
+    let mut replica_snapshot_pages_enabled = false;
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
     let mut connected_client_contract: Option<u64> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
@@ -1348,6 +1349,7 @@ async fn websocket(
         tenant: None,
         replica: None,
         capabilities: Some(ServerCapabilities {
+            replica_snapshot_pages: Some(1),
             replica_resume: Some(1),
             query_resume: Some(1),
             preserve_subscriptions: Some(1),
@@ -1941,6 +1943,8 @@ async fn websocket(
                     if control_only {
                         suppress_control_replica(&mut response);
                     }
+                    replica_snapshot_pages_enabled =
+                        snapshot_pages_negotiated(capabilities.as_ref());
                     telemetry_device = device.clone();
                     telemetry_batch_enabled =
                         capabilities.as_ref().and_then(|c| c.telemetry_batch) == Some(1);
@@ -2513,7 +2517,10 @@ async fn websocket(
                         }]
                     };
                     for response in messages {
-                        if send_json(&mut socket, &response).await.is_err() {
+                        if send_replica_open(&mut socket, response, replica_snapshot_pages_enabled)
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -2534,7 +2541,10 @@ async fn websocket(
                                 "replica batch cannot contain more than {REPLICA_OPEN_BATCH_LIMIT} opens"
                             ),
                         };
-                        if send_json(&mut socket, &response).await.is_err() {
+                        if send_replica_open(&mut socket, response, replica_snapshot_pages_enabled)
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                         continue;
@@ -2560,7 +2570,10 @@ async fn websocket(
                             .collect()
                     };
                     for response in messages {
-                        if send_json(&mut socket, &response).await.is_err() {
+                        if send_replica_open(&mut socket, response, replica_snapshot_pages_enabled)
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -3743,6 +3756,27 @@ fn record_connection_subscriptions(
     );
 }
 
+fn snapshot_pages_negotiated(capabilities: Option<&gonvex_protocol::ClientCapabilities>) -> bool {
+    capabilities.and_then(|c| c.replica_snapshot_pages) == Some(1)
+}
+
+async fn send_replica_open(
+    socket: &mut WebSocket,
+    message: ServerMessage,
+    paged: bool,
+) -> Result<(), ()> {
+    if paged && matches!(message, ServerMessage::ReplicaSnapshot { .. }) {
+        // Feed events stay queued while these pages are sent. The installed
+        // subscription resumes from the materialized repeatable-read cursor.
+        for page in replica::SnapshotPages::new(message) {
+            send_json(socket, &page).await?;
+        }
+        Ok(())
+    } else {
+        send_json(socket, &replica::legacy_snapshot_frame(message)).await
+    }
+}
+
 async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), ()> {
     let encoded = serde_json::to_string(message).map_err(|_| ())?;
     socket
@@ -3753,6 +3787,17 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snapshot_pages_negotiation_preserves_old_clients() {
+        assert!(!super::snapshot_pages_negotiated(None));
+        let mut capabilities = gonvex_protocol::ClientCapabilities::default();
+        assert!(!super::snapshot_pages_negotiated(Some(&capabilities)));
+        capabilities.replica_snapshot_pages = Some(2);
+        assert!(!super::snapshot_pages_negotiated(Some(&capabilities)));
+        capabilities.replica_snapshot_pages = Some(1);
+        assert!(super::snapshot_pages_negotiated(Some(&capabilities)));
+    }
+
     #[test]
     fn cached_startup_auth_error_codes() {
         use gonvex_postgres::DatabaseError;
