@@ -394,7 +394,7 @@ export type ServerMessage =
     capabilities?: ServerCapabilities;
   }
   | { type: "auth.result"; id: string; result: JsonValue }
-  | { type: "auth.error"; id: string; error: string }
+  | { type: "auth.error"; id: string; error: string; code?: string }
   | { type: "error.ack"; id: string; accepted?: number; fingerprints?: string[]; error?: string }
   | { type: "support.command"; id: string; result: JsonValue }
   | {

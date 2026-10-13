@@ -448,6 +448,7 @@ describe("GonvexClient", () => {
 
 		expect(onAuthError).toHaveBeenCalledWith(
 			"Runtime did not provide an authoritative Local Replica visibility scope",
+			{ definitive: false, code: undefined },
 		);
 		expect(client.localReplica.freshness()).toBe("verifying");
 	});
@@ -902,7 +903,7 @@ describe("GonvexClient", () => {
     await flushMicrotasks();
     expect(client.localReplica.entity("tasks", "task-a")).toMatchObject({ title: "restricted" });
 
-    socket.receive({ type: "auth.error", id: authID, error: "tenant membership changed; authenticate again" });
+    socket.receive({ type: "auth.error", id: authID, error: "tenant membership removed", code: "member_removed" });
 
     expect(client.localReplica.entity("tasks", "task-a")).toBeUndefined();
   });
@@ -1319,7 +1320,7 @@ describe("GonvexClient", () => {
     expect(auths[1]).toMatchObject({ token: "fresh-token", tenant: "tenant-a" });
   });
 
-  it("gives up and notifies onAuthError when the forced refresh returns the rejected token", async () => {
+  it("reconnects without signing out when forced refresh returns the rejected token", async () => {
     const fetchToken = vi.fn(async () => "always-bad");
     const client = new GonvexClient("ws://runtime.test/ws", { tenant: "tenant-a", fetchToken });
     const onAuthError = vi.fn();
@@ -1336,7 +1337,10 @@ describe("GonvexClient", () => {
 
     // Re-sending the very token the server just refused would loop forever.
     expect(sentMessages(socket).filter((message) => message.type === "auth")).toHaveLength(1);
-    expect(onAuthError).toHaveBeenCalledWith("token expired");
+    expect(onAuthError).not.toHaveBeenCalled();
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(latestSocket()).not.toBe(socket);
     // Tenant reads stay fail-closed until a valid authenticated scope exists.
     expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(false);
   });
@@ -1358,12 +1362,12 @@ describe("GonvexClient", () => {
 
     const auths = sentMessages(socket).filter((message) => message.type === "auth");
     expect(auths).toHaveLength(2);
-    socket.receive({ type: "auth.error", id: auths[1].id, error: "still bad" });
+    socket.receive({ type: "auth.error", id: auths[1].id, error: "still bad", code: "credential_rejected" });
     await vi.advanceTimersByTimeAsync(0);
 
     expect(sentMessages(socket).filter((message) => message.type === "auth")).toHaveLength(2);
     expect(fetchToken).toHaveBeenCalledTimes(2);
-    expect(onAuthError).toHaveBeenCalledWith("still bad");
+    expect(onAuthError).toHaveBeenCalledWith("still bad", { definitive: true, code: "credential_rejected" });
   });
 
   it("sends a token provided to setAuth as-is and keeps the fetcher for reconnects", async () => {
@@ -1387,7 +1391,7 @@ describe("GonvexClient", () => {
     expect(sentMessages(secondSocket)[0]).toMatchObject({ type: "auth", token: "fetched-token" });
   });
 
-  it("treats a null fetch result as signed out", async () => {
+  it("keeps the installed token when the fetcher returns null", async () => {
     const fetchToken = vi.fn(async () => null);
     const client = new GonvexClient("ws://runtime.test/ws", { token: "stale-token", tenant: "tenant-a", fetchToken });
     client.connect();
@@ -1396,8 +1400,7 @@ describe("GonvexClient", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     const [auth] = sentMessages(socket);
-    expect(auth).toMatchObject({ type: "auth", tenant: "tenant-a" });
-    expect(auth.token).toBeUndefined();
+    expect(auth).toMatchObject({ type: "auth", tenant: "tenant-a", token: "stale-token" });
   });
 
   it("keeps the installed token when the fetcher rejects", async () => {

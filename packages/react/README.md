@@ -232,3 +232,16 @@ remain Firebase's responsibility when this adapter is configured.
 Full docs live at https://desarso.github.io/gonvex/
 
 [Use public tenant clients with the regular provider and query, Action, and Reducer hooks](../../docs/public-functions.md).
+
+### Restored sessions
+
+`GonvexAuthProvider` can render a valid persisted native session while reconnecting,
+just as it already does for a canonical external-provider session. The existing
+access-token safety window and tenant checks still apply; OAuth callbacks do not
+optimistically install the previous session.
+
+`useGonvexAuth().isLocalSessionReady` becomes true once the client's matching
+replica is readable. `sessionState === "reconnecting"` identifies a restored
+replica awaiting server auth. Terminal account-session auth rejection clears the
+provider to `signedOut`. A rejected developer grant still falls back to the
+original account session first.

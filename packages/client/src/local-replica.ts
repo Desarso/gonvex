@@ -381,8 +381,9 @@ export class LocalReplica implements LocalReplicaView {
    * Atomically switch the authoritative store to an opaque persistence scope.
    * A newer request supersedes an older one even if the older storage read is
    * slow (or resolves after auth has already changed again).
+   * Pass restoreFromStorage=false for an empty, unauthorized partition.
    */
-  activateScope(scope: ReplicaScope = defaultReplicaScope, forceReload = false): Promise<void> {
+  activateScope(scope: ReplicaScope = defaultReplicaScope, forceReload = false, restoreFromStorage = true): Promise<void> {
     const nextScope = normalizeReplicaScope(scope);
     if (!forceReload && this.scopeLoaded && this.scopeValue === nextScope) return this.application;
     if (this.scopeActivation && this.scopeActivationName === nextScope) return this.scopeActivation;
@@ -396,7 +397,7 @@ export class LocalReplica implements LocalReplicaView {
       // A prior transaction may still be in the storage queue. Wait for it so
       // a same-scope activation cannot load a snapshot from before its commit.
       await this.persistence;
-      const snapshot = this.storage?.loadWorkingSet
+      const snapshot = !restoreFromStorage ? undefined : this.storage?.loadWorkingSet
         ? await this.storage.loadWorkingSet(nextScope,this.residencyBudget)
         : await this.storage?.load(nextScope);
       if (generation !== this.scopeActivationGeneration) return;
@@ -419,7 +420,7 @@ export class LocalReplica implements LocalReplicaView {
       this.freshnessValue = "verifying";
       this.notify(true);
       queueMicrotask(()=>{
-        if(generation!==this.scopeActivationGeneration)return;
+        if(!restoreFromStorage || generation!==this.scopeActivationGeneration)return;
         for(const signature of this.retainedWindows.keys())this.retainWindow(signature)();
         for(const [entity,ids] of this.retainedRows)this.retainRows(entity,[...ids.keys()])();
       });

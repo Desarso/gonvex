@@ -496,9 +496,9 @@ export type GonvexClientAuth = {
    * when the server rejects the current token — so a socket that outlives a
    * short-lived Gonvex app session reauthenticates with a
    * live credential instead of replaying the expired one. A `token` passed in
-   * the same `setAuth` call is trusted and sent as-is; resolving `null` signs
-   * the session out; a rejected fetch keeps the currently installed token so
-   * an offline start is not signed out.
+   * the same `setAuth` call is trusted and sent as-is. Missing tokens and failed
+   * fetches keep the installed token. Explicit sign-out uses `setAuth` to clear
+   * the token and fetcher.
    */
   fetchToken?: GonvexAuthTokenFetcher;
   /** Non-secret identity hint used to isolate local-replica persistence. */
@@ -636,7 +636,8 @@ export class GonvexClient {
   // At most one forced refresh per rejection cycle; cleared when auth settles
   // or a fresh send cycle starts, so a bad token can't refresh-loop forever.
   private authRetriedAfterError = false;
-  private readonly authErrorHandlers = new Set<(error: string) => void>();
+  private authRefreshedToken: string | undefined;
+  private readonly authErrorHandlers = new Set<(error: string, details?: { definitive: boolean; code?: string }) => void>();
   private readonly developerCredentialHandlers = new Set<(token: string) => void>();
   private managedAuthAttempt: {
     ids: Set<string>;
@@ -665,6 +666,9 @@ export class GonvexClient {
   private replicaScope: ReplicaScope = "";
   private hasAuthoritativeReplicaScope = false;
   private replicaReady: Promise<void> = Promise.resolve();
+  private localSessionRestore: Promise<void> = Promise.resolve();
+  private localSessionStateValue: "unavailable" | "restored" | "authenticated" = "unavailable";
+  private readonly localSessionHandlers = new Set<() => void>();
   private replicaFrames: Promise<void> = Promise.resolve();
   private queuedReplicaWatermark?: { revision: number; scope: ReplicaScope };
   private processedReplicaWatermarkRevision = 0;
@@ -793,7 +797,7 @@ export class GonvexClient {
     this.outboxScope = initialScope;
     this.replicaScope = ["awaiting-server-scope", this.url, this.outboxEphemeralScope].join("\u0000");
     this.outboxScopeGeneration += 1;
-    this.setReplicaReady(this.replica.activateScope(this.replicaScope, true));
+    this.setReplicaReady(this.replica.activateScope(this.replicaScope, true, false));
     this.outboxReady = Promise.resolve();
     this.timeouts = {
       queryTimeoutMs: options.timeouts?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
@@ -808,7 +812,8 @@ export class GonvexClient {
         transport: (type, payload) => this.sendNativeError(type, payload),
       });
     }
-    if (this.localBinding) this.setOutboxReady(this.restoreLocalSession(initialScope, this.outboxScopeGeneration));
+    this.localSessionRestore = this.restoreLocalSession(initialScope, this.outboxScopeGeneration);
+    this.setOutboxReady(this.localSessionRestore);
   }
 
   /**
@@ -1067,14 +1072,18 @@ export class GonvexClient {
   }
 
   private async restoreLocalSession(scope: string, generation: number): Promise<void> {
-    if (!this.localBinding || !scope.startsWith("identity\u0000")) return;
+    if (!this.localStorage || !scope.startsWith("identity\u0000")) return;
     const saved = await this.localStorage?.loadSession?.(scope);
     if (!saved || generation !== this.outboxScopeGeneration || scope !== this.outboxScope || this.hasAuthoritativeReplicaScope) return;
     this.lastOnlineAtMs = saved.lastOnlineAtMs ?? 0;
     this.localIdentity = saved.identity;
     void this.localExecutor?.ready.catch(() => undefined);
     await this.activateReplicaDirective(saved.directive);
-    this.replica.setFreshness("offline");
+    if (generation !== this.outboxScopeGeneration || scope !== this.outboxScope) return;
+    if (this.localSessionStateValue !== "authenticated") {
+      this.replica.setFreshness("offline");
+      this.setLocalSessionState("restored");
+    }
   }
 
   private ensureLocalCollections(tables: Iterable<string>) {
@@ -1621,6 +1630,44 @@ export class GonvexClient {
     }
   }
 
+  /** Readability of the active local partition, independent of network auth. */
+  localSessionState(): "unavailable" | "restored" | "authenticated" {
+    return this.localSessionStateValue;
+  }
+
+  onLocalSessionChange(listener: () => void): () => void {
+    this.localSessionHandlers.add(listener);
+    return () => { this.localSessionHandlers.delete(listener); };
+  }
+
+  /** Resolves without a server round trip. False means no matching cached session.
+   * A scope change while hydration is pending also resolves false.
+   */
+  get localSessionReady(): Promise<boolean> {
+    const generation = this.outboxScopeGeneration;
+    return this.localSessionRestore.then(() => generation === this.outboxScopeGeneration
+      && this.localSessionStateValue !== "unavailable");
+  }
+
+  /** Install the account/tenant credentials and restore only their cached replica.
+   * Server authentication starts in the background. This does not
+   * authorize server reads or replay queued reducers. Explicitly clear auth on
+   * sign-out; never supply the previous account's identity hint after sign-out.
+   */
+  restoreSession(auth: GonvexClientAuth): Promise<boolean> {
+    this.setAuth(auth);
+    this.connect();
+    return this.localSessionReady;
+  }
+
+  private setLocalSessionState(state: "unavailable" | "restored" | "authenticated") {
+    if (this.localSessionStateValue === state) return;
+    this.localSessionStateValue = state;
+    for (const listener of this.localSessionHandlers) {
+      try { listener(); } catch { /* A listener must not break authentication. */ }
+    }
+  }
+
   /**
    * Atomically install credentials and wait for the runtime to accept them.
    * This is used by provider-owned, memory-only authentication transitions
@@ -1647,12 +1694,10 @@ export class GonvexClient {
   }
 
   /**
-   * Subscribe to unrecoverable auth rejections: the server refused the
-   * credentials and, when a token fetcher is installed, a force-refreshed
-   * token did not fix it. Lets apps route to sign-in instead of silently
-   * degrading to an unauthenticated session.
+   * Subscribe to auth errors. Only details.definitive authorizes clearing an
+   * account session; transport and refresh failures keep cached access.
    */
-  onAuthError(handler: (error: string) => void): () => void {
+  onAuthError(handler: (error: string, details?: { definitive: boolean; code?: string }) => void): () => void {
     this.authErrorHandlers.add(handler);
     return () => {
       this.authErrorHandlers.delete(handler);
@@ -1692,6 +1737,9 @@ export class GonvexClient {
       // e.g. installing the hint after its token is already live — are inert.
       || (hasOwn(auth, "identity") && !sameAuthTokenIdentity(this.auth, nextAuth));
     if (scopeMayChange) {
+      if (!nextAuth.token && !nextAuth.identity && !nextAuth.fetchToken) {
+        void this.localStorage?.saveSession?.(this.outboxScope, undefined).catch(() => undefined);
+      }
       this.pendingMessages.length = 0;
       this.pendingReplicaFrames.length = 0;
       this.rejectPendingCalls((call) => new GonvexClientError(
@@ -1763,6 +1811,7 @@ export class GonvexClient {
       this.flushTelemetry();
       this.isWebSocketConnected = false;
       this.replica.setFreshness("offline");
+      if (this.localSessionStateValue === "authenticated") this.setLocalSessionState("restored");
       this.markReplicaSubscriptionsOutOfDate();
       this.authInFlight = false;
       this.authResendRequired = false;
@@ -1840,13 +1889,29 @@ export class GonvexClient {
           message.type === "auth.error"
           && (message.id === "membership-changed" || message.id === "session-expired")
         ) {
+          if (["revoked", "member_removed", "account_disabled"].includes(message.code ?? "")) {
+            this.authInFlight = false;
+            this.authFetchGeneration += 1;
+            this.latestAuthFrameId = undefined;
+            this.activeAuthFrameId = undefined;
+            this.authResendRequired = false;
+            if (this.authWatchdogTimer) {
+              clearTimeout(this.authWatchdogTimer);
+              this.authWatchdogTimer = undefined;
+            }
+            this.quarantineReplicaScope();
+            this.cancelManagedAuthAttempt(message.error);
+            this.notifyAuthError(message.error, true, message.code);
+            return;
+          }
           // These are unsolicited connection-scope events, not replies to an
           // auth frame. The runtime has already discarded every tenant
           // subscription. Rotate their routing IDs immediately so delayed
           // Replica errors from that discarded scope cannot reach current
           // React listeners.
           this.pendingReplicaFrames.length = 0;
-          this.quarantineReplicaScope();
+          if (message.id === "membership-changed") this.quarantineReplicaScope();
+          else this.rotateSubscriptionScopes();
           this.activeAuthFrameId = undefined;
 
           // If credentials are already being revalidated, that queued auth
@@ -1869,9 +1934,10 @@ export class GonvexClient {
             this.authInFlight = true;
             this.authRetriedAfterError = true;
             this.armAuthWatchdog();
-            void this.refreshRejectedAuth(fetcher, this.auth.token, message.error);
+            void this.refreshRejectedAuth(fetcher, this.auth.token);
           } else {
-            this.notifyAuthError(message.error);
+            this.notifyAuthError(message.error, false, message.code);
+            this.retryTransientAuth();
           }
           return;
         }
@@ -1921,6 +1987,7 @@ export class GonvexClient {
             for (const handler of Array.from(this.developerCredentialHandlers)) handler(developerSessionToken);
           }
           this.authRetriedAfterError = false;
+          this.authRefreshedToken = undefined;
           const directive = this.controlOnly ? undefined : replicaDirectiveFromAuthResult(message.result);
           const localIdentity = this.controlOnly ? undefined : localIdentityFromAuthResult(message.result);
           if (localIdentity) {
@@ -1943,14 +2010,19 @@ export class GonvexClient {
             this.flushPendingMessages();
             return;
           }
+          const authScopeGeneration = this.outboxScopeGeneration;
+          const isCurrentAuth = () => this.socket === socket && this.activeAuthFrameId === message.id
+            && this.latestAuthFrameId === undefined && authScopeGeneration === this.outboxScopeGeneration;
           void this.activateReplicaDirective(directive)
-            .then(() => this.activateOutboxScope())
+            .then(() => isCurrentAuth() ? this.activateOutboxScope() : undefined)
             .then(async () => {
-              if (localIdentity && this.localBinding) await this.localStorage?.saveSession?.(this.outboxScope, {
-                directive, identity: localIdentity, artifactHash: this.activeArtifactHashValue ?? this.localBinding.artifactHash, lastOnlineAtMs: this.lastOnlineAtMs,
+              if (!isCurrentAuth()) return;
+              if (localIdentity) await this.localStorage?.saveSession?.(this.outboxScope, {
+                directive, identity: localIdentity, artifactHash: this.activeArtifactHashValue || this.localBinding?.artifactHash || "", lastOnlineAtMs: this.lastOnlineAtMs,
               });
             })
             .then(() => {
+              if (!isCurrentAuth()) return;
               // The accepted server identity is not usable until its durable
               // Replica partition has been activated locally. Only now may
               // tenant calls and subscriptions leave the client.
@@ -1961,6 +2033,7 @@ export class GonvexClient {
               else for (const subscription of this.replicaSubscriptions.values()) {
                 if (subscription.socketGeneration !== this.socketGeneration) this.sendReplicaOpen(subscription);
               }
+              this.setLocalSessionState("authenticated");
               this.settleManagedAuthAttempt(message.id);
               // Same-scope reauthentication does not reload the outbox, so no
               // restore callback will wake a reducer queued during auth.
@@ -1968,6 +2041,7 @@ export class GonvexClient {
               this.flushPendingMessages();
             })
             .catch((error) => {
+              if (!isCurrentAuth()) return;
               this.authInFlight = false;
               this.pendingReplicaFrames.length = 0;
               this.settleManagedAuthAttempt(message.id, error instanceof Error ? error.message : "Runtime returned an invalid Local Replica scope");
@@ -1979,20 +2053,35 @@ export class GonvexClient {
           this.authInFlight = false;
           this.pendingReplicaFrames.length = 0;
           const fetcher = this.auth.fetchToken;
-          if (fetcher && !this.authRetriedAfterError) {
+          if (fetcher && !this.authRetriedAfterError && !this.authRefreshedToken && message.code !== "transient"
+            && !["revoked", "member_removed", "account_disabled"].includes(message.code ?? "")) {
             // The installed token was rejected — typically expired while the
             // socket was down. Force-refresh through the fetcher and retry
             // once before treating the rejection as final.
             this.authRetriedAfterError = true;
             this.authInFlight = true;
             this.armAuthWatchdog();
-            void this.refreshRejectedAuth(fetcher, this.auth.token, message.error);
+            void this.refreshRejectedAuth(fetcher, this.auth.token);
             return;
           }
+          const definitive = message.code === "revoked" || message.code === "member_removed"
+            || message.code === "account_disabled"
+            || (!!this.authRefreshedToken && this.authRefreshedToken === this.auth.token
+              && message.code === "credential_rejected")
+            || (message.code === "credential_rejected" && /^gvx_(dev|imp)_/.test(this.auth.token ?? ""));
           this.authRetriedAfterError = false;
-          this.quarantineReplicaScope();
+          this.authRefreshedToken = undefined;
           this.settleManagedAuthAttempt(message.id, message.error);
-          this.notifyAuthError(message.error);
+          if (definitive) {
+            this.quarantineReplicaScope();
+            this.notifyAuthError(message.error, true, message.code);
+          } else {
+            // Report every rejection; only `definitive` authorizes clearing a session.
+            this.notifyAuthError(message.error, false, message.code);
+            // Signed-out calls still reach the server for authorization errors.
+            // A restored account must instead keep its reconnect barrier.
+            if (this.auth.token || fetcher || this.localSessionStateValue !== "unavailable") this.retryTransientAuth();
+          }
         }
         this.flushPendingMessages();
       }
@@ -2067,6 +2156,8 @@ export class GonvexClient {
     this.flushTelemetry();
     this.unsubscribeTelemetryLifecycle?.();
     this.manuallyClosed = true;
+    this.outboxScopeGeneration += 1;
+    this.setLocalSessionState("unavailable");
     this.unsubscribeLocal?.();
     for (const close of this.localCollectionClosers.splice(0)) close();
     this.localCollectionKeys.clear();
@@ -3246,6 +3337,7 @@ export class GonvexClient {
     const ready = this.hasAuthoritativeReplicaScope
       ? this.restoreOutbox(scope, generation)
       : this.restoreLocalSession(scope, generation);
+    if (!this.hasAuthoritativeReplicaScope) this.localSessionRestore = ready;
     this.setOutboxReady(ready);
     // Never show the previous identity's intents under the new one.
     this.publishIntents([]);
@@ -3307,6 +3399,8 @@ export class GonvexClient {
   }
 
   private quarantineReplicaScope() {
+    this.outboxScopeGeneration += 1;
+    this.authenticatedSocketGeneration = 0;
     this.localIdentity = undefined;
     // Keep the durable prior identity scope intact for an authorized future
     // login, but make every synchronous selector fail closed immediately.
@@ -3318,7 +3412,8 @@ export class GonvexClient {
     this.resetReplicaScopeState();
     this.replicaScope = scope;
     this.hasAuthoritativeReplicaScope = false;
-    this.setReplicaReady(this.replica.activateScope(scope, true));
+    this.setReplicaReady(this.replica.activateScope(scope, true, false));
+    this.setLocalSessionState("unavailable");
     this.rotateSubscriptionScopes();
   }
 
@@ -4495,6 +4590,7 @@ export class GonvexClient {
     if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project && !this.auth.fetchToken) return;
     this.authInFlight = true;
     this.authRetriedAfterError = false;
+    this.authRefreshedToken = undefined;
     this.armAuthWatchdog();
     const fetcher = this.auth.fetchToken;
     if (fetcher && options.useFetcher !== false) {
@@ -4556,9 +4652,6 @@ export class GonvexClient {
     if (generation !== this.authFetchGeneration || this.auth.fetchToken !== fetcher) return;
     if (typeof token === "string" && token) {
       this.applyAuth({ token });
-    } else if (token === null) {
-      // The fetcher is authoritative about sign-out.
-      this.applyAuth({ token: undefined });
     }
     // A dead socket's close handler already reset authInFlight; the next
     // reconnect runs its own sendAuth, so this resolve has nothing to send.
@@ -4566,39 +4659,58 @@ export class GonvexClient {
     this.sendAuthFrame();
   }
 
-  private async refreshRejectedAuth(fetcher: GonvexAuthTokenFetcher, rejectedToken: string | undefined, error: string) {
+  private async refreshRejectedAuth(fetcher: GonvexAuthTokenFetcher, rejectedToken: string | undefined) {
     const generation = ++this.authFetchGeneration;
     const socket = this.socket;
+    const scope = this.outboxScope;
     let token: string | null | undefined;
     try {
       token = await fetcher({ forceRefreshToken: true });
     } catch {
       token = undefined;
     }
-    if (generation !== this.authFetchGeneration || this.auth.fetchToken !== fetcher) return;
+    if (generation !== this.authFetchGeneration || this.auth.fetchToken !== fetcher) {
+      // Providers can install their rotated session inside the fetcher before
+      // returning it. That frame still carries the force-refreshed credential.
+      if (this.auth.fetchToken === fetcher && this.outboxScope === scope
+        && this.socket === socket && socket?.readyState === WebSocket.OPEN
+        && this.authInFlight && this.latestAuthFrameId !== undefined
+        && typeof token === "string" && token && token !== rejectedToken && this.auth.token === token) {
+        this.authRefreshedToken = token;
+      }
+      return;
+    }
     if (typeof token === "string" && token && token !== rejectedToken) {
       this.applyAuth({ token });
+      this.authRefreshedToken = token;
       if (this.socket === socket && socket?.readyState === WebSocket.OPEN) {
         this.sendAuthFrame();
       }
       return;
     }
-    // No fresher credential exists (fetch failed, signed out, or the refresh
-    // returned the very token the server just refused): surface the rejection
-    // and degrade to the unauthenticated flow exactly like the no-fetcher path.
-    this.authInFlight = false;
+    if (this.socket !== socket || socket?.readyState !== WebSocket.OPEN) return;
+    // An unavailable identity provider or an unchanged token is not evidence
+    // that the account was revoked. Keep the restored replica and retry.
+    this.retryTransientAuth();
+  }
+
+  private retryTransientAuth() {
+    this.authInFlight = true;
+    if (this.localSessionStateValue === "authenticated") this.setLocalSessionState("restored");
+    this.replica.setFreshness("offline");
     if (this.authWatchdogTimer) {
       clearTimeout(this.authWatchdogTimer);
       this.authWatchdogTimer = undefined;
     }
-    this.quarantineReplicaScope();
-    this.notifyAuthError(error);
-    this.flushPendingMessages();
+    // Closing uses the existing reconnect backoff and transport-loss handling.
+    this.socket?.close();
+    this.scheduleReconnect();
   }
 
-  private notifyAuthError(error: string) {
+  private notifyAuthError(error: string, definitive = false, code?: string) {
+    if (definitive) void this.localStorage?.saveSession?.(this.outboxScope, undefined).catch(() => undefined);
     for (const handler of Array.from(this.authErrorHandlers)) {
-      handler(error);
+      handler(error, { definitive, code });
     }
   }
 
@@ -5063,7 +5175,11 @@ function normalizeQuerySubscriptionRetentionMs(value: number | undefined): numbe
 function authIdentityKey(auth: GonvexClientAuth) {
   if (auth.token) {
     const tokenIdentity = authIdentityKeyFromToken(auth);
-    if (tokenIdentity) return tokenIdentity;
+    if (tokenIdentity) {
+      // Conflicting account credentials cannot reuse either account's cache.
+      if (auth.identity?.sub && !tokenIdentity.endsWith(`\u0000${auth.identity.sub}`)) return "";
+      return tokenIdentity;
+    }
   }
   // Token-free fallback: an explicit identity hint carries the same claims a
   // token would supply, so both paths derive the same key for the same Account.
