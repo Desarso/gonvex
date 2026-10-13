@@ -162,6 +162,8 @@ pub struct BrowserTelemetryInfo {
 #[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_subscriptions: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_control: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_batch: Option<u8>,
@@ -231,6 +233,7 @@ pub struct ReplicaOpenRequest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub hashes: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    // An optional xor1: digest selects aggregate verification for this open.
     pub digest: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub full_integrity: bool,
@@ -412,6 +415,12 @@ pub struct PerformanceTelemetryEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_resume: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_resume: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_subscriptions: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_batch: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -694,6 +703,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn sdk_resume_capabilities_are_optional_and_round_trip() {
+        let legacy: ClientCapabilities = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(legacy.preserve_subscriptions, None);
+        assert_eq!(serde_json::to_value(legacy).unwrap(), serde_json::json!({}));
+        let legacy: ServerCapabilities = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(legacy.replica_resume, None);
+        assert_eq!(legacy.query_resume, None);
+        assert_eq!(legacy.preserve_subscriptions, None);
+        let frame = serde_json::json!({
+            "replicaResume":1, "queryResume":1, "preserveSubscriptions":1
+        });
+        let capabilities: ServerCapabilities = serde_json::from_value(frame.clone()).unwrap();
+        assert_eq!(serde_json::to_value(capabilities).unwrap(), frame);
+        round_trip_client(
+            r#"{"type":"auth","id":"refresh","token":"new","capabilities":{"preserveSubscriptions":1}}"#,
+        );
+    }
 
     #[test]
     fn telemetry_batch_preserves_event_fields_and_optional_capabilities() {

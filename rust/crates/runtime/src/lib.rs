@@ -1348,6 +1348,9 @@ async fn websocket(
         tenant: None,
         replica: None,
         capabilities: Some(ServerCapabilities {
+            replica_resume: Some(1),
+            query_resume: Some(1),
+            preserve_subscriptions: Some(1),
             telemetry_batch: Some(1),
             protocol_version: Some(PROTOCOL_VERSION),
             runtime_version: Some(runtime.inner.config.runtime_version.clone()),
@@ -1941,27 +1944,54 @@ async fn websocket(
                     telemetry_device = device.clone();
                     telemetry_batch_enabled =
                         capabilities.as_ref().and_then(|c| c.telemetry_batch) == Some(1);
-                    replicas.clear();
-                    live_queries.clear();
-                    control_queries.clear();
-                    tenant_session = tenant_data_session(control_only, &authenticated_control);
-                    if let Some(session) = tenant_session.as_ref().filter(|s| !s.is_anonymous()) {
-                        feed = Some(runtime.inner.change_feeds.subscribe(&session.route).await);
+                    let next_tenant_session =
+                        tenant_data_session(control_only, &authenticated_control);
+                    let preserved = !control_only
+                        && tenant_session.is_some()
+                        && preserve_subscription_scope(
+                            &control_connection,
+                            &authenticated_control,
+                            capabilities.as_ref(),
+                        );
+                    if preserved {
+                        if let ServerMessage::AuthResult {
+                            result: serde_json::Value::Object(result),
+                            ..
+                        } = &mut response
+                        {
+                            result.insert(
+                                "subscriptionsPreserved".into(),
+                                serde_json::Value::Bool(true),
+                            );
+                        }
                     } else {
-                        feed = None;
+                        replicas.clear();
+                        live_queries.clear();
+                        control_queries.clear();
+                        if let Some(session) =
+                            next_tenant_session.as_ref().filter(|s| !s.is_anonymous())
+                        {
+                            feed = Some(runtime.inner.change_feeds.subscribe(&session.route).await);
+                        } else {
+                            feed = None;
+                        }
+                        feed_scheduler.reset();
+                        sent_replica_revision = 0;
                     }
-                    feed_scheduler.reset();
-                    sent_replica_revision = 0;
+                    tenant_session = next_tenant_session;
                     control_connection = authenticated_control;
                     runtime.inner.metrics.authenticated(
                         &connection_id,
                         &control_connection,
                         device.as_ref(),
                     );
-                    runtime
-                        .inner
-                        .metrics
-                        .subscriptions(&connection_id, std::iter::empty::<&str>());
+                    record_connection_subscriptions(
+                        &runtime,
+                        &connection_id,
+                        &replicas,
+                        &live_queries,
+                        &control_queries,
+                    );
                     if send_json(&mut socket, &response).await.is_err() {
                         break;
                     }
@@ -2014,7 +2044,7 @@ async fn websocket(
                     path,
                     args,
                     scope,
-                    ..
+                    window_revision,
                 }) => {
                     runtime.inner.metrics.activity(
                         &connection_id,
@@ -2044,7 +2074,13 @@ async fn websocket(
                             .open_live_query(session, id.clone(), path.clone(), args)
                             .await
                         {
-                            Ok(opened) => (opened.message, Some(opened.subscription)),
+                            Ok(opened) => (
+                                live_query::resume_message(
+                                    opened.message,
+                                    window_revision.as_deref(),
+                                ),
+                                Some(opened.subscription),
+                            ),
                             Err(error) => (
                                 ServerMessage::QueryError {
                                     id,
@@ -2126,7 +2162,13 @@ async fn websocket(
                                 )
                                 .await
                             {
-                                Ok(opened) => (opened.message, Some(opened.subscription)),
+                                Ok(opened) => (
+                                    live_query::resume_message(
+                                        opened.message,
+                                        subscribe.window_revision.as_deref(),
+                                    ),
+                                    Some(opened.subscription),
+                                ),
                                 Err(error) => (
                                     ServerMessage::QueryError {
                                         id: subscribe.id,
@@ -3655,6 +3697,27 @@ where
     messages
 }
 
+fn preserve_subscription_scope(
+    old: &control::ControlConnection,
+    new: &control::ControlConnection,
+    capabilities: Option<&gonvex_protocol::ClientCapabilities>,
+) -> bool {
+    if capabilities.is_none_or(|caps| caps.preserve_subscriptions != Some(1)) {
+        return false;
+    }
+    let (Some(old_session), Some(new_session)) = (&old.tenant, &new.tenant) else {
+        return false;
+    };
+    !old_session.is_anonymous()
+        && old.project_id == new.project_id
+        && old.identity == new.identity
+        && old.impersonation_id == new.impersonation_id
+        && old_session.identity == new_session.identity
+        && old_session.route == new_session.route
+        && old_session.member == new_session.member
+        && old_session.delegation == new_session.delegation
+}
+
 fn record_connection_subscriptions(
     runtime: &Runtime,
     connection_id: &str,
@@ -4361,6 +4424,80 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         }
 
         assert_eq!(worker.await.unwrap(), (0..input_count).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn sdk_resume_token_rotation_preserves_only_identical_authorization_scope() {
+        let session = TenantSession {
+            identity: gonvex_postgres::SessionIdentity {
+                project_id: "project".to_owned(),
+                account: gonvex_postgres::Account {
+                    id: "account".to_owned(),
+                    email: "account@example.test".to_owned(),
+                    email_verified: true,
+                    name: "Account".to_owned(),
+                    avatar_url: String::new(),
+                    provider: "firebase".to_owned(),
+                },
+            },
+            route: gonvex_postgres::TenantRoute {
+                project_id: "project".to_owned(),
+                tenant_id: "tenant".to_owned(),
+                database_url: "postgres://tenant".to_owned(),
+            },
+            member: gonvex_postgres::Member {
+                id: "member".to_owned(),
+                account_id: "account".to_owned(),
+                status: "active".to_owned(),
+                display_name: "Account".to_owned(),
+                avatar_url: String::new(),
+                role: "member".to_owned(),
+                permissions: serde_json::json!({}),
+                membership_revision: 1,
+            },
+            admission_revision: 5,
+            delegation: None,
+        };
+        let old = control::ControlConnection {
+            project_id: "project".into(),
+            identity: Some(session.identity.clone()),
+            tenant: Some(session),
+            auth_token: "old".into(),
+            ..Default::default()
+        };
+        let capabilities = gonvex_protocol::ClientCapabilities {
+            preserve_subscriptions: Some(1),
+            ..Default::default()
+        };
+        assert!(!preserve_subscription_scope(&old, &old, None));
+        let mut refreshed = old.clone();
+        refreshed.auth_token = "new".into();
+        refreshed.tenant.as_mut().unwrap().admission_revision += 1;
+        assert!(preserve_subscription_scope(
+            &old,
+            &refreshed,
+            Some(&capabilities)
+        ));
+        refreshed.tenant.as_mut().unwrap().member.permissions = serde_json::json!({"admin":true});
+        assert!(!preserve_subscription_scope(
+            &old,
+            &refreshed,
+            Some(&capabilities)
+        ));
+        refreshed = old.clone();
+        refreshed.tenant.as_mut().unwrap().route.tenant_id = "other".into();
+        assert!(!preserve_subscription_scope(
+            &old,
+            &refreshed,
+            Some(&capabilities)
+        ));
+        refreshed = old.clone();
+        refreshed.identity.as_mut().unwrap().account.id = "other".into();
+        assert!(!preserve_subscription_scope(
+            &old,
+            &refreshed,
+            Some(&capabilities)
+        ));
     }
 
     #[test]

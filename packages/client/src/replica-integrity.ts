@@ -6,13 +6,17 @@ export async function replicaRowsHashes(
   keyField: string,
 ): Promise<Record<string, string>> {
   const seen = new Set<string>();
-  const entries = await Promise.all(rows.map(async (row) => {
-    const key = replicaRowKey(row, keyField);
-    if (!key) throw new Error(`replica row is missing key ${JSON.stringify(keyField)}`);
-    if (seen.has(key)) throw new Error(`replica collection contains duplicate key ${JSON.stringify(key)}`);
-    seen.add(key);
-    return [key, await hashValue(stableStringify(row))] as const;
-  }));
+  const entries: Array<readonly [string, string]> = [];
+  for (let offset = 0; offset < rows.length; offset += 128) {
+    if (offset) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    entries.push(...await Promise.all(rows.slice(offset, offset + 128).map(async (row) => {
+      const key = replicaRowKey(row, keyField);
+      if (!key) throw new Error(`replica row is missing key ${JSON.stringify(keyField)}`);
+      if (seen.has(key)) throw new Error(`replica collection contains duplicate key ${JSON.stringify(key)}`);
+      seen.add(key);
+      return [key, await hashValue(stableStringify(row))] as const;
+    })));
+  }
   return Object.fromEntries(entries);
 }
 
@@ -62,8 +66,39 @@ function utf8KeyCompare(left: string, right: string) {
 }
 
 /** Carry verified unchanged hashes forward; only changed rows need serialization. */
-export async function applyReplicaHashDelta(previous: Readonly<Record<string, string>>, upserts: readonly JsonValue[], deleted: readonly string[], key: string): Promise<Record<string, string>> {
+export async function applyReplicaHashDelta(previous: Readonly<Record<string, string>>, upserts: readonly JsonValue[], deleted: readonly string[], key: string, aggregate?: string): Promise<Record<string, string>> {
   const next = { ...previous };
   for (const id of deleted) delete next[id];
-  return Object.assign(next, await replicaRowsHashes(upserts, key));
+  const changed = await replicaRowsHashes(upserts, key);
+  const bytes = aggregateBytes(aggregate ?? replicaAggregateDigest(previous));
+  for (const id of new Set([...deleted, ...Object.keys(changed)])) {
+    if (Object.prototype.hasOwnProperty.call(previous, id)) xorHash(bytes, previous[id]!);
+  }
+  Object.assign(next, changed);
+  for (const hash of Object.values(changed)) xorHash(bytes, hash);
+  aggregates.set(next, formatAggregate(bytes));
+  return next;
+}
+
+// Row hashes include the collection key. XOR is independent of membership order.
+const aggregates = new WeakMap<object, string>();
+export function replicaAggregateDigest(hashes: Readonly<Record<string, string>>): string {
+  const cached = aggregates.get(hashes);
+  if (cached) return cached;
+  const bytes = new Uint8Array(32);
+  for (const hash of Object.values(hashes)) xorHash(bytes, hash);
+  const digest = formatAggregate(bytes);
+  aggregates.set(hashes, digest);
+  return digest;
+}
+function xorHash(bytes: Uint8Array, hash: string) {
+  for (let i = 0; i < 32; i += 1) bytes[i] = bytes[i]! ^ parseInt(hash.slice(i * 2, i * 2 + 2), 16);
+}
+function aggregateBytes(digest: string) {
+  const bytes = new Uint8Array(32);
+  xorHash(bytes, digest.slice(5));
+  return bytes;
+}
+function formatAggregate(bytes: Uint8Array) {
+  return `xor1:${Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("")}`;
 }
