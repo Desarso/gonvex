@@ -72,7 +72,7 @@ export async function applyReplicaHashDelta(previous: Readonly<Record<string, st
   const changed = await replicaRowsHashes(upserts, key);
   const bytes = aggregateBytes(aggregate ?? replicaAggregateDigest(previous));
   for (const id of new Set([...deleted, ...Object.keys(changed)])) {
-    if (previous[id]) xorHash(bytes, previous[id]!);
+    if (Object.prototype.hasOwnProperty.call(previous, id)) xorHash(bytes, previous[id]!);
   }
   Object.assign(next, changed);
   for (const hash of Object.values(changed)) xorHash(bytes, hash);

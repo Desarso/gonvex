@@ -36,3 +36,13 @@ it('yields between full-window hashing chunks and still rejects duplicate keys a
     digest.mockRestore();
   }
 });
+
+it('applies deltas for row ids that shadow inherited Object properties', async () => {
+  const { replicaAggregateDigest } = await import('./replica-integrity');
+  const hashes = await replicaRowsHashes([{ id: 'a', value: 1 }], 'id');
+  const upserts = [{ id: 'toString', value: 2 }, { id: 'constructor', value: 3 }];
+  const next = await applyReplicaHashDelta(hashes, upserts, ['hasOwnProperty'], 'id');
+  const full = await replicaRowsHashes([{ id: 'a', value: 1 }, ...upserts], 'id');
+  expect(next).toEqual(full);
+  expect(replicaAggregateDigest(next)).toBe(replicaAggregateDigest({ ...full }));
+});
