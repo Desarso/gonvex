@@ -211,17 +211,18 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       for (let offset = 0; offset < members.length; offset += 128) {
         await this.database.members.bulkPut(members.slice(offset, offset + 128));
       }
-      if (check.prior && !check.prior.deleted) {
-        this.pendingCleanup.add(scope);
-        await this.database.meta.put({ scope,
-        key: `retired:${JSON.stringify([window.signature, check.prior.generation])}`,
-        value: JSON.stringify({ signature: window.signature, generation: check.prior.generation }) });
-      }
+      if (check.prior && !check.prior.deleted) await this.retireGeneration(scope, window.signature, check.prior.generation!);
       await this.writeMetadata(scope, window, sequence, generation);
       const receipt = this.receipt();
       if (receipt) receipt.changes.windows[window.signature] = window;
     }
     return accepted;
+  }
+
+  private async retireGeneration(scope: string, signature: string, generation: number) {
+    await this.database.meta.put({ scope, key: `retired:${JSON.stringify([signature, generation])}`,
+      value: JSON.stringify({ signature, generation }) });
+    this.pendingCleanup.add(scope);
   }
 
   /** Delete at most limit retired records. Active generations are never scanned. */
@@ -247,7 +248,12 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     if (this.closed || !this.pendingCleanup.has(scope) || this.cleanupTimers.has(scope)) return;
     this.cleanupTimers.set(scope, setTimeout(() => {
       this.cleanupTimers.delete(scope);
-      void this.cleanupRetiredMemberships(scope).then(count => { if (count) this.scheduleCleanup(scope); else this.pendingCleanup.delete(scope); }, () => { this.pendingCleanup.delete(scope); });
+      void this.cleanupRetiredMemberships(scope).then(async () => {
+        if (this.closed) return;
+        const pending = await this.database.meta.where('[scope+key]')
+          .between([scope, 'retired:'], [scope, 'retired;'], true, false).first();
+        if (pending) this.scheduleCleanup(scope); else this.pendingCleanup.delete(scope);
+      }).catch(() => { this.pendingCleanup.delete(scope); });
     }, 50));
   }
 
@@ -634,7 +640,8 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     const normalizedScope = normalizeScope(scope);
     await this.database.transaction("rw", this.database.windows,this.database.members, this.database.meta, async () => {
       const sequence=await this.nextSequence(normalizedScope);
-      await this.database.members.where('[scope+signature+generation+order]').between([normalizedScope, signature], [normalizedScope, signature, []]).delete();
+      const prior = await this.database.windows.get([normalizedScope, signature]);
+      if (prior && !prior.deleted) await this.retireGeneration(normalizedScope, signature, prior.generation!);
       await this.database.windows.put({scope:normalizedScope,signature,value:'null',deleted:true,sequence});
       await this.saveCursor(normalizedScope,snapshot.cursor);
     });
@@ -648,11 +655,31 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     await this.database.transaction("rw", this.database.entities, this.database.windows,this.database.members, this.database.meta, async () => {
       const sequence=await this.nextSequence(normalizedScope);
       await this.acceptEpoch(normalizedScope,snapshot.cursor,sequence);
-      await this.database.entities.where("scope").equals(normalizedScope).delete();
-      await this.database.windows.where("scope").equals(normalizedScope).delete();
-      await this.database.members.where("scope").equals(normalizedScope).delete();
-      await this.database.meta.delete([normalizedScope, "cursor"]);
-      await this.database.meta.put({scope:normalizedScope,key:'resetSequence',value:String(sequence)});
+      const current = await this.database.meta.get([normalizedScope, 'cursor']);
+      const cursor = current ? JSON.parse(current.value) as ReplicaCursor : undefined;
+      const stale = Boolean(cursor && snapshot.cursor && cursor.epoch === snapshot.cursor.epoch && cursor.revision > snapshot.cursor.revision);
+      if (!stale) {
+        // A same-epoch replacement must retain tombstones and field authority.
+        // Absence is a versioned delete, not permission to forget newer replay.
+        let after: [string, string, string] | undefined;
+        for (;;) {
+          const page = await this.database.entities.where('[scope+entity+id]')
+            .between(after ?? [normalizedScope], [normalizedScope, []], !after, false).limit(128).toArray();
+          if (!page.length) break;
+          const absent = page.filter(record => !Object.hasOwn(snapshot.entities[record.entity] ?? {}, record.id));
+          const records = absent.map(record => this.versionedRecord(normalizedScope, record.entity, record.id, null, snapshot.cursor, sequence, record));
+          if (records.length) await this.writeRecords(records.filter((record, index) => record !== absent[index]));
+          const last = page.at(-1)!; after = [last.scope, last.entity, last.id];
+        }
+        for (const record of await this.database.windows.where('scope').equals(normalizedScope).toArray()) {
+          if (record.deleted || snapshot.liveQueries[record.signature]) continue;
+          const window = JSON.parse(record.value) as ReplicaWindow;
+          if (window.cursor && (!snapshot.cursor || (window.cursor.epoch === snapshot.cursor.epoch && window.cursor.revision > snapshot.cursor.revision))) continue;
+          await this.retireGeneration(normalizedScope, record.signature, record.generation!);
+          await this.database.windows.put({ ...record, deleted: true, value: 'null', sequence });
+        }
+        await this.database.meta.put({scope:normalizedScope,key:'resetSequence',value:String(sequence)});
+      }
       for (const [entity, rows] of Object.entries(snapshot.entities)) {
         const entries = Object.entries(rows);
         // Empty tables have no IndexedDB work. Repeatedly awaiting already

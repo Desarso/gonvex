@@ -1,24 +1,34 @@
 import { IndexedDBLocalReplicaStorage } from '../../dist/indexeddb-replica.js';
 import { IndexedDBEngineReplicaStorage } from '../../dist/indexeddb-engine.js';
-import { replicaAggregateDigest, replicaRowsHashes } from '../../dist/replica-integrity.js';
+import { replicaRowsHashes } from '../../dist/replica-integrity.js';
 
-window.runStorageCase = async data => {
-  const stores = [new IndexedDBLocalReplicaStorage(`native-baseline-${data.rows.length}`), new IndexedDBEngineReplicaStorage(`native-engine-${data.rows.length}`)];
-  const samples = [[], []], empty = { entities: {}, liveQueries: {} };
-  try {
-    for (const storage of stores) await storage.replaceWindow(data.window, { ...empty, cursor: data.window.cursor }, 'default', data.rows);
-    for (let index = 0; index < 25; index++) {
-      const row = { ...data.rows[Math.floor(data.rows.length / 2)], field1: `delta-${index}` };
-      const hashes = { ...data.window.hashes, ...await replicaRowsHashes([row], 'id') };
-      const cursor = { epoch: 'fixture', revision: index + 2 };
-      const window = { ...data.window, cursor, hashes, aggregateDigest: replicaAggregateDigest(hashes) };
-      for (const variant of index % 2 ? [1, 0] : [0, 1]) {
-        const start = performance.now();
-        await stores[variant].applyWindowDelta(window, { upserts: [row], deleted: [], memberships: [{ id: row.id }] }, { ...empty, cursor });
-        if (index >= 5) samples[variant].push(performance.now() - start);
-      }
-    }
-    const summary = values => { const sorted = [...values].sort((a, b) => a - b); return { median: sorted[10], p95: sorted[18], samples: values }; };
-    return { metric: `single-row-${data.rows.length}`, encodedBytes: data.encodedBytes, legacy: summary(samples[0]), engine: summary(samples[1]) };
-  } finally { stores.forEach(storage => storage.close()); }
+let state;
+window.prepareStorageCase = async (data, variant) => {
+  state?.storage.close();
+  const storage = variant === 0 ? new IndexedDBLocalReplicaStorage(`native-baseline-${data.rows.length}`)
+    : new IndexedDBEngineReplicaStorage(`native-engine-${data.rows.length}`);
+  await storage.replaceWindow(data.window, { entities: {}, liveQueries: {}, cursor: data.window.cursor }, 'default', data.rows);
+  // Retain only the inputs a row delta needs. The seed's decoded corpus is not
+  // the store's working set and must not dominate its garbage collector.
+  const row = data.rows[Math.floor(data.rows.length / 2)];
+  state = { storage, window: data.window, row, originalHash: data.window.hashes[row.id],
+    aggregate: Uint8Array.from({ length: 32 }, (_, index) => parseInt(data.window.aggregateDigest.slice(5 + index * 2, 7 + index * 2), 16)) };
 };
+window.applyStorageSample = async index => {
+  const row = { ...state.row, field1: `delta-${index}` };
+  const hash = (await replicaRowsHashes([row], 'id'))[row.id];
+  const hashes = state.window.hashes;
+  hashes[row.id] = hash;
+  // Prepare the existing XOR certificate without allocating a 50k-key input
+  // map per sample. This is fixture setup, outside the timed storage call.
+  const bytes = state.aggregate.slice();
+  for (let index = 0; index < 32; index++) bytes[index] ^= parseInt(state.originalHash.slice(index * 2, index * 2 + 2), 16) ^ parseInt(hash.slice(index * 2, index * 2 + 2), 16);
+  const aggregateDigest = 'xor1:' + Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  const cursor = { epoch: 'fixture', revision: index + 2 };
+  const window = { ...state.window, cursor, hashes, aggregateDigest };
+  const start = performance.now();
+  await state.storage.applyWindowDelta(window, { upserts: [row], deleted: [], memberships: [{ id: row.id }] },
+    { entities: {}, liveQueries: {}, cursor });
+  return performance.now() - start;
+};
+window.closeStorageCase = () => state?.storage.close();

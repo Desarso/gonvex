@@ -289,3 +289,46 @@ it('keeps rejected stale-write corrections when a peer commit creates a sequence
   expect(local.getWindow('tasks')?.ids).toEqual(['a', 'b']);
   expect(local.entity('statuses', 's')?.title).toBe('peer');
 });
+
+it('preserves tombstones and newer fields when a same-epoch full snapshot is replayed', async () => {
+  const storage = store(); await seed(storage, 'tasks', 10);
+  await storage.applyTransaction({ cursor: { epoch: 'e', revision: 11 }, changes: [
+    { entity: 'tasks', id: 'a', operation: 'delete' },
+  ] }, empty);
+  const old = window(['a', 'b'], 'tasks', 9);
+  await storage.replaceSnapshot({ cursor: old.cursor, liveQueries: { tasks: old }, entities: { tasks: {
+    a: { id: 'a', title: 'resurrect' }, b: { id: 'b', title: 'stale', description: 'new projection' },
+  } } });
+  const restored = await storage.load();
+  expect(restored?.cursor?.revision).toBe(11);
+  expect(restored?.entities.tasks.a).toBeUndefined();
+  expect(restored?.entities.tasks.b).toEqual({ id: 'b', title: 'B', description: 'new projection' });
+  expect(restored?.liveQueries.tasks.ids).toEqual(['b']);
+  await storage.replaceSnapshot({ cursor: { epoch: 'e', revision: 12 }, liveQueries: {}, entities: {} });
+  expect((await storage.load())?.entities).toEqual({});
+  expect(Object.values((await storage.load())!.liveQueries).every(window => window.ids.length === 0)).toBe(true);
+  await storage.replaceWindow(window(['a'], 'tasks', 10), empty, 'default', [{ id: 'a', title: 'late again' }]);
+  expect((await storage.load())?.entities.tasks?.a).toBeUndefined();
+});
+
+it('retires a removed window without scanning or deleting its memberships on the interactive path', async () => {
+  const storage = store(); await seed(storage);
+  const db = (storage as any).database, members = vi.spyOn(db.members, 'where');
+  await storage.removeWindow('tasks', empty);
+  expect(members).not.toHaveBeenCalled();
+  expect((await storage.readChanges('default', 1)).windows.tasks).toBeNull();
+  expect((await storage.load())?.liveQueries).toEqual({});
+  await storage.cleanupRetiredMemberships();
+  expect(await db.members.count()).toBe(0);
+  expect((await storage.load())?.entities.tasks.a).toBeDefined();
+});
+
+it('continues idle retirement cleanup past an empty generation', async () => {
+  const storage = store();
+  await storage.replaceWindow(window([], 'empty'), empty);
+  await storage.replaceWindow(window([], 'empty', 2), empty);
+  await seed(storage, 'z-real'); await seed(storage, 'z-real', 2);
+  const table = (storage as any).database.members;
+  await vi.waitFor(async () => expect(await table.count()).toBe(2));
+  expect((await storage.load())?.liveQueries['z-real'].ids).toEqual(['a', 'b']);
+});
