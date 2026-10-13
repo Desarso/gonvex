@@ -659,6 +659,9 @@ export class GonvexClient {
   private replicaScope: ReplicaScope = "";
   private hasAuthoritativeReplicaScope = false;
   private replicaReady: Promise<void> = Promise.resolve();
+  private localSessionRestore: Promise<void> = Promise.resolve();
+  private localSessionStateValue: "unavailable" | "restored" | "authenticated" = "unavailable";
+  private readonly localSessionHandlers = new Set<() => void>();
   private replicaFrames: Promise<void> = Promise.resolve();
   private queuedReplicaWatermark?: { revision: number; scope: ReplicaScope };
   private processedReplicaWatermarkRevision = 0;
@@ -771,7 +774,7 @@ export class GonvexClient {
     this.outboxScope = initialScope;
     this.replicaScope = ["awaiting-server-scope", this.url, this.outboxEphemeralScope].join("\u0000");
     this.outboxScopeGeneration += 1;
-    this.setReplicaReady(this.replica.activateScope(this.replicaScope, true));
+    this.setReplicaReady(this.replica.activateScope(this.replicaScope, true, false));
     this.outboxReady = Promise.resolve();
     this.timeouts = {
       queryTimeoutMs: options.timeouts?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
@@ -786,7 +789,8 @@ export class GonvexClient {
         transport: (type, payload) => this.sendNativeError(type, payload),
       });
     }
-    if (this.localBinding) this.setOutboxReady(this.restoreLocalSession(initialScope, this.outboxScopeGeneration));
+    this.localSessionRestore = this.restoreLocalSession(initialScope, this.outboxScopeGeneration);
+    this.setOutboxReady(this.localSessionRestore);
   }
 
   /**
@@ -1044,14 +1048,18 @@ export class GonvexClient {
   }
 
   private async restoreLocalSession(scope: string, generation: number): Promise<void> {
-    if (!this.localBinding || !scope.startsWith("identity\u0000")) return;
+    if (!scope.startsWith("identity\u0000")) return;
     const saved = await this.localStorage?.loadSession?.(scope);
     if (!saved || generation !== this.outboxScopeGeneration || scope !== this.outboxScope || this.hasAuthoritativeReplicaScope) return;
     this.lastOnlineAtMs = saved.lastOnlineAtMs ?? 0;
     this.localIdentity = saved.identity;
     void this.localExecutor?.ready.catch(() => undefined);
     await this.activateReplicaDirective(saved.directive);
-    this.replica.setFreshness("offline");
+    if (generation !== this.outboxScopeGeneration || scope !== this.outboxScope) return;
+    if (this.localSessionStateValue !== "authenticated") {
+      this.replica.setFreshness("offline");
+      this.setLocalSessionState("restored");
+    }
   }
 
   private ensureLocalCollections(tables: Iterable<string>) {
@@ -1566,6 +1574,44 @@ export class GonvexClient {
     }
   }
 
+  /** Readability of the active local partition, independent of network auth. */
+  localSessionState(): "unavailable" | "restored" | "authenticated" {
+    return this.localSessionStateValue;
+  }
+
+  onLocalSessionChange(listener: () => void): () => void {
+    this.localSessionHandlers.add(listener);
+    return () => { this.localSessionHandlers.delete(listener); };
+  }
+
+  /** Resolves without a server round trip. False means no matching cached session.
+   * A scope change while hydration is pending also resolves false.
+   */
+  get localSessionReady(): Promise<boolean> {
+    const generation = this.outboxScopeGeneration;
+    return this.localSessionRestore.then(() => generation === this.outboxScopeGeneration
+      && this.localSessionStateValue !== "unavailable");
+  }
+
+  /** Install the account/tenant credentials and restore only their cached replica.
+   * Server authentication starts in the background. This does not
+   * authorize server reads or replay queued reducers. Explicitly clear auth on
+   * sign-out; never supply the previous account's identity hint after sign-out.
+   */
+  restoreSession(auth: GonvexClientAuth): Promise<boolean> {
+    this.setAuth(auth);
+    this.connect();
+    return this.localSessionReady;
+  }
+
+  private setLocalSessionState(state: "unavailable" | "restored" | "authenticated") {
+    if (this.localSessionStateValue === state) return;
+    this.localSessionStateValue = state;
+    for (const listener of this.localSessionHandlers) {
+      try { listener(); } catch { /* A listener must not break authentication. */ }
+    }
+  }
+
   /**
    * Atomically install credentials and wait for the runtime to accept them.
    * This is used by provider-owned, memory-only authentication transitions
@@ -1636,6 +1682,9 @@ export class GonvexClient {
       // e.g. installing the hint after its token is already live — are inert.
       || (hasOwn(auth, "identity") && !sameAuthTokenIdentity(this.auth, nextAuth));
     if (scopeMayChange) {
+      if (!nextAuth.token && !nextAuth.identity && !nextAuth.fetchToken) {
+        void this.localStorage?.saveSession?.(this.outboxScope, undefined).catch(() => undefined);
+      }
       this.pendingMessages.length = 0;
       this.pendingReplicaFrames.length = 0;
       this.rejectPendingCalls((call) => new GonvexClientError(
@@ -1704,6 +1753,7 @@ export class GonvexClient {
       if (this.socket !== socket || this.manuallyClosed) return;
       this.isWebSocketConnected = false;
       this.replica.setFreshness("offline");
+      if (this.localSessionStateValue === "authenticated") this.setLocalSessionState("restored");
       this.markReplicaSubscriptionsOutOfDate();
       this.authInFlight = false;
       this.authResendRequired = false;
@@ -1877,14 +1927,19 @@ export class GonvexClient {
             this.flushPendingMessages();
             return;
           }
+          const authScopeGeneration = this.outboxScopeGeneration;
+          const isCurrentAuth = () => this.socket === socket && this.activeAuthFrameId === message.id
+            && this.latestAuthFrameId === undefined && authScopeGeneration === this.outboxScopeGeneration;
           void this.activateReplicaDirective(directive)
-            .then(() => this.activateOutboxScope())
+            .then(() => isCurrentAuth() ? this.activateOutboxScope() : undefined)
             .then(async () => {
-              if (localIdentity && this.localBinding) await this.localStorage?.saveSession?.(this.outboxScope, {
-                directive, identity: localIdentity, artifactHash: this.activeArtifactHashValue ?? this.localBinding.artifactHash, lastOnlineAtMs: this.lastOnlineAtMs,
+              if (!isCurrentAuth()) return;
+              if (localIdentity) await this.localStorage?.saveSession?.(this.outboxScope, {
+                directive, identity: localIdentity, artifactHash: this.activeArtifactHashValue || this.localBinding?.artifactHash || "", lastOnlineAtMs: this.lastOnlineAtMs,
               });
             })
             .then(() => {
+              if (!isCurrentAuth()) return;
               // The accepted server identity is not usable until its durable
               // Replica partition has been activated locally. Only now may
               // tenant calls and subscriptions leave the client.
@@ -1896,6 +1951,7 @@ export class GonvexClient {
               // Queries must be sent again just like Replica Collections.
               this.resumeQuerySubscriptions(reauthenticatedSameSocket);
               this.resumeReplicaSubscriptions();
+              this.setLocalSessionState("authenticated");
               this.settleManagedAuthAttempt(message.id);
               // Same-scope reauthentication does not reload the outbox, so no
               // restore callback will wake a reducer queued during auth.
@@ -1903,6 +1959,7 @@ export class GonvexClient {
               this.flushPendingMessages();
             })
             .catch((error) => {
+              if (!isCurrentAuth()) return;
               this.authInFlight = false;
               this.pendingReplicaFrames.length = 0;
               this.settleManagedAuthAttempt(message.id, error instanceof Error ? error.message : "Runtime returned an invalid Local Replica scope");
@@ -2000,6 +2057,8 @@ export class GonvexClient {
 
   close() {
     this.manuallyClosed = true;
+    this.outboxScopeGeneration += 1;
+    this.setLocalSessionState("unavailable");
     this.unsubscribeLocal?.();
     for (const close of this.localCollectionClosers.splice(0)) close();
     this.localCollectionKeys.clear();
@@ -3152,6 +3211,7 @@ export class GonvexClient {
     const ready = this.hasAuthoritativeReplicaScope
       ? this.restoreOutbox(scope, generation)
       : this.restoreLocalSession(scope, generation);
+    if (!this.hasAuthoritativeReplicaScope) this.localSessionRestore = ready;
     this.setOutboxReady(ready);
     // Never show the previous identity's intents under the new one.
     this.publishIntents([]);
@@ -3212,6 +3272,8 @@ export class GonvexClient {
   }
 
   private quarantineReplicaScope() {
+    this.outboxScopeGeneration += 1;
+    this.authenticatedSocketGeneration = 0;
     this.localIdentity = undefined;
     // Keep the durable prior identity scope intact for an authorized future
     // login, but make every synchronous selector fail closed immediately.
@@ -3223,7 +3285,8 @@ export class GonvexClient {
     this.resetReplicaScopeState();
     this.replicaScope = scope;
     this.hasAuthoritativeReplicaScope = false;
-    this.setReplicaReady(this.replica.activateScope(scope, true));
+    this.setReplicaReady(this.replica.activateScope(scope, true, false));
+    this.setLocalSessionState("unavailable");
     this.rotateSubscriptionScopes();
   }
 
@@ -4404,6 +4467,7 @@ export class GonvexClient {
   }
 
   private notifyAuthError(error: string) {
+    void this.localStorage?.saveSession?.(this.outboxScope, undefined).catch(() => undefined);
     for (const handler of Array.from(this.authErrorHandlers)) {
       handler(error);
     }
@@ -4870,7 +4934,11 @@ function normalizeQuerySubscriptionRetentionMs(value: number | undefined): numbe
 function authIdentityKey(auth: GonvexClientAuth) {
   if (auth.token) {
     const tokenIdentity = authIdentityKeyFromToken(auth);
-    if (tokenIdentity) return tokenIdentity;
+    if (tokenIdentity) {
+      // Conflicting account credentials cannot reuse either account's cache.
+      if (auth.identity?.sub && !tokenIdentity.endsWith(`\u0000${auth.identity.sub}`)) return "";
+      return tokenIdentity;
+    }
   }
   // Token-free fallback: an explicit identity hint carries the same claims a
   // token would supply, so both paths derive the same key for the same Account.

@@ -107,6 +107,26 @@ function sharedStores(kv: ReturnType<typeof createMemoryGonvexKv>) {
   });
 }
 describe("SDK-owned local reducer lifecycle", () => {
+  it('publishes a readable restored session while keeping durable edits queued until server auth', async () => {
+    const { create, kv } = await fixture();
+    const client = create();
+    await expect(client.localSessionReady).resolves.toBe(true);
+    expect(await client.reducer(ref, { amount: 2 })).toBe(2);
+    const entries = await createKvOutboxStore(kv).load();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.scope).toBe(owner);
+    client.connect();
+    const socket = Socket.all.at(-1)!;
+    socket.open();
+    await vi.waitFor(() => expect(socket.sent.some(message => message.type === "auth")).toBe(true));
+    expect(socket.sent.some(message => message.type === "reducer.call")).toBe(false);
+    const auth = socket.sent.find(message => message.type === "auth");
+    socket.receive({ type: "auth.result", id: auth.id, result: { replica: directive, localIdentity: identity } });
+    await vi.waitFor(() => expect(socket.sent.some(message => message.type === "reducer.call")).toBe(true));
+    expect(client.localSessionState()).toBe("authenticated");
+    expect(socket.sent.filter(message => message.type === "reducer.call")).toHaveLength(1);
+  });
+
   it.each([false, true])('does not expand a successful cached edit into another full collection subscription (disk read: %s)', async (needsDisk) => {
     const { create } = await fixture();
     const client = create();
