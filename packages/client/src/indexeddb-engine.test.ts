@@ -1,0 +1,264 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+import { Dexie } from 'dexie';
+import { IndexedDBEngineReplicaStorage, indexedDBEngineReplica } from './indexeddb-engine';
+import { IndexedDBLocalReplicaStorage } from './indexeddb-replica';
+import { LocalReplica, type ReplicaWindow } from './local-replica';
+import { GonvexClient } from './index';
+import { applyReplicaHashDelta, replicaAggregateDigest, replicaRowsHashes } from './replica-integrity';
+
+const stores: Array<IndexedDBEngineReplicaStorage | IndexedDBLocalReplicaStorage> = [];
+const replicas: LocalReplica[] = [];
+const clients: GonvexClient[] = [];
+let oldIDB: typeof globalThis.indexedDB, oldRange: typeof globalThis.IDBKeyRange;
+beforeEach(() => {
+  oldIDB = globalThis.indexedDB; oldRange = globalThis.IDBKeyRange;
+  Object.assign(globalThis, { indexedDB: new IDBFactory(), IDBKeyRange });
+  Dexie.dependencies.indexedDB = globalThis.indexedDB; Dexie.dependencies.IDBKeyRange = IDBKeyRange;
+});
+afterEach(() => {
+  clients.splice(0).forEach(client => client.close());
+  replicas.splice(0).forEach(replica => replica.dispose());
+  stores.splice(0).forEach(storage => storage.close());
+  vi.restoreAllMocks(); vi.unstubAllGlobals();
+  Object.assign(globalThis, { indexedDB: oldIDB, IDBKeyRange: oldRange });
+  Dexie.dependencies.indexedDB = oldIDB; Dexie.dependencies.IDBKeyRange = oldRange;
+});
+function store(name = `engine-${Math.random()}`) { const value = new IndexedDBEngineReplicaStorage(name); stores.push(value); return value; }
+function replica(storage: IndexedDBEngineReplicaStorage, maxResidentRows?: number) {
+  const value = new LocalReplica(storage, { maxResidentRows }); replicas.push(value); return value;
+}
+function window(ids = ['a', 'b'], signature = 'tasks', revision = 1): ReplicaWindow {
+  return { signature, kind: 'replica', entity: 'tasks', key: 'id', ids,
+    completeness: 'complete', source: 'server', cursor: { epoch: 'e', revision } };
+}
+const empty = { entities: {}, liveQueries: {} };
+async function seed(storage: IndexedDBEngineReplicaStorage, signature = 'tasks', revision = 1) {
+  const value = window(['a', 'b'], signature, revision);
+  await storage.replaceWindow(value, { ...empty, cursor: value.cursor }, 'default', [{ id: 'a', title: 'A', status: 'new' }, { id: 'b', title: 'B' }]);
+}
+
+it('isolates the engine namespace from an open legacy database and exports a client storage option', async () => {
+  const name = 'shared-name';
+  const legacy = new IndexedDBLocalReplicaStorage(name); stores.push(legacy);
+  await legacy.replaceWindow(window(), { entities: { tasks: { a: { id: 'a', title: 'legacy' } } }, liveQueries: {} });
+  const engine = indexedDBEngineReplica(name) as IndexedDBEngineReplicaStorage; stores.push(engine);
+  expect(await engine.load()).toBeUndefined();
+  await seed(engine);
+  expect((await legacy.load())?.entities.tasks.a.title).toBe('legacy');
+  const client = new GonvexClient('ws://runtime.test/ws', { errorReporting: false, localReplica: { storage: engine } }); clients.push(client);
+  expect((client as any).localStorage).toBe(engine);
+  const defaultClient = new GonvexClient('ws://runtime.test/ws', { errorReporting: false }); clients.push(defaultClient);
+  expect((defaultClient as any).localStorage).toBeUndefined();
+});
+
+it('writes one member and metadata only, and never rereads its adjacent row commits', async () => {
+  const storage = store(), local = replica(storage);
+  const rows = Array.from({ length: 1_000 }, (_, index) => ({ id: `id-${index}`, title: 'old' }));
+  await local.replaceWindow({ ...window(), rows });
+  const db = (storage as any).database;
+  const memberPut = vi.spyOn(db.members, 'put'), fullMembers = vi.spyOn(db.members, 'bulkPut');
+  const metadataPut = vi.spyOn(db.windows, 'put'), reads = vi.spyOn(storage, 'readChanges');
+  await local.applyWindowDelta({ signature: 'tasks', kind: 'replica', entity: 'tasks', key: 'id',
+    upserts: [{ id: 'id-500', title: 'new' }], deleted: [], cursor: { epoch: 'e', revision: 2 } });
+  expect(reads).not.toHaveBeenCalled(); expect(memberPut).toHaveBeenCalledOnce(); expect(fullMembers).not.toHaveBeenCalled();
+  expect(JSON.parse(metadataPut.mock.calls[0][0].value)).not.toHaveProperty('ids');
+  expect(JSON.parse(metadataPut.mock.calls[0][0].value)).not.toHaveProperty('hashes');
+  await local.applyTransaction({ cursor: { epoch: 'e', revision: 3 }, changes: [{ entity: 'tasks', id: 'id-500', operation: 'update', newValue: { title: 'transaction' } }] });
+  expect(reads).not.toHaveBeenCalled();
+  expect(local.entity('tasks', 'id-500')?.title).toBe('transaction');
+}, 30_000);
+
+it('rolls back rows, members, sequence and checkpoint when a write fails between them', async () => {
+  const storage = store(); await seed(storage);
+  const before = await storage.load();
+  const db = (storage as any).database;
+  const failure = vi.spyOn(db.windows, 'put').mockRejectedValueOnce(new Error('checkpoint failed'));
+  await expect(storage.applyWindowDelta(window(['a', 'c'], 'tasks', 2),
+    { upserts: [{ id: 'c', title: 'C' }], deleted: ['b'], memberships: [{ id: 'c', moved: true, after: 'a' }] },
+    { ...empty, cursor: { epoch: 'e', revision: 2 } })).rejects.toThrow('checkpoint failed');
+  failure.mockRestore();
+  expect(await storage.load()).toEqual(before);
+  const receipt = await storage.applyWindowDelta(window(['a', 'c'], 'tasks', 2),
+    { upserts: [{ id: 'c', title: 'C' }], deleted: ['b'], memberships: [{ id: 'c', moved: true, after: 'a' }] },
+    { ...empty, cursor: { epoch: 'e', revision: 2 } });
+  expect(receipt).toMatchObject({ previousSequence: 1, sequence: 2, changes: { entities: { tasks: { b: null, c: { id: 'c', title: 'C' } } } } });
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['a', 'c']);
+});
+
+it('preserves per-field authority and tombstones in receipts and after reopening', async () => {
+  const name = 'authority'; let storage = store(name); await seed(storage, 'tasks', 10);
+  const local = replica(storage); await local.hydrate();
+  // The disk window is newer than the connection-wide floor, as with overlapping projections.
+  (local as any).cursorValue = { epoch: 'e', revision: 1 };
+  const reads = vi.spyOn(storage, 'readChanges');
+  await local.applyTransaction({ cursor: { epoch: 'e', revision: 9 }, changes: [
+    { entity: 'tasks', id: 'a', operation: 'update', newValue: { title: 'stale', description: 'new field' } },
+    { entity: 'tasks', id: 'b', operation: 'delete' },
+  ] });
+  expect(reads).not.toHaveBeenCalled();
+  expect(local.entity('tasks', 'a')).toEqual({ id: 'a', title: 'A', status: 'new', description: 'new field' });
+  expect(local.entity('tasks', 'b')).toEqual({ id: 'b', title: 'B' });
+  expect(local.getWindow('tasks')?.ids).toEqual(['a', 'b']);
+  await storage.applyTransaction({ cursor: { epoch: 'e', revision: 11 }, changes: [{ entity: 'tasks', id: 'a', operation: 'delete' }] }, empty);
+  const receipt = await storage.applyTransaction({ cursor: { epoch: 'e', revision: 10 }, changes: [{ entity: 'tasks', id: 'a', operation: 'update', newValue: { title: 'resurrect' } }] }, empty);
+  expect(receipt.changes.entities.tasks.a).toBeNull();
+  local.dispose(); storage.close(); storage = store(name);
+  expect((await storage.load())?.entities.tasks.a).toBeUndefined();
+  expect((await storage.load())?.cursor?.revision).toBe(11);
+});
+
+it('uses reverse ownership for exclusion and deletes from every active owning window', async () => {
+  const storage = store(); await seed(storage); await seed(storage, 'other');
+  await storage.applyWindowDelta(window(['b'], 'tasks', 2), { upserts: [], deleted: ['a'], memberships: [] }, empty);
+  expect((await storage.load())?.entities.tasks.a).toBeDefined();
+  const db = (storage as any).database;
+  const allWindows = vi.spyOn(db.windows, 'where');
+  await storage.applyTransaction({ cursor: { epoch: 'e', revision: 3 }, changes: [{ entity: 'tasks', id: 'b', operation: 'delete' }] }, empty);
+  expect(allWindows).not.toHaveBeenCalled();
+  const after = await storage.load();
+  expect(after?.liveQueries.tasks.ids).toEqual([]); expect(after?.liveQueries.other.ids).toEqual(['a']);
+  expect(after?.entities.tasks.b).toBeUndefined();
+});
+
+it('resets rows and membership on epoch change and refuses a retired epoch', async () => {
+  const storage = store(); await seed(storage);
+  const next = { ...window(['z']), cursor: { epoch: 'next', revision: 1 } };
+  await storage.replaceWindow(next, { ...empty, cursor: next.cursor }, 'default', [{ id: 'z' }]);
+  expect((await storage.readChanges('default', 1)).reset).toBe(true);
+  expect((await storage.load())?.entities.tasks).toEqual({ z: { id: 'z' } });
+  await expect(storage.applyWindowDelta(window(), { upserts: [], deleted: [] }, empty)).rejects.toThrow('obsolete replica epoch');
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['z']);
+});
+
+it('preserves server order, duplicate IDs and result skeleton across generation replacement and ordered moves', async () => {
+  const storage = store();
+  const value = { ...window(['a', 'b', 'a']), kind: 'live' as const, resultSkeleton: [{ id: 'a' }, { id: 'b' }, { id: 'a' }] };
+  await storage.replaceWindow(value, empty, 'default', [{ id: 'a' }, { id: 'b' }]);
+  expect((await storage.load())?.liveQueries.tasks).toMatchObject({ ids: value.ids, resultSkeleton: value.resultSkeleton });
+  await seed(storage);
+  const rebalances = vi.spyOn((storage as any).database.members, 'bulkPut');
+  for (let index = 0; index < 240; index++) {
+    const id = `insert-${index}`;
+    const previous = (await storage.load())!.liveQueries.tasks;
+    const ids = ['a', id, ...previous.ids.slice(1)];
+    await storage.applyWindowDelta({ ...previous, ids, cursor: { epoch: 'e', revision: index + 2 } },
+      { upserts: [{ id }], deleted: [], memberships: [{ id, moved: true, after: 'a', before: previous.ids[1] }] }, empty);
+    expect((await storage.load())?.liveQueries.tasks.ids).toEqual(ids);
+  }
+  expect(rebalances).toHaveBeenCalled();
+  expect(rebalances.mock.calls.every(([records]) => (records as any[]).length <= 33)).toBe(true);
+  const local = replica(storage); await local.hydrate();
+  await local.replaceWindow({ ...window(), rows: [{ id: 'a', rank: 1 }, { id: 'b', rank: 2 }], orderBy: 'rank', orderDirection: 'asc', cursor: { epoch: 'e', revision: 1000 } });
+  await local.applyWindowDelta({ signature: 'tasks', kind: 'replica', entity: 'tasks', key: 'id', upserts: [{ id: 'a', rank: 3 }], deleted: [], cursor: { epoch: 'e', revision: 1001 } });
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['b', 'a']);
+  for (let index = 0; index < 10; index++) await storage.cleanupRetiredMemberships('default', 20);
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['b', 'a']);
+}, 30_000);
+
+it('hydrates a bounded working set without turning cold or partial rows into proven absence', async () => {
+  const storage = store(); await seed(storage);
+  const snapshot = await storage.loadWorkingSet('default', { maxRows: 1, maxBytes: 4096 });
+  expect(Object.keys(snapshot!.entities.tasks)).toHaveLength(1);
+  expect(snapshot?.residentPartialTables).toEqual(['tasks']);
+  expect(snapshot?.liveQueries.tasks.completeness).toBe('complete');
+  expect((await storage.loadEntityRows('default', 'tasks', ['b']))[0].row).toEqual({ id: 'b', title: 'B' });
+  const local = replica(storage, 1); await local.hydrate();
+  expect(local.entity('tasks', 'b')).toBeUndefined();
+  expect((await storage.loadWindowRows('default', 'tasks'))?.rows).toHaveLength(2);
+});
+
+it('round-trips binary projected hashes and still verifies cursor+digest resume after a delta and watermark', async () => {
+  const storage = store(); const local = replica(storage);
+  const rows = [{ id: 'a', value: 1 }, { id: 'b', value: 2 }];
+  const hashes = await replicaRowsHashes(rows, 'id');
+  await local.replaceWindow({ ...window(), rows, hashes });
+  const upserts = [{ id: 'a', value: 3 }];
+  const next = await applyReplicaHashDelta(hashes, upserts, [], 'id');
+  await local.applyWindowDelta({ signature: 'tasks', kind: 'replica', entity: 'tasks', key: 'id', upserts, deleted: [], hashes: next, cursor: { epoch: 'e', revision: 2 } });
+  const members = await (storage as any).database.members.toArray();
+  expect(members.every((member: any) => member.hash instanceof Uint8Array && member.hash.length === 32)).toBe(true);
+  const puts = vi.spyOn((storage as any).database.members, 'put');
+  await local.advanceWatermark(3, ['tasks']); expect(puts).not.toHaveBeenCalled();
+  const restored = replica(storage); await restored.hydrate();
+  expect(restored.windowResumeState('tasks')).toEqual({ cursor: { epoch: 'e', revision: 3 }, digest: replicaAggregateDigest(next) });
+  expect(restored.getWindow('tasks')?.hashes).toEqual(next);
+  const client = new GonvexClient('ws://runtime.test/ws', { errorReporting: false, localReplica: { storage } }); clients.push(client);
+  const state = client as any; await state.replica.hydrate(); state.serverCapabilities = { replicaResume: 1 };
+  expect(state.replicaOpenRequest({ key: 'tasks', id: 'r', path: 'tasks.list', args: {} })).toEqual({ id: 'r', path: 'tasks.list', args: {}, cursor: { epoch: 'e', revision: 3 }, digest: replicaAggregateDigest(next) });
+});
+
+it('notifies other tabs only after commit and catches a peer sequence gap before accepting an own receipt', async () => {
+  const name = 'peers'; const writer = store(name), follower = store(name);
+  await seed(writer);
+  const local = replica(follower); await local.hydrate();
+  const notification = vi.fn(); follower.subscribePeer(notification);
+  await writer.applyTransaction({ cursor: { epoch: 'e', revision: 2 }, changes: [{ entity: 'tasks', id: 'a', operation: 'update', newValue: { title: 'peer' } }] }, empty);
+  await vi.waitFor(() => expect(notification).toHaveBeenCalledWith('default'));
+  await local.synchronizeStorage(); expect(local.entity('tasks', 'a')?.title).toBe('peer');
+  // Force a peer write between hydration and our own commit.
+  const isolated = replica(writer); await isolated.hydrate();
+  await follower.applyTransaction({ cursor: { epoch: 'e', revision: 3 }, changes: [{ entity: 'tasks', id: 'b', operation: 'update', newValue: { title: 'gap' } }] }, empty);
+  const reads = vi.spyOn(writer, 'readChanges');
+  await isolated.applyTransaction({ cursor: { epoch: 'e', revision: 4 }, changes: [{ entity: 'tasks', id: 'a', operation: 'update', newValue: { title: 'own' } }] });
+  expect(isolated.entity('tasks', 'b')?.title).toBe('gap');
+  expect(reads).toHaveBeenCalled();
+});
+
+it('publishes no cross-entity partial state or peer notification if checkpoint persistence fails', async () => {
+  const storage = store(), peer = store((storage as any).database.name.replace(':engine-members-v1', ''));
+  await seed(storage); const local = replica(storage); await local.hydrate();
+  const before = await storage.load(); const publish = vi.fn(), notifyPeer = vi.fn();
+  local.subscribe(publish); peer.subscribePeer(notifyPeer);
+  // Let the seed notification settle before injecting a later commit failure.
+  await new Promise(resolve => setTimeout(resolve, 20)); notifyPeer.mockClear();
+  const table = (storage as any).database.meta, put = table.put.bind(table);
+  const fail = vi.spyOn(table, 'put').mockImplementation((record: any) => {
+    if (record.key === 'cursor') throw new Error('crash at checkpoint');
+    return put(record);
+  });
+  await expect(local.applyTransaction({ cursor: { epoch: 'e', revision: 2 }, changes: [
+    { entity: 'tasks', id: 'a', operation: 'update', newValue: { title: 'partial' } },
+    { entity: 'statuses', id: 'new', operation: 'insert', newValue: { id: 'new', name: 'partial' } },
+  ] })).rejects.toThrow('crash at checkpoint');
+  fail.mockRestore();
+  expect(await storage.load()).toEqual(before);
+  expect(local.entity('tasks', 'a')?.title).toBe('A'); expect(local.entity('statuses', 'new')).toBeUndefined();
+  expect(publish).not.toHaveBeenCalled();
+  await new Promise(resolve => setTimeout(resolve, 20)); expect(notifyPeer).not.toHaveBeenCalled();
+});
+
+it('updates field authority even for equal visible values and restores hashes on an unchanged snapshot', async () => {
+  const storage = store(), local = replica(storage);
+  const rows = [{ id: 'a', value: 1 }];
+  await local.replaceWindow({ ...window(['a']), rows });
+  await local.applyWindowDelta({ signature: 'tasks', kind: 'replica', entity: 'tasks', key: 'id', upserts: rows, deleted: [], cursor: { epoch: 'e', revision: 10 } });
+  const receipt = await storage.applyTransaction({ cursor: { epoch: 'e', revision: 9 }, changes: [
+    { entity: 'tasks', id: 'a', operation: 'update', newValue: { value: 2 } },
+  ] }, empty);
+  expect(receipt.changes.entities.tasks.a?.value).toBe(1);
+  await local.synchronizeStorage();
+  const hashes = await replicaRowsHashes(rows, 'id');
+  await local.replaceWindow({ ...window(['a'], 'tasks', 11), rows, hashes });
+  expect((await storage.load())?.liveQueries.tasks.hashes).toEqual(hashes);
+});
+
+it('moves several ordered members in final sequence without rewriting other memberships', async () => {
+  const storage = store(), local = replica(storage);
+  await local.replaceWindow({ ...window(['a', 'b', 'c', 'd']), rows: [
+    { id: 'a', rank: 1 }, { id: 'b', rank: 2 }, { id: 'c', rank: 3 }, { id: 'd', rank: 4 },
+  ], orderBy: 'rank', orderDirection: 'asc' });
+  const bulk = vi.spyOn((storage as any).database.members, 'bulkPut');
+  await local.applyWindowDelta({ signature: 'tasks', kind: 'replica', entity: 'tasks', key: 'id',
+    orderBy: 'rank', orderDirection: 'asc', cursor: { epoch: 'e', revision: 2 },
+    upserts: [{ id: 'a', rank: 6 }, { id: 'b', rank: 5 }], deleted: [] });
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['c', 'd', 'b', 'a']);
+  expect(bulk).not.toHaveBeenCalled();
+});
+
+it('preserves ordered deltas through the original storage call shape', async () => {
+  const storage = store(); await seed(storage);
+  await storage.applyWindowDelta({ ...window(['b', 'c', 'a'], 'tasks', 2), orderBy: 'rank' },
+    { upserts: [{ id: 'a', rank: 3 }, { id: 'c', rank: 2 }], deleted: [] }, empty);
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['b', 'c', 'a']);
+});

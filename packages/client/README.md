@@ -442,3 +442,24 @@ notifications or workflow transitions. Deferred work disables coalescing.
 Undeclared reducers, previously sent intents and intents with downstream
 causal dependents are never replaced. Replacement is an atomic durable write;
 stores without that operation keep every intent.
+
+## Opt-in membership storage
+
+The legacy IndexedDB adapter remains unchanged. To try the engine's membership-row format in a fresh, isolated replica namespace:
+
+```ts
+import { GonvexClient, indexedDBEngineReplica } from '@gonvex/client';
+
+const replicaStorage = indexedDBEngineReplica('my-app-fresh-engine-cohort');
+const client = new GonvexClient(runtimeUrl, {
+  ...existingOptions,
+  localReplica: {
+    ...existingOptions.localReplica,
+    storage: replicaStorage,
+  },
+});
+```
+
+This creates `my-app-fresh-engine-cohort:engine-members-v1`. It never opens or upgrades the legacy database with the same base name. Engine participants use a separate peer channel and keep existing scope/authority, offline outbox, reducer coverage and resume rules. This option changes replica persistence only; it does not start a worker or move subscriptions off the main thread.
+
+Use a fresh cohort namespace. This release supplies no automatic legacy import or lossless backend export. Keep the engine database when disabling the option; do not treat changing storage factories as a migration of populated data. Existing durable outbox storage and its coordination remain unchanged. Runtime and application contract changes are unnecessary.
