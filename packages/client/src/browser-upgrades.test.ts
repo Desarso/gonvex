@@ -165,3 +165,62 @@ it('rejects reads and reservations while an upgrade journal is incomplete', asyn
     expect(await metadata.table('state').get('sequence')).toBeUndefined();
   } finally { metadata.close(); }
 });
+
+it('reloads once when delivery ownership changes even before a peer broadcast arrives', async () => {
+  vi.stubGlobal('BroadcastChannel', class { postMessage() {} close() {} });
+  const { StoreReducerOutbox } = await import('./outbox.js');
+  const first = open(1); await first.ready;
+  const second = open(1); await second.ready;
+  const a = new StoreReducerOutbox(first.store), b = new StoreReducerOutbox(second.store);
+  const loadA = vi.spyOn(first.store, 'load');
+  await a.list('tenant'); await b.list('tenant');
+  await b.enqueue({ scope: 'tenant', path: 'save', args: {}, entityKeys: [] });
+  await first.store.coordinate!('tenant', 'delivery', async () => {
+    expect(await a.list('tenant')).toHaveLength(1);
+    await a.count('tenant'); await a.nextReady('tenant', Date.now());
+    const [entry] = await a.list('tenant'); await a.markInflightMany([entry!.id]); await a.ackMany([entry!.id]);
+  });
+  expect(loadA).toHaveBeenCalledTimes(2);
+  await second.store.coordinate!('tenant', 'delivery', async () => {
+    expect(await b.list('tenant')).toEqual([]);
+  });
+});
+
+it('holds the contract fence for an intent epoch while a migration is queued', async () => {
+  type Job = { mode: string; run: () => Promise<unknown>; resolve: (value: unknown) => void; reject: (reason: unknown) => void };
+  const queues = new Map<string, { active: number; jobs: Job[] }>();
+  const pump = (name: string) => {
+    const queue = queues.get(name)!;
+    if (queue.active || !queue.jobs.length) return;
+    const first = queue.jobs.shift()!;
+    const jobs = [first];
+    if (first.mode === 'shared') while (queue.jobs[0]?.mode === 'shared') jobs.push(queue.jobs.shift()!);
+    queue.active = jobs.length;
+    for (const job of jobs) Promise.resolve().then(job.run).then(job.resolve, job.reject).finally(() => { queue.active--; pump(name); });
+  };
+  vi.stubGlobal('navigator', { locks: { request: (name: string, options: { mode: string }, run: () => Promise<unknown>) => new Promise((resolve, reject) => {
+    if (!queues.has(name)) queues.set(name, { active: 0, jobs: [] });
+    queues.get(name)!.jobs.push({ mode: options.mode, run, resolve, reject }); pump(name);
+  }) } });
+  const old = open(1); await old.ready;
+  const metadata = Dexie.connections.find(db => db.name === `${prefix}-upgrades`)!;
+  const contractRead = vi.spyOn((metadata as any).state, 'get');
+  let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const delivery = old.store.coordinate!('tenant', 'intent', async () => {
+    entered(); await gate;
+    await old.store.load('tenant');
+    await old.store.load('tenant');
+    await old.store.clear('tenant');
+  });
+  await started;
+  const next = open(2, [{ from: 1, to: 2, intent: (intent: any) => intent }]);
+  let migrated = false; void next.ready.then(() => { migrated = true; });
+  await Promise.resolve(); expect(migrated).toBe(false);
+  release(); await delivery;
+  // All reads in this epoch reuse the contract check under the held shared lock.
+  expect(contractRead).toHaveBeenCalledTimes(1);
+  await next.ready;
+  await expect(old.store.load('tenant')).rejects.toThrow('Reload');
+});

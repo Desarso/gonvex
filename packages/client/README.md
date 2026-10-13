@@ -27,6 +27,22 @@ The references include argument/result schemas and their authorization class.
 They never accept database URLs. Tenant-admin references always operate on the
 active, authoritatively admitted tenant.
 
+For a separate auth/control connection, pass `role: "control"`:
+
+```ts
+const controlClient = new GonvexClient(socketUrl, {
+  project: projectId,
+  tenant: selectedTenantId,
+  role: "control",
+});
+```
+
+This disables generated local execution, Replica Collections, replica storage,
+and the offline outbox. The selected tenant still scopes Control Plane calls.
+Deploy a runtime supporting the `tenantControl` auth capability before enabling
+this mode for tenant-scoped calls. Older runtimes treat control-only sessions as
+account-scoped and reject developer-grant authentication.
+
 Control Plane live Queries resubscribe on reconnect and refresh after an
 authorized Control Plane Reducer. Use `watchControlQuery` instead of refetching
 after a write.
@@ -172,6 +188,20 @@ const result = client.offlineLiveQuery(api.tasks.grid, args);
 
 `supported: false` means the plan is explicitly server-only. A partial result
 must be labeled as cached data rather than presented as the full database.
+
+## Performance telemetry
+
+`telemetry: true` reports operation timing. Device information is captured once
+per client and sent with authentication. Runtimes advertising `telemetryBatch: 1`
+receive up to 50 events per frame, flushed every five seconds while events are
+pending, on page hide, when the document becomes hidden, and before auth changes
+or close. Older runtimes receive individual events with cached device information.
+Buffered performance events are dropped on transport loss rather than replayed
+under a different session. This does not affect the durable reducer outbox.
+
+Live Query patches still update state and notify `onTelemetry` listeners. Only
+initial/full server results and errors are reported over the network, avoiding
+an extra telemetry frame for each normalized patch.
 
 ## Lightweight Error Tracking
 
@@ -378,3 +408,37 @@ durable queued intents remain isolated for a future authorized login. Token-fetc
 failures, socket closure, and transient or uncoded server errors preserve cached
 access. Only `details?.definitive` in `onAuthError((message, details) => ...)`
 authorizes clearing an application session.
+
+### Causal offline delivery
+
+Local reducers persist point reads, table scans and written row IDs with each
+intent. The outbox sends up to eight independent intents at once, using
+`reducer.callMany` when the server advertises `reducerBatch: 1`. Dependent
+intents wait for the earlier call to settle. A backed-off call blocks its
+causal dependents; unrelated saves can proceed. Old executor results and
+uncovered local reads retain conservative barriers.
+
+Browser upgrade stores cache journal entries between peer invalidations and
+lock ownership changes. A full reload at lock acquisition also covers delayed
+broadcasts from older tabs. Contract checks are cached only during short intent
+locks. Delivery waits never hold the upgrade fence. SQLite and browser stores
+write batch admission, completion and deletion in one transaction per phase
+for the items that settle together.
+
+Pure overwrite reducers can explicitly opt into replacing a never-sent intent:
+
+```ts
+const setTitle = reducer({
+  coalesce: { mode: "latest", key: ["taskId"] },
+  // args, result and run ...
+});
+```
+
+The key lists scalar argument fields identifying the overwritten value. Include
+all fields needed to distinguish separate values. This declaration promises
+that dropping intermediate calls has no observable side effects. Do not use it
+for increments, sparse patches updating different fields, audit events,
+notifications or workflow transitions. Deferred work disables coalescing.
+Undeclared reducers, previously sent intents and intents with downstream
+causal dependents are never replaced. Replacement is an atomic durable write;
+stores without that operation keep every intent.

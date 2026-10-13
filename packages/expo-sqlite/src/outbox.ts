@@ -48,6 +48,12 @@ export class ExpoSQLiteOutboxStore implements OutboxStore {
     });
   }
 
+  deleteMany(ids: number[]): Promise<void> {
+    return this.serial(() => this.transaction(async () => {
+      for (const id of ids) await this.database.runAsync(`DELETE FROM _gonvex_outbox WHERE id = ?`, id);
+    }));
+  }
+
   clear(scope?: string): Promise<void> {
     return this.serial(async () => {
       if (scope === undefined) await this.database.runAsync(`DELETE FROM _gonvex_outbox`);
@@ -77,6 +83,33 @@ export class ExpoSQLiteOutboxStore implements OutboxStore {
         throw new Error("Outbox identity cannot change");
       }
       if (JSON.stringify(next) !== JSON.stringify(prior)) await this.write(next);
+      return next;
+    }));
+  }
+
+  updateMany(ids: number[], change: (entry: ReducerOutboxEntry) => ReducerOutboxEntry): Promise<ReducerOutboxEntry[]> {
+    return this.serial(() => this.transaction(async () => {
+      const entries: ReducerOutboxEntry[] = [];
+      for (const id of ids) {
+        const row = await this.database.getFirstAsync<OutboxRow>(`SELECT value FROM _gonvex_outbox WHERE id = ?`, id);
+        const prior = row ? parseEntry(row.value) : undefined;
+        if (!prior) continue;
+        const next = change(prior);
+        if (next.id !== prior.id || next.scope !== prior.scope || next.idempotencyKey !== prior.idempotencyKey) throw new Error("Outbox identity cannot change");
+        if (JSON.stringify(next) !== JSON.stringify(prior)) await this.write(next);
+        entries.push(next);
+      }
+      return entries;
+    }));
+  }
+
+  replacePending(id: number, draft: Omit<ReducerOutboxEntry, "id">): Promise<ReducerOutboxEntry | undefined> {
+    return this.serial(() => this.transaction(async () => {
+      const row = await this.database.getFirstAsync<OutboxRow>(`SELECT value FROM _gonvex_outbox WHERE id = ?`, id);
+      const prior = row ? parseEntry(row.value) : undefined;
+      if (!prior || prior.scope !== draft.scope || prior.path !== draft.path || prior.coalesceKey !== draft.coalesceKey || prior.state !== "pending" || prior.sentAt !== undefined || prior.attempts || prior.lastError) return undefined;
+      const next = { ...draft, id };
+      await this.write(next);
       return next;
     }));
   }

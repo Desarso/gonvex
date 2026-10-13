@@ -27,6 +27,9 @@ import {
 } from "./optimistic.js";
 import {
   createReducerOutbox,
+  readyIntents,
+  intentsConflict,
+  type IntentDependencies,
   DEFAULT_OUTBOX_MAX_BACKOFF_MS,
   outboxBackoffMs,
   outboxEntryIsLive,
@@ -502,6 +505,8 @@ export type GonvexClientAuth = {
 };
 
 export type GonvexClientOptions = GonvexClientAuth & {
+  /** Control Plane only, including tenant-scoped control calls. Disables local data and outbox. */
+  role?: "control";
   /** Anonymous, online-only connection scoped to one tenant ID or routing domain. */
   public?: { tenant: string };
   clientContract?: import("./client-upgrades.js").ClientContract;
@@ -644,6 +649,11 @@ export class GonvexClient {
     reject: (error: Error) => void;
   } | undefined;
   private telemetryEnabled = false;
+  private readonly controlOnly: boolean;
+  private readonly telemetryDevice = browserTelemetryInfo();
+  private readonly telemetryEvents: Array<Omit<Extract<ClientMessage, { type: "telemetry.event" }>, "type">> = [];
+  private telemetryTimer?: ReturnType<typeof setTimeout>;
+  private unsubscribeTelemetryLifecycle?: () => void;
   private readonly querySubscriptionRetentionMs: number;
   private readonly replicaSubscriptionRetentionMs: number;
   private readonly reducerOutbox: ReducerOutbox;
@@ -675,6 +685,7 @@ export class GonvexClient {
   private peerRefreshDirty = false;
   private readonly unsubscribeBrowserOnline: (() => void) | undefined;
   private drainingOutbox = false;
+  private outboxProgressWake?: () => void;
   /** A wake-up (timer, enqueue, reconnect) that arrived while a drain was running. */
   private outboxDrainRequested = false;
   private outboxDrainTimer: ReturnType<typeof setTimeout> | undefined;
@@ -705,6 +716,11 @@ export class GonvexClient {
   private lastOnlineAtMs = 0;
 
   constructor(private readonly url: string, options: GonvexClientOptions = {}) {
+    this.controlOnly = options.role === "control";
+    if (this.controlOnly && options.public) throw new Error("Control connections cannot be public tenant connections");
+    if (this.controlOnly) {
+      options = { ...options, clientContract: options.clientContract ?? options.localRuntime?.clientContract, localRuntime: undefined, localReplica: undefined, outbox: { enabled: false } };
+    }
     if (options.public) {
       if (!options.public.tenant.trim() || !options.project?.trim()) throw new Error("Public connections require project and tenant");
       if (options.token || options.fetchToken || options.identity || options.tenant) throw new Error("Public connections cannot include session credentials or a separate tenant");
@@ -758,6 +774,16 @@ export class GonvexClient {
       this.refreshIntents();
       void this.drainOutbox();
     });
+    if (typeof document !== "undefined" && typeof globalThis.addEventListener === "function") {
+      const onPageHide = () => this.flushTelemetry();
+      const onVisibilityChange = () => { if (document.hidden) this.flushTelemetry(); };
+      globalThis.addEventListener("pagehide", onPageHide);
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      this.unsubscribeTelemetryLifecycle = () => {
+        globalThis.removeEventListener("pagehide", onPageHide);
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      };
+    }
     if (typeof globalThis.addEventListener === "function") {
       const onBrowserOnline = () => {
         if (this.manuallyClosed) return;
@@ -1025,6 +1051,7 @@ export class GonvexClient {
     if (this.intentsRefreshRunning) return;
     this.intentsRefreshRunning = true;
     void (async () => {
+      await new Promise(resolve => setTimeout(resolve, 0));
       try {
         while (this.intentsRefreshDirty && !this.manuallyClosed) {
           this.intentsRefreshDirty = false;
@@ -1195,6 +1222,12 @@ export class GonvexClient {
     })().catch(() => undefined).finally(() => { this.peerRefreshScheduled = false; });
   }
 
+  private readonly localReadVersions = new Map<string, string>();
+
+  private localReadStamp(dependencies: IntentDependencies): string {
+    return JSON.stringify([this.localIdentity, this.localBinding?.artifactHash, dependencies.scans.map(entity => this.replica.executionReadVersion(entity)), dependencies.reads.map(row => this.replica.executionReadVersion(row.entity, row.rowId))]);
+  }
+
   private scheduleLocalReplay() {
     if (!this.localExecutor || this.replacingLocal || this.localReplayScheduled || this.manuallyClosed || !this.localIdentity) return;
     // Restore and peer notifications discover durable intents explicitly. A
@@ -1218,6 +1251,7 @@ export class GonvexClient {
   }
 
   private rebaseLocalEntries(afterRejection = false): Promise<void> {
+    if (!afterRejection && this.drainingOutbox && this.canSendReducerNow()) return Promise.resolve();
     return this.coordinateOutbox("intent", () => this.rebaseLocalEntriesLocked(afterRejection));
   }
 
@@ -1247,6 +1281,8 @@ export class GonvexClient {
     const snapshot = needsExecution && this.localBinding.mode !== 'portable' ? this.localSnapshot(false) : undefined;
     const replayPatches: import('@gonvex/local-runtime').LocalPatch[] = [];
     const commands: Array<{ commandId: string; patches: OptimisticPatch[] }> = [];
+    const replayed: ReducerOutboxEntry[] = [];
+    const readStamps = new Map<string, string>();
     for (const entry of entries) {
       // Predictions can wait; a fresh user intent must not sit behind the
       // entire durable backlog. Publish only a complete, coherent rebase.
@@ -1255,11 +1291,17 @@ export class GonvexClient {
         return;
       }
       let patches = entry.patches ?? [];
-      if (entry.localExecution && entry.state !== "inflight" && entry.state !== "committed") {
+      const stamp = entry.dependencies ? this.localReadStamp(entry.dependencies) : undefined;
+      const affected = afterRejection || !stamp || this.localReadVersions.get(entry.idempotencyKey) !== stamp || replayed.some(prior => intentsConflict(prior, entry));
+      if (entry.localExecution && entry.state !== "inflight" && entry.state !== "committed" && affected) {
+        // A changed branch can stop writing a row. Its old dependents still
+        // need to remove predictions derived from that previous write.
+        replayed.push({ ...entry });
         const execution: LocalExecution = { ...entry.localExecution, scope: replicaScope, identity: this.localIdentity, artifactHash: this.localBinding.artifactHash };
         try {
           const transaction = await this.executeLocal(entry.path, entry.args as JsonValue, snapshot, execution, replayPatches);
           patches = transaction.patches;
+          entry.dependencies = localIntentDependencies(transaction);
           if (scope !== this.outboxScope || replicaScope !== this.replicaScope) return;
         } catch (error) {
           // Re-execution is a prediction. Only an authoritative server rejection
@@ -1270,8 +1312,10 @@ export class GonvexClient {
         }
         if (scope !== this.outboxScope || replicaScope !== this.replicaScope) return;
         // Storage failures must abort rebasing, never masquerade as rejection.
-        await this.reducerOutbox.updateLocal(entry.id, patches, execution);
+        await this.reducerOutbox.updateLocal(entry.id, patches, execution, entry.dependencies);
+        replayed.push(entry);
       }
+      if (entry.dependencies) readStamps.set(entry.idempotencyKey, this.localReadStamp(entry.dependencies));
       if (snapshot) applyLocalPatches(snapshot, patches);
       for (const patch of patches) replayPatches.push(patch.op === 'delete'
         ? {entity:patch.entity ?? patch.collection!,rowId:patch.rowId,op:'delete'}
@@ -1285,6 +1329,8 @@ export class GonvexClient {
       setTimeout(() => this.scheduleLocalReplay(), 0);
       return;
     }
+    this.localReadVersions.clear();
+    for (const [id, stamp] of readStamps) this.localReadVersions.set(id, stamp);
     this.replacingLocal = true;
     try { this.replaceLocalPredictions(commands); }
     finally { this.replacingLocal = false; }
@@ -1386,16 +1432,29 @@ export class GonvexClient {
         // to this intent, rather than persisting the whole replica.
         const entry = await this.reducerOutbox.enqueue({
           scope, path: ref.path, args, idempotencyKey: reducerId, state: "pending",
-          // All local intents form one causal chain, including reads of rows
-          // written by a previous intent, not only overlapping write patches.
-          entityKeys: ["__gonvex_local_intents"], patches, localExecution: execution,
+          entityKeys: transaction ? [] : ["__gonvex_local_intents"],
+          ...(transaction ? { dependencies: localIntentDependencies(transaction), coalesceKey: transaction.coalesceKey } : {}),
+          patches, localExecution: execution,
         });
         if (scope !== this.outboxScope || execution.scope !== this.replicaScope) {
           throw new GonvexClientError("Session changed while persisting local reducer", { code: "superseded" });
         }
+        for (const [commandId, id] of this.optimisticOutboxEntryIds) if (id === entry.id && commandId !== reducerId) {
+          this.optimisticOutboxEntryIds.delete(commandId);
+          this.optimisticReducerIds.delete(commandId);
+          this.localReadVersions.delete(commandId);
+        }
+        if (entry.dependencies) this.localReadVersions.set(reducerId, this.localReadStamp(entry.dependencies));
         this.optimisticOutboxEntryIds.set(reducerId, entry.id);
         this.replacingLocal = true;
-        try { this.addOptimisticReducer(reducerId, patches); }
+        try {
+          if (sharedEntries.some(previous => previous.id === entry.id && previous.idempotencyKey !== reducerId)) {
+            this.replaceLocalPredictions(sharedEntries.filter(previous => previous.state !== "committed").map(previous => previous.id === entry.id
+              ? { commandId: reducerId, patches }
+              : { commandId: previous.idempotencyKey, patches: previous.patches ?? [] }));
+            if (patches.length) this.optimisticReducerIds.add(reducerId);
+          } else this.addOptimisticReducer(reducerId, patches);
+        }
         finally { this.replacingLocal = false; }
         if (!transaction) {
           this.reportLocalFallback(ref.path, reducerId, "call", fallback);
@@ -1665,6 +1724,7 @@ export class GonvexClient {
   }
 
   private applyAuth(auth: GonvexClientAuth) {
+    this.flushTelemetry();
     if (this.publicTenant && (auth.token || auth.fetchToken || auth.identity || auth.tenant !== undefined && auth.tenant !== this.publicTenant || auth.project !== undefined && auth.project !== this.auth.project)) {
       throw new Error("Public connection scope is fixed; create another client to sign in or change tenants");
     }
@@ -1720,6 +1780,7 @@ export class GonvexClient {
     if (this.updateRequired) return;
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
 
+    this.flushTelemetry();
     const isReconnect = this.socket !== undefined;
     this.manuallyClosed = false;
     const generation = ++this.socketGeneration;
@@ -1731,6 +1792,7 @@ export class GonvexClient {
     }
     const socket = new WebSocket(transportUrl);
     this.socket = socket;
+    this.serverCapabilities = {};
     socket.addEventListener("open", () => {
       if (this.socket !== socket) return;
       if (this.reconnectTimer) {
@@ -1750,6 +1812,7 @@ export class GonvexClient {
     });
     socket.addEventListener("close", () => {
       if (this.socket !== socket || this.manuallyClosed) return;
+      this.flushTelemetry();
       this.isWebSocketConnected = false;
       this.replica.setFreshness("offline");
       if (this.localSessionStateValue === "authenticated") this.setLocalSessionState("restored");
@@ -1788,6 +1851,10 @@ export class GonvexClient {
       }
       if (message.type === "session.ready") {
         this.serverCapabilities = message.capabilities ?? {};
+        if (this.controlOnly) {
+          this.flushPendingMessages();
+          return;
+        }
         if (!message.replica) {
           if (this.hasControlPlaneWork() || (!!this.auth.token && !this.auth.tenant)) {
             this.flushPendingMessages();
@@ -1921,15 +1988,15 @@ export class GonvexClient {
           }
           this.authRetriedAfterError = false;
           this.authRefreshedToken = undefined;
-          const directive = replicaDirectiveFromAuthResult(message.result);
-          const localIdentity = localIdentityFromAuthResult(message.result);
+          const directive = this.controlOnly ? undefined : replicaDirectiveFromAuthResult(message.result);
+          const localIdentity = this.controlOnly ? undefined : localIdentityFromAuthResult(message.result);
           if (localIdentity) {
             this.localIdentity = localIdentity;
             void this.localExecutor?.ready.catch(() => undefined);
           }
           if (!directive) {
             this.authInFlight = false;
-            if (!this.auth.tenant || this.publicTenant) {
+            if (this.controlOnly || !this.auth.tenant || this.publicTenant) {
               this.resumeQuerySubscriptions(reauthenticatedSameSocket);
               this.settleManagedAuthAttempt(message.id);
             } else {
@@ -2086,6 +2153,8 @@ export class GonvexClient {
   }
 
   close() {
+    this.flushTelemetry();
+    this.unsubscribeTelemetryLifecycle?.();
     this.manuallyClosed = true;
     this.outboxScopeGeneration += 1;
     this.setLocalSessionState("unavailable");
@@ -2129,6 +2198,7 @@ export class GonvexClient {
       this.outboxDrainTimer = undefined;
     }
     this.unsubscribeOutbox();
+    this.reducerOutbox.dispose?.();
     this.unsubscribePeerOutbox?.();
     this.unsubscribePeerReplica?.();
     this.unsubscribeBrowserOnline?.();
@@ -2289,6 +2359,7 @@ export class GonvexClient {
 
   private async handleQueryMessage(subscription: QuerySubscription, message: ServerMessage, scope = this.replicaScope) {
       if (scope !== this.replicaScope || (subscription.scope !== undefined && subscription.scope !== scope)) return;
+      const serverResult = message.type === "query.result";
       const normalized = this.normalizeSubscriptionMessage(subscription, message);
       if (!normalized) return;
       message = normalized;
@@ -2303,7 +2374,7 @@ export class GonvexClient {
           outcome: "ok",
           clientReceivedAtMs: nowMs(),
           serverTrace: message.trace,
-        });
+        }, serverResult);
       }
       if (message.type === "query.error") {
         subscription.serverSettled = true;
@@ -2487,6 +2558,7 @@ export class GonvexClient {
   }
 
   private subscribeReplicaTransport<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue>(ref: FunctionReference<Args, Result>, args: Args = {} as Args, onMessage: ReplicaSubscriptionHandler, metadataOnly = false) {
+    if (this.controlOnly) throw new Error("Control connections cannot subscribe to Replica Collections");
     if (metadataOnly) this.replicaMetadataListeners.add(onMessage);
     this.connect();
     const key = querySubscriptionKey(ref, args);
@@ -3250,6 +3322,7 @@ export class GonvexClient {
   }
 
   private async activateReplicaDirective(directive: ReplicaDirective): Promise<void> {
+    if (this.controlOnly) return;
     if (
       directive.protocolVersion !== 1
       || !directive.visibilityScope.trim()
@@ -3408,6 +3481,7 @@ export class GonvexClient {
       // The running drain may already be past the entry this wake-up is for
       // (for example a short backoff timer firing before the drain returned).
       this.outboxDrainRequested = true;
+      this.outboxProgressWake?.();
       return;
     }
     if (this.manuallyClosed || !this.canSendReducerNow()) return;
@@ -3416,92 +3490,51 @@ export class GonvexClient {
     this.outboxDrainRequested = false;
     try {
       await this.coordinateOutbox("delivery", async () => {
-      if (this.manuallyClosed || drainScope !== this.outboxScope || !this.canSendReducerNow()) return;
-      if (this.sharedOutboxStore) await this.reducerOutbox.recoverInflight?.(drainScope);
-      while (!this.manuallyClosed && this.socket?.readyState === WebSocket.OPEN) {
-        const scope = this.outboxScope;
-        const entry = await this.inLocalLane(async () => {
-          const next = await this.reducerOutbox.nextReady(scope, Date.now());
-          // A concurrent discard (this or another tab) fences the entry; a
-          // refused transition means it must not be sent.
-          if (next && (await this.reducerOutbox.markInflight(next.id)) === false) return null;
-          return next;
-        });
-        if (entry === null) continue;
-        if (!entry) {
-          await this.scheduleNextOutboxAttempt(scope);
-          return;
-        }
-        if (scope !== this.outboxScope) return;
-        if (this.directOutboxReducerIds.has(entry.idempotencyKey)) {
-          // Scope recovery may observe an inflight row created by this live
-          // process and reset it to pending under the assumption that a prior
-          // process crashed. The foreground call still owns that command ID.
-          // Restore the durable marker and wait for its real result instead of
-          // registering a second response handler for the same command.
-          await this.reducerOutbox.markInflight(entry.id);
-          return;
-        }
-        if (!this.canSendReducerNow()) {
-          await this.reducerOutbox.markPending(entry.id);
-          return;
-        }
-        if ((await this.reducerOutbox.markInflight(entry.id)) === false) continue;
-        if (scope !== this.outboxScope) return;
-        if (!this.canSendReducerNow()) {
-          await this.reducerOutbox.markPending(entry.id);
-          return;
-        }
+        if (this.manuallyClosed || drainScope !== this.outboxScope || !this.canSendReducerNow()) return;
+        if (this.sharedOutboxStore) await this.reducerOutbox.recoverInflight?.(drainScope);
+        let active = 0, generation = 0, stopped = false;
+        let deliveryFailure: unknown;
+        let wake: (() => void) | undefined;
+        const deliveries = new Set<Promise<void>>();
+        const signal = () => { generation += 1; wake?.(); wake = undefined; };
+        const waitForProgress = (observed: number) => generation !== observed ? Promise.resolve() : new Promise<void>(resolve => { wake = resolve; });
+        this.outboxProgressWake = signal;
         try {
-          await this.call(
-            "reducer",
-            { kind: "reducer", path: entry.path, receiptPath: entry.receiptPath, ...(entry.localExecution ? { artifactHash: entry.localExecution.artifactHash, intentEntropy: entry.localExecution.intentEntropy } : {}) },
-            entry.args as JsonValue,
-            this.timeouts.reducerTimeoutMs,
-            entry.idempotencyKey,
-            entry.idempotencyKey,
-          );
-          this.unauthenticatedRetries = 0;
-          await this.reducerOutbox.markCommitted(entry.id);
-          if (entry.localExecution && this.localExecutor) {
-            await this.inLocalLane(async () => {
-              await this.reducerOutbox.ack(entry.id);
-              if (scope === this.outboxScope) await this.rebaseLocalEntries();
+          while (!this.manuallyClosed && drainScope === this.outboxScope && this.canSendReducerNow() && !stopped) {
+            const observed = generation;
+            const capacity = 8 - active;
+            if (capacity === 0) { await waitForProgress(observed); continue; }
+            const scope = this.outboxScope;
+            const entries = await this.inLocalLane(async () => {
+              const candidates = (this.reducerOutbox.readyBatch
+                ? await this.reducerOutbox.readyBatch(scope, Date.now(), capacity)
+                : readyIntents(await this.reducerOutbox.list(scope), Date.now(), capacity))
+                .filter(entry => !this.directOutboxReducerIds.has(entry.idempotencyKey));
+              if (this.reducerOutbox.markInflightMany) return this.reducerOutbox.markInflightMany(candidates.map(entry => entry.id));
+              const admitted: ReducerOutboxEntry[] = [];
+              for (const entry of candidates) if ((await this.reducerOutbox.markInflight(entry.id)) !== false) admitted.push(entry);
+              return admitted;
             });
-          } else if ((entry.patches?.length ?? 0) > 0) {
-            await this.settleOptimisticReducer(entry.idempotencyKey);
-          } else {
-            await this.ackOptimisticReducer(entry.idempotencyKey, entry.id);
-          }
-        } catch (error) {
-          const disposition = deliveryErrorClass(error);
-          if (disposition === "rejected") {
-            // Keep today's rollback and rebase, but record the rejection
-            // durably instead of deleting the intent without a trace.
-            if (entry.localExecution && this.localExecutor) {
-              await this.inLocalLane(async () => {
-                await this.reducerOutbox.reject(entry.id, reducerErrorMessage(error));
-                if (scope === this.outboxScope) {
-                  await this.rebaseLocalEntries(true);
-                  this.reportLocalRejection(entry.idempotencyKey, entry.path, error);
-                }
-              });
-            } else {
-              this.optimisticReducerIds.delete(entry.idempotencyKey);
-              this.optimisticOutboxEntryIds.delete(entry.idempotencyKey);
-              this.replica.rejectCommand(entry.idempotencyKey);
-              await this.reducerOutbox.reject(entry.id, reducerErrorMessage(error));
-              if (scope === this.outboxScope) this.reportLocalRejection(entry.idempotencyKey, entry.path, error);
+            if (entries.length === 0) {
+              if (active > 0) { await waitForProgress(observed); continue; }
+              await this.scheduleNextOutboxAttempt(scope);
+              break;
             }
-            continue;
+            if (scope !== this.outboxScope || !this.canSendReducerNow()) {
+              for (const entry of entries) await this.reducerOutbox.markPending(entry.id);
+              break;
+            }
+            active += entries.length;
+            const delivery = this.settleOutboxBatch(entries, scope, (count, stop) => {
+              active -= count; stopped ||= stop; signal();
+            }).then(() => undefined, error => { deliveryFailure = error; stopped = true; }).finally(() => { deliveries.delete(delivery); signal(); });
+            deliveries.add(delivery);
           }
-          const outcome = await this.recordDeliveryFailure(entry, error, disposition);
-          // A parked intent keeps its prediction but no longer blocks the
-          // chain; later intents proceed and the server validates them.
-          if (outcome === "parked") continue;
-          return;
+        } finally {
+          await Promise.all(deliveries);
+          this.outboxProgressWake = undefined;
         }
-      }
+        if (deliveryFailure !== undefined) throw deliveryFailure;
       });
     } finally {
       this.drainingOutbox = false;
@@ -3512,6 +3545,108 @@ export class GonvexClient {
         void this.drainOutbox();
       }
     }
+  }
+
+  private async settleOutboxBatch(entries: ReducerOutboxEntry[], scope: string, progress: (count: number, stop: boolean) => void): Promise<boolean> {
+    const calls = this.deliverOutboxBatch(entries);
+    let stop = false;
+    const completed: Array<{ entry: ReducerOutboxEntry; outcome: PromiseSettledResult<unknown> }> = [];
+    let scheduled = false;
+    let settlements = Promise.resolve();
+    const enqueue = (entry: ReducerOutboxEntry, outcome: PromiseSettledResult<unknown>) => {
+      completed.push({ entry, outcome });
+      if (scheduled) return;
+      scheduled = true;
+      settlements = settlements.then(async () => {
+        // Coalesce a burst of per-item frames without waiting for a slow sibling.
+        await new Promise(resolve => setTimeout(resolve, 0));
+        scheduled = false;
+        const group = completed.splice(0);
+        const entries = group.map(item => item.entry);
+        const outcomes = group.map(item => item.outcome);
+        const succeeded = entries.filter((_, index) => outcomes[index]!.status === "fulfilled");
+        if (this.reducerOutbox.markCommittedMany) await this.reducerOutbox.markCommittedMany(succeeded.map(entry => entry.id));
+        else for (const entry of succeeded) await this.reducerOutbox.markCommitted(entry.id);
+        const localIds = this.localExecutor ? succeeded.filter(entry => entry.localExecution).map(entry => entry.id) : [];
+        if (localIds.length > 0) await this.inLocalLane(async () => {
+          if (this.reducerOutbox.ackMany) await this.reducerOutbox.ackMany(localIds);
+          else for (const id of localIds) await this.reducerOutbox.ack(id);
+        });
+        for (let index = 0; index < entries.length; index += 1) {
+          const entry = entries[index]!;
+          const outcome = outcomes[index]!;
+          try {
+            if (outcome.status === "rejected") throw outcome.reason;
+            this.unauthenticatedRetries = 0;
+            if (entry.localExecution && this.localExecutor) continue;
+            if ((entry.patches?.length ?? 0) > 0) {
+              await this.settleOptimisticReducer(entry.idempotencyKey);
+            } else {
+              await this.ackOptimisticReducer(entry.idempotencyKey, entry.id);
+            }
+          } catch (error) {
+            const disposition = deliveryErrorClass(error);
+            if (disposition === "rejected") {
+              // Keep today's rollback and rebase, but record the rejection
+              // durably instead of deleting the intent without a trace.
+              if (entry.localExecution && this.localExecutor) {
+                await this.inLocalLane(async () => {
+                  await this.reducerOutbox.reject(entry.id, reducerErrorMessage(error));
+                  if (scope === this.outboxScope) {
+                    await this.rebaseLocalEntries(true);
+                    this.reportLocalRejection(entry.idempotencyKey, entry.path, error);
+                  }
+                });
+              } else {
+                this.optimisticReducerIds.delete(entry.idempotencyKey);
+                this.optimisticOutboxEntryIds.delete(entry.idempotencyKey);
+                this.replica.rejectCommand(entry.idempotencyKey);
+                await this.reducerOutbox.reject(entry.id, reducerErrorMessage(error));
+                if (scope === this.outboxScope) this.reportLocalRejection(entry.idempotencyKey, entry.path, error);
+              }
+              continue;
+            }
+            const outcome = await this.recordDeliveryFailure(entry, error, disposition);
+            if (outcome === "update_required" || disposition === "unauthenticated" || disposition === "network") stop = true;
+            // A backed-off intent blocks only its causal dependents.
+          }
+        }
+        progress(entries.length, stop);
+      });
+      void settlements.catch(() => undefined);
+    };
+    await Promise.all(calls.map((call, index) => call.then(
+      value => enqueue(entries[index]!, { status: "fulfilled", value }),
+      reason => enqueue(entries[index]!, { status: "rejected", reason }),
+    )));
+    await settlements;
+    return stop;
+  }
+
+  private deliverOutboxBatch(entries: ReducerOutboxEntry[]): Promise<unknown>[] {
+    if (this.serverCapabilities.reducerBatch !== 1) {
+      return entries.map(entry => this.call(
+        "reducer",
+        { kind: "reducer", path: entry.path, receiptPath: entry.receiptPath, ...(entry.localExecution ? { artifactHash: entry.localExecution.artifactHash, intentEntropy: entry.localExecution.intentEntropy } : {}) },
+        entry.args as JsonValue, this.timeouts.reducerTimeoutMs, entry.idempotencyKey, entry.idempotencyKey,
+      ));
+    }
+    const registered = entries.map(entry => this.registerCall("reducer", { kind: "reducer", path: entry.path }, entry.args as JsonValue, this.timeouts.reducerTimeoutMs, entry.idempotencyKey, entry.idempotencyKey));
+    // The caller attaches per-item handlers in the same turn as registration.
+    const outcomes = registered.map(entry => entry.promise);
+    this.send({
+      type: "reducer.callMany",
+      calls: entries.map((entry, index) => ({
+        id: entry.idempotencyKey, path: entry.path, args: entry.args as JsonValue,
+        idempotencyKey: entry.idempotencyKey,
+        trace: { clientSentAtMs: registered[index]!.clientSentAtMs },
+        ...(entry.receiptPath ? { receiptPath: entry.receiptPath } : {}),
+        ...(this.clientContract ? { clientContract: this.clientContract.version } : {}),
+        ...(entry.localExecution ? { artifactHash: entry.localExecution.artifactHash, intentEntropy: entry.localExecution.intentEntropy } : {}),
+      })),
+    });
+    this.notifyConnectionState();
+    return outcomes;
   }
 
   /**
@@ -4304,7 +4439,7 @@ export class GonvexClient {
     });
   }
 
-  private recordTelemetry(event: GonvexTelemetryEvent) {
+  private recordTelemetry(event: GonvexTelemetryEvent, report = true) {
     this.emitTelemetry(event);
     if (event.outcome === "error") {
       this.errorReporter?.captureException(new Error(event.error || `${event.type} failed`), {
@@ -4312,7 +4447,7 @@ export class GonvexClient {
         serverTrace: event.serverTrace,
       });
     }
-    if (this.telemetryEnabled) {
+    if (this.telemetryEnabled && report) {
       this.reportTelemetry(event);
     }
   }
@@ -4324,7 +4459,7 @@ export class GonvexClient {
   }
 
   private reportTelemetry(event: GonvexTelemetryEvent) {
-    this.send({
+    const frame: Extract<ClientMessage, { type: "telemetry.event" }> = {
       type: "telemetry.event",
       id: event.id,
       kind: event.type,
@@ -4336,8 +4471,31 @@ export class GonvexClient {
       clientReceivedAtMs: event.clientReceivedAtMs,
       clientDurationMs: event.clientDurationMs,
       trace: event.serverTrace,
-      device: event.device ?? browserTelemetryInfo(),
+      device: event.device,
+    };
+    if (this.serverCapabilities.telemetryBatch !== 1 || this.authInFlight) {
+      this.send({ ...frame, device: event.device ?? this.telemetryDevice });
+      return;
+    }
+    // Performance telemetry is best effort; never retain it across socket scopes.
+    if (this.socket?.readyState !== WebSocket.OPEN) return;
+    const { type: _, ...entry } = frame;
+    this.telemetryEvents.push({
+      ...entry,
+      trace: entry.trace ? { ...entry.trace } : undefined,
+      device: entry.device ? { ...entry.device } : undefined,
     });
+    if (this.telemetryEvents.length >= 50) this.flushTelemetry();
+    else this.telemetryTimer ??= setTimeout(() => this.flushTelemetry(), 5_000);
+  }
+
+  private flushTelemetry() {
+    if (this.telemetryTimer) clearTimeout(this.telemetryTimer);
+    this.telemetryTimer = undefined;
+    const events = this.telemetryEvents.splice(0);
+    if (events.length && this.socket?.readyState === WebSocket.OPEN) {
+      this.sendNow({ type: "telemetry.batch", events });
+    }
   }
 
   /** Send a bounded native error-telemetry frame using authenticated connection attribution. */
@@ -4392,6 +4550,7 @@ export class GonvexClient {
   }
 
   private sendAuth(force: boolean, options: { useFetcher?: boolean } = {}) {
+    this.flushTelemetry();
     if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project && !this.auth.fetchToken) return;
     this.authInFlight = true;
     this.authRetriedAfterError = false;
@@ -4416,10 +4575,10 @@ export class GonvexClient {
       token: this.auth.token,
       project: this.auth.project,
       tenant: this.auth.tenant,
-      controlOnly: !this.auth.tenant,
+      controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
-      device: browserTelemetryInfo(),
-		capabilities: { replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1 },
+      device: this.telemetryDevice,
+		capabilities: { tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1 },
     });
   }
 
@@ -5184,5 +5343,13 @@ function deferredLocalExecutor(create: () => LocalExecutor): LocalExecutor {
     },
     replay: async (...args) => start().replay(...args),
     close: () => { closed = true; executor?.close(); },
+  };
+}
+
+function localIntentDependencies(transaction: LocalTransactionResult): IntentDependencies {
+  return {
+    reads: transaction.readRows ?? [],
+    scans: transaction.scanTables ?? transaction.readTables,
+    writes: transaction.patches.map(patch => ({ entity: patch.entity, rowId: patch.rowId })),
   };
 }

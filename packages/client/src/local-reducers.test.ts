@@ -43,6 +43,22 @@ const createTask = reducer({
   },
 });
 const createRef: FunctionReference = { kind: "reducer", path: "createTask", offline: { mode: "allowed" }, localExecution: 1 };
+const setCount = reducer({
+  coalesce: { mode: "latest", key: ["taskId"] },
+  args: schema.object({ taskId: schema.string(), value: schema.number() }), result: schema.number(),
+  run: async (ctx, args: { taskId: string; value: number }) => { await ctx.db.update("tasks", args.taskId, { count: args.value }); return args.value; },
+});
+const setCountRef: FunctionReference = { kind: "reducer", path: "setCount", localExecution: 1, offline: { mode: "allowed" } };
+const conditionalIncrement = reducer({
+  args: schema.object({}), result: schema.number(),
+  run: async ctx => {
+    const [gate] = await selectRows<any>(ctx.db, { table: "tasks", where: { column: "_id", op: "eq", value: "t2" } });
+    if (!gate?.count) return 0;
+    const [row] = await selectRows<any>(ctx.db, { table: "tasks", where: { column: "_id", op: "eq", value: "t1" } });
+    await ctx.db.update("tasks", "t1", { count: row.count + 1 });
+    return row.count + 1;
+  },
+});
 const clients: GonvexClient[] = [];
 const hosts: LocalReducerRuntime[] = [];
 
@@ -57,7 +73,7 @@ async function fixture() {
     liveQueries: { [collectionKey]: { signature: collectionKey, kind: "replica", entity: "tasks", key: "_id", ids: ["t1"], completeness: "complete", source: "server" } },
   }, "visible");
   const create = (store = createKvOutboxStore(kv), clientContract?: { version: number; offlineMaxAgeMs: number | null }, retry?: OutboxRetryOptions) => {
-    const host = createPortableReducer({schema: {tasks: {key: "_id",columns: {_id: {type: "text", nullable: false},count: {type: "bigint",nullable: true},statusId: {type: "text",nullable: true}}}}, reducers: {increment, createTask},artifactHash: "artifact"});
+    const host = createPortableReducer({schema: {tasks: {key: "_id",columns: {_id: {type: "text", nullable: false},count: {type: "bigint",nullable: true},statusId: {type: "text",nullable: true}}}}, reducers: {increment, createTask, setCount, conditionalIncrement},artifactHash: "artifact"});
     const client = new GonvexClient(url, {
       clientContract,
       project: "project", tenant: "tenant", identity: { sub: "account", iss: "issuer" },
@@ -69,11 +85,11 @@ async function fixture() {
   };
   return { create, kv, storage };
 }
-async function connect(client: GonvexClient, watermark = false) {
+async function connect(client: GonvexClient, watermark = false, batch = false) {
   client.connect();
   const socket = Socket.all.at(-1)!;
   socket.open();
-  if (watermark) socket.receive({ type: "session.ready", capabilities: { replicaWatermark: 1 }, replica: directive });
+  if (watermark || batch) socket.receive({ type: "session.ready", capabilities: { ...(watermark ? { replicaWatermark: 1 } : {}), ...(batch ? { reducerBatch: 1 } : {}) }, replica: directive });
   await vi.waitFor(() => expect(socket.sent.some((message) => message.type === "auth")).toBe(true));
   const auth = socket.sent.find((message) => message.type === "auth");
   socket.receive({ type: "auth.result", id: auth.id, result: { replica: directive, localIdentity: identity, artifactHash: "artifact", accountId: "account", tenantId: "tenant" } });
@@ -462,7 +478,7 @@ it("runs a newly admitted edit before replaying the rest of a pending backlog", 
     if (order.length === 1) { entered(); await gate; }
     return original(...args);
   });
-  const replay = (client as any).inLocalLane(() => (client as any).rebaseLocalEntries());
+  const replay = (client as any).inLocalLane(() => (client as any).rebaseLocalEntries(true));
   await started;
   const edit = client.reducer(ref, { amount: 10 });
   await new Promise(resolve => setTimeout(resolve, 0));
@@ -1020,10 +1036,10 @@ describe("per-row intent status", () => {
     });
     const socket = await connect(client);
     const calls = () => socket.sent.filter((message) => message.type === "reducer.call");
-    await vi.waitFor(() => expect(calls()).toHaveLength(1));
+    await vi.waitFor(() => expect(calls()).toHaveLength(2));
     socket.receive({ type: "reducer.error", id: calls()[0].id, error: "pool timed out", class: "transient", retryable: true });
     await vi.waitFor(() => expect(client.entityIntentStatus("tasks", createdId)).toBe("failed"));
-    // The unrelated update proceeds past the parked create and is still syncing.
+    // The unrelated update is already inflight and remains syncing.
     await vi.waitFor(() => expect(calls()).toHaveLength(2));
     expect(client.entityIntentStatus("tasks", "t1")).toBe("syncing");
     socket.receive({ type: "reducer.result", id: calls()[1].id, result: 1, originCommandId: calls()[1].id });
@@ -1116,4 +1132,119 @@ describe("local dependency residency", () => {
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(subscribe.mock.calls.map(call => (call[0] as FunctionReference).path).sort()).toEqual(expected);
   });
+});
+
+
+it('batches independent local intents while a transient failure blocks only its dependent', async () => {
+  const { create, kv } = await fixture(); const client = create(sharedStores(kv)(), { version: 1, offlineMaxAgeMs: null });
+  await client.reducer(ref, {}); await client.reducer(ref, {}); await client.reducer(createRef, {});
+  const legacyStore = createKvOutboxStore(kv);
+  const [migrated] = await legacyStore.load();
+  await legacyStore.put({ ...migrated!, receiptPath: 'old.increment' });
+  const socket = await connect(client, false, true);
+  const batches = () => socket.sent.filter(message => message.type === 'reducer.callMany');
+  await vi.waitFor(() => expect(batches()).toHaveLength(1));
+  expect(batches()[0].calls.map((call: any) => call.path)).toEqual(['increment', 'createTask']);
+  for (const call of batches()[0].calls) {
+    expect(call.idempotencyKey).toBe(call.id); expect(call.artifactHash).toBe('artifact'); expect(call.clientContract).toBe(1); expect(call.intentEntropy).toMatch(/^[0-9a-f]{64}$/);
+  }
+  const [head, independent] = batches()[0].calls;
+  expect(head.receiptPath).toBe('old.increment');
+  socket.receive({ type: 'reducer.error', id: head.id, error: 'pool timed out', class: 'transient', retryable: true });
+  socket.receive({ type: 'reducer.result', id: independent.id, result: 'created', originCommandId: independent.id });
+  await vi.waitFor(async () => expect((await createKvOutboxStore(kv).load()).find(entry => entry.idempotencyKey === head.id)?.lastErrorClass).toBe('transient'));
+  await client.reducer(createRef, {});
+  await vi.waitFor(() => expect(batches()).toHaveLength(2));
+  expect(batches()[1].calls.map((call: any) => call.path)).toEqual(['createTask']);
+  expect(socket.sent.filter(message => message.type === 'reducer.call')).toHaveLength(0);
+});
+
+it('replays only reads affected by an authoritative row change and their dependents', async () => {
+  const { create } = await fixture(); const client = create();
+  await client.reducer(ref, {}); await client.reducer(ref, {}); await client.reducer(createRef, {});
+  const execute = vi.spyOn(client as any, 'executeLocal');
+  const replica = (client as any).replica;
+  await replica.applyTransaction({ cursor: { epoch: 'epoch', revision: 1 }, changes: [{ entity: 'tasks', id: 't1', operation: 'update', newValue: { _id: 't1', count: 10, statusId: 'todo' } }] });
+  await vi.waitFor(() => expect(client.localReplica.entity('tasks', 't1')?.count).toBe(12));
+  expect(execute.mock.calls.map(call => call[0])).toEqual(['increment', 'increment']);
+  execute.mockClear();
+  await replica.applyTransaction({ cursor: { epoch: 'epoch', revision: 2 }, changes: [{ entity: 'tasks', id: 'unrelated', operation: 'insert', newValue: { _id: 'unrelated', count: 0, statusId: 'todo' } }] });
+  await (client as any).inLocalLane(() => (client as any).rebaseLocalEntries());
+  expect(execute).not.toHaveBeenCalled();
+});
+
+it('replays old dependents when a changed branch stops writing their row', async () => {
+  const { create, storage } = await fixture();
+  const snapshot = (await storage.load('visible'))!;
+  snapshot.entities.tasks!.t2 = { _id: 't2', count: 1, statusId: 'todo' };
+  snapshot.liveQueries[collectionKey]!.ids.push('t2');
+  await storage.replaceSnapshot(snapshot, 'visible');
+  const client = create();
+  const replica = (client as any).replica;
+  await client.reducer({ ...ref, path: 'conditionalIncrement' }, {});
+  await client.reducer(ref, {});
+  expect(client.localReplica.entity('tasks', 't1')?.count).toBe(2);
+  const execute = vi.spyOn(client as any, 'executeLocal');
+  await replica.applyTransaction({ cursor: { epoch: 'epoch', revision: 2 }, changes: [{ entity: 'tasks', id: 't2', operation: 'update', newValue: { _id: 't2', count: 0, statusId: 'todo' } }] });
+  await vi.waitFor(() => expect(client.localReplica.entity('tasks', 't1')?.count).toBe(1));
+  expect(execute.mock.calls.map(call => call[0])).toEqual(['conditionalIncrement', 'increment']);
+});
+
+it('delivers each independent intent once across two tabs sharing delivery ownership', async () => {
+  const { create, kv } = await fixture(); const stores = sharedStores(kv);
+  const first = create(stores()), second = create(stores());
+  await first.reducer(ref, {}); await second.reducer(createRef, {});
+  const a = await connect(first), b = await connect(second);
+  const calls = () => [a, b].flatMap(socket => socket.sent.filter(message => message.type === 'reducer.call'));
+  await vi.waitFor(() => expect(calls()).toHaveLength(2));
+  expect(new Set(calls().map(call => call.id)).size).toBe(2);
+  for (const socket of [a, b]) for (const call of socket.sent.filter(message => message.type === 'reducer.call')) socket.receive({ type: 'reducer.result', id: call.id, result: call.path === 'increment' ? 1 : 'created', originCommandId: call.id });
+  await vi.waitFor(async () => expect(await stores().load()).toEqual([]));
+  await Promise.all([(first as any).drainOutbox(), (second as any).drainOutbox()]);
+  expect(calls()).toHaveLength(2);
+});
+
+it('does not rewrite durable predictions when replay returns the same transaction', async () => {
+  const { create, kv } = await fixture(); const store = createKvOutboxStore(kv);
+  const put = vi.spyOn(store, 'put'); const client = create(store);
+  await client.reducer(ref, {}); put.mockClear();
+  const execute = vi.spyOn(client as any, 'executeLocal');
+  await (client as any).inLocalLane(() => (client as any).rebaseLocalEntries(true));
+  expect(execute).toHaveBeenCalledTimes(1); expect(put).not.toHaveBeenCalled();
+  expect(client.localReplica.entity('tasks', 't1')?.count).toBe(1);
+});
+
+
+it('publishes a coalesced overwrite atomically after persisting its replacement', async () => {
+  const { create, kv } = await fixture(); const base = createKvOutboxStore(kv);
+  const store: OutboxStore = { ...base, replacePending: async (id, draft) => {
+    const prior = (await base.load()).find(entry => entry.id === id);
+    if (!prior || prior.state !== 'pending' || prior.sentAt !== undefined) return undefined;
+    const next = { ...draft, id }; await base.put(next); return next;
+  } };
+  const client = create(store);
+  expect(await client.reducer(setCountRef, { taskId: 't1', value: 1 })).toBe(1);
+  const seen: unknown[] = [];
+  const unsubscribe = (client as any).replica.subscribe(() => { seen.push(client.localReplica.entity('tasks', 't1')?.count); });
+  expect(await client.reducer(setCountRef, { taskId: 't1', value: 2 })).toBe(2);
+  unsubscribe();
+  expect(seen).not.toContain(0); expect(seen.at(-1)).toBe(2);
+  expect(await base.load()).toMatchObject([{ args: { taskId: 't1', value: 2 }, coalesceKey: '["t1"]' }]);
+  expect(await base.load()).toHaveLength(1);
+});
+
+it('refills delivery slots before a slow independent call finishes', async () => {
+  const { create, kv } = await fixture(); const client = create();
+  for (let n = 0; n < 12; n++) await client.reducer(createRef, {});
+  const socket = await connect(client, false, true);
+  const batches = () => socket.sent.filter(message => message.type === 'reducer.callMany');
+  await vi.waitFor(() => expect(batches()).toHaveLength(1));
+  expect(batches()[0].calls).toHaveLength(8);
+  const slow = batches()[0].calls[0];
+  for (const call of batches()[0].calls.slice(1)) socket.receive({ type: 'reducer.result', id: call.id, result: 'created', originCommandId: call.id });
+  await vi.waitFor(() => expect(batches()).toHaveLength(2));
+  expect(batches()[1].calls).toHaveLength(4);
+  expect((await createKvOutboxStore(kv).load()).find(entry => entry.idempotencyKey === slow.id)?.state).toBe('inflight');
+  for (const call of [slow, ...batches()[1].calls]) socket.receive({ type: 'reducer.result', id: call.id, result: 'created', originCommandId: call.id });
+  await vi.waitFor(async () => expect(await createKvOutboxStore(kv).load()).toEqual([]));
 });

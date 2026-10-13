@@ -38,11 +38,15 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
   const locks = globalThis.navigator?.locks;
   const channel = typeof BroadcastChannel === "function" ? new BroadcastChannel(lockName) : undefined;
   const peers=new Set<()=>void>();
+  const invalidations = new Set<() => void>();
+  const invalidate = () => { for (const listener of invalidations) listener(); };
+  let fenceDepth = 0;
+  const fencedOperations = new Set<Promise<unknown>>();
   let closed = false;
   const requireUpgrade = (error: Error) => { options.onRequired?.(error); return error; };
   if (channel) channel.onmessage = event => {
-    if(event.data?.type==='outbox') { for(const listener of peers) listener(); }
-    else if (event.data?.version !== options.contract.version) requireUpgrade(new Error("Another tab upgraded the application. Reload to continue."));
+    if(event.data?.type==='outbox') { invalidate(); for(const listener of peers) listener(); }
+    else if (event.data?.version !== options.contract.version) { invalidate(); requireUpgrade(new Error("Another tab upgraded the application. Reload to continue.")); }
   };
   const ready = (async () => {
     if (!locks) throw new Error("Safe offline upgrades require browser Web Locks support");
@@ -94,10 +98,15 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
   const fenced = async <T>(run: () => Promise<T>): Promise<T> => {
     await ready;
     if (closed) throw new Error("Application storage is closed");
+    if (fenceDepth > 0) {
+      const operation = run();
+      fencedOperations.add(operation);
+      try { return await operation; } finally { fencedOperations.delete(operation); }
+    }
     return locks!.request(lockName, { mode: "shared" }, run);
   };
   const guarded = <T>(run: () => Promise<T>): Promise<T> => fenced(async () => {
-    checkContract(await meta.state.get("contract"));
+    if (fenceDepth === 0) checkContract(await meta.state.get("contract"));
     return run();
   });
   const reserveId = async () => {
@@ -126,9 +135,32 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
     store: {
       strictPersistence: true,
       shared:true,
-      coordinate:async (scope,lane,run)=>{
+      cacheShared: true,
+      subscribeInvalidation: listener => { invalidations.add(listener); return () => invalidations.delete(listener); },
+      coordinate: async (scope, lane, run) => {
         await ready;
-        return locks!.request(`${lockName}:${lane}:${scope}`,{mode:'exclusive'},run);
+        return locks!.request(`${lockName}:${lane}:${scope}`, { mode: 'exclusive' }, async () => {
+          // Reload once at ownership transfer. BroadcastChannel delivery can lag
+          // behind lock release, including writes from older SDK versions.
+          invalidate();
+          // Older tabs acquire the intent lane before each upgrade fence. Never
+          // hold an upgrade fence across network waits or another lane lock.
+          if (lane === 'delivery') return run();
+          if (fenceDepth > 0) {
+            const operation = run();
+            fencedOperations.add(operation);
+            try { return await operation; } finally { fencedOperations.delete(operation); }
+          }
+          return locks!.request(lockName, { mode: 'shared' }, async () => {
+            checkContract(await meta.state.get('contract'));
+            fenceDepth += 1;
+            try { return await run(); } finally {
+              // Concurrent UI reads must finish before releasing the migration fence.
+              while (fencedOperations.size > 0) await Promise.allSettled([...fencedOperations]);
+              fenceDepth -= 1;
+            }
+          });
+        });
       },
       subscribePeer:listener=>{peers.add(listener);return()=>{peers.delete(listener);};},
       append: draft => fenced(async () => {
@@ -146,7 +178,7 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
         // The upgrade fence prevents contract changes during these reads.
         // Check it alongside the journal read, before exposing any entries.
         const [, entries] = await Promise.all([
-          meta.state.get('contract').then(checkContract),
+          fenceDepth ? Promise.resolve() : meta.state.get('contract').then(checkContract),
           scope ? queue.entries.where('scope').equals(scope).toArray() : queue.entries.toArray(),
         ]);
         return entries;
@@ -164,6 +196,32 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
         if(changed)channel?.postMessage({type:'outbox'});
         return updated;
       }),
+      updateMany: (ids, change) => guarded(async () => {
+        const entries = await queue.transaction('rw', queue.entries, async () => {
+          const prior = await queue.entries.bulkGet(ids);
+          const next = prior.filter((entry): entry is ReducerOutboxEntry => entry !== undefined).map(entry => {
+            const updated = change(entry);
+            if (updated.id !== entry.id || updated.scope !== entry.scope || updated.idempotencyKey !== entry.idempotencyKey) throw new Error('Outbox identity cannot change');
+            return updated;
+          });
+          await queue.entries.bulkPut(next);
+          return next;
+        });
+        channel?.postMessage({ type: 'outbox' });
+        return entries;
+      }),
+      replacePending: (id, draft) => guarded(async () => {
+        const entry = await queue.transaction('rw', queue.entries, async () => {
+          const prior = await queue.entries.get(id);
+          if (!prior || prior.scope !== draft.scope || prior.path !== draft.path || prior.coalesceKey !== draft.coalesceKey || prior.state !== 'pending' || prior.sentAt !== undefined || prior.attempts || prior.lastError) return undefined;
+          const next = { ...draft, id };
+          await queue.entries.put(next);
+          return next;
+        });
+        if (entry) channel?.postMessage({ type: 'outbox' });
+        return entry;
+      }),
+      deleteMany: ids => guarded(async () => { await queue.entries.bulkDelete(ids); channel?.postMessage({ type: 'outbox' }); }),
       delete: id => guarded(async()=>{await queue.entries.delete(id);channel?.postMessage({type:'outbox'});}),
       clear: scope => guarded(async()=>{if(scope)await queue.entries.where('scope').equals(scope).delete();else await queue.entries.clear();channel?.postMessage({type:'outbox'});}),
     },

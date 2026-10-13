@@ -316,6 +316,9 @@ export class LocalReplica implements LocalReplicaView {
   private freshnessValue: ReplicaFreshness = "verifying";
   private versionValue = 0;
   private executionVersionValue = 0;
+  private executionVersionFloor = 0;
+  private readonly executionEntityVersions = new Map<string, number>();
+  private readonly executionRowVersions = new Map<string, number>();
   private entityVersionClock = 0;
   private entityVersionFloor = 0;
   private readonly entityVersions = new Map<string, number>();
@@ -610,6 +613,9 @@ export class LocalReplica implements LocalReplicaView {
 
   /** Changes to the authoritative execution snapshot, excluding UI metadata and predictions. */
   executionVersion() { return this.executionVersionValue; }
+  executionReadVersion(entity: string, rowId?: string) {
+    return (rowId === undefined ? this.executionEntityVersions.get(entity) : this.executionRowVersions.get(JSON.stringify([entity, rowId]))) ?? this.executionVersionFloor;
+  }
   entityVersion(entity: string, id?: string) { return id === undefined ? this.entityVersions.get(entity) ?? this.entityVersionFloor : this.rowVersion(entity, id); }
   rowVersion(entity: string, id: string) { return this.rowVersions.get(`${entity}\0${id}`) ?? this.entityVersionFloor; }
 
@@ -1471,7 +1477,17 @@ export class LocalReplica implements LocalReplicaView {
   private notify(executionChanged = false) {
     if (this.disposed) return;
     if(executionChanged)this.trimResidentRows();
-    if (executionChanged) this.executionVersionValue += 1;
+    if (executionChanged) {
+      this.executionVersionValue += 1;
+      if (this.invalidateSubscriptions) {
+        this.executionVersionFloor = this.executionVersionValue;
+        this.executionEntityVersions.clear();
+        this.executionRowVersions.clear();
+      } else for (const [entity, ids] of this.changedEntities) {
+        this.executionEntityVersions.set(entity, this.executionVersionValue);
+        for (const id of ids) this.executionRowVersions.set(JSON.stringify([entity, id]), this.executionVersionValue);
+      }
+    }
     this.versionValue += 1;
     const callbacks = new Map<(changedIDs?: ReadonlySet<string>) => void, ReadonlySet<string> | undefined>();
     for (const listener of this.listeners) callbacks.set(listener, undefined);
