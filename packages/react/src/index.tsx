@@ -18,6 +18,8 @@ export type AuthState = {
   isAuthenticated: boolean;
   /** Freshness of the canonical Gonvex session during provider rotation. */
   sessionState?: "loading" | "current" | "reconnecting" | "degraded" | "signedOut";
+  /** True only after the active cached or authenticated replica is readable. */
+  isLocalSessionReady?: boolean;
   /** Terminal runtime rejection after one forced token refresh attempt. */
   authError?: Error | null;
   fetchAccessToken?: (args: { forceRefreshToken: boolean }) => Promise<string | null>;
@@ -267,14 +269,15 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   } | null>(null);
   if (!initialAuthRef.current) {
     const persisted = readAuthSession(storageKey);
-    const warmSession = props.externalAuth
-      ? reusableExternalAuthSession(
-          persisted,
-          initialTenantId,
-          props.externalAuth.provider,
-          hasExplicitInitialTenant,
-        )
-      : null;
+    const callback = new URL(window.location.href);
+    const hasAuthCallback = callback.pathname === callbackPath
+      && (callback.searchParams.has("code") || callback.searchParams.has("error"));
+    const warmSession = hasAuthCallback ? null : reusableExternalAuthSession(
+      persisted,
+      initialTenantId,
+      props.externalAuth?.provider ?? persisted?.account.provider ?? "",
+      hasExplicitInitialTenant,
+    );
     // A reload keeps developer mode only while this tab's stored grant
     // belongs to the same account and project and has not expired.
     const candidate = warmSession ?? persisted;
@@ -318,6 +321,12 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   const [developerMode, setDeveloperMode] = useState<GonvexDeveloperModeState>(
     () => initialAuth.developer ? publicDeveloperMode(initialAuth.developer) : { active: false },
   );
+  const subscribeLocalSession = useCallback((listener: () => void) =>
+    props.client.onLocalSessionChange?.(listener) ?? (() => undefined), [props.client]);
+  const readLocalSession = useCallback(() =>
+    props.client.localSessionState?.() ?? "unavailable", [props.client]);
+  const localSessionState = useReactSyncExternalStore(subscribeLocalSession, readLocalSession, readLocalSession);
+  const authInvalidationVersionRef = useRef(0);
   const sessionRef = useRef(session);
   const refreshRef = useRef<Promise<GonvexAuthSession | null> | null>(null);
   const developerModeRef = useRef<ActiveDeveloperMode | null>(initialAuth.developer);
@@ -378,7 +387,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     } else {
       if (persist) safeLocalStorageRemove(storageKey);
       if (installClientAuth) {
-        props.client.setAuth({ project: props.projectId, tenant: undefined, token: undefined, identity: undefined });
+        props.client.setAuth({ project: props.projectId, tenant: undefined, token: undefined, identity: undefined, fetchToken: undefined });
       }
       installedClientScopeRef.current = null;
     }
@@ -448,15 +457,23 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     installSession(current ? { ...current, activeTenantId } : null);
   }, [installSession, storageKey]);
 
-  useEffect(() => props.client.onAuthError((message) => {
+  useEffect(() => props.client.onAuthError((message, details) => {
     const developer = developerModeRef.current;
-    if (!developer) return;
+    if (!developer) {
+      if (!details?.definitive) return;
+      authInvalidationVersionRef.current += 1;
+      installSession(null);
+      setSessionState("signedOut");
+      setIsLoading(false);
+      setError(message || "Your session is no longer authorized. Please sign in again.");
+      return;
+    }
     restoreAccountSession();
     // A grant restored after a reload may already be gone (exited in another
     // tab, revoked, or expired server-side). Falling back to the account
     // session is the expected outcome there, not an error to surface.
     setError(developer.restoring ? null : message || "Developer mode ended because its authorization is no longer valid.");
-  }), [props.client, restoreAccountSession]);
+  }), [installSession, props.client, restoreAccountSession]);
 
   useEffect(() => props.client.onDeveloperCredential?.((token) => {
     // The runtime consumed the previous credential and issued a single-use
@@ -482,10 +499,11 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
 
   useEffect(() => {
     if (props.externalAuth) return;
+    const authInvalidationVersion = authInvalidationVersionRef.current;
     let cancelled = false;
     let bootstrap = authBootstrapPromises.get(storageKey);
     if (!bootstrap) {
-      bootstrap = bootstrapGonvexAuth({ callbackPath, client: props.client, pkceStorageKey, projectId: props.projectId, runtimeUrl, storageKey })
+      bootstrap = bootstrapGonvexAuth({ callbackPath, client: props.client, pkceStorageKey, projectId: props.projectId, runtimeUrl, storageKey, isCurrent: () => authInvalidationVersion === authInvalidationVersionRef.current })
         .finally(() => {
           // Keep the resolved promise briefly so a StrictMode remount attaches
           // to the same result instead of re-running a spent OAuth code.
@@ -498,7 +516,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       authBootstrapPromises.set(storageKey, bootstrap);
     }
     void bootstrap.then((next) => {
-      if (!cancelled) {
+      if (!cancelled && authInvalidationVersion === authInvalidationVersionRef.current) {
         installSession(next);
         setSessionState(next ? "current" : "signedOut");
       }
@@ -523,6 +541,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     // installed only after the trusted host verifies it and resolves Account.
     const unsubscribe = adapter.onIdTokenChanged((identity) => {
       const currentGeneration = ++generation;
+      const authInvalidationVersion = authInvalidationVersionRef.current;
       if (!identity) {
         // Gonvex owns the canonical application session after the external
         // provider proves identity. Firebase can report null transiently while
@@ -619,7 +638,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
         });
         return sessionFromNativeGrant(grant, current ?? undefined);
       }).then((next) => {
-        if (cancelled || currentGeneration !== generation) return;
+        if (cancelled || currentGeneration !== generation || authInvalidationVersion !== authInvalidationVersionRef.current) return;
         // A user can select a different tenant while the provider exchange is
         // still in flight. The returned access token is account-wide, but its
         // activeTenantId reflects the scope captured when the exchange began.
@@ -630,7 +649,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
         setSessionState("current");
         setError(null);
       }).catch((cause) => {
-        if (cancelled || currentGeneration !== generation) return;
+        if (cancelled || currentGeneration !== generation || authInvalidationVersion !== authInvalidationVersionRef.current) return;
         const latest = readAuthSession(storageKey);
         if (latest && attemptedRefreshToken && latest.refreshToken !== attemptedRefreshToken) {
           // A competing tab completed the single-use rotation first. Its
@@ -667,6 +686,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
 
   const refreshSession = useCallback(async (force = false) => {
     if (refreshRef.current) return refreshRef.current;
+    const authInvalidationVersion = authInvalidationVersionRef.current;
     let attemptedRefreshToken = "";
     const lockName = props.externalAuth
       ? `${storageKey}:external-session`
@@ -701,12 +721,13 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
           initialTenantId,
           hasExplicitInitialTenant,
         );
-        if (!next) return null;
+        if (!next || authInvalidationVersion !== authInvalidationVersionRef.current) return null;
         safeLocalStorageSet(storageKey, JSON.stringify(next));
         return next;
       }
       attemptedRefreshToken = current.refreshToken;
       const grant = await props.client.action(control.auth.refreshSession, { refreshToken: current.refreshToken });
+      if (authInvalidationVersion !== authInvalidationVersionRef.current) return null;
       const next = sessionFromNativeGrant(grant, current);
       // Persist the rotated token before releasing the cross-tab lock. The
       // next waiter must never read and reuse the just-consumed refresh token.
@@ -715,6 +736,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       setError(null);
       return next;
     }).then((next) => {
+      if (authInvalidationVersion !== authInvalidationVersionRef.current) return null;
       if (next) {
         setRefreshRetryAt(0);
         setError(null);
@@ -726,6 +748,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       setIsLoading(false);
       return next;
     }).catch((cause) => {
+      if (authInvalidationVersion !== authInvalidationVersionRef.current) return null;
       const latest = readAuthSession(storageKey);
       if (latest && attemptedRefreshToken && latest.refreshToken !== attemptedRefreshToken) {
         // Another tab completed the one permitted rotation while this request
@@ -848,6 +871,8 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   }, [installSession, props.client, props.externalAuth]);
 
   const signOut = useCallback(async (options?: { allDevices?: boolean }) => {
+    authInvalidationVersionRef.current += 1;
+    setSessionState("signedOut");
     const current = sessionRef.current;
     setError(null);
     // Start remote revocation while the authenticated socket is still
@@ -1097,7 +1122,8 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       && session.expiresAt > Date.now()
       && session.refreshExpiresAt > Date.now()
     ),
-    sessionState,
+    sessionState: localSessionState === "restored" ? "reconnecting" : sessionState,
+    isLocalSessionReady: localSessionState !== "unavailable",
     fetchAccessToken,
     account: session?.account ?? null,
     tenants: session?.tenants ?? [],
@@ -1117,7 +1143,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     developerMode,
     enterDeveloperMode,
     exitDeveloperMode,
-    }), [acceptInvitation, activeTenant, createTenant, developerMode, enterDeveloperMode, error, exitDeveloperMode, fetchAccessToken, handoffSessionTo, inviteMember, isLoading, refreshMemberships, revokeInvitation, session, sessionState, setActiveTenant, signIn, signInWithPassword, signInWithProvider, signOut]);
+    }), [acceptInvitation, activeTenant, createTenant, developerMode, enterDeveloperMode, error, exitDeveloperMode, fetchAccessToken, handoffSessionTo, inviteMember, isLoading, localSessionState, refreshMemberships, revokeInvitation, session, sessionState, setActiveTenant, signIn, signInWithPassword, signInWithProvider, signOut]);
 
   return (
     <ManagedAuthContext.Provider value={authValue}>
@@ -1201,6 +1227,7 @@ async function bootstrapGonvexAuth(options: {
   projectId: string;
   runtimeUrl: string;
   storageKey: string;
+  isCurrent: () => boolean;
 }): Promise<GonvexAuthSession | null> {
   const current = readAuthSession(options.storageKey);
   const url = new URL(window.location.href);
@@ -1218,6 +1245,7 @@ async function bootstrapGonvexAuth(options: {
         if (latest.refreshExpiresAt <= Date.now()) throw new GonvexAuthRequestError("Your session expired. Please sign in again.", 401);
         options.client.setAuth({ project: options.projectId, token: latest.accessToken });
         const grant = await options.client.action(control.auth.refreshSession, { refreshToken: latest.refreshToken });
+        if (!options.isCurrent()) return null;
         const next = sessionFromNativeGrant(grant, latest);
         safeLocalStorageSet(options.storageKey, JSON.stringify(next));
         return next;
@@ -1267,6 +1295,7 @@ async function bootstrapGonvexAuth(options: {
   });
   // Persist before returning so a StrictMode remount can recover the session
   // even if the first effect was cancelled before installSession.
+  if (!options.isCurrent()) return null;
   safeLocalStorageSet(options.storageKey, JSON.stringify(session));
   return session;
 }
@@ -1531,6 +1560,7 @@ function reusableExternalAuthSession(
   now = Date.now(),
 ): GonvexAuthSession | null {
   if (!session || session.account.provider !== provider) return null;
+  if (!Number.isFinite(session.refreshExpiresAt) || session.refreshExpiresAt <= now) return null;
   if (!Number.isFinite(session.expiresAt) || session.expiresAt <= now + WARM_SESSION_ACCESS_SAFETY_MS) {
     return null;
   }

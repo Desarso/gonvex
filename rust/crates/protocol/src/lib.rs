@@ -478,7 +478,12 @@ pub enum ServerMessage {
     #[serde(rename = "auth.result")]
     AuthResult { id: String, result: Value },
     #[serde(rename = "auth.error")]
-    AuthError { id: String, error: String },
+    AuthError {
+        id: String,
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
     #[serde(rename = "query.result")]
     QueryResult {
         id: String,
@@ -676,6 +681,18 @@ pub enum ServerMessage {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cached_startup_optional_auth_error_code() {
+        let old = serde_json::json!({"type":"auth.error","id":"auth","error":"expired"});
+        let parsed: super::ServerMessage = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), old);
+        let coded = serde_json::json!({
+            "type":"auth.error","id":"auth","error":"expired","code":"credential_rejected"
+        });
+        let parsed: super::ServerMessage = serde_json::from_value(coded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), coded);
+    }
+
     use super::*;
 
     #[test]

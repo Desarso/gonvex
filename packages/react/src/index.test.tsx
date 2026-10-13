@@ -22,7 +22,7 @@ class FakeGonvexClient {
   readonly queryListeners = new Set<(message: ServerMessage) => void>();
   readonly scopeHandlers = new Set<() => void>();
   readonly connectionHandlers = new Set<(state: ConnectionState) => void>();
-  readonly authErrorHandlers = new Set<(error: string) => void>();
+  readonly authErrorHandlers = new Set<(error: string, details?: { definitive: boolean }) => void>();
   readonly query = vi.fn((ref: FunctionReference, args: unknown) => {
     this.subscribedRefs.push(ref);
     this.subscribedArgs.push(args);
@@ -40,6 +40,17 @@ class FakeGonvexClient {
       this.queryListeners.add(handler);
     });
   });
+  localState: "unavailable" | "restored" | "authenticated" = "unavailable";
+  readonly localSessionHandlers = new Set<() => void>();
+  localSessionState = () => this.localState;
+  onLocalSessionChange = (listener: () => void) => {
+    this.localSessionHandlers.add(listener);
+    return () => { this.localSessionHandlers.delete(listener); };
+  };
+  setLocalState(state: typeof this.localState) {
+    this.localState = state;
+    for (const listener of this.localSessionHandlers) listener();
+  }
   readonly prepareReducer = vi.fn(() => Promise.resolve());
   readonly reducer = vi.fn(() => Promise.resolve(null));
   readonly action = vi.fn(() => Promise.resolve(null));
@@ -132,8 +143,8 @@ class FakeGonvexClient {
     return () => this.authErrorHandlers.delete(handler);
   }
 
-  emitAuthError(error: string) {
-    for (const handler of Array.from(this.authErrorHandlers)) handler(error);
+  emitAuthError(error: string, details?: { definitive: boolean }) {
+    for (const handler of Array.from(this.authErrorHandlers)) handler(error, details);
   }
 
   readonly developerCredentialHandlers = new Set<(token: string) => void>();
@@ -2284,7 +2295,7 @@ describe("GonvexAuthProvider developer mode across reloads", () => {
     expect(auth!.developerMode).toEqual({active:false});
     expect(auth!.account).toBeNull();
     expect(sessionStorage.getItem(grantKey("acct-1"))).toBeNull();
-    expect(client.setAuth).toHaveBeenLastCalledWith({project:"shop",tenant:undefined,token:undefined,identity:undefined});
+    expect(client.setAuth).toHaveBeenLastCalledWith({project:"shop",tenant:undefined,token:undefined,identity:undefined,fetchToken:undefined});
   });
 
   it("forgets the grant when its expiry timer ends developer mode", async () => {
@@ -2321,9 +2332,12 @@ describe("GonvexAuthProvider developer mode across reloads", () => {
     expect(client.action).not.toHaveBeenCalled();
 
     // A later auth error belongs to the account session, not developer mode.
-    const calls = client.setAuth.mock.calls.length;
     act(()=>client.emitAuthError("account token rejected"));
-    expect(client.setAuth.mock.calls.length).toBe(calls);
+    expect(auth).toMatchObject({ isAuthenticated: true, sessionState: "current" });
+    expect(localStorage.getItem(storageKey)).not.toBeNull();
+    act(()=>client.emitAuthError("account token rejected", { definitive: true }));
+    expect(auth).toMatchObject({ isAuthenticated: false, sessionState: "signedOut" });
+    expect(localStorage.getItem(storageKey)).toBeNull();
     expect(auth!.developerMode).toEqual({active:false});
   });
 
@@ -2387,4 +2401,59 @@ it('batch selectors retain both changes when a subscriber writes reentrantly', a
   actAtPaint(() => replica.applyOptimistic('outer',[{entity:'tasks',rowId:'a',op:'patch',fields:{title:'outer'}}]));
   expect(result.current.map(row=>row!.title)).toEqual(['outer','nested']);
   release(); unmount();
+});
+
+
+describe("restored native auth", () => {
+  it("renders a warm native session and reports local readiness separately from server auth", async () => {
+    const client = new FakeGonvexClient();
+    const storageKey = "gonvex-auth:https%3A%2F%2Fnative-cached.test:shop";
+    localStorage.setItem(storageKey, JSON.stringify({
+      accessToken: "native-access", expiresAt: Date.now() + 900_000,
+      refreshToken: "native-refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "account", email: "a@example.test", emailVerified: true, provider: "password" },
+      tenants: [{ id: "tenant", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant",
+    }));
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() {
+      auth = useGonvexAuth();
+      return <div data-testid="cached-shell">{auth.account?.id}</div>;
+    }
+    const rendered = render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://native-cached.test" projectId="shop"><Consumer /></GonvexAuthProvider>);
+    expect(rendered.getByTestId("cached-shell").textContent).toBe("account");
+    expect(auth).toMatchObject({ isLoading: false, sessionState: "reconnecting", isLocalSessionReady: false });
+    act(() => client.setLocalState("restored"));
+    expect(auth).toMatchObject({ isLocalSessionReady: true, sessionState: "reconnecting" });
+    await act(async () => { await Promise.resolve(); });
+    act(() => client.setLocalState("authenticated"));
+    expect(auth).toMatchObject({ isLocalSessionReady: true, sessionState: "current" });
+    act(() => {
+      client.setLocalState("unavailable");
+      for (const listener of client.authErrorHandlers) listener("revoked", { definitive: true });
+    });
+    expect(auth).toMatchObject({ isAuthenticated: false, sessionState: "signedOut", isLocalSessionReady: false });
+    expect(rendered.getByTestId("cached-shell").textContent).toBe("");
+    expect(localStorage.getItem(storageKey)).toBeNull();
+    expect(client.setAuth).toHaveBeenLastCalledWith(expect.objectContaining({ token: undefined, identity: undefined }));
+  });
+
+  it("does not reinstall a warm session when the runtime rejects it during bootstrap", async () => {
+    const client = new FakeGonvexClient();
+    const storageKey = "gonvex-auth:https%3A%2F%2Fnative-rejected.test:shop";
+    localStorage.setItem(storageKey, JSON.stringify({
+      accessToken: "native-access", expiresAt: Date.now() + 900_000,
+      refreshToken: "native-refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "account", email: "a@example.test", emailVerified: true, provider: "password" },
+      tenants: [],
+    }));
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://native-rejected.test" projectId="shop"><Consumer /></GonvexAuthProvider>);
+    act(() => { for (const listener of client.authErrorHandlers) listener("revoked", { definitive: true }); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(auth).toMatchObject({ isAuthenticated: false, sessionState: "signedOut" });
+    expect(auth?.account).toBeNull();
+    expect(localStorage.getItem(storageKey)).toBeNull();
+  });
 });

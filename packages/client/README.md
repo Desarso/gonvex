@@ -383,6 +383,31 @@ Full docs live at https://desarso.github.io/gonvex/
 
 [Open online anonymous tenant connections with `public: { tenant }`](../../docs/public-functions.md).
 
+### Cached startup before server auth
+
+`client.restoreSession(auth)` installs account and tenant credentials, starts
+connecting in the background, and resolves `true` when their persisted replica
+is readable. It resolves `false` when no matching session exists or the scope
+changes during hydration. Storage failures reject the promise. The read-only
+replica path works without `localRuntime`.
+
+`client.localSessionReady` observes the current local restore without starting
+or waiting for network authentication. Subscribe with
+`client.onLocalSessionChange(listener)` and read `client.localSessionState()`:
+`"unavailable"`, `"restored"`, or `"authenticated"`. A restored session is local
+readability, not server authorization. Server reads and durable reducer replay
+still wait for accepted auth. `authenticate(auth)` still waits for the server,
+including for developer and impersonation transitions.
+
+Always install the current account and tenant, and clear `token`, `identity`,
+`fetchToken`, and `tenant` on sign-out. JWT claims conflicting with an identity
+hint cannot restore either account's cache. Opaque tokens need the account
+identity hint supplied by your auth provider. Definitive auth rejection and
+sign-out forget the saved directive and immediately hide the old replica;
+durable queued intents remain isolated for a future authorized login. Token-fetch
+failures, socket closure, and transient or uncoded server errors preserve cached
+access. Only `details?.definitive` in `onAuthError((message, details) => ...)`
+authorizes clearing an application session.
 
 ### Causal offline delivery
 

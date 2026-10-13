@@ -256,6 +256,7 @@ impl Runtime {
         let failure = |id: String| {
             (
                 ServerMessage::AuthError {
+                    code: Some("transient".into()),
                     id,
                     error: AUTH_FAILURE.to_owned(),
                 },
@@ -284,6 +285,7 @@ impl Runtime {
         let Some(control) = self.inner.control_plane.read().await.clone() else {
             return (
                 ServerMessage::AuthError {
+                    code: Some("transient".into()),
                     id,
                     error: "auth session store is unavailable".to_owned(),
                 },
@@ -303,6 +305,7 @@ impl Runtime {
                 );
                 return (
                     ServerMessage::AuthError {
+                        code: Some("transient".into()),
                         id,
                         error: "tenant is not available".to_owned(),
                     },
