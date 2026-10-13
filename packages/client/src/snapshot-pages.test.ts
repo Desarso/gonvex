@@ -345,3 +345,18 @@ it("reconnects when replaying the buffered feed fails after a staging collection
   await vi.waitFor(() => expect(socket.readyState).toBe(3));
   expect(client.localReplica.entity("other", "x")).toBeUndefined();
 });
+
+it("drops frames buffered during staging when the collection is reset", async () => {
+  const { client, socket, open } = await setup();
+  const sequence = await pages([{ id: "a", value: 1 }, { id: "b", value: 1 }], open.id);
+  socket.receive(sequence[0]); await settled(client);
+  socket.receive({ type: "replica.delta", id: open.id, cursor: { epoch: "e", revision: 11 }, upserts: [{ id: "stale", value: 2 }], deleted: [] });
+  await settled(client);
+  socket.receive({ type: "replica.reset", id: open.id, path: "tasks.all", reason: "integrity-mismatch" });
+  await settled(client);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await settled(client);
+  expect(client.localReplica.entity("tasks", "stale")).toBeUndefined();
+  expect((client as any).replica.getWindow(open.key ?? "")).toBeUndefined();
+  expect((client as any).snapshotDeferredFrames).toEqual([]);
+});

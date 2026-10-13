@@ -200,6 +200,8 @@ type ReplicaSubscription = {
   isUpToDate: boolean;
   forceFullIntegrity: boolean;
   verificationGeneration: number;
+  /** Bumped on replica.reset so frames buffered during snapshot staging cannot replay after it. */
+  resetGeneration?: number;
   scope?: ReplicaScope;
 };
 
@@ -2908,12 +2910,15 @@ export class GonvexClient {
       }
       return;
     }
-    if (message.type === "replica.delta" && this.deferSnapshotFrame(message, () => this.handleReplicaMessage(subscription, message, scope))) return;
+    const resetGeneration = subscription.resetGeneration ?? 0;
+    const deferredApply = () => (subscription.resetGeneration ?? 0) === resetGeneration
+      ? this.handleReplicaMessage(subscription, message, scope) : Promise.resolve();
+    if (message.type === "replica.delta" && this.deferSnapshotFrame(message, deferredApply)) return;
     if (message.type === "replica.ready" && subscription.snapshotPages) {
       this.restartPagedSnapshots();
       return;
     }
-    if (message.type === "replica.ready" && this.deferSnapshotFrame(message, () => this.handleReplicaMessage(subscription, message, scope))) return;
+    if (message.type === "replica.ready" && this.deferSnapshotFrame(message, deferredApply)) return;
     if (message.type === "replica.reset" || message.type === "replica.error" || message.type === "replica.needHashes") {
       this.discardSnapshotPages(subscription);
     }
@@ -3026,6 +3031,7 @@ export class GonvexClient {
       return;
     }
     if (message.type === "replica.reset") {
+      subscription.resetGeneration = (subscription.resetGeneration ?? 0) + 1;
       this.clearReplicaRetry(subscription, true);
       subscription.isUpToDate = false;
       subscription.opening = false;
