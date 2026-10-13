@@ -14,7 +14,7 @@ import type {
   ReplicaOpenRequest,
   ReducerErrorClass,
 } from "@gonvex/protocol";
-import { applyReplicaHashDelta, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
+import { applyReplicaHashDelta, replicaAggregateDigest, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
 import type { LocalExecution, LocalSnapshot, LocalTransactionResult } from "@gonvex/local-runtime";
 import type { LocalExecutor, LocalRuntimeBinding } from "@gonvex/local-runtime/worker-client";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
@@ -165,6 +165,7 @@ type QuerySubscription = {
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
   lastMessage?: ServerMessage;
   serverSettled: boolean;
+  forceSnapshot?: boolean;
   socketGeneration?: number;
   lastRevision?: SubscriptionRevision;
   revisionSocketGeneration?: number;
@@ -566,11 +567,6 @@ export type GonvexTelemetryEvent = {
   device?: BrowserTelemetryInfo;
 };
 
-// Small collections can send their row hashes immediately and repair in one
-// round trip. Everything else resumes with one 64-byte digest and only sends
-// the hash map when the server proves that something actually differs
-// (replica.needHashes) — the server verifies digest-only resumes with zero row
-// data on the unchanged path, so a reload uploads bytes, not hash maps.
 // Must match the runtime's per-frame replica.openMany admission limit. Keeping
 // this client-side prevents one oversized page from stranding every replica in a
 // batch behind a frame-level rejection.
@@ -1843,6 +1839,9 @@ export class GonvexClient {
         }
         if (message.type === "auth.result") {
           const reauthenticatedSameSocket = this.authenticatedSocketGeneration === this.socketGeneration;
+          const subscriptionsPreserved = reauthenticatedSameSocket && message.result !== null
+            && typeof message.result === "object" && !Array.isArray(message.result)
+            && message.result.subscriptionsPreserved === true;
           this.authenticatedSocketGeneration = this.socketGeneration;
           this.lastOnlineAtMs = Date.now();
           this.activeArtifactHashValue = artifactHashFromAuthResult(message.result) ?? this.activeArtifactHashValue;
@@ -1864,7 +1863,7 @@ export class GonvexClient {
           if (!directive) {
             this.authInFlight = false;
             if (!this.auth.tenant || this.publicTenant) {
-              this.resumeQuerySubscriptions(reauthenticatedSameSocket);
+              if (!subscriptionsPreserved) this.resumeQuerySubscriptions(reauthenticatedSameSocket);
               this.settleManagedAuthAttempt(message.id);
             } else {
               this.settleManagedAuthAttempt(message.id, "Runtime did not provide an authoritative Local Replica visibility scope");
@@ -1890,12 +1889,11 @@ export class GonvexClient {
               // tenant calls and subscriptions leave the client.
               this.authInFlight = false;
               this.drainPendingReplicaFrames();
-              // Authentication is replaced in-place on the same socket during
-              // normal token rotation. The runtime clears its subscription
-              // maps for every accepted auth frame, so same-generation Live
-              // Queries must be sent again just like Replica Collections.
-              this.resumeQuerySubscriptions(reauthenticatedSameSocket);
-              this.resumeReplicaSubscriptions();
+              this.resumeQuerySubscriptions(reauthenticatedSameSocket && !subscriptionsPreserved);
+              if (!subscriptionsPreserved) this.resumeReplicaSubscriptions();
+              else for (const subscription of this.replicaSubscriptions.values()) {
+                if (subscription.socketGeneration !== this.socketGeneration) this.sendReplicaOpen(subscription);
+              }
               this.settleManagedAuthAttempt(message.id);
               // Same-scope reauthentication does not reload the outbox, so no
               // restore callback will wake a reducer queued during auth.
@@ -2288,7 +2286,9 @@ export class GonvexClient {
         this.requestSubscriptionSnapshot(subscription);
         return undefined;
       }
-      if (!this.acceptRevision(subscription, message.throughRevision)) return undefined;
+      if (!this.acceptRevision(subscription, message.throughRevision)
+        && !(subscription.lastRevision && sameRevision(subscription.lastRevision, message.throughRevision)
+          && subscription.revisionSocketGeneration !== this.socketGeneration)) return undefined;
       subscription.lastRevision = message.throughRevision;
       subscription.revisionSocketGeneration = this.socketGeneration;
       subscription.serverSettled = true;
@@ -2380,10 +2380,13 @@ export class GonvexClient {
 			return { ...message, type: "query.result", result, originCommandIds: message.originCommandIds };
 		}
     if (message.type === "query.result" && message.subscriptionRevision) {
-      if (!this.acceptRevision(subscription, message.subscriptionRevision)) return undefined;
+      if (!this.acceptRevision(subscription, message.subscriptionRevision)
+        && !(subscription.lastRevision && sameRevision(subscription.lastRevision, message.subscriptionRevision)
+          && (subscription.forceSnapshot || subscription.revisionSocketGeneration !== this.socketGeneration))) return undefined;
       subscription.lastRevision = message.subscriptionRevision;
       subscription.revisionSocketGeneration = this.socketGeneration;
     }
+    if (message.type === "query.result") subscription.forceSnapshot = false;
     return message;
   }
 
@@ -2737,6 +2740,7 @@ export class GonvexClient {
       return;
     }
     if (message.type === "replica.delta") {
+      const verificationGeneration = subscription.verificationGeneration;
       const prior = current();
       if (replicaCursorIsStale(subscription, message.cursor) || (prior?.cursor && message.cursor.revision < prior.cursor.revision)) return;
       this.clearReplicaRetry(subscription, true);
@@ -2766,9 +2770,11 @@ export class GonvexClient {
       const canCarryHashes = prior?.hashes && subscription.columns?.length
         && upserts.every(row => subscription.columns!.every(column => hasOwn(row, column)));
       const hashes = message.hashes ?? (canCarryHashes
-        ? await applyReplicaHashDelta(prior!.hashes!, projectReplicaIntegrityRows(upserts, subscription.columns), message.deleted ?? [], prior?.key ?? "id")
+        ? await applyReplicaHashDelta(prior!.hashes!, projectReplicaIntegrityRows(upserts, subscription.columns), message.deleted ?? [], prior?.key ?? "id", prior?.aggregateDigest)
         : undefined);
+      if (scope !== this.replicaScope || verificationGeneration !== subscription.verificationGeneration) return;
       await this.replica.applyWindowDelta({
+        scope,
         signature: subscription.key,
         kind: "replica",
         entity: subscription.entity,
@@ -2815,6 +2821,7 @@ export class GonvexClient {
       return;
     }
     if (message.type === "replica.needHashes") {
+      subscription.forceFullIntegrity = true;
       subscription.isUpToDate = false;
       subscription.opening = false;
       this.emitReplicaMessage(subscription, { type: "replica.syncing", id: subscription.id, path: subscription.path, reason: "integrity-reconciling" }, scope);
@@ -2824,6 +2831,7 @@ export class GonvexClient {
     if (message.type === "replica.ready") {
       const window = current();
       if (!window?.cursor || replicaCursorIsStale(subscription, message.cursor) || message.cursor.revision < window.cursor.revision) return;
+      const verificationGeneration = subscription.verificationGeneration;
       const hashesWereStored = window.hashes !== undefined;
       const hashes = window.hashes ?? await replicaRowsHashes(
         projectReplicaIntegrityRows(
@@ -2832,7 +2840,10 @@ export class GonvexClient {
         ),
         window.key,
       );
-      const digest = await replicaHashesDigest(hashes);
+      const digest = message.digest?.startsWith("xor1:")
+        ? window.aggregateDigest ?? replicaAggregateDigest(hashes)
+        : await replicaHashesDigest(hashes);
+      if (scope !== this.replicaScope || verificationGeneration !== subscription.verificationGeneration) return;
       if (!message.digest || message.digest !== digest) {
         await this.handleReplicaMessage(subscription, { type: "replica.reset", id: subscription.id, path: subscription.path, reason: "integrity-mismatch" }, scope);
         return;
@@ -2909,6 +2920,7 @@ export class GonvexClient {
     scope = this.replicaScope,
   ) {
     this.clearReplicaRetry(subscription, true);
+    subscription.forceFullIntegrity = false;
     subscription.isUpToDate = true;
     subscription.opening = false;
     raiseReplicaCursorFloor(subscription, message.cursor);
@@ -2941,7 +2953,7 @@ export class GonvexClient {
         return;
       }
       await this.replica.replaceWindow({
-        ...window, rows: this.replica.committedWindowRows(subscription.key), source: "server", cursor: message.cursor,
+        ...window, scope, rows: this.replica.committedWindowRows(subscription.key), source: "server", cursor: message.cursor,
         completeness,
         mode, truncated,
         // Persist the exact integrity map verified above. Subsequent auth
@@ -3074,10 +3086,15 @@ export class GonvexClient {
   }
 
   private replicaOpenRequest(subscription: ReplicaSubscription): ReplicaOpenRequest {
+    if (!subscription.forceFullIntegrity && this.serverCapabilities.replicaResume === 1) {
+      const resume = this.replica.windowResumeState(subscription.key);
+      if (resume) return { id: subscription.id, path: subscription.path, args: subscription.args, ...resume };
+    }
     const window = this.replica.getWindow(subscription.key);
     const cursor = window?.cursor;
     const hashes = window?.hashes;
-    const fullIntegrity = cursor !== undefined && hashes !== undefined;
+    const fullIntegrity = cursor !== undefined
+      && (hashes !== undefined || this.serverCapabilities.replicaResume === 1);
     // Resume protocol state must describe only the committed server window.
     // windowRows() includes optimistic overlays for rendering and would cause
     // the server digest to disagree (and advertise uncommitted IDs as deletes).
@@ -3089,7 +3106,9 @@ export class GonvexClient {
       cursor,
       keys,
       hashes,
-      digest: undefined,
+      // Select aggregate verification on cold opens and integrity repair too.
+      digest: this.serverCapabilities.replicaResume === 1
+        ? window?.aggregateDigest ?? replicaAggregateDigest({}) : undefined,
       fullIntegrity: fullIntegrity || undefined,
     };
   }
@@ -3099,7 +3118,10 @@ export class GonvexClient {
     const subscriptions = Array.from(this.pendingReplicaOpens);
     this.pendingReplicaOpens.clear();
     if (this.authInFlight || !this.hasAuthoritativeReplicaScope) {
-      for (const subscription of subscriptions) subscription.opening = false;
+      for (const subscription of subscriptions) {
+        subscription.opening = false;
+        subscription.socketGeneration = undefined;
+      }
       return;
     }
     const opens = subscriptions
@@ -3960,7 +3982,7 @@ export class GonvexClient {
       path: subscription.path,
       args: subscription.args,
       ...(subscription.executionScope === "control" ? { scope: "control" as const } : {}),
-      windowRevision: undefined,
+      windowRevision: this.queryResumeRevision(subscription),
     });
   }
 
@@ -3968,6 +3990,12 @@ export class GonvexClient {
     this.querySubscribeFlushTimer = undefined;
     const subscriptions = Array.from(this.pendingQuerySubscribes);
     this.pendingQuerySubscribes.clear();
+    for (const subscription of subscriptions) {
+      if (subscription.executionScope !== "control"
+        && (this.authInFlight || (!!this.auth.tenant && !this.hasAuthoritativeReplicaScope))) {
+        subscription.socketGeneration = undefined;
+      }
+    }
     const subscribes = subscriptions
       .filter((subscription) => (
         subscription.listeners.size > 0
@@ -3983,11 +4011,16 @@ export class GonvexClient {
         path: subscription.path,
         args: subscription.args,
         ...(subscription.executionScope === "control" ? { scope: "control" as const } : {}),
-        windowRevision: undefined,
+        windowRevision: this.queryResumeRevision(subscription),
       }));
     for (let offset = 0; offset < subscribes.length; offset += maxReplicaBatchOpens) {
       this.send({ type: "query.subscribeMany", subscribes: subscribes.slice(offset, offset + maxReplicaBatchOpens) });
     }
+  }
+
+  private queryResumeRevision(subscription: QuerySubscription): string | undefined {
+    return !subscription.forceSnapshot && this.serverCapabilities.queryResume === 1 && subscription.lastMessage?.type === "query.result"
+      ? subscription.lastMessage.windowRevision : undefined;
   }
 
   private resumeQuerySubscriptions(force = false) {
@@ -4041,6 +4074,7 @@ export class GonvexClient {
     // Do not advertise the cache revision while recovering. Otherwise the
     // runtime can answer with another progress frame instead of a snapshot.
     subscription.serverSettled = false;
+    subscription.forceSnapshot = true;
     subscription.socketGeneration = undefined;
     this.sendSubscription(subscription);
   }
@@ -4325,7 +4359,7 @@ export class GonvexClient {
       controlOnly: !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
       device: browserTelemetryInfo(),
-		capabilities: { replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1 },
+		capabilities: { replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
     });
   }
 

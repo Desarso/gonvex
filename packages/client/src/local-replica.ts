@@ -1,3 +1,4 @@
+import { replicaAggregateDigest } from "./replica-integrity.js";
 import type { DataPredicate } from '@gonvex/module-sdk';
 import type { JsonValue, PublicInvocationProvenance, ReplicaCursor, SubscriptionRevision } from "@gonvex/protocol";
 import type { OptimisticPatch } from "./optimistic.js";
@@ -44,6 +45,7 @@ export type ReplicaWindow = {
   orderDirection?: "asc" | "desc";
   maxRows?: number;
   maxBytes?: number;
+  aggregateDigest?: string;
   hashes?: Record<string, string>;
 };
 
@@ -879,8 +881,16 @@ export class LocalReplica implements LocalReplicaView {
     return application;
   }
 
+  windowResumeState(signature: string): { cursor: ReplicaCursor; digest: string } | undefined {
+    const window = this.liveQueries.get(signature);
+    if (!window?.cursor || !window.hashes) return undefined;
+    window.aggregateDigest ??= replicaAggregateDigest(window.hashes);
+    return { cursor: { ...window.cursor }, digest: window.aggregateDigest };
+  }
+
   getWindow(signature: string): ReplicaWindow | undefined {
     const window = this.liveQueries.get(signature);
+    if (window?.hashes && !window.aggregateDigest) window.aggregateDigest = replicaAggregateDigest(window.hashes);
     return window ? cloneWindow(window) : undefined;
   }
 
@@ -1026,6 +1036,7 @@ export class LocalReplica implements LocalReplicaView {
       orderDirection: input.orderDirection,
       maxRows: input.maxRows,
       maxBytes: input.maxBytes,
+      aggregateDigest: input.hashes ? replicaAggregateDigest(input.hashes) : undefined,
       hashes: input.hashes ? { ...input.hashes } : undefined,
     };
     nextQueries.set(input.signature, window);

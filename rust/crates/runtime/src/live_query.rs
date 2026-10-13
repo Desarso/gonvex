@@ -664,6 +664,29 @@ fn canonical_group_key(
         .collect()
 }
 
+fn result_revision(result: &Value) -> String {
+    use sha2::{Digest as _, Sha256};
+    format!("{:x}", Sha256::digest(serde_json::to_vec(result).unwrap()))
+}
+
+pub(crate) fn resume_message(message: ServerMessage, revision: Option<&str>) -> ServerMessage {
+    if let ServerMessage::QueryResult { id, payload } = &message {
+        if revision.is_some() && payload.get("windowRevision").and_then(Value::as_str) == revision {
+            return ServerMessage::QueryProgress {
+                id: id.clone(),
+                payload: BTreeMap::from([
+                    ("path".into(), payload["path"].clone()),
+                    (
+                        "throughRevision".into(),
+                        payload["subscriptionRevision"].clone(),
+                    ),
+                ]),
+            };
+        }
+    }
+    message
+}
+
 fn query_message(
     id: &str,
     path: &str,
@@ -676,6 +699,10 @@ fn query_message(
         id: id.to_owned(),
         payload: BTreeMap::from([
             ("path".to_owned(), Value::String(path.to_owned())),
+            (
+                "windowRevision".to_owned(),
+                Value::String(result_revision(&result)),
+            ),
             ("result".to_owned(), result),
             ("reason".to_owned(), Value::String(reason.to_owned())),
             (
@@ -1608,6 +1635,26 @@ mod tests {
             new_value: Value::Null,
             provenance: Default::default(),
         }
+    }
+
+    #[test]
+    fn sdk_resume_unchanged_query_sends_progress_and_changed_query_sends_full_result() {
+        let result = serde_json::json!([{"id":"1", "title":"same"}]);
+        let revision = result_revision(&result);
+        let message = || query_message("q", "tasks.list", result.clone(), "initial", "e", 42);
+        let unchanged = resume_message(message(), Some(&revision));
+        assert!(matches!(unchanged, ServerMessage::QueryProgress { .. }));
+        let encoded = serde_json::to_value(unchanged).unwrap();
+        assert_eq!(encoded["throughRevision"]["sequence"], 42);
+        assert!(encoded.get("result").is_none());
+        assert!(matches!(
+            resume_message(message(), None),
+            ServerMessage::QueryResult { .. }
+        ));
+        assert!(matches!(
+            resume_message(message(), Some("old")),
+            ServerMessage::QueryResult { .. }
+        ));
     }
 
     #[test]

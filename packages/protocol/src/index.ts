@@ -174,6 +174,11 @@ export type ReplicaDirective = {
 };
 
 export type ServerCapabilities = {
+  /** Accepts cursor + xor1 row-hash digest, with needHashes repair. */
+  replicaResume?: 1;
+  /** Accepts held windowRevision and confirms unchanged results with progress. */
+  queryResume?: 1;
+  preserveSubscriptions?: 1;
   /** WebSocket protocol generation implemented by this runtime. */
   protocolVersion?: number;
   /** Exact runtime build identifier, normally the deployed Git commit SHA. */
@@ -222,6 +227,7 @@ export type ReplicaOpenRequest = {
   cursor?: ReplicaCursor;
   keys?: string[];
   hashes?: Record<string, string>;
+  /** Optional xor1: digest selects aggregate verification on replicaResume runtimes. */
   digest?: string;
   fullIntegrity?: boolean;
 };
@@ -236,6 +242,8 @@ export type ReplicaReady = {
 };
 
 export type ClientCapabilities = {
+  /** Honors auth.result subscriptionsPreserved on an in-place refresh. */
+  preserveSubscriptions?: 1;
   /** Client accepts coalesced `replica.readyMany` server frames. */
   replicaReadyMany?: 1;
   /** Client accepts connection-level `replica.watermark` server frames. */

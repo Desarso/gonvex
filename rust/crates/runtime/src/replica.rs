@@ -58,6 +58,7 @@ pub struct ReplicaSubscription {
     pub cursor: ReplicaCursor,
     pub rows: BTreeMap<String, Value>,
     pub hashes: BTreeMap<String, String>,
+    pub aggregate: Option<[u8; 32]>,
     pub truncated: bool,
     pub resolved: ResolvedVisibility,
 }
@@ -69,6 +70,7 @@ struct Snapshot {
     truncated: bool,
     clock: ReplicaClock,
     resolved: ResolvedVisibility,
+    resume_changes: Vec<LogChange>,
 }
 
 // Small and normal application collections can carry their integrity map with
@@ -127,31 +129,81 @@ impl Runtime {
             &session.identity.account.id,
             &session.member.permissions,
         );
+        let aggregate = request
+            .digest
+            .as_deref()
+            .is_some_and(|digest| digest.starts_with("xor1:"));
         let snapshot = self
-            .replica_snapshot(session, &definition, &visibility, &request.args)
+            .replica_snapshot_for_resume(
+                session,
+                &definition,
+                &visibility,
+                &request.args,
+                if aggregate {
+                    request.cursor.as_ref().map(|cursor| cursor.revision)
+                } else {
+                    None
+                },
+            )
             .await?;
         let cursor = cursor_for(&snapshot.clock, &definition, &directive.visibility_scope);
-        let digest = hashes_digest(&snapshot.hashes);
+        let resume_aggregate = aggregate.then(|| aggregate_bytes(&snapshot.hashes));
+        let digest = if let Some(aggregate) = &resume_aggregate {
+            format_aggregate(aggregate)
+        } else {
+            hashes_digest(&snapshot.hashes)
+        };
         let mut messages = Vec::new();
-        let resumable = request.cursor.as_ref().is_some_and(|client| {
-            client.epoch == cursor.epoch
-                && client.revision <= cursor.revision
-                && client.revision >= snapshot.clock.retained_revision
-        });
+        let resumable = cursor_resumable(
+            request.cursor.as_ref(),
+            &cursor,
+            snapshot.clock.retained_revision,
+        );
         if resumable {
             if !request.digest.as_deref().unwrap_or_default().is_empty()
                 && !request.full_integrity
                 && request.hashes.is_empty()
             {
-                if request.digest.as_deref() != Some(digest.as_str()) {
-                    messages.push(ServerMessage::ReplicaNeedHashes {
-                        id: request.id,
-                        path: Some(request.path),
-                    });
+                let prior_hashes = if !aggregate || request.cursor.as_ref() == Some(&cursor) {
+                    Some(snapshot.hashes.clone())
+                } else {
+                    resume_hashes(
+                        &snapshot.hashes,
+                        &snapshot.resume_changes,
+                        &request.args,
+                        &definition,
+                        &visibility,
+                        &snapshot.resolved,
+                    )?
+                };
+                if let Err(message) =
+                    verify_resume_hashes(&request, prior_hashes.as_ref(), aggregate)
+                {
+                    messages.push(message);
                     return Ok(ReplicaOpenResult {
                         messages,
                         subscription: None,
                     });
+                }
+                if aggregate {
+                    let prior_hashes = prior_hashes.unwrap();
+                    let keys = prior_hashes.keys().cloned().collect::<Vec<_>>();
+                    let (upserts, deleted) =
+                        diff_rows(&snapshot.by_key, &snapshot.hashes, &prior_hashes, &keys);
+                    if !upserts.is_empty()
+                        || !deleted.is_empty()
+                        || request.cursor.as_ref() != Some(&cursor)
+                    {
+                        messages.push(replica_delta(
+                            &request.id,
+                            &request.path,
+                            cursor.clone(),
+                            upserts,
+                            deleted,
+                            digest.clone(),
+                            snapshot.truncated,
+                        ));
+                    }
                 }
             } else {
                 let (upserts, deleted) = diff_rows(
@@ -202,6 +254,7 @@ impl Runtime {
                 visibility_scope: directive.visibility_scope,
                 cursor,
                 rows: snapshot.by_key,
+                aggregate: resume_aggregate,
                 hashes: snapshot.hashes,
                 truncated: snapshot.truncated,
                 resolved: snapshot.resolved,
@@ -216,6 +269,18 @@ impl Runtime {
         plan: &VisibilityPlan,
         args: &Value,
     ) -> Result<Snapshot, ReplicaError> {
+        self.replica_snapshot_for_resume(session, definition, plan, args, None)
+            .await
+    }
+
+    async fn replica_snapshot_for_resume(
+        &self,
+        session: &TenantSession,
+        definition: &ReplicaCollectionDefinition,
+        plan: &VisibilityPlan,
+        args: &Value,
+        after: Option<u64>,
+    ) -> Result<Snapshot, ReplicaError> {
         let control = self
             .inner
             .control_plane
@@ -229,6 +294,15 @@ impl Runtime {
         let resolved = visibility::resolve(&mut transaction, session, plan).await?;
         let clock = clock_in_transaction(&mut transaction).await?;
         let rows = query_rows(&mut transaction, definition, plan, &resolved, args).await?;
+        let resume_changes = if let Some(after) =
+            after.filter(|after| *after >= clock.retained_revision && *after < clock.revision)
+        {
+            let mut tables = plan.resolved_dependency_columns(&resolved).tables();
+            tables.insert(definition.table.clone());
+            resume_changes(&mut transaction, after, clock.revision, tables).await?
+        } else {
+            Vec::new()
+        };
         transaction.commit().await?;
         let (rows, truncated) = apply_budgets(rows, definition)?;
         let mut by_key = BTreeMap::new();
@@ -247,6 +321,7 @@ impl Runtime {
             truncated,
             clock,
             resolved,
+            resume_changes,
         })
     }
 
@@ -360,6 +435,9 @@ impl Runtime {
                 }
                 subscription.rows = snapshot.by_key;
                 subscription.hashes = snapshot.hashes;
+                if subscription.aggregate.is_some() {
+                    subscription.aggregate = Some(aggregate_bytes(&subscription.hashes));
+                }
                 subscription.truncated = snapshot.truncated;
                 subscription.resolved = snapshot.resolved;
                 subscription.cursor.revision = snapshot.clock.revision;
@@ -370,7 +448,7 @@ impl Runtime {
                         subscription.cursor.clone(),
                         upserts,
                         deleted,
-                        hashes_digest(&subscription.hashes),
+                        subscription_digest(subscription),
                         subscription.truncated,
                     ));
                 }
@@ -407,6 +485,15 @@ impl Runtime {
                     let new_projection = new_visible
                         .then(|| project_row(&change.new_value, &subscription.definition))
                         .transpose()?;
+                    let new_hash = new_projection.as_ref().map(row_hash);
+                    if let Some(aggregate) = &mut subscription.aggregate {
+                        if let Some(previous) = subscription.hashes.get(&change.row_id) {
+                            xor_hash(aggregate, previous);
+                        }
+                        if let Some(hash) = &new_hash {
+                            xor_hash(aggregate, hash);
+                        }
+                    }
                     if new_visible {
                         let new_projection = new_projection
                             .as_ref()
@@ -416,7 +503,7 @@ impl Runtime {
                             .insert(change.row_id.clone(), new_projection.clone());
                         subscription
                             .hashes
-                            .insert(change.row_id.clone(), row_hash(new_projection));
+                            .insert(change.row_id.clone(), new_hash.unwrap());
                     } else {
                         subscription.rows.remove(&change.row_id);
                         subscription.hashes.remove(&change.row_id);
@@ -447,7 +534,7 @@ impl Runtime {
                         subscription.cursor.clone(),
                         upserts.into_values().collect(),
                         deleted.into_iter().collect(),
-                        hashes_digest(&subscription.hashes),
+                        subscription_digest(subscription),
                         subscription.truncated,
                     ));
                 }
@@ -457,7 +544,7 @@ impl Runtime {
                 &subscription.path,
                 &subscription.definition,
                 subscription.cursor.clone(),
-                hashes_digest(&subscription.hashes),
+                subscription_digest(subscription),
                 subscription.truncated,
             ));
         }
@@ -527,6 +614,41 @@ fn normalize_entity_changes<'a>(
             change.new_value = Some(Value::Object(fields));
         }
     }
+}
+
+async fn resume_changes(
+    transaction: &mut TenantTransaction,
+    after: u64,
+    through: u64,
+    tables: BTreeSet<String>,
+) -> Result<Vec<LogChange>, ReplicaError> {
+    let rows = sqlx::query(
+            "SELECT revision, ordinal, table_name, row_id, operation, changed_columns, old_value, new_value
+             FROM _gonvex_sync_changes
+             WHERE revision > $1 AND revision <= $2 AND table_name = ANY($3)
+             ORDER BY revision, ordinal",
+        ).bind(after as i64).bind(through as i64).bind(tables.into_iter().collect::<Vec<_>>()).fetch_all(&mut **transaction.transaction()).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| LogChange {
+            revision: row.get::<i64, _>("revision") as u64,
+            ordinal: row.get("ordinal"),
+            table: row.get("table_name"),
+            row_id: row.get("row_id"),
+            operation: row.get("operation"),
+            changed_columns: row
+                .get::<Option<Vec<String>>, _>("changed_columns")
+                .unwrap_or_default(),
+            old_value: row
+                .get::<Option<Value>, _>("old_value")
+                .unwrap_or(Value::Null),
+            new_value: row
+                .get::<Option<Value>, _>("new_value")
+                .unwrap_or(Value::Null),
+            origin_command_id: String::new(),
+            provenance: Default::default(),
+        })
+        .collect())
 }
 
 async fn clock_in_transaction(
@@ -748,6 +870,110 @@ fn row_key(row: &Value, key: &str) -> Result<String, ReplicaError> {
 
 fn row_hash(row: &Value) -> String {
     hex_digest(stable_json(row).as_bytes())
+}
+
+fn cursor_resumable(
+    client: Option<&ReplicaCursor>,
+    current: &ReplicaCursor,
+    retained: u64,
+) -> bool {
+    client.is_some_and(|client| {
+        client.epoch == current.epoch
+            && client.revision <= current.revision
+            && client.revision >= retained
+    })
+}
+
+fn verify_resume_hashes(
+    request: &ReplicaOpenRequest,
+    hashes: Option<&BTreeMap<String, String>>,
+    aggregate: bool,
+) -> Result<(), ServerMessage> {
+    if hashes.is_some_and(|hashes| {
+        request.digest.as_deref()
+            == Some(
+                if aggregate {
+                    aggregate_digest(hashes)
+                } else {
+                    hashes_digest(hashes)
+                }
+                .as_str(),
+            )
+    }) {
+        Ok(())
+    } else {
+        Err(ServerMessage::ReplicaNeedHashes {
+            id: request.id.clone(),
+            path: Some(request.path.clone()),
+        })
+    }
+}
+
+fn xor_hash(aggregate: &mut [u8; 32], hash: &str) {
+    for (index, byte) in aggregate.iter_mut().enumerate() {
+        *byte ^= u8::from_str_radix(&hash[index * 2..index * 2 + 2], 16).unwrap_or(0);
+    }
+}
+
+fn aggregate_bytes(hashes: &BTreeMap<String, String>) -> [u8; 32] {
+    let mut aggregate = [0u8; 32];
+    for hash in hashes.values() {
+        xor_hash(&mut aggregate, hash);
+    }
+    aggregate
+}
+
+fn aggregate_digest(hashes: &BTreeMap<String, String>) -> String {
+    format_aggregate(&aggregate_bytes(hashes))
+}
+
+fn format_aggregate(aggregate: &[u8; 32]) -> String {
+    format!(
+        "xor1:{}",
+        aggregate
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn subscription_digest(subscription: &ReplicaSubscription) -> String {
+    if let Some(aggregate) = &subscription.aggregate {
+        format_aggregate(aggregate)
+    } else {
+        hashes_digest(&subscription.hashes)
+    }
+}
+
+// Reconstruct the cursor's membership from retained before-images. Visibility
+// dependency changes require reconciliation rather than trusting old visibility.
+fn resume_hashes(
+    current: &BTreeMap<String, String>,
+    changes: &[LogChange],
+    args: &Value,
+    definition: &ReplicaCollectionDefinition,
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+) -> Result<Option<BTreeMap<String, String>>, ReplicaError> {
+    let dependencies = plan.resolved_dependency_columns(resolved);
+    if table_change_relevance(&definition.table, &dependencies, changes.iter()).1 {
+        return Ok(None);
+    }
+    let mut prior = current.clone();
+    for change in changes
+        .iter()
+        .rev()
+        .filter(|change| change.table == definition.table)
+    {
+        prior.remove(&change.row_id);
+        if row_in_collection(&change.old_value, args, definition, plan, resolved) {
+            prior.insert(
+                change.row_id.clone(),
+                row_hash(&project_row(&change.old_value, definition)?),
+            );
+        }
+    }
+    Ok(Some(prior))
 }
 
 fn hashes_digest(hashes: &BTreeMap<String, String>) -> String {
@@ -989,6 +1215,161 @@ fn hex_digest(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sdk_resume_expired_or_wrong_epoch_cursor_requires_snapshot() {
+        let current = ReplicaCursor {
+            epoch: "e".into(),
+            revision: 10,
+        };
+        assert!(cursor_resumable(
+            Some(&ReplicaCursor {
+                epoch: "e".into(),
+                revision: 5
+            }),
+            &current,
+            5
+        ));
+        assert!(!cursor_resumable(
+            Some(&ReplicaCursor {
+                epoch: "e".into(),
+                revision: 4
+            }),
+            &current,
+            5
+        ));
+        assert!(!cursor_resumable(
+            Some(&ReplicaCursor {
+                epoch: "old".into(),
+                revision: 10
+            }),
+            &current,
+            5
+        ));
+        assert!(!cursor_resumable(None, &current, 5));
+    }
+
+    #[test]
+    fn sdk_resume_delta_verifies_before_images_and_detects_mismatch() -> Result<(), ReplicaError> {
+        let definition = ReplicaCollectionDefinition {
+            table: "tasks".into(),
+            key: "id".into(),
+            columns: vec!["id".into(), "title".into()],
+            equal_filters: BTreeMap::new(),
+            exclude_when_set: Vec::new(),
+            visibility_tables: Vec::new(),
+            visibility_plan_hash: String::new(),
+            order_by: String::new(),
+            order_direction: String::new(),
+            mode: "eager".into(),
+            max_rows: 100,
+            max_bytes: 10000,
+            retention_ms: 0,
+        };
+        let (plan, resolved) = public_visibility();
+        let old = serde_json::json!({"id":"1", "title":"old"});
+        let new = serde_json::json!({"id":"1", "title":"new"});
+        let inserted = serde_json::json!({"id":"2", "title":"inserted"});
+        let removed = serde_json::json!({"id":"3", "title":"removed"});
+        let original = BTreeMap::from([
+            ("1".into(), row_hash(&old)),
+            ("3".into(), row_hash(&removed)),
+        ]);
+        let current = BTreeMap::from([
+            ("1".into(), row_hash(&new)),
+            ("2".into(), row_hash(&inserted)),
+        ]);
+        let mut insertion = source_change(Value::Null, inserted.clone());
+        insertion.row_id = "2".into();
+        let mut deletion = source_change(removed, Value::Null);
+        deletion.row_id = "3".into();
+        let intermediate = serde_json::json!({"id":"1", "title":"intermediate"});
+        let changes = vec![
+            source_change(old, intermediate.clone()),
+            source_change(intermediate, new.clone()),
+            insertion,
+            deletion,
+        ];
+        let prior = resume_hashes(
+            &current,
+            &changes,
+            &serde_json::json!({}),
+            &definition,
+            &plan,
+            &resolved,
+        )?
+        .unwrap();
+        assert_eq!(aggregate_digest(&prior), aggregate_digest(&original));
+        let mut request: ReplicaOpenRequest = serde_json::from_value(serde_json::json!({
+            "id":"r", "path":"tasks.list", "args":{}, "digest":aggregate_digest(&original)
+        }))
+        .unwrap();
+        assert!(verify_resume_hashes(&request, Some(&prior), true).is_ok());
+        request.digest = Some(aggregate_digest(&BTreeMap::new()));
+        assert!(matches!(
+            verify_resume_hashes(&request, Some(&prior), true),
+            Err(ServerMessage::ReplicaNeedHashes { .. })
+        ));
+        assert!(matches!(
+            verify_resume_hashes(&request, None, true),
+            Err(ServerMessage::ReplicaNeedHashes { .. })
+        ));
+        let (upserts, deleted) = diff_rows(
+            &BTreeMap::from([("1".into(), new.clone()), ("2".into(), inserted.clone())]),
+            &current,
+            &prior,
+            &["1".into(), "3".into()],
+        );
+        assert_eq!(upserts, vec![new, inserted]);
+        assert_eq!(deleted, vec!["3"]);
+        // A bounded snapshot may omit an unchanged row displaced since the
+        // cursor. Its reconstructed checksum must request reconciliation.
+        let bounded_prior = BTreeMap::from([("3".into(), original["3"].clone())]);
+        request.digest = Some(aggregate_digest(&original));
+        assert!(matches!(
+            verify_resume_hashes(&request, Some(&bounded_prior), true),
+            Err(ServerMessage::ReplicaNeedHashes { .. })
+        ));
+        let dependency = visibility_with_task_dependency("tasks");
+        assert!(resume_hashes(
+            &current,
+            &[routing_change("tasks", "update", &["createdBy"])],
+            &serde_json::json!({}),
+            &definition,
+            &dependency,
+            &resolved
+        )?
+        .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn sdk_resume_aggregate_matches_client_xor_fixture() {
+        let hashes = BTreeMap::from([("a".into(), "01".repeat(32)), ("b".into(), "03".repeat(32))]);
+        assert_eq!(
+            aggregate_digest(&hashes),
+            format!("xor1:{}", "02".repeat(32))
+        );
+        assert_eq!(
+            aggregate_digest(&BTreeMap::new()),
+            format!("xor1:{}", "00".repeat(32))
+        );
+        let mut aggregate = aggregate_bytes(&hashes);
+        xor_hash(&mut aggregate, &hashes["a"]);
+        xor_hash(&mut aggregate, &"05".repeat(32));
+        assert_eq!(
+            format_aggregate(&aggregate),
+            aggregate_digest(&BTreeMap::from([
+                ("a".into(), "05".repeat(32)),
+                ("b".into(), "03".repeat(32)),
+            ]))
+        );
+        xor_hash(&mut aggregate, &hashes["b"]);
+        assert_eq!(
+            format_aggregate(&aggregate),
+            format!("xor1:{}", "05".repeat(32))
+        );
+    }
 
     #[test]
     fn repeated_writes_publish_only_the_final_collection_membership() {
