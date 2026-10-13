@@ -14,6 +14,7 @@ import type {
   ReplicaOpenRequest,
   ReducerErrorClass,
 } from "@gonvex/protocol";
+import { SnapshotPageStager, type SnapshotPage } from "./snapshot-pages.js";
 import { applyReplicaHashDelta, replicaAggregateDigest, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
 import type { LocalExecution, LocalSnapshot, LocalTransactionResult } from "@gonvex/local-runtime";
 import type { LocalExecutor, LocalRuntimeBinding } from "@gonvex/local-runtime/worker-client";
@@ -190,6 +191,7 @@ type ReplicaSubscription = {
   // current again.
   cursorFloor?: ReplicaCursor;
   retiredEpochs: Set<string>;
+  snapshotPages?: SnapshotPageStager;
   lastMessage?: ReplicaMessage;
   socketGeneration?: number;
   opening: boolean;
@@ -198,6 +200,8 @@ type ReplicaSubscription = {
   isUpToDate: boolean;
   forceFullIntegrity: boolean;
   verificationGeneration: number;
+  /** Bumped on replica.reset so frames buffered during snapshot staging cannot replay after it. */
+  resetGeneration?: number;
   scope?: ReplicaScope;
 };
 
@@ -506,6 +510,8 @@ export type GonvexClientAuth = {
 };
 
 export type GonvexClientOptions = GonvexClientAuth & {
+  /** Disable negotiated snapshot paging for a runtime rollback. Defaults to true. */
+  replicaSnapshotPages?: boolean;
   /** Control Plane only, including tenant-scoped control calls. Disables local data and outbox. */
   role?: "control";
   /** Anonymous, online-only connection scoped to one tenant ID or routing domain. */
@@ -618,6 +624,7 @@ export class GonvexClient {
   private replicaOpenFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private querySubscribeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private serverCapabilities: ServerCapabilities = {};
+  private readonly replicaSnapshotPagesEnabled: boolean;
   private activeArtifactHashValue = "";
   private readonly publicTenant?: string;
   private auth: GonvexClientAuth = {};
@@ -670,8 +677,11 @@ export class GonvexClient {
   private localSessionStateValue: "unavailable" | "restored" | "authenticated" = "unavailable";
   private readonly localSessionHandlers = new Set<() => void>();
   private replicaFrames: Promise<void> = Promise.resolve();
-  private queuedReplicaWatermark?: { revision: number; scope: ReplicaScope };
+  private queuedReplicaWatermark?: { revision: number; scope: ReplicaScope; generation: number };
   private processedReplicaWatermarkRevision = 0;
+  private readonly snapshotPageSubscriptions = new Set<ReplicaSubscription>();
+  private snapshotDeferredFrames: Array<() => Promise<void>> = [];
+  private snapshotDeferredBytes = 0;
   private readonly pendingReplicaFrames: Array<Extract<ServerMessage, { type: "replica.transaction" | "replica.watermark" }>> = [];
   private readonly unsubscribeOutbox: () => void;
   private readonly sharedOutboxStore?: OutboxStore;
@@ -742,6 +752,7 @@ export class GonvexClient {
     this.querySubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
       options.querySubscriptionRetentionMs,
     );
+    this.replicaSnapshotPagesEnabled = options.replicaSnapshotPages !== false;
     this.replicaSubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
       options.replicaSubscriptionRetentionMs,
     );
@@ -2153,6 +2164,12 @@ export class GonvexClient {
   }
 
   close() {
+    this.snapshotDeferredFrames = [];
+    this.snapshotDeferredBytes = 0;
+    for (const subscription of this.replicaSubscriptions.values()) {
+      this.discardSnapshotPages(subscription);
+      subscription.verificationGeneration += 1;
+    }
     this.flushTelemetry();
     this.unsubscribeTelemetryLifecycle?.();
     this.manuallyClosed = true;
@@ -2609,7 +2626,12 @@ export class GonvexClient {
     this.replicaSubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => {
       const scope = subscription.scope ?? this.replicaScope;
-      this.enqueueReplicaFrame(() => this.handleReplicaMessage(subscription, message as ReplicaMessage, scope));
+      const socketGeneration = this.socketGeneration;
+      const verificationGeneration = subscription.verificationGeneration;
+      this.enqueueReplicaFrame(async () => {
+        if (verificationGeneration !== subscription.verificationGeneration || socketGeneration !== this.socketGeneration || !this.isWebSocketConnected) return;
+        await this.handleReplicaMessage(subscription, message as ReplicaMessage | SnapshotPage, scope);
+      });
     });
     this.startReplica(subscription);
     return () => this.unsubscribeReplicaListener(key, onMessage);
@@ -2861,21 +2883,58 @@ export class GonvexClient {
     };
   }
 
-  private async handleReplicaMessage(subscription: ReplicaSubscription, message: ReplicaMessage, scope = this.replicaScope) {
+  private async handleReplicaMessage(subscription: ReplicaSubscription, message: ReplicaMessage | SnapshotPage, scope = this.replicaScope, verifiedSnapshot = false) {
     if (scope !== this.replicaScope || (subscription.scope !== undefined && subscription.scope !== scope)) return;
+    if (message.type === "replica.snapshotPage") {
+      if (!this.replicaSnapshotPagesEnabled || this.serverCapabilities.replicaSnapshotPages !== 1 || !subscription.opening
+        || subscription.socketGeneration !== this.socketGeneration) return;
+      if (!message.cursor || typeof message.cursor.epoch !== "string" || message.visibilityScope !== scope) {
+        this.restartPagedSnapshots();
+        return;
+      }
+      if (replicaCursorIsStale(subscription, message.cursor)) return;
+      const generation = subscription.verificationGeneration;
+      const stager = subscription.snapshotPages ??= new SnapshotPageStager(message);
+      this.snapshotPageSubscriptions.add(subscription);
+      try {
+        const snapshot = await stager.append(message);
+        if (scope !== this.replicaScope || generation !== subscription.verificationGeneration
+          || subscription.snapshotPages !== stager || this.manuallyClosed) return;
+        if (!snapshot) return;
+        this.discardSnapshotPages(subscription);
+        await this.handleReplicaMessage(subscription, snapshot, scope, true);
+        await this.drainSnapshotFrames();
+      } catch {
+        if (generation !== subscription.verificationGeneration) return;
+        this.restartPagedSnapshots();
+      }
+      return;
+    }
+    const resetGeneration = subscription.resetGeneration ?? 0;
+    const deferredApply = () => (subscription.resetGeneration ?? 0) === resetGeneration
+      ? this.handleReplicaMessage(subscription, message, scope) : Promise.resolve();
+    if (message.type === "replica.delta" && this.deferSnapshotFrame(message, deferredApply)) return;
+    if (message.type === "replica.ready" && subscription.snapshotPages) {
+      this.restartPagedSnapshots();
+      return;
+    }
+    if (message.type === "replica.ready" && this.deferSnapshotFrame(message, deferredApply)) return;
+    if (message.type === "replica.reset" || message.type === "replica.error" || message.type === "replica.needHashes") {
+      this.discardSnapshotPages(subscription);
+    }
     const current = () => this.replica.getWindow(subscription.key);
     if (message.type === "replica.snapshot") {
       if (!subscription.opening || replicaCursorIsStale(subscription, message.cursor)) return;
-      this.clearReplicaRetry(subscription, true);
-      subscription.opening = false;
-      subscription.isUpToDate = false;
-      raiseReplicaCursorFloor(subscription, message.cursor);
-      const rows = boundReplicaRows(message.result, message.key, message.maxRows, message.maxBytes, message.orderBy, message.orderDirection);
+      const generation = subscription.verificationGeneration;
+      const rows = verifiedSnapshot ? message.result
+        : boundReplicaRows(message.result, message.key, message.maxRows, message.maxBytes, message.orderBy, message.orderDirection);
       let hashes: Record<string, string> | undefined;
       if (message.hashes && message.digest) {
-        const digest = await replicaHashesDigest(message.hashes);
+        const digest = verifiedSnapshot ? message.digest : message.digest.startsWith("xor1:")
+          ? replicaAggregateDigest(message.hashes) : await replicaHashesDigest(message.hashes);
         if (digest === message.digest) hashes = message.hashes;
       }
+      if (scope !== this.replicaScope || generation !== subscription.verificationGeneration || this.manuallyClosed) return;
       const window = {
         signature: subscription.key,
         kind: "replica" as const,
@@ -2897,7 +2956,12 @@ export class GonvexClient {
         scope,
       };
       await this.replica.replaceWindow(window);
-      const snapshot: ReplicaMessage = { ...message, result: [] };
+      if (scope !== this.replicaScope || generation !== subscription.verificationGeneration || this.manuallyClosed) return;
+      this.clearReplicaRetry(subscription, true);
+      subscription.opening = false;
+      subscription.isUpToDate = false;
+      raiseReplicaCursorFloor(subscription, message.cursor);
+      const snapshot: ReplicaMessage = { ...message, result: [], hashes: verifiedSnapshot ? undefined : message.hashes };
       subscription.lastMessage = snapshot;
       this.emitReplicaMessage(subscription, snapshot, scope);
       return;
@@ -2967,6 +3031,7 @@ export class GonvexClient {
       return;
     }
     if (message.type === "replica.reset") {
+      subscription.resetGeneration = (subscription.resetGeneration ?? 0) + 1;
       this.clearReplicaRetry(subscription, true);
       subscription.isUpToDate = false;
       subscription.opening = false;
@@ -3022,11 +3087,59 @@ export class GonvexClient {
     this.emitReplicaMessage(subscription, message, scope);
   }
 
+  private discardSnapshotPages(subscription: ReplicaSubscription) {
+    subscription.snapshotPages = undefined;
+    this.snapshotPageSubscriptions.delete(subscription);
+  }
+
+  private deferSnapshotFrame(message: ServerMessage, operation: () => Promise<void>) {
+    if (this.snapshotPageSubscriptions.size === 0) return false;
+    this.snapshotDeferredBytes += new TextEncoder().encode(JSON.stringify(message)).byteLength;
+    if (this.snapshotDeferredBytes > 2 * 1024 * 1024 || this.snapshotDeferredFrames.length >= 1024) {
+      // Reconnect from durable checkpoints rather than lose an authoritative
+      // transaction or retain an unbounded interleaved feed.
+      this.socket?.close();
+      return true;
+    }
+    const scope = this.replicaScope;
+    const generation = this.socketGeneration;
+    this.snapshotDeferredFrames.push(async () => {
+      if (scope === this.replicaScope && generation === this.socketGeneration && this.isWebSocketConnected) await operation();
+    });
+    return true;
+  }
+
+  private async drainSnapshotFrames() {
+    if (this.snapshotPageSubscriptions.size > 0) return;
+    const frames = this.snapshotDeferredFrames;
+    this.snapshotDeferredFrames = [];
+    this.snapshotDeferredBytes = 0;
+    for (const apply of frames) {
+      try {
+        await apply();
+      } catch (error) {
+        // The rest of the backlog was already dequeued. Reconnect from the
+        // durable checkpoint so no later watermark passes an unapplied frame.
+        this.socket?.close();
+        throw error;
+      }
+    }
+  }
+
+  private restartPagedSnapshots() {
+    // A malformed or interrupted stream must not modify the active rows or
+    // checkpoint. Closing also fences async verification and replays the feed.
+    this.socket?.close();
+  }
+
   private enqueueReplicaFrame(operation: () => Promise<void>, watermark = false) {
     // Any entity/window frame seals the adjacent watermark batch. Advancing
     // across that barrier could make an unapplied transaction look stale.
     if (!watermark) this.queuedReplicaWatermark = undefined;
-    const processing = this.replicaFrames.then(operation);
+    const processing = this.replicaFrames.then(async () => {
+      await operation();
+      if (this.snapshotDeferredFrames.length > 0) await this.drainSnapshotFrames();
+    });
     this.replicaFrames = processing.catch(() => {
       this.replica.setFreshness("verifying");
     });
@@ -3035,36 +3148,44 @@ export class GonvexClient {
   private enqueueReplicaWatermark(revision: number) {
     if (!Number.isSafeInteger(revision) || revision < 0) return;
     const pending = this.queuedReplicaWatermark;
-    if (pending && pending.scope === this.replicaScope) {
+    if (pending && pending.scope === this.replicaScope && pending.generation === this.socketGeneration) {
       pending.revision = Math.max(pending.revision, revision);
       return;
     }
-    const batch = { revision, scope: this.replicaScope };
+    const batch = { revision, scope: this.replicaScope, generation: this.socketGeneration };
     this.queuedReplicaWatermark = batch;
     this.enqueueReplicaFrame(async () => {
       if (this.queuedReplicaWatermark === batch) this.queuedReplicaWatermark = undefined;
-      if (batch.scope !== this.replicaScope) return;
+      if (batch.scope !== this.replicaScope || batch.generation !== this.socketGeneration || !this.isWebSocketConnected) return;
+      if (this.deferSnapshotFrame({ type: "replica.watermark", revision: batch.revision }, () => this.handleReplicaWatermark(batch.revision))) return;
       await this.handleReplicaWatermark(batch.revision);
     }, true);
   }
 
   private enqueueReplicaTransaction(message: Extract<ServerMessage, { type: "replica.transaction" }>) {
     const scope = this.replicaScope;
+    const generation = this.socketGeneration;
     this.enqueueReplicaFrame(async () => {
-      await this.replica.applyTransaction({
-        cursor: message.cursor,
-        originCommandId: message.originCommandId,
-        provenance: message.provenance,
-        changes: message.changes.map((change) => ({
-          ...change,
-          oldValue: asReplicaRow(change.oldValue),
-          newValue: asReplicaRow(change.newValue),
-        })),
-      }, scope);
-      if (message.originCommandId && !this.replica.hasPendingCommand(message.originCommandId)) {
-        await this.ackOptimisticReducer(message.originCommandId);
-      }
+      if (scope !== this.replicaScope || generation !== this.socketGeneration || !this.isWebSocketConnected) return;
+      if (this.deferSnapshotFrame(message, () => this.applyReplicaTransaction(message, scope))) return;
+      await this.applyReplicaTransaction(message, scope);
     });
+  }
+
+  private async applyReplicaTransaction(message: Extract<ServerMessage, { type: "replica.transaction" }>, scope: ReplicaScope) {
+    await this.replica.applyTransaction({
+      cursor: message.cursor,
+      originCommandId: message.originCommandId,
+      provenance: message.provenance,
+      changes: message.changes.map((change) => ({
+        ...change,
+        oldValue: asReplicaRow(change.oldValue),
+        newValue: asReplicaRow(change.newValue),
+      })),
+    }, scope);
+    if (message.originCommandId && !this.replica.hasPendingCommand(message.originCommandId)) {
+      await this.ackOptimisticReducer(message.originCommandId);
+    }
   }
 
   private drainPendingReplicaFrames() {
@@ -3195,8 +3316,11 @@ export class GonvexClient {
   }
 
   private markReplicaSubscriptionsOutOfDate() {
+    this.snapshotDeferredFrames = [];
+    this.snapshotDeferredBytes = 0;
     for (const subscription of this.replicaSubscriptions.values()) {
       const wasUpToDate = subscription.isUpToDate;
+      this.discardSnapshotPages(subscription);
       subscription.verificationGeneration += 1;
       subscription.isUpToDate = false;
       if (!wasUpToDate) continue;
@@ -3311,6 +3435,8 @@ export class GonvexClient {
       this.clearReplicaRetry(latest);
       this.pendingReplicaOpens.delete(latest);
       this.replicaSubscriptions.delete(key);
+      this.discardSnapshotPages(latest);
+      this.enqueueReplicaFrame(() => this.drainSnapshotFrames());
       this.handlers.delete(latest.id);
       this.send({ type: "replica.close", id: latest.id });
     }, this.replicaSubscriptionRetentionMs);
@@ -4263,6 +4389,8 @@ export class GonvexClient {
 
   private resumeReplicaSubscriptions() {
     for (const subscription of this.replicaSubscriptions.values()) {
+      this.discardSnapshotPages(subscription);
+      subscription.verificationGeneration += 1;
       if (subscription.listeners.size === 0) continue;
       subscription.opening = false;
       subscription.socketGeneration = undefined;
@@ -4333,6 +4461,8 @@ export class GonvexClient {
     for (const subscription of this.replicaSubscriptions.values()) {
       if (subscription.listeners.size === 0) continue;
       this.clearReplicaRetry(subscription, true);
+      this.discardSnapshotPages(subscription);
+      subscription.verificationGeneration += 1;
       subscription.opening = false;
       subscription.socketGeneration = undefined;
       this.sendReplicaOpen(subscription);
@@ -4394,6 +4524,8 @@ export class GonvexClient {
   }
 
   private resetReplicaScopeState() {
+    this.snapshotDeferredFrames = [];
+    this.snapshotDeferredBytes = 0;
     this.processedReplicaWatermarkRevision = 0;
     for (const subscription of this.querySubscriptions.values()) {
       subscription.lastMessage = undefined;
@@ -4406,6 +4538,7 @@ export class GonvexClient {
       subscription.retiredEpochs.clear();
       subscription.lastMessage = undefined;
       subscription.opening = false;
+      this.discardSnapshotPages(subscription);
       subscription.verificationGeneration += 1;
     }
     for (const handler of this.sessionScopeHandlers) handler();
@@ -4437,17 +4570,18 @@ export class GonvexClient {
       subscription.scope = this.replicaScope;
       this.handlers.set(subscription.id, (message) => {
         const scope = subscription.scope ?? this.replicaScope;
+        const socketGeneration = this.socketGeneration;
+        const verificationGeneration = subscription.verificationGeneration;
         // Snapshot/delta/ready frames for every Replica Collection must be
         // handled in wire order. In particular, `ready` verifies the entities
         // written by the preceding snapshot or delta. Running these handlers
         // concurrently after an auth-scope rotation lets `ready` inspect the
         // old window, falsely reset it for an integrity mismatch, and leave a
         // retained entity stale until another server change happens.
-        this.enqueueReplicaFrame(() => this.handleReplicaMessage(
-          subscription,
-          message as ReplicaMessage,
-          scope,
-        ));
+        this.enqueueReplicaFrame(async () => {
+          if (verificationGeneration !== subscription.verificationGeneration || socketGeneration !== this.socketGeneration || !this.isWebSocketConnected) return;
+          await this.handleReplicaMessage(subscription, message as ReplicaMessage | SnapshotPage, scope);
+        });
       });
     }
   }
@@ -4614,7 +4748,7 @@ export class GonvexClient {
       controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
       device: this.telemetryDevice,
-		capabilities: { tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
+		capabilities: { replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
     });
   }
 
