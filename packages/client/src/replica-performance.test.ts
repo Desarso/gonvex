@@ -106,3 +106,50 @@ it('keeps computed offline windows reactive to relation-table changes', async ()
   replica.applyOptimistic('offline',[{entity:'relations',rowId:'a',op:'patch',fields:{value:4}}]);
   expect(computed).toHaveBeenCalledOnce(); expect(normal).not.toHaveBeenCalled();
 });
+
+it('captures reducer tables lazily and isolates speculative reads across awaited commits', async () => {
+  const replica = new LocalReplica(); await materialize(replica);
+  const table = replica['entities'].get('tasks')!;
+  const entries = vi.spyOn(table, 'entries');
+  const captured = replica.captureExecutionRows(false);
+  expect(entries).not.toHaveBeenCalled(); entries.mockRestore();
+  let resume!:()=>void;
+  const paused = new Promise<void>(resolve=>{resume=resolve;});
+  const read = replica.withReadView(()=>({tasks:{key:'id',complete:true}}),false,async view=>{
+    const first=await view.select({table:'tasks',where:{column:'id',op:'eq',value:'a'}});
+    await paused;
+    const second=await view.select({table:'tasks',where:{column:'id',op:'eq',value:'a'}});
+    expect(second).toEqual(first);
+    expect(second.rows[0]).toBe(first.rows[0]);
+    expect(()=>{second.rows[0]!.value=999;}).toThrow(TypeError);
+  },true);
+  await replica.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{value:9}}]});
+  resume(); await read;
+  expect(captured('tasks')[0]!.value).toBe(1);
+  expect(replica.entity('tasks','a')!.value).toBe(9);
+});
+
+it('maintains equality candidates in table order across writes, deletes, rejection and scope resets', async () => {
+  const replica = new LocalReplica(); await materialize(replica);
+  expect(replica.equalityRows('tasks','value',1).map(row=>row.id)).toEqual(['a']);
+  await replica.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'tasks',id:'b',operation:'update',newValue:{value:1}}]});
+  expect(replica.equalityRows('tasks','value',1).map(row=>row.id)).toEqual(['a','b']);
+  replica.applyOptimistic('edit',[{entity:'tasks',rowId:'a',op:'patch',fields:{value:2}}]);
+  expect(replica.equalityRows('tasks','value',1)).toEqual(replica.entityRows('tasks'));
+  replica.rejectCommand('edit');
+  await replica.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'delete'}]});
+  expect(replica.equalityRows('tasks','value',1).map(row=>row.id)).toEqual(['b']);
+  await replica.activateScope('other');
+  expect(replica.equalityRows('tasks','value',1)).toEqual([]);
+});
+
+it('updates reverse memberships once for burst deletes and reclaims removed window metadata', async () => {
+  const replica = new LocalReplica(); await materialize(replica); await materialize(replica,'other');
+  await replica.applyTransaction({cursor:{epoch:'e',revision:1},changes:['a','b'].map(id=>({entity:'tasks',id,operation:'delete' as const}))});
+  expect(replica.getWindow('tasks')!.ids).toEqual([]);
+  expect(replica['memberships'].has('tasks')).toBe(false);
+  expect(replica['rowVersions'].has('tasks\0a')).toBe(false);
+  await replica.removeWindow('other');
+  expect(replica['memberships'].size).toBe(0);
+  expect(replica['membershipBytes']).toBe(256);
+});

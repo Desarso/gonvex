@@ -2457,3 +2457,20 @@ describe("restored native auth", () => {
     expect(localStorage.getItem(storageKey)).toBeNull();
   });
 });
+
+it('keeps an offline hook snapshot stable when only unrelated dependencies change',()=>{
+  const client=new FakeGonvexClient();
+  client.localReplica.freshness=()=> 'offline';
+  let token='tasks:1';
+  Object.assign(client,{
+    offlineLiveQueryToken:()=>token,
+    offlineLiveQuery:vi.fn(()=>({rows:[{id:'a',value:token}],completeness:'complete',supported:true})),
+  });
+  const ref:FunctionReference={kind:'query',path:'tasks:grid',live:{entity:'tasks',key:'id',plan:{table:'tasks',key:'id'}}};
+  const {result}=renderHook(()=>useLiveQueryState(ref),{wrapper:wrapperFor(client)});
+  const first=result.current;
+  actAtPaint(()=>client.updateReplica());expect(result.current).toBe(first);
+  expect((client as any).offlineLiveQuery).toHaveBeenCalledOnce();
+  actAtPaint(()=>{token='tasks:2';client.updateReplica();});
+  expect(result.current).not.toBe(first);expect(result.current.rows[0]!.value).toBe('tasks:2');
+});

@@ -149,3 +149,15 @@ it('keeps crypto alive between indexed reads without wrapping database work in w
   });
   expect(wait).toHaveBeenCalledTimes(1);
 });
+
+it('combines many pages once and preserves global sort, projection, exclusions and limits',async()=>{
+  const rows=Array.from({length:73},(_,i)=>({_id:String(i).padStart(3,'0'),score:(i*19)%73,extra:'hidden'}));
+  const page=vi.fn(async(_read,after)=>{
+    const start=after?Number(after)+1:0;
+    return rows.slice(start,start+3).map(row=>({id:row._id,row}));
+  });
+  const view=pagedReplicaReadView({tasks:{key:'_id',complete:true}},page);
+  const result=await view.select({table:'tasks',columns:['_id','score'],orderBy:[{column:'score',direction:'desc'}],limit:7},['010']);
+  const expected=rows.filter(row=>row._id!=='010').sort((a,b)=>b.score-a.score).slice(0,7).map(({_id,score})=>({_id,score}));
+  expect(result).toEqual({rows:expected,complete:true});expect(page).toHaveBeenCalledTimes(26);
+});

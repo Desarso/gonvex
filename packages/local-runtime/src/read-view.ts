@@ -79,24 +79,23 @@ export function executionReadColumns(read: DataRead, key: string): string[] | un
 export function projectDataRows(
   rows: JsonObject[],
   read: DataRead,
+  shareFrozen = false,
 ): JsonObject[] {
   orderDataRows(rows, read);
   const window = read.limit === undefined ? rows : rows.slice(0, read.limit);
-  return window.map((row) =>
-    structuredClone(
-      read.columns
-        ? Object.fromEntries(
-            read.columns.map((column) => [column, row[column] ?? null]),
-          )
-        : row,
-    ),
-  );
+  return window.map((row) => {
+    const projected = read.columns ? Object.fromEntries(read.columns.map(column => [column, row[column] ?? null])) : row;
+    // Portable reducers copy results before handing them to user handlers.
+    // Only replica-owned deeply frozen rows opt into this internal sharing.
+    return shareFrozen && Object.isFrozen(row) ? projected : structuredClone(projected);
+  });
 }
 
 /** A captured immutable RAM view. Only matching rows are copied. */
 export function memoryReadView(
   tables: ReadonlyMap<string, ReadonlyMap<string, JsonObject>>,
   coverage: ReadCoverage,
+  shareFrozen = false,
 ): ReducerReadView {
   return {
     async select(read, excludedRowIds = []) {
@@ -137,7 +136,7 @@ export function memoryReadView(
         }
       }
       return {
-        rows: projectDataRows(rows, read),
+        rows: projectDataRows(rows, read, shareFrozen),
         complete:
           read.limit === 0 ||
           (completeFields &&

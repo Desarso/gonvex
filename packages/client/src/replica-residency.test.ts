@@ -133,3 +133,45 @@ it('peer catch-up checks resident membership without enumerating resident IDs', 
   expect(keys).not.toHaveBeenCalled(); keys.mockRestore();
   expect(replica.entityRows('items')).toHaveLength(3);
 });
+
+it('evicts least recently read rows while keeping retained rows pinned and metadata bounded', async()=>{
+  const replica=new LocalReplica(storage,{maxResidentRows:3});
+  await replica.materializeWindow({signature:'small',entity:'items',key:'id',rows:[{id:'a'},{id:'b'},{id:'c'}],completeness:'partial',source:'server'});
+  replica.entity('items','a');
+  const release=replica.retainRows('items',['b']);
+  await replica.withReadView(()=>({}),false,async()=>undefined);
+  await replica.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'items',id:'d',operation:'insert',newValue:{id:'d'}}]});
+  expect(replica.entity('items','c')).toBeUndefined();
+  expect(replica.entity('items','a')).toBeDefined(); expect(replica.entity('items','b')).toBeDefined();
+  release();
+  for(let i=2;i<40;i++)await replica.applyTransaction({cursor:{epoch:'e',revision:i},changes:[{entity:'items',id:String(i),operation:'insert',newValue:{id:String(i)}}]});
+  expect(replica['recency'].size).toBe(3);
+  expect(replica['rowVersions'].size).toBeLessThanOrEqual(3);
+  expect(replica['executionRowVersions'].size).toBeLessThanOrEqual(3);
+});
+
+it('loads UI-retained windows before alphabetical cold rows and transfers decoded ownership once',async()=>{
+  await seed();
+  const active={...window,signature:'active',ids:['row-19']};
+  await storage.replaceWindow(active,{entities:{items:{'row-19':rows[19]!}},liveQueries:{active}},'scope',[rows[19]!]);
+  const working=await storage.loadWorkingSet('scope',{maxRows:3,maxBytes:100000,preferredWindows:['active']});
+  expect(working!.entities.items!['row-19']).toEqual(rows[19]);
+  const load=vi.spyOn(storage,'loadWorkingSet').mockResolvedValue(working);
+  const replica=new LocalReplica(storage,{maxResidentRows:3});await replica.activateScope('scope');
+  expect(load).toHaveBeenCalledOnce();
+  expect(replica.entity('items','row-19')).toBe(working!.entities.items!['row-19']);
+  expect(Object.isFrozen(working!.entities.items!['row-19'])).toBe(true);
+});
+
+it('updates equality indexes after peer changes publish and does not index a failed staged write',async()=>{
+  await seed();const replica=new LocalReplica(storage,{maxResidentRows:100});await replica.activateScope('scope');
+  expect(replica.equalityRows('items','status','new')).toHaveLength(20);
+  await storage.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'items',id:'row-00',operation:'update',newValue:{status:'done'}}]},{entities:{},liveQueries:{}},'scope');
+  await replica.synchronizeStorage();
+  expect(replica.equalityRows('items','status','done').map(row=>row._id)).toEqual(['row-00']);
+  expect(replica.equalityRows('items','status','new')).toHaveLength(19);
+  const fail=vi.spyOn(storage,'applyTransaction').mockRejectedValueOnce(new Error('disk'));
+  await expect(replica.applyTransaction({cursor:{epoch:'e',revision:3},changes:[{entity:'items',id:'row-00',operation:'update',newValue:{status:'reverted'}}]})).rejects.toThrow('disk');
+  expect(replica.equalityRows('items','status','done').map(row=>row._id)).toEqual(['row-00']);
+  expect(replica.equalityRows('items','status','reverted')).toEqual([]);fail.mockRestore();
+});

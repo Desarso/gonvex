@@ -87,3 +87,24 @@ describe('related query scopes', () => {
     expect(runOfflineLiveQuery(items, plan, { space: 'inbox' }, 'complete').supported).toBe(false);
   });
 });
+
+it('matches full stable sorting for bounded top-k windows, ties, nulls, offsets and both directions',()=>{
+  const rows=Array.from({length:513},(_,i)=>({id:String(i%17),order:i%11===0?null:(i*71)%100}));
+  for(const direction of ['asc','desc'] as const)for(const offset of [0,1,100,600])for(const limit of [1,20,1000]){
+    const plan={table:'tasks',key:'id',sort:{allowedColumns:['order'],defaultColumn:'order',defaultDirection:direction},window:{offsetArgument:'offset',limitArgument:'limit',defaultLimit:20,maxLimit:1000,count:'exact' as const}};
+    const full=runOfflineLiveQuery(rows,{...plan,window:undefined},{},'complete').rows;
+    const result=runOfflineLiveQuery(rows,plan,{offset,limit},'complete');
+    expect(result.rows).toEqual(full.slice(offset,offset+limit)); expect(result.total).toBe(rows.length);
+  }
+});
+
+it('reuses frozen search text but observes changes in caller-owned mutable rows',()=>{
+  const rows=[{id:'a',title:'First'}];
+  const plan={table:'tasks',key:'id',search:{argument:'search',columns:['title']}};
+  expect(runOfflineLiveQuery(rows,plan,{search:'first'},'complete').rows).toHaveLength(1);
+  rows[0]!.title='Second';
+  expect(runOfflineLiveQuery(rows,plan,{search:'first'},'complete').rows).toHaveLength(0);
+  Object.freeze(rows[0]);
+  expect(runOfflineLiveQuery(rows,plan,{search:'SECOND'},'complete').rows).toHaveLength(1);
+  expect(runOfflineLiveQuery(rows,plan,{search:'second'},'complete').rows).toHaveLength(1);
+});

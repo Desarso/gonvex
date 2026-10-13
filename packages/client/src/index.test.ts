@@ -3616,3 +3616,32 @@ describe("public tenant connections", () => {
     client.close();
   });
 });
+
+it('memoizes offline plans by root, relation and reference dependencies while retaining caller-owned arrays',async()=>{
+  const client=new GonvexClient('ws://runtime.test/ws',{outbox:{enabled:false}});
+  const replica=client['replica'];
+  await client['replicaReady'];
+  const materialize=(entity:string,rows:any[])=>replica.materializeWindow({signature:entity,kind:'replica',entity,key:'id',rows,completeness:'complete',source:'cache'});
+  await materialize('tasks',[{id:'a',status:'open',rank:2},{id:'b',status:'closed',rank:1}]);
+  await materialize('other',[{id:'a'}]);
+  const ref:FunctionReference={kind:'query',path:'tasks:list',live:{entity:'tasks',key:'id',plan:{table:'tasks',key:'id',where:{operator:'eq',column:'status',value:{argument:'status'}}}}};
+  const scan=vi.spyOn(replica,'equalityRows');
+  const first=client.offlineLiveQuery(ref,{status:'open'});
+  first.rows.length=0;
+  expect(client.offlineLiveQuery(ref,{status:'open'}).rows.map(row=>row.id)).toEqual(['a']);
+  expect(scan).toHaveBeenCalledTimes(1);
+  const token=client.offlineLiveQueryToken(ref);
+  await replica.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'other',id:'a',operation:'update',newValue:{value:1}}]});
+  expect(client.offlineLiveQueryToken(ref)).toBe(token);
+  client.offlineLiveQuery(ref,{status:'open'});expect(scan).toHaveBeenCalledTimes(1);
+  await replica.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'b',operation:'update',newValue:{status:'open'}}]});
+  expect(client.offlineLiveQuery(ref,{status:'open'}).rows.map(row=>row.id)).toEqual(['a','b']);
+  expect(scan).toHaveBeenCalledTimes(2);
+  const related:FunctionReference={...ref,live:{...ref.live!,plan:{...ref.live!.plan,index:{table:'tasks',key:'id',columns:['rank'],referenceFields:{rank:{table:'statuses',foreignKey:'status',column:'order'}},dependencies:['members']},where:{operator:'inRelation',column:'id',relation:{table:'taskUsers',column:'taskId'}}}}};
+  const relationToken=client.offlineLiveQueryToken(related);
+  await materialize('taskUsers',[{id:'link',taskId:'a'}]);
+  expect(client.offlineLiveQueryToken(related)).not.toBe(relationToken);
+  const referenceToken=client.offlineLiveQueryToken(related);await materialize('statuses',[{id:'open',order:1}]);
+  expect(client.offlineLiveQueryToken(related)).not.toBe(referenceToken);
+  client.close();
+});

@@ -1054,3 +1054,15 @@ it('keeps a lazily read persistence snapshot stable after peer reconciliation re
   expect(replica.entity('tasks','a')).toEqual({id:'a',count:2});
   expect(captured?.entities.tasks.a).toEqual({id:'a',count:1});
 });
+
+it('keeps captured and deferred storage snapshots isolated through forked table updates and clear',async()=>{
+  const snapshots:any[]=[];
+  const replica=new LocalReplica({load:async()=>undefined,applyTransaction:async(_transaction,snapshot)=>{snapshots.push(snapshot);}});
+  await replica.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'tasks',id:'a',operation:'insert',newValue:{id:'a',nested:{value:1}}}]});
+  const capture=replica.captureExecutionRows(false);
+  await replica.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{nested:{value:2}}}]});
+  await replica.clear();
+  expect(snapshots[0].entities.tasks.a.nested.value).toBe(1);
+  expect(snapshots[1].entities.tasks.a.nested.value).toBe(2);
+  expect(capture('tasks')).toEqual([{id:'a',nested:{value:1}}]);
+});
