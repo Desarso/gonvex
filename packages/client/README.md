@@ -372,6 +372,9 @@ including for developer and impersonation transitions.
 Always install the current account and tenant, and clear `token`, `identity`,
 `fetchToken`, and `tenant` on sign-out. JWT claims conflicting with an identity
 hint cannot restore either account's cache. Opaque tokens need the account
-identity hint supplied by your auth provider. Auth rejection and sign-out forget
-the saved directive and immediately hide the old replica; durable queued intents
-remain isolated for a future authorized login.
+identity hint supplied by your auth provider. Definitive auth rejection and
+sign-out forget the saved directive and immediately hide the old replica;
+durable queued intents remain isolated for a future authorized login. Token-fetch
+failures, socket closure, and transient or uncoded server errors preserve cached
+access. Only `details?.definitive` in `onAuthError((message, details) => ...)`
+authorizes clearing an application session.

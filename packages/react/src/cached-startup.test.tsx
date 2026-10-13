@@ -118,6 +118,25 @@ it("keeps the restored provider session through refresh failure and repeated sta
   expect(localStorage.getItem(storageKey)).not.toBeNull();
 });
 
+it.each([undefined, "transient"])("keeps the provider session after a refreshed-token error with code=%s", async (code) => {
+  const { client, rendered, storage, owner } = await fixture();
+  client.setAuth({ fetchToken: async ({ forceRefreshToken }) => forceRefreshToken ? "fresh-access" : "access" });
+  const socket = Socket.all.at(-1)!;
+  await act(async () => { socket.open(); });
+  await act(async () => {
+    socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "expired", code: "credential_rejected" });
+  });
+  expect(socket.sent[1].token).toBe("fresh-access");
+  await act(async () => {
+    socket.receive({ type: "auth.error", id: socket.sent[1].id, error: "authentication unavailable", code });
+  });
+  act(() => { vi.advanceTimersToNextFrame(); });
+  expect(rendered.getByTestId("app").textContent).toBe("reconnecting:cached task");
+  expect(client.localSessionState()).toBe("restored");
+  expect(await storage.loadSession(owner)).toBeDefined();
+  expect(localStorage.getItem(storageKey)).not.toBeNull();
+});
+
 it("signs out when a forced fresh credential is rejected again", async () => {
   const { client, rendered, storage, owner } = await fixture();
   client.setAuth({ fetchToken: async ({ forceRefreshToken }) => forceRefreshToken ? "fresh-access" : "access" });

@@ -1362,12 +1362,12 @@ describe("GonvexClient", () => {
 
     const auths = sentMessages(socket).filter((message) => message.type === "auth");
     expect(auths).toHaveLength(2);
-    socket.receive({ type: "auth.error", id: auths[1].id, error: "still bad" });
+    socket.receive({ type: "auth.error", id: auths[1].id, error: "still bad", code: "credential_rejected" });
     await vi.advanceTimersByTimeAsync(0);
 
     expect(sentMessages(socket).filter((message) => message.type === "auth")).toHaveLength(2);
     expect(fetchToken).toHaveBeenCalledTimes(2);
-    expect(onAuthError).toHaveBeenCalledWith("still bad", { definitive: true, code: undefined });
+    expect(onAuthError).toHaveBeenCalledWith("still bad", { definitive: true, code: "credential_rejected" });
   });
 
   it("sends a token provided to setAuth as-is and keeps the fetcher for reconnects", async () => {

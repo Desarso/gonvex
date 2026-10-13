@@ -26,15 +26,16 @@ was run.
 Network failure, token-fetch failure, missing or unchanged refresh tokens, and
 socket closure preserve cached sessions and rows. Membership-change events still
 invalidate the old visibility partition while the server verifies new permissions.
-The client retries through its existing reconnect backoff. Server operations and outbox replay still
-require accepted server authentication.
+The client retries through its existing reconnect backoff. Server operations and
+outbox replay still require accepted server authentication.
 
 `onAuthError((message, details) => ...)` supplies optional rejection details.
 Only `details?.definitive` authorizes signing out or deleting an account session.
-A server rejection followed by a fresh forced token that is also rejected is
-terminal, unless the server reports a transient failure. Explicit `revoked`,
-`member_removed` or `account_disabled` codes are also terminal. Explicit app
-sign-out still clears the saved directive and immediately hides its rows.
+A server rejection followed by a fresh forced token rejected with
+`credential_rejected` is terminal. Uncoded legacy errors preserve cached access
+because they cannot distinguish credential rejection from infrastructure failure.
+Explicit `revoked`, `member_removed` or `account_disabled` codes are also terminal.
+Explicit app sign-out still clears the saved directive and immediately hides its rows.
 
 The runtime sends an optional `code` on `auth.error`. Database credential
 rejections use `credential_rejected`, missing membership uses `member_removed`,

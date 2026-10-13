@@ -2001,7 +2001,7 @@ export class GonvexClient {
           const definitive = message.code === "revoked" || message.code === "member_removed"
             || message.code === "account_disabled"
             || (!!this.authRefreshedToken && this.authRefreshedToken === this.auth.token
-              && (message.code === undefined || message.code === "credential_rejected"))
+              && message.code === "credential_rejected")
             || (message.code === "credential_rejected" && /^gvx_(dev|imp)_/.test(this.auth.token ?? ""));
           this.authRetriedAfterError = false;
           this.authRefreshedToken = undefined;

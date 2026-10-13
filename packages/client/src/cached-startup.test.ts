@@ -176,7 +176,7 @@ describe("cached session startup", () => {
     expect(rejected).toHaveBeenCalledOnce();
   });
 
-  it("does not sign out when the server has a transient failure after forced refresh", async () => {
+  it.each([undefined, "transient"])("keeps restored access after a non-definitive refreshed-token error with code=%s", async (code) => {
     const { client, storage } = await fixture({ ...auth, fetchToken: async ({ forceRefreshToken }) => forceRefreshToken ? "fresh-token" : auth.token });
     await client.localSessionReady;
     const rejected = vi.fn();
@@ -185,7 +185,7 @@ describe("cached session startup", () => {
     await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
     socket.receive({ type: "auth.error", id: socket.sent[0].id, error: "expired", code: "credential_rejected" });
     await vi.waitFor(() => expect(socket.sent).toHaveLength(2));
-    socket.receive({ type: "auth.error", id: socket.sent[1].id, error: "database admission timeout", code: "transient" });
+    socket.receive({ type: "auth.error", id: socket.sent[1].id, error: "database admission timeout", code });
     expect(client.localSessionState()).toBe("restored");
     expect(client.localReplica.entity("tasks", "task")?.title).toBe("cached");
     expect(await storage.loadSession(owner)).toBeDefined();
