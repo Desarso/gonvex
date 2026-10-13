@@ -382,3 +382,38 @@ The package exports:
 Full docs live at https://desarso.github.io/gonvex/
 
 [Open online anonymous tenant connections with `public: { tenant }`](../../docs/public-functions.md).
+
+
+### Causal offline delivery
+
+Local reducers persist point reads, table scans and written row IDs with each
+intent. The outbox sends up to eight independent intents at once, using
+`reducer.callMany` when the server advertises `reducerBatch: 1`. Dependent
+intents wait for the earlier call to settle. A backed-off call blocks its
+causal dependents; unrelated saves can proceed. Old executor results and
+uncovered local reads retain conservative barriers.
+
+Browser upgrade stores cache journal entries between peer invalidations and
+lock ownership changes. A full reload at lock acquisition also covers delayed
+broadcasts from older tabs. Contract checks are cached only during short intent
+locks. Delivery waits never hold the upgrade fence. SQLite and browser stores
+write batch admission, completion and deletion in one transaction per phase
+for the items that settle together.
+
+Pure overwrite reducers can explicitly opt into replacing a never-sent intent:
+
+```ts
+const setTitle = reducer({
+  coalesce: { mode: "latest", key: ["taskId"] },
+  // args, result and run ...
+});
+```
+
+The key lists scalar argument fields identifying the overwritten value. Include
+all fields needed to distinguish separate values. This declaration promises
+that dropping intermediate calls has no observable side effects. Do not use it
+for increments, sparse patches updating different fields, audit events,
+notifications or workflow transitions. Deferred work disables coalescing.
+Undeclared reducers, previously sent intents and intents with downstream
+causal dependents are never replaced. Replacement is an atomic durable write;
+stores without that operation keep every intent.

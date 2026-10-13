@@ -25,6 +25,11 @@ export type ReducerOutboxOptions = {
  */
 export type OutboxStore = {
   shared?: boolean;
+  /** Opt-in cache; invalidate at coordination boundaries and on peer writes. */
+  cacheShared?: boolean;
+  subscribeInvalidation?(listener: () => void): () => void;
+  updateMany?(ids: number[], change: (entry: ReducerOutboxEntry) => ReducerOutboxEntry): Promise<ReducerOutboxEntry[]>;
+  replacePending?(id: number, draft: Omit<ReducerOutboxEntry, "id">): Promise<ReducerOutboxEntry | undefined>;
   coordinate?<T>(scope: string, lane: 'intent' | 'delivery', run: () => Promise<T>): Promise<T>;
   subscribePeer?(listener: () => void): () => void;
   update?(id: number, change: (entry: ReducerOutboxEntry) => ReducerOutboxEntry): Promise<ReducerOutboxEntry | undefined>;
@@ -39,6 +44,7 @@ export type OutboxStore = {
   /** Insert or replace the entry with this id. */
   put(entry: ReducerOutboxEntry): Promise<void>;
   delete(id: number): Promise<void>;
+  deleteMany?(ids: number[]): Promise<void>;
   clear(scope?: string): Promise<void>;
   close?(): void;
 };
@@ -55,12 +61,16 @@ export type ReducerOutboxEntry = {
   idempotencyKey: string;
   /** Entity identifiers whose writes must retain enqueue order. */
   entityKeys: string[];
+  dependencies?: IntentDependencies;
+  coalesceKey?: string;
   /** Optimistic UI state restored while this entry awaits a server result. */
   patches?: OptimisticPatch[];
   localExecution?: LocalExecution;
   createdAt: number;
   /** Failed deliveries that count toward the retry budget. */
   attempts: number;
+  /** Durable fence: even a recovered network attempt cannot be coalesced. */
+  sentAt?: number;
   nextAttemptAt: number;
   lastError?: string;
   /** Classification of `lastError`; absent for entries written by older SDKs. */
@@ -123,6 +133,8 @@ export type EnqueueReducer = {
   args: unknown;
   idempotencyKey?: string;
   entityKeys?: string[];
+  dependencies?: IntentDependencies;
+  coalesceKey?: string;
   patches?: OptimisticPatch[];
   localExecution?: LocalExecution;
   /** Direct online sends start inflight so the background drain cannot race them. */
@@ -130,19 +142,24 @@ export type EnqueueReducer = {
 };
 
 export type ReducerOutbox = {
+  dispose?(): void;
   recoverInflight?(scope: string): Promise<void>;
   enqueue(reducer: EnqueueReducer): Promise<ReducerOutboxEntry>;
   loadAll(scope: string): Promise<ReducerOutboxEntry[]>;
   /** Observe current records without performing startup inflight recovery. */
   list(scope: string): Promise<ReducerOutboxEntry[]>;
-  updateLocal(id: number, patches: OptimisticPatch[], execution: LocalExecution): Promise<void>;
+  updateLocal(id: number, patches: OptimisticPatch[], execution: LocalExecution, dependencies?: IntentDependencies): Promise<void>;
   nextReady(scope: string, now: number): Promise<ReducerOutboxEntry | undefined>;
+  readyBatch?(scope: string, now: number, limit: number): Promise<ReducerOutboxEntry[]>;
   /** Resolves true when the entry is inflight; failed/rejected/missing entries are never revived. */
   markInflight(id: number): Promise<boolean | void>;
+  markInflightMany?(ids: number[]): Promise<ReducerOutboxEntry[]>;
   /** Return a just-admitted entry to pending without recording a failed attempt. */
   markPending(id: number): Promise<void>;
   markCommitted(id: number): Promise<void>;
+  markCommittedMany?(ids: number[]): Promise<void>;
   ack(id: number): Promise<void>;
+  ackMany?(ids: number[]): Promise<void>;
   /** Record a failed delivery: back off, or park as `failed` once the budget is spent. */
   fail(id: number, error: string, options?: OutboxFailureOptions): Promise<ReducerOutboxEntry | undefined | void>;
   /** Record a permanent server rejection durably instead of deleting the entry. */
@@ -208,12 +225,15 @@ export class DexieReducerOutbox implements ReducerOutbox {
       args: cloneValue(reducer.args),
       idempotencyKey: reducer.idempotencyKey ?? createIdempotencyKey(),
       entityKeys: [...(reducer.entityKeys ?? [])],
+      ...(reducer.dependencies ? { dependencies: cloneValue(reducer.dependencies) } : {}),
+      ...(reducer.coalesceKey ? { coalesceKey: reducer.coalesceKey } : {}),
       patches: reducer.patches?.map(clonePatch),
       ...(reducer.localExecution ? { localExecution: cloneValue(reducer.localExecution) } : {}),
       createdAt,
       attempts: 0,
       nextAttemptAt: createdAt,
       state: reducer.state ?? "pending",
+      ...(reducer.state === "inflight" ? { sentAt: createdAt } : {}),
     };
 
     if (this.memoryOnly) {
@@ -222,8 +242,13 @@ export class DexieReducerOutbox implements ReducerOutbox {
     }
     try {
       const database = await this.open();
-      const id = await database.entries.add(entry);
-      const stored = { ...entry, id } as ReducerOutboxEntry;
+      const stored = await database.transaction("rw", database.entries, async () => {
+        const candidate = reducer.coalesceKey ? coalescingCandidate(await database.entries.where("scope").equals(reducer.scope).sortBy("id"), entry as Omit<ReducerOutboxEntry, "id">) : undefined;
+        const id = candidate ? candidate.id : await database.entries.add(entry);
+        const stored = { ...entry, id } as ReducerOutboxEntry;
+        if (candidate) await database.entries.put(stored);
+        return stored;
+      });
       this.remember(stored);
       this.notify();
       return cloneEntry(stored);
@@ -265,14 +290,14 @@ export class DexieReducerOutbox implements ReducerOutbox {
     return entries.map(cloneEntry);
   }
 
-  async updateLocal(id: number, patches: OptimisticPatch[], execution: LocalExecution): Promise<void> {
+  async updateLocal(id: number, patches: OptimisticPatch[], execution: LocalExecution, dependencies?: IntentDependencies): Promise<void> {
     if (this.memoryOnly) throw new Error("Durable storage is required for local reducer replay");
     const database = await this.open();
     await database.transaction("rw", database.entries, async () => {
       const entry = await database.entries.get(id);
       if (!entry) return;
-      const updated = { ...entry, patches: patches.map(clonePatch), localExecution: cloneValue(execution) };
-      await database.entries.put(updated);
+      const updated = { ...entry, patches: patches.map(clonePatch), localExecution: cloneValue(execution), ...(dependencies ? { dependencies: cloneValue(dependencies) } : {}) };
+      if (!sameLocal(entry, patches, execution, dependencies)) await database.entries.put(updated);
       this.remember(updated);
     });
   }
@@ -621,11 +646,19 @@ export class StoreReducerOutbox implements ReducerOutbox {
   private readonly ready: Promise<void>;
   private memoryOnly: boolean;
   private nextId = 1;
+  private readonly unsubscribeInvalidation?: () => void;
+  private sharedGeneration = 0;
+  private readonly loadedScopes = new Map<string, number>();
 
   constructor(store: OutboxStore, options: { enabled?: boolean } = {}) {
     this.store = store;
     this.memoryOnly = options.enabled === false;
     this.ready = this.memoryOnly || store.shared ? Promise.resolve() : this.hydrate();
+    this.unsubscribeInvalidation = store.subscribeInvalidation?.(() => { this.sharedGeneration += 1; });
+  }
+
+  dispose() {
+    this.unsubscribeInvalidation?.();
   }
 
   async enqueue(reducer: EnqueueReducer): Promise<ReducerOutboxEntry> {
@@ -637,16 +670,24 @@ export class StoreReducerOutbox implements ReducerOutbox {
       args: cloneValue(reducer.args),
       idempotencyKey: reducer.idempotencyKey ?? createIdempotencyKey(),
       entityKeys: [...(reducer.entityKeys ?? [])],
+      ...(reducer.dependencies ? { dependencies: cloneValue(reducer.dependencies) } : {}),
+      ...(reducer.coalesceKey ? { coalesceKey: reducer.coalesceKey } : {}),
       patches: reducer.patches?.map(clonePatch),
       ...(reducer.localExecution ? { localExecution: cloneValue(reducer.localExecution) } : {}),
       createdAt,
       attempts: 0,
       nextAttemptAt: createdAt,
       state: reducer.state ?? "pending",
+      ...(reducer.state === "inflight" ? { sentAt: createdAt } : {}),
     };
     let entry: ReducerOutboxEntry;
     if (reducer.localExecution && this.memoryOnly) throw new Error("Durable storage is required for local reducer execution");
-    if (reducer.localExecution && this.store.append) {
+    await this.refreshShared(reducer.scope);
+    const superseded = coalescingCandidate(this.sortedEntries(reducer.scope), draft);
+    const replacement = superseded && this.store.replacePending ? await this.store.replacePending(superseded.id, draft) : undefined;
+    if (replacement) {
+      entry = replacement;
+    } else if (reducer.localExecution && this.store.append) {
       entry = await this.store.append(draft);
     } else {
       entry = { ...draft, id: this.store.allocateId ? await this.store.allocateId() : this.nextId++ };
@@ -681,13 +722,15 @@ export class StoreReducerOutbox implements ReducerOutbox {
     return this.sortedEntries(scope).map(cloneEntry);
   }
 
-  async updateLocal(id: number, patches: OptimisticPatch[], execution: LocalExecution): Promise<void> {
+  async updateLocal(id: number, patches: OptimisticPatch[], execution: LocalExecution, dependencies?: IntentDependencies): Promise<void> {
     await this.ready;
     if (this.memoryOnly) throw new Error("Durable storage is required for local reducer replay");
-    if(this.store.update) { await this.updateShared(id,entry=>({...entry,patches:patches.map(clonePatch),localExecution:cloneValue(execution)}));return; }
+    const cached = this.entries.get(id);
+    if (cached && sameLocal(cached, patches, execution, dependencies)) return;
+    if(this.store.update) { await this.updateShared(id,entry=>({...entry,patches:patches.map(clonePatch),localExecution:cloneValue(execution),...(dependencies ? {dependencies:cloneValue(dependencies)} : {})}));return; }
     const entry = this.entries.get(id);
     if (!entry) return;
-    const updated = { ...entry, patches: patches.map(clonePatch), localExecution: cloneValue(execution) };
+    const updated = { ...entry, patches: patches.map(clonePatch), localExecution: cloneValue(execution), ...(dependencies ? { dependencies: cloneValue(dependencies) } : {}) };
     await this.store.put(cloneEntry(updated));
     this.entries.set(id, updated);
   }
@@ -698,10 +741,38 @@ export class StoreReducerOutbox implements ReducerOutbox {
     return cloneOptionalEntry(firstReady(this.sortedEntries(scope), now));
   }
 
+  async readyBatch(scope: string, now: number, limit: number): Promise<ReducerOutboxEntry[]> {
+    await this.ready;
+    await this.refreshShared(scope);
+    return readyIntents(this.sortedEntries(scope), now, limit).map(cloneEntry);
+  }
+
   async markInflight(id: number): Promise<boolean> {
     await this.ready;
     const { before, after } = await this.transition(id, markInflightChange);
     return (after ?? before)?.state === "inflight";
+  }
+
+  async markInflightMany(ids: number[]): Promise<ReducerOutboxEntry[]> {
+    if (ids.length === 0) return [];
+    await this.ready;
+    if (!this.store.updateMany || this.memoryOnly) {
+      const admitted: ReducerOutboxEntry[] = [];
+      for (const id of ids) if (await this.markInflight(id)) {
+        const entry = this.entries.get(id);
+        if (entry) admitted.push(cloneEntry(entry));
+      }
+      return admitted;
+    }
+    const admitted = new Set<number>();
+    const updated = await this.store.updateMany(ids, entry => {
+      if (entry.state !== "pending") return entry;
+      admitted.add(entry.id);
+      return markInflightChange(entry) ?? entry;
+    });
+    for (const entry of updated) this.entries.set(entry.id, cloneEntry(entry));
+    this.notify();
+    return updated.filter(entry => admitted.has(entry.id) && entry.state === "inflight").map(cloneEntry);
   }
 
   async markPending(id: number): Promise<void> {
@@ -728,6 +799,30 @@ export class StoreReducerOutbox implements ReducerOutbox {
     const updated = { ...entry, state: "committed" as const };
     this.entries.set(id, updated);
     await this.persistPut(updated);
+    this.notify();
+  }
+
+  async markCommittedMany(ids: number[]): Promise<void> {
+    if (ids.length === 0) return;
+    await this.ready;
+    if (!this.store.updateMany || this.memoryOnly) {
+      for (const id of ids) await this.markCommitted(id);
+      return;
+    }
+    const updated = await this.store.updateMany(ids, entry => entry.state === "inflight" ? { ...entry, state: "committed" } : entry);
+    for (const entry of updated) this.entries.set(entry.id, cloneEntry(entry));
+    this.notify();
+  }
+
+  async ackMany(ids: number[]): Promise<void> {
+    if (ids.length === 0) return;
+    await this.ready;
+    if (!this.store.deleteMany || this.memoryOnly) {
+      for (const id of ids) await this.ack(id);
+      return;
+    }
+    await this.store.deleteMany(ids);
+    for (const id of ids) this.entries.delete(id);
     this.notify();
   }
 
@@ -825,9 +920,12 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   private async refreshShared(scope:string) {
     if(!this.store.shared || this.memoryOnly) return;
-    const entries=await this.store.load(scope);
-    this.entries.clear();
-    for(const entry of entries) this.entries.set(entry.id,cloneEntry(entry));
+    if (this.store.cacheShared && this.loadedScopes.get(scope) === this.sharedGeneration) return;
+    const generation = this.sharedGeneration;
+    const entries = await this.store.load(scope);
+    for (const [id, entry] of this.entries) if (entry.scope === scope) this.entries.delete(id);
+    for (const entry of entries) this.entries.set(entry.id, cloneEntry(entry));
+    this.loadedScopes.set(scope, generation);
   }
 
   /**
@@ -941,27 +1039,73 @@ export function createReducerOutbox(options: ReducerOutboxOptions = {}): Reducer
 type EntryChange = (entry: ReducerOutboxEntry) => ReducerOutboxEntry | null | undefined;
 type TransitionResult = { before?: ReducerOutboxEntry; after?: ReducerOutboxEntry | null };
 
-function firstReady(entries: ReducerOutboxEntry[], now: number) {
-  const blockedEntityKeys = new Set<string>();
-  for (const entry of entries) {
-    // The runtime already accepted committed entries. They remain only to
-    // protect stale cached projections until reconciliation and must not block
-    // a newer pending write to the same entity.
-    if (entry.state === "committed") continue;
-    // Parked (failed) and rejected records wait for the app, not the server.
-    // They must not hold every later intent hostage. Later intents that truly
-    // depended on them are validated by the server and rejected on their own.
-    if (entry.state === "failed" || entry.state === "rejected") continue;
-    if (
-      entry.state === "pending"
-      && entry.nextAttemptAt <= now
-      && !entry.entityKeys.some((key) => blockedEntityKeys.has(key))
-    ) {
-      return entry;
-    }
-    for (const key of entry.entityKeys) blockedEntityKeys.add(key);
+export type IntentDependencies = {
+  reads: { entity: string; rowId: string }[];
+  writes: { entity: string; rowId: string }[];
+  scans: string[];
+};
+
+export function intentsConflict(earlier: ReducerOutboxEntry, later: ReducerOutboxEntry): boolean {
+  // Uncovered reads and old journal records keep the original global barrier.
+  if (earlier.entityKeys.includes("__gonvex_local_intents") || later.entityKeys.includes("__gonvex_local_intents")) return true;
+  const a = earlier.dependencies, b = later.dependencies;
+  if (!a || !b) {
+    const keys = (entry: ReducerOutboxEntry) => entry.dependencies
+      ? [...entry.dependencies.reads, ...entry.dependencies.writes].map(row => `${row.entity}:${row.rowId}`) : entry.entityKeys;
+    if (keys(earlier).some(key => keys(later).includes(key))) return true;
+    return Boolean(a?.scans.some(table => keys(later).some(key => key.startsWith(`${table}:`)))
+      || b?.scans.some(table => keys(earlier).some(key => key.startsWith(`${table}:`))));
   }
-  return undefined;
+  const overlaps = (left: typeof a.reads, right: typeof a.reads) => left.some(x => right.some(y => x.entity === y.entity && x.rowId === y.rowId));
+  return overlaps(a.writes, b.reads) || overlaps(a.writes, b.writes) || overlaps(a.reads, b.writes)
+    || a.writes.some(row => b.scans.includes(row.entity)) || b.writes.some(row => a.scans.includes(row.entity));
+}
+
+export function readyIntents(entries: ReducerOutboxEntry[], now: number, limit = 8): ReducerOutboxEntry[] {
+  const reads = new Set<string>(), writes = new Set<string>(), scans = new Set<string>();
+  const writeTables = new Set<string>(), legacyKeys = new Set<string>(), legacyTables = new Set<string>();
+  const ready: ReducerOutboxEntry[] = [];
+  let barrier = false, hasEarlier = false;
+  const key = (row: { entity: string; rowId: string }) => `${row.entity}:${row.rowId}`;
+  for (const entry of entries) {
+    if (!outboxEntryIsQueued(entry) || entry.state === "committed") continue;
+    const global = entry.entityKeys.includes("__gonvex_local_intents");
+    const dependencies = entry.dependencies;
+    const blocked = barrier || (global && hasEarlier) || (dependencies
+      ? dependencies.reads.some(row => writes.has(key(row)) || legacyKeys.has(key(row)))
+        || dependencies.writes.some(row => writes.has(key(row)) || reads.has(key(row)) || legacyKeys.has(key(row)) || scans.has(row.entity))
+        || dependencies.scans.some(table => writeTables.has(table) || legacyTables.has(table))
+      : entry.entityKeys.some(value => legacyKeys.has(value) || reads.has(value) || writes.has(value) || scans.has(value.split(":")[0]!)));
+    if (entry.state === "pending" && entry.nextAttemptAt <= now && !blocked) {
+      ready.push(entry);
+      if (ready.length === limit) break;
+    }
+    hasEarlier = true;
+    barrier ||= global;
+    if (dependencies) {
+      for (const row of dependencies.reads) reads.add(key(row));
+      for (const row of dependencies.writes) { writes.add(key(row)); writeTables.add(row.entity); }
+      for (const table of dependencies.scans) scans.add(table);
+    } else for (const value of entry.entityKeys) { legacyKeys.add(value); legacyTables.add(value.split(":")[0]!); }
+  }
+  return ready;
+}
+
+function firstReady(entries: ReducerOutboxEntry[], now: number) {
+  return readyIntents(entries, now, 1)[0];
+}
+
+function sameLocal(entry: ReducerOutboxEntry, patches: OptimisticPatch[], execution: LocalExecution, dependencies?: IntentDependencies) {
+  return JSON.stringify(entry.patches) === JSON.stringify(patches) && JSON.stringify(entry.localExecution) === JSON.stringify(execution) && (!dependencies || JSON.stringify(entry.dependencies) === JSON.stringify(dependencies));
+}
+
+function coalescingCandidate(entries: ReducerOutboxEntry[], draft: Omit<ReducerOutboxEntry, "id">) {
+  if (!draft.coalesceKey || !draft.dependencies) return undefined;
+  const candidate = [...entries].reverse().find(entry => entry.path === draft.path && entry.coalesceKey === draft.coalesceKey);
+  if (!candidate || candidate.state !== "pending" || candidate.attempts !== 0 || candidate.sentAt !== undefined || candidate.lastError || !candidate.dependencies) return undefined;
+  if (JSON.stringify(candidate.dependencies) !== JSON.stringify(draft.dependencies)) return undefined;
+  if (entries.some(entry => entry.id > candidate.id && outboxEntryIsLive(entry) && intentsConflict(candidate, entry))) return undefined;
+  return candidate;
 }
 
 export const DEFAULT_OUTBOX_MAX_BACKOFF_MS = 30_000;
@@ -996,7 +1140,7 @@ function isParked(entry: Pick<ReducerOutboxEntry, "state">) {
 function markInflightChange(entry: ReducerOutboxEntry): ReducerOutboxEntry | undefined {
   // A parked or rejected record only leaves its state through retry().
   if (entry.state === "inflight" || entry.state === "failed" || entry.state === "rejected") return undefined;
-  return { ...entry, state: "inflight" };
+  return { ...entry, sentAt: entry.sentAt ?? Date.now(), state: "inflight" };
 }
 
 function failChange(entry: ReducerOutboxEntry, error: string, now: number, options: OutboxFailureOptions) {
@@ -1048,6 +1192,7 @@ function cloneEntry(entry: ReducerOutboxEntry): ReducerOutboxEntry {
     args: cloneValue(entry.args),
     entityKeys: [...entry.entityKeys],
     patches: entry.patches?.map(clonePatch),
+    ...(entry.dependencies ? { dependencies: cloneValue(entry.dependencies) } : {}),
     ...(entry.localExecution ? { localExecution: cloneValue(entry.localExecution) } : {}),
   };
 }

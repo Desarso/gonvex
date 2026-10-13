@@ -96,3 +96,29 @@ it('projects only the fields a reducer reads and deletes without loading unrelat
   expect(result.result).toBe(1);
   expect(result.patches).toEqual([{entity:'tasks',rowId:'t1',op:'delete'}]);
 });
+
+it('captures absent point reads and scans without treating point reads as scans', async () => {
+  const point = await make(async ctx => {
+    await getRow(ctx.db, 'tasks', '_id', 'missing');
+    await ctx.db.update('tasks', 'a', { count: 2 });
+    return null;
+  }).execute('edit', {}, source({ tasks: [{ _id: 'a', count: 0, statusId: 'new' }] }), execution);
+  expect(point.readRows).toEqual([{ entity: 'tasks', rowId: 'missing' }, { entity: 'tasks', rowId: 'a' }]);
+  expect(point.scanTables).toEqual([]);
+  const scan = await make(ctx => selectRows(ctx.db, { table: 'tasks', where: { column: 'count', op: 'gt', value: 0 } })).execute('edit', {}, source({ tasks: [] }), execution);
+  expect(scan.scanTables).toEqual(['tasks']);
+});
+
+it('emits an overwrite key only for explicit declarations without deferred effects', async () => {
+  const run = async (ctx: ReducerContext, args: any) => { await ctx.db.update('tasks', args.id, { count: args.count }); return args.count; };
+  const data = { tasks: [{ _id: 'a', count: 0, statusId: 'new' }] };
+  expect((await make(run).execute('edit', { id: 'a', count: 1 }, source(data), execution)).coalesceKey).toBeUndefined();
+  const runtime = new PortableReducerRuntime({ schema: tables, artifactHash: 'artifact-1', reducers: {
+    edit: reducer({ coalesce: { mode: 'latest', key: ['id'] }, run }),
+    effect: reducer({ coalesce: { mode: 'latest', key: ['id'] }, run: async (ctx, args: any) => { await ctx.actions.enqueue('notify', {}); return run(ctx, args); } }),
+  } });
+  const first = await runtime.execute('edit', { id: 'a', count: 1 }, source(data), execution);
+  const second = await runtime.execute('edit', { id: 'a', count: 2 }, source(data), execution);
+  expect(first.coalesceKey).toBe('["a"]'); expect(second.coalesceKey).toBe(first.coalesceKey);
+  expect((await runtime.execute('effect', { id: 'a', count: 1 }, source(data), execution)).coalesceKey).toBeUndefined();
+});
