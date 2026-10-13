@@ -54,6 +54,7 @@ try {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${server.address().port}`;
+  await writeFile(options.output, JSON.stringify(results, null, 2) + '\n');
   for (const name of names) {
     await waitForQuiet();
     checkInterrupted();
@@ -81,14 +82,16 @@ try {
           const data = fixture(count); payload = JSON.stringify(data);
           browser.fixtures ??= {}; browser.fixtures[count] = { encodedBytes: data.encodedBytes, relatedTables: 5, visibleIDs: 250, exactIDs: 1000 };
         }
+        console.log(`${name} preparing ${kind}${count ? '-' + count : ''}`);
         for (const variant of [0, 1]) {
           await launch(variant);
           if (count) await pages[variant].evaluate(args => window.seedCase(args), { variant, kind, count, budget, victims: Math.max(1000, options.cap + options.warmups) });
         }
-        const subcases = kind === 'outbox' ? ['independent', 'dependent'] : [kind];
+        const subcases = kind === 'outbox' ? ['independent'] : [kind];
         for (const subcase of subcases) {
           const samples = [[], []];
           let target = options.samples, round = 0;
+          results.inProgress = { browser: name, metric: kind === 'outbox' ? `outbox-500-${subcase}` : `${kind}-${count}`, samples };
           while (round < options.warmups + target) {
             checkInterrupted();
             for (const variant of round % 2 ? [1, 0] : [0, 1]) {
@@ -98,12 +101,17 @@ try {
                 await pages[variant].evaluate(() => window.closeCase()); await contexts[variant].close(); contexts[variant] = undefined;
                 await launch(variant);
                 await pages[variant].evaluate(args => window.openStartup(args), { variant, count, budget });
-              } else if (kind === 'outbox') await pages[variant].evaluate(args => window.prepareOutbox(args), { index: round, dependent: subcase === 'dependent' });
+              } else if (kind === 'outbox') await pages[variant].evaluate(args => window.prepareOutbox(args), { index: round });
               else await pages[variant].evaluate(index => window.prepareSample(index), round);
               const elapsed = await pages[variant].evaluate(({ round, outbox }) => outbox ? window.runOutbox() : window.runSample(round), { round, outbox: kind === 'outbox' });
               if (round >= options.warmups) samples[variant].push(elapsed);
             }
             round++;
+            if (round % 5 === 0) {
+              observe();
+              console.log(`${name} ${results.inProgress.metric} round ${round}/${options.warmups + target}`);
+              await writeFile(options.output, JSON.stringify(results, null, 2) + '\n');
+            }
             if (round === options.warmups + target && target < options.cap && samples.some(values => summary(values).cv > options.cv)) target = Math.min(options.cap, target + 10);
           }
           observe();
@@ -115,6 +123,7 @@ try {
             for (let i = 0; i < 5; i++) value.engineRequestProfile.push(await pages[1].evaluate(index => window.profileSample(index), round + i));
           }
           browser.cases.push(value);
+          delete results.inProgress;
           console.log(`${name} ${value.metric} ${value.status} n=${samples[0].length}: legacy p95=${legacy.p95.toFixed(3)} engine p95=${engine.p95.toFixed(3)}`);
           await writeFile(options.output, JSON.stringify(results, null, 2) + '\n');
         }
@@ -130,6 +139,10 @@ try {
   for (const gate of results.gates) console.log(`${gate.verdict} ${gate.browser} ${gate.gate} CI=${gate.ci?.map(value => value.toFixed(3)).join('..')}`);
   await writeFile(options.output, JSON.stringify(results, null, 2) + '\n');
   if (results.gates.some(gate => gate.verdict === 'FAIL')) process.exitCode = 1;
+} catch (error) {
+  results.error = String(error);
+  await writeFile(options.output, JSON.stringify(results, null, 2) + '\n').catch(() => {});
+  throw error;
 } finally {
   process.off('SIGINT', interrupt); process.off('SIGTERM', interrupt);
   for (const context of contexts) await context?.close();

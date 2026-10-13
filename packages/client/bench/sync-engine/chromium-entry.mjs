@@ -47,11 +47,11 @@ window.runSample = async index => {
 };
 // Both replica modes use the same existing outbox. This measures durable state
 // transitions only, never server replay or the network drain acceptance gate.
-window.prepareOutbox = async ({ index, dependent }) => {
+window.prepareOutbox = async ({ index }) => {
   const outbox = state?.outbox ?? new DexieReducerOutbox({ databaseName: 'benchmark-outbox' });
   await outbox.clear('default');
   for (let i = 0; i < 500; i++) await outbox.enqueue({ scope: 'default', path: 'edit', args: { id: i },
-    idempotencyKey: `sample-${index}-${i}`, entityKeys: [dependent ? 'tasks' : `task-${i}`] });
+    idempotencyKey: `sample-${index}-${i}`, entityKeys: [`task-${i}`] });
   if (outbox.memoryOnly) throw new Error('Outbox fell back to memory; no durable benchmark');
   state = { outbox };
 };

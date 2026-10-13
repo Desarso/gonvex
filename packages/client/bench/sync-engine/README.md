@@ -23,7 +23,8 @@ Options are `--browsers chromium,firefox,webkit`, `--cases single-row,startup-wo
 and `--output path.json`. Pass options after the pnpm script name. A quick smoke
 run can use `--samples 5 --warmups 1 --cap 5`. Missing cases produce NOISY gates,
 not passes. Interrupted runs retain an incomplete JSON and cannot pass gates;
-profiles are removed on interruption. The report records process scheduling priority.
+partial samples are saved every five rounds and on failure; profiles are removed
+on interruption. The report records process scheduling priority.
 The old `chromium.mjs` entry point delegates to this same runner.
 
 ## Cases and scope
@@ -44,12 +45,14 @@ Both legacy and engine adapters run the same cases:
   no in-process adapter/JS cache survives. This is not a first-paint measurement.
 - Normalized delete with exactly 100 owners per victim, at both collection sizes.
   Each round deletes a different row so owner counts remain equal.
-- 500-intent independent and dependent durable outbox transitions. Admission is
+- 500-intent independent durable outbox transitions. Admission is
   prepared outside timing; timed operations are nextReady, markInflight and ack.
   Both modes use the existing DexieReducerOutbox, since replica adapters do not
   own an outbox. No network, reducer execution, authoritative replay or server
   visibility is simulated, so the design doc's 5-second/2x network drain gate
-  does not apply. This storage measurement is not a full drain.
+  does not apply. A dependent-chain replay needs that end-to-end fixture; repeating
+  the same serial storage calls would not measure its scheduler. This storage
+  measurement is not a full drain.
 
 Every case has fresh isolated profiles. Seeding, bundling and input preparation
 are excluded from timing. No runtime, worker, UI, subscriber or transport costs
