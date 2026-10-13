@@ -332,3 +332,42 @@ it('continues idle retirement cleanup past an empty generation', async () => {
   await vi.waitFor(async () => expect(await table.count()).toBe(2));
   expect((await storage.load())?.liveQueries['z-real'].ids).toEqual(['a', 'b']);
 });
+
+it('retains the exact collection certificate after a normalized delete and verifies the resumed delta', async () => {
+  const storage = store(), local = replica(storage);
+  const rows = [{ id: 'a', value: 1 }, { id: 'b', value: 2 }];
+  const hashes = await replicaRowsHashes(rows, 'id');
+  await local.replaceWindow({ ...window(), rows, hashes });
+  await local.applyTransaction({ cursor: { epoch: 'e', revision: 2 }, changes: [
+    { entity: 'tasks', id: 'a', operation: 'delete' },
+  ] });
+  const client = new GonvexClient('ws://runtime.test/ws', { errorReporting: false, localReplica: { storage } }); clients.push(client);
+  const state = client as any; await state.replica.hydrate(); state.serverCapabilities = { replicaResume: 1 }; state.replicaScope = 'default';
+  const subscription = { key: 'tasks', id: 'r', path: 'tasks.list', args: {}, entity: 'tasks',
+    columns: ['id', 'value'], retiredEpochs: new Set(), verificationGeneration: 1, forceFullIntegrity: false };
+  state.emitReplicaMessage = vi.fn();
+  expect(state.replica.getWindow('tasks')).toMatchObject({ ids: ['b'], hashes });
+  expect(state.replicaOpenRequest(subscription)).toEqual({ id: 'r', path: 'tasks.list', args: {},
+    cursor: { epoch: 'e', revision: 1 }, digest: replicaAggregateDigest(hashes) });
+  await state.handleReplicaMessage(subscription, { type: 'replica.delta', id: 'r', cursor: { epoch: 'e', revision: 2 }, upserts: [], deleted: ['a'] });
+  await state.handleReplicaMessage(subscription, { type: 'replica.ready', id: 'r', cursor: { epoch: 'e', revision: 2 }, digest: replicaAggregateDigest({ b: hashes.b }) });
+  expect(subscription).toMatchObject({ isUpToDate: true, forceFullIntegrity: false });
+  expect((await storage.load())?.liveQueries.tasks.hashes).toEqual({ b: hashes.b });
+  expect(await (storage as any).database.members.where('[scope+entity+id]').equals(['default', 'tasks', 'a']).count()).toBe(0);
+});
+
+it('reconciles checkpoint-only hashes when an unchanged full snapshot advances the collection', async () => {
+  const storage = store(), local = replica(storage);
+  const rows = [{ id: 'a', value: 1 }, { id: 'b', value: 2 }];
+  const hashes = await replicaRowsHashes(rows, 'id');
+  await local.replaceWindow({ ...window(), rows, hashes });
+  await local.applyTransaction({ cursor: { epoch: 'e', revision: 2 }, changes: [
+    { entity: 'tasks', id: 'a', operation: 'delete' },
+  ] });
+  expect((await storage.load())?.liveQueries.tasks.hashes).toEqual(hashes);
+  const full = vi.spyOn(storage, 'replaceWindow');
+  await local.replaceWindow({ ...window(['b'], 'tasks', 2), rows: [rows[1]], hashes: { b: hashes.b } });
+  expect(full).not.toHaveBeenCalled();
+  expect((await storage.load())?.liveQueries.tasks.hashes).toEqual({ b: hashes.b });
+  expect(await (storage as any).database.members.where('[scope+entity+id]').equals(['default', 'tasks', 'a']).count()).toBe(0);
+});
