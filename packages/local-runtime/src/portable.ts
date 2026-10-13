@@ -220,6 +220,8 @@ export class PortableReducerRuntime {
     const patches: LocalPatch[] = [];
     const deferred: LocalTransactionResult["deferred"] = [];
     const reads = new Set<string>();
+    const readRows = new Map<string, { entity: string; rowId: string }>();
+    const scanTables = new Set<string>();
     const primaryReads = new Map<
       string,
       Map<string, Promise<JsonObject | undefined>>
@@ -257,6 +259,10 @@ export class PortableReducerRuntime {
           throw new Error(`Unknown column ${read.table}.${column}`);
       reads.add(read.table);
       if (read.limit === 0) return [];
+      const predicate = read.where;
+      if (predicate && "column" in predicate && predicate.column === schema.key && predicate.op === "eq" && typeof predicate.value === "string") {
+        readRows.set(JSON.stringify([read.table, predicate.value]), { entity: read.table, rowId: predicate.value });
+      } else scanTables.add(read.table);
       const staged = changes.get(read.table);
       // Fetch enough ordered candidates to replace rows removed by this transaction.
       const result = await source.select({
@@ -467,6 +473,12 @@ export class PortableReducerRuntime {
     };
     const result = copy(await definition.handler(context, copy(args)));
     validateValue(definition.options.result, result);
-    return { result, patches, deferred, readTables: [...reads].sort() };
+    const coalesce = definition.options.coalesce;
+    const keyArgs = args && typeof args === "object" && !Array.isArray(args) ? args : undefined;
+    const coalesceKey = coalesce?.mode === "latest" && coalesce.key.length > 0 && keyArgs
+      && coalesce.key.every(key => Object.hasOwn(keyArgs, key) && ["string", "number", "boolean"].includes(typeof keyArgs[key]))
+      && deferred.length === 0
+      ? JSON.stringify(coalesce.key.map(key => keyArgs[key])) : undefined;
+    return { result, patches, deferred, readTables: [...reads].sort(), readRows: [...readRows.values()], scanTables: [...scanTables].sort(), ...(coalesceKey ? { coalesceKey } : {}) };
   }
 }

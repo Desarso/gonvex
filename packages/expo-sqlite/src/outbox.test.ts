@@ -158,3 +158,40 @@ it("clears one scope and lists scopes through the SDK", async () => {
   expect(await outbox.purgeScope(other)).toBe(1);
   expect((await store.load()).map((entry) => entry.scope)).toEqual([scope]);
 });
+
+it('admits, commits and deletes a batch in one SQLite transaction per phase', async () => {
+  const { adapter, db } = sqlite();
+  const store = new ExpoSQLiteOutboxStore(adapter);
+  const outbox = createReducerOutbox({ store });
+  const ids: number[] = [];
+  for (let n = 0; n < 8; n++) ids.push((await outbox.enqueue({ scope, path: 'save', args: {}, entityKeys: [] })).id);
+  let transactions = 0;
+  const original = adapter.withTransactionAsync;
+  adapter.withTransactionAsync = async run => { transactions++; return original(run); };
+  const admitted = await outbox.markInflightMany!(ids);
+  expect(admitted).toHaveLength(8); expect(transactions).toBe(1);
+  const recovered = createReducerOutbox({ store: new ExpoSQLiteOutboxStore(adapter) });
+  expect((await recovered.loadAll(scope)).map(entry => entry.state)).toEqual(Array(8).fill('pending'));
+  // Recovery keeps each original command ID, and records that it was already sent.
+  expect((await recovered.list(scope)).every(entry => entry.sentAt !== undefined)).toBe(true);
+  transactions = 0;
+  await outbox.markCommittedMany!(ids); expect(transactions).toBe(1);
+  await outbox.ackMany!(ids); expect(transactions).toBe(2);
+  expect(db.prepare('SELECT COUNT(*) AS count FROM _gonvex_outbox').get()).toEqual({ count: 0 });
+});
+
+it('atomically replaces only unsent overwrites and rolls back a failed replacement', async () => {
+  const { adapter, db } = sqlite(); const store = new ExpoSQLiteOutboxStore(adapter);
+  const outbox = createReducerOutbox({ store });
+  const draft = { scope, path: 'save', args: { value: 1 }, coalesceKey: 'a', dependencies: { reads: [], writes: [{ entity: 'tasks', rowId: 'a' }], scans: [] } };
+  const first = await outbox.enqueue(draft);
+  const latest = await outbox.enqueue({ ...draft, args: { value: 2 } });
+  expect(latest.id).toBe(first.id); expect(await store.load()).toHaveLength(1);
+  db.exec("CREATE TRIGGER fail_replace BEFORE INSERT ON _gonvex_outbox BEGIN SELECT RAISE(ABORT, 'disk failed'); END");
+  await expect(outbox.enqueue({ ...draft, args: { value: 3 } })).rejects.toThrow('disk failed');
+  expect(await store.load()).toMatchObject([{ args: { value: 2 }, idempotencyKey: latest.idempotencyKey }]);
+  db.exec('DROP TRIGGER fail_replace');
+  await outbox.markInflight(latest.id); await outbox.markPending(latest.id);
+  const later = await outbox.enqueue({ ...draft, args: { value: 4 } });
+  expect(later.id).not.toBe(latest.id);
+});
