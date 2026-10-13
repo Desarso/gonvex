@@ -8,10 +8,10 @@ export function evaluate(results) {
     const find = metric => browser.cases.find(value => value.metric === metric);
     const add = (name, cases, ci, limit) => {
       const missing = cases.some(value => !value);
-      const noisy = !browser.quiescent || cases.some(value => value?.status === 'NOISY');
+      const noisy = results.complete !== true || !browser.quiescent || cases.some(value => value?.status === 'NOISY');
       const verdict = missing || noisy ? 'NOISY' : ci[0] > limit ? 'FAIL' : ci[1] <= limit ? 'PASS' : 'NOISY';
       gates.push({ browser: browser.name, gate: name, verdict, ci, limit,
-        reason: missing ? 'case not measured' : !browser.quiescent ? 'not quiescent' : noisy ? 'sample CV exceeds threshold' : '95% bootstrap interval' });
+        reason: results.complete !== true ? 'run incomplete' : missing ? 'case not measured' : !browser.quiescent ? 'not quiescent' : noisy ? 'sample CV exceeds threshold' : '95% bootstrap interval' });
     };
     const small = find('single-row-10000'), large = find('single-row-50000');
     add('single-row durable apply p95 <= 10 ms', [large], large?.engine.p95CI, 10);

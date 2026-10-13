@@ -13,7 +13,7 @@ test('nearest-rank p95, even median and deterministic bootstrap', () => {
 });
 const values = (metric, legacy, engine) => ({ metric, legacy: summary(Array(20).fill(legacy)), engine: summary(Array(20).fill(engine)),
   ratio: comparison(Array(20).fill(engine), Array(20).fill(legacy)), status: 'OK' });
-const result = cases => ({ kind: 'native-browser-storage-v1', browsers: [{ name: 'chromium', quiescent: true, cases }] });
+const result = cases => ({ kind: 'native-browser-storage-v1', complete: true, browsers: [{ name: 'chromium', quiescent: true, cases }] });
 test('gate boundaries use confidence intervals and missing cases never pass', () => {
   const cases = [values('single-row-10000', 10, 1), values('single-row-50000', 100, 1)];
   assert.deepEqual(evaluate(result(cases)).slice(0, 2).map(gate => gate.verdict), ['PASS', 'PASS']);
@@ -24,6 +24,8 @@ test('gate boundaries use confidence intervals and missing cases never pass', ()
   cases[1].status = 'NOISY';
   assert.equal(evaluate(result(cases))[1].verdict, 'NOISY');
   assert.ok(evaluate(result([])).every(gate => gate.verdict === 'NOISY'));
+  const partial = result(cases); partial.complete = false;
+  assert.ok(evaluate(partial).every(gate => gate.verdict === 'NOISY'));
   const busy = result(cases); busy.browsers[0].quiescent = false;
   assert.ok(evaluate(busy).every(gate => gate.verdict === 'NOISY'));
   assert.throws(() => evaluate({ kind: 'emulator', browsers: [] }), /native browser/);

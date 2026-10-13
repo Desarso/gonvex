@@ -1,0 +1,521 @@
+{
+  "kind": "aborted-native-browser-development-run",
+  "environment": {
+    "node": "v26.8.2",
+    "os": "7.2.4-arch1-2",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "ram": 33537105920,
+    "commit": "e25f98e6ec89d6e27cacc1128ec7f47ca56b8baa",
+    "dirty": false,
+    "seed": 1196840961,
+    "artifactHash": "ef83e92b1ed10c04d95d262a95e99156178f8719ce1486b6cce2903c2ff2bcc0",
+    "budget": {
+      "maxRows": 9007199254740991,
+      "maxBytes": 209715200
+    },
+    "options": {
+      "browsers": "chromium,firefox,webkit",
+      "cases": "single-row,startup-working-set,delete-100-windows,outbox",
+      "samples": 20,
+      "warmups": 5,
+      "cap": 60,
+      "cv": 0.15,
+      "load": 0.5,
+      "retries": 10,
+      "output": "/home/gabriel/Desktop/coding/gonvex-sdk-membership/packages/client/bench/sync-engine/results.json"
+    },
+    "scope": "storage only; no runtime, network, worker, DOM or subscribers; WebKit approximates Safari"
+  },
+  "browsers": [
+    {
+      "name": "chromium",
+      "before": {
+        "loadavg": [
+          12.39,
+          14.71,
+          13.09
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-13T23:18:39.398Z"
+      },
+      "quiescent": false,
+      "cases": [
+        {
+          "metric": "single-row-10000",
+          "legacy": {
+            "median": 111,
+            "p95": 577.9000000953674,
+            "medianCI": [
+              96.29999995231628,
+              148.90000009536743
+            ],
+            "p95CI": [
+              281.7999999523163,
+              2198.7999999523163
+            ],
+            "cv": 1.8045028794603037,
+            "samples": [
+              113.29999995231628,
+              78,
+              2541.5,
+              84.09999990463257,
+              105.40000009536743,
+              94.39999985694885,
+              105.19999980926514,
+              64,
+              117.39999985694885,
+              140.59999990463257,
+              82.39999985694885,
+              79.89999985694885,
+              91,
+              84,
+              93.29999995231628,
+              83.5,
+              179,
+              77.5,
+              59.299999952316284,
+              77.70000004768372,
+              292.89999985694885,
+              110,
+              57.90000009536743,
+              108.90000009536743,
+              75.20000004768372,
+              75,
+              73.20000004768372,
+              63.200000047683716,
+              69.79999995231628,
+              77.40000009536743,
+              89.29999995231628,
+              107.10000014305115,
+              241.29999995231628,
+              101.59999990463257,
+              72.30000019073486,
+              66.09999990463257,
+              169.20000004768372,
+              142,
+              150.89999985694885,
+              476.60000014305115,
+              236.09999990463257,
+              193.59999990463257,
+              109.70000004768372,
+              221.29999995231628,
+              234.70000004768372,
+              200.40000009536743,
+              196.5,
+              119.40000009536743,
+              401.59999990463257,
+              467.7999999523163,
+              180.29999995231628,
+              206.59999990463257,
+              160.90000009536743,
+              155.80000019073486,
+              2198.7999999523163,
+              577.9000000953674,
+              281.7999999523163,
+              112,
+              580.7999999523163,
+              133.19999980926514
+            ]
+          },
+          "engine": {
+            "median": 24.550000071525574,
+            "p95": 116.39999985694885,
+            "medianCI": [
+              13.700000047683716,
+              37.799999952316284
+            ],
+            "p95CI": [
+              85.5,
+              327.89999985694885
+            ],
+            "cv": 4.443615386245981,
+            "samples": [
+              8.900000095367432,
+              119.90000009536743,
+              6.5,
+              4.300000190734863,
+              4.200000047683716,
+              4.699999809265137,
+              20.399999856948853,
+              25.100000143051147,
+              7.200000047683716,
+              78.10000014305115,
+              101.20000004768372,
+              13.099999904632568,
+              5.900000095367432,
+              6,
+              15.199999809265137,
+              11.299999952316284,
+              6.799999952316284,
+              15.699999809265137,
+              10.100000143051147,
+              14.799999952316284,
+              52.700000047683716,
+              76.59999990463257,
+              6,
+              21.40000009536743,
+              7.599999904632568,
+              5.700000047683716,
+              24,
+              10.599999904632568,
+              26.699999809265137,
+              10.899999856948853,
+              5.700000047683716,
+              11.900000095367432,
+              27.59999990463257,
+              109.79999995231628,
+              13.700000047683716,
+              327.89999985694885,
+              56.90000009536743,
+              77.29999995231628,
+              72.20000004768372,
+              35.799999952316284,
+              87.39999985694885,
+              18.799999952316284,
+              9.400000095367432,
+              54.59999990463257,
+              85.5,
+              10.5,
+              9.5,
+              69.10000014305115,
+              41.19999980926514,
+              101.79999995231628,
+              33,
+              36.39999985694885,
+              34.200000047683716,
+              3301.899999856949,
+              39.799999952316284,
+              116.39999985694885,
+              81.90000009536743,
+              43.10000014305115,
+              51.39999985694885,
+              37.90000009536743
+            ]
+          },
+          "ratio": {
+            "median": 0.22117117181554571,
+            "medianCI": [
+              0.12685185215334996,
+              0.3247747754191493
+            ],
+            "p95": 0.20141893033005717,
+            "p95CI": [
+              0.04602510462519482,
+              0.8164840635827063
+            ]
+          },
+          "status": "NOISY",
+          "engineRequestProfile": [
+            {
+              "elapsed": 103.29999995231628,
+              "requests": [
+                {
+                  "operation": "meta.get",
+                  "ms": 1.3999998569488525
+                },
+                {
+                  "operation": "meta.put",
+                  "ms": 4.900000095367432
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 4.400000095367432
+                },
+                {
+                  "operation": "windows.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "entities.get",
+                  "ms": 1.7999999523162842
+                },
+                {
+                  "operation": "entities.put",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "members.get",
+                  "ms": 16.200000047683716
+                },
+                {
+                  "operation": "members.put",
+                  "ms": 21.600000143051147
+                },
+                {
+                  "operation": "members.[scope+signature+generation+hashOnly].getAll",
+                  "ms": 32.5
+                },
+                {
+                  "operation": "windows.put",
+                  "ms": 0.8999998569488525
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.40000009536743164
+                },
+                {
+                  "operation": "meta.put",
+                  "ms": 0.5999999046325684
+                }
+              ]
+            },
+            {
+              "elapsed": 33.90000009536743,
+              "requests": [
+                {
+                  "operation": "meta.get",
+                  "ms": 0.9000000953674316
+                },
+                {
+                  "operation": "meta.put",
+                  "ms": 0.3000001907348633
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "windows.get",
+                  "ms": 0.10000014305114746
+                },
+                {
+                  "operation": "entities.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "entities.put",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "members.get",
+                  "ms": 0.5
+                },
+                {
+                  "operation": "members.put",
+                  "ms": 0.19999980926513672
+                },
+                {
+                  "operation": "members.[scope+signature+generation+hashOnly].getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "windows.put",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 2.700000047683716
+                },
+                {
+                  "operation": "meta.put",
+                  "ms": 13
+                }
+              ]
+            },
+            {
+              "elapsed": 8.799999952316284,
+              "requests": [
+                {
+                  "operation": "meta.get",
+                  "ms": 0.8999998569488525
+                },
+                {
+                  "operation": "meta.put",
+                  "ms": 0.7000000476837158
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "windows.get",
+                  "ms": 0.19999980926513672
+                },
+                {
+                  "operation": "entities.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "entities.put",
+                  "ms": 0.5
+                },
+                {
+                  "operation": "members.get",
+                  "ms": 0.39999985694885254
+                },
+                {
+                  "operation": "members.put",
+                  "ms": 0.6000001430511475
+                },
+                {
+                  "operation": "members.[scope+signature+generation+hashOnly].getAll",
+                  "ms": 0.8000001907348633
+                },
+                {
+                  "operation": "windows.put",
+                  "ms": 0.40000009536743164
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.39999985694885254
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.3000001907348633
+                },
+                {
+                  "operation": "meta.put",
+                  "ms": 0.19999980926513672
+                }
+              ]
+            },
+            {
+              "elapsed": 8.400000095367432,
+              "requests": [
+                {
+                  "operation": "meta.get",
+                  "ms": 1.4000000953674316
+                },
+                {
+                  "operation": "meta.put",
+                  "ms": 0.5
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.19999980926513672
+                },
+                {
+                  "operation": "windows.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "entities.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "entities.put",
+                  "ms": 0.19999980926513672
+                },
+                {
+                  "operation": "members.get",
+                  "ms": 1.5
+                },
+                {
+                  "operation": "members.put",
+                  "ms": 0.19999980926513672
+                },
+                {
+                  "operation": "members.[scope+signature+generation+hashOnly].getAll",
+                  "ms": 0.40000009536743164
+                },
+                {
+                  "operation": "windows.put",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.10000014305114746
+                },
+                {
+                  "operation": "meta.put",
+                  "ms": 0.20000004768371582
+                }
+              ]
+            },
+            {
+              "elapsed": 9.100000143051147,
+              "requests": [
+                {
+                  "operation": "meta.get",
+                  "ms": 3.200000047683716
+                },
+                {
+                  "operation": "meta.put",
+                  "ms": 0.39999985694885254
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "windows.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "entities.get",
+                  "ms": 0.10000014305114746
+                },
+                {
+                  "operation": "entities.put",
+                  "ms": 0.40000009536743164
+                },
+                {
+                  "operation": "members.get",
+                  "ms": 0.5999999046325684
+                },
+                {
+                  "operation": "members.put",
+                  "ms": 0.3000001907348633
+                },
+                {
+                  "operation": "members.[scope+signature+generation+hashOnly].getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "windows.put",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.09999990463256836
+                },
+                {
+                  "operation": "meta.put",
+                  "ms": 0.5999999046325684
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "fixtures": {
+        "10000": {
+          "encodedBytes": 20524480,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        }
+      },
+      "version": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
+      "loadReadings": [
+        {
+          "loadavg": [
+            33.66,
+            20.14,
+            15.03
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-13T23:19:34.083Z"
+        }
+      ]
+    }
+  ],
+  "complete": false,
+  "warning": "Aborted before full matrix to correct outbox fixture lifecycle. Not an acceptance result."
+}

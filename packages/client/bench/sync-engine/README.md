@@ -22,7 +22,9 @@ Options are `--browsers chromium,firefox,webkit`, `--cases single-row,startup-wo
 `--samples 20`, `--warmups 5`, `--cap 60`, `--cv 0.15`, `--load 0.5`, `--retries 10`,
 and `--output path.json`. Pass options after the pnpm script name. A quick smoke
 run can use `--samples 5 --warmups 1 --cap 5`. Missing cases produce NOISY gates,
-not passes. The old `chromium.mjs` entry point delegates to this same runner.
+not passes. Interrupted runs retain an incomplete JSON and cannot pass gates;
+profiles are removed on interruption. The report records process scheduling priority.
+The old `chromium.mjs` entry point delegates to this same runner.
 
 ## Cases and scope
 

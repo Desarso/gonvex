@@ -6,19 +6,19 @@ import { DexieReducerOutbox } from '../../dist/outbox.js';
 const empty = { entities: {}, liveQueries: {} };
 let state;
 const open = (variant, count) => variant === 0 ? new IndexedDBLocalReplicaStorage(`baseline-${count}`) : new IndexedDBEngineReplicaStorage(`engine-${count}`);
-window.seedCase = async ({ variant, kind, count, budget }) => {
+window.seedCase = async ({ variant, kind, count, budget, victims }) => {
   const data = await (await fetch('/fixture.json')).json();
   const storage = open(variant, count);
   await storage.replaceWindow(data.window, { ...empty, cursor: data.window.cursor }, 'default', data.rows);
   for (const { entity, rows } of data.related) await storage.replaceWindow({ ...data.window, signature: entity, entity, ids: rows.map(row => row.id), hashes: undefined }, empty, 'default', rows);
   if (kind === 'delete-100-windows') {
     // Every victim has exactly 100 owners, including the original collection.
-    const ids = data.rows.slice(0, 1000).map(row => row.id);
+    const ids = data.rows.slice(0, victims).map(row => row.id);
     for (let index = 1; index < 100; index++) await storage.replaceWindow({ ...data.window, signature: `owner-${index}`, ids, hashes: undefined }, empty, 'default', []);
   }
   state = { storage, kind, count, variant, budget, window: data.window, row: data.rows[Math.floor(count / 2)] };
 };
-window.openStartup = ({ variant, count, budget }) => { state = { storage: open(variant, count), budget }; };
+window.openStartup = ({ variant, count, budget }) => { state = { storage: open(variant, count), count, budget }; };
 window.prepareSample = async index => {
   if (state.kind !== 'single-row') return;
   const row = { ...state.row, field1: `delta-${index}` };
@@ -39,15 +39,16 @@ window.runSample = async index => {
     changes: [{ entity: 'tasks', id: `task-${String(index).padStart(6, '0')}`, operation: 'delete' }] }, empty);
   else {
     const loaded = await state.storage.loadWorkingSet('default', state.budget);
-    if (!loaded) throw new Error('Missing persisted working set');
+    const elapsed = performance.now() - start;
+    if (loaded?.liveQueries.tasks?.ids.length !== state.count || !loaded.entities.tasks?.['task-000000'] || !loaded.entities.related0?.['related-0']) throw new Error('Missing seeded persisted working set');
+    return elapsed;
   }
   return performance.now() - start;
 };
 // Both replica modes use the same existing outbox. This measures durable state
 // transitions only, never server replay or the network drain acceptance gate.
 window.prepareOutbox = async ({ index, dependent }) => {
-  state?.outbox?.dispose();
-  const outbox = new DexieReducerOutbox({ databaseName: 'benchmark-outbox' });
+  const outbox = state?.outbox ?? new DexieReducerOutbox({ databaseName: 'benchmark-outbox' });
   await outbox.clear('default');
   for (let i = 0; i < 500; i++) await outbox.enqueue({ scope: 'default', path: 'edit', args: { id: i },
     idempotencyKey: `sample-${index}-${i}`, entityKeys: [dependent ? 'tasks' : `task-${i}`] });
@@ -66,7 +67,7 @@ window.runOutbox = async () => {
   if (await state.outbox.count('default') !== 0) throw new Error('Outbox did not drain');
   return elapsed;
 };
-window.closeCase = () => { state?.storage?.close(); state?.outbox?.dispose(); state = undefined; };
+window.closeCase = () => { state?.storage?.close(); state = undefined; };
 // Diagnostic request latencies are collected AFTER measured samples. They
 // include native queue time and instrumentation, and are not performance samples.
 window.profileSample = async index => {
