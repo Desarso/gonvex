@@ -164,6 +164,10 @@ pub struct ClientCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preserve_subscriptions: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_control: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_batch: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_ready_many: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_watermark: Option<u8>,
@@ -372,6 +376,40 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device: Option<BrowserTelemetryInfo>,
     },
+    #[serde(rename = "telemetry.batch")]
+    TelemetryBatch {
+        events: Vec<PerformanceTelemetryEvent>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceTelemetryEvent {
+    pub id: String,
+    pub kind: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(
+        default,
+        rename = "clientSentAtMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub client_sent_at_ms: Option<f64>,
+    #[serde(rename = "clientReceivedAtMs")]
+    pub client_received_at_ms: f64,
+    #[serde(
+        default,
+        rename = "clientDurationMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub client_duration_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<MessageTrace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<BrowserTelemetryInfo>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,6 +421,8 @@ pub struct ServerCapabilities {
     pub query_resume: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preserve_subscriptions: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_batch: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -664,6 +704,21 @@ mod tests {
         round_trip_client(
             r#"{"type":"auth","id":"refresh","token":"new","capabilities":{"preserveSubscriptions":1}}"#,
         );
+    }
+
+    #[test]
+    fn telemetry_batch_preserves_event_fields_and_optional_capabilities() {
+        round_trip_client(
+            r#"{"type":"telemetry.batch","events":[{"id":"q","kind":"query","path":"tasks.list","reason":"initial","outcome":"ok","clientSentAtMs":1.25,"clientReceivedAtMs":2.25,"clientDurationMs":1.0},{"id":"r","kind":"reducer","path":"tasks.update","outcome":"error","error":"denied","clientReceivedAtMs":3.25,"device":{"browserName":"Chrome"}}]}"#,
+        );
+        round_trip_client(
+            r#"{"type":"auth","id":"a","tenant":"t","controlOnly":true,"capabilities":{"tenantControl":1,"telemetryBatch":1}}"#,
+        );
+        round_trip_client(
+            r#"{"type":"telemetry.event","id":"q","kind":"query","path":"tasks.list","outcome":"ok","clientReceivedAtMs":2.25}"#,
+        );
+        round_trip_client(r#"{"type":"auth","id":"a","tenant":"t"}"#);
+        round_trip_server(r#"{"type":"session.ready","capabilities":{"telemetryBatch":1}}"#);
     }
 
     fn round_trip_client(source: &str) {

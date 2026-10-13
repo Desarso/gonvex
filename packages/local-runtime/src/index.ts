@@ -51,6 +51,10 @@ export type LocalTransactionResult = {
   patches: LocalPatch[];
   deferred: DeferredWork[];
   readTables: string[];
+  /** Absent on older executors, whose readTables remain conservative scans. */
+  readRows?: { entity: string; rowId: string }[];
+  scanTables?: string[];
+  coalesceKey?: string;
 };
 /** Persist these envelopes in the SDK outbox, never application state. */
 export type LocalIntent = {

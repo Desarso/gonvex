@@ -1323,6 +1323,8 @@ async fn websocket(
     let mut _public_monitor: Option<public_functions::AdmissionMonitor> = None;
     let mut public_window = public_functions::Window::default();
     let mut tenant_session: Option<TenantSession> = None;
+    let mut telemetry_device = None;
+    let mut telemetry_batch_enabled = false;
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
     let mut connected_client_contract: Option<u64> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
@@ -1349,6 +1351,7 @@ async fn websocket(
             replica_resume: Some(1),
             query_resume: Some(1),
             preserve_subscriptions: Some(1),
+            telemetry_batch: Some(1),
             protocol_version: Some(PROTOCOL_VERSION),
             runtime_version: Some(runtime.inner.config.runtime_version.clone()),
             replica_batch: Some(1),
@@ -1829,9 +1832,9 @@ async fn websocket(
                     public,
                     device,
                     capabilities,
-                    ..
                 }) => {
                     service_grant = None;
+                    let tenant = control_auth_tenant(control_only, capabilities.as_ref(), tenant);
                     let auth_result = tokio::time::timeout_at(
                         if pending_connection.is_some() {
                             auth_deadline
@@ -1915,7 +1918,8 @@ async fn websocket(
                         .await
                     {
                         if let Some(required) = module.client_contract {
-                            if authenticated_control.tenant.is_some()
+                            if !control_only
+                                && authenticated_control.tenant.is_some()
                                 && client_contract != Some(required)
                             {
                                 let _ = send_json(
@@ -1930,11 +1934,21 @@ async fn websocket(
                             }
                         }
                     }
-                    let preserved = preserve_subscription_scope(
-                        &control_connection,
-                        &authenticated_control,
-                        capabilities.as_ref(),
-                    );
+                    if control_only {
+                        suppress_control_replica(&mut response);
+                    }
+                    telemetry_device = device.clone();
+                    telemetry_batch_enabled =
+                        capabilities.as_ref().and_then(|c| c.telemetry_batch) == Some(1);
+                    let next_tenant_session =
+                        tenant_data_session(control_only, &authenticated_control);
+                    let preserved = !control_only
+                        && tenant_session.is_some()
+                        && preserve_subscription_scope(
+                            &control_connection,
+                            &authenticated_control,
+                            capabilities.as_ref(),
+                        );
                     if preserved {
                         if let ServerMessage::AuthResult {
                             result: serde_json::Value::Object(result),
@@ -1950,10 +1964,8 @@ async fn websocket(
                         replicas.clear();
                         live_queries.clear();
                         control_queries.clear();
-                        if let Some(session) = authenticated_control
-                            .tenant
-                            .as_ref()
-                            .filter(|s| !s.is_anonymous())
+                        if let Some(session) =
+                            next_tenant_session.as_ref().filter(|s| !s.is_anonymous())
                         {
                             feed = Some(runtime.inner.change_feeds.subscribe(&session.route).await);
                         } else {
@@ -1962,7 +1974,7 @@ async fn websocket(
                         feed_scheduler.reset();
                         sent_replica_revision = 0;
                     }
-                    tenant_session = authenticated_control.tenant.clone();
+                    tenant_session = next_tenant_session;
                     control_connection = authenticated_control;
                     runtime.inner.metrics.authenticated(
                         &connection_id,
@@ -2599,6 +2611,28 @@ async fn websocket(
                         break;
                     }
                 }
+                Ok(ClientMessage::TelemetryBatch { events }) => {
+                    if telemetry_batch_enabled && events.len() <= 50 {
+                        for event in events {
+                            runtime
+                                .capture_performance_event(
+                                    &control_connection,
+                                    &event.id,
+                                    &event.kind,
+                                    &event.path,
+                                    event.reason.as_deref(),
+                                    &event.outcome,
+                                    event.error.as_deref(),
+                                    event.client_sent_at_ms,
+                                    event.client_received_at_ms,
+                                    event.client_duration_ms,
+                                    event.trace.as_ref(),
+                                    event.device.as_ref().or(telemetry_device.as_ref()),
+                                )
+                                .await;
+                        }
+                    }
+                }
                 Ok(ClientMessage::TelemetryEvent {
                     id,
                     kind,
@@ -2625,7 +2659,7 @@ async fn websocket(
                             client_received_at_ms,
                             client_duration_ms,
                             trace.as_ref(),
-                            device.as_ref(),
+                            device.as_ref().or(telemetry_device.as_ref()),
                         )
                         .await;
                 }
@@ -3110,6 +3144,41 @@ fn public_limit_errors(frame: ClientMessage) -> Vec<ServerMessage> {
     }
 }
 
+fn control_auth_tenant(
+    control_only: bool,
+    capabilities: Option<&gonvex_protocol::ClientCapabilities>,
+    tenant: Option<String>,
+) -> Option<String> {
+    if !control_only {
+        return tenant;
+    }
+    if capabilities.and_then(|c| c.tenant_control) == Some(1) {
+        tenant.filter(|value| !value.trim().is_empty())
+    } else {
+        None
+    }
+}
+
+fn tenant_data_session(
+    control_only: bool,
+    connection: &control::ControlConnection,
+) -> Option<TenantSession> {
+    if control_only {
+        None
+    } else {
+        connection.tenant.clone()
+    }
+}
+
+fn suppress_control_replica(response: &mut ServerMessage) {
+    if let ServerMessage::AuthResult { result, .. } = response {
+        if let Some(result) = result.as_object_mut() {
+            result.remove("replica");
+            result.remove("localIdentity");
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct AuthMode {
     control_only: bool,
@@ -3228,7 +3297,7 @@ async fn authenticate(
         );
     };
     if token.starts_with("gvx_imp_") || token.starts_with("gvx_dev_") {
-        if control_only {
+        if control_only && tenant.is_none() {
             return (
                 ServerMessage::AuthError {
                     id,
@@ -3252,7 +3321,7 @@ async fn authenticate(
                     .as_ref()
                     .map(|module| module.artifact_hash.clone())
                     .unwrap_or_default();
-                let replica = module.map(|module| {
+                let replica = module.filter(|_| !control_only).map(|module| {
                     module.replica_directive(
                         &session.route.tenant_id,
                         &session.route.database_url,
@@ -3296,7 +3365,7 @@ async fn authenticate(
             ),
         };
     }
-    if control_only {
+    if control_only && tenant.is_none() {
         return match control
             .load_session_identity(token, requested_project)
             .await
@@ -3354,7 +3423,7 @@ async fn authenticate(
                 .as_ref()
                 .map(|module| module.artifact_hash.clone())
                 .unwrap_or_default();
-            let replica = module.map(|module| {
+            let replica = module.filter(|_| !control_only).map(|module| {
                 module.replica_directive(
                     &session.route.tenant_id,
                     &session.route.database_url,
@@ -3668,6 +3737,62 @@ mod tests {
 
     use super::*;
     use crate::config::ModuleHostConfig;
+
+    #[test]
+    fn control_telemetry_preserves_legacy_auth_and_removes_replica_data() {
+        let tenant = Some("tenant".to_owned());
+        assert_eq!(control_auth_tenant(true, None, tenant.clone()), None);
+        assert_eq!(control_auth_tenant(false, None, tenant.clone()), tenant);
+        let capabilities = gonvex_protocol::ClientCapabilities {
+            tenant_control: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            control_auth_tenant(true, Some(&capabilities), tenant.clone()),
+            tenant
+        );
+        assert_eq!(
+            control_auth_tenant(true, Some(&capabilities), Some("  ".into())),
+            None
+        );
+        let mut response = ServerMessage::AuthResult {
+            id: "auth".into(),
+            result: serde_json::json!({
+                "tenantId":"tenant", "accountId":"account", "developerSessionToken":"rotated",
+                "replica":{"visibilityScope":"scope"}, "localIdentity":{"tenant":{"id":"tenant"}},
+            }),
+        };
+        suppress_control_replica(&mut response);
+        let ServerMessage::AuthResult { result, .. } = response else {
+            panic!("auth result");
+        };
+        assert_eq!(
+            result,
+            serde_json::json!({"tenantId":"tenant","accountId":"account","developerSessionToken":"rotated"})
+        );
+    }
+
+    #[test]
+    fn control_telemetry_tenant_control_keeps_authority_without_data() {
+        let mut session = TenantSession::anonymous(gonvex_postgres::TenantRoute {
+            project_id: "project".into(),
+            tenant_id: "tenant".into(),
+            database_url: "unused".into(),
+        });
+        session.identity.account.id = "account".into();
+        let connection = control::ControlConnection {
+            identity: Some(session.identity.clone()),
+            tenant: Some(session.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            tenant_data_session(false, &connection),
+            Some(session.clone())
+        );
+        assert_eq!(tenant_data_session(true, &connection), None);
+        assert_eq!(connection.tenant, Some(session));
+        assert_eq!(connection.identity.unwrap().account.id, "account");
+    }
 
     fn config(enabled: bool) -> Config {
         Config {

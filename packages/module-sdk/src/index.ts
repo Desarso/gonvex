@@ -424,6 +424,8 @@ export type ReplicaCollectionOptions<Args, Result> = Omit<QueryOptions<Args, Res
 };
 
 export type ReducerOptions<Args, Result> = FunctionMetadata & {
+  /** Opt in only for pure overwrites: omitted intermediate calls must have no observable effects. */
+  readonly coalesce?: { readonly mode: "latest"; readonly key: readonly string[] };
   readonly args?: PortableSchema;
   readonly result?: PortableSchema;
   /** Client-callable interactive reducers execute locally and queue by default. */
