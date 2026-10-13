@@ -189,7 +189,9 @@ describe("cached session startup", () => {
     expect(client.localSessionState()).toBe("restored");
     expect(client.localReplica.entity("tasks", "task")?.title).toBe("cached");
     expect(await storage.loadSession(owner)).toBeDefined();
-    expect(rejected).not.toHaveBeenCalled();
+    // Reported for diagnostics, never as a definitive rejection.
+    expect(rejected).toHaveBeenCalled();
+    for (const [, details] of rejected.mock.calls) expect(details).toMatchObject({ definitive: false });
   });
 
   it("does not mark an already accepted provider token as a pending forced refresh", async () => {

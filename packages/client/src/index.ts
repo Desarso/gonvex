@@ -1940,6 +1940,7 @@ export class GonvexClient {
             this.armAuthWatchdog();
             void this.refreshRejectedAuth(fetcher, this.auth.token);
           } else {
+            this.notifyAuthError(message.error, false, message.code);
             this.retryTransientAuth();
           }
           return;
@@ -2077,7 +2078,8 @@ export class GonvexClient {
             this.quarantineReplicaScope();
             this.notifyAuthError(message.error, true, message.code);
           } else {
-            if (/^gvx_(dev|imp)_/.test(this.auth.token ?? "")) this.notifyAuthError(message.error);
+            // Report every rejection; only `definitive` authorizes clearing a session.
+            this.notifyAuthError(message.error, false, message.code);
             // Signed-out calls still reach the server for authorization errors.
             // A restored account must instead keep its reconnect barrier.
             if (this.auth.token || fetcher || this.localSessionStateValue !== "unavailable") this.retryTransientAuth();
