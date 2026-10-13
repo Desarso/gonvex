@@ -3108,7 +3108,16 @@ export class GonvexClient {
     const frames = this.snapshotDeferredFrames;
     this.snapshotDeferredFrames = [];
     this.snapshotDeferredBytes = 0;
-    for (const apply of frames) await apply();
+    for (const apply of frames) {
+      try {
+        await apply();
+      } catch (error) {
+        // The rest of the backlog was already dequeued. Reconnect from the
+        // durable checkpoint so no later watermark passes an unapplied frame.
+        this.socket?.close();
+        throw error;
+      }
+    }
   }
 
   private restartPagedSnapshots() {

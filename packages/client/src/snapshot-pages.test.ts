@@ -320,3 +320,28 @@ it("retains validated server byte budgets and ordering without truncating Unicod
   expect(Object.values((await storage.load("visible"))!.liveQueries!)[0]!.ids).toEqual(["b", "a"]);
   expect(Object.values((await storage.load("visible"))!.liveQueries!)[0]!.completeness).toBe("complete");
 });
+
+it("reconnects when replaying the buffered feed fails after a staging collection closes", async () => {
+  vi.stubGlobal("WebSocket", Socket);
+  const client = new GonvexClient("ws://runtime.test/ws", { token: "session", tenant: "tenant", project: "project", localReplica: { storage: new MemoryLocalReplicaStorage() }, replicaSubscriptionRetentionMs: 0 });
+  clients.push(client);
+  const unsubscribe = client.subscribeReplica(reference, {}, vi.fn());
+  const socket = Socket.instances.at(-1)!;
+  socket.open();
+  socket.receive({ type: "session.ready", replica: directive, capabilities: { replicaSnapshotPages: 1, replicaWatermark: 1 } });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const auth = socket.sent.find(message => message.type === "auth");
+  socket.receive({ type: "auth.result", id: auth.id, result: { replica: directive } });
+  await vi.waitFor(() => expect(socket.sent.some(message => message.type === "replica.open")).toBe(true));
+  const open = socket.sent.find(message => message.type === "replica.open");
+  const sequence = await pages([{ id: "a", value: 1 }, { id: "b", value: 1 }], open.id);
+  socket.receive(sequence[0]); await settled(client);
+  socket.receive({ type: "replica.transaction", cursor: { epoch: "e", revision: 11 }, changes: [
+    { entity: "other", id: "x", operation: "insert", newValue: { id: "x", value: 2 } },
+  ] });
+  await settled(client);
+  vi.spyOn((client as any).replica, "applyTransaction").mockRejectedValueOnce(new Error("storage failed"));
+  (unsubscribe as () => void)();
+  await vi.waitFor(() => expect(socket.readyState).toBe(3));
+  expect(client.localReplica.entity("other", "x")).toBeUndefined();
+});
