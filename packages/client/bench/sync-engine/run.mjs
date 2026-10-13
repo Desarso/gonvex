@@ -1,66 +1,125 @@
-import 'fake-indexeddb/auto';
-import { performance } from 'node:perf_hooks';
-import { cpus, totalmem, release } from 'node:os';
+import { chromium, firefox, webkit } from '@playwright/test';
+import { createServer } from 'node:http';
+import { globSync } from 'node:fs';
+import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
+import { cpus, release, totalmem, loadavg, tmpdir } from 'node:os';
+import { dirname, resolve, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { writeFile } from 'node:fs/promises';
-import { replicaAggregateDigest } from '../../dist/replica-integrity.js';
-import { IndexedDBLocalReplicaStorage } from '../../dist/indexeddb-replica.js';
-import { IndexedDBEngineReplicaStorage } from '../../dist/indexeddb-engine.js';
-import { fixture, seed, artifactHash, budget, rowHash } from './fixture.mjs';
+import { fixture, seed, artifactHash, budget } from './fixture.mjs';
+import { summary, comparison } from './statistics.mjs';
+import { evaluate } from './gates.mjs';
 
-const warmups = 5, iterations = 20;
-const output = process.argv[2] ?? 'bench/sync-engine/results.json';
-const results = { environment: { node: process.version, os: release(), cpu: cpus()[0].model, ram: totalmem(),
-  commit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), seed, artifactHash,
-  adapter: 'fake-indexeddb, serial Node storage timings, no transport/worker/DOM/network', budget, warmups, iterations }, cases: [] };
-const empty = { entities: {}, liveQueries: {} };
-async function timed(run) { const start = performance.now(); await run(); return performance.now() - start; }
-function summary(samples) { const sorted = [...samples].sort((a, b) => a - b); return { median: sorted[Math.floor(sorted.length / 2)], p95: sorted[Math.ceil(sorted.length * .95) - 1], samples }; }
-async function measure(label, stores, prepare) {
-  const samples = [[], []];
-  for (let index = 0; index < warmups + iterations; index++) {
-    const run = prepare(index);
-    // Alternate order, one operation at a time, with a yield between pairs.
-    for (const variant of index % 2 ? [1, 0] : [0, 1]) {
-      const elapsed = await timed(() => run(stores[variant]));
-      if (index >= warmups) samples[variant].push(elapsed);
-    }
-    await new Promise(resolve => setTimeout(resolve, 0));
+const directory = dirname(fileURLToPath(import.meta.url)), root = resolve(directory, '../../../..');
+const options = { browsers: 'chromium,firefox,webkit', cases: 'single-row,startup-working-set,delete-100-windows,outbox', samples: 20, warmups: 5, cap: 60, cv: .15, load: .5, retries: 10, output: join(directory, 'results.json') };
+for (let i = 2; i < process.argv.length; i++) {
+  const key = process.argv[i].replace(/^--/, '');
+  if (!(key in options) || process.argv[i + 1] === undefined) throw new Error(`Unknown/missing option ${process.argv[i]}`);
+  options[key] = typeof options[key] === 'number' ? Number(process.argv[++i]) : process.argv[++i];
+}
+for (const key of ['samples', 'warmups', 'cap', 'retries']) if (!Number.isInteger(options[key]) || options[key] < (key === 'samples' ? 5 : 0)) throw new Error(`Invalid ${key}`);
+if (options.cap < options.samples || options.cap > 1000 || options.cv <= 0 || options.load <= 0) throw new Error('Invalid cap/CV/load');
+const engines = { chromium, firefox, webkit }, names = options.browsers.split(','), kinds = options.cases.split(',');
+if (names.some(name => !engines[name]) || kinds.some(kind => !['single-row', 'startup-working-set', 'delete-100-windows', 'outbox'].includes(kind))) throw new Error('Unknown browser/case');
+const machine = () => ({ loadavg: loadavg(), cpuCount: cpus().length, timestamp: new Date().toISOString() });
+const quiet = reading => reading.loadavg[0] <= reading.cpuCount * options.load;
+async function waitForQuiet() {
+  for (let retry = 0; retry < options.retries && !quiet(machine()); retry++) {
+    console.warn(`BUSY: load ${loadavg()[0]} > ${cpus().length * options.load}; retry in 30s`);
+    await new Promise(resolve => setTimeout(resolve, 30000));
   }
-  const value = { metric: label, legacy: summary(samples[0]), engine: summary(samples[1]) };
-  results.cases.push(value);
-  console.log(`${label}: legacy p95 ${value.legacy.p95.toFixed(3)} ms; engine p95 ${value.engine.p95.toFixed(3)} ms`);
 }
-for (const count of [10_000, 50_000]) {
-  const data = fixture(count);
-  console.log(`Seeding ${count} rows, ${data.encodedBytes} encoded bytes, ${data.encodedBytes / count} bytes/row`);
-  const stores = [new IndexedDBLocalReplicaStorage(`baseline-${count}`), new IndexedDBEngineReplicaStorage(`candidate-${count}`)];
-  try {
-    for (const storage of stores) {
-      await storage.replaceWindow(data.window, { ...empty, cursor: data.window.cursor }, 'default', data.rows);
-      for (const { entity, rows } of data.related) await storage.replaceWindow({ ...data.window, signature: entity, entity, ids: rows.map(row => row.id), hashes: undefined }, empty, 'default', rows);
+const [bundler] = globSync('node_modules/.pnpm/esbuild@*/node_modules/esbuild/lib/main.js', { cwd: root });
+if (!bundler) throw new Error('Install frozen workspace dependencies first');
+const { build } = await import(pathToFileURL(resolve(root, bundler)).href);
+const temporary = await mkdtemp(join(tmpdir(), 'sync-engine-'));
+const results = { kind: 'native-browser-storage-v1', environment: { node: process.version, os: release(), cpu: cpus()[0].model, ram: totalmem(),
+  commit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), dirty: Boolean(execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim()),
+  seed, artifactHash, budget, options, scope: 'storage only; no runtime, network, worker, DOM or subscribers; WebKit approximates Safari' }, browsers: [] };
+let server, payload, contexts = [];
+try {
+  await build({ entryPoints: [join(directory, 'chromium-entry.mjs')], bundle: true, minify: true, platform: 'browser', format: 'esm', outfile: join(temporary, 'benchmark.js') });
+  const javascript = await readFile(join(temporary, 'benchmark.js'));
+  server = createServer((request, response) => {
+    response.setHeader('Cache-Control', 'no-store');
+    if (request.url === '/benchmark.js') { response.setHeader('Content-Type', 'text/javascript'); response.end(javascript); }
+    else if (request.url === '/fixture.json') { response.setHeader('Content-Type', 'application/json'); response.end(payload); }
+    else { response.setHeader('Content-Type', 'text/html'); response.end('<!doctype html><script type="module" src="/benchmark.js"></script>'); }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  for (const name of names) {
+    await waitForQuiet();
+    const before = machine(), browser = { name, before, quiescent: quiet(before), cases: [] };
+    results.browsers.push(browser);
+    const observe = () => {
+      const reading = machine(); browser.loadReadings ??= []; browser.loadReadings.push(reading);
+      if (!quiet(reading)) { browser.quiescent = false; console.warn(`NOT QUIESCENT: ${name} load ${reading.loadavg[0]}`); }
+    };
+    for (const kind of kinds) for (const count of kind === 'outbox' ? [0] : [10000, 50000]) {
+      const profiles = await Promise.all([0, 1].map(() => mkdtemp(join(temporary, `${name}-`))));
+      const pages = [];
+      const launch = async variant => {
+        contexts[variant] = await engines[name].launchPersistentContext(profiles[variant], { headless: true });
+        const page = contexts[variant].pages()[0];
+        await page.goto(url); await page.waitForFunction(() => typeof window.seedCase === 'function');
+        browser.version ??= await page.evaluate(() => navigator.userAgent);
+        pages[variant] = page;
+      };
+      try {
+        if (count) {
+          const data = fixture(count); payload = JSON.stringify(data);
+          browser.fixtures ??= {}; browser.fixtures[count] = { encodedBytes: data.encodedBytes, relatedTables: 5, visibleIDs: 250, exactIDs: 1000 };
+        }
+        for (const variant of [0, 1]) {
+          await launch(variant);
+          if (count) await pages[variant].evaluate(args => window.seedCase(args), { variant, kind, count, budget });
+        }
+        const subcases = kind === 'outbox' ? ['independent', 'dependent'] : [kind];
+        for (const subcase of subcases) {
+          const samples = [[], []];
+          let target = options.samples, round = 0;
+          while (round < options.warmups + target) {
+            for (const variant of round % 2 ? [1, 0] : [0, 1]) {
+              if (kind === 'startup-working-set') {
+                // Close the entire process, then reopen its populated profile.
+                // OS page cache is not evicted; there is no live JS/adapter cache.
+                await pages[variant].evaluate(() => window.closeCase()); await contexts[variant].close(); contexts[variant] = undefined;
+                await launch(variant);
+                await pages[variant].evaluate(args => window.openStartup(args), { variant, count, budget });
+              } else if (kind === 'outbox') await pages[variant].evaluate(args => window.prepareOutbox(args), { index: round, dependent: subcase === 'dependent' });
+              else await pages[variant].evaluate(index => window.prepareSample(index), round);
+              const elapsed = await pages[variant].evaluate(({ round, outbox }) => outbox ? window.runOutbox() : window.runSample(round), { round, outbox: kind === 'outbox' });
+              if (round >= options.warmups) samples[variant].push(elapsed);
+            }
+            round++;
+            if (round === options.warmups + target && target < options.cap && samples.some(values => summary(values).cv > options.cv)) target = Math.min(options.cap, target + 10);
+          }
+          observe();
+          const legacy = summary(samples[0]), engine = summary(samples[1]);
+          const value = { metric: kind === 'outbox' ? `outbox-500-${subcase}` : `${kind}-${count}`, legacy, engine,
+            ratio: comparison(samples[1], samples[0]), status: Math.max(legacy.cv, engine.cv) > options.cv ? 'NOISY' : 'OK' };
+          if (kind === 'single-row') {
+            value.engineRequestProfile = [];
+            for (let i = 0; i < 5; i++) value.engineRequestProfile.push(await pages[1].evaluate(index => window.profileSample(index), round + i));
+          }
+          browser.cases.push(value);
+          console.log(`${name} ${value.metric} ${value.status} n=${samples[0].length}: legacy p95=${legacy.p95.toFixed(3)} engine p95=${engine.p95.toFixed(3)}`);
+          await writeFile(options.output, JSON.stringify(results, null, 2) + '\n');
+        }
+      } finally {
+        for (const context of contexts) await context?.close(); contexts = [];
+        for (const profile of profiles) await rm(profile, { recursive: true, force: true });
+      }
     }
-    results.cases.push({ fixture: count, encodedBytes: data.encodedBytes, columns: 50, relatedTables: 5,
-      visibleRows: data.visibleIDs.length, exactSubscriptionsFixture: data.exactIDs.length });
-    await measure(`single-row-${count}`, stores, index => {
-      const row = { ...data.rows[Math.floor(count / 2)], field1: `delta-${index}` };
-      const cursor = { epoch: 'fixture', revision: index + 2 };
-      const hashes = { ...data.window.hashes, [row.id]: rowHash(row) };
-      const window = { ...data.window, cursor, hashes, aggregateDigest: replicaAggregateDigest(hashes) };
-      return storage => storage.applyWindowDelta(window, { upserts: [row], deleted: [], memberships: [{ id: row.id }] }, { ...empty, cursor });
-    });
-    // Persisted process/store with empty decoded cache. This is storage startup,
-    // not a browser navigation or cached paint measurement.
-    await measure(`startup-working-set-${count}`, stores, () => storage => storage.loadWorkingSet('default', budget));
-    // Many unrelated windows, exactly three owners of each victim. Changing
-    // victims each iteration preserves owner count without restoring snapshots.
-    for (const storage of stores) for (let index = 0; index < 100; index++) {
-      const ids = index < 2 ? data.window.ids : [data.window.ids[count - 1]];
-      await storage.replaceWindow({ ...data.window, signature: `window-${index}`, ids, hashes: undefined,
-        cursor: { epoch: 'fixture', revision: 100 } }, empty, 'default', []);
-    }
-    await measure(`delete-100-windows-${count}`, stores, index => storage => storage.applyTransaction({ cursor: { epoch: 'fixture', revision: 101 + index },
-      changes: [{ entity: 'tasks', id: data.rows[index].id, operation: 'delete' }] }, empty));
-  } finally { stores.forEach(storage => storage.close()); }
+    browser.after = machine(); browser.quiescent &&= quiet(browser.after);
+  }
+  results.gates = evaluate(results);
+  for (const gate of results.gates) console.log(`${gate.verdict} ${gate.browser} ${gate.gate} CI=${gate.ci?.map(value => value.toFixed(3)).join('..')}`);
+  await writeFile(options.output, JSON.stringify(results, null, 2) + '\n');
+  if (results.gates.some(gate => gate.verdict === 'FAIL')) process.exitCode = 1;
+} finally {
+  for (const context of contexts) await context?.close();
+  await new Promise(resolve => server ? server.close(resolve) : resolve());
+  await rm(temporary, { recursive: true, force: true });
 }
-await writeFile(output, JSON.stringify(results, null, 2) + '\n');
