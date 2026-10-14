@@ -1,0 +1,61 @@
+{
+  "base": "11820f669782589c9d3af66bc7dfbeda2351be27",
+  "method": "esbuild production ESM library entries, minified and gzip; identical dependency builds",
+  "before": [
+    {
+      "file": "default-before.js",
+      "bytes": 350383,
+      "gzip": 98587
+    }
+  ],
+  "after": [
+    {
+      "file": "default-after.js",
+      "bytes": 352678,
+      "gzip": 99177
+    }
+  ],
+  "engine": [
+    {
+      "file": "engine.js",
+      "bytes": 15013,
+      "gzip": 4916
+    },
+    {
+      "file": "worker.js",
+      "bytes": 2867,
+      "gzip": 1336
+    },
+    {
+      "file": "import-wrapper-JO2QG6JY.js",
+      "bytes": 288,
+      "gzip": 216
+    },
+    {
+      "file": "host-MZFJTNAF.js",
+      "bytes": 154,
+      "gzip": 119
+    },
+    {
+      "file": "chunk-AL6JSGDN.js",
+      "bytes": 265980,
+      "gzip": 70820
+    },
+    {
+      "file": "chunk-UIYKPGJG.js",
+      "bytes": 7968,
+      "gzip": 2978
+    },
+    {
+      "file": "chunk-GFDGEUVB.js",
+      "bytes": 99729,
+      "gzip": 32620
+    },
+    {
+      "file": "chunk-SQE76S5B.js",
+      "bytes": 577,
+      "gzip": 358
+    }
+  ],
+  "legacyImportsWorker": false
+}

@@ -1,0 +1,141 @@
+import { createRequire } from 'node:module';
+import { createServer } from 'node:http';
+import { readFile, mkdir, writeFile, realpath } from 'node:fs/promises';
+import { tmpdir, cpus, totalmem, loadavg, release } from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { resolve, dirname } from 'node:path';
+import { WebSocketServer } from 'ws';
+import { chromium, firefox, webkit } from '@playwright/test';
+import { replicaRowsHashes, replicaAggregateDigest } from '../../dist/replica-integrity.js';
+const require = createRequire(await realpath(new URL('../../node_modules/vitest/package.json', import.meta.url)));
+const viteRequire = createRequire(require.resolve('vite/package.json'));
+const { build } = viteRequire('esbuild');
+const root = dirname(new URL(import.meta.url).pathname);
+const output = resolve(tmpdir(), 'gonvex-engine-worker-bench'); await mkdir(output, { recursive: true });
+for (const entry of ['browser', 'worker']) await build({ entryPoints: [resolve(root, `${entry}.ts`)], bundle: true, splitting: true, format: 'esm', target: 'es2022', minify: true, outdir: output, entryNames: '[name]', platform: 'browser' });
+await build({ entryPoints: [resolve(root, 'fixture.ts')], bundle: true, format: 'esm', platform: 'node', outfile: resolve(output, 'fixture.mjs') });
+const { row, columns } = await import(resolve(output, 'fixture.mjs'));
+const rows = Array.from({ length: 20_000 }, (_, index) => row(index));
+let offline = false, revision = 1, denied = 0;
+const sockets = new Set(); const opens = new Map(); const effects = new Map();
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const send = (socket, frame) => { if (socket.readyState === 1) socket.send(JSON.stringify(frame)); };
+const directive = { protocolVersion: 1, scope: 'tenant', visibilityScope: 'visible', epoch: 'fixture' };
+const identity = { auth: { account: { id: 'account' } }, tenant: { id: 'tenant' }, member: { id: 'member', accountId: 'account', permissions: {} } };
+const server = createServer(async (request, response) => {
+  try {
+    if (request.url === '/offline' || request.url === '/disconnect') { offline = request.url === '/offline'; for (const socket of sockets) socket.close(); response.end('ok'); return; }
+    if (request.url === '/revision') { revision = Math.max(revision, Number(new URL(request.url, 'http://fixture').searchParams.get('value') ?? 1)); response.end(String(revision)); return; }
+    if (request.url?.startsWith('/revision?')) { revision = Math.max(revision, Number(new URL(request.url, 'http://fixture').searchParams.get('value') ?? 1)); response.end(String(revision)); return; }
+    if (request.url === '/online') { offline = false; response.end('ok'); return; }
+    if (request.url === '/must-not-fetch') { denied++; response.end('escaped'); return; }
+    if (request.url === '/denied-count') { response.end(JSON.stringify(denied)); return; }
+    if (request.url === '/reset-burst') { response.end('ok'); return; }
+    if (request.url === '/burst') {
+      for (let tick = 0; tick < 20; tick++) {
+        const changed = rows.slice(tick * 50, tick * 50 + 50).map(value => ({ ...value, count: value.count + 1 }));
+        for (const value of changed) rows[Number(value.id)] = value;
+        revision++;
+        for (const [socket, subscriptions] of opens) for (const subscription of subscriptions) {
+          if (!subscription.path.startsWith("tasks.")) continue;
+          const visible = subscription.path === 'tasks.visible' ? changed.filter(value => Number(value.id) < 250) : changed;
+          send(socket, { type: 'replica.delta', id: subscription.id, cursor: { epoch: 'fixture', revision }, upserts: visible });
+        }
+        await sleep(50);
+      }
+      response.end('ok'); return;
+    }
+    if (request.url === '/') { response.setHeader('content-type', 'text/html'); response.end('<main></main><button>click</button><script type="module" src="/browser.js"></script>'); return; }
+    const path = resolve(output, request.url.slice(1)); if (!path.startsWith(output + '/')) throw new Error('Invalid path');
+    response.setHeader('content-type', 'text/javascript'); response.end(await readFile(path));
+  } catch (error) { response.statusCode = 500; response.end(String(error)); }
+});
+const wss = new WebSocketServer({ server, path: '/ws' });
+wss.on('connection', socket => {
+  if (offline) { socket.close(); return; }
+  sockets.add(socket); opens.set(socket, []);
+  send(socket, { type: 'session.ready', replica: directive, capabilities: { replicaSnapshotPages: 1, replicaWatermark: 1, reducerBatch: 1 } });
+  let lane = Promise.resolve();
+  socket.on('message', bytes => { lane = lane.then(async () => {
+    const frame = JSON.parse(String(bytes));
+    if (frame.type === 'auth') {
+      await sleep(50); send(socket, { type: 'auth.result', id: frame.id, result: { replica: directive, localIdentity: identity, artifactHash: 'engine-worker-fixture-v1', accountId: 'account', tenantId: 'tenant' } });
+    } else if (frame.type === 'replica.open' || frame.type === 'replica.openMany') {
+      for (const subscription of frame.opens ?? [frame]) {
+        if (!opens.has(socket)) return;
+        opens.get(socket).push(subscription);
+        const result = subscription.path === '__local.edits' ? [] : subscription.path === 'tasks.full' ? rows : rows.slice(0, subscription.path === 'tasks.source' ? 1_000 : 250);
+        const hashes = await replicaRowsHashes(result, 'id'); const digest = replicaAggregateDigest(hashes);
+        const base = { id: subscription.id, path: subscription.path, key: 'id', cursor: { epoch: 'fixture', revision }, mode: 'eager', maxRows: result.length, maxBytes: 100_000_000, truncated: false };
+        if (subscription.path === 'tasks.full') {
+          for (let offset = 0, sequence = 0; offset < result.length; offset += 100, sequence++) {
+            const last = offset + 100 >= result.length;
+            const page = { ...base, type: 'replica.snapshotPage', snapshotId: 'snapshot', scope: 'tenant', visibilityScope: 'visible', sequence, last, result: result.slice(offset, offset + 100), ...(last ? { digest } : {}) };
+            await sleep(JSON.stringify(page).length / 2_500_000 * 1_000); send(socket, page);
+          }
+        } else send(socket, { ...base, type: 'replica.snapshot', result, hashes, digest });
+        send(socket, { type: 'replica.ready', id: subscription.id, cursor: base.cursor, digest, key: 'id', complete: true });
+      }
+    } else if (frame.type === 'replica.close') { opens.set(socket, opens.get(socket).filter(value => value.id !== frame.id)); }
+    else if (frame.type === 'reducer.call' || frame.type === 'reducer.callMany') {
+      await sleep(50);
+      for (const call of frame.calls ?? [frame]) {
+        const key = call.idempotencyKey ?? call.id; if (!effects.has(key)) effects.set(key, call.args);
+        revision++;
+        for (const subscription of opens.get(socket) ?? []) if (subscription.path === '__local.edits') send(socket, { type: 'replica.delta', id: subscription.id, cursor: { epoch: 'fixture', revision }, upserts: [{ id: call.args.id, count: 1 }], originCommandIds: [key] });
+        send(socket, { type: 'reducer.result', id: call.id, originCommandId: key, result: 1, committedRevision: revision });
+        send(socket, { type: 'replica.watermark', revision });
+      }
+    }
+  }).catch(error => { process.stderr.write(String(error) + '\n'); }); });
+  socket.on('close', () => { sockets.delete(socket); opens.delete(socket); });
+});
+await new Promise(resolve => server.listen(Number(process.env.PORT ?? 48839), '127.0.0.1', resolve)); const url = `http://127.0.0.1:${server.address().port}`;
+const browserName = process.env.BROWSER ?? 'chromium';
+const context = await ({ chromium, firefox, webkit }[browserName]).launchPersistentContext(resolve(output, `profile-${browserName}`), { headless: true });
+const browser = context.browser(); const page = await context.newPage();
+page.on('console', message => { if (/^(Seed |Engine )/.test(message.text())) process.stdout.write(message.text() + '\n'); });
+page.on('pageerror', error => process.stderr.write(`PAGE: ${error}\n`));
+const measured = Number(process.env.ITERATIONS ?? 20), warmups = Number(process.env.WARMUPS ?? 5);
+const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true };
+try {
+  await page.goto(url); await page.waitForFunction(() => window.benchmark);
+  process.stdout.write(`Preparing ${process.env.SEED_ROWS ?? 50_000}-row canonical IDB fixture...\n`);
+  metadata.seed = await page.evaluate(count => window.benchmark.seed(count), Number(process.env.SEED_ROWS ?? 50_000));
+  process.stdout.write(`Seed ready: ${metadata.seed.rowBytes} bytes/row\n`);
+  for (let index = -warmups; index < measured; index++) {
+    for (const mode of index % 2 === 0 ? ['legacy', 'worker'] : ['worker', 'legacy']) {
+      if (loadavg()[0] / cpus().length > 0.5) throw new Error("Load check failed: more than half the logical CPUs are busy");
+      await page.goto(url); await page.waitForFunction(() => window.benchmark);
+      const session = browserName === 'chromium' ? await context.newCDPSession(page) : null;
+      await session?.send('Performance.enable');
+      const metrics = async () => { const values = await session?.send('Performance.getMetrics'); return values?.metrics.find(value => value.name === 'ScriptDuration')?.value ?? null; };
+      const run = async name => {
+        process.stdout.write(`${index} ${mode} ${name}...\n`);
+        const before = await metrics(); const value = await page.evaluate(async ({ name, mode }) => name === 'cold' ? window.benchmark.start(mode) : window.benchmark[name](), { name, mode });
+        const after = await metrics(); process.stdout.write(`${name}: ${value.wallMs.toFixed(1)}ms\n`); return { ...value, scriptMs: before === null ? null : (after - before) * 1_000 };
+      };
+      const cold = await run('cold'); if (cold.mode !== mode) throw new Error(`Mode silently fell back: ${mode} => ${cold.mode}`);
+      if (index === -warmups && mode === 'worker') metadata.correctness = await page.evaluate(() => window.benchmark.parity());
+      const burst = await run('burst');
+      const snapshot = process.env.SKIP_SNAPSHOT ? null : await run('snapshot');
+      const drain = process.env.SKIP_DRAIN ? null : await run('drain');
+      await page.evaluate(() => window.benchmark.stop()); await session?.detach();
+      if (index >= 0) samples.push({ index, mode, cold, burst, snapshot, drain, load: loadavg() });
+      process.stdout.write(`${index} ${mode}: cold ${cold.wallMs.toFixed(1)}ms, burst script ${burst.scriptMs?.toFixed(1)}ms, max task ${Math.max(0, ...burst.longTasks).toFixed(1)}ms\n`);
+      await writeFile(resolve(root, process.env.RESULTS ?? 'results.json'), JSON.stringify({ metadata, samples }, null, 2));
+    }
+  }
+  // A second engine-capable tab makes both foreground tabs retain legacy mode.
+  await page.goto(url); await page.waitForFunction(() => window.benchmark);
+  process.stdout.write("Multi-tab: first worker start\n"); await page.bringToFront();
+  await page.evaluate(() => window.benchmark.start("worker"));
+  process.stdout.write("Multi-tab: second tab start\n");
+  const second = await context.newPage(); await second.goto(url); await second.waitForFunction(() => window.benchmark); await second.bringToFront();
+  second.on("console", message => process.stdout.write(message.text() + "\n"));
+  await second.evaluate(() => window.benchmark.start("worker"));
+  await page.waitForFunction(() => window.benchmark.mode() === "legacy");
+  metadata.multiTab = { first: await page.evaluate(() => window.benchmark.mode()), second: await second.evaluate(() => window.benchmark.mode()) };
+  await second.evaluate(() => window.benchmark.stop()); await second.close(); await page.evaluate(() => window.benchmark.stop());
+  await writeFile(resolve(root, process.env.RESULTS ?? 'results.json'), JSON.stringify({ metadata, samples }, null, 2));
+} finally { await context.close(); for (const socket of sockets) socket.terminate(); wss.close(); server.close(); }

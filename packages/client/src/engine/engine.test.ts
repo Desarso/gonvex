@@ -107,7 +107,7 @@ it("recovers an admitted local reducer from the canonical journal with its origi
   await expect(host.rpc.call(host.rpc.request("reducer", [ref, { different: true }, { engineCommand: command }]))).rejects.toThrow("different arguments");
 });
 
-it("proxies auth fetch over the private endpoint and the captured socket works when the global is denied", async () => {
+it("proxies auth fetch over the private endpoint before sending the private token", async () => {
   const { create } = await setup(); const host = await create(); cleanups.push(host.close);
   const received: any[] = []; host.rpc.onEvent.add((method, args) => {
     received.push([method, args]);
