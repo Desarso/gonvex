@@ -1,0 +1,5286 @@
+{
+  "kind": "native-browser-storage-v1",
+  "complete": false,
+  "environment": {
+    "node": "v26.8.2",
+    "priority": 15,
+    "os": "7.2.4-arch1-2",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "ram": 33537105920,
+    "commit": "f081a173a83df962dfdccd435134ecc8713c184f",
+    "dirty": false,
+    "seed": 1196840961,
+    "artifactHash": "ef83e92b1ed10c04d95d262a95e99156178f8719ce1486b6cce2903c2ff2bcc0",
+    "budget": {
+      "maxRows": 9007199254740991,
+      "maxBytes": 209715200
+    },
+    "options": {
+      "browsers": "chromium,firefox,webkit",
+      "cases": "startup-working-set",
+      "samples": 20,
+      "warmups": 5,
+      "cap": 30,
+      "cv": 0.15,
+      "load": 0.5,
+      "retries": 2,
+      "output": "packages/client/bench/sync-engine/startup-after.json"
+    },
+    "scope": "storage only; no runtime, network, worker, DOM or subscribers; WebKit approximates Safari"
+  },
+  "browsers": [
+    {
+      "name": "chromium",
+      "before": {
+        "loadavg": [
+          2.32,
+          3.09,
+          5.25
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T04:02:34.688Z"
+      },
+      "quiescent": true,
+      "cases": [
+        {
+          "metric": "startup-working-set-10000",
+          "legacy": {
+            "median": 452.5,
+            "p95": 467.2999999523163,
+            "medianCI": [
+              437.25,
+              460.09999990463257
+            ],
+            "p95CI": [
+              460.09999990463257,
+              472
+            ],
+            "cv": 0.03846647089333418,
+            "samples": [
+              406.90000009536743,
+              446.5,
+              467.2999999523163,
+              445.7000000476837,
+              464,
+              425.7000000476837,
+              434.2000000476837,
+              437.2000000476837,
+              458.2999999523163,
+              459.69999980926514,
+              436.80000019073486,
+              437.2999999523163,
+              425.7999999523163,
+              467.09999990463257,
+              460.09999990463257,
+              465,
+              451.2000000476837,
+              460.09999990463257,
+              453.7999999523163,
+              472
+            ]
+          },
+          "engine": {
+            "median": 379.7000000476837,
+            "p95": 393,
+            "medianCI": [
+              370.3000000715256,
+              386.34999990463257
+            ],
+            "p95CI": [
+              387.5,
+              399.69999980926514
+            ],
+            "cv": 0.04023438770285349,
+            "samples": [
+              378.90000009536743,
+              357,
+              364.5,
+              382.7000000476837,
+              389.5,
+              351.2999999523163,
+              388.2000000476837,
+              399.69999980926514,
+              380.5,
+              366.5,
+              343.60000014305115,
+              382.39999985694885,
+              393,
+              356.5,
+              387.5,
+              377.89999985694885,
+              374.10000014305115,
+              385.19999980926514,
+              377,
+              390.60000014305115
+            ]
+          },
+          "ratio": {
+            "median": 0.8391160222048258,
+            "medianCI": [
+              0.8151518474703858,
+              0.8730464327240854
+            ],
+            "p95": 0.8410014980528613,
+            "p95CI": [
+              0.8275423731844304,
+              0.861422413382037
+            ]
+          },
+          "status": "OK",
+          "startupProfiles": [
+            {
+              "elapsed": 473.40000009536743,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.9000000953674316
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.399999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0.09999990463256836
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 3.6000001430511475
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 8.200000047683716
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                }
+              ],
+              "requestCounts": {
+                "entities.getAll": 43,
+                "windows.scope.getAll": 1,
+                "meta.get": 2
+              },
+              "recordsRead": 10508,
+              "cursorContinues": 0,
+              "jsonParses": 10507,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 269.366
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 56.135,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "(program)",
+                  "ms": 53.981
+                },
+                {
+                  "function": "K.addEventListener.O.once",
+                  "ms": 48.66,
+                  "source": "()=>{O===\"getAll\"?r+=K.result.length:(O===\"get\"&&K.result!==void 0||O===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},O===\"openCurs"
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 42.639
+                },
+                {
+                  "function": "",
+                  "ms": 8.266,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,m=0,g=!1,k=!1,O;for(;!k;){let _=await this.database.entities.where(\"[scope+entity+id]\").between(O??[r],[r,[]],!O,!1).limit"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 3.151,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "",
+                  "ms": 2.124,
+                  "source": "K=>!o[C.entity]?.[K])&&f.add(C.entity)});let S=await this.database.meta.get([r,\"cursor\"]);if(!(!g&&!Object.keys(c).length&&!S))return{entities:o,liveQueries:c,r"
+                },
+                {
+                  "function": "",
+                  "ms": 2.121,
+                  "source": "(){var i=st(),s=W;try{return Ne(n,!0),e.apply(this,arguments)}catch(u){t&&t(u)}finally{Ne(s,!1),i&&ot()}}}var le={awaits:0,echoes:0,id:0},Ui=0,Nt=[],qt=0,Bt=0,H"
+                },
+                {
+                  "function": "evaluate",
+                  "ms": 1.141
+                },
+                {
+                  "function": "serialize",
+                  "ms": 1.072
+                },
+                {
+                  "function": "",
+                  "ms": 1.066
+                },
+                {
+                  "function": "Xt",
+                  "ms": 1.064,
+                  "source": "(e,t,n){for(var i=n.db.objectStoreNames,s=0;s<i.length;++s){var u=i[s],l=n.objectStore(u);e._hasGetAll=\"getAll\"in l;for(var h=0;h<l.indexNames.length;++h){var p"
+                },
+                {
+                  "function": "",
+                  "ms": 1.064,
+                  "source": "(s){var u=s.name;e.core.schema.tables.some(function(l){return l.name===u})&&(s.core=e.core.table(u),e[u]instanceof e.Table&&(e[u].core=s.core))})}function Qt(e,"
+                },
+                {
+                  "function": "bound",
+                  "ms": 1.063
+                },
+                {
+                  "function": "Sn",
+                  "ms": 1.063,
+                  "source": "(e){return $i.call(e).slice(8,-1)}var xn=typeof Symbol<\"u\"?Symbol.iterator:\"@@iterator\",Ri=typeof xn==\"symbol\"?function(e){var t;return e!=null&&(t=e[xn])&&t.ap"
+                },
+                {
+                  "function": "",
+                  "ms": 1.061,
+                  "source": "(){var s=W;n&&ut(),Ne(t,!0);try{return e.apply(this,arguments)}finally{Ne(s,!1),i&&queueMicrotask(Ke)}}}function Kn(e){Promise===Ve&&le.echoes===0?qt===0?e():en"
+                },
+                {
+                  "function": "",
+                  "ms": 1.06,
+                  "source": "(){st()&&ot()})}function st(){var e=Cn;return Cn=!1,Dt=!1,e}function ot(){var e,t,n;do for(;mt.length>0;)for(e=mt,mt=[],n=e.length,t=0;t<n;++t){var i=e[t];i[0]."
+                },
+                {
+                  "function": "",
+                  "ms": 1.059,
+                  "source": "(){var u=W.transless||W,l=e._createTransaction(t,n,e._dbSchema,i);l.explicit=!0;var h={trans:l,transless:u};if(i)l.idbtrans=i.idbtrans;else try{l.create(),l.idb"
+                },
+                {
+                  "function": "queueMicrotask",
+                  "ms": 1.059
+                }
+              ],
+              "sampledLiveBytes": 229980
+            },
+            {
+              "elapsed": 372.89999985694885,
+              "requests": [
+                {
+                  "operation": "meta.scope.openKeyCursor",
+                  "ms": 0.6999998092651367
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.09999990463256836
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.9000000953674316
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3.0999999046325684
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 1.9000000953674316
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.5
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.3000001907348633
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.09999990463256836
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 3.1000001430511475
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.09999990463256836
+                }
+              ],
+              "requestCounts": {
+                "meta.scope.openKeyCursor": 1,
+                "meta.getAll": 7,
+                "entities.getAll": 42,
+                "windows.scope.getAll": 1,
+                "meta.get": 8
+              },
+              "recordsRead": 10514,
+              "cursorContinues": 1,
+              "jsonParses": 10513,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 171.68
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 61.547,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "(program)",
+                  "ms": 54.636
+                },
+                {
+                  "function": "K.addEventListener.O.once",
+                  "ms": 44.542,
+                  "source": "()=>{O===\"getAll\"?r+=K.result.length:(O===\"get\"&&K.result!==void 0||O===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},O===\"openCurs"
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 42.531
+                },
+                {
+                  "function": "",
+                  "ms": 5.307,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,m=0,g=!1,k=!1,O=0,S=(F,Q,L)=>{let X=Math.min(256,Math.max(1,a.maxRows-Q+1),Number.isFinite(a.maxBytes)?Math.max(1,Math.cei"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 3.187,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "",
+                  "ms": 2.12,
+                  "source": "X=>!o[L.entity]?.[X])&&f.add(L.entity)}let K=await this.database.meta.get([r,\"cursor\"]);if(!(!g&&!Object.keys(c).length&&!K))return{entities:o,liveQueries:c,res"
+                },
+                {
+                  "function": "bound",
+                  "ms": 1.067
+                },
+                {
+                  "function": "Tr",
+                  "ms": 1.065,
+                  "source": "(e,t){try{t(function(n){if(e._state===null){if(n===e)throw new TypeError(\"A promise cannot be resolved with itself.\");var i=e._lib&&st();n&&typeof n.then==\"func"
+                },
+                {
+                  "function": "",
+                  "ms": 1.062,
+                  "source": "(w,b){Tn(u,new Dr(Nr(i,e,l,h),Nr(s,e,l,h),w,b,e))});return this._consoleTask&&(p._consoleTask=this._consoleTask),p}return n.prototype=pt,n},set:function(e){C(th"
+                },
+                {
+                  "function": "",
+                  "ms": 1.061,
+                  "source": "(N){var q=N.name,z=N.unique,Z=N.multiEntry,V=N.keyPath,J=d(V),G={name:q,compound:J,keyPath:V,unique:z,multiEntry:Z,extractKey:Vn(V)};return D[St(V)]=G,G}),getIn"
+                },
+                {
+                  "function": "k.<computed>",
+                  "ms": 1.061,
+                  "source": "(..._){let C=performance.now(),K=S.apply(this,_),F=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${O}`;return g[F]=(g[F]??0)+1,K.add"
+                },
+                {
+                  "function": "Tr",
+                  "ms": 1.061,
+                  "source": "(e,t){try{t(function(n){if(e._state===null){if(n===e)throw new TypeError(\"A promise cannot be resolved with itself.\");var i=e._lib&&st();n&&typeof n.then==\"func"
+                },
+                {
+                  "function": "Ma",
+                  "ms": 1.06,
+                  "source": "(e){var t=e._state,n=e._deps.indexedDB;if(t.isBeingOpened||e.idbdb)return t.dbReadyPromise.then(function(){return t.dbOpenError?ue(t.dbOpenError):e});t.isBeingO"
+                },
+                {
+                  "function": "t",
+                  "ms": 1.06,
+                  "source": "(){e(),Pt.splice(Pt.indexOf(t),1)}Pt.push(t),++He,yt(function(){--He===0&&Pn()},[])}function Li(e){Ue.some(function(t){return t._value===e._value})||Ue.push(e)}"
+                },
+                {
+                  "function": "",
+                  "ms": 1.058,
+                  "source": "(){if(w=s.call(l,l),w)if(p){var E=Ke.bind(null,null);w.then(E,E)}else typeof w.next==\"function\"&&typeof w.throw==\"function\"&&(w=ar(w))},h);return(w&&typeof w.th"
+                },
+                {
+                  "function": "e._trans",
+                  "ms": 1.058,
+                  "source": "(t,n,i){var s=this._tx||W.trans,u=this.name,l=Oe&&typeof console<\"u\"&&console.createTask&&console.createTask(\"Dexie: \".concat(t===\"readonly\"?\"read\":\"write\",\" \")"
+                },
+                {
+                  "function": "t",
+                  "ms": 1.057,
+                  "source": "(){e(),Pt.splice(Pt.indexOf(t),1)}Pt.push(t),++He,yt(function(){--He===0&&Pn()},[])}function Li(e){Ue.some(function(t){return t._value===e._value})||Ue.push(e)}"
+                },
+                {
+                  "function": "",
+                  "ms": 1.057
+                }
+              ],
+              "sampledLiveBytes": 65628
+            }
+          ]
+        },
+        {
+          "metric": "startup-working-set-50000",
+          "legacy": {
+            "median": 1797.2999999523163,
+            "p95": 1877.8000001907349,
+            "medianCI": [
+              1745.3499999046326,
+              1838.3499999046326
+            ],
+            "p95CI": [
+              1843.7000000476837,
+              1904.0999999046326
+            ],
+            "cv": 0.036904174950281844,
+            "samples": [
+              1835,
+              1764.7999999523163,
+              1853.0999999046326,
+              1803.2999999523163,
+              1699.3999998569489,
+              1721.2000000476837,
+              1854.4000000953674,
+              1877.8000001907349,
+              1779.9000000953674,
+              1802.5,
+              1708.5,
+              1843.7000000476837,
+              1725.8999998569489,
+              1841.6999998092651,
+              1683.4000000953674,
+              1823.7999999523163,
+              1696.2000000476837,
+              1904.0999999046326,
+              1771.7000000476837,
+              1792.0999999046326
+            ]
+          },
+          "engine": {
+            "median": 1579.3000000715256,
+            "p95": 1657.5,
+            "medianCI": [
+              1563.0000001192093,
+              1601.6499998569489
+            ],
+            "p95CI": [
+              1605,
+              1693.2000000476837
+            ],
+            "cv": 0.029729784505273162,
+            "samples": [
+              1575.7999999523163,
+              1557.5,
+              1693.2000000476837,
+              1591.6000001430511,
+              1600.3999998569489,
+              1657.5,
+              1509.6000001430511,
+              1566.7000000476837,
+              1577.3999998569489,
+              1605,
+              1619.1000001430511,
+              1579.1000001430511,
+              1602.8999998569489,
+              1590.5,
+              1559.3000001907349,
+              1493.5999999046326,
+              1513.1999998092651,
+              1579.5,
+              1552.5999999046326,
+              1614.2000000476837
+            ]
+          },
+          "ratio": {
+            "median": 0.878706949375967,
+            "medianCI": [
+              0.8583276497755626,
+              0.9119087863351291
+            ],
+            "p95": 0.8826818616634582,
+            "p95CI": [
+              0.8477495930510642,
+              0.9137121580782592
+            ]
+          },
+          "status": "OK",
+          "startupProfiles": [
+            {
+              "elapsed": 1815.7000000476837,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.4000000953674316
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.899999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.399999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12.399999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.399999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 26.09999990463257
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.600000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.899999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.899999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.399999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 11.299999952316284
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                }
+              ],
+              "requestCounts": {
+                "entities.getAll": 190,
+                "windows.scope.getAll": 1,
+                "meta.get": 2
+              },
+              "recordsRead": 48648,
+              "cursorContinues": 0,
+              "jsonParses": 48558,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 980.131
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 233.026,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "K.addEventListener.O.once",
+                  "ms": 196.577,
+                  "source": "()=>{O===\"getAll\"?r+=K.result.length:(O===\"get\"&&K.result!==void 0||O===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},O===\"openCurs"
+                },
+                {
+                  "function": "(program)",
+                  "ms": 185.617
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 152.622
+                },
+                {
+                  "function": "",
+                  "ms": 47.265,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,m=0,g=!1,k=!1,O;for(;!k;){let _=await this.database.entities.where(\"[scope+entity+id]\").between(O??[r],[r,[]],!O,!1).limit"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 10.593,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "",
+                  "ms": 8.477,
+                  "source": "K=>!o[C.entity]?.[K])&&f.add(C.entity)});let S=await this.database.meta.get([r,\"cursor\"]);if(!(!g&&!Object.keys(c).length&&!S))return{entities:o,liveQueries:c,r"
+                },
+                {
+                  "function": "k.<computed>",
+                  "ms": 6.361,
+                  "source": "(..._){let C=performance.now(),K=S.apply(this,_),F=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${O}`;return g[F]=(g[F]??0)+1,K.add"
+                },
+                {
+                  "function": "ot",
+                  "ms": 2.133,
+                  "source": "(){var e,t,n;do for(;mt.length>0;)for(e=mt,mt=[],n=e.length,t=0;t<n;++t){var i=e[t];i[0].apply(null,i[1])}while(mt.length>0);Cn=!0,Dt=!0}function Pn(){var e=Ue;"
+                },
+                {
+                  "function": "e._trans",
+                  "ms": 2.117,
+                  "source": "(t,n,i){var s=this._tx||W.trans,u=this.name,l=Oe&&typeof console<\"u\"&&console.createTask&&console.createTask(\"Dexie: \".concat(t===\"readonly\"?\"read\":\"write\",\" \")"
+                },
+                {
+                  "function": "t",
+                  "ms": 1.069,
+                  "source": "(){e(),Pt.splice(Pt.indexOf(t),1)}Pt.push(t),++He,yt(function(){--He===0&&Pn()},[])}function Li(e){Ue.some(function(t){return t._value===e._value})||Ue.push(e)}"
+                },
+                {
+                  "function": "zi",
+                  "ms": 1.066,
+                  "source": "(e,t,n){try{var i,s=t._value;!t._state&&Tt.length&&(Tt=[]),i=Oe&&t._consoleTask?t._consoleTask.run(function(){return e(s)}):e(s),!t._state&&Tt.indexOf(s)===-1&&"
+                },
+                {
+                  "function": "queueMicrotask",
+                  "ms": 1.065
+                },
+                {
+                  "function": "",
+                  "ms": 1.065
+                },
+                {
+                  "function": "Gi",
+                  "ms": 1.063,
+                  "source": "(){var e=Nt[Nt.length-1];Nt.pop(),Ne(e,!1)}function Ne(e,t){var n=W;if((t?le.echoes&&(!qt++||e!==W):qt&&(!--qt||e!==W))&&queueMicrotask(t?Qi.bind(null,e):Gi),e!"
+                },
+                {
+                  "function": "Tr",
+                  "ms": 1.063,
+                  "source": "(e,t){try{t(function(n){if(e._state===null){if(n===e)throw new TypeError(\"A promise cannot be resolved with itself.\");var i=e._lib&&st();n&&typeof n.then==\"func"
+                },
+                {
+                  "function": "",
+                  "ms": 1.063,
+                  "source": "(i){var s=n._ctx;if(ct(s,!0)&&s.limit>0){var u=s.valueMapper,l=Wt(s,s.table.core.schema);return s.table.core.query({trans:i,limit:s.limit,values:!0,direction:s."
+                },
+                {
+                  "function": "",
+                  "ms": 1.063,
+                  "source": "_=>{if(_.deleted)return;let C=JSON.parse(_.value);c[_.signature]=C,C.ids.some(K=>!o[C.entity]?.[K])&&f.add(C.entity)});let S=await this.database.meta.get([r,\"cu"
+                },
+                {
+                  "function": "innerSerialize",
+                  "ms": 1.063
+                }
+              ],
+              "sampledLiveBytes": 131220
+            },
+            {
+              "elapsed": 1636.5999999046326,
+              "requests": [
+                {
+                  "operation": "meta.scope.openKeyCursor",
+                  "ms": 0.5
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.899999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.399999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.899999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.899999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.399999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 25.90000009536743
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.899999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.1000001430511475
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.39999985694885254
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.40000009536743164
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.5
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 12.799999952316284
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 25.09999990463257
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.09999990463256836
+                }
+              ],
+              "requestCounts": {
+                "meta.scope.openKeyCursor": 1,
+                "meta.getAll": 7,
+                "entities.getAll": 190,
+                "windows.scope.getAll": 1,
+                "meta.get": 8
+              },
+              "recordsRead": 48567,
+              "cursorContinues": 1,
+              "jsonParses": 48564,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 769.736
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 271.771,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "K.addEventListener.O.once",
+                  "ms": 202.122,
+                  "source": "()=>{O===\"getAll\"?r+=K.result.length:(O===\"get\"&&K.result!==void 0||O===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},O===\"openCurs"
+                },
+                {
+                  "function": "(program)",
+                  "ms": 182.219
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 144.997
+                },
+                {
+                  "function": "",
+                  "ms": 43.677,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,m=0,g=!1,k=!1,O=0,S=(F,Q,L)=>{let X=Math.min(256,Math.max(1,a.maxRows-Q+1),Number.isFinite(a.maxBytes)?Math.max(1,Math.cei"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 11.702,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "",
+                  "ms": 9.536,
+                  "source": "X=>!o[L.entity]?.[X])&&f.add(L.entity)}let K=await this.database.meta.get([r,\"cursor\"]);if(!(!g&&!Object.keys(c).length&&!K))return{entities:o,liveQueries:c,res"
+                },
+                {
+                  "function": "k.<computed>",
+                  "ms": 5.298,
+                  "source": "(..._){let C=performance.now(),K=S.apply(this,_),F=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${O}`;return g[F]=(g[F]??0)+1,K.add"
+                },
+                {
+                  "function": "",
+                  "ms": 2.131,
+                  "source": "(I,D){var j;I=ae(I);var N=T.trans,q=T.values,z=T.limit,Z=T.query,V=(j=T.direction)!==null&&j!==void 0?j:\"next\",J=z===1/0?void 0:z,G=Z.index,Y=Z.range,re=N.objec"
+                },
+                {
+                  "function": "bound",
+                  "ms": 2.082
+                },
+                {
+                  "function": "",
+                  "ms": 1.156
+                },
+                {
+                  "function": "ot",
+                  "ms": 1.068,
+                  "source": "(){var e,t,n;do for(;mt.length>0;)for(e=mt,mt=[],n=e.length,t=0;t<n;++t){var i=e[t];i[0].apply(null,i[1])}while(mt.length>0);Cn=!0,Dt=!0}function Pn(){var e=Ue;"
+                },
+                {
+                  "function": "",
+                  "ms": 1.068,
+                  "source": "(){var s=W;n&&ut(),Ne(t,!0);try{return e.apply(this,arguments)}finally{Ne(s,!1),i&&queueMicrotask(Ke)}}}function Kn(e){Promise===Ve&&le.echoes===0?qt===0?e():en"
+                },
+                {
+                  "function": "Ne",
+                  "ms": 1.067,
+                  "source": "(e,t){var n=W;if((t?le.echoes&&(!qt++||e!==W):qt&&(!--qt||e!==W))&&queueMicrotask(t?Qi.bind(null,e):Gi),e!==W&&(W=e,n===$e&&($e.env=Kr()),Rn)){var i=$e.env.Prom"
+                },
+                {
+                  "function": "",
+                  "ms": 1.066,
+                  "source": "(w,b){Tn(u,new Dr(Nr(i,e,l,h),Nr(s,e,l,h),w,b,e))});return this._consoleTask&&(p._consoleTask=this._consoleTask),p}return n.prototype=pt,n},set:function(e){C(th"
+                },
+                {
+                  "function": "innerSerialize",
+                  "ms": 1.065
+                },
+                {
+                  "function": "",
+                  "ms": 1.062,
+                  "source": "(R){var $=R.keyPath,P=R.autoIncrement,T=d($),I=$==null,D={},j={name:R.name,primaryKey:{name:null,isPrimaryKey:!0,outbound:I,compound:T,keyPath:$,autoIncrement:P"
+                },
+                {
+                  "function": "",
+                  "ms": 1.061,
+                  "source": "(n,i,s){if(this.db=e,this._ctx={table:n,index:i===\":id\"?null:i,or:s},this._cmp=this._ascending=ee,this._descending=function(u,l){return ee(l,u)},this._max=funct"
+                },
+                {
+                  "function": "addEventListener",
+                  "ms": 1.06
+                }
+              ],
+              "sampledLiveBytes": 328192
+            }
+          ]
+        }
+      ],
+      "fixtures": {
+        "10000": {
+          "encodedBytes": 20524480,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        },
+        "50000": {
+          "encodedBytes": 102620058,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        }
+      },
+      "version": "149.0.7827.55",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
+      "loadReadings": [
+        {
+          "loadavg": [
+            2.65,
+            3.13,
+            5.24
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:02:46.829Z"
+        },
+        {
+          "loadavg": [
+            2.76,
+            3.15,
+            5.24
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:02:52.448Z"
+        },
+        {
+          "loadavg": [
+            2.86,
+            3.16,
+            5.23
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:02:58.129Z"
+        },
+        {
+          "loadavg": [
+            2.87,
+            3.16,
+            5.22
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:03:03.782Z"
+        },
+        {
+          "loadavg": [
+            3.2,
+            3.22,
+            5.22
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:03:09.495Z"
+        },
+        {
+          "loadavg": [
+            3.2,
+            3.22,
+            5.22
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:03:09.541Z"
+        },
+        {
+          "loadavg": [
+            4.55,
+            3.62,
+            5.25
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:04:03.099Z"
+        },
+        {
+          "loadavg": [
+            4.85,
+            3.75,
+            5.26
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:04:21.613Z"
+        },
+        {
+          "loadavg": [
+            4.39,
+            3.71,
+            5.21
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:04:40.122Z"
+        },
+        {
+          "loadavg": [
+            3.93,
+            3.65,
+            5.16
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:04:58.569Z"
+        },
+        {
+          "loadavg": [
+            4.05,
+            3.69,
+            5.15
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:05:16.884Z"
+        },
+        {
+          "loadavg": [
+            4.05,
+            3.69,
+            5.15
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:05:16.934Z"
+        }
+      ],
+      "after": {
+        "loadavg": [
+          4.13,
+          3.71,
+          5.14
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T04:05:21.003Z"
+      }
+    },
+    {
+      "name": "firefox",
+      "before": {
+        "loadavg": [
+          4.13,
+          3.71,
+          5.14
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T04:05:21.004Z"
+      },
+      "quiescent": false,
+      "cases": [
+        {
+          "metric": "startup-working-set-10000",
+          "legacy": {
+            "median": 354,
+            "p95": 416,
+            "medianCI": [
+              341.5,
+              370.5
+            ],
+            "p95CI": [
+              393,
+              851
+            ],
+            "cv": 0.25122495159395425,
+            "samples": [
+              319,
+              329,
+              366,
+              396,
+              340,
+              341,
+              365,
+              313,
+              381,
+              356,
+              338,
+              372,
+              329,
+              353,
+              325,
+              393,
+              336,
+              375,
+              851,
+              384,
+              355,
+              371,
+              344,
+              416,
+              338,
+              342,
+              399,
+              353,
+              370,
+              345
+            ]
+          },
+          "engine": {
+            "median": 281,
+            "p95": 316,
+            "medianCI": [
+              277,
+              290
+            ],
+            "p95CI": [
+              302,
+              329
+            ],
+            "cv": 0.05613905104807332,
+            "samples": [
+              291,
+              267,
+              275,
+              278,
+              283,
+              264,
+              273,
+              279,
+              274,
+              299,
+              268,
+              287,
+              289,
+              296,
+              281,
+              275,
+              273,
+              294,
+              281,
+              261,
+              306,
+              294,
+              275,
+              302,
+              329,
+              316,
+              280,
+              313,
+              283,
+              280
+            ]
+          },
+          "ratio": {
+            "median": 0.7937853107344632,
+            "medianCI": [
+              0.7567567567567568,
+              0.8299120234604106
+            ],
+            "p95": 0.7596153846153846,
+            "p95CI": [
+              0.3595769682726204,
+              0.8308080808080808
+            ]
+          },
+          "status": "NOISY",
+          "startupProfiles": [
+            {
+              "elapsed": 362,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                }
+              ],
+              "requestCounts": {
+                "entities.getAll": 43,
+                "windows.scope.getAll": 1,
+                "meta.get": 2
+              },
+              "recordsRead": 10508,
+              "cursorContinues": 0,
+              "jsonParses": 10507
+            },
+            {
+              "elapsed": 292,
+              "requests": [
+                {
+                  "operation": "meta.scope.openKeyCursor",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 5
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                }
+              ],
+              "requestCounts": {
+                "meta.scope.openKeyCursor": 1,
+                "meta.getAll": 7,
+                "entities.getAll": 42,
+                "windows.scope.getAll": 1,
+                "meta.get": 8
+              },
+              "recordsRead": 10514,
+              "cursorContinues": 1,
+              "jsonParses": 10513
+            }
+          ]
+        },
+        {
+          "metric": "startup-working-set-50000",
+          "legacy": {
+            "median": 1657,
+            "p95": 1903,
+            "medianCI": [
+              1622,
+              1753
+            ],
+            "p95CI": [
+              1755,
+              1940
+            ],
+            "cv": 0.07502704303831628,
+            "samples": [
+              1656,
+              1718,
+              1638,
+              1788,
+              1555,
+              1613,
+              1751,
+              1660,
+              1755,
+              1486,
+              1626,
+              1586,
+              1603,
+              1618,
+              1658,
+              1891,
+              1895,
+              1903,
+              1640,
+              1940
+            ]
+          },
+          "engine": {
+            "median": 1356,
+            "p95": 1537,
+            "medianCI": [
+              1308,
+              1387.5
+            ],
+            "p95CI": [
+              1391,
+              1599
+            ],
+            "cv": 0.0730774553177756,
+            "samples": [
+              1267,
+              1237,
+              1273,
+              1295,
+              1310,
+              1378,
+              1314,
+              1384,
+              1340,
+              1221,
+              1306,
+              1392,
+              1361,
+              1380,
+              1351,
+              1519,
+              1537,
+              1391,
+              1460,
+              1599
+            ]
+          },
+          "ratio": {
+            "median": 0.8183464091732046,
+            "medianCI": [
+              0.765061977515134,
+              0.8462951622780159
+            ],
+            "p95": 0.8076720966894377,
+            "p95CI": [
+              0.7314766158696795,
+              0.8242268041237113
+            ]
+          },
+          "status": "OK",
+          "startupProfiles": [
+            {
+              "elapsed": 1860,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 14
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 14
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 21
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 27
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                }
+              ],
+              "requestCounts": {
+                "entities.getAll": 190,
+                "windows.scope.getAll": 1,
+                "meta.get": 2
+              },
+              "recordsRead": 48648,
+              "cursorContinues": 0,
+              "jsonParses": 48558
+            },
+            {
+              "elapsed": 1512,
+              "requests": [
+                {
+                  "operation": "meta.scope.openKeyCursor",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 13
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 14
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 15
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 18
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 13
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 13
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 13
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 14
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 15
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 14
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 26
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 84
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                }
+              ],
+              "requestCounts": {
+                "meta.scope.openKeyCursor": 1,
+                "meta.getAll": 7,
+                "entities.getAll": 190,
+                "windows.scope.getAll": 1,
+                "meta.get": 8
+              },
+              "recordsRead": 48567,
+              "cursorContinues": 1,
+              "jsonParses": 48564
+            }
+          ]
+        }
+      ],
+      "fixtures": {
+        "10000": {
+          "encodedBytes": 20524480,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        },
+        "50000": {
+          "encodedBytes": 102620058,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        }
+      },
+      "version": "151.0",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0",
+      "loadReadings": [
+        {
+          "loadavg": [
+            5.3,
+            4.01,
+            5.2
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:05:46.916Z"
+        },
+        {
+          "loadavg": [
+            4.94,
+            3.99,
+            5.18
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:06:00.442Z"
+        },
+        {
+          "loadavg": [
+            4.56,
+            3.94,
+            5.15
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:06:13.912Z"
+        },
+        {
+          "loadavg": [
+            4.29,
+            3.91,
+            5.12
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:06:27.547Z"
+        },
+        {
+          "loadavg": [
+            4.23,
+            3.92,
+            5.1
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:06:42.383Z"
+        },
+        {
+          "loadavg": [
+            4.4,
+            3.97,
+            5.1
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:06:56.587Z"
+        },
+        {
+          "loadavg": [
+            4.89,
+            4.1,
+            5.12
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:07:10.618Z"
+        },
+        {
+          "loadavg": [
+            4.89,
+            4.1,
+            5.12
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:07:10.619Z"
+        },
+        {
+          "loadavg": [
+            4.65,
+            4.16,
+            5.07
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:08:18.995Z"
+        },
+        {
+          "loadavg": [
+            4.99,
+            4.29,
+            5.09
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:08:44.825Z"
+        },
+        {
+          "loadavg": [
+            5.16,
+            4.39,
+            5.1
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:09:10.873Z"
+        },
+        {
+          "loadavg": [
+            5.11,
+            4.44,
+            5.1
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:09:36.985Z"
+        },
+        {
+          "loadavg": [
+            9.8,
+            5.58,
+            5.45
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:10:05.565Z"
+        },
+        {
+          "loadavg": [
+            9.8,
+            5.58,
+            5.45
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:10:05.607Z"
+        }
+      ],
+      "after": {
+        "loadavg": [
+          9.41,
+          5.57,
+          5.45
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T04:10:12.192Z"
+      }
+    },
+    {
+      "name": "webkit",
+      "before": {
+        "loadavg": [
+          7.44,
+          5.48,
+          5.42
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T04:10:42.195Z"
+      },
+      "quiescent": true,
+      "cases": [],
+      "fixtures": {
+        "10000": {
+          "encodedBytes": 20524480,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        }
+      },
+      "version": "26.5",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Safari/605.1.15"
+    }
+  ],
+  "error": "Error: page.evaluate: UnknownError: Unable to open cursor\n UnknownError: Unable to open cursor"
+}

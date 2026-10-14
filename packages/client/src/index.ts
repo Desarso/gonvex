@@ -76,6 +76,9 @@ export * from "./external-auth.js";
 export {
   MemoryLocalReplicaStorage,
   type LocalReplicaStorage,
+  type ReplicaStorageChanges,
+  type ReplicaStorageCommit,
+  type ReplicaWindowDelta,
   type LocalReplicaSession,
   type LocalReplicaView,
   type ReplicaSubscription,
@@ -93,6 +96,7 @@ export {
 } from "./local-replica.js";
 export * from "./query-expression.js";
 export * from "./indexeddb-replica.js";
+export * from "./indexeddb-engine.js";
 export * from "./control.js";
 
 function asReplicaRow(value: JsonValue | undefined): ReplicaRow | undefined {

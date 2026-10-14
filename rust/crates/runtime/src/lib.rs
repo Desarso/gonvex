@@ -4500,11 +4500,6 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                     provider: "firebase".to_owned(),
                 },
             },
-            route: gonvex_postgres::TenantRoute {
-                project_id: "project".to_owned(),
-                tenant_id: "tenant".to_owned(),
-                database_url: "postgres://tenant".to_owned(),
-            },
             member: gonvex_postgres::Member {
                 id: "member".to_owned(),
                 account_id: "account".to_owned(),
@@ -4516,8 +4511,11 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                 membership_revision: 1,
             },
             admission_revision: 5,
-            delegation: None,
-            developer_session: None,
+            ..TenantSession::anonymous(gonvex_postgres::TenantRoute {
+                project_id: "project".to_owned(),
+                tenant_id: "tenant".to_owned(),
+                database_url: "postgres://tenant".to_owned(),
+            })
         };
         let old = control::ControlConnection {
             project_id: "project".into(),

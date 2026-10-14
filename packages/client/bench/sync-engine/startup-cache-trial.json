@@ -1,0 +1,2091 @@
+{
+  "kind": "native-browser-storage-v1",
+  "complete": false,
+  "environment": {
+    "node": "v26.8.2",
+    "priority": 15,
+    "os": "7.2.4-arch1-2",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "ram": 33537105920,
+    "commit": "37e9239ba5bcbe0c71883b3105164869117c2209",
+    "dirty": false,
+    "seed": 1196840961,
+    "artifactHash": "ef83e92b1ed10c04d95d262a95e99156178f8719ce1486b6cce2903c2ff2bcc0",
+    "budget": {
+      "maxRows": 9007199254740991,
+      "maxBytes": 209715200
+    },
+    "options": {
+      "browsers": "chromium,firefox,webkit",
+      "cases": "startup-working-set",
+      "samples": 20,
+      "warmups": 5,
+      "cap": 30,
+      "cv": 0.15,
+      "load": 0.5,
+      "retries": 2,
+      "output": "packages/client/bench/sync-engine/startup-after.json"
+    },
+    "scope": "storage only; no runtime, network, worker, DOM or subscribers; WebKit approximates Safari"
+  },
+  "browsers": [
+    {
+      "name": "chromium",
+      "before": {
+        "loadavg": [
+          4.13,
+          7.52,
+          11.8
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T03:39:50.175Z"
+      },
+      "quiescent": true,
+      "cases": [
+        {
+          "metric": "startup-working-set-10000",
+          "legacy": {
+            "median": 436.2999999523163,
+            "p95": 456,
+            "medianCI": [
+              431,
+              440.7999999523163
+            ],
+            "p95CI": [
+              445.2000000476837,
+              494.5
+            ],
+            "cv": 0.03433297455877676,
+            "samples": [
+              431.5,
+              430,
+              436.59999990463257,
+              437,
+              436.5,
+              430.19999980926514,
+              442.19999980926514,
+              426.60000014305115,
+              439.40000009536743,
+              429.40000009536743,
+              435.7000000476837,
+              434.09999990463257,
+              436.09999990463257,
+              430.5,
+              445.2000000476837,
+              446.2999999523163,
+              494.5,
+              449.69999980926514,
+              456,
+              426.2999999523163
+            ]
+          },
+          "engine": {
+            "median": 431.5,
+            "p95": 438.7999999523163,
+            "medianCI": [
+              429.09999990463257,
+              435.4500000476837
+            ],
+            "p95CI": [
+              436.7999999523163,
+              441.60000014305115
+            ],
+            "cv": 0.01072091706186466,
+            "samples": [
+              430.5,
+              427.2000000476837,
+              438.7999999523163,
+              429.59999990463257,
+              435.7000000476837,
+              436.7999999523163,
+              427.09999990463257,
+              431.09999990463257,
+              432.7000000476837,
+              427.2000000476837,
+              438.59999990463257,
+              437.10000014305115,
+              426.2000000476837,
+              441.60000014305115,
+              431.90000009536743,
+              428.59999990463257,
+              433.2000000476837,
+              435.2000000476837,
+              427,
+              430
+            ]
+          },
+          "ratio": {
+            "median": 0.988998395707447,
+            "medianCI": [
+              0.9782214158219804,
+              1.002437043497661
+            ],
+            "p95": 0.9622807016498164,
+            "p95CI": [
+              0.8839231549910034,
+              0.9919137468458065
+            ]
+          },
+          "status": "OK",
+          "startupProfiles": [
+            {
+              "elapsed": 447.09999990463257,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.899999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 3.4000000953674316
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                }
+              ],
+              "requestCounts": {
+                "entities.getAll": 43,
+                "windows.scope.getAll": 1,
+                "meta.get": 2
+              },
+              "recordsRead": 10508,
+              "cursorContinues": 0,
+              "jsonParses": 10507,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 257.921
+                },
+                {
+                  "function": "(program)",
+                  "ms": 53.757
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 50.825,
+                  "source": "(...O){return o++,c.apply(this,O)},IDBCursor.prototype.continue=function(...O){return a++,f.apply(this,O)};let d=[],m=[],g={};for(let O of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "K.addEventListener.k.once",
+                  "ms": 43.42,
+                  "source": "()=>{k===\"getAll\"?r+=K.result.length:(k===\"get\"&&K.result!==void 0||k===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},k===\"openCurs"
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 41.389
+                },
+                {
+                  "function": "",
+                  "ms": 10.204,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,m=0,g=!1,O=!1,k;for(;!O;){let _=await this.database.entities.where(\"[scope+entity+id]\").between(k??[r],[r,[]],!k,!1).limit"
+                },
+                {
+                  "function": "",
+                  "ms": 2.116,
+                  "source": "K=>!o[C.entity]?.[K])&&f.add(C.entity)});let S=await this.database.meta.get([r,\"cursor\"]);if(!(!g&&!Object.keys(c).length&&!S))return{entities:o,liveQueries:c,r"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 2.064,
+                  "source": "(...O){return o++,c.apply(this,O)},IDBCursor.prototype.continue=function(...O){return a++,f.apply(this,O)};let d=[],m=[],g={};for(let O of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "",
+                  "ms": 1.139
+                },
+                {
+                  "function": "s",
+                  "ms": 1.063,
+                  "source": "(A){if(A.type===3)return null;if(A.type===4)throw new Error(\"Cannot convert never type to IDBKeyRange\");var M=A.lower,v=A.upper,x=A.lowerOpen,R=A.upperOpen,$=M="
+                },
+                {
+                  "function": "O.<computed>",
+                  "ms": 1.063,
+                  "source": "(..._){let C=performance.now(),K=S.apply(this,_),F=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${k}`;return g[F]=(g[F]??0)+1,K.add"
+                },
+                {
+                  "function": "B",
+                  "ms": 1.061,
+                  "source": "(e){if(typeof this!=\"object\")throw new TypeError(\"Promises must be constructed via new\");this._listeners=[],this._lib=!1;var t=this._PSD=W;if(typeof e!=\"functio"
+                },
+                {
+                  "function": "Jn",
+                  "ms": 1.06,
+                  "source": "(e,t,n,i,s,u,l,h){return{name:e,keyPath:t,unique:n,multi:i,auto:s,compound:u,src:(n&&!l?\"&\":\"\")+(i?\"*\":\"\")+(s?\"++\":\"\")+Yr(t),type:h}}function Yr(e){return typeo"
+                },
+                {
+                  "function": "e.between",
+                  "ms": 1.06,
+                  "source": "(t,n,i,s){i=i!==!1,s=s===!0;try{return this._cmp(t,n)>0||this._cmp(t,n)===0&&(i||s)&&!(i&&s)?ut(this):new this.Collection(this,function(){return Ke(t,n,!i,!s)})"
+                },
+                {
+                  "function": "Pe",
+                  "ms": 1.06,
+                  "source": "(e,t){var n=W;if((t?oe.echoes&&(!Nt++||e!==W):Nt&&(!--Nt||e!==W))&&queueMicrotask(t?Qi.bind(null,e):Gi),e!==W&&(W=e,n===Ae&&(Ae.env=Pr()),$n)){var i=Ae.env.Prom"
+                },
+                {
+                  "function": "",
+                  "ms": 1.059,
+                  "source": "(I,D){var j;I=ie(I);var N=T.trans,q=T.values,z=T.limit,X=T.query,L=(j=T.direction)!==null&&j!==void 0?j:\"next\",J=z===1/0?void 0:z,Q=X.index,G=X.range,re=N.objec"
+                },
+                {
+                  "function": "zi",
+                  "ms": 1.057,
+                  "source": "(e,t,n){try{var i,s=t._value;!t._state&&Dt.length&&(Dt=[]),i=xe&&t._consoleTask?t._consoleTask.run(function(){return e(s)}):e(s),!t._state&&Dt.indexOf(s)===-1&&"
+                }
+              ],
+              "sampledLiveBytes": 296840
+            },
+            {
+              "elapsed": 439.7999999523163,
+              "requests": [
+                {
+                  "operation": "meta.scope.openKeyCursor",
+                  "ms": 0.7000000476837158
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.09999990463256836
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 54.5
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 68.60000014305115
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 68.79999995231628
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 68.79999995231628
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 68.89999985694885
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 69
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 119.79999995231628
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 67.40000009536743
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 80.90000009536743
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 81
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 81.09999990463257
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 80.89999985694885
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 80.90000009536743
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 27.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 57.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 52.89999985694885
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 55.40000009536743
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.09999990463256836
+                }
+              ],
+              "requestCounts": {
+                "meta.scope.openKeyCursor": 1,
+                "meta.getAll": 7,
+                "windows.scope.getAll": 1,
+                "entities.getAll": 7,
+                "meta.get": 8
+              },
+              "recordsRead": 10514,
+              "cursorContinues": 1,
+              "jsonParses": 10513,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 237.844
+                },
+                {
+                  "function": "(program)",
+                  "ms": 72.577
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 59.332,
+                  "source": "(...O){return o++,c.apply(this,O)},IDBCursor.prototype.continue=function(...O){return a++,f.apply(this,O)};let d=[],m=[],g={};for(let O of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "K.addEventListener.k.once",
+                  "ms": 44.345,
+                  "source": "()=>{k===\"getAll\"?r+=K.result.length:(k===\"get\"&&K.result!==void 0||k===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},k===\"openCurs"
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 28.634
+                },
+                {
+                  "function": "",
+                  "ms": 5.742,
+                  "source": "async()=>{for(;!k;){let K=await this.database.entities.where(\"[scope+entity+id]\").between(S??[r],[r,[]],!S,!1).limit(Math.min(2048,Math.max(1,a.maxRows-g+1))).t"
+                },
+                {
+                  "function": "",
+                  "ms": 2.125,
+                  "source": "F=>!o[K.entity]?.[F])&&f.add(K.entity);let C=await this.database.meta.get([r,\"cursor\"]);if(!(!O&&!Object.keys(c).length&&!C))return{entities:o,liveQueries:c,res"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 2.107,
+                  "source": "(...O){return o++,c.apply(this,O)},IDBCursor.prototype.continue=function(...O){return a++,f.apply(this,O)};let d=[],m=[],g={};for(let O of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "",
+                  "ms": 1.147
+                },
+                {
+                  "function": "O.<computed>",
+                  "ms": 1.09,
+                  "source": "(..._){let C=performance.now(),K=S.apply(this,_),F=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${k}`;return g[F]=(g[F]??0)+1,K.add"
+                },
+                {
+                  "function": "serialize",
+                  "ms": 1.063
+                },
+                {
+                  "function": "l",
+                  "ms": 1.062,
+                  "source": "(x,R,$){var P=Et(x),T=s[P]=s[P]||[],I=x==null?0:typeof x==\"string\"?1:x.length,D=R>0,j=a(a({},$),{name:D?\"\".concat(P,\"(virtual-from:\").concat($.name,\")\"):$.name,"
+                },
+                {
+                  "function": "",
+                  "ms": 1.061,
+                  "source": "(){return W.trans=s,i(u,l,s)})}).then(function(u){if(t===\"readwrite\")try{s.idbtrans.commit()}catch{}return t===\"readonly\"?u:s._completion.then(function(){return"
+                },
+                {
+                  "function": "addEventListener",
+                  "ms": 1.061
+                },
+                {
+                  "function": "Dn",
+                  "ms": 1.06,
+                  "source": "(e,t){if(e._state===null){e._listeners.push(t);return}var n=e._state?t.onFulfilled:t.onRejected;if(n===null)return(e._state?t.resolve:t.reject)(e._value);++t.ps"
+                },
+                {
+                  "function": "Ve",
+                  "ms": 1.057,
+                  "source": "(e,t,n,i,s){var u=W;try{return Pe(e,!0),t(n,i,s)}finally{Pe(u,!1)}}function Kr(e,t,n,i){return typeof e!=\"function\"?e:function(){var s=W;n&&st(),Pe(t,!0);try{re"
+                },
+                {
+                  "function": "B",
+                  "ms": 1.055,
+                  "source": "(e){if(typeof this!=\"object\")throw new TypeError(\"Promises must be constructed via new\");this._listeners=[],this._lib=!1;var t=this._PSD=W;if(typeof e!=\"functio"
+                },
+                {
+                  "function": "Yt",
+                  "ms": 1.055,
+                  "source": "(e,t,n){for(var i=n.db.objectStoreNames,s=0;s<i.length;++s){var u=i[s],l=n.objectStore(u);e._hasGetAll=\"getAll\"in l;for(var h=0;h<l.indexNames.length;++h){var p"
+                }
+              ],
+              "sampledLiveBytes": 362360
+            }
+          ]
+        },
+        {
+          "metric": "startup-working-set-50000",
+          "legacy": {
+            "median": 1768.4500000476837,
+            "p95": 1831.2000000476837,
+            "medianCI": [
+              1722.450000166893,
+              1793
+            ],
+            "p95CI": [
+              1800.2999999523163,
+              1864.0999999046326
+            ],
+            "cv": 0.033900036459724094,
+            "samples": [
+              1650.2000000476837,
+              1657.4000000953674,
+              1732.9000000953674,
+              1702.5,
+              1723.1000001430511,
+              1727.0999999046326,
+              1764,
+              1772.9000000953674,
+              1782.6000001430511,
+              1792.5,
+              1864.0999999046326,
+              1793.5,
+              1831.2000000476837,
+              1692.2000000476837,
+              1705.7000000476837,
+              1817.5999999046326,
+              1721.8000001907349,
+              1788.4000000953674,
+              1800.2999999523163,
+              1830.5
+            ]
+          },
+          "engine": {
+            "median": 1934.6000000238419,
+            "p95": 2012.4000000953674,
+            "medianCI": [
+              1828.6999999284744,
+              1977.2999999523163
+            ],
+            "p95CI": [
+              1992.2999999523163,
+              2109.7000000476837
+            ],
+            "cv": 0.05272242819552486,
+            "samples": [
+              1839.5,
+              1768.7000000476837,
+              1786.2999999523163,
+              1766.9000000953674,
+              1827.7999999523163,
+              1791.8000001907349,
+              1777.7999999523163,
+              1964.2999999523163,
+              1992.2999999523163,
+              1829.5999999046326,
+              1990.2999999523163,
+              1919.6999998092651,
+              1997.6000001430511,
+              1931.2000000476837,
+              1938,
+              1955.5,
+              2109.7000000476837,
+              1997.7000000476837,
+              1949.9000000953674,
+              2012.4000000953674
+            ]
+          },
+          "ratio": {
+            "median": 1.0939523311214217,
+            "medianCI": [
+              1.039994331038728,
+              1.1249710647648012
+            ],
+            "p95": 1.098951507231851,
+            "p95CI": [
+              1.0716163297276158,
+              1.1607064261434734
+            ]
+          },
+          "status": "OK",
+          "startupProfiles": [
+            {
+              "elapsed": 1750.7000000476837,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.399999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.600000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 28.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.600000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.399999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.600000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.3999998569488525
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 9.700000047683716
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.09999990463256836
+                }
+              ],
+              "requestCounts": {
+                "entities.getAll": 190,
+                "windows.scope.getAll": 1,
+                "meta.get": 2
+              },
+              "recordsRead": 48648,
+              "cursorContinues": 0,
+              "jsonParses": 48558,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 962.056
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 243.412,
+                  "source": "(...O){return o++,c.apply(this,O)},IDBCursor.prototype.continue=function(...O){return a++,f.apply(this,O)};let d=[],m=[],g={};for(let O of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "(program)",
+                  "ms": 186.588
+                },
+                {
+                  "function": "K.addEventListener.k.once",
+                  "ms": 176.542,
+                  "source": "()=>{k===\"getAll\"?r+=K.result.length:(k===\"get\"&&K.result!==void 0||k===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},k===\"openCurs"
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 145.128
+                },
+                {
+                  "function": "",
+                  "ms": 30.249,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,m=0,g=!1,O=!1,k;for(;!O;){let _=await this.database.entities.where(\"[scope+entity+id]\").between(k??[r],[r,[]],!k,!1).limit"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 9.417,
+                  "source": "(...O){return o++,c.apply(this,O)},IDBCursor.prototype.continue=function(...O){return a++,f.apply(this,O)};let d=[],m=[],g={};for(let O of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "",
+                  "ms": 8.475,
+                  "source": "K=>!o[C.entity]?.[K])&&f.add(C.entity)});let S=await this.database.meta.get([r,\"cursor\"]);if(!(!g&&!Object.keys(c).length&&!S))return{entities:o,liveQueries:c,r"
+                },
+                {
+                  "function": "O.<computed>",
+                  "ms": 5.294,
+                  "source": "(..._){let C=performance.now(),K=S.apply(this,_),F=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${k}`;return g[F]=(g[F]??0)+1,K.add"
+                },
+                {
+                  "function": "",
+                  "ms": 2.117,
+                  "source": "(I,D){var j;I=ie(I);var N=T.trans,q=T.values,z=T.limit,X=T.query,L=(j=T.direction)!==null&&j!==void 0?j:\"next\",J=z===1/0?void 0:z,Q=X.index,G=X.range,re=N.objec"
+                },
+                {
+                  "function": "createTask",
+                  "ms": 1.065
+                },
+                {
+                  "function": "e._trans",
+                  "ms": 1.062,
+                  "source": "(t,n,i){var s=this._tx||W.trans,u=this.name,l=xe&&typeof console<\"u\"&&console.createTask&&console.createTask(\"Dexie: \".concat(t===\"readonly\"?\"read\":\"write\",\" \")"
+                },
+                {
+                  "function": "zi",
+                  "ms": 1.061,
+                  "source": "(e,t,n){try{var i,s=t._value;!t._state&&Dt.length&&(Dt=[]),i=xe&&t._consoleTask?t._consoleTask.run(function(){return e(s)}):e(s),!t._state&&Dt.indexOf(s)===-1&&"
+                },
+                {
+                  "function": "Pr",
+                  "ms": 1.061,
+                  "source": "(){var e=c.Promise;return $n?{Promise:e,PromiseProp:Object.getOwnPropertyDescriptor(c,\"Promise\"),all:e.all,race:e.race,allSettled:e.allSettled,any:e.any,resolve"
+                },
+                {
+                  "function": "n",
+                  "ms": 1.061,
+                  "source": "(i,s){var u=this,l=!e.global&&(e!==W||t!==qt),h=l&&!Te(),p=new B(function(w,b){Dn(u,new Mr(Kr(i,e,l,h),Kr(s,e,l,h),w,b,e))});return this._consoleTask&&(p._conso"
+                },
+                {
+                  "function": "i",
+                  "ms": 1.06,
+                  "source": "(A,M){var v=Xr(A.objectStoreNames),x=v.length>0?M.objectStore(v[0]):{};return{schema:{name:A.name,tables:v.map(function(R){return M.objectStore(R)}).map(functio"
+                },
+                {
+                  "function": "pt",
+                  "ms": 1.06,
+                  "source": "(e,t){yt.push([e,t]),Mt&&(Fi(),Mt=!1)},Rn=!0,Mt=!0,We=[],Dt=[],Cn=dt,Ae={id:\"global\",global:!0,ref:0,unhandleds:[],onunhandled:te,pgp:!1,env:{},finalize:te},W=A"
+                },
+                {
+                  "function": "",
+                  "ms": 1.059,
+                  "source": "(){var s=W;n&&st(),Pe(t,!0);try{return e.apply(this,arguments)}finally{Pe(s,!1),i&&queueMicrotask(Te)}}}function Pn(e){Promise===Je&&oe.echoes===0?Nt===0?e():en"
+                },
+                {
+                  "function": "innerSerialize",
+                  "ms": 1.059
+                },
+                {
+                  "function": "Ma",
+                  "ms": 1.058,
+                  "source": "(e){var t=e._state,n=e._deps.indexedDB;if(t.isBeingOpened||e.idbdb)return t.dbReadyPromise.then(function(){return t.dbOpenError?ae(t.dbOpenError):e});t.isBeingO"
+                }
+              ],
+              "sampledLiveBytes": 164012
+            },
+            {
+              "elapsed": 1923.2000000476837,
+              "requests": [
+                {
+                  "operation": "meta.scope.openKeyCursor",
+                  "ms": 0.7000000476837158
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.09999990463256836
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 0.40000009536743164
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 63.200000047683716
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 76.90000009536743
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 77
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 77.19999980926514
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 77.19999980926514
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 77.29999995231628
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 141.59999990463257
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 101.5
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 121.69999980926514
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 121.79999995231628
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 121.70000004768372
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 121.70000004768372
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 121.60000014305115
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 42.39999985694885
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 68.70000004768372
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 61.59999990463257
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 61.60000014305115
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 60.60000014305115
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 58.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 54.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 56.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 48.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 52.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 66.29999995231628
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 63.89999985694885
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 51.80000019073486
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 54
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 48.40000009536743
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 50.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 51.80000019073486
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 52.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 69.90000009536743
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 54.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 59.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 57.90000009536743
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 53.700000047683716
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.09999990463256836
+                }
+              ],
+              "requestCounts": {
+                "meta.scope.openKeyCursor": 1,
+                "meta.getAll": 7,
+                "windows.scope.getAll": 1,
+                "entities.getAll": 24,
+                "meta.get": 8
+              },
+              "recordsRead": 49166,
+              "cursorContinues": 1,
+              "jsonParses": 48564,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 981.088
+                },
+                {
+                  "function": "(program)",
+                  "ms": 301.726
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 244.788,
+                  "source": "(...O){return o++,c.apply(this,O)},IDBCursor.prototype.continue=function(...O){return a++,f.apply(this,O)};let d=[],m=[],g={};for(let O of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "K.addEventListener.k.once",
+                  "ms": 199.396,
+                  "source": "()=>{k===\"getAll\"?r+=K.result.length:(k===\"get\"&&K.result!==void 0||k===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},k===\"openCurs"
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 166.461
+                },
+                {
+                  "function": "",
+                  "ms": 27.246,
+                  "source": "async()=>{for(;!k;){let K=await this.database.entities.where(\"[scope+entity+id]\").between(S??[r],[r,[]],!S,!1).limit(Math.min(2048,Math.max(1,a.maxRows-g+1))).t"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 14.611,
+                  "source": "(...O){return o++,c.apply(this,O)},IDBCursor.prototype.continue=function(...O){return a++,f.apply(this,O)};let d=[],m=[],g={};for(let O of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "",
+                  "ms": 9.921,
+                  "source": "F=>!o[K.entity]?.[F])&&f.add(K.entity);let C=await this.database.meta.get([r,\"cursor\"]);if(!(!O&&!Object.keys(c).length&&!C))return{entities:o,liveQueries:c,res"
+                },
+                {
+                  "function": "zi",
+                  "ms": 1.069,
+                  "source": "(e,t,n){try{var i,s=t._value;!t._state&&Dt.length&&(Dt=[]),i=xe&&t._consoleTask?t._consoleTask.run(function(){return e(s)}):e(s),!t._state&&Dt.indexOf(s)===-1&&"
+                },
+                {
+                  "function": "Ma",
+                  "ms": 1.066,
+                  "source": "(e){var t=e._state,n=e._deps.indexedDB;if(t.isBeingOpened||e.idbdb)return t.dbReadyPromise.then(function(){return t.dbOpenError?ae(t.dbOpenError):e});t.isBeingO"
+                },
+                {
+                  "function": "addEventListener",
+                  "ms": 1.065
+                },
+                {
+                  "function": "",
+                  "ms": 1.065,
+                  "source": "(I,D){var j;I=ie(I);var N=T.trans,q=T.values,z=T.limit,X=T.query,L=(j=T.direction)!==null&&j!==void 0?j:\"next\",J=z===1/0?void 0:z,Q=X.index,G=X.range,re=N.objec"
+                },
+                {
+                  "function": "isURL",
+                  "ms": 1.063
+                },
+                {
+                  "function": "",
+                  "ms": 1.062,
+                  "source": "(n,i,s,u,l){var h=this;n!==\"readonly\"&&i.forEach(function(p){var w,b=(w=s[p])===null||w===void 0?void 0:w.yProps;b&&(i=i.concat(b.map(function(E){return E.updat"
+                },
+                {
+                  "function": "",
+                  "ms": 1.06,
+                  "source": "(){p=null;var x=e.idbdb=v.result,R=ne(x.objectStoreNames);if(R.length>0)try{var $=x.transaction(fa(R),\"readonly\");if(t.autoSchema)xa(e,x,$);else if(Yt(e,e._dbSc"
+                },
+                {
+                  "function": "e.uniqueKeys",
+                  "ms": 1.059,
+                  "source": "(t){return this._ctx.unique=\"unique\",this.keys(t)},e.prototype.firstKey=function(t){return this.limit(1).keys(function(n){return n[0]}).then(t)},e.prototype.las"
+                },
+                {
+                  "function": "table",
+                  "ms": 1.057,
+                  "source": "(t){var n=e.table(t);return a(a({},n),{getMany:function(i){if(!i.cache)return n.getMany(i);var s=si(i.keys,i.trans._cache,i.cache===\"clone\");return s?B.resolve("
+                }
+              ],
+              "sampledLiveBytes": 262936
+            }
+          ]
+        }
+      ],
+      "fixtures": {
+        "10000": {
+          "encodedBytes": 20524480,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        },
+        "50000": {
+          "encodedBytes": 102620058,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        }
+      },
+      "version": "149.0.7827.55",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
+      "loadReadings": [
+        {
+          "loadavg": [
+            3.96,
+            7.37,
+            11.71
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:40:02.952Z"
+        },
+        {
+          "loadavg": [
+            3.72,
+            7.27,
+            11.65
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:40:08.746Z"
+        },
+        {
+          "loadavg": [
+            3.38,
+            7.08,
+            11.54
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:40:14.517Z"
+        },
+        {
+          "loadavg": [
+            3.35,
+            7.01,
+            11.5
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:40:20.344Z"
+        },
+        {
+          "loadavg": [
+            3.16,
+            6.91,
+            11.44
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:40:26.229Z"
+        },
+        {
+          "loadavg": [
+            3.16,
+            6.91,
+            11.44
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:40:26.270Z"
+        },
+        {
+          "loadavg": [
+            2.74,
+            6.16,
+            10.92
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:41:20.187Z"
+        },
+        {
+          "loadavg": [
+            2.39,
+            5.85,
+            10.72
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:41:39.094Z"
+        },
+        {
+          "loadavg": [
+            2.67,
+            5.75,
+            10.6
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:41:58.860Z"
+        },
+        {
+          "loadavg": [
+            3.07,
+            5.6,
+            10.43
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:42:19.094Z"
+        },
+        {
+          "loadavg": [
+            3.08,
+            5.43,
+            10.27
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:42:39.607Z"
+        },
+        {
+          "loadavg": [
+            3.08,
+            5.43,
+            10.27
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:42:39.659Z"
+        }
+      ],
+      "after": {
+        "loadavg": [
+          2.99,
+          5.38,
+          10.22
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T03:42:43.944Z"
+      }
+    },
+    {
+      "name": "firefox",
+      "before": {
+        "loadavg": [
+          2.99,
+          5.38,
+          10.22
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T03:42:43.945Z"
+      },
+      "quiescent": true,
+      "cases": [],
+      "fixtures": {
+        "10000": {
+          "encodedBytes": 20524480,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        }
+      },
+      "version": "151.0",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0",
+      "loadReadings": [
+        {
+          "loadavg": [
+            3.66,
+            5.35,
+            10.08
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:43:10.394Z"
+        },
+        {
+          "loadavg": [
+            3.87,
+            5.31,
+            10
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:43:24.813Z"
+        },
+        {
+          "loadavg": [
+            3.89,
+            5.25,
+            9.9
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:43:39.179Z"
+        },
+        {
+          "loadavg": [
+            4.07,
+            5.24,
+            9.85
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:43:53.803Z"
+        }
+      ]
+    }
+  ],
+  "inProgress": {
+    "browser": "firefox",
+    "metric": "startup-working-set-10000",
+    "samples": [
+      [
+        344,
+        359,
+        377,
+        371,
+        343,
+        386,
+        303,
+        364,
+        353,
+        343,
+        373,
+        366,
+        354,
+        356,
+        345,
+        377,
+        407,
+        401
+      ],
+      [
+        453,
+        415,
+        389,
+        389,
+        442,
+        443,
+        455,
+        435,
+        450,
+        403,
+        433,
+        469,
+        433,
+        391,
+        465,
+        451,
+        458
+      ]
+    ]
+  },
+  "error": "Error: page.goto: Target page, context or browser has been closed"
+}

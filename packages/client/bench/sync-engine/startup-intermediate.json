@@ -1,0 +1,2069 @@
+{
+  "kind": "native-browser-storage-v1",
+  "complete": false,
+  "environment": {
+    "node": "v26.8.2",
+    "priority": 15,
+    "os": "7.2.4-arch1-2",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "ram": 33537105920,
+    "commit": "a09b50320302d5b7fc47df428898e54183271059",
+    "dirty": true,
+    "seed": 1196840961,
+    "artifactHash": "ef83e92b1ed10c04d95d262a95e99156178f8719ce1486b6cce2903c2ff2bcc0",
+    "budget": {
+      "maxRows": 9007199254740991,
+      "maxBytes": 209715200
+    },
+    "options": {
+      "browsers": "chromium,firefox,webkit",
+      "cases": "startup-working-set",
+      "samples": 20,
+      "warmups": 5,
+      "cap": 30,
+      "cv": 0.15,
+      "load": 0.5,
+      "retries": 2,
+      "output": "packages/client/bench/sync-engine/startup-after.json"
+    },
+    "scope": "storage only; no runtime, network, worker, DOM or subscribers; WebKit approximates Safari"
+  },
+  "browsers": [
+    {
+      "name": "chromium",
+      "before": {
+        "loadavg": [
+          26.27,
+          25.4,
+          17.8
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T03:26:23.369Z"
+      },
+      "quiescent": false,
+      "cases": [
+        {
+          "metric": "startup-working-set-10000",
+          "legacy": {
+            "median": 586.3499999046326,
+            "p95": 919.7999999523163,
+            "medianCI": [
+              540.1000000238419,
+              634.1000000238419
+            ],
+            "p95CI": [
+              776.8999998569489,
+              980.7999999523163
+            ],
+            "cv": 0.21448337177549284,
+            "samples": [
+              715,
+              611.6000001430511,
+              645,
+              610.6000001430511,
+              796.8000001907349,
+              810.7999999523163,
+              648.6000001430511,
+              623.2000000476837,
+              486.5,
+              661.2999999523163,
+              614.5999999046326,
+              789.0999999046326,
+              919.7999999523163,
+              980.7999999523163,
+              524.4000000953674,
+              776.8999998569489,
+              504.5,
+              504.39999985694885,
+              586.0999999046326,
+              570.0999999046326,
+              561.1999998092651,
+              586.5999999046326,
+              521.5999999046326,
+              543,
+              486.2000000476837,
+              537.2000000476837,
+              455.80000019073486,
+              504,
+              498.60000014305115,
+              557.5
+            ]
+          },
+          "engine": {
+            "median": 668.8499999046326,
+            "p95": 986.5,
+            "medianCI": [
+              646.6499998569489,
+              727.7000000476837
+            ],
+            "p95CI": [
+              797.9000000953674,
+              1011.9000000953674
+            ],
+            "cv": 0.16562917808548708,
+            "samples": [
+              797.9000000953674,
+              666.2999999523163,
+              776.1000001430511,
+              986.5,
+              1011.9000000953674,
+              883.7999999523163,
+              890.8999998569489,
+              748.7999999523163,
+              627.7000000476837,
+              632.7000000476837,
+              568.3000001907349,
+              703.9000000953674,
+              711.9000000953674,
+              743.5,
+              748.9000000953674,
+              886.8000001907349,
+              659.5,
+              646.1999998092651,
+              691.3999998569489,
+              624.6999998092651,
+              586.3000001907349,
+              647.0999999046326,
+              648.8999998569489,
+              662,
+              551.5999999046326,
+              604.8000001907349,
+              671.3999998569489,
+              622.5,
+              644.2000000476837,
+              688.9000000953674
+            ]
+          },
+          "ratio": {
+            "median": 1.1407009465565248,
+            "medianCI": [
+              1.0785994122988642,
+              1.2324792762628498
+            ],
+            "p95": 1.072515764352187,
+            "p95CI": [
+              0.901101141920151,
+              1.2699548190927996
+            ]
+          },
+          "status": "NOISY",
+          "startupProfiles": [
+            {
+              "elapsed": 610.9000000953674,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.600000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 13.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.600000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.899999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.600000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.899999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.600000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 16.40000009536743
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0.10000014305114746
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 4.700000047683716
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 11.800000190734863
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.39999985694885254
+                }
+              ],
+              "recordsRead": 10508,
+              "cursorContinues": 0,
+              "jsonParses": 10507,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 327.686
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 76.87,
+                  "source": "(...v){return o++,c.apply(this,v)},IDBCursor.prototype.continue=function(...v){return a++,f.apply(this,v)};let d=[],w=[];for(let v of[IDBObjectStore.prototype,I"
+                },
+                {
+                  "function": "(program)",
+                  "ms": 70.186
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 63.79
+                },
+                {
+                  "function": "$.addEventListener.x.once",
+                  "ms": 62.928,
+                  "source": "()=>{x===\"getAll\"?r+=$.result.length:(x===\"get\"&&$.result!==void 0||x===\"openCursor\"&&$.result)&&r++,d.push({operation:K,ms:performance.now()-A})},x===\"openCurs"
+                },
+                {
+                  "function": "",
+                  "ms": 12.811,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,w=0,v=!1,x=!1,k;for(;!x;){let A=await this.database.entities.where(\"[scope+entity+id]\").between(k??[r],[r,[]],!k,!1).limit"
+                },
+                {
+                  "function": "",
+                  "ms": 4.258,
+                  "source": "K=>!o[$.entity]?.[K])&&f.add($.entity)});let C=await this.database.meta.get([r,\"cursor\"]);if(!(!v&&!Object.keys(c).length&&!C))return{entities:o,liveQueries:c,r"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 3.19,
+                  "source": "(...v){return o++,c.apply(this,v)},IDBCursor.prototype.continue=function(...v){return a++,f.apply(this,v)};let d=[],w=[];for(let v of[IDBObjectStore.prototype,I"
+                },
+                {
+                  "function": "v.<computed>",
+                  "ms": 2.134,
+                  "source": "(...C){let A=performance.now(),$=k.apply(this,C),K=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${x}`;return $.addEventListener(\"su"
+                },
+                {
+                  "function": "",
+                  "ms": 1.18,
+                  "source": "(){it()&&at()})}function it(){var e=$n;return $n=!1,Dt=!1,e}function at(){var e,t,n;do for(;yt.length>0;)for(e=yt,yt=[],n=e.length,t=0;t<n;++t){var i=e[t];i[0]."
+                },
+                {
+                  "function": "Ji",
+                  "ms": 1.07,
+                  "source": "(e){function t(){e(),Tt.splice(Tt.indexOf(t),1)}Tt.push(t),++Le,pt(function(){--Le===0&&Mn()},[])}function Wi(e){We.some(function(t){return t._value===e._value}"
+                },
+                {
+                  "function": "Dr",
+                  "ms": 1.066,
+                  "source": "(e){var t=e._listeners;e._listeners=[];for(var n=0,i=t.length;n<i;++n)Dn(e,t[n]);var s=e._PSD;--s.ref||s.finalize(),Le===0&&(++Le,pt(function(){--Le===0&&Mn()},"
+                },
+                {
+                  "function": "n",
+                  "ms": 1.066,
+                  "source": "(i,s){var u=this,l=!e.global&&(e!==J||t!==Bt),h=l&&!Te(),p=new q(function(m,b){Dn(u,new Cr(Tr(i,e,l,h),Tr(s,e,l,h),m,b,e))});return this._consoleTask&&(p._conso"
+                },
+                {
+                  "function": "e.between",
+                  "ms": 1.065,
+                  "source": "(t,n,i,s){i=i!==!1,s=s===!0;try{return this._cmp(t,n)>0||this._cmp(t,n)===0&&(i||s)&&!(i&&s)?ut(this):new this.Collection(this,function(){return Ke(t,n,!i,!s)})"
+                },
+                {
+                  "function": "Mr",
+                  "ms": 1.064,
+                  "source": "(){var e=c.Promise;return An?{Promise:e,PromiseProp:Object.getOwnPropertyDescriptor(c,\"Promise\"),all:e.all,race:e.race,allSettled:e.allSettled,any:e.any,resolve"
+                },
+                {
+                  "function": "innerSerialize",
+                  "ms": 1.064
+                },
+                {
+                  "function": "l",
+                  "ms": 1.063,
+                  "source": "(S,R,_){var P=Et(S),T=s[P]=s[P]||[],I=S==null?0:typeof S==\"string\"?1:S.length,M=R>0,j=a(a({},_),{name:M?\"\".concat(P,\"(virtual-from:\").concat(_.name,\")\"):_.name,"
+                },
+                {
+                  "function": "e._transaction",
+                  "ms": 1.061,
+                  "source": "(t,n,i){var s=this,u=J.trans;(!u||u.db!==this||t.indexOf(\"!\")!==-1)&&(u=null);var l=t.indexOf(\"?\")!==-1;t=t.replace(\"!\",\"\").replace(\"?\",\"\");var h,p;try{if(p=n.m"
+                },
+                {
+                  "function": "",
+                  "ms": 1.061,
+                  "source": "(n,i,s){if(this.db=e,this._ctx={table:n,index:i===\":id\"?null:i,or:s},this._cmp=this._ascending=Z,this._descending=function(u,l){return Z(l,u)},this._max=functio"
+                },
+                {
+                  "function": "bound",
+                  "ms": 1.06
+                }
+              ],
+              "sampledLiveBytes": 131284
+            },
+            {
+              "elapsed": 689.7000000476837,
+              "requests": [
+                {
+                  "operation": "meta.openCursor",
+                  "ms": 1.2000000476837158
+                },
+                {
+                  "operation": "meta.openCursor",
+                  "ms": 2.299999952316284
+                },
+                {
+                  "operation": "meta.openCursor",
+                  "ms": 2.5
+                },
+                {
+                  "operation": "meta.openCursor",
+                  "ms": 2.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 85
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 73
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 75
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 65.79999995231628
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 62.40000009536743
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0.3000001907348633
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 0.3000001907348633
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 2
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 0.7999999523162842
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 0.8999998569488525
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 121.20000004768372
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 12.700000047683716
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                }
+              ],
+              "recordsRead": 21011,
+              "cursorContinues": 3,
+              "jsonParses": 10507,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 384.849
+                },
+                {
+                  "function": "(program)",
+                  "ms": 113.804
+                },
+                {
+                  "function": "$.addEventListener.x.once",
+                  "ms": 71.751,
+                  "source": "()=>{x===\"getAll\"?r+=$.result.length:(x===\"get\"&&$.result!==void 0||x===\"openCursor\"&&$.result)&&r++,d.push({operation:K,ms:performance.now()-A})},x===\"openCurs"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 63.935,
+                  "source": "(...v){return o++,c.apply(this,v)},IDBCursor.prototype.continue=function(...v){return a++,f.apply(this,v)};let d=[],w=[];for(let v of[IDBObjectStore.prototype,I"
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 55.854
+                },
+                {
+                  "function": "",
+                  "ms": 12.259,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,w=0,v=!1,x=!1,k;for(;!x;){let A=await this.database.entities.where(\"[scope+entity+id]\").between(k??[r],[r,[]],!k,!1).limit"
+                },
+                {
+                  "function": "materializeWindow",
+                  "ms": 7.867,
+                  "source": "(r){let a=JSON.parse(r.value),o=await this.database.members.where(\"[scope+signature+generation+order]\").between([r.scope,r.signature,r.generation,\"\"],[r.scope,r"
+                },
+                {
+                  "function": "window.profileSample",
+                  "ms": 3.846,
+                  "source": "async y=>{let r=0,a=0,o=0,c=JSON.parse,f=IDBCursor.prototype.continue;JSON.parse=function(...v){return o++,c.apply(this,v)},IDBCursor.prototype.continue=functio"
+                },
+                {
+                  "function": "Fi",
+                  "ms": 2.62,
+                  "source": "(e,t,n){try{var i,s=t._value;!t._state&&Mt.length&&(Mt=[]),i=xe&&t._consoleTask?t._consoleTask.run(function(){return e(s)}):e(s),!t._state&&Mt.indexOf(s)===-1&&"
+                },
+                {
+                  "function": "",
+                  "ms": 1.744,
+                  "source": "K=>!o[$.entity]?.[K])&&f.add($.entity)}let C=await this.database.meta.get([r,\"cursor\"]);if(!(!v&&!Object.keys(c).length&&!C))return{entities:o,liveQueries:c,res"
+                },
+                {
+                  "function": "",
+                  "ms": 1.727,
+                  "source": "(){if(m=s.call(l,l),m)if(p){var E=Te.bind(null,null);m.then(E,E)}else typeof m.next==\"function\"&&typeof m.throw==\"function\"&&(m=rr(m))},h);return(m&&typeof m.th"
+                },
+                {
+                  "function": "Pn",
+                  "ms": 1.093,
+                  "source": "(e,t,n,i){if(!e.idbdb||!e._state.openComplete&&!J.letThrough&&!e._vip){if(e._state.openComplete)return ae(new U.DatabaseClosed(e._state.dbOpenError));if(!e._sta"
+                },
+                {
+                  "function": "queueMicrotask",
+                  "ms": 1.072
+                },
+                {
+                  "function": "open",
+                  "ms": 1.07
+                },
+                {
+                  "function": "",
+                  "ms": 1.066,
+                  "source": "(){p=null;var S=e.idbdb=g.result,R=ne(S.objectStoreNames);if(R.length>0)try{var _=S.transaction(la(R),\"readonly\");if(t.autoSchema)Sa(e,S,_);else if(Yt(e,e._dbSc"
+                },
+                {
+                  "function": "e.limit",
+                  "ms": 1.065,
+                  "source": "(t){return this._ctx.limit=Math.min(this._ctx.limit,t),jn(this._ctx,function(){var n=t;return function(i,s,u){return--n<=0&&s(u),n>=0}},!0),this},e.prototype.un"
+                },
+                {
+                  "function": "",
+                  "ms": 1.064,
+                  "source": "(){var i=it(),s=J;try{return Pe(n,!0),e.apply(this,arguments)}catch(u){t&&t(u)}finally{Pe(s,!1),i&&at()}}}var oe={awaits:0,echoes:0,id:0},Vi=0,Kt=[],Nt=0,Bt=0,U"
+                },
+                {
+                  "function": "serialize",
+                  "ms": 1.064
+                },
+                {
+                  "function": "Ir",
+                  "ms": 1.063,
+                  "source": "(e,t){try{t(function(n){if(e._state===null){if(n===e)throw new TypeError(\"A promise cannot be resolved with itself.\");var i=e._lib&&it();n&&typeof n.then==\"func"
+                }
+              ],
+              "sampledLiveBytes": 394836
+            }
+          ]
+        },
+        {
+          "metric": "startup-working-set-50000",
+          "legacy": {
+            "median": 1957.2500001192093,
+            "p95": 2330.5,
+            "medianCI": [
+              1901,
+              2080.2999999523163
+            ],
+            "p95CI": [
+              2112,
+              2595.5
+            ],
+            "cv": 0.11069654138098912,
+            "samples": [
+              1962.2000000476837,
+              1853.9000000953674,
+              1873.3999998569489,
+              1952.3000001907349,
+              2285.399999856949,
+              2303.7999999523163,
+              2112,
+              2330.5,
+              2173.9000000953674,
+              2595.5,
+              1939,
+              1975.5,
+              2048.5999999046326,
+              1779,
+              1871,
+              1971.6999998092651,
+              1934.1000001430511,
+              1928.6000001430511,
+              1760.0999999046326,
+              1696.5
+            ]
+          },
+          "engine": {
+            "median": 2819.5499999523163,
+            "p95": 3382.9000000953674,
+            "medianCI": [
+              2755.3000000715256,
+              3041.0000001192093
+            ],
+            "p95CI": [
+              3075.7999999523163,
+              4209.700000047684
+            ],
+            "cv": 0.12528180575119624,
+            "samples": [
+              2814.699999809265,
+              2708.0999999046326,
+              2824.4000000953674,
+              2780.7999999523163,
+              3103.199999809265,
+              2914.399999856949,
+              3075.7999999523163,
+              3325.7000000476837,
+              4209.700000047684,
+              3382.9000000953674,
+              2996.7999999523163,
+              2759.4000000953674,
+              2664.9000000953674,
+              2800.5,
+              3030.100000143051,
+              2720.5,
+              2750.9000000953674,
+              3051.9000000953674,
+              2751.2000000476837,
+              2460.9000000953674
+            ]
+          },
+          "ratio": {
+            "median": 1.4405671221257312,
+            "medianCI": [
+              1.3953927586149302,
+              1.5494545265139676
+            ],
+            "p95": 1.4515769148660662,
+            "p95CI": [
+              1.3033712194549671,
+              1.8419970247270427
+            ]
+          },
+          "status": "OK",
+          "startupProfiles": [
+            {
+              "elapsed": 1652.1999998092651,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.9000000953674316
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.6999998092651367
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.399999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 31.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 11.800000190734863
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.10000014305114746
+                }
+              ],
+              "recordsRead": 48648,
+              "cursorContinues": 0,
+              "jsonParses": 48558,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 849.854
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 240.468,
+                  "source": "(...v){return o++,c.apply(this,v)},IDBCursor.prototype.continue=function(...v){return a++,f.apply(this,v)};let d=[],w=[];for(let v of[IDBObjectStore.prototype,I"
+                },
+                {
+                  "function": "(program)",
+                  "ms": 180.685
+                },
+                {
+                  "function": "$.addEventListener.x.once",
+                  "ms": 171.153,
+                  "source": "()=>{x===\"getAll\"?r+=$.result.length:(x===\"get\"&&$.result!==void 0||x===\"openCursor\"&&$.result)&&r++,d.push({operation:K,ms:performance.now()-A})},x===\"openCurs"
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 150.396
+                },
+                {
+                  "function": "",
+                  "ms": 36.583,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,w=0,v=!1,x=!1,k;for(;!x;){let A=await this.database.entities.where(\"[scope+entity+id]\").between(k??[r],[r,[]],!k,!1).limit"
+                },
+                {
+                  "function": "",
+                  "ms": 10.632,
+                  "source": "K=>!o[$.entity]?.[K])&&f.add($.entity)});let C=await this.database.meta.get([r,\"cursor\"]);if(!(!v&&!Object.keys(c).length&&!C))return{entities:o,liveQueries:c,r"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 10.588,
+                  "source": "(...v){return o++,c.apply(this,v)},IDBCursor.prototype.continue=function(...v){return a++,f.apply(this,v)};let d=[],w=[];for(let v of[IDBObjectStore.prototype,I"
+                },
+                {
+                  "function": "v.<computed>",
+                  "ms": 4.241,
+                  "source": "(...C){let A=performance.now(),$=k.apply(this,C),K=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${x}`;return $.addEventListener(\"su"
+                },
+                {
+                  "function": "",
+                  "ms": 2.118,
+                  "source": "(){var i=it(),s=J;try{return Pe(n,!0),e.apply(this,arguments)}catch(u){t&&t(u)}finally{Pe(s,!1),i&&at()}}}var oe={awaits:0,echoes:0,id:0},Vi=0,Kt=[],Nt=0,Bt=0,U"
+                },
+                {
+                  "function": "",
+                  "ms": 1.145
+                },
+                {
+                  "function": "at",
+                  "ms": 1.064,
+                  "source": "(){var e,t,n;do for(;yt.length>0;)for(e=yt,yt=[],n=e.length,t=0;t<n;++t){var i=e[t];i[0].apply(null,i[1])}while(yt.length>0);$n=!0,Dt=!0}function Mn(){var e=We;"
+                },
+                {
+                  "function": "e.where",
+                  "ms": 1.063,
+                  "source": "(t){if(typeof t==\"string\")return new this.db.WhereClause(this,t);if(d(t))return new this.db.WhereClause(this,\"[\".concat(t.join(\"+\"),\"]\"));var n=f(t);if(n.length"
+                },
+                {
+                  "function": "",
+                  "ms": 1.063,
+                  "source": "(I,M){var j;I=ie(I);var N=T.trans,B=T.values,F=T.limit,X=T.query,L=(j=T.direction)!==null&&j!==void 0?j:\"next\",z=F===1/0?void 0:F,H=X.index,Q=X.range,re=N.objec"
+                },
+                {
+                  "function": "",
+                  "ms": 1.062,
+                  "source": "(){var i=it(),s=J;try{return Pe(n,!0),e.apply(this,arguments)}catch(u){t&&t(u)}finally{Pe(s,!1),i&&at()}}}var oe={awaits:0,echoes:0,id:0},Vi=0,Kt=[],Nt=0,Bt=0,U"
+                },
+                {
+                  "function": "bound",
+                  "ms": 1.062
+                },
+                {
+                  "function": "Mn",
+                  "ms": 1.062,
+                  "source": "(){var e=We;We=[],e.forEach(function(i){i._PSD.onunhandled.call(null,i._value,i)});for(var t=Tt.slice(0),n=t.length;n;)t[--n]()}function Ji(e){function t(){e(),"
+                },
+                {
+                  "function": "queueMicrotask",
+                  "ms": 1.062
+                },
+                {
+                  "function": "innerSerialize",
+                  "ms": 1.062
+                },
+                {
+                  "function": "",
+                  "ms": 1.061,
+                  "source": "(n,i,s,u,l){var h=this;n!==\"readonly\"&&i.forEach(function(p){var m,b=(m=s[p])===null||m===void 0?void 0:m.yProps;b&&(i=i.concat(b.map(function(E){return E.updat"
+                }
+              ],
+              "sampledLiveBytes": 196824
+            },
+            {
+              "elapsed": 2603.5,
+              "requests": [
+                {
+                  "operation": "meta.openCursor",
+                  "ms": 0.5999999046325684
+                },
+                {
+                  "operation": "meta.openCursor",
+                  "ms": 0.8999998569488525
+                },
+                {
+                  "operation": "meta.openCursor",
+                  "ms": 1.0999999046325684
+                },
+                {
+                  "operation": "meta.openCursor",
+                  "ms": 1.2000000476837158
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 52.60000014305115
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 62.09999990463257
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 54.40000009536743
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 54.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 55.09999990463257
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 56.10000014305115
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 56.09999990463257
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 52.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 52.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 57.69999980926514
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 51.19999980926514
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 50.89999985694885
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 53.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 52.40000009536743
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 50.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 52.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 50.60000014305115
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 51
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 52.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 54.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 52.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 150.39999985694885
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 62.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 55.299999952316284
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 7.900000095367432
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 1.2999999523162842
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 0.8999998569488525
+                },
+                {
+                  "operation": "members.[scope+signature+generation+order].getAll",
+                  "ms": 598.3999998569489
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                }
+              ],
+              "recordsRead": 99663,
+              "cursorContinues": 3,
+              "jsonParses": 48558,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 1492.765
+                },
+                {
+                  "function": "(program)",
+                  "ms": 336.463
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 261.413
+                },
+                {
+                  "function": "$.addEventListener.x.once",
+                  "ms": 227.556,
+                  "source": "()=>{x===\"getAll\"?r+=$.result.length:(x===\"get\"&&$.result!==void 0||x===\"openCursor\"&&$.result)&&r++,d.push({operation:K,ms:performance.now()-A})},x===\"openCurs"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 225.437,
+                  "source": "(...v){return o++,c.apply(this,v)},IDBCursor.prototype.continue=function(...v){return a++,f.apply(this,v)};let d=[],w=[];for(let v of[IDBObjectStore.prototype,I"
+                },
+                {
+                  "function": "",
+                  "ms": 39.292,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,w=0,v=!1,x=!1,k;for(;!x;){let A=await this.database.entities.where(\"[scope+entity+id]\").between(k??[r],[r,[]],!k,!1).limit"
+                },
+                {
+                  "function": "materializeWindow",
+                  "ms": 22.225,
+                  "source": "(r){let a=JSON.parse(r.value),o=await this.database.members.where(\"[scope+signature+generation+order]\").between([r.scope,r.signature,r.generation,\"\"],[r.scope,r"
+                },
+                {
+                  "function": "",
+                  "ms": 7.593,
+                  "source": "K=>!o[$.entity]?.[K])&&f.add($.entity)}let C=await this.database.meta.get([r,\"cursor\"]);if(!(!v&&!Object.keys(c).length&&!C))return{entities:o,liveQueries:c,res"
+                },
+                {
+                  "function": "Ps",
+                  "ms": 2.117,
+                  "source": "(y){let r=\"\";for(let a=0;a<y.length;a++)r+=Ts[y[a]];return r}function bi(y){return(y+1).toString(16).padStart(12,\"0\")+\"8\"}function Ei(y,r){if(y!==void 0&&r!==vo"
+                },
+                {
+                  "function": "v.<computed>",
+                  "ms": 2.095,
+                  "source": "(...C){let A=performance.now(),$=k.apply(this,C),K=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${x}`;return $.addEventListener(\"su"
+                },
+                {
+                  "function": "serialize",
+                  "ms": 1.071
+                },
+                {
+                  "function": "e._trans",
+                  "ms": 1.064,
+                  "source": "(t,n,i){var s=this._tx||J.trans,u=this.name,l=xe&&typeof console<\"u\"&&console.createTask&&console.createTask(\"Dexie: \".concat(t===\"readonly\"?\"read\":\"write\",\" \")"
+                },
+                {
+                  "function": "bound",
+                  "ms": 1.063
+                },
+                {
+                  "function": "Mr",
+                  "ms": 1.061,
+                  "source": "(){var e=c.Promise;return An?{Promise:e,PromiseProp:Object.getOwnPropertyDescriptor(c,\"Promise\"),all:e.all,race:e.race,allSettled:e.allSettled,any:e.any,resolve"
+                },
+                {
+                  "function": "Ir",
+                  "ms": 1.06,
+                  "source": "(e,t){try{t(function(n){if(e._state===null){if(n===e)throw new TypeError(\"A promise cannot be resolved with itself.\");var i=e._lib&&it();n&&typeof n.then==\"func"
+                },
+                {
+                  "function": "xa",
+                  "ms": 1.06,
+                  "source": "(e,t){var n=Gt(e,e.idbdb,t),i=Vn(n,e._dbSchema);return!(i.add.length||i.change.some(function(s){return s.add.length||s.change.length}))}function Yt(e,t,n){for(v"
+                },
+                {
+                  "function": "bound",
+                  "ms": 1.06
+                },
+                {
+                  "function": "",
+                  "ms": 1.059,
+                  "source": "(){var s=J;n&&st(),Pe(t,!0);try{return e.apply(this,arguments)}finally{Pe(s,!1),i&&queueMicrotask(Te)}}}function Tn(e){Promise===Je&&oe.echoes===0?Nt===0?e():en"
+                },
+                {
+                  "function": "",
+                  "ms": 1.058,
+                  "source": "(){return l(),t.onReadyBeingFired=[],q.resolve(Gn(function(){return e.on.ready.fire(e.vip)})).then(function E(){if(t.onReadyBeingFired.length>0){var O=t.onReady"
+                },
+                {
+                  "function": "n",
+                  "ms": 1.058,
+                  "source": "(i,s){var u=this,l=!e.global&&(e!==J||t!==Bt),h=l&&!Te(),p=new q(function(m,b){Dn(u,new Cr(Tr(i,e,l,h),Tr(s,e,l,h),m,b,e))});return this._consoleTask&&(p._conso"
+                }
+              ],
+              "sampledLiveBytes": 98784
+            }
+          ]
+        }
+      ],
+      "fixtures": {
+        "10000": {
+          "encodedBytes": 20524480,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        },
+        "50000": {
+          "encodedBytes": 102620058,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        }
+      },
+      "version": "149.0.7827.55",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
+      "loadReadings": [
+        {
+          "loadavg": [
+            25.11,
+            25.31,
+            18.14
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:27:08.205Z"
+        },
+        {
+          "loadavg": [
+            23.46,
+            24.95,
+            18.1
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:27:18.352Z"
+        },
+        {
+          "loadavg": [
+            21.53,
+            24.46,
+            18.05
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:27:29.322Z"
+        },
+        {
+          "loadavg": [
+            20.36,
+            24.11,
+            18.01
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:27:40.684Z"
+        },
+        {
+          "loadavg": [
+            19.48,
+            23.8,
+            17.97
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:27:50.997Z"
+        },
+        {
+          "loadavg": [
+            18.09,
+            23.36,
+            17.89
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:27:58.782Z"
+        },
+        {
+          "loadavg": [
+            17.52,
+            23.15,
+            17.85
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:28:06.545Z"
+        },
+        {
+          "loadavg": [
+            17.52,
+            23.15,
+            17.85
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:28:06.546Z"
+        },
+        {
+          "loadavg": [
+            12.16,
+            20.36,
+            17.27
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:29:15.245Z"
+        },
+        {
+          "loadavg": [
+            11.94,
+            19.64,
+            17.11
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:29:41.686Z"
+        },
+        {
+          "loadavg": [
+            12.02,
+            18.9,
+            16.94
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:30:12.359Z"
+        },
+        {
+          "loadavg": [
+            11.01,
+            18.11,
+            16.73
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:30:38.305Z"
+        },
+        {
+          "loadavg": [
+            10.39,
+            17.43,
+            16.54
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:31:03.350Z"
+        },
+        {
+          "loadavg": [
+            10.39,
+            17.43,
+            16.54
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:31:03.396Z"
+        }
+      ],
+      "after": {
+        "loadavg": [
+          10.03,
+          17.24,
+          16.49
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T03:31:08.294Z"
+      }
+    },
+    {
+      "name": "firefox",
+      "before": {
+        "loadavg": [
+          7.42,
+          15.92,
+          16.07
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T03:31:38.301Z"
+      },
+      "quiescent": true,
+      "cases": [],
+      "fixtures": {
+        "10000": {
+          "encodedBytes": 20524480,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        }
+      },
+      "version": "151.0",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0",
+      "loadReadings": [
+        {
+          "loadavg": [
+            6.15,
+            14.8,
+            15.69
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:32:04.227Z"
+        },
+        {
+          "loadavg": [
+            6.21,
+            14.52,
+            15.59
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T03:32:18.767Z"
+        }
+      ]
+    }
+  ],
+  "inProgress": {
+    "browser": "firefox",
+    "metric": "startup-working-set-10000",
+    "samples": [
+      [
+        311,
+        325,
+        431,
+        331,
+        337,
+        338,
+        373,
+        363,
+        436
+      ],
+      [
+        508,
+        502,
+        514,
+        519,
+        514,
+        526,
+        550,
+        523,
+        628
+      ]
+    ]
+  },
+  "error": "Error: ENOTEMPTY: directory not empty, rmdir '/home/gabriel/.cache/sdk-wave1/tmp/sync-engine-Mwl6No/firefox-swQPk1'"
+}

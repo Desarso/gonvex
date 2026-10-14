@@ -21,6 +21,8 @@ it('does not reread its own metadata commits, but catches every intervening peer
   try {
     await replica.activateScope(scope);
     await replica.replaceWindow(window);
+    // Opting into the engine must never change the legacy database schema.
+    expect((storage as any).database.tables.map((table: any) => table.name)).not.toContain('members');
     const read = vi.spyOn(storage, 'readChanges');
     for (let revision = 2; revision <= 10; revision += 2) {
       await replica.applyWindowDelta({ ...window, upserts: [], deleted: [], cursor: { epoch: 'test', revision } });
