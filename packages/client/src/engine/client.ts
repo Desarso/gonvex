@@ -67,12 +67,14 @@ export class EngineClient {
   private invalidate(retire = false) {
     this.epoch += 1;
     this.rowCache.clear();
-    for (const watch of this.watches.values()) { watch.value = undefined; watch.sequence = 0; watch.error = undefined; watch.rowKeys.clear(); for (const listener of watch.listeners) listener(); }
+    for (const watch of this.watches.values()) { watch.value = undefined; watch.sequence = 0; watch.error = undefined; watch.rowKeys.clear(); }
     if (retire) {
       const active = [...this.watches.values()]; this.watches.clear();
       for (const watch of active) { const old = watch.id; watch.id = crypto.randomUUID(); this.watches.set(watch.id, watch); void this.admitted("unwatch", [old]).catch(() => undefined); }
     }
-    this.intents = []; this.emit("intents"); this.emit("scope");
+    this.intents = [];
+    for (const watch of this.watches.values()) for (const listener of watch.listeners) listener();
+    this.emit("intents"); this.emit("scope");
   }
   private attach(endpoint: EngineEndpoint) {
     this.endpoint = endpoint;
@@ -288,8 +290,12 @@ export class EngineClient {
   retainCollection(ref: FunctionReference, args: JsonValue = {}): (() => void) & { ready: Promise<void> } {
     const watch = this.watch("collectionRetention", [ref, args]);
     let resolve!: () => void;
-    const ready = new Promise<void>(done => { resolve = done; });
-    const release = watch.onUpdate(() => { if (watch.read()?.isUpToDate) resolve(); });
+    let reject!: (error: unknown) => void;
+    const ready = new Promise<void>((done, fail) => { resolve = done; reject = fail; });
+    const release = watch.onUpdate(() => {
+      try { if (watch.read()?.isUpToDate) resolve(); }
+      catch (error) { reject(error); }
+    });
     return Object.assign(release, { ready });
   }
   watchEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]) {

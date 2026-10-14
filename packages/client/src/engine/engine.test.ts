@@ -296,6 +296,66 @@ async function mockEngine(intercept?: (request: any, endpoint: Endpoint) => bool
   return { client, hosts, publish };
 }
 
+it.each(["setAuth", "authenticate", "scope", "reset", "recover"] as const)("clears every watch and intent before notifying subscribers during %s", async method => {
+  const { client, hosts } = await mockEngine();
+  const a = client.watchEntities("tasks", ["one"]), b = client.watchEntities("tasks", ["two"]);
+  const observed: unknown[] = [];
+  const read = () => { observed.push([a.getSnapshot(), b.getSnapshot(), client.intentsSnapshot(), client.cacheStats().rows]); };
+  cleanups.push(a.onUpdate(read), b.onUpdate(read), client.subscribeIntents(read), client.onSessionScopeChange(read));
+  const host = hosts[0];
+  await vi.waitFor(() => expect(host.watchIds).toHaveLength(2));
+  const event = (name: string, args: unknown[]) => host.endpoints.worker.postMessage({ generation: host.envelope.generation, scope: host.envelope.scope, id: crypto.randomUUID(), event: name, args });
+  event("watchBatch", [42, host.watchIds.map((id, index) => ({ id, value: { status: "ready", rows: [{ id: index ? "two" : "one", value: 1 }] } }))]);
+  event("intents", [[{ id: "old-account-intent" }]]);
+  await vi.waitFor(() => {
+    expect(a.getSnapshot().status).toBe("ready"); expect(b.getSnapshot().status).toBe("ready");
+    expect(client.intentsSnapshot()).toHaveLength(1); expect(client.cacheStats().rows).toBe(2);
+  });
+  observed.length = 0;
+  if (method === "setAuth") client.setAuth({ identity: { sub: "other", iss: "issuer" } });
+  else if (method === "authenticate") await client.authenticate({ identity: { sub: "other", iss: "issuer" } });
+  else if (method === "scope") event("scope", ["new-scope"]);
+  else if (method === "reset") await client.resetLocalReplica();
+  else await client.recover();
+  await vi.waitFor(() => expect(observed).toHaveLength(4));
+  for (const snapshot of observed) expect(snapshot).toEqual([{ status: "pending" }, { status: "pending" }, [], 0]);
+});
+
+it.each(["watchBatch", "watchError"] as const)("rejects collection readiness on %s errors without interrupting other subscribers", async method => {
+  const { client, hosts } = await mockEngine();
+  const retain = client.retainCollection({ kind: "query", path: "tasks.all" }); cleanups.push(retain);
+  const ready = retain.ready.then(() => ({ resolved: true }), error => ({ error }));
+  const watch = client.watchEntities("tasks", ["one"]), notified = vi.fn();
+  cleanups.push(watch.onUpdate(notified));
+  const host = hosts[0];
+  await vi.waitFor(() => expect(host.watchIds).toHaveLength(2));
+  const error = { name: "GonvexClientError", code: "storage", message: "Collection read failed" };
+  const healthy = { id: host.watchIds[1], value: { status: "ready", rows: [{ id: "one", value: 1 }] } };
+  const event = (name: string, args: unknown[]) => host.endpoints.ui.emit("message", { data: {
+    generation: host.envelope.generation, scope: host.envelope.scope, id: crypto.randomUUID(), event: name, args,
+  } });
+  expect(() => {
+    if (method === "watchBatch") event(method, [1, [{ id: host.watchIds[0], error }, healthy]]);
+    else { event(method, [host.watchIds[0], error]); event("watchBatch", [1, [healthy]]); }
+  }).not.toThrow();
+  expect(await ready).toMatchObject({ error: { name: "GonvexClientError", code: "storage", message: "Collection read failed" } });
+  expect(notified).toHaveBeenCalledOnce();
+  expect(watch.getSnapshot()).toEqual(healthy.value);
+});
+
+it("resolves collection readiness only when its watch becomes up to date", async () => {
+  const { client, hosts, publish } = await mockEngine();
+  const retain = client.retainCollection({ kind: "query", path: "tasks.all" }); cleanups.push(retain);
+  const resolved = vi.fn(); void retain.ready.then(resolved);
+  await vi.waitFor(() => expect(hosts[0].watchIds).toHaveLength(1));
+  publish(1, { isUpToDate: false });
+  await Promise.resolve();
+  expect(resolved).not.toHaveBeenCalled();
+  publish(2, { isUpToDate: true });
+  await retain.ready;
+  expect(resolved).toHaveBeenCalledOnce();
+});
+
 it.each(["query", "action"] as const)("honors longer and disabled per-call %s timeouts", async method => {
   const calls: Array<{ request: any; endpoint: Endpoint }> = [];
   const { client } = await mockEngine((request, endpoint) => {
