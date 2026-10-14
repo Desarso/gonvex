@@ -81,7 +81,12 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
         }, error => { if (expected === readGeneration) void event("watchError", [id, serializeEngineError(error)]); });
       };
       const unsubscribe = c.localReplica.subscribe(publish, { entity, ids });
-      const unsubscribeSession = c.onLocalSessionChange(coldRead);
+      let session = c.localSessionState();
+      const unsubscribeSession = c.onLocalSessionChange(() => {
+        const previousSession = session; session = c.localSessionState();
+        if (session === "unavailable" || previousSession === "unavailable") coldRead();
+        else publish();
+      });
       const unsubscribeScope = c.onSessionScopeChange(coldRead);
       coldRead();
       release = () => { readGeneration++; unsubscribe(); unsubscribeSession(); unsubscribeScope(); retain(); };

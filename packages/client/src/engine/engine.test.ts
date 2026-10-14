@@ -403,3 +403,22 @@ it("rechecks receipts after the canonical read so retirement cannot race an expl
   expect(await host.rpc.call(host.rpc.request("listIntents", []))).toEqual([]);
   expect(lookup).toHaveBeenCalledTimes(2); lookup.mockRestore();
 });
+
+it("keeps loaded entity reads ready across same-account offline session transitions", async () => {
+  const { init } = await setup();
+  const storage = new IndexedDBLocalReplicaStorage(init.storage.replicaName);
+  await storage.replaceSnapshot({ entities: { tasks: { one: { id: "one", value: 1 } } }, liveQueries: {} }, "visible"); storage.close();
+  const client = await createEngineClient(url, { engine: { workerUrl: "worker.js", artifactHash: "artifact" }, auth, storage: init.storage, fallbackBinding: binding }); cleanups.push(() => client.close());
+  const watch = client.watchEntities("tasks", ["one"]); const states: string[] = [];
+  const stop = watch.onUpdate(() => states.push(watch.getSnapshot().status)); cleanups.push(stop);
+  await vi.waitFor(() => expect(watch.getSnapshot().status).toBe("ready"));
+  client.connect(); await vi.waitFor(() => expect(Socket.all).toHaveLength(1)); const socket = Socket.all[0]; socket.open();
+  await vi.waitFor(() => expect(socket.sent.some(frame => frame.type === "auth")).toBe(true));
+  const frame = socket.sent.find(frame => frame.type === "auth");
+  socket.receive({ type: "auth.result", id: frame.id, result: { artifactHash: "artifact", replica: { protocolVersion: 1, scope: "t", visibilityScope: "visible", epoch: "e" }, localIdentity: { auth: { account: { id: "a" } }, tenant: { id: "t" }, member: { id: "m", accountId: "a", permissions: {} } } } });
+  await vi.waitFor(() => expect(client.localSessionState()).toBe("authenticated"));
+  states.length = 0; const before = watch.getSnapshot(); socket.close();
+  await vi.waitFor(() => expect(client.localSessionState()).toBe("restored"));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(states).not.toContain("pending"); expect(watch.getSnapshot()).toBe(before);
+});

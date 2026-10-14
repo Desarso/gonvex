@@ -119,15 +119,16 @@ const context = await ({ chromium, firefox, webkit }[browserName]).launchPersist
 const browser = context.browser(); const page = await context.newPage();
 page.on('console', message => { if (/^(Seed |Engine )/.test(message.text())) process.stdout.write(message.text() + '\n'); });
 page.on('pageerror', error => process.stderr.write(`PAGE: ${error}\n`));
+const loadLimit = Number(process.env.LOAD_LIMIT ?? .5);
 const measured = Number(process.env.ITERATIONS ?? 20), warmups = Number(process.env.WARMUPS ?? 5);
-const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', admission: process.env.PIPELINE ? 'pipelined' : 'sequential', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true, engineRevision: revision ?? "checkout", profileIO: Boolean(process.env.PROFILE_IO), loadChecks: [], fixtureIsolation: process.env.KEEP_EDITS ? "edits-accumulate-across-modes" : "edits-reset-before-each-mode", firefoxWorkerWebSocketWorkaround: workaroundApplied() };
+const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', admission: process.env.PIPELINE ? 'pipelined' : 'sequential', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true, engineRevision: revision ?? "checkout", profileIO: Boolean(process.env.PROFILE_IO), loadLimit, loadChecks: [], fixtureIsolation: process.env.KEEP_EDITS ? "edits-accumulate-across-modes" : "edits-reset-before-each-mode", firefoxWorkerWebSocketWorkaround: workaroundApplied() };
 try {
   await page.goto(url); await page.waitForFunction(() => window.benchmark);
   process.stdout.write(`Preparing ${process.env.SEED_ROWS ?? 50_000}-row canonical IDB fixture...\n`);
   metadata.seed = await page.evaluate(count => window.benchmark.seed(count), Number(process.env.SEED_ROWS ?? 50_000));
   process.stdout.write(`Seed ready: ${metadata.seed.rowBytes} bytes/row\n`);
   const waitForQuiet = async () => {
-    while (loadavg()[0] / cpus().length > .5) {
+    while (loadavg()[0] / cpus().length > loadLimit) {
       process.stdout.write(`Waiting for quiet machine: load ${loadavg()[0].toFixed(2)} / ${cpus().length} cores\n`);
       await sleep(30_000);
     }
@@ -143,7 +144,7 @@ try {
         for (const mode of index % 2 === 0 ? ['legacy', 'worker'] : ['worker', 'legacy']) {
           const checkStart = metadata.loadChecks.length;
           const load = loadavg(); metadata.loadChecks.push({ index, mode, load });
-          if (load[0] / cpus().length > .5) throw new Error("Load check failed before mode");
+          if (load[0] / cpus().length > loadLimit) throw new Error("Load check failed before mode");
           await page.goto(url); await page.waitForFunction(() => window.benchmark);
           if (!process.env.KEEP_EDITS) await page.evaluate(() => window.benchmark.resetEdits());
           session = browserName === 'chromium' ? await context.newCDPSession(page) : null;
@@ -154,7 +155,7 @@ try {
             const before = await metrics(); let overloaded = false;
             const observeLoad = () => {
               const load = loadavg(); metadata.loadChecks.push({ index, mode, workload: name, load });
-              if (load[0] / cpus().length > .5) overloaded = true;
+              if (load[0] / cpus().length > loadLimit) overloaded = true;
             };
             const monitor = setInterval(observeLoad, 10_000);
             let value;

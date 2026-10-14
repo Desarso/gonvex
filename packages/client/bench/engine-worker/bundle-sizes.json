@@ -34,7 +34,7 @@
     {
       "file": "worker.js",
       "bytes": 2933,
-      "gzip": 1377
+      "gzip": 1376
     },
     {
       "file": "import-wrapper-RUY2XTU7.js",
@@ -42,14 +42,14 @@
       "gzip": 205
     },
     {
-      "file": "host-ND4SAYQJ.js",
+      "file": "host-RJHGG65A.js",
       "bytes": 121,
       "gzip": 106
     },
     {
-      "file": "chunk-IG4F62KD.js",
-      "bytes": 31342,
-      "gzip": 9836
+      "file": "chunk-OS36TBYC.js",
+      "bytes": 31449,
+      "gzip": 9862
     },
     {
       "file": "chunk-Z3N5N5YI.js",
