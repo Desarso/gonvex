@@ -1,3 +1,4 @@
+import { engineAdmissionLane, type AdmissionLane } from "./cohort.js";
 import { GonvexClient, GonvexClientError, type EngineCommand, type FunctionReference, type QueuedReducerOutcome, type CallOptions } from "../index.js";
 import { engineEntryOutcome, type EngineReceipts } from "./receipts.js";
 import type { JsonValue } from "@gonvex/protocol";
@@ -39,7 +40,7 @@ export function installEngineAdmissions(client: GonvexClient, receipts: EngineRe
   };
   Object.defineProperties(client, { reducer: { value: reducer }, runOptimisticReducer: { value: runOptimisticReducer } });
 }
-export async function runLocalReducer<T>(this: GonvexClient, ref: FunctionReference, args: JsonValue, command?: EngineCommand, optionsFresh = false): Promise<T | QueuedReducerOutcome> {
+export async function runLocalReducer<T>(this: GonvexClient, ref: FunctionReference, args: JsonValue, command?: EngineCommand, optionsFresh = false, lane?: AdmissionLane): Promise<T | QueuedReducerOutcome> {
   args = structuredClone(args);
   const admittedGeneration = this["outboxScopeGeneration"];
   await this["outboxReady"];
@@ -67,7 +68,7 @@ export async function runLocalReducer<T>(this: GonvexClient, ref: FunctionRefere
   this["preparationLane"] = prepared.catch(() => undefined);
   this["waitingLocalEdits"] += 1;
   let entered = false;
-  return this["inLocalLane"](() => this["coordinateOutbox"]("intent", async () => {
+  const admit = async () => {
     entered = true;
     this["waitingLocalEdits"] -= 1;
     await prepared;
@@ -185,7 +186,8 @@ export async function runLocalReducer<T>(this: GonvexClient, ref: FunctionRefere
       if (this["replica"].executionVersion() !== executionBaseVersion) this["scheduleLocalReplay"]();
       void this["drainOutbox"]();
     }
-  })).catch(error => {
+  };
+  return (lane ? lane(admit) : this["inLocalLane"](() => this["coordinateOutbox"]("intent", admit))).catch(error => {
     if (!entered) this["waitingLocalEdits"] -= 1;
     this["optimisticReducerIds"].delete(reducerId);
     this["replica"].rejectCommand(reducerId);
@@ -203,7 +205,7 @@ export function reducer<T extends JsonValue = JsonValue, Args extends JsonValue 
     if (options.offline === "queue" || options.optimistic?.length) return Promise.reject(new GonvexClientError("Public reducers are server-only and cannot queue or execute optimistically", { code: "disconnected", path: ref.path, operation: "reducer" }));
     return this["call"]<T>("reducer", ref, args, options.timeoutMs ?? this["timeouts"].reducerTimeoutMs);
   }
-  if (ref.localExecution === 1) return runLocalReducer.call(this, ref, args, options.engineCommand, options.engineFresh) as Promise<T | QueuedReducerOutcome>;
+  if (ref.localExecution === 1) return runLocalReducer.call(this, ref, args, options.engineCommand, options.engineFresh, engineAdmissionLane(options)) as Promise<T | QueuedReducerOutcome>;
   if (options.offline === "queue" && ref.offline?.mode !== "allowed") {
     return Promise.reject(new GonvexClientError(
       `Reducer ${ref.path} does not allow offline queueing.`,

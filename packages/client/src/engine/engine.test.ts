@@ -39,7 +39,7 @@ beforeEach(() => {
   vi.stubGlobal("navigator", { locks: { request: (_name: string, options: any, callback?: any) => Promise.resolve((callback ?? options)({ name: _name })) } });
   vi.stubGlobal("WebSocket", Socket); Socket.all = [];
 });
-afterEach(async () => { for (const close of cleanups.splice(0)) await close(); vi.unstubAllGlobals(); });
+afterEach(async () => { for (const close of cleanups.splice(0)) await close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 it("correlates out-of-order replies, rejects old generations, and reuses request identity after timeout", async () => {
   const { ui, worker } = pair(); const rpc = new EngineRpc(ui, "generation", "scope"); cleanups.push(() => rpc.close());
@@ -290,13 +290,18 @@ it("keeps all canonical entries when a batched receipt transaction fails", async
 it("preserves sibling admissions when storage fails mid-batch and retries the original missing command", async () => {
   const { create } = await setup(); let host = await create();
   const commands = [0, 1, 2].map(index => ({ id: `partial-${index}`, now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "bc".repeat(32) }));
-  const check = EngineReceipts.prototype.assertCanAdmit;
+  const wrap = EngineReceipts.prototype.wrap;
   let calls = 0;
-  const failure = vi.spyOn(EngineReceipts.prototype, "assertCanAdmit").mockImplementation(async function(commandAt) {
-    if (++calls === 2) throw new Error("Crash before durable admission");
-    return check.call(this, commandAt);
+  const failure = vi.spyOn(EngineReceipts.prototype, "wrap").mockImplementation(function(store) {
+    const wrapped = wrap.call(this, store);
+    const append = wrapped.append!;
+    return { ...wrapped, append: async entry => {
+      if (++calls === 2) throw new Error("Crash before durable admission");
+      return append(entry);
+    } };
   });
-  const results = await Promise.allSettled(commands.map(command => host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command }]))));
+  await host.close(); host = await create();
+  const results = await Promise.allSettled(commands.map(command => host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command, engineFresh: true }]))));
   expect(results.map(result => result.status)).toEqual(["fulfilled", "rejected", "fulfilled"]);
   expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(["partial-0", "partial-2"]);
   failure.mockRestore(); await host.close(); host = await create(); cleanups.push(host.close);
@@ -446,4 +451,23 @@ it("recovers the original outcome from a journal written in the older wrapper fo
   host = await create(); cleanups.push(host.close);
   expect(await host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command }]))).toBe(7);
   expect(await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).toHaveLength(1);
+});
+
+it("shares one intent lease for a fresh burst while acknowledging each durable entry in order", async () => {
+  const { create } = await setup();
+  const locks: string[] = [];
+  const wrap = EngineReceipts.prototype.wrap;
+  vi.spyOn(EngineReceipts.prototype, "wrap").mockImplementation(function(store) {
+    const wrapped = wrap.call(this, store);
+    return { ...wrapped, coordinate: (scope, lane, run) => {
+      locks.push(lane); return wrapped.coordinate!(scope, lane, run);
+    } };
+  });
+  const host = await create(); cleanups.push(host.close); locks.length = 0;
+  const commands = Array.from({ length: 8 }, (_, index) => ({ id: `cohort-${index}`, now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "ab".repeat(32) }));
+  const acknowledgements: string[] = [];
+  expect(await Promise.all(commands.map(command => host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command, engineFresh: true }])).then(result => { acknowledgements.push(command.id); return result; })))).toEqual(Array(8).fill(7));
+  expect(acknowledgements).toEqual(commands.map(command => command.id));
+  expect(locks.filter(name => name.includes("intent"))).toHaveLength(1);
+  expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(acknowledgements);
 });

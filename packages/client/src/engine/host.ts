@@ -1,3 +1,4 @@
+import { EngineAdmissionCohort } from "./cohort.js";
 import { connectEngine } from "./connect.js";
 import { installEngineAdmissions } from "./admissions.js";
 import { engineScope, readReplicaEntities, closeEngine } from "./legacy.js";
@@ -129,7 +130,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
     void c.localSessionReady.then(publish);
     publish();
   };
-  const run = async (request: EngineEnvelope): Promise<unknown> => {
+  const run = async (request: EngineEnvelope, cohort?: EngineAdmissionCohort): Promise<unknown> => {
     const args = request.args as any[];
     if (request.method === "init") {
       if (client) throw new Error("Engine already initialized");
@@ -206,8 +207,8 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
       // Serialize only lookup/start so disk reads cannot reorder dependent
       // calls. Release this lane before waiting for durable acknowledgement.
       const ordered = ref.localExecution === 1 && (!options.engineFresh || pendingStarts > 0);
-      const started = ordered ? admissionStart.then(begin) : begin();
-      if (ordered) {
+      const started = cohort ? cohort.enqueue(options, begin) : ordered ? admissionStart.then(begin) : begin();
+      if (ordered && !cohort) {
         pendingStarts++;
         admissionStart = started.then(() => { pendingStarts--; }, () => { pendingStarts--; });
       }
@@ -242,15 +243,20 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
     if (!allowed.includes(request.method as any)) throw new Error("Unknown engine operation");
     return (client[request.method as typeof allowed[number]] as (...args: any[]) => unknown).apply(client, args);
   };
-  const receive = ({ data }: MessageEvent) => {
+  const receive = ({ data }: MessageEvent, cohort?: EngineAdmissionCohort) => {
     if (Array.isArray(data?.admissions) && data.admissions.length <= 1024) {
-      for (const admission of data.admissions) if (admission?.method === "reducer") receive({ data: admission } as MessageEvent);
+      const group = client && pendingStarts === 0 && data.admissions.length > 1 && data.admissions.every((request: EngineEnvelope) =>
+        request.generation === generation && request.scope === scope && request.method === "reducer" &&
+        (request.args?.[0] as FunctionReference)?.localExecution === 1 && (request.args?.[2] as any)?.engineFresh === true)
+        ? new EngineAdmissionCohort(client) : undefined;
+      for (const admission of data.admissions) if (admission?.method === "reducer") receive({ data: admission } as MessageEvent, group);
+      group?.flush();
       return;
     }
     if (!data || typeof data.id !== "string" || !Array.isArray(data.args)) return;
     const request = data as EngineEnvelope;
     if (request.method !== "init" && (request.generation !== generation || request.scope !== scope)) return;
-    const operation = run(request);
+    const operation = run(request, cohort);
     if (request.method !== "settle") calls.add(operation);
     void operation.then(result => sendEngineMessage(endpoint, { generation: request.generation, scope: request.scope, id: request.id, result }),
       error => sendEngineMessage(endpoint, { generation: request.generation, scope: request.scope, id: request.id,
