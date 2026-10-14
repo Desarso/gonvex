@@ -458,11 +458,16 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
   private initialize() {
     return this.initialized ??= this.database.open().then(async () => {
       // Read only scope keys and retirement markers, not the large startup blobs.
-      const scopes = await this.database.meta.orderBy('scope').uniqueKeys();
-      for (const scope of scopes) {
+      let after: string | undefined;
+      for (;;) {
+        const keys = await this.database.meta.where('[scope+key]')
+          .between(after === undefined ? [] : [after, []], [[]], true, false).limit(1).primaryKeys();
+        const scope = keys[0]?.[0];
+        if (scope === undefined) break;
         const retired = await this.database.meta.where('[scope+key]')
           .between([scope, 'retired:'], [scope, 'retired;'], true, false).limit(1).toArray();
-        if (retired.length) { this.pendingCleanup.add(String(scope)); this.scheduleCleanup(String(scope)); }
+        if (retired.length) { this.pendingCleanup.add(scope); this.scheduleCleanup(scope); }
+        after = scope;
       }
     });
   }

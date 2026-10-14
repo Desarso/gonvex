@@ -1,0 +1,58 @@
+{
+  "kind": "native-browser-storage-v1",
+  "complete": false,
+  "environment": {
+    "node": "v26.8.2",
+    "priority": 15,
+    "os": "7.2.4-arch1-2",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "ram": 33537105920,
+    "commit": "f081a173a83df962dfdccd435134ecc8713c184f",
+    "dirty": true,
+    "seed": 1196840961,
+    "artifactHash": "ef83e92b1ed10c04d95d262a95e99156178f8719ce1486b6cce2903c2ff2bcc0",
+    "budget": {
+      "maxRows": 9007199254740991,
+      "maxBytes": 209715200
+    },
+    "options": {
+      "browsers": "webkit",
+      "cases": "startup-working-set",
+      "samples": 5,
+      "warmups": 1,
+      "cap": 5,
+      "cv": 0.15,
+      "load": 0.5,
+      "retries": 2,
+      "output": "packages/client/bench/sync-engine/startup-webkit-debug.json"
+    },
+    "scope": "storage only; no runtime, network, worker, DOM or subscribers; WebKit approximates Safari"
+  },
+  "browsers": [
+    {
+      "name": "webkit",
+      "before": {
+        "loadavg": [
+          2.41,
+          4.04,
+          4.87
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T04:13:47.390Z"
+      },
+      "quiescent": true,
+      "cases": [],
+      "fixtures": {
+        "10000": {
+          "encodedBytes": 20524480,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        }
+      },
+      "version": "26.5",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Safari/605.1.15"
+    }
+  ],
+  "error": "Error: webkit startup-working-set-10000 variant 1 seed failed: Error: page.evaluate: UnknownError: Unable to open cursor\n UnknownError: Unable to open cursor"
+}

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { IDBFactory, IDBKeyRange, IDBObjectStore } from 'fake-indexeddb';
+import { IDBFactory, IDBKeyRange, IDBObjectStore, IDBIndex } from 'fake-indexeddb';
 import { Dexie } from 'dexie';
 import { IndexedDBEngineReplicaStorage, indexedDBEngineReplica } from './indexeddb-engine';
 import { IndexedDBLocalReplicaStorage } from './indexeddb-replica';
@@ -526,4 +526,38 @@ it('rolls back an inactive generation when its startup snapshot cannot be persis
   expect(await storage.load()).toEqual(before);
   expect(await db.members.toArray()).toEqual(members);
   expect(await db.meta.toArray()).toEqual(metadata);
+});
+
+it('propagates a prefetched native read failure instead of returning a partial startup snapshot', async () => {
+  const storage = store(); await seed(storage);
+  const db = (storage as any).database;
+  const template = await db.entities.get(['default', 'tasks', 'a']);
+  await db.entities.bulkPut(Array.from({ length: 300 }, (_, index) => ({ ...template,
+    id: `read-${index}`, value: JSON.stringify({ id: `read-${index}` }),
+  })));
+  const read = IDBObjectStore.prototype.getAll;
+  let requests = 0;
+  vi.spyOn(IDBObjectStore.prototype, 'getAll').mockImplementation(function (this: IDBObjectStore, ...args: any[]) {
+    if (this.name === 'entities' && ++requests === 2) throw new Error('prefetched read failed');
+    return (read as any).apply(this, args);
+  });
+  await expect(storage.loadWorkingSet('default', { maxRows: 1000, maxBytes: 1000000 })).rejects.toThrow('prefetched read failed');
+  expect(requests).toBe(2);
+});
+
+
+it('discovers retired scopes with bounded primary keys when secondary key cursors are unavailable', async () => {
+  const cursor = IDBIndex.prototype.openKeyCursor;
+  vi.spyOn(IDBIndex.prototype, 'openKeyCursor').mockImplementation(function (this: IDBIndex, ...args: any[]) {
+    if (this.objectStore.name === 'meta' && this.name === 'scope') throw new Error('Unable to open cursor');
+    return (cursor as any).apply(this, args);
+  });
+  vi.spyOn(IndexedDBEngineReplicaStorage.prototype as any, 'scheduleCleanup').mockImplementation(() => {});
+  const name = 'startup-scope-keys'; let storage = store(name); await seed(storage);
+  await storage.replaceWindow(window(['b'], 'tasks', 2), empty, 'default', [{ id: 'b' }]);
+  await storage.replaceWindow(window(['x'], 'tasks', 1), empty, 'tenant', [{ id: 'x' }]);
+  await storage.replaceWindow(window(['y'], 'tasks', 2), empty, 'tenant', [{ id: 'y' }]);
+  storage.close(); storage = store(name);
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['b']);
+  expect([...(storage as any).pendingCleanup].sort()).toEqual(['default', 'tenant']);
 });

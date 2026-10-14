@@ -1,0 +1,2363 @@
+{
+  "kind": "native-browser-storage-v1",
+  "complete": true,
+  "environment": {
+    "node": "v26.8.2",
+    "priority": 15,
+    "os": "7.2.4-arch1-2",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "ram": 33537105920,
+    "commit": "f081a173a83df962dfdccd435134ecc8713c184f",
+    "dirty": true,
+    "seed": 1196840961,
+    "artifactHash": "ef83e92b1ed10c04d95d262a95e99156178f8719ce1486b6cce2903c2ff2bcc0",
+    "budget": {
+      "maxRows": 9007199254740991,
+      "maxBytes": 209715200
+    },
+    "options": {
+      "browsers": "webkit",
+      "cases": "startup-working-set",
+      "samples": 5,
+      "warmups": 1,
+      "cap": 5,
+      "cv": 0.15,
+      "load": 0.5,
+      "retries": 2,
+      "output": "packages/client/bench/sync-engine/startup-webkit-smoke.json"
+    },
+    "scope": "storage only; no runtime, network, worker, DOM or subscribers; WebKit approximates Safari"
+  },
+  "browsers": [
+    {
+      "name": "webkit",
+      "before": {
+        "loadavg": [
+          4.5,
+          4.39,
+          4.89
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T04:16:08.158Z"
+      },
+      "quiescent": false,
+      "cases": [
+        {
+          "metric": "startup-working-set-10000",
+          "legacy": {
+            "median": 338,
+            "p95": 349,
+            "medianCI": [
+              291,
+              349
+            ],
+            "p95CI": [
+              338,
+              349
+            ],
+            "cv": 0.0706076689614291,
+            "samples": [
+              320,
+              338,
+              291,
+              341,
+              349
+            ]
+          },
+          "engine": {
+            "median": 257,
+            "p95": 281,
+            "medianCI": [
+              218,
+              281
+            ],
+            "p95CI": [
+              257,
+              281
+            ],
+            "cv": 0.09394882928446655,
+            "samples": [
+              257,
+              218,
+              239,
+              258,
+              281
+            ]
+          },
+          "ratio": {
+            "median": 0.7603550295857988,
+            "medianCI": [
+              0.6449704142011834,
+              0.8213058419243986
+            ],
+            "p95": 0.8051575931232091,
+            "p95CI": [
+              0.7565982404692082,
+              0.8051575931232091
+            ]
+          },
+          "status": "OK",
+          "startupProfiles": [
+            {
+              "elapsed": 340,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                }
+              ],
+              "requestCounts": {
+                "entities.getAll": 43,
+                "windows.scope.getAll": 1,
+                "meta.get": 2
+              },
+              "recordsRead": 10508,
+              "cursorContinues": 0,
+              "jsonParses": 10507
+            },
+            {
+              "elapsed": 230,
+              "requests": [
+                {
+                  "operation": "meta.getAllKeys",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAllKeys",
+                  "ms": 0
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 4
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                }
+              ],
+              "requestCounts": {
+                "meta.getAllKeys": 2,
+                "meta.getAll": 7,
+                "entities.getAll": 42,
+                "windows.scope.getAll": 1,
+                "meta.get": 8
+              },
+              "recordsRead": 10514,
+              "cursorContinues": 0,
+              "jsonParses": 10513
+            }
+          ]
+        },
+        {
+          "metric": "startup-working-set-50000",
+          "legacy": {
+            "median": 1641,
+            "p95": 2257,
+            "medianCI": [
+              1576,
+              2257
+            ],
+            "p95CI": [
+              1641,
+              2257
+            ],
+            "cv": 0.16361917058820186,
+            "samples": [
+              1641,
+              1576,
+              1582,
+              1914,
+              2257
+            ]
+          },
+          "engine": {
+            "median": 1295,
+            "p95": 1859,
+            "medianCI": [
+              1209,
+              1859
+            ],
+            "p95CI": [
+              1295,
+              1859
+            ],
+            "cv": 0.2164620531617873,
+            "samples": [
+              1295,
+              1209,
+              1248,
+              1859,
+              1808
+            ]
+          },
+          "ratio": {
+            "median": 0.7891529555149299,
+            "medianCI": [
+              0.7671319796954315,
+              0.9712643678160919
+            ],
+            "p95": 0.8236597252990696,
+            "p95CI": [
+              0.7891529555149299,
+              0.9712643678160919
+            ]
+          },
+          "status": "NOISY",
+          "startupProfiles": [
+            {
+              "elapsed": 2246,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 13
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 13
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 31
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 28
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 16
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 30
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 26
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                }
+              ],
+              "requestCounts": {
+                "entities.getAll": 190,
+                "windows.scope.getAll": 1,
+                "meta.get": 2
+              },
+              "recordsRead": 48648,
+              "cursorContinues": 0,
+              "jsonParses": 48558
+            },
+            {
+              "elapsed": 1722,
+              "requests": [
+                {
+                  "operation": "meta.getAllKeys",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAllKeys",
+                  "ms": 0
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 13
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 17
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 15
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 14
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 13
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 39
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 15
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 28
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 13
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 14
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 23
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 13
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 14
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 26
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 55
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 1
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                }
+              ],
+              "requestCounts": {
+                "meta.getAllKeys": 2,
+                "meta.getAll": 7,
+                "entities.getAll": 190,
+                "windows.scope.getAll": 1,
+                "meta.get": 8
+              },
+              "recordsRead": 48567,
+              "cursorContinues": 0,
+              "jsonParses": 48564
+            }
+          ]
+        }
+      ],
+      "fixtures": {
+        "10000": {
+          "encodedBytes": 20524480,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        },
+        "50000": {
+          "encodedBytes": 102620058,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        }
+      },
+      "version": "26.5",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Safari/605.1.15",
+      "loadReadings": [
+        {
+          "loadavg": [
+            5.64,
+            4.67,
+            4.98
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:16:27.436Z"
+        },
+        {
+          "loadavg": [
+            5.64,
+            4.67,
+            4.98
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:16:29.248Z"
+        },
+        {
+          "loadavg": [
+            8.95,
+            5.75,
+            5.32
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:17:41.411Z"
+        },
+        {
+          "loadavg": [
+            10.87,
+            6.2,
+            5.47
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:17:47.387Z"
+        }
+      ],
+      "after": {
+        "loadavg": [
+          11.68,
+          6.45,
+          5.56
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T04:17:53.572Z"
+      }
+    }
+  ],
+  "gates": [
+    {
+      "browser": "webkit",
+      "gate": "single-row durable apply p95 <= 10 ms",
+      "verdict": "NOISY",
+      "limit": 10,
+      "reason": "case not measured"
+    },
+    {
+      "browser": "webkit",
+      "gate": "50k/10k engine p95 <= 1.25x",
+      "verdict": "NOISY",
+      "limit": 1.25,
+      "reason": "case not measured"
+    },
+    {
+      "browser": "webkit",
+      "gate": "startup-working-set-10000 engine/legacy p95 <= 1x",
+      "verdict": "NOISY",
+      "ci": [
+        0.7565982404692082,
+        0.8051575931232091
+      ],
+      "limit": 1,
+      "reason": "not quiescent"
+    },
+    {
+      "browser": "webkit",
+      "gate": "startup-working-set-50000 engine/legacy p95 <= 1x",
+      "verdict": "NOISY",
+      "ci": [
+        0.7891529555149299,
+        0.9712643678160919
+      ],
+      "limit": 1,
+      "reason": "not quiescent"
+    },
+    {
+      "browser": "webkit",
+      "gate": "delete-100-windows-10000 engine/legacy p95 <= 1x",
+      "verdict": "NOISY",
+      "limit": 1,
+      "reason": "case not measured"
+    },
+    {
+      "browser": "webkit",
+      "gate": "delete-100-windows-50000 engine/legacy p95 <= 1x",
+      "verdict": "NOISY",
+      "limit": 1,
+      "reason": "case not measured"
+    }
+  ]
+}

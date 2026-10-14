@@ -85,7 +85,10 @@ try {
         console.log(`${name} preparing ${kind}${count ? '-' + count : ''}`);
         for (const variant of [0, 1]) {
           await launch(variant);
-          if (count) await pages[variant].evaluate(args => window.seedCase(args), { variant, kind, count, budget, victims: Math.max(1000, options.cap + options.warmups) });
+          if (count) {
+            try { await pages[variant].evaluate(args => window.seedCase(args), { variant, kind, count, budget, victims: Math.max(1000, options.cap + options.warmups) }); }
+            catch (error) { throw new Error(`${name} ${kind}-${count} variant ${variant} seed failed: ${error}`, { cause: error }); }
+          }
         }
         const subcases = kind === 'outbox' ? ['independent'] : [kind];
         for (const subcase of subcases) {
