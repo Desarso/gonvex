@@ -324,3 +324,24 @@ it("keeps individual reducer envelopes until batching is negotiated", async () =
   for (const request of requests) worker.postMessage({ ...request, result: 1 });
   expect(await Promise.all(pending)).toEqual([1, 1]);
 });
+
+it("orders lookup starts without making later calls wait for the first durable acknowledgement", async () => {
+  const { create } = await setup(); const host = await create(); cleanups.push(host.close);
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const starts: string[] = [];
+  const lookup = vi.spyOn(EngineReceipts.prototype, "findReceipt").mockImplementation(async (_scope, id) => { starts.push(id); return undefined; });
+  const admit = EngineReceipts.prototype.assertCanAdmit;
+  let checks = 0;
+  const check = vi.spyOn(EngineReceipts.prototype, "assertCanAdmit").mockImplementation(async function(now) {
+    if (++checks === 1) await blocked;
+    return admit.call(this, now);
+  });
+  const commands = [0, 1].map(index => ({ id: `pipeline-${index}`, now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "cd".repeat(32) }));
+  const pending = commands.map(command => host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command }])));
+  await vi.waitFor(() => expect(starts).toEqual(["pipeline-0", "pipeline-1"]));
+  expect(await host.rpc.call(host.rpc.request("listIntents", []))).toEqual([]);
+  release(); expect(await Promise.all(pending)).toEqual([7, 7]);
+  expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(commands.map(command => command.id));
+  lookup.mockRestore(); check.mockRestore();
+});

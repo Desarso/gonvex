@@ -120,7 +120,7 @@ const browser = context.browser(); const page = await context.newPage();
 page.on('console', message => { if (/^(Seed |Engine )/.test(message.text())) process.stdout.write(message.text() + '\n'); });
 page.on('pageerror', error => process.stderr.write(`PAGE: ${error}\n`));
 const measured = Number(process.env.ITERATIONS ?? 20), warmups = Number(process.env.WARMUPS ?? 5);
-const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', admission: process.env.PIPELINE ? 'pipelined' : 'sequential', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true, engineRevision: revision ?? "checkout", profileIO: Boolean(process.env.PROFILE_IO), loadChecks: [], fixtureIsolation: "edits-reset-before-each-mode", firefoxWorkerWebSocketWorkaround: workaroundApplied() };
+const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', admission: process.env.PIPELINE ? 'pipelined' : 'sequential', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true, engineRevision: revision ?? "checkout", profileIO: Boolean(process.env.PROFILE_IO), loadChecks: [], fixtureIsolation: process.env.KEEP_EDITS ? "edits-accumulate-across-modes" : "edits-reset-before-each-mode", firefoxWorkerWebSocketWorkaround: workaroundApplied() };
 try {
   await page.goto(url); await page.waitForFunction(() => window.benchmark);
   process.stdout.write(`Preparing ${process.env.SEED_ROWS ?? 50_000}-row canonical IDB fixture...\n`);
@@ -131,7 +131,7 @@ try {
       const load = loadavg(); metadata.loadChecks.push({ index, mode, load });
       if (load[0] / cpus().length > 0.5) throw new Error("Load check failed: more than half the logical CPUs are busy");
       await page.goto(url); await page.waitForFunction(() => window.benchmark);
-      await page.evaluate(() => window.benchmark.resetEdits());
+      if (!process.env.KEEP_EDITS) await page.evaluate(() => window.benchmark.resetEdits());
       const session = browserName === 'chromium' ? await context.newCDPSession(page) : null;
       await session?.send('Performance.enable');
       const metrics = async () => { const values = await session?.send('Performance.getMetrics'); return values?.metrics.find(value => value.name === 'ScriptDuration')?.value ?? null; };

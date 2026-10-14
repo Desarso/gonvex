@@ -334,4 +334,3 @@ function deliveryErrorClass(error: unknown): OutboxErrorClass {
     default: return "network";
   }
 }
-

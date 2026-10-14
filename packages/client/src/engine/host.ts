@@ -20,6 +20,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
   let receipts: EngineReceipts | undefined;
   let generation = "", scope = "";
   let admission = Promise.resolve();
+  let admissionStart = Promise.resolve();
   const commands = new Map<string, { fingerprint: string; operation: Promise<unknown> }>();
   let sequence = 0;
   let unsubscribeIntents: (() => void) | undefined;
@@ -181,14 +182,11 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
       const durable = ref.scope !== "control" && (ref.localExecution === 1 || ref.offline?.mode === "allowed" || options.offline === "queue");
       const admittedScope = engineScope(client);
       if (command.scope !== admittedScope) throw new GonvexClientError("Engine command belongs to another account scope", { code: "superseded" });
-      const execute = async () => {
+      const begin = async () => {
         if (engineScope(client!) !== admittedScope) throw new GonvexClientError("Account changed before engine admission", { code: "superseded" });
         const prior = durable && !options.engineFresh ? await receipts!.findReceipt(admittedScope, options.engineCommand.id, ref.path, value) : undefined;
         if (engineScope(client!) !== admittedScope) throw new GonvexClientError("Account changed during engine admission", { code: "superseded" });
-        if (prior) return prior.result;
-        const result = await client!.reducer(ref, value, options);
-        if (engineScope(client!) !== admittedScope) throw new GonvexClientError("Account changed during engine result persistence", { code: "superseded" });
-        return result;
+        return { operation: prior ? Promise.resolve(prior.result) : client!.reducer(ref, value, options) };
       };
       const key = JSON.stringify([admittedScope, command.id]);
       const fingerprint = JSON.stringify([ref.path, value]);
@@ -199,7 +197,14 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
       }
       // The client orders atomic admissions. Do not serialize here across
       // their durable acknowledgements, which would stall reducer preparation.
-      const result = execute();
+      // Serialize only lookup/start so disk reads cannot reorder dependent
+      // calls. Release this lane before waiting for durable acknowledgement.
+      const started = ref.localExecution === 1 ? admissionStart.then(begin) : begin();
+      if (ref.localExecution === 1) admissionStart = started.then(() => undefined, () => undefined);
+      const result = started.then(({ operation }) => operation).then(result => {
+        if (engineScope(client!) !== admittedScope) throw new GonvexClientError("Account changed during engine result persistence", { code: "superseded" });
+        return result;
+      });
       if (ref.localExecution === 1) admission = Promise.allSettled([admission, result]).then(() => undefined);
       commands.set(key, { fingerprint, operation: result });
       void result.finally(() => commands.delete(key)).catch(() => undefined);
@@ -224,7 +229,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
   };
   const receive = ({ data }: MessageEvent) => {
     if (Array.isArray(data?.admissions) && data.admissions.length <= 128) {
-      for (const admission of data.admissions) receive({ data: admission } as MessageEvent);
+      for (const admission of data.admissions) if (admission?.method === "reducer") receive({ data: admission } as MessageEvent);
       return;
     }
     if (!data || typeof data.id !== "string" || !Array.isArray(data.args)) return;
