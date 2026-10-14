@@ -71,7 +71,11 @@ window.closeCase = () => { state?.storage?.close(); state = undefined; };
 // Diagnostic request latencies are collected AFTER measured samples. They
 // include native queue time and instrumentation, and are not performance samples.
 window.profileSample = async index => {
-  const requests = [], restores = [];
+  let recordsRead = 0, cursorContinues = 0, jsonParses = 0;
+  const parse = JSON.parse, advance = IDBCursor.prototype.continue;
+  JSON.parse = function (...args) { jsonParses++; return parse.apply(this, args); };
+  IDBCursor.prototype.continue = function (...args) { cursorContinues++; return advance.apply(this, args); };
+  const requests = [], restores = [], requestCounts = {};
   for (const prototype of [IDBObjectStore.prototype, IDBIndex.prototype]) {
     for (const method of ['get', 'getAll', 'getAllKeys', 'count', 'put', 'delete', 'openCursor', 'openKeyCursor']) {
       const original = prototype[method];
@@ -79,7 +83,13 @@ window.profileSample = async index => {
       prototype[method] = function (...args) {
         const start = performance.now(), request = original.apply(this, args);
         const label = `${this.objectStore?.name ?? this.name}${this.objectStore ? '.' + this.name : ''}.${method}`;
-        request.addEventListener('success', () => requests.push({ operation: label, ms: performance.now() - start }), { once: true });
+        requestCounts[label] = (requestCounts[label] ?? 0) + 1;
+        request.addEventListener('success', () => {
+          if (method === 'getAll') recordsRead += request.result.length;
+          else if (method === 'get' && request.result !== undefined) recordsRead++;
+          else if (method === 'openCursor' && request.result) recordsRead++;
+          requests.push({ operation: label, ms: performance.now() - start });
+        }, method === 'openCursor' ? undefined : { once: true });
         return request;
       };
       restores.push(() => { prototype[method] = original; });
@@ -88,6 +98,6 @@ window.profileSample = async index => {
   try {
     await window.prepareSample(index);
     const elapsed = await window.runSample(index);
-    return { elapsed, requests };
-  } finally { restores.forEach(restore => restore()); }
+    return { elapsed, requests, requestCounts, recordsRead, cursorContinues, jsonParses };
+  } finally { restores.forEach(restore => restore()); JSON.parse = parse; IDBCursor.prototype.continue = advance; }
 };

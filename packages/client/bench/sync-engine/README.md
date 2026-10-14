@@ -66,6 +66,8 @@ After warmups, adapter order alternates each round. Each report includes all raw
 samples, median, nearest-rank p95, coefficient of variation and seeded 4,000-draw
 bootstrap 95% intervals for median and p95. Ratios resample paired rounds for
 candidate/baseline comparisons. Scaling resamples the two size runs independently.
+Startup also collects one fresh-process diagnostic per adapter after timing: native requests, records read, cursor continuations and JSON parses. Chromium writes sibling CPU and 32 KiB sampled live-allocation profiles, plus top CPU frames and sampled bytes in the JSON. These include instrumentation overhead, are not timing samples, and sampled live bytes are not peak memory or an exact allocation count.
+
 Five diagnostic engine samples after timing record native IndexedDB request counts
 and latencies at each size. They include queue/instrumentation overhead and are
 kept separate from performance samples. These are percentile bootstrap intervals, not distribution-free guarantees;

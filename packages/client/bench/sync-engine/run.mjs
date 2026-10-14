@@ -122,6 +122,34 @@ try {
             value.engineRequestProfile = [];
             for (let i = 0; i < 5; i++) value.engineRequestProfile.push(await pages[1].evaluate(index => window.profileSample(index), round + i));
           }
+          if (kind === 'startup-working-set') {
+            value.startupProfiles = [];
+            for (const variant of [0, 1]) {
+              await pages[variant].evaluate(() => window.closeCase());
+              await contexts[variant].close(); contexts[variant] = undefined;
+              await launch(variant);
+              await pages[variant].evaluate(args => window.openStartup(args), { variant, count, budget });
+              const cdp = name === 'chromium' ? await contexts[variant].newCDPSession(pages[variant]) : undefined;
+              if (cdp) { await cdp.send('Profiler.enable'); await cdp.send('HeapProfiler.enable'); await cdp.send('Profiler.start'); await cdp.send('HeapProfiler.startSampling', { samplingInterval: 32768 }); }
+              value.startupProfiles.push(await pages[variant].evaluate(() => window.profileSample(0)));
+              if (cdp) {
+                const cpu = await cdp.send('Profiler.stop'), heap = await cdp.send('HeapProfiler.stopSampling');
+                const nodes = new Map(cpu.profile.nodes.map(node => [node.id, node])), times = new Map();
+                for (const [index, id] of cpu.profile.samples.entries()) times.set(id, (times.get(id) ?? 0) + cpu.profile.timeDeltas[index]);
+                value.startupProfiles[variant].cpuTop = [...times].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([id, us]) => {
+                  const frame = nodes.get(id).callFrame;
+                  return { function: frame.functionName, ms: us / 1000,
+                    source: frame.url.endsWith('/benchmark.js') ? javascript.toString().split('\n')[frame.lineNumber]?.slice(frame.columnNumber, frame.columnNumber + 160) : undefined };
+                });
+                const allocated = node => node.selfSize + node.children.reduce((sum, child) => sum + allocated(child), 0);
+                value.startupProfiles[variant].sampledLiveBytes = allocated(heap.profile.head);
+
+                await writeFile(`${options.output}.${count}.${variant}.cpu.json`, JSON.stringify(cpu));
+                await writeFile(`${options.output}.${count}.${variant}.heap.json`, JSON.stringify(heap));
+                await cdp.detach();
+              }
+            }
+          }
           browser.cases.push(value);
           delete results.inProgress;
           console.log(`${name} ${value.metric} ${value.status} n=${samples[0].length}: legacy p95=${legacy.p95.toFixed(3)} engine p95=${engine.p95.toFixed(3)}`);
@@ -129,7 +157,7 @@ try {
         }
       } finally {
         for (const context of contexts) await context?.close(); contexts = [];
-        for (const profile of profiles) await rm(profile, { recursive: true, force: true });
+        for (const profile of profiles) await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     }
     browser.after = machine(); browser.quiescent &&= quiet(browser.after);
@@ -147,5 +175,5 @@ try {
   process.off('SIGINT', interrupt); process.off('SIGTERM', interrupt);
   for (const context of contexts) await context?.close();
   await new Promise(resolve => server ? server.close(resolve) : resolve());
-  await rm(temporary, { recursive: true, force: true });
+  await rm(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

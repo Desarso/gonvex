@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+import { IDBFactory, IDBKeyRange, IDBObjectStore } from 'fake-indexeddb';
 import { Dexie } from 'dexie';
 import { IndexedDBEngineReplicaStorage, indexedDBEngineReplica } from './indexeddb-engine';
 import { IndexedDBLocalReplicaStorage } from './indexeddb-replica';
@@ -343,6 +343,7 @@ it('retires a removed window without scanning or deleting its memberships on the
   expect((await storage.load())?.liveQueries).toEqual({});
   await storage.cleanupRetiredMemberships();
   expect(await db.members.count()).toBe(0);
+  expect((await db.meta.toArray()).some((record: any) => record.key.startsWith('startup:'))).toBe(false);
   expect((await storage.load())?.entities.tasks.a).toBeDefined();
 });
 
@@ -418,4 +419,104 @@ it('preserves checkpoint-only hashes through full snapshot replacement and reope
   await storage.applyWindowDelta(window([], 'other', 4), { upserts: [], deleted: ['a'] }, empty);
   expect((await storage.load())?.entities.tasks.a).toBeUndefined();
   expect((await storage.load())?.liveQueries.tasks.hashes).toEqual(hashes);
+});
+
+it('pages startup rows across tombstones and scopes while respecting row and byte budgets', async () => {
+  const storage = store(); await seed(storage);
+  const db = (storage as any).database;
+  const template = await db.entities.get(['default', 'tasks', 'a']);
+  await db.entities.bulkPut(Array.from({ length: 2050 }, (_, index) => ({ ...template,
+    id: `page-${String(index).padStart(4, '0')}`, deleted: index < 2048,
+    value: JSON.stringify({ id: `page-${String(index).padStart(4, '0')}` }),
+  })));
+  await db.entities.put({ ...template, scope: 'other', id: 'foreign' });
+  const getAll = vi.spyOn(IDBObjectStore.prototype, 'getAll');
+  const loaded = await storage.loadWorkingSet('default', { maxRows: 5000, maxBytes: 10000 });
+  expect(getAll.mock.instances.filter(table => table?.name === 'entities')).toHaveLength(3);
+  expect(Object.keys(loaded!.entities.tasks).sort()).toEqual(['a', 'b', 'page-2048', 'page-2049']);
+  expect(loaded?.liveQueries.tasks.ids).toEqual(['a', 'b']);
+  const bounded = await storage.loadWorkingSet('default', { maxRows: 1, maxBytes: 10000 });
+  expect(Object.keys(bounded!.entities.tasks)).toEqual(['a']);
+  expect(bounded?.residentPartialTables).toEqual(['tasks']);
+  const noBytes = await storage.loadWorkingSet('default', { maxRows: 10, maxBytes: 0 });
+  expect(noBytes?.entities).toEqual({});
+  expect(noBytes?.residentPartialTables).toEqual(['tasks']);
+}, 30_000);
+
+it('preserves duplicates and special IDs while decoding all 256 hash byte values', async () => {
+  const storage = store();
+  const unique = ['a', 'b', '__proto__', 'c', 'd', 'e', 'f', 'g'];
+  const ids = [...unique, 'a'];
+  const hashes = Object.fromEntries(unique.map((id, index) => [id,
+    Array.from({ length: 32 }, (_, byte) => ((byte + index * 32) % 256).toString(16).padStart(2, '0')).join('')]));
+  await storage.replaceWindow({ ...window(ids), hashes }, empty, 'default', ids.map(id => ({ id })));
+  const loaded = await storage.loadWorkingSet('default', { maxRows: 10, maxBytes: 10000 });
+  expect(loaded?.liveQueries.tasks.ids).toEqual(ids);
+  expect(loaded?.liveQueries.tasks.hashes).toEqual(hashes);
+  expect(Object.hasOwn(loaded!.liveQueries.tasks.hashes!, '__proto__')).toBe(true);
+});
+
+it('loads the transactional startup index without reading members and falls back for missing or stale indexes', async () => {
+  const storage = store(); await seed(storage);
+  const db = (storage as any).database;
+  const before = await storage.load();
+  const members = vi.spyOn(db.members, 'where');
+  expect((await storage.loadWorkingSet('default', { maxRows: 10, maxBytes: 10000 }))?.liveQueries).toEqual(before?.liveQueries);
+  expect(members).not.toHaveBeenCalled();
+  const record = await db.windows.get(['default', 'tasks']);
+  const key = `startup:${JSON.stringify(['tasks', record.generation])}:`;
+  const cached = await db.meta.get(['default', key]);
+  await db.meta.delete(['default', key]);
+  expect((await storage.load())?.liveQueries).toEqual(before?.liveQueries);
+  expect(members).toHaveBeenCalled(); members.mockClear();
+  await db.meta.put({ ...cached, value: JSON.stringify({ sequence: -1, ids: ['wrong'] }) });
+  expect((await storage.load())?.liveQueries).toEqual(before?.liveQueries);
+  expect(members).toHaveBeenCalled();
+});
+
+it('keeps startup edits atomic with membership writes and does not revive an index invalidated by an old writer', async () => {
+  const storage = store(); await seed(storage);
+  const db = (storage as any).database;
+  const before = await storage.load();
+  const cached = await db.meta.toArray();
+  const write = db.meta.put.bind(db.meta);
+  const put = vi.spyOn(db.meta, 'put').mockImplementation((record: any) => {
+    if (record.key.startsWith('startup:')) throw new Error('cache write failed');
+    return write(record);
+  });
+  await expect(storage.applyWindowDelta(window(['a', 'c'], 'tasks', 2),
+    { upserts: [{ id: 'c' }], deleted: ['b'], memberships: [{ id: 'c', moved: true, after: 'a' }] }, empty)).rejects.toThrow('cache write failed');
+  put.mockRestore();
+  expect(await storage.load()).toEqual(before);
+  expect(await db.meta.toArray()).toEqual(cached);
+  await storage.applyWindowDelta(window(['a', 'c'], 'tasks', 2),
+    { upserts: [{ id: 'c' }], deleted: ['b'], memberships: [{ id: 'c', moved: true, after: 'a' }] }, empty);
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['a', 'c']);
+  // Older SDKs copy an old startup marker on normalized deletes, or omit it
+  // on window metadata writes. Neither may make the cached IDs authoritative.
+  const record = await db.windows.get(['default', 'tasks']);
+  await db.transaction('rw', db.members, db.windows, async () => {
+    await db.members.delete(['default', 'tasks', record.generation, 'c']);
+    await db.windows.put({ ...record, sequence: record.sequence + 1 });
+  });
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['a']);
+  await storage.advanceWatermark([window(['a'], 'tasks', 3)], { epoch: 'e', revision: 3 });
+  expect((await db.windows.get(['default', 'tasks'])).startupSequence).toBeUndefined();
+  expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['a']);
+});
+
+it('rolls back an inactive generation when its startup snapshot cannot be persisted', async () => {
+  const storage = store(); await seed(storage);
+  const db = (storage as any).database;
+  const before = await storage.load(), members = await db.members.toArray(), metadata = await db.meta.toArray();
+  const write = db.meta.put.bind(db.meta);
+  const put = vi.spyOn(db.meta, 'put').mockImplementation((record: any) => {
+    if (record.key.startsWith('startup:') && record.key.endsWith(':')) throw new Error('startup snapshot failed');
+    return write(record);
+  });
+  await expect(storage.replaceWindow(window(['z'], 'tasks', 2), empty, 'default', [{ id: 'z' }])).rejects.toThrow('startup snapshot failed');
+  put.mockRestore();
+  expect(await storage.load()).toEqual(before);
+  expect(await db.members.toArray()).toEqual(members);
+  expect(await db.meta.toArray()).toEqual(metadata);
 });

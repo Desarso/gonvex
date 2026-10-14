@@ -20,7 +20,7 @@ type MemberRecord = {
   scope: string; signature: string; generation: number; entity: string; id: string;
   order: string; hash?: Uint8Array; duplicateOrders?: string[]; hashOnly?: 1;
 };
-type WindowRecord = { scope: ReplicaScope; signature: string; value: string; sequence?:number; deleted?:boolean; generation?:number };
+type WindowRecord = { scope: ReplicaScope; signature: string; value: string; sequence?:number; deleted?:boolean; generation?:number; startupSequence?:number };
 type MetaRecord = { scope: ReplicaScope; key: string; value: string };
 type ReplicaDatabase = Dexie & {
   entities: Table<EntityRecord, [string, string, string]>;
@@ -164,20 +164,92 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     }
   }
 
+  private startupPrefix(signature: string, generation: number) {
+    return `startup:${JSON.stringify([signature, generation])}:`;
+  }
+
+  private async cacheMember(member: MemberRecord | { scope: string; signature: string; generation: number; id: string; deleted: true }) {
+    const value = 'deleted' in member ? { id: member.id, deleted: true } : {
+      id: member.id, order: member.order, hash: member.hash ? hexHash(member.hash) : undefined,
+      duplicateOrders: member.duplicateOrders, hashOnly: member.hashOnly,
+    };
+    await this.database.meta.put({ scope: member.scope,
+      key: this.startupPrefix(member.signature, member.generation) + JSON.stringify(member.id), value: JSON.stringify(value) });
+  }
+
+  private async putMember(member: MemberRecord) {
+    await this.database.members.put(member);
+    await this.cacheMember(member);
+  }
+
+  private async deleteMember(scope: string, signature: string, generation: number, id: string) {
+    await this.database.members.delete([scope, signature, generation, id]);
+    await this.cacheMember({ scope, signature, generation, id, deleted: true });
+  }
+
+  private async startupWindow(record: WindowRecord, metadata: Omit<ReplicaWindow, 'ids' | 'hashes'> & { hasHashes?: boolean }): Promise<ReplicaWindow | undefined> {
+    if (record.startupSequence === undefined || record.startupSequence !== record.sequence) return;
+    const prefix = this.startupPrefix(record.signature, record.generation!);
+    const cached = await this.database.meta.get([record.scope, prefix]);
+    if (!cached) return;
+    const base = JSON.parse(cached.value) as { sequence: number; ids: string[]; hashes?: Record<string, string> };
+    if (base.sequence !== record.generation || !Array.isArray(base.ids)) return;
+    const patches = await this.database.meta.where('[scope+key]')
+      .between([record.scope, prefix], [record.scope, prefix + '\uffff'], false, false).toArray();
+    const { hasHashes, ...window } = metadata;
+    if (!patches.length) return { ...window, ids: base.ids, ...(hasHashes ? { hashes: base.hashes ?? {} } : {}) };
+    const members = new Map<string, { id: string; order: string; duplicateOrders?: string[]; hash?: string; hashOnly?: 1 }>();
+    base.ids.forEach((id, index) => {
+      const prior = members.get(id);
+      if (prior) (prior.duplicateOrders ??= []).push(initialOrder(index));
+      else members.set(id, { id, order: initialOrder(index), hash: base.hashes?.[id] });
+    });
+    for (const [id, hash] of Object.entries(base.hashes ?? {})) if (!members.has(id)) members.set(id, { id, order: '', hash, hashOnly: 1 });
+    for (const patch of patches) {
+      const member = JSON.parse(patch.value);
+      if (member.deleted) members.delete(member.id); else members.set(member.id, member);
+    }
+    const ordered = [...members.values()].flatMap(member => member.hashOnly ? [] :
+      [member.order, ...member.duplicateOrders ?? []].map(order => ({ id: member.id, order })));
+    ordered.sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : 0);
+    return { ...window, ids: ordered.map(member => member.id),
+      ...(hasHashes ? { hashes: Object.fromEntries([...members.values()].filter(member => member.hash !== undefined).map(member => [member.id, member.hash!])) } : {}) };
+  }
+
   private async materializeWindow(record: WindowRecord): Promise<ReplicaWindow> {
     const metadata = JSON.parse(record.value) as Omit<ReplicaWindow, 'ids' | 'hashes'> & { hasHashes?: boolean };
+    // The optional index is a cache. Membership remains the recovery source.
+    let cached: ReplicaWindow | undefined;
+    try { cached = await this.startupWindow(record, metadata); }
+    catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+    if (cached) return cached;
     const members = await this.database.members.where('[scope+signature+generation+order]')
       .between([record.scope, record.signature, record.generation!, ''], [record.scope, record.signature, record.generation!, '\uffff']).toArray();
     const { hasHashes, ...window } = metadata;
-    const ordered = members.filter(member => !member.hashOnly).flatMap(member => [member.order, ...member.duplicateOrders ?? []].map(order => ({ id: member.id, order })));
-    if (members.some(member => member.duplicateOrders?.length)) ordered.sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : 0);
-    return { ...window, ids: ordered.map(member => member.id),
-      ...(hasHashes ? { hashes: Object.fromEntries(members.filter(member => member.hash).map(member => [member.id, hexHash(member.hash!)])) } : {}) };
+    const ids: string[] = [], hashes: Record<string, string> = {};
+    const duplicates = members.some(member => member.duplicateOrders?.length);
+    if (duplicates) {
+      const ordered = members.flatMap(member => member.hashOnly ? [] :
+        [member.order, ...member.duplicateOrders ?? []].map(order => ({ id: member.id, order })));
+      ordered.sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : 0);
+      for (const member of ordered) ids.push(member.id);
+    }
+    for (const member of members) {
+      if (!duplicates && !member.hashOnly) ids.push(member.id);
+      if (hasHashes && member.hash) {
+        const hash = hexHash(member.hash);
+        if (member.id === '__proto__') Object.defineProperty(hashes, member.id, {
+          value: hash, enumerable: true, configurable: true, writable: true,
+        });
+        else hashes[member.id] = hash;
+      }
+    }
+    return { ...window, ids, ...(hasHashes ? { hashes } : {}) };
   }
 
-  private async writeMetadata(scope: string, window: ReplicaWindow, sequence: number, generation: number) {
+  private async writeMetadata(scope: string, window: ReplicaWindow, sequence: number, generation: number, cached = false) {
     const { ids, hashes, ...metadata } = window;
-    await this.database.windows.put({ scope, signature: window.signature, sequence, generation,
+    await this.database.windows.put({ scope, signature: window.signature, sequence, generation, startupSequence: cached ? sequence : undefined,
       value: JSON.stringify({ ...metadata, hasHashes: hashes !== undefined }) });
   }
 
@@ -218,7 +290,10 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
         await this.database.members.bulkPut(members.slice(offset, offset + 128));
       }
       if (check.prior && !check.prior.deleted) await this.retireGeneration(scope, window.signature, check.prior.generation!);
-      await this.writeMetadata(scope, window, sequence, generation);
+      await this.database.meta.put({ scope, key: this.startupPrefix(window.signature, generation),
+        value: JSON.stringify({ sequence: generation, ids: window.ids,
+          hashes: window.hashes === undefined ? undefined : Object.fromEntries(members.filter(member => member.hash).map(member => [member.id, hexHash(member.hash!)])) }) });
+      await this.writeMetadata(scope, window, sequence, generation, true);
       const receipt = this.receipt();
       if (receipt) receipt.changes.windows[window.signature] = window;
     }
@@ -242,7 +317,13 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       const keys = await this.database.members.where('[scope+signature+generation+order]')
         .between([scope, signature, generation, ''], [scope, signature, generation, '\uffff']).limit(limit).primaryKeys();
       await this.database.members.bulkDelete(keys);
-      if (keys.length < limit) await this.database.meta.delete([scope, retired.key]);
+      if (keys.length < limit) {
+        const prefix = this.startupPrefix(signature, generation);
+        const cachedKeys = await this.database.meta.where('[scope+key]')
+          .between([scope, prefix], [scope, prefix + '\uffff'], true, false).limit(limit - keys.length).primaryKeys();
+        await this.database.meta.bulkDelete(cachedKeys);
+        if (cachedKeys.length < limit - keys.length) await this.database.meta.delete([scope, retired.key]);
+      }
       return keys.length;
     });
   }
@@ -280,13 +361,14 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     };
     assign(0, segment.length, lower, upper);
     await this.database.members.bulkPut(segment);
+    for (const member of segment) await this.cacheMember(member);
   }
 
   private async reconcileCheckpointHashes(scope: string, window: ReplicaWindow, generation: number) {
     const hashes = await this.database.members.where('[scope+signature+generation+hashOnly]')
       .equals([scope, window.signature, generation, 1]).toArray();
     for (const member of hashes) if (!window.hashes || !Object.hasOwn(window.hashes, member.id)) {
-      await this.database.members.delete([scope, member.signature, generation, member.id]);
+      await this.deleteMember(scope, member.signature, generation, member.id);
     }
   }
 
@@ -325,6 +407,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       await this.database.entities.where('scope').equals(scope).delete();
       await this.database.windows.where('scope').equals(scope).delete();
       await this.database.members.where('scope').equals(scope).delete();
+      await this.database.meta.where('[scope+key]').between([scope, 'startup:'], [scope, 'startup;'], true, false).delete();
       await this.database.meta.put({scope,key:'resetSequence',value:String(sequence)});
     }
     await this.database.meta.put({scope,key:'epoch',value:JSON.stringify({current:cursor.epoch,retired:state ? [...state.retired,state.current] : []})});
@@ -374,8 +457,13 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
 
   private initialize() {
     return this.initialized ??= this.database.open().then(async () => {
-      const retired = await this.database.meta.filter(record => record.key.startsWith('retired:')).toArray();
-      for (const record of retired) { this.pendingCleanup.add(record.scope); this.scheduleCleanup(record.scope); }
+      // Read only scope keys and retirement markers, not the large startup blobs.
+      const scopes = await this.database.meta.orderBy('scope').uniqueKeys();
+      for (const scope of scopes) {
+        const retired = await this.database.meta.where('[scope+key]')
+          .between([scope, 'retired:'], [scope, 'retired;'], true, false).limit(1).toArray();
+        if (retired.length) { this.pendingCleanup.add(String(scope)); this.scheduleCleanup(String(scope)); }
+      }
     });
   }
 
@@ -440,29 +528,33 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     await this.initialize();
     return this.database.transaction('r',this.database.entities,this.database.windows,this.database.members,this.database.meta,async()=>{
       const entities:ReplicaSnapshot['entities']={},liveQueries:ReplicaSnapshot['liveQueries']={},partial=new Set<string>();
+      const windows = this.database.windows.where('scope').equals(scope).toArray().then(records =>
+        Promise.all(records.filter(record => !record.deleted).map(record => this.materializeWindow(record))));
       let bytes=0,count=0,hasRows=false,full=false;
       // getAll-backed pages avoid one JS/Dexie cursor continuation per row.
-      // Keep both temporary decoding and retained rows bounded independently.
+      // Eight times fewer request round trips than 256-row pages, with a fixed
+      // temporary bound independent of the retained working-set budget.
       let after: [string, string, string] | undefined;
-      while (!full) {
-        const page = await this.database.entities.where('[scope+entity+id]')
-          .between(after ?? [scope], [scope, []], !after, false)
-          .limit(Math.min(256, Math.max(1, budget.maxRows - count + 1))).toArray();
-        if (!page.length) break;
-        for (const record of page) {
-          if (record.deleted) continue;
-          hasRows = true;
-          const size = record.value.length * 2 + 256;
-          if (count >= budget.maxRows || bytes + size > budget.maxBytes) { partial.add(record.entity); full = true; break; }
-          (entities[record.entity] ??= {})[record.id] = JSON.parse(record.value);
-          bytes += size; count++;
+      const [loadedWindows] = await Promise.all([windows, (async () => {
+        while (!full) {
+          const page = await this.database.entities.where('[scope+entity+id]')
+            .between(after ?? [scope], [scope, []], !after, false)
+            .limit(Math.min(2048, Math.max(1, budget.maxRows - count + 1))).toArray();
+          if (!page.length) break;
+          for (const record of page) {
+            if (record.deleted) continue;
+            hasRows = true;
+            const size = record.value.length * 2 + 256;
+            if (count >= budget.maxRows || bytes + size > budget.maxBytes) { partial.add(record.entity); full = true; break; }
+            (entities[record.entity] ??= {})[record.id] = JSON.parse(record.value);
+            bytes += size; count++;
+          }
+          const last = page[page.length - 1]!;
+          after = [last.scope, last.entity, last.id];
         }
-        const last = page[page.length - 1]!;
-        after = [last.scope, last.entity, last.id];
-      }
-      for (const record of await this.database.windows.where('scope').equals(scope).toArray()) {
-        if(record.deleted)continue;
-        const window = await this.materializeWindow(record);liveQueries[record.signature]=window;
+      })()]);
+      for (const window of loadedWindows) {
+        liveQueries[window.signature]=window;
         if(window.ids.some(id=>!entities[window.entity]?.[id]))partial.add(window.entity);
       }
       const cursor=await this.database.meta.get([scope,'cursor']);
@@ -485,7 +577,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
 
   async loadWindowRows(scope:string,signature:string) {
     await this.initialize();
-    return this.database.transaction('r',this.database.entities,this.database.windows,this.database.members,async()=>{
+    return this.database.transaction('r',this.database.entities,this.database.windows,this.database.members,this.database.meta,async()=>{
       const record=await this.database.windows.get([scope,signature]);
       if(!record || record.deleted)return undefined;
       const window = await this.materializeWindow(record);
@@ -542,9 +634,9 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
           // A normalized transaction can delete ahead of this collection's
           // checkpoint. Retain its projected hash until the collection delta
           // advances the certificate, without retaining membership/ownership.
-          if (metadata.hasHashes && member.hash) await this.database.members.put({ ...member, hashOnly: 1 });
-          else await this.database.members.delete([normalizedScope, member.signature, member.generation, id]);
-          await this.database.windows.put({ ...window, sequence });
+          if (metadata.hasHashes && member.hash) await this.putMember({ ...member, hashOnly: 1 });
+          else await this.deleteMember(normalizedScope, member.signature, member.generation, id);
+          await this.database.windows.put({ ...window, sequence, startupSequence: window.startupSequence !== undefined && window.startupSequence === window.sequence ? sequence : undefined });
           (this.receipt()!.changes.removedMemberships ??= []).push({ signature: member.signature, id });
         }
       }
@@ -571,7 +663,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
         if (!check.accepted) { accepted = false; continue; }
         if (!check.prior || check.prior.deleted) { await this.writeWindows(normalizedScope, [window], sequence); continue; }
         await this.reconcileCheckpointHashes(normalizedScope, window, check.prior.generation!);
-        await this.writeMetadata(normalizedScope, window, sequence, check.prior.generation!);
+        await this.writeMetadata(normalizedScope, window, sequence, check.prior.generation!, check.prior.startupSequence !== undefined && check.prior.startupSequence === check.prior.sequence);
       }
       await this.saveCursor(normalizedScope,cursor);
       if (accepted && windows.length) return { scope: normalizedScope, previousSequence: sequence - 1, sequence };
@@ -621,7 +713,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       } else if (reset || !check.prior || check.prior.deleted) {
         await this.writeWindows(normalizedScope, [window], sequence);
       } else {
-        for (const id of delta.deleted) await this.database.members.delete([normalizedScope, window.signature, generation, id]);
+        for (const id of delta.deleted) await this.deleteMember(normalizedScope, window.signature, generation, id);
         const changed = new Set(delta.upserts.map(row => String(row[window.key])));
         const edits: NonNullable<ReplicaWindowDelta['memberships']> = delta.memberships ?? window.ids.flatMap((id, index) => {
           if (!changed.has(id)) return [];
@@ -643,13 +735,13 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
             change.after ? (await this.database.members.get([normalizedScope, window.signature, generation, change.after]))?.order : undefined,
             change.before ? (await this.database.members.get([normalizedScope, window.signature, generation, change.before]))?.order : undefined,
           ) : prior.order;
-          await this.database.members.put({ scope: normalizedScope, signature: window.signature, generation,
+          await this.putMember({ scope: normalizedScope, signature: window.signature, generation,
             entity: window.entity, id: change.id, order,
             hash: binaryHash(window.hashes?.[change.id]), duplicateOrders: prior?.duplicateOrders });
           if (order.length > 64) await this.rebalance(normalizedScope, window.signature, generation, order);
         }
         await this.reconcileCheckpointHashes(normalizedScope, window, generation);
-        await this.writeMetadata(normalizedScope, window, sequence, generation);
+        await this.writeMetadata(normalizedScope, window, sequence, generation, check.prior.startupSequence !== undefined && check.prior.startupSequence === check.prior.sequence);
         this.receipt()!.changes.windows[window.signature] = window;
       }
       await this.saveCursor(normalizedScope, snapshot.cursor);
@@ -753,8 +845,11 @@ function binaryHash(hash: string | undefined): Uint8Array | undefined {
   if (hash === undefined) return undefined;
   return Uint8Array.from({ length: 32 }, (_, index) => parseInt(hash.slice(index * 2, index * 2 + 2), 16));
 }
+const hexBytes = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, '0'));
 function hexHash(hash: Uint8Array): string {
-  return Array.from(hash, byte => byte.toString(16).padStart(2, '0')).join('');
+  let value = '';
+  for (let index = 0; index < hash.length; index++) value += hexBytes[hash[index]!]!;
+  return value;
 }
 function initialOrder(index: number): string { return (index + 1).toString(16).padStart(12, '0') + '8'; }
 function orderBetween(lower?: string, upper?: string): string {
