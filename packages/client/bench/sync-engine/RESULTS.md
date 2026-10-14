@@ -1,5 +1,84 @@
 # Sync engine storage measurements
 
+## Engine delete follow-up
+
+The owner-delete path issues fewer native requests and avoids per-owner serial waits. It does **not** satisfy the full acceptance gate. Chromium passes both delete gates; Firefox deletion tails remain noisy, and WebKit 10k remains slower than matched legacy. Keep the engine opt-in; these results are not approval for a rollout.
+
+The audit's [quiet-run section](#2026-10-14-quiet-run) showed WebKit 10k p95 74 -> 137 ms with ratio CI [1.388, 2.045], and Firefox 125 -> 267 ms. The new [baseline](./delete-before.json) reproduces the small-collection problem before the worker's storage changes. The [final matrix](./delete-concurrent.json) retains all samples, counters, startup admission diagnostics and gate results. Earlier [32-record serial batching](./delete-after.json) and [128-record serial batching](./delete-batch128.json) trials are retained independently; samples are never pooled or replaced. The latter report was renamed from its original output path, delete-final.json.
+
+All runs used native disk-backed profiles under the requested TMPDIR, sequential browsers, alternating adapter order, a 15% CV limit and a 60-round final cap. The final run used nice 15, ten warmups and twenty initial samples. The baseline and 32-record trial used priority 0. Baseline samples started at twenty with a forty-round cap; the 32-record trial started at thirty with a sixty-round cap. The final run was CPU-quiescent throughout. This load test does not certify quiet disk IO.
+
+Measurements recorded parent fb16159 and a dirty tree containing the worker patch. That parent's tree is identical to staging's merged #115, 1f2a649. The patch was rebased onto 1f2a649 after #115 merged. The final cache-reuse guard was subsequently tightened and tested for disjoint owner sets beyond the metadata page; it does not change the single-victim fixture's requests. No clean-tree source or whole-app performance claim is made.
+
+### Matched deletion results
+
+Before values are engine p95 from the separate baseline run, not a controlled absolute speedup. Use the final matched engine/legacy CIs for acceptance. All values are milliseconds.
+
+| Browser / fixture rows | Baseline engine p95 | Final legacy p95 | Final engine p95 | Final engine/legacy p95 CI | Delete gate |
+| --- | ---: | ---: | ---: | ---: | --- |
+| webkit / 10000 | 169.0 | 69.0 | 102.0 | [1.333, 1.537] | NOISY |
+| webkit / 50000 | 184.0 | 147.0 | 119.0 | [0.784, 0.875] | NOISY |
+| firefox / 10000 | 188.0 | 76.0 | 107.0 | [0.747, 1.529] | NOISY |
+| firefox / 50000 | 147.0 | 164.0 | 100.0 | [0.321, 0.679] | NOISY |
+| chromium / 10000 | 78.8 | 76.6 | 33.6 | [0.410, 0.624] | PASS |
+| chromium / 50000 | 78.9 | 117.4 | 31.1 | [0.241, 0.275] | PASS |
+
+The final 10k WebKit comparison still excludes parity in its ratio CI. Its formal gate is NOISY because engine CV exceeds 15%, not because the regression has disappeared. Firefox's large tail variance also prevents acceptance. Raising the CV threshold or discarding outliers was deliberately not used.
+
+### Request and atomicity evidence
+
+Every diagnostic sample in every browser and size issued 409 native requests before and 310 after, a 24.2% reduction. A bounded getAll reads at most 128 small window records when an owner set is large, followed by bulkGet for missing signatures. Small owner sets retain exact reads. A transaction-local metadata map prevents repeated scope scans and owner reads for multiple deleted rows.
+
+Dexie bulkDelete/bulkPut still issue individual native writes. The remaining counts per victim are 99 membership deletes, one hash-only membership put, 100 startup metadata patches, 100 window checkpoints, and the fixed row/cursor/sequence requests. The fixture's 100 window gets become one scoped getAll. Writes use concurrent groups of at most 128 records per table, inside the original single atomic transaction. The transaction's sequence checkpoint was already written once; it remains so. Multiple deleted rows now write each affected window checkpoint once.
+
+The 36 focused engine tests cover rollback after membership and startup writes, 100 hashed and unhashed owners, preserved hash-only resume certificates, distinct owner sets outside the metadata page, no repeated metadata-page read, and fresh freeze-compatible working-set rows. A failed checkpoint restores rows, memberships, cache patches and sequence. Existing epoch, authority, replay, hash, startup fallback, scope and budget tests remain green.
+
+Chromium sibling delete CPU profiles contain the five instrumented diagnostic samples at each size. Before and after traces are retained. Their timing includes instrumentation and scheduling; no controlled CPU, RSS or battery reduction is inferred from these traces.
+
+### Owned-row admission
+
+The brief's concern about retained decoded entity pages did not match the source. Each working-set entity value is decoded with JSON.parse on every load; the startup index retains serialized membership, not decoded entity rows. ownsWorkingSetRows=true therefore lets LocalReplica freeze the decoded row without a structuredClone. Tests prove later loads are distinct and a later persisted update does not mutate the frozen earlier value.
+
+The table measures median LocalReplica admission over five rounds per mode, alternating order with one warmup. Every admission receives fresh decoded rows. Storage decoding is outside this timer. Fixture size is not the admitted row count; the same 200 MiB working-set budget applies. These diagnostics support keeping the flag, but are not first-paint or storage-startup gate samples.
+
+| Browser / fixture rows | Cloned admission median, ms | Owned admission median, ms | Reduction |
+| --- | ---: | ---: | ---: |
+| webkit / 10000 | 537.0 | 252.0 | 53.1% |
+| webkit / 50000 | 2704.0 | 1457.0 | 46.1% |
+| firefox / 10000 | 371.0 | 164.0 | 55.8% |
+| firefox / 50000 | 2096.0 | 931.0 | 55.6% |
+| chromium / 10000 | 269.7 | 116.9 | 56.7% |
+| chromium / 50000 | 1272.2 | 648.1 | 49.1% |
+
+### Storage gates and limits
+
+Final totals: 10 PASS, 0 FAIL, 8 NOISY. NOISY is not acceptance. Missing outbox timing is deliberate: its implementation was untouched and there is no outbox storage gate in gates.mjs. No network-drain, server replay, visibility, energy or app-level outbox-latency measurement is claimed.
+
+| Browser | Gate | 95% CI | Verdict | Reason |
+| --- | --- | ---: | --- | --- |
+| webkit | single-row durable apply p95 <= 10 ms | [10.000, 11.000] | NOISY | 95% bootstrap interval |
+| webkit | 50k/10k engine p95 <= 1.25x | [0.333, 0.769] | NOISY | required adapter CV exceeds threshold |
+| webkit | startup-working-set-10000 engine/legacy p95 <= 1x | [0.750, 0.880] | PASS | 95% bootstrap interval |
+| webkit | startup-working-set-50000 engine/legacy p95 <= 1x | [0.705, 0.806] | PASS | 95% bootstrap interval |
+| webkit | delete-100-windows-10000 engine/legacy p95 <= 1x | [1.333, 1.537] | NOISY | required adapter CV exceeds threshold |
+| webkit | delete-100-windows-50000 engine/legacy p95 <= 1x | [0.784, 0.875] | NOISY | required adapter CV exceeds threshold |
+| firefox | single-row durable apply p95 <= 10 ms | [5.000, 15.000] | NOISY | required adapter CV exceeds threshold |
+| firefox | 50k/10k engine p95 <= 1.25x | [1.000, 3.000] | NOISY | required adapter CV exceeds threshold |
+| firefox | startup-working-set-10000 engine/legacy p95 <= 1x | [0.747, 0.808] | PASS | 95% bootstrap interval |
+| firefox | startup-working-set-50000 engine/legacy p95 <= 1x | [0.779, 0.865] | PASS | 95% bootstrap interval |
+| firefox | delete-100-windows-10000 engine/legacy p95 <= 1x | [0.747, 1.529] | NOISY | required adapter CV exceeds threshold |
+| firefox | delete-100-windows-50000 engine/legacy p95 <= 1x | [0.321, 0.679] | NOISY | required adapter CV exceeds threshold |
+| chromium | single-row durable apply p95 <= 10 ms | [2.400, 2.500] | PASS | 95% bootstrap interval |
+| chromium | 50k/10k engine p95 <= 1.25x | [0.828, 1.000] | PASS | 95% bootstrap interval |
+| chromium | startup-working-set-10000 engine/legacy p95 <= 1x | [0.805, 0.877] | PASS | 95% bootstrap interval |
+| chromium | startup-working-set-50000 engine/legacy p95 <= 1x | [0.901, 0.947] | PASS | 95% bootstrap interval |
+| chromium | delete-100-windows-10000 engine/legacy p95 <= 1x | [0.410, 0.624] | PASS | 95% bootstrap interval |
+| chromium | delete-100-windows-50000 engine/legacy p95 <= 1x | [0.241, 0.275] | PASS | 95% bootstrap interval |
+
+No startup cache format/schema, protocol, contract, package version, Rust runtime, reducer or outbox change was made. Native write count remains O(owners). Combining startup cache and checkpoint records could remove additional IO but needs a separate compatibility and edited-startup design; old SDK writers must continue invalidating derived indexes safely. Further native IndexedDB/storage investigation is required to satisfy the WebKit small-collection gate and certify noisy cases.
+
+Validation: pnpm --filter @gonvex/client exec vitest run src/indexeddb-engine.test.ts passed 36/36; client typecheck/build passed; protocol, module-sdk and local-runtime dependency builds passed; the four benchmark statistical checks passed. Both full affected-case matrices and the two deletion-only runs completed, with their original gate verdicts retained. The standalone final gates.mjs command was also run. No full test suite or cargo workspace tests ran. No npm packages were published and no PR was merged. No Whagons source change is required; SDK release/integration remains with the orchestrator.
+
 ## Startup follow-up
 
 The startup regression is fixed in the measured storage cases. The quiet Chromium replication and the final Firefox/WebKit runs pass both 10k and 50k startup p95 gates. This is storage startup, not application first paint or a general release certificate.
