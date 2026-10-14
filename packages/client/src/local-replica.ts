@@ -228,6 +228,9 @@ const residentTableBytes = new WeakMap<Map<string, ReplicaRow>, number>();
 function residentRows(source?: Iterable<readonly [string, ReplicaRow]>): Map<string, ReplicaRow> {
   if (source instanceof ResidentMap && residentTableBytes.has(source)) {
     const rows = source.fork();
+    // Publication clears this journal. Preserve earlier edits when catch-up
+    // forks a table that still contains an unpublished local transaction.
+    for (const id of source.changedIDs) rows.changedIDs.add(id);
     residentTableBytes.set(rows, residentTableBytes.get(source)!);
     return rows;
   }
@@ -598,6 +601,12 @@ export class LocalReplica implements LocalReplicaView {
     if(!this.storage?.withReadView || !this.storage?.loadWindowRows)return;
     let bytes=this.residentBytes,count=this.residentCount;
     if(bytes+this.metadataBytes()<=this.residencyBudget.maxBytes && count<=this.residencyBudget.maxRows)return;
+    // Derived caches can be rebuilt without disk reads. Reclaim them before
+    // selecting victims so their stale row references cannot force eviction.
+    this.readSnapshots.clear();
+    this.entityRowArrays.clear();
+    this.equalityIndexes.clear();
+    if(bytes+this.metadataBytes()<=this.residencyBudget.maxBytes && count<=this.residencyBudget.maxRows)return;
     const pending = new Map<string, Set<string>>();
     for (const command of this.pendingCommands.values()) for (const patch of command.patches) {
       const entity = patch.entity ?? patch.collection!;
@@ -637,7 +646,6 @@ export class LocalReplica implements LocalReplicaView {
       }
       for (const signature of windows) this.markWindowChanged(signature);
     }
-    this.readSnapshots.clear();
     this.residencyVersionValue++;
   }
 
