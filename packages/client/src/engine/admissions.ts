@@ -5,21 +5,28 @@ import type { LocalExecution, LocalTransactionResult } from "@gonvex/local-runti
 import { StoreReducerOutbox, outboxEntryIsLive, type IntentDependencies, type OutboxErrorClass } from "../outbox.js";
 import { optimisticPatchesFromReference, type OptimisticPatch } from "../optimistic.js";
 
+const receiptContexts = new WeakMap<GonvexClient, EngineReceipts>();
+
 // Only engine hosts install durable command identities. Ordinary clients retain
 // the established implementation and do not bundle these admission branches.
 export function installEngineAdmissions(client: GonvexClient, receipts: EngineReceipts) {
+  receiptContexts.set(client, receipts);
   const outbox = client["reducerOutbox"];
   const enqueue = outbox.enqueue.bind(outbox);
   outbox.enqueue = async intent => {
     if (intent.engineOutcome && !intent.engineOutcome.fresh) await receipts.assertCanAdmit(intent.engineOutcome.commandNow!);
-    if (intent.engineOutcome) receipts.admissions.set(intent.idempotencyKey!, structuredClone(intent.engineOutcome));
+    const outcome = intent.engineOutcome ? {
+      result: structuredClone(intent.engineOutcome.result),
+      ...(!intent.localExecution ? { commandNow: intent.engineOutcome.commandNow } : {}),
+    } : undefined;
+    if (outcome) receipts.admissions.set(intent.idempotencyKey!, outcome);
     try {
       const entry = await enqueue(intent);
       if (intent.engineOutcome) {
-        entry.engineOutcome = structuredClone(intent.engineOutcome);
+        entry.engineOutcome = structuredClone(outcome);
         if (outbox instanceof StoreReducerOutbox) {
           const cached = outbox["entries"].get(entry.id);
-          if (cached) cached.engineOutcome = structuredClone(intent.engineOutcome);
+          if (cached) cached.engineOutcome = structuredClone(outcome);
         }
       }
       return entry;
@@ -72,6 +79,10 @@ export async function runLocalReducer<T>(this: GonvexClient, ref: FunctionRefere
     if (admitted?.engineOutcome) {
       if (admitted.path !== ref.path || JSON.stringify(admitted.args) !== JSON.stringify(args)) throw new Error("Engine command ID reused with different arguments");
       return admitted.engineOutcome.result as T;
+    }
+    if (command && !optionsFresh) {
+      const receipt = await receiptContexts.get(this)!.findReceipt(scope, command.id, ref.path, args);
+      if (receipt) return receipt.result as T;
     }
     const sharedEntries = entries.filter(outboxEntryIsLive);
     const sharedPatches = sharedEntries?.filter(entry => entry.state !== "committed").flatMap(entry => (entry.patches ?? []).map(patch => patch.op === "delete"
@@ -285,6 +296,9 @@ export async function runOptimisticReducer<T>(
       reducerId,
       reducerId,
     );
+    if (options.engineCommand) receiptContexts.get(this)!.admissions.set(reducerId, {
+      result: structuredClone(result), commandNow: options.engineCommand.now,
+    });
     await this["reducerOutbox"].markCommitted(entry.id);
     if (patches.length > 0) {
       await this["settleOptimisticReducer"](reducerId);
@@ -306,6 +320,7 @@ export async function runOptimisticReducer<T>(
     await this["rejectOptimisticReducer"](reducerId, entryId);
     throw error;
   } finally {
+    receiptContexts.get(this)?.admissions.delete(reducerId);
     this["directOutboxReducerIds"].delete(reducerId);
     void this["drainOutbox"]();
   }

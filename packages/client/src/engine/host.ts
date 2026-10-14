@@ -201,8 +201,13 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
       // calls. Release this lane before waiting for durable acknowledgement.
       const started = ref.localExecution === 1 ? admissionStart.then(begin) : begin();
       if (ref.localExecution === 1) admissionStart = started.then(() => undefined, () => undefined);
-      const result = started.then(({ operation }) => operation).then(result => {
+      const result = started.then(({ operation }) => operation).then(async result => {
         if (engineScope(client!) !== admittedScope) throw new GonvexClientError("Account changed during engine result persistence", { code: "superseded" });
+        if (durable && ref.localExecution !== 1) {
+          const receipt = await receipts!.findReceipt(admittedScope, command.id, ref.path, value);
+          if (!receipt || JSON.stringify(receipt.result) !== JSON.stringify(result)) await receipts!.put(admittedScope, command.id, ref.path, value, result, command.now);
+          if (engineScope(client!) !== admittedScope) throw new GonvexClientError("Account changed during engine result persistence", { code: "superseded" });
+        }
         return result;
       });
       if (ref.localExecution === 1) admission = Promise.allSettled([admission, result]).then(() => undefined);

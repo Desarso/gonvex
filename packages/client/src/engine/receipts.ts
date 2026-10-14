@@ -13,12 +13,12 @@ export class EngineReceipts {
     this.database.version(1).stores({ receipts: "&key" });
     this.database.version(2).stores({ receipts: "&key,retainedAt", metadata: "&key" }).upgrade(async transaction => {
       const now = Date.now(), receipts = transaction.table<Receipt, string>("receipts");
-      await receipts.toCollection().modify({ retainedAt: now, commandAt: now });
       const excess = await receipts.count() - this.limit;
       if (excess > 0) {
-        await receipts.orderBy("retainedAt").limit(excess).delete();
+        await receipts.toCollection().limit(excess).delete();
         await transaction.table("metadata").put({ key: "retryFloor", retryFloor: now });
       }
+      await receipts.toCollection().modify({ retainedAt: now, commandAt: now });
     });
   }
   async openJournal() { await this.journal.open(); }
@@ -35,16 +35,26 @@ export class EngineReceipts {
   }
   private pending: Array<{ receipt: Receipt; resolve(): void; reject(error: unknown): void }> = [];
   private scheduled = false;
+  private nextExpiryCheckAt = 0;
   private async flush() {
     const pending = this.pending.splice(0); this.scheduled = false;
+    let checkedExpiry = false;
     try {
       await this.database.transaction("rw", [this.database.receipts, this.database.metadata], async () => {
         await this.database.receipts.bulkPut(pending.map(item => item.receipt));
-        const removed = await this.database.receipts.where("retainedAt").below(Date.now() - this.maxAgeMs).toArray();
-        await this.database.receipts.bulkDelete(removed.map(receipt => receipt.key));
-        const excess = await this.database.receipts.count() - this.limit;
+        const now = Date.now(), removed: Receipt[] = [];
+        const count = await this.database.receipts.count();
+        if (now >= this.nextExpiryCheckAt) {
+          checkedExpiry = true;
+          removed.push(...await this.database.receipts.where("retainedAt").below(now - this.maxAgeMs).toArray());
+          await this.database.receipts.bulkDelete(removed.map(receipt => receipt.key));
+        }
+        const excess = count - removed.length - this.limit;
         if (excess > 0) {
-          const excessRows = await this.database.receipts.orderBy("retainedAt").limit(excess).toArray();
+          // Free a small group while retaining the hard cap. A singleton
+          // server acknowledgement should not force the same prune every tick.
+          const size = Math.max(excess, Math.max(1, Math.floor(this.limit / 16)));
+          const excessRows = await this.database.receipts.orderBy("retainedAt").limit(size).toArray();
           removed.push(...excessRows);
           await this.database.receipts.bulkDelete(excessRows.map(receipt => receipt.key));
         }
@@ -53,6 +63,7 @@ export class EngineReceipts {
           await this.database.metadata.put({ key: "retryFloor", retryFloor: Math.max(prior?.retryFloor ?? 0, ...removed.map(receipt => receipt.commandAt)) });
         }
       });
+      if (checkedExpiry) this.nextExpiryCheckAt = Date.now() + Math.min(this.maxAgeMs, 24 * 60 * 60 * 1000);
       for (const item of pending) item.resolve();
     } catch (error) { for (const item of pending) item.reject(error); }
   }
@@ -80,6 +91,8 @@ export class EngineReceipts {
     return { ...store,
       ...(store.append ? { append: async (entry: Omit<ReducerOutboxEntry, "id">) => store.append!(admitted(entry)) } : {}),
       put: entry => store.put(admitted(entry)),
+      ...(store.update ? { update: (id: number, change: (entry: ReducerOutboxEntry) => ReducerOutboxEntry) => store.update!(id, entry => admitted(change(entry))) } : {}),
+      ...(store.updateMany ? { updateMany: (ids: number[], change: (entry: ReducerOutboxEntry) => ReducerOutboxEntry) => store.updateMany!(ids, entry => admitted(change(entry))) } : {}),
       ...(store.replacePending ? { replacePending: async (id: number, draft: Omit<ReducerOutboxEntry, "id">) => {
         await remember([id]); return store.replacePending!(id, admitted(draft));
       } } : {}),

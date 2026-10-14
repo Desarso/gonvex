@@ -343,9 +343,63 @@ it("orders lookup starts without making later calls wait for the first durable a
   });
   const commands = [0, 1].map(index => ({ id: `pipeline-${index}`, now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "cd".repeat(32) }));
   const pending = commands.map(command => host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command }])));
-  await vi.waitFor(() => expect(starts).toEqual(["pipeline-0", "pipeline-1"]));
+  await vi.waitFor(() => expect(starts.slice(0, 2)).toEqual(["pipeline-0", "pipeline-1"]));
   expect(await host.rpc.call(host.rpc.request("listIntents", []))).toEqual([]);
   release(); expect(await Promise.all(pending)).toEqual([7, 7]);
   expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(commands.map(command => command.id));
   lookup.mockRestore(); check.mockRestore();
+});
+
+it("delivers preceding watch batches before resolving a small reducer reply", async () => {
+  const { ui, worker } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
+  const events: string[] = []; rpc.onEvent.add(method => events.push(method));
+  const pending = rpc.call(rpc.request("reducer", [], "result"));
+  const watch = sendEngineMessage(worker, { generation: "g", scope: "s", id: "watch", event: "watchBatch", args: ["x".repeat(40_000)] });
+  const reply = sendEngineMessage(worker, { generation: "g", scope: "s", id: "result", result: 7 });
+  expect(await pending).toBe(7); expect(events).toEqual(["watchBatch"]);
+  await Promise.all([watch, reply]);
+});
+
+it("amortizes pruning while never exceeding the hard receipt cap", async () => {
+  const receipts = new EngineReceipts(crypto.randomUUID()); cleanups.push(() => receipts.close());
+  await Promise.all(Array.from({ length: 1024 }, (_, index) => receipts.put("s", String(index), "p", {}, index)));
+  const database = (receipts as any).database;
+  const readFloor = vi.spyOn(database.metadata, "get");
+  for (let index = 1024; index < 1088; index++) {
+    await receipts.put("s", String(index), "p", {}, index);
+    expect(await database.receipts.count()).toBeLessThanOrEqual(1024);
+  }
+  expect(readFloor).toHaveBeenCalledTimes(1);
+  expect(await database.receipts.count()).toBe(1024);
+});
+
+it("preserves an online queued-capable reducer's actual server result after retirement and reopen", async () => {
+  const { create } = await setup(); let host = await create();
+  await host.rpc.call(host.rpc.request("connect", [])); const socket = Socket.all[0]; socket.open();
+  await vi.waitFor(() => expect(socket.sent.some(frame => frame.type === "auth")).toBe(true));
+  const frame = socket.sent.find(frame => frame.type === "auth");
+  socket.receive({ type: "auth.result", id: frame.id, result: { artifactHash: "artifact", replica: { protocolVersion: 1, scope: "t", visibilityScope: "visible", epoch: "e" }, localIdentity: { auth: { account: { id: "a" } }, tenant: { id: "t" }, member: { id: "m", accountId: "a", permissions: {} } } } });
+  await vi.waitFor(() => expect(host.endpoints.worker.sent.some(frame => frame.event === "session" && frame.args[0] === "authenticated")).toBe(true));
+  const remote: FunctionReference = { kind: "reducer", path: "online", offline: { mode: "allowed" } };
+  const command = { id: "server-result", now: Date.now(), scope: owner, entropy: "de".repeat(32) };
+  const first = host.rpc.call(host.rpc.request("reducer", [remote, {}, { engineCommand: command }]));
+  await vi.waitFor(() => expect(socket.sent.some(frame => frame.type === "reducer.call" && frame.path === "online")).toBe(true));
+  const call = socket.sent.find(frame => frame.type === "reducer.call" && frame.path === "online");
+  socket.receive({ type: "reducer.result", id: call.id, result: { value: 42 } });
+  expect(await first).toEqual({ value: 42 });
+  expect(await host.rpc.call(host.rpc.request("listIntents", []))).toEqual([]);
+  await host.close(); host = await create(); cleanups.push(host.close);
+  expect(await host.rpc.call(host.rpc.request("reducer", [remote, {}, { engineCommand: command }]))).toEqual({ value: 42 });
+  expect(socket.sent.filter(frame => frame.type === "reducer.call" && frame.path === "online")).toHaveLength(1);
+});
+
+it("rechecks receipts after the canonical read so retirement cannot race an explicit retry", async () => {
+  const { create, init } = await setup(); const host = await create(); cleanups.push(host.close);
+  const receipts = new EngineReceipts(init.storage.outboxName); cleanups.push(() => receipts.close());
+  const command = { id: "retired-race", now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "ef".repeat(32) };
+  await receipts.put(owner, command.id, ref.path, {}, 7, command.now);
+  const lookup = vi.spyOn(EngineReceipts.prototype, "findReceipt").mockResolvedValueOnce(undefined);
+  expect(await host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command }]))).toBe(7);
+  expect(await host.rpc.call(host.rpc.request("listIntents", []))).toEqual([]);
+  expect(lookup).toHaveBeenCalledTimes(2); lookup.mockRestore();
 });

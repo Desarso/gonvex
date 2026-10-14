@@ -164,7 +164,11 @@ export function sendEngineMessage(endpoint: EngineEndpoint, message: Record<stri
     endpoint.addEventListener("message", ack); endpoint.postMessage({ ...value, generation: message.generation, scope: message.scope, id: message.id, deliveryId });
   });
   const send = async () => {
-    if (JSON.stringify(message).length <= 16 * 1024) { await sendPacket(message); return; }
+    if (JSON.stringify(message).length <= 16 * 1024) {
+      if (message.event) await sendPacket(message);
+      else endpoint.postMessage(message);
+      return;
+    }
     let split: ReturnType<typeof splitMessage>;
     try { split = splitMessage(message); } catch (error) {
       if (!(error instanceof TextCodecRequired)) throw error;
@@ -199,9 +203,6 @@ export function sendEngineMessage(endpoint: EngineEndpoint, message: Record<stri
     for (const alias of aliases) await sendPacket({ packet: { kind: "alias", ...alias } });
     await sendPacket({ packet: { kind: "end" } });
   };
-  if (!message.event && JSON.stringify(message).length <= 16 * 1024) {
-    endpoint.postMessage(message); return Promise.resolve();
-  }
   const operation = (sending.get(endpoint) ?? Promise.resolve()).then(send);
   sending.set(endpoint, operation.catch(() => undefined));
   return operation;

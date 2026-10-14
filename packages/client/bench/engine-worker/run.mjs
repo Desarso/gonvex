@@ -126,40 +126,62 @@ try {
   process.stdout.write(`Preparing ${process.env.SEED_ROWS ?? 50_000}-row canonical IDB fixture...\n`);
   metadata.seed = await page.evaluate(count => window.benchmark.seed(count), Number(process.env.SEED_ROWS ?? 50_000));
   process.stdout.write(`Seed ready: ${metadata.seed.rowBytes} bytes/row\n`);
+  const waitForQuiet = async () => {
+    while (loadavg()[0] / cpus().length > .5) {
+      process.stdout.write(`Waiting for quiet machine: load ${loadavg()[0].toFixed(2)} / ${cpus().length} cores\n`);
+      await sleep(30_000);
+    }
+  };
+  metadata.discardedPairs = [];
   for (let index = -warmups; index < measured; index++) {
-    for (const mode of index % 2 === 0 ? ['legacy', 'worker'] : ['worker', 'legacy']) {
-      const load = loadavg(); metadata.loadChecks.push({ index, mode, load });
-      if (load[0] / cpus().length > 0.5) throw new Error("Load check failed: more than half the logical CPUs are busy");
-      await page.goto(url); await page.waitForFunction(() => window.benchmark);
-      if (!process.env.KEEP_EDITS) await page.evaluate(() => window.benchmark.resetEdits());
-      const session = browserName === 'chromium' ? await context.newCDPSession(page) : null;
-      await session?.send('Performance.enable');
-      const metrics = async () => { const values = await session?.send('Performance.getMetrics'); return values?.metrics.find(value => value.name === 'ScriptDuration')?.value ?? null; };
-      const run = async name => {
-        process.stdout.write(`${index} ${mode} ${name}...\n`);
-        const before = await metrics();
-        let overloaded = false;
-        const observeLoad = () => {
-          const load = loadavg(); metadata.loadChecks.push({ index, mode, workload: name, load });
-          if (load[0] / cpus().length > .5) overloaded = true;
-        };
-        const monitor = setInterval(observeLoad, 10_000);
-        let value;
-        try { value = await page.evaluate(async ({ name, mode }) => name === 'cold' ? window.benchmark.start(mode) : window.benchmark[name](), { name, mode }); }
-        finally { clearInterval(monitor); }
-        observeLoad();
-        if (overloaded) throw new Error(`Load check failed during ${mode} ${name}; sample excluded`);
-        const after = await metrics(); process.stdout.write(`${name}: ${value.wallMs.toFixed(1)}ms\n`); return { ...value, scriptMs: before === null ? null : (after - before) * 1_000 };
-
-      };
-      const cold = await run('cold'); if (cold.mode !== mode) throw new Error(`Mode silently fell back: ${mode} => ${cold.mode}`);
-      if (index === -warmups && mode === 'worker') metadata.correctness = await page.evaluate(() => window.benchmark.parity());
-      const burst = await run('burst');
-      const snapshot = process.env.SKIP_SNAPSHOT ? null : await run('snapshot');
-      const drain = process.env.SKIP_DRAIN ? null : await run('drain');
-      await page.evaluate(() => window.benchmark.stop()); await session?.detach();
-      if (index >= 0) samples.push({ index, mode, cold, burst, snapshot, drain, load: loadavg() });
-      process.stdout.write(`${index} ${mode}: cold ${cold.wallMs.toFixed(1)}ms, burst script ${burst.scriptMs?.toFixed(1)}ms, max task ${Math.max(0, ...burst.longTasks).toFixed(1)}ms\n`);
+    let complete = false;
+    while (!complete) {
+      if (process.env.WAIT_LOAD) await waitForQuiet();
+      const pair = [];
+      let session;
+      try {
+        for (const mode of index % 2 === 0 ? ['legacy', 'worker'] : ['worker', 'legacy']) {
+          const checkStart = metadata.loadChecks.length;
+          const load = loadavg(); metadata.loadChecks.push({ index, mode, load });
+          if (load[0] / cpus().length > .5) throw new Error("Load check failed before mode");
+          await page.goto(url); await page.waitForFunction(() => window.benchmark);
+          if (!process.env.KEEP_EDITS) await page.evaluate(() => window.benchmark.resetEdits());
+          session = browserName === 'chromium' ? await context.newCDPSession(page) : null;
+          await session?.send('Performance.enable');
+          const metrics = async () => { const values = await session?.send('Performance.getMetrics'); return values?.metrics.find(value => value.name === 'ScriptDuration')?.value ?? null; };
+          const run = async name => {
+            process.stdout.write(`${index} ${mode} ${name}...\n`);
+            const before = await metrics(); let overloaded = false;
+            const observeLoad = () => {
+              const load = loadavg(); metadata.loadChecks.push({ index, mode, workload: name, load });
+              if (load[0] / cpus().length > .5) overloaded = true;
+            };
+            const monitor = setInterval(observeLoad, 10_000);
+            let value;
+            try { value = await page.evaluate(async ({ name, mode }) => name === 'cold' ? window.benchmark.start(mode) : window.benchmark[name](), { name, mode }); }
+            finally { clearInterval(monitor); }
+            observeLoad();
+            if (overloaded) throw new Error(`Load check failed during ${mode} ${name}; entire pair excluded`);
+            const after = await metrics(); process.stdout.write(`${name}: ${value.wallMs.toFixed(1)}ms\n`);
+            return { ...value, scriptMs: before === null ? null : (after - before) * 1_000 };
+          };
+          const cold = await run('cold'); if (cold.mode !== mode) throw new Error(`Mode silently fell back: ${mode} => ${cold.mode}`);
+          if (index === -warmups && mode === 'worker' && !metadata.correctness) metadata.correctness = await page.evaluate(() => window.benchmark.parity());
+          const burst = await run('burst');
+          const snapshot = process.env.SKIP_SNAPSHOT ? null : await run('snapshot');
+          const drain = process.env.SKIP_DRAIN ? null : await run('drain');
+          await page.evaluate(() => window.benchmark.stop()); await session?.detach(); session = null;
+          pair.push({ index, mode, cold, burst, snapshot, drain, load: loadavg(), loadChecks: metadata.loadChecks.slice(checkStart) });
+          process.stdout.write(`${index} ${mode}: cold ${cold.wallMs.toFixed(1)}ms, burst script ${burst.scriptMs?.toFixed(1)}ms\n`);
+        }
+        if (index >= 0) samples.push(...pair);
+        complete = true;
+      } catch (error) {
+        await page.evaluate(() => window.benchmark.stop()).catch(() => undefined); await session?.detach().catch(() => undefined);
+        if (!process.env.WAIT_LOAD || !String(error).includes('Load check failed')) throw error;
+        metadata.discardedPairs.push({ index, reason: String(error), load: loadavg() });
+        process.stdout.write(`Discarding pair ${index}; will retry after load drops\n`);
+      }
       await writeFile(resolve(root, process.env.RESULTS ?? 'results.json'), JSON.stringify({ metadata, samples }, null, 2));
     }
   }

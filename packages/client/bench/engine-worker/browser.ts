@@ -48,7 +48,11 @@ async function seed(count = 50_000) {
   database.close();
   }
   await storage.saveSession(reducerOutboxScope(runtime, auth, "unused"), { directive, artifactHash, identity: { auth: { account: { id: "account" } }, tenant: { id: "tenant" }, member: { id: "member", accountId: "account", permissions: {} } } });
-  storage.close(); return { rows: count, rowBytes: new TextEncoder().encode(JSON.stringify(row(0))).length };
+  storage.close(); return { rows: count, initialEdits: await countEdits(), rowBytes: new TextEncoder().encode(JSON.stringify(row(0))).length };
+}
+async function countEdits() {
+  const database = new Dexie(storageOptions.replicaName); await database.open();
+  const count = await database.table("entities").where("[scope+entity]").equals(["visible", "edits"]).count(); database.close(); return count;
 }
 async function resetEdits() {
   // Keep task hydration fixed while removing prior synthetic edits outside
@@ -161,11 +165,20 @@ async function parity() {
   if (JSON.stringify(first) !== JSON.stringify(second)) throw new Error("Command retry changed result");
   const queued = await client.listIntents();
   if (queued.filter(entry => entry.id === command.id).length !== 1) throw new Error("Crash recovery duplicated admission");
+  const batchCommands = Array.from({ length: 32 }, () => client.createCommand());
+  const calls = batchCommands.map((engineCommand, index) => client.reducer(editRef, { id: `crash-${index}` }, { engineCommand, timeoutMs: 0 }));
+  const interrupted = Promise.allSettled(calls);
+  await Promise.race(calls); engineWorker!.terminate(); await client.recover(); await interrupted;
+  const prefix = (await client.listIntents()).filter(entry => batchCommands.some(command => command.id === entry.id)).length;
+  if (prefix < 1 || prefix >= batchCommands.length) throw new Error("Crash did not interrupt a partially durable batch");
+  await Promise.all(batchCommands.map((engineCommand, index) => client.reducer(editRef, { id: `crash-${index}` }, { engineCommand, timeoutMs: 0 })));
+  const replayed = (await client.listIntents()).filter(entry => batchCommands.some(command => command.id === entry.id));
+  if (replayed.length !== 32 || new Set(replayed.map(entry => entry.id)).size !== 32) throw new Error("Batch crash retry duplicated or lost a command");
   await fetch("/online", { method: "POST" }); client.connect(); await until(() => client.connectionState().isWebSocketConnected); await until(() => client.localSessionState() === "authenticated");
   await fetch("/disconnect", { method: "POST" }); await until(() => !client.connectionState().isWebSocketConnected);
   await until(() => client.connectionState().isWebSocketConnected, 15_000); await until(() => client.localSessionState() === "authenticated");
   const deniedCount = await fetch("/denied-count").then(response => response.json()); if (deniedCount !== 0) throw new Error("Reducer network escaped");
-  return { deniedApis: 3, retryResult: second, durableCrashRecovery: true, reconnect: true };
+  return { deniedApis: 3, retryResult: second, durableCrashRecovery: true, batchCrashRecovery: { durablePrefix: prefix, commands: 32, sameIds: true }, reconnect: true };
 }
 async function stop() { release?.(); release = undefined; if ("engineMode" in client) await client.close(); else await closeEngine(client); closeStorage?.(); closeStorage = undefined; await wait(100); }
 (window as any).benchmark = { seed, resetEdits, start, burst, snapshot, drain, parity, stop, mode: () => (client as any).engineMode };
