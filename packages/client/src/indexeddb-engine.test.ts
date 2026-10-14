@@ -571,5 +571,7 @@ it('keeps rows whose ids shadow Object.prototype members in receipts and snapsho
   if (changed) expect(Object.keys(changed).sort()).toEqual([...ids].sort());
   const snapshot = await storage.load();
   expect(Object.keys(snapshot!.entities.tasks).sort()).toEqual([...ids].sort());
+  const read = await storage.readChanges('default', 0);
+  expect(Object.keys(read.entities.tasks ?? {}).sort()).toEqual([...ids].sort());
   expect(JSON.parse(JSON.stringify(snapshot!.entities.tasks))['__proto__']).toEqual({ id: '__proto__', title: '__proto__' });
 });

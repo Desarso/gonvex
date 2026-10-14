@@ -428,7 +428,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     return this.database.transaction('r',this.database.entities,this.database.windows,this.database.members,this.database.meta,async()=>{
       const sequence=Number((await this.database.meta.get([scope,'sequence']))?.value ?? 0);
       const reset=afterSequence < Number((await this.database.meta.get([scope,'resetSequence']))?.value ?? 0);
-      const changes:ReplicaStorageChanges={sequence,reset,entities:{},windows:{}};
+      const changes:ReplicaStorageChanges={sequence,reset,entities:Object.create(null),windows:Object.create(null)};
       if(sequence===afterSequence)return changes;
       const wanted=interest ? new Map(Object.entries(interest.rows).map(([table,ids])=>[table,new Set(ids)])) : undefined;
       let availableRows=interest ? reset ? interest.maxRows : interest.availableRows : 0;
@@ -449,7 +449,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
           if(record.deleted || availableRows<=0 || availableBytes<size)return;
           availableRows--;availableBytes-=size;
         }
-        (changes.entities[record.entity]??={})[record.id]=record.deleted ? null : JSON.parse(record.value);
+        (changes.entities[record.entity]??=Object.create(null))[record.id]=record.deleted ? null : JSON.parse(record.value);
       });
       return changes;
     });
@@ -518,7 +518,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     if (entityRecords.length === 0 && windowRecords.length === 0 && !cursor) return undefined;
     const entities: ReplicaSnapshot["entities"] = Object.create(null);
     for (const record of entityRecords) if(!record.deleted) (entities[record.entity] ??= Object.create(null))[record.id] = JSON.parse(record.value) as ReplicaRow;
-    const liveQueries: ReplicaSnapshot["liveQueries"] = {};
+    const liveQueries: ReplicaSnapshot["liveQueries"] = Object.create(null);
     for (const record of windowRecords) if(!record.deleted) liveQueries[record.signature] = await this.materializeWindow(record);
     return {
       storageSequence:Number((await this.database.meta.get([normalizedScope,'sequence']))?.value ?? 0),
