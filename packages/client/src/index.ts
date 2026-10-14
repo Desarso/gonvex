@@ -1,3 +1,6 @@
+import { sameAuthTokenIdentity, reducerOutboxScope } from "./auth-scope.js";
+export { reducerOutboxScope } from "./auth-scope.js";
+import { GonvexClientError } from "./client-error.js";
 import { readIsCovered, primaryReadKeys } from "@gonvex/local-runtime/read-view";
 import type { DataRead } from "@gonvex/module-sdk";
 import type {
@@ -288,46 +291,7 @@ export type FunctionReference<Args extends JsonValue = JsonValue, Result extends
   };
 };
 
-export type GonvexClientErrorCode = "server" | "timeout" | "disconnected" | "closed" | "auth" | "superseded";
-
-/**
- * Typed error for every rejected Gonvex operation. `code` distinguishes
- * server-side failures from transport-level ones so apps can decide whether
- * a retry is safe:
- *
- * - `server`: the runtime executed the function and returned an error.
- * - `timeout`: no response arrived within the operation timeout. For
- *   reducers/actions the write may or may not have been applied.
- * - `disconnected`: the socket dropped while the operation was pending.
- *   Reducers/actions fail closed unless a reducer opted into the outbox.
- * - `closed`: the client was explicitly closed.
- * - `auth`: authentication was rejected.
- * - `superseded`: the operation belonged to an authentication scope that the
- *   caller replaced before the operation completed.
- */
-export class GonvexClientError extends Error {
-  readonly code: GonvexClientErrorCode;
-  readonly path?: string;
-  readonly operation?: "query" | "reducer" | "action";
-  /**
-   * For `server` Reducer errors: the runtime's classification, or a legacy
-   * inference when an older runtime sent none. Undefined means a legacy
-   * runtime's unclassified error, which is handled as a rejection.
-   */
-  readonly errorClass?: ReducerErrorClass;
-  /** True when the same call (same idempotency key) may succeed later. */
-  readonly retryable?: boolean;
-
-  constructor(message: string, options: { code: GonvexClientErrorCode; path?: string; operation?: "query" | "reducer" | "action"; errorClass?: ReducerErrorClass; retryable?: boolean }) {
-    super(message);
-    this.name = "GonvexClientError";
-    this.code = options.code;
-    this.path = options.path;
-    this.operation = options.operation;
-    if (options.errorClass) this.errorClass = options.errorClass;
-    if (options.retryable !== undefined) this.retryable = options.retryable;
-  }
-}
+export { GonvexClientError, type GonvexClientErrorCode } from "./client-error.js";
 
 /** One durable reducer intent, as exposed to application UI. */
 export type OutboxIntent = {
@@ -468,7 +432,11 @@ export const DEFAULT_QUERY_TIMEOUT_MS = 20_000;
 export const DEFAULT_REDUCER_TIMEOUT_MS = 20_000;
 export const DEFAULT_ACTION_TIMEOUT_MS = 60_000;
 
+export type EngineCommand = { id: string; now: number; entropy: string; artifactHash?: string; scope?: string };
+
 export type CallOptions = {
+  /** Stable worker RPC execution identity. Reuse the entire object after timeout. */
+  engineCommand?: EngineCommand;
   /** Per-call override of the operation timeout. `0` disables. */
   timeoutMs?: number;
   /** Ordered row changes to expose until the reducer settles. */
@@ -510,6 +478,8 @@ export type GonvexClientAuth = {
 };
 
 export type GonvexClientOptions = GonvexClientAuth & {
+  /** @internal Captured before network globals are denied in an engine worker. */
+  webSocketConstructor?: typeof WebSocket;
   /** Disable negotiated snapshot paging for a runtime rollback. Defaults to true. */
   replicaSnapshotPages?: boolean;
   /** Control Plane only, including tenant-scoped control calls. Disables local data and outbox. */
@@ -721,7 +691,11 @@ export class GonvexClient {
   private updateRequired = false;
   private lastOnlineAtMs = 0;
 
+  private readonly capturedWebSocket?: typeof WebSocket;
+  private get webSocket(): typeof WebSocket { return this.capturedWebSocket ?? WebSocket; }
+
   constructor(private readonly url: string, options: GonvexClientOptions = {}) {
+    this.capturedWebSocket = options.webSocketConstructor;
     this.controlOnly = options.role === "control";
     if (this.controlOnly && options.public) throw new Error("Control connections cannot be public tenant connections");
     if (this.controlOnly) {
@@ -1356,16 +1330,16 @@ export class GonvexClient {
     for (const command of commands) if (command.patches.length) this.optimisticReducerIds.add(command.commandId);
   }
 
-  private async runLocalReducer<T>(ref: FunctionReference, args: JsonValue): Promise<T | QueuedReducerOutcome> {
+  private async runLocalReducer<T>(ref: FunctionReference, args: JsonValue, command?: EngineCommand): Promise<T | QueuedReducerOutcome> {
     args = structuredClone(args);
     const admittedGeneration = this.outboxScopeGeneration;
     await this.outboxReady;
     await this.replicaReady;
     if (!this.localExecutor || !this.localBinding) throw new Error("This reducer requires the generated Gonvex client with local execution enabled");
-    const reducerId = randomID();
+    const reducerId = command?.id ?? randomID();
     const execution: LocalExecution | undefined = this.localIdentity ? {
-      scope:this.replicaScope,commandId:reducerId,now:Date.now(),
-      intentEntropy:Array.from(crypto.getRandomValues(new Uint8Array(32)),byte=>byte.toString(16).padStart(2,'0')).join(''),
+      scope:this.replicaScope,commandId:reducerId,now:command?.now ?? Date.now(),
+      intentEntropy:command?.entropy ?? Array.from(crypto.getRandomValues(new Uint8Array(32)),byte=>byte.toString(16).padStart(2,'0')).join(''),
       artifactHash:this.localBinding.artifactHash,identity:structuredClone(this.localIdentity),
     } : undefined;
     let preparedResult: {transaction:LocalTransactionResult; base:number; pending:string} | undefined;
@@ -1395,7 +1369,10 @@ export class GonvexClient {
       if (this.clientContract && this.clientContract.offlineMaxAgeMs !== null && !this.canSendReducerNow() && (Date.now() - this.lastOnlineAtMs > this.clientContract.offlineMaxAgeMs || Date.now() < this.lastOnlineAtMs)) throw new Error("Offline editing window expired. Reconnect before making more changes.");
       const scope = this.outboxScope;
       if (!execution || execution.scope !== this.replicaScope) throw new GonvexClientError("Session changed before local reducer execution", {code:'superseded'});
-      const sharedEntries = (await this.reducerOutbox.list(scope)).filter(outboxEntryIsLive);
+      const entries = await this.reducerOutbox.list(scope);
+      const admitted = command && entries.find(entry => entry.idempotencyKey === command.id);
+      if (admitted?.engineOutcome) return admitted.engineOutcome.result as T;
+      const sharedEntries = entries.filter(outboxEntryIsLive);
       const sharedPatches = sharedEntries?.filter(entry => entry.state !== "committed").flatMap(entry => (entry.patches ?? []).map(patch => patch.op === "delete"
         ? {entity: patch.entity ?? patch.collection!, rowId: patch.rowId, op: "delete" as const}
         : {entity: patch.entity ?? patch.collection!, rowId: patch.rowId, op: patch.op === "upsert" ? "insert" as const : patch.op, fields: patch.fields as import("@gonvex/module-sdk").JsonObject}));
@@ -1448,6 +1425,7 @@ export class GonvexClient {
           scope, path: ref.path, args, idempotencyKey: reducerId, state: "pending",
           entityKeys: transaction ? [] : ["__gonvex_local_intents"],
           ...(transaction ? { dependencies: localIntentDependencies(transaction), coalesceKey: transaction.coalesceKey } : {}),
+          ...(command ? { engineOutcome: { result: transaction ? transaction.result : { status: "queued", reducerId } } } : {}),
           patches, localExecution: execution,
         });
         if (scope !== this.outboxScope || execution.scope !== this.replicaScope) {
@@ -1525,6 +1503,23 @@ export class GonvexClient {
 
   /** Retain only the data an active view observes; cold rows remain on disk. */
   retainReplicaEntities(entity:string,ids:readonly string[]) { return this.replica.retainRows(entity,ids); }
+  async readReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Promise<Array<T | undefined>> {
+    const generation = this.outboxScopeGeneration;
+    const ready = await this.localSessionReady;
+    if (!ready) throw new GonvexClientError("No authenticated local session is available for a cold row read", { code: "disconnected" });
+    if (generation !== this.outboxScopeGeneration) throw new GonvexClientError("Session changed during cold row read", { code: "superseded" });
+    const scope = this.replicaScope;
+    const hydration = this.replicaReady;
+    await hydration;
+    if (generation !== this.outboxScopeGeneration || scope !== this.replicaScope || hydration !== this.replicaReady) throw new GonvexClientError("Session changed during cold row read", { code: "superseded" });
+    const release = this.replica.retainRows(entity, ids);
+    try {
+      await release.ready;
+      if (generation !== this.outboxScopeGeneration || scope !== this.replicaScope) throw new GonvexClientError("Session changed during cold row read", { code: "superseded" });
+      return this.replica.entityBatch<T>(entity, ids);
+    } finally { release(); }
+  }
+
   retainReplicaWindow(signature:string) { return this.replica.retainWindow(signature); }
 
   /** Read rows and server-owned completeness for a persisted Replica Collection. */
@@ -1664,7 +1659,7 @@ export class GonvexClient {
     // The caller owns auth now: a token fetch still in flight from the
     // previous installation must not clobber this one when it resolves.
     this.authFetchGeneration += 1;
-    if (this.socket?.readyState === WebSocket.OPEN) {
+    if (this.socket?.readyState === this.webSocket.OPEN) {
       if (this.authInFlight && this.latestAuthFrameId) {
         // Keep server-side connection auth transitions serialized. Sending a
         // second frame concurrently allows an older, slower project-only auth
@@ -1729,7 +1724,7 @@ export class GonvexClient {
     const promise = new Promise<void>((resolve, reject) => {
       this.managedAuthAttempt = { ids: new Set(), resolve, reject };
     });
-    if (this.socket?.readyState === WebSocket.OPEN) {
+    if (this.socket?.readyState === this.webSocket.OPEN) {
       if (this.authInFlight && this.latestAuthFrameId) {
         this.authResendRequired = true;
       } else {
@@ -1822,7 +1817,7 @@ export class GonvexClient {
 
   connect() {
     if (this.updateRequired) return;
-    if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
+    if (this.socket && this.socket.readyState <= this.webSocket.OPEN) return;
 
     this.flushTelemetry();
     const isReconnect = this.socket !== undefined;
@@ -1834,7 +1829,7 @@ export class GonvexClient {
       publicUrl.searchParams.set("public", "1");
       transportUrl = publicUrl.toString();
     }
-    const socket = new WebSocket(transportUrl);
+    const socket = new this.webSocket(transportUrl);
     this.socket = socket;
     this.serverCapabilities = {};
     socket.addEventListener("open", () => {
@@ -2198,6 +2193,25 @@ export class GonvexClient {
       const id = "id" in message ? message.id : "system";
       this.handlers.get(id)?.(message);
     });
+  }
+
+  /** @internal Authenticated namespace used to fence engine command retries. */
+  engineScope(): string { return this.outboxScope; }
+
+  /** Finish worker-owned durable work before releasing its journal handles. */
+  async closeEngine(): Promise<void> {
+    await this.localLane;
+    this.manuallyClosed = true;
+    this.socket?.close();
+    this.rejectPendingCalls(call => new GonvexClientError(`Engine stopped while waiting for ${call.kind} ${call.path}`, { code: "closed", path: call.path, operation: call.kind }));
+    this.outboxProgressWake?.();
+    while (this.drainingOutbox) await new Promise(resolve => setTimeout(resolve, 10));
+    await this.localLane;
+    await this.preparationLane;
+    await this.localSessionRestore.catch(() => undefined);
+    await this.replicaFrames;
+    await this.replica.settle();
+    this.close();
   }
 
   close() {
@@ -3896,7 +3910,7 @@ export class GonvexClient {
 
   /** Re-send auth on the open socket so a lost tenant session is restored. */
   private requestReauthentication() {
-    if (this.manuallyClosed || this.authInFlight || this.socket?.readyState !== WebSocket.OPEN) return;
+    if (this.manuallyClosed || this.authInFlight || this.socket?.readyState !== this.webSocket.OPEN) return;
     if (!this.auth.project && !this.auth.tenant && !this.auth.token && !this.auth.fetchToken) return;
     this.sendAuth(false);
   }
@@ -3925,7 +3939,7 @@ export class GonvexClient {
       if (options.offline === "queue" || options.optimistic?.length) return Promise.reject(new GonvexClientError("Public reducers are server-only and cannot queue or execute optimistically", { code: "disconnected", path: ref.path, operation: "reducer" }));
       return this.call<T>("reducer", ref, args, options.timeoutMs ?? this.timeouts.reducerTimeoutMs);
     }
-    if (ref.localExecution === 1) return this.runLocalReducer<T>(ref, args);
+    if (ref.localExecution === 1) return this.runLocalReducer<T>(ref, args, options.engineCommand);
     if (options.offline === "queue" && ref.offline?.mode !== "allowed") {
       return Promise.reject(new GonvexClientError(
         `Reducer ${ref.path} does not allow offline queueing.`,
@@ -3936,7 +3950,7 @@ export class GonvexClient {
       ...options,
       offline: options.offline ?? (ref.offline?.mode === "allowed" ? "queue" : "reject"),
     };
-    const reducerId = randomID();
+    const reducerId = options.engineCommand?.id ?? randomID();
     const patches = effectiveOptions.optimistic
       ?? optimisticPatchesFromReference(ref.optimistic?.transaction, args);
     if (patches.length === 0 && effectiveOptions.offline !== "queue") {
@@ -3946,6 +3960,7 @@ export class GonvexClient {
         args,
         effectiveOptions.timeoutMs ?? this.timeouts.reducerTimeoutMs,
         reducerId,
+        options.engineCommand?.id,
       );
     }
     return this.runOptimisticReducer<T>(ref, args, effectiveOptions, reducerId, patches);
@@ -3969,6 +3984,10 @@ export class GonvexClient {
         { code: "closed", path: ref.path, operation: "reducer" },
       );
     }
+    if (options.engineCommand) {
+      const previous = (await this.reducerOutbox.list(this.outboxScope)).find(entry => entry.idempotencyKey === reducerId);
+      if (previous?.engineOutcome) return previous.engineOutcome.result as T;
+    }
     this.directOutboxReducerIds.add(reducerId);
     let entryId: number | undefined;
     try {
@@ -3978,6 +3997,7 @@ export class GonvexClient {
         path: ref.path,
         args,
         idempotencyKey: reducerId,
+        ...(options.engineCommand ? { engineOutcome: { result: { status: "queued", reducerId } } } : {}),
         entityKeys: patches.map((patch) => `${patch.entity ?? patch.collection ?? ""}:${patch.rowId}`),
         patches,
         state: "inflight",
@@ -4051,7 +4071,7 @@ export class GonvexClient {
     if (this.updateRequired) return false;
     if (globalThis.navigator?.onLine === false) return false;
     const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN || this.authInFlight) return false;
+    if (!socket || socket.readyState !== this.webSocket.OPEN || this.authInFlight) return false;
     const hasConfiguredAuth = Boolean(
       this.auth.project || this.auth.tenant || this.auth.token || this.auth.fetchToken,
     );
@@ -4687,7 +4707,7 @@ export class GonvexClient {
       return;
     }
     // Performance telemetry is best effort; never retain it across socket scopes.
-    if (this.socket?.readyState !== WebSocket.OPEN) return;
+    if (this.socket?.readyState !== this.webSocket.OPEN) return;
     const { type: _, ...entry } = frame;
     this.telemetryEvents.push({
       ...entry,
@@ -4702,7 +4722,7 @@ export class GonvexClient {
     if (this.telemetryTimer) clearTimeout(this.telemetryTimer);
     this.telemetryTimer = undefined;
     const events = this.telemetryEvents.splice(0);
-    if (events.length && this.socket?.readyState === WebSocket.OPEN) {
+    if (events.length && this.socket?.readyState === this.webSocket.OPEN) {
       this.sendNow({ type: "telemetry.batch", events });
     }
   }
@@ -4828,7 +4848,7 @@ export class GonvexClient {
     }
     // A dead socket's close handler already reset authInFlight; the next
     // reconnect runs its own sendAuth, so this resolve has nothing to send.
-    if (this.socket !== socket || socket?.readyState !== WebSocket.OPEN) return;
+    if (this.socket !== socket || socket?.readyState !== this.webSocket.OPEN) return;
     this.sendAuthFrame();
   }
 
@@ -4846,7 +4866,7 @@ export class GonvexClient {
       // Providers can install their rotated session inside the fetcher before
       // returning it. That frame still carries the force-refreshed credential.
       if (this.auth.fetchToken === fetcher && this.outboxScope === scope
-        && this.socket === socket && socket?.readyState === WebSocket.OPEN
+        && this.socket === socket && socket?.readyState === this.webSocket.OPEN
         && this.authInFlight && this.latestAuthFrameId !== undefined
         && typeof token === "string" && token && token !== rejectedToken && this.auth.token === token) {
         this.authRefreshedToken = token;
@@ -4856,12 +4876,12 @@ export class GonvexClient {
     if (typeof token === "string" && token && token !== rejectedToken) {
       this.applyAuth({ token });
       this.authRefreshedToken = token;
-      if (this.socket === socket && socket?.readyState === WebSocket.OPEN) {
+      if (this.socket === socket && socket?.readyState === this.webSocket.OPEN) {
         this.sendAuthFrame();
       }
       return;
     }
-    if (this.socket !== socket || socket?.readyState !== WebSocket.OPEN) return;
+    if (this.socket !== socket || socket?.readyState !== this.webSocket.OPEN) return;
     // An unavailable identity provider or an unchanged token is not evidence
     // that the account was revoked. Keep the restored replica and retry.
     this.retryTransientAuth();
@@ -4897,7 +4917,7 @@ export class GonvexClient {
     this.authWatchdogTimer = setTimeout(() => {
       this.authWatchdogTimer = undefined;
       if (!this.authInFlight) return;
-      if (this.socket?.readyState === WebSocket.OPEN) {
+      if (this.socket?.readyState === this.webSocket.OPEN) {
         this.sendAuth(true);
       } else {
         this.connect();
@@ -4915,7 +4935,7 @@ export class GonvexClient {
 
   private sendNow(message: ClientMessage) {
     const socket = this.socket;
-    if (!socket || socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+    if (!socket || socket.readyState === this.webSocket.CLOSING || socket.readyState === this.webSocket.CLOSED) {
       // Never drop silently. A missing socket swallowed the message outright,
       // and an "open" listener on a closing/closed socket never fires — either
       // way the caller hung forever with the server never seeing the call.
@@ -4928,7 +4948,7 @@ export class GonvexClient {
       this.connect();
       return;
     }
-    if (socket.readyState === WebSocket.CONNECTING) {
+    if (socket.readyState === this.webSocket.CONNECTING) {
       socket.addEventListener(
         "open",
         () => {
@@ -5343,66 +5363,6 @@ function normalizeQuerySubscriptionRetentionMs(value: number | undefined): numbe
   if (value === undefined) return 250;
   if (!Number.isFinite(value)) return 250;
   return Math.max(0, Math.min(5 * 60_000, Math.floor(value)));
-}
-
-function authIdentityKey(auth: GonvexClientAuth) {
-  if (auth.token) {
-    const tokenIdentity = authIdentityKeyFromToken(auth);
-    if (tokenIdentity) {
-      // Conflicting account credentials cannot reuse either account's cache.
-      if (auth.identity?.sub && !tokenIdentity.endsWith(`\u0000${auth.identity.sub}`)) return "";
-      return tokenIdentity;
-    }
-  }
-  // Token-free fallback: an explicit identity hint carries the same claims a
-  // token would supply, so both paths derive the same key for the same Account.
-  const hint = auth.identity;
-  if (hint && typeof hint.sub === "string" && hint.sub.trim()) {
-    return [auth.project ?? "", auth.tenant ?? "", hint.iss ?? "", hint.sub].join("\u0000");
-  }
-  return "";
-}
-
-function authIdentityKeyFromToken(auth: GonvexClientAuth) {
-  if (!auth.token) return "";
-  const parts = auth.token.split(".");
-  if (parts.length < 2) return "";
-  try {
-    const encoded = parts[1]!.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=");
-    const payload = JSON.parse(globalThis.atob(padded)) as { sub?: unknown; iss?: unknown };
-    if (typeof payload.sub !== "string" || !payload.sub.trim()) return "";
-    return [
-      auth.project ?? "",
-      auth.tenant ?? "",
-      typeof payload.iss === "string" ? payload.iss : "",
-      payload.sub,
-    ].join("\u0000");
-  } catch {
-    return "";
-  }
-}
-
-function sameAuthTokenIdentity(left: GonvexClientAuth, right: GonvexClientAuth) {
-  const leftIdentity = authIdentityKey(left);
-  const rightIdentity = authIdentityKey(right);
-  return leftIdentity !== "" && leftIdentity === rightIdentity;
-}
-
-function reducerOutboxScope(url: string, auth: GonvexClientAuth, ephemeralScope: string) {
-  const identity = authIdentityKey(auth);
-  if (identity) return ["identity", url, identity].join("\u0000");
-  if (auth.token || auth.identity || auth.fetchToken) {
-    // Opaque tokens (or credentials installed before tenant selection) do not
-    // expose a stable Account key. A per-client scope preserves current-session
-    // queue semantics without ever restoring those rows under another Account.
-    return ["ephemeral-auth", url, ephemeralScope].join("\u0000");
-  }
-  // Anonymous/dev-auth clients still need a stable namespace, but it must be
-  // isolated by deployment and tenant. Once an authenticated identity is
-  // installed, applyAuth switches away from this scope before restoring or
-  // sending its durable reducers.
-  return ["anonymous", url, auth.project ?? "", auth.tenant ?? ""].join("\u0000");
 }
 
 function isEphemeralOutboxScope(scope: string) {

@@ -589,7 +589,7 @@ export class LocalReplica implements LocalReplicaView {
     return Object.fromEntries(Object.entries(coverage).map(([table,value])=>[table,this.residentPartialTables.has(table)?{...value,complete:false,completeWhere:undefined}:value]));
   }
 
-  retainRows(entity:string,ids:readonly string[]):()=>void {
+  retainRows(entity:string,ids:readonly string[]): (() => void) & { ready: Promise<void> } {
     const scopeGeneration=this.scopeActivationGeneration;
     let retained=this.retainedRows.get(entity);
     if(!retained){retained=new Map();this.retainedRows.set(entity,retained);}
@@ -607,14 +607,16 @@ export class LocalReplica implements LocalReplicaView {
     }, true);
 
     let released=false;
-    return ()=>{
+    return Object.assign(()=>{
       if(released)return;released=true;
       const current=this.retainedRows.get(entity);
       for(const id of ids){const count=current?.get(id)??0;if(count>1)current!.set(id,count-1);else current?.delete(id);this.refreshPin(entity,id);}
       if(!current?.size)this.retainedRows.delete(entity);
       this.trimResidentRows();
-    };
+    }, { ready: operation });
   }
+
+  async settle(): Promise<void> { await this.application; await this.persistence; }
 
   private trimResidentRows() {
     // Without indexed persistence, eviction would lose the only readable copy.

@@ -183,6 +183,7 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
         ]);
         return entries;
       }),
+      getMany: ids => guarded(() => queue.entries.bulkGet([...ids])),
       put: entry => guarded(async () => { await queue.entries.put(entry);channel?.postMessage({type:'outbox'}); }),
       update: (id,change) => guarded(async () => {
         let changed = false;
