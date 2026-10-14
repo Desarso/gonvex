@@ -277,15 +277,25 @@ export class LocalReplica implements LocalReplicaView {
       count += rows.size;
     }
     if (this.storage?.withReadView && this.storage?.loadWindowRows) {
-      for (const [entity, old] of this.entityTables) if (!next.has(entity)) {
-        for (const id of old.keys()) this.recency.delete(`${entity}\0${id}`);
+      const reset = !next.size || [...this.entityTables].every(([entity,old]) => {
+        const rows = next.get(entity);
+        return !rows || rows instanceof ResidentMap && !rows.sharesLineage(old);
+      });
+      if (reset) this.recency.clear();
+      else for (const [entity,old] of this.entityTables) {
+        const rows = next.get(entity);
+        if (!rows || rows instanceof ResidentMap && !rows.sharesLineage(old)) {
+          for (const id of old.keys()) this.recency.delete(`${entity}\0${id}`);
+        }
       }
-      for (const [entity, rows] of next) if (rows !== this.entityTables.get(entity)) {
-        const ids = rows instanceof ResidentMap ? rows.changedIDs : rows.keys();
+      for (const [entity,rows] of next) if (reset || rows !== this.entityTables.get(entity)) {
+        const previous = this.entityTables.get(entity);
+        const replaced = rows instanceof ResidentMap && (!previous || !rows.sharesLineage(previous));
+        const ids = reset || replaced ? rows.keys() : rows instanceof ResidentMap ? rows.changedIDs : rows.keys();
         for (const id of ids) {
           const key = `${entity}\0${id}`;
-          this.recency.delete(key);
-          if (rows.has(id)) this.recency.set(key, { entity, id }, this.rowIsPinned(entity,id));
+          if (reset || replaced || rows.has(id)) this.recency.set(key, { entity, id }, this.rowIsPinned(entity,id));
+          else this.recency.delete(key);
         }
       }
     }
@@ -739,10 +749,19 @@ export class LocalReplica implements LocalReplicaView {
   /** Changes to the authoritative execution snapshot, excluding UI metadata and predictions. */
   executionVersion() { return this.executionVersionValue; }
   executionReadVersion(entity: string, rowId?: string) {
-    return (rowId === undefined ? this.executionEntityVersions.get(entity) : this.executionRowVersions.get(JSON.stringify([entity, rowId]))) ?? this.executionEntityVersions.get(entity) ?? this.executionVersionFloor;
+    if (rowId === undefined) return this.executionEntityVersions.get(entity) ?? this.executionVersionFloor;
+    const known = this.executionRowVersions.get(JSON.stringify([entity, rowId]));
+    return known ?? (this.hasResidentRow(entity,rowId) ? this.executionVersionFloor : this.executionEntityVersions.get(entity) ?? this.executionVersionFloor);
   }
   entityVersion(entity: string, id?: string) { return id === undefined ? this.entityVersions.get(entity) ?? this.entityVersionFloor : this.rowVersion(entity, id); }
-  rowVersion(entity: string, id: string) { return this.rowVersions.get(`${entity}\0${id}`) ?? this.entityVersions.get(entity) ?? this.entityVersionFloor; }
+  rowVersion(entity: string, id: string) {
+    const known = this.rowVersions.get(`${entity}\0${id}`);
+    return known ?? (this.hasResidentRow(entity,id) ? this.entityVersionFloor : this.entityVersions.get(entity) ?? this.entityVersionFloor);
+  }
+  private hasResidentRow(entity:string,id:string):boolean {
+    return this.storage?.withReadView && this.storage?.loadWindowRows
+      ? this.recency.has(`${entity}\0${id}`) : this.entities.get(entity)?.has(id) === true;
+  }
 
   residencyVersion(): number { return this.residencyVersionValue; }
 
@@ -790,7 +809,10 @@ export class LocalReplica implements LocalReplicaView {
       let index = this.rowListeners.get(selection.entity);
       if (!index) { index = new Map(); this.rowListeners.set(selection.entity, index); }
       for (const id of new Set(selection.ids)) add(index, id);
-      releases.push(() => { if (!index!.size) this.rowListeners.delete(selection.entity); });
+      releases.push(() => {
+        if (!index!.size) this.rowListeners.delete(selection.entity);
+        for (const id of selection.ids!) if (!index!.has(id) && !this.hasResidentRow(selection.entity,id)) this.rowVersions.delete(`${selection.entity}\0${id}`);
+      });
     }
     let released = false;
     return () => { if (released) return; released = true; for (const release of releases) release(); };
@@ -1696,6 +1718,9 @@ export class LocalReplica implements LocalReplicaView {
         }
       }
     }
+    for (const [entity,ids] of this.changedEntities) for (const id of ids) {
+      if (!this.hasResidentRow(entity,id) && !this.rowListeners.get(entity)?.has(id)) this.rowVersions.delete(`${entity}\0${id}`);
+    }
     this.versionValue += 1;
     const callbacks = new Map<(changedIDs?: ReadonlySet<string>) => void, ReadonlySet<string> | undefined>();
     for (const listener of this.listeners) callbacks.set(listener, undefined);
@@ -1730,8 +1755,7 @@ export class LocalReplica implements LocalReplicaView {
     if (!changed) { changed = new Set(); this.changedEntities.set(entity, changed); }
     if (ids === undefined) for (const [key, index] of this.equalityIndexes) if (index.entity === entity) this.equalityIndexes.delete(key);
     for (const id of ids ?? this.entities.get(entity)?.keys() ?? []) {
-      if (this.entities.get(entity)?.has(id) || this.rowListeners.get(entity)?.has(id)) this.rowVersions.set(`${entity}\0${id}`, version);
-      else this.rowVersions.delete(`${entity}\0${id}`);
+      this.rowVersions.set(`${entity}\0${id}`, version);
       changed.add(id);
     }
   }

@@ -1066,3 +1066,18 @@ it('keeps captured and deferred storage snapshots isolated through forked table 
   expect(snapshots[1].entities.tasks.a.nested.value).toBe(2);
   expect(capture('tasks')).toEqual([{id:'a',nested:{value:1}}]);
 });
+
+it('keeps restored row versions scoped to that row and advances missing-row tokens after reclamation',async()=>{
+  const replica=new LocalReplica({load:async()=>({cursor:{epoch:'e',revision:1},entities:{tasks:{a:{id:'a',value:1},b:{id:'b',value:2}}},liveQueries:{root:{signature:'root',kind:'replica',entity:'tasks',key:'id',ids:['a','b'],completeness:'complete',source:'cache'}}}),applyTransaction:async()=>{},withReadView:async(_s,_c,run)=>run({} as any),loadWindowRows:async()=>undefined},{maxResidentRows:2});
+  await replica.activateScope('scope');
+  const version=replica.entityVersion('tasks','a'), execution=replica.executionReadVersion('tasks','a');
+  const cache=new Map();const before=replica.watchRows('root',cache);
+  await replica.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'b',operation:'update',newValue:{value:3}}]});
+  expect(replica.entityVersion('tasks','a')).toBe(version);
+  expect(replica.executionReadVersion('tasks','a')).toBe(execution);
+  expect(replica.watchRows('root',cache)[0]).toBe(before[0]);
+  await replica.applyTransaction({cursor:{epoch:'e',revision:3},changes:[{entity:'tasks',id:'c',operation:'insert',newValue:{id:'c'}}]});
+  expect(replica.entity('tasks','a')).toBeUndefined();
+  expect(replica.entityVersion('tasks','a')).toBeGreaterThan(version);
+  expect(replica.executionReadVersion('tasks','a')).toBeGreaterThan(execution);
+});

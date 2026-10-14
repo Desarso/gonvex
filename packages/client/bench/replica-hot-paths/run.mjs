@@ -45,6 +45,8 @@ if(modes.includes('chromium')) {
   const {chromium}=await import('@playwright/test');
   browser=await chromium.launch({headless:true,args:['--js-flags=--expose-gc']});
   server=createServer(async(req,res)=>{
+    res.setHeader('Cross-Origin-Opener-Policy','same-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy','require-corp');
     if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end('<!doctype html><title>Replica benchmark</title>');return;}
     const file=req.url==='/scenarios.mjs'?path.join(here,'scenarios.mjs'):path.join(generated,path.basename(req.url));
     try{res.setHeader('Content-Type','text/javascript');res.end(await fs.readFile(file));}catch{res.statusCode=404;res.end();}
@@ -52,12 +54,21 @@ if(modes.includes('chromium')) {
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));url=`http://127.0.0.1:${server.address().port}`;
   output.chromium=browser.version();
 }
+if(process.argv.includes('--resume-node')) {
+  const previous=JSON.parse(await fs.readFile(path.join(here,'results.json'),'utf8'));
+  if(previous.baselineSHA!==baselineSHA || previous.candidateSHA!==output.candidateSHA || previous.trials!==trials || previous.iterations!==iterations
+    || JSON.stringify(previous.bundleSHA256)!==JSON.stringify(output.bundleSHA256))throw new Error('Cannot resume measurements from different sources or settings');
+  output.measurements=previous.measurements.filter(record=>record.mode==='node');
+  output.nodeDate=previous.date;
+}
 try {
 for(const mode of modes)for(const count of sizes)for(let trial=0;trial<trials;trial++)for(const name of trial%2?['candidate','baseline']:['baseline','candidate']) {
   process.stderr.write(`${mode} ${count} trial ${trial+1}/${trials} ${name}\n`);
   let page,session,subject;
   if(mode==='chromium') {
     page=await browser.newPage();await page.goto(url);
+    if(!await page.evaluate(()=>crossOriginIsolated))throw new Error('Benchmark page must be cross-origin isolated for high-resolution timing');
+    output.crossOriginIsolated=true;
     session=await page.context().newCDPSession(page);await session.send('HeapProfiler.enable');
     await page.evaluate(async({name,count})=>{
       const sdk=await import(`/${name}.mjs`);const {fixture}=await import('/scenarios.mjs');
@@ -93,8 +104,9 @@ for(const mode of modes)for(const count of sizes)for(let trial=0;trial<trials;tr
   output.measurements.push({mode,count,trial,name,scenario:'heap',loaded,updated,delta:updated-loaded,method:session?'CDP Runtime.getHeapUsage after collectGarbage':'Node heapUsed after exposed GC',longTasks,verification:page?await page.evaluate(()=>subject.verify()):subject.verify()});
 
   for(const [scenario,[samples,warmups]] of Object.entries(configs)) {
-    const values=page?await page.evaluate(async({scenario,samples,warmups})=>{const {measure}=await import('/scenarios.mjs');return measure(subject.operations[scenario],samples,warmups);},{scenario,samples,warmups}):await measure(subject.operations[scenario],samples,warmups);
-    output.measurements.push({mode,count,trial,name,scenario,values});
+    const batchSize=page && scenario==='capture'?20:1;
+    const values=page?await page.evaluate(async({scenario,samples,warmups,batchSize})=>{const {measure}=await import('/scenarios.mjs');return measure(subject.operations[scenario],samples,warmups,batchSize);},{scenario,samples,warmups,batchSize}):await measure(subject.operations[scenario],samples,warmups);
+    output.measurements.push({mode,count,trial,name,scenario,values,batchSize});
   }
   if(page&&trial===0)for(const scenario of ['single','burst']) {
     await session.send('Profiler.enable');await session.send('Profiler.setSamplingInterval',{interval:100});await session.send('Profiler.start');

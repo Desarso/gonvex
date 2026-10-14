@@ -175,3 +175,26 @@ it('updates equality indexes after peer changes publish and does not index a fai
   expect(replica.equalityRows('items','status','done').map(row=>row._id)).toEqual(['row-00']);
   expect(replica.equalityRows('items','status','reverted')).toEqual([]);fail.mockRestore();
 });
+
+it('publishes monotonic peer-insert versions for a previously missing row and reclaims released missing-row subscriptions',async()=>{
+  await seed();const replica=new LocalReplica(storage,{maxResidentRows:100});await replica.activateScope('scope');
+  await replica.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'items',id:'row-00',operation:'update',newValue:{status:'updated'}}]});
+  const missing=replica.entityVersion('items','new');
+  await storage.applyTransaction({cursor:{epoch:'e',revision:3},changes:[{entity:'items',id:'new',operation:'insert',newValue:{_id:'new',status:'new'}}]},{entities:{},liveQueries:{}},'scope');
+  await replica.synchronizeStorage();
+  expect(replica.entityVersion('items','new')).toBeGreaterThan(missing);
+  const release=replica.subscribe(()=>{}, {entity:'items',ids:['new']});
+  await replica.applyTransaction({cursor:{epoch:'e',revision:4},changes:[{entity:'items',id:'new',operation:'delete'}]});
+  expect(replica['rowVersions'].has('items\0new')).toBe(true);
+  release();expect(replica['rowVersions'].has('items\0new')).toBe(false);
+});
+
+it('drops old recency entries on an epoch replacement of the same table without scanning unchanged writes',async()=>{
+  const replica=new LocalReplica(storage,{maxResidentRows:100});
+  await replica.materializeWindow({signature:'small',entity:'items',key:'id',rows:[{id:'a'},{id:'b'}],completeness:'partial',source:'server',cursor:{epoch:'old',revision:1}});
+  await replica.applyTransaction({cursor:{epoch:'new',revision:1},changes:[{entity:'items',id:'z',operation:'insert',newValue:{id:'z'}}]});
+  expect(replica['recency'].size).toBe(1);
+  expect(replica['recency'].has('items\0a')).toBe(false);
+  expect(replica['recency'].has('items\0z')).toBe(true);
+  replica.dispose();expect(replica['recency'].size).toBe(0);
+});

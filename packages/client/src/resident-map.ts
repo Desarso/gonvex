@@ -59,6 +59,7 @@ export class ResidentMap<V> extends Map<string, V> {
   private byID?: Node<string, Entry<V>>;
   private byPosition?: Node<number, Entry<V>>;
   private owner: object = {};
+  private lineage: object = {};
   private count = 0;
   private nextPosition = 0;
   readonly changedIDs = new Set<string>();
@@ -66,10 +67,12 @@ export class ResidentMap<V> extends Map<string, V> {
   fork(): ResidentMap<V> {
     this.owner = {};
     const next = new ResidentMap<V>();
+    next.lineage = this.lineage;
     next.byID = this.byID; next.byPosition = this.byPosition;
     next.count = this.count; next.nextPosition = this.nextPosition;
     return next;
   }
+  sharesLineage(other: Map<string,V>): boolean { return other instanceof ResidentMap && this.lineage === other.lineage; }
   override get size() { return this.count; }
   override get(id: string): V | undefined { return get(this.byID, id)?.value; }
   position(id: string): number { return get(this.byID, id)?.position ?? -1; }

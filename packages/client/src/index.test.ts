@@ -3643,5 +3643,11 @@ it('memoizes offline plans by root, relation and reference dependencies while re
   expect(client.offlineLiveQueryToken(related)).not.toBe(relationToken);
   const referenceToken=client.offlineLiveQueryToken(related);await materialize('statuses',[{id:'open',order:1}]);
   expect(client.offlineLiveQueryToken(related)).not.toBe(referenceToken);
+  const full:FunctionReference={...ref,live:{...ref.live!,plan:{...ref.live!.plan,where:undefined}}};
+  expect(client.offlineLiveQuery(full).rows).toHaveLength(2);
+  const switching=replica.activateScope('new-identity');
+  expect(client.offlineLiveQuery(full).rows).toEqual([]);
+  expect(client.offlineLiveQuery(ref,{status:'open'}).rows).toEqual([]);
+  await switching;
   client.close();
 });

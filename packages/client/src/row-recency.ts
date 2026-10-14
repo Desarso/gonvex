@@ -7,6 +7,7 @@ export class RowRecency {
   private readonly heap: Entry[] = [];
   private clock = 0;
   get size() { return this.entries.size; }
+  has(key: string): boolean { return this.entries.has(key); }
   clear(): void { this.entries.clear(); this.heap.length = 0; this.clock = 0; }
   set(key: string, row: { entity: string; id: string }, pinned: boolean): void {
     this.delete(key);
