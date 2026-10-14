@@ -121,9 +121,15 @@ try {
           const legacy = summary(samples[0]), engine = summary(samples[1]);
           const value = { metric: kind === 'outbox' ? `outbox-500-${subcase}` : `${kind}-${count}`, legacy, engine,
             ratio: comparison(samples[1], samples[0]), status: Math.max(legacy.cv, engine.cv) > options.cv ? 'NOISY' : 'OK' };
-          if (kind === 'single-row') {
+          if (kind === 'single-row' || kind === 'delete-100-windows') {
             value.engineRequestProfile = [];
+            const cdp = kind === 'delete-100-windows' && name === 'chromium' ? await contexts[1].newCDPSession(pages[1]) : undefined;
+            if (cdp) { await cdp.send('Profiler.enable'); await cdp.send('Profiler.start'); }
             for (let i = 0; i < 5; i++) value.engineRequestProfile.push(await pages[1].evaluate(index => window.profileSample(index), round + i));
+            if (cdp) {
+              await writeFile(`${options.output}.${count}.delete.cpu.json`, JSON.stringify(await cdp.send('Profiler.stop')));
+              await cdp.detach();
+            }
           }
           if (kind === 'startup-working-set') {
             value.startupProfiles = [];
@@ -153,6 +159,7 @@ try {
               }
             }
           }
+          if (kind === 'startup-working-set') value.rowOwnership = await pages[1].evaluate(() => window.profileRowOwnership());
           browser.cases.push(value);
           delete results.inProgress;
           console.log(`${name} ${value.metric} ${value.status} n=${samples[0].length}: legacy p95=${legacy.p95.toFixed(3)} engine p95=${engine.p95.toFixed(3)}`);
