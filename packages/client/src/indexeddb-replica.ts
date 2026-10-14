@@ -344,11 +344,28 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     });
   }
 
-  async loadWorkingSet(scope:string,budget:{maxRows:number;maxBytes:number}):Promise<ReplicaSnapshot|undefined> {
+  readonly ownsWorkingSetRows = true;
+
+  async loadWorkingSet(scope:string,budget:{maxRows:number;maxBytes:number;preferredWindows?:readonly string[]}):Promise<ReplicaSnapshot|undefined> {
     await this.initialize();
     return this.database.transaction('r',this.database.entities,this.database.windows,this.database.meta,async()=>{
       const entities:ReplicaSnapshot['entities']={},liveQueries:ReplicaSnapshot['liveQueries']={},partial=new Set<string>();
       let bytes=0,count=0,hasRows=false,full=false;
+      for (const signature of budget.preferredWindows ?? []) {
+        const record = await this.database.windows.get([scope,signature]);
+        if (!record || record.deleted) continue;
+        const window: ReplicaWindow = JSON.parse(record.value);
+        for (let offset = 0; offset < window.ids.length && !full; offset += 256) {
+          const records = await this.database.entities.bulkGet(window.ids.slice(offset,offset+256).map(id => [scope,window.entity,id]) as [string,string,string][]);
+          for (const row of records) {
+            if (!row || row.deleted || entities[row.entity]?.[row.id]) continue;
+            const size = row.value.length * 2 + 256;
+            if (count >= budget.maxRows || bytes + size > budget.maxBytes) { full = true; break; }
+            (entities[row.entity] ??= {})[row.id] = JSON.parse(row.value);
+            hasRows = true; bytes += size; count++;
+          }
+        }
+      }
       // getAll-backed pages avoid one JS/Dexie cursor continuation per row.
       // Keep both temporary decoding and retained rows bounded independently.
       let after: [string, string, string] | undefined;
@@ -358,7 +375,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
           .limit(Math.min(256, Math.max(1, budget.maxRows - count + 1))).toArray();
         if (!page.length) break;
         for (const record of page) {
-          if (record.deleted) continue;
+          if (record.deleted || entities[record.entity]?.[record.id]) continue;
           hasRows = true;
           const size = record.value.length * 2 + 256;
           if (count >= budget.maxRows || bytes + size > budget.maxBytes) { partial.add(record.entity); full = true; break; }

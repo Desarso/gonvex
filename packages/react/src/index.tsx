@@ -1969,12 +1969,12 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, ref.kind, ref.path, argsKey]);
   const getSnapshot = useMemo(() => {
-    let offlineVersion = -1;
+    let offlineVersion = "";
     let offlineResult: LiveQueryResult<T> | undefined;
     return () => {
       if (args === 'skip') return emptyLiveQuery as LiveQueryResult<T>;
       if (client.localReplica.freshness() !== 'offline') return client.localReplica.liveQuerySnapshot<T>(signature);
-      const version = client.localReplica.version();
+      const version = client.offlineLiveQueryToken(ref);
       if (offlineVersion === version && offlineResult) return offlineResult;
     const offline = client.offlineLiveQuery<T>(ref, args);
     offlineResult = {

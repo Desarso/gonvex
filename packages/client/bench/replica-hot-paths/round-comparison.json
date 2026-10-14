@@ -1,0 +1,1573 @@
+{
+  "method": "Independent-round paired hierarchical bootstrap of (round2 baseline/candidate median ratio)/(round1 baseline/candidate median ratio); 2,000 draws, deterministic seed. Machine load differs across rounds. Median and p95 candidate intervals independently resample candidate trials/values across rounds; p95 intervals are exploratory with only 45 hot-path samples. Timer-quantized capture samples can yield unbounded ratios.",
+  "round1SHA": "1dd4e09886da4fd45bfaeb8fcb20cebb62fdcf6d",
+  "round2SHA": "c660679e9bfa4f75af2646b4dacc081136d1b08e",
+  "comparisons": [
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "single",
+      "round1Ratio": 9.103398933690048,
+      "round2Ratio": 11.503600564580031,
+      "normalizedGainChange": 1.2636599415639433,
+      "ci": [
+        0.7805750319019704,
+        2.014360322099958
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.2205076676425153,
+      "candidateCI": [
+        0.8972778633784031,
+        1.8930016004743229
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.2277549476503957,
+      "candidateP95CI": [
+        0.5898657382305434,
+        2.839860469091785
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "singleVisible",
+      "round1Ratio": 2.5282671897402573,
+      "round2Ratio": 2.6731949250289606,
+      "normalizedGainChange": 1.0573229506267463,
+      "ci": [
+        0.7822026536645469,
+        1.469972228374587
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.3171395617077124,
+      "candidateCI": [
+        1.109166934954786,
+        1.472554805418272
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.3406194311840869,
+      "candidateP95CI": [
+        0.9643431657731256,
+        1.6479464474197456
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "burst",
+      "round1Ratio": 2.080682277841328,
+      "round2Ratio": 3.5471155395454104,
+      "normalizedGainChange": 1.7047848089644333,
+      "ci": [
+        1.443900325314907,
+        2.224660167438351
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.352178192410056,
+      "candidateCI": [
+        1.8958257018390354,
+        2.9305494661710654
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 2.790123850392609,
+      "candidateP95CI": [
+        1.637052606998364,
+        3.4528848322485044
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "optimistic",
+      "round1Ratio": 3.6032565497372753,
+      "round2Ratio": 3.167613280062904,
+      "normalizedGainChange": 0.8790973488395837,
+      "ci": [
+        0.7127530044702771,
+        1.1493607701625432
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.160885456799663,
+      "candidateCI": [
+        1.0019646699608362,
+        1.37637648581837
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.2513458397012223,
+      "candidateP95CI": [
+        1.0675276078623315,
+        1.5380377331484194
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "unrelated",
+      "round1Ratio": 11.038431843580208,
+      "round2Ratio": 10.88858334907201,
+      "normalizedGainChange": 0.9864248385430446,
+      "ci": [
+        0.35864829579524293,
+        1.3888273291847764
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.3264175990741482,
+      "candidateCI": [
+        1.2099246368292988,
+        1.540371374917315
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.4282813589018146,
+      "candidateP95CI": [
+        1.1941843197858704,
+        1.7707585351369988
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "matching",
+      "round1Ratio": 7.563339307257811,
+      "round2Ratio": 9.224530337085202,
+      "normalizedGainChange": 1.2196372478269362,
+      "ci": [
+        0.48816160735424424,
+        2.016974148833937
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.810615730337875,
+      "candidateCI": [
+        1.5135392860064065,
+        2.110203018266662
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 28.809344134105963,
+      "candidateP95CI": [
+        1.9875264768210827,
+        43.21253203001203
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "sorted",
+      "round1Ratio": 22.43874562913086,
+      "round2Ratio": 18.40283792146496,
+      "normalizedGainChange": 0.8201366611854486,
+      "ci": [
+        0.5678430696454547,
+        1.4416561731716875
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.1734408830810374,
+      "candidateCI": [
+        0.9262688399089696,
+        1.3478563321521124
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.6031873932662817,
+      "candidateP95CI": [
+        1.1039027761358298,
+        1.7382539674580677
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "snapshots",
+      "round1Ratio": 2.29388489214223,
+      "round2Ratio": 2.287532834849156,
+      "normalizedGainChange": 0.9972308735652634,
+      "ci": [
+        0.8550200361220972,
+        1.5897231496952482
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.1234592845959224,
+      "candidateCI": [
+        1.015503875928002,
+        1.7253968251882992
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.774251890661833,
+      "candidateP95CI": [
+        0.0035253285276139724,
+        2.0766416996889445
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "capture",
+      "round1Ratio": 228.6318273761835,
+      "round2Ratio": 214.91619589357515,
+      "normalizedGainChange": 0.9400099643168179,
+      "ci": [
+        0.6166776454129798,
+        1.354944597161581
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.3964218458183244,
+      "candidateCI": [
+        1.068493150770266,
+        1.934086629799414
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.8387997220832983,
+      "candidateP95CI": [
+        1.0849256901312416,
+        2.2381656818426623
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "startup",
+      "round1Ratio": 1.4462208952348878,
+      "round2Ratio": 1.641897022279582,
+      "normalizedGainChange": 1.1353016871000978,
+      "ci": [
+        1.015123316912662,
+        1.3643179389052502
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.6388212647502876,
+      "candidateCI": [
+        1.3912103297398792,
+        1.8990635485077436
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.8156600571825428,
+      "candidateP95CI": [
+        1.5026383282618305,
+        2.0298411863073706
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "single",
+      "round1Ratio": 43.66028487481251,
+      "round2Ratio": 43.3303846053398,
+      "normalizedGainChange": 0.99244392769267,
+      "ci": [
+        0.6822949042151294,
+        1.7334611840834018
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.0127495279854661,
+      "candidateCI": [
+        0.8388404699014474,
+        1.5170013692853688
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.068908966684342,
+      "candidateP95CI": [
+        0.7683030245947879,
+        1.4753547116571586
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "singleVisible",
+      "round1Ratio": 10.61312659766608,
+      "round2Ratio": 8.502859904932063,
+      "normalizedGainChange": 0.801164466162301,
+      "ci": [
+        0.5137866055200131,
+        1.415815782173874
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.1139651977885994,
+      "candidateCI": [
+        0.9881388341029381,
+        1.4109777604030276
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.438269384924086,
+      "candidateP95CI": [
+        0.9268451216190997,
+        1.9774231885472155
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "burst",
+      "round1Ratio": 1.5690292350363513,
+      "round2Ratio": 3.601001362540003,
+      "normalizedGainChange": 2.2950505204936955,
+      "ci": [
+        1.6436648147191004,
+        3.1941364114323063
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.537316413965654,
+      "candidateCI": [
+        1.9976704638512084,
+        3.5082816724483985
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 3.412723056471921,
+      "candidateP95CI": [
+        2.1367487085282675,
+        4.549568910060873
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "optimistic",
+      "round1Ratio": 12.32594367600169,
+      "round2Ratio": 11.529074480109644,
+      "normalizedGainChange": 0.9353502484808907,
+      "ci": [
+        0.8335283964020435,
+        2.119261864337934
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.9957316821722956,
+      "candidateCI": [
+        0.9420176864968278,
+        2.2716618679360403
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 2.344020663722693,
+      "candidateP95CI": [
+        0.9126982839781214,
+        2.981381683923538
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "unrelated",
+      "round1Ratio": 72.32553191348035,
+      "round2Ratio": 51.28907614729956,
+      "normalizedGainChange": 0.7091420524726217,
+      "ci": [
+        0.3250946314345205,
+        1.2540035609070521
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.0607163657133072,
+      "candidateCI": [
+        0.9135275171743465,
+        1.4457358253024675
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.2696209973035668,
+      "candidateP95CI": [
+        0.8495744844582196,
+        2.1624291139154157
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "matching",
+      "round1Ratio": 13.51166248803282,
+      "round2Ratio": 23.54466168027264,
+      "normalizedGainChange": 1.7425436507998902,
+      "ci": [
+        1.3611878393761345,
+        2.7515764700508005
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.5719360202077746,
+      "candidateCI": [
+        2.372679501609242,
+        3.391188007956491
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 3.407835744338327,
+      "candidateP95CI": [
+        2.171807748710553,
+        5.133310911994217
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "sorted",
+      "round1Ratio": 42.298285420789625,
+      "round2Ratio": 29.62723796385542,
+      "normalizedGainChange": 0.7004359081962603,
+      "ci": [
+        0.5314953517052954,
+        0.8164790871480603
+      ],
+      "status": "lower gain",
+      "candidateSpeedRatio": 1.1061598020520458,
+      "candidateCI": [
+        0.9231764748527564,
+        1.2093219906647528
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.0781514315697238,
+      "candidateP95CI": [
+        0.9320214946558698,
+        1.4517100846645543
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "snapshots",
+      "round1Ratio": 0.6425575742117883,
+      "round2Ratio": 1.2333203806528854,
+      "normalizedGainChange": 1.919392798638742,
+      "ci": [
+        0.38625882253444227,
+        2.38813360537778
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.973928916746525,
+      "candidateCI": [
+        0.9165869073948346,
+        1.0883294454664019
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.1035252222094063,
+      "candidateP95CI": [
+        0.36532546255312515,
+        1.4019196160469547
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "capture",
+      "round1Ratio": 1208.2827827277308,
+      "round2Ratio": 1180.5902171834787,
+      "normalizedGainChange": 0.97708105590834,
+      "ci": [
+        0.868266571705112,
+        1.079960741197603
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.0417940870910471,
+      "candidateCI": [
+        0.9485887070008692,
+        1.268518515399538
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.2244408982287078,
+      "candidateP95CI": [
+        0.888977635812919,
+        2.5091514143850233
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "startup",
+      "round1Ratio": 1.0882290991404873,
+      "round2Ratio": 1.5880456268614103,
+      "normalizedGainChange": 1.4592934779227018,
+      "ci": [
+        1.2297635149378785,
+        1.7982941402307522
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.720868930498363,
+      "candidateCI": [
+        1.5164643799083508,
+        2.001546916720426
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 2.0467412779372727,
+      "candidateP95CI": [
+        1.489897446571636,
+        2.284408367250677
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "single",
+      "round1Ratio": 75.19743626973252,
+      "round2Ratio": 95.69067170931929,
+      "normalizedGainChange": 1.2725257197077533,
+      "ci": [
+        0.8123162732470888,
+        1.7133818397248133
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.5835486252105528,
+      "candidateCI": [
+        0.9006459753959825,
+        2.1813106799927615
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 2.0843651976974105,
+      "candidateP95CI": [
+        1.0451262872252405,
+        2.3941718116624227
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "singleVisible",
+      "round1Ratio": 18.091252481611402,
+      "round2Ratio": 20.512307657670398,
+      "normalizedGainChange": 1.1338246303576738,
+      "ci": [
+        0.7963034874746926,
+        1.2686448539693136
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.4537582108423024,
+      "candidateCI": [
+        1.1388339659550075,
+        1.6960164172664054
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.5743605193656593,
+      "candidateP95CI": [
+        1.0481112334832379,
+        2.0384217539147835
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "burst",
+      "round1Ratio": 1.6644569132209253,
+      "round2Ratio": 4.226080923907078,
+      "normalizedGainChange": 2.5390149125152783,
+      "ci": [
+        1.9758521259858925,
+        3.399859736331416
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 3.08131236052927,
+      "candidateCI": [
+        2.138258128174184,
+        4.202162916015705
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 4.082440967086457,
+      "candidateP95CI": [
+        2.2759417381901317,
+        5.827889032337068
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "optimistic",
+      "round1Ratio": 25.949358385262503,
+      "round2Ratio": 22.176231697237203,
+      "normalizedGainChange": 0.8545965325228163,
+      "ci": [
+        0.6277456198743141,
+        1.7265411624079168
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.0380651993955288,
+      "candidateCI": [
+        0.9511048764199664,
+        2.1017016014500847
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 2.274663593501516,
+      "candidateP95CI": [
+        0.8342268767992772,
+        2.745571843432352
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "unrelated",
+      "round1Ratio": 188.20130329893453,
+      "round2Ratio": 101.15033702504957,
+      "normalizedGainChange": 0.5374582176212922,
+      "ci": [
+        0.44437079636548,
+        1.2080983416715156
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.25818556913462,
+      "candidateCI": [
+        1.0474254301362402,
+        1.4369755479428519
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.3721137007856457,
+      "candidateP95CI": [
+        0.8613320168840884,
+        1.8594769776826063
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "matching",
+      "round1Ratio": 13.679227924402547,
+      "round2Ratio": 32.76061798963551,
+      "normalizedGainChange": 2.3949171817799333,
+      "ci": [
+        2.1678281795220165,
+        3.383331716755351
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 3.2459444451621566,
+      "candidateCI": [
+        2.852127839182919,
+        5.04752654061453
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 8.675291882417172,
+      "candidateP95CI": [
+        2.5824390442921916,
+        18.015555963205422
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "sorted",
+      "round1Ratio": 28.145488059009725,
+      "round2Ratio": 40.05911375284624,
+      "normalizedGainChange": 1.4232872305805622,
+      "ci": [
+        0.8402456367269484,
+        2.939578209876622
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 2.068461191963109,
+      "candidateCI": [
+        1.0754073562608122,
+        3.993285792966332
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 3.6076704090442546,
+      "candidateP95CI": [
+        1.1197028403675486,
+        3.9487673090316373
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "snapshots",
+      "round1Ratio": 1.2156615347335715,
+      "round2Ratio": 1.2226748334367938,
+      "normalizedGainChange": 1.0057691211762816,
+      "ci": [
+        0.4285018203116773,
+        1.5417854170018264
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.1075909847426604,
+      "candidateCI": [
+        1.019295847348543,
+        1.6638898095085375
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.2112014989951592,
+      "candidateP95CI": [
+        0.5909150597299887,
+        3.236380485208991
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "capture",
+      "round1Ratio": 1590.805235511554,
+      "round2Ratio": 2673.1792321911603,
+      "normalizedGainChange": 1.68039378581222,
+      "ci": [
+        0.8008955444813695,
+        2.2234549101756067
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.8665987844023504,
+      "candidateCI": [
+        1.0101833028597655,
+        2.1282860129836134
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.0807952619210242,
+      "candidateP95CI": [
+        0.7984220913434511,
+        5.934528427041523
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "startup",
+      "round1Ratio": 0.9779054254631534,
+      "round2Ratio": 1.6651481224587352,
+      "normalizedGainChange": 1.70277010342804,
+      "ci": [
+        1.3517258960461267,
+        2.0137002358736673
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.8905786460772607,
+      "candidateCI": [
+        1.4841753210593798,
+        2.2755255402872696
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 2.1452553496356495,
+      "candidateP95CI": [
+        1.4661906478421558,
+        2.453064920611409
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "single",
+      "round1Ratio": 4.846150460330851,
+      "round2Ratio": 3.9090889386918204,
+      "normalizedGainChange": 0.806637963614721,
+      "ci": [
+        0.6053209539150173,
+        1.7373744087699525
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.1818177877383642,
+      "candidateCI": [
+        0.9999960263690152,
+        1.5999971389879646
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.3125014901175405,
+      "candidateP95CI": [
+        0.9374986961510379,
+        1.7142857142857142
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "singleVisible",
+      "round1Ratio": 1.5000005960463056,
+      "round2Ratio": 1.962962112636009,
+      "normalizedGainChange": 1.3086408884169614,
+      "ci": [
+        0.3859756490373965,
+        1.8539096249106972
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.4814819393498413,
+      "candidateCI": [
+        1.2068963816276264,
+        1.9259259913356916
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.7169801644817637,
+      "candidateP95CI": [
+        0.7413785023870616,
+        4.294121854449526
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "burst",
+      "round1Ratio": 1.1863552960800667,
+      "round2Ratio": 2.0473322027669196,
+      "normalizedGainChange": 1.7257327628002141,
+      "ci": [
+        1.2830999644326546,
+        2.743312660371756
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.8795181039312967,
+      "candidateCI": [
+        1.4127111975291626,
+        2.934055963451617
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 2.776209652222282,
+      "candidateP95CI": [
+        1.5782493258825314,
+        5.650141703712164
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "optimistic",
+      "round1Ratio": 2.0465127110421113,
+      "round2Ratio": 1.9249994933606402,
+      "normalizedGainChange": 0.9406242546035324,
+      "ci": [
+        0.7529060929614557,
+        1.422825235308936
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.0749993145467485,
+      "candidateCI": [
+        0.860465193645865,
+        1.62162186543909
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.1549297571891592,
+      "candidateP95CI": [
+        0.7042253142759665,
+        2.075472563855725
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "unrelated",
+      "round1Ratio": 6.78571939468871,
+      "round2Ratio": 9.55559146564376,
+      "normalizedGainChange": 1.4081913662865386,
+      "ci": [
+        0.9770181301402718,
+        2.4425128856342027
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.5555596763853494,
+      "candidateCI": [
+        1.2222216335353706,
+        2.374997019764919
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.9230822839829953,
+      "candidateP95CI": [
+        1.3846128452481385,
+        20.300016689316454
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "matching",
+      "round1Ratio": 4.406248649582992,
+      "round2Ratio": 12.187477089511093,
+      "normalizedGainChange": 2.7659530949676476,
+      "ci": [
+        1.6431320683833226,
+        4.987503542221885
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.9999970197738008,
+      "candidateCI": [
+        1.6470565135926578,
+        3.6874934807551893
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 2.9583363135684144,
+      "candidateP95CI": [
+        1.5652178420010574,
+        4.571427922670651
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "sorted",
+      "round1Ratio": 16.860453150227993,
+      "round2Ratio": 14.465105525097142,
+      "normalizedGainChange": 0.857931005543676,
+      "ci": [
+        0.4164846988553667,
+        1.6113257220346475
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1,
+      "candidateCI": [
+        0.48780489223191725,
+        1.9069746810737922
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.0823525913858516,
+      "candidateP95CI": [
+        0.4941177922549295,
+        3.3555539307781235
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "snapshots",
+      "round1Ratio": 3.0000476848981927,
+      "round2Ratio": 4.0000953697963855,
+      "normalizedGainChange": null,
+      "ci": null,
+      "status": "timer-quantized; no ratio inference",
+      "candidateSpeedRatio": null,
+      "candidateCI": null,
+      "candidateStatus": "timer-quantized; no ratio inference",
+      "candidateP95Ratio": null,
+      "candidateP95CI": null,
+      "candidateP95Status": "timer-quantized; no ratio inference"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "capture",
+      "round1Ratio": 207.50020265598548,
+      "round2Ratio": 196.75018477457502,
+      "normalizedGainChange": 0.9481927355067074,
+      "ci": [
+        0.706994863665725,
+        1.897619089653162
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1,
+      "candidateCI": [
+        0.7500059604701619,
+        2
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.6666666666666667,
+      "candidateP95CI": [
+        0.1923086093031018,
+        2.6000171662359213
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "startup",
+      "round1Ratio": 1.070828048148632,
+      "round2Ratio": 1.788141150579476,
+      "normalizedGainChange": 1.669867681997138,
+      "ci": [
+        1.2299332688772673,
+        2.5215877062692638
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.65394201616371,
+      "candidateCI": [
+        1.3153750002384186,
+        2.4377499997615812
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 2.1761062839968854,
+      "candidateP95CI": [
+        1.362701027812943,
+        2.5778014411484773
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "startupIndexedDB",
+      "round1Ratio": 1.3442031477243683,
+      "round2Ratio": 1.0803267212982355,
+      "normalizedGainChange": 0.8036930453013332,
+      "ci": [
+        0.6959657793999225,
+        2.8559436658301696
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.1297860755757199,
+      "candidateCI": [
+        1.053090296985356,
+        5.4336254030313444
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 8.060764140042043,
+      "candidateP95CI": [
+        1.0493482848708255,
+        8.47584823525468
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "single",
+      "round1Ratio": 49.87475338701698,
+      "round2Ratio": 23.636334080377306,
+      "normalizedGainChange": 0.4739138035824381,
+      "ci": [
+        0.2306173202603075,
+        1.110002903713935
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.7272754858314513,
+      "candidateCI": [
+        0.5384623849172872,
+        1.4545529420944487
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.4230765351176824,
+      "candidateP95CI": [
+        0.29687515133994996,
+        15.888902134378137
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "singleVisible",
+      "round1Ratio": 8.250000229248641,
+      "round2Ratio": 7.925927757399365,
+      "normalizedGainChange": 0.9607184893522371,
+      "ci": [
+        0.893618258538715,
+        1.8052956565162406
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.9259259913356916,
+      "candidateCI": [
+        1.7499978712642816,
+        4.333333922021224
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 5.249996821087633,
+      "candidateP95CI": [
+        1.1833326445689871,
+        18.599987920133007
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "burst",
+      "round1Ratio": 1.227397257186924,
+      "round2Ratio": 2.374776338641381,
+      "normalizedGainChange": 1.9348066200539986,
+      "ci": [
+        1.5713971977236576,
+        3.9337442885280396
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.611806709499551,
+      "candidateCI": [
+        2.0905892893733924,
+        7.087656358226678
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 7.818379312581601,
+      "candidateP95CI": [
+        2.4392587993312107,
+        23.4246275225576
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "optimistic",
+      "round1Ratio": 7.178566015500602,
+      "round2Ratio": 6.358968809986673,
+      "normalizedGainChange": 0.8858271688601622,
+      "ci": [
+        0.7957963210797437,
+        1.2626253912570695
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.4358972477961585,
+      "candidateCI": [
+        1.238094967779438,
+        2.1891897116551924
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.7647052773695056,
+      "candidateP95CI": [
+        1.0757578822645435,
+        2
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "unrelated",
+      "round1Ratio": 27.67999839782715,
+      "round2Ratio": 46.33350110997494,
+      "normalizedGainChange": 1.673898258376058,
+      "ci": [
+        1.0249331147539187,
+        2.251898557131591
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.777787785507277,
+      "candidateCI": [
+        1.999994039565365,
+        5.124972432989813
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 12.636347085011293,
+      "candidateP95CI": [
+        2.272724514168549,
+        141.39946403707873
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "matching",
+      "round1Ratio": 6.7861648819257985,
+      "round2Ratio": 17.91175711609016,
+      "normalizedGainChange": 2.6394520952174547,
+      "ci": [
+        2.0154789834217905,
+        3.588468075753918
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 4.676467535818869,
+      "candidateCI": [
+        3.823528256796329,
+        10.352936474099339
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 50.54055565722357,
+      "candidateP95CI": [
+        4.499998864673639,
+        66.99997615815093
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "sorted",
+      "round1Ratio": 16.88111904901108,
+      "round2Ratio": 24.350787405506345,
+      "normalizedGainChange": 1.4424865635274842,
+      "ci": [
+        0.6845588807931788,
+        1.7405924296048951
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 2.246073457893528,
+      "candidateCI": [
+        1.5816325736214663,
+        3.8421051706964007
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 10.686274803129361,
+      "candidateP95CI": [
+        2.082523829121967,
+        14.87064500640053
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "snapshots",
+      "round1Ratio": 3.666645474052293,
+      "round2Ratio": 5.500011920940324,
+      "normalizedGainChange": 1.5000119209403238,
+      "ci": [
+        1.0999971389879646,
+        2.5882372740634363
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.5000119209403238,
+      "candidateCI": [
+        1,
+        4
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 0.21276563365535042,
+      "candidateP95CI": [
+        0.062499953433861555,
+        13.333243264722244
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "capture",
+      "round1Ratio": 683.284037574676,
+      "round2Ratio": 998.2509477147557,
+      "normalizedGainChange": 1.4609604393189957,
+      "ci": [
+        0.8013383568623271,
+        1.824277933819018
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.7500059604701619,
+      "candidateCI": [
+        1.0000119209403238,
+        2.3333227370261462
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 2,
+      "candidateP95CI": [
+        1.1999942779759294,
+        2.9999904632932157
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "startup",
+      "round1Ratio": 1.2653613440092746,
+      "round2Ratio": 1.9444030709962916,
+      "normalizedGainChange": 1.5366385896027814,
+      "ci": [
+        1.2501394506502648,
+        2.962382436224531
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.9266441334157043,
+      "candidateCI": [
+        1.5627953249645894,
+        5.861381869615005
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 7.035306309791609,
+      "candidateP95CI": [
+        1.7054945608796162,
+        7.464998167120504
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "startupIndexedDB",
+      "round1Ratio": 1.0309259742582975,
+      "round2Ratio": 1.067899496279741,
+      "normalizedGainChange": 1.0358643810949124,
+      "ci": [
+        0.2817640124499107,
+        1.0901587335635434
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.2545860972853171,
+      "candidateCI": [
+        1.0795372337005338,
+        1.2817211765651753
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.3132182611103436,
+      "candidateP95CI": [
+        1.1312411975203382,
+        1.3347977600788834
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "single",
+      "round1Ratio": 48.09085037301625,
+      "round2Ratio": 51.000047683761295,
+      "normalizedGainChange": 1.0604937797560219,
+      "ci": [
+        0.6448446540167425,
+        1.4965902133455284
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.375002980235081,
+      "candidateCI": [
+        0.8333333333333334,
+        1.833337306980108
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 0.8333333333333334,
+      "candidateP95CI": [
+        0.32608713680042295,
+        1.538458716942376
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "singleVisible",
+      "round1Ratio": 8.046152694973184,
+      "round2Ratio": 14.892846255894469,
+      "normalizedGainChange": 1.8509276197553075,
+      "ci": [
+        1.0017686378740007,
+        2.567789108639065
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.3214271725450994,
+      "candidateCI": [
+        1.3076921195908002,
+        3.2307651395664454
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.2467533271777989,
+      "candidateP95CI": [
+        0.4203538553335286,
+        3.333336512250753
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "burst",
+      "round1Ratio": 1.2345840141875624,
+      "round2Ratio": 2.356097617329953,
+      "normalizedGainChange": 1.908414162385231,
+      "ci": [
+        1.4940242276796663,
+        3.3366343123180595
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.4918699844144028,
+      "candidateCI": [
+        1.8495114034442182,
+        3.6353039757539616
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 5.400872614326218,
+      "candidateP95CI": [
+        1.2902982484145569,
+        8.267471537910735
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "optimistic",
+      "round1Ratio": 7.2465757540722215,
+      "round2Ratio": 12.945933162960872,
+      "normalizedGainChange": 1.7864897300888478,
+      "ci": [
+        0.8637168198354802,
+        2.060530041410478
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.972971092097785,
+      "candidateCI": [
+        1.0749993145467485,
+        2.1081053216263483
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 1.9787239223221778,
+      "candidateP95CI": [
+        1.4210521032276846,
+        2.755557274524805
+      ],
+      "candidateP95Status": "faster candidate tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "unrelated",
+      "round1Ratio": 89.6362560525734,
+      "round2Ratio": 77.5453623307772,
+      "normalizedGainChange": 0.8651115714303745,
+      "ci": [
+        0.4519414703481585,
+        1.2357058646570325
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 2,
+      "candidateCI": [
+        0.8571428571428571,
+        2.6666596024244478
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 0.7727264353067526,
+      "candidateP95CI": [
+        0.22950840816486062,
+        3.1666706403134413
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "matching",
+      "round1Ratio": 8.761030059501218,
+      "round2Ratio": 19.68056073417049,
+      "normalizedGainChange": 2.2463752093656146,
+      "ci": [
+        1.3105920269619002,
+        3.606179838886312
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 3.777778587223807,
+      "candidateCI": [
+        2.56756849059084,
+        5.513890204238686
+      ],
+      "candidateStatus": "faster candidate",
+      "candidateP95Ratio": 3.5102044788315085,
+      "candidateP95CI": [
+        0.19557704709615403,
+        7.095889990404469
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "sorted",
+      "round1Ratio": 40.19752890045124,
+      "round2Ratio": 30.487999979654948,
+      "normalizedGainChange": 0.7584545820007533,
+      "ci": [
+        0.37069562804037315,
+        0.9648925937939286
+      ],
+      "status": "lower gain",
+      "candidateSpeedRatio": 1.0800000508626302,
+      "candidateCI": [
+        0.5436241365886954,
+        1.2754009798620463
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 0.679262668233974,
+      "candidateP95CI": [
+        0.26079824991116335,
+        1.960422138027122
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "snapshots",
+      "round1Ratio": 1.3333340902175739,
+      "round2Ratio": 4.9999809265864315,
+      "normalizedGainChange": 3.749983566212226,
+      "ci": [
+        0.5641052811331975,
+        10.222156093416952
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 4.199984741269145,
+      "candidateCI": [
+        0.6666649006061119,
+        7.666613685130732
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 0.8709678411732042,
+      "candidateP95CI": [
+        0.2608692947993656,
+        2.0454533632150924
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "capture",
+      "round1Ratio": 4088.984407484408,
+      "round2Ratio": 2346.0022411367804,
+      "normalizedGainChange": 0.5737371453025591,
+      "ci": [
+        0.15058386671826363,
+        2.9253434847351167
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.2500059604701617,
+      "candidateCI": [
+        0.5714334371019272,
+        1.5
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1,
+      "candidateP95CI": [
+        0.29166708058738333,
+        1.5000039736467747
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "startup",
+      "round1Ratio": 2.1134199586560327,
+      "round2Ratio": 1.9691676441248696,
+      "normalizedGainChange": 0.9317446047860284,
+      "ci": [
+        0.6036990581684308,
+        1.4552487268168115
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.7332682043051135,
+      "candidateCI": [
+        0.3806870015960755,
+        5.4436874848993915
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.251724684099743,
+      "candidateP95CI": [
+        0.3942340408362919,
+        5.210023194020684
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "startupIndexedDB",
+      "round1Ratio": 0.9209818084067828,
+      "round2Ratio": 1.0842164267634895,
+      "normalizedGainChange": 1.1772397857011836,
+      "ci": [
+        0.7521265413087269,
+        1.3398011248089954
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.6194905386438225,
+      "candidateCI": [
+        0.360371174221344,
+        4.631236155244061
+      ],
+      "candidateStatus": "interval spans unchanged candidate",
+      "candidateP95Ratio": 1.1814110727944427,
+      "candidateP95CI": [
+        0.37794237598045743,
+        4.761487066697903
+      ],
+      "candidateP95Status": "interval spans unchanged tail"
+    }
+  ]
+}

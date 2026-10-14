@@ -118,14 +118,15 @@ export function runOfflineLiveQuery<T extends Record<string, unknown>>(
     // A partial working set cannot prove matches in server-only search documents.
     if (plan.search.sources?.length) completeness = 'partial';
   }
+  const total = plan.window?.count === "exact" ? result.length : undefined;
   if (plan.sort) {
     const requestedColumn = plan.sort.columnArgument ? String(args[plan.sort.columnArgument] ?? "") : "";
     const column = plan.sort.allowedColumns.includes(requestedColumn) ? requestedColumn : plan.sort.defaultColumn;
     const requestedDirection = plan.sort.directionArgument ? String(args[plan.sort.directionArgument] ?? "").toLocaleLowerCase() : "";
     const direction = requestedDirection === "asc" || requestedDirection === "desc" ? requestedDirection : plan.sort.defaultDirection;
     const fields = plan.index?.sortColumns?.[column] ?? [column];
-    const resolved = new Map<T, unknown[]>();
-    for (const row of result) {
+    const resolved = fields.some(field => plan.index?.referenceFields?.[field]) ? new Map<T, unknown[]>() : undefined;
+    if (resolved) for (const row of result) {
       resolved.set(row,fields.map(field=>{
         const reference=plan.index?.referenceFields?.[field];
         if(!reference)return row[field];
@@ -136,17 +137,20 @@ export function runOfflineLiveQuery<T extends Record<string, unknown>>(
       }));
     }
     if(fields.some(field=>!plan.index?.referenceFields?.[field] && result.some(row=>!Object.hasOwn(row,field))))return {rows:[],completeness:'partial',supported:false,unsupportedOperator:'missingSortField'};
-    result = [...result].sort((left, right) => {
+    const comparator = (left: T, right: T) => {
       for(let i=0;i<fields.length;i++){
-        const a=resolved.get(left)![i],b=resolved.get(right)![i];
+        const a=resolved ? resolved.get(left)![i] : left[fields[i]!],b=resolved ? resolved.get(right)![i] : right[fields[i]!];
         // PostgreSQL ASC puts NULL last; DESC puts it first.
         const order=a==null ? b==null ? 0 : 1 : b==null ? -1 : compare(a,b);
         if(order)return direction==='desc'?-order:order;
       }
       return compare(left[plan.key],right[plan.key]);
-    });
+    };
+    const requestedLimit = plan.window && nonNegativeInteger(args[plan.window.limitArgument], plan.window.defaultLimit);
+    const take = plan.window ? nonNegativeInteger(args[plan.window.offsetArgument], 0)
+      + Math.min(requestedLimit || plan.window.defaultLimit, plan.window.maxLimit || requestedLimit || plan.window.defaultLimit) : result.length;
+    result = take < result.length ? smallestRows(result, take, comparator) : result.sort(comparator);
   }
-  const total = plan.window?.count === "exact" ? result.length : undefined;
   let offset: number | undefined;
   let limit: number | undefined;
   if (plan.window) {
@@ -165,14 +169,77 @@ export function runOfflineLiveQuery<T extends Record<string, unknown>>(
   };
 }
 
+/** A bounded max heap, with input position preserving stable-sort ties. */
+function smallestRows<T>(rows: readonly T[], count: number, compareRows: (a: T, b: T) => number): T[] {
+  if (!count) return [];
+  type Entry = { row: T; position: number };
+  const compare = (a: Entry, b: Entry) => compareRows(a.row, b.row) || a.position - b.position;
+  const heap: Entry[] = [];
+  for (let position = 0; position < rows.length; position++) {
+    const row = rows[position]!;
+    if (heap.length < count) {
+      const entry = { row, position };
+      heap.push(entry);
+      let i = heap.length - 1;
+      while (i > 0) {
+        const parent = (i - 1) >>> 1;
+        if (compare(heap[parent]!, entry) >= 0) break;
+        heap[i] = heap[parent]!; i = parent;
+      }
+      heap[i] = entry;
+    } else if ((compareRows(row,heap[0]!.row) || position - heap[0]!.position) < 0) {
+      const entry = { row, position };
+      let i = 0;
+      while (i * 2 + 1 < heap.length) {
+        let child = i * 2 + 1;
+        if (child + 1 < heap.length && compare(heap[child + 1]!, heap[child]!) > 0) child++;
+        if (compare(entry, heap[child]!) >= 0) break;
+        heap[i] = heap[child]!; i = child;
+      }
+      heap[i] = entry;
+    }
+  }
+  return heap.sort(compare).map(entry => entry.row);
+}
+
+/** All tables that can affect evaluation, including reference sorts and coverage. */
+export function liveQueryDependencies(plan: LiveQueryPlan): string[] {
+  const tables = new Set([plan.table]);
+  const visit = (expression?: LiveQueryExpression): void => {
+    if (expression?.relation) { tables.add(expression.relation.table); visit(expression.relation.where); }
+    expression?.children?.forEach(visit);
+  };
+  visit(plan.where);
+  for (const reference of Object.values(plan.index?.referenceFields ?? {})) tables.add(reference.table);
+  for (const table of plan.index?.dependencies ?? []) tables.add(table);
+  for (const source of plan.search?.sources ?? []) {
+    tables.add(source.table);
+    for (const table of source.dependencies ?? []) tables.add(table);
+  }
+  return [...tables];
+}
+
+/** Only a conjunctive equality can safely restrict the candidate corpus. */
+export function liveQueryEquality(expression: LiveQueryExpression | undefined, args: Record<string, JsonValue>): { column: string; value: unknown } | undefined {
+  if (expression?.operator === 'and') {
+    for (const child of expression.children ?? []) {
+      const equality = liveQueryEquality(child, args);
+      if (equality) return equality;
+    }
+  }
+  if (expression?.operator !== 'eq' || !expression.column || expression.value?.context) return undefined;
+  const value = resolveValue(expression.value, args);
+  return value === null || ['string', 'number', 'boolean', 'undefined'].includes(typeof value) ? { column: expression.column, value } : undefined;
+}
+
 function applyStructuredFilters<T extends Record<string, unknown>>(
-  rows: readonly T[],
+  rows: T[],
   definition: LiveQueryPlan["filters"],
   args: Record<string, JsonValue>,
 ): { rows: T[]; supported: true } | { rows: T[]; supported: false; reason: string } {
-  if (!definition) return { rows: [...rows], supported: true };
+  if (!definition) return { rows, supported: true };
   const raw = args[definition.argument];
-  if (raw === undefined || raw === null) return { rows: [...rows], supported: true };
+  if (raw === undefined || raw === null) return { rows, supported: true };
   if (!Array.isArray(raw)) return { rows: [], supported: false, reason: "invalidFilter" };
   const allowedColumns = new Set(definition.allowedColumns);
   const allowedOperators = new Set(definition.allowedOperators);
