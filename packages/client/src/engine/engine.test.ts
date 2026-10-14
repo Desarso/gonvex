@@ -776,3 +776,22 @@ it("accepts text replies from older hosts without the optional alias metadata", 
   receive({ kind: "textEnd" });
   expect(await result).toEqual({ value: 7 });
 });
+
+it("reuses an admission lease across awaited replies and releases it after idle", async () => {
+  const { create } = await setup(); const leases: string[] = [];
+  const wrap = EngineReceipts.prototype.wrap;
+  vi.spyOn(EngineReceipts.prototype, "wrap").mockImplementation(function(store) {
+    const wrapped = wrap.call(this, store);
+    return { ...wrapped, coordinate: (scope, lane, run) => {
+      leases.push(lane); return wrapped.coordinate!(scope, lane, run);
+    } };
+  });
+  const host = await create(); cleanups.push(host.close); leases.length = 0;
+  const commands = Array.from({ length: 4 }, (_, index) => ({ id: `awaited-${index}`, now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "ab".repeat(32) }));
+  for (const command of commands.slice(0, 3)) expect(await host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command, engineFresh: true }]))).toBe(7);
+  expect(leases.filter(lane => lane === "intent")).toHaveLength(1);
+  await new Promise(resolve => setTimeout(resolve, 15));
+  expect(await host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: commands[3], engineFresh: true }]))).toBe(7);
+  expect(leases.filter(lane => lane === "intent")).toHaveLength(2);
+  expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(commands.map(command => command.id));
+});

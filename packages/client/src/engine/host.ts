@@ -243,24 +243,31 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
     if (!allowed.includes(request.method as any)) throw new Error("Unknown engine operation");
     return (client[request.method as typeof allowed[number]] as (...args: any[]) => unknown).apply(client, args);
   };
+  let activeCohort: EngineAdmissionCohort | undefined;
   const receive = ({ data }: MessageEvent, cohort?: EngineAdmissionCohort) => {
     if (Array.isArray(data?.admissions) && data.admissions.length <= 1024) {
-      const group = client && pendingStarts === 0 && data.admissions.length > 1 && data.admissions.every((request: EngineEnvelope) =>
-        request.generation === generation && request.scope === scope && request.method === "reducer" &&
-        (request.args?.[0] as FunctionReference)?.localExecution === 1)
-        ? new EngineAdmissionCohort(client) : undefined;
-      for (const admission of data.admissions) if (admission?.method === "reducer") receive({ data: admission } as MessageEvent, group);
-      if (group) {
-        // Reserve start order before the asynchronous ownership transfer.
-        // Later packets must not enter the local lane ahead of this cohort.
-        pendingStarts++;
-        admissionStart = group.flush().then(() => { pendingStarts--; }, () => { pendingStarts--; });
-      }
+      for (const admission of data.admissions) if (admission?.method === "reducer") receive({ data: admission } as MessageEvent);
       return;
     }
     if (!data || typeof data.id !== "string" || !Array.isArray(data.args)) return;
     const request = data as EngineEnvelope;
     if (request.method !== "init" && (request.generation !== generation || request.scope !== scope)) return;
+    if (!cohort && client && request.method === "reducer" && (request.args[0] as FunctionReference)?.localExecution === 1) {
+      const group = activeCohort?.canAccept() ? activeCohort : pendingStarts === 0 ? new EngineAdmissionCohort(client) : undefined;
+      if (group) {
+        const existing = group === activeCohort;
+        activeCohort = group;
+        receive({ data } as MessageEvent, group);
+        if (!existing) {
+          pendingStarts++;
+          admissionStart = group.flush().then(() => {
+            pendingStarts--; if (activeCohort === group) activeCohort = undefined;
+          }, () => { pendingStarts--; if (activeCohort === group) activeCohort = undefined; });
+        }
+        return;
+      }
+    }
+    if (!cohort) activeCohort?.seal();
     const operation = run(request, cohort);
     if (request.method !== "settle") calls.add(operation);
     void operation.then(result => sendEngineMessage(endpoint, { generation: request.generation, scope: request.scope, id: request.id, result }),

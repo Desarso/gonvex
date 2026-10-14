@@ -29,7 +29,7 @@
     {
       "file": "engine.js",
       "bytes": 16101,
-      "gzip": 5311
+      "gzip": 5312
     },
     {
       "file": "worker.js",
@@ -42,14 +42,14 @@
       "gzip": 205
     },
     {
-      "file": "host-IBWAL7CD.js",
+      "file": "host-ZF5KUVDT.js",
       "bytes": 121,
       "gzip": 106
     },
     {
-      "file": "chunk-NVWARAWU.js",
-      "bytes": 33048,
-      "gzip": 10426
+      "file": "chunk-KPNR6DNY.js",
+      "bytes": 33729,
+      "gzip": 10661
     },
     {
       "file": "chunk-L3S26PMH.js",
