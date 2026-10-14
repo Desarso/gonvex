@@ -6,6 +6,8 @@ The startup regression is fixed in the measured storage cases. The quiet Chromiu
 
 The complete matrix used client source `99e928c3d78096fc066918630c1412fe7c58c382` with a clean source tree. [startup-after.json](./startup-after.json) retains every sample, including non-quiescent Chromium observations. The independent [Chromium replication](./startup-chromium-repeat.json) used `7b870d014f5b1124ba6a3ad7e3d71f76de682e63`, also clean. Client source and benchmark logic are identical between these revisions; only the retained remote Rust test fixture and measurement artifacts differ. No original samples were replaced or pooled.
 
+After measurement, remote `5bcaf6c` brought staging's SDK29, snapshot-page negotiation and developer-session updates into the shared branch. That merge was preserved normally. Protocol/module-sdk/local-runtime were rebuilt, and all 46 focused storage tests plus client typecheck/build passed again. The minified benchmark entry bundle before and after rebuilding the merge is byte-identical, SHA-256 `25f6bf2720d908f23e6a073038f03d25fe972c7e6cef4162f8c14718be35f0d8`. These upstream changes do not alter the measured storage code; no transport-performance claim is inferred from these timings.
+
 Only startup cases ran, sequential browsers, nice 15, five warmups, 20 initial samples, a 30-round cap, 15% CV limit and 4,000 seeded bootstrap draws. The machine, seed, fixture, residency budget and fresh-process methodology are unchanged. The table below explicitly uses the quiet Chromium replication and Firefox/WebKit from the complete matrix. All six cases have n=20.
 
 | Browser / rows | Legacy median [95% CI], ms | Engine median [95% CI], ms | Legacy p95 [95% CI], ms | Engine p95 [95% CI], ms | Engine/legacy p95 [95% CI] | Startup gate |
@@ -67,7 +69,7 @@ The read index consists of a compact per-generation ID/hash snapshot in the exis
 
 The benchmark seeds clean generation indexes. Tests cover edited-index replay, moves/rebalancing, duplicate IDs, hash-only certificates, older writers, missing/stale indexes, rollback, cross-scope retirement and prefetch errors; patch-heavy startup timing is not measured. Existing uncached or invalidated generations fall back until a full window replacement writes a fresh index. The cache adds derived disk data and one small metadata put per member edit. Write/delete performance was deliberately not rerun under the startup-only brief. UI-window filtering, lazy hash getters, schema upgrades, protocol changes, first paint, physical Safari/iOS, battery and broader app gates remain outside this work.
 
-Validation: 46 focused storage tests passed; client typecheck/build passed; four benchmark statistical checks passed. No full test suite or cargo workspace run. No Whagons app code change, contract/version bump, npm publication or PR merge.
+Validation: 46 focused storage tests passed; client typecheck/build passed; four benchmark statistical checks passed. No full test suite or cargo workspace run. No Whagons app code change, contract/version bump by this startup follow-up, npm publication or PR merge. The upstream SDK29 version preparation was retained.
 
 ## Original full matrix
 
