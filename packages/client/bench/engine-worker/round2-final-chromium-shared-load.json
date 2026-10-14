@@ -1,0 +1,524 @@
+{
+  "metadata": {
+    "browser": "chromium",
+    "version": "149.0.7827.55",
+    "sdkCommit": "d759a5cb8c207f290bcd6fc4f3aac5c77deb0b94",
+    "fixture": "engine-worker-fixture-v1",
+    "admission": "pipelined",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "cores": 16,
+    "ram": 33537105920,
+    "os": "linux 7.2.4-arch1-2",
+    "network": "local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate",
+    "load": [
+      9.22,
+      6.3,
+      4.28
+    ],
+    "production": true,
+    "engineRevision": "checkout",
+    "profileIO": false,
+    "loadLimit": 0.5,
+    "loadChecks": [
+      {
+        "index": -1,
+        "mode": "worker",
+        "load": [
+          7.2,
+          6.31,
+          4.41
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          7.59,
+          6.41,
+          4.46
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          7.26,
+          6.38,
+          4.47
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.9,
+          6.33,
+          4.47
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.53,
+          6.27,
+          4.47
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.07,
+          6.18,
+          4.46
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          5.89,
+          6.14,
+          4.47
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          5.37,
+          6.02,
+          4.45
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          5.48,
+          6.02,
+          4.46
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          8.49,
+          6.63,
+          4.68
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          9.02,
+          6.81,
+          4.76
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          10.5,
+          7.21,
+          4.91
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "load": [
+          6.43,
+          6.64,
+          4.86
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          6.4,
+          6.63,
+          4.86
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          6.4,
+          6.63,
+          4.86
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          8.44,
+          7.07,
+          5.03
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          8.45,
+          7.11,
+          5.06
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          9.71,
+          7.44,
+          5.19
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "load": [
+          7.06,
+          7.02,
+          5.12
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          7.06,
+          7.02,
+          5.12
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          6.97,
+          7.01,
+          5.13
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          9.62,
+          7.57,
+          5.33
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          10.06,
+          7.73,
+          5.41
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          12.22,
+          8.22,
+          5.58
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "load": [
+          7.02,
+          7.56,
+          5.52
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          6.77,
+          7.5,
+          5.52
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          6.77,
+          7.5,
+          5.52
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          7.14,
+          7.56,
+          5.56
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.35,
+          7.38,
+          5.52
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          7.04,
+          7.5,
+          5.57
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          7.26,
+          7.54,
+          5.6
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          7.61,
+          7.6,
+          5.64
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          7.64,
+          7.61,
+          5.66
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "load": [
+          7.64,
+          7.61,
+          5.66
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "cold",
+        "load": [
+          7.99,
+          7.68,
+          5.69
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "burst",
+        "load": [
+          7.99,
+          7.69,
+          5.7
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          8.14,
+          7.73,
+          5.74
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          7.95,
+          7.71,
+          5.75
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          7.95,
+          7.71,
+          5.75
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "load": [
+          7.95,
+          7.71,
+          5.75
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          8.36,
+          7.79,
+          5.79
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "load": [
+          7.67,
+          7.74,
+          5.9
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          9.24,
+          8.07,
+          6.03
+        ]
+      }
+    ],
+    "fixtureIsolation": "edits-reset-before-each-mode",
+    "firefoxWorkerWebSocketWorkaround": false,
+    "seed": {
+      "rows": 50000,
+      "initialEdits": 0,
+      "rowBytes": 2554
+    },
+    "discardedPairs": [
+      {
+        "index": -1,
+        "reason": "Error: Load check failed during worker drain; entire pair excluded",
+        "load": [
+          10.5,
+          7.21,
+          4.91
+        ]
+      },
+      {
+        "index": -1,
+        "reason": "Error: Load check failed during worker snapshot; entire pair excluded",
+        "load": [
+          9.71,
+          7.44,
+          5.19
+        ]
+      },
+      {
+        "index": -1,
+        "reason": "Error: Load check failed during worker snapshot; entire pair excluded",
+        "load": [
+          12.22,
+          8.22,
+          5.58
+        ]
+      },
+      {
+        "index": -1,
+        "reason": "Error: Load check failed during legacy snapshot; entire pair excluded",
+        "load": [
+          7.95,
+          7.71,
+          5.75
+        ]
+      },
+      {
+        "index": -1,
+        "reason": "Error: Load check failed during worker cold; entire pair excluded",
+        "load": [
+          8.36,
+          7.79,
+          5.79
+        ]
+      },
+      {
+        "index": -1,
+        "reason": "Error: Load check failed during worker cold; entire pair excluded",
+        "load": [
+          9.24,
+          8.07,
+          6.03
+        ]
+      }
+    ],
+    "correctness": {
+      "deniedApis": 3,
+      "retryResult": 1,
+      "durableCrashRecovery": true,
+      "batchCrashRecovery": {
+        "durablePrefix": 1,
+        "commands": 32,
+        "sameIds": true
+      },
+      "reconnect": true
+    },
+    "failure": "Interrupted to integrate correctness fixes concurrently pushed to the remote branch. Shared load repeatedly excluded warmup pairs; no measured pairs accepted."
+  },
+  "samples": []
+}
