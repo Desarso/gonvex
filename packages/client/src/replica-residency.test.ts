@@ -176,6 +176,70 @@ it('updates equality indexes after peer changes publish and does not index a fai
   expect(replica.equalityRows('items','status','reverted')).toEqual([]);fail.mockRestore();
 });
 
+it('publishes local updates, inserts and deletes to indexes when catching up with a peer write', async () => {
+  await seed();
+  const replica = new LocalReplica(storage, {maxResidentRows:100});
+  await replica.activateScope('scope');
+  expect(replica.equalityRows('items','status','new')).toHaveLength(20);
+
+  await storage.applyTransaction({cursor:{epoch:'e',revision:2},changes:[
+    {entity:'items',id:'row-01',operation:'update',newValue:{status:'peer'}},
+  ]},{entities:{},liveQueries:{}},'scope');
+  await replica.applyTransaction({cursor:{epoch:'e',revision:3},changes:[
+    {entity:'items',id:'row-00',operation:'update',newValue:{status:'local'}},
+    {entity:'items',id:'row-new',operation:'insert',newValue:{_id:'row-new',status:'local'}},
+    {entity:'items',id:'row-02',operation:'delete'},
+  ]});
+
+  expect(replica.equalityRows('items','status','local').map(row=>row._id)).toEqual(['row-00','row-new']);
+  expect(replica.equalityRows('items','status','peer').map(row=>row._id)).toEqual(['row-01']);
+  expect(replica.equalityRows('items','status','new')).toEqual(replica.entityRows('items').filter(row=>row.status==='new'));
+  expect(replica['recency'].has('items\0row-new')).toBe(true);
+  expect(replica['recency'].has('items\0row-02')).toBe(false);
+});
+
+it.each(['snapshots','arrays','indexes'] as const)('reclaims %s before evicting resident rows under byte pressure', async cache => {
+  await seed();
+  const replica = new LocalReplica(storage, {maxResidentRows:100});
+  await replica.activateScope('scope');
+  const budget = replica['residentBytes'] + replica['metadataBytes']();
+  if (cache === 'snapshots') replica.liveQuerySnapshot('all');
+  else if (cache === 'arrays') replica.entityRows('items');
+  else replica.equalityRows('items','name','Name 0');
+  expect(replica['residentBytes'] + replica['metadataBytes']()).toBeGreaterThan(budget);
+
+  replica['residencyBudget'].maxBytes = budget;
+  replica['trimResidentRows']();
+
+  expect(replica['residentCount']).toBe(20);
+  expect(replica['residentBytes'] + replica['metadataBytes']()).toBeLessThanOrEqual(budget);
+  expect(replica.entityRows('items')).toEqual(rows);
+});
+
+it('evicts only the oldest unpinned row when row bytes still exceed the budget after cache reclamation', async () => {
+  await seed();
+  const replica = new LocalReplica(storage, {maxResidentRows:100});
+  await replica.activateScope('scope');
+  const release = replica.retainRows('items',['row-00']);
+  await replica.withReadView(coverage,false,async()=>undefined);
+  const budget = replica['residentBytes'] + replica['metadataBytes']() - 1;
+  replica.liveQuerySnapshot('all');
+  replica.entityRows('items');
+  replica.equalityRows('items','name','Name 0');
+  replica.entity('items','row-01');
+
+  replica['residencyBudget'].maxBytes = budget;
+  replica['trimResidentRows']();
+
+  expect(replica['residentCount']).toBe(19);
+  expect(replica.entity('items','row-02')).toBeUndefined();
+  expect(replica.entity('items','row-00')).toEqual(rows[0]);
+  expect(replica.entity('items','row-01')).toEqual(rows[1]);
+  expect(replica['residentBytes'] + replica['metadataBytes']()).toBeLessThanOrEqual(budget);
+  expect(Object.keys((await storage.load('scope'))!.entities.items!)).toHaveLength(20);
+  release();
+});
+
 it('publishes monotonic peer-insert versions for a previously missing row and reclaims released missing-row subscriptions',async()=>{
   await seed();const replica=new LocalReplica(storage,{maxResidentRows:100});await replica.activateScope('scope');
   await replica.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'items',id:'row-00',operation:'update',newValue:{status:'updated'}}]});
