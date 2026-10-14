@@ -166,8 +166,8 @@ export class EngineClient {
     return { protocolVersion: 1, url: this.url, options: { ...this.config.options, ...auth }, fetchToken: Boolean(this.fetchToken), storage: this.config.storage, residency: this.config.residency, ownerLock: this.engineMode === "worker" ? this.ownerLock : undefined, artifactHash: this.config.engine.artifactHash };
   }
   private async initializeEndpoint() {
-    const state = await this.call<{ connection: ConnectionState; session: "unavailable" | "restored" | "authenticated"; commandScope: string; capabilities?: { admissionBatch?: number } }>("init", [this.init()]);
-    this.rpc.setAdmissionBatching(state.capabilities?.admissionBatch === 1);
+    const state = await this.call<{ connection: ConnectionState; session: "unavailable" | "restored" | "authenticated"; commandScope: string; capabilities?: { admissionBatch?: number; admissionBatchLimit?: number } }>("init", [this.init()]);
+    this.rpc.setAdmissionBatching(state.capabilities?.admissionBatch === 1, state.capabilities?.admissionBatchLimit);
     this.connection = { ...state.connection, hasEverConnected: this.connection?.hasEverConnected || state.connection.hasEverConnected, connectionCount: this.connectionOffset + state.connection.connectionCount }; this.session = state.session; this.commandScope = state.commandScope;
   }
   async initialize(): Promise<void> {

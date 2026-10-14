@@ -21,6 +21,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
   let generation = "", scope = "";
   let admission = Promise.resolve();
   let admissionStart = Promise.resolve();
+  let pendingStarts = 0;
   const commands = new Map<string, { fingerprint: string; operation: Promise<unknown> }>();
   let sequence = 0;
   let unsubscribeIntents: (() => void) | undefined;
@@ -165,7 +166,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
       client.onLocalExecutionFallback(value => event("fallback", [value]));
       client.onReducerRejection(value => event("rejection", [value]));
       await client.localSessionReady;
-      return { connection: client.connectionState(), session: client.localSessionState(), commandScope: engineScope(client), capabilities: { admissionBatch: 1 } };
+      return { connection: client.connectionState(), session: client.localSessionState(), commandScope: engineScope(client), capabilities: { admissionBatch: 1, admissionBatchLimit: 1024 } };
     }
     if (!client) throw new Error("Engine is not initialized");
     if (request.method === "fetchTokenResult") {
@@ -204,8 +205,12 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
       // their durable acknowledgements, which would stall reducer preparation.
       // Serialize only lookup/start so disk reads cannot reorder dependent
       // calls. Release this lane before waiting for durable acknowledgement.
-      const started = ref.localExecution === 1 ? admissionStart.then(begin) : begin();
-      if (ref.localExecution === 1) admissionStart = started.then(() => undefined, () => undefined);
+      const ordered = ref.localExecution === 1 && (!options.engineFresh || pendingStarts > 0);
+      const started = ordered ? admissionStart.then(begin) : begin();
+      if (ordered) {
+        pendingStarts++;
+        admissionStart = started.then(() => { pendingStarts--; }, () => { pendingStarts--; });
+      }
       const result = started.then(({ operation }) => operation).then(async result => {
         if (engineScope(client!) !== admittedScope) throw new GonvexClientError("Account changed during engine result persistence", { code: "superseded" });
         if (durable && ref.localExecution !== 1) {
@@ -238,7 +243,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
     return (client[request.method as typeof allowed[number]] as (...args: any[]) => unknown).apply(client, args);
   };
   const receive = ({ data }: MessageEvent) => {
-    if (Array.isArray(data?.admissions) && data.admissions.length <= 128) {
+    if (Array.isArray(data?.admissions) && data.admissions.length <= 1024) {
       for (const admission of data.admissions) if (admission?.method === "reducer") receive({ data: admission } as MessageEvent);
       return;
     }

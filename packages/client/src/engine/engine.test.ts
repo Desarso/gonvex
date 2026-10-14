@@ -422,3 +422,13 @@ it("keeps loaded entity reads ready across same-account offline session transiti
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(states).not.toContain("pending"); expect(watch.getSnapshot()).toBe(before);
 });
+
+it("coalesces a 500-call burst into one negotiated packet and retains the older 128-call limit", async () => {
+  for (const limit of [undefined, 1024]) {
+    const { ui } = pair(); const rpc = new EngineRpc(ui, "g", "s"); rpc.setAdmissionBatching(true, limit);
+    const pending = Array.from({ length: 500 }, (_, index) => rpc.call(rpc.request("reducer", [], String(index)), 0));
+    const settled = Promise.allSettled(pending); await Promise.resolve();
+    expect(ui.sent.map(frame => frame.admissions.length)).toEqual(limit ? [500] : [128, 128, 128, 116]);
+    rpc.close(); await settled;
+  }
+});

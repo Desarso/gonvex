@@ -32,14 +32,18 @@ export class EngineRpc {
   private readonly chunks = new Map<string, any>();
   private closed = false;
   private admissionBatching = false;
-  setAdmissionBatching(enabled: boolean) { this.admissionBatching = enabled; }
+  private admissionBatchLimit = 128;
+  setAdmissionBatching(enabled: boolean, limit = 128) {
+    this.admissionBatching = enabled;
+    this.admissionBatchLimit = Number.isSafeInteger(limit) && limit >= 1 && limit <= 1024 ? limit : 128;
+  }
   private admissions: EngineEnvelope[] = [];
   private admissionScheduled = false;
   private flushAdmissions() {
     this.admissionScheduled = false;
     const requests = this.admissions.splice(0).filter(request => this.pending.has(request.id));
-    for (let offset = 0; offset < requests.length; offset += 128) {
-      this.endpoint.postMessage({ admissions: requests.slice(offset, offset + 128) });
+    for (let offset = 0; offset < requests.length; offset += this.admissionBatchLimit) {
+      this.endpoint.postMessage({ admissions: requests.slice(offset, offset + this.admissionBatchLimit) });
     }
   }
   readonly onCrash = new Set<(error: Error) => void>();
