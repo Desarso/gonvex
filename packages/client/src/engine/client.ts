@@ -242,8 +242,8 @@ export class EngineClient {
     const [ref, args, options] = error.request.args as [FunctionReference, JsonValue, CallOptions];
     return this.reducer<T>(ref, args, options);
   }
-  query<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options?: CallOptions): Promise<T> { return this.admitted("query", [ref, args, options]); }
-  action<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options?: CallOptions): Promise<T> { return this.admitted("action", [ref, args, options]); }
+  query<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options?: CallOptions): Promise<T> { return this.admitted("query", [ref, args, options], options?.timeoutMs); }
+  action<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options?: CallOptions): Promise<T> { return this.admitted("action", [ref, args, options], options?.timeoutMs); }
   prepareReducer(ref: FunctionReference): Promise<void> { return this.admitted("prepareReducer", [ref]); }
   async readEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): Promise<T | undefined> { return (await this.readEntities<T>(entity, [id]))[0]; }
   readEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Promise<Array<T | undefined>> { return this.admitted("readEntities", [entity, ids]); }
@@ -315,7 +315,11 @@ export class EngineClient {
   onSessionScopeChange(listener: () => void) { return this.listen("scope", listener); }
   get localSessionReady(): Promise<boolean> { const epoch = this.epoch; return this.admitted<boolean>("localSessionReady", []).then(ready => epoch === this.epoch && ready); }
   restoreSession(auth: GonvexClientAuth): Promise<boolean> { this.setAuth(auth); this.connect(); return this.localSessionReady; }
-  resetLocalReplica(options: ResetLocalReplicaOptions = {}): Promise<ResetLocalReplicaResult> { this.invalidate(true); return this.admitted<ResetLocalReplicaResult>("resetLocalReplica", [options]).then(async result => { await this.restartWatches(); return result; }); }
+  resetLocalReplica(options: ResetLocalReplicaOptions = {}): Promise<ResetLocalReplicaResult> {
+    this.invalidate(true);
+    return this.admitted<ResetLocalReplicaResult>("resetLocalReplica", [options]).finally(() =>
+      this.restartWatches().catch(error => this.emit("error", error)));
+  }
   retryIntent(id: string): Promise<boolean> { return this.admitted("retryIntent", [id]); }
   discardIntent(id: string): Promise<boolean> { return this.admitted("discardIntent", [id]); }
   onDeveloperCredential(listener: (token: string) => void) { return this.listen("developerCredential", listener); }

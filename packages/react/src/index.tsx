@@ -1946,13 +1946,17 @@ export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: st
 export function useRetainedLiveQuery<T extends ReplicaRow = ReplicaRow>(signatureOrReference: string | FunctionReference, args: JsonValue = {}): LiveQueryResult<T> & { pending?: boolean } {
   const client = useWatchClient();
   const argsKey = JSON.stringify(args);
+  const referenceKey = typeof signatureOrReference === "string" ? JSON.stringify(signatureOrReference)
+    : JSON.stringify([signatureOrReference.kind, signatureOrReference.path, signatureOrReference.scope, signatureOrReference.delivery, signatureOrReference.live]);
   const watch = useMemo(() => {
     if ("engineMode" in client) return client.watchRetained<T>(signatureOrReference, args);
     const signature = typeof signatureOrReference === "string" ? signatureOrReference : client.replicaSignature(signatureOrReference, args);
     return { getSnapshot: () => client.localReplica.liveQuerySnapshot<T>(signature), onUpdate: (notify: () => void) => {
       const release = client.retainReplicaWindow(signature); const stop = client.localReplica.subscribe(notify, { window: signature }); return () => { stop(); release(); };
     } };
-  }, [client, signatureOrReference, argsKey]);
+    // Equivalent generated references can be reconstructed on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, referenceKey, argsKey]);
   return useSyncExternalStore(watch.onUpdate, watch.getSnapshot, () => emptyLiveQuery as LiveQueryResult<T>) ?? pendingLiveQuery as LiveQueryResult<T> & { pending?: boolean };
 }
 const pendingLiveQuery = { rows: [], ids: [], source: "cache" as const, completeness: "partial" as const, freshness: "verifying" as const, pending: true };
@@ -1965,8 +1969,13 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
   args: JsonValue | "skip" = {},
 ): LiveQueryResult<T> & { pending?: boolean } {
   const client = useWatchClient();
-  const engineWatch = useMemo(() => "engineMode" in client && args !== "skip" ? client.watchRetained<T>(ref, args, true) : undefined, [client, ref, JSON.stringify(args)]);
   const argsKey = JSON.stringify(args);
+  const referenceKey = JSON.stringify([ref.kind, ref.path, ref.scope, ref.delivery, ref.live]);
+  const engineWatch = useMemo(
+    () => "engineMode" in client && args !== "skip" ? client.watchRetained<T>(ref, args, true) : undefined,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, referenceKey, argsKey],
+  );
   const signature = args === "skip" || "engineMode" in client ? "" : client.replicaSignature(ref, args);
   useEffect(() => {
     if (args === "skip" || "engineMode" in client) return;

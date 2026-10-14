@@ -62,6 +62,18 @@ it("bounds chunk delivery and reassembles a large reply atomically", async () =>
   expect(ui.sent.filter(frame => frame.deliveryAck).length).toBe(worker.sent.length);
 });
 
+it.each(["\u0000", "\\\"", "\u0800"])("bounds serialized packets for escaped and multibyte strings, %j", async character => {
+  const { ui, worker } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
+  const shared = { text: character.repeat(16_000), missing: undefined };
+  const result = { first: shared, second: shared, rows: [shared, undefined] };
+  const pending = rpc.call<typeof result>(rpc.request("query", [], "escaped"));
+  await sendEngineMessage(worker, { generation: "g", scope: "s", id: "escaped", result });
+  const actual = await pending;
+  expect(actual).toEqual(result); expect(actual.first).toBe(actual.second); expect(actual.rows[0]).toBe(actual.first);
+  expect(worker.sent.every(frame => new TextEncoder().encode(JSON.stringify(frame)).byteLength <= 64 * 1024)).toBe(true);
+  expect(ui.sent.filter(frame => frame.deliveryAck).length).toBe(worker.sent.length);
+});
+
 it("rejects outstanding RPCs on a worker crash", async () => {
   const { ui } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
   const pending = rpc.call(rpc.request("reducer", [])); ui.emit("error", {});
@@ -256,7 +268,7 @@ it("uses the declared Live Query key for offline membership", async () => {
   expect(snapshot.freshness).toBe("offline");
 });
 
-async function mockEngine() {
+async function mockEngine(intercept?: (request: any, endpoint: Endpoint) => boolean) {
   const hosts: Array<{ endpoints: ReturnType<typeof pair>; envelope: any; watchIds: string[] }> = [];
   vi.stubGlobal("Worker", class {});
   vi.stubGlobal("navigator", { locks: { request: (_name: string, _options: any, callback: any) => Promise.resolve(callback({ name: _name })), query: async () => ({ held: [] }) } });
@@ -266,6 +278,7 @@ async function mockEngine() {
       if (!data.method) return;
       host.envelope = data;
       if (data.method === "watch") host.watchIds.push(data.args[0]);
+      if (intercept?.(data, host.endpoints.worker)) return;
       host.endpoints.worker.postMessage({ generation: data.generation, scope: data.scope, id: data.id, result: data.method === "init" ? {
         connection: { isWebSocketConnected: false, hasEverConnected: false, connectionCount: 0, connectionRetries: 0, hasInflightRequests: false, inflightReducers: 0, inflightActions: 0, inflightOneShotQueries: 0 }, session: "restored", commandScope: owner,
       } : undefined });
@@ -282,6 +295,53 @@ async function mockEngine() {
   };
   return { client, hosts, publish };
 }
+
+it.each(["query", "action"] as const)("honors longer and disabled per-call %s timeouts", async method => {
+  const calls: Array<{ request: any; endpoint: Endpoint }> = [];
+  const { client } = await mockEngine((request, endpoint) => {
+    if (request.method !== method) return false;
+    calls.push({ request, endpoint }); return true;
+  });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    for (const timeoutMs of [30_000, 0]) {
+      let settled = false;
+      const pending = client[method]({ kind: method, path: "slow.test" }, {}, { timeoutMs }).then(
+        result => { settled = true; return { result }; }, error => { settled = true; return { error }; });
+      await vi.advanceTimersByTimeAsync(21_000);
+      const timedOut = settled;
+      const { request, endpoint } = calls.at(-1)!;
+      endpoint.postMessage({ generation: request.generation, scope: request.scope, id: request.id, result: 42 });
+      const outcome = await pending;
+      expect(timedOut).toBe(false);
+      expect(outcome).toEqual({ result: 42 });
+      expect(request.args[2]).toEqual({ timeoutMs });
+    }
+  } finally { vi.useRealTimers(); }
+});
+
+it.each([false, true])("resubscribes mounted watches after replica reset, rejected=%s", async rejected => {
+  const { client, hosts, publish } = await mockEngine((request, endpoint) => {
+    if (request.method !== "resetLocalReplica") return false;
+    endpoint.postMessage({ generation: request.generation, scope: request.scope, id: request.id,
+      ...(rejected ? { error: { name: "GonvexClientError", code: "storage", message: "Reset failed" } }
+        : { result: { discardedIntents: 0, resubscribed: 1 } }) }); return true;
+  });
+  const watch = client.watchEntities("tasks", ["one"]);
+  cleanups.push(watch.onUpdate(() => {}));
+  await vi.waitFor(() => expect(hosts[0].watchIds).toHaveLength(1));
+  const previousId = hosts[0].watchIds[0];
+  publish(42, { status: "ready", rows: [{ id: "one", value: 1 }] });
+  await vi.waitFor(() => expect(watch.getSnapshot().status).toBe("ready"));
+  const reset = client.resetLocalReplica();
+  if (rejected) await expect(reset).rejects.toMatchObject({ code: "storage", message: "Reset failed" });
+  else expect(await reset).toEqual({ discardedIntents: 0, resubscribed: 1 });
+  expect(watch.getSnapshot()).toEqual({ status: "pending" });
+  expect(hosts[0].watchIds).toHaveLength(2);
+  expect(hosts[0].watchIds[1]).not.toBe(previousId);
+  publish(1, { status: "ready", rows: [{ id: "one", value: 2 }] });
+  await vi.waitFor(() => expect(watch.getSnapshot()).toEqual({ status: "ready", rows: [{ id: "one", value: 2 }] }));
+});
 
 it("accepts object results after truthy scalars and keeps new undefined own fields", async () => {
   const { client, hosts, publish } = await mockEngine();

@@ -109,6 +109,17 @@ export class EngineRpc {
 }
 
 const sending = new WeakMap<EngineEndpoint, Promise<void>>();
+const segmentBytes = 16 * 1024;
+const encoder = new TextEncoder();
+function serializedBytes(value: unknown): number { return encoder.encode(JSON.stringify(value) ?? "null").byteLength; }
+function* textSegments(value: string) {
+  for (let offset = 0; offset < value.length;) {
+    let end = Math.min(offset + segmentBytes, value.length);
+    // JSON escaping and UTF-8 can expand a short string beyond its character count.
+    while (serializedBytes(value.slice(offset, end)) > segmentBytes) end = offset + Math.floor((end - offset) / 2);
+    yield value.slice(offset, end); offset = end;
+  }
+}
 
 type Segment = { path: string[]; kind: "array" | "object"; items: unknown[] } | { path: string[]; kind: "string"; value: string };
 
@@ -120,7 +131,8 @@ function splitMessage(message: Record<string, unknown>) {
   const seen = new WeakMap<object, { value: any; path: string[]; changed: boolean }>();
   const aliases: Array<{ path: string[]; source: string[] }> = [];
   const prepare = (value: any, path: string[]): any => {
-    if (typeof value === "string" && value.length > 16 * 1024) { segments.push({ path, kind: "string", value }); return ""; }
+    if (serializedBytes(path) > segmentBytes) throw new TextCodecRequired();
+    if (typeof value === "string" && serializedBytes(value) > segmentBytes) { segments.push({ path, kind: "string", value }); return ""; }
     if (!value || typeof value !== "object") return value;
     const prior = seen.get(value);
     if (prior) { aliases.push({ path, source: prior.path }); return prior.value; }
@@ -130,7 +142,7 @@ function splitMessage(message: Record<string, unknown>) {
     if (Object.keys(value).some(key => key.length > 1024)) throw new TextCodecRequired();
     let unchanged = true;
     for (const key of Object.keys(value)) { setEngineProperty(result, key, prepare(value[key], [...path, key])); unchanged &&= result[key] === value[key]; }
-    if (JSON.stringify(result).length > 16 * 1024) {
+    if (serializedBytes(result) > segmentBytes) {
       segments.push({ path, kind: array ? "array" : "object", items: array ? result : Object.entries(result) }); result = array ? [] : {};
     } else if (unchanged) result = value;
     seen.set(value, { value: result, path, changed: result !== value }); return result;
@@ -145,19 +157,21 @@ function splitMessage(message: Record<string, unknown>) {
 export function sendEngineMessage(endpoint: EngineEndpoint, message: Record<string, unknown>): Promise<void> {
   const sendPacket = (value: Record<string, unknown>) => new Promise<void>((resolve, reject) => {
     const deliveryId = crypto.randomUUID();
+    const frame = { ...value, generation: message.generation, scope: message.scope, id: message.id, deliveryId };
+    if (serializedBytes(frame) > 64 * 1024) { reject(new Error("Engine packet exceeds transport limit")); return; }
     const timer = setTimeout(() => { endpoint.removeEventListener("message", ack); reject(new Error("Engine delivery timed out")); }, 20_000);
     const ack = ({ data }: MessageEvent) => {
       if (data?.deliveryAck !== deliveryId || data.generation !== message.generation || data.scope !== message.scope) return;
       clearTimeout(timer); endpoint.removeEventListener("message", ack); resolve();
     };
-    endpoint.addEventListener("message", ack); endpoint.postMessage({ ...value, generation: message.generation, scope: message.scope, id: message.id, deliveryId });
+    endpoint.addEventListener("message", ack); endpoint.postMessage(frame);
   });
   const send = async () => {
-    if (JSON.stringify(message).length <= 16 * 1024) { await sendPacket(message); return; }
+    if (serializedBytes(message) <= segmentBytes) { await sendPacket(message); return; }
     let split: ReturnType<typeof splitMessage>;
     try { split = splitMessage(message); } catch (error) {
       if (!(error instanceof TextCodecRequired)) throw error;
-      // Unusually long JSON keys cannot be used as bounded packet addresses.
+      // Unusually long JSON keys or paths cannot be used as bounded packet addresses.
       const paths: string[][] = [], parents = new WeakMap<object, string[]>();
       const aliasPaths: Array<{ path: string[]; source: string[] }> = [];
       let isRoot = true;
@@ -174,19 +188,19 @@ export function sendEngineMessage(endpoint: EngineEndpoint, message: Record<stri
       });
       const text = `{"payload":${payload},"undefinedPaths":${JSON.stringify(paths)},"aliasPaths":${JSON.stringify(aliasPaths)}}`;
       await sendPacket({ packet: { kind: "textBegin" } });
-      for (let offset = 0; offset < text.length; offset += 16 * 1024) await sendPacket({ packet: { kind: "text", value: text.slice(offset, offset + 16 * 1024) } });
+      for (const value of textSegments(text)) await sendPacket({ packet: { kind: "text", value } });
       await sendPacket({ packet: { kind: "textEnd" } }); return;
     }
     const { value, segments, aliases } = split;
     await sendPacket({ packet: { kind: "begin", value } });
     for (const segment of segments) {
       if (segment.kind === "string") {
-        for (let offset = 0; offset < segment.value.length; offset += 16 * 1024) await sendPacket({ packet: { kind: "string", path: segment.path, value: segment.value.slice(offset, offset + 16 * 1024) } });
+        for (const value of textSegments(segment.value)) await sendPacket({ packet: { kind: "string", path: segment.path, value } });
       } else {
         let items: unknown[] = [], size = 0;
         for (const item of segment.items) {
-          const bytes = (JSON.stringify(item)?.length ?? 4) + 1;
-          if (items.length && size + bytes > 16 * 1024) { await sendPacket({ packet: { kind: segment.kind, path: segment.path, items } }); items = []; size = 0; }
+          const bytes = serializedBytes(item) + 1;
+          if (items.length && size + bytes > segmentBytes) { await sendPacket({ packet: { kind: segment.kind, path: segment.path, items } }); items = []; size = 0; }
           items.push(item); size += bytes;
         }
         if (items.length) await sendPacket({ packet: { kind: segment.kind, path: segment.path, items } });
