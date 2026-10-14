@@ -1,6 +1,6 @@
 # Sync engine storage measurements
 
-Native browser storage only, measured source `e2ff2ef8e598ad6ae83da77410adca0bae48a85b`. Source dirty flag `false`. Timed browser code was unchanged after that revision; derived gate evaluation uses `9522ca4e8f90bc6e1cad2ce7f7e4bb89ee3644a1` as identified by the full `environment.gatesCommit` in JSON. Five warmups, 20 initial measured rounds, a 30-round cap, 15% CV limit and 4,000 seeded bootstrap draws. Serial browsers and alternating adapter order. Scheduling priority was nice 15 to keep the shared machine responsive.
+Native browser storage only, measured source `a3fd7d0d50fd60666bbffc530159dc7063e56b3d`. Source dirty flag `false`. Five warmups, 20 initial measured rounds, a 30-round cap, 15% CV limit and 4,000 seeded bootstrap draws. Serial browsers and alternating adapter order. Scheduling priority was nice 15 to keep the shared machine responsive.
 
 No runtime, worker, DOM, subscriber delivery, wire or energy measurement. WebKit approximates Safari and does not certify Safari/iOS. Startup reopens populated persistent profiles in fresh browser processes, with empty JS/adapter caches. OS disk caches are not evicted; launch/navigation are excluded. Deletes have 100 actual owners per victim. Outbox admission is excluded; both replica modes use the same existing durable outbox.
 
@@ -10,26 +10,26 @@ Values are milliseconds unless labeled as ratios. Brackets are bootstrap 95% con
 
 ## chromium
 
-Browser 149.0.7827.55. Quiescent: **no**. One-minute load before/after: 5.130 / 7.560; maximum observed 8.130. Threshold is 8 on 16 logical CPUs.
+Browser 149.0.7827.55. Quiescent: **no**. One-minute load before/after: 23.560 / 12.740; maximum observed 34.930. Threshold is 8 on 16 logical CPUs.
 
 | Case | n | Legacy median [CI] / p95 | Engine median [CI] / p95 | Engine/legacy median [CI] | CV legacy / engine | CV status |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| single-row-10000 | 30 | 44.700 [40.050, 52.350] / 93.000 | 2.200 [2.100, 2.300] / 2.800 | 0.049 [0.042, 0.055] | 36.3% / 14.0% | NOISY |
-| single-row-50000 | 30 | 109.050 [99.150, 110.900] / 160.600 | 2.050 [1.900, 2.250] / 2.500 | 0.019 [0.017, 0.021] | 44.0% / 14.9% | NOISY |
-| startup-working-set-10000 | 20 | 432.750 [426.000, 438.550] / 448.200 | 555.500 [547.000, 557.850] / 573.200 | 1.284 [1.259, 1.304] | 2.5% / 2.0% | OK |
-| startup-working-set-50000 | 20 | 1710.000 [1685.700, 1742.050] / 2134.300 | 2483.050 [2463.450, 2508.450] / 3248.700 | 1.452 [1.425, 1.480] | 10.1% / 10.7% | OK |
-| delete-100-windows-10000 | 20 | 77.450 [74.000, 81.300] / 85.800 | 45.300 [42.900, 49.300] / 53.500 | 0.585 [0.544, 0.631] | 7.7% / 12.1% | OK |
-| delete-100-windows-50000 | 30 | 123.250 [119.550, 131.000] / 153.700 | 47.700 [44.050, 50.800] / 77.200 | 0.387 [0.356, 0.417] | 13.0% / 23.7% | NOISY |
-| outbox-500-independent | 30 | 10709.550 [9620.300, 14807.650] / 19992.600 | 10470.150 [9397.000, 14110.600] / 19958.600 | 0.978 [0.932, 1.050] | 42.0% / 40.3% | NOISY |
+| single-row-10000 | 30 | 72.550 [68.000, 77.300] / 169.900 | 7.750 [6.950, 10.850] / 61.400 | 0.107 [0.097, 0.149] | 165.4% / 363.5% | NOISY |
+| single-row-50000 | 30 | 325.050 [269.400, 378.000] / 619.500 | 13.700 [10.450, 22.500] / 108.400 | 0.042 [0.032, 0.071] | 38.9% / 111.3% | NOISY |
+| startup-working-set-10000 | 30 | 682.100 [639.850, 707.000] / 1296.400 | 856.700 [767.350, 984.250] / 1431.000 | 1.256 [1.136, 1.409] | 36.3% / 44.2% | NOISY |
+| startup-working-set-50000 | 30 | 2204.450 [2051.450, 2476.200] / 4791.800 | 3078.500 [3000.700, 3382.350] / 5831.000 | 1.396 [1.321, 1.542] | 31.8% / 28.5% | NOISY |
+| delete-100-windows-10000 | 30 | 77.450 [74.500, 81.050] / 105.100 | 58.400 [55.450, 65.650] / 101.000 | 0.754 [0.717, 0.847] | 15.3% / 53.3% | NOISY |
+| delete-100-windows-50000 | 30 | 172.300 [150.950, 200.200] / 674.600 | 73.600 [63.450, 97.650] / 202.900 | 0.427 [0.355, 0.596] | 67.0% / 49.1% | NOISY |
+| outbox-500-independent | 30 | 15296.050 [12731.850, 18560.750] / 27136.800 | 14397.650 [11539.500, 17413.300] / 23454.000 | 0.941 [0.843, 0.997] | 40.5% / 36.4% | NOISY |
 
 | Storage gate | 95% CI | Limit | Verdict | Reason |
 | --- | ---: | ---: | --- | --- |
-| single-row durable apply p95 <= 10 ms | [2.400, 2.600] | 10 | NOISY | not quiescent |
-| 50k/10k engine p95 <= 1.25x | [0.800, 1.000] | 1.25 | NOISY | not quiescent |
-| startup-working-set-10000 engine/legacy p95 <= 1x | [1.232, 1.312] | 1 | NOISY | not quiescent |
-| startup-working-set-50000 engine/legacy p95 <= 1x | [1.304, 1.763] | 1 | NOISY | not quiescent |
-| delete-100-windows-10000 engine/legacy p95 <= 1x | [0.571, 0.722] | 1 | NOISY | not quiescent |
-| delete-100-windows-50000 engine/legacy p95 <= 1x | [0.287, 0.672] | 1 | NOISY | not quiescent |
+| single-row durable apply p95 <= 10 ms | [45.800, 108.700] | 10 | NOISY | not quiescent |
+| 50k/10k engine p95 <= 1.25x | [0.112, 4.645] | 1.25 | NOISY | not quiescent |
+| startup-working-set-10000 engine/legacy p95 <= 1x | [0.874, 1.599] | 1 | NOISY | not quiescent |
+| startup-working-set-50000 engine/legacy p95 <= 1x | [1.130, 1.916] | 1 | NOISY | not quiescent |
+| delete-100-windows-10000 engine/legacy p95 <= 1x | [0.720, 2.390] | 1 | NOISY | not quiescent |
+| delete-100-windows-50000 engine/legacy p95 <= 1x | [0.164, 0.839] | 1 | NOISY | not quiescent |
 
 ### Single-row IndexedDB request diagnostics
 
@@ -37,38 +37,38 @@ Five extra engine samples per size, after measured rounds. Latencies include nat
 
 | Operation | 10k requests/sample | 50k requests/sample | 10k mean latency, ms | 50k mean latency, ms |
 | --- | ---: | ---: | ---: | ---: |
-| `entities.get` | 1 | 1 | 0.100 | 0.040 |
-| `entities.put` | 1 | 1 | 0.160 | 0.140 |
-| `members.[scope+signature+generation+hashOnly].getAll` | 1 | 1 | 0.120 | 0.080 |
-| `members.get` | 1 | 1 | 0.140 | 0.140 |
-| `members.put` | 1 | 1 | 0.160 | 0.160 |
-| `meta.get` | 4 | 4 | 0.105 | 0.095 |
-| `meta.put` | 2 | 2 | 0.100 | 0.090 |
-| `windows.get` | 1 | 1 | 0.060 | 0.060 |
-| `windows.put` | 1 | 1 | 0.120 | 0.100 |
+| `entities.get` | 1 | 1 | 0.160 | 0.240 |
+| `entities.put` | 1 | 1 | 0.480 | 0.420 |
+| `members.[scope+signature+generation+hashOnly].getAll` | 1 | 1 | 0.260 | 0.820 |
+| `members.get` | 1 | 1 | 0.340 | 0.700 |
+| `members.put` | 1 | 1 | 0.240 | 0.520 |
+| `meta.get` | 4 | 4 | 0.480 | 1.610 |
+| `meta.put` | 2 | 2 | 0.220 | 1.240 |
+| `windows.get` | 1 | 1 | 0.160 | 0.200 |
+| `windows.put` | 1 | 1 | 0.240 | 0.500 |
 
 ## firefox
 
-Browser 151.0. Quiescent: **no**. One-minute load before/after: 7.560 / 19.320; maximum observed 54.120. Threshold is 8 on 16 logical CPUs.
+Browser 151.0. Quiescent: **no**. One-minute load before/after: 7.600 / 5.200; maximum observed 15.830. Threshold is 8 on 16 logical CPUs.
 
 | Case | n | Legacy median [CI] / p95 | Engine median [CI] / p95 | Engine/legacy median [CI] | CV legacy / engine | CV status |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| single-row-10000 | 30 | 42.000 [39.000, 46.500] / 83.000 | 5.000 [5.000, 6.500] / 9.000 | 0.119 [0.110, 0.150] | 42.8% / 90.6% | NOISY |
-| single-row-50000 | 30 | 117.000 [112.500, 120.000] / 130.000 | 4.000 [4.000, 5.000] / 11.000 | 0.034 [0.033, 0.043] | 7.8% / 395.9% | NOISY |
-| startup-working-set-10000 | 20 | 394.000 [376.500, 417.500] / 441.000 | 509.000 [497.000, 538.000] / 573.000 | 1.292 [1.215, 1.378] | 13.6% / 6.8% | OK |
-| startup-working-set-50000 | 30 | 1650.500 [1605.000, 1846.500] / 2267.000 | 2307.000 [2274.000, 2474.000] / 3714.000 | 1.398 [1.272, 1.487] | 14.4% / 16.8% | NOISY |
-| delete-100-windows-10000 | 30 | 105.500 [97.000, 115.000] / 603.000 | 157.000 [120.000, 186.000] / 344.000 | 1.488 [1.115, 1.788] | 96.5% / 47.4% | NOISY |
-| delete-100-windows-50000 | 30 | 210.500 [203.000, 219.500] / 296.000 | 110.000 [98.000, 154.500] / 352.000 | 0.523 [0.465, 0.727] | 18.0% / 53.3% | NOISY |
-| outbox-500-independent | 30 | 5281.500 [3526.000, 6064.500] / 15830.000 | 4118.000 [3608.000, 5775.000] / 12810.000 | 0.780 [0.703, 1.117] | 273.1% / 60.1% | NOISY |
+| single-row-10000 | 30 | 47.000 [46.000, 48.000] / 61.000 | 4.000 [4.000, 5.000] / 6.000 | 0.085 [0.083, 0.108] | 10.1% / 27.8% | NOISY |
+| single-row-50000 | 30 | 137.000 [127.500, 146.000] / 175.000 | 5.000 [5.000, 6.000] / 70.000 | 0.036 [0.034, 0.044] | 14.0% / 400.5% | NOISY |
+| startup-working-set-10000 | 20 | 397.000 [378.000, 417.500] / 471.000 | 535.500 [516.000, 562.000] / 632.000 | 1.349 [1.255, 1.439] | 9.2% / 9.0% | OK |
+| startup-working-set-50000 | 30 | 1726.000 [1692.000, 1793.000] / 2584.000 | 2340.500 [2303.500, 2454.000] / 3917.000 | 1.356 [1.308, 1.409] | 15.3% / 18.6% | NOISY |
+| delete-100-windows-10000 | 30 | 67.000 [65.000, 69.000] / 91.000 | 59.000 [54.000, 60.500] / 122.000 | 0.881 [0.810, 0.910] | 13.7% / 37.0% | NOISY |
+| delete-100-windows-50000 | 30 | 144.000 [140.000, 151.500] / 165.000 | 60.000 [58.000, 62.500] / 118.000 | 0.417 [0.396, 0.435] | 10.2% / 25.8% | NOISY |
+| outbox-500-independent | 20 | 2024.500 [1915.000, 2297.000] / 2603.000 | 2123.500 [1983.000, 2257.000] / 2546.000 | 1.049 [0.904, 1.124] | 13.3% / 12.2% | OK |
 
 | Storage gate | 95% CI | Limit | Verdict | Reason |
 | --- | ---: | ---: | --- | --- |
-| single-row durable apply p95 <= 10 ms | [5.000, 352.000] | 10 | NOISY | not quiescent |
-| 50k/10k engine p95 <= 1.25x | [0.184, 44.000] | 1.25 | NOISY | not quiescent |
-| startup-working-set-10000 engine/legacy p95 <= 1x | [0.974, 1.366] | 1 | NOISY | not quiescent |
-| startup-working-set-50000 engine/legacy p95 <= 1x | [1.164, 1.824] | 1 | NOISY | not quiescent |
-| delete-100-windows-10000 engine/legacy p95 <= 1x | [0.430, 2.408] | 1 | NOISY | not quiescent |
-| delete-100-windows-50000 engine/legacy p95 <= 1x | [0.699, 1.454] | 1 | NOISY | not quiescent |
+| single-row durable apply p95 <= 10 ms | [7.000, 688.000] | 10 | NOISY | not quiescent |
+| 50k/10k engine p95 <= 1.25x | [1.167, 114.667] | 1.25 | NOISY | not quiescent |
+| startup-working-set-10000 engine/legacy p95 <= 1x | [1.143, 1.523] | 1 | NOISY | not quiescent |
+| startup-working-set-50000 engine/legacy p95 <= 1x | [1.019, 1.670] | 1 | NOISY | not quiescent |
+| delete-100-windows-10000 engine/legacy p95 <= 1x | [0.769, 1.736] | 1 | NOISY | not quiescent |
+| delete-100-windows-50000 engine/legacy p95 <= 1x | [0.347, 0.773] | 1 | NOISY | not quiescent |
 
 ### Single-row IndexedDB request diagnostics
 
@@ -76,38 +76,38 @@ Five extra engine samples per size, after measured rounds. Latencies include nat
 
 | Operation | 10k requests/sample | 50k requests/sample | 10k mean latency, ms | 50k mean latency, ms |
 | --- | ---: | ---: | ---: | ---: |
-| `entities.get` | 1 | 1 | 0.000 | 0.000 |
-| `entities.put` | 1 | 1 | 0.400 | 0.800 |
-| `members.[scope+signature+generation+hashOnly].getAll` | 1 | 1 | 0.200 | 0.200 |
-| `members.get` | 1 | 1 | 0.400 | 0.000 |
-| `members.put` | 1 | 1 | 0.400 | 0.000 |
-| `meta.get` | 4 | 4 | 0.050 | 0.200 |
-| `meta.put` | 2 | 2 | 0.400 | 0.300 |
-| `windows.get` | 1 | 1 | 0.200 | 0.000 |
-| `windows.put` | 1 | 1 | 0.200 | 0.200 |
+| `entities.get` | 1 | 1 | 0.200 | 0.600 |
+| `entities.put` | 1 | 1 | 0.000 | 1.600 |
+| `members.[scope+signature+generation+hashOnly].getAll` | 1 | 1 | 0.400 | 0.600 |
+| `members.get` | 1 | 1 | 0.200 | 0.400 |
+| `members.put` | 1 | 1 | 0.400 | 1.000 |
+| `meta.get` | 4 | 4 | 0.000 | 0.550 |
+| `meta.put` | 2 | 2 | 0.200 | 0.300 |
+| `windows.get` | 1 | 1 | 0.000 | 0.400 |
+| `windows.put` | 1 | 1 | 0.200 | 0.600 |
 
 ## webkit
 
-Browser 26.5. Quiescent: **no**. One-minute load before/after: 20.930 / 5.660; maximum observed 60.190. Threshold is 8 on 16 logical CPUs.
+Browser 26.5. Quiescent: **no**. One-minute load before/after: 5.200 / 4.710; maximum observed 10.840. Threshold is 8 on 16 logical CPUs.
 
 | Case | n | Legacy median [CI] / p95 | Engine median [CI] / p95 | Engine/legacy median [CI] | CV legacy / engine | CV status |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| single-row-10000 | 30 | 96.500 [83.000, 123.500] / 245.000 | 47.500 [37.000, 69.000] / 162.000 | 0.492 [0.335, 0.703] | 45.8% / 288.9% | NOISY |
-| single-row-50000 | 30 | 251.500 [241.000, 263.000] / 326.000 | 20.000 [18.000, 23.000] / 41.000 | 0.080 [0.071, 0.093] | 13.2% / 38.9% | NOISY |
-| startup-working-set-10000 | 30 | 572.000 [438.000, 681.500] / 1111.000 | 1000.000 [776.000, 1137.500] / 2054.000 | 1.748 [1.491, 2.216] | 42.1% / 38.3% | NOISY |
-| startup-working-set-50000 | 30 | 1998.000 [1781.000, 2247.000] / 5040.000 | 3602.500 [3423.500, 4382.000] / 10077.000 | 1.803 [1.643, 2.085] | 47.0% / 75.0% | NOISY |
-| delete-100-windows-10000 | 30 | 113.500 [108.500, 134.000] / 250.000 | 185.000 [171.500, 228.000] / 715.000 | 1.630 [1.451, 1.870] | 50.8% / 72.9% | NOISY |
-| delete-100-windows-50000 | 30 | 206.500 [196.500, 216.500] / 256.000 | 157.500 [127.500, 176.500] / 242.000 | 0.763 [0.614, 0.854] | 12.4% / 24.2% | NOISY |
-| outbox-500-independent | 30 | 16708.000 [14629.000, 19026.500] / 25868.000 | 15751.000 [14264.500, 16441.000] / 23368.000 | 0.943 [0.824, 1.083] | 22.0% / 21.7% | NOISY |
+| single-row-10000 | 30 | 28.500 [26.000, 32.000] / 39.000 | 11.000 [10.000, 11.000] / 17.000 | 0.386 [0.312, 0.423] | 18.6% / 25.6% | NOISY |
+| single-row-50000 | 30 | 159.500 [151.500, 168.000] / 237.000 | 13.000 [13.000, 15.000] / 21.000 | 0.082 [0.078, 0.093] | 20.3% / 28.6% | NOISY |
+| startup-working-set-10000 | 20 | 303.500 [293.000, 313.000] / 367.000 | 580.500 [540.000, 609.500] / 662.000 | 1.913 [1.776, 2.034] | 10.8% / 8.4% | OK |
+| startup-working-set-50000 | 30 | 1468.000 [1374.500, 1669.000] / 2152.000 | 2826.000 [2755.000, 3157.500] / 3644.000 | 1.925 [1.808, 2.117] | 17.0% / 11.0% | NOISY |
+| delete-100-windows-10000 | 20 | 65.500 [60.000, 69.500] / 73.000 | 99.000 [87.500, 105.000] / 112.000 | 1.511 [1.290, 1.733] | 8.3% / 13.5% | OK |
+| delete-100-windows-50000 | 30 | 157.500 [152.500, 164.500] / 185.000 | 113.500 [97.500, 132.500] / 145.000 | 0.721 [0.623, 0.834] | 9.6% / 19.1% | NOISY |
+| outbox-500-independent | 30 | 14602.500 [14148.500, 15944.000] / 22275.000 | 14119.000 [13742.000, 15204.500] / 21592.000 | 0.967 [0.900, 1.018] | 20.8% / 17.6% | NOISY |
 
 | Storage gate | 95% CI | Limit | Verdict | Reason |
 | --- | ---: | ---: | --- | --- |
-| single-row durable apply p95 <= 10 ms | [26.000, 56.000] | 10 | NOISY | not quiescent |
-| 50k/10k engine p95 <= 1.25x | [0.018, 0.571] | 1.25 | NOISY | not quiescent |
-| startup-working-set-10000 engine/legacy p95 <= 1x | [1.461, 2.149] | 1 | NOISY | not quiescent |
-| startup-working-set-50000 engine/legacy p95 <= 1x | [0.812, 6.284] | 1 | NOISY | not quiescent |
-| delete-100-windows-10000 engine/legacy p95 <= 1x | [0.649, 4.206] | 1 | NOISY | not quiescent |
-| delete-100-windows-50000 engine/legacy p95 <= 1x | [0.739, 1.013] | 1 | NOISY | not quiescent |
+| single-row durable apply p95 <= 10 ms | [18.000, 31.000] | 10 | NOISY | not quiescent |
+| 50k/10k engine p95 <= 1.25x | [0.792, 2.214] | 1.25 | NOISY | not quiescent |
+| startup-working-set-10000 engine/legacy p95 <= 1x | [1.572, 2.095] | 1 | NOISY | not quiescent |
+| startup-working-set-50000 engine/legacy p95 <= 1x | [1.536, 1.963] | 1 | NOISY | not quiescent |
+| delete-100-windows-10000 engine/legacy p95 <= 1x | [1.453, 1.757] | 1 | NOISY | not quiescent |
+| delete-100-windows-50000 engine/legacy p95 <= 1x | [0.683, 0.885] | 1 | NOISY | not quiescent |
 
 ### Single-row IndexedDB request diagnostics
 
@@ -115,28 +115,32 @@ Five extra engine samples per size, after measured rounds. Latencies include nat
 
 | Operation | 10k requests/sample | 50k requests/sample | 10k mean latency, ms | 50k mean latency, ms |
 | --- | ---: | ---: | ---: | ---: |
-| `entities.get` | 1 | 1 | 2.400 | 0.400 |
-| `entities.put` | 1 | 1 | 3.400 | 1.000 |
-| `members.[scope+signature+generation+hashOnly].getAll` | 1 | 1 | 0.800 | 0.000 |
-| `members.get` | 1 | 1 | 0.200 | 0.200 |
-| `members.put` | 1 | 1 | 2.200 | 0.800 |
-| `meta.get` | 4 | 4 | 5.500 | 0.150 |
-| `meta.put` | 2 | 2 | 1.300 | 0.500 |
-| `windows.get` | 1 | 1 | 3.000 | 0.200 |
-| `windows.put` | 1 | 1 | 0.400 | 0.200 |
+| `entities.get` | 1 | 1 | 0.200 | 0.200 |
+| `entities.put` | 1 | 1 | 0.400 | 0.800 |
+| `members.[scope+signature+generation+hashOnly].getAll` | 1 | 1 | 0.400 | 0.400 |
+| `members.get` | 1 | 1 | 0.400 | 0.400 |
+| `members.put` | 1 | 1 | 0.000 | 0.200 |
+| `meta.get` | 4 | 4 | 0.100 | 0.150 |
+| `meta.put` | 2 | 2 | 0.300 | 0.200 |
+| `windows.get` | 1 | 1 | 0.200 | 0.200 |
+| `windows.put` | 1 | 1 | 0.400 | 0.000 |
 
 ## Interpretation and remaining work
 
-All 18 storage gates are **NOISY**. None of the three browser runs stayed quiescent. The machine reached a one-minute load above 60 on 16 logical CPUs. Stable individual case CVs do not override the run's load warning. These are completed measurements, not reference-hardware acceptance certificates.
+All 18 storage gates are **NOISY**. None of the three browser runs stayed quiescent. Stable case CVs do not override that browser's load warning. These are completed measurements on the final storage revision, not reference-hardware acceptance certificates.
 
-The nominal 50k/10k engine p95 ratios are 0.893 in Chromium, 1.222 in Firefox and 0.253 in WebKit. Their bootstrap intervals are recorded above. The earlier 3.70x Chromium result did not reproduce. All thirty diagnostic row updates issued exactly 13 native requests at both sizes. The engine updates one entity, one membership and checkpoint metadata; it does not serialize a collection-sized ID/hash payload. The sparse hashOnly index query has no retained tombstones in this row-update fixture. No SDK request count grew with collection size. Per-request latencies still vary with native storage and scheduling, and this non-quiescent run cannot isolate those effects. No engine adapter change or native scaling fix is justified by these data; the scaling acceptance gate remains open pending a quiet rerun.
+The nominal 50k/10k engine p95 ratios are 1.765 in Chromium, 11.667 in Firefox and 1.235 in WebKit. Their 95% bootstrap intervals are respectively [0.112, 4.645], [1.167, 114.667] and [0.792, 2.214]. Every interval includes the 1.25 limit. Thus the earlier 3.70x point estimate cannot be treated as an established native scaling failure, and this final run also cannot close the scaling gate. Large outliers remain in the raw samples.
 
-Startup costs are worse in the candidate in all three nominal 50k results. The engine working-set path still reads and materializes full window membership/hash maps, including binary-to-hex conversion. That path is a follow-up profiling target, not evidence of a completed startup optimization. Delete results also vary by browser and size; the 100-owner engine path reads owner metadata and writes membership/window records for each owner. Do not infer a universal win from the single-row result.
+All thirty diagnostic engine updates issued exactly 13 native requests at both sizes. The operations are four meta gets, two meta puts, one window get/put, one entity get/put, one membership get/put, and one sparse hashOnly-index getAll. The latter returns no retained tombstones in this row-update fixture. No request count or SDK ID/hash serialization grows with collection size. The per-operation latency tables above show native completion/queue variability, including accesses to the tiny metadata table. They do not isolate a collection-size-dependent native backend cost under this changing machine load. No speculative index/schema removal or durability relaxation was used. A quiescent rerun and native backend/CPU trace are needed before attributing a scaling cause or making a driver fix.
+
+Startup remains a nominal regression in all three 50k results. The engine working-set path still reads and materializes full membership/hash maps, including binary-to-hex conversion. The 100-owner path reads owner metadata and writes membership/window records per owner. These are follow-up profiling targets, not completed startup/delete optimizations. Keep the engine opt-in.
 
 The 500-intent case uses the same DexieReducerOutbox in both profiles. Its ratio is a storage control measurement, not a new engine outbox improvement or the design doc's independent/dependent network drain gate. Durable admission, server replay and optimistic-layer retirement are outside this timing.
 
+The first complete matrix was preserved in pre-final-fix-results.json before the concurrent df657fe correctness commit was integrated. That commit guards stale-window pruning and preserves checkpoint-only hashes through full snapshot replacement. It was merged without discarding either history, verified with 39 focused tests, and the entire 21-case matrix was rerun. Only this second run is the current result.
+
 The old fake-indexeddb timings have been removed from this report. They remain in [emulator-results.json](./emulator-results.json), explicitly labeled as emulator data and rejected by gates. Its overwrite path scans secondary indexes; those scans do not establish native IndexedDB performance. Historical non-persistent Chromium snapshots and the aborted development run remain adjacent as historical artifacts, not current acceptance results.
 
-The focused IndexedDB correctness tests passed, 36 tests across indexeddb-engine.test.ts and indexeddb-replica.test.ts. Client typecheck and build passed. All four benchmark statistics/gate checks passed, including CLI exit codes and relevant-adapter noise handling. Fresh-process persisted startup assertions passed in all three browsers for both adapters.
+The focused IndexedDB correctness tests passed, 39 tests across indexeddb-engine.test.ts and indexeddb-replica.test.ts. Client typecheck and build passed. All four benchmark statistics/gate checks passed, including CLI exit codes and relevant-adapter noise handling. Fresh-process persisted startup assertions passed in all three browsers for both adapters.
 
-No storage implementation, legacy adapter, wire protocol, package version or Whagons integration changed in this benchmark follow-up. Keep the engine opt-in. No app code change is required. Dependent-chain replay, shaped-network outbox drain, first paint, worker/main-thread tasks, multi-tab memory, owner kill/recovery and physical Safari/device gates remain end-to-end work.
+The benchmark implementation changes no storage behavior. The concurrent df657fe engine correctness fix is retained and retimed. Legacy adapter behavior, wire protocol, package version and Whagons integration remain unchanged. Keep the engine opt-in. No app code change is required. Dependent-chain replay, shaped-network outbox drain, first paint, worker/main-thread tasks, multi-tab memory, owner kill/recovery and physical Safari/device gates remain end-to-end work.
