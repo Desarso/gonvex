@@ -431,8 +431,8 @@ it('pages startup rows across tombstones and scopes while respecting row and byt
   })));
   await db.entities.put({ ...template, scope: 'other', id: 'foreign' });
   const getAll = vi.spyOn(IDBObjectStore.prototype, 'getAll');
-  const loaded = await storage.loadWorkingSet('default', { maxRows: 5000, maxBytes: 10000 });
-  expect(getAll.mock.instances.filter(table => table?.name === 'entities')).toHaveLength(3);
+  const loaded = await storage.loadWorkingSet('default', { maxRows: 5000, maxBytes: 10000000 });
+  expect(getAll.mock.instances.filter(table => table?.name === 'entities')).toHaveLength(6);
   expect(Object.keys(loaded!.entities.tasks).sort()).toEqual(['a', 'b', 'page-2048', 'page-2049']);
   expect(loaded?.liveQueries.tasks.ids).toEqual(['a', 'b']);
   const bounded = await storage.loadWorkingSet('default', { maxRows: 1, maxBytes: 10000 });

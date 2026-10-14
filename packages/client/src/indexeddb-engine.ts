@@ -528,32 +528,32 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     await this.initialize();
     return this.database.transaction('r',this.database.entities,this.database.windows,this.database.members,this.database.meta,async()=>{
       const entities:ReplicaSnapshot['entities']={},liveQueries:ReplicaSnapshot['liveQueries']={},partial=new Set<string>();
-      const windows = this.database.windows.where('scope').equals(scope).toArray().then(records =>
-        Promise.all(records.filter(record => !record.deleted).map(record => this.materializeWindow(record))));
-      let bytes=0,count=0,hasRows=false,full=false;
+      let bytes=0,count=0,hasRows=false,full=false,averageBytes=0;
       // getAll-backed pages avoid one JS/Dexie cursor continuation per row.
-      // Eight times fewer request round trips than 256-row pages, with a fixed
-      // temporary bound independent of the retained working-set budget.
+      // Bound temporary records, and trim the last page to the estimated byte
+      // budget instead of decoding a full page of rows that cannot be retained.
       let after: [string, string, string] | undefined;
-      const [loadedWindows] = await Promise.all([windows, (async () => {
-        while (!full) {
-          const page = await this.database.entities.where('[scope+entity+id]')
-            .between(after ?? [scope], [scope, []], !after, false)
-            .limit(Math.min(2048, Math.max(1, budget.maxRows - count + 1))).toArray();
-          if (!page.length) break;
-          for (const record of page) {
-            if (record.deleted) continue;
-            hasRows = true;
-            const size = record.value.length * 2 + 256;
-            if (count >= budget.maxRows || bytes + size > budget.maxBytes) { partial.add(record.entity); full = true; break; }
-            (entities[record.entity] ??= {})[record.id] = JSON.parse(record.value);
-            bytes += size; count++;
-          }
-          const last = page[page.length - 1]!;
-          after = [last.scope, last.entity, last.id];
+      while (!full) {
+        const page = await this.database.entities.where('[scope+entity+id]')
+          .between(after ?? [scope], [scope, []], !after, false)
+          .limit(Math.min(512, Math.max(1, budget.maxRows - count + 1),
+            Number.isFinite(budget.maxBytes) ? Math.max(1, Math.ceil((budget.maxBytes - bytes) / (averageBytes || 256)) + 1) : 512)).toArray();
+        if (!page.length) break;
+        averageBytes = page.reduce((sum, record) => sum + record.value.length * 2 + 256, 0) / page.length;
+        for (const record of page) {
+          if (record.deleted) continue;
+          hasRows = true;
+          const size = record.value.length * 2 + 256;
+          if (count >= budget.maxRows || bytes + size > budget.maxBytes) { partial.add(record.entity); full = true; break; }
+          (entities[record.entity] ??= {})[record.id] = JSON.parse(record.value);
+          bytes += size; count++;
         }
-      })()]);
-      for (const window of loadedWindows) {
+        const last = page[page.length - 1]!;
+        after = [last.scope, last.entity, last.id];
+      }
+      for (const record of await this.database.windows.where('scope').equals(scope).toArray()) {
+        if (record.deleted) continue;
+        const window = await this.materializeWindow(record);
         liveQueries[window.signature]=window;
         if(window.ids.some(id=>!entities[window.entity]?.[id]))partial.add(window.entity);
       }
