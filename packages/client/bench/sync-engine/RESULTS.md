@@ -217,3 +217,74 @@ The old fake-indexeddb timings have been removed from this report. They remain i
 The focused IndexedDB correctness tests passed, 39 tests across indexeddb-engine.test.ts and indexeddb-replica.test.ts. Client typecheck and build passed. All four benchmark statistics/gate checks passed, including CLI exit codes and relevant-adapter noise handling. Fresh-process persisted startup assertions passed in all three browsers for both adapters.
 
 The benchmark implementation changes no storage behavior. The concurrent df657fe engine correctness fix is retained and retimed. Legacy adapter behavior, wire protocol, package version and Whagons integration remain unchanged. Keep the engine opt-in. No app code change is required. Dependent-chain replay, shaped-network outbox drain, first paint, worker/main-thread tasks, multi-tab memory, owner kill/recovery and physical Safari/device gates remain end-to-end work.
+
+## 2026-10-14 quiet run
+
+The full default matrix completed sequentially in Chromium, Firefox and WebKit. This was scheduled as a quiet run and started below the requested 4.0 load limit, but other heavy processes started during measurement. It does not certify an entirely quiet host. No samples were discarded, replaced or pooled with earlier runs.
+
+Source commit `ad7364e0ea7152da1cc3fd19c85e079cd33a8445`, source dirty flag `false`. Node v26.8.2, process priority nice 15. Default settings: five warmups, 20 initial samples, adaptive cap 60, CV limit 15%, and 4,000 seeded bootstrap draws. TMPDIR was `/home/gabriel/.cache/sdk-wave1/tmp`. The runner's default quiescence threshold is 8 on 16 logical CPUs. The task's 4.0 limit was checked before starting; it was not substituted for the runner's default.
+
+Initial uptime/top load averages were 0.67 / 1.76 / 2.55, then 1.43 / 1.65 / 2.42 immediately before launch. No pre-start wait was needed. The initial top snapshot showed Gabriel's Gonvex, Chrome and Electron processes, plus root's Tailscale daemon. Root's MinIO daemon also appeared later. At 23:10 Pacific, Gabriel's Python PIDs 3921979 and 3909294 used about 380% and 297% CPU at nice 5. They were unrelated to this benchmark and were not stopped. External uptime observations reached 9.99 during Chromium outbox, between runner readings. Chromium's runner quiescent flag therefore does not prove continuous quiet. Firefox recorded peak one-minute load 39.37.
+
+Raw samples and metadata: [quiet-2026-10-14-results.json](./quiet-2026-10-14-results.json). Sibling Chromium CPU/heap profiles are diagnostics, excluded from timings. Existing measurement artifacts and report sections are preserved.
+
+| Browser | Before load 1 / 5 / 15 min | After load 1 / 5 / 15 min | Max runner 1-min load | Runner quiescent |
+| --- | --- | --- | ---: | --- |
+| chromium | 1.430 / 1.650 / 2.420 | 6.490 / 5.850 / 4.650 | 6.490 | yes |
+| firefox | 6.490 / 5.850 / 4.650 | 7.600 / 13.370 / 9.480 | 39.370 | no |
+| webkit | 7.600 / 13.370 / 9.480 | 1.890 / 2.420 / 4.390 | 7.600 | yes |
+
+Milliseconds; brackets are bootstrap 95% confidence intervals. CV status is separate from gate verdicts.
+
+| Browser | Case | n | Legacy p95 [95% CI], ms | Engine p95 [95% CI], ms | Legacy / engine CV | Case CV status |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| chromium | single-row-10000 | 60 | 36.700 [31.800, 38.200] | 2.600 [2.500, 3.000] | 16.5% / 22.7% | NOISY |
+| chromium | single-row-50000 | 60 | 101.500 [99.300, 103.300] | 2.500 [2.400, 4.800] | 5.8% / 31.4% | NOISY |
+| chromium | startup-working-set-10000 | 20 | 445.500 [430.100, 474.700] | 354.800 [351.500, 354.900] | 3.2% / 1.3% | OK |
+| chromium | startup-working-set-50000 | 20 | 1692.800 [1685.100, 1710.400] | 1547.300 [1507.300, 1610.500] | 2.5% / 2.3% | OK |
+| chromium | delete-100-windows-10000 | 20 | 68.000 [63.700, 71.800] | 62.000 [60.800, 67.100] | 7.3% / 7.9% | OK |
+| chromium | delete-100-windows-50000 | 20 | 114.000 [111.100, 117.400] | 63.900 [58.600, 84.200] | 4.8% / 13.5% | OK |
+| chromium | outbox-500-independent | 60 | 33785.800 [29682.100, 37841.800] | 33243.200 [29616.100, 37991.100] | 51.5% / 50.3% | NOISY |
+| firefox | single-row-10000 | 60 | 51.000 [47.000, 52.000] | 9.000 [7.000, 10.000] | 9.3% / 31.6% | NOISY |
+| firefox | single-row-50000 | 60 | 108.000 [105.000, 116.000] | 6.000 [4.000, 15.000] | 5.5% / 360.8% | NOISY |
+| firefox | startup-working-set-10000 | 60 | 646.000 [602.000, 674.000] | 525.000 [483.000, 542.000] | 28.1% / 28.5% | NOISY |
+| firefox | startup-working-set-50000 | 20 | 3257.000 [3061.000, 3363.000] | 2768.000 [2429.000, 2772.000] | 8.6% / 11.8% | OK |
+| firefox | delete-100-windows-10000 | 60 | 125.000 [106.000, 138.000] | 267.000 [225.000, 308.000] | 15.8% / 41.2% | NOISY |
+| firefox | delete-100-windows-50000 | 60 | 167.000 [144.000, 226.000] | 146.000 [131.000, 160.000] | 43.1% / 26.7% | NOISY |
+| firefox | outbox-500-independent | 20 | 1955.000 [1800.000, 2077.000] | 1856.000 [1809.000, 1861.000] | 9.5% / 5.9% | OK |
+| webkit | single-row-10000 | 60 | 35.000 [35.000, 38.000] | 16.000 [11.000, 18.000] | 19.3% / 23.5% | NOISY |
+| webkit | single-row-50000 | 60 | 129.000 [127.000, 134.000] | 18.000 [11.000, 20.000] | 9.8% / 28.7% | NOISY |
+| webkit | startup-working-set-10000 | 20 | 258.000 [248.000, 261.000] | 198.000 [195.000, 202.000] | 2.7% / 2.6% | OK |
+| webkit | startup-working-set-50000 | 20 | 1200.000 [1172.000, 1202.000] | 890.000 [881.000, 892.000] | 2.0% / 1.3% | OK |
+| webkit | delete-100-windows-10000 | 40 | 74.000 [67.000, 98.000] | 137.000 [133.000, 137.000] | 14.5% / 12.3% | OK |
+| webkit | delete-100-windows-50000 | 40 | 149.000 [141.000, 159.000] | 149.000 [147.000, 151.000] | 5.3% / 14.8% | OK |
+| webkit | outbox-500-independent | 20 | 13355.000 [12754.000, 13355.000] | 13286.000 [12942.000, 13327.000] | 3.2% / 2.9% | OK |
+
+These are the unmodified gates.mjs verdicts. Chromium had an externally observed load breach that its sparse runner readings missed, so its nominal PASS verdicts do not certify a continuously quiet host. Firefox gates are NOISY because of observed non-quiescence.
+
+| Browser | Gate | 95% CI | Limit | Verdict | Reason |
+| --- | --- | ---: | ---: | --- | --- |
+| chromium | single-row durable apply p95 <= 10 ms | [2.400, 4.800] | 10 | NOISY | required adapter CV exceeds threshold |
+| chromium | 50k/10k engine p95 <= 1.25x | [0.800, 1.920] | 1.25 | NOISY | required adapter CV exceeds threshold |
+| chromium | startup-working-set-10000 engine/legacy p95 <= 1x | [0.747, 0.825] | 1 | PASS | 95% bootstrap interval |
+| chromium | startup-working-set-50000 engine/legacy p95 <= 1x | [0.887, 0.952] | 1 | PASS | 95% bootstrap interval |
+| chromium | delete-100-windows-10000 engine/legacy p95 <= 1x | [0.854, 1.053] | 1 | NOISY | 95% bootstrap interval |
+| chromium | delete-100-windows-50000 engine/legacy p95 <= 1x | [0.499, 0.754] | 1 | PASS | 95% bootstrap interval |
+| firefox | single-row durable apply p95 <= 10 ms | [4.000, 15.000] | 10 | NOISY | not quiescent |
+| firefox | 50k/10k engine p95 <= 1.25x | [0.400, 2.143] | 1.25 | NOISY | not quiescent |
+| firefox | startup-working-set-10000 engine/legacy p95 <= 1x | [0.748, 0.870] | 1 | NOISY | not quiescent |
+| firefox | startup-working-set-50000 engine/legacy p95 <= 1x | [0.746, 0.893] | 1 | NOISY | not quiescent |
+| firefox | delete-100-windows-10000 engine/legacy p95 <= 1x | [1.681, 2.775] | 1 | NOISY | not quiescent |
+| firefox | delete-100-windows-50000 engine/legacy p95 <= 1x | [0.619, 1.111] | 1 | NOISY | not quiescent |
+| webkit | single-row durable apply p95 <= 10 ms | [11.000, 20.000] | 10 | NOISY | required adapter CV exceeds threshold |
+| webkit | 50k/10k engine p95 <= 1.25x | [0.667, 1.727] | 1.25 | NOISY | required adapter CV exceeds threshold |
+| webkit | startup-working-set-10000 engine/legacy p95 <= 1x | [0.751, 0.815] | 1 | PASS | 95% bootstrap interval |
+| webkit | startup-working-set-50000 engine/legacy p95 <= 1x | [0.733, 0.755] | 1 | PASS | 95% bootstrap interval |
+| webkit | delete-100-windows-10000 engine/legacy p95 <= 1x | [1.388, 2.045] | 1 | FAIL | 95% bootstrap interval |
+| webkit | delete-100-windows-50000 engine/legacy p95 <= 1x | [0.931, 1.064] | 1 | NOISY | 95% bootstrap interval |
+
+Gate totals: 5 PASS, 1 FAIL, 12 NOISY. NOISY is not acceptance. The outbox case is a storage control using the same durable outbox in both modes; it has no network-drain gate.
+
+Validation: protocol, module-sdk and local-runtime builds passed; client typecheck and build passed; all four bench:sync-engine:check tests passed. The complete native matrix ran all 21 browser/case combinations with default sample settings. The runner and the separate gates.mjs invocation exited 1 because of FAIL verdicts. No full tests, cargo tests or source edits were needed for this measurement-only task.
+
+No Whagons app code change is required. Keep the engine opt-in. No protocol, package version or client-contract change, npm publication, PR merge or speculative performance fix was made. A reserved-machine rerun is still needed for continuous quiet-host acceptance, and any FAIL verdict needs a separate focused investigation. These storage measurements do not certify server replay, network, first paint, physical Safari/iOS, memory or battery behavior.
