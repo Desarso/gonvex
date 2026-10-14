@@ -60,7 +60,7 @@ import {
   type ReplicaCollectionSubscriptionState,
   type ReplicaCollectionPlan,
 } from "./local-replica.js";
-import { runOfflineLiveQuery, liveScopeCoverage, type LiveQueryPlan, type OfflineLiveQueryResult } from "./query-expression.js";
+import { runOfflineLiveQuery, liveQueryDependencies, liveQueryEquality, liveScopeCoverage, type LiveQueryPlan, type OfflineLiveQueryResult } from "./query-expression.js";
 export * from "./error-reporter.js";
 export * from "./optimistic.js";
 export * from "./outbox.js";
@@ -764,6 +764,13 @@ export class GonvexClient {
     };
     this.replica = new LocalReplica(options.localReplica?.storage,{maxResidentRows:options.localReplica?.maxResidentRows,maxResidentBytes:options.localReplica?.maxResidentBytes});
     this.replicaView = createLocalReplicaView(this.replica);
+    let residencyVersion = this.replica.residencyVersion();
+    this.replica.subscribe(() => {
+      const next = this.replica.residencyVersion();
+      if (next === residencyVersion) return;
+      residencyVersion = next;
+      this.offlineResults.clear(); this.offlineResultRows = 0;
+    });
     if (this.localExecutor) {
       let executionVersion = this.replica.executionVersion();
       this.unsubscribeLocal = this.replica.subscribe(() => {
@@ -1525,6 +1532,17 @@ export class GonvexClient {
     return this.replica.collectionState<T>(this.replicaSignature(ref, args));
   }
 
+  private offlineResultsScope = -1;
+  private offlineResultRows = 0;
+  private readonly offlineResults = new Map<string, { token: string; result: OfflineLiveQueryResult<ReplicaRow> }>();
+
+  /** SDK selector token includes relation/reference tables and identity context. */
+  offlineLiveQueryToken(ref: FunctionReference): string {
+    const tables = ref.live?.plan ? liveQueryDependencies(ref.live.plan) : [];
+    if (ref.live && !tables.includes(ref.live.entity)) tables.push(ref.live.entity);
+    return JSON.stringify([this.replica.dependencyVersion(tables), this.localIdentity]);
+  }
+
   /** Run the generated Live Query plan over the bounded normalized cache. */
   offlineLiveQuery<T extends ReplicaRow = ReplicaRow>(
     ref: FunctionReference,
@@ -1535,8 +1553,15 @@ export class GonvexClient {
       return { rows: [], completeness: "partial", supported: false, unsupportedOperator: "missingPlan" };
     }
     const queryArgs = isJsonRecord(args) ? args : {};
-    return runOfflineLiveQuery(
-      this.replica.entityRows<T>(ref.live.entity),
+    if (this.offlineResultsScope !== this.outboxScopeGeneration) { this.offlineResults.clear(); this.offlineResultRows = 0; this.offlineResultsScope = this.outboxScopeGeneration; }
+    const key = JSON.stringify([ref.live, queryArgs, options.window]);
+    const token = this.offlineLiveQueryToken(ref);
+    const cached = this.offlineResults.get(key);
+    if (cached?.token === token) return { ...cached.result, rows: cached.result.rows.slice() as T[] };
+    const equality = liveQueryEquality(ref.live.plan.where, queryArgs);
+    const rows = equality ? this.replica.equalityRows(ref.live.entity, equality.column, equality.value) : this.replica.cachedEntityRows(ref.live.entity);
+    const result = runOfflineLiveQuery(
+      rows as readonly T[],
       options.window === false ? { ...ref.live.plan, window: undefined, sort: undefined } : ref.live.plan,
       queryArgs,
       this.replica.entityCompleteness(ref.live.entity),
@@ -1554,6 +1579,18 @@ export class GonvexClient {
         },
       },
     );
+    if (cached) { this.offlineResults.delete(key); this.offlineResultRows -= cached.result.rows.length; }
+    // Full offline exports can contain an entire table. Do not retain those in
+    // the selector cache; keep at most 4,096 row references across 64 plans.
+    if (result.rows.length <= 4096) {
+      while (this.offlineResults.size && (this.offlineResults.size >= 64 || this.offlineResultRows + result.rows.length > 4096)) {
+        const oldest = this.offlineResults.keys().next().value!;
+        this.offlineResultRows -= this.offlineResults.get(oldest)!.result.rows.length;
+        this.offlineResults.delete(oldest);
+      }
+      this.offlineResults.set(key, { token, result }); this.offlineResultRows += result.rows.length;
+    }
+    return { ...result, rows: result.rows.slice() };
   }
 
   /** Number of reducers still queued for delivery (excludes failed and rejected intents). */
@@ -2222,6 +2259,7 @@ export class GonvexClient {
     this.handlers.clear();
     this.querySubscriptions.clear();
     this.replicaSubscriptions.clear();
+    this.offlineResults.clear(); this.offlineResultRows = 0;
     this.sessionScopeHandlers.clear();
     this.authErrorHandlers.clear();
     this.developerCredentialHandlers.clear();
@@ -2831,6 +2869,9 @@ export class GonvexClient {
       localLiveQueryResult: () => {
         if (latestError) throw latestError;
         if (!ref.live) return undefined;
+        const nextToken = JSON.stringify([this.replica.freshness(), this.replica.freshness() === 'offline'
+          ? this.offlineLiveQueryToken(ref) : this.replica.windowVersion(key), transportGeneration]);
+        if (snapshotToken === nextToken) return snapshotResult;
         const offline = this.replica.freshness() === "offline" && ref.live.plan
           ? this.offlineLiveQuery(ref, args)
           : undefined;
@@ -2838,8 +2879,6 @@ export class GonvexClient {
         const window = this.replica.getWindow(key);
         const skeleton = transportResult ?? window?.resultSkeleton;
         if (skeleton === undefined && (ref.live.resultPath?.length ?? 0) > 0) return undefined;
-        const nextToken = `${this.replica.version()}:${transportGeneration}`;
-        if (snapshotToken === nextToken) return snapshotResult;
         const materializedRows = offline?.supported
           ? offline.rows as unknown as JsonValue[]
           : this.replica.liveQuery(key).rows as unknown as JsonValue[];

@@ -1,0 +1,186 @@
+[
+  {
+    "file": "baseline-100000-updated.heapsnapshot",
+    "constructors": {
+      "string": {
+        "count": 2490239,
+        "shallowBytes": 144775453
+      },
+      "native": {
+        "count": 109028,
+        "shallowBytes": 14979920
+      },
+      "array": {
+        "count": 361,
+        "shallowBytes": 8544892
+      },
+      "Object": {
+        "count": 100534,
+        "shallowBytes": 2816044
+      },
+      "code": {
+        "count": 11695,
+        "shallowBytes": 456792
+      },
+      "object shape": {
+        "count": 2566,
+        "shallowBytes": 160108
+      },
+      "closure": {
+        "count": 3198,
+        "shallowBytes": 92652
+      },
+      "concatenated string": {
+        "count": 231,
+        "shallowBytes": 4620
+      },
+      "Array": {
+        "count": 132,
+        "shallowBytes": 2112
+      },
+      "system / Context / scope @4791393": {
+        "count": 51,
+        "shallowBytes": 2040
+      },
+      "system / Context / scope @5374591": {
+        "count": 80,
+        "shallowBytes": 1600
+      },
+      "system / Context / scope @4791253": {
+        "count": 51,
+        "shallowBytes": 1428
+      }
+    },
+    "replicaShapes": {}
+  },
+  {
+    "file": "round1-candidate-100000-updated.heapsnapshot",
+    "constructors": {
+      "string": {
+        "count": 2491035,
+        "shallowBytes": 144785669
+      },
+      "native": {
+        "count": 405945,
+        "shallowBytes": 20961537
+      },
+      "Object": {
+        "count": 500570,
+        "shallowBytes": 13617100
+      },
+      "array": {
+        "count": 971,
+        "shallowBytes": 10969264
+      },
+      "number": {
+        "count": 203898,
+        "shallowBytes": 2400396
+      },
+      "code": {
+        "count": 12456,
+        "shallowBytes": 622540
+      },
+      "object shape": {
+        "count": 2619,
+        "shallowBytes": 163540
+      },
+      "closure": {
+        "count": 3249,
+        "shallowBytes": 94148
+      },
+      "Set": {
+        "count": 639,
+        "shallowBytes": 10248
+      },
+      "concatenated string": {
+        "count": 231,
+        "shallowBytes": 4620
+      },
+      "Array": {
+        "count": 135,
+        "shallowBytes": 2160
+      },
+      "system / Context / scope @5485193": {
+        "count": 51,
+        "shallowBytes": 2040
+      }
+    },
+    "replicaShapes": {
+      "treap node": {
+        "count": 200001,
+        "shallowBytes": 5600028
+      },
+      "treap entry": {
+        "count": 100001,
+        "shallowBytes": 2400024
+      },
+      "recency record": {
+        "count": 100000,
+        "shallowBytes": 2800000
+      }
+    }
+  },
+  {
+    "file": "candidate-100000-updated.heapsnapshot",
+    "constructors": {
+      "string": {
+        "count": 2290485,
+        "shallowBytes": 139204853
+      },
+      "native": {
+        "count": 109083,
+        "shallowBytes": 15039665
+      },
+      "array": {
+        "count": 4068,
+        "shallowBytes": 12750872
+      },
+      "Object": {
+        "count": 103215,
+        "shallowBytes": 2871616
+      },
+      "code": {
+        "count": 12502,
+        "shallowBytes": 658896
+      },
+      "object shape": {
+        "count": 2617,
+        "shallowBytes": 163672
+      },
+      "closure": {
+        "count": 3254,
+        "shallowBytes": 94268
+      },
+      "Map": {
+        "count": 2309,
+        "shallowBytes": 36964
+      },
+      "Array": {
+        "count": 1012,
+        "shallowBytes": 16192
+      },
+      "Set": {
+        "count": 598,
+        "shallowBytes": 9592
+      },
+      "concatenated string": {
+        "count": 231,
+        "shallowBytes": 4620
+      },
+      "system / Context / scope @4834789": {
+        "count": 51,
+        "shallowBytes": 2040
+      }
+    },
+    "replicaShapes": {
+      "slot page": {
+        "count": 407,
+        "shallowBytes": 9768
+      },
+      "hash bucket": {
+        "count": 2241,
+        "shallowBytes": 44820
+      }
+    }
+  }
+]

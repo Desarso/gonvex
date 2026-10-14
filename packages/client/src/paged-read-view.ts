@@ -65,10 +65,7 @@ export function pagedReplicaReadView(
         const selected = await view.select(read, excludedRowIds);
         fieldsComplete &&= selected.complete;
         const unprojected = await view.select({ ...read, columns: executionReadColumns(read, known?.key ?? '_id') }, excludedRowIds);
-        rows = projectDataRows([...rows, ...unprojected.rows], {
-          ...read,
-          columns: undefined,
-        });
+        rows.push(...unprojected.rows);
         if (primaryKeys?.every(id => excludedRowIds.includes(id) || foundKeys.has(id))) break;
       }
       return {

@@ -21,7 +21,8 @@ import type { LocalColumn, LocalSchema } from "./schema.js";
 import { validateValue } from "./validation.js";
 
 /** A transaction-consistent SDK read view. Implementations may use RAM or disk.
- * Rows are detached values; complete describes this read, not the whole database.
+ * Rows are detached or immutable internal values. The runtime copies them
+ * before invoking reducer handlers; complete describes this read, not the database.
  */
 export type ReducerReadView = {
   readonly keepAliveFor?: <T>(promise: Promise<T>) => Promise<T>;

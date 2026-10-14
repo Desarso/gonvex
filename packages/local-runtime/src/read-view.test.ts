@@ -132,3 +132,31 @@ it.each<DataPredicate>([
   const view=memoryReadView(new Map([['tasks',new Map(rows.map(row=>[row._id,row]))]]),{tasks:{key:'_id',complete:true}});
   expect((await view.select({table:'tasks',where})).rows).toEqual(rows.filter(row=>matchesDataPredicate(row,where)));
 });
+
+it('shares only opted-in frozen rows and still copies mutable legacy read views',async()=>{
+  const nested=Object.freeze({count:1});const row=Object.freeze({_id:'a',nested});
+  const tables=new Map([['tasks',new Map([['a',row]])]]);
+  const coverage={tasks:{key:'_id',complete:true}};
+  const read={table:'tasks'};
+  const shared=await memoryReadView(tables,coverage,true).select(read);
+  expect(shared.rows[0]).toBe(row);
+  const defensive=await memoryReadView(tables,coverage).select(read);
+  expect(defensive.rows[0]).not.toBe(row);expect(defensive.rows[0]).toEqual(row);
+  const projected=await memoryReadView(tables,coverage,true).select({...read,columns:['nested']});
+  expect(projected.rows[0]!.nested).toBe(nested);
+  const mutable={_id:'b',nested:{count:1}};
+  const copy=await memoryReadView(new Map([['tasks',new Map([['b',mutable]])]]),coverage,true).select(read);
+  expect(copy.rows[0]).not.toBe(mutable);
+});
+
+it('lets portable handlers mutate returned JSON without modifying shared replica rows',async()=>{
+  const {PortableReducerRuntime}=await import('./portable.js');
+  const {reducer,schema,getRow}=await import('@gonvex/module-sdk');
+  const nested=Object.freeze({count:1});const row=Object.freeze({_id:'a',nested});
+  const runtime=new PortableReducerRuntime({artifactHash:'test',schema:{tasks:{key:'_id',columns:{_id:{type:'text',nullable:false},nested:{type:'jsonb',nullable:false}}}},reducers:{edit:reducer({args:schema.any(),result:schema.any(),run:async ctx=>{
+    const selected=await getRow<any>(ctx.db,'tasks','_id','a');selected.nested.count=9;
+    return selected;
+  }})}});
+  const result=await runtime.execute('edit',{},memoryReadView(new Map([['tasks',new Map([['a',row]])]]),{tasks:{key:'_id',complete:true}},true),{scope:'test',commandId:'test',now:1,artifactHash:'test',identity:{auth:{},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}}});
+  expect((result.result as any).nested.count).toBe(9);expect(row.nested.count).toBe(1);
+});
