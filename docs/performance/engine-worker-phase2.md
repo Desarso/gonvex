@@ -94,7 +94,42 @@ The pipelined Chromium run at `6e58ccc` completed one warmup pair and two measur
 
 Before the retirement reread fix, Firefox completed all four workloads, crash/retry, private reconnect and two-tab fallback in two alternating pairs. Its drain gate failed: 32,504 → 33,283 ms median, paired ratio 1.024 [1.024, 1.067]. This led to removing unnecessary local retirement journal reads. The Firefox harness assertion is resolved. Firefox and WebKit do not expose Chromium's CDP script metric or Long Tasks API; those gates are unavailable rather than passing on empty arrays.
 
-**Final validation pending:** the `f0461b4` Firefox, Chromium and full WebKit reruns are queued serially with 35% start headroom and a 50% acceptance cutoff. Shared load rose above 100 on 16 logical cores and has repeatedly prevented accepted samples. The latest retired-cache change must not be described as having passed their final gates yet. WebKit's full attempt completed native parity but accepted no measured pairs before restart. Raw failures and excluded attempts remain in the benchmark directory. No merge readiness is claimed until the guarded reruns complete.
+## Final serial validation attempt, 2026-10-14
+
+The checkout was pulled with `git pull --ff-only` and remained at `3e5c3d2`, including `f0461b4`. Product and harness code were unchanged. Chromium ran five warmup pairs and ten of the requested twenty measured alternating pairs. Fourteen attempts were excluded for load. The three-hour cumulative load-wait budget expired before Chromium completed, so Firefox and WebKit were not started. This attempt is **NOISY**, and the PR is **not merge-ready by its final gates**. Numeric gates computed from the accepted Chromium subset pass, but that subset does not replace the required complete run or its final two-tab fixture.
+
+| Browser | Measured pairs | Cold script | Burst long task | Drain | Final verdict |
+| --- | ---: | --- | --- | --- | --- |
+| Chromium 149.0.7827.55 | 10 / 20 | PASS on accepted subset | PASS on accepted subset | PASS on accepted subset | NOISY, incomplete |
+| Firefox | 0 / 20 | Unavailable | Unavailable | Not measured | NOISY, not started |
+| WebKit | 0 / 20 | Unavailable | Unavailable | Not measured | NOISY, not started |
+
+The following Chromium medians and paired bootstrap 95% confidence intervals describe only the ten accepted pairs. Ratios are worker / legacy.
+
+| Workload | Legacy → worker script median | Legacy → worker wall median | Paired script ratio, 95% CI | Paired wall ratio, 95% CI |
+| --- | ---: | ---: | --- | --- |
+| Cached cold paint | 363.2 → 12.0 ms | 2,639 → 2,916 ms | 0.031 [0.028, 0.035] | 1.100 [1.036, 1.184] |
+| 1,000-row burst | 73.8 → 23.4 ms | 1,541 → 1,548 ms | 0.327 [0.281, 0.349] | 1.002 [0.999, 1.008] |
+| 20k-row snapshot | 643.0 → 9.0 ms | 22,746 → 22,878 ms | 0.014 [0.007, 0.019] | 1.004 [0.992, 1.012] |
+| 500 sequential intents | 1434.8 → 557.0 ms | 47,629 → 32,874 ms | 0.378 [0.333, 0.438] | 0.769 [0.679, 0.836] |
+
+Initial `uptime` showed load 16.65 on 16 logical cores. The pre-browser controller saw 12.74 and waited one three-minute interval, then started Chromium at 4.46. The guarded runner retained 35% start headroom and a 50% acceptance cutoff. Maximum accepted load was 7.64, or 0.4775 of cores. Waiting load peaked at 29.38. About 180.5 minutes of cumulative load waiting elapsed before the next monitoring check stopped the run. Process snapshots showed `gabriel` Node, Chrome, compiler and ffmpeg jobs, including Node at 441% CPU and a compiler at 164%. No unrelated process was killed. Only the validation controller and its descendants were terminated at the wait limit.
+
+The Chromium subset passed reducer network denial, durable crash/retry, termination after the first durable acknowledgement in a 32-command batch with the original command IDs, and private reconnect. The final two-tab fixture was not reached. Firefox and WebKit have no timings or paired confidence intervals from this attempt. Existing historical artifacts, including the untracked `round2-final-firefox-full.json`, were preserved.
+
+Raw accepted samples, exclusions, load checks, numeric subset gates and the serial status are in `round2-validation-chromium.json`, `round2-validation-chromium-summary.json`, and `round2-validation-status.json`. Runner and process snapshots are in `round2-validation-chromium.log` and `round2-validation-load.log`. Rerun the same configuration serially on a quiet machine. No application change is required for this validation follow-up. No unit tests, typechecks or builds were rerun for this documentation/results-only change.
+
+```sh
+export TMPDIR=/home/gabriel/.cache/sdk-wave1/tmp
+START_LOAD_LIMIT=.35 LOAD_LIMIT=.5 WAIT_LOAD=1 BROWSER=chromium WARMUPS=5 ITERATIONS=20 \
+  PROFILE_SET=gonvex-final-validation-chromium PORT=48849 RESULTS=round2-validation-chromium.json \
+  node packages/client/bench/engine-worker/run.mjs
+node packages/client/bench/engine-worker/summarize.mjs \
+  round2-validation-chromium.json round2-validation-chromium-summary.json
+```
+
+Use fresh result/profile names for the next attempt, and substitute Firefox then WebKit after checking `uptime` before each browser.
+
 
 
 The concurrently reviewed correctness fixes exposed a cold-sampling mismatch in the historical runs: wall time stopped at cached paint, while CDP script sampling also included subsequent exact-ID subscription and online preparation. Historical cold script ratios are invalid and their summaries now omit them. The corrected runner calls `prepare()` only after sampling cached paint and marks new runs with `coldSamplingAligned: true`.
