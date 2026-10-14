@@ -198,17 +198,20 @@ export function sendEngineMessage(endpoint: EngineEndpoint, message: Record<stri
     try { split = splitMessage(message); } catch (error) {
       if (!(error instanceof TextCodecRequired)) throw error;
       // Unusually long JSON keys or paths cannot be used as bounded packet addresses.
-      const paths: string[][] = [], parents = new WeakMap<object, string[]>();
+      const paths: string[][] = [], parents = new WeakMap<object, string[]>(), locations = new WeakMap<object, string[]>();
       const aliasPaths: Array<{ path: string[]; source: string[] }> = [];
       let isRoot = true;
       const payload = JSON.stringify(message, function(key, value) {
-        const path = isRoot ? [] : [...(parents.get(this) ?? []), key];
+        const path = isRoot ? [] : [...(locations.get(this) ?? []), key];
         isRoot = false;
         if (value === undefined) { paths.push(path); return null; }
         if (value && typeof value === "object") {
           const source = parents.get(value);
-          if (source) { aliasPaths.push({ path, source }); return null; }
-          parents.set(value, path);
+          if (source) aliasPaths.push({ path, source });
+          else parents.set(value, path);
+          // Older receivers ignore alias metadata. Keep the complete value
+          // in their payload; newer receivers restore shared identity.
+          locations.set(value, path);
         }
         return value;
       });
