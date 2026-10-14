@@ -32,7 +32,9 @@ async function seed(count = 50_000) {
   await storage.loadSession("probe"); await existing.open();
   const existingCount = await existing.table("entities").where("[scope+entity]").equals(["visible", "tasks"]).count();
   const cursor = await existing.table("meta").get(["visible", "cursor"]);
-  await fetch(`/revision?value=${cursor ? JSON.parse(cursor.value).revision + 1 : 1}`);
+  const windows = await existing.table("windows").where("scope").equals("visible").toArray();
+  const revision = Math.max(cursor ? JSON.parse(cursor.value).revision : 0, ...windows.map(window => JSON.parse(window.value).cursor?.revision ?? 0));
+  await fetch(`/revision?value=${revision + 1}`);
   existing.close();
   if (existingCount !== count) {
   // Seed preparation writes the adapter's exact record format in bulk. It is
@@ -175,8 +177,10 @@ async function parity() {
   const replayed = (await client.listIntents()).filter(entry => batchCommands.some(command => command.id === entry.id));
   if (replayed.length !== 32 || new Set(replayed.map(entry => entry.id)).size !== 32) throw new Error("Batch crash retry duplicated or lost a command");
   await fetch("/online", { method: "POST" }); client.connect(); await until(() => client.connectionState().isWebSocketConnected); await until(() => client.localSessionState() === "authenticated");
+  await until(async () => (await client.listIntents()).length === 0);
   await fetch("/disconnect", { method: "POST" }); await until(() => !client.connectionState().isWebSocketConnected);
   await until(() => client.connectionState().isWebSocketConnected, 15_000); await until(() => client.localSessionState() === "authenticated");
+  await until(async () => (await client.listIntents()).length === 0);
   const deniedCount = await fetch("/denied-count").then(response => response.json()); if (deniedCount !== 0) throw new Error("Reducer network escaped");
   return { deniedApis: 3, retryResult: second, durableCrashRecovery: true, batchCrashRecovery: { durablePrefix: prefix, commands: 32, sameIds: true }, reconnect: true };
 }
