@@ -1308,13 +1308,17 @@ async fn websocket_upgrade(
 }
 
 async fn websocket(
-    mut socket: WebSocket,
+    socket: WebSocket,
     runtime: Runtime,
     ip: std::net::IpAddr,
     public_transport: bool,
     _public_connection: Option<public_functions::PublicConnection>,
     pending: public_functions::PublicConnection,
 ) {
+    let mut socket = ReplicaSocket {
+        inner: socket,
+        binary: None,
+    };
     let mut pending_connection = Some(pending);
     let auth_deadline =
         tokio::time::Instant::now() + runtime.inner.config.public_functions.auth_timeout;
@@ -1438,7 +1442,7 @@ async fn websocket(
                 }
                 continue;
             }
-            transport = next_socket_or_feed(&mut socket, &mut feed, &mut feed_scheduler) => {
+            transport = next_socket_or_feed(&mut socket.inner, &mut feed, &mut feed_scheduler) => {
                 match transport {
                     ScheduledTransport::Socket(message) => {
                         let Some(message) = message else { break; };
@@ -1996,8 +2000,26 @@ async fn websocket(
                         &live_queries,
                         &control_queries,
                     );
+                    let binary = matches!(response, ServerMessage::AuthResult { .. })
+                        && binary_replica_negotiated(control_only, capabilities.as_ref());
+                    if let ServerMessage::AuthResult {
+                        result: serde_json::Value::Object(result),
+                        ..
+                    } = &mut response
+                    {
+                        result.insert(
+                            "binaryReplica".into(),
+                            serde_json::json!(if binary { 1 } else { 0 }),
+                        );
+                    }
                     if send_json(&mut socket, &response).await.is_err() {
                         break;
+                    }
+                    if binary {
+                        socket.binary =
+                            Some(gonvex_protocol::binary_replica::BinaryReplicaCodec::default());
+                    } else if !binary {
+                        socket.binary = None;
                     }
                 }
                 Ok(ClientMessage::QueryCall {
@@ -3095,7 +3117,7 @@ fn member_access_changed(
         || admitted.membership_revision != current.membership_revision
 }
 
-async fn send_all(socket: &mut WebSocket, messages: &[ServerMessage]) -> Result<(), ()> {
+async fn send_all(socket: &mut ReplicaSocket, messages: &[ServerMessage]) -> Result<(), ()> {
     for message in messages {
         if send_json(socket, message).await.is_err() {
             return Err(());
@@ -3756,12 +3778,19 @@ fn record_connection_subscriptions(
     );
 }
 
+fn binary_replica_negotiated(
+    control_only: bool,
+    capabilities: Option<&gonvex_protocol::ClientCapabilities>,
+) -> bool {
+    !control_only && capabilities.and_then(|c| c.binary_replica) == Some(1)
+}
+
 fn snapshot_pages_negotiated(capabilities: Option<&gonvex_protocol::ClientCapabilities>) -> bool {
     capabilities.and_then(|c| c.replica_snapshot_pages) == Some(1)
 }
 
 async fn send_replica_open(
-    socket: &mut WebSocket,
+    socket: &mut ReplicaSocket,
     message: ServerMessage,
     paged: bool,
 ) -> Result<(), ()> {
@@ -3777,7 +3806,35 @@ async fn send_replica_open(
     }
 }
 
-async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), ()> {
+struct ReplicaSocket {
+    inner: WebSocket,
+    binary: Option<gonvex_protocol::binary_replica::BinaryReplicaCodec>,
+}
+
+impl std::ops::Deref for ReplicaSocket {
+    type Target = WebSocket;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for ReplicaSocket {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+async fn send_json(socket: &mut ReplicaSocket, message: &ServerMessage) -> Result<(), ()> {
+    if gonvex_protocol::binary_replica::BinaryReplicaCodec::client_revision_is_safe(message) {
+        if let Some(codec) = &mut socket.binary {
+            let encoded = codec.encode(message).map_err(|_| ())?;
+            return socket
+                .inner
+                .send(Message::Binary(encoded.into()))
+                .await
+                .map_err(|_| ());
+        }
+    }
     let encoded = serde_json::to_string(message).map_err(|_| ())?;
     socket
         .send(Message::Text(encoded.into()))
@@ -3787,6 +3844,79 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn binary_replica_negotiation_requires_an_exact_opt_in() {
+        assert!(!super::binary_replica_negotiated(false, None));
+        for version in [None, Some(0), Some(1), Some(2)] {
+            let capabilities = gonvex_protocol::ClientCapabilities {
+                binary_replica: version,
+                ..Default::default()
+            };
+            assert_eq!(
+                super::binary_replica_negotiated(false, Some(&capabilities)),
+                version == Some(1)
+            );
+            assert!(!super::binary_replica_negotiated(true, Some(&capabilities)));
+        }
+    }
+
+    #[tokio::test]
+    async fn binary_replica_transport_keeps_auth_and_control_json() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as WireMessage;
+        let expected = serde_json::json!({"type":"replica.snapshot","id":"open","key":"id",
+            "cursor":{"epoch":"e","revision":1},"result":[{"id":"a","nested":{"empty":[],"null":null}}]});
+        let expected_handler = expected.clone();
+        let app = axum::Router::new().route("/ws", axum::routing::get(move |upgrade: WebSocketUpgrade| {
+            let expected = expected_handler.clone();
+            async move {
+                upgrade.on_upgrade(move |inner| async move {
+                    let mut socket = ReplicaSocket { inner, binary: None };
+                    let Some(Ok(Message::Text(auth))) = socket.next().await else { return; };
+                    let ClientMessage::Auth { id, capabilities, control_only, .. } = serde_json::from_str(&auth).unwrap() else { panic!("auth expected"); };
+                    let accepted = binary_replica_negotiated(control_only, capabilities.as_ref());
+                    send_json(&mut socket, &ServerMessage::AuthResult { id, result: serde_json::json!({"binaryReplica":if accepted {1} else {0}}) }).await.unwrap();
+                    if accepted { socket.binary = Some(Default::default()); }
+                    send_json(&mut socket, &serde_json::from_value(expected).unwrap()).await.unwrap();
+                    send_json(&mut socket, &ServerMessage::AuthError { code: None, id: "control".into(), error: "control".into() }).await.unwrap();
+                })
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        for version in [None, Some(1), Some(2)] {
+            let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+                .await
+                .unwrap();
+            socket.send(WireMessage::Text(serde_json::json!({"type":"auth","id":"auth","capabilities":{"binaryReplica":version}}).to_string().into())).await.unwrap();
+            let auth = socket.next().await.unwrap().unwrap();
+            assert!(matches!(auth, WireMessage::Text(_)));
+            let data = socket.next().await.unwrap().unwrap();
+            let decoded: serde_json::Value = match data {
+                WireMessage::Binary(bytes) => {
+                    assert_eq!(version, Some(1));
+                    gonvex_protocol::binary_replica::BinaryReplicaCodec::default()
+                        .decode_value(&bytes)
+                        .unwrap()
+                }
+                WireMessage::Text(text) => {
+                    assert_ne!(version, Some(1));
+                    serde_json::from_str(&text).unwrap()
+                }
+                _ => panic!("replica data expected"),
+            };
+            assert_eq!(decoded, expected);
+            assert!(matches!(
+                socket.next().await.unwrap().unwrap(),
+                WireMessage::Text(_)
+            ));
+        }
+        server.abort();
+    }
+
     #[test]
     fn snapshot_pages_negotiation_preserves_old_clients() {
         assert!(!super::snapshot_pages_negotiated(None));

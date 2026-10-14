@@ -162,6 +162,8 @@ pub struct BrowserTelemetryInfo {
 #[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_replica: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_snapshot_pages: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preserve_subscriptions: Option<u8>,
@@ -881,3 +883,5 @@ mod tests {
         ));
     }
 }
+
+pub mod binary_replica;

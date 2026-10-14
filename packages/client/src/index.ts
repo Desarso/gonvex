@@ -1,3 +1,4 @@
+import { BinaryReplicaCodec } from "@gonvex/protocol";
 import { readIsCovered, primaryReadKeys } from "@gonvex/local-runtime/read-view";
 import type { DataRead } from "@gonvex/module-sdk";
 import type {
@@ -512,6 +513,8 @@ export type GonvexClientAuth = {
 export type GonvexClientOptions = GonvexClientAuth & {
   /** Disable negotiated snapshot paging for a runtime rollback. Defaults to true. */
   replicaSnapshotPages?: boolean;
+  /** Opt in to negotiated binary replica frames. Disabled pending performance gates. */
+  binaryReplica?: boolean;
   /** Control Plane only, including tenant-scoped control calls. Disables local data and outbox. */
   role?: "control";
   /** Anonymous, online-only connection scoped to one tenant ID or routing domain. */
@@ -625,6 +628,7 @@ export class GonvexClient {
   private querySubscribeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private serverCapabilities: ServerCapabilities = {};
   private readonly replicaSnapshotPagesEnabled: boolean;
+  private readonly binaryReplicaEnabled: boolean;
   private activeArtifactHashValue = "";
   private readonly publicTenant?: string;
   private auth: GonvexClientAuth = {};
@@ -752,6 +756,7 @@ export class GonvexClient {
     this.querySubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
       options.querySubscriptionRetentionMs,
     );
+    this.binaryReplicaEnabled = options.binaryReplica === true;
     this.replicaSnapshotPagesEnabled = options.replicaSnapshotPages !== false;
     this.replicaSubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
       options.replicaSubscriptionRetentionMs,
@@ -1798,6 +1803,10 @@ export class GonvexClient {
       transportUrl = publicUrl.toString();
     }
     const socket = new WebSocket(transportUrl);
+    socket.binaryType = "arraybuffer";
+    let binaryCodec = new BinaryReplicaCodec();
+    let binaryAccepted = false;
+    let binaryFailed = false;
     this.socket = socket;
     this.serverCapabilities = {};
     socket.addEventListener("open", () => {
@@ -1849,12 +1858,28 @@ export class GonvexClient {
       this.notifyConnectionState();
     });
     socket.addEventListener("message", (event) => {
-      if (this.socket !== socket) return;
+      if (this.socket !== socket || binaryFailed) return;
       let message: ServerMessage;
       try {
-        message = JSON.parse(String(event.data)) as ServerMessage;
+        if (typeof event.data === "string") {
+          message = JSON.parse(event.data) as ServerMessage;
+        } else {
+          if (!binaryAccepted || !(event.data instanceof ArrayBuffer)) throw new Error("Unexpected binary frame");
+          message = binaryCodec.decode(new Uint8Array(event.data));
+        }
       } catch {
+        if (typeof event.data !== "string") {
+          binaryFailed = true;
+          this.markReplicaSubscriptionsOutOfDate();
+          socket.close(4002, "Invalid binary replica frame");
+        }
         return;
+      }
+      if (message.type === "auth.result") {
+        binaryCodec = new BinaryReplicaCodec();
+        binaryAccepted = this.binaryReplicaEnabled && message.result !== null
+          && typeof message.result === "object" && !Array.isArray(message.result)
+          && message.result.binaryReplica === 1;
       }
       if (message.type === "session.ready") {
         this.serverCapabilities = message.capabilities ?? {};
@@ -4748,7 +4773,7 @@ export class GonvexClient {
       controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
       device: this.telemetryDevice,
-		capabilities: { replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
+		capabilities: { binaryReplica: this.binaryReplicaEnabled && !this.controlOnly ? 1 : undefined, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
     });
   }
 

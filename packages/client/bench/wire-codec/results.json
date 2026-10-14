@@ -1,0 +1,208 @@
+{
+  "date": "2026-10-14T03:33:57.248Z",
+  "nodeVersion": "v26.8.2",
+  "chromiumVersion": "149.0.7827.55",
+  "permessageDeflate": false,
+  "bytes": {
+    "snapshot": {
+      "json": 32832408,
+      "binary": 9956821,
+      "hypotheticalDeflateJson": 2222856,
+      "hypotheticalDeflateBinary": 1165527
+    },
+    "transaction": {
+      "json": 1718741,
+      "binary": 510283,
+      "hypotheticalDeflateJson": 110230,
+      "hypotheticalDeflateBinary": 60169
+    },
+    "delta": {
+      "json": 1743,
+      "binary": 567,
+      "hypotheticalDeflateJson": 405,
+      "hypotheticalDeflateBinary": 239
+    }
+  },
+  "node": {
+    "snapshot": {
+      "json": {
+        "ms": {
+          "median": 113.50172200000088,
+          "p95": 118.28759999999966,
+          "medianCI95": [
+            111.96087899999839,
+            114.27365099999952
+          ]
+        },
+        "peakLiveHeapDelta": 37338352,
+        "repeatsPerSample": 1
+      },
+      "binary": {
+        "ms": {
+          "median": 220.8158770000009,
+          "p95": 237.06516700000066,
+          "medianCI95": [
+            215.10619099999894,
+            224.80704200000037
+          ]
+        },
+        "peakLiveHeapDelta": 108577952,
+        "repeatsPerSample": 1
+      }
+    },
+    "transaction": {
+      "json": {
+        "ms": {
+          "median": 5.9052149999988615,
+          "p95": 7.587496000000101,
+          "medianCI95": [
+            5.829271000002336,
+            6.325158999999985
+          ]
+        },
+        "peakLiveHeapDelta": 2036168,
+        "repeatsPerSample": 1
+      },
+      "binary": {
+        "ms": {
+          "median": 19.319407000002684,
+          "p95": 25.965661000002,
+          "medianCI95": [
+            18.382904999998573,
+            20.92907999999443
+          ]
+        },
+        "peakLiveHeapDelta": 24718104,
+        "repeatsPerSample": 1
+      }
+    },
+    "delta": {
+      "json": {
+        "ms": {
+          "median": 0.005336039000001619,
+          "p95": 0.007798072999998113,
+          "medianCI95": [
+            0.005187046999999438,
+            0.005663446999998996
+          ]
+        },
+        "peakLiveHeapDelta": 2897840,
+        "repeatsPerSample": 1000
+      },
+      "binary": {
+        "ms": {
+          "median": 0.028810450999997555,
+          "p95": 0.03315983399999823,
+          "medianCI95": [
+            0.027963969999997063,
+            0.02929961600000388
+          ]
+        },
+        "peakLiveHeapDelta": 12215256,
+        "repeatsPerSample": 1000
+      }
+    }
+  },
+  "chromium": {
+    "snapshot": {
+      "json": {
+        "ms": {
+          "median": 49.39999985694885,
+          "p95": 54.200000047683716,
+          "medianCI95": [
+            47.60000014305115,
+            51.299999952316284
+          ]
+        },
+        "peakLiveHeapDelta": 23009092,
+        "repeatsPerSample": 1
+      },
+      "binary": {
+        "ms": {
+          "median": 157.29999995231628,
+          "p95": 162.5,
+          "medianCI95": [
+            153.59999990463257,
+            158.30000019073486
+          ]
+        },
+        "peakLiveHeapDelta": 74289364,
+        "repeatsPerSample": 1
+      }
+    },
+    "transaction": {
+      "json": {
+        "ms": {
+          "median": 2.6999998092651367,
+          "p95": 2.700000047683716,
+          "medianCI95": [
+            2.6000001430511475,
+            2.700000047683716
+          ]
+        },
+        "peakLiveHeapDelta": 1241056,
+        "repeatsPerSample": 1
+      },
+      "binary": {
+        "ms": {
+          "median": 12.799999952316284,
+          "p95": 16.799999952316284,
+          "medianCI95": [
+            12.099999904632568,
+            15.700000047683716
+          ]
+        },
+        "peakLiveHeapDelta": 12719720,
+        "repeatsPerSample": 1
+      }
+    },
+    "delta": {
+      "json": {
+        "ms": {
+          "median": 0.003,
+          "p95": 0.0032000000476837156,
+          "medianCI95": [
+            0.003,
+            0.0030999999046325685
+          ]
+        },
+        "peakLiveHeapDelta": 1647392,
+        "repeatsPerSample": 1000
+      },
+      "binary": {
+        "ms": {
+          "median": 0.023,
+          "p95": 0.024799999952316285,
+          "medianCI95": [
+            0.022799999952316283,
+            0.02390000009536743
+          ]
+        },
+        "peakLiveHeapDelta": 26557836,
+        "repeatsPerSample": 1000
+      }
+    }
+  },
+  "rustWholeFixture": {
+    "jsonMs": {
+      "median": 81.035059,
+      "p95": 111.562745,
+      "medianCI95": [
+        76.176772,
+        83.699015
+      ]
+    },
+    "binaryMs": {
+      "median": 568.4605150000001,
+      "p95": 666.771396,
+      "medianCI95": [
+        555.605511,
+        599.842388
+      ]
+    },
+    "jsonPeakBytes": 44109544,
+    "binaryPeakBytes": 22323805
+  },
+  "peakAllocationNote": "Peak sampled live JS heap delta after whole decode, includes unreclaimed temporaries; not total allocations or OS RSS. Inputs already allocated. Rust peak tracked live allocation delta includes output buffers.",
+  "crossLanguageRoundTrips": "passed both directions, all 159 frames"
+}

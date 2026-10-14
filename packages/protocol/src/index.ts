@@ -245,6 +245,7 @@ export type ReplicaReady = {
 };
 
 export type ClientCapabilities = {
+  binaryReplica?: 1;
   /** Accepts atomically activated replica.snapshotPage frames. */
   replicaSnapshotPages?: 1;
   /** Honors auth.result subscriptionsPreserved on an in-place refresh. */
@@ -551,3 +552,5 @@ export type ServerMessage =
   | { type: "action.error"; id: string; path?: string; error: string; trace?: MessageTrace }
   | { type: "client.updateRequired"; reason: string; contract: number }
   | { type: "system.reload"; reason: string; artifactHash?: string };
+
+export { BinaryReplicaCodec, BINARY_REPLICA_MAX_BYTES } from "./binary-replica.js";
