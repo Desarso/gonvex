@@ -310,7 +310,11 @@ it("migrates old receipts before pruning and refuses ambiguous retries after evi
   await old.table("receipts").bulkPut([0, 1].map(index => ({ key: JSON.stringify(["s", String(index)]), path: "p", args: "{}", result: index })));
   old.close();
   const receipts = new EngineReceipts(name, 1); cleanups.push(() => receipts.close());
-  expect((await receipts.get("s", "0"))?.result).toBe(0);
+  const existing = await receipts.get("s", "0");
+  const migrated = await (receipts as any).database.table("receipts").toArray();
+  expect(migrated).toHaveLength(1); expect([0, 1]).toContain(migrated[0].result);
+  if (existing) expect(existing.result).toBe(0);
+  await expect(receipts.assertCanAdmit(Date.now() - 1000)).rejects.toThrow("receipt expired");
   await receipts.put("s", "new", "p", {}, 9);
   expect(await (receipts as any).database.table("receipts").count()).toBe(1);
   await expect(receipts.assertCanAdmit(Date.now() - 1000)).rejects.toThrow("receipt expired");

@@ -11,8 +11,15 @@ export class EngineReceipts {
     this.journal = new Dexie(name, { cache: "disabled" });
     this.database = new Dexie(`${name}-engine-receipts`, { cache: "disabled" }) as typeof this.database;
     this.database.version(1).stores({ receipts: "&key" });
-    this.database.version(2).stores({ receipts: "&key,retainedAt", metadata: "&key" }).upgrade(transaction =>
-      transaction.table("receipts").toCollection().modify({ retainedAt: Date.now(), commandAt: Date.now() }));
+    this.database.version(2).stores({ receipts: "&key,retainedAt", metadata: "&key" }).upgrade(async transaction => {
+      const now = Date.now(), receipts = transaction.table<Receipt, string>("receipts");
+      await receipts.toCollection().modify({ retainedAt: now, commandAt: now });
+      const excess = await receipts.count() - this.limit;
+      if (excess > 0) {
+        await receipts.orderBy("retainedAt").limit(excess).delete();
+        await transaction.table("metadata").put({ key: "retryFloor", retryFloor: now });
+      }
+    });
   }
   async openJournal() { await this.journal.open(); }
   private key(scope: string, command: string) { return JSON.stringify([scope, command]); }

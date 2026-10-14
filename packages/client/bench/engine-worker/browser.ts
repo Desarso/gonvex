@@ -21,9 +21,10 @@ const paint = () => new Promise(resolve => requestAnimationFrame(() => requestAn
 async function until(test: () => boolean | Promise<boolean>, timeout = 60_000) { const started = performance.now(); while (!await test()) { if (performance.now() - started > timeout) throw new Error("Fixture timed out"); await wait(10); } }
 const tasks: number[] = [], frames: number[] = [], clicks: number[] = [];
 let observing = false;
-new PerformanceObserver(list => { if (observing) for (const entry of list.getEntries()) tasks.push(entry.duration); }).observe({ entryTypes: ["longtask"] });
+const longTaskSupported = PerformanceObserver.supportedEntryTypes.includes("longtask");
+if (longTaskSupported) new PerformanceObserver(list => { if (observing) for (const entry of list.getEntries()) tasks.push(entry.duration); }).observe({ entryTypes: ["longtask"] });
 function begin() { observing = true; tasks.length = 0; frames.length = 0; clicks.length = 0; }
-async function finish(start: number) { await paint(); observing = false; return { wallMs: performance.now() - start, longTasks: [...tasks], frames: [...frames], clicks: [...clicks] }; }
+async function finish(start: number) { await paint(); observing = false; return { wallMs: performance.now() - start, longTasks: [...tasks], longTaskSupported, frames: [...frames], clicks: [...clicks] }; }
 function signature(ref: typeof visible) { return `${ref.path}\u0000{}\u0000{"delivery":"replica","live":null,"scope":"tenant"}`; }
 async function seed(count = 50_000) {
   const storage = new IndexedDBLocalReplicaStorage(storageOptions.replicaName);

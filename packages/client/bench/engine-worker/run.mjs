@@ -137,8 +137,20 @@ try {
       const metrics = async () => { const values = await session?.send('Performance.getMetrics'); return values?.metrics.find(value => value.name === 'ScriptDuration')?.value ?? null; };
       const run = async name => {
         process.stdout.write(`${index} ${mode} ${name}...\n`);
-        const before = await metrics(); const value = await page.evaluate(async ({ name, mode }) => name === 'cold' ? window.benchmark.start(mode) : window.benchmark[name](), { name, mode });
+        const before = await metrics();
+        let overloaded = false;
+        const observeLoad = () => {
+          const load = loadavg(); metadata.loadChecks.push({ index, mode, workload: name, load });
+          if (load[0] / cpus().length > .5) overloaded = true;
+        };
+        const monitor = setInterval(observeLoad, 10_000);
+        let value;
+        try { value = await page.evaluate(async ({ name, mode }) => name === 'cold' ? window.benchmark.start(mode) : window.benchmark[name](), { name, mode }); }
+        finally { clearInterval(monitor); }
+        observeLoad();
+        if (overloaded) throw new Error(`Load check failed during ${mode} ${name}; sample excluded`);
         const after = await metrics(); process.stdout.write(`${name}: ${value.wallMs.toFixed(1)}ms\n`); return { ...value, scriptMs: before === null ? null : (after - before) * 1_000 };
+
       };
       const cold = await run('cold'); if (cold.mode !== mode) throw new Error(`Mode silently fell back: ${mode} => ${cold.mode}`);
       if (index === -warmups && mode === 'worker') metadata.correctness = await page.evaluate(() => window.benchmark.parity());
@@ -163,4 +175,8 @@ try {
   metadata.multiTab = { first: await page.evaluate(() => window.benchmark.mode()), second: await second.evaluate(() => window.benchmark.mode()) };
   await second.evaluate(() => window.benchmark.stop()); await second.close(); await page.evaluate(() => window.benchmark.stop());
   await writeFile(resolve(root, process.env.RESULTS ?? 'results.json'), JSON.stringify({ metadata, samples }, null, 2));
+} catch (error) {
+  metadata.failure = String(error);
+  await writeFile(resolve(root, process.env.RESULTS ?? 'results.json'), JSON.stringify({ metadata, samples }, null, 2));
+  throw error;
 } finally { await context.close(); for (const socket of sockets) socket.terminate(); wss.close(); server.close(); }
