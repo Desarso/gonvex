@@ -166,7 +166,8 @@ export class EngineClient {
     return { protocolVersion: 1, url: this.url, options: { ...this.config.options, ...auth }, fetchToken: Boolean(this.fetchToken), storage: this.config.storage, residency: this.config.residency, ownerLock: this.engineMode === "worker" ? this.ownerLock : undefined, artifactHash: this.config.engine.artifactHash };
   }
   private async initializeEndpoint() {
-    const state = await this.call<{ connection: ConnectionState; session: "unavailable" | "restored" | "authenticated"; commandScope: string }>("init", [this.init()]);
+    const state = await this.call<{ connection: ConnectionState; session: "unavailable" | "restored" | "authenticated"; commandScope: string; capabilities?: { admissionBatch?: number } }>("init", [this.init()]);
+    this.rpc.setAdmissionBatching(state.capabilities?.admissionBatch === 1);
     this.connection = { ...state.connection, hasEverConnected: this.connection?.hasEverConnected || state.connection.hasEverConnected, connectionCount: this.connectionOffset + state.connection.connectionCount }; this.session = state.session; this.commandScope = state.commandScope;
   }
   async initialize(): Promise<void> {
@@ -230,7 +231,7 @@ export class EngineClient {
   async reducer<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options: CallOptions = {}): Promise<T | QueuedReducerOutcome> {
     // Expose createCommand so an application can retain the identity across a crash/reopen.
     try {
-      return await this.admitted("reducer", [structuredClone(ref), structuredClone(args), structuredClone({ ...options, engineCommand: options.engineCommand ?? this.createCommand() })], options.timeoutMs);
+      return await this.admitted("reducer", [structuredClone(ref), structuredClone(args), structuredClone({ ...options, engineFresh: options.engineCommand === undefined, engineCommand: options.engineCommand ?? this.createCommand() })], options.timeoutMs);
     } catch (error) {
       if (error instanceof EngineRpcTimeout) void this.recover().catch(failure => this.emit("error", failure));
       throw error;

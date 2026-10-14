@@ -1,3 +1,6 @@
+import { connectEngine } from "./connect.js";
+import { installEngineAdmissions } from "./admissions.js";
+import { engineScope, readReplicaEntities, closeEngine } from "./legacy.js";
 import { GonvexClient, GonvexClientError, type GonvexClientOptions, type FunctionReference, type EngineCommand } from "../index.js";
 import type { JsonValue } from "@gonvex/protocol";
 import { browserUpgradeStorage, type BrowserUpgradeOptions } from "../browser-upgrades.js";
@@ -71,7 +74,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
       const coldRead = () => {
         const expected = ++readGeneration; ready = false; publish();
         if (c.localSessionState() === "unavailable") return;
-        void c.readReplicaEntities(entity, ids).then(() => {
+        void readReplicaEntities(c, entity, ids).then(() => {
           if (expected !== readGeneration) return;
           ready = true; publish();
         }, error => { if (expected === readGeneration) void event("watchError", [id, serializeEngineError(error)]); });
@@ -137,12 +140,17 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
         });
       }
       stores = browserUpgradeStorage({ ...init.storage, migrations }); await stores.ready;
-      receipts = new EngineReceipts(init.storage.outboxName);
+      receipts = new EngineReceipts(init.storage.outboxName); await receipts.openJournal();
       client = new GonvexClient(init.url, { ...init.options, localRuntime: binding,
-        webSocketConstructor: networkConstructor, fetchToken: init.fetchToken ? fetchToken : undefined,
+        fetchToken: init.fetchToken ? fetchToken : undefined,
         localReplica: { storage: stores.storage, ...init.residency },
         outbox: { store: receipts.wrap(stores.store) } });
-      client.onSessionScopeChange(() => { previous.clear(); void event("scope", [client!.engineScope()]); });
+      installEngineAdmissions(client, receipts);
+      if (networkConstructor) {
+        const hostClient = client;
+        Object.defineProperty(client, "connect", { value: () => connectEngine(hostClient, networkConstructor) });
+      }
+      client.onSessionScopeChange(() => { previous.clear(); void event("scope", [engineScope(client!)]); });
       client.subscribeToConnectionState(state => event("connection", [state]));
       client.onDeveloperCredential(token => event("developerCredential", [token]));
       client.onAuthError((message, details) => event("authError", [message, details]));
@@ -151,7 +159,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
       client.onLocalExecutionFallback(value => event("fallback", [value]));
       client.onReducerRejection(value => event("rejection", [value]));
       await client.localSessionReady;
-      return { connection: client.connectionState(), session: client.localSessionState(), commandScope: client.engineScope() };
+      return { connection: client.connectionState(), session: client.localSessionState(), commandScope: engineScope(client), capabilities: { admissionBatch: 1 } };
     }
     if (!client) throw new Error("Engine is not initialized");
     if (request.method === "fetchTokenResult") {
@@ -166,21 +174,20 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
     }
     if (request.method === "resnapshot") { previous.delete(args[0]); dirty.add(args[0]); scheduleBatch(); return; }
     if (request.method === "reducer") {
-      const [ref, value, options] = args as [FunctionReference, JsonValue, { engineCommand: EngineCommand; offline?: "queue" | "reject" }];
+      const [ref, value, options] = args as [FunctionReference, JsonValue, { engineCommand: EngineCommand; engineFresh?: boolean; offline?: "queue" | "reject" }];
       const command = options.engineCommand;
       if (!command || typeof command.id !== "string" || !command.id || command.id.length > 200 || !Number.isSafeInteger(command.now) || !/^[0-9a-f]{64}$/.test(command.entropy)) throw new Error("Invalid engine command identity");
       if (ref.localExecution === 1 && command.artifactHash !== binding?.artifactHash) throw new Error("Engine command artifact mismatch");
       const durable = ref.scope !== "control" && (ref.localExecution === 1 || ref.offline?.mode === "allowed" || options.offline === "queue");
-      const admittedScope = client.engineScope();
+      const admittedScope = engineScope(client);
       if (command.scope !== admittedScope) throw new GonvexClientError("Engine command belongs to another account scope", { code: "superseded" });
       const execute = async () => {
-        if (client!.engineScope() !== admittedScope) throw new GonvexClientError("Account changed before engine admission", { code: "superseded" });
-        const prior = durable ? await receipts!.find(stores!.store, admittedScope, options.engineCommand.id, ref.path, value) : undefined;
-        if (client!.engineScope() !== admittedScope) throw new GonvexClientError("Account changed during engine admission", { code: "superseded" });
+        if (engineScope(client!) !== admittedScope) throw new GonvexClientError("Account changed before engine admission", { code: "superseded" });
+        const prior = durable && !options.engineFresh ? await receipts!.findReceipt(admittedScope, options.engineCommand.id, ref.path, value) : undefined;
+        if (engineScope(client!) !== admittedScope) throw new GonvexClientError("Account changed during engine admission", { code: "superseded" });
         if (prior) return prior.result;
         const result = await client!.reducer(ref, value, options);
-        if (durable) await receipts!.put(admittedScope, options.engineCommand.id, ref.path, value, result);
-        if (client!.engineScope() !== admittedScope) throw new GonvexClientError("Account changed during engine result persistence", { code: "superseded" });
+        if (engineScope(client!) !== admittedScope) throw new GonvexClientError("Account changed during engine result persistence", { code: "superseded" });
         return result;
       };
       const key = JSON.stringify([admittedScope, command.id]);
@@ -190,10 +197,10 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
         if (running.fingerprint !== fingerprint) throw new Error("Engine command ID reused with different arguments");
         return running.operation;
       }
-      // Local receipt lookup and admission share a lane. Server-only calls keep
-      // their existing concurrency and use the same wire idempotency key.
-      const result = ref.localExecution === 1 ? admission.then(execute) : execute();
-      if (ref.localExecution === 1) admission = result.then(() => undefined, () => undefined);
+      // The client orders atomic admissions. Do not serialize here across
+      // their durable acknowledgements, which would stall reducer preparation.
+      const result = execute();
+      if (ref.localExecution === 1) admission = Promise.allSettled([admission, result]).then(() => undefined);
       commands.set(key, { fingerprint, operation: result });
       void result.finally(() => commands.delete(key)).catch(() => undefined);
       return result;
@@ -202,11 +209,11 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
     if (request.method === "close") {
       await admission;
       for (const release of subscriptions.values()) release(); subscriptions.clear(); readers.clear(); previous.clear(); dirty.clear();
-      unsubscribeIntents?.(); await client.closeEngine(); stores?.close(); receipts?.close(); releaseOwnership?.(); return;
+      unsubscribeIntents?.(); await closeEngine(client); stores?.close(); receipts?.close(); releaseOwnership?.(); return;
     }
     if (request.method === "localSessionReady") return client.localSessionReady;
     if (request.method === "connect") { client.connect(); return; }
-    if (request.method === "readEntities") return client.readReplicaEntities(args[0], args[1]);
+    if (request.method === "readEntities") return readReplicaEntities(client, args[0], args[1]);
     if (request.method === "setAuth" || request.method === "authenticate") {
       const auth = { ...args[0], fetchToken: args[1] ? fetchToken : undefined };
       return request.method === "authenticate" ? client.authenticate(auth) : client.setAuth(auth);
@@ -216,6 +223,10 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
     return (client[request.method as typeof allowed[number]] as (...args: any[]) => unknown).apply(client, args);
   };
   const receive = ({ data }: MessageEvent) => {
+    if (Array.isArray(data?.admissions) && data.admissions.length <= 128) {
+      for (const admission of data.admissions) receive({ data: admission } as MessageEvent);
+      return;
+    }
     if (!data || typeof data.id !== "string" || !Array.isArray(data.args)) return;
     const request = data as EngineEnvelope;
     if (request.method !== "init" && (request.generation !== generation || request.scope !== scope)) return;

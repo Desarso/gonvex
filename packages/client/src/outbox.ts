@@ -55,7 +55,7 @@ export type ReducerOutboxEntry = {
   /** Original receipt namespace survives operation renames across client upgrades. */
   receiptPath?: string;
   /** Optional durable local RPC receipt, written with admission before prediction. */
-  engineOutcome?: { result: unknown };
+  engineOutcome?: { result: unknown; commandNow?: number; fresh?: boolean };
   /** Auto-incremented sequence number. Lower ids always happened first. */
   id: number;
   /** Authenticated project/tenant/user identity that owns this reducer. */
@@ -132,7 +132,7 @@ export function outboxEntryIsQueued(entry: Pick<ReducerOutboxEntry, "state">): b
 }
 
 export type EnqueueReducer = {
-  engineOutcome?: { result: unknown };
+  engineOutcome?: { result: unknown; commandNow?: number; fresh?: boolean };
   scope: string;
   path: string;
   args: unknown;
@@ -225,7 +225,6 @@ export class DexieReducerOutbox implements ReducerOutbox {
   async enqueue(reducer: EnqueueReducer): Promise<ReducerOutboxEntry> {
     const createdAt = Date.now();
     const entry: NewReducerOutboxEntry = {
-      ...(reducer.engineOutcome ? { engineOutcome: cloneValue(reducer.engineOutcome) } : {}),
       scope: reducer.scope,
       path: reducer.path,
       args: cloneValue(reducer.args),
@@ -671,7 +670,6 @@ export class StoreReducerOutbox implements ReducerOutbox {
     await this.ready;
     const createdAt = Date.now();
     const draft: Omit<ReducerOutboxEntry, "id"> = {
-      ...(reducer.engineOutcome ? { engineOutcome: cloneValue(reducer.engineOutcome) } : {}),
       scope: reducer.scope,
       path: reducer.path,
       args: cloneValue(reducer.args),
@@ -1196,7 +1194,6 @@ function createIdempotencyKey() {
 function cloneEntry(entry: ReducerOutboxEntry): ReducerOutboxEntry {
   return {
     ...entry,
-    ...(entry.engineOutcome ? { engineOutcome: cloneValue(entry.engineOutcome) } : {}),
     args: cloneValue(entry.args),
     entityKeys: [...entry.entityKeys],
     patches: entry.patches?.map(clonePatch),

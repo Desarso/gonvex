@@ -31,6 +31,17 @@ export class EngineRpc {
   private readonly pending = new Map<string, { resolve(value: any): void; reject(error: Error): void; request: EngineEnvelope; timer?: ReturnType<typeof setTimeout> }>();
   private readonly chunks = new Map<string, any>();
   private closed = false;
+  private admissionBatching = false;
+  setAdmissionBatching(enabled: boolean) { this.admissionBatching = enabled; }
+  private admissions: EngineEnvelope[] = [];
+  private admissionScheduled = false;
+  private flushAdmissions() {
+    this.admissionScheduled = false;
+    const requests = this.admissions.splice(0).filter(request => this.pending.has(request.id));
+    for (let offset = 0; offset < requests.length; offset += 128) {
+      this.endpoint.postMessage({ admissions: requests.slice(offset, offset + 128) });
+    }
+  }
   readonly onCrash = new Set<(error: Error) => void>();
   readonly onEvent = new Set<(method: string, args: any[]) => void>();
   private readonly receive = ({ data }: MessageEvent) => {
@@ -84,13 +95,20 @@ export class EngineRpc {
     return new Promise((resolve, reject) => {
       const timer = timeoutMs > 0 ? setTimeout(() => { this.pending.delete(request.id); this.chunks.delete(request.id); reject(new EngineRpcTimeout(request)); }, timeoutMs) : undefined;
       this.pending.set(request.id, { resolve, reject, request, timer });
-      this.endpoint.postMessage(request);
+      if (request.method === "reducer" && this.admissionBatching) {
+        this.admissions.push(request);
+        if (!this.admissionScheduled) { this.admissionScheduled = true; queueMicrotask(() => this.flushAdmissions()); }
+      } else {
+        // Control operations cannot overtake already issued admissions.
+        if (this.admissions.length) this.flushAdmissions();
+        this.endpoint.postMessage(request);
+      }
     });
   }
   private fail(error: Error) {
     this.closed = true;
     for (const waiter of this.pending.values()) { clearTimeout(waiter.timer); waiter.reject(new EngineRpcUnavailable(waiter.request, error)); }
-    this.pending.clear(); this.chunks.clear();
+    this.pending.clear(); this.chunks.clear(); this.admissions.length = 0;
   }
   isClosed() { return this.closed; }
   close() {
@@ -181,6 +199,9 @@ export function sendEngineMessage(endpoint: EngineEndpoint, message: Record<stri
     for (const alias of aliases) await sendPacket({ packet: { kind: "alias", ...alias } });
     await sendPacket({ packet: { kind: "end" } });
   };
+  if (!message.event && JSON.stringify(message).length <= 16 * 1024) {
+    endpoint.postMessage(message); return Promise.resolve();
+  }
   const operation = (sending.get(endpoint) ?? Promise.resolve()).then(send);
   sending.set(endpoint, operation.catch(() => undefined));
   return operation;

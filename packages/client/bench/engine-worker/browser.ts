@@ -1,8 +1,13 @@
+import { installProfile, resetProfile, readProfile } from "./profile.js";
+import { reducerOutboxScope } from "../../src/auth-scope.js";
+import { closeEngine } from "../../src/engine/legacy.js";
 import { Dexie } from "dexie";
 import { entityRecord } from "../../src/indexeddb-read-view.js";
-import { GonvexClient, IndexedDBLocalReplicaStorage, browserUpgradeStorage, reducerOutboxScope } from "../../src/index.js";
+import { GonvexClient, IndexedDBLocalReplicaStorage, browserUpgradeStorage } from "../../src/index.js";
 import { createEngineClient, EngineRpcTimeout, type EngineClient } from "../../src/engine/client.js";
 import { artifactHash, binding, columns, denyRef, editCollection, editRef, full, row, source, visible } from "./fixture.js";
+const profiling = new URL(location.href).searchParams.has("io");
+if (profiling) installProfile();
 const runtime = `ws://${location.host}/ws`;
 const auth = { project: "benchmark", tenant: "tenant", identity: { sub: "account", iss: "fixture" }, fetchToken: async () => "private-fixture-token" };
 const storageOptions = { replicaName: "engine-bench", outboxName: "engine-bench-outbox", contract: { version: 1, offlineMaxAgeMs: null }, initialVersion: 1 };
@@ -44,9 +49,20 @@ async function seed(count = 50_000) {
   await storage.saveSession(reducerOutboxScope(runtime, auth, "unused"), { directive, artifactHash, identity: { auth: { account: { id: "account" } }, tenant: { id: "tenant" }, member: { id: "member", accountId: "account", permissions: {} } } });
   storage.close(); return { rows: count, rowBytes: new TextEncoder().encode(JSON.stringify(row(0))).length };
 }
+async function resetEdits() {
+  // Keep task hydration fixed while removing prior synthetic edits outside
+  // measurement. No SDK client or worker has opened these stores yet.
+  const database = new Dexie(storageOptions.replicaName); await database.open();
+  await database.transaction("rw", [database.table("entities"), database.table("windows")], async () => {
+    await database.table("entities").where("[scope+entity]").equals(["visible", "edits"]).delete();
+    const key = signature(editCollection);
+    await database.table("windows").put({ scope: "visible", signature: key, value: JSON.stringify({ signature: key, kind: "replica", entity: "edits", key: "id", ids: [], completeness: "complete", source: "server", columns: ["id", "count"] }) });
+  });
+  database.close(); await fetch("/reset-edits", { method: "POST" });
+}
 async function start(mode: "legacy" | "worker") {
   begin(); const started = performance.now();
-  if (mode === "worker") client = await createEngineClient(runtime, { engine: { workerUrl: "/worker.js", artifactHash, workerFactory: () => { engineWorker = new Worker("/worker.js", { type: "module" }); return engineWorker; } }, auth, storage: storageOptions, onDiagnostic: message => console.log(`Engine ${message}`), fallbackBinding: binding, residency: { maxResidentRows: Number.MAX_SAFE_INTEGER, maxResidentBytes: 200 * 1024 * 1024 } });
+  if (mode === "worker") client = await createEngineClient(runtime, { engine: { workerUrl: "/worker.js", artifactHash, workerFactory: () => { engineWorker = new Worker(`/worker.js${profiling ? "?io" : ""}`, { type: "module" }); return engineWorker; } }, auth, storage: storageOptions, onDiagnostic: message => console.log(`Engine ${message}`), fallbackBinding: binding, residency: { maxResidentRows: Number.MAX_SAFE_INTEGER, maxResidentBytes: 200 * 1024 * 1024 } });
   else {
     const stores = browserUpgradeStorage({ ...storageOptions, migrations: [] }); await stores.ready; closeStorage = stores.close;
     client = new GonvexClient(runtime, { ...auth, localRuntime: binding, outbox: { store: stores.store }, localReplica: { storage: stores.storage, maxResidentRows: Number.MAX_SAFE_INTEGER, maxResidentBytes: 200 * 1024 * 1024 } });
@@ -57,6 +73,7 @@ async function start(mode: "legacy" | "worker") {
   release = watch.onUpdate(() => { const rows = watch.localReplicaResult(); if (rows) document.querySelector("main")!.textContent = `${rows.length}:${(rows[0] as any)?.id}`; });
   await until(() => watch.localReplicaResult()?.length === 250);
   const result = await finish(started);
+  console.log("Engine cached paint ready");
   // Exact-ID subscriptions retain 1,000 rows in both modes.
   const releases: Array<() => void> = [];
   let readyEntities = 0;
@@ -68,7 +85,9 @@ async function start(mode: "legacy" | "worker") {
     else { releases.push(client.retainReplicaEntities("tasks", [String(index)])); releases.push(client.localReplica.subscribe(() => undefined, { entity: "tasks", ids: [String(index)] })); }
   }
   const prior = release; release = () => { prior?.(); releases.forEach(close => close()); };
-  client.connect(); await until(() => client.localSessionState() === "authenticated"); await sourceReady;
+  client.connect(); await until(() => client.localSessionState() === "authenticated");
+  console.log("Engine authenticated");
+  await Promise.race([sourceReady, wait(60_000).then(() => { throw new Error("Source subscription did not become ready"); })]);
   if ("engineMode" in client) await until(() => readyEntities === 1_000);
   await wait(200);
   return { ...result, mode: "engineMode" in client ? client.engineMode : "legacy" };
@@ -96,17 +115,35 @@ async function snapshot() {
   const stop = watch.onUpdate(() => { if (watch.status().isUpToDate) resolve(); });
   await ready; const result = await finish(started); stop(); return result;
 }
+async function workerProfile(operation: "reset" | "read") {
+  if (!engineWorker || !("engineMode" in client) || client.engineMode !== "worker") return readProfile();
+  return new Promise<any>(resolve => {
+    const receive = ({ data }: MessageEvent) => {
+      if (data?.benchProfile === operation) { engineWorker!.removeEventListener("message", receive); resolve(data.value); }
+    };
+    engineWorker!.addEventListener("message", receive); engineWorker!.postMessage({ benchProfile: operation });
+  });
+}
 async function drain() {
   // Queue in offline mode, then reconnect the same client and original IDs.
   await fetch("/offline", { method: "POST" }); await until(() => !client.connectionState().isWebSocketConnected);
+  if (profiling) { resetProfile(); await workerProfile("reset"); }
   begin(); const started = performance.now();
-  for (let index = 0; index < 500; index++) await client.reducer(editRef, { id: crypto.randomUUID() });
+  const latencies: number[] = [];
+  const admit = async () => {
+    const called = performance.now();
+    await client.reducer(editRef, { id: crypto.randomUUID() }, { timeoutMs: 0 });
+    latencies.push(performance.now() - called);
+  };
+  if (new URL(location.href).searchParams.has("pipeline")) await Promise.all(Array.from({ length: 500 }, admit));
+  else for (let index = 0; index < 500; index++) await admit();
   const admissionMs = performance.now() - started;
+  const admissionProfile = profiling ? await workerProfile("read") : undefined;
   await fetch("/online", { method: "POST" }); client.connect(); await until(async () => {
     const entries = "engineMode" in client ? await (client as any).listIntents() : await client.listIntents();
     return entries.length === 0;
   }, 120_000);
-  return { ...await finish(started), admissionMs };
+  return { ...await finish(started), admissionMs, admissionLatenciesMs: latencies, ...(profiling ? { admissionProfile, drainProfile: await workerProfile("read") } : {}) };
 }
 async function parity() {
   if (!("engineMode" in client)) throw new Error("Worker fixture required");
@@ -128,5 +165,5 @@ async function parity() {
   const deniedCount = await fetch("/denied-count").then(response => response.json()); if (deniedCount !== 0) throw new Error("Reducer network escaped");
   return { deniedApis: 3, retryResult: second, durableCrashRecovery: true, reconnect: true };
 }
-async function stop() { release?.(); release = undefined; if ("engineMode" in client) await client.close(); else await client.closeEngine(); closeStorage?.(); closeStorage = undefined; await wait(100); }
-(window as any).benchmark = { seed, start, burst, snapshot, drain, parity, stop, mode: () => (client as any).engineMode };
+async function stop() { release?.(); release = undefined; if ("engineMode" in client) await client.close(); else await closeEngine(client); closeStorage?.(); closeStorage = undefined; await wait(100); }
+(window as any).benchmark = { seed, resetEdits, start, burst, snapshot, drain, parity, stop, mode: () => (client as any).engineMode };

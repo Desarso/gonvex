@@ -5,13 +5,15 @@ import { tmpdir, cpus, totalmem, loadavg, release } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
 import { WebSocketServer } from 'ws';
-import { chromium, firefox, webkit } from '@playwright/test';
+import { installFirefoxWorkerWebSocketWorkaround } from './firefox-websocket-workaround.mjs';
+const workaroundApplied = process.env.BROWSER === 'firefox' ? installFirefoxWorkerWebSocketWorkaround() : () => false;
+const { chromium, firefox, webkit } = await import('@playwright/test');
 import { replicaRowsHashes, replicaAggregateDigest } from '../../dist/replica-integrity.js';
 const require = createRequire(await realpath(new URL('../../node_modules/vitest/package.json', import.meta.url)));
 const viteRequire = createRequire(require.resolve('vite/package.json'));
 const { build } = viteRequire('esbuild');
 const root = dirname(new URL(import.meta.url).pathname);
-const output = resolve(tmpdir(), 'gonvex-engine-worker-bench'); await mkdir(output, { recursive: true });
+const output = resolve(tmpdir(), process.env.PROFILE_SET ?? 'gonvex-engine-worker-round2'); await mkdir(output, { recursive: true });
 for (const entry of ['browser', 'worker']) await build({ entryPoints: [resolve(root, `${entry}.ts`)], bundle: true, splitting: true, format: 'esm', target: 'es2022', minify: true, outdir: output, entryNames: '[name]', platform: 'browser' });
 await build({ entryPoints: [resolve(root, 'fixture.ts')], bundle: true, format: 'esm', platform: 'node', outfile: resolve(output, 'fixture.mjs') });
 const { row, columns } = await import(resolve(output, 'fixture.mjs'));
@@ -30,6 +32,7 @@ const server = createServer(async (request, response) => {
     if (request.url === '/online') { offline = false; response.end('ok'); return; }
     if (request.url === '/must-not-fetch') { denied++; response.end('escaped'); return; }
     if (request.url === '/denied-count') { response.end(JSON.stringify(denied)); return; }
+    if (request.url === '/reset-edits') { effects.clear(); response.end('ok'); return; }
     if (request.url === '/reset-burst') { response.end('ok'); return; }
     if (request.url === '/burst') {
       for (let tick = 0; tick < 20; tick++) {
@@ -45,8 +48,8 @@ const server = createServer(async (request, response) => {
       }
       response.end('ok'); return;
     }
-    if (request.url === '/') { response.setHeader('content-type', 'text/html'); response.end('<main></main><button>click</button><script type="module" src="/browser.js"></script>'); return; }
-    const path = resolve(output, request.url.slice(1)); if (!path.startsWith(output + '/')) throw new Error('Invalid path');
+    if (new URL(request.url, 'http://fixture').pathname === '/') { response.setHeader('content-type', 'text/html'); response.end('<main></main><button>click</button><script type="module" src="/browser.js"></script>'); return; }
+    const path = resolve(output, new URL(request.url, 'http://fixture').pathname.slice(1)); if (!path.startsWith(output + '/')) throw new Error('Invalid path');
     response.setHeader('content-type', 'text/javascript'); response.end(await readFile(path));
   } catch (error) { response.statusCode = 500; response.end(String(error)); }
 });
@@ -58,6 +61,7 @@ wss.on('connection', socket => {
   let lane = Promise.resolve();
   socket.on('message', bytes => { lane = lane.then(async () => {
     const frame = JSON.parse(String(bytes));
+    if (process.env.DEBUG_FIXTURE) process.stdout.write(`WIRE ${frame.type} ${frame.path ?? frame.opens?.map(open => open.path).join(",")}\n`);
     if (frame.type === 'auth') {
       await sleep(50); send(socket, { type: 'auth.result', id: frame.id, result: { replica: directive, localIdentity: identity, artifactHash: 'engine-worker-fixture-v1', accountId: 'account', tenantId: 'tenant' } });
     } else if (frame.type === 'replica.open' || frame.type === 'replica.openMany') {
@@ -90,14 +94,17 @@ wss.on('connection', socket => {
   }).catch(error => { process.stderr.write(String(error) + '\n'); }); });
   socket.on('close', () => { sockets.delete(socket); opens.delete(socket); });
 });
-await new Promise(resolve => server.listen(Number(process.env.PORT ?? 48839), '127.0.0.1', resolve)); const url = `http://127.0.0.1:${server.address().port}`;
+await new Promise(resolve => server.listen(Number(process.env.PORT ?? 48839), '127.0.0.1', resolve)); const query = new URLSearchParams();
+if (process.env.PIPELINE) query.set("pipeline", "");
+if (process.env.PROFILE_IO) query.set("io", "");
+const url = `http://127.0.0.1:${server.address().port}${query.size ? `?${query}` : ""}`;
 const browserName = process.env.BROWSER ?? 'chromium';
 const context = await ({ chromium, firefox, webkit }[browserName]).launchPersistentContext(resolve(output, `profile-${browserName}`), { headless: true });
 const browser = context.browser(); const page = await context.newPage();
 page.on('console', message => { if (/^(Seed |Engine )/.test(message.text())) process.stdout.write(message.text() + '\n'); });
 page.on('pageerror', error => process.stderr.write(`PAGE: ${error}\n`));
 const measured = Number(process.env.ITERATIONS ?? 20), warmups = Number(process.env.WARMUPS ?? 5);
-const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true };
+const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', admission: process.env.PIPELINE ? 'pipelined' : 'sequential', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true, profileIO: Boolean(process.env.PROFILE_IO), fixtureIsolation: "edits-reset-before-each-mode", firefoxWorkerWebSocketWorkaround: workaroundApplied() };
 try {
   await page.goto(url); await page.waitForFunction(() => window.benchmark);
   process.stdout.write(`Preparing ${process.env.SEED_ROWS ?? 50_000}-row canonical IDB fixture...\n`);
@@ -107,6 +114,7 @@ try {
     for (const mode of index % 2 === 0 ? ['legacy', 'worker'] : ['worker', 'legacy']) {
       if (loadavg()[0] / cpus().length > 0.5) throw new Error("Load check failed: more than half the logical CPUs are busy");
       await page.goto(url); await page.waitForFunction(() => window.benchmark);
+      await page.evaluate(() => window.benchmark.resetEdits());
       const session = browserName === 'chromium' ? await context.newCDPSession(page) : null;
       await session?.send('Performance.enable');
       const metrics = async () => { const values = await session?.send('Performance.getMetrics'); return values?.metrics.find(value => value.name === 'ScriptDuration')?.value ?? null; };

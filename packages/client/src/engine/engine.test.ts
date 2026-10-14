@@ -50,7 +50,7 @@ it("correlates out-of-order replies, rejects old generations, and reuses request
   worker.postMessage({ generation: "generation", scope: "scope", id: "second", result: 2 });
   expect(await b).toBe(2); await expect(a).rejects.toBeInstanceOf(EngineRpcTimeout);
   const retried = rpc.call(first); worker.postMessage({ generation: "generation", scope: "scope", id: "first", result: 1 });
-  expect(await retried).toBe(1); expect(ui.sent.filter(frame => frame.id === "first")).toEqual([first, first]);
+  expect(await retried).toBe(1); expect(ui.sent.flatMap(frame => frame.admissions ?? [frame]).filter(frame => frame.id === "first")).toEqual([first, first]);
 });
 
 it("bounds chunk delivery and reassembles a large reply atomically", async () => {
@@ -83,7 +83,8 @@ async function setup() {
   const create = async () => {
     const endpoints = pair(); const stop = serveEngineHost(endpoints.worker, binding);
     const rpc = new EngineRpc(endpoints.ui, crypto.randomUUID(), "private");
-    await rpc.call(rpc.request("init", [init]));
+    const state = await rpc.call<{ capabilities?: { admissionBatch?: number } }>(rpc.request("init", [init]));
+    rpc.setAdmissionBatching(state.capabilities?.admissionBatch === 1);
     const close = async () => { await rpc.call(rpc.request("close", [])); rpc.close(); stop(); };
     return { rpc, endpoints, close };
   };
@@ -92,7 +93,7 @@ async function setup() {
 
 it("recovers an admitted local reducer from the canonical journal with its original outcome and entropy", async () => {
   const { create, init } = await setup(); let host = await create();
-  const command = { id: "original", now: 123, artifactHash: "artifact", scope: owner, entropy: "aa".repeat(32) };
+  const command = { id: "original", now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "aa".repeat(32) };
   const request = host.rpc.request("reducer", [ref, {}, { engineCommand: command }]);
   expect(await host.rpc.call(request)).toBe(7);
   await host.close(); host = await create(); cleanups.push(host.close);
@@ -101,9 +102,10 @@ it("recovers an admitted local reducer from the canonical journal with its origi
   expect(entries).toHaveLength(1); expect(entries[0].id).toBe("original");
   const database = new Dexie(init.storage.outboxName); await database.open();
   const [entry] = await database.table("entries").toArray(); database.close();
-  expect(entry.localExecution).toMatchObject({ commandId: "original", now: 123, intentEntropy: "aa".repeat(32) });
+  expect(entry.localExecution).toMatchObject({ commandId: "original", now: command.now, intentEntropy: "aa".repeat(32) });
   const receipts = new EngineReceipts(init.storage.outboxName); cleanups.push(() => receipts.close());
-  expect((await receipts.get(owner, "original"))?.result).toBe(7);
+  expect(await receipts.get(owner, "original")).toBeUndefined();
+  expect(entry.engineOutcome.result).toBe(7);
   await expect(host.rpc.call(host.rpc.request("reducer", [ref, { different: true }, { engineCommand: command }]))).rejects.toThrow("different arguments");
 });
 
@@ -221,4 +223,104 @@ it("publishes a whole committed watch batch before notifying either mounted view
   endpoints.worker.postMessage({ generation: envelope.generation, scope: envelope.scope, id: "commit", event: "watchBatch", args: [1, watchIds.map((id, index) => ({ id, value: { status: "ready", rows: [{ id: String(index + 1), count: 1 }] } }))] });
   await vi.waitFor(() => expect(observed).toHaveLength(2));
   for (const states of observed as any[]) expect(states.map((state: any) => state.rows[0].count)).toEqual([1, 1]);
+});
+
+it("coalesces admissions without waiting for replies and preserves control ordering", async () => {
+  const { ui, worker } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
+  rpc.setAdmissionBatching(true);
+  const requests = Array.from({ length: 3 }, (_, index) => rpc.request("reducer", [{ index }], String(index)));
+  const pending = requests.map(request => rpc.call(request));
+  const control = rpc.call(rpc.request("query", [], "control"));
+  expect(ui.sent[0]).toEqual({ admissions: requests });
+  expect(ui.sent[1].id).toBe("control");
+  for (const request of requests.toReversed()) worker.postMessage({ ...request, result: Number(request.id) });
+  worker.postMessage({ generation: "g", scope: "s", id: "control", result: 9 });
+  expect(await Promise.all(pending)).toEqual([0, 1, 2]); expect(await control).toBe(9);
+});
+
+it("recovers every command whose batch replies were lost without duplicating durable entries", async () => {
+  const { create } = await setup(); let host = await create();
+  const commands = Array.from({ length: 3 }, (_, index) => ({ id: `batch-${index}`, now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "ab".repeat(32) }));
+  const requests = commands.map(command => host.rpc.request("reducer", [ref, {}, { engineCommand: command }]));
+  const reply = host.endpoints.worker.postMessage.bind(host.endpoints.worker);
+  host.endpoints.worker.postMessage = data => { if (!requests.some(request => request.id === (data as any).id)) reply(data); };
+  const results = await Promise.allSettled(requests.map(request => host.rpc.call(request, 100)));
+  expect(results.every(result => result.status === "rejected" && result.reason instanceof EngineRpcTimeout)).toBe(true);
+  expect(host.endpoints.ui.sent.filter(frame => frame.admissions).map(frame => frame.admissions.length)).toEqual([3]);
+  const before = await host.rpc.call<any[]>(host.rpc.request("listIntents", []));
+  expect(before.map(entry => entry.id)).toEqual(commands.map(command => command.id));
+  await host.close(); host = await create(); cleanups.push(host.close);
+  expect(await Promise.all(commands.map(command => host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command }]))))).toEqual([7, 7, 7]);
+  expect(await host.rpc.call(host.rpc.request("listIntents", []))).toEqual(before);
+});
+
+it("batches receipt retirement into one transaction and bounds recovery with a durable retry floor", async () => {
+  const name = crypto.randomUUID(); let receipts = new EngineReceipts(name, 2, 1000);
+  const database = (receipts as any).database as Dexie;
+  const transaction = vi.spyOn(database, "transaction");
+  const now = Date.now();
+  await Promise.all([0, 1, 2].map(index => receipts.put("s", String(index), "p", {}, index, now - 10 + index)));
+  expect(transaction).toHaveBeenCalledTimes(1);
+  expect(await database.table("receipts").count()).toBe(2);
+  const remaining = await database.table("receipts").toArray();
+  const removed = [0, 1, 2].find(index => !remaining.some(receipt => receipt.key === JSON.stringify(["s", String(index)])))!;
+  receipts.close(); receipts = new EngineReceipts(name, 2, 1000); cleanups.push(() => receipts.close());
+  await expect(receipts.assertCanAdmit(now - 10 + removed)).rejects.toThrow("receipt expired");
+  await expect(receipts.assertCanAdmit(now + 1)).resolves.toBeUndefined();
+  const spy = vi.spyOn(Date, "now").mockReturnValue(now + 2000);
+  expect(await receipts.get("s", String(remaining[0].result))).toBeUndefined();
+  await expect(receipts.assertCanAdmit(now)).rejects.toThrow("receipt expired");
+  await receipts.put("s", "new", "p", {}, 9);
+  spy.mockRestore();
+  expect(await (receipts as any).database.table("receipts").count()).toBe(1);
+});
+
+it("keeps all canonical entries when a batched receipt transaction fails", async () => {
+  const receipts = new EngineReceipts(crypto.randomUUID()); cleanups.push(() => receipts.close());
+  const entries: any[] = [1, 2].map(id => ({ id, scope: "s", path: "p", args: {}, idempotencyKey: String(id), engineOutcome: { result: id }, createdAt: Date.now() }));
+  const remove = vi.fn(async () => undefined);
+  const store = receipts.wrap({ load: async () => entries, put: async () => undefined, delete: remove, deleteMany: remove, clear: async () => undefined });
+  vi.spyOn((receipts as any).database, "transaction").mockRejectedValueOnce(new Error("Crash before commit"));
+  await expect(store.deleteMany!([1, 2])).rejects.toThrow("Crash before commit");
+  expect(remove).not.toHaveBeenCalled();
+  expect(await receipts.get("s", "1")).toBeUndefined(); expect(await receipts.get("s", "2")).toBeUndefined();
+});
+
+it("preserves sibling admissions when storage fails mid-batch and retries the original missing command", async () => {
+  const { create } = await setup(); let host = await create();
+  const commands = [0, 1, 2].map(index => ({ id: `partial-${index}`, now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "bc".repeat(32) }));
+  const check = EngineReceipts.prototype.assertCanAdmit;
+  let calls = 0;
+  const failure = vi.spyOn(EngineReceipts.prototype, "assertCanAdmit").mockImplementation(async function(commandAt) {
+    if (++calls === 2) throw new Error("Crash before durable admission");
+    return check.call(this, commandAt);
+  });
+  const results = await Promise.allSettled(commands.map(command => host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command }]))));
+  expect(results.map(result => result.status)).toEqual(["fulfilled", "rejected", "fulfilled"]);
+  expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(["partial-0", "partial-2"]);
+  failure.mockRestore(); await host.close(); host = await create(); cleanups.push(host.close);
+  expect(await Promise.all(commands.map(command => host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command }]))))).toEqual([7, 7, 7]);
+  expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id).sort()).toEqual(commands.map(command => command.id));
+});
+
+it("migrates old receipts before pruning and refuses ambiguous retries after eviction", async () => {
+  const name = crypto.randomUUID();
+  const old = new Dexie(`${name}-engine-receipts`);
+  old.version(1).stores({ receipts: "&key" });
+  await old.table("receipts").bulkPut([0, 1].map(index => ({ key: JSON.stringify(["s", String(index)]), path: "p", args: "{}", result: index })));
+  old.close();
+  const receipts = new EngineReceipts(name, 1); cleanups.push(() => receipts.close());
+  expect((await receipts.get("s", "0"))?.result).toBe(0);
+  await receipts.put("s", "new", "p", {}, 9);
+  expect(await (receipts as any).database.table("receipts").count()).toBe(1);
+  await expect(receipts.assertCanAdmit(Date.now() - 1000)).rejects.toThrow("receipt expired");
+});
+
+it("keeps individual reducer envelopes until batching is negotiated", async () => {
+  const { ui, worker } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
+  const requests = [rpc.request("reducer", [], "old-a"), rpc.request("reducer", [], "old-b")];
+  const pending = requests.map(request => rpc.call(request));
+  expect(ui.sent).toEqual(requests);
+  for (const request of requests) worker.postMessage({ ...request, result: 1 });
+  expect(await Promise.all(pending)).toEqual([1, 1]);
 });
