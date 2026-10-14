@@ -247,7 +247,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
     if (Array.isArray(data?.admissions) && data.admissions.length <= 1024) {
       const group = client && pendingStarts === 0 && data.admissions.length > 1 && data.admissions.every((request: EngineEnvelope) =>
         request.generation === generation && request.scope === scope && request.method === "reducer" &&
-        (request.args?.[0] as FunctionReference)?.localExecution === 1 && (request.args?.[2] as any)?.engineFresh === true)
+        (request.args?.[0] as FunctionReference)?.localExecution === 1)
         ? new EngineAdmissionCohort(client) : undefined;
       for (const admission of data.admissions) if (admission?.method === "reducer") receive({ data: admission } as MessageEvent, group);
       group?.flush();

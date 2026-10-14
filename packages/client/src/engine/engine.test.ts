@@ -471,3 +471,21 @@ it("shares one intent lease for a fresh burst while acknowledging each durable e
   expect(locks.filter(name => name.includes("intent"))).toHaveLength(1);
   expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(acknowledgements);
 });
+
+it("does not let a fresh cohort overtake an explicit retry awaiting lookup", async () => {
+  const { create } = await setup(); const host = await create(); cleanups.push(host.close);
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const lookup = EngineReceipts.prototype.findReceipt;
+  const waiting = vi.spyOn(EngineReceipts.prototype, "findReceipt").mockImplementation(async function(scope, id, path, args) {
+    if (id === "ordered-0") await blocked;
+    return lookup.call(this, scope, id, path, args);
+  });
+  const commands = Array.from({ length: 3 }, (_, index) => ({ id: `ordered-${index}`, now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "ab".repeat(32) }));
+  const first = host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: commands[0] }]));
+  await vi.waitFor(() => expect(waiting).toHaveBeenCalled());
+  const rest = commands.slice(1).map(command => host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command, engineFresh: true }])));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  release(); expect(await Promise.all([first, ...rest])).toEqual([7, 7, 7]);
+  expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(commands.map(command => command.id));
+});
