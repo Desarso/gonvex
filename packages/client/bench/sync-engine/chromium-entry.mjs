@@ -1,3 +1,4 @@
+import { LocalReplica } from '../../dist/local-replica.js';
 import { IndexedDBLocalReplicaStorage } from '../../dist/indexeddb-replica.js';
 import { IndexedDBEngineReplicaStorage } from '../../dist/indexeddb-engine.js';
 import { replicaRowsHashes } from '../../dist/replica-integrity.js';
@@ -100,4 +101,22 @@ window.profileSample = async index => {
     const elapsed = await window.runSample(index);
     return { elapsed, requests, requestCounts, recordsRead, cursorContinues, jsonParses };
   } finally { restores.forEach(restore => restore()); JSON.parse = parse; IDBCursor.prototype.continue = advance; }
+};
+
+// Isolate replica admission from storage decoding. Every round gets fresh rows;
+// freezing owned rows must never carry over into the cloned comparison.
+window.profileRowOwnership = async () => {
+  const samples = [[], []];
+  for (let round = 0; round < 6; round++) for (const owned of round % 2 ? [1, 0] : [0, 1]) {
+    const snapshot = await state.storage.loadWorkingSet('default', state.budget);
+    const replica = new LocalReplica({ ownsWorkingSetRows: Boolean(owned),
+      loadWorkingSet: async () => snapshot }, { maxResidentRows: 100000, maxResidentBytes: state.budget.maxBytes });
+    const start = performance.now();
+    await replica.hydrate();
+    const elapsed = performance.now() - start;
+    if (!replica.entity('tasks', 'task-000000')) throw new Error('Missing hydrated row');
+    if (round) samples[owned].push(elapsed);
+    replica.dispose();
+  }
+  return { cloned: samples[0], owned: samples[1] };
 };

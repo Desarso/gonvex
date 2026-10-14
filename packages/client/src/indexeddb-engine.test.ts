@@ -575,3 +575,79 @@ it('keeps rows whose ids shadow Object.prototype members in receipts and snapsho
   expect(Object.keys(read.entities.tasks ?? {}).sort()).toEqual([...ids].sort());
   expect(JSON.parse(JSON.stringify(snapshot!.entities.tasks))['__proto__']).toEqual({ id: '__proto__', title: '__proto__' });
 });
+
+it.each([false, true])('batches many-owner deletes and rolls back startup patches and checkpoints, hashes=%s', async hashed => {
+  const storage = store(), db = (storage as any).database;
+  const rows = [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }];
+  const hashes = hashed ? await replicaRowsHashes(rows, 'id') : undefined;
+  for (let index = 0; index < 100; index++) {
+    await storage.replaceWindow({ ...window(['a', 'b'], `owner-${index}`), hashes }, empty, 'default', rows);
+  }
+  const before = await storage.load();
+  const transaction = { cursor: { epoch: 'e', revision: 2 }, changes: [
+    { entity: 'tasks', id: 'a', operation: 'delete' as const },
+    { entity: 'tasks', id: 'b', operation: 'delete' as const },
+  ] };
+  const failure = vi.spyOn(db.windows, 'bulkPut').mockRejectedValueOnce(new Error('checkpoint failed'));
+  await expect(storage.applyTransaction(transaction, empty)).rejects.toThrow('checkpoint failed');
+  failure.mockRestore();
+  expect(await storage.load()).toEqual(before);
+  expect(await storage.loadWorkingSet('default', { maxRows: 100, maxBytes: Infinity })).toMatchObject(before!);
+  const reads = vi.spyOn(db.windows, 'get'), bulkReads = vi.spyOn(db.windows, 'bulkGet'), deletes = vi.spyOn(db.members, 'delete');
+  const windowPages = vi.spyOn(db.windows, 'where'), checkpoints = vi.spyOn(db.windows, 'bulkPut'), sequence = vi.spyOn(db.meta, 'put');
+  const receipt = await storage.applyTransaction(transaction, empty);
+  expect(reads).not.toHaveBeenCalled(); expect(bulkReads).not.toHaveBeenCalled(); expect(windowPages).toHaveBeenCalledOnce(); expect(deletes).not.toHaveBeenCalled();
+  expect(checkpoints.mock.calls.flatMap(call => call[0])).toHaveLength(100);
+  expect(sequence.mock.calls.filter(call => call[0].key === 'sequence')).toHaveLength(1);
+  expect(receipt.changes.removedMemberships).toHaveLength(200);
+  const loaded = await storage.loadWorkingSet('default', { maxRows: 100, maxBytes: Infinity });
+  expect(Object.values(loaded!.liveQueries).every(value => value.ids.length === 0)).toBe(true);
+  const members = await db.members.toArray();
+  expect(members).toHaveLength(hashed ? 200 : 0);
+  expect(members.every((member: any) => member.hashOnly === 1)).toBe(true);
+  if (hashed) for (const value of Object.values(loaded!.liveQueries)) expect(value.hashes).toEqual(hashes);
+  expect(receipt.sequence).toBe(receipt.previousSequence + 1);
+}, 30_000);
+
+it('returns fresh working-set rows that remain safe to freeze and update', async () => {
+  const storage = store(); await seed(storage);
+  const budget = { maxRows: 100, maxBytes: Infinity };
+  const first = await storage.loadWorkingSet('default', budget);
+  const local = replica(storage);
+  const load = vi.spyOn(storage, 'loadWorkingSet').mockResolvedValueOnce(first);
+  await local.hydrate();
+  expect(local.entity('tasks', 'a')).toBe(first!.entities.tasks.a);
+  expect(Object.isFrozen(first!.entities.tasks.a)).toBe(true);
+  load.mockRestore();
+  const second = await storage.loadWorkingSet('default', budget);
+  expect(second!.entities.tasks.a).not.toBe(first!.entities.tasks.a);
+  second!.entities.tasks.a.title = 'caller';
+  expect((await storage.loadWorkingSet('default', budget))!.entities.tasks.a.title).toBe('A');
+  await storage.applyTransaction({ cursor: { epoch: 'e', revision: 2 }, changes: [
+    { entity: 'tasks', id: 'a', operation: 'update', newValue: { title: 'updated' } },
+  ] }, empty);
+  expect((await storage.loadWorkingSet('default', budget))!.entities.tasks.a.title).toBe('updated');
+  expect(first!.entities.tasks.a.title).toBe('A');
+});
+
+it('falls back to exact window keys when many owners lie beyond the bounded metadata page', async () => {
+  const storage = store(), db = (storage as any).database;
+  for (let index = 0; index < 140; index++) await storage.replaceWindow(window([], `aa-unrelated-${index}`), empty);
+  for (let index = 0; index < 40; index++) {
+    await seed(storage, `zz-owner-${index}`);
+    await storage.replaceWindow(window(['c'], `zz-other-${index}`), empty, 'default', [{ id: 'c' }]);
+  }
+  const page = vi.spyOn(db.windows, 'where'), exact = vi.spyOn(db.windows, 'bulkGet');
+  await storage.applyTransaction({ cursor: { epoch: 'e', revision: 2 }, changes: [
+    { entity: 'tasks', id: 'a', operation: 'delete' },
+    { entity: 'tasks', id: 'c', operation: 'delete' },
+  ] }, empty);
+  expect(page).toHaveBeenCalledOnce(); expect(exact).toHaveBeenCalledTimes(2);
+  expect(exact.mock.calls[0][0]).toHaveLength(40);
+  const loaded = await storage.load();
+  for (let index = 0; index < 40; index++) {
+    expect(loaded!.liveQueries[`zz-owner-${index}`].ids).toEqual(['b']);
+    expect(loaded!.liveQueries[`zz-other-${index}`].ids).toEqual([]);
+  }
+  expect(loaded!.liveQueries['aa-unrelated-0'].ids).toEqual([]);
+}, 30_000);

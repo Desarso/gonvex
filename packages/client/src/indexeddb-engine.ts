@@ -36,6 +36,9 @@ const defaultReplicaScope: ReplicaScope = "default";
 // of their time on native request round trips. Keep one atomic transaction.
 const writeBatchSize = 32;
 const writeIndexBudget = 64;
+// Membership/checkpoint records contain no row payloads. Keep these bursts
+// bounded too, but avoid splitting a typical 100-owner delete into 13 writes.
+const membershipBatchSize = 128;
 
 // Small replica checkpoints usually change only a few rows. IndexedDB getAll
 // avoids a JS/Dexie continuation per row. The fallback remains streaming so a
@@ -50,6 +53,9 @@ async function visitRecords<T, Key>(collection: Collection<T, Key>, visit: (reco
 export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
   readonly supportsResidentLookup = true;
   readonly supportsMembershipDeltas = true;
+  // Working-set entity values are parsed afresh on every load. Startup indexes
+  // contain serialized membership only, so freezing rows cannot affect storage.
+  readonly ownsWorkingSetRows = true;
   private readonly database: ReplicaDatabase;
   private initialized?: Promise<void>;
   private readonly commits = new WeakMap<Transaction, ReplicaStorageCommit>();
@@ -372,12 +378,25 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     }
   }
 
-  private async owners(scope: string, entity: string, id: string) {
+  private async owners(scope: string, entity: string, id: string, windows = new Map<string, WindowRecord | undefined>()) {
     const members = await this.database.members.where('[scope+entity+id]').equals([scope, entity, id]).toArray();
     const active: Array<{ member: MemberRecord; window: WindowRecord }> = [];
+    let signatures = [...new Set(members.filter(member => !member.hashOnly).map(member => member.signature))]
+      .filter(signature => !windows.has(signature));
+    if (signatures.length >= writeBatchSize && windows.size < writeBatchSize) {
+      // bulkGet still issues one native request per key. Most replicas have
+      // few small window records; one bounded getAll avoids that request fanout.
+      const records = await this.database.windows.where('scope').equals(scope).limit(membershipBatchSize).toArray();
+      for (const record of records) windows.set(record.signature, record);
+      signatures = signatures.filter(signature => !windows.has(signature));
+    }
+    if (signatures.length) {
+      const records = await this.database.windows.bulkGet(signatures.map(signature => [scope, signature]));
+      signatures.forEach((signature, index) => windows.set(signature, records[index]));
+    }
     for (const member of members) {
       if (member.hashOnly) continue;
-      const window = await this.database.windows.get([scope, member.signature]);
+      const window = windows.get(member.signature);
       if (window && !window.deleted && window.generation === member.generation) active.push({ member, window });
     }
     return active;
@@ -652,18 +671,37 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
         }
         if (records.length) await this.writeRecords(records);
       }
+      const removals: [string, string, number, string][] = [], retained: MemberRecord[] = [], patches: MetaRecord[] = [];
+      const checkpoints = new Map<string, WindowRecord>(), ownerWindows = new Map<string, WindowRecord | undefined>();
       for (const [entity, ids] of deleted) for (const id of ids) {
-        for (const { member, window } of await this.owners(normalizedScope, entity, id)) {
+        for (const { member, window } of await this.owners(normalizedScope, entity, id, ownerWindows)) {
           const metadata = JSON.parse(window.value) as ReplicaWindow & { hasHashes?: boolean };
           if (metadata.cursor?.epoch === transaction.cursor.epoch && metadata.cursor.revision > transaction.cursor.revision) continue;
-          // A normalized transaction can delete ahead of this collection's
-          // checkpoint. Retain its projected hash until the collection delta
-          // advances the certificate, without retaining membership/ownership.
-          if (metadata.hasHashes && member.hash) await this.putMember({ ...member, hashOnly: 1 });
-          else await this.deleteMember(normalizedScope, member.signature, member.generation, id);
-          await this.database.windows.put({ ...window, sequence, startupSequence: window.startupSequence !== undefined && window.startupSequence === window.sequence ? sequence : undefined });
+          // Retain projected hashes until the collection certificate advances,
+          // without retaining membership/ownership. Batch native requests while
+          // keeping rows, startup patches and checkpoints in this transaction.
+          const keepHash = metadata.hasHashes && member.hash;
+          if (keepHash) retained.push({ ...member, hashOnly: 1 });
+          else removals.push([normalizedScope, member.signature, member.generation, id]);
+          patches.push({ scope: normalizedScope,
+            key: this.startupPrefix(member.signature, member.generation) + JSON.stringify(id),
+            value: JSON.stringify(keepHash ? { id, order: member.order, hash: hexHash(member.hash!),
+              duplicateOrders: member.duplicateOrders, hashOnly: 1 } : { id, deleted: true }) });
+          checkpoints.set(member.signature, { ...window, sequence,
+            startupSequence: window.startupSequence !== undefined && window.startupSequence === window.sequence ? sequence : undefined });
           (this.receipt()!.changes.removedMemberships ??= []).push({ signature: member.signature, id });
         }
+      }
+      const windows = [...checkpoints.values()];
+      const edits = Math.max(removals.length, retained.length, patches.length, windows.length);
+      for (let offset = 0; offset < edits; offset += membershipBatchSize) {
+        // These keys are disjoint and all writes are private until commit.
+        await Promise.all([
+          removals.length > offset ? this.database.members.bulkDelete(removals.slice(offset, offset + membershipBatchSize)) : undefined,
+          retained.length > offset ? this.database.members.bulkPut(retained.slice(offset, offset + membershipBatchSize)) : undefined,
+          patches.length > offset ? this.database.meta.bulkPut(patches.slice(offset, offset + membershipBatchSize)) : undefined,
+          windows.length > offset ? this.database.windows.bulkPut(windows.slice(offset, offset + membershipBatchSize)) : undefined,
+        ]);
       }
       if (transaction.memberships?.length) await this.writeWindows(normalizedScope,transaction.memberships,sequence);
       await this.saveCursor(normalizedScope,transaction.cursor);

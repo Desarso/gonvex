@@ -68,10 +68,16 @@ bootstrap 95% intervals for median and p95. Ratios resample paired rounds for
 candidate/baseline comparisons. Scaling resamples the two size runs independently.
 Startup also collects one fresh-process diagnostic per adapter after timing: native requests, records read, cursor continuations and JSON parses. Chromium writes sibling CPU and 32 KiB sampled live-allocation profiles, plus top CPU frames and sampled bytes in the JSON. These include instrumentation overhead, are not timing samples, and sampled live bytes are not peak memory or an exact allocation count.
 
-Five diagnostic engine samples after timing record native IndexedDB request counts
-and latencies at each size. They include queue/instrumentation overhead and are
-kept separate from performance samples. These are percentile bootstrap intervals, not distribution-free guarantees;
-p95 uncertainty especially needs more samples than median uncertainty.
+Five diagnostic engine samples after single-row and delete timing record native
+IndexedDB request counts and latencies at each size. Chromium also records a
+sibling delete CPU profile across those five samples. Bulk Dexie operations can
+reduce serial waits without reducing native request counts. Startup records a
+separate five-round LocalReplica row-admission diagnostic comparing cloning
+against ownership, with fresh decoded snapshots and alternating order. Decoding
+is outside this diagnostic timer; these values are not storage gate samples.
+Request diagnostics include queue/instrumentation overhead. The reported CIs
+are percentile bootstrap intervals, not distribution-free guarantees; p95
+uncertainty especially needs more samples than median uncertainty.
 
 If either adapter's CV exceeds the configured limit, add ten rounds at a time
 up to the cap, retaining every sample. Cases still above the limit are NOISY.
