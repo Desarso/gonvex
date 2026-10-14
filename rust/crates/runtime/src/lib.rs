@@ -3743,6 +3743,7 @@ fn preserve_subscription_scope(
         && old_session.route == new_session.route
         && old_session.member == new_session.member
         && old_session.delegation == new_session.delegation
+        && old_session.developer_session == new_session.developer_session
 }
 
 fn record_connection_subscriptions(
@@ -4516,6 +4517,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             },
             admission_revision: 5,
             delegation: None,
+            developer_session: None,
         };
         let old = control::ControlConnection {
             project_id: "project".into(),
