@@ -316,13 +316,11 @@ export async function runOptimisticReducer<T>(
     return result;
   } catch (error: unknown) {
     const disposition = deliveryErrorClass(error);
-    if (disposition !== "rejected" && options.offline === "queue") {
-      const queuedEntryId = this["optimisticOutboxEntryIds"].get(reducerId) ?? entryId;
-      if (queuedEntryId !== undefined) {
-        // Records backoff (or parks the entry) and arms the client's timer,
-        // exactly like the background drain path.
-        await this["recordDeliveryFailure"]({ id: queuedEntryId }, error, disposition);
-      }
+    const queuedEntryId = this["optimisticOutboxEntryIds"].get(reducerId) ?? entryId;
+    if (disposition !== "rejected" && options.offline === "queue" && queuedEntryId !== undefined) {
+      // Records backoff (or parks the entry) and arms the client's timer,
+      // exactly like the background drain path.
+      await this["recordDeliveryFailure"]({ id: queuedEntryId }, error, disposition);
       return { status: "queued", reducerId };
     }
     await this["rejectOptimisticReducer"](reducerId, entryId);
