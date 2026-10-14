@@ -53,3 +53,19 @@ it('isolates edits across page boundaries, bucket collisions and compaction', ()
   expect(cleared.sharesLineage(next)).toBe(false);
   expect([...next]).toEqual([...expected]);
 });
+
+it('grows bucket directories without changing captured slots or values',()=>{
+  const original = new ResidentMap<number>();
+  for (let i=0;i<2048;i++) original.set(String(i),i);
+  expect(original['bucketCount']).toBe(16);
+  const next = original.fork(); next.set('2048',2048);
+  expect(next['bucketCount']).toBe(64);
+  expect(original['bucketCount']).toBe(16);
+  expect(original.get('2048')).toBeUndefined();
+  for (let i=0;i<2048;i++) {
+    expect(next.get(String(i))).toBe(i);
+    expect(next.position(String(i))).toBe(original.position(String(i)));
+  }
+  original.set('0',-1);
+  expect(next.get('0')).toBe(0);
+});
