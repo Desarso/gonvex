@@ -88,7 +88,6 @@ export type ReplicaStorageChanges = {
 /** Opaque persistence namespace for one deployment/project/tenant identity. */
 export type ReplicaScope = string;
 
-const emptyMembership: ReadonlySet<string> = new Set();
 
 const defaultReplicaScope: ReplicaScope = "default";
 
@@ -253,6 +252,8 @@ function deleteResidentRow(rows: Map<string, ReplicaRow>, id: string): boolean {
  * observe relation tables, so their windows opt into broad offline delivery. */
 export type ReplicaSubscription = { entity: string; ids?: readonly string[] } | { window: string; offlineGlobal?: boolean };
 
+type EqualityIndex = { entity: string; column: string; values: Map<string, Set<string>>; bytes: number; scan?: Iterator<[string, ReplicaRow]> };
+
 export class LocalReplica implements LocalReplicaView {
   private readonly retainedWindows = new Map<string, number>();
   private readonly retainedRows = new Map<string,Map<string,number>>();
@@ -261,7 +262,8 @@ export class LocalReplica implements LocalReplicaView {
   private readonly recency = new RowRecency();
   private membershipBytes = 0;
   private residencyVersionValue = 0;
-  private readonly equalityIndexes = new Map<string, { entity: string; column: string; values: Map<string, Set<string>>; keys: Map<string, string>; bytes: number }>();
+  private readonly equalityIndexes = new Map<string, EqualityIndex>();
+  private equalityTimer?: ReturnType<typeof setTimeout>;
   private readonly entityRowArrays = new Map<string, { version: number; rows: ReplicaRow[] }>();
   private residentBytes = 0;
   private residentCount = 0;
@@ -301,7 +303,7 @@ export class LocalReplica implements LocalReplicaView {
     }
     for (const [entity, rows] of next) if (rows !== this.entityTables.get(entity) && rows instanceof ResidentMap) {
       for (const id of rows.changedIDs) for (const index of this.equalityIndexes.values()) {
-        if (index.entity === entity) this.indexEqualityRow(index,id,rows.get(id));
+        if (index.entity === entity) this.indexEqualityRow(index,id,rows.get(id),this.entityTables.get(entity)?.get(id));
       }
       rows.changedIDs.clear();
     }
@@ -311,7 +313,7 @@ export class LocalReplica implements LocalReplicaView {
   }
   private queryWindows = new Map<string, ReplicaWindow>();
   private readonly memberships = new Map<string, Map<string, string | Set<string>>>();
-  private readonly singleWindowMemberships = new Map<string, ReadonlySet<string>>();
+  private readonly largeMemberships = new Map<string, Map<string, readonly string[]>>();
   private get liveQueries() { return this.queryWindows; }
   private set liveQueries(next: Map<string, ReplicaWindow>) {
     for (const [signature, old] of this.queryWindows) {
@@ -319,6 +321,9 @@ export class LocalReplica implements LocalReplicaView {
       if (current?.entity === old.entity && current.ids === old.ids) continue;
       this.membershipBytes -= windowMembershipSize(old);
       const table = this.memberships.get(old.entity);
+      const large = this.largeMemberships.get(old.entity);
+      large?.delete(signature);
+      if (!large?.size) this.largeMemberships.delete(old.entity);
       for (const id of old.ids) {
         const owners = table?.get(id);
         if (owners === signature) table?.delete(id);
@@ -336,6 +341,13 @@ export class LocalReplica implements LocalReplicaView {
       if (old?.entity === window.entity && old.ids === window.ids) continue;
       this.membershipBytes += windowMembershipSize(window);
       if (!window.ids.length) continue;
+      if (window.ids.length > 1024) {
+        let large = this.largeMemberships.get(window.entity);
+        if (!large) { large = new Map(); this.largeMemberships.set(window.entity,large); }
+        large.set(signature,[...window.ids].sort());
+        for (const id of window.ids) this.refreshPin(window.entity,id);
+        continue;
+      }
       let table = this.memberships.get(window.entity);
       if (!table) { table = new Map(); this.memberships.set(window.entity, table); }
       for (const id of window.ids) {
@@ -347,15 +359,21 @@ export class LocalReplica implements LocalReplicaView {
         this.refreshPin(window.entity,id);
       }
     }
-    for (const signature of this.singleWindowMemberships.keys()) if (!next.has(signature)) this.singleWindowMemberships.delete(signature);
     this.queryWindows = next;
   }
-  private windowsForRow(entity: string, id: string): ReadonlySet<string> {
+  private *windowsForRow(entity: string, id: string): IterableIterator<string> {
     const owners = this.memberships.get(entity)?.get(id);
-    if (typeof owners !== 'string') return owners ?? emptyMembership;
-    let singleton = this.singleWindowMemberships.get(owners);
-    if (!singleton) { singleton = new Set([owners]); this.singleWindowMemberships.set(owners,singleton); }
-    return singleton;
+    if (typeof owners === 'string') yield owners;
+    else if (owners) yield* owners;
+    for (const [signature, ids] of this.largeMemberships.get(entity) ?? []) {
+      let low = 0, high = ids.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (ids[middle]! < id) low = middle + 1;
+        else high = middle;
+      }
+      if (ids[low] === id) yield signature;
+    }
   }
   private readonly replicaPlans = new Map<string, { definition: ReplicaCollectionPlan; args: ReplicaRow }>();
   private pendingCommands = new Map<string, PendingCommand>();
@@ -453,6 +471,8 @@ export class LocalReplica implements LocalReplicaView {
     this.replicaPlans.clear();
     this.readSnapshots.clear();
     this.equalityIndexes.clear();
+    if (this.equalityTimer !== undefined) clearTimeout(this.equalityTimer);
+    this.equalityTimer = undefined;
     this.entityRowArrays.clear();
     this.entityVersions.clear();
     this.rowVersions.clear();
@@ -654,8 +674,11 @@ export class LocalReplica implements LocalReplicaView {
 
   private touchRow(entity: string, id: string): void { this.recency.touch(`${entity}\0${id}`); }
   private rowIsPinned(entity:string,id:string):boolean {
-    return this.retainedRows.get(entity)?.has(id) === true
-      || [...this.windowsForRow(entity,id)].some(signature=>this.retainedWindows.has(signature));
+    if (this.retainedRows.get(entity)?.has(id) === true) return true;
+    if (this.retainedWindows.size) for (const signature of this.windowsForRow(entity,id)) {
+      if (this.retainedWindows.has(signature)) return true;
+    }
+    return false;
   }
   private refreshPin(entity:string,id:string):void { this.recency.pin(`${entity}\0${id}`,this.rowIsPinned(entity,id)); }
 
@@ -750,12 +773,14 @@ export class LocalReplica implements LocalReplicaView {
   executionVersion() { return this.executionVersionValue; }
   executionReadVersion(entity: string, rowId?: string) {
     if (rowId === undefined) return this.executionEntityVersions.get(entity) ?? this.executionVersionFloor;
-    const known = this.executionRowVersions.get(JSON.stringify([entity, rowId]));
+    const resident = this.recency.version(`${entity}\0${rowId}`,true);
+    const known = resident === undefined ? this.executionRowVersions.get(JSON.stringify([entity, rowId])) : Math.max(resident,this.executionVersionFloor);
     return known ?? (this.hasResidentRow(entity,rowId) ? this.executionVersionFloor : this.executionEntityVersions.get(entity) ?? this.executionVersionFloor);
   }
   entityVersion(entity: string, id?: string) { return id === undefined ? this.entityVersions.get(entity) ?? this.entityVersionFloor : this.rowVersion(entity, id); }
   rowVersion(entity: string, id: string) {
-    const known = this.rowVersions.get(`${entity}\0${id}`);
+    const resident = this.recency.version(`${entity}\0${id}`);
+    const known = resident === undefined ? this.rowVersions.get(`${entity}\0${id}`) : Math.max(resident,this.entityVersionFloor);
     return known ?? (this.hasResidentRow(entity,id) ? this.entityVersionFloor : this.entityVersions.get(entity) ?? this.entityVersionFloor);
   }
   private hasResidentRow(entity:string,id:string):boolean {
@@ -1205,7 +1230,7 @@ export class LocalReplica implements LocalReplicaView {
     nextQueries.set(input.signature, window);
     const presentIDs = new Set(ids);
     for (const id of input.removedIDs ?? []) {
-      const stillReferenced = presentIDs.has(id) || [...nextQueries.values()].some(candidate => candidate.signature !== input.signature && candidate.entity === input.entity && this.windowsForRow(input.entity,id).has(candidate.signature));
+      const stillReferenced = presentIDs.has(id) || [...nextQueries.values()].some(candidate => candidate.signature !== input.signature && candidate.entity === input.entity && [...this.windowsForRow(input.entity,id)].includes(candidate.signature));
       if (!stillReferenced && deleteResidentRow(entityRows,id)) changedRowIDs.add(id);
     }
 
@@ -1313,7 +1338,13 @@ export class LocalReplica implements LocalReplicaView {
     // exactly once. No subscriber can observe a partial entity/query update.
     this.entities = nextEntities;
     this.liveQueries = nextQueries;
-    for (const change of transaction.changes) this.markEntityChanged(change.entity, [change.id]);
+    const changedRows = new Map<string, Set<string>>();
+    for (const change of transaction.changes) {
+      let ids = changedRows.get(change.entity);
+      if (!ids) { ids = new Set(); changedRows.set(change.entity, ids); }
+      ids.add(change.id);
+    }
+    for (const [entity, ids] of changedRows) this.markEntityChanged(entity, ids);
     for (const signature of changedWindows) this.markWindowChanged(signature);
     this.cursorValue = { ...transaction.cursor };
     this.freshnessValue = "current";
@@ -1415,9 +1446,15 @@ export class LocalReplica implements LocalReplicaView {
     let index = this.equalityIndexes.get(key);
     if (!index) {
       if (this.equalityIndexes.size >= 4) this.equalityIndexes.delete(this.equalityIndexes.keys().next().value!);
-      index = { entity, column, values: new Map(), keys: new Map(), bytes: 0 };
-      for (const [id, row] of this.entities.get(entity) ?? []) this.indexEqualityRow(index, id, row);
+      index = { entity, column, values: new Map(), bytes: 0, scan: this.entities.get(entity)?.entries() };
       this.equalityIndexes.set(key, index);
+    }
+    this.advanceEqualityIndex(index,512);
+    if (index.scan) {
+      this.scheduleEqualityIndexes();
+      // Preserve synchronous query results while the extra index builds in
+      // bounded turns. No partially indexed subset can omit matching rows.
+      return this.cachedEntityRows(entity);
     }
     const table = this.entities.get(entity);
     const ids = [...index.values.get(JSON.stringify(value) ?? 'undefined') ?? []];
@@ -1425,22 +1462,38 @@ export class LocalReplica implements LocalReplicaView {
     return ids.map(id => table!.get(id)!);
   }
 
-  private indexEqualityRow(index: { column: string; values: Map<string, Set<string>>; keys: Map<string, string>; bytes: number }, id: string, row?: ReplicaRow): void {
-    const prior = index.keys.get(id);
+  private advanceEqualityIndex(index: EqualityIndex, limit: number): void {
+    for (let i = 0; i < limit && index.scan; i++) {
+      const entry = index.scan.next();
+      if (entry.done) { index.scan = undefined; break; }
+      const id = entry.value[0];
+      this.indexEqualityRow(index,id,this.entities.get(index.entity)?.get(id));
+    }
+  }
+
+  private scheduleEqualityIndexes(): void {
+    if (this.equalityTimer !== undefined) return;
+    this.equalityTimer = setTimeout(() => {
+      this.equalityTimer = undefined;
+      const index = [...this.equalityIndexes.values()].find(index=>index.scan);
+      if (!index || this.disposed) return;
+      this.advanceEqualityIndex(index,512);
+      if ([...this.equalityIndexes.values()].some(index=>index.scan)) this.scheduleEqualityIndexes();
+    },0);
+  }
+
+  private indexEqualityRow(index: EqualityIndex, id: string, row?: ReplicaRow, priorRow?: ReplicaRow): void {
+    const prior = priorRow ? JSON.stringify(priorRow[index.column]) ?? 'undefined' : undefined;
     const next = row ? JSON.stringify(row[index.column]) ?? 'undefined' : undefined;
-    if (prior === next) return;
-    if (prior !== undefined) {
+    if (prior !== undefined && prior !== next) {
       const bucket = index.values.get(prior);
-      bucket?.delete(id);
+      if (bucket?.delete(id)) index.bytes -= 64 + id.length * 2;
       if (!bucket?.size) index.values.delete(prior);
-      index.keys.delete(id);
-      index.bytes -= 128 + (id.length + prior.length) * 2;
     }
     if (next !== undefined) {
       let bucket = index.values.get(next);
       if (!bucket) { bucket = new Set(); index.values.set(next, bucket); }
-      bucket.add(id); index.keys.set(id, next);
-      index.bytes += 128 + (id.length + next.length) * 2;
+      if (!bucket.has(id)) { bucket.add(id); index.bytes += 64 + id.length * 2; }
     }
   }
 
@@ -1712,9 +1765,10 @@ export class LocalReplica implements LocalReplicaView {
       } else for (const [entity, ids] of this.changedEntities) {
         this.executionEntityVersions.set(entity, this.executionVersionValue);
         for (const id of ids) {
-          const key = JSON.stringify([entity, id]);
-          if (this.entities.get(entity)?.has(id)) this.executionRowVersions.set(key, this.executionVersionValue);
-          else this.executionRowVersions.delete(key);
+          if (this.entities.get(entity)?.has(id)) {
+            if (!this.recency.setVersion(`${entity}\0${id}`,this.executionVersionValue,true)) this.executionRowVersions.set(JSON.stringify([entity,id]),this.executionVersionValue);
+          }
+          else this.executionRowVersions.delete(JSON.stringify([entity,id]));
         }
       }
     }
@@ -1755,7 +1809,7 @@ export class LocalReplica implements LocalReplicaView {
     if (!changed) { changed = new Set(); this.changedEntities.set(entity, changed); }
     if (ids === undefined) for (const [key, index] of this.equalityIndexes) if (index.entity === entity) this.equalityIndexes.delete(key);
     for (const id of ids ?? this.entities.get(entity)?.keys() ?? []) {
-      this.rowVersions.set(`${entity}\0${id}`, version);
+      if (!this.recency.setVersion(`${entity}\0${id}`, version)) this.rowVersions.set(`${entity}\0${id}`, version);
       changed.add(id);
     }
   }
@@ -1765,6 +1819,8 @@ export class LocalReplica implements LocalReplicaView {
     this.residencyVersionValue++;
     this.entityVersionFloor = ++this.entityVersionClock;
     this.equalityIndexes.clear();
+    if (this.equalityTimer !== undefined) clearTimeout(this.equalityTimer);
+    this.equalityTimer = undefined;
     this.entityRowArrays.clear();
     this.entityVersions.clear();
     this.rowVersions.clear();

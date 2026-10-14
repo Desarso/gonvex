@@ -15,3 +15,32 @@ it('matches an LRU model through randomized reads, pins, releases, deletions and
   }
   actual.clear();expect(actual.oldest()).toBeUndefined();expect(actual.size).toBe(0);
 });
+
+it('reuses entries on writes and preserves pinned access order on release',()=>{
+  const actual = new RowRecency();
+  actual.set('a',{entity:'tasks',id:'a'},false);
+  actual.set('b',{entity:'tasks',id:'b'},false);
+  const entry = actual['lookup']('a');
+  actual.set('a',{entity:'tasks',id:'a'},false);
+  expect(actual['lookup']('a')).toBe(entry);
+  expect(actual.oldest()?.key).toBe('b');
+  actual.set('b',{entity:'tasks',id:'b'},true);
+  actual.touch('a'); actual.pin('b',false);
+  expect(actual.oldest()?.key).toBe('b');
+});
+
+it('keeps independent row/execution versions and clears reused slots',()=>{
+  const actual = new RowRecency();
+  actual.set('tasks\0a',{entity:'tasks',id:'a'},false);
+  expect(actual.setVersion('tasks\0a',4)).toBe(true);
+  expect(actual.setVersion('tasks\0a',7,true)).toBe(true);
+  actual.set('tasks\0a',{entity:'tasks',id:'a'},true);
+  expect(actual.version('tasks\0a')).toBe(4);
+  expect(actual.version('tasks\0a',true)).toBe(7);
+  actual.set('tasks\0b',{entity:'tasks',id:'b'},false);
+  actual.delete('tasks\0a');
+  actual.set('tasks\0c',{entity:'tasks',id:'c'},false);
+  expect(actual.version('tasks\0c')).toBeUndefined();
+  expect(actual.version('tasks\0c',true)).toBeUndefined();
+  expect(actual.setVersion('tasks\0missing',8)).toBe(false);
+});

@@ -1,63 +1,19 @@
-/** Persistent treaps keep published table versions isolated. Forks share both
- * indexes; edits copy only the search paths. The second index preserves Map's
- * insertion order, including delete/reinsert and updates to existing keys. */
-type Node<K, V> = { key: K; value: V; priority: number; owner: object; left?: Node<K, V>; right?: Node<K, V> };
-function priority(value: string): number {
+/** Copy-on-write pages retain published versions without per-row tree nodes.
+ * Hash buckets map IDs to integer slots; slot pages preserve Map insertion order.
+ * Only edited pages/buckets copy. Directory copies are proportional to pages. */
+const pageSize = 256;
+const bucketCount = 1024;
+type Page<V> = { owner: object; ids: Array<string | undefined>; values: Array<V | undefined> };
+type Bucket = { owner: object; slots: Map<string, number> };
+function bucketNumber(id: string): number {
   let hash = 2166136261;
-  for (let i = 0; i < value.length; i++) hash = Math.imul(hash ^ value.charCodeAt(i), 16777619);
-  hash ^= hash >>> 16; hash = Math.imul(hash, 0x7feb352d);
-  hash ^= hash >>> 15; hash = Math.imul(hash, 0x846ca68b);
-  return (hash ^ hash >>> 16) >>> 0;
+  for (let i = 0; i < id.length; i++) hash = Math.imul(hash ^ id.charCodeAt(i), 16777619);
+  return (hash >>> 0) % bucketCount;
 }
-function get<K extends string | number, V>(node: Node<K, V> | undefined, key: K): V | undefined {
-  while (node) { if (key === node.key) return node.value; node = key < node.key ? node.left : node.right; }
-  return undefined;
-}
-function own<K, V>(node: Node<K, V>, owner: object): Node<K, V> {
-  return node.owner === owner ? node : { ...node, owner };
-}
-function merge<K, V>(left: Node<K, V> | undefined, right: Node<K, V> | undefined, owner: object): Node<K, V> | undefined {
-  if (!left) return right;
-  if (!right) return left;
-  if (left.priority < right.priority) {
-    const next = own(left, owner); next.right = merge(next.right, right, owner); return next;
-  }
-  const next = own(right, owner); next.left = merge(left, next.left, owner); return next;
-}
-function remove<K extends string | number, V>(node: Node<K, V> | undefined, key: K, owner: object): Node<K, V> | undefined {
-  if (!node) return undefined;
-  if (key === node.key) return merge(node.left, node.right, owner);
-  const next = own(node, owner);
-  if (key < next.key) next.left = remove(next.left, key, owner);
-  else next.right = remove(next.right, key, owner);
-  return next;
-}
-function put<K extends string | number, V>(node: Node<K, V> | undefined, key: K, value: V, owner: object): Node<K, V> {
-  if (!node) return { key, value, priority: priority(String(key)), owner };
-  const next = own(node, owner);
-  if (key === next.key) { next.value = value; return next; }
-  if (key < next.key) {
-    const left = put(next.left, key, value, owner); next.left = left;
-    if (left.priority >= next.priority) return next;
-    next.left = left.right; left.right = next; return left;
-  }
-  const right = put(next.right, key, value, owner); next.right = right;
-  if (right.priority >= next.priority) return next;
-  next.right = right.left; right.left = next; return right;
-}
-function* nodes<K, V>(root?: Node<K, V>): Generator<Node<K, V>> {
-  const stack: Node<K, V>[] = [];
-  let node = root;
-  while (node || stack.length) {
-    while (node) { stack.push(node); node = node.left; }
-    node = stack.pop()!; yield node; node = node.right;
-  }
-}
-type Entry<V> = { id: string; position: number; value: V };
 
 export class ResidentMap<V> extends Map<string, V> {
-  private byID?: Node<string, Entry<V>>;
-  private byPosition?: Node<number, Entry<V>>;
+  private buckets: Array<Bucket | undefined> = [];
+  private pages: Page<V>[] = [];
   private owner: object = {};
   private lineage: object = {};
   private count = 0;
@@ -68,36 +24,86 @@ export class ResidentMap<V> extends Map<string, V> {
     this.owner = {};
     const next = new ResidentMap<V>();
     next.lineage = this.lineage;
-    next.byID = this.byID; next.byPosition = this.byPosition;
+    next.buckets = this.buckets.slice(); next.pages = this.pages.slice();
     next.count = this.count; next.nextPosition = this.nextPosition;
     return next;
   }
   sharesLineage(other: Map<string,V>): boolean { return other instanceof ResidentMap && this.lineage === other.lineage; }
   override get size() { return this.count; }
-  override get(id: string): V | undefined { return get(this.byID, id)?.value; }
-  position(id: string): number { return get(this.byID, id)?.position ?? -1; }
-  override has(id: string): boolean { return get(this.byID, id) !== undefined; }
+  override get(id: string): V | undefined {
+    const slot = this.buckets[bucketNumber(id)]?.slots.get(id);
+    return slot === undefined ? undefined : this.pages[slot >>> 8]!.values[slot % pageSize];
+  }
+  position(id: string): number { return this.buckets[bucketNumber(id)]?.slots.get(id) ?? -1; }
+  override has(id: string): boolean { return this.position(id) !== -1; }
+  private writableBucket(number: number): Map<string, number> {
+    let bucket = this.buckets[number];
+    if (!bucket || bucket.owner !== this.owner) {
+      bucket = { owner: this.owner, slots: new Map(bucket?.slots) };
+      this.buckets[number] = bucket;
+    }
+    return bucket.slots;
+  }
+  private writablePage(slot: number): Page<V> {
+    const number = slot >>> 8;
+    let page = this.pages[number];
+    if (!page || page.owner !== this.owner) {
+      page = { owner: this.owner, ids: page?.ids.slice() ?? [], values: page?.values.slice() ?? [] };
+      this.pages[number] = page;
+    }
+    return page;
+  }
   override set(id: string, value: V): this {
     this.changedIDs.add(id);
-    const prior = get(this.byID, id);
-    const position = prior?.position ?? this.nextPosition++;
-    const entry = { id, position, value };
-    this.byID = put(this.byID, id, entry, this.owner);
-    this.byPosition = put(this.byPosition, position, entry, this.owner);
-    if (!prior) this.count++;
+    const number = bucketNumber(id);
+    let slot = this.buckets[number]?.slots.get(id);
+    if (slot === undefined) {
+      slot = this.nextPosition++;
+      this.writableBucket(number).set(id, slot);
+      this.count++;
+    }
+    const page = this.writablePage(slot);
+    page.ids[slot % pageSize] = id; page.values[slot % pageSize] = value;
     return this;
   }
   override delete(id: string): boolean {
-    const prior = get(this.byID, id);
-    if (!prior) return false;
+    const number = bucketNumber(id);
+    const slot = this.buckets[number]?.slots.get(id);
+    if (slot === undefined) return false;
     this.changedIDs.add(id);
-    this.byID = remove(this.byID, id, this.owner); this.byPosition = remove(this.byPosition, prior.position, this.owner);
-    this.count--; return true;
+    this.writableBucket(number).delete(id);
+    const page = this.writablePage(slot);
+    page.ids[slot % pageSize] = undefined; page.values[slot % pageSize] = undefined;
+    this.count--;
+    // Bound tombstones under long-running delete/reinsert workloads. Old page
+    // directories remain valid for captured reducer and persistence views.
+    if (this.nextPosition > 1024 && this.nextPosition > this.count * 2) this.compact();
+    return true;
   }
-  override clear(): void { this.byID = undefined; this.byPosition = undefined; this.count = 0; this.nextPosition = 0; }
-  override *entries(): MapIterator<[string, V]> { for (const { value } of nodes(this.byPosition)) yield [value.id, value.value]; }
-  override *keys(): MapIterator<string> { for (const { value } of nodes(this.byPosition)) yield value.id; }
-  override *values(): MapIterator<V> { for (const { value } of nodes(this.byPosition)) yield value.value; }
+  private compact(): void {
+    const next = new ResidentMap<V>();
+    for (const [id, value] of this.entries()) next.set(id, value);
+    this.pages = next.pages; this.buckets = next.buckets; this.owner = next.owner;
+    this.nextPosition = next.nextPosition;
+  }
+  override clear(): void {
+    this.buckets = []; this.pages = []; this.count = 0; this.nextPosition = 0;
+    this.lineage = {}; this.changedIDs.clear();
+  }
+  override *entries(): MapIterator<[string, V]> {
+    for (const page of this.pages) for (let i = 0; i < page.ids.length; i++) {
+      const id = page.ids[i];
+      if (id !== undefined) yield [id, page.values[i]!];
+    }
+  }
+  override *keys(): MapIterator<string> {
+    for (const page of this.pages) for (const id of page.ids) if (id !== undefined) yield id;
+  }
+  override *values(): MapIterator<V> {
+    for (const page of this.pages) for (let i = 0; i < page.ids.length; i++) {
+      if (page.ids[i] !== undefined) yield page.values[i]!;
+    }
+  }
   override [Symbol.iterator](): MapIterator<[string, V]> { return this.entries(); }
   override forEach(callback: (value: V, key: string, map: Map<string, V>) => void, thisArg?: unknown): void {
     for (const [id, value] of this.entries()) callback.call(thisArg, value, id, this);

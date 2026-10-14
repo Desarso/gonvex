@@ -33,12 +33,13 @@ for(const [name,source] of [['baseline',baselineRoot],['candidate',root]]) {
     return {path:path.join(source,'packages',pkg,'src',`${sub??'index'}.ts`)};
   });}}]});
 }
+if(process.argv.includes('--build-only'))process.exit(0);
 const sizes=(process.env.REPLICA_BENCH_SIZES??'10000,50000,100000').split(',').map(Number);
 const trials=Number(process.env.REPLICA_BENCH_TRIALS??3);
 const iterations=Number(process.env.REPLICA_BENCH_SAMPLES??15);
 const output={baselineSHA,candidateSHA:execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),candidateDirty:execFileSync('git',['diff','HEAD','--name-only','--','packages/client/src','packages/local-runtime/src','packages/react/src','packages/protocol/src','packages/module-sdk/src'],{cwd:root,encoding:'utf8'}).trim().length>0,date:new Date().toISOString(),trials,iterations,runtime:process.version,measurements:[],profiles:[]};
 output.bundleSHA256=Object.fromEntries(await Promise.all(['baseline','candidate'].map(async name=>[name,createHash('sha256').update(await fs.readFile(path.join(generated,`${name}.mjs`))).digest('hex')])));
-const configs={single:[iterations,30],singleVisible:[iterations,30],burst:[iterations,3],optimistic:[iterations,5],unrelated:[iterations,5],matching:[iterations,5],sorted:[iterations,5],snapshots:[iterations,10],capture:[iterations,10],startup:[Math.max(3,Math.floor(iterations/3)),1]};
+const configs={single:[iterations,30],singleVisible:[iterations,30],burst:[iterations,3],optimistic:[iterations,5],coldQuery:[iterations,1],unrelated:[iterations,5],matching:[iterations,5],sorted:[iterations,5],snapshots:[iterations,10],capture:[iterations,10],startup:[Math.max(3,Math.floor(iterations/3)),1]};
 const modes=process.argv.includes('--node-only')?['node']:process.argv.includes('--browser-only')?['chromium']:['node','chromium'];
 let browser,server,url,largeContext,chromium;
 if(modes.includes('chromium')) {
@@ -112,6 +113,10 @@ for(const mode of modes)for(const count of sizes)for(let trial=0;trial<trials;tr
   output.measurements.push({mode,count,trial,name,scenario:'heap',loaded,updated,delta:updated-loaded,method:session?'CDP Runtime.getHeapUsage after collectGarbage':'Node heapUsed after exposed GC',longTasks,verification:page?await page.evaluate(()=>subject.verify()):subject.verify()});
 
   for(const [scenario,[samples,warmups]] of Object.entries(configs)) {
+    if(scenario==='unrelated') {
+      if(page)await page.evaluate(()=>subject.prepareQueries());
+      else await subject.prepareQueries();
+    }
     const batchSize=page && scenario==='capture'?20:1;
     const values=page?await page.evaluate(async({scenario,samples,warmups,batchSize})=>{const {measure}=await import('/scenarios.mjs');return measure(subject.operations[scenario],samples,warmups,batchSize);},{scenario,samples,warmups,batchSize}):await measure(subject.operations[scenario],samples,warmups);
     output.measurements.push({mode,count,trial,name,scenario,values,batchSize});

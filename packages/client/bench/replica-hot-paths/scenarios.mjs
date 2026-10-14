@@ -43,6 +43,16 @@ export async function fixture(sdk, count) {
   Object.assign(client,{replica,offlineResults:new Map(),offlineResultsScope:0,offlineResultRows:0,outboxScopeGeneration:0});
   const ref={kind:'query',path:'tasks:grid',live:{entity:'tasks',key:'id',plan:{table:'tasks',key:'id',where:{operator:'eq',column:'status',value:{literal:'open'}},search:{argument:'search',columns:['column1','column2']},sort:{allowedColumns:['rank'],defaultColumn:'rank',defaultDirection:'asc'},window:{offsetArgument:'offset',limitArgument:'limit',defaultLimit:50,maxLimit:500,count:'exact'}}}};
   const args={};
+  const coldQuery=()=>{
+    client.offlineResults.clear();
+    replica.equalityIndexes?.clear();
+    return client.offlineLiveQuery(ref,args).rows.length;
+  };
+  const prepareQueries=async()=>{
+    client.offlineResults.clear();
+    client.offlineLiveQuery(ref,args);
+    while (replica.equalityIndexes && [...replica.equalityIndexes.values()].some(index=>index.scan)) await new Promise(resolve=>setTimeout(resolve,0));
+  };
   const unrelated=async()=>{
     await replica.applyTransaction({cursor:{epoch:'bench',revision:++revision},changes:[{entity:'tags',id:'0',operation:'update',newValue:{column0:revision}}]});
     return client.offlineLiveQuery(ref,args).rows.length;
@@ -82,7 +92,7 @@ export async function fixture(sdk, count) {
     const cold=new sdk.LocalReplica(indexedDB,{maxResidentRows:count,maxResidentBytes:1024*2**20});
     await cold.activateScope('cold');checksum+=cold.entityRows('tasks').length;cold.dispose();
   };
-  return {replica,prepareStorage,operations:{single,singleVisible,burst,optimistic,unrelated,matching,sorted,snapshots,capture,startup,startupIndexedDB},verify:()=>({wakes,checksum,rows:replica.entityRows('tasks').length})};
+  return {replica,prepareStorage,prepareQueries,operations:{coldQuery,single,singleVisible,burst,optimistic,unrelated,matching,sorted,snapshots,capture,startup,startupIndexedDB},verify:()=>({wakes,checksum,rows:replica.entityRows('tasks').length})};
 }
 
 export async function measure(run, iterations, warmups, batchSize=1) {

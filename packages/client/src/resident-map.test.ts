@@ -30,3 +30,26 @@ it('protects both branches when either side of a fork is edited in place',()=>{
   expect([...fork]).toEqual([['a',1],['b',2]]);
   fork.set('b',4).set('c',5);expect([...original]).toEqual([['a',3]]);
 });
+
+it('isolates edits across page boundaries, bucket collisions and compaction', () => {
+  const original = new ResidentMap<number | undefined>();
+  const expected = new Map<string, number | undefined>();
+  for (let i=0;i<5000;i++) { original.set(String(i),i); expected.set(String(i),i); }
+  original.set('undefined',undefined); expected.set('undefined',undefined);
+  const captured = [...original];
+  const next = original.fork();
+  for (let i=0;i<4000;i++) { next.delete(String(i)); expected.delete(String(i)); }
+  for (let i=0;i<500;i++) { next.set(String(i),-i); expected.set(String(i),-i); }
+  expect([...next]).toEqual([...expected]);
+  expect([...original]).toEqual(captured);
+  expect(next.has('undefined')).toBe(true);
+  expect(next.get('undefined')).toBeUndefined();
+  const positions = [...next.keys()].map(id=>next.position(id));
+  expect(positions).toEqual([...positions].sort((a,b)=>a-b));
+  expect(next['nextPosition']).toBeLessThan(next.size*2+1024);
+  original.set('4096',99);
+  expect(next.get('4096')).toBe(4096);
+  const cleared = next.fork(); cleared.clear(); cleared.set('fresh',1);
+  expect(cleared.sharesLineage(next)).toBe(false);
+  expect([...next]).toEqual([...expected]);
+});
