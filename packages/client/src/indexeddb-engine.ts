@@ -529,17 +529,35 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     return this.database.transaction('r',this.database.entities,this.database.windows,this.database.members,this.database.meta,async()=>{
       const entities:ReplicaSnapshot['entities']={},liveQueries:ReplicaSnapshot['liveQueries']={},partial=new Set<string>();
       let bytes=0,count=0,hasRows=false,full=false,averageBytes=0;
-      // getAll-backed pages avoid one JS/Dexie cursor continuation per row.
-      // Bound temporary records, and trim the last page to the estimated byte
-      // budget instead of decoding a full page of rows that cannot be retained.
-      let after: [string, string, string] | undefined;
+      // Read ahead by at most one small page while decoding the current page.
+      // Do not prefetch across either resident budget; membership is atomic in
+      // this same read transaction even while a native request is outstanding.
+      const readPage = (after: [string, string, string] | undefined, rows: number, usedBytes: number) => {
+        const limit = Math.min(256, Math.max(1, budget.maxRows - rows + 1),
+          Number.isFinite(budget.maxBytes) ? Math.max(1, Math.ceil((budget.maxBytes - usedBytes) / (averageBytes || 256)) + 1) : 256);
+        const page = this.database.entities.where('[scope+entity+id]')
+          .between(after ?? [scope], [scope, []], !after, false).limit(limit).toArray();
+        // A decoding error can abort before we await the prefetched request.
+        // Its rejection is still propagated when awaited on the normal path.
+        void page.catch(() => {});
+        return { page, limit };
+      };
+      let pending = readPage(undefined, count, bytes);
       while (!full) {
-        const page = await this.database.entities.where('[scope+entity+id]')
-          .between(after ?? [scope], [scope, []], !after, false)
-          .limit(Math.min(256, Math.max(1, budget.maxRows - count + 1),
-            Number.isFinite(budget.maxBytes) ? Math.max(1, Math.ceil((budget.maxBytes - bytes) / (averageBytes || 256)) + 1) : 256)).toArray();
+        const { page: request, limit } = pending;
+        const page = await request;
         if (!page.length) break;
-        averageBytes = page.reduce((sum, record) => sum + record.value.length * 2 + 256, 0) / page.length;
+        const last = page[page.length - 1]!;
+        const after: [string, string, string] = [last.scope, last.entity, last.id];
+        let nextRows = count, nextBytes = bytes, pageBytes = 0;
+        for (const record of page) {
+          const size = record.value.length * 2 + 256;
+          pageBytes += size;
+          if (!record.deleted) { nextRows++; nextBytes += size; }
+        }
+        averageBytes = pageBytes / page.length;
+        const next = page.length === limit && nextRows < budget.maxRows && nextBytes < budget.maxBytes
+          ? readPage(after, nextRows, nextBytes) : undefined;
         for (const record of page) {
           if (record.deleted) continue;
           hasRows = true;
@@ -548,8 +566,8 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
           (entities[record.entity] ??= {})[record.id] = JSON.parse(record.value);
           bytes += size; count++;
         }
-        const last = page[page.length - 1]!;
-        after = [last.scope, last.entity, last.id];
+        if (full || page.length < limit) break;
+        pending = next ?? readPage(after, count, bytes);
       }
       const records = (await this.database.windows.where('scope').equals(scope).toArray()).filter(record => !record.deleted);
       for (let offset = 0; offset < records.length; offset += 4) {
