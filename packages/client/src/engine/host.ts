@@ -250,7 +250,12 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
         (request.args?.[0] as FunctionReference)?.localExecution === 1)
         ? new EngineAdmissionCohort(client) : undefined;
       for (const admission of data.admissions) if (admission?.method === "reducer") receive({ data: admission } as MessageEvent, group);
-      group?.flush();
+      if (group) {
+        // Reserve start order before the asynchronous ownership transfer.
+        // Later packets must not enter the local lane ahead of this cohort.
+        pendingStarts++;
+        admissionStart = group.flush().then(() => { pendingStarts--; }, () => { pendingStarts--; });
+      }
       return;
     }
     if (!data || typeof data.id !== "string" || !Array.isArray(data.args)) return;

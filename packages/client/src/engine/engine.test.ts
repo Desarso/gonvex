@@ -489,3 +489,25 @@ it("does not let a fresh cohort overtake an explicit retry awaiting lookup", asy
   release(); expect(await Promise.all([first, ...rest])).toEqual([7, 7, 7]);
   expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(commands.map(command => command.id));
 });
+
+it("keeps a later packet behind a cohort waiting for its delivery lease", async () => {
+  const { create } = await setup();
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const wrap = EngineReceipts.prototype.wrap; let waiting = false;
+  vi.spyOn(EngineReceipts.prototype, "wrap").mockImplementation(function(store) {
+    const wrapped = wrap.call(this, store);
+    return { ...wrapped, coordinate: async (scope, lane, run) => {
+      if (lane === "delivery" && !waiting) { waiting = true; await blocked; }
+      return wrapped.coordinate!(scope, lane, run);
+    } };
+  });
+  const host = await create(); cleanups.push(host.close);
+  const commands = Array.from({ length: 3 }, (_, index) => ({ id: `packet-${index}`, now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "ab".repeat(32) }));
+  const pending = commands.slice(0, 2).map(command => host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command, engineFresh: true }])));
+  await vi.waitFor(() => expect(waiting).toBe(true));
+  pending.push(host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: commands[2], engineFresh: true }])));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  release(); expect(await Promise.all(pending)).toEqual([7, 7, 7]);
+  expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(commands.map(command => command.id));
+});

@@ -12,7 +12,7 @@ export class EngineAdmissionCohort {
     return new Promise<{ operation: Promise<unknown> }>((resolve, reject) => this.entries.push({ options, begin, resolve, reject }));
   }
   flush() {
-    if (!this.entries.length) return;
+    if (!this.entries.length) return Promise.resolve();
     const client = this.client, scope = client["outboxScope"], store = client["sharedOutboxStore"]!;
     let lane: Promise<unknown> = Promise.resolve();
     const admissionLane: AdmissionLane = run => {
@@ -38,7 +38,7 @@ export class EngineAdmissionCohort {
         }));
       } finally { for (const entry of this.entries) lanes.delete(entry.options); }
     };
-    void Promise.all([client["outboxReady"], client["replicaReady"]]).then(() =>
+    return Promise.all([client["outboxReady"], client["replicaReady"]]).then(() =>
       store.coordinate!(scope, "delivery", () => client["inLocalLane"](() => store.coordinate!(scope, "intent", execute))),
     ).catch(error => { for (const entry of this.entries) entry.reject(error); });
   }
