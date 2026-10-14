@@ -864,3 +864,44 @@ it("reuses an admission lease across awaited replies and releases it after idle"
   expect(leases.filter(lane => lane === "intent")).toHaveLength(2);
   expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(commands.map(command => command.id));
 });
+
+it("keeps complete text payloads for older receivers that ignore alias metadata", async () => {
+  const { ui, worker } = pair(); let text = "", decoded: any;
+  ui.addEventListener("message", ({ data }: MessageEvent) => {
+    ui.postMessage({ generation: data.generation, scope: data.scope, deliveryAck: data.deliveryId });
+    if (data.packet?.kind === "text") text += data.packet.value;
+    if (data.packet?.kind === "textEnd") {
+      const envelope = JSON.parse(text); decoded = envelope.payload;
+      for (const path of envelope.undefinedPaths) {
+        let parent = decoded; for (const key of path.slice(0, -1)) parent = parent[key];
+        Object.defineProperty(parent, path.at(-1)!, { value: undefined, enumerable: true, configurable: true });
+      }
+    }
+  });
+  const row = { value: "v".repeat(20_000), missing: undefined };
+  await sendEngineMessage(worker, { generation: "g", scope: "s", id: "older-receiver", result: { ["x".repeat(2000)]: row, other: row } });
+  expect(decoded.result.other).toEqual(row);
+  expect(Object.hasOwn(decoded.result.other, "missing")).toBe(true);
+  expect(decoded.result["x".repeat(2000)]).toEqual(row);
+});
+
+it("retires durable local outcomes from the fenced cache without rereading the journal", async () => {
+  const receipts = new EngineReceipts(crypto.randomUUID()); cleanups.push(() => receipts.close());
+  const entry: any = { id: 1, scope: "s", path: "p", args: {}, idempotencyKey: "c", state: "committed", localExecution: { now: Date.now() }, engineResult: 7 };
+  receipts.cachedEntry = () => entry;
+  const load = vi.fn(async () => [entry]); const getMany = vi.fn(async () => [entry]); const remove = vi.fn(async () => undefined);
+  const store = receipts.wrap({ load, getMany, put: async () => undefined, delete: remove, clear: async () => undefined });
+  await store.delete(1);
+  expect(load).not.toHaveBeenCalled(); expect(getMany).not.toHaveBeenCalled(); expect(remove).toHaveBeenCalledWith(1);
+  expect((await receipts.get("s", "c"))?.result).toBe(7);
+});
+
+it("rereads remote retirement outcomes instead of trusting a cached queued placeholder", async () => {
+  const receipts = new EngineReceipts(crypto.randomUUID()); cleanups.push(() => receipts.close());
+  const entry: any = { id: 1, scope: "s", path: "p", args: {}, idempotencyKey: "c", state: "committed", engineResult: 42, createdAt: Date.now() };
+  receipts.cachedEntry = () => ({ ...entry, engineResult: { status: "queued" } });
+  const load = vi.fn(async () => [entry]);
+  const store = receipts.wrap({ load, put: async () => undefined, delete: async () => undefined, clear: async () => undefined });
+  await store.delete(1);
+  expect(load).toHaveBeenCalledOnce(); expect((await receipts.get("s", "c"))?.result).toBe(42);
+});

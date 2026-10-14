@@ -3,7 +3,7 @@ import { GonvexClient, GonvexClientError, type EngineCommand, type FunctionRefer
 import { engineEntryOutcome, type EngineReceipts } from "./receipts.js";
 import type { JsonValue } from "@gonvex/protocol";
 import type { LocalExecution, LocalTransactionResult } from "@gonvex/local-runtime";
-import { StoreReducerOutbox, outboxEntryIsLive, type IntentDependencies, type OutboxErrorClass } from "../outbox.js";
+import { StoreReducerOutbox, outboxEntryIsLive, type ReducerOutboxEntry, type IntentDependencies, type OutboxErrorClass } from "../outbox.js";
 import { optimisticPatchesFromReference, type OptimisticPatch } from "../optimistic.js";
 
 const receiptContexts = new WeakMap<GonvexClient, EngineReceipts>();
@@ -13,6 +13,16 @@ const receiptContexts = new WeakMap<GonvexClient, EngineReceipts>();
 export function installEngineAdmissions(client: GonvexClient, receipts: EngineReceipts) {
   receiptContexts.set(client, receipts);
   const outbox = client["reducerOutbox"];
+  const retiring = new Map<number, ReducerOutboxEntry>();
+  receipts.cachedEntry = id => retiring.get(id) ?? (outbox instanceof StoreReducerOutbox ? outbox["entries"].get(id) : undefined);
+  const ack = outbox.ack.bind(outbox);
+  outbox.ack = async id => {
+    // ack removes its memory entry before calling the store. Retain that
+    // durable local outcome only until the original deletion settles.
+    const entry = receipts.cachedEntry?.(id);
+    if (entry) retiring.set(id, entry);
+    try { return await ack(id); } finally { retiring.delete(id); }
+  };
   const enqueue = outbox.enqueue.bind(outbox);
   outbox.enqueue = async intent => {
     if (intent.engineOutcome && !intent.engineOutcome.fresh) await receipts.assertCanAdmit(intent.engineOutcome.commandNow!);

@@ -77,6 +77,7 @@ export class EngineReceipts {
       if (!this.scheduled) { this.scheduled = true; queueMicrotask(() => { void this.flush(); }); }
     });
   }
+  cachedEntry?: (id: number) => ReducerOutboxEntry | undefined;
   readonly admissions = new Map<string, { result: unknown; commandNow?: number }>();
   wrap(store: OutboxStore): OutboxStore {
     const admitted = <T extends Omit<ReducerOutboxEntry, "id">>(entry: T): T => {
@@ -89,8 +90,13 @@ export class EngineReceipts {
       const selected = new Set(ids);
       // Read only recovery metadata here. Deletion still goes through the
       // contract-fenced canonical store after the receipt transaction commits.
-      const entries: Array<ReducerOutboxEntry | undefined> = store.getMany ? await store.getMany(ids)
-        : this.journal.isOpen() ? await this.journal.table("entries").bulkGet([...ids]) : await store.load();
+      const cached = ids.map(id => this.cachedEntry?.(id)).map(entry =>
+        entry?.localExecution && engineEntryOutcome(entry) ? entry : undefined);
+      const missing = ids.filter((_id, index) => !cached[index]);
+      const loaded: Array<ReducerOutboxEntry | undefined> = !missing.length ? [] : store.getMany ? await store.getMany(missing)
+        : this.journal.isOpen() ? await this.journal.table("entries").bulkGet(missing) : await store.load();
+      const missingIds = new Set(missing);
+      const entries = [...cached, ...loaded.filter(entry => entry && missingIds.has(entry.id))];
       await Promise.all(entries.map(entry => {
         if (!entry || !selected.has(entry.id)) return;
         // Local results are durable at admission. A remote entry's queued
@@ -120,5 +126,5 @@ export class EngineReceipts {
     if (receipt && (receipt.path !== path || receipt.args !== JSON.stringify(args))) throw new Error("Engine command ID reused with different arguments");
     return receipt;
   }
-  close() { this.database.close(); this.journal.close(); }
+  close() { this.cachedEntry = undefined; this.database.close(); this.journal.close(); }
 }
