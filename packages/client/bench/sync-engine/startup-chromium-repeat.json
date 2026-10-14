@@ -1,0 +1,2874 @@
+{
+  "kind": "native-browser-storage-v1",
+  "complete": true,
+  "environment": {
+    "node": "v26.8.2",
+    "priority": 15,
+    "os": "7.2.4-arch1-2",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "ram": 33537105920,
+    "commit": "7b870d014f5b1124ba6a3ad7e3d71f76de682e63",
+    "dirty": false,
+    "seed": 1196840961,
+    "artifactHash": "ef83e92b1ed10c04d95d262a95e99156178f8719ce1486b6cce2903c2ff2bcc0",
+    "budget": {
+      "maxRows": 9007199254740991,
+      "maxBytes": 209715200
+    },
+    "options": {
+      "browsers": "chromium",
+      "cases": "startup-working-set",
+      "samples": 20,
+      "warmups": 5,
+      "cap": 30,
+      "cv": 0.15,
+      "load": 0.5,
+      "retries": 10,
+      "output": "packages/client/bench/sync-engine/startup-chromium-repeat.json"
+    },
+    "scope": "storage only; no runtime, network, worker, DOM or subscribers; WebKit approximates Safari"
+  },
+  "browsers": [
+    {
+      "name": "chromium",
+      "before": {
+        "loadavg": [
+          0.9,
+          3.36,
+          5.02
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T04:35:20.505Z"
+      },
+      "quiescent": true,
+      "cases": [
+        {
+          "metric": "startup-working-set-10000",
+          "legacy": {
+            "median": 429.15000009536743,
+            "p95": 447,
+            "medianCI": [
+              425.7000000476837,
+              435.64999997615814
+            ],
+            "p95CI": [
+              436.90000009536743,
+              463.40000009536743
+            ],
+            "cv": 0.027377864651025326,
+            "samples": [
+              428.10000014305115,
+              415.5,
+              447,
+              427.89999985694885,
+              419.2999999523163,
+              439.59999990463257,
+              436.90000009536743,
+              440.7999999523163,
+              425.09999990463257,
+              426.40000009536743,
+              431,
+              415.2999999523163,
+              439.90000009536743,
+              430.2000000476837,
+              426.30000019073486,
+              415.39999985694885,
+              432.90000009536743,
+              463.40000009536743,
+              422.2999999523163,
+              434.39999985694885
+            ]
+          },
+          "engine": {
+            "median": 353.64999997615814,
+            "p95": 362,
+            "medianCI": [
+              350.85000002384186,
+              356.75
+            ],
+            "p95CI": [
+              357.10000014305115,
+              369.7000000476837
+            ],
+            "cv": 0.01689617604199636,
+            "samples": [
+              360.69999980926514,
+              350.7000000476837,
+              356.2000000476837,
+              352.2999999523163,
+              357.10000014305115,
+              346.59999990463257,
+              361.69999980926514,
+              354.10000014305115,
+              353.10000014305115,
+              362,
+              356.40000009536743,
+              369.7000000476837,
+              347.2999999523163,
+              357.09999990463257,
+              351,
+              349,
+              345.30000019073486,
+              353.19999980926514,
+              354.69999980926514,
+              350.09999990463257
+            ]
+          },
+          "ratio": {
+            "median": 0.8240708374637508,
+            "medianCI": [
+              0.8097713094827684,
+              0.8356003752153764
+            ],
+            "p95": 0.8098434004474273,
+            "p95CI": [
+              0.7783772113401668,
+              0.8409918110279503
+            ]
+          },
+          "status": "OK",
+          "startupProfiles": [
+            {
+              "elapsed": 427.7999999523163,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 3
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0.40000009536743164
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 0.09999990463256836
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 3.3999998569488525
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.10000014305114746
+                }
+              ],
+              "requestCounts": {
+                "entities.getAll": 43,
+                "windows.scope.getAll": 1,
+                "meta.get": 2
+              },
+              "recordsRead": 10508,
+              "cursorContinues": 0,
+              "jsonParses": 10507,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 244.325
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 58.141,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "(program)",
+                  "ms": 55.484
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 38.175
+                },
+                {
+                  "function": "K.addEventListener.O.once",
+                  "ms": 36.99,
+                  "source": "()=>{O===\"getAll\"?r+=K.result.length:(O===\"get\"&&K.result!==void 0||O===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},O===\"openCurs"
+                },
+                {
+                  "function": "",
+                  "ms": 7.048,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,m=0,g=!1,k=!1,O;for(;!k;){let _=await this.database.entities.where(\"[scope+entity+id]\").between(O??[r],[r,[]],!O,!1).limit"
+                },
+                {
+                  "function": "",
+                  "ms": 2.127,
+                  "source": "K=>!o[C.entity]?.[K])&&f.add(C.entity)});let S=await this.database.meta.get([r,\"cursor\"]);if(!(!g&&!Object.keys(c).length&&!S))return{entities:o,liveQueries:c,r"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 2.122,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "B",
+                  "ms": 1.068,
+                  "source": "(e){if(typeof this!=\"object\")throw new TypeError(\"Promises must be constructed via new\");this._listeners=[],this._lib=!1;var t=this._PSD=W;if(typeof e!=\"functio"
+                },
+                {
+                  "function": "",
+                  "ms": 1.064,
+                  "source": "(){p=null;var x=e.idbdb=v.result,R=X(x.objectStoreNames);if(R.length>0)try{var $=x.transaction(fa(R),\"readonly\");if(t.autoSchema)xa(e,x,$);else if(Xt(e,e._dbSch"
+                },
+                {
+                  "function": "",
+                  "ms": 1.064,
+                  "source": "(){var s=W;n&&ut(),Ne(t,!0);try{return e.apply(this,arguments)}finally{Ne(s,!1),i&&queueMicrotask(Ke)}}}function Kn(e){Promise===Ve&&le.echoes===0?qt===0?e():en"
+                },
+                {
+                  "function": "k.<computed>",
+                  "ms": 1.061,
+                  "source": "(..._){let C=performance.now(),K=S.apply(this,_),F=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${O}`;return g[F]=(g[F]??0)+1,K.add"
+                },
+                {
+                  "function": "query",
+                  "ms": 1.06,
+                  "source": "(x){return n.query(M(x))},openCursor:function(x){var R=x.query.index,$=R.keyTail,P=R.isVirtual,T=R.keyLength;if(!P)return n.openCursor(x);function I(D){function"
+                },
+                {
+                  "function": "Ne",
+                  "ms": 1.06,
+                  "source": "(e,t){var n=W;if((t?le.echoes&&(!qt++||e!==W):qt&&(!--qt||e!==W))&&queueMicrotask(t?Qi.bind(null,e):Gi),e!==W&&(W=e,n===$e&&($e.env=Kr()),Rn)){var i=$e.env.Prom"
+                },
+                {
+                  "function": "e.transaction",
+                  "ms": 1.059,
+                  "source": "(){var t=Da.apply(this,arguments);return this._transaction.apply(this,t)},e.prototype._transaction=function(t,n,i){var s=this,u=W.trans;(!u||u.db!==this||t.inde"
+                },
+                {
+                  "function": "isTypedArray",
+                  "ms": 1.058
+                },
+                {
+                  "function": "Ma",
+                  "ms": 1.057,
+                  "source": "(e){var t=e._state,n=e._deps.indexedDB;if(t.isBeingOpened||e.idbdb)return t.dbReadyPromise.then(function(){return t.dbOpenError?ue(t.dbOpenError):e});t.isBeingO"
+                },
+                {
+                  "function": "u",
+                  "ms": 1.056,
+                  "source": "(A){var M=A.name;function v($){var P=$.trans,T=$.type,I=$.keys,D=$.values,j=$.range;return new Promise(function(N,q){N=ae(N);var z=P.objectStore(M),Z=z.keyPath="
+                }
+              ],
+              "sampledLiveBytes": 230124
+            },
+            {
+              "elapsed": 349.09999990463257,
+              "requests": [
+                {
+                  "operation": "meta.getAllKeys",
+                  "ms": 0.5999999046325684
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.09999990463256836
+                },
+                {
+                  "operation": "meta.getAllKeys",
+                  "ms": 0.09999990463256836
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 1.9000000953674316
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.19999980926513672
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.39999985694885254
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.39999985694885254
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.19999980926513672
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 3.1000001430511475
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.10000014305114746
+                }
+              ],
+              "requestCounts": {
+                "meta.getAllKeys": 2,
+                "meta.getAll": 7,
+                "entities.getAll": 42,
+                "windows.scope.getAll": 1,
+                "meta.get": 8
+              },
+              "recordsRead": 10514,
+              "cursorContinues": 0,
+              "jsonParses": 10513,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 165.276
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 53.953,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "(program)",
+                  "ms": 50.116
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 42.535
+                },
+                {
+                  "function": "K.addEventListener.O.once",
+                  "ms": 35.983,
+                  "source": "()=>{O===\"getAll\"?r+=K.result.length:(O===\"get\"&&K.result!==void 0||O===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},O===\"openCurs"
+                },
+                {
+                  "function": "",
+                  "ms": 4.058,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,m=0,g=!1,k=!1,O=0,S=(F,Q,L)=>{let X=Math.min(256,Math.max(1,a.maxRows-Q+1),Number.isFinite(a.maxBytes)?Math.max(1,Math.cei"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 3.178,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "",
+                  "ms": 2.12,
+                  "source": "X=>!o[L.entity]?.[X])&&f.add(L.entity)}let K=await this.database.meta.get([r,\"cursor\"]);if(!(!g&&!Object.keys(c).length&&!K))return{entities:o,liveQueries:c,res"
+                },
+                {
+                  "function": "",
+                  "ms": 1.154
+                },
+                {
+                  "function": "Tn",
+                  "ms": 1.067,
+                  "source": "(e,t){if(e._state===null){e._listeners.push(t);return}var n=e._state?t.onFulfilled:t.onRejected;if(n===null)return(e._state?t.resolve:t.reject)(e._value);++t.ps"
+                },
+                {
+                  "function": "bound",
+                  "ms": 1.066
+                },
+                {
+                  "function": "",
+                  "ms": 1.063,
+                  "source": "async()=>{let r;for(;;){let o=(await this.database.meta.where(\"[scope+key]\").between(r===void 0?[]:[r,[]],[[]],!0,!1).limit(1).primaryKeys())[0]?.[0];if(o===voi"
+                },
+                {
+                  "function": "addEventListener",
+                  "ms": 1.063
+                },
+                {
+                  "function": "",
+                  "ms": 1.062,
+                  "source": "(){var i=st(),s=W;try{return Ne(n,!0),e.apply(this,arguments)}catch(u){t&&t(u)}finally{Ne(s,!1),i&&ot()}}}var le={awaits:0,echoes:0,id:0},Ui=0,Nt=[],qt=0,Bt=0,H"
+                },
+                {
+                  "function": "Sn",
+                  "ms": 1.061,
+                  "source": "(e){return $i.call(e).slice(8,-1)}var xn=typeof Symbol<\"u\"?Symbol.iterator:\"@@iterator\",Ri=typeof xn==\"symbol\"?function(e){var t;return e!=null&&(t=e[xn])&&t.ap"
+                },
+                {
+                  "function": "",
+                  "ms": 1.06,
+                  "source": "(){var i=st(),s=W;try{return Ne(n,!0),e.apply(this,arguments)}catch(u){t&&t(u)}finally{Ne(s,!1),i&&ot()}}}var le={awaits:0,echoes:0,id:0},Ui=0,Nt=[],qt=0,Bt=0,H"
+                },
+                {
+                  "function": "Ee",
+                  "ms": 1.059,
+                  "source": "(e){return ae(function(t){return bt(t),e(t.target.error),!1})}function bt(e){e.stopPropagation&&e.stopPropagation(),e.preventDefault&&e.preventDefault()}var Ut="
+                },
+                {
+                  "function": "Tr",
+                  "ms": 1.059,
+                  "source": "(e,t){try{t(function(n){if(e._state===null){if(n===e)throw new TypeError(\"A promise cannot be resolved with itself.\");var i=e._lib&&st();n&&typeof n.then==\"func"
+                },
+                {
+                  "function": "e._trans",
+                  "ms": 1.059,
+                  "source": "(t,n,i){var s=this._tx||W.trans,u=this.name,l=Oe&&typeof console<\"u\"&&console.createTask&&console.createTask(\"Dexie: \".concat(t===\"readonly\"?\"read\":\"write\",\" \")"
+                },
+                {
+                  "function": "isURL",
+                  "ms": 1.058
+                }
+              ],
+              "sampledLiveBytes": 131632
+            }
+          ]
+        },
+        {
+          "metric": "startup-working-set-50000",
+          "legacy": {
+            "median": 1689.9500000476837,
+            "p95": 1732.7000000476837,
+            "medianCI": [
+              1656.9499999284744,
+              1706.5
+            ],
+            "p95CI": [
+              1721.7999999523163,
+              1753.1000001430511
+            ],
+            "cv": 0.024884539920099258,
+            "samples": [
+              1686.9000000953674,
+              1732.7000000476837,
+              1695.7000000476837,
+              1695,
+              1693,
+              1621.2000000476837,
+              1753.1000001430511,
+              1728.9000000953674,
+              1630.9000000953674,
+              1721.7999999523163,
+              1618.0999999046326,
+              1684.8000001907349,
+              1725.5999999046326,
+              1712,
+              1628.5,
+              1701,
+              1657.2999999523163,
+              1625.7000000476837,
+              1656.5999999046326,
+              1659.4000000953674
+            ]
+          },
+          "engine": {
+            "median": 1516,
+            "p95": 1548.1999998092651,
+            "medianCI": [
+              1507.0499999523163,
+              1527.1000000238419
+            ],
+            "p95CI": [
+              1530.5,
+              1550.5999999046326
+            ],
+            "cv": 0.010773662827305703,
+            "samples": [
+              1548.1999998092651,
+              1524.0999999046326,
+              1517.7000000476837,
+              1505,
+              1530.1000001430511,
+              1514.2999999523163,
+              1530.5,
+              1518.6000001430511,
+              1542.8999998569489,
+              1522,
+              1550.5999999046326,
+              1495.0999999046326,
+              1508.2999999523163,
+              1508.7000000476837,
+              1509.3999998569489,
+              1531.0999999046326,
+              1505.7999999523163,
+              1500.5,
+              1500.5999999046326,
+              1502.4000000953674
+            ]
+          },
+          "ratio": {
+            "median": 0.8970679605652383,
+            "medianCI": [
+              0.8881632892519967,
+              0.9171989875331621
+            ],
+            "p95": 0.8935187855754942,
+            "p95CI": [
+              0.8733671780159126,
+              0.900569171766509
+            ]
+          },
+          "status": "OK",
+          "startupProfiles": [
+            {
+              "elapsed": 1772.8000001907349,
+              "requests": [
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.6999998092651367
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.5999999046325684
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.399999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 12.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.899999856948853
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 29.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.600000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 11.300000190734863
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.3000001907348633
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.09999990463256836
+                }
+              ],
+              "requestCounts": {
+                "entities.getAll": 190,
+                "windows.scope.getAll": 1,
+                "meta.get": 2
+              },
+              "recordsRead": 48648,
+              "cursorContinues": 0,
+              "jsonParses": 48558,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 956.689
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 223.494,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "K.addEventListener.O.once",
+                  "ms": 187.567,
+                  "source": "()=>{O===\"getAll\"?r+=K.result.length:(O===\"get\"&&K.result!==void 0||O===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},O===\"openCurs"
+                },
+                {
+                  "function": "(program)",
+                  "ms": 187.071
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 153.056
+                },
+                {
+                  "function": "",
+                  "ms": 34.335,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,m=0,g=!1,k=!1,O;for(;!k;){let _=await this.database.entities.where(\"[scope+entity+id]\").between(O??[r],[r,[]],!O,!1).limit"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 12.74,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "",
+                  "ms": 10.56,
+                  "source": "K=>!o[C.entity]?.[K])&&f.add(C.entity)});let S=await this.database.meta.get([r,\"cursor\"]);if(!(!g&&!Object.keys(c).length&&!S))return{entities:o,liveQueries:c,r"
+                },
+                {
+                  "function": "k.<computed>",
+                  "ms": 5.302,
+                  "source": "(..._){let C=performance.now(),K=S.apply(this,_),F=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${O}`;return g[F]=(g[F]??0)+1,K.add"
+                },
+                {
+                  "function": "bound",
+                  "ms": 3.184
+                },
+                {
+                  "function": "",
+                  "ms": 3.153,
+                  "source": "(I,D){var j;I=ae(I);var N=T.trans,q=T.values,z=T.limit,Z=T.query,V=(j=T.direction)!==null&&j!==void 0?j:\"next\",J=z===1/0?void 0:z,G=Z.index,Y=Z.range,re=N.objec"
+                },
+                {
+                  "function": "",
+                  "ms": 2.129,
+                  "source": "(i){var s=n._ctx;if(ct(s,!0)&&s.limit>0){var u=s.valueMapper,l=Wt(s,s.table.core.schema);return s.table.core.query({trans:i,limit:s.limit,values:!0,direction:s."
+                },
+                {
+                  "function": "",
+                  "ms": 2.129,
+                  "source": "(n,i,s){if(this.db=e,this._ctx={table:n,index:i===\":id\"?null:i,or:s},this._cmp=this._ascending=ee,this._descending=function(u,l){return ee(l,u)},this._max=funct"
+                },
+                {
+                  "function": "addEventListener",
+                  "ms": 2.12
+                },
+                {
+                  "function": "window.profileSample",
+                  "ms": 1.144,
+                  "source": "async y=>{let r=0,a=0,o=0,c=JSON.parse,f=IDBCursor.prototype.continue;JSON.parse=function(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=functio"
+                },
+                {
+                  "function": "",
+                  "ms": 1.076,
+                  "source": "(){--He===0&&Pn()},[])}function Li(e){Ue.some(function(t){return t._value===e._value})||Ue.push(e)}function Vi(e){for(var t=Ue.length;t;)if(Ue[--t]._value===e._"
+                },
+                {
+                  "function": "n",
+                  "ms": 1.069,
+                  "source": "(i,s){var u=this,l=!e.global&&(e!==W||t!==Bt),h=l&&!Ke(),p=new B(function(w,b){Tn(u,new Dr(Nr(i,e,l,h),Nr(s,e,l,h),w,b,e))});return this._consoleTask&&(p._conso"
+                },
+                {
+                  "function": "Yi",
+                  "ms": 1.067,
+                  "source": "(e,t){for(var n=e.length,i=t.length,s=n<i?n:i,u=0;u<s;++u){var l=ee(e[u],t[u]);if(l!==0)return l}return n===i?0:n<i?-1:1}function Xi(e,t){for(var n=e.length,i=t"
+                },
+                {
+                  "function": "Ne",
+                  "ms": 1.065,
+                  "source": "(e,t){var n=W;if((t?le.echoes&&(!qt++||e!==W):qt&&(!--qt||e!==W))&&queueMicrotask(t?Qi.bind(null,e):Gi),e!==W&&(W=e,n===$e&&($e.env=Kr()),Rn)){var i=$e.env.Prom"
+                },
+                {
+                  "function": "serialize",
+                  "ms": 1.064
+                }
+              ],
+              "sampledLiveBytes": 98364
+            },
+            {
+              "elapsed": 1516.0999999046326,
+              "requests": [
+                {
+                  "operation": "meta.getAllKeys",
+                  "ms": 0.7000000476837158
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.09999990463256836
+                },
+                {
+                  "operation": "meta.getAllKeys",
+                  "ms": 0.10000014305114746
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 2.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 11
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.900000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 10.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 7.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 26
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.1000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 9.100000143051147
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.6000001430511475
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.400000095367432
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.199999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.200000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.800000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6.099999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.3999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.700000047683716
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 6
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 8.799999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.8999998569488525
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.699999809265137
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.5
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.299999952316284
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.300000190734863
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 5.599999904632568
+                },
+                {
+                  "operation": "entities.getAll",
+                  "ms": 4
+                },
+                {
+                  "operation": "windows.scope.getAll",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.3000001907348633
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.39999985694885254
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.2999999523162842
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 11.5
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 22.40000009536743
+                },
+                {
+                  "operation": "meta.getAll",
+                  "ms": 0.09999990463256836
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.20000004768371582
+                },
+                {
+                  "operation": "meta.get",
+                  "ms": 0.09999990463256836
+                }
+              ],
+              "requestCounts": {
+                "meta.getAllKeys": 2,
+                "meta.getAll": 7,
+                "entities.getAll": 190,
+                "windows.scope.getAll": 1,
+                "meta.get": 8
+              },
+              "recordsRead": 48567,
+              "cursorContinues": 0,
+              "jsonParses": 48564,
+              "cpuTop": [
+                {
+                  "function": "(idle)",
+                  "ms": 754.017
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 240.303,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "K.addEventListener.O.once",
+                  "ms": 173.289,
+                  "source": "()=>{O===\"getAll\"?r+=K.result.length:(O===\"get\"&&K.result!==void 0||O===\"openCursor\"&&K.result)&&r++,d.push({operation:F,ms:performance.now()-C})},O===\"openCurs"
+                },
+                {
+                  "function": "(program)",
+                  "ms": 172.494
+                },
+                {
+                  "function": "(garbage collector)",
+                  "ms": 137.638
+                },
+                {
+                  "function": "",
+                  "ms": 25.102,
+                  "source": "async()=>{let o={},c={},f=new Set,d=0,m=0,g=!1,k=!1,O=0,S=(F,Q,L)=>{let X=Math.min(256,Math.max(1,a.maxRows-Q+1),Number.isFinite(a.maxBytes)?Math.max(1,Math.cei"
+                },
+                {
+                  "function": "JSON.parse",
+                  "ms": 10.563,
+                  "source": "(...k){return o++,c.apply(this,k)},IDBCursor.prototype.continue=function(...k){return a++,f.apply(this,k)};let d=[],m=[],g={};for(let k of[IDBObjectStore.protot"
+                },
+                {
+                  "function": "",
+                  "ms": 9.573,
+                  "source": "X=>!o[L.entity]?.[X])&&f.add(L.entity)}let K=await this.database.meta.get([r,\"cursor\"]);if(!(!g&&!Object.keys(c).length&&!K))return{entities:o,liveQueries:c,res"
+                },
+                {
+                  "function": "k.<computed>",
+                  "ms": 2.118,
+                  "source": "(..._){let C=performance.now(),K=S.apply(this,_),F=`${this.objectStore?.name??this.name}${this.objectStore?\".\"+this.name:\"\"}.${O}`;return g[F]=(g[F]??0)+1,K.add"
+                },
+                {
+                  "function": "",
+                  "ms": 2.115,
+                  "source": "(){e.apply(this,arguments),t.apply(this,arguments)}}function Pi(e,t){return e===ne?t:function(){var n=e.apply(this,arguments);n!==void 0&&(arguments[0]=n);var i"
+                },
+                {
+                  "function": "zi",
+                  "ms": 2.111,
+                  "source": "(e,t,n){try{var i,s=t._value;!t._state&&Tt.length&&(Tt=[]),i=Oe&&t._consoleTask?t._consoleTask.run(function(){return e(s)}):e(s),!t._state&&Tt.indexOf(s)===-1&&"
+                },
+                {
+                  "function": "Dr",
+                  "ms": 1.097,
+                  "source": "(e,t,n,i,s){this.onFulfilled=typeof e==\"function\"?e:null,this.onRejected=typeof t==\"function\"?t:null,this.resolve=n,this.reject=i,this.psd=s}S(B,{all:function()"
+                },
+                {
+                  "function": "e.between",
+                  "ms": 1.07,
+                  "source": "(t,n,i,s){i=i!==!1,s=s===!0;try{return this._cmp(t,n)>0||this._cmp(t,n)===0&&(i||s)&&!(i&&s)?lt(this):new this.Collection(this,function(){return qe(t,n,!i,!s)})"
+                },
+                {
+                  "function": "bound",
+                  "ms": 1.063
+                },
+                {
+                  "function": "serialize",
+                  "ms": 1.063
+                },
+                {
+                  "function": "Ne",
+                  "ms": 1.059,
+                  "source": "(e,t){var n=W;if((t?le.echoes&&(!qt++||e!==W):qt&&(!--qt||e!==W))&&queueMicrotask(t?Qi.bind(null,e):Gi),e!==W&&(W=e,n===$e&&($e.env=Kr()),Rn)){var i=$e.env.Prom"
+                },
+                {
+                  "function": "ot",
+                  "ms": 1.059,
+                  "source": "(){var e,t,n;do for(;mt.length>0;)for(e=mt,mt=[],n=e.length,t=0;t<n;++t){var i=e[t];i[0].apply(null,i[1])}while(mt.length>0);Cn=!0,Dt=!0}function Pn(){var e=Ue;"
+                },
+                {
+                  "function": "innerSerialize",
+                  "ms": 1.059
+                },
+                {
+                  "function": "",
+                  "ms": 1.058,
+                  "source": "(R){var $=R.keyPath,P=R.autoIncrement,T=d($),I=$==null,D={},j={name:R.name,primaryKey:{name:null,isPrimaryKey:!0,outbound:I,compound:T,keyPath:$,autoIncrement:P"
+                },
+                {
+                  "function": "",
+                  "ms": 1.058,
+                  "source": "(){var s=W;n&&ut(),Ne(t,!0);try{return e.apply(this,arguments)}finally{Ne(s,!1),i&&queueMicrotask(Ke)}}}function Kn(e){Promise===Ve&&le.echoes===0?qt===0?e():en"
+                }
+              ],
+              "sampledLiveBytes": 65624
+            }
+          ]
+        }
+      ],
+      "fixtures": {
+        "10000": {
+          "encodedBytes": 20524480,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        },
+        "50000": {
+          "encodedBytes": 102620058,
+          "relatedTables": 5,
+          "visibleIDs": 250,
+          "exactIDs": 1000
+        }
+      },
+      "version": "149.0.7827.55",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.7827.55 Safari/537.36",
+      "loadReadings": [
+        {
+          "loadavg": [
+            0.99,
+            3.3,
+            4.98
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:35:32.314Z"
+        },
+        {
+          "loadavg": [
+            1.47,
+            3.36,
+            5
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:35:37.688Z"
+        },
+        {
+          "loadavg": [
+            1.67,
+            3.37,
+            4.99
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:35:43.118Z"
+        },
+        {
+          "loadavg": [
+            1.78,
+            3.37,
+            4.98
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:35:48.457Z"
+        },
+        {
+          "loadavg": [
+            2.04,
+            3.4,
+            4.98
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:35:53.851Z"
+        },
+        {
+          "loadavg": [
+            2.04,
+            3.4,
+            4.98
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:35:53.891Z"
+        },
+        {
+          "loadavg": [
+            2.2,
+            3.23,
+            4.83
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:36:46.352Z"
+        },
+        {
+          "loadavg": [
+            2.8,
+            3.3,
+            4.83
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:37:03.921Z"
+        },
+        {
+          "loadavg": [
+            2.82,
+            3.28,
+            4.79
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:37:21.426Z"
+        },
+        {
+          "loadavg": [
+            3.09,
+            3.32,
+            4.78
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:37:38.827Z"
+        },
+        {
+          "loadavg": [
+            2.89,
+            3.25,
+            4.72
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:37:56.128Z"
+        },
+        {
+          "loadavg": [
+            2.89,
+            3.25,
+            4.72
+          ],
+          "cpuCount": 16,
+          "timestamp": "2026-10-14T04:37:56.174Z"
+        }
+      ],
+      "after": {
+        "loadavg": [
+          2.74,
+          3.21,
+          4.7
+        ],
+        "cpuCount": 16,
+        "timestamp": "2026-10-14T04:38:00.065Z"
+      }
+    }
+  ],
+  "gates": [
+    {
+      "browser": "chromium",
+      "gate": "single-row durable apply p95 <= 10 ms",
+      "verdict": "NOISY",
+      "limit": 10,
+      "reason": "case not measured"
+    },
+    {
+      "browser": "chromium",
+      "gate": "50k/10k engine p95 <= 1.25x",
+      "verdict": "NOISY",
+      "limit": 1.25,
+      "reason": "case not measured"
+    },
+    {
+      "browser": "chromium",
+      "gate": "startup-working-set-10000 engine/legacy p95 <= 1x",
+      "verdict": "PASS",
+      "ci": [
+        0.7783772113401668,
+        0.8409918110279503
+      ],
+      "limit": 1,
+      "reason": "95% bootstrap interval"
+    },
+    {
+      "browser": "chromium",
+      "gate": "startup-working-set-50000 engine/legacy p95 <= 1x",
+      "verdict": "PASS",
+      "ci": [
+        0.8733671780159126,
+        0.900569171766509
+      ],
+      "limit": 1,
+      "reason": "95% bootstrap interval"
+    },
+    {
+      "browser": "chromium",
+      "gate": "delete-100-windows-10000 engine/legacy p95 <= 1x",
+      "verdict": "NOISY",
+      "limit": 1,
+      "reason": "case not measured"
+    },
+    {
+      "browser": "chromium",
+      "gate": "delete-100-windows-50000 engine/legacy p95 <= 1x",
+      "verdict": "NOISY",
+      "limit": 1,
+      "reason": "case not measured"
+    }
+  ]
+}

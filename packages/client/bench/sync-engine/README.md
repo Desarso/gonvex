@@ -100,3 +100,15 @@ therefore add collection-size emulator costs which native IndexedDB does not
 share. The Node timing runner has been removed; Node now only orchestrates real
 browsers. Archived emulator JSON is labeled as such and rejected by gates.
 No emulator timings are presented as performance results in RESULTS.md.
+
+## Engine startup index
+
+Engine startup uses a compact generation snapshot and transactional per-member
+edits in the existing metadata table. Membership rows remain authoritative.
+Missing or stale indexes fall back; a full window replacement warms the index.
+The fixture seeds a clean index. Patch-heavy startup and the extra metadata write
+per member edit are correctness-tested but not timed by the startup cases.
+Entity read-ahead keeps at most two 256-record pages and forecasts both resident
+budgets before issuing the next request. Window reads run in batches of four
+after entity loading. Scope discovery uses bounded primary-key getAllKeys pages,
+including on WebKit, and never loads cache values merely to find retirement work.

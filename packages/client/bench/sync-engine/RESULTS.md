@@ -1,5 +1,76 @@
 # Sync engine storage measurements
 
+## Startup follow-up
+
+The startup regression is fixed in the measured storage cases. The quiet Chromium replication and the final Firefox/WebKit runs pass both 10k and 50k startup p95 gates. This is storage startup, not application first paint or a general release certificate.
+
+The complete matrix used client source `99e928c3d78096fc066918630c1412fe7c58c382` with a clean source tree. [startup-after.json](./startup-after.json) retains every sample, including non-quiescent Chromium observations. The independent [Chromium replication](./startup-chromium-repeat.json) used `7b870d014f5b1124ba6a3ad7e3d71f76de682e63`, also clean. Client source and benchmark logic are identical between these revisions; only the retained remote Rust test fixture and measurement artifacts differ. No original samples were replaced or pooled.
+
+Only startup cases ran, sequential browsers, nice 15, five warmups, 20 initial samples, a 30-round cap, 15% CV limit and 4,000 seeded bootstrap draws. The machine, seed, fixture, residency budget and fresh-process methodology are unchanged. The table below explicitly uses the quiet Chromium replication and Firefox/WebKit from the complete matrix. All six cases have n=20.
+
+| Browser / rows | Legacy median [95% CI], ms | Engine median [95% CI], ms | Legacy p95 [95% CI], ms | Engine p95 [95% CI], ms | Engine/legacy p95 [95% CI] | Startup gate |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| chromium / 10000 | 429.150 [425.700, 435.650] | 353.650 [350.850, 356.750] | 447.000 [436.900, 463.400] | 362.000 [357.100, 369.700] | 0.810 [0.778, 0.841] | PASS |
+| chromium / 50000 | 1689.950 [1656.950, 1706.500] | 1516.000 [1507.050, 1527.100] | 1732.700 [1721.800, 1753.100] | 1548.200 [1530.500, 1550.600] | 0.894 [0.873, 0.901] | PASS |
+| firefox / 10000 | 419.500 [407.500, 440.000] | 337.500 [330.000, 345.500] | 462.000 [444.000, 463.000] | 379.000 [349.000, 380.000] | 0.820 [0.754, 0.856] | PASS |
+| firefox / 50000 | 1586.000 [1544.500, 1640.000] | 1273.000 [1203.500, 1330.500] | 1721.000 [1687.000, 1748.000] | 1428.000 [1339.000, 1451.000] | 0.830 [0.781, 0.860] | PASS |
+| webkit / 10000 | 286.000 [283.500, 292.000] | 219.500 [216.000, 226.500] | 312.000 [294.000, 335.000] | 243.000 [230.000, 273.000] | 0.779 [0.710, 0.907] | PASS |
+| webkit / 50000 | 1258.000 [1248.000, 1419.500] | 935.000 [919.000, 1031.000] | 1571.000 [1421.000, 1651.000] | 1113.000 [1035.000, 1175.000] | 0.708 [0.674, 0.767] | PASS |
+
+| Quiet run | Max observed 1-minute load | Legacy / engine CV at 10k | Legacy / engine CV at 50k |
+| --- | ---: | ---: | ---: |
+| chromium | 3.09 / 8 threshold | 2.7% / 1.7% | 2.5% / 1.1% |
+| firefox | 7.38 / 8 threshold | 5.7% / 5.5% | 5.1% / 6.9% |
+| webkit | 4.95 / 8 threshold | 4.8% / 6.5% | 9.7% / 8.4% |
+
+The initial complete Chromium run remained non-quiescent, with peak load 8.50. Its 10k p95 ratio was 0.842 [0.734, 1.310] and its 50k ratio was 0.882 [0.857, 0.916]. Both gates remain NOISY in that file. The quiet replication resolves Chromium independently. Non-startup gates are intentionally missing/NOISY in these startup-only reports; no write, delete, outbox or whole-engine acceptance is claimed.
+
+### Before and after
+
+Historical 50k p95 values below come from the original hardened matrix on `a3fd7d0`, retained in results.json. Every historical browser was non-quiescent. The absolute times span different host loads and must not be interpreted as a controlled absolute speedup. The new matched engine/legacy comparisons above are the acceptance evidence.
+
+| Browser | Historical legacy / engine p95, ms | New quiet legacy / engine p95, ms | New engine p95 reduction relative to matched legacy |
+| --- | ---: | ---: | ---: |
+| chromium | 4791.800 / 5831.000 | 1732.700 / 1548.200 | 10.6% |
+| firefox | 2584.000 / 3917.000 | 1721.000 / 1428.000 | 17.0% |
+| webkit | 2152.000 / 3644.000 | 1571.000 / 1113.000 | 29.2% |
+
+### Operation and CPU evidence
+
+The original loader already used getAll-backed entity pages and six bulk membership reads. It did not issue a per-member cursor or a per-ID entity join. Those membership reads still cloned another 50,500 records at 50k, then eagerly decoded 50,000 binary hashes and constructed temporary ordering/hash-entry arrays. The busy-host [before profile](./startup-before.json) assigned about 520 ms to the hex decoder, plus its callback and hash-entry mapping. CPU profile time includes scheduling and instrumentation; it is diagnostic evidence, not a controlled CPU-speedup measurement.
+
+All final browsers produced identical operation counts. Values read exclude key-only records. Total requests count issued requests, not repeated cursor success events. The old meta cursor was issued once and continued three times.
+
+| Counter | Original engine 10k / 50k | Final engine 10k / 50k | Final legacy 10k / 50k |
+| --- | ---: | ---: | ---: |
+| IDB values read | 21,011 / 99,151 | 10,514 / 48,567 | 10,508 / 48,648 |
+| Entity getAll requests | 43 / 190 | 42 / 190 | 43 / 190 |
+| Membership getAll requests | 6 / 6 | 0 / 0 | 0 / 0 |
+| Total issued IDB requests | 53 / 200 | 60 / 208 | 46 / 193 |
+| Value cursors / continue calls | 1 / 3 at both sizes | 0 / 0 | 0 / 0 |
+| JSON.parse calls | 10,507 / 48,558 | 10,513 / 48,564 | 10,507 / 48,558 |
+| Eager binary hash conversions | 10,000 / 50,000 | 0 / 0 | 0 / 0 |
+
+The final loader trades a few constant-size metadata requests and six extra JSON parses for eliminating the membership materialization pass. It does not claim fewer total requests. At 50k it reads 51% fewer values than the original engine, while retaining exactly the same rows and windows. One-page read-ahead overlaps the next native read with current-page JSON decoding, inside the same atomic transaction. Two pages of at most 256 records bound temporary row reads; the next page is issued only when the current page fits both resident budgets. Four-window batches run after the entity pass.
+
+For an ordinary hashed ID, the original JavaScript expression constructs five transient arrays and one temporary order object, before V8 optimizations, in addition to native MemberRecord/typed-array materialization and the final hash string. The clean-generation cache path constructs none of those per-member temporary structures and performs no hash-byte decoding. The required row JSON parsing and final ID/hash strings remain. These are source-level construction counts, not exact allocator measurements. Sibling .cpu.json and .heap.json files preserve CDP CPU and 32 KiB sampled live-allocation traces. Sampled live bytes after the call do not measure total transient allocation or peak RSS, so no per-row byte or battery claim is inferred from them.
+
+The read index consists of a compact per-generation ID/hash snapshot in the existing meta table and one latest patch per edited member. Both are written with authoritative membership in the same transaction. A window sequence marker prevents reuse after older SDK writers; missing bases, generation mismatches and stale markers fall back to membership. Retirement cleanup removes cache records within its existing bounded budget. Primary-key getAllKeys pages discover scopes without reading cache payloads or using the secondary unique-key cursor that failed during WebKit initialization.
+
+### Rejected trials and limits
+
+- [startup-intermediate.json](./startup-intermediate.json) contains the interrupted pre-index trial with faster hex conversion/direct ID collection and 2,048-row entity pages. Chromium 10k still regressed and 50k remained slower.
+- [startup-cache-trial.json](./startup-cache-trial.json) measured the compact index with 2,048-row pages and concurrent entity/window loading on 37e9239. Chromium 50k regressed about 10%; native reads overshot the byte budget by roughly 500 rows.
+- [startup-512-trial.json](./startup-512-trial.json) measured 84a6bc7. Larger native row batches still increased entity-read latency. They were rejected; the final cap is 256.
+- [startup-small-trial.json](./startup-small-trial.json) measured fdfb215 without read-ahead. Chromium 50k remained about 6% slower. Read-ahead supplied the remaining improvement.
+- [startup-pipeline-pre-webkit.json](./startup-pipeline-pre-webkit.json) retains the incomplete f081a17 matrix, including Firefox noise/load warnings and the WebKit cursor failure. [startup-webkit-debug.json](./startup-webkit-debug.json) identifies variant 1 as the failing seed. [startup-webkit-smoke.json](./startup-webkit-smoke.json) proves the primary-key initialization fix, with five samples only and a non-quiescent 50k case. None is substituted into final acceptance evidence.
+
+The benchmark seeds clean generation indexes. Tests cover edited-index replay, moves/rebalancing, duplicate IDs, hash-only certificates, older writers, missing/stale indexes, rollback, cross-scope retirement and prefetch errors; patch-heavy startup timing is not measured. Existing uncached or invalidated generations fall back until a full window replacement writes a fresh index. The cache adds derived disk data and one small metadata put per member edit. Write/delete performance was deliberately not rerun under the startup-only brief. UI-window filtering, lazy hash getters, schema upgrades, protocol changes, first paint, physical Safari/iOS, battery and broader app gates remain outside this work.
+
+Validation: 46 focused storage tests passed; client typecheck/build passed; four benchmark statistical checks passed. No full test suite or cargo workspace run. No Whagons app code change, contract/version bump, npm publication or PR merge.
+
+## Original full matrix
+
 Native browser storage only, measured source `a3fd7d0d50fd60666bbffc530159dc7063e56b3d`. Source dirty flag `false`. Five warmups, 20 initial measured rounds, a 30-round cap, 15% CV limit and 4,000 seeded bootstrap draws. Serial browsers and alternating adapter order. Scheduling priority was nice 15 to keep the shared machine responsive.
 
 No runtime, worker, DOM, subscriber delivery, wire or energy measurement. WebKit approximates Safari and does not certify Safari/iOS. Startup reopens populated persistent profiles in fresh browser processes, with empty JS/adapter caches. OS disk caches are not evicted; launch/navigation are excluded. Deletes have 100 actual owners per victim. Outbox admission is excluded; both replica modes use the same existing durable outbox.
