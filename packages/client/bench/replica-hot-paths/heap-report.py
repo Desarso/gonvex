@@ -34,10 +34,11 @@ for filename in sys.argv[1:]:
             for j in range(offset, offset + count * edge_width, edge_width):
                 if edge_types[edges[j + edge_fields.index('type')]] == 'property':
                     properties.add(strings[edges[j + edge_fields.index('name_or_index')]])
+            # V8 omits immediate numeric fields from reference edges.
             for label, required in [
-                ('treap node', {'key','value','priority','owner'}),
-                ('treap entry', {'id','position','value'}),
-                ('recency record', {'key','entity','id','time','position'}),
+                ('treap node', {'value','owner'}),
+                ('treap entry', {'id','value'}),
+                ('recency record', {'key','entity','id'}),
                 ('slot page', {'owner','ids','values'}),
                 ('hash bucket', {'owner','slots'}),
             ]:

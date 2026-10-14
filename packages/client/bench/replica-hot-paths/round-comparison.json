@@ -1,0 +1,1198 @@
+{
+  "method": "Independent-round paired hierarchical bootstrap of (round2 baseline/candidate median ratio)/(round1 baseline/candidate median ratio); 2,000 draws, deterministic seed. Machine load differs across rounds. Intervals describe normalized gains, not absolute latency. Timer-quantized capture samples can yield unbounded ratios.",
+  "round1SHA": "1dd4e09886da4fd45bfaeb8fcb20cebb62fdcf6d",
+  "round2SHA": "36c04f271ec512d4ab40facc32b60ff6d1c07971",
+  "comparisons": [
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "single",
+      "round1Ratio": 9.103398933690048,
+      "round2Ratio": 11.439638091244587,
+      "normalizedGainChange": 1.256633722697633,
+      "ci": [
+        0.9006697744521774,
+        2.5868208475567633
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.2178853637074976,
+      "candidateCI": [
+        1.0744519856608266,
+        2.1805620923572038
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "singleVisible",
+      "round1Ratio": 2.5282671897402573,
+      "round2Ratio": 2.800558957629107,
+      "normalizedGainChange": 1.1076989682869807,
+      "ci": [
+        0.8832637065153627,
+        1.5762051867616875
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.3615769091373546,
+      "candidateCI": [
+        1.2708453004891178,
+        1.6112002745007985
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "burst",
+      "round1Ratio": 2.080682277841328,
+      "round2Ratio": 3.6272641017323353,
+      "normalizedGainChange": 1.743305136186174,
+      "ci": [
+        1.3996313037250823,
+        2.288990108702855
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.4284855723314216,
+      "candidateCI": [
+        1.7672837828743464,
+        3.0307243055398714
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "optimistic",
+      "round1Ratio": 3.6032565497372753,
+      "round2Ratio": 3.141268756719473,
+      "normalizedGainChange": 0.8717860394782361,
+      "ci": [
+        0.7045061852954778,
+        1.1863944970379148
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.1498939597029887,
+      "candidateCI": [
+        0.9660151485028957,
+        1.4980023171981198
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "unrelated",
+      "round1Ratio": 11.038431843580208,
+      "round2Ratio": 10.763656974278843,
+      "normalizedGainChange": 0.9751074361652947,
+      "ci": [
+        0.30633612153865175,
+        1.394433734824676
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.2584928746211914,
+      "candidateCI": [
+        0.9867505394046431,
+        1.4717712624206356
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "matching",
+      "round1Ratio": 7.563339307257811,
+      "round2Ratio": 8.371285745174902,
+      "normalizedGainChange": 1.1068240369887652,
+      "ci": [
+        0.416179263921137,
+        2.194192087491722
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.6085269151393773,
+      "candidateCI": [
+        1.2583803864361027,
+        2.3337708626904377
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "sorted",
+      "round1Ratio": 22.43874562913086,
+      "round2Ratio": 17.42437052443435,
+      "normalizedGainChange": 0.7765305072050619,
+      "ci": [
+        0.5031051134477204,
+        1.4343999367315237
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.1506570809728838,
+      "candidateCI": [
+        0.8005344439480576,
+        1.3975135614323206
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "snapshots",
+      "round1Ratio": 2.29388489214223,
+      "round2Ratio": 2.2737728486740574,
+      "normalizedGainChange": 0.9912323222769079,
+      "ci": [
+        0.8605557652592135,
+        1.5582038187571974
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.1419182583182512,
+      "candidateCI": [
+        1.030651340826275,
+        1.771440211891478
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "capture",
+      "round1Ratio": 228.6318273761835,
+      "round2Ratio": 197.65507995249564,
+      "normalizedGainChange": 0.8645125318763266,
+      "ci": [
+        0.5561885284708658,
+        1.2258696281226027
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.321746878824944,
+      "candidateCI": [
+        0.9920191542342383,
+        1.8306595375273265
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 10000,
+      "scenario": "startup",
+      "round1Ratio": 1.4462208952348878,
+      "round2Ratio": 1.751938851140362,
+      "normalizedGainChange": 1.2113909133195182,
+      "ci": [
+        1.0199549458455492,
+        1.4540471939630981
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.7799180255475742,
+      "candidateCI": [
+        1.5079873851752623,
+        2.046469767206896
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "single",
+      "round1Ratio": 43.66028487481251,
+      "round2Ratio": 47.9701245409744,
+      "normalizedGainChange": 1.0987130450137814,
+      "ci": [
+        0.8212599778918358,
+        1.376315719426409
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.0829571491276822,
+      "candidateCI": [
+        0.9855538071897836,
+        1.342264939950271
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "singleVisible",
+      "round1Ratio": 10.61312659766608,
+      "round2Ratio": 10.095753534850127,
+      "normalizedGainChange": 0.9512515884876256,
+      "ci": [
+        0.5915531571714419,
+        1.638194847274967
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.2509295361838146,
+      "candidateCI": [
+        1.1467946291619409,
+        1.5958510642843935
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "burst",
+      "round1Ratio": 1.5690292350363513,
+      "round2Ratio": 3.9559546241534322,
+      "normalizedGainChange": 2.521275280165051,
+      "ci": [
+        1.8685860438384279,
+        3.4533482855432487
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.568764132584358,
+      "candidateCI": [
+        2.1609252902885,
+        3.5060157013582254
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "optimistic",
+      "round1Ratio": 12.32594367600169,
+      "round2Ratio": 11.10804159411043,
+      "normalizedGainChange": 0.9011919805976003,
+      "ci": [
+        0.8014848865670068,
+        2.0235386512667883
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.9799963039752789,
+      "candidateCI": [
+        0.9370951470752131,
+        2.2365263960133297
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "unrelated",
+      "round1Ratio": 72.32553191348035,
+      "round2Ratio": 45.75082397304408,
+      "normalizedGainChange": 0.6325680954240841,
+      "ci": [
+        0.2887842432040889,
+        1.2172002037548888
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.9556448307130392,
+      "candidateCI": [
+        0.7987340158695967,
+        1.4787177247915555
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "matching",
+      "round1Ratio": 13.51166248803282,
+      "round2Ratio": 22.35742316955085,
+      "normalizedGainChange": 1.6546759652524368,
+      "ci": [
+        1.260804568683659,
+        2.3668476281021107
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.7550579375570883,
+      "candidateCI": [
+        2.341620156380822,
+        3.5874479806581387
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "sorted",
+      "round1Ratio": 42.298285420789625,
+      "round2Ratio": 29.940285667091427,
+      "normalizedGainChange": 0.7078368631078309,
+      "ci": [
+        0.53324042966987,
+        0.8537718088910263
+      ],
+      "status": "lower gain",
+      "candidateSpeedRatio": 1.0809263935476152,
+      "candidateCI": [
+        0.9190333423545181,
+        1.221834257624062
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "snapshots",
+      "round1Ratio": 0.6425575742117883,
+      "round2Ratio": 1.3651217610493276,
+      "normalizedGainChange": 2.124512753155067,
+      "ci": [
+        0.3662596222631726,
+        2.690297089041418
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.9659678590198698,
+      "candidateCI": [
+        0.8718199769708159,
+        1.093195485390662
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "capture",
+      "round1Ratio": 1208.2827827277308,
+      "round2Ratio": 1233.7184846176626,
+      "normalizedGainChange": 1.02105111671997,
+      "ci": [
+        0.9022401020661527,
+        1.4059521599624205
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.073529405920202,
+      "candidateCI": [
+        0.9688149695461465,
+        1.304152638484961
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 50000,
+      "scenario": "startup",
+      "round1Ratio": 1.0882290991404873,
+      "round2Ratio": 1.6602388075134822,
+      "normalizedGainChange": 1.5256335350936523,
+      "ci": [
+        1.2576594409025956,
+        1.895489353007818
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.8076845199854816,
+      "candidateCI": [
+        1.5420072286835373,
+        2.1163215366108976
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "single",
+      "round1Ratio": 75.19743626973252,
+      "round2Ratio": 80.39857168476026,
+      "normalizedGainChange": 1.0691663928058839,
+      "ci": [
+        0.6523874319767771,
+        1.4159121504705239
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.3144038754250293,
+      "candidateCI": [
+        0.7456296492163168,
+        1.658759087624683
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "singleVisible",
+      "round1Ratio": 18.091252481611402,
+      "round2Ratio": 20.118389703526844,
+      "normalizedGainChange": 1.1120506843832896,
+      "ci": [
+        0.8098448296467537,
+        1.221591561979821
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.4794896349522968,
+      "candidateCI": [
+        1.146890011101766,
+        1.714115685556133
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "burst",
+      "round1Ratio": 1.6644569132209253,
+      "round2Ratio": 3.9049005160422974,
+      "normalizedGainChange": 2.3460508259633124,
+      "ci": [
+        1.76928169633406,
+        3.124123805977545
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 3.0576167806532726,
+      "candidateCI": [
+        2.0846364849983186,
+        4.018476772889538
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "optimistic",
+      "round1Ratio": 25.949358385262503,
+      "round2Ratio": 19.907405773362694,
+      "normalizedGainChange": 0.767163699302437,
+      "ci": [
+        0.5458374892323242,
+        1.5499692465054546
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.9945255152539887,
+      "candidateCI": [
+        0.8925956396589311,
+        1.9912380469051103
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "unrelated",
+      "round1Ratio": 188.20130329893453,
+      "round2Ratio": 67.54288367504773,
+      "normalizedGainChange": 0.35888637587043803,
+      "ci": [
+        0.29034147355117407,
+        1.0258597506408942
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.8012050238997063,
+      "candidateCI": [
+        0.7053505929993319,
+        1.1720610298016403
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "matching",
+      "round1Ratio": 13.679227924402547,
+      "round2Ratio": 36.27487601573283,
+      "normalizedGainChange": 2.6518218876243465,
+      "ci": [
+        2.3614436633859333,
+        3.744519232068038
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 3.2547886082962103,
+      "candidateCI": [
+        2.8729001820869158,
+        4.916370340161485
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "sorted",
+      "round1Ratio": 28.145488059009725,
+      "round2Ratio": 41.3445612035327,
+      "normalizedGainChange": 1.468958758748466,
+      "ci": [
+        0.8224538969596265,
+        3.1102033348733302
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.9103068474238154,
+      "candidateCI": [
+        1.0720178171189394,
+        3.7247241133880307
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "snapshots",
+      "round1Ratio": 1.2156615347335715,
+      "round2Ratio": 1.4331856892987087,
+      "normalizedGainChange": 1.178934800806057,
+      "ci": [
+        0.6077112091749582,
+        1.856230998680974
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.1085853450687226,
+      "candidateCI": [
+        0.9929682236717846,
+        1.6626415425171825
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "capture",
+      "round1Ratio": 1590.805235511554,
+      "round2Ratio": 2676.767505239251,
+      "normalizedGainChange": 1.6826494189771037,
+      "ci": [
+        0.8158716793754053,
+        2.220556565753767
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.8858024822124169,
+      "candidateCI": [
+        1.021627188264856,
+        2.1039501090762105
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "node",
+      "count": 100000,
+      "scenario": "startup",
+      "round1Ratio": 0.9779054254631534,
+      "round2Ratio": 1.698967877865957,
+      "normalizedGainChange": 1.7373539747581372,
+      "ci": [
+        1.3740851706084913,
+        1.97748612646974
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.9218556077105304,
+      "candidateCI": [
+        1.4983813432335173,
+        2.252073921201363
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "single",
+      "round1Ratio": 4.846150460330851,
+      "round2Ratio": 4.727266816075462,
+      "normalizedGainChange": 0.975468437220731,
+      "ci": [
+        0.6231881053326285,
+        1.9139842648881873
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.1818177877383642,
+      "candidateCI": [
+        0.916668653490054,
+        1.5454490283370974
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "singleVisible",
+      "round1Ratio": 1.5000005960463056,
+      "round2Ratio": 4.92856814423632,
+      "normalizedGainChange": 3.2857107905336944,
+      "ci": [
+        0.406976223572629,
+        4.789118520269889
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.4285706987191822,
+      "candidateCI": [
+        1.20000158945871,
+        1.8571413974383646
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "burst",
+      "round1Ratio": 1.1863552960800667,
+      "round2Ratio": 1.9062748703819088,
+      "normalizedGainChange": 1.6068330260593828,
+      "ci": [
+        1.162484253602542,
+        2.661905348499234
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.734710144167306,
+      "candidateCI": [
+        1.3036376833460077,
+        2.687196064617385
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "optimistic",
+      "round1Ratio": 2.0465127110421113,
+      "round2Ratio": 1.6956514527983082,
+      "normalizedGainChange": 0.8285565213689096,
+      "ci": [
+        0.56609503777178,
+        1.334681460678394
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.9347821579989427,
+      "candidateCI": [
+        0.6379309210850842,
+        1.4047636077533796
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "unrelated",
+      "round1Ratio": 6.78571939468871,
+      "round2Ratio": 8.100007152564194,
+      "normalizedGainChange": 1.193684365861665,
+      "ci": [
+        0.7652191688541473,
+        2.1111181956905454
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.4,
+      "candidateCI": [
+        1,
+        2.2222163353537066
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "matching",
+      "round1Ratio": 4.406248649582992,
+      "round2Ratio": 10.52940681484141,
+      "normalizedGainChange": 2.3896533428357283,
+      "ci": [
+        1.5133908025354104,
+        4.386437313777825
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.882353106171953,
+      "candidateCI": [
+        1.5555514347475947,
+        3.4705875753121878
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "sorted",
+      "round1Ratio": 16.860453150227993,
+      "round2Ratio": 13.127665596995316,
+      "normalizedGainChange": 0.7786069259246332,
+      "ci": [
+        0.6653342702390019,
+        1.4975648456437123
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.9148946747411129,
+      "candidateCI": [
+        0.8333343267450269,
+        1.8604651936458652
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "snapshots",
+      "round1Ratio": 3.0000476848981927,
+      "round2Ratio": null,
+      "normalizedGainChange": null,
+      "ci": null,
+      "status": "timer-quantized; no ratio inference",
+      "candidateSpeedRatio": null,
+      "candidateCI": null,
+      "candidateStatus": "timer-quantized; no ratio inference"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "capture",
+      "round1Ratio": 207.50020265598548,
+      "round2Ratio": 190.50017881410486,
+      "normalizedGainChange": 0.9180722542711683,
+      "ci": [
+        0.6828011243837097,
+        1.8351515567663947
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1,
+      "candidateCI": [
+        0.7500059604701619,
+        2
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "startup",
+      "round1Ratio": 1.070828048148632,
+      "round2Ratio": 1.6784491149083534,
+      "normalizedGainChange": 1.56743103415179,
+      "ci": [
+        1.2049699972516612,
+        2.4087334879433357
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 1.5420743587420895,
+      "candidateCI": [
+        1.2579108143935331,
+        2.2595350101521285
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 10000,
+      "scenario": "startupIndexedDB",
+      "round1Ratio": 1.3442031477243683,
+      "round2Ratio": 1.0739896988087159,
+      "normalizedGainChange": 0.798978711385178,
+      "ci": [
+        0.6646238746060258,
+        2.8772784582045703
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.027521507530445,
+      "candidateCI": [
+        0.9363996211290426,
+        5.126976128398506
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "single",
+      "round1Ratio": 49.87475338701698,
+      "round2Ratio": 26.15382386384477,
+      "normalizedGainChange": 0.5243900388017344,
+      "ci": [
+        0.22787586981934166,
+        0.998677535101668
+      ],
+      "status": "lower gain",
+      "candidateSpeedRatio": 0.6153871547518615,
+      "candidateCI": [
+        0.5,
+        1.357144560134332
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "singleVisible",
+      "round1Ratio": 8.250000229248641,
+      "round2Ratio": 7.406256705528932,
+      "normalizedGainChange": 0.8977280605728477,
+      "ci": [
+        0.5850454256784515,
+        1.896007872453507
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.6250014901175405,
+      "candidateCI": [
+        1.1590901948204655,
+        3.6785677184891767
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "burst",
+      "round1Ratio": 1.227397257186924,
+      "round2Ratio": 1.9697542518881639,
+      "normalizedGainChange": 1.6048221065791286,
+      "ci": [
+        0.8963539109618681,
+        3.558206832259444
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.839949591671749,
+      "candidateCI": [
+        1.2711230065975394,
+        5.3647324912995185
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "optimistic",
+      "round1Ratio": 7.178566015500602,
+      "round2Ratio": 5.826086100197991,
+      "normalizedGainChange": 0.8115946956004563,
+      "ci": [
+        0.5566753044082963,
+        1.2498911707263354
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.2173921156019032,
+      "candidateCI": [
+        0.8928572340887513,
+        2.0769236412275993
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "unrelated",
+      "round1Ratio": 27.67999839782715,
+      "round2Ratio": 39.91670441631103,
+      "normalizedGainChange": 1.4420775551578229,
+      "ci": [
+        0.8525100431408211,
+        2.2107510646090787
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 2.0833353201567206,
+      "candidateCI": [
+        1.3571411541513823,
+        4.100002384188064
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "matching",
+      "round1Ratio": 6.7861648819257985,
+      "round2Ratio": 19.524995201827238,
+      "normalizedGainChange": 2.877176658915245,
+      "ci": [
+        1.6368139353595896,
+        4.0382212191151305
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 3.9749982416633984,
+      "candidateCI": [
+        2.6923070574652987,
+        7.652181169268023
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "sorted",
+      "round1Ratio": 16.88111904901108,
+      "round2Ratio": 20.62114552250955,
+      "normalizedGainChange": 1.2215508618024684,
+      "ci": [
+        0.5272040911919803,
+        1.5624067601127145
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.8898678404843152,
+      "candidateCI": [
+        1.181818198238195,
+        4.79828334524403
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "snapshots",
+      "round1Ratio": 3.666645474052293,
+      "round2Ratio": 3.333359824522364,
+      "normalizedGainChange": 0.9091033883999727,
+      "ci": [
+        0.6666613685130731,
+        2.187455297539577
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.0000158947134183,
+      "candidateCI": [
+        0.6666613685130732,
+        3.5000119209403238
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "capture",
+      "round1Ratio": 683.284037574676,
+      "round2Ratio": 1023.2387735882793,
+      "normalizedGainChange": 1.497530627556113,
+      "ci": [
+        0.6137003577817096,
+        1.7377403250523402
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.749985099002229,
+      "candidateCI": [
+        0.8000133515168277,
+        2
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "startup",
+      "round1Ratio": 1.2653613440092746,
+      "round2Ratio": 1.6074131660595603,
+      "normalizedGainChange": 1.2703194812056615,
+      "ci": [
+        0.907798824606163,
+        2.5536455321209153
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.5380376369216535,
+      "candidateCI": [
+        1.079864481560963,
+        4.952937456207646
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 50000,
+      "scenario": "startupIndexedDB",
+      "round1Ratio": 1.0309259742582975,
+      "round2Ratio": 0.9288990462228379,
+      "normalizedGainChange": 0.9010337011744581,
+      "ci": [
+        0.21346381896910727,
+        1.0517945228142391
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.9749979130716038,
+      "candidateCI": [
+        0.6907000263553532,
+        1.1213274752768276
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "single",
+      "round1Ratio": 48.09085037301625,
+      "round2Ratio": 77.16612890407693,
+      "normalizedGainChange": 1.6045906509354386,
+      "ci": [
+        0.9587887331151775,
+        1.7959764374865028
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.8333227370261465,
+      "candidateCI": [
+        1.3333412806268825,
+        2
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "singleVisible",
+      "round1Ratio": 8.046152694973184,
+      "round2Ratio": 15.80770789661427,
+      "normalizedGainChange": 1.9646293695731254,
+      "ci": [
+        1.3665756376478584,
+        3.1737090219016166
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.5000027509862286,
+      "candidateCI": [
+        1.8461522943183069,
+        3.519998550415039
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "burst",
+      "round1Ratio": 1.2345840141875624,
+      "round2Ratio": 2.150454870616293,
+      "normalizedGainChange": 1.741845711513958,
+      "ci": [
+        1.0923761461626322,
+        2.4714823453477237
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 2.144856555436474,
+      "candidateCI": [
+        1.4927461209791695,
+        3.6658370234061475
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "optimistic",
+      "round1Ratio": 7.2465757540722215,
+      "round2Ratio": 9.533337289317359,
+      "normalizedGainChange": 1.3155644283384589,
+      "ci": [
+        0.5933942092307419,
+        1.7244768469998202
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.6222229521954652,
+      "candidateCI": [
+        0.7818182763975021,
+        2.0000012548358237
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "unrelated",
+      "round1Ratio": 89.6362560525734,
+      "round2Ratio": 76.82349740264111,
+      "normalizedGainChange": 0.8570583019172804,
+      "ci": [
+        0.41033382976072236,
+        1.4909058934535968
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.2941186370317181,
+      "candidateCI": [
+        0.6470593185158591,
+        2.090906726430185
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "matching",
+      "round1Ratio": 8.761030059501218,
+      "round2Ratio": 24.821424516691568,
+      "normalizedGainChange": 2.8331628071259805,
+      "ci": [
+        1.6482096000051554,
+        4.421038847526257
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 3.2380944001162573,
+      "candidateCI": [
+        2.146067566228137,
+        4.833334963546398
+      ],
+      "candidateStatus": "faster candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "sorted",
+      "round1Ratio": 40.19752890045124,
+      "round2Ratio": 32.63443580939288,
+      "normalizedGainChange": 0.811851790447411,
+      "ci": [
+        0.6739605914408918,
+        1.0796061325714357
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 0.9551887757925056,
+      "candidateCI": [
+        0.8340611867456759,
+        1.1753555177124109
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "snapshots",
+      "round1Ratio": 1.3333340902175739,
+      "round2Ratio": 6.500003973646774,
+      "normalizedGainChange": 4.875000212876955,
+      "ci": [
+        1.0857221253366496,
+        6.4071119528653036
+      ],
+      "status": "higher gain",
+      "candidateSpeedRatio": 3.5000039736467747,
+      "candidateCI": [
+        0.8333373069801079,
+        4.599982833927788
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "capture",
+      "round1Ratio": 4088.984407484408,
+      "round2Ratio": 3119.502980235081,
+      "normalizedGainChange": 0.7629041026728288,
+      "ci": [
+        0.1904124111559818,
+        5.433008901918075
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.2500059604701617,
+      "candidateCI": [
+        0.9999880792017833,
+        1.5
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "startup",
+      "round1Ratio": 2.1134199586560327,
+      "round2Ratio": 1.7526953250446153,
+      "normalizedGainChange": 0.8293171065532997,
+      "ci": [
+        0.5791092828191795,
+        1.4774860537892383
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.4050854793432408,
+      "candidateCI": [
+        0.3423999957407696,
+        4.925142779646687
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    },
+    {
+      "mode": "chromium",
+      "count": 100000,
+      "scenario": "startupIndexedDB",
+      "round1Ratio": 0.9209818084067828,
+      "round2Ratio": 1.0877893262058693,
+      "normalizedGainChange": 1.1811192319722892,
+      "ci": [
+        0.7478778581596318,
+        1.5018301781212697
+      ],
+      "status": "interval spans unchanged gain",
+      "candidateSpeedRatio": 1.4168143335133108,
+      "candidateCI": [
+        0.2990986044548606,
+        4.174704953023427
+      ],
+      "candidateStatus": "interval spans unchanged candidate"
+    }
+  ]
+}

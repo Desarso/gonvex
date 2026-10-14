@@ -26,6 +26,22 @@ No claim is made about React paint, network, server runtime, durable-outbox IO, 
 
 Use `--resume` to reuse completed fixture pairs after interruption. It verifies source/bundle hashes and trial settings; fixture seeding is unmeasured.
 
-At 100k rows, fresh pages share one persistent browser context and the same read-only seeded IndexedDB database across builds/trials. Lower sizes use fresh contexts/databases. This avoids repeating expensive unmeasured secondary-index insertion; all normal lookup keys remain populated. Each startup creates a new LocalReplica and reads the same full corpus. CDP memory is page JavaScript heap, excluding the shared native IndexedDB backend.
+At 50k and 100k rows, fresh pages share one persistent browser context and a read-only seeded IndexedDB database per size across builds/trials. At 10k, each fixture uses a fresh context/database. This avoids repeating expensive unmeasured secondary-index insertion; all normal lookup keys remain populated. Each startup creates a new LocalReplica and reads the same full corpus. CDP memory is page JavaScript heap, excluding the shared native IndexedDB backend.
 
-The committed run resumed unchanged production bundles: Node and 10k/50k Chromium fixtures were collected earlier, with the same normal records seeded in an unmeasured single transaction. The final 100k fixtures use the bounded sorted setup and shared persistent profile described above. Raw output records the collection start/resume dates and this setup difference.
+The round 1 run at `4e4b043` retained earlier Node and 10k/50k Chromium fixtures seeded in a single unmeasured transaction, then used bounded sorted setup for 100k. Round 2 retains only completed Node/10k pairs on unchanged production bundle hashes, uses bounded sorted setup at every size, and reruns all 50k/100k Chromium pairs with the shared read-only fixtures described above. Raw output records collection/resume dates and setup notes.
+
+Round 2 adds a first-use offline query scenario. It clears the query-result cache and equality indexes before each call, with a warmed resident row array. Equality indexes build in 512-row turns; synchronous queries evaluate the full table until construction finishes. The runner explicitly waits for construction before measuring warm unrelated/matching queries. These timings distinguish cold index work from steady query work; they do not measure a cold browser/module cache.
+
+Resident tables now use copy-on-write 256-slot pages and ID-to-slot hash buckets. Forks copy page/bucket directories, rather than individual row entries. Hash directories start at 16 buckets and grow at bounded load thresholds. Large membership windows use sorted ID-reference arrays and binary search; small windows retain reverse maps. Recency and resident row/execution versions share integer slots. Initial population, directory growth, membership replacement and tombstone compaction still perform corpus work.
+
+After a completed run:
+
+```sh
+node packages/client/bench/replica-hot-paths/compare-rounds.mjs
+python packages/client/bench/replica-hot-paths/heap-report.py \
+  packages/client/bench/replica-hot-paths/.generated/baseline-100000-updated.heapsnapshot \
+  packages/client/bench/replica-hot-paths/.generated/round1-candidate-100000-updated.heapsnapshot \
+  packages/client/bench/replica-hot-paths/.generated/candidate-100000-updated.heapsnapshot
+```
+
+The round comparison reads the original committed measurements from `4e4b043` and the latest `results.json`. It reports both normalized baseline/candidate gains and absolute candidate latency changes with independent-round hierarchical bootstrap intervals. Different machine load and three trial pairs limit cross-round conclusions. The heap report groups shallow bytes by constructor and recognizes replica record shapes from their property names; it does not calculate dominator retained sizes. Use CDP post-GC heap readings for retained-heap conclusions. Preserve the original candidate snapshot under the shown `round1-` name before rerunning; raw snapshots remain ignored.

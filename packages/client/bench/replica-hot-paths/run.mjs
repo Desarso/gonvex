@@ -64,6 +64,7 @@ if(process.argv.includes('--resume-node') || process.argv.includes('--resume')) 
   output.resumedDate=previous.date;
   output.initialDate=previous.initialDate??previous.date;
   output.nodeDate=previous.nodeDate??previous.date;
+  output.setupNotes='Resumed unchanged production bundle hashes. Completed Node and 10k Chromium pairs retained. All 50k and 100k Chromium pairs use fresh pages in a persistent context with a read-only seeded database per size; all sizes use the same bounded sorted fixture seeding. No 50k samples from the earlier isolated setup were retained.';
 }
 try {
 for(const mode of modes)for(const count of sizes)for(let trial=0;trial<trials;trial++)for(const name of trial%2?['candidate','baseline']:['baseline','candidate']) {
@@ -71,11 +72,11 @@ for(const mode of modes)for(const count of sizes)for(let trial=0;trial<trials;tr
   process.stderr.write(`${mode} ${count} trial ${trial+1}/${trials} ${name}\n`);
   let page,session,subject;
   if(mode==='chromium') {
-    if(count===100000 && !largeContext){
-      const profile=path.join(generated,'indexeddb-profile');await fs.rm(profile,{recursive:true,force:true});
+    if(count>=50000 && !largeContext){
+      const profile=path.join(generated,'indexeddb-round2-profile');await fs.rm(profile,{recursive:true,force:true});
       largeContext=await chromium.launchPersistentContext(profile,{headless:true,args:['--js-flags=--expose-gc']});
     }
-    page=count===100000?await largeContext.newPage():await browser.newPage();await page.goto(url);
+    page=count>=50000?await largeContext.newPage():await browser.newPage();await page.goto(url);
     if(!await page.evaluate(()=>crossOriginIsolated))throw new Error('Benchmark page must be cross-origin isolated for high-resolution timing');
     output.crossOriginIsolated=true;
     session=await page.context().newCDPSession(page);await session.send('HeapProfiler.enable');

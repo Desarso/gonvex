@@ -72,10 +72,10 @@ export async function fixture(sdk, count) {
   };
   let indexedDB;
   const prepareStorage=async()=>{
-    indexedDB=new sdk.IndexedDBLocalReplicaStorage(count===100000?'hotpaths-shared-100000':`hotpaths-${crypto.randomUUID()}`);
+    indexedDB=new sdk.IndexedDBLocalReplicaStorage(count>=50000?`hotpaths-shared-${count}`:`hotpaths-${crypto.randomUUID()}`);
     await indexedDB.initialize();
     const database=indexedDB.database;
-    if(count===100000 && (await database.meta.get(['cold','fixtureCount']))?.value===String(count))return;
+    if(count>=50000 && (await database.meta.get(['cold','fixtureCount']))?.value===String(count))return;
     const snapshot=JSON.parse(serialized);
     // Fixture seeding is not timed. Use the adapter's normal record builder,
     // batching native requests without its production per-write IO throttle.
