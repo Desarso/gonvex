@@ -40,9 +40,9 @@ const output={baselineSHA,candidateSHA:execFileSync('git',['rev-parse','HEAD'],{
 output.bundleSHA256=Object.fromEntries(await Promise.all(['baseline','candidate'].map(async name=>[name,createHash('sha256').update(await fs.readFile(path.join(generated,`${name}.mjs`))).digest('hex')])));
 const configs={single:[iterations,30],singleVisible:[iterations,30],burst:[iterations,3],optimistic:[iterations,5],unrelated:[iterations,5],matching:[iterations,5],sorted:[iterations,5],snapshots:[iterations,10],capture:[iterations,10],startup:[Math.max(3,Math.floor(iterations/3)),1]};
 const modes=process.argv.includes('--node-only')?['node']:process.argv.includes('--browser-only')?['chromium']:['node','chromium'];
-let browser,server,url;
+let browser,server,url,largeContext,chromium;
 if(modes.includes('chromium')) {
-  const {chromium}=await import('@playwright/test');
+  ({chromium}=await import('@playwright/test'));
   browser=await chromium.launch({headless:true,args:['--js-flags=--expose-gc']});
   server=createServer(async(req,res)=>{
     res.setHeader('Cross-Origin-Opener-Policy','same-origin');
@@ -54,19 +54,27 @@ if(modes.includes('chromium')) {
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));url=`http://127.0.0.1:${server.address().port}`;
   output.chromium=browser.version();
 }
-if(process.argv.includes('--resume-node')) {
+if(process.argv.includes('--resume-node') || process.argv.includes('--resume')) {
   const previous=JSON.parse(await fs.readFile(path.join(here,'results.json'),'utf8'));
   if(previous.baselineSHA!==baselineSHA || previous.candidateSHA!==output.candidateSHA || previous.trials!==trials || previous.iterations!==iterations
     || JSON.stringify(previous.bundleSHA256)!==JSON.stringify(output.bundleSHA256))throw new Error('Cannot resume measurements from different sources or settings');
-  output.measurements=previous.measurements.filter(record=>record.mode==='node');
-  output.nodeDate=previous.date;
+  output.measurements=process.argv.includes('--resume')?previous.measurements:previous.measurements.filter(record=>record.mode==='node');
+  if(process.argv.includes('--resume'))output.profiles=previous.profiles;
+  output.resumedDate=previous.date;
+  output.initialDate=previous.initialDate??previous.date;
+  output.nodeDate=previous.nodeDate??previous.date;
 }
 try {
 for(const mode of modes)for(const count of sizes)for(let trial=0;trial<trials;trial++)for(const name of trial%2?['candidate','baseline']:['baseline','candidate']) {
+  if(output.measurements.some(record=>record.mode===mode && record.count===count && record.trial===trial && record.name===name && record.scenario===(mode==='chromium'?'startupIndexedDB':'startup')))continue;
   process.stderr.write(`${mode} ${count} trial ${trial+1}/${trials} ${name}\n`);
   let page,session,subject;
   if(mode==='chromium') {
-    page=await browser.newPage();await page.goto(url);
+    if(count===100000 && !largeContext){
+      const profile=path.join(generated,'indexeddb-profile');await fs.rm(profile,{recursive:true,force:true});
+      largeContext=await chromium.launchPersistentContext(profile,{headless:true,args:['--js-flags=--expose-gc']});
+    }
+    page=count===100000?await largeContext.newPage():await browser.newPage();await page.goto(url);
     if(!await page.evaluate(()=>crossOriginIsolated))throw new Error('Benchmark page must be cross-origin isolated for high-resolution timing');
     output.crossOriginIsolated=true;
     session=await page.context().newCDPSession(page);await session.send('HeapProfiler.enable');
@@ -118,13 +126,15 @@ for(const mode of modes)for(const count of sizes)for(let trial=0;trial<trials;tr
     output.profiles.push({count,name,scenario,...workload,topSelfMs:[...times].sort((a,b)=>b[1]-a[1]).slice(0,12)});
   }
   if(page){
+    process.stderr.write('  preparing IndexedDB fixture\n');
     await page.evaluate(async()=>{await subject.prepareStorage();});
+    process.stderr.write('  measuring IndexedDB startup\n');
     const values=await page.evaluate(async samples=>{const {measure}=await import('/scenarios.mjs');return measure(subject.operations.startupIndexedDB,samples,1);},Math.max(3,Math.floor(iterations/3)));
     output.measurements.push({mode,count,trial,name,scenario:'startupIndexedDB',values});
     await page.close();
   }else{subject.replica.dispose();subject=null;global.gc?.();}
   await fs.writeFile(path.join(here,'results.json'),JSON.stringify(output,null,2));
 }
-}finally{await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));}
+}finally{await largeContext?.close();await browser?.close();if(server)await new Promise(resolve=>server.close(resolve));}
 execFileSync(process.execPath,[path.join(here,'summarize.mjs')],{stdio:'inherit'});
 console.log(`Wrote ${path.join(here,'results.json')}`);

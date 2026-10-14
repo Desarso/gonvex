@@ -62,21 +62,21 @@ export async function fixture(sdk, count) {
   };
   let indexedDB;
   const prepareStorage=async()=>{
-    indexedDB=new sdk.IndexedDBLocalReplicaStorage(`hotpaths-${crypto.randomUUID()}`);
+    indexedDB=new sdk.IndexedDBLocalReplicaStorage(count===100000?'hotpaths-shared-100000':`hotpaths-${crypto.randomUUID()}`);
     await indexedDB.initialize();
-    const snapshot=JSON.parse(serialized), database=indexedDB.database;
+    const database=indexedDB.database;
+    if(count===100000 && (await database.meta.get(['cold','fixtureCount']))?.value===String(count))return;
+    const snapshot=JSON.parse(serialized);
     // Fixture seeding is not timed. Use the adapter's normal record builder,
     // batching native requests without its production per-write IO throttle.
-    await database.transaction('rw',database.entities,database.windows,database.meta,async()=>{
-      for(const [entity,rows] of Object.entries(snapshot.entities)) {
-        const entries=Object.entries(rows);
-        for(let offset=0;offset<entries.length;offset+=128) {
-          await database.entities.bulkPut(entries.slice(offset,offset+128).map(([id,row])=>indexedDB.versionedRecord('cold',entity,id,row,undefined,1,undefined)));
-        }
+    for(const [entity,rows] of Object.entries(snapshot.entities).sort(([a],[b])=>a<b?-1:a>b?1:0)) {
+      const entries=Object.entries(rows).sort(([a],[b])=>a<b?-1:a>b?1:0);
+      for(let offset=0;offset<entries.length;offset+=128) {
+        await database.entities.bulkPut(entries.slice(offset,offset+128).map(([id,row])=>indexedDB.versionedRecord('cold',entity,id,row,undefined,1,undefined)));
       }
-      await database.windows.bulkPut(Object.values(snapshot.liveQueries).map(window=>({scope:'cold',signature:window.signature,value:JSON.stringify(window),sequence:1})));
-      await database.meta.bulkPut([{scope:'cold',key:'sequence',value:'1'},{scope:'cold',key:'resetSequence',value:'1'}]);
-    });
+    }
+    await database.windows.bulkPut(Object.values(snapshot.liveQueries).map(window=>({scope:'cold',signature:window.signature,value:JSON.stringify(window),sequence:1})));
+    await database.meta.bulkPut([{scope:'cold',key:'sequence',value:'1'},{scope:'cold',key:'resetSequence',value:'1'},{scope:'cold',key:'fixtureCount',value:String(count)}]);
   };
   const startupIndexedDB=async()=>{
     const cold=new sdk.LocalReplica(indexedDB,{maxResidentRows:count,maxResidentBytes:1024*2**20});
