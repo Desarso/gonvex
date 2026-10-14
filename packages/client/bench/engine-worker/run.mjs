@@ -14,11 +14,22 @@ const viteRequire = createRequire(require.resolve('vite/package.json'));
 const { build } = viteRequire('esbuild');
 const root = dirname(new URL(import.meta.url).pathname);
 const output = resolve(tmpdir(), process.env.PROFILE_SET ?? 'gonvex-engine-worker-round2'); await mkdir(output, { recursive: true });
-for (const entry of ['browser', 'worker']) await build({ entryPoints: [resolve(root, `${entry}.ts`)], bundle: true, splitting: true, format: 'esm', target: 'es2022', minify: true, outdir: output, entryNames: '[name]', platform: 'browser' });
+const revision = process.env.ENGINE_REVISION;
+const revisionFiles = revision ? new Set(execFileSync('git', ['ls-tree', '-r', '--name-only', revision, 'packages/client/src'], { encoding: 'utf8' }).trim().split('\n')) : undefined;
+const sourceRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+const revisionPlugin = { name: 'engine-revision', setup(build) {
+  build.onLoad({ filter: /packages\/client\/src\/.*\.ts$/ }, args => {
+    const file = args.path.slice(sourceRoot.length + 1);
+    if (!revisionFiles?.has(file)) return;
+    return { contents: execFileSync('git', ['show', `${revision}:${file}`], { encoding: 'utf8' }), loader: 'ts', resolveDir: dirname(args.path) };
+  });
+} };
+for (const entry of ['browser', 'worker']) await build({ plugins: revision ? [revisionPlugin] : [], entryPoints: [resolve(root, `${entry}.ts`)], bundle: true, splitting: true, format: 'esm', target: 'es2022', minify: true, outdir: output, entryNames: '[name]', platform: 'browser' });
 await build({ entryPoints: [resolve(root, 'fixture.ts')], bundle: true, format: 'esm', platform: 'node', outfile: resolve(output, 'fixture.mjs') });
 const { row, columns } = await import(resolve(output, 'fixture.mjs'));
 const rows = Array.from({ length: 20_000 }, (_, index) => row(index));
-let offline = false, revision = 1, denied = 0;
+let offline = false, serverRevision = 1, denied = 0;
+let wireProfile = { callFrames: 0, callManyFrames: 0, calls: 0, batchSizes: [] };
 const sockets = new Set(); const opens = new Map(); const effects = new Map();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const send = (socket, frame) => { if (socket.readyState === 1) socket.send(JSON.stringify(frame)); };
@@ -27,22 +38,24 @@ const identity = { auth: { account: { id: 'account' } }, tenant: { id: 'tenant' 
 const server = createServer(async (request, response) => {
   try {
     if (request.url === '/offline' || request.url === '/disconnect') { offline = request.url === '/offline'; for (const socket of sockets) socket.close(); response.end('ok'); return; }
-    if (request.url === '/revision') { revision = Math.max(revision, Number(new URL(request.url, 'http://fixture').searchParams.get('value') ?? 1)); response.end(String(revision)); return; }
-    if (request.url?.startsWith('/revision?')) { revision = Math.max(revision, Number(new URL(request.url, 'http://fixture').searchParams.get('value') ?? 1)); response.end(String(revision)); return; }
+    if (request.url === '/revision') { serverRevision = Math.max(serverRevision, Number(new URL(request.url, 'http://fixture').searchParams.get('value') ?? 1)); response.end(String(serverRevision)); return; }
+    if (request.url?.startsWith('/revision?')) { serverRevision = Math.max(serverRevision, Number(new URL(request.url, 'http://fixture').searchParams.get('value') ?? 1)); response.end(String(serverRevision)); return; }
     if (request.url === '/online') { offline = false; response.end('ok'); return; }
     if (request.url === '/must-not-fetch') { denied++; response.end('escaped'); return; }
     if (request.url === '/denied-count') { response.end(JSON.stringify(denied)); return; }
+    if (request.url === '/reset-wire-profile') { wireProfile = { callFrames: 0, callManyFrames: 0, calls: 0, batchSizes: [] }; response.end('ok'); return; }
+    if (request.url === '/wire-profile') { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(wireProfile)); return; }
     if (request.url === '/reset-edits') { effects.clear(); response.end('ok'); return; }
     if (request.url === '/reset-burst') { response.end('ok'); return; }
     if (request.url === '/burst') {
       for (let tick = 0; tick < 20; tick++) {
         const changed = rows.slice(tick * 50, tick * 50 + 50).map(value => ({ ...value, count: value.count + 1 }));
         for (const value of changed) rows[Number(value.id)] = value;
-        revision++;
+        serverRevision++;
         for (const [socket, subscriptions] of opens) for (const subscription of subscriptions) {
           if (!subscription.path.startsWith("tasks.")) continue;
           const visible = subscription.path === 'tasks.visible' ? changed.filter(value => Number(value.id) < 250) : changed;
-          send(socket, { type: 'replica.delta', id: subscription.id, cursor: { epoch: 'fixture', revision }, upserts: visible });
+          send(socket, { type: 'replica.delta', id: subscription.id, cursor: { epoch: 'fixture', revision: serverRevision }, upserts: visible });
         }
         await sleep(50);
       }
@@ -70,7 +83,7 @@ wss.on('connection', socket => {
         opens.get(socket).push(subscription);
         const result = subscription.path === '__local.edits' ? [] : subscription.path === 'tasks.full' ? rows : rows.slice(0, subscription.path === 'tasks.source' ? 1_000 : 250);
         const hashes = await replicaRowsHashes(result, 'id'); const digest = replicaAggregateDigest(hashes);
-        const base = { id: subscription.id, path: subscription.path, key: 'id', cursor: { epoch: 'fixture', revision }, mode: 'eager', maxRows: result.length, maxBytes: 100_000_000, truncated: false };
+        const base = { id: subscription.id, path: subscription.path, key: 'id', cursor: { epoch: 'fixture', revision: serverRevision }, mode: 'eager', maxRows: result.length, maxBytes: 100_000_000, truncated: false };
         if (subscription.path === 'tasks.full') {
           for (let offset = 0, sequence = 0; offset < result.length; offset += 100, sequence++) {
             const last = offset + 100 >= result.length;
@@ -82,13 +95,16 @@ wss.on('connection', socket => {
       }
     } else if (frame.type === 'replica.close') { opens.set(socket, opens.get(socket).filter(value => value.id !== frame.id)); }
     else if (frame.type === 'reducer.call' || frame.type === 'reducer.callMany') {
+      const calls = frame.calls ?? [frame];
+      wireProfile[frame.type === 'reducer.callMany' ? 'callManyFrames' : 'callFrames']++;
+      wireProfile.calls += calls.length; wireProfile.batchSizes.push(calls.length);
       await sleep(50);
       for (const call of frame.calls ?? [frame]) {
         const key = call.idempotencyKey ?? call.id; if (!effects.has(key)) effects.set(key, call.args);
-        revision++;
-        for (const subscription of opens.get(socket) ?? []) if (subscription.path === '__local.edits') send(socket, { type: 'replica.delta', id: subscription.id, cursor: { epoch: 'fixture', revision }, upserts: [{ id: call.args.id, count: 1 }], originCommandIds: [key] });
-        send(socket, { type: 'reducer.result', id: call.id, originCommandId: key, result: 1, committedRevision: revision });
-        send(socket, { type: 'replica.watermark', revision });
+        serverRevision++;
+        for (const subscription of opens.get(socket) ?? []) if (subscription.path === '__local.edits') send(socket, { type: 'replica.delta', id: subscription.id, cursor: { epoch: 'fixture', revision: serverRevision }, upserts: [{ id: call.args.id, count: 1 }], originCommandIds: [key] });
+        send(socket, { type: 'reducer.result', id: call.id, originCommandId: key, result: 1, committedRevision: serverRevision });
+        send(socket, { type: 'replica.watermark', revision: serverRevision });
       }
     }
   }).catch(error => { process.stderr.write(String(error) + '\n'); }); });
@@ -104,7 +120,7 @@ const browser = context.browser(); const page = await context.newPage();
 page.on('console', message => { if (/^(Seed |Engine )/.test(message.text())) process.stdout.write(message.text() + '\n'); });
 page.on('pageerror', error => process.stderr.write(`PAGE: ${error}\n`));
 const measured = Number(process.env.ITERATIONS ?? 20), warmups = Number(process.env.WARMUPS ?? 5);
-const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', admission: process.env.PIPELINE ? 'pipelined' : 'sequential', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true, profileIO: Boolean(process.env.PROFILE_IO), fixtureIsolation: "edits-reset-before-each-mode", firefoxWorkerWebSocketWorkaround: workaroundApplied() };
+const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', admission: process.env.PIPELINE ? 'pipelined' : 'sequential', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true, engineRevision: revision ?? "checkout", profileIO: Boolean(process.env.PROFILE_IO), loadChecks: [], fixtureIsolation: "edits-reset-before-each-mode", firefoxWorkerWebSocketWorkaround: workaroundApplied() };
 try {
   await page.goto(url); await page.waitForFunction(() => window.benchmark);
   process.stdout.write(`Preparing ${process.env.SEED_ROWS ?? 50_000}-row canonical IDB fixture...\n`);
@@ -112,7 +128,8 @@ try {
   process.stdout.write(`Seed ready: ${metadata.seed.rowBytes} bytes/row\n`);
   for (let index = -warmups; index < measured; index++) {
     for (const mode of index % 2 === 0 ? ['legacy', 'worker'] : ['worker', 'legacy']) {
-      if (loadavg()[0] / cpus().length > 0.5) throw new Error("Load check failed: more than half the logical CPUs are busy");
+      const load = loadavg(); metadata.loadChecks.push({ index, mode, load });
+      if (load[0] / cpus().length > 0.5) throw new Error("Load check failed: more than half the logical CPUs are busy");
       await page.goto(url); await page.waitForFunction(() => window.benchmark);
       await page.evaluate(() => window.benchmark.resetEdits());
       const session = browserName === 'chromium' ? await context.newCDPSession(page) : null;

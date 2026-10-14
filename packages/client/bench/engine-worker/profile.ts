@@ -6,23 +6,27 @@ export function resetProfile() {
 resetProfile();
 export function readProfile() { return structuredClone(profile); }
 export function installProfile() {
-  for (const name of ["get", "getAll", "openCursor", "put", "add", "delete", "clear"] as const) {
-    const original = IDBObjectStore.prototype[name];
-    (IDBObjectStore.prototype as any)[name] = function(this: IDBObjectStore, ...args: any[]) {
-      const key = `${this.name}.${name}`, current = profile, started = performance.now();
-      current.requests[key] = (current.requests[key] ?? 0) + 1;
-      const request: IDBRequest = (original as any).apply(this, args);
-      let first = true;
-      request.addEventListener("success", () => {
-        if (first) { first = false; current.requestMs[key] = (current.requestMs[key] ?? 0) + performance.now() - started; }
-        if (["get", "getAll", "openCursor"].includes(name)) {
-          const result = request.result;
-          const count = name === "getAll" ? result.length : result ? 1 : 0;
-          current.rowsRead[key] = (current.rowsRead[key] ?? 0) + count;
-        }
-      });
-      return request;
-    };
+  for (const prototype of [IDBObjectStore.prototype, IDBIndex.prototype]) {
+    for (const name of ["get", "getAll", "openCursor", "put", "add", "delete", "clear"] as const) {
+      const original = (prototype as any)[name];
+      if (!original) continue;
+      (prototype as any)[name] = function(this: IDBObjectStore | IDBIndex, ...args: any[]) {
+        const store = "objectStore" in this ? `${this.objectStore.name}:${this.name}` : this.name;
+        const key = `${store}.${name}`, current = profile, started = performance.now();
+        current.requests[key] = (current.requests[key] ?? 0) + 1;
+        const request: IDBRequest = original.apply(this, args);
+        let first = true;
+        request.addEventListener("success", () => {
+          if (first) { first = false; current.requestMs[key] = (current.requestMs[key] ?? 0) + performance.now() - started; }
+          if (["get", "getAll", "openCursor"].includes(name)) {
+            const result = request.result;
+            const count = name === "getAll" ? result.length : result ? 1 : 0;
+            current.rowsRead[key] = (current.rowsRead[key] ?? 0) + count;
+          }
+        });
+        return request;
+      };
+    }
   }
 }
 export function installWorkerProfile() {

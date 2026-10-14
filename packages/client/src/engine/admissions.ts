@@ -177,13 +177,12 @@ export async function runLocalReducer<T>(this: GonvexClient, ref: FunctionRefere
   });
 }
 
-
 export function reducer<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(
   this: GonvexClient,
   ref: FunctionReference<Args, T>,
   args: Args = {} as Args,
   options: CallOptions & { engineFresh?: boolean } = {},
-  ): Promise<T | QueuedReducerOutcome> {
+): Promise<T | QueuedReducerOutcome> {
   if (this["publicTenant"]) {
     if (options.offline === "queue" || options.optimistic?.length) return Promise.reject(new GonvexClientError("Public reducers are server-only and cannot queue or execute optimistically", { code: "disconnected", path: ref.path, operation: "reducer" }));
     return this["call"]<T>("reducer", ref, args, options.timeoutMs ?? this["timeouts"].reducerTimeoutMs);
@@ -215,7 +214,6 @@ export function reducer<T extends JsonValue = JsonValue, Args extends JsonValue 
   return this["runOptimisticReducer"]<T>(ref, args, effectiveOptions, reducerId, patches);
 }
 
-
 export async function runOptimisticReducer<T>(
   this: GonvexClient,
   ref: FunctionReference,
@@ -223,7 +221,7 @@ export async function runOptimisticReducer<T>(
   options: CallOptions & { engineFresh?: boolean },
   reducerId: string,
   patches: OptimisticPatch[],
-  ): Promise<T | QueuedReducerOutcome> {
+): Promise<T | QueuedReducerOutcome> {
   // The startup recovery transaction converts abandoned inflight entries to
   // pending. Finish it before inserting a brand-new direct send, otherwise
   // recovery can mistake that live entry for a crashed reducer and race the
@@ -316,9 +314,9 @@ export async function runOptimisticReducer<T>(
 
 function localIntentDependencies(transaction: LocalTransactionResult): IntentDependencies {
   return {
-  reads: transaction.readRows ?? [],
-  scans: transaction.scanTables ?? transaction.readTables,
-  writes: transaction.patches.map(patch => ({ entity: patch.entity, rowId: patch.rowId })),
+    reads: transaction.readRows ?? [],
+    scans: transaction.scanTables ?? transaction.readTables,
+    writes: transaction.patches.map(patch => ({ entity: patch.entity, rowId: patch.rowId })),
   };
 }
 
@@ -331,10 +329,9 @@ function randomID() {
 function deliveryErrorClass(error: unknown): OutboxErrorClass {
   if (!(error instanceof GonvexClientError)) return "transient";
   switch (error.code) {
-  case "server": return error.errorClass ?? "rejected";
-  case "timeout": return "transient";
-  default: return "network";
-}
+    case "server": return error.errorClass ?? "rejected";
+    case "timeout": return "transient";
+    default: return "network";
+  }
 }
 
-const legacyUnauthenticatedReducerError = "authenticate with an active tenant before calling a Reducer";

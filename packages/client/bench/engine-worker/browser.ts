@@ -127,6 +127,7 @@ async function workerProfile(operation: "reset" | "read") {
 async function drain() {
   // Queue in offline mode, then reconnect the same client and original IDs.
   await fetch("/offline", { method: "POST" }); await until(() => !client.connectionState().isWebSocketConnected);
+  await fetch("/reset-wire-profile", { method: "POST" });
   if (profiling) { resetProfile(); await workerProfile("reset"); }
   begin(); const started = performance.now();
   const latencies: number[] = [];
@@ -143,7 +144,7 @@ async function drain() {
     const entries = "engineMode" in client ? await (client as any).listIntents() : await client.listIntents();
     return entries.length === 0;
   }, 120_000);
-  return { ...await finish(started), admissionMs, admissionLatenciesMs: latencies, ...(profiling ? { admissionProfile, drainProfile: await workerProfile("read") } : {}) };
+  return { ...await finish(started), admissionMs, admissionLatenciesMs: latencies, wireProfile: await fetch("/wire-profile").then(response => response.json()), ...(profiling ? { admissionProfile, drainProfile: await workerProfile("read") } : {}) };
 }
 async function parity() {
   if (!("engineMode" in client)) throw new Error("Worker fixture required");
