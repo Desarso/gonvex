@@ -105,7 +105,8 @@ it("recovers an admitted local reducer from the canonical journal with its origi
   expect(entry.localExecution).toMatchObject({ commandId: "original", now: command.now, intentEntropy: "aa".repeat(32) });
   const receipts = new EngineReceipts(init.storage.outboxName); cleanups.push(() => receipts.close());
   expect(await receipts.get(owner, "original")).toBeUndefined();
-  expect(entry.engineOutcome.result).toBe(7);
+  expect(entry.engineResult).toBe(7);
+  expect(entry.engineOutcome).toBeUndefined();
   await expect(host.rpc.call(host.rpc.request("reducer", [ref, { different: true }, { engineCommand: command }]))).rejects.toThrow("different arguments");
 });
 
@@ -431,4 +432,18 @@ it("coalesces a 500-call burst into one negotiated packet and retains the older 
     expect(ui.sent.map(frame => frame.admissions.length)).toEqual(limit ? [500] : [128, 128, 128, 116]);
     rpc.close(); await settled;
   }
+});
+
+it("recovers the original outcome from a journal written in the older wrapper format", async () => {
+  const { create, init } = await setup(); let host = await create();
+  const command = { id: "older-format", now: Date.now(), artifactHash: "artifact", scope: owner, entropy: "ab".repeat(32) };
+  expect(await host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command }]))).toBe(7);
+  await host.close();
+  const database = new Dexie(init.storage.outboxName); await database.open();
+  const [entry] = await database.table("entries").toArray();
+  const { engineResult, ...older } = entry;
+  await database.table("entries").put({ ...older, engineOutcome: { result: engineResult } }); database.close();
+  host = await create(); cleanups.push(host.close);
+  expect(await host.rpc.call(host.rpc.request("reducer", [ref, {}, { engineCommand: command }]))).toBe(7);
+  expect(await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).toHaveLength(1);
 });

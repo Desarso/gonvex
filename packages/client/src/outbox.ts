@@ -52,6 +52,9 @@ export type OutboxStore = {
 };
 
 export type ReducerOutboxEntry = {
+  /** Optional flat recovery result; presence distinguishes an undefined result. */
+  engineResult?: unknown;
+  engineCommandNow?: number;
   /** Original receipt namespace survives operation renames across client upgrades. */
   receiptPath?: string;
   /** Optional durable local RPC receipt, written with admission before prediction. */

@@ -1,5 +1,5 @@
 import { GonvexClient, GonvexClientError, type EngineCommand, type FunctionReference, type QueuedReducerOutcome, type CallOptions } from "../index.js";
-import type { EngineReceipts } from "./receipts.js";
+import { engineEntryOutcome, type EngineReceipts } from "./receipts.js";
 import type { JsonValue } from "@gonvex/protocol";
 import type { LocalExecution, LocalTransactionResult } from "@gonvex/local-runtime";
 import { StoreReducerOutbox, outboxEntryIsLive, type IntentDependencies, type OutboxErrorClass } from "../outbox.js";
@@ -23,10 +23,14 @@ export function installEngineAdmissions(client: GonvexClient, receipts: EngineRe
     try {
       const entry = await enqueue(intent);
       if (intent.engineOutcome) {
-        entry.engineOutcome = structuredClone(outcome);
+        entry.engineResult = structuredClone(outcome!.result);
+        if (outcome!.commandNow !== undefined) entry.engineCommandNow = outcome!.commandNow;
         if (outbox instanceof StoreReducerOutbox) {
           const cached = outbox["entries"].get(entry.id);
-          if (cached) cached.engineOutcome = structuredClone(outcome);
+          if (cached) {
+            cached.engineResult = structuredClone(outcome!.result);
+            if (outcome!.commandNow !== undefined) cached.engineCommandNow = outcome!.commandNow;
+          }
         }
       }
       return entry;
@@ -76,9 +80,10 @@ export async function runLocalReducer<T>(this: GonvexClient, ref: FunctionRefere
     if (!execution || execution.scope !== this["replicaScope"]) throw new GonvexClientError("Session changed before local reducer execution", {code:'superseded'});
     const entries = await this["reducerOutbox"].list(scope);
     const admitted = command && entries.find(entry => entry.idempotencyKey === command.id);
-    if (admitted?.engineOutcome) {
+    const admittedOutcome = admitted && engineEntryOutcome(admitted);
+    if (admittedOutcome) {
       if (admitted.path !== ref.path || JSON.stringify(admitted.args) !== JSON.stringify(args)) throw new Error("Engine command ID reused with different arguments");
-      return admitted.engineOutcome.result as T;
+      return admittedOutcome.result as T;
     }
     if (command && !optionsFresh) {
       const receipt = await receiptContexts.get(this)!.findReceipt(scope, command.id, ref.path, args);
@@ -246,9 +251,10 @@ export async function runOptimisticReducer<T>(
   }
   if (options.engineCommand) {
     const previous = (await this["reducerOutbox"].list(this["outboxScope"])).find(entry => entry.idempotencyKey === reducerId);
-    if (previous?.engineOutcome) {
+    const previousOutcome = previous && engineEntryOutcome(previous);
+    if (previousOutcome) {
       if (previous.path !== ref.path || JSON.stringify(previous.args) !== JSON.stringify(args)) throw new Error("Engine command ID reused with different arguments");
-      return previous.engineOutcome.result as T;
+      return previousOutcome.result as T;
     }
   }
   this["directOutboxReducerIds"].add(reducerId);

@@ -1,6 +1,10 @@
 import { Dexie, type Table } from "dexie";
 import type { OutboxStore, ReducerOutboxEntry } from "../outbox.js";
 
+export function engineEntryOutcome(entry: ReducerOutboxEntry) {
+  return Object.hasOwn(entry, "engineResult") ? { result: entry.engineResult } : entry.engineOutcome;
+}
+
 type Receipt = { key: string; path: string; args: string; result: unknown; retainedAt: number; commandAt: number };
 
 /** Receipts are recovery metadata. The established IDB outbox remains canonical. */
@@ -77,7 +81,9 @@ export class EngineReceipts {
   wrap(store: OutboxStore): OutboxStore {
     const admitted = <T extends Omit<ReducerOutboxEntry, "id">>(entry: T): T => {
       const outcome = this.admissions.get(entry.idempotencyKey);
-      return outcome ? { ...entry, engineOutcome: structuredClone(outcome) } : entry;
+      if (!outcome) return entry;
+      const { engineOutcome: _legacy, ...value } = entry;
+      return { ...value, engineResult: structuredClone(outcome.result), ...(outcome.commandNow === undefined ? {} : { engineCommandNow: outcome.commandNow }) } as T;
     };
     const remember = async (ids: readonly number[]) => {
       const selected = new Set(ids);
@@ -85,8 +91,12 @@ export class EngineReceipts {
       // contract-fenced canonical store after the receipt transaction commits.
       const entries: Array<ReducerOutboxEntry | undefined> = store.getMany ? await store.getMany(ids)
         : this.journal.isOpen() ? await this.journal.table("entries").bulkGet([...ids]) : await store.load();
-      await Promise.all(entries.map(entry => entry && selected.has(entry.id) && entry.engineOutcome
-        ? this.put(entry.scope, entry.idempotencyKey, entry.path, entry.args, entry.engineOutcome.result, entry.engineOutcome.commandNow ?? entry.localExecution?.now ?? entry.createdAt) : undefined));
+      await Promise.all(entries.map(entry => {
+        if (!entry || !selected.has(entry.id)) return;
+        const outcome = engineEntryOutcome(entry);
+        if (outcome) return this.put(entry.scope, entry.idempotencyKey, entry.path, entry.args, outcome.result,
+          entry.engineCommandNow ?? entry.engineOutcome?.commandNow ?? entry.localExecution?.now ?? entry.createdAt);
+      }));
     };
     return { ...store,
       ...(store.append ? { append: async (entry: Omit<ReducerOutboxEntry, "id">) => store.append!(admitted(entry)) } : {}),
