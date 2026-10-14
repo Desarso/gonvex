@@ -536,8 +536,8 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       while (!full) {
         const page = await this.database.entities.where('[scope+entity+id]')
           .between(after ?? [scope], [scope, []], !after, false)
-          .limit(Math.min(512, Math.max(1, budget.maxRows - count + 1),
-            Number.isFinite(budget.maxBytes) ? Math.max(1, Math.ceil((budget.maxBytes - bytes) / (averageBytes || 256)) + 1) : 512)).toArray();
+          .limit(Math.min(256, Math.max(1, budget.maxRows - count + 1),
+            Number.isFinite(budget.maxBytes) ? Math.max(1, Math.ceil((budget.maxBytes - bytes) / (averageBytes || 256)) + 1) : 256)).toArray();
         if (!page.length) break;
         averageBytes = page.reduce((sum, record) => sum + record.value.length * 2 + 256, 0) / page.length;
         for (const record of page) {
@@ -551,11 +551,13 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
         const last = page[page.length - 1]!;
         after = [last.scope, last.entity, last.id];
       }
-      for (const record of await this.database.windows.where('scope').equals(scope).toArray()) {
-        if (record.deleted) continue;
-        const window = await this.materializeWindow(record);
-        liveQueries[window.signature]=window;
-        if(window.ids.some(id=>!entities[window.entity]?.[id]))partial.add(window.entity);
+      const records = (await this.database.windows.where('scope').equals(scope).toArray()).filter(record => !record.deleted);
+      for (let offset = 0; offset < records.length; offset += 4) {
+        const windows = await Promise.all(records.slice(offset, offset + 4).map(record => this.materializeWindow(record)));
+        for (const window of windows) {
+          liveQueries[window.signature]=window;
+          if(window.ids.some(id=>!entities[window.entity]?.[id]))partial.add(window.entity);
+        }
       }
       const cursor=await this.database.meta.get([scope,'cursor']);
       if(!hasRows && !Object.keys(liveQueries).length && !cursor)return undefined;
