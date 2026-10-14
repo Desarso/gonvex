@@ -45,7 +45,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
           const patches = previous.has(id) ? diffEngineValue(previous.get(id), value) : undefined;
           if (patches?.length === 0) continue;
           updates.push(patches ? { id, patches } : { id, value }); previous.set(id, value);
-        } catch (error) { updates.push({ id, error: serializeEngineError(error) }); }
+        } catch (error) { previous.delete(id); updates.push({ id, error: serializeEngineError(error) }); }
       }
       dirty.clear();
       if (!updates.length) return;
@@ -93,7 +93,7 @@ export function serveEngineHost(endpoint: EngineEndpoint, binding?: StaticEngine
         if (!ready) return undefined;
         if (kind !== "liveState" || c.localReplica.freshness() !== "offline") return c.localReplica.liveQuerySnapshot(signature);
         const offline = c.offlineLiveQuery(ref, args[1]);
-        return { rows: offline.rows, ids: offline.rows.map(row => String(row.id ?? row._id ?? "")).filter(Boolean),
+        return { rows: offline.rows, ids: offline.rows.map(row => String(row[ref.live!.key] ?? "")).filter(Boolean),
           ...(offline.total === undefined ? {} : { total: offline.total }), ...(offline.offset === undefined ? {} : { offset: offline.offset }),
           ...(offline.limit === undefined ? {} : { limit: offline.limit }), source: "cache", completeness: offline.completeness,
           freshness: "offline", supported: offline.supported, ...(offline.unsupportedOperator ? { unsupportedOperator: offline.unsupportedOperator } : {}) };

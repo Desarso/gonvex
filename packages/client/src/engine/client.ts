@@ -26,9 +26,9 @@ function reconcile(previous: any, next: any, ownedRows?: WeakSet<object>): any {
   if (ownedRows?.has(next)) return next;
   if (next === null || typeof next !== "object") return next;
   const array = Array.isArray(next);
-  let equal = previous && array === Array.isArray(previous) && Object.keys(previous).length === Object.keys(next).length;
+  let equal = previous !== null && typeof previous === "object" && array === Array.isArray(previous) && Object.keys(previous).length === Object.keys(next).length;
   const result: any = array ? [] : {};
-  for (const key of Object.keys(next)) { setEngineProperty(result, key, reconcile(previous?.[key], next[key], ownedRows)); if (result[key] !== previous?.[key]) equal = false; }
+  for (const key of Object.keys(next)) { setEngineProperty(result, key, reconcile(previous?.[key], next[key], ownedRows)); if (!Object.hasOwn(previous ?? {}, key) || result[key] !== previous?.[key]) equal = false; }
   return equal ? previous : Object.freeze(result);
 }
 
@@ -275,7 +275,7 @@ export class EngineClient {
     const state: WatchState = { id: crypto.randomUUID(), kind, args, sequence: 0, listeners: new Set(), rowKeys: new Set() };
     const read = () => { if (state.error) throw state.error; return state.value; };
     return { read, onUpdate: (listener: () => void) => {
-      if (!state.listeners.size) { this.watches.set(state.id, state); const id = state.id; const generation = this.rpc.generation;
+      if (!state.listeners.size) { state.sequence = 0; state.error = undefined; this.watches.set(state.id, state); const id = state.id; const generation = this.rpc.generation;
         void this.admitted("watch", [id, kind, args]).catch(error => { if (generation !== this.rpc.generation || id !== state.id || !this.watches.has(id)) return; state.error = error; listener(); }); }
       state.listeners.add(listener);
       return () => { state.listeners.delete(listener); if (!state.listeners.size) { this.watches.delete(state.id); this.releaseRows(state); state.value = undefined; void this.admitted("unwatch", [state.id]).catch(() => undefined); } };

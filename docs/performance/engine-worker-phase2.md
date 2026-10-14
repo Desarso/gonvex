@@ -76,12 +76,14 @@ Chromium 149.0.7827.55 ran five warmup pairs and 20 measured pairs, alternating 
 
 | Workload | Legacy main script median | Worker main script median | Reduction | Worker / legacy ratio, bootstrap 95% CI | Legacy → worker wall median |
 | --- | ---: | ---: | ---: | --- | ---: |
-| Cached 50k-row cold start | 430.4 ms | 39.1 ms | 90.9% | 0.0908 [0.0848, 0.0934] | 2,348 → 2,422 ms |
-| 1,000-row burst | 77.8 ms | 25.2 ms | 67.6% | 0.3237 [0.3126, 0.3312] | 1,542 → 1,544 ms |
+| Cached 50k-row cold start | Invalid interval | Invalid interval | Not validated | Not validated | 2,348 → 2,422 ms |
+| 1,000-row burst | 77.8 ms | 25.2 ms | 67.6% | 0.3237 [0.3116, 0.3314] | 1,542 → 1,544 ms |
 | 20k-row background paged snapshot | 575.2 ms | 3.4 ms | 99.4% | 0.0058 [0.0042, 0.0068] | 22,547 → 22,546 ms |
-| Admit/drain 500 independent intents | 1,172.9 ms | 840.1 ms | 28.4% | 0.7163 [0.6896, 0.7384] | 49,469 → 73,843 ms |
+| Admit/drain 500 independent intents | 1,172.9 ms | 840.1 ms | 28.4% | 0.7163 [0.6905, 0.7384] | 49,469 → 73,843 ms |
 
 **Phase 2 gate: PASS in this Chromium fixture.** Worker mode recorded zero page long tasks above 50 ms during the burst, durable admitted-command crash/retry preserved one journal entry and its result, and all three reducer network globals were denied while the private transport reconnected. Both foreground clients selected legacy mode in the final two-tab fixture. Legacy also had zero burst long tasks: the settled baseline already passed that part of the gate.
+
+The historical cold script sample included the subsequent exact-ID subscription and online readiness setup, while wall time and long tasks stopped at cached paint. Its script reduction and bootstrap ratio are invalid. The corrected runner ends `start()` at cached paint and calls `prepare()` after the CDP sample. Historical raw samples are retained with `coldSamplingAligned: false`; the summary omits their cold script statistics. A new full run is required for a cold CPU comparison. The remaining measurements describe the original measured revision, not this repair.
 
 Burst p95 frame interval was 16.7 ms in both modes. Scheduled-click to two-RAF paint-proxy p95 was 33.5 → 32.9 ms; no meaningful input-latency improvement is claimed from that small difference. Across all 20 cold runs, legacy recorded 20 long tasks, maximum 291 ms, versus none in worker mode. Across snapshots it recorded 40, maximum 542 ms, versus none in worker mode. These observers cover all page tasks and therefore upper-bound SDK tasks; no separate trace attribution was collected.
 
@@ -107,7 +109,11 @@ pnpm --filter @gonvex/local-runtime build
 pnpm --filter @gonvex/cli build
 ```
 
-There are 14 client tests, one React test, and one generator integration test, including compilation of its generated static worker. No full suite or cargo workspace run was needed. The local-runtime implementation is reused unchanged and was typechecked/built for compatibility.
+The original validation had 14 client engine tests, one React engine test, and one generator integration test, including compilation of its generated static worker. The local-runtime implementation is reused unchanged and was typechecked/built for compatibility.
+
+Review regression validation now includes 22 engine tests and 93 React tests. It covers watch error recovery, detached-watch resubscription after host replacement, scalar-to-object results, own `__proto__` patches, long-key aliases and empty-name undefined fields, late chunks after timeout, offline Live Query keys, skipped queries, and the existing legacy selector cache and reentrant-write tests. `pnpm build:packages`, `pnpm -r test`, `pnpm typecheck`, repository script tests, and npm tarball verification passed. The full Rust workspace suite was not run separately.
+
+A Chromium correctness smoke with 1,000 seeded rows, one warmup pair and one measured pair completed the corrected cold boundary, burst delivery, reducer network denial, durable crash/retry, private reconnect, and two-tab fallback. Snapshot and drain were skipped. Other checks ran concurrently, so this smoke supplies no performance comparison and does not replace the original full run or the required new cold CPU measurement.
 
 ## Files and follow-up
 

@@ -1,7 +1,7 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { EngineClient, EngineEntitiesState } from "@gonvex/client/engine";
-import { GonvexProvider, useEntityState, useReplicaCollection } from "./index.js";
+import { GonvexProvider, useEntityState, useLiveQueryState, useReplicaCollection } from "./index.js";
 
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 it("worker hooks expose pending, publish results, and retain unchanged row identity", () => {
@@ -28,4 +28,18 @@ it("worker hooks expose pending, publish results, and retain unchanged row ident
   expect(screen.getByText("ready:2")).toBeTruthy(); expect(identities.every(value => value === row)).toBe(true);
   act(() => { entities = { status: "pending" }; rows = undefined; listeners.forEach(listener => listener()); vi.advanceTimersToNextFrame(); });
   expect(screen.getByText("pending:loading")).toBeTruthy();
+});
+
+it("keeps skipped engine Live Queries empty without a pending subscription", () => {
+  const watchRetained = vi.fn();
+  const client = { engineMode: "worker", watchRetained } as unknown as EngineClient;
+  let snapshot: ReturnType<typeof useLiveQueryState>;
+  function App() {
+    snapshot = useLiveQueryState({ kind: "query", path: "tasks.live" }, "skip");
+    return <div>{snapshot.pending ? "pending" : "skipped"}</div>;
+  }
+  render(<GonvexProvider client={client}><App /></GonvexProvider>);
+  expect(screen.getByText("skipped")).toBeTruthy();
+  expect(snapshot!).toMatchObject({ rows: [], ids: [] });
+  expect(watchRetained).not.toHaveBeenCalled();
 });

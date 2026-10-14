@@ -39,7 +39,7 @@ beforeEach(() => {
   vi.stubGlobal("navigator", { locks: { request: (_name: string, options: any, callback?: any) => Promise.resolve((callback ?? options)({ name: _name })) } });
   vi.stubGlobal("WebSocket", Socket); Socket.all = [];
 });
-afterEach(async () => { for (const close of cleanups.splice(0)) await close(); vi.unstubAllGlobals(); });
+afterEach(async () => { for (const close of cleanups.splice(0)) await close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 it("correlates out-of-order replies, rejects old generations, and reuses request identity after timeout", async () => {
   const { ui, worker } = pair(); const rpc = new EngineRpc(ui, "generation", "scope"); cleanups.push(() => rpc.close());
@@ -221,4 +221,139 @@ it("publishes a whole committed watch batch before notifying either mounted view
   endpoints.worker.postMessage({ generation: envelope.generation, scope: envelope.scope, id: "commit", event: "watchBatch", args: [1, watchIds.map((id, index) => ({ id, value: { status: "ready", rows: [{ id: String(index + 1), count: 1 }] } }))] });
   await vi.waitFor(() => expect(observed).toHaveLength(2));
   for (const states of observed as any[]) expect(states.map((state: any) => state.rows[0].count)).toEqual([1, 1]);
+});
+
+it("clears a watch error when its next successful host read has the same value", async () => {
+  let failed = false, publish = () => {};
+  vi.spyOn(GonvexClient.prototype, "watchControlQuery").mockImplementation(() => ({
+    onUpdate: (notify: () => void) => { publish = notify; return () => {}; },
+    getSnapshot: () => { if (failed) throw new Error("Temporary read failure"); return { result: 1, version: 1 }; },
+  }) as any);
+  const { create } = await setup(); const host = await create(); cleanups.push(host.close);
+  const updates: any[] = [];
+  host.rpc.onEvent.add((method, args) => { if (method === "watchBatch") updates.push(...args[1]); });
+  await host.rpc.call(host.rpc.request("watch", ["control", "control", [{ kind: "query", path: "control.test" }, {}]]));
+  await vi.waitFor(() => expect(updates.at(-1)?.value).toEqual({ result: 1, version: 1 }));
+  failed = true; publish();
+  await vi.waitFor(() => expect(updates.at(-1)?.error?.message).toBe("Temporary read failure"));
+  failed = false; publish();
+  await vi.waitFor(() => expect(updates.at(-1)).toEqual({ id: "control", value: { result: 1, version: 1 } }));
+});
+
+it("uses the declared Live Query key for offline membership", async () => {
+  const { init, create } = await setup();
+  const storage = new IndexedDBLocalReplicaStorage(init.storage.replicaName);
+  await storage.replaceSnapshot({ entities: { tasks: { one: { slug: "one", title: "Task", id: "other-id" } } }, liveQueries: {} }, "visible"); storage.close();
+  const host = await create(); cleanups.push(host.close);
+  const liveRef: FunctionReference = { kind: "query", path: "tasks.bySlug", delivery: "live", live: {
+    entity: "tasks", key: "slug", plan: { table: "tasks", key: "slug", columns: ["slug", "title", "id"] },
+  } };
+  let snapshot: any;
+  host.rpc.onEvent.add((method, args) => { if (method === "watchBatch") for (const update of args[1]) if (update.id === "live") snapshot = update.patches ? applyEnginePatches(snapshot, update.patches) : update.value; });
+  await host.rpc.call(host.rpc.request("watch", ["live", "liveState", [liveRef, {}]]));
+  await vi.waitFor(() => expect(snapshot?.ids).toEqual(["one"]));
+  expect(snapshot.rows).toEqual([{ slug: "one", title: "Task", id: "other-id" }]);
+  expect(snapshot.freshness).toBe("offline");
+});
+
+async function mockEngine() {
+  const hosts: Array<{ endpoints: ReturnType<typeof pair>; envelope: any; watchIds: string[] }> = [];
+  vi.stubGlobal("Worker", class {});
+  vi.stubGlobal("navigator", { locks: { request: (_name: string, _options: any, callback: any) => Promise.resolve(callback({ name: _name })), query: async () => ({ held: [] }) } });
+  const workerFactory = () => {
+    const host = { endpoints: pair(), envelope: undefined as any, watchIds: [] as string[] }; hosts.push(host);
+    host.endpoints.worker.addEventListener("message", ({ data }) => {
+      if (!data.method) return;
+      host.envelope = data;
+      if (data.method === "watch") host.watchIds.push(data.args[0]);
+      host.endpoints.worker.postMessage({ generation: data.generation, scope: data.scope, id: data.id, result: data.method === "init" ? {
+        connection: { isWebSocketConnected: false, hasEverConnected: false, connectionCount: 0, connectionRetries: 0, hasInflightRequests: false, inflightReducers: 0, inflightActions: 0, inflightOneShotQueries: 0 }, session: "restored", commandScope: owner,
+      } : undefined });
+    });
+    return Object.assign(host.endpoints.ui, { terminate: vi.fn() }) as unknown as Worker;
+  };
+  const client = await createEngineClient(url, { engine: { workerUrl: "worker.js", artifactHash: "artifact", workerFactory }, auth,
+    storage: { replicaName: "mock", outboxName: "mock-outbox", contract: { version: 1, offlineMaxAgeMs: null }, initialVersion: 1 }, fallbackBinding: binding });
+  cleanups.push(() => client.close());
+  const publish = (sequence: number, value: unknown) => {
+    const host = hosts.at(-1)!;
+    host.endpoints.worker.postMessage({ generation: host.envelope.generation, scope: host.envelope.scope, id: crypto.randomUUID(), event: "watchBatch",
+      args: [sequence, [{ id: host.watchIds.at(-1), value }]] });
+  };
+  return { client, hosts, publish };
+}
+
+it("accepts object results after truthy scalars and keeps new undefined own fields", async () => {
+  const { client, hosts, publish } = await mockEngine();
+  const watch = client.watchControlQuery({ kind: "query", path: "control.test" });
+  cleanups.push(watch.onUpdate(() => {}));
+  await vi.waitFor(() => expect(hosts[0].watchIds).toHaveLength(1));
+  publish(1, { result: 1, version: 1 });
+  await vi.waitFor(() => expect(watch.getSnapshot()?.result).toBe(1));
+  publish(2, { result: {}, version: 2 });
+  await vi.waitFor(() => expect(watch.getSnapshot()?.result).toEqual({}));
+  publish(3, { result: { a: undefined }, version: 3 });
+  await vi.waitFor(() => expect(watch.getSnapshot()?.result).toEqual({ a: undefined }));
+  publish(4, { result: { b: undefined }, version: 4 });
+  await vi.waitFor(() => expect(Object.keys(watch.getSnapshot()!.result as object)).toEqual(["b"]));
+});
+
+it("accepts a new host's sequence when a detached watch is subscribed again", async () => {
+  const { client, hosts, publish } = await mockEngine();
+  const watch = client.watchEntities("tasks", ["one"]);
+  const stop = watch.onUpdate(() => {});
+  await vi.waitFor(() => expect(hosts[0].watchIds).toHaveLength(1));
+  publish(42, { status: "ready", rows: [{ id: "one", value: 1 }] });
+  await vi.waitFor(() => expect(watch.getSnapshot().status).toBe("ready"));
+  stop(); await client.recover();
+  cleanups.push(watch.onUpdate(() => {}));
+  await vi.waitFor(() => expect(hosts[1].watchIds).toHaveLength(1));
+  publish(1, { status: "ready", rows: [{ id: "one", value: 2 }] });
+  await vi.waitFor(() => expect(watch.getSnapshot()).toEqual({ status: "ready", rows: [{ id: "one", value: 2 }] }));
+});
+
+it("patches own __proto__ fields without changing prototypes or earlier snapshots", () => {
+  const previous = Object.freeze({ nested: Object.freeze({}) });
+  const added = { nested: JSON.parse('{"__proto__":{"value":1},"missing":null}') };
+  added.nested.missing = undefined;
+  const first = applyEnginePatches(previous, diffEngineValue(previous, added)!) as typeof added;
+  expect(Object.hasOwn(first.nested, "__proto__")).toBe(true);
+  expect(Object.hasOwn(first.nested, "missing")).toBe(true);
+  expect(Object.getPrototypeOf(first.nested)).toBe(Object.prototype);
+  const changed = { nested: JSON.parse('{"__proto__":{"value":2}}') };
+  const second = applyEnginePatches(first, diffEngineValue(first, changed)!) as typeof changed;
+  expect(Object.getPrototypeOf(second.nested)).toBe(Object.prototype);
+  expect(second.nested.__proto__.value).toBe(2);
+  expect(first.nested.__proto__.value).toBe(1);
+  expect(previous.nested).toEqual({});
+});
+
+it("preserves aliases and empty-name undefined fields in the long-key text codec", async () => {
+  const { ui, worker } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
+  const shared = { "": undefined, nested: { value: "x".repeat(40_000) } };
+  const result = { ["k".repeat(1100)]: shared, first: shared, second: shared, "": undefined };
+  const pending = rpc.call<typeof result>(rpc.request("query", [], "text"));
+  await sendEngineMessage(worker, { generation: "g", scope: "s", id: "text", result });
+  const actual = await pending;
+  expect(actual).toEqual(result); expect(actual.first).toBe(actual.second); expect(actual.first).toBe(actual["k".repeat(1100)]);
+  expect(Object.hasOwn(actual, "")).toBe(true); expect(actual[""]).toBeUndefined();
+  expect(Object.hasOwn(actual.first, "")).toBe(true); expect(actual.first[""]).toBeUndefined();
+  expect(worker.sent.every(frame => new TextEncoder().encode(JSON.stringify(frame)).byteLength <= 64 * 1024)).toBe(true);
+});
+
+it.each([false, true])("finishes late chunked replies after timeout, text codec=%s", async text => {
+  const { ui } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
+  const pending = rpc.call(rpc.request("query", [], "late"), 5);
+  const envelope = { generation: "g", scope: "s", id: "late" };
+  const receive = (packet: unknown) => ui.emit("message", { data: { ...envelope, packet } });
+  receive(text ? { kind: "textBegin" } : { kind: "begin", value: { ...envelope, result: "" } });
+  await expect(pending).rejects.toBeInstanceOf(EngineRpcTimeout);
+  expect(() => {
+    receive(text ? { kind: "text", value: JSON.stringify({ payload: { ...envelope, result: "late" }, undefinedPaths: [], aliasPaths: [] }) }
+      : { kind: "string", path: ["result"], value: "late" });
+    receive({ kind: text ? "textEnd" : "end" });
+  }).not.toThrow();
+  const next = rpc.call(rpc.request("query", [], "next"));
+  ui.emit("message", { data: { ...envelope, id: "next", result: "fresh" } });
+  expect(await next).toBe("fresh");
 });

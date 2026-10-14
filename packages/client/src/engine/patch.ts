@@ -15,7 +15,10 @@ export function diffEngineValue(previous: unknown, next: unknown, limit = 128): 
       patches.push({ path, value: after }); return;
     }
     for (const key of Object.keys(before)) if (!Object.hasOwn(after, key)) patches.push({ path: [...path, key], remove: true });
-    for (const key of Object.keys(after)) visit(before[key], after[key], [...path, key]);
+    for (const key of Object.keys(after)) {
+      if (!Object.hasOwn(before, key)) patches.push({ path: [...path, key], value: after[key] });
+      else visit(before[key], after[key], [...path, key]);
+    }
   };
   visit(previous, next, []);
   return patches.length > limit ? undefined : patches;
@@ -38,8 +41,8 @@ export function applyEnginePatches(previous: unknown, patches: readonly EnginePa
     result = copy(result);
     let parent = result;
     for (const key of patch.path.slice(0, -1)) {
-      if (!parent[key] || typeof parent[key] !== "object") throw new Error("Engine patch requires a resnapshot");
-      parent[key] = copy(parent[key]); parent = parent[key];
+      if (!Object.hasOwn(parent, key) || !parent[key] || typeof parent[key] !== "object") throw new Error("Engine patch requires a resnapshot");
+      setEngineProperty(parent, key, copy(parent[key])); parent = parent[key];
     }
     const key = patch.path[patch.path.length - 1];
     if (patch.remove) delete parent[key]; else setEngineProperty(parent, key, patch.value);

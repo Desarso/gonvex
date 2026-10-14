@@ -15,9 +15,10 @@ const bootstrap = (before, after) => {
 const summary = { metadata: result.metadata, samplesPerMode: result.samples.filter(sample => sample.mode === 'worker').length, metrics: {} };
 for (const workload of ['cold', 'burst', 'snapshot', 'drain']) {
   const rows = {};
+  const scriptTimingValid = workload !== 'cold' || result.metadata.coldSamplingAligned === true;
   for (const mode of ['legacy', 'worker']) {
     const samples = result.samples.filter(sample => sample.mode === mode && sample[workload]).map(sample => sample[workload]);
-    rows[mode] = { wallMedianMs: quantile(samples.map(sample => sample.wallMs), .5), wallP95Ms: quantile(samples.map(sample => sample.wallMs), .95), scriptMedianMs: quantile(samples.map(sample => sample.scriptMs), .5), longTasks: samples.flatMap(sample => sample.longTasks).length, maxLongTaskMs: Math.max(0, ...samples.flatMap(sample => sample.longTasks)), clickP95Ms: quantile(samples.flatMap(sample => sample.clicks), .95), frameP95Ms: quantile(samples.flatMap(sample => sample.frames), .95) };
+    rows[mode] = { wallMedianMs: quantile(samples.map(sample => sample.wallMs), .5), wallP95Ms: quantile(samples.map(sample => sample.wallMs), .95), scriptMedianMs: scriptTimingValid ? quantile(samples.map(sample => sample.scriptMs), .5) : null, longTasks: samples.flatMap(sample => sample.longTasks).length, maxLongTaskMs: Math.max(0, ...samples.flatMap(sample => sample.longTasks)), clickP95Ms: quantile(samples.flatMap(sample => sample.clicks), .95), frameP95Ms: quantile(samples.flatMap(sample => sample.frames), .95) };
     if (workload === 'drain') Object.assign(rows[mode], {
       admissionMedianMs: quantile(samples.map(sample => sample.admissionMs), .5),
       admissionP95Ms: quantile(samples.map(sample => sample.admissionMs), .95),
@@ -26,9 +27,9 @@ for (const workload of ['cold', 'burst', 'snapshot', 'drain']) {
       averageAdmissionPerIntentMedianMs: quantile(samples.map(sample => sample.admissionMs / 500), .5),
     });
   }
-  const before = result.samples.filter(sample => sample.mode === 'legacy' && sample[workload]).map(sample => sample[workload].scriptMs);
-  const after = result.samples.filter(sample => sample.mode === 'worker' && sample[workload]).map(sample => sample[workload].scriptMs);
-  summary.metrics[workload] = { ...rows, scriptRatio: before.length && after.length ? bootstrap(before, after) : null };
+  const before = result.samples.filter(sample => sample.mode === 'legacy' && sample[workload]).map(sample => sample[workload].scriptMs).filter(Number.isFinite);
+  const after = result.samples.filter(sample => sample.mode === 'worker' && sample[workload]).map(sample => sample[workload].scriptMs).filter(Number.isFinite);
+  summary.metrics[workload] = { ...rows, scriptTimingValid, scriptRatio: scriptTimingValid && before.length && after.length ? bootstrap(before, after) : null };
 }
 summary.gate = { burst: summary.metrics.burst.worker.maxLongTaskMs <= 50 ? 'PASS' : 'FAIL', correctness: result.metadata.correctness, multiTab: result.metadata.multiTab, maxLoadFraction: Math.max(...result.samples.map(sample => sample.load[0])) / result.metadata.cores };
 await writeFile(new URL('summary.json', import.meta.url), JSON.stringify(summary, null, 2));

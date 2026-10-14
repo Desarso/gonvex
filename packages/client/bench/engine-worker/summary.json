@@ -1,5 +1,6 @@
 {
   "metadata": {
+    "coldSamplingAligned": false,
     "browser": "chromium",
     "version": "149.0.7827.55",
     "sdkCommit": "6462f7e5c7c9e7fe158868411a70d0aafe6f88bf",
@@ -36,7 +37,7 @@
       "legacy": {
         "wallMedianMs": 2348.4000000953674,
         "wallP95Ms": 2394,
-        "scriptMedianMs": 430.38,
+        "scriptMedianMs": null,
         "longTasks": 20,
         "maxLongTaskMs": 291,
         "clickP95Ms": null,
@@ -45,19 +46,14 @@
       "worker": {
         "wallMedianMs": 2422.4000000953674,
         "wallP95Ms": 2480.7000000476837,
-        "scriptMedianMs": 39.068,
+        "scriptMedianMs": null,
         "longTasks": 0,
         "maxLongTaskMs": 0,
         "clickP95Ms": null,
         "frameP95Ms": null
       },
-      "scriptRatio": {
-        "ratio": 0.0907755936614155,
-        "ci95": [
-          0.08480830919174184,
-          0.09338536803451802
-        ]
-      }
+      "scriptTimingValid": false,
+      "scriptRatio": null
     },
     "burst": {
       "legacy": {
@@ -78,11 +74,12 @@
         "clickP95Ms": 32.89999985694885,
         "frameP95Ms": 16.700000000000728
       },
+      "scriptTimingValid": true,
       "scriptRatio": {
         "ratio": 0.323656093703794,
         "ci95": [
-          0.31261174016686527,
-          0.331195342786858
+          0.31164057181756316,
+          0.33137638617090676
         ]
       }
     },
@@ -105,6 +102,7 @@
         "clickP95Ms": null,
         "frameP95Ms": null
       },
+      "scriptTimingValid": true,
       "scriptRatio": {
         "ratio": 0.005824081446736611,
         "ci95": [
@@ -140,10 +138,11 @@
         "postAdmissionMedianMs": 23740.200000047684,
         "averageAdmissionPerIntentMedianMs": 99.86359999990464
       },
+      "scriptTimingValid": true,
       "scriptRatio": {
         "ratio": 0.7162781656488427,
         "ci95": [
-          0.6896163590085667,
+          0.6905199878953971,
           0.7384045969039063
         ]
       }

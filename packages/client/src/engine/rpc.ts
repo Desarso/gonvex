@@ -38,11 +38,18 @@ export class EngineRpc {
     if (data.deliveryId) this.endpoint.postMessage({ generation: this.generation, scope: this.scope, deliveryAck: data.deliveryId });
     if (data.packet) {
       const packet = data.packet;
+      if (packet.kind !== "begin" && packet.kind !== "textBegin" && !this.chunks.has(data.id)) return;
       if (packet.kind === "textBegin") this.chunks.set(data.id, []);
       else if (packet.kind === "text") this.chunks.get(data.id).push(packet.value);
       else if (packet.kind === "textEnd") {
         const decoded = JSON.parse(this.chunks.get(data.id).join("")); this.chunks.delete(data.id); data = decoded.payload;
         for (const path of decoded.undefinedPaths) { let parent = data; for (const key of path.slice(0, -1)) parent = parent[key]; setEngineProperty(parent, path[path.length - 1], undefined); }
+        for (const { path, source } of decoded.aliasPaths) {
+          let parent = data, value = data;
+          for (const key of path.slice(0, -1)) parent = parent[key];
+          for (const key of source) value = value[key];
+          setEngineProperty(parent, path[path.length - 1], value);
+        }
       }
       else if (packet.kind === "begin") this.chunks.set(data.id, packet.value);
       else if (packet.kind === "end") { data = this.chunks.get(data.id); this.chunks.delete(data.id); }
@@ -82,7 +89,7 @@ export class EngineRpc {
     if (this.closed) return Promise.reject(new Error("Engine RPC is closed"));
     if (this.pending.has(request.id)) return Promise.reject(new Error("Engine RPC request is already pending"));
     return new Promise((resolve, reject) => {
-      const timer = timeoutMs > 0 ? setTimeout(() => { this.pending.delete(request.id); this.chunks.delete(request.id); reject(new EngineRpcTimeout(request)); }, timeoutMs) : undefined;
+      const timer = timeoutMs > 0 ? setTimeout(() => { this.pending.delete(request.id); reject(new EngineRpcTimeout(request)); }, timeoutMs) : undefined;
       this.pending.set(request.id, { resolve, reject, request, timer });
       this.endpoint.postMessage(request);
     });
@@ -152,13 +159,20 @@ export function sendEngineMessage(endpoint: EngineEndpoint, message: Record<stri
       if (!(error instanceof TextCodecRequired)) throw error;
       // Unusually long JSON keys cannot be used as bounded packet addresses.
       const paths: string[][] = [], parents = new WeakMap<object, string[]>();
+      const aliasPaths: Array<{ path: string[]; source: string[] }> = [];
+      let isRoot = true;
       const payload = JSON.stringify(message, function(key, value) {
-        const path = key === "" ? [] : [...(parents.get(this) ?? []), key];
+        const path = isRoot ? [] : [...(parents.get(this) ?? []), key];
+        isRoot = false;
         if (value === undefined) { paths.push(path); return null; }
-        if (value && typeof value === "object") parents.set(value, path);
+        if (value && typeof value === "object") {
+          const source = parents.get(value);
+          if (source) { aliasPaths.push({ path, source }); return null; }
+          parents.set(value, path);
+        }
         return value;
       });
-      const text = `{"payload":${payload},"undefinedPaths":${JSON.stringify(paths)}}`;
+      const text = `{"payload":${payload},"undefinedPaths":${JSON.stringify(paths)},"aliasPaths":${JSON.stringify(aliasPaths)}}`;
       await sendPacket({ packet: { kind: "textBegin" } });
       for (let offset = 0; offset < text.length; offset += 16 * 1024) await sendPacket({ packet: { kind: "text", value: text.slice(offset, offset + 16 * 1024) } });
       await sendPacket({ packet: { kind: "textEnd" } }); return;

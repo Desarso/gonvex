@@ -97,7 +97,7 @@ const browser = context.browser(); const page = await context.newPage();
 page.on('console', message => { if (/^(Seed |Engine )/.test(message.text())) process.stdout.write(message.text() + '\n'); });
 page.on('pageerror', error => process.stderr.write(`PAGE: ${error}\n`));
 const measured = Number(process.env.ITERATIONS ?? 20), warmups = Number(process.env.WARMUPS ?? 5);
-const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true };
+const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true, coldSamplingAligned: true };
 try {
   await page.goto(url); await page.waitForFunction(() => window.benchmark);
   process.stdout.write(`Preparing ${process.env.SEED_ROWS ?? 50_000}-row canonical IDB fixture...\n`);
@@ -116,6 +116,7 @@ try {
         const after = await metrics(); process.stdout.write(`${name}: ${value.wallMs.toFixed(1)}ms\n`); return { ...value, scriptMs: before === null ? null : (after - before) * 1_000 };
       };
       const cold = await run('cold'); if (cold.mode !== mode) throw new Error(`Mode silently fell back: ${mode} => ${cold.mode}`);
+      await page.evaluate(() => window.benchmark.prepare());
       if (index === -warmups && mode === 'worker') metadata.correctness = await page.evaluate(() => window.benchmark.parity());
       const burst = await run('burst');
       const snapshot = process.env.SKIP_SNAPSHOT ? null : await run('snapshot');
@@ -130,10 +131,12 @@ try {
   await page.goto(url); await page.waitForFunction(() => window.benchmark);
   process.stdout.write("Multi-tab: first worker start\n"); await page.bringToFront();
   await page.evaluate(() => window.benchmark.start("worker"));
+  await page.evaluate(() => window.benchmark.prepare());
   process.stdout.write("Multi-tab: second tab start\n");
   const second = await context.newPage(); await second.goto(url); await second.waitForFunction(() => window.benchmark); await second.bringToFront();
   second.on("console", message => process.stdout.write(message.text() + "\n"));
   await second.evaluate(() => window.benchmark.start("worker"));
+  await second.evaluate(() => window.benchmark.prepare());
   await page.waitForFunction(() => window.benchmark.mode() === "legacy");
   metadata.multiTab = { first: await page.evaluate(() => window.benchmark.mode()), second: await second.evaluate(() => window.benchmark.mode()) };
   await second.evaluate(() => window.benchmark.stop()); await second.close(); await page.evaluate(() => window.benchmark.stop());

@@ -57,6 +57,9 @@ async function start(mode: "legacy" | "worker") {
   release = watch.onUpdate(() => { const rows = watch.localReplicaResult(); if (rows) document.querySelector("main")!.textContent = `${rows.length}:${(rows[0] as any)?.id}`; });
   await until(() => watch.localReplicaResult()?.length === 250);
   const result = await finish(started);
+  return { ...result, mode: "engineMode" in client ? client.engineMode : "legacy" };
+}
+async function prepare() {
   // Exact-ID subscriptions retain 1,000 rows in both modes.
   const releases: Array<() => void> = [];
   let readyEntities = 0;
@@ -71,7 +74,6 @@ async function start(mode: "legacy" | "worker") {
   client.connect(); await until(() => client.localSessionState() === "authenticated"); await sourceReady;
   if ("engineMode" in client) await until(() => readyEntities === 1_000);
   await wait(200);
-  return { ...result, mode: "engineMode" in client ? client.engineMode : "legacy" };
 }
 async function burst() {
   await fetch("/reset-burst", { method: "POST" });
@@ -129,4 +131,4 @@ async function parity() {
   return { deniedApis: 3, retryResult: second, durableCrashRecovery: true, reconnect: true };
 }
 async function stop() { release?.(); release = undefined; if ("engineMode" in client) await client.close(); else await client.closeEngine(); closeStorage?.(); closeStorage = undefined; await wait(100); }
-(window as any).benchmark = { seed, start, burst, snapshot, drain, parity, stop, mode: () => (client as any).engineMode };
+(window as any).benchmark = { seed, start, prepare, burst, snapshot, drain, parity, stop, mode: () => (client as any).engineMode };
