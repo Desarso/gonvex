@@ -73,8 +73,7 @@ for(const mode of modes)for(const count of sizes)for(let trial=0;trial<trials;tr
   let page,session,subject;
   if(mode==='chromium') {
     if(count>=50000 && !largeContext){
-      const profile=path.join(generated,'indexeddb-round2-profile');
-      if(!process.argv.includes('--reuse-storage'))await fs.rm(profile,{recursive:true,force:true});
+      const profile=path.join(generated,'indexeddb-round2-profile');await fs.rm(profile,{recursive:true,force:true});
       largeContext=await chromium.launchPersistentContext(profile,{headless:true,args:['--js-flags=--expose-gc']});
     }
     page=count>=50000?await largeContext.newPage():await browser.newPage();await page.goto(url);

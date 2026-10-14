@@ -3,24 +3,24 @@
     "file": "baseline-100000-updated.heapsnapshot",
     "constructors": {
       "string": {
-        "count": 2490238,
-        "shallowBytes": 144775437
+        "count": 2490239,
+        "shallowBytes": 144775453
       },
       "native": {
-        "count": 109022,
-        "shallowBytes": 14978468
+        "count": 109028,
+        "shallowBytes": 14979920
       },
       "array": {
         "count": 361,
         "shallowBytes": 8544892
       },
       "Object": {
-        "count": 100533,
-        "shallowBytes": 2816024
+        "count": 100534,
+        "shallowBytes": 2816044
       },
       "code": {
-        "count": 11689,
-        "shallowBytes": 455044
+        "count": 11695,
+        "shallowBytes": 456792
       },
       "object shape": {
         "count": 2566,
@@ -38,15 +38,15 @@
         "count": 132,
         "shallowBytes": 2112
       },
-      "system / Context / scope @4972283": {
+      "system / Context / scope @4791393": {
         "count": 51,
         "shallowBytes": 2040
       },
-      "system / Context / scope @4658013": {
+      "system / Context / scope @5374591": {
         "count": 80,
         "shallowBytes": 1600
       },
-      "system / Context / scope @4972335": {
+      "system / Context / scope @4791253": {
         "count": 51,
         "shallowBytes": 1428
       }
@@ -124,12 +124,12 @@
     "file": "candidate-100000-updated.heapsnapshot",
     "constructors": {
       "string": {
-        "count": 2290491,
-        "shallowBytes": 139204949
+        "count": 2290485,
+        "shallowBytes": 139204853
       },
       "native": {
-        "count": 109085,
-        "shallowBytes": 15039577
+        "count": 109083,
+        "shallowBytes": 15039665
       },
       "array": {
         "count": 4068,
@@ -140,8 +140,8 @@
         "shallowBytes": 2871616
       },
       "code": {
-        "count": 12503,
-        "shallowBytes": 654768
+        "count": 12502,
+        "shallowBytes": 658896
       },
       "object shape": {
         "count": 2617,
@@ -167,7 +167,7 @@
         "count": 231,
         "shallowBytes": 4620
       },
-      "system / Context / scope @3996441": {
+      "system / Context / scope @4834789": {
         "count": 51,
         "shallowBytes": 2040
       }
