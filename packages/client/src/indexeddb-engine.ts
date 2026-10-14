@@ -59,7 +59,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
   private recordChanges(records: readonly EntityRecord[]) {
     const receipt = this.receipt();
     if (!receipt) return;
-    for (const record of records) (receipt.changes.entities[record.entity] ??= {})[record.id] = record.deleted ? null : JSON.parse(record.value);
+    for (const record of records) (receipt.changes.entities[record.entity] ??= Object.create(null))[record.id] = record.deleted ? null : JSON.parse(record.value);
   }
 
   private async commit(scope: string, run: (sequence: number) => Promise<void>): Promise<ReplicaStorageCommit> {
@@ -67,7 +67,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     const receipt = await this.database.transaction('rw', this.database.entities, this.database.windows, this.database.members, this.database.meta, async () => {
       const sequence = await this.nextSequence(scope);
       const receipt: ReplicaStorageCommit = { scope, previousSequence: sequence - 1, sequence,
-        changes: { sequence, entities: {}, windows: {} } };
+        changes: { sequence, entities: Object.create(null), windows: Object.create(null) } };
       this.commits.set(Dexie.currentTransaction!, receipt);
       await run(sequence);
       return receipt;
@@ -226,7 +226,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     const members = await this.database.members.where('[scope+signature+generation+order]')
       .between([record.scope, record.signature, record.generation!, ''], [record.scope, record.signature, record.generation!, '\uffff']).toArray();
     const { hasHashes, ...window } = metadata;
-    const ids: string[] = [], hashes: Record<string, string> = {};
+    const ids: string[] = [], hashes: Record<string, string> = Object.create(null);
     const duplicates = members.some(member => member.duplicateOrders?.length);
     if (duplicates) {
       const ordered = members.flatMap(member => member.hashOnly ? [] :
@@ -516,8 +516,8 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       this.database.meta.get([normalizedScope, "cursor"]),
     ]);
     if (entityRecords.length === 0 && windowRecords.length === 0 && !cursor) return undefined;
-    const entities: ReplicaSnapshot["entities"] = {};
-    for (const record of entityRecords) if(!record.deleted) (entities[record.entity] ??= {})[record.id] = JSON.parse(record.value) as ReplicaRow;
+    const entities: ReplicaSnapshot["entities"] = Object.create(null);
+    for (const record of entityRecords) if(!record.deleted) (entities[record.entity] ??= Object.create(null))[record.id] = JSON.parse(record.value) as ReplicaRow;
     const liveQueries: ReplicaSnapshot["liveQueries"] = {};
     for (const record of windowRecords) if(!record.deleted) liveQueries[record.signature] = await this.materializeWindow(record);
     return {
@@ -568,7 +568,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
           hasRows = true;
           const size = record.value.length * 2 + 256;
           if (count >= budget.maxRows || bytes + size > budget.maxBytes) { partial.add(record.entity); full = true; break; }
-          (entities[record.entity] ??= {})[record.id] = JSON.parse(record.value);
+          (entities[record.entity] ??= Object.create(null))[record.id] = JSON.parse(record.value);
           bytes += size; count++;
         }
         if (full || page.length < limit) break;

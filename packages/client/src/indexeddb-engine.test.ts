@@ -561,3 +561,15 @@ it('discovers retired scopes with bounded primary keys when secondary key cursor
   expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['b']);
   expect([...(storage as any).pendingCleanup].sort()).toEqual(['default', 'tenant']);
 });
+
+it('keeps rows whose ids shadow Object.prototype members in receipts and snapshots', async () => {
+  const storage = store();
+  const ids = ['__proto__', 'constructor', 'toString'];
+  const value = window(ids);
+  const receipt = await storage.replaceWindow(value, { ...empty, cursor: value.cursor }, 'default', ids.map((id) => ({ id, title: id })));
+  const changed = (receipt as any)?.changes?.entities?.tasks;
+  if (changed) expect(Object.keys(changed).sort()).toEqual([...ids].sort());
+  const snapshot = await storage.load();
+  expect(Object.keys(snapshot!.entities.tasks).sort()).toEqual([...ids].sort());
+  expect(JSON.parse(JSON.stringify(snapshot!.entities.tasks))['__proto__']).toEqual({ id: '__proto__', title: '__proto__' });
+});
