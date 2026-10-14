@@ -207,6 +207,12 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
         else records.set(id, { scope, signature: window.signature, generation, entity: window.entity, id,
           order: initialOrder(index), hash: binaryHash(window.hashes?.[id]) });
       });
+      // Normalized deletes can remove IDs ahead of the collection checkpoint.
+      // Preserve that checkpoint's certificate without retaining ownership.
+      for (const [id, hash] of Object.entries(window.hashes ?? {})) {
+        if (!records.has(id)) records.set(id, { scope, signature: window.signature, generation, entity: window.entity, id,
+          order: '', hash: binaryHash(hash), hashOnly: 1 });
+      }
       const members = [...records.values()];
       for (let offset = 0; offset < members.length; offset += 128) {
         await this.database.members.bulkPut(members.slice(offset, offset + 128));
@@ -587,9 +593,9 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       // collections, and `replica.ready` repeated the same work. Persist this
       // window atomically while leaving unrelated entity tables untouched.
       const rows = () => snapshot.entities[window.entity] ?? {};
-      const previousRecord = await this.database.windows.get([normalizedScope, window.signature]);
-      if (previousRecord && !previousRecord.deleted) {
-        const previous = await this.materializeWindow(previousRecord);
+      const check = await this.acceptsWindow(normalizedScope, window);
+      if (check.accepted && check.prior && !check.prior.deleted) {
+        const previous = await this.materializeWindow(check.prior);
         const nextIDs = new Set(window.ids);
         await this.pruneRows(normalizedScope,window,previous.ids.filter(id=>!nextIDs.has(id) && rows()[id]===undefined),window.cursor ?? snapshot.cursor,sequence);
       }
@@ -608,7 +614,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       const check = await this.acceptsWindow(normalizedScope, window);
       const generation = check.prior?.generation ?? sequence;
       const rows = delta.deleted.length ? snapshot.entities[window.entity] ?? {} : {};
-      await this.pruneRows(normalizedScope, window, delta.deleted.filter(id => rows[id] === undefined), window.cursor ?? snapshot.cursor, sequence);
+      if (check.accepted) await this.pruneRows(normalizedScope, window, delta.deleted.filter(id => rows[id] === undefined), window.cursor ?? snapshot.cursor, sequence);
       await this.writeRows(normalizedScope, window.entity, window.key, delta.upserts, window.cursor ?? snapshot.cursor, sequence);
       if (!check.accepted) {
         if (check.prior) this.receipt()!.changes.windows[window.signature] = await this.materializeWindow(check.prior);

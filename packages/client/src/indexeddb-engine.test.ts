@@ -121,6 +121,29 @@ it('uses reverse ownership for exclusion and deletes from every active owning wi
   expect(after?.entities.tasks.b).toBeUndefined();
 });
 
+it.each(['delta', 'replacement'] as const)('does not prune rows for a rejected stale window %s', async method => {
+  const name = `stale-window-${method}`; let storage = store(name);
+  await seed(storage);
+  const current = window(['a', 'b'], 'tasks', 10);
+  // A watermark advances membership authority without rewriting the row fields.
+  await storage.advanceWatermark([current], current.cursor);
+  const before = (await storage.load())!;
+  const stale = window(['b'], 'tasks', 5);
+  const snapshot = { ...empty, cursor: stale.cursor };
+  if (method === 'delta') {
+    const receipt = await storage.applyWindowDelta(stale, { upserts: [], deleted: ['a'] }, snapshot);
+    expect(receipt.changes.entities).toEqual({});
+    expect(receipt.changes.windows.tasks).toEqual(current);
+  } else {
+    await storage.replaceWindow(stale, snapshot);
+  }
+  expect((await storage.readChanges('default', before.storageSequence!)).entities).toEqual({});
+  storage.close(); storage = store(name);
+  expect(await storage.load()).toMatchObject({
+    cursor: before.cursor, entities: before.entities, liveQueries: before.liveQueries,
+  });
+});
+
 it('resets rows and membership on epoch change and refuses a retired epoch', async () => {
   const storage = store(); await seed(storage);
   const next = { ...window(['z']), cursor: { epoch: 'next', revision: 1 } };
@@ -370,4 +393,29 @@ it('reconciles checkpoint-only hashes when an unchanged full snapshot advances t
   expect(full).not.toHaveBeenCalled();
   expect((await storage.load())?.liveQueries.tasks.hashes).toEqual({ b: hashes.b });
   expect(await (storage as any).database.members.where('[scope+entity+id]').equals(['default', 'tasks', 'a']).count()).toBe(0);
+});
+
+it('preserves checkpoint-only hashes through full snapshot replacement and reopening', async () => {
+  const name = 'snapshot-certificate'; let storage = store(name);
+  const local = replica(storage);
+  const rows = [{ id: 'a', value: 1 }, { id: 'b', value: 2 }];
+  const hashes = await replicaRowsHashes(rows, 'id');
+  await local.replaceWindow({ ...window(), rows, hashes });
+  await local.applyTransaction({ cursor: { epoch: 'e', revision: 2 }, changes: [
+    { entity: 'tasks', id: 'a', operation: 'delete' },
+  ] });
+  const snapshot = (await storage.load())!;
+  expect(snapshot.liveQueries.tasks).toMatchObject({ ids: ['b'], hashes });
+  await storage.replaceSnapshot(snapshot);
+  local.dispose(); storage.close(); storage = store(name);
+  const restored = replica(storage); await restored.hydrate();
+  expect((await storage.load())?.liveQueries.tasks).toEqual(snapshot.liveQueries.tasks);
+  expect(restored.windowResumeState('tasks')).toEqual({
+    cursor: snapshot.liveQueries.tasks.cursor, digest: replicaAggregateDigest(hashes),
+  });
+  // A checkpoint hash must not keep a row alive as an owning membership.
+  await storage.replaceWindow(window(['a'], 'other', 3), empty, 'default', [rows[0]]);
+  await storage.applyWindowDelta(window([], 'other', 4), { upserts: [], deleted: ['a'] }, empty);
+  expect((await storage.load())?.entities.tasks.a).toBeUndefined();
+  expect((await storage.load())?.liveQueries.tasks.hashes).toEqual(hashes);
 });
