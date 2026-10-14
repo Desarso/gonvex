@@ -26,9 +26,9 @@ function reconcile(previous: any, next: any, ownedRows?: WeakSet<object>): any {
   if (ownedRows?.has(next)) return next;
   if (next === null || typeof next !== "object") return next;
   const array = Array.isArray(next);
-  let equal = previous && array === Array.isArray(previous) && Object.keys(previous).length === Object.keys(next).length;
+  let equal = previous !== null && typeof previous === "object" && array === Array.isArray(previous) && Object.keys(previous).length === Object.keys(next).length;
   const result: any = array ? [] : {};
-  for (const key of Object.keys(next)) { setEngineProperty(result, key, reconcile(previous?.[key], next[key], ownedRows)); if (result[key] !== previous?.[key]) equal = false; }
+  for (const key of Object.keys(next)) { setEngineProperty(result, key, reconcile(previous?.[key], next[key], ownedRows)); if (!Object.hasOwn(previous ?? {}, key) || result[key] !== previous?.[key]) equal = false; }
   return equal ? previous : Object.freeze(result);
 }
 
@@ -67,12 +67,14 @@ export class EngineClient {
   private invalidate(retire = false) {
     this.epoch += 1;
     this.rowCache.clear();
-    for (const watch of this.watches.values()) { watch.value = undefined; watch.sequence = 0; watch.error = undefined; watch.rowKeys.clear(); for (const listener of watch.listeners) listener(); }
+    for (const watch of this.watches.values()) { watch.value = undefined; watch.sequence = 0; watch.error = undefined; watch.rowKeys.clear(); }
     if (retire) {
       const active = [...this.watches.values()]; this.watches.clear();
       for (const watch of active) { const old = watch.id; watch.id = crypto.randomUUID(); this.watches.set(watch.id, watch); void this.admitted("unwatch", [old]).catch(() => undefined); }
     }
-    this.intents = []; this.emit("intents"); this.emit("scope");
+    this.intents = [];
+    for (const watch of this.watches.values()) for (const listener of watch.listeners) listener();
+    this.emit("intents"); this.emit("scope");
   }
   private attach(endpoint: EngineEndpoint) {
     this.endpoint = endpoint;
@@ -243,8 +245,8 @@ export class EngineClient {
     const [ref, args, options] = error.request.args as [FunctionReference, JsonValue, CallOptions];
     return this.reducer<T>(ref, args, options);
   }
-  query<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options?: CallOptions): Promise<T> { return this.admitted("query", [ref, args, options]); }
-  action<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options?: CallOptions): Promise<T> { return this.admitted("action", [ref, args, options]); }
+  query<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options?: CallOptions): Promise<T> { return this.admitted("query", [ref, args, options], options?.timeoutMs); }
+  action<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options?: CallOptions): Promise<T> { return this.admitted("action", [ref, args, options], options?.timeoutMs); }
   prepareReducer(ref: FunctionReference): Promise<void> { return this.admitted("prepareReducer", [ref]); }
   async readEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): Promise<T | undefined> { return (await this.readEntities<T>(entity, [id]))[0]; }
   readEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Promise<Array<T | undefined>> { return this.admitted("readEntities", [entity, ids]); }
@@ -276,7 +278,7 @@ export class EngineClient {
     const state: WatchState = { id: crypto.randomUUID(), kind, args, sequence: 0, listeners: new Set(), rowKeys: new Set() };
     const read = () => { if (state.error) throw state.error; return state.value; };
     return { read, onUpdate: (listener: () => void) => {
-      if (!state.listeners.size) { this.watches.set(state.id, state); const id = state.id; const generation = this.rpc.generation;
+      if (!state.listeners.size) { state.sequence = 0; state.error = undefined; this.watches.set(state.id, state); const id = state.id; const generation = this.rpc.generation;
         void this.admitted("watch", [id, kind, args]).catch(error => { if (generation !== this.rpc.generation || id !== state.id || !this.watches.has(id)) return; state.error = error; listener(); }); }
       state.listeners.add(listener);
       return () => { state.listeners.delete(listener); if (!state.listeners.size) { this.watches.delete(state.id); this.releaseRows(state); state.value = undefined; void this.admitted("unwatch", [state.id]).catch(() => undefined); } };
@@ -289,8 +291,12 @@ export class EngineClient {
   retainCollection(ref: FunctionReference, args: JsonValue = {}): (() => void) & { ready: Promise<void> } {
     const watch = this.watch("collectionRetention", [ref, args]);
     let resolve!: () => void;
-    const ready = new Promise<void>(done => { resolve = done; });
-    const release = watch.onUpdate(() => { if (watch.read()?.isUpToDate) resolve(); });
+    let reject!: (error: unknown) => void;
+    const ready = new Promise<void>((done, fail) => { resolve = done; reject = fail; });
+    const release = watch.onUpdate(() => {
+      try { if (watch.read()?.isUpToDate) resolve(); }
+      catch (error) { reject(error); }
+    });
     return Object.assign(release, { ready });
   }
   watchEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]) {
@@ -316,7 +322,11 @@ export class EngineClient {
   onSessionScopeChange(listener: () => void) { return this.listen("scope", listener); }
   get localSessionReady(): Promise<boolean> { const epoch = this.epoch; return this.admitted<boolean>("localSessionReady", []).then(ready => epoch === this.epoch && ready); }
   restoreSession(auth: GonvexClientAuth): Promise<boolean> { this.setAuth(auth); this.connect(); return this.localSessionReady; }
-  resetLocalReplica(options: ResetLocalReplicaOptions = {}): Promise<ResetLocalReplicaResult> { this.invalidate(true); return this.admitted<ResetLocalReplicaResult>("resetLocalReplica", [options]).then(async result => { await this.restartWatches(); return result; }); }
+  resetLocalReplica(options: ResetLocalReplicaOptions = {}): Promise<ResetLocalReplicaResult> {
+    this.invalidate(true);
+    return this.admitted<ResetLocalReplicaResult>("resetLocalReplica", [options]).finally(() =>
+      this.restartWatches().catch(error => this.emit("error", error)));
+  }
   retryIntent(id: string): Promise<boolean> { return this.admitted("retryIntent", [id]); }
   discardIntent(id: string): Promise<boolean> { return this.admitted("discardIntent", [id]); }
   onDeveloperCredential(listener: (token: string) => void) { return this.listen("developerCredential", listener); }

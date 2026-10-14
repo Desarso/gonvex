@@ -1,5 +1,6 @@
 {
   "metadata": {
+    "coldSamplingAligned": false,
     "browser": "webkit",
     "version": "26.5",
     "sdkCommit": "6462f7e5c7c9e7fe158868411a70d0aafe6f88bf",

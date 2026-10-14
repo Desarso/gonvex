@@ -1,5 +1,6 @@
 {
   "metadata": {
+    "coldSamplingAligned": false,
     "browser": "chromium",
     "version": "149.0.7827.55",
     "sdkCommit": "6462f7e5c7c9e7fe158868411a70d0aafe6f88bf",

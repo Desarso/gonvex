@@ -518,7 +518,8 @@
       },
       "reconnect": true
     },
-    "failure": "Interrupted to integrate correctness fixes concurrently pushed to the remote branch. Shared load repeatedly excluded warmup pairs; no measured pairs accepted."
+    "failure": "Interrupted to integrate correctness fixes concurrently pushed to the remote branch. Shared load repeatedly excluded warmup pairs; no measured pairs accepted.",
+    "coldSamplingAligned": false
   },
   "samples": []
 }

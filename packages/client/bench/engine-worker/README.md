@@ -3,7 +3,7 @@
 Run one browser at a time with production-built assets and persistent profiles. The fixture has 50,000 task rows with 50 columns, five related tables, a 250-row mounted view, and 1,000 exact-ID subscriptions. Both modes use a 200 MiB resident budget and unlimited resident row count. Row bytes, browser version, source revision, hardware, load observations, and individual command latencies are recorded.
 
 ```sh
-PIPELINE=1 LOAD_LIMIT=.5 WAIT_LOAD=1 BROWSER=chromium WARMUPS=1 ITERATIONS=4 \
+PIPELINE=1 START_LOAD_LIMIT=.35 LOAD_LIMIT=.5 WAIT_LOAD=1 BROWSER=chromium WARMUPS=1 ITERATIONS=4 \
   RESULTS=round2-final-chromium-pipelined.json node packages/client/bench/engine-worker/run.mjs
 node packages/client/bench/engine-worker/summarize.mjs \
   round2-final-chromium-pipelined.json round2-final-chromium-pipelined-summary.json
@@ -22,7 +22,9 @@ Admission defaults to sequential awaited calls. `PIPELINE=1` issues all 500 prom
 
 The bundle script compares identical dependency builds against the settled `11820f6` baseline and recorded `origin/staging`. It verifies the default minified asset's SHA-256, checks gzip growth, and reports opt-in entry/chunk sizes. Its worker entry excludes profiling code.
 
-The harness checks load before each mode, every ten seconds during long workloads, and after each workload. It rejects a complete pair when one-minute load exceeds half the logical CPU count. LOAD_LIMIT selects a stricter fraction when needed. WAIT_LOAD=1 waits and repeats that pair; otherwise it stops and records a failure. Failed/partial runs are diagnostic artifacts. Complete runs report 10,000 deterministic bootstrap samples, both independent median ratios and paired median ratios. The drain gate requires the paired 95% upper bound to be at most 1. Chromium's cold-script gate requires at least 40% reduction at that bound.
+Cold sampling ends after the cached visible rows paint. The runner samples CDP around `start()` and then calls `prepare()` outside that interval to register the exact-ID interests, connect/authenticate, and wait for source readiness. New runs record `coldSamplingAligned: true`. Historical samples in `results.json` used different cold script and wall intervals, so their cold script medians and ratios are invalid and omitted from `summary.json`. Their raw values remain for audit; the corrected harness needs a new full measurement run.
+
+The harness checks load before each mode, every ten seconds during long workloads, and after each workload. It rejects a complete pair when one-minute load exceeds half the logical CPU count. LOAD_LIMIT selects a stricter fraction when needed. START_LOAD_LIMIT can reserve headroom before a pair without changing the acceptance cutoff during measurement. WAIT_LOAD=1 waits and repeats that pair; otherwise it stops and records a failure. Failed/partial runs are diagnostic artifacts. Complete runs report 10,000 deterministic bootstrap samples, both independent median ratios and paired median ratios. The drain gate requires the paired 95% upper bound to be at most 1. Chromium's cold-script gate requires at least 40% reduction at that bound.
 
 Chromium uses CDP ScriptDuration. RAF intervals and scheduled click-to-two-RAF paint timings are available across browsers. Long-task and script metrics are explicitly unavailable when the browser lacks the corresponding API; an empty observation array does not establish a pass.
 

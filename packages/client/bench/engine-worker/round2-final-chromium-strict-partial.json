@@ -1036,7 +1036,8 @@
       },
       "reconnect": true
     },
-    "failure": "Stopped intentionally after two accepted pairs: 35% load cutoff repeatedly paused the shared machine; superseded by final 50%-cutoff run."
+    "failure": "Stopped intentionally after two accepted pairs: 35% load cutoff repeatedly paused the shared machine; superseded by final 50%-cutoff run.",
+    "coldSamplingAligned": false
   },
   "samples": [
     {

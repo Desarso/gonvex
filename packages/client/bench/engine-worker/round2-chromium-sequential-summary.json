@@ -1907,7 +1907,8 @@
     "multiTab": {
       "first": "legacy",
       "second": "legacy"
-    }
+    },
+    "coldSamplingAligned": false
   },
   "samplesPerMode": 6,
   "metrics": {
@@ -1915,7 +1916,7 @@
       "legacy": {
         "wallMedianMs": 2510.0999999046326,
         "wallP95Ms": 2847.5999999046326,
-        "scriptMedianMs": 446.76300000000003,
+        "scriptMedianMs": null,
         "longTasks": 6,
         "maxLongTaskMs": 315,
         "clickP95Ms": null,
@@ -1924,19 +1925,14 @@
       "worker": {
         "wallMedianMs": 2645.7999999523163,
         "wallP95Ms": 3504.7000000476837,
-        "scriptMedianMs": 40.721000000000004,
+        "scriptMedianMs": null,
         "longTasks": 0,
         "maxLongTaskMs": 0,
         "clickP95Ms": null,
         "frameP95Ms": null
       },
-      "scriptRatio": {
-        "ratio": 0.09114676013904464,
-        "ci95": [
-          0.07947838115510907,
-          0.0957078534742177
-        ]
-      },
+      "scriptTimingValid": false,
+      "scriptRatio": null,
       "pairedWallRatio": {
         "ratio": 1.0371605334082474,
         "ci95": [
@@ -1945,14 +1941,7 @@
         ],
         "pairs": 6
       },
-      "pairedScriptRatio": {
-        "ratio": 0.09213521279724869,
-        "ci95": [
-          0.07898003033929293,
-          0.09338387475148205
-        ],
-        "pairs": 6
-      },
+      "pairedScriptRatio": null,
       "wallRatio": {
         "ratio": 1.0540615911927171,
         "ci95": [
@@ -1980,6 +1969,7 @@
         "clickP95Ms": 32.299999952316284,
         "frameP95Ms": 16.799999999999727
       },
+      "scriptTimingValid": true,
       "scriptRatio": {
         "ratio": 0.3147416608433993,
         "ci95": [
@@ -2030,6 +2020,7 @@
         "clickP95Ms": null,
         "frameP95Ms": null
       },
+      "scriptTimingValid": true,
       "scriptRatio": {
         "ratio": 0.010582609968044476,
         "ci95": [
@@ -2092,6 +2083,7 @@
         "postAdmissionMedianMs": 22680.5,
         "averageAdmissionPerIntentMedianMs": 58.5497999997139
       },
+      "scriptTimingValid": true,
       "scriptRatio": {
         "ratio": 0.6046995450246372,
         "ci95": [
@@ -2118,7 +2110,7 @@
       "wallRatio": {
         "ratio": 0.994734156466454,
         "ci95": [
-          0.922649722322837,
+          0.9190355824915237,
           1.1343767211628797
         ]
       }
@@ -2126,7 +2118,7 @@
   },
   "gate": {
     "drain": "FAIL",
-    "coldScript": "PASS",
+    "coldScript": "UNAVAILABLE",
     "burst": "PASS",
     "correctness": {
       "deniedApis": 3,

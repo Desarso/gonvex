@@ -120,15 +120,16 @@ const browser = context.browser(); const page = await context.newPage();
 page.on('console', message => { if (/^(Seed |Engine )/.test(message.text())) process.stdout.write(message.text() + '\n'); });
 page.on('pageerror', error => process.stderr.write(`PAGE: ${error}\n`));
 const loadLimit = Number(process.env.LOAD_LIMIT ?? .5);
+const startLoadLimit = Math.min(loadLimit, Number(process.env.START_LOAD_LIMIT ?? loadLimit));
 const measured = Number(process.env.ITERATIONS ?? 20), warmups = Number(process.env.WARMUPS ?? 5);
-const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', admission: process.env.PIPELINE ? 'pipelined' : 'sequential', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true, engineRevision: revision ?? "checkout", profileIO: Boolean(process.env.PROFILE_IO), loadLimit, loadChecks: [], fixtureIsolation: process.env.KEEP_EDITS ? "edits-accumulate-across-modes" : "edits-reset-before-each-mode", firefoxWorkerWebSocketWorkaround: workaroundApplied() };
+const samples = []; const metadata = { browser: browserName, version: browser.version(), sdkCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), fixture: 'engine-worker-fixture-v1', admission: process.env.PIPELINE ? 'pipelined' : 'sequential', cpu: cpus()[0].model, cores: cpus().length, ram: totalmem(), os: `${process.platform} ${release()}`, network: 'local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate', load: loadavg(), production: true, coldSamplingAligned: true, engineRevision: revision ?? "checkout", profileIO: Boolean(process.env.PROFILE_IO), loadLimit, startLoadLimit, loadChecks: [], fixtureIsolation: process.env.KEEP_EDITS ? "edits-accumulate-across-modes" : "edits-reset-before-each-mode", firefoxWorkerWebSocketWorkaround: workaroundApplied() };
 try {
   await page.goto(url); await page.waitForFunction(() => window.benchmark);
   process.stdout.write(`Preparing ${process.env.SEED_ROWS ?? 50_000}-row canonical IDB fixture...\n`);
   metadata.seed = await page.evaluate(count => window.benchmark.seed(count), Number(process.env.SEED_ROWS ?? 50_000));
   process.stdout.write(`Seed ready: ${metadata.seed.rowBytes} bytes/row\n`);
   const waitForQuiet = async () => {
-    while (loadavg()[0] / cpus().length > loadLimit) {
+    while (loadavg()[0] / cpus().length > startLoadLimit) {
       process.stdout.write(`Waiting for quiet machine: load ${loadavg()[0].toFixed(2)} / ${cpus().length} cores\n`);
       await sleep(30_000);
     }
@@ -167,6 +168,7 @@ try {
             return { ...value, scriptMs: before === null ? null : (after - before) * 1_000 };
           };
           const cold = await run('cold'); if (cold.mode !== mode) throw new Error(`Mode silently fell back: ${mode} => ${cold.mode}`);
+          await page.evaluate(() => window.benchmark.prepare());
           if (index === -warmups && mode === 'worker' && !metadata.correctness) metadata.correctness = await page.evaluate(() => window.benchmark.parity());
           const burst = await run('burst');
           const snapshot = process.env.SKIP_SNAPSHOT ? null : await run('snapshot');
@@ -190,10 +192,12 @@ try {
   await page.goto(url); await page.waitForFunction(() => window.benchmark);
   process.stdout.write("Multi-tab: first worker start\n"); await page.bringToFront();
   await page.evaluate(() => window.benchmark.start("worker"));
+  await page.evaluate(() => window.benchmark.prepare());
   process.stdout.write("Multi-tab: second tab start\n");
   const second = await context.newPage(); await second.goto(url); await second.waitForFunction(() => window.benchmark); await second.bringToFront();
   second.on("console", message => process.stdout.write(message.text() + "\n"));
   await second.evaluate(() => window.benchmark.start("worker"));
+  await second.evaluate(() => window.benchmark.prepare());
   await page.waitForFunction(() => window.benchmark.mode() === "legacy");
   metadata.multiTab = { first: await page.evaluate(() => window.benchmark.mode()), second: await second.evaluate(() => window.benchmark.mode()) };
   await second.evaluate(() => window.benchmark.stop()); await second.close(); await page.evaluate(() => window.benchmark.stop());

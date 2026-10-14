@@ -1880,27 +1880,49 @@ export function useControlQuery<T extends JsonValue = JsonValue>(ref: FunctionRe
 
 function useEntityBatchState<T extends ReplicaRow>(entity: string, ids: readonly string[]): EngineEntitiesState<T> {
   const client = useWatchClient();
-  const idsKey = JSON.stringify(ids);
+  const stable = useRef<readonly string[]>([]);
+  if (stable.current.length !== ids.length || ids.some((id, index) => id !== stable.current[index])) stable.current = [...ids];
+  const selectedIDs = stable.current;
+  const cache = useMemo(() => new Map<string, { version: number; row: T | undefined }>(), [client, entity]);
   const watch = useMemo(() => {
-    if ("engineMode" in client) return client.watchEntities<T>(entity, ids);
-    let snapshot: EngineEntitiesState<T> = { status: "ready", rows: client.replicaEntities<T>(entity, ids) };
-    let version = -1;
-    const read = () => {
+    if ("engineMode" in client) return client.watchEntities<T>(entity, selectedIDs);
+    const retained = new Set(selectedIDs);
+    for (const id of cache.keys()) if (!retained.has(id)) cache.delete(id);
+    let snapshot: EngineEntitiesState<T> = { status: "ready", rows: [] };
+    let tableVersion: number | undefined;
+    const versions = new Map<string, number>();
+    const refresh = (touched?: ReadonlySet<string>) => {
       const next = client.localReplica.entityVersion(entity);
-      if (version !== next) {
-        version = next;
-        const rows = client.replicaEntities<T>(entity, ids);
-        const prior = snapshot.status === "ready" ? snapshot.rows : undefined;
-        if (!prior || rows.some((row, index) => row !== prior[index])) snapshot = { status: "ready", rows };
+      // Reentrant writes can deliver an older notification after a newer one.
+      // Its touched IDs still need their own version checks.
+      if (next === tableVersion && !touched) return false;
+      tableVersion = next;
+      let changed = false;
+      for (const id of touched ?? selectedIDs) {
+        if (touched && !versions.has(id)) continue;
+        const version = client.localReplica.entityVersion(entity, id);
+        if (versions.get(id) !== version) { versions.set(id, version); changed = true; }
       }
-      return snapshot;
+      if (changed) snapshot = { status: "ready", rows: selectedIDs.map(id => {
+        const version = versions.get(id)!;
+        const prior = cache.get(id);
+        if (prior?.version === version) return prior.row;
+        const row = client.localReplica.entity<T>(entity, id);
+        cache.set(id, { version, row });
+        return row;
+      }) };
+      return changed;
     };
-    return { getSnapshot: read, onUpdate: (notify: () => void) => {
-      const release = client.retainReplicaEntities(entity, ids);
-      const stop = client.localReplica.subscribe(notify, { entity, ids });
-      return () => { stop(); release(); };
+    refresh();
+    let active = false;
+    return { getSnapshot: () => { if (!active) refresh(); return snapshot; }, onUpdate: (notify: () => void) => {
+      const release = client.retainReplicaEntities(entity, selectedIDs);
+      const stop = client.localReplica.subscribe(touched => { if (refresh(touched)) notify(); }, { entity, ids: selectedIDs });
+      active = true;
+      if (refresh()) notify();
+      return () => { active = false; stop(); release(); };
     } };
-  }, [client, entity, idsKey]);
+  }, [client, entity, selectedIDs, cache]);
   return useSyncExternalStore(watch.onUpdate, watch.getSnapshot, () => pendingEntityState);
 }
 
@@ -1917,21 +1939,24 @@ export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id:
 
 export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined> {
   const state = useEntityBatchState<T>(entity, ids);
-  const idsKey = JSON.stringify(ids);
-  return useMemo(() => state.status === "ready" ? state.rows : ids.map(() => undefined), [state, idsKey]);
+  return useMemo(() => state.status === "ready" ? state.rows : ids.map(() => undefined), [state, ids.length]);
 }
 
 /** Read a persisted Live Query window without opening another server subscription. */
 export function useRetainedLiveQuery<T extends ReplicaRow = ReplicaRow>(signatureOrReference: string | FunctionReference, args: JsonValue = {}): LiveQueryResult<T> & { pending?: boolean } {
   const client = useWatchClient();
   const argsKey = JSON.stringify(args);
+  const referenceKey = typeof signatureOrReference === "string" ? JSON.stringify(signatureOrReference)
+    : JSON.stringify([signatureOrReference.kind, signatureOrReference.path, signatureOrReference.scope, signatureOrReference.delivery, signatureOrReference.live]);
   const watch = useMemo(() => {
     if ("engineMode" in client) return client.watchRetained<T>(signatureOrReference, args);
     const signature = typeof signatureOrReference === "string" ? signatureOrReference : client.replicaSignature(signatureOrReference, args);
     return { getSnapshot: () => client.localReplica.liveQuerySnapshot<T>(signature), onUpdate: (notify: () => void) => {
       const release = client.retainReplicaWindow(signature); const stop = client.localReplica.subscribe(notify, { window: signature }); return () => { stop(); release(); };
     } };
-  }, [client, signatureOrReference, argsKey]);
+    // Equivalent generated references can be reconstructed on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, referenceKey, argsKey]);
   return useSyncExternalStore(watch.onUpdate, watch.getSnapshot, () => emptyLiveQuery as LiveQueryResult<T>) ?? pendingLiveQuery as LiveQueryResult<T> & { pending?: boolean };
 }
 const pendingLiveQuery = { rows: [], ids: [], source: "cache" as const, completeness: "partial" as const, freshness: "verifying" as const, pending: true };
@@ -1944,8 +1969,13 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
   args: JsonValue | "skip" = {},
 ): LiveQueryResult<T> & { pending?: boolean } {
   const client = useWatchClient();
-  const engineWatch = useMemo(() => "engineMode" in client && args !== "skip" ? client.watchRetained<T>(ref, args, true) : undefined, [client, ref, JSON.stringify(args)]);
   const argsKey = JSON.stringify(args);
+  const referenceKey = JSON.stringify([ref.kind, ref.path, ref.scope, ref.delivery, ref.live]);
+  const engineWatch = useMemo(
+    () => "engineMode" in client && args !== "skip" ? client.watchRetained<T>(ref, args, true) : undefined,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, referenceKey, argsKey],
+  );
   const signature = args === "skip" || "engineMode" in client ? "" : client.replicaSignature(ref, args);
   useEffect(() => {
     if (args === "skip" || "engineMode" in client) return;
@@ -1958,8 +1988,8 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
     let offlineVersion = "";
     let offlineResult: LiveQueryResult<T> | undefined;
     return () => {
-      if ("engineMode" in client) return engineWatch?.getSnapshot() ?? pendingLiveQuery as LiveQueryResult<T> & { pending?: boolean };
       if (args === 'skip') return emptyLiveQuery as LiveQueryResult<T>;
+      if ("engineMode" in client) return engineWatch?.getSnapshot() ?? pendingLiveQuery as LiveQueryResult<T> & { pending?: boolean };
       if (client.localReplica.freshness() !== 'offline') return client.localReplica.liveQuerySnapshot<T>(signature);
       const version = client.offlineLiveQueryToken(ref);
       if (offlineVersion === version && offlineResult) return offlineResult;

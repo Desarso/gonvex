@@ -657,7 +657,8 @@
     "multiTab": {
       "first": "legacy",
       "second": "legacy"
-    }
+    },
+    "coldSamplingAligned": false
   },
   "samplesPerMode": 2,
   "metrics": {
@@ -680,6 +681,7 @@
         "clickP95Ms": null,
         "frameP95Ms": null
       },
+      "scriptTimingValid": false,
       "scriptRatio": null,
       "pairedWallRatio": {
         "ratio": 0.795448668218257,
@@ -717,6 +719,7 @@
         "clickP95Ms": 28,
         "frameP95Ms": 17.100000000000364
       },
+      "scriptTimingValid": true,
       "scriptRatio": null,
       "pairedWallRatio": {
         "ratio": 0.9974126778783958,
@@ -754,6 +757,7 @@
         "clickP95Ms": null,
         "frameP95Ms": null
       },
+      "scriptTimingValid": true,
       "scriptRatio": null,
       "pairedWallRatio": {
         "ratio": 0.9992069436489404,
@@ -803,6 +807,7 @@
         "postAdmissionMedianMs": 23152,
         "averageAdmissionPerIntentMedianMs": 20.34
       },
+      "scriptTimingValid": true,
       "scriptRatio": null,
       "pairedWallRatio": {
         "ratio": 1.092011481278421,

@@ -68,7 +68,8 @@
       "durableCrashRecovery": true,
       "reconnect": true
     },
-    "failure": "Load gate stopped after two warmup pairs, before measured samples. See execution log; subsequent workstation load observation was 11.02 / 16 cores."
+    "failure": "Load gate stopped after two warmup pairs, before measured samples. See execution log; subsequent workstation load observation was 11.02 / 16 cores.",
+    "coldSamplingAligned": false
   },
   "samples": []
 }

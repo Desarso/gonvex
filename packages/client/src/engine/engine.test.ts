@@ -62,6 +62,18 @@ it("bounds chunk delivery and reassembles a large reply atomically", async () =>
   expect(ui.sent.filter(frame => frame.deliveryAck).length).toBe(worker.sent.length);
 });
 
+it.each(["\u0000", "\\\"", "\u0800"])("bounds serialized packets for escaped and multibyte strings, %j", async character => {
+  const { ui, worker } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
+  const shared = { text: character.repeat(16_000), missing: undefined };
+  const result = { first: shared, second: shared, rows: [shared, undefined] };
+  const pending = rpc.call<typeof result>(rpc.request("query", [], "escaped"));
+  await sendEngineMessage(worker, { generation: "g", scope: "s", id: "escaped", result });
+  const actual = await pending;
+  expect(actual).toEqual(result); expect(actual.first).toBe(actual.second); expect(actual.rows[0]).toBe(actual.first);
+  expect(worker.sent.every(frame => new TextEncoder().encode(JSON.stringify(frame)).byteLength <= 64 * 1024)).toBe(true);
+  expect(ui.sent.filter(frame => frame.deliveryAck).length).toBe(worker.sent.length);
+});
+
 it("rejects outstanding RPCs on a worker crash", async () => {
   const { ui } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
   const pending = rpc.call(rpc.request("reducer", [])); ui.emit("error", {});
@@ -510,4 +522,257 @@ it("keeps a later packet behind a cohort waiting for its delivery lease", async 
   await new Promise(resolve => setTimeout(resolve, 0));
   release(); expect(await Promise.all(pending)).toEqual([7, 7, 7]);
   expect((await host.rpc.call<any[]>(host.rpc.request("listIntents", []))).map(entry => entry.id)).toEqual(commands.map(command => command.id));
+});
+
+it("clears a watch error when its next successful host read has the same value", async () => {
+  let failed = false, publish = () => {};
+  vi.spyOn(GonvexClient.prototype, "watchControlQuery").mockImplementation(() => ({
+    onUpdate: (notify: () => void) => { publish = notify; return () => {}; },
+    getSnapshot: () => { if (failed) throw new Error("Temporary read failure"); return { result: 1, version: 1 }; },
+  }) as any);
+  const { create } = await setup(); const host = await create(); cleanups.push(host.close);
+  const updates: any[] = [];
+  host.rpc.onEvent.add((method, args) => { if (method === "watchBatch") updates.push(...args[1]); });
+  await host.rpc.call(host.rpc.request("watch", ["control", "control", [{ kind: "query", path: "control.test" }, {}]]));
+  await vi.waitFor(() => expect(updates.at(-1)?.value).toEqual({ result: 1, version: 1 }));
+  failed = true; publish();
+  await vi.waitFor(() => expect(updates.at(-1)?.error?.message).toBe("Temporary read failure"));
+  failed = false; publish();
+  await vi.waitFor(() => expect(updates.at(-1)).toEqual({ id: "control", value: { result: 1, version: 1 } }));
+});
+
+it("uses the declared Live Query key for offline membership", async () => {
+  const { init, create } = await setup();
+  const storage = new IndexedDBLocalReplicaStorage(init.storage.replicaName);
+  await storage.replaceSnapshot({ entities: { tasks: { one: { slug: "one", title: "Task", id: "other-id" } } }, liveQueries: {} }, "visible"); storage.close();
+  const host = await create(); cleanups.push(host.close);
+  const liveRef: FunctionReference = { kind: "query", path: "tasks.bySlug", delivery: "live", live: {
+    entity: "tasks", key: "slug", plan: { table: "tasks", key: "slug", columns: ["slug", "title", "id"] },
+  } };
+  let snapshot: any;
+  host.rpc.onEvent.add((method, args) => { if (method === "watchBatch") for (const update of args[1]) if (update.id === "live") snapshot = update.patches ? applyEnginePatches(snapshot, update.patches) : update.value; });
+  await host.rpc.call(host.rpc.request("watch", ["live", "liveState", [liveRef, {}]]));
+  await vi.waitFor(() => expect(snapshot?.ids).toEqual(["one"]));
+  expect(snapshot.rows).toEqual([{ slug: "one", title: "Task", id: "other-id" }]);
+  expect(snapshot.freshness).toBe("offline");
+});
+
+async function mockEngine(intercept?: (request: any, endpoint: Endpoint) => boolean) {
+  const hosts: Array<{ endpoints: ReturnType<typeof pair>; envelope: any; watchIds: string[] }> = [];
+  vi.stubGlobal("Worker", class {});
+  vi.stubGlobal("navigator", { locks: { request: (_name: string, _options: any, callback: any) => Promise.resolve(callback({ name: _name })), query: async () => ({ held: [] }) } });
+  const workerFactory = () => {
+    const host = { endpoints: pair(), envelope: undefined as any, watchIds: [] as string[] }; hosts.push(host);
+    host.endpoints.worker.addEventListener("message", ({ data }) => {
+      if (!data.method) return;
+      host.envelope = data;
+      if (data.method === "watch") host.watchIds.push(data.args[0]);
+      if (intercept?.(data, host.endpoints.worker)) return;
+      host.endpoints.worker.postMessage({ generation: data.generation, scope: data.scope, id: data.id, result: data.method === "init" ? {
+        connection: { isWebSocketConnected: false, hasEverConnected: false, connectionCount: 0, connectionRetries: 0, hasInflightRequests: false, inflightReducers: 0, inflightActions: 0, inflightOneShotQueries: 0 }, session: "restored", commandScope: owner,
+      } : undefined });
+    });
+    return Object.assign(host.endpoints.ui, { terminate: vi.fn() }) as unknown as Worker;
+  };
+  const client = await createEngineClient(url, { engine: { workerUrl: "worker.js", artifactHash: "artifact", workerFactory }, auth,
+    storage: { replicaName: "mock", outboxName: "mock-outbox", contract: { version: 1, offlineMaxAgeMs: null }, initialVersion: 1 }, fallbackBinding: binding });
+  cleanups.push(() => client.close());
+  const publish = (sequence: number, value: unknown) => {
+    const host = hosts.at(-1)!;
+    host.endpoints.worker.postMessage({ generation: host.envelope.generation, scope: host.envelope.scope, id: crypto.randomUUID(), event: "watchBatch",
+      args: [sequence, [{ id: host.watchIds.at(-1), value }]] });
+  };
+  return { client, hosts, publish };
+}
+
+it.each(["setAuth", "authenticate", "scope", "reset", "recover"] as const)("clears every watch and intent before notifying subscribers during %s", async method => {
+  const { client, hosts } = await mockEngine();
+  const a = client.watchEntities("tasks", ["one"]), b = client.watchEntities("tasks", ["two"]);
+  const observed: unknown[] = [];
+  const read = () => { observed.push([a.getSnapshot(), b.getSnapshot(), client.intentsSnapshot(), client.cacheStats().rows]); };
+  cleanups.push(a.onUpdate(read), b.onUpdate(read), client.subscribeIntents(read), client.onSessionScopeChange(read));
+  const host = hosts[0];
+  await vi.waitFor(() => expect(host.watchIds).toHaveLength(2));
+  const event = (name: string, args: unknown[]) => host.endpoints.worker.postMessage({ generation: host.envelope.generation, scope: host.envelope.scope, id: crypto.randomUUID(), event: name, args });
+  event("watchBatch", [42, host.watchIds.map((id, index) => ({ id, value: { status: "ready", rows: [{ id: index ? "two" : "one", value: 1 }] } }))]);
+  event("intents", [[{ id: "old-account-intent" }]]);
+  await vi.waitFor(() => {
+    expect(a.getSnapshot().status).toBe("ready"); expect(b.getSnapshot().status).toBe("ready");
+    expect(client.intentsSnapshot()).toHaveLength(1); expect(client.cacheStats().rows).toBe(2);
+  });
+  observed.length = 0;
+  if (method === "setAuth") client.setAuth({ identity: { sub: "other", iss: "issuer" } });
+  else if (method === "authenticate") await client.authenticate({ identity: { sub: "other", iss: "issuer" } });
+  else if (method === "scope") event("scope", ["new-scope"]);
+  else if (method === "reset") await client.resetLocalReplica();
+  else await client.recover();
+  await vi.waitFor(() => expect(observed).toHaveLength(4));
+  for (const snapshot of observed) expect(snapshot).toEqual([{ status: "pending" }, { status: "pending" }, [], 0]);
+});
+
+it.each(["watchBatch", "watchError"] as const)("rejects collection readiness on %s errors without interrupting other subscribers", async method => {
+  const { client, hosts } = await mockEngine();
+  const retain = client.retainCollection({ kind: "query", path: "tasks.all" }); cleanups.push(retain);
+  const ready = retain.ready.then(() => ({ resolved: true }), error => ({ error }));
+  const watch = client.watchEntities("tasks", ["one"]), notified = vi.fn();
+  cleanups.push(watch.onUpdate(notified));
+  const host = hosts[0];
+  await vi.waitFor(() => expect(host.watchIds).toHaveLength(2));
+  const error = { name: "GonvexClientError", code: "storage", message: "Collection read failed" };
+  const healthy = { id: host.watchIds[1], value: { status: "ready", rows: [{ id: "one", value: 1 }] } };
+  const event = (name: string, args: unknown[]) => host.endpoints.ui.emit("message", { data: {
+    generation: host.envelope.generation, scope: host.envelope.scope, id: crypto.randomUUID(), event: name, args,
+  } });
+  expect(() => {
+    if (method === "watchBatch") event(method, [1, [{ id: host.watchIds[0], error }, healthy]]);
+    else { event(method, [host.watchIds[0], error]); event("watchBatch", [1, [healthy]]); }
+  }).not.toThrow();
+  expect(await ready).toMatchObject({ error: { name: "GonvexClientError", code: "storage", message: "Collection read failed" } });
+  expect(notified).toHaveBeenCalledOnce();
+  expect(watch.getSnapshot()).toEqual(healthy.value);
+});
+
+it("resolves collection readiness only when its watch becomes up to date", async () => {
+  const { client, hosts, publish } = await mockEngine();
+  const retain = client.retainCollection({ kind: "query", path: "tasks.all" }); cleanups.push(retain);
+  const resolved = vi.fn(); void retain.ready.then(resolved);
+  await vi.waitFor(() => expect(hosts[0].watchIds).toHaveLength(1));
+  publish(1, { isUpToDate: false });
+  await Promise.resolve();
+  expect(resolved).not.toHaveBeenCalled();
+  publish(2, { isUpToDate: true });
+  await retain.ready;
+  expect(resolved).toHaveBeenCalledOnce();
+});
+
+it.each(["query", "action"] as const)("honors longer and disabled per-call %s timeouts", async method => {
+  const calls: Array<{ request: any; endpoint: Endpoint }> = [];
+  const { client } = await mockEngine((request, endpoint) => {
+    if (request.method !== method) return false;
+    calls.push({ request, endpoint }); return true;
+  });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    for (const timeoutMs of [30_000, 0]) {
+      let settled = false;
+      const pending = client[method]({ kind: method, path: "slow.test" }, {}, { timeoutMs }).then(
+        result => { settled = true; return { result }; }, error => { settled = true; return { error }; });
+      await vi.advanceTimersByTimeAsync(21_000);
+      const timedOut = settled;
+      const { request, endpoint } = calls.at(-1)!;
+      endpoint.postMessage({ generation: request.generation, scope: request.scope, id: request.id, result: 42 });
+      const outcome = await pending;
+      expect(timedOut).toBe(false);
+      expect(outcome).toEqual({ result: 42 });
+      expect(request.args[2]).toEqual({ timeoutMs });
+    }
+  } finally { vi.useRealTimers(); }
+});
+
+it.each([false, true])("resubscribes mounted watches after replica reset, rejected=%s", async rejected => {
+  const { client, hosts, publish } = await mockEngine((request, endpoint) => {
+    if (request.method !== "resetLocalReplica") return false;
+    endpoint.postMessage({ generation: request.generation, scope: request.scope, id: request.id,
+      ...(rejected ? { error: { name: "GonvexClientError", code: "storage", message: "Reset failed" } }
+        : { result: { discardedIntents: 0, resubscribed: 1 } }) }); return true;
+  });
+  const watch = client.watchEntities("tasks", ["one"]);
+  cleanups.push(watch.onUpdate(() => {}));
+  await vi.waitFor(() => expect(hosts[0].watchIds).toHaveLength(1));
+  const previousId = hosts[0].watchIds[0];
+  publish(42, { status: "ready", rows: [{ id: "one", value: 1 }] });
+  await vi.waitFor(() => expect(watch.getSnapshot().status).toBe("ready"));
+  const reset = client.resetLocalReplica();
+  if (rejected) await expect(reset).rejects.toMatchObject({ code: "storage", message: "Reset failed" });
+  else expect(await reset).toEqual({ discardedIntents: 0, resubscribed: 1 });
+  expect(watch.getSnapshot()).toEqual({ status: "pending" });
+  expect(hosts[0].watchIds).toHaveLength(2);
+  expect(hosts[0].watchIds[1]).not.toBe(previousId);
+  publish(1, { status: "ready", rows: [{ id: "one", value: 2 }] });
+  await vi.waitFor(() => expect(watch.getSnapshot()).toEqual({ status: "ready", rows: [{ id: "one", value: 2 }] }));
+});
+
+it("accepts object results after truthy scalars and keeps new undefined own fields", async () => {
+  const { client, hosts, publish } = await mockEngine();
+  const watch = client.watchControlQuery({ kind: "query", path: "control.test" });
+  cleanups.push(watch.onUpdate(() => {}));
+  await vi.waitFor(() => expect(hosts[0].watchIds).toHaveLength(1));
+  publish(1, { result: 1, version: 1 });
+  await vi.waitFor(() => expect(watch.getSnapshot()?.result).toBe(1));
+  publish(2, { result: {}, version: 2 });
+  await vi.waitFor(() => expect(watch.getSnapshot()?.result).toEqual({}));
+  publish(3, { result: { a: undefined }, version: 3 });
+  await vi.waitFor(() => expect(watch.getSnapshot()?.result).toEqual({ a: undefined }));
+  publish(4, { result: { b: undefined }, version: 4 });
+  await vi.waitFor(() => expect(Object.keys(watch.getSnapshot()!.result as object)).toEqual(["b"]));
+});
+
+it("accepts a new host's sequence when a detached watch is subscribed again", async () => {
+  const { client, hosts, publish } = await mockEngine();
+  const watch = client.watchEntities("tasks", ["one"]);
+  const stop = watch.onUpdate(() => {});
+  await vi.waitFor(() => expect(hosts[0].watchIds).toHaveLength(1));
+  publish(42, { status: "ready", rows: [{ id: "one", value: 1 }] });
+  await vi.waitFor(() => expect(watch.getSnapshot().status).toBe("ready"));
+  stop(); await client.recover();
+  cleanups.push(watch.onUpdate(() => {}));
+  await vi.waitFor(() => expect(hosts[1].watchIds).toHaveLength(1));
+  publish(1, { status: "ready", rows: [{ id: "one", value: 2 }] });
+  await vi.waitFor(() => expect(watch.getSnapshot()).toEqual({ status: "ready", rows: [{ id: "one", value: 2 }] }));
+});
+
+it("patches own __proto__ fields without changing prototypes or earlier snapshots", () => {
+  const previous = Object.freeze({ nested: Object.freeze({}) });
+  const added = { nested: JSON.parse('{"__proto__":{"value":1},"missing":null}') };
+  added.nested.missing = undefined;
+  const first = applyEnginePatches(previous, diffEngineValue(previous, added)!) as typeof added;
+  expect(Object.hasOwn(first.nested, "__proto__")).toBe(true);
+  expect(Object.hasOwn(first.nested, "missing")).toBe(true);
+  expect(Object.getPrototypeOf(first.nested)).toBe(Object.prototype);
+  const changed = { nested: JSON.parse('{"__proto__":{"value":2}}') };
+  const second = applyEnginePatches(first, diffEngineValue(first, changed)!) as typeof changed;
+  expect(Object.getPrototypeOf(second.nested)).toBe(Object.prototype);
+  expect(second.nested.__proto__.value).toBe(2);
+  expect(first.nested.__proto__.value).toBe(1);
+  expect(previous.nested).toEqual({});
+});
+
+it("preserves aliases and empty-name undefined fields in the long-key text codec", async () => {
+  const { ui, worker } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
+  const shared = { "": undefined, nested: { value: "x".repeat(40_000) } };
+  const result = { ["k".repeat(1100)]: shared, first: shared, second: shared, "": undefined };
+  const pending = rpc.call<typeof result>(rpc.request("query", [], "text"));
+  await sendEngineMessage(worker, { generation: "g", scope: "s", id: "text", result });
+  const actual = await pending;
+  expect(actual).toEqual(result); expect(actual.first).toBe(actual.second); expect(actual.first).toBe(actual["k".repeat(1100)]);
+  expect(Object.hasOwn(actual, "")).toBe(true); expect(actual[""]).toBeUndefined();
+  expect(Object.hasOwn(actual.first, "")).toBe(true); expect(actual.first[""]).toBeUndefined();
+  expect(worker.sent.every(frame => new TextEncoder().encode(JSON.stringify(frame)).byteLength <= 64 * 1024)).toBe(true);
+});
+
+it.each([false, true])("finishes late chunked replies after timeout, text codec=%s", async text => {
+  const { ui } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
+  const pending = rpc.call(rpc.request("query", [], "late"), 5);
+  const envelope = { generation: "g", scope: "s", id: "late" };
+  const receive = (packet: unknown) => ui.emit("message", { data: { ...envelope, packet } });
+  receive(text ? { kind: "textBegin" } : { kind: "begin", value: { ...envelope, result: "" } });
+  await expect(pending).rejects.toBeInstanceOf(EngineRpcTimeout);
+  expect(() => {
+    receive(text ? { kind: "text", value: JSON.stringify({ payload: { ...envelope, result: "late" }, undefinedPaths: [], aliasPaths: [] }) }
+      : { kind: "string", path: ["result"], value: "late" });
+    receive({ kind: text ? "textEnd" : "end" });
+  }).not.toThrow();
+  const next = rpc.call(rpc.request("query", [], "next"));
+  ui.emit("message", { data: { ...envelope, id: "next", result: "fresh" } });
+  expect(await next).toBe("fresh");
+});
+
+it("accepts text replies from older hosts without the optional alias metadata", async () => {
+  const { ui } = pair(); const rpc = new EngineRpc(ui, "g", "s"); cleanups.push(() => rpc.close());
+  const request = rpc.request("query", [], "older-host"); const result = rpc.call(request);
+  const receive = (packet: unknown) => ui.emit("message", { data: { generation: "g", scope: "s", id: request.id, packet } });
+  receive({ kind: "textBegin" });
+  receive({ kind: "text", value: JSON.stringify({ payload: { ...request, result: { value: 7 } }, undefinedPaths: [] }) });
+  receive({ kind: "textEnd" });
+  expect(await result).toEqual({ value: 7 });
 });

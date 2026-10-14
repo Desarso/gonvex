@@ -71,7 +71,8 @@
     "multiTab": {
       "first": "legacy",
       "second": "legacy"
-    }
+    },
+    "coldSamplingAligned": false
   },
   "samples": [
     {

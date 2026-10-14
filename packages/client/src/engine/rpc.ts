@@ -53,11 +53,18 @@ export class EngineRpc {
     if (data.deliveryId) this.endpoint.postMessage({ generation: this.generation, scope: this.scope, deliveryAck: data.deliveryId });
     if (data.packet) {
       const packet = data.packet;
+      if (packet.kind !== "begin" && packet.kind !== "textBegin" && !this.chunks.has(data.id)) return;
       if (packet.kind === "textBegin") this.chunks.set(data.id, []);
       else if (packet.kind === "text") this.chunks.get(data.id).push(packet.value);
       else if (packet.kind === "textEnd") {
         const decoded = JSON.parse(this.chunks.get(data.id).join("")); this.chunks.delete(data.id); data = decoded.payload;
         for (const path of decoded.undefinedPaths) { let parent = data; for (const key of path.slice(0, -1)) parent = parent[key]; setEngineProperty(parent, path[path.length - 1], undefined); }
+        for (const { path, source } of decoded.aliasPaths ?? []) {
+          let parent = data, value = data;
+          for (const key of path.slice(0, -1)) parent = parent[key];
+          for (const key of source) value = value[key];
+          setEngineProperty(parent, path[path.length - 1], value);
+        }
       }
       else if (packet.kind === "begin") this.chunks.set(data.id, packet.value);
       else if (packet.kind === "end") { data = this.chunks.get(data.id); this.chunks.delete(data.id); }
@@ -97,7 +104,7 @@ export class EngineRpc {
     if (this.closed) return Promise.reject(new Error("Engine RPC is closed"));
     if (this.pending.has(request.id)) return Promise.reject(new Error("Engine RPC request is already pending"));
     return new Promise((resolve, reject) => {
-      const timer = timeoutMs > 0 ? setTimeout(() => { this.pending.delete(request.id); this.chunks.delete(request.id); reject(new EngineRpcTimeout(request)); }, timeoutMs) : undefined;
+      const timer = timeoutMs > 0 ? setTimeout(() => { this.pending.delete(request.id); reject(new EngineRpcTimeout(request)); }, timeoutMs) : undefined;
       this.pending.set(request.id, { resolve, reject, request, timer });
       if (request.method === "reducer" && this.admissionBatching) {
         this.admissions.push(request);
@@ -124,6 +131,17 @@ export class EngineRpc {
 }
 
 const sending = new WeakMap<EngineEndpoint, Promise<void>>();
+const segmentBytes = 16 * 1024;
+const encoder = new TextEncoder();
+function serializedBytes(value: unknown): number { return encoder.encode(JSON.stringify(value) ?? "null").byteLength; }
+function* textSegments(value: string) {
+  for (let offset = 0; offset < value.length;) {
+    let end = Math.min(offset + segmentBytes, value.length);
+    // JSON escaping and UTF-8 can expand a short string beyond its character count.
+    while (serializedBytes(value.slice(offset, end)) > segmentBytes) end = offset + Math.floor((end - offset) / 2);
+    yield value.slice(offset, end); offset = end;
+  }
+}
 
 type Segment = { path: string[]; kind: "array" | "object"; items: unknown[] } | { path: string[]; kind: "string"; value: string };
 
@@ -135,7 +153,8 @@ function splitMessage(message: Record<string, unknown>) {
   const seen = new WeakMap<object, { value: any; path: string[]; changed: boolean }>();
   const aliases: Array<{ path: string[]; source: string[] }> = [];
   const prepare = (value: any, path: string[]): any => {
-    if (typeof value === "string" && value.length > 16 * 1024) { segments.push({ path, kind: "string", value }); return ""; }
+    if (serializedBytes(path) > segmentBytes) throw new TextCodecRequired();
+    if (typeof value === "string" && serializedBytes(value) > segmentBytes) { segments.push({ path, kind: "string", value }); return ""; }
     if (!value || typeof value !== "object") return value;
     const prior = seen.get(value);
     if (prior) { aliases.push({ path, source: prior.path }); return prior.value; }
@@ -145,7 +164,7 @@ function splitMessage(message: Record<string, unknown>) {
     if (Object.keys(value).some(key => key.length > 1024)) throw new TextCodecRequired();
     let unchanged = true;
     for (const key of Object.keys(value)) { setEngineProperty(result, key, prepare(value[key], [...path, key])); unchanged &&= result[key] === value[key]; }
-    if (JSON.stringify(result).length > 16 * 1024) {
+    if (serializedBytes(result) > segmentBytes) {
       segments.push({ path, kind: array ? "array" : "object", items: array ? result : Object.entries(result) }); result = array ? [] : {};
     } else if (unchanged) result = value;
     seen.set(value, { value: result, path, changed: result !== value }); return result;
@@ -160,15 +179,17 @@ function splitMessage(message: Record<string, unknown>) {
 export function sendEngineMessage(endpoint: EngineEndpoint, message: Record<string, unknown>): Promise<void> {
   const sendPacket = (value: Record<string, unknown>) => new Promise<void>((resolve, reject) => {
     const deliveryId = crypto.randomUUID();
+    const frame = { ...value, generation: message.generation, scope: message.scope, id: message.id, deliveryId };
+    if (serializedBytes(frame) > 64 * 1024) { reject(new Error("Engine packet exceeds transport limit")); return; }
     const timer = setTimeout(() => { endpoint.removeEventListener("message", ack); reject(new Error("Engine delivery timed out")); }, 20_000);
     const ack = ({ data }: MessageEvent) => {
       if (data?.deliveryAck !== deliveryId || data.generation !== message.generation || data.scope !== message.scope) return;
       clearTimeout(timer); endpoint.removeEventListener("message", ack); resolve();
     };
-    endpoint.addEventListener("message", ack); endpoint.postMessage({ ...value, generation: message.generation, scope: message.scope, id: message.id, deliveryId });
+    endpoint.addEventListener("message", ack); endpoint.postMessage(frame);
   });
   const send = async () => {
-    if (JSON.stringify(message).length <= 16 * 1024) {
+    if (serializedBytes(message) <= segmentBytes) {
       if (message.event) await sendPacket(message);
       else endpoint.postMessage(message);
       return;
@@ -176,29 +197,36 @@ export function sendEngineMessage(endpoint: EngineEndpoint, message: Record<stri
     let split: ReturnType<typeof splitMessage>;
     try { split = splitMessage(message); } catch (error) {
       if (!(error instanceof TextCodecRequired)) throw error;
-      // Unusually long JSON keys cannot be used as bounded packet addresses.
+      // Unusually long JSON keys or paths cannot be used as bounded packet addresses.
       const paths: string[][] = [], parents = new WeakMap<object, string[]>();
+      const aliasPaths: Array<{ path: string[]; source: string[] }> = [];
+      let isRoot = true;
       const payload = JSON.stringify(message, function(key, value) {
-        const path = key === "" ? [] : [...(parents.get(this) ?? []), key];
+        const path = isRoot ? [] : [...(parents.get(this) ?? []), key];
+        isRoot = false;
         if (value === undefined) { paths.push(path); return null; }
-        if (value && typeof value === "object") parents.set(value, path);
+        if (value && typeof value === "object") {
+          const source = parents.get(value);
+          if (source) { aliasPaths.push({ path, source }); return null; }
+          parents.set(value, path);
+        }
         return value;
       });
-      const text = `{"payload":${payload},"undefinedPaths":${JSON.stringify(paths)}}`;
+      const text = `{"payload":${payload},"undefinedPaths":${JSON.stringify(paths)},"aliasPaths":${JSON.stringify(aliasPaths)}}`;
       await sendPacket({ packet: { kind: "textBegin" } });
-      for (let offset = 0; offset < text.length; offset += 16 * 1024) await sendPacket({ packet: { kind: "text", value: text.slice(offset, offset + 16 * 1024) } });
+      for (const value of textSegments(text)) await sendPacket({ packet: { kind: "text", value } });
       await sendPacket({ packet: { kind: "textEnd" } }); return;
     }
     const { value, segments, aliases } = split;
     await sendPacket({ packet: { kind: "begin", value } });
     for (const segment of segments) {
       if (segment.kind === "string") {
-        for (let offset = 0; offset < segment.value.length; offset += 16 * 1024) await sendPacket({ packet: { kind: "string", path: segment.path, value: segment.value.slice(offset, offset + 16 * 1024) } });
+        for (const value of textSegments(segment.value)) await sendPacket({ packet: { kind: "string", path: segment.path, value } });
       } else {
         let items: unknown[] = [], size = 0;
         for (const item of segment.items) {
-          const bytes = (JSON.stringify(item)?.length ?? 4) + 1;
-          if (items.length && size + bytes > 16 * 1024) { await sendPacket({ packet: { kind: segment.kind, path: segment.path, items } }); items = []; size = 0; }
+          const bytes = serializedBytes(item) + 1;
+          if (items.length && size + bytes > segmentBytes) { await sendPacket({ packet: { kind: segment.kind, path: segment.path, items } }); items = []; size = 0; }
           items.push(item); size += bytes;
         }
         if (items.length) await sendPacket({ packet: { kind: segment.kind, path: segment.path, items } });
