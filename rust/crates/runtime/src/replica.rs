@@ -133,7 +133,7 @@ impl Runtime {
             .digest
             .as_deref()
             .is_some_and(|digest| digest.starts_with("xor1:"));
-        let snapshot = self
+        let mut snapshot = self
             .replica_snapshot_for_resume(
                 session,
                 &definition,
@@ -231,8 +231,11 @@ impl Runtime {
             messages.push(replica_snapshot_message(
                 &request,
                 &definition,
-                &snapshot,
+                &mut snapshot,
                 cursor.clone(),
+                &directive.scope,
+                &directive.visibility_scope,
+                &digest,
             ));
         }
         messages.push(replica_ready(
@@ -1089,10 +1092,18 @@ fn diff_rows(
 fn replica_snapshot_message(
     request: &ReplicaOpenRequest,
     definition: &ReplicaCollectionDefinition,
-    snapshot: &Snapshot,
+    snapshot: &mut Snapshot,
     cursor: ReplicaCursor,
+    scope: &str,
+    visibility_scope: &str,
+    digest: &str,
 ) -> ServerMessage {
     let mut metadata = BTreeMap::from([
+        ("scope".to_owned(), Value::String(scope.to_owned())),
+        (
+            "visibilityScope".to_owned(),
+            Value::String(visibility_scope.to_owned()),
+        ),
         ("path".to_owned(), Value::String(request.path.clone())),
         (
             "orderBy".to_owned(),
@@ -1110,6 +1121,7 @@ fn replica_snapshot_message(
         ("maxBytes".to_owned(), Value::from(definition.max_bytes)),
         ("truncated".to_owned(), Value::Bool(snapshot.truncated)),
     ]);
+    metadata.insert("pageDigest".to_owned(), Value::String(digest.to_owned()));
     if snapshot.hashes.len() <= INLINE_SNAPSHOT_HASH_LIMIT {
         metadata.insert(
             "hashes".to_owned(),
@@ -1122,10 +1134,149 @@ fn replica_snapshot_message(
     }
     ServerMessage::ReplicaSnapshot {
         id: request.id.clone(),
-        result: snapshot.rows.clone(),
+        result: std::mem::take(&mut snapshot.rows),
         cursor,
         key: definition.key.clone(),
         metadata,
+    }
+}
+
+pub(crate) fn legacy_snapshot_frame(mut message: ServerMessage) -> ServerMessage {
+    if let ServerMessage::ReplicaSnapshot { metadata, .. } = &mut message {
+        metadata.remove("pageDigest");
+        metadata.remove("scope");
+        metadata.remove("visibilityScope");
+    }
+    message
+}
+
+const SNAPSHOT_PAGE_BYTES: usize = 256 * 1024;
+const SNAPSHOT_PAGE_ROWS: usize = 512;
+
+// Rows are moved from the materialized authorized snapshot, not copied into
+// a second collection of pages. Only the current page is encoded by the socket.
+pub(crate) struct SnapshotPages {
+    id: String,
+    snapshot_id: String,
+    cursor: ReplicaCursor,
+    key: String,
+    metadata: BTreeMap<String, Value>,
+    digest: Value,
+    rows: std::iter::Peekable<std::vec::IntoIter<Value>>,
+    sequence: u64,
+    finished: bool,
+}
+
+impl SnapshotPages {
+    pub(crate) fn new(message: ServerMessage) -> Self {
+        let ServerMessage::ReplicaSnapshot {
+            id,
+            result,
+            cursor,
+            key,
+            mut metadata,
+        } = message
+        else {
+            unreachable!("snapshot paging requires a snapshot");
+        };
+        metadata.remove("hashes");
+        let digest = metadata
+            .remove("pageDigest")
+            .or_else(|| metadata.remove("digest"))
+            .expect("snapshot digest");
+        metadata.remove("digest");
+        Self {
+            id,
+            snapshot_id: uuid::Uuid::new_v4().to_string(),
+            cursor,
+            key,
+            metadata,
+            digest,
+            rows: result.into_iter().peekable(),
+            sequence: 0,
+            finished: false,
+        }
+    }
+
+    fn page(&self, result: Vec<Value>, last: bool) -> ServerMessage {
+        let mut metadata = self.metadata.clone();
+        if last {
+            metadata.insert("digest".to_owned(), self.digest.clone());
+        }
+        ServerMessage::ReplicaSnapshotPage {
+            id: self.id.clone(),
+            snapshot_id: self.snapshot_id.clone(),
+            cursor: self.cursor.clone(),
+            key: self.key.clone(),
+            sequence: self.sequence,
+            last,
+            result,
+            metadata,
+        }
+    }
+}
+
+fn json_byte_len(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(number) => number.to_string().len(),
+        Value::String(value) => json_string_byte_len(value),
+        Value::Array(values) => {
+            2 + values.iter().map(json_byte_len).sum::<usize>() + values.len().saturating_sub(1)
+        }
+        Value::Object(values) => {
+            2 + values
+                .iter()
+                .map(|(key, value)| json_string_byte_len(key) + 1 + json_byte_len(value))
+                .sum::<usize>()
+                + values.len().saturating_sub(1)
+        }
+    }
+}
+
+fn json_string_byte_len(value: &str) -> usize {
+    // Count JSON escapes without allocating a temporary encoded row buffer.
+    2 + value.len()
+        + value
+            .bytes()
+            .map(|byte| match byte {
+                b'"' | b'\\' | b'\x08' | b'\x0c' | b'\n' | b'\r' | b'\t' => 1,
+                0..=0x1f => 5,
+                _ => 0,
+            })
+            .sum::<usize>()
+}
+
+impl Iterator for SnapshotPages {
+    type Item = ServerMessage;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        // Reserve the final digest and the longer false marker in every page.
+        let mut bytes = serde_json::to_vec(&self.page(Vec::new(), true))
+            .unwrap()
+            .len()
+            + 1;
+        let mut rows = Vec::new();
+        while let Some(row) = self.rows.peek() {
+            let row_bytes = json_byte_len(row) + usize::from(!rows.is_empty());
+            if !rows.is_empty()
+                && (bytes + row_bytes > SNAPSHOT_PAGE_BYTES || rows.len() == SNAPSHOT_PAGE_ROWS)
+            {
+                break;
+            }
+            // A single oversized row remains indivisible, matching legacy JSON.
+            bytes += row_bytes;
+            rows.push(self.rows.next().unwrap());
+        }
+        self.finished = self.rows.peek().is_none();
+        let page = self.page(rows, self.finished);
+        self.sequence += 1;
+        Some(page)
     }
 }
 
@@ -1215,6 +1366,200 @@ fn hex_digest(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paged_fixture(rows: Vec<Value>) -> ServerMessage {
+        let hashes = rows
+            .iter()
+            .map(|row| (row_key(row, "id").unwrap(), row_hash(row)))
+            .collect();
+        ServerMessage::ReplicaSnapshot {
+            id: "open".into(),
+            result: rows,
+            cursor: ReplicaCursor {
+                epoch: "e".into(),
+                revision: 10,
+            },
+            key: "id".into(),
+            metadata: BTreeMap::from([
+                ("pageDigest".into(), Value::String(hashes_digest(&hashes))),
+                ("scope".into(), Value::String("tenant".into())),
+                ("visibilityScope".into(), Value::String("visible".into())),
+                ("path".into(), Value::String("tasks.all".into())),
+                ("mode".into(), Value::String("eager".into())),
+                ("orderBy".into(), Value::String("id".into())),
+                ("orderDirection".into(), Value::String("asc".into())),
+                ("maxRows".into(), Value::from(20_000)),
+                ("maxBytes".into(), Value::from(100_000_000)),
+                ("truncated".into(), Value::Bool(false)),
+            ]),
+        }
+    }
+
+    #[test]
+    fn snapshot_pages_json_byte_len_matches_encoder() {
+        let values = [
+            Value::Null,
+            Value::Bool(true),
+            Value::Bool(false),
+            serde_json::json!(-0.0),
+            serde_json::json!(1.5e30),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(i64::MIN),
+            serde_json::json!("é😀\\\"\n\t\r\u{0008}\u{000c}\u{001f}\u{0000}\u{2028}"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!({"escaped\"key": [null, true, false, 1.2, {"nested":"é😀"}]}),
+        ];
+        for value in values {
+            assert_eq!(
+                json_byte_len(&value),
+                serde_json::to_vec(&value).unwrap().len(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_pages_legacy_frame_preserves_original_metadata() {
+        let frame = paged_fixture(vec![serde_json::json!({"id":"a"})]);
+        let ServerMessage::ReplicaSnapshot {
+            metadata, result, ..
+        } = legacy_snapshot_frame(frame)
+        else {
+            panic!("snapshot");
+        };
+        assert_eq!(result.len(), 1);
+        assert!(!metadata.contains_key("pageDigest"));
+        assert!(!metadata.contains_key("scope"));
+        assert!(!metadata.contains_key("visibilityScope"));
+        assert_eq!(metadata["path"], "tasks.all");
+    }
+
+    #[test]
+    fn snapshot_pages_byte_and_row_limits_20k_measurement() {
+        let rows: Vec<Value> = (0..20_000)
+            .map(|i| serde_json::json!({"id":format!("row-{i:05}"),"body":"é".repeat(500)}))
+            .collect();
+        let snapshot = paged_fixture(rows);
+        let legacy = legacy_snapshot_frame(snapshot.clone());
+        let encoded = serde_json::to_string(&legacy).unwrap();
+        drop(legacy);
+        let before = encoded.len();
+        let before_buffer = encoded.capacity();
+        drop(encoded);
+        let mut maximum = 0;
+        let mut maximum_buffer = 0;
+        let mut total = 0;
+        let mut count = 0;
+        let mut rows = 0;
+        let mut identity = None;
+        for page in SnapshotPages::new(snapshot) {
+            let encoded = serde_json::to_string(&page).unwrap();
+            let bytes = encoded.len();
+            maximum_buffer = maximum_buffer.max(encoded.capacity());
+            assert!(bytes <= SNAPSHOT_PAGE_BYTES);
+            maximum = maximum.max(bytes);
+            total += bytes;
+            let ServerMessage::ReplicaSnapshotPage {
+                snapshot_id,
+                sequence,
+                last,
+                result,
+                metadata,
+                cursor,
+                ..
+            } = page
+            else {
+                panic!("page");
+            };
+            assert_eq!(sequence, count);
+            assert_eq!(cursor.revision, 10);
+            assert!(result.len() <= SNAPSHOT_PAGE_ROWS);
+            if let Some(identity) = &identity {
+                assert_eq!(&snapshot_id, identity);
+            } else {
+                identity = Some(snapshot_id);
+            }
+            assert_eq!(metadata.contains_key("digest"), last);
+            rows += result.len();
+            count += 1;
+        }
+        assert_eq!(rows, 20_000);
+        assert!(maximum < before / 50);
+        println!("20k JSON wire: monolithic={before} bytes, max_page={maximum} bytes, total_pages={total} bytes, pages={count}; peak single encoded String capacity: before={before_buffer} bytes, after={maximum_buffer} bytes; resident/staged rows and transport queues excluded");
+    }
+
+    #[test]
+    fn snapshot_pages_materialized_generation_ignores_concurrent_changes() {
+        let source: Vec<Value> = (0..1_200)
+            .map(|i| serde_json::json!({"id":i,"value":0}))
+            .collect();
+        let snapshot = paged_fixture(source.clone());
+        let mut pages = SnapshotPages::new(snapshot);
+        let first = pages.next().unwrap();
+        // A writer can commit after the repeatable-read transaction is closed.
+        // Pages own that generation; writes are later replayed by the feed.
+        let writer = std::thread::spawn(move || {
+            let mut source = source;
+            for row in &mut source {
+                row["value"] = Value::from(1);
+            }
+            source
+        });
+        let mut count = 0;
+        for page in std::iter::once(first).chain(pages) {
+            let ServerMessage::ReplicaSnapshotPage { result, cursor, .. } = page else {
+                panic!("page");
+            };
+            assert_eq!(cursor.revision, 10);
+            assert!(result.iter().all(|row| row["value"] == 0));
+            count += result.len();
+        }
+        assert_eq!(count, 1_200);
+        assert!(writer.join().unwrap().iter().all(|row| row["value"] == 1));
+    }
+
+    #[test]
+    fn snapshot_pages_interruption_empty_and_oversized_rows() {
+        let source: Vec<Value> = (0..1_200).map(|i| serde_json::json!({"id":i})).collect();
+        let mut interrupted = SnapshotPages::new(paged_fixture(source.clone()));
+        let ServerMessage::ReplicaSnapshotPage {
+            snapshot_id: old_id,
+            last,
+            ..
+        } = interrupted.next().unwrap()
+        else {
+            panic!("page");
+        };
+        assert!(!last);
+        drop(interrupted);
+        let restarted: Vec<_> = SnapshotPages::new(paged_fixture(source)).collect();
+        let ServerMessage::ReplicaSnapshotPage {
+            snapshot_id,
+            sequence,
+            ..
+        } = &restarted[0]
+        else {
+            panic!("page");
+        };
+        assert_ne!(snapshot_id, &old_id);
+        assert_eq!(*sequence, 0);
+        let empty: Vec<_> = SnapshotPages::new(paged_fixture(vec![])).collect();
+        assert!(
+            matches!(&empty[0], ServerMessage::ReplicaSnapshotPage { last: true, result, metadata, .. } if result.is_empty() && metadata.contains_key("digest"))
+        );
+        assert_eq!(empty.len(), 1);
+        let large = serde_json::json!({"id":"large", "value":"x".repeat(SNAPSHOT_PAGE_BYTES)});
+        let pages: Vec<_> = SnapshotPages::new(paged_fixture(vec![
+            large,
+            serde_json::json!({"id":"small"}),
+        ]))
+        .collect();
+        assert_eq!(pages.len(), 2);
+        assert!(
+            matches!(&pages[0], ServerMessage::ReplicaSnapshotPage { result, last: false, .. } if result.len() == 1)
+        );
+    }
 
     #[test]
     fn sdk_resume_expired_or_wrong_epoch_cursor_requires_snapshot() {

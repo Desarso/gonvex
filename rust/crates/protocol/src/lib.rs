@@ -162,6 +162,8 @@ pub struct BrowserTelemetryInfo {
 #[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_snapshot_pages: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preserve_subscriptions: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_control: Option<u8>,
@@ -416,6 +418,8 @@ pub struct PerformanceTelemetryEvent {
 #[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_snapshot_pages: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_resume: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_resume: Option<u8>,
@@ -622,6 +626,19 @@ pub enum ServerMessage {
         #[serde(flatten)]
         metadata: BTreeMap<String, Value>,
     },
+    #[serde(rename = "replica.snapshotPage")]
+    ReplicaSnapshotPage {
+        #[serde(rename = "snapshotId")]
+        snapshot_id: String,
+        sequence: u64,
+        last: bool,
+        id: String,
+        result: Vec<Value>,
+        cursor: ReplicaCursor,
+        key: String,
+        #[serde(flatten)]
+        metadata: BTreeMap<String, Value>,
+    },
     #[serde(rename = "replica.delta")]
     ReplicaDelta {
         id: String,
@@ -703,6 +720,22 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn snapshot_pages_capabilities_and_frames_round_trip() {
+        let old: ClientCapabilities = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(old.replica_snapshot_pages, None);
+        let old: ServerCapabilities = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(old.replica_snapshot_pages, None);
+        round_trip_client(r#"{"type":"auth","id":"a","capabilities":{"replicaSnapshotPages":1}}"#);
+        round_trip_server(r#"{"type":"session.ready","capabilities":{"replicaSnapshotPages":1}}"#);
+        round_trip_server(
+            r#"{"type":"replica.snapshotPage","id":"a","snapshotId":"s","scope":"scope","visibilityScope":"v","sequence":0,"last":false,"result":[{"id":"a","nullable":null}],"key":"id","cursor":{"epoch":"e","revision":1},"mode":"eager"}"#,
+        );
+        round_trip_server(
+            r#"{"type":"replica.snapshotPage","id":"a","snapshotId":"s","scope":"scope","visibilityScope":"v","sequence":1,"last":true,"result":[],"key":"id","cursor":{"epoch":"e","revision":1},"digest":"final"}"#,
+        );
+    }
 
     #[test]
     fn sdk_resume_capabilities_are_optional_and_round_trip() {

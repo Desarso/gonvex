@@ -174,6 +174,7 @@ export type ReplicaDirective = {
 };
 
 export type ServerCapabilities = {
+  replicaSnapshotPages?: 1;
   /** Accepts cursor + xor1 row-hash digest, with needHashes repair. */
   replicaResume?: 1;
   /** Accepts held windowRevision and confirms unchanged results with progress. */
@@ -244,6 +245,8 @@ export type ReplicaReady = {
 };
 
 export type ClientCapabilities = {
+  /** Accepts atomically activated replica.snapshotPage frames. */
+  replicaSnapshotPages?: 1;
   /** Honors auth.result subscriptionsPreserved on an in-place refresh. */
   preserveSubscriptions?: 1;
   /** Preserve selected tenant authentication on control-only sockets. */
@@ -481,6 +484,26 @@ export type ServerMessage =
     maxRows?: number;
     maxBytes?: number;
     hashes?: Record<string, string>;
+    digest?: string;
+    truncated?: boolean;
+  }
+  | {
+    type: "replica.snapshotPage";
+    snapshotId: string;
+    scope: string;
+    visibilityScope: string;
+    sequence: number;
+    last: boolean;
+    id: string;
+    path?: string;
+    result: JsonValue[];
+    cursor: ReplicaCursor;
+    key: string;
+    orderBy?: string;
+    orderDirection?: "asc" | "desc";
+    mode?: "eager" | "progressive";
+    maxRows?: number;
+    maxBytes?: number;
     digest?: string;
     truncated?: boolean;
   }
