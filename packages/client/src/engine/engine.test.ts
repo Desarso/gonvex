@@ -188,7 +188,7 @@ it("shares mounted row objects, evicts all unmounted row metadata, and clears ac
 it("retains the canonical journal entry if a retirement receipt cannot persist", async () => {
   const receipts = new EngineReceipts(crypto.randomUUID()); cleanups.push(() => receipts.close());
   const remove = vi.fn(async () => undefined);
-  const entry: any = { id: 1, scope: "s", path: "p", args: {}, idempotencyKey: "c", engineOutcome: { result: 1 } };
+  const entry: any = { id: 1, scope: "s", path: "p", args: {}, idempotencyKey: "c", state: "committed", engineOutcome: { result: 1 } };
   const store = receipts.wrap({ load: async () => [entry], put: async () => undefined, delete: remove, clear: async () => undefined });
   vi.spyOn(receipts, "put").mockRejectedValueOnce(new Error("Disk full"));
   await expect(store.delete(1)).rejects.toThrow("Disk full"); expect(remove).not.toHaveBeenCalled();
@@ -290,7 +290,7 @@ it("batches receipt retirement into one transaction and bounds recovery with a d
 
 it("keeps all canonical entries when a batched receipt transaction fails", async () => {
   const receipts = new EngineReceipts(crypto.randomUUID()); cleanups.push(() => receipts.close());
-  const entries: any[] = [1, 2].map(id => ({ id, scope: "s", path: "p", args: {}, idempotencyKey: String(id), engineOutcome: { result: id }, createdAt: Date.now() }));
+  const entries: any[] = [1, 2].map(id => ({ id, scope: "s", path: "p", args: {}, idempotencyKey: String(id), state: "committed", engineOutcome: { result: id }, createdAt: Date.now() }));
   const remove = vi.fn(async () => undefined);
   const store = receipts.wrap({ load: async () => entries, put: async () => undefined, delete: remove, deleteMany: remove, clear: async () => undefined });
   vi.spyOn((receipts as any).database, "transaction").mockRejectedValueOnce(new Error("Crash before commit"));
@@ -409,6 +409,75 @@ it("preserves an online queued-capable reducer's actual server result after reti
   await host.close(); host = await create(); cleanups.push(host.close);
   expect(await host.rpc.call(host.rpc.request("reducer", [remote, {}, { engineCommand: command }]))).toEqual({ value: 42 });
   expect(socket.sent.filter(frame => frame.type === "reducer.call" && frame.path === "online")).toHaveLength(1);
+});
+
+it("does not turn a definitive server rejection into a queued receipt on retry or reopen", async () => {
+  const { create, init } = await setup(); let host = await create();
+  cleanups.push(() => host.close());
+  const receipts = new EngineReceipts(init.storage.outboxName); cleanups.push(() => receipts.close());
+  const remote: FunctionReference = { kind: "reducer", path: "online", offline: { mode: "allowed" } };
+  const command = { id: "server-rejection", now: Date.now(), scope: owner, entropy: "de".repeat(32) };
+  const connect = async () => {
+    await host.rpc.call(host.rpc.request("connect", [])); const socket = Socket.all.at(-1)!; socket.open();
+    await vi.waitFor(() => expect(socket.sent.some(frame => frame.type === "auth")).toBe(true));
+    const frame = socket.sent.find(frame => frame.type === "auth");
+    socket.receive({ type: "auth.result", id: frame.id, result: { artifactHash: "artifact", replica: { protocolVersion: 1, scope: "t", visibilityScope: "visible", epoch: "e" }, localIdentity: { auth: { account: { id: "a" } }, tenant: { id: "t" }, member: { id: "m", accountId: "a", permissions: {} } } } });
+    await vi.waitFor(() => expect(host.endpoints.worker.sent.some(frame => frame.event === "session" && frame.args[0] === "authenticated")).toBe(true));
+    return socket;
+  };
+  let socket = await connect();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt === 2) { await host.close(); host = await create(); socket = await connect(); }
+    const count = socket.sent.filter(frame => frame.type === "reducer.call").length;
+    const pending = host.rpc.call(host.rpc.request("reducer", [remote, {}, { engineCommand: command, offline: "queue" }]));
+    const rejected = expect(pending).rejects.toMatchObject({ code: "server", errorClass: "rejected", message: "Task is archived" });
+    await vi.waitFor(() => expect(socket.sent.filter(frame => frame.type === "reducer.call")).toHaveLength(count + 1));
+    const call = socket.sent.filter(frame => frame.type === "reducer.call").at(-1)!;
+    expect(call.idempotencyKey).toBe(command.id);
+    socket.receive({ type: "reducer.error", id: call.id, path: call.path, error: "Task is archived", class: "rejected", retryable: false });
+    await rejected;
+    expect(await host.rpc.call(host.rpc.request("listIntents", []))).toEqual([]);
+    expect(await receipts.get(owner, command.id)).toBeUndefined();
+  }
+});
+
+it("rejects an expired remote command without reporting a nonexistent queued intent", async () => {
+  const { create, init } = await setup(); const host = await create(); cleanups.push(host.close);
+  const remote: FunctionReference = { kind: "reducer", path: "online", offline: { mode: "allowed" } };
+  const command = { id: "expired-remote", now: Date.now() - 31 * 24 * 60 * 60 * 1000, scope: owner, entropy: "de".repeat(32) };
+  await expect(host.rpc.call(host.rpc.request("reducer", [remote, {}, { engineCommand: command, offline: "queue" }]))).rejects.toThrow("receipt expired");
+  expect(await host.rpc.call(host.rpc.request("listIntents", []))).toEqual([]);
+  const receipts = new EngineReceipts(init.storage.outboxName); cleanups.push(() => receipts.close());
+  expect(await receipts.get(owner, command.id)).toBeUndefined();
+  expect(Socket.all).toHaveLength(0);
+});
+
+it("propagates remote admission storage failures instead of reporting a queued intent", async () => {
+  const { create, init } = await setup();
+  const wrap = EngineReceipts.prototype.wrap;
+  vi.spyOn(EngineReceipts.prototype, "wrap").mockImplementation(function(store) {
+    return { ...wrap.call(this, store), put: async () => { throw new Error("Disk full before admission"); } };
+  });
+  const host = await create(); cleanups.push(host.close);
+  const remote: FunctionReference = { kind: "reducer", path: "online", offline: { mode: "allowed" } };
+  const command = { id: "failed-remote", now: Date.now(), scope: owner, entropy: "de".repeat(32) };
+  await expect(host.rpc.call(host.rpc.request("reducer", [remote, {}, { engineCommand: command, offline: "queue", engineFresh: true }]))).rejects.toThrow("Disk full before admission");
+  expect(await host.rpc.call(host.rpc.request("listIntents", []))).toEqual([]);
+  const receipts = new EngineReceipts(init.storage.outboxName); cleanups.push(() => receipts.close());
+  expect(await receipts.get(owner, command.id)).toBeUndefined();
+});
+
+it("returns queued only after durable remote admission and recovers that outcome after reopen", async () => {
+  const { create } = await setup(); let host = await create(); cleanups.push(() => host.close());
+  const remote: FunctionReference = { kind: "reducer", path: "online", offline: { mode: "allowed" } };
+  const command = { id: "queued-remote", now: Date.now(), scope: owner, entropy: "de".repeat(32) };
+  const queued = { status: "queued", reducerId: command.id };
+  expect(await host.rpc.call(host.rpc.request("reducer", [remote, {}, { engineCommand: command, offline: "queue" }]))).toEqual(queued);
+  const entries = await host.rpc.call<any[]>(host.rpc.request("listIntents", []));
+  expect(entries).toEqual([expect.objectContaining({ id: command.id, state: "pending" })]);
+  await host.close(); host = await create();
+  expect(await host.rpc.call(host.rpc.request("reducer", [remote, {}, { engineCommand: command, offline: "queue" }]))).toEqual(queued);
+  expect(await host.rpc.call(host.rpc.request("listIntents", []))).toEqual(entries);
 });
 
 it("rechecks receipts after the canonical read so retirement cannot race an explicit retry", async () => {

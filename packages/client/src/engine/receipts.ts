@@ -93,6 +93,10 @@ export class EngineReceipts {
         : this.journal.isOpen() ? await this.journal.table("entries").bulkGet([...ids]) : await store.load();
       await Promise.all(entries.map(entry => {
         if (!entry || !selected.has(entry.id)) return;
+        // Local results are durable at admission. A remote entry's queued
+        // placeholder is provisional until the server commits it. Successful
+        // queued replies are persisted by the host, not by error cleanup.
+        if (!entry.localExecution && entry.state !== "committed") return;
         const outcome = engineEntryOutcome(entry);
         if (outcome) return this.put(entry.scope, entry.idempotencyKey, entry.path, entry.args, outcome.result,
           entry.engineCommandNow ?? entry.engineOutcome?.commandNow ?? entry.localExecution?.now ?? entry.createdAt);
