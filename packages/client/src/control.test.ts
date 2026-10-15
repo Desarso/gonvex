@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { control, controlFunctionSchemas } from "./control";
 
 describe("Control Plane references", () => {
+  it("allows developer tenant discovery while preserving project administration boundaries", () => {
+    expect(control.support.listTenants.authorization).toBe("developer");
+    expect(control.support.listSessions.authorization).toBe("projectAdmin");
+    expect(control.support.listErrors.authorization).toBe("projectAdmin");
+    expect(control.project.developers.list.authorization).toBe("projectAdmin");
+  });
+
   it("ships an explicit schema and authorization boundary for every generated reference", () => {
     const references: Array<Record<string, unknown>> = [];
     const visit = (value: unknown) => {

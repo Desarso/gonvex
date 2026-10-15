@@ -4435,9 +4435,12 @@ fn definition(path: &str) -> Option<Definition> {
             authorization: ProjectAdmin,
             live: true,
         },
-        "control.support.listSessions"
-        | "control.support.listTenants"
-        | "control.support.listErrors" => Definition {
+        "control.support.listTenants" => Definition {
+            kind: Query,
+            authorization: Developer,
+            live: true,
+        },
+        "control.support.listSessions" | "control.support.listErrors" => Definition {
             kind: Query,
             authorization: ProjectAdmin,
             live: true,
