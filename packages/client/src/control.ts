@@ -240,7 +240,7 @@ export const control = Object.freeze({
     setUserOverride: ref<JSONObject & { scopeId: string; value: JsonValue }, ControlUpdated>("reducer", "control.voice.setUserOverride", "projectAdmin"),
   }),
   support: Object.freeze({
-    listTenants: liveRef<JSONObject, ControlSupportTenant[]>("control.support.listTenants", "projectAdmin"),
+    listTenants: liveRef<JSONObject, ControlSupportTenant[]>("control.support.listTenants", "developer"),
     listSessions: liveRef<JSONObject, ControlSupportSession[]>("control.support.listSessions", "projectAdmin"),
     listErrors: liveRef<JSONObject, ControlSupportErrors>("control.support.listErrors", "projectAdmin"),
     getSession: ref<JSONObject & { id:string }, JSONObject>("query","control.support.getSession","projectAdmin"),

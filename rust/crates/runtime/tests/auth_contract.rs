@@ -6,9 +6,12 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use gonvex_postgres::{token_hash, ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
+use gonvex_postgres::{
+    token_hash, Account, ControlPlane, Member, PoolLimits, PoolRegistry, SessionIdentity,
+    TenantRoute, TenantSession,
+};
 use gonvex_runtime::config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig};
-use gonvex_runtime::control::ControlConnection;
+use gonvex_runtime::control::{ControlConnection, ControlError};
 use gonvex_runtime::Runtime;
 use pbkdf2::pbkdf2_hmac;
 use serde_json::Value;
@@ -60,6 +63,178 @@ fn test_config(database_url: String) -> Config {
         service_principals: Vec::new(),
         public_functions: Default::default(),
     }
+}
+
+#[tokio::test]
+async fn tenant_directory_allows_project_developers_without_support_administration() {
+    let Some(base_url) = std::env::var("GONVEX_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping tenant directory contract test");
+        return;
+    };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let schema = format!("gonvex_tenant_directory_{nonce}");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&base_url)
+        .await
+        .unwrap();
+    sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let database_url = scoped_url(&base_url, &schema);
+    let runtime = Runtime::new(test_config(database_url.clone()));
+    runtime.start().await.unwrap();
+    let fixture = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO gonvex_runtime_projects(id,name,status,owner_email) VALUES('project','Project','active','owner@example.test'),('other','Other','active','other-owner@example.test')",
+    ).execute(&fixture).await.unwrap();
+    sqlx::query(
+        "INSERT INTO gonvex_project_members(project_id,email,name,role) VALUES('project','admin@example.test','Admin','admin'),('project','dev@example.test','Dev','dev'),('other','other-dev@example.test','Other developer','dev')",
+    ).execute(&fixture).await.unwrap();
+    sqlx::query(
+        "INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('visible','project','visible','Visible','visible',$1,'active'),('private','other','private','Private','private',$1,'active')",
+    ).bind(&database_url).execute(&fixture).await.unwrap();
+
+    for role in [
+        "owner",
+        "admin",
+        "dev",
+        "member",
+        "tenant-admin",
+        "other-dev",
+    ] {
+        let identity = SessionIdentity {
+            project_id: "project".to_owned(),
+            account: Account {
+                id: role.to_owned(),
+                email: format!("{role}@example.test"),
+                email_verified: true,
+                name: role.to_owned(),
+                avatar_url: String::new(),
+                provider: "password".to_owned(),
+            },
+        };
+        let connection = ControlConnection {
+            project_id: "project".to_owned(),
+            identity: Some(identity.clone()),
+            tenant: matches!(role, "member" | "tenant-admin").then(|| TenantSession {
+                identity,
+                route: TenantRoute {
+                    project_id: "project".to_owned(),
+                    tenant_id: "visible".to_owned(),
+                    database_url: database_url.clone(),
+                },
+                member: Member {
+                    id: role.to_owned(),
+                    account_id: role.to_owned(),
+                    status: "active".to_owned(),
+                    display_name: role.to_owned(),
+                    avatar_url: String::new(),
+                    role: if role == "tenant-admin" {
+                        "admin"
+                    } else {
+                        "member"
+                    }
+                    .to_owned(),
+                    permissions: serde_json::json!({}),
+                    membership_revision: 1,
+                },
+                admission_revision: 0,
+                delegation: None,
+                developer_session: None,
+            }),
+            ..ControlConnection::default()
+        };
+        let args = serde_json::json!({});
+        let result = runtime
+            .execute_control_query(&connection, "control.support.listTenants", &args)
+            .await;
+        let live = runtime
+            .open_control_query(
+                &connection,
+                role.to_owned(),
+                "control.support.listTenants".to_owned(),
+                args.clone(),
+            )
+            .await;
+        if matches!(role, "owner" | "admin" | "dev") {
+            let rows = result.unwrap_or_else(|error| panic!("{role} must list tenants: {error}"));
+            assert_eq!(
+                rows.as_array().unwrap().len(),
+                1,
+                "{role} must stay within its project"
+            );
+            assert_eq!(rows[0]["id"], "visible");
+            assert_eq!(live.unwrap().1.last_result, rows);
+            if role == "dev" {
+                for path in [
+                    "control.support.listSessions",
+                    "control.support.listErrors",
+                    "control.project.developers.list",
+                ] {
+                    assert!(
+                        matches!(
+                            runtime
+                                .execute_control_query(&connection, path, &args)
+                                .await,
+                            Err(ControlError::ProjectAdminRequired)
+                        ),
+                        "tenant discovery must not grant {path}"
+                    );
+                }
+                let impersonating = ControlConnection {
+                    impersonation_id: "support-grant".to_owned(),
+                    ..connection.clone()
+                };
+                assert!(matches!(
+                    runtime
+                        .execute_control_query(&impersonating, "control.support.listTenants", &args)
+                        .await,
+                    Err(ControlError::AdministrationDuringImpersonation)
+                ));
+            }
+        } else {
+            assert!(
+                matches!(result, Err(ControlError::DeveloperRequired)),
+                "{role} must not list tenants"
+            );
+            assert!(
+                matches!(live, Err(ControlError::DeveloperRequired)),
+                "{role} must not subscribe to tenants"
+            );
+        }
+    }
+    assert!(matches!(
+        runtime
+            .execute_control_query(
+                &ControlConnection {
+                    project_id: "project".to_owned(),
+                    ..ControlConnection::default()
+                },
+                "control.support.listTenants",
+                &serde_json::json!({})
+            )
+            .await,
+        Err(ControlError::AuthenticationRequired)
+    ));
+    runtime.shutdown().await;
+    fixture.close().await;
+    sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
 }
 
 #[tokio::test]

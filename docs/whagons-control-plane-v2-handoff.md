@@ -152,7 +152,7 @@ the project mode disables Gonvex-native auth.
 | `control.support.getSession` | Query | projectAdmin | `{ id }` | support session detail |
 | `control.support.listErrors` | live Query | projectAdmin | `{}` | `{ groups, releases }` |
 | `control.support.getError` | Query | projectAdmin | `{ fingerprint }` | error detail |
-| `control.support.listTenants` | live Query | projectAdmin | `{}` | tenant summaries |
+| `control.support.listTenants` | live Query | developer | `{}` | tenant summaries |
 | `control.support.getTenant` | Query | projectAdmin | `{ tenantId }` | tenant detail |
 | `control.support.pruneSessions` | Reducer | projectAdmin | `{ olderThanSeconds }` | `{ deleted }` |
 | `control.support.heartbeat` | Reducer | account | `{ release, environment }` | `{ sessionId }` |
