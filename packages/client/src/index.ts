@@ -2979,6 +2979,7 @@ export class GonvexClient {
       const generation = subscription.verificationGeneration;
       const rows = verifiedSnapshot ? message.result
         : boundReplicaRows(message.result, message.key, message.maxRows, message.maxBytes, message.orderBy, message.orderDirection);
+      const materializedRows = rows.filter((row): row is ReplicaRow => asReplicaRow(row) !== undefined).map(row => asReplicaRow(row)!);
       let hashes: Record<string, string> | undefined;
       if (message.hashes && message.digest) {
         const digest = verifiedSnapshot ? message.digest : message.digest.startsWith("xor1:")
@@ -2986,12 +2987,19 @@ export class GonvexClient {
         if (digest === message.digest) hashes = message.hashes;
       }
       if (scope !== this.replicaScope || generation !== subscription.verificationGeneration || this.manuallyClosed) return;
+      // Legacy snapshots omit integrity metadata until replica.ready. Rows
+      // may be evicted after persistence, so capture their hashes before that
+      // happens instead of rehashing an incomplete resident working set later.
+      const storedHashes = hashes ?? await replicaRowsHashes(
+        projectReplicaIntegrityRows(materializedRows, subscription.columns), message.key,
+      );
+      if (scope !== this.replicaScope || generation !== subscription.verificationGeneration || this.manuallyClosed) return;
       const window = {
         signature: subscription.key,
         kind: "replica" as const,
         entity: subscription.entity,
         key: message.key,
-        rows: rows.filter((row): row is ReplicaRow => asReplicaRow(row) !== undefined).map((row) => asReplicaRow(row)!),
+        rows: materializedRows,
         // New runtimes include authoritative integrity and truncation metadata
         // in bounded snapshots. Older runtimes remain verifying until ready.
         completeness: hashes && message.truncated !== true ? "complete" as const : "partial" as const,
@@ -3003,7 +3011,7 @@ export class GonvexClient {
         maxRows: message.maxRows,
         maxBytes: message.maxBytes,
         truncated: message.truncated,
-        hashes,
+        hashes: storedHashes,
         scope,
       };
       await this.replica.replaceWindow(window);
@@ -3287,15 +3295,13 @@ export class GonvexClient {
         this.emitReplicaMessage(subscription, message, scope);
         return;
       }
-      await this.replica.replaceWindow({
-        ...window, scope, rows: this.replica.committedWindowRows(subscription.key), source: "server", cursor: message.cursor,
-        completeness,
-        mode, truncated,
+      await this.replica.confirmWindow(subscription.key, {
+        cursor: message.cursor, completeness, mode, truncated,
         // Persist the exact integrity map verified above. Subsequent auth
         // rotations can then prove unchanged rows instead of requesting a full
         // upsert of every entity in every retained collection.
         hashes,
-      });
+      }, scope);
     }
     this.replica.setFreshness("current");
     this.emitReplicaMessage(subscription, message, scope);

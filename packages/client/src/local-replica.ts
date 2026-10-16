@@ -1123,6 +1123,50 @@ export class LocalReplica implements LocalReplicaView {
     return application;
   }
 
+  /** Confirm verified collection metadata without rebuilding membership from
+   * the resident subset. Cold member rows remain durable and unmaterialized. */
+  confirmWindow(signature: string, metadata: Pick<ReplicaWindow, "cursor" | "completeness" | "mode" | "truncated" | "hashes">, scope?: ReplicaScope): Promise<void> {
+    return this.enqueueApplication(async () => {
+      if (scope !== undefined && normalizeReplicaScope(scope) !== this.scopeValue) return;
+      const current = this.liveQueries.get(signature);
+      if (!current) return;
+      if (current.cursor && metadata.cursor && (current.cursor.epoch !== metadata.cursor.epoch
+        || current.cursor.revision > metadata.cursor.revision)) return;
+      if (!this.storage?.advanceWatermark) {
+        // Legacy/custom adapters without metadata commits retain their original
+        // snapshot contract. Read cold members from that adapter if necessary.
+        const loaded = this.storage?.loadWindowRows
+          ? await this.storage.loadWindowRows(this.scopeValue, signature) : undefined;
+        const rows = loaded?.rows ?? this.committedWindowRows(signature);
+        if (rows.length !== current.ids.length) throw new Error("Cannot confirm incomplete collection membership");
+        await this.materializeWindowNow({ ...current, ...metadata, rows, source: "server", scope });
+        return;
+      }
+      const next: ReplicaWindow = { ...current, ...metadata, source: "server",
+        cursor: metadata.cursor ? { ...metadata.cursor } : undefined,
+        hashes: metadata.hashes === current.hashes ? current.hashes : metadata.hashes ? { ...metadata.hashes } : undefined,
+        aggregateDigest: metadata.hashes ? replicaAggregateDigest(metadata.hashes) : undefined };
+      const queries = new Map(this.liveQueries).set(signature, next);
+      const entities = new Map(this.entities);
+      const cursor = replicaTransactionFloor(this.cursorValue, queries);
+      const writeScope = this.scopeValue;
+      const receipt = await this.persist(() => this.storage!.advanceWatermark!([next], cursor, writeScope));
+      if (!this.acceptMetadataCommit(receipt, writeScope) && this.storage.readChanges) {
+        await this.mergeStoredChanges(entities, queries);
+      }
+      this.entities = entities;
+      this.liveQueries = queries;
+      this.cursorValue = replicaTransactionFloor(cursor, queries);
+      const confirmed = queries.get(signature);
+      if (confirmed?.completeness === "complete" && !confirmed.truncated && confirmed.ids.every(id => entities.get(confirmed.entity)?.has(id))) {
+        this.residentPartialTables.delete(confirmed.entity);
+      }
+      this.markWindowChanged(signature, false);
+      this.trimResidentRows();
+      this.notify();
+    });
+  }
+
   windowResumeState(signature: string): { cursor: ReplicaCursor; digest: string } | undefined {
     const window = this.liveQueries.get(signature);
     if (!window?.cursor || !window.hashes) return undefined;
