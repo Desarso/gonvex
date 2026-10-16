@@ -1130,6 +1130,20 @@ export class LocalReplica implements LocalReplicaView {
     return { cursor: { ...window.cursor }, digest: window.aggregateDigest };
   }
 
+  /** @internal Shared committed metadata for SDK reconciliation. Published
+   * windows are replaced, never mutated. Public getWindow remains detached. */
+  windowMetadata(signature: string): Readonly<ReplicaWindow> | undefined {
+    const window = this.liveQueries.get(signature);
+    if (!window || Object.isFrozen(window)) return window;
+    if (window.hashes && !window.aggregateDigest) window.aggregateDigest = replicaAggregateDigest(window.hashes);
+    Object.freeze(window.ids);
+    if (window.hashes) Object.freeze(window.hashes);
+    if (window.cursor) Object.freeze(window.cursor);
+    if (window.subscriptionRevision) Object.freeze(window.subscriptionRevision);
+    if (window.resultPath) Object.freeze(window.resultPath);
+    return Object.freeze(window);
+  }
+
   getWindow(signature: string): ReplicaWindow | undefined {
     const window = this.liveQueries.get(signature);
     if (window?.hashes && !window.aggregateDigest) window.aggregateDigest = replicaAggregateDigest(window.hashes);

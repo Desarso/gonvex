@@ -1081,3 +1081,23 @@ it('keeps restored row versions scoped to that row and advances missing-row toke
   expect(replica.entityVersion('tasks','a')).toBeGreaterThan(version);
   expect(replica.executionReadVersion('tasks','a')).toBeGreaterThan(execution);
 });
+
+it('shares immutable internal window metadata while preserving detached public copies', async () => {
+  const replica = new LocalReplica();
+  const input = {signature:'meta',entity:'items',key:'id',rows:[{id:'a',value:1}],completeness:'complete' as const,source:'server' as const,hashes:{a:'hash'},cursor:{epoch:'e',revision:1}};
+  await replica.materializeWindow(input);
+  const first = replica.windowMetadata('meta')!;
+  expect(replica.windowMetadata('meta')).toBe(first);
+  expect(Object.isFrozen(first)).toBe(true);
+  expect(Object.isFrozen(first.ids)).toBe(true);
+  expect(Object.isFrozen(first.hashes)).toBe(true);
+  const copy = replica.getWindow('meta')!;
+  copy.ids.push('caller'); copy.hashes!.a = 'caller';
+  expect(replica.windowMetadata('meta')!.ids).toEqual(['a']);
+  expect(replica.windowMetadata('meta')!.hashes).toEqual({a:'hash'});
+  await replica.materializeWindow({...input,rows:[{id:'b',value:2}],hashes:{b:'next'},cursor:{epoch:'e',revision:2}});
+  expect(replica.windowMetadata('meta')).not.toBe(first);
+  expect(first.ids).toEqual(['a']); expect(first.cursor!.revision).toBe(1);
+  expect(replica.windowResumeState('meta')!.cursor.revision).toBe(2);
+  replica.dispose();
+});

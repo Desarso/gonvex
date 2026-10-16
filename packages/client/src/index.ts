@@ -2888,7 +2888,7 @@ export class GonvexClient {
           ? this.offlineLiveQuery(ref, args)
           : undefined;
         if (!this.replica.hasLiveQuery(key) && !offline?.supported) return undefined;
-        const window = this.replica.getWindow(key);
+        const window = this.replica.windowMetadata(key);
         const skeleton = transportResult ?? window?.resultSkeleton;
         if (skeleton === undefined && (ref.live.resultPath?.length ?? 0) > 0) return undefined;
         const materializedRows = offline?.supported
@@ -2973,7 +2973,7 @@ export class GonvexClient {
     if (message.type === "replica.reset" || message.type === "replica.error" || message.type === "replica.needHashes") {
       this.discardSnapshotPages(subscription);
     }
-    const current = () => this.replica.getWindow(subscription.key);
+    const current = () => this.replica.windowMetadata(subscription.key);
     if (message.type === "replica.snapshot") {
       if (!subscription.opening || replicaCursorIsStale(subscription, message.cursor)) return;
       const generation = subscription.verificationGeneration;
@@ -3259,7 +3259,7 @@ export class GonvexClient {
     subscription.isUpToDate = true;
     subscription.opening = false;
     raiseReplicaCursorFloor(subscription, message.cursor);
-    const window = this.replica.getWindow(subscription.key);
+    const window = this.replica.windowMetadata(subscription.key);
     if (window) {
       const completeness = message.truncated === true ? "partial" : "complete";
       const mode = message.mode ?? window.mode;
@@ -3385,7 +3385,7 @@ export class GonvexClient {
   }
 
   private startReplica(subscription: ReplicaSubscription) {
-    const cached = this.replica.getWindow(subscription.key);
+    const cached = this.replica.windowMetadata(subscription.key);
     if (cached) {
       subscription.isUpToDate = false;
       const message: ReplicaMessage = {
@@ -3428,7 +3428,7 @@ export class GonvexClient {
       const resume = this.replica.windowResumeState(subscription.key);
       if (resume) return { id: subscription.id, path: subscription.path, args: subscription.args, ...resume };
     }
-    const window = this.replica.getWindow(subscription.key);
+    const window = this.replica.windowMetadata(subscription.key);
     const cursor = window?.cursor;
     const hashes = window?.hashes;
     const fullIntegrity = cursor !== undefined
