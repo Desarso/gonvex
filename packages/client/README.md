@@ -464,6 +464,30 @@ This creates `my-app-fresh-engine-cohort:engine-members-v1`. It never opens or u
 
 Use a fresh cohort namespace. This release supplies no automatic legacy import or lossless backend export. Keep the engine database when disabling the option; do not treat changing storage factories as a migration of populated data. Existing durable outbox storage and its coordination remain unchanged. Runtime and application contract changes are unnecessary.
 
+## Bounded disk row pages
+
+The engine storage factory also exposes `loadReplicaRowsPage(scope, signature,
+{offset, limit, maxBytes})`. It reads only the requested native membership range
+and normalized row payloads. It does not reconstruct the collection's complete
+ID list or integrity map. `limit` is an integer between 0 and 512.
+
+The result includes the window header, `totalUniqueRows`, ordered unique `ids`,
+`rows`, `nextOffset`, and a conservative `decodedBytes` estimate. Repeated
+positions of one entity count once, in first-membership order. This API is for
+Replica Collections, not reconstruction of duplicate-bearing Live Query results.
+A zero limit counts without decoding rows. All reads share one storage transaction.
+
+An oversized row is returned as `blockedId` without advancing past it; callers
+must handle it explicitly. A missing normalized row is listed in `missingIds`.
+Neither case means that the requested page contains complete row data. The byte
+budget covers decoded row estimates, not exact heap allocation. One encoded row
+still crosses IndexedDB before its size can be checked. Header/payload separation
+and bounded snapshot ingestion are also needed for a renderer-memory ceiling.
+
+The existing `loadWindowRows` and legacy storage contracts are unchanged. This
+page API alone does not change client startup, residency, subscriptions or app
+queries, and it does not migrate a populated legacy database.
+
 ## Background replica metadata
 
 `watchReplicaMetadata` keeps the generated collection subscription active without
