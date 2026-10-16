@@ -2214,6 +2214,14 @@ export class GonvexClient {
     this.flushTelemetry();
     this.unsubscribeTelemetryLifecycle?.();
     this.manuallyClosed = true;
+    this.authInFlight = false;
+    this.authResendRequired = false;
+    this.latestAuthFrameId = undefined;
+    this.activeAuthFrameId = undefined;
+    if (this.authWatchdogTimer) {
+      clearTimeout(this.authWatchdogTimer);
+      this.authWatchdogTimer = undefined;
+    }
     this.outboxScopeGeneration += 1;
     this.setLocalSessionState("unavailable");
     this.unsubscribeLocal?.();
@@ -4900,7 +4908,7 @@ export class GonvexClient {
     if (this.authWatchdogTimer) clearTimeout(this.authWatchdogTimer);
     this.authWatchdogTimer = setTimeout(() => {
       this.authWatchdogTimer = undefined;
-      if (!this.authInFlight) return;
+      if (this.manuallyClosed || !this.authInFlight) return;
       if (this.socket?.readyState === WebSocket.OPEN) {
         this.sendAuth(true);
       } else {

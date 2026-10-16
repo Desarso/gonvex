@@ -3651,3 +3651,17 @@ it('memoizes offline plans by root, relation and reference dependencies while re
   await switching;
   client.close();
 });
+
+
+it('cancels an in-flight authentication watchdog when the client closes', async () => {
+  const client = new GonvexClient('ws://runtime.test/ws');
+  client.connect(); latestSocket().open();
+  const internal = client as any;
+  internal.authInFlight = true; internal.armAuthWatchdog();
+  client.close();
+  expect(internal.authInFlight).toBe(false);
+  expect(internal.authWatchdogTimer).toBeUndefined();
+  const count = FakeWebSocket.instances.length;
+  await vi.advanceTimersByTimeAsync(20000);
+  expect(FakeWebSocket.instances).toHaveLength(count);
+});
