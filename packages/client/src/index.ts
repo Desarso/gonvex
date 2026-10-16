@@ -3187,13 +3187,11 @@ export class GonvexClient {
       if (!window?.cursor || replicaCursorIsStale(subscription, message.cursor) || message.cursor.revision < window.cursor.revision) return;
       const verificationGeneration = subscription.verificationGeneration;
       const hashesWereStored = window.hashes !== undefined;
-      const hashes = window.hashes ?? await replicaRowsHashes(
-        projectReplicaIntegrityRows(
-          this.replica.committedWindowRows(subscription.key),
-          subscription.columns,
-        ),
-        window.key,
-      );
+      const hashes = window.hashes ?? await this.hashReplicaWindow(subscription, window);
+      if (!hashes) {
+        await this.handleReplicaMessage(subscription, { type: "replica.reset", id: subscription.id, path: subscription.path, reason: "integrity-missing" }, scope);
+        return;
+      }
       const digest = message.digest?.startsWith("xor1:")
         ? window.aggregateDigest ?? replicaAggregateDigest(hashes)
         : await replicaHashesDigest(hashes);
@@ -3319,6 +3317,35 @@ export class GonvexClient {
     for (const message of pending) {
       if (message.type === "replica.transaction") this.enqueueReplicaTransaction(message);
       else this.enqueueReplicaWatermark(message.revision);
+    }
+  }
+
+  /** Legacy partial-image deltas need a fresh certificate. Read committed
+   * disk rows in one consistent transaction without hydrating the collection. */
+  private async hashReplicaWindow(subscription: ReplicaSubscription, window: ReplicaWindow): Promise<Record<string, string> | undefined> {
+    try {
+      return await this.replica.withReadView(
+        () => ({ [window.entity]: { key: window.key, complete: false } }), false,
+        async view => {
+          const hashes: Record<string, string> = {};
+          for (let offset = 0; offset < window.ids.length; offset += 128) {
+            const ids = window.ids.slice(offset, offset + 128);
+            const read = await view.select({ table: window.entity, key: window.key,
+              where: { column: window.key, op: "in", values: ids } });
+            if (!read.complete || read.rows.length !== ids.length) {
+              const error = new Error("Replica integrity rows are not durably available");
+              error.name = "IncompleteReplicaError";
+              throw error;
+            }
+            const work = replicaRowsHashes(projectReplicaIntegrityRows(read.rows, subscription.columns), window.key);
+            Object.assign(hashes, await (view.keepAliveFor ? view.keepAliveFor(work) : work));
+          }
+          return hashes;
+        },
+      );
+    } catch (error) {
+      if (error instanceof Error && error.name === "IncompleteReplicaError") return undefined;
+      throw error;
     }
   }
 
