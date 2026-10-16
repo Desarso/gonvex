@@ -46,3 +46,32 @@ it('verifies a legacy ready frame after unmounted snapshot rows have been evicte
   expect(await storage.loadEntityRows('visible','items',rows.map(r=>r._id))).toHaveLength(20);
   stop();
 });
+
+it.each([false,true])('keeps cold legacy certificates through a no-upsert delta, deleted=%s',async(remove)=>{
+  // Older generated refs may omit columns and the runtime may lack watermarks.
+  // A deletion still changes only membership, never the surviving row images.
+  const legacy:FunctionReference={...ref,replica:{table:'items',key:'_id'}};
+  const stop=client.subscribeReplica(legacy,{},()=>{});
+  const socket=Socket.all[0];socket.open();socket.receive({type:'session.ready',replica:directive});
+  await vi.waitFor(()=>expect(socket.sent.some(m=>m.type==='replica.open')).toBe(true));
+  const open=socket.sent.find(m=>m.type==='replica.open');
+  const rows=Array.from({length:20},(_,i)=>({_id:'item-'+i,name:'Item '+i}));
+  const key=client.replicaSignature(legacy,{});
+  socket.receive({type:'replica.snapshot',id:open.id,path:legacy.path,result:rows,key:'_id',cursor:{epoch:'epoch',revision:1}});
+  await vi.waitFor(()=>expect(client.localReplica.getWindow(key)?.ids.length).toBe(20));
+  const firstDigest=await replicaHashesDigest(await replicaRowsHashes(rows,'_id'));
+  socket.receive({type:'replica.ready',id:open.id,path:legacy.path,digest:firstDigest,cursor:{epoch:'epoch',revision:1},truncated:false});
+  await vi.waitFor(()=>expect(client.localReplica.getWindow(key)?.completeness).toBe('complete'));
+  expect(client.localReplica.entityRows('items').length).toBeLessThanOrEqual(2);
+  const remaining=remove ? rows.slice(1) : rows;
+  socket.receive({type:'replica.delta',id:open.id,path:legacy.path,upserts:[],deleted:remove?['item-0']:[],cursor:{epoch:'epoch',revision:2}});
+  await vi.waitFor(()=>expect(client.localReplica.getWindow(key)?.cursor?.revision).toBe(2));
+  const expected=await replicaRowsHashes(remaining,'_id');
+  expect(client.localReplica.getWindow(key)?.hashes).toEqual(expected);
+  socket.receive({type:'replica.ready',id:open.id,path:legacy.path,digest:await replicaHashesDigest(expected),cursor:{epoch:'epoch',revision:2},truncated:false});
+  await (client as any).replicaFrames;
+  expect(client.localReplica.getWindow(key)?.completeness).toBe('complete');
+  expect(socket.sent.filter(m=>m.type==='replica.open')).toHaveLength(1);
+  expect((await storage.load('visible'))?.liveQueries[key]?.ids).toEqual(remaining.map(row=>row._id));
+  stop();
+});

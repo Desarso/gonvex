@@ -3114,10 +3114,14 @@ export class GonvexClient {
         this.emitReplicaMessage(subscription, snapshot, scope);
         return;
       }
-      // Incremental integrity is safe only for full projected row images. Older
-      // partial-row protocols keep the full normalized rehash on replica.ready.
-      const canCarryHashes = prior?.hashes && subscription.columns?.length
-        && upserts.every(row => subscription.columns!.every(column => hasOwn(row, column)));
+      // Empty/deletion-only deltas preserve every surviving row image, even
+      // when older generated references omit projection columns. Dropping that
+      // certificate would rehash only resident rows after cold eviction.
+      // Upserts still require full projected images; partial legacy images do
+      // not prove a new hash by themselves.
+      const canCarryHashes = prior?.hashes && (upserts.length === 0
+        || (subscription.columns?.length
+          && upserts.every(row => subscription.columns!.every(column => hasOwn(row, column)))));
       const hashes = message.hashes ?? (canCarryHashes
         ? await applyReplicaHashDelta(prior!.hashes!, projectReplicaIntegrityRows(upserts, subscription.columns), message.deleted ?? [], prior?.key ?? "id", prior?.aggregateDigest)
         : undefined);
