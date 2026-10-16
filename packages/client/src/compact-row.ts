@@ -5,6 +5,7 @@ import type { ReplicaRow } from './local-replica.js';
 // by repeated spreads and later additions. Nested immutable values stay shared.
 const templates = new Map<string, string>();
 const strings = new Map<string, string>();
+const compactRows = new WeakSet<ReplicaRow>();
 let stringBytes = 0;
 function sharedString(value: string): string {
   if (value.length > 1024) return value;
@@ -21,7 +22,7 @@ function sharedString(value: string): string {
 }
 export function compactReplicaRow(row: ReplicaRow): ReplicaRow {
   const keys = Object.keys(row);
-  if (keys.length < 16 || Object.isFrozen(row)) return row;
+  if (keys.length < 16 || Object.isFrozen(row) || compactRows.has(row)) return row;
   const signature = JSON.stringify(keys);
   let template = templates.get(signature);
   if (!template) {
@@ -35,5 +36,45 @@ export function compactReplicaRow(row: ReplicaRow): ReplicaRow {
   for (const key of keys) {
     const value = row[key]; result[key] = typeof value === 'string' ? sharedString(value) : value;
   }
+  compactRows.add(result);
   return result;
+}
+
+
+/** Storage already decoded a fresh owned row with JSON's shared property layout. */
+export function admitOwnedReplicaRow(row: ReplicaRow): ReplicaRow {
+  if (!Object.isFrozen(row)) for (const key of Object.keys(row)) {
+    const value = row[key]; if (typeof value === 'string') row[key] = sharedString(value);
+  }
+  compactRows.add(row); return row;
+}
+
+/** Clone only newly supplied nested values; primitives and old immutable
+ * fields need no defensive copies. The published row owns every new subtree. */
+export function mergeCompactReplicaRow(previous: ReplicaRow | undefined, incoming: ReplicaRow): ReplicaRow {
+  const keys = previous ? [...new Set([...Object.keys(previous), ...Object.keys(incoming)])] : Object.keys(incoming);
+  const signature = JSON.stringify(keys);
+  let template = templates.get(signature);
+  if (!template) {
+    template = '{' + keys.map(key => JSON.stringify(key) + ':null').join(',') + '}';
+    if (template.length <= 65536) {
+      if (templates.size >= 64) templates.delete(templates.keys().next().value!);
+      templates.set(signature, template);
+    }
+  }
+  const result = JSON.parse(template) as ReplicaRow;
+  const nested: ReplicaRow = Object.create(null);
+  for (const key of Object.keys(incoming)) {
+    const value = incoming[key];
+    if (value !== null && typeof value === 'object') nested[key] = value;
+  }
+  // Clone the nested graph together, preserving aliases between new fields.
+  const copied = Object.keys(nested).length ? structuredClone(nested) : undefined;
+  for (const key of keys) {
+    const supplied = Object.prototype.hasOwnProperty.call(incoming, key);
+    const value = supplied ? incoming[key] : previous![key];
+    result[key] = typeof value === 'string' ? sharedString(value)
+      : supplied && value !== null && typeof value === 'object' ? copied![key] : value;
+  }
+  compactRows.add(result); return result;
 }

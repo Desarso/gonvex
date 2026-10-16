@@ -1,4 +1,4 @@
-import { compactReplicaRow } from "./compact-row.js";
+import { admitOwnedReplicaRow, compactReplicaRow, mergeCompactReplicaRow } from "./compact-row.js";
 import { RowRecency } from "./row-recency.js";
 import { ResidentMap } from "./resident-map.js";
 import { replicaAggregateDigest } from "./replica-integrity.js";
@@ -1244,7 +1244,7 @@ export class LocalReplica implements LocalReplicaView {
       // supplied by another collection.
       const priorRow = entityRows.get(id);
       if (priorRow && Object.keys(row).every(key => Object.prototype.hasOwnProperty.call(priorRow, key) && sameReplicaValue(priorRow[key], row[key]))) continue;
-      setResidentRow(entityRows,id, { ...(priorRow ?? {}), ...cloneRow(row) });
+      setResidentRow(entityRows,id, mergeCompactReplicaRow(priorRow, row));
       changedRowIDs.add(id);
     }
     const previous = nextQueries.get(input.signature);
@@ -1357,7 +1357,7 @@ export class LocalReplica implements LocalReplicaView {
       }
       // Change-feed rows are projections, just like collection snapshots.
       // A narrow subscription must not erase fields supplied by another one.
-      else if (change.newValue) setResidentRow(rows,change.id, {...rows.get(change.id),...cloneRow(change.newValue)});
+      else if (change.newValue) setResidentRow(rows,change.id, mergeCompactReplicaRow(rows.get(change.id),change.newValue));
     }
     const deleted = new Map<string, Set<string>>();
     for (const change of transaction.changes) if (change.operation === "delete") {
@@ -2170,7 +2170,7 @@ function hydratedTransactionFloor(
   return { epoch, revision: Math.min(persisted.revision, provenRevision) };
 }
 function entitiesFromSnapshot(source: ReplicaSnapshot["entities"], owned = false) {
-  return new Map(Object.entries(source).map(([entity, rows]) => [entity, residentRows(Object.entries(rows).map(([id, row]) => [id, owned ? row : cloneRow(row)] as const))]));
+  return new Map(Object.entries(source).map(([entity, rows]) => [entity, residentRows(Object.entries(rows).map(([id, row]) => [id, owned ? admitOwnedReplicaRow(row) : cloneRow(row)] as const))]));
 }
 function snapshotFrom(cursor: ReplicaCursor | undefined, entities: Map<string, Map<string, ReplicaRow>>, liveQueries: Map<string, ReplicaWindow>): ReplicaSnapshot {
   return {
