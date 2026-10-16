@@ -534,3 +534,12 @@ This API does not make the whole replication pipeline bounded by itself.
 Snapshot ingestion and stored membership metadata still need bounded adapters,
 and application views must stop retaining full collections. Existing
 `watchReplica` consumers retain their original row-bearing behavior.
+
+## Local intent read-stamp lifetime
+
+Local dependency stamps are an execution cache for live journal entries. They
+must not become a history of completed operations. Successful durable delivery,
+discard and journal refresh release retired stamps. Closing the client or
+changing its replica scope clears this cache without deleting durable pending
+intents. Failed parked intents keep their prediction and remain eligible for
+retry; cache cleanup does not change the durable acknowledgement barrier.

@@ -258,6 +258,54 @@ describe("SDK-owned local reducer lifecycle", () => {
     expect(await client.reducer(ref, {})).toBe(1);
     expect((await createKvOutboxStore(kv).load())).toHaveLength(1);
   });
+  it("releases completed intent read stamps after every durable delivery", async () => {
+    const { create, kv } = await fixture();
+    const client = create();
+    const socket = await connect(client, true);
+    const calls = () => socket.sent.filter(message => message.type === "reducer.call");
+    for (let i = 0; i < 8; i++) {
+      expect(await client.reducer(ref, {})).toBe(i + 1);
+      await vi.waitFor(() => expect(calls()).toHaveLength(i + 1));
+      const call = calls()[i], revision = i + 2;
+      socket.receive({ type: "reducer.result", id: call.id, result: i + 1, originCommandId: call.id, committedRevision: revision });
+      expect((client as any).localReadVersions.has(call.id)).toBe(true);
+      socket.receive({ type: "replica.transaction", cursor: { epoch: "epoch", revision }, originCommandId: call.id,
+        changes: [{ entity: "tasks", id: "t1", operation: "update", newValue: { _id: "t1", count: i + 1, statusId: "todo" } }],
+      });
+      socket.receive({ type: "replica.watermark", revision });
+      await vi.waitFor(async () => {
+        expect(await createKvOutboxStore(kv).load()).toHaveLength(0);
+        expect((client as any).localReadVersions.size).toBe(0);
+      });
+    }
+  });
+
+  it("keeps read stamps only for live offline intents and clears them on close", async () => {
+    const { create, kv } = await fixture();
+    const client = create();
+    await client.reducer(ref, {});
+    await client.reducer(ref, {});
+    const entries = await createKvOutboxStore(kv).load();
+    expect((client as any).localReadVersions.size).toBe(2);
+    expect(await client.discardIntent(entries[0].idempotencyKey)).toBe(true);
+    expect((client as any).localReadVersions.has(entries[0].idempotencyKey)).toBe(false);
+    expect((client as any).localReadVersions.has(entries[1].idempotencyKey)).toBe(true);
+    expect(await createKvOutboxStore(kv).load()).toHaveLength(1);
+    client.close();
+    expect((client as any).localReadVersions.size).toBe(0);
+    expect(await createKvOutboxStore(kv).load()).toHaveLength(1);
+  });
+
+  it("drops read stamps on identity change while keeping the prior durable journal", async () => {
+    const { create, kv } = await fixture();
+    const client = create();
+    await client.reducer(ref, {});
+    expect((client as any).localReadVersions.size).toBe(1);
+    client.setAuth({ identity: { sub: "different-account", iss: "issuer" } });
+    expect((client as any).localReadVersions.size).toBe(0);
+    expect(await createKvOutboxStore(kv).load()).toHaveLength(1);
+  });
+
   it("waits for the durable server watermark before sending a dependent intent", async () => {
     const { create, kv } = await fixture();
     const client = create();

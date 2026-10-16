@@ -964,6 +964,7 @@ export class GonvexClient {
       if (!removed) return false;
       this.optimisticOutboxEntryIds.delete(id);
       this.optimisticReducerIds.delete(id);
+      this.localReadVersions.delete(id);
       if (outboxEntryIsLive(removed)) {
         this.replacingLocal = true;
         try { this.replica.rejectCommand(id); }
@@ -1239,6 +1240,7 @@ export class GonvexClient {
         await this.replica.synchronizeStorage();
         const entries = (await this.reducerOutbox.list(scope)).filter(outboxEntryIsLive);
         if (this.manuallyClosed || scope !== this.outboxScope) return;
+        this.pruneLocalReadVersions(entries);
         this.replaceLocalPredictions(entries.filter(entry => entry.state !== "committed").map(entry => ({commandId: entry.idempotencyKey, patches: entry.patches ?? []})));
         this.optimisticReducerIds.clear();
         this.optimisticOutboxEntryIds.clear();
@@ -1254,6 +1256,14 @@ export class GonvexClient {
   }
 
   private readonly localReadVersions = new Map<string, string>();
+
+  private pruneLocalReadVersions(entries: readonly Pick<ReducerOutboxEntry, "idempotencyKey">[]) {
+    if (!this.localReadVersions.size) return;
+    if (!entries.length) { this.localReadVersions.clear(); return; }
+    const live = new Set(entries.map(entry => entry.idempotencyKey));
+    for (const id of this.localReadVersions.keys()) if (!live.has(id)) this.localReadVersions.delete(id);
+  }
+
 
   private localReadStamp(dependencies: IntentDependencies): string {
     return JSON.stringify([this.localIdentity, this.localBinding?.artifactHash, dependencies.scans.map(entity => this.replica.executionReadVersion(entity)), dependencies.reads.map(row => this.replica.executionReadVersion(row.entity, row.rowId))]);
@@ -1299,6 +1309,7 @@ export class GonvexClient {
     // Failed (parked) intents stay predicted until retried or discarded.
     const entries = (await this.reducerOutbox.list(scope)).filter(outboxEntryIsLive);
     if (scope !== this.outboxScope || replicaScope !== this.replicaScope) return;
+    this.pruneLocalReadVersions(entries);
     if (entries.length === 0) {
       this.replacingLocal = true;
       try { this.replaceLocalPredictions([]); }
@@ -2227,6 +2238,7 @@ export class GonvexClient {
     this.flushTelemetry();
     this.unsubscribeTelemetryLifecycle?.();
     this.manuallyClosed = true;
+    this.localReadVersions.clear();
     this.authInFlight = false;
     this.authResendRequired = false;
     this.latestAuthFrameId = undefined;
@@ -3773,6 +3785,7 @@ export class GonvexClient {
     this.optimisticOutboxEntryIds.delete(reducerId);
     this.optimisticReducerIds.delete(reducerId);
     if (entryId !== undefined) await this.reducerOutbox.ack(entryId);
+    this.localReadVersions.delete(reducerId);
   }
 
   private async drainOutbox() {
@@ -3874,6 +3887,9 @@ export class GonvexClient {
         if (localIds.length > 0) await this.inLocalLane(async () => {
           if (this.reducerOutbox.ackMany) await this.reducerOutbox.ackMany(localIds);
           else for (const id of localIds) await this.reducerOutbox.ack(id);
+          if (scope === this.outboxScope) for (const entry of succeeded) {
+            if (entry.localExecution) this.localReadVersions.delete(entry.idempotencyKey);
+          }
         });
         for (let index = 0; index < entries.length; index += 1) {
           const entry = entries[index]!;
@@ -4693,6 +4709,7 @@ export class GonvexClient {
   }
 
   private resetReplicaScopeState() {
+    this.localReadVersions.clear();
     this.snapshotDeferredFrames = [];
     this.snapshotDeferredBytes = 0;
     this.processedReplicaWatermarkRevision = 0;
