@@ -9,6 +9,8 @@ type UpgradeRecord = { key: string; version: number; journal?: {
 } };
 export type BrowserUpgradeOptions = {
   replicaName: string;
+  /** Keep cold rows on disk until an active window or entity retains them. */
+  startupWorkingSet?: "prefetch" | "mounted";
   outboxName: string;
   contract: ClientContract;
   /** Version assigned to data written before this mechanism was introduced. */
@@ -21,7 +23,7 @@ export type BrowserUpgradeOptions = {
 export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
   storage: LocalReplicaStorage; store: OutboxStore; ready: Promise<void>; close(): void;
 } {
-  const replica = new IndexedDBLocalReplicaStorage(options.replicaName);
+  const replica = new IndexedDBLocalReplicaStorage(options.replicaName, options.startupWorkingSet);
   const queue = new Dexie(options.outboxName, { cache: 'disabled' }) as Dexie & { entries: Table<ReducerOutboxEntry, number> };
   // SDK fences and peer notifications own journal delivery. These stores are
   // never used by Dexie.liveQuery; its mutation ranges and cache transaction

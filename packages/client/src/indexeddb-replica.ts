@@ -52,7 +52,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   private readonly channel?:BroadcastChannel;
   private readonly peers=new Set<(scope:string)=>void>();
 
-  constructor(name = "gonvex-local-replica") {
+  constructor(name = "gonvex-local-replica", private readonly startupWorkingSet: "prefetch" | "mounted" = "prefetch") {
     this.database = new Dexie(name, { cache: 'disabled' }) as ReplicaDatabase;
     // Gonvex owns subscription delivery and peer synchronization. These private
     // tables are never queried through Dexie.liveQuery; collecting index ranges
@@ -369,7 +369,10 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       // getAll-backed pages avoid one JS/Dexie cursor continuation per row.
       // Keep both temporary decoding and retained rows bounded independently.
       let after: [string, string, string] | undefined;
-      while (!full) {
+      // An explicit mounted-window list defines the startup working set, even
+      // when empty. Do not use the spare budget to decode unrelated disk rows.
+      // Callers without a mounted list retain the bounded prefetch contract.
+      while (!full && (this.startupWorkingSet === "prefetch" || budget.preferredWindows === undefined)) {
         const page = await this.database.entities.where('[scope+entity+id]')
           .between(after ?? [scope], [scope, []], !after, false)
           .limit(Math.min(256, Math.max(1, budget.maxRows - count + 1))).toArray();

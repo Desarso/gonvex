@@ -262,3 +262,23 @@ it('drops old recency entries on an epoch replacement of the same table without 
   expect(replica['recency'].has('items\0z')).toBe(true);
   replica.dispose();expect(replica['recency'].size).toBe(0);
 });
+
+
+it('does not decode unmounted disk rows at startup and can mount them offline later', async () => {
+  storage.close();
+  storage = new IndexedDBLocalReplicaStorage(`mounted-${Math.random()}`, 'mounted');
+  await seed();
+  const loaded = await storage.loadWorkingSet('scope', {maxRows:100, maxBytes:1000000, preferredWindows:[]});
+  expect(loaded!.entities).toEqual({});
+  expect(loaded!.residentPartialTables).toContain('items');
+  expect(loaded!.liveQueries.all!.ids).toHaveLength(20);
+  const replica = new LocalReplica(storage);
+  await replica.activateScope('scope');
+  expect(replica.entityRows('items')).toEqual([]);
+  const release = replica.retainWindow('all');
+  await replica.withReadView(coverage, false, async () => undefined);
+  expect(replica.windowRows('all')).toEqual(rows);
+  release(); replica.dispose();
+});
+
+
