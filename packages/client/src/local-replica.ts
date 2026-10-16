@@ -1041,15 +1041,52 @@ export class LocalReplica implements LocalReplicaView {
         const id = typeof rawID === "string" || typeof rawID === "number" ? String(rawID) : "";
         if (id && !present.has(id)) { ids.push(id); present.add(id); }
       }
-      const upserts = new Map(input.upserts.map(row => [String(row[input.key]), row]));
-      const rows = ids
-        .map((id) => upserts.has(id) ? {...this.entities.get(input.entity)?.get(id),...upserts.get(id)} : this.entities.get(input.entity)?.get(id))
-        .filter((row): row is ReplicaRow => row !== undefined);
+      const upserts = new Map<string, ReplicaRow>();
+      for (const row of input.upserts) {
+        const id = String(row[input.key]);
+        let prior = upserts.get(id) ?? this.entities.get(input.entity)?.get(id);
+        // A narrow update to a cold row must not discard fields persisted by
+        // another collection. Load one prior row at a time, not the window.
+        if (!prior && this.storage?.loadEntityRows) {
+          prior = (await this.storage.loadEntityRows(this.scopeValue, input.entity, [id]))[0]?.row;
+        }
+        upserts.set(id, { ...prior, ...row });
+      }
+      const readResident = (id: string) => upserts.get(id) ?? this.entities.get(input.entity)?.get(id);
+      const rows = ids.map(readResident).filter((row): row is ReplicaRow => row !== undefined);
       const plan = this.replicaPlans.get(input.signature)?.definition;
       const orderBy = input.orderBy ?? existing?.orderBy ?? plan?.orderBy;
       const orderDirection = input.orderDirection ?? existing?.orderDirection ?? plan?.orderDirection;
+      let membershipIds = ids;
       if ((input.kind ?? existing?.kind) === 'replica' && orderBy) {
-        rows.sort((a,b) => compareReplicaMembershipRows(a,b,input.key,orderBy,orderDirection));
+        const compare = (a: ReplicaRow, b: ReplicaRow) => compareReplicaMembershipRows(a,b,input.key,orderBy,orderDirection);
+        if (rows.length === ids.length) {
+          rows.sort(compare);
+          membershipIds = rows.map(row => String(row[input.key]));
+        } else {
+          const readCold = async (id: string): Promise<ReplicaRow> => {
+            const row = readResident(id) ?? (await this.storage?.loadEntityRows?.(this.scopeValue,input.entity,[id]))?.[0]?.row;
+            if (!row) throw new Error("Cannot order missing replica member " + id);
+            return row;
+          };
+          // Existing membership is already ordered. Only changed keys need
+          // reinsertion, with logarithmic disk lookups and no full hydration.
+          // A changed sort definition is rare and rebuilds the ID order alone.
+          const reorderAll = (existing?.orderBy ?? plan?.orderBy) !== orderBy
+            || (existing?.orderDirection ?? plan?.orderDirection ?? 'desc') !== (orderDirection ?? 'desc');
+          membershipIds = reorderAll ? [] : ids.filter(id => !upserts.has(id));
+          const changed = reorderAll ? ids : [...upserts.keys()].filter(id => present.has(id));
+          for (const id of changed) {
+            const row = await readCold(id);
+            let low = 0, high = membershipIds.length;
+            while (low < high) {
+              const mid = (low + high) >>> 1;
+              if (compare(await readCold(membershipIds[mid]!), row) <= 0) low = mid + 1;
+              else high = mid;
+            }
+            membershipIds.splice(low, 0, id);
+          }
+        }
       }
       await this.materializeWindowNow({
         ...input,
@@ -1057,7 +1094,7 @@ export class LocalReplica implements LocalReplicaView {
         completeness: input.completeness ?? existing?.completeness ?? "partial",
         source: input.source ?? existing?.source ?? "server",
         removedIDs: [...deleted],
-      }, { upserts: input.upserts, deleted: [...deleted] });
+      }, { upserts: input.upserts, deleted: [...deleted] }, membershipIds);
     });
 
     return application;
@@ -1281,7 +1318,7 @@ export class LocalReplica implements LocalReplicaView {
     hashes?: Record<string, string>;
     removedIDs?: string[];
     scope?: ReplicaScope;
-  }, delta?: { upserts: ReplicaRow[]; deleted: string[] }) {
+  }, delta?: { upserts: ReplicaRow[]; deleted: string[] }, membershipIds?: string[]) {
     if (input.scope !== undefined && normalizeReplicaScope(input.scope) !== this.scopeValue) return;
     if (!input.signature.trim() || !input.entity.trim() || !input.key.trim()) {
       throw new Error("replica materialization requires signature, entity, and key");
@@ -1321,7 +1358,7 @@ export class LocalReplica implements LocalReplicaView {
       kind: input.kind ?? "live",
       entity: input.entity,
       key: input.key,
-      ids,
+      ids: membershipIds ?? ids,
       cursor: input.cursor ? { ...input.cursor } : undefined,
       completeness: input.completeness,
       source: input.source,
@@ -1340,7 +1377,7 @@ export class LocalReplica implements LocalReplicaView {
       hashes: input.hashes ? { ...input.hashes } : undefined,
     };
     nextQueries.set(input.signature, window);
-    const presentIDs = new Set(ids);
+    const presentIDs = new Set(window.ids);
     for (const id of input.removedIDs ?? []) {
       const stillReferenced = presentIDs.has(id) || [...nextQueries.values()].some(candidate => candidate.signature !== input.signature && candidate.entity === input.entity && [...this.windowsForRow(input.entity,id)].includes(candidate.signature));
       if (!stillReferenced && deleteResidentRow(entityRows,id)) changedRowIDs.add(id);
