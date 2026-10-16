@@ -345,6 +345,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   }
 
   readonly ownsWorkingSetRows = true;
+  readonly ownsHydrationRows = true;
 
   async loadWorkingSet(scope:string,budget:{maxRows:number;maxBytes:number;preferredWindows?:readonly string[]}):Promise<ReplicaSnapshot|undefined> {
     await this.initialize();

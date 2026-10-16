@@ -315,3 +315,53 @@ it('retains already resident views without allocating application jobs or storag
     expect(loadRows).not.toHaveBeenCalled();
   } finally { releases.forEach(release=>release()); replica.dispose(); }
 });
+
+it.each([true,false])('transfers only explicitly owned window hydration rows: %s', async owned => {
+  storage.close(); storage = new IndexedDBLocalReplicaStorage(`transfer-${Math.random()}`, 'mounted');
+  Object.defineProperty(storage,'ownsHydrationRows',{value:owned});
+  await seed();
+  const load = storage.loadWindowRows.bind(storage);
+  let decoded: Awaited<ReturnType<typeof load>>;
+  vi.spyOn(storage,'loadWindowRows').mockImplementation(async (...args) => decoded = await load(...args));
+  const replica = new LocalReplica(storage);
+  await replica.activateScope('scope');
+  const release = replica.retainWindow('all');
+  await replica.withReadView(coverage,false,async()=>undefined);
+  try {
+    const published = replica.entity('items',rows[0]!._id)!;
+    expect(published).toEqual(rows[0]);
+    if (owned) {
+      expect(published).toBe(decoded!.rows[0]);
+      expect(Object.isFrozen(decoded!.rows[0])).toBe(true);
+    } else {
+      expect(published).not.toBe(decoded!.rows[0]);
+      decoded!.rows[0]!.name = 'caller change';
+      expect(published.name).toBe(rows[0]!.name);
+    }
+  } finally {release();replica.dispose();}
+});
+
+it.each([true,false])('transfers only explicitly owned entity hydration rows: %s', async owned => {
+  storage.close(); storage = new IndexedDBLocalReplicaStorage(`entity-transfer-${Math.random()}`, 'mounted');
+  Object.defineProperty(storage,'ownsHydrationRows',{value:owned});
+  await seed();
+  const load = storage.loadEntityRows.bind(storage);
+  let decoded: Awaited<ReturnType<typeof load>> = [];
+  vi.spyOn(storage,'loadEntityRows').mockImplementation(async (...args) => decoded = await load(...args));
+  const replica = new LocalReplica(storage);
+  await replica.activateScope('scope');
+  const release = replica.retainRows('items',[rows[0]!._id]);
+  await replica.withReadView(coverage,false,async()=>undefined);
+  try {
+    const published = replica.entity('items',rows[0]!._id)!;
+    expect(published).toEqual(rows[0]);
+    if (owned) {
+      expect(published).toBe(decoded[0]!.row);
+      expect(Object.isFrozen(decoded[0]!.row)).toBe(true);
+    } else {
+      expect(published).not.toBe(decoded[0]!.row);
+      decoded[0]!.row.name = 'caller change';
+      expect(published.name).toBe(rows[0]!.name);
+    }
+  } finally {release();replica.dispose();}
+});

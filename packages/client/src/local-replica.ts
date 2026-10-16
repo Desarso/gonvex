@@ -131,6 +131,9 @@ export interface LocalReplicaStorage {
   readonly supportsMembershipDeltas?: boolean;
   /** Working-set rows are newly decoded and may be frozen by the replica. */
   readonly ownsWorkingSetRows?: boolean;
+  /** Window/entity hydration returns fresh decoded rows owned by the caller.
+   * The replica may admit and freeze them without another defensive copy. */
+  readonly ownsHydrationRows?: boolean;
   readChanges?(scope:string, afterSequence:number,interest?:{rows:Record<string,string[]>;hasRow?:(entity:string,id:string)=>boolean;windows:string[];availableRows:number;availableBytes:number;maxRows:number;maxBytes:number}):Promise<ReplicaStorageChanges>;
   subscribePeer?(listener:(scope:string)=>void):()=>void;
   withReadView?<T>(scope: string, coverage: ReadCoverage, run: (view: ReducerReadView) => Promise<T>): Promise<T>;
@@ -594,7 +597,7 @@ export class LocalReplica implements LocalReplicaView {
       const loaded=await this.storage.loadWindowRows(this.scopeValue,signature);
       if(!loaded || !this.retainedWindows.has(signature) || scopeGeneration!==this.scopeActivationGeneration)return;
       const table=residentRows(this.entities.get(loaded.window.entity));
-      for(const row of loaded.rows)setResidentRow(table,String(row[loaded.window.key]),cloneRow(row));
+      for(const row of loaded.rows)setResidentRow(table,String(row[loaded.window.key]),this.storage!.ownsHydrationRows ? admitOwnedReplicaRow(row) : cloneRow(row));
       this.entities=new Map(this.entities).set(loaded.window.entity,table);
       this.liveQueries = new Map(this.liveQueries).set(signature,normalizeWindow(loaded.window));
       if(loaded.window.kind==='replica' && loaded.window.completeness==='complete' && !loaded.window.truncated && loaded.rows.length===loaded.window.ids.length)this.residentPartialTables.delete(loaded.window.entity);
@@ -637,7 +640,7 @@ export class LocalReplica implements LocalReplicaView {
       const rows=await this.storage.loadEntityRows(this.scopeValue,entity,missing);
       if(scopeGeneration!==this.scopeActivationGeneration)return;
       const next=residentRows(this.entities.get(entity));
-      for(const {id,row} of rows)if(this.retainedRows.get(entity)?.has(id))setResidentRow(next,id,cloneRow(row));
+      for(const {id,row} of rows)if(this.retainedRows.get(entity)?.has(id))setResidentRow(next,id,this.storage!.ownsHydrationRows ? admitOwnedReplicaRow(row) : cloneRow(row));
       this.entities=new Map(this.entities).set(entity,next);
       this.markEntityChanged(entity,missing);this.notify(true);
     });
