@@ -296,3 +296,22 @@ it('coalesces repeated retained-window disk reads without dropping reference own
   releases.at(-1)!(); expect(replica['retainedWindows'].has('all')).toBe(false);
   expect(replica['pendingRetains'].size).toBe(0); replica.dispose();
 });
+
+it('retains already resident views without allocating application jobs or storage-read keys', async () => {
+  await seed();
+  const replica = new LocalReplica(storage, {maxResidentRows:100});
+  await replica.activateScope('scope');
+  const loadWindow = vi.spyOn(storage, 'loadWindowRows');
+  const loadRows = vi.spyOn(storage, 'loadEntityRows');
+  const ids = rows.map(row => row._id);
+  const releases = Array.from({length:100}, () => [replica.retainWindow('all'), replica.retainRows('items',ids)]).flat();
+  try {
+    expect(replica['applicationJobs']).toHaveLength(0);
+    expect(replica['pendingRetains'].size).toBe(0);
+    expect(replica['retainedWindows'].get('all')).toBe(100);
+    expect(replica['retainedRows'].get('items')!.get(ids[0]!)).toBe(100);
+    await replica.withReadView(coverage,false,async()=>undefined);
+    expect(loadWindow).not.toHaveBeenCalled();
+    expect(loadRows).not.toHaveBeenCalled();
+  } finally { releases.forEach(release=>release()); replica.dispose(); }
+});
