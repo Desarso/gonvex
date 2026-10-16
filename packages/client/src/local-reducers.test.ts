@@ -280,6 +280,34 @@ describe("SDK-owned local reducer lifecycle", () => {
     expect(pending).toHaveLength(1);
     expect(pending[0]?.idempotencyKey).toBe(calls()[1].id);
   });
+  it("does not redeliver an accepted intent or release its dependents while persistence is slow", async () => {
+    const { create, kv } = await fixture();
+    const client = create();
+    await client.reducer(ref, {});
+    await client.reducer(ref, {});
+    vi.useFakeTimers();
+    try {
+      const socket = await connect(client, true);
+      const calls = () => socket.sent.filter(message => message.type === "reducer.call");
+      await vi.waitFor(() => expect(calls()).toHaveLength(1));
+      const first = calls()[0];
+      socket.receive({ type: "reducer.result", id: first.id, result: 1, originCommandId: first.id, committedRevision: 4 });
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(calls()).toHaveLength(1);
+      const pending = await createKvOutboxStore(kv).load();
+      expect(pending).toHaveLength(2);
+      expect(pending[0]).toMatchObject({ idempotencyKey: first.id, state: "inflight", attempts: 0 });
+      expect(client.localReplica.entity("tasks", "t1")?.count).toBe(2);
+      socket.receive({ type: "replica.transaction", cursor: { epoch: "epoch", revision: 4 }, originCommandId: first.id,
+      changes: [{ entity: "tasks", id: "t1", operation: "update", newValue: { _id: "t1", count: 1, statusId: "todo" } }],
+      });
+      socket.receive({ type: "replica.watermark", revision: 4 });
+      await vi.waitFor(() => expect(calls()).toHaveLength(2), { timeout: 10_000 });
+      expect(calls()[1].id).not.toBe(first.id);
+      expect(await createKvOutboxStore(kv).load()).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("keeps the local prediction until every frame of the committed revision arrives", async () => {
     const { create } = await fixture();
     const client = create();

@@ -267,6 +267,15 @@ const stop = client.subscribeToConnectionState((state) => {
 
 Override per client (`timeouts` option) or per call (`{ timeoutMs }`). Use `0` to disable.
 
+For tenant Reducers and Actions, the response timer stops when the server
+returns a successful result. If that result requires a Replica watermark, the
+Promise and local prediction remain pending until the watermark is durably
+applied. Slow local persistence must not trigger another delivery of an already
+accepted intent. Disconnect, close, and authentication-scope changes still
+reject pending tenant calls. There is no separate deadline for local persistence;
+a storage failure that never recovers leaves the call pending until one of those
+connection or lifecycle events. Control-call timeout behavior is unchanged.
+
 ### Typed errors
 
 Rejected operations throw `GonvexClientError` with `code`:

@@ -473,9 +473,11 @@ export type ConnectionState = {
 export type GonvexTimeoutOptions = {
   /** One-shot `client.query()` timeout. Default 20s. `0` disables. */
   queryTimeoutMs?: number;
-  /** `client.reducer()` timeout. Default 20s. `0` disables. */
+  /** Server-response timeout for `client.reducer()`. Default 20s. `0` disables.
+   * A tenant response waiting for its durable Replica watermark has no response timer. */
   reducerTimeoutMs?: number;
-  /** `client.action()` timeout. Default 60s. `0` disables. */
+  /** Server-response timeout for `client.action()`. Default 60s. `0` disables.
+   * A tenant response waiting for its durable Replica watermark has no response timer. */
   actionTimeoutMs?: number;
 };
 
@@ -4376,6 +4378,14 @@ export class GonvexClient {
           return;
         }
         if (kind === "reducer" && message.type === "reducer.result") {
+          // The server has answered. Slow local persistence must not turn an
+          // accepted operation into a timeout and another outbox delivery.
+          // Keep the call and prediction until the durable barrier; disconnect,
+          // scope changes and close still reject and release pending calls.
+          if (pending.scope === "tenant") {
+            if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
+            pending.timeoutTimer = undefined;
+          }
           const complete = () => {
             // A collection frame can advance the shared cursor before another
             // collection's rows and membership have arrived. Retire the local
@@ -4413,6 +4423,14 @@ export class GonvexClient {
           }));
         }
         if (kind === "action" && message.type === "action.result") {
+          // The server has answered. Slow local persistence must not turn an
+          // accepted operation into a timeout and another outbox delivery.
+          // Keep the call and prediction until the durable barrier; disconnect,
+          // scope changes and close still reject and release pending calls.
+          if (pending.scope === "tenant") {
+            if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
+            pending.timeoutTimer = undefined;
+          }
           const complete = () => {
             settle();
             this.emitTelemetryFromCall(kind, id, ref.path, "ok", clientSentAtMs, message.trace);

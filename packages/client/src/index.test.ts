@@ -3125,6 +3125,42 @@ describe("GonvexClient", () => {
     });
   });
 
+  it.each([
+    ...(["reducer", "action"] as const).flatMap(kind =>
+      (["tenant"] as const).flatMap(scope =>
+        [false, true].map(disconnect => ({ kind, scope, disconnect })))),
+  ])("keeps an accepted call behind its durable barrier beyond the response timeout: %j", async ({ kind, scope, disconnect }) => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", capabilities: { replicaWatermark: 1, controlWatermark: 1 }, replica: testReplicaDirective });
+    await (client as any).replicaReady;
+    const result = kind === "reducer"
+      ? client.reducer({ kind, scope, path: "tasks.noop" }, {}, { timeoutMs: 1_000 })
+      : client.action({ kind, scope, path: "jobs.run" }, {}, { timeoutMs: 1_000 });
+    let outcome = "pending";
+    void result.then(() => { outcome = "resolved"; }, () => { outcome = "rejected"; });
+    await vi.advanceTimersByTimeAsync(0);
+    const call = sentMessages(socket).findLast(message => message.type === kind + ".call")!;
+    expect(call).toBeDefined();
+    socket.receive({ type: kind + ".result", id: call.id, result: { ok: true }, committedRevision: 9 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(outcome).toBe("pending");
+    expect(client.connectionState().hasInflightRequests).toBe(true);
+    if (disconnect) {
+      socket.disconnect();
+      await expect(result).rejects.toMatchObject({ code: "disconnected" });
+      expect(client.connectionState().hasInflightRequests).toBe(false);
+    } else {
+      socket.receive({ type: "replica.watermark", revision: 9 });
+      await expect(result).resolves.toEqual({ ok: true });
+      expect(client.connectionState().hasInflightRequests).toBe(false);
+    }
+    expect(sentMessages(socket).filter(message => message.type === kind + ".call")).toHaveLength(1);
+    client.close();
+  });
+
   it("gives actions a longer default timeout than reducers", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const action = client.action({ kind: "action", path: "jobs.run" });
