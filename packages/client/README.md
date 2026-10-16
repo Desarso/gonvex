@@ -486,6 +486,14 @@ positions of one entity count once, in first-membership order. This API is for
 Replica Collections, not reconstruction of duplicate-bearing Live Query results.
 A zero limit counts without decoding rows. All reads share one storage transaction.
 
+Each page returns the scope's `storageSequence`. Pass it as
+`expectedStorageSequence` on continuation reads. Any intervening durable change
+to that scope throws `ReplicaPageChangedError` with code `replica-page-changed`;
+restart the read rather than combining pages from different versions. The guard
+also detects row-only updates without membership changes. It does not hold an
+old snapshot open across calls or cover optimistic overlays. Omitting the guard
+keeps independent single-page reads available.
+
 An oversized row is returned as `blockedId` without advancing past it; callers
 must handle it explicitly. A missing normalized row is listed in `missingIds`.
 Neither case means that the requested page contains complete row data. The byte

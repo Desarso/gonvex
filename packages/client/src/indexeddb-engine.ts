@@ -52,6 +52,7 @@ async function visitRecords<T, Key>(collection: Collection<T, Key>, visit: (reco
 /** A bounded page of unique normalized rows in first-membership order.
  * This is not a reconstruction of duplicate-bearing Live Query results. */
 export type ReplicaRowsPage = {
+  storageSequence: number;
   window: Omit<ReplicaWindow, "ids" | "hashes" | "aggregateDigest">;
   offset: number;
   nextOffset: number;
@@ -62,6 +63,15 @@ export type ReplicaRowsPage = {
   decodedBytes: number;
   blockedId?: string;
 };
+
+/** A caller must restart its multi-page read after any durable scope change. */
+export class ReplicaPageChangedError extends Error {
+  readonly code = "replica-page-changed";
+  constructor(readonly expectedStorageSequence: number, readonly storageSequence: number) {
+    super("Replica storage changed between bounded page reads");
+    this.name = "ReplicaPageChangedError";
+  }
+}
 
 /** Atomic normalized web persistence for the Gonvex Local Replica. */
 export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
@@ -638,16 +648,21 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
    * cross IndexedDB before its size can be inspected; this is not by itself a
    * renderer-memory ceiling. An oversized row is reported, never skipped. */
   async loadReplicaRowsPage(scope: string, signature: string, options: {
-    offset: number; limit: number; maxBytes: number;
+    offset: number; limit: number; maxBytes: number; expectedStorageSequence?: number;
   }): Promise<ReplicaRowsPage | undefined> {
     if (!Number.isSafeInteger(options.offset) || options.offset < 0
       || !Number.isSafeInteger(options.limit) || options.limit < 0 || options.limit > 512
-      || !Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0) {
+      || !Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0
+      || options.expectedStorageSequence !== undefined && (!Number.isSafeInteger(options.expectedStorageSequence) || options.expectedStorageSequence < 0)) {
       throw new RangeError("Invalid replica page budget");
     }
     await this.initialize();
     const normalizedScope = normalizeScope(scope);
-    return this.database.transaction("r", this.database.windows, this.database.members, this.database.entities, async () => {
+    return this.database.transaction("r", this.database.windows, this.database.members, this.database.entities, this.database.meta, async () => {
+      const storageSequence = Number((await this.database.meta.get([normalizedScope, "sequence"]))?.value ?? 0);
+      if (options.expectedStorageSequence !== undefined && options.expectedStorageSequence !== storageSequence) {
+        throw new ReplicaPageChangedError(options.expectedStorageSequence, storageSequence);
+      }
       const record = await this.database.windows.get([normalizedScope, signature]);
       if (!record || record.deleted) return undefined;
       const { hasHashes, aggregateDigest, ...window } = JSON.parse(record.value) as Omit<ReplicaWindow, "ids" | "hashes"> & { hasHashes?: boolean };
@@ -658,7 +673,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
         .between([normalizedScope, signature, record.generation!, ""], [normalizedScope, signature, record.generation!, "\uffff"], false, true);
       const totalUniqueRows = await members.clone().count();
       const page = await members.offset(options.offset).limit(options.limit).toArray();
-      const result: ReplicaRowsPage = { window, offset: options.offset, nextOffset: options.offset,
+      const result: ReplicaRowsPage = { storageSequence, window, offset: options.offset, nextOffset: options.offset,
         totalUniqueRows, ids: [], rows: [], missingIds: [], decodedBytes: 0 };
       for (const member of page) {
         const row = await this.database.entities.get([normalizedScope, window.entity, member.id]);

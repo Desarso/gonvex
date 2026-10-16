@@ -57,3 +57,30 @@ it('reports missing normalized rows rather than presenting them as complete data
 it.each([{offset:-1,limit:1,maxBytes:1000},{offset:0,limit:513,maxBytes:1000},{offset:0,limit:1,maxBytes:Infinity},{offset:.5,limit:1,maxBytes:1000}])('rejects invalid bounds %j',async options=>{
   await expect(storage.loadReplicaRowsPage('tenant','items',options)).rejects.toThrow(RangeError);
 });
+
+it('rejects a continuation after durable rows or membership change', async () => {
+  await seed([{id:'a',title:'A'},{id:'b',title:'B'}]);
+  const first=(await storage.loadReplicaRowsPage('tenant','items',{offset:0,limit:1,maxBytes:10000}))!;
+  expect(first.storageSequence).toBeGreaterThan(0);
+  expect(await storage.loadReplicaRowsPage('tenant','items',{offset:1,limit:1,maxBytes:10000,expectedStorageSequence:first.storageSequence}))
+    .toMatchObject({rows:[{id:'b',title:'B'}],storageSequence:first.storageSequence});
+  await seed([{id:'a',title:'New A'},{id:'b',title:'New B'}]);
+  await expect(storage.loadReplicaRowsPage('tenant','items',{offset:1,limit:1,maxBytes:10000,expectedStorageSequence:first.storageSequence}))
+    .rejects.toMatchObject({name:'ReplicaPageChangedError',code:'replica-page-changed',expectedStorageSequence:first.storageSequence});
+  expect(await storage.loadReplicaRowsPage('tenant','items',{offset:0,limit:1,maxBytes:10000}))
+    .toMatchObject({rows:[{id:'a',title:'New A'}]});
+});
+
+it('detects a row-only update and keeps sequence guards isolated by scope', async () => {
+  await seed([{id:'a',title:'A'},{id:'b',title:'B'}]);
+  const first=(await storage.loadReplicaRowsPage('tenant','items',{offset:0,limit:1,maxBytes:10000}))!;
+  await seed([{id:'a',title:'Other'}],'other');
+  await expect(storage.loadReplicaRowsPage('tenant','items',{offset:1,limit:1,maxBytes:10000,expectedStorageSequence:first.storageSequence})).resolves.toMatchObject({rows:[{id:'b',title:'B'}]});
+  await storage.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'items',id:'b',operation:'update',newValue:{title:'Changed'}}]}, {entities:{},liveQueries:{}}, 'tenant');
+  await expect(storage.loadReplicaRowsPage('tenant','items',{offset:1,limit:1,maxBytes:10000,expectedStorageSequence:first.storageSequence}))
+    .rejects.toMatchObject({code:'replica-page-changed'});
+});
+
+it.each([-1,0.5,Infinity,NaN])('rejects invalid continuation sequence %s',async expectedStorageSequence=>{
+  await expect(storage.loadReplicaRowsPage('tenant','items',{offset:0,limit:1,maxBytes:10000,expectedStorageSequence})).rejects.toThrow(RangeError);
+});
