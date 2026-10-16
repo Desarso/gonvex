@@ -282,3 +282,17 @@ it('does not decode unmounted disk rows at startup and can mount them offline la
 });
 
 
+it('coalesces repeated retained-window disk reads without dropping reference ownership', async () => {
+  storage.close(); storage = new IndexedDBLocalReplicaStorage(`coalesce-${Math.random()}`, 'mounted');
+  await seed(); const replica = new LocalReplica(storage); await replica.activateScope('scope');
+  const load = vi.spyOn(storage, 'loadWindowRows');
+  const releases = Array.from({length:100}, () => replica.retainWindow('all'));
+  expect(replica['applicationJobs']).toHaveLength(1);
+  await replica.withReadView(coverage, false, async () => undefined);
+  expect(load).toHaveBeenCalledOnce();
+  expect(replica.windowRows('all')).toEqual(rows);
+  releases.slice(0,-1).forEach(release => release());
+  expect(replica['retainedWindows'].get('all')).toBe(1);
+  releases.at(-1)!(); expect(replica['retainedWindows'].has('all')).toBe(false);
+  expect(replica['pendingRetains'].size).toBe(0); replica.dispose();
+});

@@ -436,6 +436,18 @@ export class LocalReplica implements LocalReplicaView {
     }
     this.applicationRunning = false;
   }
+  // Share only idempotent disk reads. Server writes, cursors and Reducer
+  // transactions keep their original ordered application jobs.
+  private readonly pendingRetains = new Map<string, Promise<void>>();
+  private enqueueRetain(key: string, run: () => Promise<void>): Promise<void> {
+    const existing = this.pendingRetains.get(key);
+    if (existing) return existing;
+    const operation = this.enqueueApplication(run, true);
+    this.pendingRetains.set(key, operation);
+    const release = () => { if (this.pendingRetains.get(key) === operation) this.pendingRetains.delete(key); };
+    void operation.then(release, release);
+    return operation;
+  }
   private hydration?: Promise<void>;
   private freshnessValue: ReplicaFreshness = "verifying";
   private versionValue = 0;
@@ -570,7 +582,7 @@ export class LocalReplica implements LocalReplicaView {
       if (window) for (const id of window.ids) this.refreshPin(window.entity,id);
     }
     const scopeGeneration=this.scopeActivationGeneration;
-    const operation=this.enqueueApplication(async()=>{
+    const operation=this.enqueueRetain(JSON.stringify([scopeGeneration, 'window', signature]), async()=>{
       if(!this.scopeLoaded || !this.retainedWindows.has(signature) || scopeGeneration!==this.scopeActivationGeneration || !this.storage?.loadWindowRows)return;
       const existing=this.liveQueries.get(signature);
       if(existing?.ids.every(id=>this.entities.get(existing.entity)?.has(id)))return;
@@ -584,7 +596,7 @@ export class LocalReplica implements LocalReplicaView {
       this.markEntityChanged(loaded.window.entity,loaded.window.ids);
       this.markWindowChanged(signature);
       this.notify(true);
-    }, true);
+    });
 
     let released=false;
     return ()=>{
@@ -610,7 +622,7 @@ export class LocalReplica implements LocalReplicaView {
     let retained=this.retainedRows.get(entity);
     if(!retained){retained=new Map();this.retainedRows.set(entity,retained);}
     for(const id of ids){retained.set(id,(retained.get(id)??0)+1);this.refreshPin(entity,id);}
-    const operation=this.enqueueApplication(async()=>{
+    const operation=this.enqueueRetain(JSON.stringify([scopeGeneration, 'rows', entity, [...ids].sort()]), async()=>{
       if(!this.scopeLoaded || !this.storage?.loadEntityRows || scopeGeneration!==this.scopeActivationGeneration)return;
       const missing=ids.filter(id=>!this.entities.get(entity)?.has(id) && this.retainedRows.get(entity)?.has(id));
       if(!missing.length)return;
@@ -620,7 +632,7 @@ export class LocalReplica implements LocalReplicaView {
       for(const {id,row} of rows)if(this.retainedRows.get(entity)?.has(id))setResidentRow(next,id,cloneRow(row));
       this.entities=new Map(this.entities).set(entity,next);
       this.markEntityChanged(entity,missing);this.notify(true);
-    }, true);
+    });
 
     let released=false;
     return ()=>{
