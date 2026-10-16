@@ -14,7 +14,7 @@ import type {
   ReplicaMetadataCommit,
 } from "./local-replica.js";
 
-type WindowRecord = { scope: ReplicaScope; signature: string; value: string; sequence?:number; deleted?:boolean };
+type WindowRecord = { scope: ReplicaScope; signature: string; value: string; sequence?:number; deleted?:boolean; cursorPrefixLength?:number };
 type MetaRecord = { scope: ReplicaScope; key: string; value: string };
 type LegacySnapshotRecord = { scope?: ReplicaScope; key?: string; snapshot: ReplicaSnapshot };
 type ReplicaDatabase = Dexie & {
@@ -34,6 +34,25 @@ const writeIndexBudget = 64;
 const windowBatchSize = 64;
 const windowBatchBytes = 16 * 1024;
 const windowEncoder = new TextEncoder();
+// Keep the cursor first so a cursor-only commit can replace a small JSON prefix.
+// The complete value remains ordinary ReplicaWindow JSON for older readers.
+function encodeWindow(window: ReplicaWindow): Pick<WindowRecord, "value" | "cursorPrefixLength"> {
+  const { cursor, ...rest } = window;
+  const body = JSON.stringify({ ...rest, kind: window.kind ?? "live", key: window.key ?? "id" });
+  if (!cursor) return { value: body };
+  const prefix = JSON.stringify({ cursor }).slice(0, -1);
+  return { value: prefix + "," + body.slice(1), cursorPrefixLength: prefix.length };
+}
+function cursorPrefix(record: WindowRecord): ReplicaCursor | undefined {
+  const length = record.cursorPrefixLength;
+  if (!Number.isSafeInteger(length) || length! < 1 || !record.value.startsWith('{"cursor":')
+    || ![",", "}"].includes(record.value.charAt(length!))) return;
+  try {
+    const cursor = JSON.parse(record.value.slice(0, length) + "}").cursor;
+    if (typeof cursor?.epoch === "string" && Number.isSafeInteger(cursor.revision) && cursor.revision >= 0) return cursor;
+  } catch { return; }
+}
+
 
 // Small replica checkpoints usually change only a few rows. IndexedDB getAll
 // avoids a JS/Dexie continuation per row. The fallback remains streaming so a
@@ -181,13 +200,13 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     // Small/empty windows need few native round trips; large memberships must
     // not share an unbounded burst. A single window remains indivisible. Every
     // flush still belongs to the caller's original atomic transaction.
-    let batch: Array<{ window: ReplicaWindow; value: string }> = [];
+    let batch: Array<{ window: ReplicaWindow; value: string; cursorPrefixLength?:number }> = [];
     let bytes = 0;
     let accepted = true;
     const flush = async () => {
       if (!batch.length) return;
       const prior=await this.database.windows.bulkGet(batch.map(({window})=>[scope,window.signature]) as [string,string][]);
-      await this.database.windows.bulkPut(batch.flatMap(({window,value},index)=>{
+      await this.database.windows.bulkPut(batch.flatMap(({window,value,cursorPrefixLength},index)=>{
         const record=prior[index];
         const before=record && !record.deleted ? JSON.parse(record.value) as ReplicaWindow : undefined;
         if(before?.cursor && (!window.cursor || (before.cursor.epoch===window.cursor.epoch && before.cursor.revision>window.cursor.revision))) {
@@ -197,15 +216,15 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
         // Serialization already isolates persisted values. Copying ordered IDs
         // and large integrity maps before stringifying doubled temporary memory
         // for every cursor-only checkpoint.
-        return [{scope,sequence,signature:window.signature,value}];
+        return [{scope,sequence,signature:window.signature,value,cursorPrefixLength}];
       }));
       batch = []; bytes = 0;
     };
     for (const window of windows) {
-      const value = JSON.stringify({ ...window, kind: window.kind ?? 'live', key: window.key ?? 'id' });
+      const { value, cursorPrefixLength } = encodeWindow(window);
       const size = windowEncoder.encode(value).byteLength;
       if (batch.length && (batch.length >= windowBatchSize || bytes + size > windowBatchBytes)) await flush();
-      batch.push({ window, value }); bytes += size;
+      batch.push({ window, value, cursorPrefixLength }); bytes += size;
     }
     await flush();
     return accepted;
@@ -477,6 +496,53 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       await this.saveCursor(normalizedScope,transaction.cursor);
     });
     this.channel?.postMessage({scope:normalizedScope});
+  }
+
+  /** Cursor-only commits retain encoded membership and integrity certificates. */
+  async advanceCursorWatermark(windows: readonly ReplicaWindow[], cursor: ReplicaSnapshot["cursor"], scope: ReplicaScope = defaultReplicaScope): Promise<void | ReplicaMetadataCommit> {
+    await this.initialize();
+    const normalizedScope = normalizeScope(scope);
+    const receipt = await this.database.transaction("rw", this.database.windows, this.database.meta, async () => {
+      const sequence = await this.nextSequence(normalizedScope);
+      let accepted = true;
+      let small: ReplicaWindow[] = [];
+      const flushSmall = async () => {
+        if (!small.length) return;
+        accepted = await this.writeWindows(normalizedScope, small, sequence) && accepted;
+        small = [];
+      };
+      for (const window of windows) {
+        // Keep the existing native batches for small reference collections.
+        // The cursor optimization targets large memberships, where decoding
+        // hashes and IDs dominates a few native request round trips.
+        if (window.ids.length < 128) {
+          small.push(window);
+          if (small.length >= windowBatchSize) await flushSmall();
+          continue;
+        }
+        await flushSmall();
+        const record = await this.database.windows.get([normalizedScope, window.signature]);
+        const before = record && !record.deleted ? cursorPrefix(record) : undefined;
+        if (!record || record.deleted || !before || !window.cursor) {
+          // Existing databases and unfamiliar record encodings keep the full,
+          // validated legacy path. The next ordinary write creates a prefix.
+          accepted = await this.writeWindows(normalizedScope, [window], sequence) && accepted;
+          continue;
+        }
+        if (before.epoch === window.cursor.epoch && before.revision > window.cursor.revision) {
+          accepted = false;
+          await this.database.windows.put({ ...record, sequence });
+          continue;
+        }
+        const prefix = JSON.stringify({ cursor: window.cursor }).slice(0, -1);
+        await this.database.windows.put({ ...record, sequence, value: prefix + record.value.slice(record.cursorPrefixLength), cursorPrefixLength: prefix.length });
+      }
+      await flushSmall();
+      await this.saveCursor(normalizedScope, cursor);
+      if (accepted && windows.length) return { scope: normalizedScope, previousSequence: sequence - 1, sequence };
+    });
+    this.channel?.postMessage({ scope: normalizedScope });
+    return receipt;
   }
 
   async advanceWatermark(

@@ -543,3 +543,22 @@ discard and journal refresh release retired stamps. Closing the client or
 changing its replica scope clears this cache without deleting durable pending
 intents. Failed parked intents keep their prediction and remain eligible for
 retry; cache cleanup does not change the durable acknowledgement barrier.
+
+## Cursor-only legacy checkpoints
+
+Storage adapters may implement `advanceCursorWatermark` for updates that change
+only collection cursors. `LocalReplica.advanceWatermark` uses this optional path;
+full integrity confirmations and metadata changes keep `advanceWatermark`.
+Adapters without the optional method retain their existing behavior.
+
+The legacy IndexedDB adapter writes ordinary window JSON with the cursor first
+and an optional prefix-length hint. Large cursor-only updates replace that small
+prefix without decoding or serializing membership IDs and hashes. Small windows
+keep their existing native batching. Records without a usable hint fall back to
+the full write path. Older readers still see the complete, updated window JSON;
+no schema version changes or empty-database switches are involved.
+
+Native IndexedDB still copies an encoded window value. This optimization does
+not provide cold membership paging, eliminate startup hydration, or enforce a
+renderer memory ceiling. The cursor-only method requires unchanged IDs, hashes
+and other metadata; use the full method when those change.

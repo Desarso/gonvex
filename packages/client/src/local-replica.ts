@@ -144,6 +144,8 @@ export interface LocalReplicaStorage {
   applyTransaction(transaction: ReplicaTransaction, snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void | ReplicaStorageCommit>;
   /** Advance ready Replica Collection cursors without rewriting normalized rows. */
   advanceWatermark?(windows: readonly ReplicaWindow[], cursor: ReplicaCursor | undefined, scope?: ReplicaScope): Promise<void | ReplicaMetadataCommit>;
+  /** Optional cursor-only fast path. IDs, hashes and other window metadata are unchanged. */
+  advanceCursorWatermark?(windows: readonly ReplicaWindow[], cursor: ReplicaCursor | undefined, scope?: ReplicaScope): Promise<void | ReplicaMetadataCommit>;
   /** Persist a normalized Query/Collection materialization atomically. */
   replaceSnapshot?(snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
   replaceWindow?(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope?: ReplicaScope, projection?:readonly ReplicaRow[]): Promise<void>;
@@ -1132,8 +1134,10 @@ export class LocalReplica implements LocalReplicaView {
       // set. A watermark cannot outrun an older retained Replica Collection.
       const nextCursor = replicaTransactionFloor(this.cursorValue, nextQueries);
       const writeScope = this.scopeValue;
-      if (this.storage?.advanceWatermark) {
-        const receipt = await this.persist(() => this.storage!.advanceWatermark!(changedWindows, nextCursor, writeScope));
+      if (this.storage?.advanceCursorWatermark || this.storage?.advanceWatermark) {
+        const storage = this.storage;
+        const advance = storage.advanceCursorWatermark ?? storage.advanceWatermark!;
+        const receipt = await this.persist(() => advance.call(storage, changedWindows, nextCursor, writeScope));
         this.acceptMetadataCommit(receipt, writeScope);
       } else if (this.storage?.replaceSnapshot) {
         // Compatibility for older/custom storage adapters. Current IndexedDB
