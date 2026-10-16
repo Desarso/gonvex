@@ -1,3 +1,4 @@
+import { compactReplicaRow } from "./compact-row.js";
 import { RowRecency } from "./row-recency.js";
 import { ResidentMap } from "./resident-map.js";
 import { replicaAggregateDigest } from "./replica-integrity.js";
@@ -257,6 +258,7 @@ function residentRows(source?: Iterable<readonly [string, ReplicaRow]>): Map<str
 function setResidentRow(rows: Map<string, ReplicaRow>, id: string, row: ReplicaRow): void {
   const prior = rows.get(id);
   if (prior === row) return;
+  row = compactReplicaRow(row);
   immutable(row);
   residentTableBytes.set(rows, (residentTableBytes.get(rows) ?? 0) - (prior ? residentRowSize(prior) : 0) + residentRowSize(row));
   rows.set(id, row);
