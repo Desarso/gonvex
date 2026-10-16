@@ -463,3 +463,33 @@ const client = new GonvexClient(runtimeUrl, {
 This creates `my-app-fresh-engine-cohort:engine-members-v1`. It never opens or upgrades the legacy database with the same base name. Engine participants use a separate peer channel and keep existing scope/authority, offline outbox, reducer coverage and resume rules. This option changes replica persistence only; it does not start a worker or move subscriptions off the main thread.
 
 Use a fresh cohort namespace. This release supplies no automatic legacy import or lossless backend export. Keep the engine database when disabling the option; do not treat changing storage factories as a migration of populated data. Existing durable outbox storage and its coordination remain unchanged. Runtime and application contract changes are unnecessary.
+
+## Background replica metadata
+
+`watchReplicaMetadata` keeps the generated collection subscription active without
+retaining its rows for a UI view. With indexed persistence configured, unmounted
+rows remain on disk and can be evicted from the resident working set. Active
+views separately retain their bounded windows or entity IDs.
+
+```ts
+const watch = client.watchReplicaMetadata(api.items.all, {}, { deferStart: true });
+const stop = watch.onUpdate(() => {
+  const metadata = watch.localReplicaMetadata();
+  if (metadata) renderSyncStatus(metadata);
+});
+// On unmount:
+stop();
+```
+
+The immutable metadata contains `entity`, `key`, `rowCount`, `completeness`,
+`truncated`, `computedRevision`, `freshness`, and `isUpToDate`. It contains no
+rows or membership IDs. Completeness describes durable collection coverage;
+it does not assert that every covered row is resident. `rowCount` describes
+committed membership and excludes pending local predictions. Reading metadata
+alone never hydrates a collection. Use `deferStart` when creating the watch
+during a render that may be abandoned.
+
+This API does not make the whole replication pipeline bounded by itself.
+Snapshot ingestion and stored membership metadata still need bounded adapters,
+and application views must stop retaining full collections. Existing
+`watchReplica` consumers retain their original row-bearing behavior.
