@@ -158,6 +158,17 @@ export type ReplicaMessage =
       | "replica.error";
   }>
   | ReplicaReadyMessage;
+/** Durable collection coverage, independent of which rows are resident. */
+export type ReplicaCollectionMetadata = Readonly<{
+  entity: string;
+  key: string;
+  rowCount: number;
+  completeness: "complete" | "partial";
+  truncated: boolean;
+  computedRevision: number;
+  freshness: ReplicaFreshness;
+  isUpToDate: boolean;
+}>;
 export type ReplicaSubscriptionHandler = (message: ReplicaMessage) => void;
 type WatchUpdateHandler = () => void;
 type TelemetryHandler = (event: GonvexTelemetryEvent) => void;
@@ -2690,6 +2701,58 @@ export class GonvexClient {
   /** Subscribe to a bounded Replica Collection. */
   subscribeReplica<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue>(ref: FunctionReference<Args, Result>, args: Args = {} as Args, onMessage: ReplicaSubscriptionHandler) {
     return this.subscribeReplicaTransport(ref, args, onMessage);
+  }
+
+  /** Keep an authorized collection durable without pinning or materializing its
+   * rows. Mounted views must separately retain bounded windows or entity IDs.
+   * Completeness describes disk coverage, not synchronous resident row reads.
+   */
+  watchReplicaMetadata<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue>(
+    ref: FunctionReference<Args, Result>, args: Args = {} as Args, options: { deferStart?: boolean } = {},
+  ) {
+    const key = querySubscriptionKey(ref, args);
+    const handlers = new Set<WatchUpdateHandler>();
+    let stop: (() => void) | undefined;
+    let latestError: Error | undefined;
+    let token = "";
+    let state: ReplicaCollectionMetadata | undefined;
+    const notify = () => { for (const handler of Array.from(handlers)) handler(); };
+    const start = () => {
+      if (stop) return;
+      const unsubscribeTransport = this.subscribeReplicaTransport(ref, args, message => {
+        latestError = message.type === "replica.error" ? new Error(message.error) : undefined;
+        notify();
+      }, true);
+      const unsubscribeReplica = this.replica.subscribe(notify, { window: key });
+      const unsubscribeScope = this.onSessionScopeChange(() => {
+        latestError = undefined; token = ""; state = undefined; notify();
+      });
+      stop = () => { unsubscribeTransport(); unsubscribeReplica(); unsubscribeScope(); stop = undefined; };
+    };
+    if (!options.deferStart) start();
+    return {
+      localReplicaMetadata: (): ReplicaCollectionMetadata | undefined => {
+        if (latestError) throw latestError;
+        if (!this.replica.hasLiveQuery(key)) return undefined;
+        const window = this.replica.windowMetadata(key)!;
+        const isUpToDate = this.replicaSubscriptions.get(key)?.isUpToDate === true;
+        const freshness = this.replica.freshness();
+        const nextToken = JSON.stringify([this.replica.windowVersion(key), freshness, isUpToDate]);
+        if (nextToken !== token) {
+          state = Object.freeze({ entity: window.entity, key: window.key, rowCount: window.ids.length,
+            completeness: window.completeness, truncated: window.truncated === true,
+            computedRevision: window.cursor?.revision ?? window.subscriptionRevision?.sequence ?? 0,
+            freshness: isUpToDate || freshness === "offline" ? freshness : "verifying", isUpToDate });
+          token = nextToken;
+        }
+        return state;
+      },
+      onUpdate: (handler: WatchUpdateHandler) => {
+        start(); handlers.add(handler);
+        queueMicrotask(() => { if (handlers.has(handler)) handler(); });
+        return () => { handlers.delete(handler); if (!handlers.size) stop?.(); };
+      },
+    };
   }
 
   /** Watch a bounded Replica Collection through the normalized Local Replica. */
