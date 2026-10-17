@@ -752,3 +752,26 @@ it('does not mark fully resident native rows partial just because an overlapping
   expect(snapshot!.residentPartialTables).toEqual([]);
   expect(Object.keys(snapshot!.entities.tasks).sort()).toEqual(['a', 'b']);
 });
+
+it('bounds native startup header reads across several pages and deleted windows', async () => {
+  const storage = new IndexedDBEngineReplicaStorage('paged-native-headers', 'mounted'); stores.push(storage);
+  await seed(storage);
+  for (let index = 0; index < 257; index++) await storage.replaceWindow({ ...window(['a'], 'cached-' + String(index).padStart(4, '0')), kind: 'live' }, empty);
+  await storage.removeWindow('cached-0128', empty);
+  const headerReads: Array<number | undefined> = [];
+  const storeGetAll = IDBObjectStore.prototype.getAll, indexGetAll = IDBIndex.prototype.getAll;
+  vi.spyOn(IDBObjectStore.prototype, 'getAll').mockImplementation(function (this: IDBObjectStore, range, count) {
+    if (this.name === 'windows') headerReads.push(count ?? (range as { count?: number } | null)?.count);
+    return Reflect.apply(storeGetAll, this, arguments);
+  });
+  vi.spyOn(IDBIndex.prototype, 'getAll').mockImplementation(function (this: IDBIndex, range, count) {
+    if (this.objectStore.name === 'windows') headerReads.push(count ?? (range as { count?: number } | null)?.count);
+    return Reflect.apply(indexGetAll, this, arguments);
+  });
+  const snapshot = await storage.loadWorkingSet('default', { maxRows: 2, maxBytes: 100_000, preferredWindows: ['cached-0256'] });
+  expect(Object.keys(snapshot!.liveQueries).sort()).toEqual(['cached-0256', 'tasks']);
+  expect(snapshot!.liveQueries['cached-0256'].ids).toEqual(['a']);
+  expect(Object.keys(snapshot!.entities.tasks)).toEqual(['a']);
+  expect(headerReads.length).toBeGreaterThanOrEqual(3);
+  expect(headerReads.every(count => Number.isInteger(count) && count! > 0 && count! <= 128), JSON.stringify(headerReads)).toBe(true);
+});

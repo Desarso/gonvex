@@ -656,31 +656,43 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       // Keep their ID/hash maps on disk until retainWindow requests the window.
       const mounted = this.startupWorkingSet === 'mounted' && budget.preferredWindows !== undefined
         ? new Set(budget.preferredWindows) : undefined;
-      const records: WindowRecord[] = [];
+      let records: WindowRecord[] = [];
+      const restore = async () => {
+        const batch = records; records = [];
+        for (const window of await Promise.all(batch.map(record => this.materializeWindow(record)))) {
+          liveQueries[window.signature] = window;
+          if (window.ids.some(id => !entities[window.entity]?.[id])) partial.add(window.entity);
+        }
+      };
       let hasStoredWindow = false;
-      for (const record of await this.database.windows.where('scope').equals(scope).toArray()) {
-        if (record.deleted) continue;
-        hasStoredWindow = true;
-        const header = mounted && !mounted.has(record.signature) ? JSON.parse(record.value) as Pick<ReplicaWindow, 'kind' | 'entity'> : undefined;
-        if (header?.kind === 'live') {
-          // Read keys only and stop at the first cold member. Do not recreate
-          // IDs/hash arrays, or falsely label resident overlap incomplete.
-          let missing = false;
-          await this.database.members.where('[scope+signature+generation+order]')
-            .between([scope,record.signature,record.generation!,""],[scope,record.signature,record.generation!,"\uffff"],false,true)
-            .until(() => missing).eachPrimaryKey(key => { if (!entities[header.entity]?.[key[3]]) missing = true; });
-          if (missing) partial.add(header.entity);
-          continue;
+      let afterWindow: [string, string] | undefined;
+      while (true) {
+        // Header payloads can grow with navigation history even when memberships
+        // stay cold. Native keyset pages also bound that temporary startup array.
+        const page = await this.database.windows.where('[scope+signature]')
+          .between(afterWindow ?? [scope], [scope, []], !afterWindow, false).limit(128).toArray();
+        if (!page.length) break;
+        afterWindow = [scope, page[page.length - 1]!.signature];
+        for (const record of page) {
+          if (record.deleted) continue;
+          hasStoredWindow = true;
+          const header = mounted && !mounted.has(record.signature) ? JSON.parse(record.value) as Pick<ReplicaWindow, 'kind' | 'entity'> : undefined;
+          if (header?.kind === 'live') {
+            // Read keys only and stop at the first cold member. Do not recreate
+            // IDs/hash arrays, or falsely label resident overlap incomplete.
+            let missing = false;
+            await this.database.members.where('[scope+signature+generation+order]')
+              .between([scope,record.signature,record.generation!,""],[scope,record.signature,record.generation!,"\uffff"],false,true)
+              .until(() => missing).eachPrimaryKey(key => { if (!entities[header.entity]?.[key[3]]) missing = true; });
+            if (missing) partial.add(header.entity);
+            continue;
+          }
+          records.push(record);
+          if (records.length === 4) await restore();
         }
-        records.push(record);
+        if (page.length < 128) break;
       }
-      for (let offset = 0; offset < records.length; offset += 4) {
-        const windows = await Promise.all(records.slice(offset, offset + 4).map(record => this.materializeWindow(record)));
-        for (const window of windows) {
-          liveQueries[window.signature]=window;
-          if(window.ids.some(id=>!entities[window.entity]?.[id]))partial.add(window.entity);
-        }
-      }
+      if (records.length) await restore();
       const cursor=await this.database.meta.get([scope,'cursor']);
       if(!hasRows && !Object.keys(liveQueries).length && !cursor && !hasStoredWindow)return undefined;
       return {entities,liveQueries,residentPartialTables:[...partial],cursor:cursor?JSON.parse(cursor.value):undefined,storageSequence:Number((await this.database.meta.get([scope,'sequence']))?.value??0)};
