@@ -5,5 +5,8 @@
   "extractedSha256": "b6f90d7424403d2f8df52f9db88f70ea9b574c6119d9bca53041bcfe94395512",
   "upstreamRecoveryFix": "ea1d55e202",
   "license": "SQLite public domain",
-  "changes": "No VFS logic changes. Replaces the initializer in the pinned npm browser module during package bootstrap."
+  "changes": "No VFS logic changes. Replaces the initializer in the pinned npm browser module during package bootstrap.",
+  "npmPackage": "3.53.4-build2",
+  "npmBrowserModuleSha256": "5c056c0c455a9558ccef1b72bdedd620bf4a819b5e6de438df253c166900ab55",
+  "npmWasmSha256": "2ee8f3dab694532afc8840e07703127287662d08b74e6ff50491ce63f00d5752"
 }

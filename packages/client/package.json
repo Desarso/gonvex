@@ -23,11 +23,15 @@
     },
     "./sqlite/router-worker": {
       "default": "./dist/sqlite-router-worker.js"
+    },
+    "./sqlite-module": {
+      "types": "./dist/vendor/sqlite3.d.mts",
+      "default": "./dist/vendor/sqlite3.mjs"
     }
   },
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json && node scripts/sqlite-assets.mjs",
     "bench:sync-engine": "pnpm build && node bench/sync-engine/run.mjs",
     "bench:sync-engine:chromium": "pnpm build && node bench/sync-engine/chromium.mjs",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",

@@ -19,7 +19,7 @@ export async function openOfficialSQLiteHost(): Promise<OfficialSQLiteHost> {
   (globalThis as typeof globalThis & { sqlite3ApiConfig?: unknown }).sqlite3ApiConfig = {
     disable: { vfs: { opfs: true, 'opfs-vfs': true, 'opfs-wl': true } },
   };
-  const { default: initialize } = await import('@sqlite.org/sqlite-wasm');
+  const { default: initialize } = await import('@gonvex/client/sqlite-module');
   const sqlite3 = await initialize();
   // On failed initialization preserve existing files and the unsent outbox.
   const pool = await sqlite3.installOpfsSAHPoolVfs({ directory: '.gonvex-sqlite-v1', initialCapacity: 6, preserveOnInitFailure: true } as Parameters<typeof sqlite3.installOpfsSAHPoolVfs>[0]);

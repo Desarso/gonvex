@@ -24,6 +24,10 @@ describe("client package artifact", () => {
     const removed = /(?:browser-cache|cache(?:-coordinator)?|persistent-cache|query-cache|sync-store)/;
 
     expect(files).toContain("dist/index.js");
+    expect(files).toContain("dist/vendor/sqlite3.mjs");
+    expect(files).toContain("dist/vendor/sqlite3.wasm");
+    expect(files).toContain("dist/vendor/SQLITE-NOTICE.md");
+    expect(readFileSync(resolve(packageRoot, "dist/sqlite-official-host.js"), "utf8")).toContain("@gonvex/client/sqlite-module");
     expect(files).toContain("dist/control.js");
     expect(files).toContain("dist/control.d.ts");
     expect(files.filter((file) => removed.test(file))).toEqual([]);
