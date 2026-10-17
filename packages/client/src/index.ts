@@ -69,6 +69,7 @@ export * from "./client-upgrades.js";
 export * from "./browser-upgrades.js";
 export * from "./signals.js";
 export * from "./paged-read-view.js";
+export { SQLiteLocalReplicaStorage, sqliteReplicaStorage, type SQLiteReplicaDatabase } from "./sqlite-replica-storage.js";
 export {mergeReplicaRecord,type ReplicaRecordVersion,type VersionedReplicaRecord} from './replica-record.js';
 export * from "./external-auth.js";
 // Keep the mutable LocalReplica implementation private to GonvexClient. The

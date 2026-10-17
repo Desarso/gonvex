@@ -1,9 +1,9 @@
 import { afterEach, expect, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import {
-  ExpoSQLiteLocalReplicaStorage,
-  type ExpoSQLiteDatabase,
-} from "./index";
+  SQLiteLocalReplicaStorage,
+  type SQLiteReplicaDatabase,
+} from "./sqlite-replica-storage";
 
 const databases: DatabaseSync[] = [];
 afterEach(() => {
@@ -13,7 +13,7 @@ function fixture() {
   const db = new DatabaseSync(":memory:");
   databases.push(db);
   const queries: Array<{ sql: string; params: unknown[] }> = [];
-  const adapter: ExpoSQLiteDatabase = {
+  const adapter: SQLiteReplicaDatabase = {
     async execAsync(sql) {
       db.exec(sql);
     },
@@ -40,7 +40,7 @@ function fixture() {
       }
     },
   };
-  return { storage: new ExpoSQLiteLocalReplicaStorage(adapter), queries };
+  return { storage: new SQLiteLocalReplicaStorage(adapter), queries };
 }
 
 it("loads a bounded working set and reads one cold row through the SQLite primary key", async () => {

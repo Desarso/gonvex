@@ -1,3 +1,4 @@
+import { SQLiteLocalReplicaStorage } from "@gonvex/client";
 import { describe, expect, it } from "vitest";
 import type { ExpoSQLiteDatabase } from "./index.js";
 import { ExpoSQLiteLocalReplicaStorage } from "./index.js";
@@ -115,4 +116,8 @@ describe("ExpoSQLiteLocalReplicaStorage migrations", () => {
     expect(database.tables.get("_gonvex_replica_queries")?.rows).toHaveLength(1);
     expect(database.tables.get("_gonvex_replica_meta")?.rows).toHaveLength(1);
   });
+});
+
+it("preserves the Expo constructor as the shared client storage alias", () => {
+  expect(ExpoSQLiteLocalReplicaStorage).toBe(SQLiteLocalReplicaStorage);
 });
