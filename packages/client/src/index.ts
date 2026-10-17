@@ -3632,6 +3632,8 @@ export class GonvexClient {
       this.pendingReplicaOpens.delete(latest);
       this.replicaSubscriptions.delete(key);
       this.discardSnapshotPages(latest);
+      // Queued pages must not recreate a barrier for a closed server stream.
+      this.invalidateReplicaVerification(latest);
       this.enqueueReplicaFrame(() => this.drainSnapshotFrames());
       this.handlers.delete(latest.id);
       this.send({ type: "replica.close", id: latest.id });

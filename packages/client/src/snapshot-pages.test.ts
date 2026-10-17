@@ -54,7 +54,7 @@ async function setup(capabilities: Record<string, number> = { replicaSnapshotPag
   const client = new GonvexClient("ws://runtime.test/ws", { token: "session", tenant: "tenant", project: "project", localReplica: { storage }, replicaSubscriptionRetentionMs: 0 });
   clients.push(client);
   const observer = vi.fn();
-  client.subscribeReplica(reference, {}, observer);
+  const unsubscribe = client.subscribeReplica(reference, {}, observer);
   const socket = Socket.instances.at(-1)!;
   socket.open();
   socket.receive({ type: "session.ready", replica: directive, capabilities });
@@ -63,7 +63,7 @@ async function setup(capabilities: Record<string, number> = { replicaSnapshotPag
   socket.receive({ type: "auth.result", id: auth.id, result: { replica: directive } });
   await vi.waitFor(() => expect(socket.sent.some(message => message.type === "replica.open")).toBe(true));
   const open = socket.sent.find(message => message.type === "replica.open");
-  return { client, socket, observer, open, storage };
+  return { client, socket, observer, open, storage, unsubscribe };
 }
 
 it("stages pages without publishing rows or cursor and commits once after final validation", async () => {
@@ -424,4 +424,58 @@ it('keeps scope-wide authoritative transactions when a reload invalidates queued
   release(); await settled(client);
   expect(client.localReplica.entity('other', 'x')).toEqual({ id: 'x', value: 2 });
   expect(client.localReplica.entity('tasks', 'temporary')).toBeUndefined();
+});
+
+
+it('never recreates a closed snapshot barrier from queued pages or blocks later authoritative transactions', async () => {
+  const { client, socket, open, unsubscribe } = await setup();
+  let release!: () => void;
+  (client as any).replicaFrames = new Promise<void>(resolve => { release = resolve; });
+  socket.receive({ ...base, id: open.id, result: [{ id: 'abandoned', value: 1 }] });
+  unsubscribe();
+  await vi.waitFor(() => expect(socket.sent.some(message => message.type === 'replica.close' && message.id === open.id)).toBe(true));
+  socket.receive({ type: 'replica.transaction', cursor: { epoch: 'e', revision: 11 }, changes: [
+    { entity: 'other', id: 'x', operation: 'insert', newValue: { id: 'x', value: 2 } },
+  ] });
+  release(); await settled(client);
+  expect(client.localReplica.entity('other', 'x')).toEqual({ id: 'x', value: 2 });
+  expect((client as any).snapshotPageSubscriptions.size).toBe(0);
+  expect((client as any).snapshotDeferredFrames.length).toBe(0);
+  expect(client.localReplica.entity('tasks', 'abandoned')).toBeUndefined();
+});
+
+it('keeps queued pages when a new listener arrives before last-listener retention expires', async () => {
+  const { client, socket, open, unsubscribe } = await setup();
+  let release!: () => void;
+  (client as any).replicaFrames = new Promise<void>(resolve => { release = resolve; });
+  const sequence = await pages([{ id: 'a', value: 1 }, { id: 'b', value: 2 }], open.id);
+  socket.receive(sequence[0]);
+  unsubscribe();
+  const observer = vi.fn();
+  client.subscribeReplica(reference, {}, observer);
+  socket.receive(sequence[1]);
+  release(); await settled(client);
+  expect(socket.sent.some(message => message.type === 'replica.close' && message.id === open.id)).toBe(false);
+  expect(client.localReplica.entityRows('tasks')).toEqual([{ id: 'a', value: 1 }, { id: 'b', value: 2 }]);
+  expect(observer).toHaveBeenCalledTimes(1);
+});
+
+it('allows a fresh subscription after actual close while discarding only its predecessor queued pages', async () => {
+  const { client, socket, open, unsubscribe } = await setup();
+  let release!: () => void;
+  (client as any).replicaFrames = new Promise<void>(resolve => { release = resolve; });
+  socket.receive({ ...base, id: open.id, result: [{ id: 'abandoned', value: 1 }] });
+  unsubscribe();
+  await vi.waitFor(() => expect(socket.sent.some(message => message.type === 'replica.close' && message.id === open.id)).toBe(true));
+  const observer = vi.fn();
+  client.subscribeReplica(reference, {}, observer);
+  await vi.waitFor(() => expect(socket.sent.filter(message => message.type === 'replica.open').length).toBe(2));
+  const current = socket.sent.filter(message => message.type === 'replica.open').at(-1)!;
+  expect(current.id).not.toBe(open.id);
+  const sequence = await pages([{ id: 'fresh', value: 2 }], current.id);
+  socket.receive(sequence[0]); socket.receive(sequence[1]);
+  release(); await settled(client);
+  expect(client.localReplica.entityRows('tasks')).toEqual([{ id: 'fresh', value: 2 }]);
+  expect((client as any).snapshotPageSubscriptions.size).toBe(0);
+  expect(observer).toHaveBeenCalledTimes(1);
 });
