@@ -421,14 +421,14 @@ export class LocalReplica implements LocalReplicaView {
   private application = Promise.resolve();
   private applicationRunning = false;
   private disposed = false;
-  private readonly applicationJobs: Array<{ urgent: boolean; run: () => Promise<void>; cancel: () => void }> = [];
+  private readonly applicationJobs: Array<{ urgent: boolean; run: () => Promise<void>; cancel: () => void; retainedKey?: string; skip?: () => void }> = [];
 
-  private enqueueApplication<T>(run: () => Promise<T>, urgent = false): Promise<T> {
+  private enqueueApplication<T>(run: () => Promise<T>, urgent = false, retained?: { key: string; skipped: T }): Promise<T> {
     if (this.disposed) return Promise.reject(new Error("Local replica is closed"));
     let resolve!: (value: T) => void;
     let reject!: (error: unknown) => void;
     const result = new Promise<T>((done, failed) => { resolve = done; reject = failed; });
-    this.applicationJobs.push({ urgent, cancel: () => reject(new Error("Local replica is closed")), run: async () => { try { resolve(await run()); } catch (error) { reject(error); } finally { if (this.disposed) this.releaseMemory(); } } });
+    this.applicationJobs.push({ urgent, retainedKey: retained?.key, skip: retained ? () => resolve(retained.skipped) : undefined, cancel: () => reject(new Error("Local replica is closed")), run: async () => { try { resolve(await run()); } catch (error) { reject(error); } finally { if (this.disposed) this.releaseMemory(); } } });
     // A completed urgent read may overtake an earlier blocked write. The
     // scope barrier must wait for both, but must not retain the read's payload
     // in Promise.all's result array until that earlier write drains.
@@ -457,12 +457,23 @@ export class LocalReplica implements LocalReplicaView {
   private enqueueRetain(key: string, run: () => Promise<void>): Promise<void> {
     const existing = this.pendingRetains.get(key);
     if (existing) return existing;
-    const operation = this.enqueueApplication(run, true);
+    const operation = this.enqueueApplication(run, true, { key, skipped: undefined });
     this.pendingRetains.set(key, operation);
     const release = () => { if (this.pendingRetains.get(key) === operation) this.pendingRetains.delete(key); };
     void operation.then(release, release);
     return operation;
   }
+  /** Drop only an idempotent disk restore that has not started. Never cancel a
+   * durable application job or interrupt an active read transaction. */
+  private cancelQueuedRetain(key: string): void {
+    const index = this.applicationJobs.findIndex(job => job.retainedKey === key);
+    if (index < 0) return;
+    const [job] = this.applicationJobs.splice(index, 1);
+    // Remove synchronously so a same-turn remount can enqueue a fresh restore.
+    this.pendingRetains.delete(key);
+    job!.skip!();
+  }
+
   private hydration?: Promise<void>;
   private freshnessValue: ReplicaFreshness = "verifying";
   private versionValue = 0;
@@ -624,6 +635,7 @@ export class LocalReplica implements LocalReplicaView {
       if(count>1)this.retainedWindows.set(signature,count-1);
       else {
         this.retainedWindows.delete(signature);this.readSnapshots.delete(signature);
+        this.cancelQueuedRetain(JSON.stringify([scopeGeneration, 'window', signature]));
         const window=this.liveQueries.get(signature);
         if(window)for(const id of window.ids)this.refreshPin(window.entity,id);
         this.trimResidentRows();
