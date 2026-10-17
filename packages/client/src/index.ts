@@ -220,6 +220,11 @@ type ReplicaSubscription = {
   scope?: ReplicaScope;
 };
 
+type QueuedReplicaOperation = {
+  operation?: () => Promise<void>;
+  owner?: ReplicaSubscription;
+};
+
 function replicaCursorIsStale(subscription: ReplicaSubscription, cursor: ReplicaCursor) {
   if (subscription.retiredEpochs.has(cursor.epoch)) return true;
   const floor = subscription.cursorFloor;
@@ -694,6 +699,7 @@ export class GonvexClient {
   private localSessionStateValue: "unavailable" | "restored" | "authenticated" = "unavailable";
   private readonly localSessionHandlers = new Set<() => void>();
   private replicaFrames: Promise<void> = Promise.resolve();
+  private readonly queuedReplicaOperations = new Set<QueuedReplicaOperation>();
   private queuedReplicaWatermark?: { revision: number; scope: ReplicaScope; generation: number };
   private processedReplicaWatermarkRevision = 0;
   private readonly snapshotPageSubscriptions = new Set<ReplicaSubscription>();
@@ -2233,7 +2239,7 @@ export class GonvexClient {
     this.snapshotDeferredBytes = 0;
     for (const subscription of this.replicaSubscriptions.values()) {
       this.discardSnapshotPages(subscription);
-      subscription.verificationGeneration += 1;
+      this.invalidateReplicaVerification(subscription);
     }
     this.flushTelemetry();
     this.unsubscribeTelemetryLifecycle?.();
@@ -2706,7 +2712,7 @@ export class GonvexClient {
       this.enqueueReplicaFrame(async () => {
         if (verificationGeneration !== subscription.verificationGeneration || socketGeneration !== this.socketGeneration || !this.isWebSocketConnected) return;
         await this.handleReplicaMessage(subscription, message as ReplicaMessage | SnapshotPage, scope);
-      });
+      }, false, subscription);
     });
     this.startReplica(subscription);
     return () => this.unsubscribeReplicaListener(key, onMessage);
@@ -3270,17 +3276,42 @@ export class GonvexClient {
     this.socket?.close();
   }
 
-  private enqueueReplicaFrame(operation: () => Promise<void>, watermark = false) {
+  private invalidateReplicaVerification(subscription: ReplicaSubscription) {
+    subscription.verificationGeneration += 1;
+    // These callbacks already reject this generation when eventually run.
+    // Release their payloads now instead of retaining them behind slow disk IO.
+    // Active work and scope-wide authoritative transaction frames are untouched.
+    for (const job of this.queuedReplicaOperations) {
+      if (job.owner !== subscription) continue;
+      job.operation = undefined;
+      job.owner = undefined;
+      this.queuedReplicaOperations.delete(job);
+    }
+  }
+
+  private async applyQueuedReplicaFrame(job: QueuedReplicaOperation) {
+    this.queuedReplicaOperations.delete(job);
+    const operation = job.operation;
+    job.operation = undefined;
+    job.owner = undefined;
+    await operation?.();
+    if (this.snapshotDeferredFrames.length > 0) await this.drainSnapshotFrames();
+  }
+
+  private replicaFrameFailed() {
+    this.replica.setFreshness("verifying");
+  }
+
+  private enqueueReplicaFrame(operation: () => Promise<void>, watermark = false, owner?: ReplicaSubscription) {
     // Any entity/window frame seals the adjacent watermark batch. Advancing
     // across that barrier could make an unapplied transaction look stale.
     if (!watermark) this.queuedReplicaWatermark = undefined;
-    const processing = this.replicaFrames.then(async () => {
-      await operation();
-      if (this.snapshotDeferredFrames.length > 0) await this.drainSnapshotFrames();
-    });
-    this.replicaFrames = processing.catch(() => {
-      this.replica.setFreshness("verifying");
-    });
+    const job: QueuedReplicaOperation = { operation, owner };
+    this.queuedReplicaOperations.add(job);
+    // Bind methods outside the enqueue closure so a canceled operation cannot
+    // remain reachable through a promise callback's shared lexical context.
+    const processing = this.replicaFrames.then(this.applyQueuedReplicaFrame.bind(this, job));
+    this.replicaFrames = processing.catch(this.replicaFrameFailed.bind(this));
   }
 
   private enqueueReplicaWatermark(revision: number) {
@@ -3486,7 +3517,7 @@ export class GonvexClient {
     for (const subscription of this.replicaSubscriptions.values()) {
       const wasUpToDate = subscription.isUpToDate;
       this.discardSnapshotPages(subscription);
-      subscription.verificationGeneration += 1;
+      this.invalidateReplicaVerification(subscription);
       subscription.isUpToDate = false;
       if (!wasUpToDate) continue;
       this.emitReplicaMessage(subscription, {
@@ -4575,7 +4606,7 @@ export class GonvexClient {
   private resumeReplicaSubscriptions() {
     for (const subscription of this.replicaSubscriptions.values()) {
       this.discardSnapshotPages(subscription);
-      subscription.verificationGeneration += 1;
+      this.invalidateReplicaVerification(subscription);
       if (subscription.listeners.size === 0) continue;
       subscription.opening = false;
       subscription.socketGeneration = undefined;
@@ -4647,7 +4678,7 @@ export class GonvexClient {
       if (subscription.listeners.size === 0) continue;
       this.clearReplicaRetry(subscription, true);
       this.discardSnapshotPages(subscription);
-      subscription.verificationGeneration += 1;
+      this.invalidateReplicaVerification(subscription);
       subscription.opening = false;
       subscription.socketGeneration = undefined;
       this.sendReplicaOpen(subscription);
@@ -4725,7 +4756,7 @@ export class GonvexClient {
       subscription.lastMessage = undefined;
       subscription.opening = false;
       this.discardSnapshotPages(subscription);
-      subscription.verificationGeneration += 1;
+      this.invalidateReplicaVerification(subscription);
     }
     for (const handler of this.sessionScopeHandlers) handler();
   }
@@ -4767,7 +4798,7 @@ export class GonvexClient {
         this.enqueueReplicaFrame(async () => {
           if (verificationGeneration !== subscription.verificationGeneration || socketGeneration !== this.socketGeneration || !this.isWebSocketConnected) return;
           await this.handleReplicaMessage(subscription, message as ReplicaMessage | SnapshotPage, scope);
-        });
+        }, false, subscription);
       });
     }
   }

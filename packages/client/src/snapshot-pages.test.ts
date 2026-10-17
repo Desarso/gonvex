@@ -1,4 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { Session } from "node:inspector";
+import { setTimeout as nextTurn } from "node:timers/promises";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { Dexie } from "dexie";
 import { IndexedDBLocalReplicaStorage } from "./indexeddb-replica";
@@ -359,4 +361,67 @@ it("drops frames buffered during staging when the collection is reset", async ()
   expect(client.localReplica.entity("tasks", "stale")).toBeUndefined();
   expect((client as any).replica.getWindow(open.key ?? "")).toBeUndefined();
   expect((client as any).snapshotDeferredFrames).toEqual([]);
+});
+
+async function framePayloadCollected(reference: WeakRef<object>) {
+  const inspector = new Session(); inspector.connect();
+  try {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await nextTurn(0);
+      await new Promise<void>((resolve, reject) => inspector.post('HeapProfiler.collectGarbage', error => error ? reject(error) : resolve()));
+    }
+    return reference.deref() === undefined;
+  } finally { inspector.disconnect(); }
+}
+
+for (const invalidate of ['close', 'disconnect', 'reload'] as const) {
+  it(`releases queued stale snapshot payloads on ${invalidate} before a slow prior frame completes`, async () => {
+    const { client, socket, open } = await setup();
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    // Model a slow durable frame without completing it during the GC assertion.
+    (client as any).replicaFrames = held;
+    let reference!: WeakRef<object>;
+    const handler = (client as any).handlers.get(open.id);
+    (client as any).handlers.set(open.id, (message: object) => {
+      reference = new WeakRef(message); handler(message);
+    });
+    socket.receive({ ...base, id: open.id, result: [{ id: 'temporary', value: 'x'.repeat(1024 * 1024) }] });
+    if (invalidate === 'close') client.close();
+    else if (invalidate === 'disconnect') socket.close();
+    else socket.receive({ type: 'system.reload', artifactHash: 'next' });
+    try {
+      expect(await framePayloadCollected(reference)).toBe(true);
+      expect(client.localReplica.entity('tasks', 'temporary')).toBeUndefined();
+    } finally {
+      release(); await settled(client); client.close();
+    }
+  }, 15_000);
+}
+
+it('preserves an uninvalidated queued snapshot and its wire-order publication', async () => {
+  const { client, socket, observer, open } = await setup();
+  let release!: () => void;
+  (client as any).replicaFrames = new Promise<void>(resolve => { release = resolve; });
+  const sequence = await pages([{ id: 'a', value: 1 }, { id: 'b', value: 2 }], open.id);
+  socket.receive(sequence[0]); socket.receive(sequence[1]);
+  expect(client.localReplica.entity('tasks', 'a')).toBeUndefined();
+  expect(observer).not.toHaveBeenCalled();
+  release(); await settled(client);
+  expect(client.localReplica.entityRows('tasks')).toEqual([{ id: 'a', value: 1 }, { id: 'b', value: 2 }]);
+  expect(observer).toHaveBeenCalledTimes(1);
+});
+
+it('keeps scope-wide authoritative transactions when a reload invalidates queued subscription frames', async () => {
+  const { client, socket, open } = await setup();
+  let release!: () => void;
+  (client as any).replicaFrames = new Promise<void>(resolve => { release = resolve; });
+  socket.receive({ type: 'replica.transaction', cursor: { epoch: 'e', revision: 11 }, changes: [
+    { entity: 'other', id: 'x', operation: 'insert', newValue: { id: 'x', value: 2 } },
+  ] });
+  socket.receive({ ...base, id: open.id, result: [{ id: 'temporary', value: 9 }] });
+  socket.receive({ type: 'system.reload', artifactHash: 'next' });
+  release(); await settled(client);
+  expect(client.localReplica.entity('other', 'x')).toEqual({ id: 'x', value: 2 });
+  expect(client.localReplica.entity('tasks', 'temporary')).toBeUndefined();
 });
