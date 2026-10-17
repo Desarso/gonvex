@@ -1,6 +1,7 @@
+import { SQLiteReplicaCommits } from "./sqlite-replica-commits.js";
 import type {
   ReplicaWindow, LocalReplicaStorage, ReplicaScope, ReplicaRow,
-  ReplicaSnapshot, ReplicaTransaction,
+  ReplicaSnapshot, ReplicaTransaction, ReplicaStorageCommit, ReplicaMetadataCommit, ReplicaStorageChanges,
 } from "./local-replica.js";
 import { pagedReplicaReadView } from "./paged-read-view.js";
 import { mergeReplicaRecord, type ReplicaRecordVersion } from "./replica-record.js";
@@ -34,11 +35,13 @@ const replicaSchemaVersion = 3;
  */
 export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
   private initialized?: Promise<void>;
+  private readonly commits: SQLiteReplicaCommits;
+  readonly supportsResidentLookup = true;
 
-  constructor(private readonly database: SQLiteReplicaDatabase) {}
+  constructor(private readonly database: SQLiteReplicaDatabase) { this.commits = new SQLiteReplicaCommits(database); }
 
   private initialize() {
-    return (this.initialized ??= this.migrateSchema());
+    return (this.initialized ??= this.migrateSchema().then(() => this.commits.initialize()));
   }
 
   private async migrateSchema() {
@@ -219,6 +222,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     await this.initialize();
     let snapshot: ReplicaSnapshot | undefined;
     await this.database.withTransactionAsync(async () => {
+      const storageSequence = await this.commits.sequence(scope);
       const cursor = await this.database.getFirstAsync<MetaRecord>(
         `SELECT scope, key, value FROM _gonvex_replica_meta WHERE scope = ? AND key = 'cursor'`,
         scope,
@@ -270,8 +274,9 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         scope,
         ...(lastAdmitted ? [lastAdmitted.entity, lastAdmitted.entity, lastAdmitted.id] : []),
       );
-      if (cursor || queries.length || count || remaining.length)
+      if (cursor || queries.length || count || remaining.length || storageSequence)
         snapshot = {
+          storageSequence,
           cursor: cursor ? JSON.parse(cursor.value) : undefined,
           entities,
           residentPartialTables: remaining.map(record => record.entity),
@@ -429,6 +434,33 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     return result;
   }
 
+  async readChanges(scope: string, afterSequence: number, interest?: Parameters<NonNullable<LocalReplicaStorage['readChanges']>>[2]): Promise<ReplicaStorageChanges> {
+    await this.initialize();return this.commits.readChanges(scope,afterSequence,interest);
+  }
+
+  private async writeWindowHeader(scope: string, input: ReplicaWindow): Promise<void> {
+    const record=await this.database.getFirstAsync<QueryRecord>('SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=? AND signature=?',scope,input.signature);
+    const prior=record?normalizeWindow(JSON.parse(record.value)):undefined;
+    const window=prior?.cursor&&input.cursor&&prior.cursor.epoch===input.cursor.epoch&&prior.cursor.revision>input.cursor.revision?prior:normalizeWindow(input);
+    await this.database.runAsync('INSERT INTO _gonvex_replica_queries VALUES(?,?,?) ON CONFLICT(scope,signature) DO UPDATE SET value=excluded.value',scope,window.signature,JSON.stringify(window));
+    await this.commits.window(scope,window.signature,window);
+  }
+
+  private async reconcileDeletedMemberships(scope: string, requested: Map<string,Set<string>>, cursor: ReplicaSnapshot['cursor']): Promise<void> {
+    for(const[entity,ids]of requested){
+      const canonical=this.commits.changes(scope).entities[entity]??{};
+      const records=await this.database.getAllAsync<QueryRecord>("SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=? AND json_extract(value,'$.entity')=?",scope,entity);
+      for(const record of records){
+        const window=normalizeWindow(JSON.parse(record.value));
+        if(!window.ids.some(id=>ids.has(id)))continue;
+        const obsolete=window.cursor&&cursor&&window.cursor.epoch===cursor.epoch&&window.cursor.revision>cursor.revision;
+        const next=obsolete?window:{...window,ids:window.ids.filter(id=>!ids.has(id)||canonical[id]!==null)};
+        if(next!==window)await this.database.runAsync('UPDATE _gonvex_replica_queries SET value=? WHERE scope=? AND signature=?',JSON.stringify(next),scope,window.signature);
+        await this.commits.window(scope,window.signature,next);
+      }
+    }
+  }
+
   async loadSession(
     scope: string,
   ): Promise<import("@gonvex/client").LocalReplicaSession | undefined> {
@@ -462,9 +494,9 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     transaction: ReplicaTransaction,
     _snapshot: ReplicaSnapshot,
     scope: ReplicaScope = defaultReplicaScope,
-  ): Promise<void> {
+  ): Promise<ReplicaStorageCommit> {
     await this.initialize();
-    await this.database.withTransactionAsync(async () => {
+    return this.commits.commit(scope, async () => {
       const previous = await this.database.getFirstAsync<MetaRecord>(
         `SELECT scope, key, value FROM _gonvex_replica_meta WHERE scope = ? AND key = 'cursor'`,
         scope,
@@ -485,12 +517,17 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
           `DELETE FROM _gonvex_replica_queries WHERE scope = ?`,
           scope,
         );
+        await this.commits.reset(scope);
       }
+      const requestedDeletes = new Map<string, Set<string>>();
       const grouped = new Map<
         string,
         Array<{ id: string; row: ReplicaRow | null }>
       >();
       for (const change of transaction.changes) {
+        if (change.operation === 'delete') {
+          let ids = requestedDeletes.get(change.entity); if (!ids) requestedDeletes.set(change.entity, ids = new Set()); ids.add(change.id);
+        }
         const rows = grouped.get(change.entity) ?? [];
         rows.push({
           id: change.id,
@@ -500,15 +537,8 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
       }
       for (const [entity, rows] of grouped)
         await this.writeRecords(scope, entity, rows, transaction.cursor);
-      for (const membership of transaction.memberships ?? []) {
-        await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)
-           ON CONFLICT(scope, signature) DO UPDATE SET value = excluded.value`,
-          scope,
-          membership.signature,
-          JSON.stringify(membership),
-        );
-      }
+      await this.reconcileDeletedMemberships(scope, requestedDeletes, transaction.cursor);
+      for (const membership of transaction.memberships ?? []) await this.writeWindowHeader(scope, membership);
       await this.database.runAsync(
         `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
          ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
@@ -524,20 +554,12 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     windows: readonly ReplicaWindow[],
     cursor: ReplicaSnapshot["cursor"],
     scope: ReplicaScope = defaultReplicaScope,
-  ): Promise<void> {
+  ): Promise<ReplicaMetadataCommit> {
     await this.initialize();
     // Watermarks carry no row changes. Keep this transaction metadata-only so
     // advancing many retained windows does not rewrite the normalized corpus.
-    await this.database.withTransactionAsync(async () => {
-      for (const window of windows) {
-        await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)
-           ON CONFLICT(scope, signature) DO UPDATE SET value = excluded.value`,
-          scope,
-          window.signature,
-          JSON.stringify(normalizeWindow(window)),
-        );
-      }
+    return this.commits.commit(scope, async () => {
+      for (const window of windows) await this.writeWindowHeader(scope, window);
       if (cursor) {
         await this.database.runAsync(
           `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
@@ -556,7 +578,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     scope: ReplicaScope = defaultReplicaScope,
   ): Promise<void> {
     await this.initialize();
-    await this.database.withTransactionAsync(async () => {
+    await this.commits.commit(scope, async () => {
       await this.database.runAsync(
         `DELETE FROM _gonvex_replica_entities WHERE scope = ?`,
         scope,
@@ -569,6 +591,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         `DELETE FROM _gonvex_replica_meta WHERE scope = ? AND (key = 'cursor' OR key LIKE 'row:%')`,
         scope,
       );
+      await this.commits.reset(scope);
       for (const [entity, rows] of Object.entries(snapshot.entities)) {
         let params: string[] = [], batchCount = 0, textBytes = 0;
         const flush = async () => {
@@ -610,6 +633,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
           JSON.stringify(snapshot.cursor),
         );
       }
+      await this.commits.indexReplacement(scope);
     });
   }
 
@@ -645,25 +669,20 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
           JSON.parse(record.value) as ReplicaRecordVersion,
         ]),
       );
-      const versions = batch.map(({ id, row }) => {
-        const old = previous.get(id) ?? null;
-        if (!cursor)
-          return {
-            id,
-            row: row === null ? null : { ...old, ...row },
-            authority: undefined,
-          };
-        const prior = authorities.get(authorityKey(id)) ?? {
-          epoch: cursor.epoch,
-          fields: Object.fromEntries(
-            Object.keys(old ?? {}).map((key) => [key, 0]),
-          ),
-        };
-        return {
-          id,
-          ...mergeReplicaRecord({ row: old, authority: prior }, row, cursor),
-        };
-      });
+      const versions: Array<{id:string;row:ReplicaRow|null;authority:ReplicaRecordVersion|undefined}> = [];
+      for (const {id,row} of batch) {
+        const old=previous.get(id)??null;
+        if (!cursor) {
+          const merged=row===null?null:{...old,...row};
+          versions.push({id,row:merged,authority:undefined});
+          if(merged)previous.set(id,merged);else previous.delete(id);
+          continue;
+        }
+        const prior=authorities.get(authorityKey(id))??{epoch:cursor.epoch,fields:Object.fromEntries(Object.keys(old??{}).map(key=>[key,0]))};
+        const merged=mergeReplicaRecord({row:old,authority:prior},row,cursor);
+        versions.push({id,...merged});authorities.set(authorityKey(id),merged.authority);
+        if(merged.row)previous.set(id,merged.row);else previous.delete(id);
+      }
       const params = versions.flatMap(({ id, row }) => [
         scope,
         entity,
@@ -683,17 +702,22 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
             JSON.stringify(authority),
           ]),
         );
+      await this.commits.rows(scope, entity, versions);
     }
   }
 
-  async replaceWindow(
+  async replaceWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope, projection?: readonly ReplicaRow[]): Promise<void> {
+    await this.replaceWindowCommit(window, snapshot, scope, projection);
+  }
+
+  private async replaceWindowCommit(
     window: ReplicaWindow,
     snapshot: ReplicaSnapshot,
     scope: ReplicaScope = defaultReplicaScope,
     projection?: readonly ReplicaRow[],
-  ): Promise<void> {
+  ): Promise<ReplicaStorageCommit> {
     await this.initialize();
-    await this.database.withTransactionAsync(async () => {
+    return this.commits.commit(scope, async () => {
       const oldRecord = await this.database.getFirstAsync<QueryRecord>(
         `SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=? AND signature=?`,
         scope,
@@ -707,8 +731,13 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         window.cursor &&
         oldWindow.cursor.epoch === window.cursor.epoch &&
         oldWindow.cursor.revision > window.cursor.revision
-      )
+      ) {
+        await this.commits.window(scope,oldWindow.signature,oldWindow);
+        const ids=projection?.map(row=>String(row[window.key]))??window.ids;
+        const canonical=new Map((await this.loadEntityRows(scope,window.entity,ids)).map(entry=>[entry.id,entry.row]));
+        await this.commits.rows(scope,window.entity,ids.map(id=>({id,row:canonical.get(id)??null})));
         return;
+      }
       const rows =
         projection ??
         window.ids
@@ -727,6 +756,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         window.signature,
         JSON.stringify(normalizeWindow(window)),
       );
+      await this.commits.window(scope,window.signature,normalizeWindow(window));
       const removed =
         oldWindow?.ids.filter((id) => !window.ids.includes(id)) ?? [];
       if (removed.length) {
@@ -767,8 +797,8 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     delta: { upserts: ReplicaRow[]; deleted: string[] },
     snapshot: ReplicaSnapshot,
     scope: ReplicaScope = defaultReplicaScope,
-  ): Promise<void> {
-    await this.replaceWindow(window, snapshot, scope, delta.upserts);
+  ): Promise<ReplicaStorageCommit> {
+    return this.replaceWindowCommit(window, snapshot, scope, delta.upserts);
   }
 
   async removeWindow(
@@ -777,12 +807,13 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     scope: ReplicaScope = defaultReplicaScope,
   ): Promise<void> {
     await this.initialize();
-    await this.database.withTransactionAsync(async () => {
+    await this.commits.commit(scope, async () => {
       await this.database.runAsync(
         `DELETE FROM _gonvex_replica_queries WHERE scope = ? AND signature = ?`,
         scope,
         signature,
       );
+      await this.commits.window(scope,signature,null);
       if (snapshot.cursor) {
         await this.database.runAsync(
           `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
@@ -798,7 +829,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
 
   async clear(scope: ReplicaScope = defaultReplicaScope): Promise<void> {
     await this.initialize();
-    await this.database.withTransactionAsync(async () => {
+    await this.commits.commit(scope, async () => {
       await this.database.runAsync(
         `DELETE FROM _gonvex_replica_entities WHERE scope = ?`,
         scope,
@@ -811,6 +842,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         `DELETE FROM _gonvex_replica_meta WHERE scope = ?`,
         scope,
       );
+      await this.commits.reset(scope);
     });
   }
 }

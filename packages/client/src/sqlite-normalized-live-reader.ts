@@ -45,6 +45,7 @@ async function normalizedRead<T extends Record<string, unknown>>(
     if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('Positive finite overlay limits required');
   const canonicalRows: Array<{ id: string; row: Record<string, JsonValue> }> = [];
   let cursor: ReplicaCursor | undefined;
+  let storageSequence: number | undefined;
   const view = await readSQLiteLiveWindow<T>({ async readSnapshot(readScope, run) {
     let result!: Awaited<ReturnType<typeof run>>;
     await database.withTransactionAsync(async () => {
@@ -106,15 +107,21 @@ async function normalizedRead<T extends Record<string, unknown>>(
             canonicalRows.push({ id: record.id, row: row as Record<string, JsonValue> });
           }
         }
-        const stored = await database.getFirstAsync<{ value: string }>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='cursor'", scope);
+        const metadata = await database.getAllAsync<{ key: string; value: string }>("SELECT key,value FROM _gonvex_replica_meta WHERE scope=? AND key IN ('cursor','sequence')", scope);
+        const stored = metadata.find(row => row.key === 'cursor');
         cursor = stored ? JSON.parse(stored.value) as ReplicaCursor : undefined;
+        const sequence = metadata.find(row => row.key === 'sequence');
+        if (sequence) {
+          storageSequence = Number(sequence.value);
+          if (!Number.isSafeInteger(storageSequence) || storageSequence < 0) throw new Error('Invalid normalized query storage sequence');
+        }
       }
       signal?.throwIfAborted();
       await database.runAsync('DELETE FROM _gonvex_live_overlay');
     });
     return result;
   } }, plan, args, scope, context, budget, signal, { rowsTable: rowSource });
-  return { view, canonicalRows, ...(cursor ? { cursor } : {}) };
+  return { view, canonicalRows, ...(cursor ? { cursor } : {}), ...(storageSequence === undefined ? {} : { storageSequence }) };
 }
 
 export type NormalizedSQLiteLiveSnapshot<T extends Record<string, unknown>> = {
@@ -125,6 +132,7 @@ export type NormalizedSQLiteLiveSnapshot<T extends Record<string, unknown>> = {
    * Pending inserts have no base entry. Hydrate these, then apply the journal. */
   canonicalRows: Array<{ id: string; row: Record<string, JsonValue> }>;
   cursor?: ReplicaCursor;
+  storageSequence?: number;
 };
 
 /** A view-only component read. Publication into the Local Replica must instead

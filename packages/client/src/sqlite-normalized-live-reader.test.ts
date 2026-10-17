@@ -101,7 +101,7 @@ it('returns canonical hydration separately from predicted rows and captures the 
   {entity:'tasks',rowId:'c',op:'insert',fields:{_id:'c',name:'Gamma',workspaceId:'w'}}],coverage:async()=>'complete'}));
  expect(snapshot.view.rows.map(row=>row.name)).toEqual(['Aardvark','Beta','Gamma']);
  expect(snapshot.canonicalRows.map(entry=>[entry.id,entry.row.name])).toEqual([['a','Fresh'],['b','Beta']]);
- expect(snapshot.cursor).toEqual({epoch:'e',revision:9});
+ expect(snapshot.cursor).toEqual({epoch:'e',revision:9});expect(snapshot.storageSequence).toBe(2);
  expect(await store.loadEntityRows('s','tasks',['c'])).toEqual([]);
 });
 it('hydrates only selected canonical rows and does not apply a predicted delete to disk',async()=>{

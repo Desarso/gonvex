@@ -92,3 +92,13 @@ it('enforces actor-side queued bytes even if a caller uses looser limits',async(
  await expect(remote.loadEntityRows!('s','tasks',['b'.repeat(700)])).rejects.toThrow('actor queue budget');
  release();await view;expect(await first).toEqual([]);
 });
+
+it('forwards committed authority and bounded peer reconciliation through the actor',async()=>{
+ const {remote}=fixture();
+ const receipt=await remote.applyTransaction({cursor:{epoch:'e',revision:3},changes:[{entity:'tasks',id:'t',operation:'insert',newValue:{_id:'t',name:'Fresh'}}]},empty,'s');
+ expect(receipt).toMatchObject({scope:'s',previousSequence:0,sequence:1,changes:{entities:{tasks:{t:{name:'Fresh'}}}}});
+ const stale=await remote.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'t',operation:'update',newValue:{_id:'t',name:'Old'}}]},empty,'s');
+ expect(stale).toMatchObject({previousSequence:1,sequence:2,changes:{entities:{tasks:{t:{name:'Fresh'}}}}});
+ const changes=await remote.readChanges!('s',0,{rows:{tasks:['t']},windows:[],availableRows:0,availableBytes:0,maxRows:1,maxBytes:10000});
+ expect(changes.entities.tasks!.t!.name).toBe('Fresh');expect(changes.sequence).toBe(2);
+});

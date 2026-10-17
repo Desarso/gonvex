@@ -10,7 +10,7 @@ export type RemoteStorageLimits = {
   timeoutMs: number;
   readView: RemoteReadLimits;
 };
-const methods = ['load', 'loadWorkingSet', 'loadWindowRows', 'loadEntityRows', 'loadSession', 'saveSession',
+const methods = ['load', 'readChanges', 'loadWorkingSet', 'loadWindowRows', 'loadEntityRows', 'loadSession', 'saveSession',
   'applyTransaction', 'advanceWatermark', 'replaceSnapshot', 'replaceWindow', 'applyWindowDelta', 'removeWindow', 'clear'] as const;
 type Method = typeof methods[number];
 type Request = { id: number; method: Method | 'readView'; args: unknown[]; readPort?: MessagePort };
@@ -72,6 +72,9 @@ export function remoteSQLiteStorage(port: MessagePort, limits: RemoteStorageLimi
     ownsWorkingSetRows: true,
     ownsHydrationRows: true,
     load: scope => request('load', [scope]),
+    // The proxy intentionally does not advertise supportsResidentLookup.
+    // LocalReplica supplies bounded row IDs instead of an uncloneable callback.
+    readChanges: (scope, sequence, interest) => request('readChanges', [scope, sequence, interest]),
     loadWorkingSet: (scope, budget) => request('loadWorkingSet', [scope, budget]),
     loadWindowRows: (scope, signature) => request('loadWindowRows', [scope, signature]),
     loadEntityRows: (scope, entity, ids) => request('loadEntityRows', [scope, entity, ids]),

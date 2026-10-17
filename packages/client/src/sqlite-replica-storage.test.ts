@@ -40,7 +40,7 @@ function fixture() {
       }
     },
   };
-  return { storage: new SQLiteLocalReplicaStorage(adapter), queries, db };
+  return { storage: new SQLiteLocalReplicaStorage(adapter), queries, db, adapter };
 }
 
 it("loads a bounded working set and reads one cold row through the SQLite primary key", async () => {
@@ -426,4 +426,47 @@ it("keeps the old snapshot atomic if a later restore batch fails", async () => {
   const tasks=Object.fromEntries(Array.from({length:251},(_,i)=>['t'+i,{_id:'t'+i,note:'x'.repeat(3000)}]));
   await expect(storage.replaceSnapshot({entities:{tasks},liveQueries:{}},'tenant')).rejects.toThrow('restore failure');
   expect(await storage.loadEntityRows('tenant','tasks',['before','t0','t109'])).toEqual([{id:'before',row:{_id:'before',name:'Keep me'}}]);
+});
+
+async function replicaWithNewerRowProjection(){
+ const {storage,adapter}=fixture();const {LocalReplica}=await import('./local-replica');
+ const replica=new LocalReplica(storage);await replica.activateScope('tenant');
+ await replica.materializeWindow({signature:'references',kind:'replica',entity:'statuses',key:'_id',rows:[{_id:'s',name:'Status'}],cursor:{epoch:'e',revision:1},completeness:'complete',source:'server'});
+ await replica.materializeWindow({signature:'tasks',kind:'replica',entity:'tasks',key:'_id',rows:[{_id:'t',name:'Fresh',score:1}],cursor:{epoch:'e',revision:3},completeness:'complete',source:'server'});
+ expect(replica.cursor()?.revision).toBe(1);
+ return {storage,adapter,replica};
+}
+it('publishes committed authority when a delayed transaction is older than an existing row projection',async()=>{
+ const {storage,replica}=await replicaWithNewerRowProjection();
+ try{
+  await replica.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'t',operation:'update',newValue:{_id:'t',name:'Stale'}}]},'tenant');
+  expect((await storage.loadEntityRows('tenant','tasks',['t']))[0]?.row.name).toBe('Fresh');
+  expect(replica.entity('tasks','t')?.name).toBe('Fresh');
+ }finally{replica.dispose();}
+});
+it('publishes committed authority for a rejected stale delete without dropping its collection membership',async()=>{
+ const {storage,replica}=await replicaWithNewerRowProjection();
+ try{
+  await replica.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'t',operation:'delete'}]},'tenant');
+  expect((await storage.loadEntityRows('tenant','tasks',['t']))[0]?.row.name).toBe('Fresh');
+  expect(replica.entity('tasks','t')?.name).toBe('Fresh');
+  expect(replica.liveQuery('tasks').rows.map(row=>row._id)).toEqual(['t']);
+ }finally{replica.dispose();}
+});
+it('applies ordered row projections within one transaction without losing earlier fields',async()=>{
+ const {storage}=fixture();await storage.replaceSnapshot({entities:{tasks:{t:{_id:'t',name:'Original',score:1}}},liveQueries:{}},'tenant');
+ await storage.applyTransaction({cursor:{epoch:'e',revision:2},changes:[
+  {entity:'tasks',id:'t',operation:'update',newValue:{_id:'t',name:'Changed'}},
+  {entity:'tasks',id:'t',operation:'update',newValue:{_id:'t',score:5}}]}, {entities:{},liveQueries:{}},'tenant');
+ expect((await storage.loadEntityRows('tenant','tasks',['t']))[0]?.row).toEqual({_id:'t',name:'Changed',score:5});
+});
+it('reconciles peer publication before accepting its own later canonical commit',async()=>{
+ const {storage,adapter,replica}=await replicaWithNewerRowProjection();
+ try{
+  const peer=new SQLiteLocalReplicaStorage(adapter);
+  await peer.applyTransaction({cursor:{epoch:'e',revision:4},changes:[{entity:'tasks',id:'t',operation:'update',newValue:{_id:'t',name:'Peer'}}]}, {entities:{},liveQueries:{}},'tenant');
+  await replica.applyTransaction({cursor:{epoch:'e',revision:5},changes:[{entity:'tasks',id:'t',operation:'update',newValue:{_id:'t',score:9}}]},'tenant');
+  expect((await storage.loadEntityRows('tenant','tasks',['t']))[0]?.row).toEqual({_id:'t',name:'Peer',score:9});
+  expect(replica.entity('tasks','t')).toEqual({_id:'t',name:'Peer',score:9});
+ }finally{replica.dispose();}
 });
