@@ -9,6 +9,9 @@ type Row = Record<string, unknown>;
  * same durable read version.
  * This interface does not install an adapter or create another entity cache. */
 export interface SQLiteLiveReadSnapshot {
+  /** Internal normalized source selected after capturing the coherent overlay.
+   * The compiler validates the identifier; application values remain bound. */
+  rowsTable?: string;
   rows(statement: SQLiteLiveStatement): AsyncIterable<readonly unknown[]>;
   coverage(plan: LiveQueryPlan, args: Record<string, JsonValue>,
     context: Readonly<Record<string, JsonValue>>): Promise<'complete' | 'partial'>;
@@ -39,11 +42,14 @@ export async function readSQLiteLiveWindow<T extends Row = Row>(database: SQLite
   abort();
   const partial = (reason: string): OfflineLiveQueryResult<T> =>
     ({ rows: [], completeness: 'partial', supported: false, unsupportedOperator: reason });
-  const compiled = compileSQLiteLiveQuery(plan, args, scope, context, source);
-  if (!compiled.supported) return partial(compiled.unsupportedOperator);
-  if (compiled.limit > budget.maxRows) return partial('queryRowBudget');
+  const prepared = compileSQLiteLiveQuery(plan, args, scope, context, source);
+  if (!prepared.supported) return partial(prepared.unsupportedOperator);
+  if (prepared.limit > budget.maxRows) return partial('queryRowBudget');
   const result = await database.readSnapshot(scope, async (snapshot): Promise<OfflineLiveQueryResult<T>> => {
     abort();
+    const compiled = snapshot.rowsTable === undefined || snapshot.rowsTable === source.rowsTable
+      ? prepared : compileSQLiteLiveQuery(plan, args, scope, context, { rowsTable: snapshot.rowsTable });
+    if (!compiled.supported) return partial(compiled.unsupportedOperator);
     const coverage = await snapshot.coverage(plan, args, context);
     abort();
     let summary: readonly unknown[] | undefined, bytes = 0;

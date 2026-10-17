@@ -11,6 +11,7 @@ const budget:NormalizedLiveReadBudget={maxRows:5,maxTextBytes:16000,maxPatches:1
 const plan:LiveQueryPlan={table:'tasks',key:'_id',where:{operator:'eq',column:'workspaceId',value:{argument:'workspace'}},
  sort:{allowedColumns:['name'],defaultColumn:'name',defaultDirection:'asc'},window:{offsetArgument:'offset',limitArgument:'limit',defaultLimit:5,maxLimit:5,count:'exact'}};
 async function fixture(normalizeKeys=false){
+ const statements:string[]=[];
  const native=new DatabaseSync(':memory:');databases.push(native);
  for(const[name,fn]of Object.entries(sqliteLiveQueryFunctions))native.function(name,{varargs:true},fn as any);
  // Node's builtin has no custom collation API. These contract fixtures use
@@ -22,7 +23,7 @@ async function fixture(normalizeKeys=false){
  const db:SQLiteReplicaDatabase={
   async execAsync(text){native.exec(sql(text));},
   async runAsync(text,...args){return native.prepare(sql(text)).run(...bindings(text,args) as any[]);},
-  async getAllAsync<T>(text,...args){return native.prepare(sql(text)).all(...bindings(text,args) as any[]) as T[];},
+  async getAllAsync<T>(text,...args){statements.push(text);return native.prepare(sql(text)).all(...bindings(text,args) as any[]) as T[];},
   async getFirstAsync<T>(text,...args){return native.prepare(sql(text)).get(...bindings(text,args) as any[]) as T??null;},
   async withTransactionAsync(run){native.exec('BEGIN');try{await run();native.exec('COMMIT');}catch(error){native.exec('ROLLBACK');throw error;}}
  };
@@ -30,7 +31,7 @@ async function fixture(normalizeKeys=false){
  await store.replaceSnapshot({entities:{tasks:{a:{_id:'a',name:'Alpha',workspaceId:'w'},b:{_id:'b',name:'Beta',workspaceId:'w'}}},liveQueries:{}},'s');
  const read=(patches:OptimisticPatch[]=[],options:{complete?:boolean;budget?:NormalizedLiveReadBudget;signal?:AbortSignal}={})=>
   readNormalizedSQLiteLiveWindow(db,plan,{workspace:'w'},'s',{},options.budget??budget,async()=>({patches,coverage:async()=>options.complete===false?'partial':'complete'}),options.signal);
- return {db,store,native,read};
+ return {db,store,native,read,statements};
 }
 it('reads the existing normalized store and exposes a pending insert without persisting it',async()=>{
  const {read,store}=await fixture();
@@ -124,4 +125,25 @@ it('rejects an oversized canonical base even when its predicted replacement is s
 it('requires a stable entity key before a predicted result can request canonical hydration',async()=>{
  const {db}=await fixture();
  await expect(readNormalizedSQLiteLiveSnapshot(db,plan,{workspace:'w'},'s',{},budget,async()=>({patches:[{entity:'tasks',rowId:'missing',op:'insert',fields:{name:'Small',workspaceId:'w'}}],coverage:async()=>'complete'}))).rejects.toThrow('stable entity key');
+});
+
+it('does not expand an empty pending overlay into canonical query plans',async()=>{
+ const {read,native,statements}=await fixture();
+ const ordinary=await read();
+ const emptySQL=statements.find(sql=>sql.startsWith('WITH filtered AS MATERIALIZED'))!;
+ const compiled=compileSQLiteLiveQuery(plan,{workspace:'w'},'s',{}, {rowsTable:'_gonvex_live_rows'});
+ if(!compiled.supported)throw Error('Unsupported fixture');
+ const explain=(sql:string)=>native.prepare('EXPLAIN QUERY PLAN '+sql.replaceAll('COLLATE gv_json','COLLATE BINARY')).all(
+  Object.fromEntries(compiled.combined.bindings.map((value,index)=>['?'+(index+1),value]))
+ );
+ const emptyPlan=explain(emptySQL);
+ statements.length=0;
+ const pending=await read([{entity:'tasks',rowId:'c',op:'insert',fields:{_id:'c',name:'Gamma',workspaceId:'w'}}]);
+ const overlaySQL=statements.find(sql=>sql.startsWith('WITH filtered AS MATERIALIZED'))!;
+ const overlayPlan=explain(overlaySQL);
+ expect(ordinary.rows.map(row=>row._id)).toEqual(['a','b']);
+ expect(pending.rows.map(row=>row._id)).toEqual(['a','b','c']);
+ expect(emptyPlan.some(row=>String(row.detail).includes('_gonvex_live_overlay'))).toBe(false);
+ expect(overlayPlan.some(row=>String(row.detail).includes('_gonvex_live_overlay'))).toBe(true);
+ expect(emptyPlan.length).toBeLessThan(overlayPlan.length);
 });

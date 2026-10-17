@@ -60,3 +60,9 @@ it('rejects retirement during transaction cleanup before publishing a result',as
  await expect(readSQLiteLiveWindow(database,plan,{},'scope',{},budget,controller.signal)).rejects.toBe(reason);
  expect(f.finalized()).toBe(1);
 });
+
+it('validates a snapshot-selected source before executing any SQL',async()=>{
+ const f=fixture([summary,item('a')]);f.snapshot.rowsTable='rows; DROP TABLE tasks';
+ await expect(readSQLiteLiveWindow(f.database,plan,{},'scope',{},budget)).rejects.toThrow('row source');
+ expect(f.finalized()).toBe(0);
+});

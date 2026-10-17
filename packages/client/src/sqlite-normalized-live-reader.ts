@@ -17,13 +17,16 @@ export type NormalizedLiveReadBudget = SQLiteLiveReadBudget & {
   maxOverlayBytes: number;
 };
 const rowSource = '_gonvex_live_rows';
+const canonicalRowSource = '_gonvex_canonical_rows';
 const schema = `CREATE TEMP TABLE IF NOT EXISTS _gonvex_live_overlay (
  scope TEXT NOT NULL,entity TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,position INTEGER NOT NULL,
  PRIMARY KEY(scope,entity,id));
  CREATE TEMP VIEW IF NOT EXISTS ${rowSource} AS
  SELECT e.scope,e.entity,e.id,e.value,e.rowid AS position FROM main._gonvex_replica_entities e
  WHERE e.value <> 'null' AND NOT EXISTS(SELECT 1 FROM _gonvex_live_overlay p WHERE p.scope=e.scope AND p.entity=e.entity AND p.id=e.id)
- UNION ALL SELECT scope,entity,id,value,position FROM _gonvex_live_overlay WHERE value <> 'null';`;
+ UNION ALL SELECT scope,entity,id,value,position FROM _gonvex_live_overlay WHERE value <> 'null';
+ CREATE TEMP VIEW IF NOT EXISTS ${canonicalRowSource} AS
+ SELECT scope,entity,id,value,rowid AS position FROM main._gonvex_replica_entities WHERE value <> 'null';`;
 
 /** Query the existing normalized SQL replica, not a second durable task store.
  * The caller's worker actor serializes this whole operation with storage writes
@@ -79,7 +82,11 @@ async function normalizedRead<T extends Record<string, unknown>>(
         await database.runAsync('INSERT INTO _gonvex_live_overlay VALUES(?,?,?,?,?) ON CONFLICT(scope,entity,id) DO UPDATE SET value=excluded.value,position=excluded.position',
           readScope, entity, patch.rowId, JSON.stringify(value), position);
       }
-      result = await run({ coverage: captured.coverage, async *rows(statement) {
+      // The empty-overlay source is selected only after capture, inside this
+      // same transaction. Avoid expanding the UNION/anti-join at every query
+      // dependency when there are no predictions. Pending edits keep that view.
+      result = await run({ rowsTable: captured.patches.length ? rowSource : canonicalRowSource,
+        coverage: captured.coverage, async *rows(statement) {
         signal?.throwIfAborted();
         const records = await database.getAllAsync<{ kind: unknown; value: unknown; total: unknown; missingSortFields: unknown; missingReferences: unknown }>(statement.sql, ...statement.bindings);
         for (const row of records) { signal?.throwIfAborted(); yield [row.kind, row.value, row.total, row.missingSortFields, row.missingReferences]; }
