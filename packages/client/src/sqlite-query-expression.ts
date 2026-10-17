@@ -68,7 +68,9 @@ class UnsupportedPlan extends Error {}
  * position preserves first-insertion order for locale-equivalent key ties.
  * id is String(row[the registered entity key]), including numeric entity keys. */
 export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string, JsonValue>, scope: string,
-  context: Readonly<Record<string, JsonValue>> = {}): SQLiteLivePlan {
+  context: Readonly<Record<string, JsonValue>> = {}, source: { rowsTable?: string } = {}): SQLiteLivePlan {
+  const rowsTable = source.rowsTable ?? 'replica_rows';
+  if (!/^[a-z_][a-z0-9_]*$/i.test(rowsTable)) throw new TypeError('Invalid normalized SQLite row source');
   if (plan.serverOnly) return { supported: false, unsupportedOperator: 'serverOnly' };
   // Full exports need a streaming API. Do not disguise an unbounded array as a
   // bounded window or silently discard its rows in this candidate implementation.
@@ -120,7 +122,7 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
         if (!e) return '1';
         const children = e.children ?? [];
         if (alias === 'r0' && e === rootUnion) {
-          const branches = children.map(child => `SELECT r0.id FROM replica_rows r0 WHERE r0.scope=${bind(scope)} AND r0.entity=${bind(plan.table)} AND ${expression(child, 'r0')}`);
+          const branches = children.map(child => `SELECT r0.id FROM ${rowsTable} r0 WHERE r0.scope=${bind(scope)} AND r0.entity=${bind(plan.table)} AND ${expression(child, 'r0')}`);
           return `(r0.id IN (${branches.join(' UNION ALL ')}))`;
         }
         if (e.operator === 'and') return '(' + (children.map(child => expression(child, alias)).join(' AND ') || '1') + ')';
@@ -136,7 +138,7 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
           // Materialize that set once, rather than correlating it per root row.
           // Normalized id is String(row[key]), matching related-membership keys.
           const member = alias === 'r0' && e.column === plan.key ? `${alias}.id` : `gv_str(${left})`;
-          return `(NULLIF(${left},'null') IS NOT NULL AND ${member} IN (SELECT gv_str(${right}) FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(e.relation.table)} AND NULLIF(${right},'null') IS NOT NULL AND ${expression(e.relation.where, related)}))`;
+          return `(NULLIF(${left},'null') IS NOT NULL AND ${member} IN (SELECT gv_str(${right}) FROM ${rowsTable} ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(e.relation.table)} AND NULLIF(${right},'null') IS NOT NULL AND ${expression(e.relation.where, related)}))`;
         }
         const right = bind(resolve(e.value));
         if (e.operator === 'eq') return `(${left} IS ${right})`;
@@ -172,24 +174,24 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
         where.push('(' + (expressions.join(separator === '$or' ? ' OR ' : ' AND ') || (separator === '$or' ? '0' : '1')) + ')');
       }
       const conditions = () => where.map(term => '(' + term + ')').join(' AND ');
-      if (kind === 'count') return { sql: `SELECT count(*) FROM replica_rows ${root} WHERE ${conditions()}`, bindings };
+      if (kind === 'count') return { sql: `SELECT count(*) FROM ${rowsTable} ${root} WHERE ${conditions()}`, bindings };
       if (kind === 'missingSortFields') {
         where.push('(' + plainFields.map(name => value(root, name) + ' IS NULL').join(' OR ') + ')');
-        return { sql: `SELECT 1 FROM replica_rows ${root} WHERE ${conditions()} LIMIT 1`, bindings };
+        return { sql: `SELECT 1 FROM ${rowsTable} ${root} WHERE ${conditions()} LIMIT 1`, bindings };
       }
       if (kind === 'missingReferences') {
         where.push('(' + refs.map(ref => {
           const related = 'r' + (++aliasCount), foreign = value(root, ref.foreignKey);
-          return `(NULLIF(${foreign},'null') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(ref.table)} AND ${related}.id=gv_str(${foreign})))`;
+          return `(NULLIF(${foreign},'null') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ${rowsTable} ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(ref.table)} AND ${related}.id=gv_str(${foreign})))`;
         }).join(' OR ') + ')');
-        return { sql: `SELECT 1 FROM replica_rows ${root} WHERE ${conditions()} LIMIT 1`, bindings };
+        return { sql: `SELECT 1 FROM ${rowsTable} ${root} WHERE ${conditions()} LIMIT 1`, bindings };
       }
       const projected = fields.map((name, i) => {
         const ref = liveQueryReferenceField(plan, name);
         let selected: string;
         if (ref) {
           const related = 'r' + (++aliasCount);
-          selected = `COALESCE(NULLIF((SELECT ${value(related, ref.column)} FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(ref.table)} AND ${related}.id=gv_str(${value(root, ref.foreignKey)}) LIMIT 1),'null'),${bind(encode(ref.fallback ?? null))})`;
+          selected = `COALESCE(NULLIF((SELECT ${value(related, ref.column)} FROM ${rowsTable} ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(ref.table)} AND ${related}.id=gv_str(${value(root, ref.foreignKey)}) LIMIT 1),'null'),${bind(encode(ref.fallback ?? null))})`;
         } else selected = value(root, name);
         return `NULLIF(${selected},'null') AS s${i}`;
       });
@@ -201,16 +203,16 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
         const missingSort = plainFields.length ? '(' + plainFields.map(name => value(root, name) + ' IS NULL').join(' OR ') + ')' : '0';
         const missingRefs = refs.length ? '(' + refs.map(ref => {
           const related = 'r' + (++aliasCount), foreign = value(root, ref.foreignKey);
-          return `(NULLIF(${foreign},'null') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(ref.table)} AND ${related}.id=gv_str(${foreign})))`;
+          return `(NULLIF(${foreign},'null') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ${rowsTable} ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(ref.table)} AND ${related}.id=gv_str(${foreign})))`;
         }).join(' OR ') + ')' : '0';
         const names = [...fields.map((_, i) => 's' + i), 'rk', 'rp'];
         const summaryOrder = names.map(name => 'NULL AS ' + name).join(',');
         const pageOrder = names.map(name => 'page.' + name).join(',');
         const total = plan.window!.count === 'exact' ? 'count(*)' : 'NULL';
-        const sql = `WITH filtered AS MATERIALIZED (SELECT ${root}.id,${projected.join(',')},${missingSort} AS ms,${missingRefs} AS mr FROM replica_rows ${root} WHERE ${conditions()}),page AS MATERIALIZED (SELECT * FROM filtered ORDER BY ${ordering('')} LIMIT ${bind(limit)} OFFSET ${bind(offset)}) SELECT kind,value,total,missingSortFields,missingReferences FROM (SELECT 0 AS kind,NULL AS value,${total} AS total,COALESCE(max(ms),0) AS missingSortFields,COALESCE(max(mr),0) AS missingReferences,${summaryOrder} FROM filtered UNION ALL SELECT 1,result.value,NULL,NULL,NULL,${pageOrder} FROM page JOIN replica_rows result ON result.scope=${bind(scope)} AND result.entity=${bind(plan.table)} AND result.id=page.id) ORDER BY kind ASC,${ordering('')}`;
+        const sql = `WITH filtered AS MATERIALIZED (SELECT ${root}.id,${projected.join(',')},${missingSort} AS ms,${missingRefs} AS mr FROM ${rowsTable} ${root} WHERE ${conditions()}),page AS MATERIALIZED (SELECT * FROM filtered ORDER BY ${ordering('')} LIMIT ${bind(limit)} OFFSET ${bind(offset)}) SELECT kind,value,total,missingSortFields,missingReferences FROM (SELECT 0 AS kind,NULL AS value,${total} AS total,COALESCE(max(ms),0) AS missingSortFields,COALESCE(max(mr),0) AS missingReferences,${summaryOrder} FROM filtered UNION ALL SELECT 1,result.value,NULL,NULL,NULL,${pageOrder} FROM page JOIN ${rowsTable} result ON result.scope=${bind(scope)} AND result.entity=${bind(plan.table)} AND result.id=page.id) ORDER BY kind ASC,${ordering('')}`;
         return { sql, bindings };
       }
-      const sql = `WITH page AS MATERIALIZED (SELECT ${root}.id,${projected.join(',')} FROM replica_rows ${root} WHERE ${conditions()} ORDER BY ${ordering('')} LIMIT ${bind(limit)} OFFSET ${bind(offset)}) SELECT result.value FROM page JOIN replica_rows result ON result.scope=${bind(scope)} AND result.entity=${bind(plan.table)} AND result.id=page.id ORDER BY ${ordering('page.')}`;
+      const sql = `WITH page AS MATERIALIZED (SELECT ${root}.id,${projected.join(',')} FROM ${rowsTable} ${root} WHERE ${conditions()} ORDER BY ${ordering('')} LIMIT ${bind(limit)} OFFSET ${bind(offset)}) SELECT result.value FROM page JOIN ${rowsTable} result ON result.scope=${bind(scope)} AND result.entity=${bind(plan.table)} AND result.id=page.id ORDER BY ${ordering('page.')}`;
       return { sql, bindings };
     };
     return { supported: true, rows: build('rows'), combined: build('combined'), ...(plan.window.count === 'exact' ? { count: build('count') } : {}),

@@ -32,14 +32,14 @@ export type SQLiteLiveReadBudget = {
 export async function readSQLiteLiveWindow<T extends Row = Row>(database: SQLiteLiveReadDatabase,
   plan: LiveQueryPlan, args: Record<string, JsonValue>, scope: string,
   context: Readonly<Record<string, JsonValue>>, budget: SQLiteLiveReadBudget,
-  signal?: AbortSignal): Promise<OfflineLiveQueryResult<T>> {
+  signal?: AbortSignal, source: { rowsTable?: string } = {}): Promise<OfflineLiveQueryResult<T>> {
   for (const value of [budget.maxRows, budget.maxTextBytes])
     if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('Positive finite query budget required');
   const abort = () => signal?.throwIfAborted();
   abort();
   const partial = (reason: string): OfflineLiveQueryResult<T> =>
     ({ rows: [], completeness: 'partial', supported: false, unsupportedOperator: reason });
-  const compiled = compileSQLiteLiveQuery(plan, args, scope, context);
+  const compiled = compileSQLiteLiveQuery(plan, args, scope, context, source);
   if (!compiled.supported) return partial(compiled.unsupportedOperator);
   if (compiled.limit > budget.maxRows) return partial('queryRowBudget');
   const result = await database.readSnapshot(scope, async (snapshot): Promise<OfflineLiveQueryResult<T>> => {
