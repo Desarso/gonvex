@@ -280,6 +280,10 @@ export type ReplicaSubscription = { entity: string; ids?: readonly string[] } | 
 
 type EqualityIndex = { entity: string; column: string; values: Map<string, Set<string>>; bytes: number; scan?: Iterator<[string, ReplicaRow]> };
 
+// Keep barrier callbacks outside enqueueApplication's closure context. A
+// pending earlier job must not retain a completed read's resolver and result.
+function applicationCompleted(): void {}
+
 export class LocalReplica implements LocalReplicaView {
   private readonly retainedWindows = new Map<string, number>();
   private readonly retainedRows = new Map<string,Map<string,number>>();
@@ -425,7 +429,11 @@ export class LocalReplica implements LocalReplicaView {
     let reject!: (error: unknown) => void;
     const result = new Promise<T>((done, failed) => { resolve = done; reject = failed; });
     this.applicationJobs.push({ urgent, cancel: () => reject(new Error("Local replica is closed")), run: async () => { try { resolve(await run()); } catch (error) { reject(error); } finally { if (this.disposed) this.releaseMemory(); } } });
-    this.application = Promise.all([this.application, result]).then(() => undefined, () => undefined);
+    // A completed urgent read may overtake an earlier blocked write. The
+    // scope barrier must wait for both, but must not retain the read's payload
+    // in Promise.all's result array until that earlier write drains.
+    const completed = result.then(applicationCompleted, applicationCompleted);
+    this.application = Promise.all([this.application, completed]).then(applicationCompleted);
     if (!this.applicationRunning) {
       this.applicationRunning = true;
       queueMicrotask(() => { void this.drainApplicationJobs(); });
