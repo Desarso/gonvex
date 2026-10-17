@@ -154,7 +154,15 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
       const filters = plan.filters && args[plan.filters.argument];
       if (Array.isArray(filters)) for (const raw of filters) {
         const filter = raw as { column: string; operator: FilterOperator; value: string; valueTo?: string };
-        where.push(`gv_filter(${value(root, filter.column)},${bind(filter.operator)},${bind(filter.value)},${bind(filter.valueTo ?? null)})`);
+        const left = value(root, filter.column);
+        if (filter.operator === 'empty' || filter.operator === 'notEmpty') {
+          // String([]), String([null]) and nested empty arrays are empty too.
+          // Scalar null/missing/empty strings, the common tombstone predicate,
+          // stay inside SQLite. Containers retain the JS String semantics, including custom own keys.
+          const containerEmpty = `gv_filter(${left},'empty','',NULL)`;
+          const empty = `(${left} IS NULL OR ${left} IN ('null','""') OR CASE WHEN json_type(${left}) IN ('array','object') THEN ${containerEmpty} ELSE 0 END)`;
+          where.push(filter.operator === 'empty' ? empty : `(NOT ${empty})`);
+        } else where.push(`gv_filter(${left},${bind(filter.operator)},${bind(filter.value)},${bind(filter.valueTo ?? null)})`);
       }
       if (search && plan.search) {
         const separator = plan.search.booleanTerms && search.includes('$and') ? '$and' : plan.search.booleanTerms && search.includes('$or') ? '$or' : '';
