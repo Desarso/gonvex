@@ -7,6 +7,13 @@ export class SQLiteReplicaEngineError extends Error {
 }
 export type SQLiteTypedWrite = { table: string; id: string; version: number; row: Record<string, unknown> | null };
 export type SQLiteTypedPage = { rows: Record<string, unknown>[]; cursor: SQLiteKeyset | null; bytes: number; sequence: number };
+export type SQLiteBootstrapState = { token: string; nextPage: number; rows: number; root: string; complete: boolean };
+type SQLiteBootstrapRecord = { scope: string; token: string; physical: string; next_page: number; rows: number; root: string; base_sequence: number; complete: number };
+function bootstrapState(row: SQLiteBootstrapRecord): SQLiteBootstrapState { return { token: row.token, nextPage: row.next_page, rows: row.rows, root: row.root, complete: !!row.complete }; }
+async function sha256(text: string): Promise<string> {
+  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+}
 function fail(code: SQLiteReplicaEngineError['code'], message: string): never { throw new SQLiteReplicaEngineError(code, message); }
 
 /** Conservative JS admission accounting before JSON serialization or cloning.
@@ -39,6 +46,25 @@ export function sqlitePayloadBytes(value: unknown, maxBytes: number): number {
   };
   visit(value, 0);
   return bytes;
+}
+
+/** JSON.parse owns this graph: no accessors, cycles or foreign prototypes.
+ * Avoid allocating a descriptor and key array for every field on the trusted
+ * wire path. Still enforce graph/depth/finite-number budgets before ingestion. */
+function parsedPayloadBytes(value: unknown, maxBytes: number): number {
+  let bytes = 0, nodes = 0;
+  const visit = (item: any, depth: number): void => {
+    if (++nodes > 100000 || depth > 32) fail('BUDGET', 'SQLite parsed payload structure exceeds budget');
+    bytes += 16;
+    if (typeof item === 'string') bytes += item.length * 2;
+    else if (typeof item === 'number' && !Number.isFinite(item)) fail('INVALID_ROW', 'Nonfinite SQLite JSON number');
+    else if (item && typeof item === 'object') for (const key in item) {
+      if (!Object.hasOwn(item, key)) continue;
+      bytes += key.length * 2 + 16; visit(item[key], depth + 1);
+    }
+    if (bytes > maxBytes) fail('BUDGET', 'SQLite parsed payload byte budget exceeded');
+  };
+  visit(value, 0); return bytes;
 }
 
 /** One instance runs inside the elected owner worker. Every public operation
@@ -75,8 +101,11 @@ export class SQLiteTypedReplicaEngine {
 CREATE TABLE IF NOT EXISTS gv_tombstones(scope TEXT NOT NULL, entity TEXT NOT NULL, id TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY(scope,entity,id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_intent_receipts(scope TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(scope,id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, sequence INTEGER NOT NULL, PRIMARY KEY(scope,id)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
-        const signature = JSON.stringify({ format: 2, tables: this.schema });
+CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);
+CREATE TABLE IF NOT EXISTS gv_scope_alias(scope TEXT PRIMARY KEY,physical TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gv_bootstrap(scope TEXT PRIMARY KEY,token TEXT UNIQUE NOT NULL,physical TEXT NOT NULL,next_page INTEGER NOT NULL,rows INTEGER NOT NULL,root TEXT NOT NULL,base_sequence INTEGER NOT NULL,complete INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(token,page)) WITHOUT ROWID;`);
+        const signature = JSON.stringify({ format: 3, tables: this.schema });
         const old = await this.db.getFirstAsync<{ schema: string; epoch: number }>('SELECT schema,epoch FROM gv_storage_meta WHERE id=1');
         if (old && old.schema !== signature) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
         await this.db.execAsync(ddl.tables + '\n' + ddl.indexes + '\n' + ddl.search);
@@ -93,6 +122,10 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
     const lease = await this.db.getFirstAsync<{ epoch: number; owner: string; sequence: number }>('SELECT epoch,owner,sequence FROM gv_storage_meta WHERE id=1');
     if (!lease || lease.epoch !== this.epoch || lease.owner !== this.owner) fail('FENCED', 'SQLite owner epoch is stale');
     return lease.sequence;
+  }
+  private async physicalScope(scope: string): Promise<string> {
+    if (!scope || scope.length > 512 || scope.startsWith('\u0000bootstrap:')) throw new TypeError('Invalid SQLite public scope');
+    return (await this.db.getFirstAsync<{ physical: string }>('SELECT physical FROM gv_scope_alias WHERE scope=?', scope))?.physical ?? scope;
   }
   private validateWrite(input: SQLiteTypedWrite) {
     const table = Object.hasOwn(this.schema, input.table) && this.schema[input.table];
@@ -129,17 +162,13 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
           const value = item.row![field];
           return value == null ? null : shape.kind === 'json' ? JSON.stringify(value) : shape.kind === 'boolean' ? Number(value) : value;
         }), ...(table.search ?? []).map(field => String(item.row![field] ?? '').toLowerCase()));
-        if (!selects.length || !this.db.runManyAsync) selects.push(select);
+        selects.push(select);
         bindings.push(scope, item.table, item.id, item.version);
         end++;
       }
       const head = `INSERT INTO ${tn}(${columns.map(q).join(',')}) `;
       const tail = ` ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`;
-      if (this.db.runManyAsync) {
-        const width = columns.length + 4, rows: unknown[][] = [];
-        for (let i = 0; i < bindings.length; i += width) rows.push(bindings.slice(i, i + width));
-        await this.db.runManyAsync(head + selects[0] + tail, rows);
-      } else await this.db.runAsync(head + selects.join(' UNION ALL ') + tail, ...bindings);
+      await this.db.runAsync(head + selects.join(' UNION ALL ') + tail, ...bindings);
       offset = end;
     }
   }
@@ -162,7 +191,7 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
             result = JSON.parse(receipt.result); return;
           }
         }
-        await this.writeBatch(admitted.scope, admitted.writes);
+        await this.writeBatch(await this.physicalScope(admitted.scope), admitted.writes);
         if (previous >= Number.MAX_SAFE_INTEGER) fail('FENCED', 'SQLite storage sequence exhausted');
         result = { sequence: previous + 1 };
         if (admitted.intent) {
@@ -174,31 +203,142 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
       return result;
     });
   }
+  /** Restartable bootstrap keeps unverified rows in an invisible generation.
+   * Its page receipts and chain survive worker recycling. This entry point is
+   * deliberately limited to first sync with no pending intents. Existing data
+   * and migrations require a separately verified source/overlay transition. */
+  beginBootstrap(scope: string, token: string): Promise<SQLiteBootstrapState> {
+    sqlitePayloadBytes({ scope, token }, 2048);
+    if (!token || token.length > 128) throw new TypeError('Invalid SQLite bootstrap token');
+    return this.enqueue(2048, async () => {
+      let state!: SQLiteBootstrapState;
+      await this.db.withTransactionAsync(async () => {
+        const sequence = await this.fence(), physical = await this.physicalScope(scope);
+        const old = await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT * FROM gv_bootstrap WHERE scope=?', scope);
+        if (old) {
+          if (old.token !== token) fail('INTENT_CONFLICT', 'Another bootstrap owns this scope');
+          state = bootstrapState(old); return;
+        }
+        for (const entity of Object.keys(this.schema)) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? LIMIT 1`, physical)) fail('INVALID_ROW', 'Bootstrap requires an empty scope');
+        for (const table of ['gv_outbox', 'gv_intent_receipts', 'gv_tombstones']) if (await this.db.getFirstAsync(`SELECT 1 FROM ${table} WHERE scope=? LIMIT 1`, scope)) fail('INVALID_ROW', 'Bootstrap cannot replace pending work');
+        const stage = '\u0000bootstrap:' + token;
+        await this.db.runAsync('INSERT INTO gv_bootstrap VALUES(?,?,?,0,0,?,?,0)', scope, token, stage, '0'.repeat(64), sequence);
+        state = { token, nextPage: 0, rows: 0, root: '0'.repeat(64), complete: false };
+      }); return state;
+    });
+  }
+  appendBootstrap(scope: string, token: string, page: number, encoded: string): Promise<SQLiteBootstrapState> {
+    sqlitePayloadBytes({ scope, token, page }, 2048);
+    if (typeof encoded !== 'string' || encoded.length * 2 > this.limits.batchBytes || !Number.isSafeInteger(page) || page < 0) throw new RangeError('Invalid SQLite bootstrap page');
+    return this.enqueue(this.limits.batchBytes, async () => {
+      const admitted = JSON.parse(encoded) as SQLiteTypedWrite[];
+      parsedPayloadBytes(admitted, this.limits.batchBytes);
+      if (!Array.isArray(admitted) || admitted.length > 512 || admitted.some(write => write.row === null)) fail('INVALID_ROW', 'Bootstrap accepts bounded live rows only');
+      const hash = await sha256(encoded);
+      let state!: SQLiteBootstrapState;
+      await this.db.withTransactionAsync(async () => {
+        await this.fence();
+        const old = await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT * FROM gv_bootstrap WHERE scope=? AND token=?', scope, token);
+        if (!old) fail('INVALID_ROW', 'Bootstrap is not open');
+        if (page < old.next_page) {
+          const receipt = await this.db.getFirstAsync<{ hash: string }>('SELECT hash FROM gv_bootstrap_pages WHERE token=? AND page=?', token, page);
+          if (receipt?.hash !== hash) fail('INTENT_CONFLICT', 'Bootstrap page replay changed its payload');
+          state = bootstrapState(old); return;
+        }
+        if (old.complete || page !== old.next_page) fail('PAGE_CHANGED', 'Bootstrap page is out of sequence');
+        const groups = new Map<string, string[]>(), seen = new Set<string>();
+        for (const write of admitted) {
+          this.validateWrite(write);
+          const key = JSON.stringify([write.table, write.id]);
+          if (seen.has(key)) fail('INVALID_ROW', 'Duplicate bootstrap row'); seen.add(key);
+          const ids = groups.get(write.table) ?? []; ids.push(write.id); groups.set(write.table, ids);
+        }
+        for (const [entity, ids] of groups) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? AND id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, old.physical, ...ids)) fail('INVALID_ROW', 'Duplicate bootstrap row');
+        await this.writeBatch(old.physical, admitted);
+        const root = await sha256(old.root + hash), rows = old.rows + admitted.length;
+        await this.db.runAsync('INSERT INTO gv_bootstrap_pages VALUES(?,?,?)', token, page, hash);
+        await this.db.runAsync('UPDATE gv_bootstrap SET next_page=?,rows=?,root=? WHERE scope=? AND token=?', page + 1, rows, root, scope, token);
+        state = { token, nextPage: page + 1, rows, root, complete: false };
+      }); return state;
+    });
+  }
+  abortBootstrap(scope: string, token: string): Promise<void> {
+    sqlitePayloadBytes({ scope, token }, 2048);
+    return this.enqueue(2048, () => this.db.withTransactionAsync(async () => {
+      await this.fence();
+      const old = await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT * FROM gv_bootstrap WHERE scope=? AND token=?', scope, token);
+      if (!old) return;
+      if (old.complete) fail('INVALID_ROW', 'A published bootstrap cannot be discarded');
+      for (const entity of Object.keys(this.schema)) await this.db.runAsync(`DELETE FROM ${q(sqliteTableName(entity))} WHERE scope=?`, old.physical);
+      await this.db.runAsync('DELETE FROM gv_bootstrap_pages WHERE token=?', token);
+      await this.db.runAsync('DELETE FROM gv_bootstrap WHERE scope=? AND token=?', scope, token);
+    }));
+  }
+  finishBootstrap(scope: string, token: string, expected: { pages: number; rows: number; root: string }): Promise<SQLiteBootstrapState> {
+    sqlitePayloadBytes({ scope, token, expected }, 2048);
+    return this.enqueue(2048, async () => {
+      let state!: SQLiteBootstrapState;
+      await this.db.withTransactionAsync(async () => {
+        const sequence = await this.fence();
+        const old = await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT * FROM gv_bootstrap WHERE scope=? AND token=?', scope, token);
+        if (!old || old.rows !== expected.rows || old.next_page !== expected.pages || old.root !== expected.root) fail('INVALID_ROW', 'Bootstrap manifest does not match');
+        if (!old.complete) {
+          if (sequence !== old.base_sequence) fail('PAGE_CHANGED', 'Canonical writes raced bootstrap activation');
+          if (sequence >= Number.MAX_SAFE_INTEGER) fail('FENCED', 'SQLite storage sequence exhausted');
+          await this.db.runAsync('INSERT INTO gv_scope_alias VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET physical=excluded.physical', scope, old.physical);
+          await this.db.runAsync('UPDATE gv_bootstrap SET complete=1 WHERE scope=? AND token=?', scope, token);
+          await this.db.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1', sequence + 1);
+        }
+        state = { ...bootstrapState(old), complete: true };
+      }); return state;
+    });
+  }
   /** Stream a previously empty scope in bounded pages with one atomic commit.
    * Only bootstrap uses this lane. Readers wait for activation, and a failed
    * source or owner crash leaves the scope empty. The producer must stream
    * rather than retaining the complete fixture. No outbox intent is accepted
    * or acknowledged until the import transaction finishes. */
-  importScope(scope: string, source: AsyncIterable<readonly SQLiteTypedWrite[]>): Promise<{ sequence: number; rows: number }> {
+  importScope(scope: string, source: AsyncIterable<readonly SQLiteTypedWrite[] | string>): Promise<{ sequence: number; rows: number }> {
     if (!scope || scope.length > 512) throw new TypeError('Invalid SQLite import scope');
     return this.enqueue(this.limits.batchBytes, async () => {
       let result!: { sequence: number; rows: number };
       await this.db.withTransactionAsync(async () => {
         const previous = await this.fence();
         if (previous >= Number.MAX_SAFE_INTEGER) fail('FENCED', 'SQLite storage sequence exhausted');
+        const physical = await this.physicalScope(scope);
+        if (physical !== scope) fail('INVALID_ROW', 'Bootstrap import cannot replace an activated scope');
         for (const entity of Object.keys(this.schema)) {
-          if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? LIMIT 1`, scope))
+          if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? LIMIT 1`, physical))
             fail('INVALID_ROW', 'Bootstrap import requires an empty scope');
         }
         for (const table of ['gv_tombstones', 'gv_intent_receipts', 'gv_outbox'])
           if (await this.db.getFirstAsync(`SELECT 1 FROM ${table} WHERE scope=? LIMIT 1`, scope))
             fail('INVALID_ROW', 'Bootstrap import cannot replace pending work or tombstones');
+        // Only a completely empty canonical database may defer global indexes.
+        // Existing scopes keep every index/trigger available throughout import.
+        let deferIndexes = true;
+        for (const entity of Object.keys(this.schema)) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} LIMIT 1`)) { deferIndexes = false; break; }
+        if (deferIndexes) for (const [entity, table] of Object.entries(this.schema)) {
+          const name = sqliteTableName(entity);
+          for (let i = 0; i < table.indexes.length; i++) await this.db.execAsync(`DROP INDEX IF EXISTS ${q(name + '_i_' + i)}`);
+          if (table.search?.length) {
+            for (const suffix of ['a', 'u', 'd']) await this.db.execAsync(`DROP TRIGGER IF EXISTS ${q(name + '_fts_' + suffix)}`);
+            await this.db.execAsync(`DROP TABLE IF EXISTS ${q(sqliteSearchName(entity))}`);
+          }
+        }
         let rows = 0, sliceStarted = performance.now();
         for await (const page of source) {
-          sqlitePayloadBytes(page, this.limits.batchBytes);
-          if (!Array.isArray(page) || page.length > 512) fail('BUDGET', 'SQLite import page exceeds row budget');
-          const admitted = JSON.parse(JSON.stringify(page)) as SQLiteTypedWrite[];
-          await this.writeBatch(scope, admitted);
+          let admitted: SQLiteTypedWrite[];
+          if (typeof page === 'string') {
+            if (page.length * 2 > this.limits.batchBytes) fail('BUDGET', 'SQLite encoded import page exceeds byte budget');
+            admitted = JSON.parse(page) as SQLiteTypedWrite[];
+            parsedPayloadBytes(admitted, this.limits.batchBytes);
+          } else {
+            sqlitePayloadBytes(page, this.limits.batchBytes);
+            admitted = JSON.parse(JSON.stringify(page)) as SQLiteTypedWrite[];
+          }
+          if (!Array.isArray(admitted) || admitted.length > 512) fail('BUDGET', 'SQLite import page exceeds row budget');
+          await this.writeBatch(physical, admitted);
           rows += admitted.length;
           if (!Number.isSafeInteger(rows)) fail('BUDGET', 'SQLite import row count exhausted');
           // Promise-only ingestion monopolizes a worker task, withholding both
@@ -207,6 +347,21 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
           if (performance.now() - sliceStarted >= 8) {
             await new Promise<void>(resolve => setTimeout(resolve, 0));
             sliceStarted = performance.now();
+          }
+        }
+        if (deferIndexes) {
+          const ddl = compileSQLiteTypedSchema(this.schema);
+          await this.db.execAsync(ddl.indexes + '\n' + ddl.search);
+          for (const [entity, table] of Object.entries(this.schema)) if (table.search?.length) {
+            const tn = q(sqliteTableName(entity)), fn = q(sqliteSearchName(entity)), columns = table.search.map((_, i) => q('s' + i)).join(',');
+            let after = 0;
+            for (;;) {
+              const last = (await this.db.getFirstAsync<{ last: number | null }>(`SELECT max(rid) last FROM (SELECT rid FROM ${tn} WHERE rid>? ORDER BY rid LIMIT 512)`, after))?.last;
+              if (last == null) break;
+              await this.db.runAsync(`INSERT INTO ${fn}(rowid,${columns}) SELECT rid,${columns} FROM ${tn} WHERE rid>? AND rid<=? ORDER BY rid`, after, last);
+              after = last;
+              await new Promise<void>(resolve => setTimeout(resolve, 0));
+            }
           }
         }
         result = { sequence: previous + 1, rows };
@@ -218,13 +373,14 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
   page(scope: string, plan: SQLitePagePlan): Promise<SQLiteTypedPage> {
     const bytes = sqlitePayloadBytes({ scope, plan }, 16_384);
     const admitted = JSON.parse(JSON.stringify(plan)) as SQLitePagePlan;
-    const statement = compileSQLiteTypedPage(this.schema, scope, admitted);
+    compileSQLiteTypedPage(this.schema, scope, admitted);
     return this.enqueue(bytes, async () => {
       let result!: SQLiteTypedPage;
       await this.db.withTransactionAsync(async () => {
         const sequence = await this.fence();
         if (admitted.after && admitted.after.sequence !== sequence) fail('PAGE_CHANGED', 'SQLite keyset belongs to an older replica snapshot');
-        let selectedStatement = statement;
+        const physical = await this.physicalScope(scope);
+        let selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted);
         if (admitted.search) {
           // Inspect at most 1025 matching rowids. A common term uses the native
           // sort/filter index and stops at the requested page, avoiding a huge
@@ -234,7 +390,7 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
           const candidates = Array.from(admitted.search).length < 3 ? 1025 : (await this.db.getFirstAsync<{ n: number }>(
             `SELECT count(*) n FROM (SELECT rowid FROM ${q(sqliteSearchName(admitted.table))} WHERE ${(table.search ?? []).map((_, i) => `${q('s' + i)} GLOB ?`).join(' OR ')} LIMIT 1025)`,
             ...(table.search ?? []).map(() => pattern)))!.n;
-          if (candidates > 1024) selectedStatement = compileSQLiteTypedPage(this.schema, scope, admitted, 'ordered');
+          if (candidates > 1024) selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, 'ordered');
         }
         // The host must enforce a column byte limit before decoding as well.
         const records = await this.db.getAllAsync<Record<string, unknown>>(selectedStatement.sql, ...selectedStatement.bindings);
@@ -265,7 +421,7 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
       let n = 0;
       await this.db.withTransactionAsync(async () => {
         await this.fence();
-        n = (await this.db.getFirstAsync<{ n: number }>(`SELECT n FROM ${q(sqliteCountName(entity, group))} WHERE scope=? AND bucket=${bucket}`, scope, ...bindings))?.n ?? 0;
+        n = (await this.db.getFirstAsync<{ n: number }>(`SELECT n FROM ${q(sqliteCountName(entity, group))} WHERE scope=? AND bucket=${bucket}`, await this.physicalScope(scope), ...bindings))?.n ?? 0;
       });
       return n;
     });

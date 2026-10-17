@@ -163,3 +163,61 @@ it('streams bounded bootstrap pages in one durable transaction and rolls back a 
   expect(await engine.count('other', 'tasks', 0, ['w', false])).toBe(0);
   expect(await engine.outbox('other')).toEqual([]);
 });
+it('admits immutable encoded bootstrap frames without an object-graph clone and rejects invalid JSON numbers', async () => {
+  const { engine } = fixture(); await engine.open('owner');
+  expect(await engine.importScope('encoded', (async function* () { yield JSON.stringify([write('a', 1)]); })())).toMatchObject({ rows: 1 });
+  expect((await engine.page('encoded', plan)).rows[0]!._id).toBe('a');
+  await expect(engine.importScope('invalid', (async function* () { yield '[{"table":"tasks","id":"a","version":1,"row":{"_id":"a","due":1e999}}]'; })())).rejects.toThrow('Nonfinite');
+  expect((await engine.page('invalid', plan)).rows).toEqual([]);
+});
+it('restores deferred indexes after bootstrap failure and maintains FTS on later writes', async () => {
+  const { engine, db } = fixture(); await engine.open('owner');
+  const before = db.prepare("SELECT name FROM sqlite_master WHERE type IN ('index','trigger') ORDER BY name").all();
+  await expect(engine.importScope('fresh', (async function* () { yield [write('a', 1, 'needle')]; throw Error('broken frame'); })())).rejects.toThrow('broken frame');
+  expect(db.prepare("SELECT name FROM sqlite_master WHERE type IN ('index','trigger') ORDER BY name").all()).toEqual(before);
+  await engine.importScope('fresh', (async function* () { yield JSON.stringify([write('a', 1, 'needle')]); })());
+  expect((await engine.page('fresh', { ...plan, search: 'needle' })).rows).toHaveLength(1);
+  await engine.apply('fresh', [write('b', 2, 'needle two')]);
+  expect((await engine.page('fresh', { ...plan, search: 'needle' })).rows).toHaveLength(2);
+  expect(await engine.count('fresh', 'tasks', 0, ['w', false])).toBe(2);
+});
+it('resumes invisible bootstrap pages across owner changes, verifies the manifest and preserves exactly-once receipts', async () => {
+  const { engine, host } = fixture(); await engine.open('owner');
+  const token = 'bootstrap'; await engine.beginBootstrap('new', token);
+  const encoded = JSON.stringify([write('a', 1, 'needle')]);
+  const first = await engine.appendBootstrap('new', token, 0, encoded);
+  expect((await engine.page('new', plan)).rows).toEqual([]); expect(await engine.count('new', 'tasks', 0, ['w', false])).toBe(0);
+  const next = new SQLiteTypedReplicaEngine(host, schema); await next.open('replacement');
+  expect(await next.beginBootstrap('new', token)).toEqual(first);
+  expect(await next.appendBootstrap('new', token, 0, encoded)).toEqual(first);
+  await expect(next.appendBootstrap('new', token, 0, JSON.stringify([write('a', 2)]))).rejects.toMatchObject({ code: 'INTENT_CONFLICT' });
+  await expect(next.appendBootstrap('new', token, 2, JSON.stringify([write('b', 2)]))).rejects.toMatchObject({ code: 'PAGE_CHANGED' });
+  await expect(next.appendBootstrap('new', token, 1, encoded)).rejects.toThrow('Duplicate');
+  await expect(next.finishBootstrap('new', token, { pages: 1, rows: 1, root: 'wrong' })).rejects.toThrow('manifest');
+  await next.finishBootstrap('new', token, { pages: 1, rows: 1, root: first.root });
+  expect((await next.page('new', { ...plan, search: 'needle' })).rows[0]!._id).toBe('a');
+  expect(await next.count('new', 'tasks', 0, ['w', false])).toBe(1);
+  const state = await next.finishBootstrap('new', token, { pages: 1, rows: 1, root: first.root }); expect(state.complete).toBe(true);
+  await next.apply('new', [write('b', 2)], { id: 'intent', payload: {} });
+  expect((await next.page('new', plan)).rows.map(row => row._id)).toEqual(['a', 'b']);
+  expect(await next.count('new', 'tasks', 0, ['w', false])).toBe(2);
+  expect((await next.outbox('new'))[0]!.id).toBe('intent');
+});
+it('never activates bootstrap over a concurrent canonical intent', async () => {
+  const { engine } = fixture(); await engine.open('owner'); await engine.beginBootstrap('s', 'new');
+  const receipt = await engine.appendBootstrap('s', 'new', 0, JSON.stringify([write('a', 1)]));
+  await engine.apply('s', [write('offline', 2)], { id: 'offline-intent', payload: {} });
+  await expect(engine.finishBootstrap('s', 'new', { pages: 1, rows: 1, root: receipt.root })).rejects.toMatchObject({ code: 'PAGE_CHANGED' });
+  expect((await engine.page('s', plan)).rows.map(row => row._id)).toEqual(['offline']);
+  expect((await engine.outbox('s'))[0]!.id).toBe('offline-intent');
+});
+it('discards only unpublished bootstrap generations and permits a new source after cancellation', async () => {
+  const { engine } = fixture(); await engine.open('owner'); await engine.beginBootstrap('s', 'first');
+  await engine.appendBootstrap('s', 'first', 0, JSON.stringify([write('a', 1)]));
+  await engine.abortBootstrap('s', 'first'); await engine.abortBootstrap('s', 'first');
+  await engine.beginBootstrap('s', 'second');
+  const state = await engine.appendBootstrap('s', 'second', 0, JSON.stringify([write('b', 2)]));
+  await engine.finishBootstrap('s', 'second', { pages: 1, rows: 1, root: state.root });
+  await expect(engine.abortBootstrap('s', 'second')).rejects.toThrow('published');
+  expect((await engine.page('s', plan)).rows.map(row => row._id)).toEqual(['b']);
+});

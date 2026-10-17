@@ -1,3 +1,4 @@
+import { fixtureWrites } from './fixture.mjs';
 import { openOfficialSQLiteHost } from '../../src/sqlite-official-host.js';
 import { SQLiteTypedReplicaEngine } from '../../src/sqlite-typed-engine.js';
 let host: Awaited<ReturnType<typeof openOfficialSQLiteHost>>;
@@ -14,13 +15,21 @@ const handlers = {
     }
     return { count, ms: performance.now() - begin, memoryBytes: host.memoryBytes() };
   },
-  async seedAll({ count }) {
+  async bootstrapOpen({ token }) { return engine.beginBootstrap('test-scope', token); },
+  async bootstrapSeed({ token, start, count }) {
+    let state;
+    for (let offset=start; offset<start+count; offset+=100) state = await engine.appendBootstrap('test-scope',token,offset/100,JSON.stringify(fixtureWrites(offset,Math.min(100,start+count-offset))));
+    return state;
+  },
+  async bootstrapFinish({ token, expected }) { return engine.finishBootstrap('test-scope',token,expected); },
+  async seedAll({ count, encoded = false }) {
     const begin = performance.now();
     const result = await engine.importScope('test-scope', (async function* () {
       for (let offset = 0; offset < count; offset += 50) {
-        yield Array.from({ length: Math.min(50, count - offset) }, (_, index) => { const id = offset + index;
+        const page = Array.from({ length: Math.min(50, count - offset) }, (_, index) => { const id = offset + index;
           return { table: 'tasks', id: String(id), version: 1, row: { _id: String(id), name: `Task ${String(id).padStart(8, '0')} café 東京`, workspace: String(id % 10), due: id % 365, version: 1, description: 'Synthetic maintenance procedure. '.repeat(15) + (id % 997 === 0 ? 'rare-needle 🔧' : '') } };
         });
+        yield encoded ? JSON.stringify(page) : page;
       }
     })());
     return { ...result, ms: performance.now() - begin, memoryBytes: host.memoryBytes() };

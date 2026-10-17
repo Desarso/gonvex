@@ -39,3 +39,21 @@ it('rolls back on error, rejects transaction interleaving and closes idempotentl
 it('refuses opening OPFS from a non-worker caller', async () => {
   await expect(openOfficialSQLiteHost()).rejects.toThrow('elected dedicated worker');
 });
+it('caps retained native write plans and drops bindings and failed statements', async () => {
+  const { host } = fixture(); await host.database.execAsync('CREATE TABLE t(id INTEGER PRIMARY KEY,value TEXT)');
+  for (let i = 0; i < 100; i++) {
+    await host.database.runAsync(`INSERT INTO t VALUES(?,?) /* ${i} */`, i, 'x'.repeat(1000));
+    expect(host.statementBytes()).toBeLessThanOrEqual(262144);
+  }
+  await expect(host.database.runAsync('INSERT INTO t VALUES(?,?)', 0, 'collision')).rejects.toThrow();
+  await host.database.runAsync('INSERT INTO t VALUES(?,?)', 101, 'recovered');
+  expect(await host.database.getFirstAsync('SELECT value FROM t WHERE id=101')).toEqual({ value: 'recovered' });
+  host.close(); expect(host.statementBytes()).toBe(0);
+});
+it('imports encoded frames with deferred FTS using the pinned official WASM', async () => {
+  const { host } = fixture();
+  const schema = { records: { key: '_id', fields: { _id: { kind: 'text' }, title: { kind: 'text' }, rank: { kind: 'number' } }, indexes: [{ columns: ['rank'] }], search: ['title'] } } as const;
+  const engine = new SQLiteTypedReplicaEngine(host.database, schema); await engine.open('owner');
+  await engine.importScope('fresh', (async function* () { yield JSON.stringify([{ table: 'records', id: 'r', version: 1, row: { _id: 'r', title: '東京 café', rank: 1 } }]); })());
+  expect((await engine.page('fresh', { table: 'records', search: 'café', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows).toHaveLength(1);
+});

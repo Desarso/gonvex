@@ -5,6 +5,7 @@ import { SQLiteBridgeBudgetError } from './wasm-sqlite-database.js';
 export type OfficialSQLiteHost = {
   database: SQLiteReplicaDatabase;
   memoryBytes(): number;
+  statementBytes(): number;
   close(): void;
 };
 
@@ -42,10 +43,16 @@ PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=3000;`);
 }
 
 /** Official oo1 bridge shared by the owner and real-WASM tests. Statements are
- * finalized after each call, so query history cannot grow a statement cache. */
+ * read statements are finalized immediately; write plans use a byte-capped LRU. */
 export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
   budget = { maxRows: 512, maxBytes: 262_144 }): OfficialSQLiteHost {
-  let transaction = false, closed = false;
+  let transaction = false, closed = false, statementBytes = 0;
+  const statements = new Map<string, { statement: PreparedStatement; bytes: number }>();
+  const statementBudget = 262144, maxStatements = 4;
+  function retire(sql: string) {
+    const cached = statements.get(sql); if (!cached) return;
+    statements.delete(sql); statementBytes -= cached.bytes; cached.statement.finalize();
+  }
   function check() { if (closed) throw new Error('SQLite host closed'); }
   function bind(statement: PreparedStatement, values: unknown[]) {
     for (const value of values) if (value !== null && typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean' && !(value instanceof Uint8Array)) throw new TypeError('Invalid SQLite binding');
@@ -78,9 +85,30 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
   const database: SQLiteReplicaDatabase = {
     async execAsync(sql) { check(); db.exec(sql); },
     async runAsync(sql, ...values) {
-      check(); const statement = db.prepare(sql);
-      try { bind(statement, values); while (statement.step()) { /* No retained output. */ } }
-      finally { statement.finalize(); }
+      check();
+      let cached = statements.get(sql);
+      if (cached) { statements.delete(sql); statements.set(sql, cached); }
+      const statement = cached?.statement ?? db.prepare(sql);
+      let retain = !!cached;
+      try {
+        bind(statement, values); while (statement.step()) { /* No retained output. */ }
+        statement.reset(true); // Never retain bound row strings or buffers.
+        const size = sql.length * 2 + 128 + sqlite3.capi.sqlite3_stmt_status(statement.pointer!, sqlite3.capi.SQLITE_STMTSTATUS_MEMUSED, 0);
+        if (cached) {
+          // SQLite may recompile after a schema/index change. Charge the new
+          // native plan as well as its SQL key before retaining it again.
+          statementBytes += size - cached.bytes; cached.bytes = size;
+          while (statementBytes > statementBudget) retire(statements.keys().next().value!);
+        } else {
+          if (size <= statementBudget) {
+            while (statements.size >= maxStatements || statementBytes + size > statementBudget) retire(statements.keys().next().value!);
+            statements.set(sql, { statement, bytes: size }); statementBytes += size; retain = true;
+          }
+        }
+      } catch (e) {
+        if (cached) { retire(sql); retain = true; }
+        throw e;
+      } finally { if (!retain) statement.finalize(); }
     },
     async runManyAsync(sql, rows) {
       check(); if (rows.length > 512) throw new SQLiteBridgeBudgetError('rows');
@@ -106,6 +134,6 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
       finally { transaction = false; }
     },
   };
-  return { database, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength,
-    close() { if (!closed) { closed = true; db.close(); } } };
+  return { database, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes,
+    close() { if (!closed) { closed = true; for (const sql of statements.keys()) retire(sql); db.close(); } } };
 }
