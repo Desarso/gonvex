@@ -83,7 +83,12 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
       const bindings: Binding[] = [];
       const bind = (value: Binding) => { bindings.push(value); return '?' + bindings.length; };
       let aliasCount = 0;
-      const value = (alias: string, name: string) => `${alias}.value -> ${bind('$.' + JSON.stringify(name))}`;
+      // An expression index cannot match a parameterized JSON path. Only the
+      // declared field path is an escaped SQL literal; routing/data stay bound.
+      const value = (alias: string, name: string) => {
+        const path = ('$.' + JSON.stringify(name)).replaceAll("'", "''");
+        return `${alias}.value -> '${path}'`;
+      };
       const resolve = (input: LiveQueryValue | undefined): Binding => {
         if (input?.context) {
           if (context[input.context] === undefined) throw new UnsupportedPlan('missingIdentityContext');

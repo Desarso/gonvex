@@ -28,7 +28,7 @@ it('preserves missing, JSON null, boolean, numeric and string distinctions despi
   expect(f.gv_order('"null"')).toBe('"null"');
 });
 
-it('keeps routing, data and metadata values as bound parameters in independently executable statements', () => {
+it('keeps routing, data and table names as bound parameters in independently executable statements', () => {
   const scope="scope' OR 1=1--",workspace="data');DROP TABLE replica_rows;--";
   const compiled=compileSQLiteLiveQuery({...plan,table:'a strange table',sort:{...plan.sort!,defaultColumn:'a".column',allowedColumns:['a".column']}},{workspace,offset:99,limit:5},scope);
   expect(compiled.supported).toBe(true);
@@ -37,7 +37,7 @@ it('keeps routing, data and metadata values as bound parameters in independently
     expect(statement!.sql).not.toContain(scope);
     expect(statement!.sql).not.toContain(workspace);
     expect(statement!.sql).not.toContain('a strange table');
-    const indices=[...new Set([...statement!.sql.matchAll(/\?(\d+)/g)].map(match=>Number(match[1])))].sort((a,b)=>a-b);
+    const indices=[...new Set([...statement!.sql.replace(/'(?:[^']|'')*'/g,'').matchAll(/\?(\d+)/g)].map(match=>Number(match[1])))].sort((a,b)=>a-b);
     expect(indices).toEqual(Array.from({length:statement!.bindings.length},(_,i)=>i+1));
     expect(statement!.bindings).toContain(scope);
     expect(statement!.bindings).toContain(JSON.stringify(workspace));
