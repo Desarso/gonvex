@@ -470,3 +470,82 @@ it('reconciles peer publication before accepting its own later canonical commit'
   expect(replica.entity('tasks','t')).toEqual({_id:'t',name:'Peer',score:9});
  }finally{replica.dispose();}
 });
+
+function epochSnapshot(epoch:string,revision:number,id:string) {
+ const row={_id:id,name:epoch};
+ const window={signature:'epoch-window',kind:'replica' as const,entity:'tasks',key:'_id',ids:[id],cursor:{epoch,revision},completeness:'complete' as const,source:'server' as const};
+ return {cursor:{epoch,revision},entities:{tasks:{[id]:row}},liveQueries:{'epoch-window':window}};
+}
+it('rejects a retired transaction epoch without rewinding canonical rows or sequence',async()=>{
+ const {storage}=fixture(),first=epochSnapshot('old',10,'a'),next=epochSnapshot('new',1,'b');
+ await storage.replaceSnapshot(first,'s');
+ await storage.applyTransaction({cursor:next.cursor,changes:[{entity:'tasks',id:'b',operation:'insert',newValue:next.entities.tasks.b}]},next,'s');
+ const before=await storage.loadWorkingSet('s',{maxRows:10,maxBytes:100000});
+ await expect(storage.applyTransaction({cursor:{epoch:'old',revision:11},changes:[{entity:'tasks',id:'a',operation:'insert',newValue:first.entities.tasks.a}]},first,'s')).rejects.toThrow('obsolete replica epoch');
+ expect(await storage.loadWorkingSet('s',{maxRows:10,maxBytes:100000})).toEqual(before);
+});
+it('clears the preceding generation when a new-epoch collection window arrives first',async()=>{
+ const {storage}=fixture(),first=epochSnapshot('old',10,'a'),next=epochSnapshot('new',1,'b');
+ await storage.replaceSnapshot(first,'s');
+ await storage.replaceWindow(next.liveQueries['epoch-window'],next,'s');
+ expect((await storage.load('s'))?.entities).toEqual(next.entities);
+ await expect(storage.replaceWindow(first.liveQueries['epoch-window'],first,'s')).rejects.toThrow('obsolete replica epoch');
+});
+it('does not let an old watermark or removal change the new epoch',async()=>{
+ const {storage}=fixture(),first=epochSnapshot('old',10,'a'),next=epochSnapshot('new',1,'b');
+ await storage.replaceSnapshot(first,'s');await storage.replaceSnapshot(next,'s');
+ const before=await storage.loadWorkingSet('s',{maxRows:10,maxBytes:100000});
+ await expect(storage.advanceWatermark([first.liveQueries['epoch-window']],first.cursor,'s')).rejects.toThrow('obsolete replica epoch');
+ await expect(storage.removeWindow('epoch-window',first,'s')).rejects.toThrow('obsolete replica epoch');
+ await expect(storage.replaceSnapshot(first,'s')).rejects.toThrow('obsolete replica epoch');
+ expect(await storage.loadWorkingSet('s',{maxRows:10,maxBytes:100000})).toEqual(before);
+});
+it('requires watermarks to use the current epoch instead of creating a generation without rows',async()=>{
+ const {storage}=fixture(),first=epochSnapshot('old',10,'a'),next=epochSnapshot('new',1,'b');
+ await storage.replaceSnapshot(first,'s');
+ await expect(storage.advanceWatermark([next.liveQueries['epoch-window']],next.cursor,'s')).rejects.toThrow('obsolete replica epoch');
+ expect((await storage.load('s'))?.entities).toEqual(first.entities);
+});
+it('rolls back epoch retirement along with a failed new-generation write',async()=>{
+ const {storage,adapter}=fixture(),first=epochSnapshot('old',10,'a'),next=epochSnapshot('new',1,'b');
+ await storage.replaceSnapshot(first,'s');
+ const original=adapter.runAsync,failed=Error('new generation failed');
+ adapter.runAsync=async(sql,...args)=>{if(/INSERT INTO _gonvex_replica_entities/.test(sql))throw failed;return original(sql,...args);};
+ await expect(storage.replaceWindow(next.liveQueries['epoch-window'],next,'s')).rejects.toBe(failed);
+ adapter.runAsync=original;
+ await expect(storage.replaceWindow(first.liveQueries['epoch-window'],first,'s')).resolves.toBeUndefined();
+ expect((await storage.load('s'))?.entities).toEqual(first.entities);
+});
+it('keeps retired epoch history on disk and scope isolated',async()=>{
+ const {storage,adapter}=fixture();
+ for(let i=0;i<40;i++)await storage.replaceSnapshot(epochSnapshot('epoch-'+i,1,'t'+i),'s');
+ const reopened=new SQLiteLocalReplicaStorage(adapter);
+ await expect(reopened.replaceSnapshot(epochSnapshot('epoch-0',2,'old'),'s')).rejects.toThrow('obsolete replica epoch');
+ await expect(storage.replaceSnapshot(epochSnapshot('epoch-0',1,'other'),'other')).resolves.toBeUndefined();
+ expect(Object.keys((await storage.load('other'))!.entities.tasks!)).toEqual(['other']);
+});
+
+it('uses a legacy cursor as the current epoch without rehydrating rows',async()=>{
+ const {storage,adapter,db}=fixture(),first=epochSnapshot('old',10,'a'),next=epochSnapshot('new',1,'b');
+ await storage.replaceSnapshot(first,'s');
+ db.prepare("DELETE FROM _gonvex_replica_meta WHERE key='currentEpoch'").run();
+ const reopened=new SQLiteLocalReplicaStorage(adapter);
+ await reopened.replaceWindow(next.liveQueries['epoch-window'],next,'s');
+ await expect(reopened.replaceSnapshot(first,'s')).rejects.toThrow('obsolete replica epoch');
+ expect((await reopened.load('s'))?.entities).toEqual(next.entities);
+});
+it('rolls back a replacement whose memberships mix epochs',async()=>{
+ const {storage}=fixture(),first=epochSnapshot('old',10,'a'),next=epochSnapshot('new',1,'b');
+ await storage.replaceSnapshot(first,'s');
+ await expect(storage.replaceSnapshot({...next,liveQueries:first.liveQueries},'s')).rejects.toThrow('obsolete replica epoch');
+ expect((await storage.load('s'))?.entities).toEqual(first.entities);
+ await storage.replaceSnapshot(next,'s');
+ await expect(storage.replaceSnapshot(first,'s')).rejects.toThrow('obsolete replica epoch');
+});
+it('fences retired epochs for a collection delta as well as its full replacement',async()=>{
+ const {storage}=fixture(),first=epochSnapshot('old',10,'a'),next=epochSnapshot('new',1,'b');
+ await storage.replaceSnapshot(first,'s');
+ await storage.applyWindowDelta(next.liveQueries['epoch-window'],{upserts:[next.entities.tasks.b],deleted:[]},next,'s');
+ expect((await storage.load('s'))?.entities).toEqual(next.entities);
+ await expect(storage.applyWindowDelta(first.liveQueries['epoch-window'],{upserts:[first.entities.tasks.a],deleted:[]},first,'s')).rejects.toThrow('obsolete replica epoch');
+});

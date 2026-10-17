@@ -83,6 +83,10 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         scope TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
         PRIMARY KEY (scope, key)
       );
+      -- Retired generations stay on disk, never in an O(usage) JS history list.
+      CREATE TABLE IF NOT EXISTS _gonvex_replica_retired_epochs (
+        scope TEXT NOT NULL,epoch TEXT NOT NULL,PRIMARY KEY(scope,epoch)
+      );
       CREATE TABLE IF NOT EXISTS _gonvex_replica_lookup (
         scope TEXT NOT NULL, entity TEXT NOT NULL, column_name TEXT NOT NULL,
         kind TEXT NOT NULL, scalar BLOB NOT NULL, id TEXT NOT NULL,
@@ -438,7 +442,53 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     await this.initialize();return this.commits.readChanges(scope,afterSequence,interest);
   }
 
+  private async currentEpoch(scope: string): Promise<{epoch:string;stored:boolean}|undefined> {
+    const record=await this.database.getFirstAsync<{key:string;value:string}>(
+      "SELECT key,value FROM _gonvex_replica_meta WHERE scope=? AND key IN ('currentEpoch','cursor') ORDER BY CASE key WHEN 'currentEpoch' THEN 0 ELSE 1 END LIMIT 1",scope);
+    if(!record)return;
+    return {epoch:record.key==='currentEpoch'?record.value:JSON.parse(record.value).epoch,stored:record.key==='currentEpoch'};
+  }
+
+  private async assertEpoch(scope: string, cursor: ReplicaSnapshot['cursor']): Promise<void> {
+    if(!cursor)return;
+    const current=await this.currentEpoch(scope);
+    if(current&&current.epoch!==cursor.epoch)throw new Error('This tab has an obsolete replica epoch. Reconnect before continuing.');
+  }
+
+  /** Called only inside the owning canonical commit. A first row-bearing frame
+   * can publish a new generation; metadata-only watermarks cannot replace it.
+   * History is point-looked-up on disk and retirement rolls back with the rows. */
+  private async acceptEpoch(scope: string, cursor: ReplicaSnapshot['cursor']): Promise<void> {
+    if(!cursor)return;
+    const current=await this.currentEpoch(scope);
+    if(current?.epoch===cursor.epoch){
+      if(!current.stored)await this.database.runAsync("INSERT OR REPLACE INTO _gonvex_replica_meta VALUES(?,'currentEpoch',?)",scope,cursor.epoch);
+      return;
+    }
+    if(await this.database.getFirstAsync("SELECT epoch FROM _gonvex_replica_retired_epochs WHERE scope=? AND epoch=? LIMIT 1",scope,cursor.epoch))
+      throw new Error('This tab has an obsolete replica epoch. Reconnect before continuing.');
+    if(current){
+      await this.database.runAsync('INSERT OR IGNORE INTO _gonvex_replica_retired_epochs VALUES(?,?)',scope,current.epoch);
+      await this.database.runAsync('DELETE FROM _gonvex_replica_entities WHERE scope=?',scope);
+      await this.database.runAsync('DELETE FROM _gonvex_replica_queries WHERE scope=?',scope);
+      await this.database.runAsync("DELETE FROM _gonvex_replica_meta WHERE scope=? AND (key='cursor' OR key LIKE 'row:%')",scope);
+      await this.commits.reset(scope);
+    }
+    await this.database.runAsync("INSERT OR REPLACE INTO _gonvex_replica_meta VALUES(?,'currentEpoch',?)",scope,cursor.epoch);
+  }
+
+  private async saveCursor(scope: string, cursor: ReplicaSnapshot['cursor']): Promise<void> {
+    if(!cursor)return;
+    await this.assertEpoch(scope,cursor);
+    await this.database.runAsync(
+      `INSERT INTO _gonvex_replica_meta (scope,key,value) VALUES(?,'cursor',?)
+       ON CONFLICT(scope,key) DO UPDATE SET value=excluded.value
+       WHERE json_extract(_gonvex_replica_meta.value,'$.epoch')=json_extract(excluded.value,'$.epoch')
+       AND json_extract(_gonvex_replica_meta.value,'$.revision')<=json_extract(excluded.value,'$.revision')`,scope,JSON.stringify(cursor));
+  }
+
   private async writeWindowHeader(scope: string, input: ReplicaWindow): Promise<void> {
+    await this.assertEpoch(scope,input.cursor);
     const record=await this.database.getFirstAsync<QueryRecord>('SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=? AND signature=?',scope,input.signature);
     const prior=record?normalizeWindow(JSON.parse(record.value)):undefined;
     const window=prior?.cursor&&input.cursor&&prior.cursor.epoch===input.cursor.epoch&&prior.cursor.revision>input.cursor.revision?prior:normalizeWindow(input);
@@ -497,28 +547,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
   ): Promise<ReplicaStorageCommit> {
     await this.initialize();
     return this.commits.commit(scope, async () => {
-      const previous = await this.database.getFirstAsync<MetaRecord>(
-        `SELECT scope, key, value FROM _gonvex_replica_meta WHERE scope = ? AND key = 'cursor'`,
-        scope,
-      );
-      if (
-        previous &&
-        JSON.parse(previous.value).epoch !== transaction.cursor.epoch
-      ) {
-        await this.database.runAsync(
-          `DELETE FROM _gonvex_replica_meta WHERE scope = ? AND key LIKE 'row:%'`,
-          scope,
-        );
-        await this.database.runAsync(
-          `DELETE FROM _gonvex_replica_entities WHERE scope = ?`,
-          scope,
-        );
-        await this.database.runAsync(
-          `DELETE FROM _gonvex_replica_queries WHERE scope = ?`,
-          scope,
-        );
-        await this.commits.reset(scope);
-      }
+      await this.acceptEpoch(scope,transaction.cursor);
       const requestedDeletes = new Map<string, Set<string>>();
       const grouped = new Map<
         string,
@@ -539,14 +568,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         await this.writeRecords(scope, entity, rows, transaction.cursor);
       await this.reconcileDeletedMemberships(scope, requestedDeletes, transaction.cursor);
       for (const membership of transaction.memberships ?? []) await this.writeWindowHeader(scope, membership);
-      await this.database.runAsync(
-        `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
-         ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
-           WHERE json_extract(_gonvex_replica_meta.value, '$.epoch') <> json_extract(excluded.value, '$.epoch')
-              OR json_extract(_gonvex_replica_meta.value, '$.revision') <= json_extract(excluded.value, '$.revision')`,
-        scope,
-        JSON.stringify(transaction.cursor),
-      );
+      await this.saveCursor(scope,transaction.cursor);
     });
   }
 
@@ -559,17 +581,10 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     // Watermarks carry no row changes. Keep this transaction metadata-only so
     // advancing many retained windows does not rewrite the normalized corpus.
     return this.commits.commit(scope, async () => {
+      await this.assertEpoch(scope,cursor);
+      for(const window of windows)if(cursor&&window.cursor&&window.cursor.epoch!==cursor.epoch)throw new Error('This tab has an obsolete replica epoch. Reconnect before continuing.');
       for (const window of windows) await this.writeWindowHeader(scope, window);
-      if (cursor) {
-        await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
-           ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
-           WHERE json_extract(_gonvex_replica_meta.value, '$.epoch') <> json_extract(excluded.value, '$.epoch')
-              OR json_extract(_gonvex_replica_meta.value, '$.revision') <= json_extract(excluded.value, '$.revision')`,
-          scope,
-          JSON.stringify(cursor),
-        );
-      }
+      await this.saveCursor(scope,cursor);
     });
   }
 
@@ -579,6 +594,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
   ): Promise<void> {
     await this.initialize();
     await this.commits.commit(scope, async () => {
+      await this.acceptEpoch(scope,snapshot.cursor);
       await this.database.runAsync(
         `DELETE FROM _gonvex_replica_entities WHERE scope = ?`,
         scope,
@@ -616,6 +632,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
       for (const [signature, membership] of Object.entries(
         snapshot.liveQueries,
       )) {
+        await this.assertEpoch(scope,membership.cursor);
         await this.database.runAsync(
           `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)`,
           scope,
@@ -623,16 +640,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
           JSON.stringify(membership),
         );
       }
-      if (snapshot.cursor) {
-        await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
-           ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
-           WHERE json_extract(_gonvex_replica_meta.value, '$.epoch') <> json_extract(excluded.value, '$.epoch')
-              OR json_extract(_gonvex_replica_meta.value, '$.revision') <= json_extract(excluded.value, '$.revision')`,
-          scope,
-          JSON.stringify(snapshot.cursor),
-        );
-      }
+      await this.saveCursor(scope,snapshot.cursor);
       await this.commits.indexReplacement(scope);
     });
   }
@@ -718,6 +726,9 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
   ): Promise<ReplicaStorageCommit> {
     await this.initialize();
     return this.commits.commit(scope, async () => {
+      await this.acceptEpoch(scope,window.cursor??snapshot.cursor);
+      await this.assertEpoch(scope,window.cursor);
+      await this.assertEpoch(scope,snapshot.cursor);
       const oldRecord = await this.database.getFirstAsync<QueryRecord>(
         `SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=? AND signature=?`,
         scope,
@@ -779,16 +790,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
           window.cursor,
         );
       }
-      if (snapshot.cursor) {
-        await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
-           ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
-           WHERE json_extract(_gonvex_replica_meta.value, '$.epoch') <> json_extract(excluded.value, '$.epoch')
-              OR json_extract(_gonvex_replica_meta.value, '$.revision') <= json_extract(excluded.value, '$.revision')`,
-          scope,
-          JSON.stringify(snapshot.cursor),
-        );
-      }
+      await this.saveCursor(scope,snapshot.cursor);
     });
   }
 
@@ -808,22 +810,14 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
   ): Promise<void> {
     await this.initialize();
     await this.commits.commit(scope, async () => {
+      await this.assertEpoch(scope,snapshot.cursor);
       await this.database.runAsync(
         `DELETE FROM _gonvex_replica_queries WHERE scope = ? AND signature = ?`,
         scope,
         signature,
       );
       await this.commits.window(scope,signature,null);
-      if (snapshot.cursor) {
-        await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
-           ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
-           WHERE json_extract(_gonvex_replica_meta.value, '$.epoch') <> json_extract(excluded.value, '$.epoch')
-              OR json_extract(_gonvex_replica_meta.value, '$.revision') <= json_extract(excluded.value, '$.revision')`,
-          scope,
-          JSON.stringify(snapshot.cursor),
-        );
-      }
+      await this.saveCursor(scope,snapshot.cursor);
     });
   }
 
@@ -842,6 +836,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         `DELETE FROM _gonvex_replica_meta WHERE scope = ?`,
         scope,
       );
+      await this.database.runAsync('DELETE FROM _gonvex_replica_retired_epochs WHERE scope=?',scope);
       await this.commits.reset(scope);
     });
   }
