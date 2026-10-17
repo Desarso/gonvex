@@ -221,3 +221,45 @@ it('discards only unpublished bootstrap generations and permits a new source aft
   await expect(engine.abortBootstrap('s', 'second')).rejects.toThrow('published');
   expect((await engine.page('s', plan)).rows.map(row => row._id)).toEqual(['b']);
 });
+it('commits a bounded streamed credit group atomically, including all page receipts', async () => {
+  const { engine } = fixture(); await engine.open('owner'); await engine.beginBootstrap('s', 'group');
+  await expect(engine.appendBootstrapBatch('s', 'group', (async function* () {
+    yield { page: 0, encoded: JSON.stringify([write('a', 1)]) };
+    yield { page: 1, encoded: JSON.stringify([write('a', 2)]) };
+  })())).rejects.toThrow('Duplicate');
+  expect(await engine.beginBootstrap('s', 'group')).toMatchObject({ rows: 0, nextPage: 0 });
+  const result = await engine.appendBootstrapBatch('s', 'group', (async function* () {
+    yield { page: 0, encoded: JSON.stringify([write('a', 1)]) };
+    yield { page: 1, encoded: JSON.stringify([write('b', 2)]) };
+  })());
+  expect(result).toMatchObject({ rows: 2, nextPage: 2 });
+  await engine.finishBootstrap('s', 'group', { pages: 2, rows: 2, root: result.root });
+  expect((await engine.page('s', plan)).rows.map(row => row._id)).toEqual(['a', 'b']);
+});
+it('rejects excessive bootstrap credit groups without retaining partial progress', async () => {
+  const { engine } = fixture(); await engine.open('owner'); await engine.beginBootstrap('s', 'group');
+  await expect(engine.appendBootstrapBatch('s', 'group', (async function* () { for (let page = 0; page < 17; page++) yield { page, encoded: '[]' }; })())).rejects.toMatchObject({ code: 'BUDGET' });
+  expect(await engine.beginBootstrap('s', 'group')).toMatchObject({ rows: 0, nextPage: 0 });
+});
+it('shrinks wide row pages to their byte budget without losing keyset membership', async () => {
+  const { engine } = fixture(); await engine.open('owner');
+  for (let offset = 0; offset < 20; offset += 5) await engine.apply('s', Array.from({ length: 5 }, (_, i) => write(String(offset + i), offset + i, 'x'.repeat(10000))));
+  let after, ids: unknown[] = [];
+  do {
+    const result = await engine.page('s', { ...plan, limit: 20, after });
+    expect(result.bytes).toBeLessThanOrEqual(262144);
+    ids.push(...result.rows.map(row => row._id)); after = result.cursor ?? undefined;
+    if (!result.rows.length) break;
+  } while (after);
+  expect(ids).toEqual(Array.from({ length: 20 }, (_, i) => String(i)));
+});
+it('replays wide outbox entries in smaller causal pages instead of stalling on the default limit', async () => {
+  const { engine } = fixture(); await engine.open('owner');
+  for (let i = 0; i < 32; i++) await engine.apply('s', [], { id: 'intent-' + i, payload: { text: 'x'.repeat(10000) } });
+  let after = 0; const ids: string[] = [];
+  for (;;) {
+    const page = await engine.outbox('s', after); if (!page.length) break;
+    expect(page.length).toBeLessThan(32); ids.push(...page.map(row => row.id)); after = page.at(-1)!.sequence;
+  }
+  expect(ids).toEqual(Array.from({ length: 32 }, (_, i) => 'intent-' + i));
+});

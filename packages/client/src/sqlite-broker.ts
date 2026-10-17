@@ -177,6 +177,7 @@ export class SQLiteReplicaBroker {
         if (this.generation !== g) return;
         const m = event.data;
         if (m.type === 'change') { this.broadcast(m); return; }
+        if (m.type === 'storage-fault') { this.cooldown = Date.now() + 1000; this.setState('pending'); this.stop(g); return; }
         const p = this.workerCalls.get(m.id);
         if (!p || p.generation !== g) return;
         this.workerCalls.delete(m.id); g.lastProgress = Math.min(Date.now(), Number(m.sentAt) || 0);

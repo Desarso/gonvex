@@ -14,6 +14,7 @@ async function sha256(text: string): Promise<string> {
   const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
+function pageBudgetError(error: unknown): boolean { return !!error && typeof error === 'object' && 'code' in error && (error.code === 'BUDGET' || error.code === 'sqlite-bridge-budget'); }
 function fail(code: SQLiteReplicaEngineError['code'], message: string): never { throw new SQLiteReplicaEngineError(code, message); }
 
 /** Conservative JS admission accounting before JSON serialization or cloning.
@@ -228,39 +229,54 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
     });
   }
   appendBootstrap(scope: string, token: string, page: number, encoded: string): Promise<SQLiteBootstrapState> {
-    sqlitePayloadBytes({ scope, token, page }, 2048);
-    if (typeof encoded !== 'string' || encoded.length * 2 > this.limits.batchBytes || !Number.isSafeInteger(page) || page < 0) throw new RangeError('Invalid SQLite bootstrap page');
-    return this.enqueue(this.limits.batchBytes, async () => {
-      const admitted = JSON.parse(encoded) as SQLiteTypedWrite[];
-      parsedPayloadBytes(admitted, this.limits.batchBytes);
-      if (!Array.isArray(admitted) || admitted.length > 512 || admitted.some(write => write.row === null)) fail('INVALID_ROW', 'Bootstrap accepts bounded live rows only');
-      const hash = await sha256(encoded);
-      let state!: SQLiteBootstrapState;
+    return this.appendBootstrapBatch(scope, token, (async function* () { yield { page, encoded }; })());
+  }
+  /** A bounded streamed credit group commits together. The producer yields one
+   * frame at a time; it never needs a 1,000-row object or worker message. */
+  appendBootstrapBatch(scope: string, token: string, source: AsyncIterable<{ page: number; encoded: string }>): Promise<SQLiteBootstrapState> {
+    sqlitePayloadBytes({ scope, token }, 2048);
+    return this.enqueue(Math.min(this.limits.queuedBytes, this.limits.batchBytes * 2), async () => {
+      let state: SQLiteBootstrapState | undefined;
       await this.db.withTransactionAsync(async () => {
-        await this.fence();
-        const old = await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT * FROM gv_bootstrap WHERE scope=? AND token=?', scope, token);
-        if (!old) fail('INVALID_ROW', 'Bootstrap is not open');
-        if (page < old.next_page) {
-          const receipt = await this.db.getFirstAsync<{ hash: string }>('SELECT hash FROM gv_bootstrap_pages WHERE token=? AND page=?', token, page);
-          if (receipt?.hash !== hash) fail('INTENT_CONFLICT', 'Bootstrap page replay changed its payload');
-          state = bootstrapState(old); return;
+        let pages = 0, bytes = 0;
+        for await (const frame of source) {
+          const page = frame.page, encoded = frame.encoded;
+          if (++pages > 16 || typeof encoded !== 'string' || (bytes += encoded.length * 2) > this.limits.queuedBytes) fail('BUDGET', 'Bootstrap credit group exceeds budget');
+          state = await this.appendBootstrapPage(scope, token, page, encoded);
         }
-        if (old.complete || page !== old.next_page) fail('PAGE_CHANGED', 'Bootstrap page is out of sequence');
-        const groups = new Map<string, string[]>(), seen = new Set<string>();
-        for (const write of admitted) {
-          this.validateWrite(write);
-          const key = JSON.stringify([write.table, write.id]);
-          if (seen.has(key)) fail('INVALID_ROW', 'Duplicate bootstrap row'); seen.add(key);
-          const ids = groups.get(write.table) ?? []; ids.push(write.id); groups.set(write.table, ids);
-        }
-        for (const [entity, ids] of groups) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? AND id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, old.physical, ...ids)) fail('INVALID_ROW', 'Duplicate bootstrap row');
-        await this.writeBatch(old.physical, admitted);
-        const root = await sha256(old.root + hash), rows = old.rows + admitted.length;
-        await this.db.runAsync('INSERT INTO gv_bootstrap_pages VALUES(?,?,?)', token, page, hash);
-        await this.db.runAsync('UPDATE gv_bootstrap SET next_page=?,rows=?,root=? WHERE scope=? AND token=?', page + 1, rows, root, scope, token);
-        state = { token, nextPage: page + 1, rows, root, complete: false };
-      }); return state;
+        if (!state) fail('INVALID_ROW', 'Empty bootstrap credit group');
+      });
+      return state!;
     });
+  }
+  private async appendBootstrapPage(scope: string, token: string, page: number, encoded: string): Promise<SQLiteBootstrapState> {
+    if (typeof encoded !== 'string' || encoded.length * 2 > this.limits.batchBytes || !Number.isSafeInteger(page) || page < 0) throw new RangeError('Invalid SQLite bootstrap page');
+    const admitted = JSON.parse(encoded) as SQLiteTypedWrite[];
+    parsedPayloadBytes(admitted, this.limits.batchBytes);
+    if (!Array.isArray(admitted) || admitted.length > 512 || admitted.some(write => write.row === null)) fail('INVALID_ROW', 'Bootstrap accepts bounded live rows only');
+    const hash = await sha256(encoded);
+    await this.fence();
+    const old = await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT * FROM gv_bootstrap WHERE scope=? AND token=?', scope, token);
+    if (!old) fail('INVALID_ROW', 'Bootstrap is not open');
+    if (page < old.next_page) {
+      const receipt = await this.db.getFirstAsync<{ hash: string }>('SELECT hash FROM gv_bootstrap_pages WHERE token=? AND page=?', token, page);
+      if (receipt?.hash !== hash) fail('INTENT_CONFLICT', 'Bootstrap page replay changed its payload');
+      return bootstrapState(old);
+    }
+    if (old.complete || page !== old.next_page) fail('PAGE_CHANGED', 'Bootstrap page is out of sequence');
+    const groups = new Map<string, string[]>(), seen = new Set<string>();
+    for (const write of admitted) {
+      this.validateWrite(write);
+      const key = JSON.stringify([write.table, write.id]);
+      if (seen.has(key)) fail('INVALID_ROW', 'Duplicate bootstrap row'); seen.add(key);
+      const ids = groups.get(write.table) ?? []; ids.push(write.id); groups.set(write.table, ids);
+    }
+    for (const [entity, ids] of groups) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? AND id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, old.physical, ...ids)) fail('INVALID_ROW', 'Duplicate bootstrap row');
+    await this.writeBatch(old.physical, admitted);
+    const root = await sha256(old.root + hash), rows = old.rows + admitted.length;
+    await this.db.runAsync('INSERT INTO gv_bootstrap_pages VALUES(?,?,?)', token, page, hash);
+    await this.db.runAsync('UPDATE gv_bootstrap SET next_page=?,rows=?,root=? WHERE scope=? AND token=?', page + 1, rows, root, scope, token);
+    return { token, nextPage: page + 1, rows, root, complete: false };
   }
   abortBootstrap(scope: string, token: string): Promise<void> {
     sqlitePayloadBytes({ scope, token }, 2048);
@@ -380,6 +396,7 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
         const sequence = await this.fence();
         if (admitted.after && admitted.after.sequence !== sequence) fail('PAGE_CHANGED', 'SQLite keyset belongs to an older replica snapshot');
         const physical = await this.physicalScope(scope);
+        let access: 'trigram' | 'ordered' = 'trigram';
         let selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted);
         if (admitted.search) {
           // Inspect at most 1025 matching rowids. A common term uses the native
@@ -390,11 +407,20 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
           const candidates = Array.from(admitted.search).length < 3 ? 1025 : (await this.db.getFirstAsync<{ n: number }>(
             `SELECT count(*) n FROM (SELECT rowid FROM ${q(sqliteSearchName(admitted.table))} WHERE ${(table.search ?? []).map((_, i) => `${q('s' + i)} GLOB ?`).join(' OR ')} LIMIT 1025)`,
             ...(table.search ?? []).map(() => pattern)))!.n;
-          if (candidates > 1024) selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, 'ordered');
+          if (candidates > 1024) { access = 'ordered'; selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access); }
         }
         // The host must enforce a column byte limit before decoding as well.
-        const records = await this.db.getAllAsync<Record<string, unknown>>(selectedStatement.sql, ...selectedStatement.bindings);
-        const outputBytes = sqlitePayloadBytes(records, this.limits.pageBytes);
+        let records: Record<string, unknown>[], outputBytes: number, limit = admitted.limit;
+        for (;;) {
+          try {
+            records = await this.db.getAllAsync<Record<string, unknown>>(selectedStatement.sql, ...selectedStatement.bindings);
+            outputBytes = sqlitePayloadBytes(records, this.limits.pageBytes); break;
+          } catch (error) {
+            if (!pageBudgetError(error) || limit === 1) throw error;
+            limit = Math.max(1, Math.floor(limit / 2));
+            selectedStatement = compileSQLiteTypedPage(this.schema, physical, { ...admitted, limit }, access);
+          }
+        }
         const last = records.at(-1);
         const fields = admitted.select ? [...new Set([this.schema[admitted.table]!.key, ...admitted.select])] : undefined;
         const decode = (record: Record<string, unknown>): Record<string, unknown> => {
@@ -432,9 +458,18 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
       let result!: { id: string; payload: unknown; sequence: number }[];
       await this.db.withTransactionAsync(async () => {
         await this.fence();
-        const rows = await this.db.getAllAsync<{ id: string; payload: string; sequence: number }>('SELECT id,payload,sequence FROM gv_outbox WHERE scope=? AND sequence>? ORDER BY sequence LIMIT ?', scope, afterSequence, limit);
-        sqlitePayloadBytes(rows, this.limits.pageBytes);
-        result = rows.map(row => ({ ...row, payload: JSON.parse(row.payload) }));
+        let count = limit;
+        for (;;) {
+          try {
+            const rows = await this.db.getAllAsync<{ id: string; payload: string; sequence: number }>('SELECT id,payload,sequence FROM gv_outbox WHERE scope=? AND sequence>? ORDER BY sequence LIMIT ?', scope, afterSequence, count);
+            sqlitePayloadBytes(rows, this.limits.pageBytes);
+            result = rows.map(row => ({ ...row, payload: JSON.parse(row.payload) }));
+            sqlitePayloadBytes(result, this.limits.pageBytes); break;
+          } catch (error) {
+            if (!pageBudgetError(error) || count === 1) throw error;
+            count = Math.max(1, Math.floor(count / 2));
+          }
+        }
       });
       return result;
     });

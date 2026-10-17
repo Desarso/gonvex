@@ -28,7 +28,7 @@ async function execute(op: string, args: any) {
       host?.close(); host = undefined; engine = undefined;
       const message = String((e as Error).message);
       if (/mode invariant/.test(message)) Object.assign(e as object, { code: 'STORAGE_MODE' });
-      else if (/not supported|unavailable|is not a function/i.test(message)) Object.assign(e as object, { code: 'UNSUPPORTED' });
+      else if (['SecurityError','NotSupportedError','NotAllowedError'].includes((e as Error).name) || /not supported|unavailable|is not a function/i.test(message)) Object.assign(e as object, { code: 'UNSUPPORTED' });
       throw e;
     }
   }
@@ -71,7 +71,15 @@ function admit(data: any, peer?: { port: MessagePort; token: string }, tab?: str
         globalThis.postMessage(change);
         for (const p of ports.values()) p.port.postMessage(change);
       }
-    } catch (e) { reply(data.id, undefined, e, peer, tab); }
+    } catch (e) {
+      const failure = e as { resultCode?: number; code?: string | number; message?: string };
+      const native = typeof failure.resultCode === 'number' ? failure.resultCode & 255 : typeof failure.code === 'number' ? failure.code & 255 : 0;
+      const transient = [5,6,10,13].includes(native) || /SQLITE_(BUSY|LOCKED|IOERR|FULL)|database is locked|database or disk is full|QuotaExceeded|disk I\/O/i.test(String(failure.message));
+      if (transient) {
+        reply(data.id, undefined, { code: 'BUSY', message: 'Storage is recovering; retry the same intent ID' }, peer, tab);
+        globalThis.postMessage({ type: 'storage-fault' });
+      } else reply(data.id, undefined, e, peer, tab);
+    }
   });
   lane = run.then(() => { operations--; bytes -= size; }, () => { operations--; bytes -= size; });
 };

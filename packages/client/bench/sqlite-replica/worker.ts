@@ -17,9 +17,9 @@ const handlers = {
   },
   async bootstrapOpen({ token }) { return engine.beginBootstrap('test-scope', token); },
   async bootstrapSeed({ token, start, count }) {
-    let state;
-    for (let offset=start; offset<start+count; offset+=100) state = await engine.appendBootstrap('test-scope',token,offset/100,JSON.stringify(fixtureWrites(offset,Math.min(100,start+count-offset))));
-    return state;
+    return engine.appendBootstrapBatch('test-scope', token, (async function* () {
+      for (let offset=start; offset<start+count; offset+=100) yield { page: offset/100, encoded: JSON.stringify(fixtureWrites(offset,Math.min(100,start+count-offset))) };
+    })());
   },
   async bootstrapFinish({ token, expected }) { return engine.finishBootstrap('test-scope',token,expected); },
   async seedAll({ count, encoded = false }) {

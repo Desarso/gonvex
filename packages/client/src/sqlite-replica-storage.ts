@@ -11,8 +11,6 @@ import type { ReducerReadView as ReplicaReducerReadView } from "@gonvex/local-ru
 export interface SQLiteReplicaDatabase {
   execAsync(sql: string): Promise<void>;
   runAsync(sql: string, ...params: unknown[]): Promise<unknown>;
-  /** Reuse one prepared statement for an already admitted bounded batch. */
-  runManyAsync?(sql: string, rows: readonly (readonly unknown[])[]): Promise<void>;
   getFirstAsync<T>(sql: string, ...params: unknown[]): Promise<T | null>;
   getAllAsync<T>(sql: string, ...params: unknown[]): Promise<T[]>;
   withTransactionAsync(task: () => Promise<void>): Promise<void>;
