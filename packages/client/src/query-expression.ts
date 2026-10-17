@@ -373,3 +373,13 @@ export function liveScopeCoverage(expression: LiveQueryExpression | undefined, a
   const op = operators[expression.operator as keyof typeof operators];
   return op ? { column: expression.column, op, value: value as string | number | boolean | null } : undefined;
 }
+
+// Shared by disk-query implementations so scalar behavior stays identical to
+// the synchronous evaluator. These are internal module exports, not SDK APIs.
+export {
+  compare as compareLiveQueryValues,
+  equal as equalLiveQueryValues,
+  evaluateFilter as evaluateLiveQueryFilter,
+  applyStructuredFilters as validateLiveQueryFilters,
+  nonNegativeInteger as liveQueryNonNegativeInteger,
+};
