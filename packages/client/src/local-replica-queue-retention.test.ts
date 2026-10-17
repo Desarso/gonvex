@@ -78,3 +78,28 @@ it('keeps same-scope activation waiting for all earlier jobs, including rejected
   expect(activated).toBe(true);
   replica.dispose();
 });
+
+it('preserves the existing fail-fast scope barrier after an urgent read rejects', async () => {
+  const first = deferred(), second = deferred(), firstEntered = deferred(), secondEntered = deferred();
+  let writes = 0;
+  const replica = new LocalReplica({
+    load: async () => undefined,
+    applyTransaction: async () => {
+      if (++writes === 1) { firstEntered.resolve(); await first.promise; }
+      else { secondEntered.resolve(); await second.promise; }
+    },
+  });
+  const a = replica.applyTransaction({ cursor: { epoch: 'test', revision: 1 }, changes: [] });
+  await firstEntered.promise;
+  const b = replica.applyTransaction({ cursor: { epoch: 'test', revision: 2 }, changes: [] });
+  const rejectedRead = replica.withReadView(() => ({}), false, async () => { throw new Error('read unavailable'); }).catch(error => error.message);
+  first.resolve();
+  expect(await rejectedRead).toBe('read unavailable');
+  await secondEntered.promise;
+  let activated = false;
+  const activation = replica.activateScope().then(() => { activated = true; });
+  try {
+    await nextTurn(0);
+    expect(activated).toBe(true);
+  } finally { second.resolve(); await Promise.all([a, b, activation]); replica.dispose(); }
+});

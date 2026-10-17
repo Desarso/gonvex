@@ -430,10 +430,10 @@ export class LocalReplica implements LocalReplicaView {
     const result = new Promise<T>((done, failed) => { resolve = done; reject = failed; });
     this.applicationJobs.push({ urgent, retainedKey: retained?.key, skip: retained ? () => resolve(retained.skipped) : undefined, cancel: () => reject(new Error("Local replica is closed")), run: async () => { try { resolve(await run()); } catch (error) { reject(error); } finally { if (this.disposed) this.releaseMemory(); } } });
     // A completed urgent read may overtake an earlier blocked write. The
-    // scope barrier must wait for both, but must not retain the read's payload
-    // in Promise.all's result array until that earlier write drains.
-    const completed = result.then(applicationCompleted, applicationCompleted);
-    this.application = Promise.all([this.application, completed]).then(applicationCompleted);
+    // scope barrier must discard the read's payload rather than retaining it
+    // in Promise.all's result array. Keep the existing fail-fast rejection path.
+    const completed = result.then(applicationCompleted);
+    this.application = Promise.all([this.application, completed]).then(applicationCompleted, applicationCompleted);
     if (!this.applicationRunning) {
       this.applicationRunning = true;
       queueMicrotask(() => { void this.drainApplicationJobs(); });
