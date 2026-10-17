@@ -651,3 +651,34 @@ it('falls back to exact window keys when many owners lie beyond the bounded meta
   }
   expect(loaded!.liveQueries['aa-unrelated-0'].ids).toEqual([]);
 }, 30_000);
+
+it('restores only explicitly mounted native windows without filling spare row budget', async () => {
+  const storage = new IndexedDBEngineReplicaStorage('mounted-native-'+Math.random(), 'mounted'); stores.push(storage);
+  await seed(storage);
+  await storage.replaceWindow(window(['z'], 'active'), empty, 'default', [{id:'z',title:'Visible'}]);
+  const snapshot = await storage.loadWorkingSet('default', {maxRows:100,maxBytes:1_000_000,preferredWindows:['active']});
+  expect(snapshot?.entities).toEqual({tasks:{z:{id:'z',title:'Visible'}}});
+  expect(snapshot?.liveQueries.tasks.ids).toEqual(['a','b']);
+  expect(snapshot?.residentPartialTables).toContain('tasks');
+  expect((await storage.load())?.entities.tasks.a.title).toBe('A');
+});
+
+it('keeps native rows cold when the explicit startup window list is empty', async () => {
+  const storage = new IndexedDBEngineReplicaStorage('empty-mounted-native-'+Math.random(), 'mounted'); stores.push(storage);
+  await seed(storage);
+  const snapshot = await storage.loadWorkingSet('default', {maxRows:100,maxBytes:1_000_000,preferredWindows:[]});
+  expect(snapshot?.entities).toEqual({});
+  expect(snapshot?.liveQueries.tasks.ids).toEqual(['a','b']);
+  expect((await storage.load())?.entities.tasks.b.title).toBe('B');
+});
+
+it('prioritizes native mounted rows within row and byte budgets, deduplicating shared members', async () => {
+  const storage = new IndexedDBEngineReplicaStorage('bounded-mounted-native-'+Math.random(), 'mounted'); stores.push(storage);
+  await seed(storage);
+  await storage.replaceWindow(window(['b'], 'preferred'), empty, 'default', [{id:'b',title:'B'}]);
+  const bytes=JSON.stringify({id:'b',title:'B'}).length*2+256;
+  expect((await storage.loadWorkingSet('default',{maxRows:1,maxBytes:bytes,preferredWindows:['preferred','tasks']}))?.entities)
+    .toEqual({tasks:{b:{id:'b',title:'B'}}});
+  expect((await storage.loadWorkingSet('default',{maxRows:2,maxBytes:10000,preferredWindows:['preferred','tasks']}))?.entities.tasks)
+    .toEqual({b:{id:'b',title:'B'},a:{id:'a',title:'A',status:'new'}});
+});

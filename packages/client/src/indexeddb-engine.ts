@@ -109,7 +109,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
   private readonly channel?:BroadcastChannel;
   private readonly peers=new Set<(scope:string)=>void>();
 
-  constructor(namespace = "gonvex-local-replica") {
+  constructor(namespace = "gonvex-local-replica", private readonly startupWorkingSet: "prefetch" | "mounted" = "prefetch") {
     const name = `${namespace}:engine-members-v1`;
     this.database = new Dexie(name, { cache: 'disabled' }) as ReplicaDatabase;
     // Gonvex owns subscription delivery and peer synchronization. These private
@@ -572,11 +572,44 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     });
   }
 
-  async loadWorkingSet(scope:string,budget:{maxRows:number;maxBytes:number}):Promise<ReplicaSnapshot|undefined> {
+  async loadWorkingSet(scope:string,budget:{maxRows:number;maxBytes:number;preferredWindows?:readonly string[]}):Promise<ReplicaSnapshot|undefined> {
     await this.initialize();
     return this.database.transaction('r',this.database.entities,this.database.windows,this.database.members,this.database.meta,async()=>{
       const entities:ReplicaSnapshot['entities']={},liveQueries:ReplicaSnapshot['liveQueries']={},partial=new Set<string>();
-      let bytes=0,count=0,hasRows=false,full=false,averageBytes=0;
+      let bytes=0,count=0,hasRows=false,full=budget.maxRows<=0 || budget.maxBytes<=0,averageBytes=0;
+      // Match the legacy adapter's mounted-startup contract. Read native
+      // membership pages rather than reconstructing a preferred window's full
+      // ID/hash arrays merely to select its first resident rows.
+      for (const signature of budget.preferredWindows ?? []) {
+        if (full) break;
+        const window = await this.database.windows.get([scope,signature]);
+        if (!window || window.deleted) continue;
+        const header = JSON.parse(window.value) as Pick<ReplicaWindow,"entity">;
+        const members = this.database.members.where('[scope+signature+generation+order]')
+          .between([scope,signature,window.generation!,""],[scope,signature,window.generation!,"\uffff"],false,true);
+        let offset=0;
+        while (!full) {
+          const limit=Math.min(128,Math.max(1,budget.maxRows-count+1),
+            Number.isFinite(budget.maxBytes) ? Math.max(1,Math.ceil((budget.maxBytes-bytes)/(averageBytes || 256))+1) : 128);
+          const page=await members.clone().offset(offset).limit(limit).toArray();
+          if (!page.length) break;
+          const ids=page.filter(member=>!entities[header.entity]?.[member.id]).map(member=>member.id);
+          const records=await this.database.entities.bulkGet(ids.map(id=>[scope,header.entity,id]) as [string,string,string][]);
+          let pageBytes=0,liveRecords=0;
+          for (const record of records) {
+            if (!record || record.deleted) continue;
+            hasRows=true;
+            const size=record.value.length*2+256;
+            pageBytes+=size;liveRecords++;
+            if (count>=budget.maxRows || bytes+size>budget.maxBytes) { full=true;break; }
+            (entities[record.entity] ??= Object.create(null))[record.id]=JSON.parse(record.value);
+            bytes+=size;count++;
+          }
+          if (liveRecords) averageBytes=pageBytes/liveRecords;
+          offset+=page.length;
+          if (page.length<limit) break;
+        }
+      }
       // Read ahead by at most one small page while decoding the current page.
       // Do not prefetch across either resident budget; membership is atomic in
       // this same read transaction even while a native request is outstanding.
@@ -590,32 +623,34 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
         void page.catch(() => {});
         return { page, limit };
       };
-      let pending = readPage(undefined, count, bytes);
-      while (!full) {
-        const { page: request, limit } = pending;
-        const page = await request;
-        if (!page.length) break;
-        const last = page[page.length - 1]!;
-        const after: [string, string, string] = [last.scope, last.entity, last.id];
-        let nextRows = count, nextBytes = bytes, pageBytes = 0;
-        for (const record of page) {
-          const size = record.value.length * 2 + 256;
-          pageBytes += size;
-          if (!record.deleted) { nextRows++; nextBytes += size; }
+      if (this.startupWorkingSet === 'prefetch' || budget.preferredWindows === undefined) {
+        let pending = !full ? readPage(undefined, count, bytes) : undefined;
+        while (pending && !full) {
+          const { page: request, limit } = pending;
+          const page = await request;
+          if (!page.length) break;
+          const last = page[page.length - 1]!;
+          const after: [string, string, string] = [last.scope, last.entity, last.id];
+          let nextRows = count, nextBytes = bytes, pageBytes = 0;
+          for (const record of page) {
+            const size = record.value.length * 2 + 256;
+            pageBytes += size;
+            if (!record.deleted) { nextRows++; nextBytes += size; }
+          }
+          averageBytes = pageBytes / page.length;
+          const next = page.length === limit && nextRows < budget.maxRows && nextBytes < budget.maxBytes
+            ? readPage(after, nextRows, nextBytes) : undefined;
+          for (const record of page) {
+            if (record.deleted || entities[record.entity]?.[record.id]) continue;
+            hasRows = true;
+            const size = record.value.length * 2 + 256;
+            if (count >= budget.maxRows || bytes + size > budget.maxBytes) { partial.add(record.entity); full = true; break; }
+            (entities[record.entity] ??= Object.create(null))[record.id] = JSON.parse(record.value);
+            bytes += size; count++;
+          }
+          if (full || page.length < limit) break;
+          pending = next ?? readPage(after, count, bytes);
         }
-        averageBytes = pageBytes / page.length;
-        const next = page.length === limit && nextRows < budget.maxRows && nextBytes < budget.maxBytes
-          ? readPage(after, nextRows, nextBytes) : undefined;
-        for (const record of page) {
-          if (record.deleted) continue;
-          hasRows = true;
-          const size = record.value.length * 2 + 256;
-          if (count >= budget.maxRows || bytes + size > budget.maxBytes) { partial.add(record.entity); full = true; break; }
-          (entities[record.entity] ??= Object.create(null))[record.id] = JSON.parse(record.value);
-          bytes += size; count++;
-        }
-        if (full || page.length < limit) break;
-        pending = next ?? readPage(after, count, bytes);
       }
       const records = (await this.database.windows.where('scope').equals(scope).toArray()).filter(record => !record.deleted);
       for (let offset = 0; offset < records.length; offset += 4) {
@@ -967,8 +1002,8 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
   }
 }
 
-export function indexedDBEngineReplica(name?: string): IndexedDBEngineReplicaStorage {
-  return new IndexedDBEngineReplicaStorage(name);
+export function indexedDBEngineReplica(name?: string, startupWorkingSet: "prefetch" | "mounted" = "prefetch"): IndexedDBEngineReplicaStorage {
+  return new IndexedDBEngineReplicaStorage(name,startupWorkingSet);
 }
 
 function normalizeScope(scope: ReplicaScope): ReplicaScope {

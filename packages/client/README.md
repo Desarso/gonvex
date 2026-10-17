@@ -469,6 +469,15 @@ const client = new GonvexClient(runtimeUrl, {
 });
 ```
 
+Pass a second argument of `'mounted'` to restore rows only from the explicitly
+retained windows during scope activation. An empty retained-window list loads
+no rows; spare row/byte budget does not prefetch unrelated collections. Shared
+members are charged once. The default remains `'prefetch'`, and direct
+`loadWorkingSet` callers that omit `preferredWindows` retain bounded prefetch.
+This does not yet make startup metadata bounded: cached windows still
+materialize their complete IDs and hashes. It also does not change active
+full-collection readers into paged queries.
+
 This creates `my-app-fresh-engine-cohort:engine-members-v1`. It never opens or upgrades the legacy database with the same base name. Engine participants use a separate peer channel and keep existing scope/authority, offline outbox, reducer coverage and resume rules. This option changes replica persistence only; it does not start a worker or move subscriptions off the main thread.
 
 Use a fresh cohort namespace. This release supplies no automatic legacy import or lossless backend export. Keep the engine database when disabling the option; do not treat changing storage factories as a migration of populated data. Existing durable outbox storage and its coordination remain unchanged. Runtime and application contract changes are unnecessary.
