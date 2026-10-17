@@ -26,3 +26,16 @@ test('generation is stable and changed exposed layouts change the version', () =
   const changed = structuredClone(manifest); changed.functions['__local.things'].replica.columns.push('secret');
   assert.notEqual(first['sqlite-schema.ts'].match(/sqliteSchemaVersion = "(.*?)"/)[1], sqliteBindings(local, changed)['sqlite-schema.ts'].match(/sqliteSchemaVersion = "(.*?)"/)[1]);
 });
+test('requires explicit residency and caps every resident declaration', () => {
+  const small = structuredClone(manifest);
+  small.functions['__local.things'].replica.maxRows = 100;
+  small.functions['__local.things'].replica.maxBytes = 10000;
+  assert.match(sqliteBindings(local, small)['sqlite-schema.ts'], /"things":"paged"/);
+  small.functions['__local.things'].replica.residency = 'resident';
+  assert.match(sqliteBindings(local, small)['sqlite-schema.ts'], /"things":"resident"/);
+  small.functions.extra = { replica: { ...small.functions['__local.things'].replica, residency: 'paged' } };
+  assert.match(sqliteBindings(local, small)['sqlite-schema.ts'], /"things":"paged"/);
+  delete small.functions.extra;
+  small.functions['__local.things'].replica.maxBytes = 3000000;
+  assert.throws(() => sqliteBindings(local, small), /bounded row and byte/);
+});

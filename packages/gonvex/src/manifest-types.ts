@@ -56,6 +56,7 @@ export type ReplicaCollectionDefinition = {
   table: string;
   key: string;
   columns: string[];
+  residency?: 'resident' | 'paged';
   equalFilters?: Record<string, string>;
   excludeWhenSet?: string[];
   visibilityTables?: string[];

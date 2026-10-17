@@ -21,8 +21,11 @@ export function sqliteBindings(local: LocalSchema, manifest: Manifest): Record<s
         : type === 'boolean' ? 'boolean' : /json|\[\]$/.test(type) ? 'json' : 'text';
       table.fields[column] = { kind, nullable: source.columns[column]!.nullable };
     }
-    const bounded = declaration.maxRows !== undefined && declaration.maxRows <= 2_000 && declaration.maxBytes !== undefined && declaration.maxBytes <= 2_097_152;
-    if (!bounded || !residency[declaration.table]) residency[declaration.table] = bounded ? 'resident' : 'paged';
+    // Delivery limits describe a server window, not permission to retain a
+    // whole table. Only explicit reference-data declarations may be resident.
+    const resident = declaration.residency === 'resident';
+    if (resident && !(declaration.maxRows !== undefined && declaration.maxRows > 0 && declaration.maxRows <= 2000 && declaration.maxBytes !== undefined && declaration.maxBytes > 0 && declaration.maxBytes <= 2097152)) throw new Error('Resident collection requires bounded row and byte budgets: ' + declaration.table);
+    if (!resident || !residency[declaration.table]) residency[declaration.table] = resident ? 'resident' : 'paged';
   }
   const addIndex = (entity: string, columns: readonly string[]) => {
     const table = tables[entity];

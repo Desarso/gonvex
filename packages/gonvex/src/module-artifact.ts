@@ -1262,6 +1262,11 @@ function replicaFromOptions(options?: ObjectEntries): ReplicaCollectionDefinitio
     definition.orderBy = orderBy;
     definition.orderDirection = stringMember(value, "orderDirection")?.toLowerCase() === "asc" ? "asc" : "desc";
   }
+  const residency = stringMember(value, 'residency');
+  if (residency !== undefined) {
+    if (residency !== 'resident' && residency !== 'paged') throw new Error('Replica residency must be resident or paged');
+    definition.residency = residency;
+  }
   definition.mode = stringMember(value, "mode") === "progressive" ? "progressive" : "eager";
   const maxRows = numberMember(value, "maxRows");
   if (maxRows !== undefined && maxRows > 0) definition.maxRows = maxRows;

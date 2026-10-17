@@ -413,6 +413,7 @@ export type ReplicaCollectionDefinition = {
   readonly table: string;
   readonly key: string;
   readonly columns: readonly string[];
+  readonly residency?: 'resident' | 'paged';
   readonly equalFilters?: Readonly<Record<string, string>>;
   readonly excludeWhenSet?: readonly string[];
   readonly visibilityTables?: readonly string[];
@@ -735,6 +736,12 @@ const validateReplicaCollection: (value: unknown, path: string) => asserts value
     if (budget !== undefined && (typeof budget !== "number" || !Number.isSafeInteger(budget) || budget <= 0)) {
       throw new Error(`replica collection ${path} ${field} must be a positive integer`);
     }
+  }
+  if (value.residency !== undefined && value.residency !== 'resident' && value.residency !== 'paged') {
+    throw new Error(`replica collection ${path} has an invalid residency`);
+  }
+  if (value.residency === 'resident' && (typeof value.maxRows !== 'number' || value.maxRows > 2000 || typeof value.maxBytes !== 'number' || value.maxBytes > 2097152)) {
+    throw new Error(`resident replica collection ${path} requires maxRows <= 2000 and maxBytes <= 2097152`);
   }
   if (value.mode !== undefined && value.mode !== "eager" && value.mode !== "progressive") {
     throw new Error(`replica collection ${path} has an invalid completeness mode`);
