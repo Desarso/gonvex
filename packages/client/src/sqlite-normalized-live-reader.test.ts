@@ -2,7 +2,7 @@ import { afterEach, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { SQLiteLocalReplicaStorage, type SQLiteReplicaDatabase } from './sqlite-replica-storage';
 import { sqliteLiveQueryFunctions, compileSQLiteLiveQuery } from './sqlite-query-expression';
-import { readNormalizedSQLiteLiveWindow, type NormalizedLiveReadBudget } from './sqlite-normalized-live-reader';
+import { readNormalizedSQLiteLiveWindow, readNormalizedSQLiteLiveSnapshot, type NormalizedLiveReadBudget } from './sqlite-normalized-live-reader';
 import type { LiveQueryPlan } from './query-expression';
 import type { OptimisticPatch } from './optimistic';
 const databases:DatabaseSync[]=[];
@@ -91,4 +91,37 @@ it('keeps pending delete/reinsert in its established order for canonically equiv
  await store.replaceSnapshot({entities:{tasks:{'é':{_id:'é',name:'Same',workspaceId:'w'},'e\u0301':{_id:'e\u0301',name:'Same',workspaceId:'w'}}},liveQueries:{}},'s');
  const result=await read([{entity:'tasks',rowId:'é',op:'delete'},{entity:'tasks',rowId:'é',op:'insert',fields:{_id:'é',name:'Same',workspaceId:'w'}}]);
  expect(result.rows.map(row=>row._id)).toEqual(['é','e\u0301']);
+});
+
+it('returns canonical hydration separately from predicted rows and captures the same durable cursor',async()=>{
+ const {db,store}=await fixture();
+ await store.applyTransaction({cursor:{epoch:'e',revision:9},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{_id:'a',name:'Fresh'}}]},{entities:{},liveQueries:{}},'s');
+ const snapshot=await readNormalizedSQLiteLiveSnapshot(db,plan,{workspace:'w'},'s',{},budget,async()=>({patches:[
+  {entity:'tasks',rowId:'a',op:'patch',fields:{name:'Aardvark'}},
+  {entity:'tasks',rowId:'c',op:'insert',fields:{_id:'c',name:'Gamma',workspaceId:'w'}}],coverage:async()=>'complete'}));
+ expect(snapshot.view.rows.map(row=>row.name)).toEqual(['Aardvark','Beta','Gamma']);
+ expect(snapshot.canonicalRows.map(entry=>[entry.id,entry.row.name])).toEqual([['a','Fresh'],['b','Beta']]);
+ expect(snapshot.cursor).toEqual({epoch:'e',revision:9});
+ expect(await store.loadEntityRows('s','tasks',['c'])).toEqual([]);
+});
+it('hydrates only selected canonical rows and does not apply a predicted delete to disk',async()=>{
+ const {db,store}=await fixture();
+ const snapshot=await readNormalizedSQLiteLiveSnapshot(db,plan,{workspace:'w'},'s',{},budget,async()=>({patches:[{entity:'tasks',rowId:'b',op:'delete'}],coverage:async()=>'complete'}));
+ expect(snapshot.canonicalRows.map(entry=>entry.id)).toEqual(['a']);
+ expect((await store.loadEntityRows('s','tasks',['b']))[0]?.row.name).toBe('Beta');
+});
+it('keeps canonical hydration scoped even when another tenant has the same selected ID',async()=>{
+ const {db,store}=await fixture();await store.replaceSnapshot({entities:{tasks:{a:{_id:'a',name:'Secret',workspaceId:'w'}}},liveQueries:{}},'other');
+ const snapshot=await readNormalizedSQLiteLiveSnapshot(db,plan,{workspace:'w'},'s',{},budget,async()=>({patches:[],coverage:async()=>'complete'}));
+ expect(snapshot.canonicalRows.map(entry=>entry.row.name)).toEqual(['Alpha','Beta']);
+});
+it('rejects an oversized canonical base even when its predicted replacement is small',async()=>{
+ const {db,store,read}=await fixture();
+ await store.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{_id:'a',note:'x'.repeat(2000)}}]},{entities:{},liveQueries:{}},'s');
+ await expect(readNormalizedSQLiteLiveSnapshot(db,plan,{workspace:'w'},'s',{}, {...budget,maxTextBytes:1000},async()=>({patches:[{entity:'tasks',rowId:'a',op:'insert',fields:{_id:'a',name:'Small',workspaceId:'w'}}],coverage:async()=>'complete'}))).rejects.toThrow('Canonical query text budget');
+ expect((await read()).rows.find(row=>row._id==='a')?.name).toBe('Alpha');
+});
+it('requires a stable entity key before a predicted result can request canonical hydration',async()=>{
+ const {db}=await fixture();
+ await expect(readNormalizedSQLiteLiveSnapshot(db,plan,{workspace:'w'},'s',{},budget,async()=>({patches:[{entity:'tasks',rowId:'missing',op:'insert',fields:{name:'Small',workspaceId:'w'}}],coverage:async()=>'complete'}))).rejects.toThrow('stable entity key');
 });
