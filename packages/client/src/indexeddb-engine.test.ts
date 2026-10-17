@@ -1,3 +1,4 @@
+import { MissingReducerDataError } from '@gonvex/local-runtime/portable';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange, IDBObjectStore, IDBIndex } from 'fake-indexeddb';
 import { Dexie } from 'dexie';
@@ -681,4 +682,73 @@ it('prioritizes native mounted rows within row and byte budgets, deduplicating s
     .toEqual({tasks:{b:{id:'b',title:'B'}}});
   expect((await storage.loadWorkingSet('default',{maxRows:2,maxBytes:10000,preferredWindows:['preferred','tasks']}))?.entities.tasks)
     .toEqual({b:{id:'b',title:'B'},a:{id:'a',title:'A',status:'new'}});
+});
+
+it('keeps unmounted native Live Query memberships on disk during mounted startup', async () => {
+  const storage = new IndexedDBEngineReplicaStorage('mounted-live-metadata', 'mounted'); stores.push(storage);
+  await storage.replaceWindow(window(['a', 'b', 'c'], 'all-tasks'), empty, 'default', [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }, { id: 'c', title: 'C' }]);
+  await storage.replaceWindow({ ...window(['b', 'c'], 'cold-live'), kind: 'live', resultPath: ['page'], resultSkeleton: { page: [], total: 2 } }, empty);
+  await storage.replaceWindow({ ...window(['a'], 'visible-live'), kind: 'live' }, empty);
+  const snapshot = await storage.loadWorkingSet('default', { maxRows: 2, maxBytes: 100_000, preferredWindows: ['visible-live'] });
+  expect(Object.keys(snapshot!.liveQueries).sort()).toEqual(['all-tasks', 'visible-live']);
+  expect(snapshot!.liveQueries['all-tasks'].ids).toEqual(['a', 'b', 'c']);
+  expect(Object.keys(snapshot!.entities.tasks)).toEqual(['a']);
+  // Startup omission must not delete durable membership or its result envelope.
+  expect((await storage.loadWindowRows('default', 'cold-live'))?.window).toMatchObject({ ids: ['b', 'c'], resultPath: ['page'], resultSkeleton: { page: [], total: 2 } });
+});
+
+it('restores an omitted native Live Query on demand without losing offline collection coverage', async () => {
+  const storage = new IndexedDBEngineReplicaStorage('restore-cold-live', 'mounted'); stores.push(storage);
+  await storage.replaceWindow(window(['a', 'b', 'c'], 'all-tasks'), empty, 'default', [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }, { id: 'c', title: 'C' }]);
+  await storage.replaceWindow({ ...window(['b', 'c'], 'cold-live'), kind: 'live', resultPath: ['page'], resultSkeleton: { page: [], total: 2 } }, empty);
+  const local = replica(storage, 2); await local.activateScope('default', true);
+  expect(local.getWindow('cold-live')).toBeUndefined();
+  expect(local.entityRows('tasks')).toEqual([]);
+  const release = local.retainWindow('cold-live');
+  try {
+    await local.activateScope();
+    expect(local.windowRows('cold-live').map(row => row.id)).toEqual(['b', 'c']);
+    expect(local.getWindow('cold-live')?.resultSkeleton).toEqual({ page: [], total: 2 });
+    const result = await local.withReadView(() => ({ tasks: { key: 'id', complete: true } }), false,
+      async view => {
+        const read = { table: 'tasks', key: 'id', columns: ['id', 'title'], where: { column: 'id', op: 'eq' as const, value: 'a' }, limit: 1 };
+        const result = await view.select(read);
+        if (!result.complete) throw new MissingReducerDataError(read);
+        return result;
+      });
+    expect(result).toEqual({ rows: [{ id: 'a', title: 'A' }], complete: true });
+    expect(local.entity('tasks', 'a')).toBeUndefined();
+  } finally { release(); }
+});
+
+it('preserves native prefetch metadata compatibility when mounted preferences are omitted', async () => {
+  const storage = new IndexedDBEngineReplicaStorage('direct-prefetch-live', 'mounted'); stores.push(storage);
+  await seed(storage);
+  await storage.replaceWindow({ ...window(['a'], 'cached-live'), kind: 'live' }, empty);
+  const snapshot = await storage.loadWorkingSet('default', { maxRows: 2, maxBytes: 100_000 });
+  expect(snapshot!.liveQueries['cached-live'].ids).toEqual(['a']);
+  expect(Object.keys(snapshot!.entities.tasks).sort()).toEqual(['a', 'b']);
+});
+
+it('keeps the durable sequence and cold-row coverage when every native cached window is deferred', async () => {
+  const storage = new IndexedDBEngineReplicaStorage('only-cold-live', 'mounted'); stores.push(storage);
+  await storage.replaceWindow({ ...window(['a', 'b'], 'cold-live'), kind: 'live' }, empty, 'default', [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }]);
+  const snapshot = await storage.loadWorkingSet('default', { maxRows: 2, maxBytes: 100_000, preferredWindows: [] });
+  expect(snapshot).toMatchObject({ storageSequence: 1, entities: {}, liveQueries: {}, residentPartialTables: ['tasks'] });
+  const local = replica(storage, 2); await local.activateScope('default', true);
+  const readChanges = vi.spyOn(storage, 'readChanges');
+  await local.applyTransaction({ cursor: { epoch: 'e', revision: 2 }, changes: [{ entity: 'tasks', id: 'a', operation: 'update', newValue: { title: 'new' } }] });
+  expect(readChanges).not.toHaveBeenCalled();
+  expect(local.getWindow('cold-live')).toBeUndefined();
+  expect((await storage.loadWindowRows('default', 'cold-live'))?.rows).toEqual([{ id: 'a', title: 'new' }, { id: 'b', title: 'B' }]);
+});
+
+it('does not mark fully resident native rows partial just because an overlapping Live Query stays on disk', async () => {
+  const storage = new IndexedDBEngineReplicaStorage('resident-overlap-live', 'mounted'); stores.push(storage);
+  await seed(storage);
+  await storage.replaceWindow({ ...window(['b'], 'cold-live'), kind: 'live' }, empty);
+  const snapshot = await storage.loadWorkingSet('default', { maxRows: 2, maxBytes: 100_000, preferredWindows: ['tasks'] });
+  expect(snapshot!.liveQueries['cold-live']).toBeUndefined();
+  expect(snapshot!.residentPartialTables).toEqual([]);
+  expect(Object.keys(snapshot!.entities.tasks).sort()).toEqual(['a', 'b']);
 });

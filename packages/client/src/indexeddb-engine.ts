@@ -652,7 +652,28 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
           pending = next ?? readPage(after, count, bytes);
         }
       }
-      const records = (await this.database.windows.where('scope').equals(scope).toArray()).filter(record => !record.deleted);
+      // Inactive Live Queries are result caches, not reducer collection coverage.
+      // Keep their ID/hash maps on disk until retainWindow requests the window.
+      const mounted = this.startupWorkingSet === 'mounted' && budget.preferredWindows !== undefined
+        ? new Set(budget.preferredWindows) : undefined;
+      const records: WindowRecord[] = [];
+      let hasStoredWindow = false;
+      for (const record of await this.database.windows.where('scope').equals(scope).toArray()) {
+        if (record.deleted) continue;
+        hasStoredWindow = true;
+        const header = mounted && !mounted.has(record.signature) ? JSON.parse(record.value) as Pick<ReplicaWindow, 'kind' | 'entity'> : undefined;
+        if (header?.kind === 'live') {
+          // Read keys only and stop at the first cold member. Do not recreate
+          // IDs/hash arrays, or falsely label resident overlap incomplete.
+          let missing = false;
+          await this.database.members.where('[scope+signature+generation+order]')
+            .between([scope,record.signature,record.generation!,""],[scope,record.signature,record.generation!,"\uffff"],false,true)
+            .until(() => missing).eachPrimaryKey(key => { if (!entities[header.entity]?.[key[3]]) missing = true; });
+          if (missing) partial.add(header.entity);
+          continue;
+        }
+        records.push(record);
+      }
       for (let offset = 0; offset < records.length; offset += 4) {
         const windows = await Promise.all(records.slice(offset, offset + 4).map(record => this.materializeWindow(record)));
         for (const window of windows) {
@@ -661,7 +682,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
         }
       }
       const cursor=await this.database.meta.get([scope,'cursor']);
-      if(!hasRows && !Object.keys(liveQueries).length && !cursor)return undefined;
+      if(!hasRows && !Object.keys(liveQueries).length && !cursor && !hasStoredWindow)return undefined;
       return {entities,liveQueries,residentPartialTables:[...partial],cursor:cursor?JSON.parse(cursor.value):undefined,storageSequence:Number((await this.database.meta.get([scope,'sequence']))?.value??0)};
     });
   }
