@@ -1,3 +1,4 @@
+import { sqliteWorkerOperations as publicOperations } from './sqlite-worker-protocol.js';
 import { sqlitePayloadBytes } from './sqlite-typed-engine.js';
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
 
@@ -20,7 +21,7 @@ export class SQLiteBrokerError extends Error {
   constructor(readonly code: string, message: string, readonly outcome: 'rejected' | 'unknown' = 'rejected') { super(message); this.name = 'SQLiteBrokerError'; }
 }
 const error = (code: string, message: string, outcome?: 'rejected' | 'unknown') => new SQLiteBrokerError(code, message, outcome);
-const publicOperations = new Set(['page', 'count', 'apply', 'outbox', 'acknowledge', 'ping', 'stats', 'integrity']);
+
 const permanent = new Set(['SCHEMA_MISMATCH', 'STORAGE_MODE', 'UNSUPPORTED', 'PROTOCOL']);
 
 /** One elected dedicated worker per origin. Never opens SQLite on the main

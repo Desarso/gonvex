@@ -69,3 +69,22 @@ it('serves arbitrary native view positions under the official WASM result byte c
   expect(page.rows[0]!.rank).toBe(90); expect(page.nextOffset).toBe(90 + page.rows.length);
   expect(await host.database.getFirstAsync('PRAGMA integrity_check')).toEqual({ integrity_check: 'ok' });
 });
+
+it('keeps staged memberships and certificate pages bounded in the official WASM', async () => {
+  const { SQLiteWindowStore } = await import('./sqlite-window-store.js');
+  const { host } = fixture({ maxRows: 4, maxBytes: 2048 });
+  const store = new SQLiteWindowStore(host.database);
+  const header = { signature: 'grid', entity: 'tasks', key: '_id', kind: 'replica', completeness: 'complete', source: 'server' } as const;
+  await store.begin('s', header, 'one');
+  const ids = Array.from({ length: 128 }, (_, n) => String(n).padStart(3, '0'));
+  const state = await store.append('s', 'grid', 'one', 0, JSON.stringify({ ids, hashes: Object.fromEntries(ids.map(id => [id, 'h'.repeat(200)])) }));
+  await store.publish('s', 'grid', state);
+  expect((await store.header('s', 'grid'))?.uniqueRows).toBe(128);
+  const page = await store.page('s', 'grid', 'one', 100, 128);
+  expect(page.ids[0]).toBe('100'); expect(page.ids.length).toBeGreaterThan(0); expect(page.ids.length).toBeLessThanOrEqual(4);
+  const certificates = await store.hashPage('s', 'grid', 'one');
+  expect(certificates.length).toBeGreaterThan(0); expect(certificates.length).toBeLessThanOrEqual(4);
+  expect(certificates[0]).toEqual({ id: '000', hash: 'h'.repeat(200) });
+  expect((await store.hashPage('s', 'grid', 'one', certificates.at(-1)!.id))[0]!.id).toBe(String(certificates.length).padStart(3, '0'));
+  expect(await host.database.getFirstAsync('PRAGMA integrity_check')).toEqual({ integrity_check: 'ok' });
+});

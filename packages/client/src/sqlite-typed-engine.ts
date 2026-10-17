@@ -1,3 +1,4 @@
+import { SQLiteWindowStore, type SQLiteWindowHeader, type SQLiteWindowProgress } from './sqlite-window-store.js';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import { compileSQLiteTypedSchema, sqliteIdentifier as q, sqliteTableName, sqliteFieldName, sqliteSearchName, sqliteCountName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
 import { compileSQLiteTypedPage, compileSQLiteTypedView, type SQLitePagePlan, type SQLiteKeyset } from './sqlite-typed-query.js';
@@ -79,6 +80,7 @@ export class SQLiteTypedReplicaEngine {
   private epoch = 0;
   private owner = '';
   private initialized = false;
+  private windows?: SQLiteWindowStore;
   constructor(private readonly db: SQLiteReplicaDatabase, readonly schema: SQLiteTypedSchema,
     private readonly limits = { operations: 64, queuedBytes: 2_097_152, batchBytes: 262_144, pageBytes: 262_144 }) {
     compileSQLiteTypedSchema(schema);
@@ -590,6 +592,34 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
       });
       return result;
     });
+  }
+  /** Membership operations share the canonical engine's queue and durable
+   * epoch fence. The store checks that fence inside each of its transactions. */
+  private membership<A, T>(args: A, run: (store: SQLiteWindowStore, args: A) => Promise<T>): Promise<T> {
+    const bytes = sqlitePayloadBytes(args, this.limits.batchBytes);
+    const admitted = structuredClone(args);
+    return this.enqueue(bytes, () => run(this.windows ??= new SQLiteWindowStore(this.db, () => this.fence()), admitted));
+  }
+  windowBegin(scope: string, header: SQLiteWindowHeader, generation: string) {
+    return this.membership({ scope, header, generation }, (store, a) => store.begin(a.scope, a.header, a.generation));
+  }
+  windowAppend(scope: string, signature: string, generation: string, page: number, encoded: string) {
+    return this.membership({ scope, signature, generation, page, encoded }, (store, a) => store.append(a.scope, a.signature, a.generation, a.page, a.encoded));
+  }
+  windowPublish(scope: string, signature: string, progress: SQLiteWindowProgress) {
+    return this.membership({ scope, signature, progress }, (store, a) => store.publish(a.scope, a.signature, a.progress));
+  }
+  windowHeader(scope: string, signature: string) {
+    return this.membership({ scope, signature }, (store, a) => store.header(a.scope, a.signature));
+  }
+  windowPage(scope: string, signature: string, generation: string, offset: number, limit = 128) {
+    return this.membership({ scope, signature, generation, offset, limit }, (store, a) => store.page(a.scope, a.signature, a.generation, a.offset, a.limit));
+  }
+  windowHashes(scope: string, signature: string, generation: string, after = '', limit = 128) {
+    return this.membership({ scope, signature, generation, after, limit }, (store, a) => store.hashPage(a.scope, a.signature, a.generation, a.after, a.limit));
+  }
+  windowCollect(scope: string, signature: string, generation: string) {
+    return this.membership({ scope, signature, generation }, (store, a) => store.collect(a.scope, a.signature, a.generation));
   }
   stats() { return { pendingOperations: this.pending, pendingBytes: this.pendingBytes, epoch: this.epoch }; }
 }

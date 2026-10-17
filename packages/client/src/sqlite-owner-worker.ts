@@ -1,3 +1,4 @@
+import { sqliteWorkerOperations as publicOperations } from './sqlite-worker-protocol.js';
 import { openOfficialSQLiteHost, type OfficialSQLiteHost } from './sqlite-official-host.js';
 import { SQLiteTypedReplicaEngine, sqlitePayloadBytes, type SQLiteTypedWrite } from './sqlite-typed-engine.js';
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
@@ -8,7 +9,7 @@ import type { SQLitePagePlan } from './sqlite-typed-query.js';
 let host: OfficialSQLiteHost | undefined, engine: SQLiteTypedReplicaEngine | undefined;
 let lane = Promise.resolve(), operations = 0, bytes = 0;
 const ports = new Map<string, { port: MessagePort; seen: number; token: string }>();
-const publicOperations = new Set(['page', 'viewPage', 'count', 'apply', 'outbox', 'acknowledge', 'ping', 'stats', 'integrity']);
+
 setInterval(() => {
   for (const [id, peer] of ports) if (Date.now() - peer.seen > 30000) { peer.port.close(); ports.delete(id); }
 }, 5000);
@@ -39,6 +40,13 @@ async function execute(op: string, args: any) {
     case 'integrity': return engine.integrity();
     case 'page': return engine.page(scope(args.scope), args.plan as SQLitePagePlan);
     case 'viewPage': return engine.viewPage(scope(args.scope), args.signature, args.plan as SQLitePagePlan, args.offset);
+    case 'windowBegin': return engine.windowBegin(scope(args.scope), args.header, args.generation);
+    case 'windowAppend': return engine.windowAppend(scope(args.scope), args.signature, args.generation, args.page, args.encoded);
+    case 'windowPublish': await engine.windowPublish(scope(args.scope), args.signature, args.progress); return { published: true };
+    case 'windowHeader': return (await engine.windowHeader(scope(args.scope), args.signature)) ?? null;
+    case 'windowPage': return engine.windowPage(scope(args.scope), args.signature, args.generation, args.offset, args.limit);
+    case 'windowHashes': return engine.windowHashes(scope(args.scope), args.signature, args.generation, args.after, args.limit);
+    case 'windowCollect': return engine.windowCollect(scope(args.scope), args.signature, args.generation);
     case 'count': return engine.count(scope(args.scope), args.entity, args.group, args.values);
     case 'apply': {
       if (!args.intent || typeof args.intent.id !== 'string') throw new TypeError('Broker writes require an immutable durable intent ID');

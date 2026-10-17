@@ -317,3 +317,20 @@ it('preserves JSON scalar types, duplicate-key semantics and Unicode in native b
   expect(result.rows).toEqual([{ _id: 'a', name: 'İ CAFÉ 東京', data: 'plain', done: true }, { _id: 'b', data: [1, null, { x: false }] }]);
   expect((await engine.page('s', { ...plan, search: 'i\u0307 café' })).rows).toHaveLength(1);
 });
+
+it('serializes membership staging with canonical writes, snapshots arguments and fences every membership operation', async () => {
+  const { engine, host } = fixture(); await engine.open('first');
+  const header = { signature: 'grid', entity: 'tasks', key: '_id', kind: 'replica', completeness: 'complete', source: 'server' } as const;
+  const pending = engine.windowBegin('s', header, 'one');
+  (header as { entity: string }).entity = 'mutated';
+  await pending;
+  const state = await engine.windowAppend('s', 'grid', 'one', 0, '{"ids":["a"]}');
+  await Promise.all([engine.apply('s', [write('a', 1)]), engine.windowPublish('s', 'grid', state)]);
+  expect((await engine.windowHeader('s', 'grid'))?.header.entity).toBe('tasks');
+  expect((await engine.windowPage('s', 'grid', 'one', 0)).ids).toEqual(['a']);
+  const replacement = new SQLiteTypedReplicaEngine(host, schema); await replacement.open('second');
+  await expect(engine.windowHeader('s', 'grid')).rejects.toMatchObject({ code: 'FENCED' });
+  await expect(engine.windowAppend('s', 'grid', 'one', 1, '{"ids":[]}')).rejects.toMatchObject({ code: 'FENCED' });
+  await expect(engine.windowCollect('s', 'grid', 'one')).rejects.toMatchObject({ code: 'FENCED' });
+  expect((await replacement.windowPage('s', 'grid', 'one', 0)).ids).toEqual(['a']);
+});
