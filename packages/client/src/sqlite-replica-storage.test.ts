@@ -361,3 +361,47 @@ it("clears one replica scope for a cache reset without touching the offline sess
   expect((await storage.load("other"))?.entities.tasks?.t2).toMatchObject({ name: "Other" });
   expect(await storage.loadSession(identity)).toMatchObject({ directive: { visibilityScope: "visible" } });
 });
+
+it("keeps a row-limited warm replica partial when the collection is complete on disk", async () => {
+  const { LocalReplica } = await import('./local-replica');
+  const {storage}=fixture();
+  const tasks=Object.fromEntries(Array.from({length:3},(_,i)=>['t'+i,{_id:'t'+i,name:'Task '+i}]));
+  await storage.replaceSnapshot({entities:{tasks},liveQueries:{all:{signature:'all',kind:'replica',entity:'tasks',key:'_id',ids:Object.keys(tasks),completeness:'complete',source:'server'}}},'tenant');
+  const replica=new LocalReplica(storage,{maxResidentRows:1,maxResidentBytes:100000});
+  try{
+    await replica.activateScope('tenant');
+    expect(replica.cachedEntityRows('tasks')).toHaveLength(1);
+    expect(replica.entityCompleteness('tasks')).toBe('partial');
+  }finally{replica.dispose();}
+});
+
+it("preserves the existence of cold rows when no row fits the startup byte budget", async () => {
+  const {storage}=fixture();
+  await storage.replaceSnapshot({entities:{tasks:{a:{_id:'a',note:'x'.repeat(1000)}}},liveQueries:{}},'tenant');
+  const snapshot=await storage.loadWorkingSet('tenant',{maxRows:10,maxBytes:1});
+  expect(snapshot).toBeDefined();
+  expect(snapshot!.entities).toEqual({});
+  expect(snapshot!.residentPartialTables).toEqual(['tasks']);
+});
+
+it("marks only omitted live tables partial and leaves a full working set complete", async () => {
+  const {storage}=fixture();
+  await storage.replaceSnapshot({entities:{alpha:{a:{_id:'a'}},zeta:{z:{_id:'z'}}},liveQueries:{}},'tenant');
+  const limited=await storage.loadWorkingSet('tenant',{maxRows:1,maxBytes:100000});
+  expect(limited!.residentPartialTables).toEqual(['zeta']);
+  const full=await storage.loadWorkingSet('tenant',{maxRows:10,maxBytes:100000});
+  expect(full!.residentPartialTables??[]).toEqual([]);
+  expect(await storage.loadWorkingSet('other',{maxRows:1,maxBytes:100000})).toBeUndefined();
+});
+
+it("skips a tombstone history without paging its payloads into a warm working set", async () => {
+  const {storage,queries}=fixture();
+  await storage.replaceSnapshot({entities:{tasks:{live:{_id:'live',name:'Still here'}}},liveQueries:{}},'tenant');
+  await storage.applyTransaction({cursor:{epoch:'e',revision:1},changes:Array.from({length:1000},(_,i)=>({entity:'tasks',id:'gone_'+i,operation:'delete' as const}))},{entities:{},liveQueries:{}},'tenant');
+  queries.length=0;
+  const snapshot=await storage.loadWorkingSet('tenant',{maxRows:1,maxBytes:100000});
+  expect(snapshot!.entities.tasks).toEqual({live:{_id:'live',name:'Still here'}});
+  expect(snapshot!.residentPartialTables).toEqual([]);
+  const pages=queries.filter(q=>q.sql.startsWith('SELECT scope, entity, id, value')&&q.sql.includes('LIMIT ?'));
+  expect(pages).toHaveLength(1);
+});

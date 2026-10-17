@@ -68,6 +68,10 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         scope TEXT NOT NULL, entity TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL,
         PRIMARY KEY (scope, entity, id)
       );
+      -- Warm paging and cold-table discovery must skip tombstones without
+      -- decoding or scanning their retained row payloads.
+      CREATE INDEX IF NOT EXISTS _gonvex_replica_live_entities
+        ON _gonvex_replica_entities(scope,entity,id) WHERE value <> 'null';
       CREATE TABLE IF NOT EXISTS _gonvex_replica_queries (
         scope TEXT NOT NULL, signature TEXT NOT NULL, value TEXT NOT NULL,
         PRIMARY KEY (scope, signature)
@@ -224,6 +228,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         scope,
       );
       const entities: ReplicaSnapshot["entities"] = {};
+      let lastAdmitted: { entity: string; id: string } | undefined;
       let count = 0,
         bytes = 0,
         afterEntity = "",
@@ -231,7 +236,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         finished = false;
       while (count < budget.maxRows && !finished) {
         const records = await this.database.getAllAsync<EntityRecord>(
-          `SELECT scope, entity, id, value FROM _gonvex_replica_entities WHERE scope = ? AND (entity > ? OR (entity = ? AND id > ?)) ORDER BY entity, id LIMIT ?`,
+          `SELECT scope, entity, id, value FROM _gonvex_replica_entities WHERE scope = ? AND value <> 'null' AND (entity > ? OR (entity = ? AND id > ?)) ORDER BY entity, id LIMIT ?`,
           scope,
           afterEntity,
           afterEntity,
@@ -251,15 +256,25 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
           );
           bytes += size;
           count++;
+          lastAdmitted = { entity: record.entity, id: record.id };
         }
         const last = records.at(-1)!;
         afterEntity = last.entity;
         afterId = last.id;
       }
-      if (cursor || queries.length || count)
+      // The accepted rows form a prefix in (entity,id) order. Discover only
+      // the names of live tables outside it through the covering partial index.
+      // Complete disk coverage must not imply that a resident-only read is exact.
+      const remaining = await this.database.getAllAsync<{ entity: string }>(
+        `SELECT DISTINCT entity FROM _gonvex_replica_entities WHERE scope = ? AND value <> 'null'${lastAdmitted ? ' AND (entity > ? OR (entity = ? AND id > ?))' : ''} ORDER BY entity`,
+        scope,
+        ...(lastAdmitted ? [lastAdmitted.entity, lastAdmitted.entity, lastAdmitted.id] : []),
+      );
+      if (cursor || queries.length || count || remaining.length)
         snapshot = {
           cursor: cursor ? JSON.parse(cursor.value) : undefined,
           entities,
+          residentPartialTables: remaining.map(record => record.entity),
           liveQueries: Object.fromEntries(
             queries.map((row) => [
               row.signature,
