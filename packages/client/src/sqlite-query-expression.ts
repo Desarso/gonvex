@@ -27,6 +27,7 @@ const encode = (value: unknown): Binding => value === undefined ? null : JSON.st
  * member is SQL NULL; a present JSON null is the text 'null'. Native SQLite
  * lower/collation/equality are deliberately not substituted for JS semantics. */
 export const sqliteLiveQueryFunctions = {
+  gv_canonical: (a: string | null) => encode(decode(a)),
   gv_eq: (a: string | null, b: string | null) => Number(equalLiveQueryValues(decode(a), decode(b))),
   gv_cmp: (a: string | null, b: string | null) => compareLiveQueryValues(decode(a), decode(b)),
   gv_str: (a: string | null) => String(decode(a)),
@@ -58,7 +59,8 @@ class UnsupportedPlan extends Error {}
  * in one coherent transaction, check coverage and preflights, and enforce the
  * SQLite/cache/transport budgets separately. replica_rows has normalized
  * (scope,entity,id,value,position) records; value is the canonical JSON row.
- * position preserves first-insertion order for locale-equivalent key ties. */
+ * position preserves first-insertion order for locale-equivalent key ties.
+ * id is String(row[the registered entity key]), including numeric entity keys. */
 export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string, JsonValue>, scope: string,
   context: Readonly<Record<string, JsonValue>> = {}): SQLiteLivePlan {
   if (plan.serverOnly) return { supported: false, unsupportedOperator: 'serverOnly' };
@@ -78,6 +80,18 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
   const refs = fields.flatMap(field => { const ref = liveQueryReferenceField(plan, field); return ref ? [ref] : []; });
   const plainFields = fields.filter(field => !liveQueryReferenceField(plan, field));
   const search = plan.search ? String(args[plan.search.argument] ?? '').trim().toLocaleLowerCase() : '';
+  // A root owning-scope OR shared-scope must not force a wide-row scan.
+  // Build its candidate IDs from independently indexable branches. Other
+  // boolean expressions keep their normal evaluation, including NOT scopes.
+  const indexable = (e: LiveQueryExpression): boolean => e.operator === 'eq' && Boolean(e.column)
+    || e.operator === 'inRelation' && e.column === plan.key
+    || e.operator === 'and' && (e.children ?? []).some(indexable);
+  const disjunction = (e?: LiveQueryExpression): LiveQueryExpression | undefined => {
+    if (e?.operator === 'or' && e.children?.length && e.children.length <= 8 && e.children.every(indexable)) return e;
+    if (e?.operator === 'and') for (const child of e.children ?? []) { const found = disjunction(child); if (found) return found; }
+    return undefined;
+  };
+  const rootUnion = disjunction(plan.where);
   try {
     const build = (kind: 'rows' | 'count' | 'missingSortFields' | 'missingReferences'): SQLiteLiveStatement => {
       const bindings: Binding[] = [];
@@ -99,6 +113,10 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
       const expression = (e: LiveQueryExpression | undefined, alias: string): string => {
         if (!e) return '1';
         const children = e.children ?? [];
+        if (alias === 'r0' && e === rootUnion) {
+          const branches = children.map(child => `SELECT r0.id FROM replica_rows r0 WHERE r0.scope=${bind(scope)} AND r0.entity=${bind(plan.table)} AND ${expression(child, 'r0')}`);
+          return `(r0.id IN (${branches.join(' UNION ALL ')}))`;
+        }
         if (e.operator === 'and') return '(' + (children.map(child => expression(child, alias)).join(' AND ') || '1') + ')';
         if (e.operator === 'or') return '(' + (children.map(child => expression(child, alias)).join(' OR ') || '0') + ')';
         if (e.operator === 'not') return children.length === 1 ? '(NOT ' + expression(children[0], alias) + ')' : '0';
@@ -108,11 +126,15 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
           if (!e.relation) throw new UnsupportedPlan('missingRelation');
           const related = 'r' + (++aliasCount);
           const right = value(related, e.relation.column);
-          return `EXISTS (SELECT 1 FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(e.relation.table)} AND gv_present(${left}) AND gv_present(${right}) AND gv_str(${left})=gv_str(${right}) AND ${expression(e.relation.where, related)})`;
+          // Related scopes depend only on their own row, args and identity.
+          // Materialize that set once, rather than correlating it per root row.
+          // Normalized id is String(row[key]), matching related-membership keys.
+          const member = alias === 'r0' && e.column === plan.key ? `${alias}.id` : `gv_str(${left})`;
+          return `(gv_present(${left}) AND ${member} IN (SELECT gv_str(${right}) FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(e.relation.table)} AND gv_present(${right}) AND ${expression(e.relation.where, related)}))`;
         }
         const right = bind(resolve(e.value));
-        if (e.operator === 'eq') return `gv_eq(${left},${right})`;
-        if (e.operator === 'neq') return `(NOT gv_eq(${left},${right}))`;
+        if (e.operator === 'eq') return `(gv_canonical(${left}) IS gv_canonical(${right}))`;
+        if (e.operator === 'neq') return `(gv_canonical(${left}) IS NOT gv_canonical(${right}))`;
         if (e.operator === 'contains' || e.operator === 'containsInsensitive') return `gv_contains(${left},${right},${e.operator === 'contains' ? 0 : 1})`;
         if (e.operator === 'arrayContains') return `gv_array_contains(${left},${right})`;
         if (e.operator === 'in') return `gv_array_contains(${right},${left})`;

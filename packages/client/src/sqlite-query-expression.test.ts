@@ -17,6 +17,11 @@ it.each([[0.1,0.2],[-1e30,1e30],[-1e12,1e12]])('preserves numeric comparison sig
 
 it('preserves missing, JSON null, boolean, numeric and string distinctions despite SQL affinity', () => {
   const f=sqliteLiveQueryFunctions;
+  expect(f.gv_canonical(null)).toBeNull();
+  expect(f.gv_canonical('null')).toBe('null');
+  expect(f.gv_canonical('false')).toBe('false');
+  expect(f.gv_canonical('0')).toBe('0');
+  expect(f.gv_canonical('\"0\"')).toBe('\"0\"');
   expect(f.gv_eq(null,'null')).toBe(0);
   expect(f.gv_eq(null,null)).toBe(1);
   expect(f.gv_eq('false','0')).toBe(0);
