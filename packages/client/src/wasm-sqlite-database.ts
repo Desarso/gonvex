@@ -3,7 +3,8 @@ import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 /** Minimal host surface provided by the pinned browser SQLite factory. No
  * dependency, database, worker or WASM instance is created by this module. */
 export interface WasmSQLiteAPI {
-  statements(database: number, sql: string): AsyncIterable<number>;
+  statements(database: number, sql: string, options?: { unscoped?: boolean }): AsyncIterable<number>;
+  finalize(statement: number): Promise<number>;
   bind_collection(statement: number, values: unknown[]): unknown;
   step(statement: number): Promise<number>;
   column_names(statement: number): string[];
@@ -40,43 +41,60 @@ export function wasmSQLiteDatabase(api: WasmSQLiteAPI, database: number,
     return result;
   }
   const bindings = (values: unknown[]) => values.map(value => typeof value === 'boolean' ? Number(value) : value);
+  async function owned<T>(statement: number, run: () => Promise<T>): Promise<T> {
+    let failed = false;
+    try { return await run(); }
+    catch (error) { failed = true; throw error; }
+    finally {
+      // The pinned iterator starts async finalization without awaiting it.
+      // Own this lifecycle so the SQL lane includes all native VFS cleanup.
+      try { await api.finalize(statement); }
+      catch (error) { if (!failed) throw error; }
+    }
+  }
+
   async function discard(sql: string, params: unknown[] = []) {
-    for await (const statement of api.statements(database, sql)) {
-      if (params.length) api.bind_collection(statement, bindings(params));
-      while (await api.step(statement) === 100) { /* Drain without retaining rows. */ }
+    for await (const statement of api.statements(database, sql, { unscoped: true })) {
+      await owned(statement, async () => {
+        if (params.length) api.bind_collection(statement, bindings(params));
+        while (await api.step(statement) === 100) { /* Drain without retaining rows. */ }
+      });
     }
   }
   async function read<T>(sql: string, params: unknown[], first: boolean): Promise<T[]> {
     const rows: T[] = [];
     let bytes = 0;
-    for await (const statement of api.statements(database, sql)) {
-      if (params.length) api.bind_collection(statement, bindings(params));
-      let columns: string[] | undefined;
-      while (await api.step(statement) === 100) {
-        if (rows.length >= budget.maxRows) throw new SQLiteBridgeBudgetError('rows');
-        columns ??= api.column_names(statement);
-        const entries: Array<[string, unknown]> = [];
-        for (const [index, name] of columns.entries()) {
-          const remaining = budget.maxTextBytes - bytes - name.length * 2;
-          if (remaining < 0) throw new SQLiteBridgeBudgetError('text');
-          if (api.column_type && api.column_bytes) {
-            const type = api.column_type(statement, index);
-            const size = type === 3 || type === 4 ? api.column_bytes(statement, index) : 0;
-            // Check a guaranteed lower bound before creating a JS copy. UTF-8
-            // text can use more bytes than UTF-16; leave the exact check below.
-            if (type === 4 && size > remaining || type === 3 && size > remaining * 2)
-              throw new SQLiteBridgeBudgetError('text');
+    for await (const statement of api.statements(database, sql, { unscoped: true })) {
+      const stop = await owned(statement, async () => {
+        if (params.length) api.bind_collection(statement, bindings(params));
+        let columns: string[] | undefined;
+        while (await api.step(statement) === 100) {
+          if (rows.length >= budget.maxRows) throw new SQLiteBridgeBudgetError('rows');
+          columns ??= api.column_names(statement);
+          const entries: Array<[string, unknown]> = [];
+          for (const [index, name] of columns.entries()) {
+            const remaining = budget.maxTextBytes - bytes - name.length * 2;
+            if (remaining < 0) throw new SQLiteBridgeBudgetError('text');
+            if (api.column_type && api.column_bytes) {
+              const type = api.column_type(statement, index);
+              const size = type === 3 || type === 4 ? api.column_bytes(statement, index) : 0;
+              // Check a guaranteed lower bound before creating a JS copy. UTF-8
+              // text can use more bytes than UTF-16; leave the exact check below.
+              if (type === 4 && size > remaining || type === 3 && size > remaining * 2)
+                throw new SQLiteBridgeBudgetError('text');
+            }
+            const value = api.column(statement, index);
+            bytes += name.length * 2 + (typeof value === 'string' ? value.length * 2
+              : value instanceof Uint8Array ? value.byteLength : 8);
+            if (bytes > budget.maxTextBytes) throw new SQLiteBridgeBudgetError('text');
+            entries.push([name, value]);
           }
-          const value = api.column(statement, index);
-          bytes += name.length * 2 + (typeof value === 'string' ? value.length * 2
-            : value instanceof Uint8Array ? value.byteLength : 8);
-          if (bytes > budget.maxTextBytes) throw new SQLiteBridgeBudgetError('text');
-          entries.push([name, value]);
+          rows.push(Object.fromEntries(entries) as T);
+          if (first) return true;
         }
-        rows.push(Object.fromEntries(entries) as T);
-        // Exiting the async generator finalizes this native statement too.
-        if (first) return rows;
-      }
+        return false;
+      });
+      if (stop) return rows;
     }
     return rows;
   }

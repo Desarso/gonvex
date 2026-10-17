@@ -4,7 +4,8 @@ import { wasmSQLiteDatabase, type WasmSQLiteAPI } from './wasm-sqlite-database';
 function fixture(result: Array<Record<string,unknown>>, gate?:Promise<void>) {
  const calls:string[]=[],bound:unknown[][]=[];let row=-1,finalized=0,active=0;
  const api:WasmSQLiteAPI={
-  async *statements(_db,sql){calls.push(sql);active++;expect(active).toBe(1);try{row=-1;yield 1;}finally{active--;finalized++;}},
+  async *statements(_db,sql,options={}){calls.push(sql);active++;expect(active).toBe(1);try{row=-1;yield 1;}finally{active--;if(!options.unscoped)void api.finalize(1);}},
+  async finalize(){finalized++;return 0;},
   bind_collection(_stmt,values){bound.push(values);},
   async step(){if(gate)await gate;return ++row<result.length?100:101;},
   column_names(){return Object.keys(result[row]!);},
@@ -62,4 +63,17 @@ it('does not reject multi-byte text merely because UTF-8 is larger than UTF-16',
  const f=fixture([{v:'漢字'}]);f.api.column_type=()=>3;f.api.column_bytes=()=>6;
  const db=wasmSQLiteDatabase(f.api,1,{maxRows:1,maxTextBytes:6});
  expect(await db.getAllAsync('text')).toEqual([{v:'漢字'}]);
+});
+
+it('waits for native finalization before returning a row or starting another statement',async()=>{
+ let release!:()=>void,entered!:()=>void;
+ const gate=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
+ const f=fixture([{v:1}]);f.api.finalize=async()=>{entered();await gate;return 0;};
+ const db=wasmSQLiteDatabase(f.api,1,{maxRows:2,maxTextBytes:100});
+ const first=db.getFirstAsync('first'),second=db.getFirstAsync('second');
+ try{
+  await started;
+  const premature=await Promise.race([first.then(()=>true),new Promise<boolean>(resolve=>setTimeout(()=>resolve(false),10))]);
+  expect(premature).toBe(false);expect(f.calls).toEqual(['first']);
+ }finally{release();await Promise.all([first,second]);}
 });
