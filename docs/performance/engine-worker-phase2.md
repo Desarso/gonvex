@@ -151,6 +151,75 @@ pnpm --filter @gonvex/react build
 node packages/client/bench/engine-worker/bundles.mjs
 ```
 
+## Final serial validation, 2026-10-17
+
+**Run conditions.** All runs used head `71b48f7`; the gonvex `staging` branch was at `c90765f` and was not merged in. The host was arch3: Ryzen 7 5800X, 16 logical cores, Linux 7.2.4, Playwright browsers.
+
+Each browser ran inside its own capped scope:
+- `MemoryMax=3G` and `CPUQuota=300%`;
+- `nice 10` and `ionice -c3` (idle-class disk access);
+- core dumps disabled.
+
+The browsers ran one at a time. Each started only after these checks passed:
+- memory pressure (full avg10) at most 1% and IO pressure (full avg10) at most 5%;
+- at least 8 GB of memory available;
+- no other heavy work running on the shared sweep slots.
+
+The harness settings were unchanged from the earlier rounds: sequential admission, `START_LOAD_LIMIT=.35`, `LOAD_LIMIT=.5`, `WAIT_LOAD=1`, 5 warmup pairs and 20 measured pairs. Ratios are worker ÷ legacy, as paired medians with 10,000-sample bootstrap 95% confidence intervals.
+
+The CPU cap changes absolute numbers against the earlier uncapped runs. Compare legacy and worker only within the same run.
+
+| Browser | Pairs | Cold wall | Burst wall | 20k snapshot wall | 500-intent drain wall | Verdict |
+| --- | ---: | --- | --- | --- | --- | --- |
+| Chromium 149.0.7827.55, 50k rows | 20/20, 6 load exclusions | 1.027 [0.880, 1.080] | 0.998 [0.995, 1.001] | 1.001 [0.992, 1.004] | 0.938 [0.783, 0.990] | **PASS**: drain, cold-script and burst gates; correctness; two-tab |
+| Firefox 151.0, 50k rows | 20/20, 2 load exclusions | **1.176 [1.039, 1.471]**; p95 5,497 → 13,991 ms | 1.001 [0.994, 1.008] | 0.999 [0.995, 1.011] | 0.955 [0.928, 0.964] | **PASS** on the drain gate; script gates unavailable; correctness; two-tab. **Cold paint regresses.** |
+| WebKit 26.5, 50k rows | 0/20 | not measured | not measured | not measured | not measured | **BLOCKED**: per-origin storage quota |
+| WebKit 26.5, 25k rows, reduced fixture | 10/20 | 1.062 [0.967, 1.164] | 1.001 [0.999, 1.003] | 1.001 [0.997, 1.007] | 0.976 [0.934, 1.040] | **INCOMPLETE**: the legacy-mode cold paint timed out |
+
+Chromium script time, legacy → worker medians, with the paired ratio:
+
+| Workload | Script time | Paired ratio |
+| --- | --- | --- |
+| Cold | 337.0 → 8.9 ms | 0.026 [0.025, 0.028] |
+| Burst | 61.0 → 22.2 ms | 0.381 [0.351, 0.402] |
+| Snapshot | 780.7 → 8.5 ms | 0.011 [0.010, 0.013] |
+| Drain | 1,260.4 → 529.8 ms | 0.417 [0.395, 0.434] |
+
+The capped drain improvement (0.938) is smaller than the uncapped 2026-10-14 subset (0.769) and the round-2 run (0.684).
+
+Every browser that reached the fixtures passed every correctness fixture:
+- reducer network denial (3 APIs);
+- durable crash and retry;
+- a 32-command mid-batch termination with a durable prefix of 1 and the same command IDs;
+- private reconnect.
+
+Chromium and Firefox both finished the two-tab fixture, and both tabs fell back to legacy as designed.
+
+**Firefox cold paint.** Worker-mode cached paint is slower than legacy on Firefox: median 3,391 → 4,757 ms, p95 5,497 → 13,991 ms. No harness gate covers cold wall time, but this is an open regression for any Firefox opt-in.
+
+**WebKit at 50k rows.** The 50k-row fixture's canonical database grew to 1.16 GB:
+- `entities` values took 350 MB in SQLite pages;
+- the index tables took 805 MB, mostly the existing `*lookupKeys` multiEntry index, with 1.7M index rows for 50,005 entities.
+
+That exceeds WebKit's per-origin quota of about 1 GB. A `QuotaExceededError` was raised during a **legacy** warmup drain. The index layout predates this PR and is the same on `staging`. Large tenants on Safari face the same limit, which is separate follow-up work.
+
+**WebKit at 25k rows: first attempt.** It stopped during the warmups with `Fixture timed out` in a legacy drain. Two earlier attempts of that pair had been excluded for load. During the failing attempt the one-minute load reached 9.5, above the cutoff of 8, and host IO pressure was high: the IO full average over five minutes was about 36%. With idle-class disk access, the browser's IndexedDB writes can stall for long periods. The harness rethrew the timeout instead of excluding the overloaded pair, so the run aborted.
+
+**WebKit at 25k rows: second attempt.** It ran on a quiet machine (load about 1–4.5) and produced 10 accepted measured pairs. Then legacy cold start in pair 10 did not paint its 250 cached rows within the fixture's 60-second limit, at load 3.6.
+
+The drain gate computed from those 10 pairs is FAIL: the upper bound is 1.040, above the required 1. Drain times also rose late in the run in both modes: legacy p95 was 43.4 s and worker p95 59.6 s, against medians of 35.0 s and 33.8 s. Because the run is incomplete, neither result is a WebKit verdict.
+
+No product code changed. A harness patch was tried locally to exclude workloads that fail while overloaded. It was reverted because its retry path was never exercised.
+
+Raw data:
+- `round3-validation-chromium.json` and its `-summary.json`;
+- `round3-validation-firefox.json` and its `-summary.json`;
+- `round3-validation-webkit-50k-quota-failure.json`;
+- `round3-validation-webkit-25k-attempt1-timeout.json`;
+- `round3-validation-webkit-25k.json` and its `-summary.json`.
+
+Overall verdict: **not merge-ready**. Chromium passes. Firefox passes its gate but shows a cold-paint regression. WebKit is blocked and incomplete.
+
 ## Files and follow-up
 
 - Client: package subpath exports; `auth-scope.ts`, `client-error.ts`; compile-time engine metadata in `index.ts`/`outbox.ts`; `engine/` proxy, host, worker, RPC, patches, receipts, connection/admission hooks, read/close helpers, and focused tests. The default `local-replica.ts` and `browser-upgrades.ts` runtime changes from Round 1 were removed.
