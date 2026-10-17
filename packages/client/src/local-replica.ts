@@ -54,6 +54,7 @@ export type ReplicaWindow = {
 
 /** Static Replica Collection metadata plus the arguments for one subscription. */
 export type ReplicaCollectionPlan = {
+  residency?: 'resident' | 'paged';
   table: string;
   key: string;
   equalFilters?: Readonly<Record<string, string>>;

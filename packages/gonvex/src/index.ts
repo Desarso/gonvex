@@ -1484,7 +1484,7 @@ function renderAPI(manifest: Manifest) {
       __argsType: functionTypeName(path, "Args"),
       __resultType: functionTypeName(path, "Result"),
       ...(entry.delivery ? { delivery: entry.delivery } : {}),
-      ...(entry.delivery === "replica" && entry.replica ? { replica: entry.replica } : {}),
+      ...(entry.delivery === "replica" && entry.replica ? { replica: { ...entry.replica, residency: entry.replica.residency ?? 'paged' } } : {}),
       ...(entry.offline !== undefined ? { offline: entry.offline } : {}),
       ...(entry.localExecution !== undefined ? { localExecution: entry.localExecution } : {}),
       // Args/Result are phantom types below. Validation schemas remain in the
@@ -1524,7 +1524,7 @@ function renderAPI(manifest: Manifest) {
     "  readonly kind: Kind;",
     "  readonly path: string;",
     "  readonly delivery?: \"oneShot\" | \"live\" | \"replica\";",
-    "  readonly replica?: { readonly table: string; readonly key: string; readonly columns?: readonly string[] };",
+    "  readonly replica?: { readonly table: string; readonly key: string; readonly columns?: readonly string[]; readonly residency?: 'resident' | 'paged' };",
     "  readonly offline?: { readonly mode: \"forbidden\" | \"allowed\" | \"onlineOnly\"; readonly conflict?: \"reject\" | \"expectedVersion\" | \"merge\"; readonly reason?: string };",
     "  readonly localExecution?: 1;",
     "  readonly args?: Args;",
@@ -1710,7 +1710,9 @@ function renderObject(value: any, depth: number): string {
   const entries = Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   if (isFunctionRef(value)) {
     const visible = Object.fromEntries(entries.filter(([key]) => !key.startsWith("__")));
-    return `${renderObject(visible, depth)} as unknown as FunctionReference<${JSON.stringify(value.kind)}, ${value.__argsType}, ${value.__resultType}>`;
+    const residency = value.replica?.residency;
+    const residencyType = residency === 'resident' || residency === 'paged' ? ` & { readonly replica: { readonly residency: ${JSON.stringify(residency)} } }` : '';
+    return `${renderObject(visible, depth)} as unknown as FunctionReference<${JSON.stringify(value.kind)}, ${value.__argsType}, ${value.__resultType}>${residencyType}`;
   }
   const indent = "  ".repeat(depth);
   const childIndent = "  ".repeat(depth + 1);

@@ -161,9 +161,11 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
       const columns = new Set<string>();
       let maxRows = 50000;
       let maxBytes = 67108864;
+      let declared = false, resident = true;
       for (const entry of Object.values(functions)) {
         if (entry.internal) continue;
         if (entry.replica?.table === table) {
+          declared = true; resident &&= entry.replica.residency === 'resident';
           entry.replica.columns.forEach((column) => columns.add(column));
           if (!Object.keys(entry.replica.equalFilters ?? {}).length) {
             maxRows = Math.min(maxRows, entry.replica.maxRows ?? maxRows);
@@ -180,7 +182,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
         args: { kind: "object", fields: {} }, result: { kind: "array", items: { kind: "any" } },
         delivery: "replica", interactive: false, classification: "system",
         replica: { table, key: plan.key, columns: [...columns].filter((column) => !!schema[table]!.columns[column]),
-          mode: "progressive", maxRows, maxBytes },
+          mode: "progressive", residency: declared && resident ? 'resident' : 'paged', maxRows, maxBytes },
       };
     }
   }

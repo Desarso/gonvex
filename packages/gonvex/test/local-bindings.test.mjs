@@ -71,3 +71,25 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   assert.equal(response.patches[0].fields.title,'changed');
   assert.deepEqual(requests,[], 'shared execution must not download an engine or contact a server');
 });
+
+test('explicit replica residency propagates to generated local collections without guessing from delivery limits', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gonvex-replica-residency-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'gonvex')); await mkdir(join(root, 'migrations'));
+  await mkdir(join(root, 'node_modules', '@gonvex'), { recursive: true });
+  await symlink(fileURLToPath(new URL('../../module-sdk', import.meta.url)), join(root, 'node_modules', '@gonvex', 'module-sdk'));
+  await writeFile(join(root, 'migrations', '0000.sql'), 'CREATE TABLE records ("_id" text PRIMARY KEY, title text);');
+  const entry = join(root, 'gonvex', 'index.ts');
+  const source = residency => `import { reducer, schema, replicaCollection, visibility } from '@gonvex/module-sdk';
+export const access = visibility({table:'records',key:'_id',sets:{},where:{operator:'public'}});
+export const list = replicaCollection({args:schema.object({}),result:schema.any(),replica:{table:'records',key:'_id',columns:['_id','title'],residency:'resident',maxRows:100,maxBytes:10000}});
+export const get = replicaCollection({args:schema.object({id:schema.string()}),result:schema.any(),replica:{table:'records',key:'_id',columns:['_id','title'],${residency ? `residency:'${residency}',` : ''}equalFilters:{id:'_id'},maxRows:1,maxBytes:1000}});
+export const rename = reducer({args:schema.object({id:schema.string(),title:schema.string()}),result:schema.any(),run:(ctx,args)=>ctx.db.update('records',args.id,{title:args.title})});`;
+  for (const residency of ['resident', 'paged', undefined]) {
+    await writeFile(entry, source(residency));
+    const artifact = await buildModuleArtifact({root,backendDir:join(root,'gonvex'),files:[entry],migrations:[]});
+    const functions = moduleManifestFunctions(artifact);
+    assert.equal(functions['__local.records'].replica.residency, residency === 'resident' ? 'resident' : 'paged');
+    assert.equal(functions.list.replica.residency, 'resident');
+  }
+});
