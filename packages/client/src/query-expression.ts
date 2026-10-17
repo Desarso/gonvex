@@ -124,11 +124,11 @@ export function runOfflineLiveQuery<T extends Record<string, unknown>>(
     const column = plan.sort.allowedColumns.includes(requestedColumn) ? requestedColumn : plan.sort.defaultColumn;
     const requestedDirection = plan.sort.directionArgument ? String(args[plan.sort.directionArgument] ?? "").toLocaleLowerCase() : "";
     const direction = requestedDirection === "asc" || requestedDirection === "desc" ? requestedDirection : plan.sort.defaultDirection;
-    const fields = plan.index?.sortColumns?.[column] ?? [column];
-    const resolved = fields.some(field => plan.index?.referenceFields?.[field]) ? new Map<T, unknown[]>() : undefined;
+    const fields = liveQuerySortFields(plan, column);
+    const resolved = fields.some(field => liveQueryReferenceField(plan, field)) ? new Map<T, unknown[]>() : undefined;
     if (resolved) for (const row of result) {
       resolved.set(row,fields.map(field=>{
-        const reference=plan.index?.referenceFields?.[field];
+        const reference=liveQueryReferenceField(plan, field);
         if(!reference)return row[field];
         const id=row[reference.foreignKey];
         const related=id == null ? undefined : referenceRow?.(reference.table,String(id));
@@ -136,7 +136,7 @@ export function runOfflineLiveQuery<T extends Record<string, unknown>>(
         return related?.[reference.column] ?? reference.fallback ?? null;
       }));
     }
-    if(fields.some(field=>!plan.index?.referenceFields?.[field] && result.some(row=>!Object.hasOwn(row,field))))return {rows:[],completeness:'partial',supported:false,unsupportedOperator:'missingSortField'};
+    if(fields.some(field=>!liveQueryReferenceField(plan, field) && result.some(row=>!Object.hasOwn(row,field))))return {rows:[],completeness:'partial',supported:false,unsupportedOperator:'missingSortField'};
     const comparator = (left: T, right: T) => {
       for(let i=0;i<fields.length;i++){
         const a=resolved ? resolved.get(left)![i] : left[fields[i]!],b=resolved ? resolved.get(right)![i] : right[fields[i]!];
@@ -200,6 +200,18 @@ function smallestRows<T>(rows: readonly T[], count: number, compareRows: (a: T, 
     }
   }
   return heap.sort(compare).map(entry => entry.row);
+}
+
+
+/** Metadata maps contain declared keys only, never inherited Object fields. */
+export function liveQuerySortFields(plan: LiveQueryPlan, column: string): readonly string[] {
+  const fields = plan.index?.sortColumns;
+  return fields && Object.hasOwn(fields, column) ? fields[column] ?? [column] : [column];
+}
+
+export function liveQueryReferenceField(plan: LiveQueryPlan, field: string) {
+  const references = plan.index?.referenceFields;
+  return references && Object.hasOwn(references, field) ? references[field] : undefined;
 }
 
 /** All tables that can affect evaluation, including reference sorts and coverage. */

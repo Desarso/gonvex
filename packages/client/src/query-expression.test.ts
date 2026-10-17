@@ -108,3 +108,16 @@ it('reuses frozen search text but observes changes in caller-owned mutable rows'
   expect(runOfflineLiveQuery(rows,plan,{search:'SECOND'},'complete').rows).toHaveLength(1);
   expect(runOfflineLiveQuery(rows,plan,{search:'second'},'complete').rows).toHaveLength(1);
 });
+
+
+it.each(['toString','constructor','__proto__'])('uses only declared index mappings when sorting %s', column => {
+  const rows = [{id:'a',[column]:2},{id:'b',[column]:1}];
+  const plan = { table:'tasks',key:'id',index:{table:'grid',key:'id',columns:[column],sortColumns:{},referenceFields:{}},
+    sort:{defaultColumn:column,defaultDirection:'asc' as const,allowedColumns:[column]} };
+  expect(runOfflineLiveQuery(rows,plan,{},'complete').rows.map(row=>row.id)).toEqual(['b','a']);
+  Object.defineProperty(plan.index.sortColumns,column,{value:[column],enumerable:true});
+  expect(runOfflineLiveQuery(rows,plan,{},'complete').rows.map(row=>row.id)).toEqual(['b','a']);
+  const mapped = JSON.parse(JSON.stringify(plan));
+  Object.defineProperty(mapped.index.sortColumns,column,{value:['rank'],enumerable:true});
+  expect(runOfflineLiveQuery(rows.map(row=>({...row,rank:3-Number(row[column])})),mapped,{},'complete').rows.map(row=>row.id)).toEqual(['a','b']);
+});
