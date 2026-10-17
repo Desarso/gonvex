@@ -30,7 +30,7 @@ const settled = () => {};
  * It is not an exclusive transaction API for unrelated concurrent callers.
  * Native/cache/input/resident budgets remain the host's responsibility. */
 export function wasmSQLiteDatabase(api: WasmSQLiteAPI, database: number,
-  budget: WasmSQLiteReadBudget): SQLiteReplicaDatabase {
+  budget: WasmSQLiteReadBudget, controls: { readSignal?: () => AbortSignal | undefined } = {}): SQLiteReplicaDatabase {
   for (const value of [budget.maxRows, budget.maxTextBytes])
     if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('Positive finite SQLite bridge budget required');
   let lane = Promise.resolve(), transaction = false;
@@ -62,13 +62,17 @@ export function wasmSQLiteDatabase(api: WasmSQLiteAPI, database: number,
     }
   }
   async function read<T>(sql: string, params: unknown[], first: boolean): Promise<T[]> {
+    const signal = controls.readSignal?.();
+    signal?.throwIfAborted();
     const rows: T[] = [];
     let bytes = 0;
     for await (const statement of api.statements(database, sql, { unscoped: true })) {
       const stop = await owned(statement, async () => {
+        signal?.throwIfAborted();
         if (params.length) api.bind_collection(statement, bindings(params));
         let columns: string[] | undefined;
         while (await api.step(statement) === 100) {
+          signal?.throwIfAborted();
           if (rows.length >= budget.maxRows) throw new SQLiteBridgeBudgetError('rows');
           columns ??= api.column_names(statement);
           const entries: Array<[string, unknown]> = [];
@@ -94,8 +98,10 @@ export function wasmSQLiteDatabase(api: WasmSQLiteAPI, database: number,
         }
         return false;
       });
+      signal?.throwIfAborted();
       if (stop) return rows;
     }
+    signal?.throwIfAborted();
     return rows;
   }
   const connection: SQLiteReplicaDatabase = {

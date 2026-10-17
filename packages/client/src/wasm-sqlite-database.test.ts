@@ -77,3 +77,10 @@ it('waits for native finalization before returning a row or starting another sta
   expect(premature).toBe(false);expect(f.calls).toEqual(['first']);
  }finally{release();await Promise.all([first,second]);}
 });
+it('cancels a read at a safe step boundary, finalizes it and still permits rollback',async()=>{
+ const f=fixture([{v:1}]),controller=new AbortController(),reason=new Error('retired');
+ const original=f.api.step;f.api.step=async()=>{controller.abort(reason);return 100;};
+ const db=wasmSQLiteDatabase(f.api,1,{maxRows:1,maxTextBytes:100},{readSignal:()=>controller.signal});
+ await expect(db.getAllAsync('read')).rejects.toBe(reason);expect(f.finalized()).toBe(1);
+ f.api.step=original;await db.execAsync('ROLLBACK');expect(f.finalized()).toBe(2);
+});
