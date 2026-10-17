@@ -40,7 +40,7 @@ function fixture() {
       }
     },
   };
-  return { storage: new SQLiteLocalReplicaStorage(adapter), queries };
+  return { storage: new SQLiteLocalReplicaStorage(adapter), queries, db };
 }
 
 it("loads a bounded working set and reads one cold row through the SQLite primary key", async () => {
@@ -404,4 +404,26 @@ it("skips a tombstone history without paging its payloads into a warm working se
   expect(snapshot!.residentPartialTables).toEqual([]);
   const pages=queries.filter(q=>q.sql.startsWith('SELECT scope, entity, id, value')&&q.sql.includes('LIMIT ?'));
   expect(pages).toHaveLength(1);
+});
+
+it("restores a snapshot through bounded batches instead of one SQL call per row", async () => {
+  const {storage,queries}=fixture();
+  const tasks=Object.fromEntries(Array.from({length:251},(_,i)=>['t'+i,{_id:'t'+i,note:'x'.repeat(3000)}]));
+  await storage.replaceSnapshot({entities:{tasks},liveQueries:{}},'tenant');
+  const writes=queries.filter(q=>q.sql.startsWith('INSERT INTO _gonvex_replica_entities'));
+  expect(writes.length).toBeLessThan(10);
+  for(const write of writes){
+    expect(write.params.length).toBeLessThanOrEqual(400);
+    expect(write.params.reduce((bytes,value)=>bytes+String(value).length*2,0)).toBeLessThanOrEqual(256*1024);
+  }
+  expect((await storage.loadEntityRows('tenant','tasks',['t250']))[0]!.row).toEqual(tasks.t250);
+});
+
+it("keeps the old snapshot atomic if a later restore batch fails", async () => {
+  const {storage,db}=fixture();
+  await storage.replaceSnapshot({entities:{tasks:{before:{_id:'before',name:'Keep me'}}},liveQueries:{}},'tenant');
+  db.exec(`CREATE TRIGGER fail_restore BEFORE INSERT ON _gonvex_replica_entities WHEN NEW.id='t110' BEGIN SELECT RAISE(ABORT,'restore failure'); END;`);
+  const tasks=Object.fromEntries(Array.from({length:251},(_,i)=>['t'+i,{_id:'t'+i,note:'x'.repeat(3000)}]));
+  await expect(storage.replaceSnapshot({entities:{tasks},liveQueries:{}},'tenant')).rejects.toThrow('restore failure');
+  expect(await storage.loadEntityRows('tenant','tasks',['before','t0','t109'])).toEqual([{id:'before',row:{_id:'before',name:'Keep me'}}]);
 });

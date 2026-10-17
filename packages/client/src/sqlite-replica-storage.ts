@@ -570,15 +570,25 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         scope,
       );
       for (const [entity, rows] of Object.entries(snapshot.entities)) {
-        for (const [id, value] of Object.entries(rows)) {
+        let params: string[] = [], batchCount = 0, textBytes = 0;
+        const flush = async () => {
+          if (!batchCount) return;
+          const values = params, count = batchCount;
+          params = []; batchCount = 0; textBytes = 0;
           await this.database.runAsync(
-            `INSERT INTO _gonvex_replica_entities (scope, entity, id, value) VALUES (?, ?, ?, ?)`,
-            scope,
-            entity,
-            id,
-            JSON.stringify(value),
+            `INSERT INTO _gonvex_replica_entities (scope, entity, id, value) VALUES ${Array.from({ length: count }, () => '(?,?,?,?)').join(',')}`,
+            ...values,
           );
+        };
+        for (const [id, value] of Object.entries(rows)) {
+          const encoded = JSON.stringify(value);
+          const size = 2 * (scope.length + entity.length + id.length + encoded.length);
+          // Bound bridge calls by both parameter count and serialized text.
+          // One indivisible row keeps the existing API's size semantics.
+          if (batchCount && (batchCount >= 100 || textBytes + size > 256 * 1024)) await flush();
+          params.push(scope, entity, id, encoded); batchCount++; textBytes += size;
         }
+        await flush();
       }
       for (const [signature, membership] of Object.entries(
         snapshot.liveQueries,
