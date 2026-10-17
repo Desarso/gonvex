@@ -59,6 +59,9 @@ class UnsupportedPlan extends Error {}
  * in one coherent transaction, check coverage and preflights, and enforce the
  * SQLite/cache/transport budgets separately. replica_rows has normalized
  * (scope,entity,id,value,position) records; value is the canonical JSON row.
+ * Equality relies on canonical JSON.stringify encoding for every stored row and
+ * bound value. Arbitrary SQLite JSON text with alternate number/escape spellings
+ * is not an admissible row encoding. JSON member order remains significant.
  * position preserves first-insertion order for locale-equivalent key ties.
  * id is String(row[the registered entity key]), including numeric entity keys. */
 export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string, JsonValue>, scope: string,
@@ -133,8 +136,8 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
           return `(gv_present(${left}) AND ${member} IN (SELECT gv_str(${right}) FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(e.relation.table)} AND gv_present(${right}) AND ${expression(e.relation.where, related)}))`;
         }
         const right = bind(resolve(e.value));
-        if (e.operator === 'eq') return `(gv_canonical(${left}) IS gv_canonical(${right}))`;
-        if (e.operator === 'neq') return `(gv_canonical(${left}) IS NOT gv_canonical(${right}))`;
+        if (e.operator === 'eq') return `(${left} IS ${right})`;
+        if (e.operator === 'neq') return `(${left} IS NOT ${right})`;
         if (e.operator === 'contains' || e.operator === 'containsInsensitive') return `gv_contains(${left},${right},${e.operator === 'contains' ? 0 : 1})`;
         if (e.operator === 'arrayContains') return `gv_array_contains(${left},${right})`;
         if (e.operator === 'in') return `gv_array_contains(${right},${left})`;
