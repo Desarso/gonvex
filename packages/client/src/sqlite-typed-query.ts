@@ -3,6 +3,8 @@ export type SQLiteBinding = string | number | null;
 export type SQLitePredicate =
   | { field: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte'; value: SQLiteBinding | boolean }
   | { op: 'and' | 'or'; children: readonly SQLitePredicate[] }
+  | { op: 'not'; child: SQLitePredicate }
+  | { op: 'in'; field: string; values: readonly (SQLiteBinding | boolean)[] }
   | { op: 'relation'; field: string; table: string; relatedField: string; where?: SQLitePredicate };
 export type SQLiteOrder = { field: string; direction: 'asc' | 'desc' };
 export type SQLiteKeyset = { values: readonly SQLiteBinding[]; id: string; sequence: number };
@@ -23,7 +25,7 @@ export type SQLiteTypedStatement = { sql: string; bindings: SQLiteBinding[] };
 
 /** Keyset predicates use PostgreSQL's ASC NULLS LAST / DESC NULLS FIRST and
  * an ascending identity tie-break. No OFFSET or WASM-to-JS sort callback. */
-export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan, access: 'trigram' | 'ordered' = 'trigram'): SQLiteTypedStatement {
+export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan, access: 'trigram' | 'ordered' = 'trigram', keysOnly = false): SQLiteTypedStatement {
   const table = Object.hasOwn(schema, plan.table) && schema[plan.table];
   if (!table) throw new TypeError('Unknown SQLite table');
   if (!Number.isSafeInteger(plan.limit) || plan.limit < 1 || plan.limit > 256) throw new RangeError('SQLite page limit must be 1..256');
@@ -45,6 +47,13 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
   const predicate = (entity: string, alias: string, input?: SQLitePredicate): string => {
     if (!input) return '1';
     if (input.op === 'and' || input.op === 'or') return '(' + (input.children.map(child => predicate(entity, alias, child)).join(input.op === 'and' ? ' AND ' : ' OR ') || (input.op === 'and' ? '1' : '0')) + ')';
+    if (input.op === 'not') return `(NOT (${predicate(entity, alias, input.child)}))`;
+    if (input.op === 'in') {
+      if (!Array.isArray(input.values) || input.values.length > 256) throw new RangeError('SQLite IN list exceeds budget');
+      const column = field(entity, alias, input.field), shape = schema[entity]!.fields[input.field]!;
+      if (input.values.some(value => value !== null && (shape.kind === 'json' || typeof value !== (shape.kind === 'number' ? 'number' : shape.kind === 'boolean' ? 'boolean' : 'string')))) throw new TypeError('SQLite IN value differs from field type');
+      return input.values.length ? `${column} IN (${input.values.map(bind).join(',')})` : '0';
+    }
     if (input.op === 'relation') {
       if (!Object.hasOwn(schema, input.table)) throw new TypeError('Unknown related SQLite table');
       const related = 'r' + ++aliasId;
@@ -54,11 +63,12 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
     }
     if (!('field' in input)) throw new TypeError('Unknown SQLite predicate');
     const column = field(entity, alias, input.field);
-    const operators = { eq: 'IS', ne: 'IS NOT', lt: '<', lte: '<=', gt: '>', gte: '>=' };
+    const operators = { eq: '=', ne: '<>', lt: '<', lte: '<=', gt: '>', gte: '>=' };
     if (!Object.hasOwn(operators, input.op)) throw new TypeError('Unknown SQLite comparison');
     const shape = schema[entity]!.fields[input.field]!;
     if (input.value !== null && (shape.kind === 'json' || typeof input.value !== (shape.kind === 'number' ? 'number' : shape.kind === 'boolean' ? 'boolean' : 'string')))
       throw new TypeError('SQLite predicate does not match its declared field type');
+    if (input.value === null && (input.op === 'eq' || input.op === 'ne')) return `${column} IS ${input.op === 'ne' ? 'NOT ' : ''}NULL`;
     return `${column} ${operators[input.op]} ${bind(input.value)}`;
   };
   const where = [`t.scope=${bind(scope)}`, predicate(plan.table, 't', plan.where)];
@@ -73,8 +83,10 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
     // GLOB's bracket quoting preserves literal *, ?, [ without ESCAPE. A
     // selective filter/sort stays outside the FTS subquery and before LIMIT.
     const pattern = '*' + normalized.replace(/[\[\]*?]/g, char => char === '[' ? '[[]' : char === ']' ? '[]]' : '[' + char + ']') + '*';
-    const matches = table.search.map((_, i) => `${access === 'ordered' ? 't.' : ''}${q('s' + i)} GLOB ${bind(pattern)}`).join(' OR ');
-    where.push(access === 'ordered' ? `(${matches})` : `t.rid IN (SELECT rowid FROM ${fn} WHERE ${matches})`);
+    const matches = table.search.map((_, i) => `${access === 'ordered' ? 't.' : ''}${q('s' + i)} GLOB ${bind(pattern)}`);
+    // Separate indexed virtual-table scans. OR across FTS columns can fall
+    // back to scanning every content row instead of the trigram index.
+    where.push(access === 'ordered' ? `(${matches.join(' OR ')})` : `t.rid IN (${matches.map(match => `SELECT rowid FROM ${fn} WHERE ${match}`).join(' UNION ')})`);
   }
   const orderColumns = plan.order.map(order => field(plan.table, 't', order.field));
   if (plan.after) {
@@ -96,5 +108,12 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
     const path = ('$.' + JSON.stringify(name)).replaceAll("'", "''");
     return `,${field(plan.table, 't', name)} AS ${q('p' + i)},json_type(t.body,'${path}') AS ${q('h' + i)}`;
   }).join('') : ',t.body';
-  return { sql: `SELECT t.id,t.version${selected}${orderColumns.map((column, i) => `,${column} AS ${q('k' + i)}`).join('')} FROM ${q(sqliteTableName(plan.table))} t WHERE ${where.map(term => '(' + term + ')').join(' AND ')} ORDER BY ${ordering.join(',')},${field(plan.table, 't', table.key)} ASC LIMIT ${bind(plan.limit)}`, bindings };
+  return { sql: `SELECT ${keysOnly ? 't.rid,t.id' : `t.id,t.version${selected}${orderColumns.map((column, i) => `,${column} AS ${q('k' + i)}`).join('')}`} FROM ${q(sqliteTableName(plan.table))} t WHERE ${where.map(term => '(' + term + ')').join(' AND ')} ORDER BY ${ordering.join(',')},${field(plan.table, 't', table.key)} ASC${keysOnly ? '' : ` LIMIT ${bind(plan.limit)}`}`, bindings };
+}
+
+/** Native-only view construction. Its unbounded SELECT must only be consumed
+ * by INSERT...SELECT in the owner connection, never by a JS row reader. */
+export function compileSQLiteTypedView(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan): SQLiteTypedStatement {
+  if (plan.after) throw new TypeError('Position views do not accept a keyset');
+  return compileSQLiteTypedPage(schema, scope, plan, 'ordered', true);
 }

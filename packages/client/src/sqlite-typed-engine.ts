@@ -1,12 +1,13 @@
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import { compileSQLiteTypedSchema, sqliteIdentifier as q, sqliteTableName, sqliteFieldName, sqliteSearchName, sqliteCountName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
-import { compileSQLiteTypedPage, type SQLitePagePlan, type SQLiteKeyset } from './sqlite-typed-query.js';
+import { compileSQLiteTypedPage, compileSQLiteTypedView, type SQLitePagePlan, type SQLiteKeyset } from './sqlite-typed-query.js';
 
 export class SQLiteReplicaEngineError extends Error {
   constructor(readonly code: 'FENCED' | 'SCHEMA_MISMATCH' | 'BUDGET' | 'INTENT_CONFLICT' | 'INVALID_ROW' | 'PAGE_CHANGED', message: string) { super(message); this.name = 'SQLiteReplicaEngineError'; }
 }
 export type SQLiteTypedWrite = { table: string; id: string; version: number; row: Record<string, unknown> | null };
 export type SQLiteTypedPage = { rows: Record<string, unknown>[]; cursor: SQLiteKeyset | null; bytes: number; sequence: number };
+export type SQLiteTypedViewPage = { rows: Record<string, unknown>[]; sequence: number; bytes: number; offset: number; total: number; nextOffset: number | null };
 export type SQLiteBootstrapState = { token: string; nextPage: number; rows: number; root: string; complete: boolean };
 type SQLiteBootstrapRecord = { scope: string; token: string; physical: string; next_page: number; rows: number; root: string; base_sequence: number; complete: number };
 function bootstrapState(row: SQLiteBootstrapRecord): SQLiteBootstrapState { return { token: row.token, nextPage: row.next_page, rows: row.rows, root: row.root, complete: !!row.complete }; }
@@ -103,6 +104,9 @@ CREATE TABLE IF NOT EXISTS gv_tombstones(scope TEXT NOT NULL, entity TEXT NOT NU
 CREATE TABLE IF NOT EXISTS gv_intent_receipts(scope TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(scope,id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, sequence INTEGER NOT NULL, PRIMARY KEY(scope,id)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);
+CREATE TABLE IF NOT EXISTS gv_views(scope TEXT NOT NULL,signature TEXT NOT NULL,plan TEXT NOT NULL,sequence INTEGER NOT NULL,n INTEGER NOT NULL,touched INTEGER NOT NULL,PRIMARY KEY(scope,signature)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS gv_views_recency ON gv_views(touched);
+CREATE TABLE IF NOT EXISTS gv_view_members(scope TEXT NOT NULL,signature TEXT NOT NULL,position INTEGER NOT NULL,rid INTEGER NOT NULL,PRIMARY KEY(scope,signature,position)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_scope_alias(scope TEXT PRIMARY KEY,physical TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_bootstrap(scope TEXT PRIMARY KEY,token TEXT UNIQUE NOT NULL,physical TEXT NOT NULL,next_page INTEGER NOT NULL,rows INTEGER NOT NULL,root TEXT NOT NULL,base_sequence INTEGER NOT NULL,complete INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(token,page)) WITHOUT ROWID;`);
@@ -171,6 +175,39 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
       const tail = ` ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`;
       await this.db.runAsync(head + selects.join(' UNION ALL ') + tail, ...bindings);
       offset = end;
+    }
+  }
+  /** Bulk first-sync frames enter SQLite as one JSON value, rather than one
+   * binding and repeated SELECT text per field per row. JSONB parsing and typed
+   * column extraction stay native. Search normalization still uses the same JS
+   * Unicode lowercase contract once at ingress, never during a query or sort. */
+  private async writeBootstrapFrame(scope: string, writes: readonly SQLiteTypedWrite[]): Promise<void> {
+    if (writes.some(write => write.row === null)) return this.writeBatch(scope, writes);
+    const entities = new Set<string>();
+    for (const write of writes) { this.validateWrite(write); entities.add(write.table); }
+    // Re-encode the admitted graph once. JSON duplicate-key semantics must be
+    // JSON.parse's last-key-wins semantics, not SQLite's first-key lookup.
+    const encoded = JSON.stringify(writes);
+    for (const entity of entities) {
+      const table = this.schema[entity]!, tn = q(sqliteTableName(entity));
+      const fields = Object.entries(table.fields);
+      const columns = ['scope', 'id', 'body', 'version', ...fields.map(([name]) => sqliteFieldName(name)), ...(table.search ?? []).map((_, i) => 's' + i)];
+      const path = (name: string) => "'" + ('$.' + JSON.stringify(name)).replaceAll("'", "''") + "'";
+      const values = fields.map(([name, shape]) => {
+        const extract = `json_extract(row,${path(name)})`;
+        return shape.kind === 'json' ? `CASE WHEN json_type(row,${path(name)}) IS NULL OR json_type(row,${path(name)})='null' THEN NULL ELSE json_quote(${extract}) END` : extract;
+      });
+      const normalized = JSON.stringify(writes.map(write => write.table === entity
+        ? (table.search ?? []).map(name => String(write.row![name] ?? '').toLowerCase()) : []));
+      await this.db.runAsync(`WITH input AS MATERIALIZED (
+        SELECT CAST(key AS INTEGER) pos,jsonb_extract(value,'$.row') row,
+          json_extract(value,'$.id') id,json_extract(value,'$.version') version
+        FROM json_each(jsonb(?)) WHERE json_extract(value,'$.table')=?
+      ) INSERT INTO ${tn}(${columns.map(q).join(',')})
+      SELECT ?,id,json(row),version,${values.concat((table.search ?? []).map((_, i) => `json_extract(?, '$[' || pos || '][${i}]')`)).join(',')}
+      FROM input WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND gv_tombstones.id=input.id AND gv_tombstones.version>=input.version)
+      ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`,
+      encoded, entity, scope, ...(table.search ?? []).map(() => normalized), scope, entity);
     }
   }
   /** A durable delivery uses the same immutable ID on every retry. The receipt
@@ -272,7 +309,7 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
       const ids = groups.get(write.table) ?? []; ids.push(write.id); groups.set(write.table, ids);
     }
     for (const [entity, ids] of groups) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? AND id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, old.physical, ...ids)) fail('INVALID_ROW', 'Duplicate bootstrap row');
-    await this.writeBatch(old.physical, admitted);
+    await this.writeBootstrapFrame(old.physical, admitted);
     const root = await sha256(old.root + hash), rows = old.rows + admitted.length;
     await this.db.runAsync('INSERT INTO gv_bootstrap_pages VALUES(?,?,?)', token, page, hash);
     await this.db.runAsync('UPDATE gv_bootstrap SET next_page=?,rows=?,root=? WHERE scope=? AND token=?', page + 1, rows, root, scope, token);
@@ -354,7 +391,7 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
             admitted = JSON.parse(JSON.stringify(page)) as SQLiteTypedWrite[];
           }
           if (!Array.isArray(admitted) || admitted.length > 512) fail('BUDGET', 'SQLite import page exceeds row budget');
-          await this.writeBatch(physical, admitted);
+          await this.writeBootstrapFrame(physical, admitted);
           rows += admitted.length;
           if (!Number.isSafeInteger(rows)) fail('BUDGET', 'SQLite import row count exhausted');
           // Promise-only ingestion monopolizes a worker task, withholding both
@@ -405,7 +442,7 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
           const table = this.schema[admitted.table]!;
           const pattern = '*' + admitted.search.toLowerCase().replace(/[\[\]*?]/g, char => char === '[' ? '[[]' : char === ']' ? '[]]' : '[' + char + ']') + '*';
           const candidates = Array.from(admitted.search).length < 3 ? 1025 : (await this.db.getFirstAsync<{ n: number }>(
-            `SELECT count(*) n FROM (SELECT rowid FROM ${q(sqliteSearchName(admitted.table))} WHERE ${(table.search ?? []).map((_, i) => `${q('s' + i)} GLOB ?`).join(' OR ')} LIMIT 1025)`,
+            `SELECT count(*) n FROM (${(table.search ?? []).map((_, i) => `SELECT rowid FROM (SELECT rowid FROM ${q(sqliteSearchName(admitted.table))} WHERE ${q('s' + i)} GLOB ? LIMIT 1025)`).join(' UNION ')} LIMIT 1025)`,
             ...(table.search ?? []).map(() => pattern)))!.n;
           if (candidates > 1024) { access = 'ordered'; selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access); }
         }
@@ -435,6 +472,64 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
           cursor: last ? { id: String(last.id), sequence, values: admitted.order.map((_, i) => last['k' + i] as string | number | null) } : null };
       });
       return result;
+    });
+  }
+  /** Membership/order lives on disk, including deep scroll positions. Header
+   * count is obtained natively. A canonical commit invalidates the view by its
+   * sequence and the next read rebuilds it in the same FIFO transaction. */
+  viewPage(scope: string, signature: string, plan: SQLitePagePlan, offset = 0): Promise<SQLiteTypedViewPage> {
+    const charge = sqlitePayloadBytes({ scope, signature, plan, offset }, 16384);
+    if (!signature || signature.length > 256 || !Number.isSafeInteger(offset) || offset < 0) throw new TypeError('Invalid SQLite view position');
+    const admitted = JSON.parse(JSON.stringify(plan)) as SQLitePagePlan;
+    compileSQLiteTypedView(this.schema, scope, admitted);
+    const encoded = JSON.stringify(admitted);
+    return this.enqueue(charge, async () => {
+      let result!: SQLiteTypedViewPage;
+      await this.db.withTransactionAsync(async () => {
+        const sequence = await this.fence(), physical = await this.physicalScope(scope);
+        let header = await this.db.getFirstAsync<{ plan: string; sequence: number; n: number }>('SELECT plan,sequence,n FROM gv_views WHERE scope=? AND signature=?', scope, signature);
+        if (!header || header.plan !== encoded || header.sequence !== sequence) {
+          await this.db.runAsync('DELETE FROM gv_view_members WHERE scope=? AND signature=?', scope, signature);
+          const statement = compileSQLiteTypedView(this.schema, physical, admitted);
+          await this.db.runAsync(`INSERT INTO gv_view_members SELECT ?,?,row_number() OVER ()-1,rid FROM (${statement.sql})`, scope, signature, ...statement.bindings);
+          const n = (await this.db.getFirstAsync<{ n: number }>('SELECT count(*) n FROM gv_view_members WHERE scope=? AND signature=?', scope, signature))!.n;
+          await this.db.runAsync('INSERT INTO gv_views VALUES(?,?,?,?,?,?) ON CONFLICT(scope,signature) DO UPDATE SET plan=excluded.plan,sequence=excluded.sequence,n=excluded.n,touched=excluded.touched', scope, signature, encoded, sequence, n, Date.now());
+          header = { plan: encoded, sequence, n };
+          // A global disk-header cap also bounds retained plans across scopes.
+          // Evict one exact view, never scan or decode its member IDs in JS.
+          const count = (await this.db.getFirstAsync<{ n: number }>('SELECT count(*) n FROM gv_views'))!.n;
+          if (count > 32) {
+            const oldest = await this.db.getFirstAsync<{ scope: string; signature: string }>('SELECT scope,signature FROM gv_views WHERE scope<>? OR signature<>? ORDER BY touched,scope,signature LIMIT 1', scope, signature);
+            if (oldest) {
+              await this.db.runAsync('DELETE FROM gv_view_members WHERE scope=? AND signature=?', oldest.scope, oldest.signature);
+              await this.db.runAsync('DELETE FROM gv_views WHERE scope=? AND signature=?', oldest.scope, oldest.signature);
+            }
+          }
+        } else await this.db.runAsync('UPDATE gv_views SET touched=? WHERE scope=? AND signature=?', Date.now(), scope, signature);
+        const table = this.schema[admitted.table]!;
+        const fields = admitted.select ? [...new Set([table.key, ...admitted.select])] : undefined;
+        const selected = fields ? fields.map((name, i) => {
+          const path = ('$.' + JSON.stringify(name)).replaceAll("'", "''");
+          return `t.${q(sqliteFieldName(name))} AS ${q('p' + i)},json_type(t.body,'${path}') AS ${q('h' + i)}`;
+        }).join(',') : 't.body';
+        let records: Record<string, unknown>[], bytes: number, limit = admitted.limit;
+        for (;;) {
+          try {
+            records = await this.db.getAllAsync<Record<string, unknown>>(`SELECT ${selected} FROM gv_view_members m JOIN ${q(sqliteTableName(admitted.table))} t ON t.scope=? AND t.rid=m.rid
+              WHERE m.scope=? AND m.signature=? AND m.position>=? AND m.position<? ORDER BY m.position`, physical, scope, signature, offset, offset + limit);
+            bytes = sqlitePayloadBytes(records, this.limits.pageBytes); break;
+          } catch (error) {
+            if (!pageBudgetError(error) || limit === 1) throw error;
+            limit = Math.max(1, Math.floor(limit / 2));
+          }
+        }
+        const rows = records.map(record => !fields ? JSON.parse(String(record.body)) : Object.fromEntries(fields.flatMap((name, i) => {
+          if (record['h' + i] === null) return [];
+          const value = record['p' + i], kind = table.fields[name]!.kind;
+          return [[name, value === null ? null : kind === 'json' ? JSON.parse(String(value)) : kind === 'boolean' ? Boolean(value) : value]];
+        })));
+        result = { rows, sequence, bytes, offset, total: header.n, nextOffset: offset + rows.length < header.n ? offset + rows.length : null };
+      }); return result;
     });
   }
   count(scope: string, entity: string, group: number, values: readonly (string | number | boolean | null)[]): Promise<number> {

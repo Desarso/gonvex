@@ -8,7 +8,7 @@ import type { SQLitePagePlan } from './sqlite-typed-query.js';
 let host: OfficialSQLiteHost | undefined, engine: SQLiteTypedReplicaEngine | undefined;
 let lane = Promise.resolve(), operations = 0, bytes = 0;
 const ports = new Map<string, { port: MessagePort; seen: number; token: string }>();
-const publicOperations = new Set(['page', 'count', 'apply', 'outbox', 'acknowledge', 'ping', 'stats', 'integrity']);
+const publicOperations = new Set(['page', 'viewPage', 'count', 'apply', 'outbox', 'acknowledge', 'ping', 'stats', 'integrity']);
 setInterval(() => {
   for (const [id, peer] of ports) if (Date.now() - peer.seen > 30000) { peer.port.close(); ports.delete(id); }
 }, 5000);
@@ -38,6 +38,7 @@ async function execute(op: string, args: any) {
     case 'stats': return { ...engine.stats(), wasmBytes: host.memoryBytes(), clients: ports.size };
     case 'integrity': return engine.integrity();
     case 'page': return engine.page(scope(args.scope), args.plan as SQLitePagePlan);
+    case 'viewPage': return engine.viewPage(scope(args.scope), args.signature, args.plan as SQLitePagePlan, args.offset);
     case 'count': return engine.count(scope(args.scope), args.entity, args.group, args.values);
     case 'apply': {
       if (!args.intent || typeof args.intent.id !== 'string') throw new TypeError('Broker writes require an immutable durable intent ID');

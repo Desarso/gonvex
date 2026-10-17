@@ -57,3 +57,15 @@ it('imports encoded frames with deferred FTS using the pinned official WASM', as
   await engine.importScope('fresh', (async function* () { yield JSON.stringify([{ table: 'records', id: 'r', version: 1, row: { _id: 'r', title: '東京 café', rank: 1 } }]); })());
   expect((await engine.page('fresh', { table: 'records', search: 'café', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows).toHaveLength(1);
 });
+it('serves arbitrary native view positions under the official WASM result byte cap', async () => {
+  const { host } = fixture({ maxRows: 4, maxBytes: 2048 });
+  const schema = { records: { key: '_id', fields: { _id: { kind: 'text' }, rank: { kind: 'number' }, payload: { kind: 'text' } }, indexes: [{ columns: ['rank'] }] } } as const;
+  const engine = new SQLiteTypedReplicaEngine(host.database, schema); await engine.open('owner');
+  await engine.importScope('s', (async function* () {
+    for (let i = 0; i < 100; i += 10) yield JSON.stringify(Array.from({ length: 10 }, (_, n) => ({ table: 'records', id: String(i + n), version: 1, row: { _id: String(i + n), rank: i + n, payload: 'x'.repeat(200) } })));
+  })());
+  const page = await engine.viewPage('s', 'grid', { table: 'records', order: [{ field: 'rank', direction: 'asc' }], limit: 32 }, 90);
+  expect(page.total).toBe(100); expect(page.rows.length).toBeGreaterThan(0); expect(page.rows.length).toBeLessThanOrEqual(4);
+  expect(page.rows[0]!.rank).toBe(90); expect(page.nextOffset).toBe(90 + page.rows.length);
+  expect(await host.database.getFirstAsync('PRAGMA integrity_check')).toEqual({ integrity_check: 'ok' });
+});

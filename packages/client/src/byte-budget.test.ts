@@ -29,3 +29,12 @@ it('rejects a duplicate ledger and releases resources once even when cleanup thr
   cache.put('one', new Uint8Array(20), 64); cache.close(); cache.close();
   expect(releases).toBe(1); expect(ledger.bytes).toBe(0); expect(() => cache.put('two', new Uint8Array(1), 20)).toThrow('closed');
 });
+it('reserves cache ceilings under one global budget and releases the reservation on close', () => {
+  const ledger = new ByteLedger(100);
+  const pages = new BoundedByteCache('pages', 70, 10, ledger);
+  const details = new BoundedByteCache('details', 30, 10, ledger);
+  expect(() => new BoundedByteCache('labels', 1, 1, ledger)).toThrow('global');
+  pages.put('one', 'one', 70); details.put('one', 'one', 30); expect(ledger.bytes).toBe(100);
+  details.close(); const labels = new BoundedByteCache('labels', 30, 10, ledger);
+  labels.put('label', 'label', 30); expect(ledger.bytes).toBe(100);
+});

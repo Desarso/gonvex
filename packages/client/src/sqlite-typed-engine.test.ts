@@ -263,3 +263,57 @@ it('replays wide outbox entries in smaller causal pages instead of stalling on t
   }
   expect(ids).toEqual(Array.from({ length: 32 }, (_, i) => 'intent-' + i));
 });
+it('uses independently indexed FTS columns and deduplicates rows matching both', async () => {
+  const { host } = fixture();
+  const multiple: SQLiteTypedSchema = { ...schema, tasks: { ...schema.tasks!, fields: { ...schema.tasks!.fields, description: { kind: 'text' } }, search: ['name', 'description'] } };
+  const engine = new SQLiteTypedReplicaEngine(host, multiple); await engine.open('owner');
+  await engine.apply('s', [
+    { ...write('a', 1, 'needle title'), row: { ...write('a', 1, 'needle title').row, description: 'needle detail' } },
+    { ...write('b', 2, 'other'), row: { ...write('b', 2, 'other').row, description: 'needle detail' } },
+  ]);
+  const statement = compileSQLiteTypedPage(multiple, 's', { ...plan, search: 'needle' });
+  expect(statement.sql).toContain(' UNION ');
+  expect((await engine.page('s', { ...plan, search: 'needle' })).rows.map(row => row._id)).toEqual(['a', 'b']);
+});
+
+it('keeps deep view membership on disk and rebuilds atomically after canonical changes', async () => {
+  const { engine, db, host } = fixture(); await engine.open('owner');
+  await engine.importScope('s', (async function* () {
+    for (let i = 0; i < 3000; i += 100) yield Array.from({ length: 100 }, (_, n) => write(String(i + n).padStart(5, '0'), i + n));
+  })());
+  const statements: string[] = [], read = host.getAllAsync.bind(host);
+  host.getAllAsync = async <T>(sql: string, ...values: unknown[]) => { statements.push(sql); return read<T>(sql, ...values); };
+  const view = { ...plan, select: ['due'], limit: 20 };
+  const last = await engine.viewPage('s', 'grid', view, 2980);
+  expect(last.total).toBe(3000); expect(last.nextOffset).toBeNull();
+  expect(last.rows.map(row => row.due)).toEqual(Array.from({ length: 20 }, (_, n) => 2980 + n));
+  expect(statements.every(sql => !/SELECT.*FROM gv_view_members(?! m JOIN)/.test(sql))).toBe(true);
+  expect(statements.join(' ')).not.toMatch(/OFFSET/);
+  expect(db.prepare('SELECT count(*) n FROM gv_view_members').get()!.n).toBe(3000);
+  // The existing persisted header and order can be reused by the next owner.
+  const next = new SQLiteTypedReplicaEngine(host, schema); await next.open('next');
+  expect((await next.viewPage('s', 'grid', view, 1234)).rows[0]!.due).toBe(1234);
+  await next.apply('s', [{ ...write('02999', -1), version: 2 }]);
+  expect((await next.viewPage('s', 'grid', view, 0)).rows[0]!.due).toBe(-1);
+  expect((await next.viewPage('other', 'grid', view)).total).toBe(0);
+  expect(() => next.viewPage('s', 'grid', { ...view, order: [{ field: 'missing', direction: 'asc' }] })).toThrow();
+  expect((await next.viewPage('s', 'grid', view)).total).toBe(3000);
+});
+
+it('bounds retained view plans and evicts their native membership together', async () => {
+  const { engine, db } = fixture(); await engine.open('owner'); await engine.apply('s', [write('a', 1)]);
+  for (let i = 0; i < 40; i++) await engine.viewPage('s', 'view-' + i, plan);
+  expect(db.prepare('SELECT count(*) n FROM gv_views').get()!.n).toBe(32);
+  expect(db.prepare('SELECT count(*) n FROM gv_view_members').get()!.n).toBe(32);
+  expect(db.prepare('SELECT count(*) n FROM gv_view_members m LEFT JOIN gv_views v USING(scope,signature) WHERE v.signature IS NULL').get()!.n).toBe(0);
+});
+
+it('preserves JSON scalar types, duplicate-key semantics and Unicode in native bootstrap extraction', async () => {
+  const { engine } = fixture(); await engine.open('owner');
+  const encoded = '[{"table":"tasks","id":"a","version":1,"row":{"_id":"a","name":"ignored","name":"İ CAFÉ 東京","due":2,"done":true,"data":"plain"}},' +
+    '{"table":"tasks","id":"b","version":1,"row":{"_id":"b","due":3,"data":[1,null,{"x":false}]}}]';
+  await engine.importScope('s', (async function* () { yield encoded; })());
+  const result = await engine.page('s', { ...plan, select: ['name', 'data', 'done'] });
+  expect(result.rows).toEqual([{ _id: 'a', name: 'İ CAFÉ 東京', data: 'plain', done: true }, { _id: 'b', data: [1, null, { x: false }] }]);
+  expect((await engine.page('s', { ...plan, search: 'i\u0307 café' })).rows).toHaveLength(1);
+});
