@@ -21,8 +21,8 @@ const q = sqliteIdentifier;
 export function validateSQLiteTypedSchema(schema: SQLiteTypedSchema): void {
   if (!Object.keys(schema).length) throw new TypeError('SQLite schema must declare a table');
   for (const [entity, table] of Object.entries(schema)) {
-    if (!entity || !Object.hasOwn(table.fields, table.key) || table.fields[table.key]!.kind !== 'text')
-      throw new TypeError('SQLite replica tables require a declared text identity');
+    if (!entity || !Object.hasOwn(table.fields, table.key) || !['text', 'number'].includes(table.fields[table.key]!.kind))
+      throw new TypeError('SQLite replica tables require a declared scalar identity');
     for (const [field, shape] of Object.entries(table.fields)) {
       if (!field || !['text', 'number', 'boolean', 'json'].includes(shape.kind)) throw new TypeError('Invalid SQLite field');
     }
@@ -45,8 +45,8 @@ export function compileSQLiteTypedSchema(schema: SQLiteTypedSchema): { tables: s
     const name = sqliteTableName(entity), tn = q(name);
     const fields = Object.entries(table.fields).map(([field, shape]) =>
       `${q(sqliteFieldName(field))} ${shape.kind === 'number' ? 'REAL' : shape.kind === 'boolean' ? 'INTEGER' : 'TEXT'}`);
-    tables.push(`CREATE TABLE IF NOT EXISTS ${tn}(rid INTEGER PRIMARY KEY, scope TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, version INTEGER NOT NULL, ${fields.join(',')}, UNIQUE(scope,id));`);
-    table.indexes.forEach((index, i) => indexes.push(`CREATE INDEX IF NOT EXISTS ${q(name + '_i_' + i)} ON ${tn}(scope,${index.columns.map(field => q(sqliteFieldName(field))).join(',')},id);`));
+    tables.push(`CREATE TABLE IF NOT EXISTS ${tn}(rid INTEGER PRIMARY KEY, scope TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, version INTEGER NOT NULL, ${fields.concat((table.search ?? []).map((_, i) => q('s' + i) + ' TEXT')).join(',')}, UNIQUE(scope,id));`);
+    table.indexes.forEach((index, i) => indexes.push(`CREATE INDEX IF NOT EXISTS ${q(name + '_i_' + i)} ON ${tn}(scope,${[...new Set([...index.columns, table.key])].map(field => q(sqliteFieldName(field))).join(',')});`));
     (table.counts ?? []).forEach((group, i) => {
       const cn = q(sqliteCountName(entity, i));
       const key = (prefix: string) => `json_array(${group.columns.map(field => `${prefix}.${q(sqliteFieldName(field))}`).join(',')})`;

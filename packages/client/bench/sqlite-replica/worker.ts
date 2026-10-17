@@ -1,0 +1,30 @@
+import { openOfficialSQLiteHost } from '../../src/sqlite-official-host.js';
+import { SQLiteTypedReplicaEngine } from '../../src/sqlite-typed-engine.js';
+let host: Awaited<ReturnType<typeof openOfficialSQLiteHost>>;
+let engine: SQLiteTypedReplicaEngine;
+const schema = { tasks: { key: '_id', fields: { _id: { kind: 'text' }, name: { kind: 'text' }, workspace: { kind: 'text' }, due: { kind: 'number' }, version: { kind: 'number' }, description: { kind: 'text' } }, indexes: [{ columns: ['workspace', 'due'] }, { columns: ['due'] }, { columns: ['name'] }], search: ['name', 'description'], counts: [{ columns: ['workspace'] }] } } as const;
+const handlers = {
+  async open() { host = await openOfficialSQLiteHost(); engine = new SQLiteTypedReplicaEngine(host.database, schema); const epoch = await engine.open('browser-proof'); return { epoch, memoryBytes: host.memoryBytes() }; },
+  async seed({ start = 0, count = 1000 }) {
+    const begin = performance.now();
+    for (let offset = start; offset < start + count; offset += 50) {
+      const writes = Array.from({ length: Math.min(50, start + count - offset) }, (_, index) => { const id = offset + index;
+        return { table: 'tasks', id: String(id), version: 1, row: { _id: String(id), name: `Task ${String(id).padStart(8, '0')} café 東京`, workspace: String(id % 10), due: id % 365, version: 1, description: 'Synthetic maintenance procedure. '.repeat(15) + (id % 997 === 0 ? 'rare-needle 🔧' : '') } }; });
+      await engine.apply('test-scope', writes);
+    }
+    return { count, ms: performance.now() - begin, memoryBytes: host.memoryBytes() };
+  },
+  async page(args) { const begin = performance.now(); const result = await engine.page('test-scope', { table: 'tasks', order: [{ field: 'due', direction: 'asc' }], limit: 50, select: ['name', 'due', 'workspace'], ...args }); return { ...result, ms: performance.now() - begin }; },
+  async count() { return engine.count('test-scope', 'tasks', 0, ['3']); },
+  async dirty() {
+    await host.database.execAsync("CREATE TABLE IF NOT EXISTS crash_probe(id INTEGER PRIMARY KEY,value BLOB); BEGIN IMMEDIATE; INSERT INTO crash_probe VALUES(1,zeroblob(4194304));");
+    return { dirty: true };
+  },
+  async check() { return { integrity: await host.database.getFirstAsync('PRAGMA integrity_check'), probe: await host.database.getFirstAsync('SELECT count(*) n FROM crash_probe'), count: await engine.count('test-scope', 'tasks', 0, ['3']) }; },
+  async close() { host.close(); return true; },
+};
+let lane = Promise.resolve();
+globalThis.onmessage = ({ data: { id, op, args } }) => { lane = lane.then(async () => {
+  try { const result = await handlers[op](args ?? {}); globalThis.postMessage({ id, result }); }
+  catch (error) { globalThis.postMessage({ id, error: { name: error.name, message: error.message, code: error.code } }); }
+}); };

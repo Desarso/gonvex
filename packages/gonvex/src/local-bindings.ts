@@ -1,3 +1,4 @@
+import { sqliteBindings } from "./sqlite-bindings.js";
 import { nativeLocalBindings } from "./native-local-bindings.js";
 import { rolldown } from "rolldown";
 import { createHash } from "node:crypto";
@@ -26,7 +27,7 @@ export async function projectLocalSchema(root: string): Promise<LocalSchema> {
 
 export async function localBindings(root: string, manifest: Manifest): Promise<Record<string, string>> {
   const reducers = Object.entries(manifest.functions).filter(([, entry]) => entry.localExecution === 1);
-  if (!reducers.length) return {};
+  if (!reducers.length) return Object.values(manifest.functions).some(entry => entry.replica) ? sqliteBindings(await projectLocalSchema(root), manifest) : {};
   const schema = await projectLocalSchema(root);
   const generatedDirectory = join(root, "gonvex", "_generated");
   const imports = reducers.map(([, entry], index) => {
@@ -86,6 +87,7 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
   });
   return {
     ...native,
+    ...sqliteBindings(schema, manifest),
     "local-schema.ts": `${header}export const localSchema = ${JSON.stringify(schema)} as const;\n`,
     ...Object.fromEntries(Object.entries(webChunks).map(([name, code]) => [name, header + code])),
     "local-reducers.d.ts": `${header}import type { ReducerDefinition } from "@gonvex/module-sdk";\nexport declare const localReducers: Readonly<Record<string, () => Promise<ReducerDefinition<any, any>>>>;\n`,

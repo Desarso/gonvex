@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./sqlite": {
+      "types": "./dist/sqlite.d.ts",
+      "default": "./dist/sqlite.js"
     }
   },
   "types": "./dist/index.d.ts",
@@ -22,10 +26,11 @@
     "bench:sync-engine:check": "node --test bench/sync-engine/statistics.checks.mjs"
   },
   "dependencies": {
-    "@gonvex/protocol": "workspace:*",
-    "dexie": "^4.4.4",
     "@gonvex/local-runtime": "workspace:*",
-    "@gonvex/module-sdk": "workspace:*"
+    "@gonvex/module-sdk": "workspace:*",
+    "@gonvex/protocol": "workspace:*",
+    "@sqlite.org/sqlite-wasm": "3.53.4-build2",
+    "dexie": "^4.4.4"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.4",

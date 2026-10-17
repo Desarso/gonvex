@@ -7,7 +7,7 @@ export class SQLiteReplicaEngineError extends Error {
 }
 export type SQLiteTypedWrite = { table: string; id: string; version: number; row: Record<string, unknown> | null };
 export type SQLiteTypedPage = { rows: Record<string, unknown>[]; cursor: SQLiteKeyset | null; bytes: number; sequence: number };
-const fail = (code: SQLiteReplicaEngineError['code'], message: string): never => { throw new SQLiteReplicaEngineError(code, message); };
+function fail(code: SQLiteReplicaEngineError['code'], message: string): never { throw new SQLiteReplicaEngineError(code, message); }
 
 /** Conservative JS admission accounting before JSON serialization or cloning.
  * Only own plain JSON data is accepted, with bounded depth and property count. */
@@ -23,6 +23,7 @@ export function sqlitePayloadBytes(value: unknown, maxBytes: number): number {
       if (typeof current !== 'object' || !Array.isArray(current) && Object.getPrototypeOf(current) !== Object.prototype && Object.getPrototypeOf(current) !== null)
         fail('INVALID_ROW', 'SQLite payload must be plain JSON data');
       const object = current as object;
+      if (Array.isArray(object) && (object.length > 100_000 || object.length * 16 > maxBytes || Object.keys(object).length !== object.length)) fail('BUDGET', 'SQLite arrays must be dense and fit the byte budget');
       if (stack.has(object)) fail('INVALID_ROW', 'Cyclic SQLite payload');
       stack.add(object);
       for (const key of Object.keys(object)) {
@@ -30,7 +31,7 @@ export function sqlitePayloadBytes(value: unknown, maxBytes: number): number {
         if (bytes > maxBytes) fail('BUDGET', 'SQLite payload byte budget exceeded');
         const descriptor = Object.getOwnPropertyDescriptor(object, key)!;
         if (!('value' in descriptor)) fail('INVALID_ROW', 'SQLite payload accessor rejected');
-        visit(descriptor.value, depth + 1);
+        if (descriptor.value !== undefined || Array.isArray(object)) visit(descriptor.value, depth + 1);
       }
       stack.delete(object);
     }
@@ -105,7 +106,7 @@ CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payl
       return;
     }
     await this.db.runAsync('DELETE FROM gv_tombstones WHERE scope=? AND entity=? AND id=?', scope, input.table, input.id);
-    if (input.row[table.key] !== input.id) fail('INVALID_ROW', 'SQLite row key does not match its identity');
+    if (input.row[table.key] == null || String(input.row[table.key]) !== input.id) fail('INVALID_ROW', 'SQLite row key does not match its identity');
     const fields = Object.entries(table.fields), values: unknown[] = [];
     for (const [field, shape] of fields) {
       const value = input.row[field];
@@ -114,15 +115,16 @@ CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payl
         fail('INVALID_ROW', 'SQLite field type differs from the generated schema');
       values.push(shape.kind === 'json' ? JSON.stringify(value) : shape.kind === 'boolean' ? Number(value) : value);
     }
-    const columns = ['scope', 'id', 'body', 'version', ...fields.map(([field]) => sqliteFieldName(field))];
+    const searchValues = (table.search ?? []).map(field => String(input.row![field] ?? '').toLowerCase());
+    const columns = ['scope', 'id', 'body', 'version', ...fields.map(([field]) => sqliteFieldName(field)), ...(table.search ?? []).map((_, i) => 's' + i)];
     await this.db.runAsync(`INSERT INTO ${tn}(${columns.map(q).join(',')}) VALUES(${columns.map(() => '?').join(',')}) ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')}`,
-      scope, input.id, JSON.stringify(input.row), input.version, ...values);
+      scope, input.id, JSON.stringify(input.row), input.version, ...values, ...searchValues);
     if (table.search?.length) {
       const fn = q(sqliteSearchName(input.table));
       const row = await this.db.getFirstAsync<{ rid: number }>(`SELECT rid FROM ${tn} WHERE scope=? AND id=?`, scope, input.id);
       await this.db.runAsync(`DELETE FROM ${fn} WHERE rowid=?`, row!.rid);
       await this.db.runAsync(`INSERT INTO ${fn}(rowid,${table.search.map((_, i) => q('s' + i)).join(',')}) VALUES(${table.search.map(() => '?').concat('?').join(',')})`,
-        row!.rid, ...table.search.map(field => String(input.row![field] ?? '').toLowerCase()));
+        row!.rid, ...searchValues);
     }
   }
   /** A durable delivery uses the same immutable ID on every retry. The receipt
@@ -163,11 +165,32 @@ CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payl
       let result!: SQLiteTypedPage;
       await this.db.withTransactionAsync(async () => {
         const sequence = await this.fence();
+        let selectedStatement = statement;
+        if (admitted.search) {
+          // Inspect at most 1025 matching rowids. A common term uses the native
+          // sort/filter index and stops at the requested page, avoiding a huge
+          // FTS candidate materialization followed by a global sort.
+          const table = this.schema[admitted.table]!;
+          const pattern = '*' + admitted.search.toLowerCase().replace(/[\[\]*?]/g, char => char === '[' ? '[[]' : char === ']' ? '[]]' : '[' + char + ']') + '*';
+          const candidates = Array.from(admitted.search).length < 3 ? 1025 : (await this.db.getFirstAsync<{ n: number }>(
+            `SELECT count(*) n FROM (SELECT rowid FROM ${q(sqliteSearchName(admitted.table))} WHERE ${(table.search ?? []).map((_, i) => `${q('s' + i)} GLOB ?`).join(' OR ')} LIMIT 1025)`,
+            ...(table.search ?? []).map(() => pattern)))!.n;
+          if (candidates > 1024) selectedStatement = compileSQLiteTypedPage(this.schema, scope, admitted, 'ordered');
+        }
         // The host must enforce a column byte limit before decoding as well.
-        const records = await this.db.getAllAsync<Record<string, unknown>>(statement.sql, ...statement.bindings);
+        const records = await this.db.getAllAsync<Record<string, unknown>>(selectedStatement.sql, ...selectedStatement.bindings);
         const outputBytes = sqlitePayloadBytes(records, this.limits.pageBytes);
         const last = records.at(-1);
-        result = { rows: records.map(record => JSON.parse(String(record.body))), sequence, bytes: outputBytes,
+        const fields = admitted.select ? [...new Set([this.schema[admitted.table]!.key, ...admitted.select])] : undefined;
+        const decode = (record: Record<string, unknown>): Record<string, unknown> => {
+          if (!fields) return JSON.parse(String(record.body));
+          return Object.fromEntries(fields.flatMap((field, i) => {
+            if (record['h' + i] === null) return [];
+            const value = record['p' + i], kind = this.schema[admitted.table]!.fields[field]!.kind;
+            return [[field, value === null ? null : kind === 'json' ? JSON.parse(String(value)) : kind === 'boolean' ? Boolean(value) : value]];
+          }));
+        };
+        result = { rows: records.map(decode), sequence, bytes: outputBytes,
           cursor: last ? { id: String(last.id), values: admitted.order.map((_, i) => last['k' + i] as string | number | null) } : null };
       });
       return result;
@@ -176,12 +199,14 @@ CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payl
   count(scope: string, entity: string, group: number, values: readonly (string | number | boolean | null)[]): Promise<number> {
     const table = Object.hasOwn(this.schema, entity) && this.schema[entity], descriptor = table && table.counts?.[group];
     if (!descriptor || descriptor.columns.length !== values.length) throw new TypeError('Unknown SQLite count');
-    const bytes = sqlitePayloadBytes({ scope, values }, 16_384), bucket = JSON.stringify(values.map(value => typeof value === 'boolean' ? Number(value) : value));
+    const bytes = sqlitePayloadBytes({ scope, values }, 16_384);
+    const bucket = `json_array(${descriptor.columns.map(field => `CAST(? AS ${table!.fields[field]!.kind === 'number' ? 'REAL' : table!.fields[field]!.kind === 'boolean' ? 'INTEGER' : 'TEXT'})`).join(',')})`;
+    const bindings = values.map(value => typeof value === 'boolean' ? Number(value) : value);
     return this.enqueue(bytes, async () => {
       let n = 0;
       await this.db.withTransactionAsync(async () => {
         await this.fence();
-        n = (await this.db.getFirstAsync<{ n: number }>(`SELECT n FROM ${q(sqliteCountName(entity, group))} WHERE scope=? AND bucket=?`, scope, bucket))?.n ?? 0;
+        n = (await this.db.getFirstAsync<{ n: number }>(`SELECT n FROM ${q(sqliteCountName(entity, group))} WHERE scope=? AND bucket=${bucket}`, scope, ...bindings))?.n ?? 0;
       });
       return n;
     });

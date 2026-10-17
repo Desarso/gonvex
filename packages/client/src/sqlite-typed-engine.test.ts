@@ -111,3 +111,24 @@ it('encodes hostile schema identifiers and rejects implicit locale sorting', () 
   expect(sqliteTableName('a')).not.toBe(sqliteTableName('A'));
   expect(() => compileSQLiteTypedPage(schema, 's', { ...plan, order: [{ field: 'name', direction: 'asc' }] })).toThrow('collation');
 });
+
+it('projects only visible fields while preserving JSON, booleans and missing versus null', async () => {
+  const { engine } = fixture(); await engine.open('a');
+  await engine.apply('s', [
+    { ...write('a', 1), row: { _id: 'a', name: 'hidden'.repeat(8000), done: true, data: { nested: ['café', 2] } } },
+    { ...write('b', 2), row: { _id: 'b', name: 'other', done: false, data: null } },
+  ]);
+  const result = await engine.page('s', { ...plan, select: ['done', 'data', 'workspace'] });
+  expect(result.rows).toEqual([{ _id: 'a', done: true, data: { nested: ['café', 2] } }, { _id: 'b', done: false, data: null }]);
+  expect(result.bytes).toBeLessThan(3000);
+});
+
+it('rejects huge sparse arrays before JSON.stringify can allocate their holes', () => {
+  const sparse = new Array(1_000_000_000);
+  expect(() => sqlitePayloadBytes({ sparse }, 262144)).toThrow('dense');
+});
+
+it('rejects scalar affinity coercion and arbitrary comparison operators', () => {
+  expect(() => compileSQLiteTypedPage(schema, 's', { ...plan, where: { field: 'workspace', op: 'eq', value: 1 } })).toThrow('declared field type');
+  expect(() => compileSQLiteTypedPage(schema, 's', { ...plan, where: { field: 'due', op: 'constructor', value: 1 } as any })).toThrow('comparison');
+});

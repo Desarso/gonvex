@@ -7,6 +7,11 @@ settings:
 overrides:
   brace-expansion: 2.1.4
 
+patchedDependencies:
+  '@sqlite.org/sqlite-wasm@3.53.4-build2':
+    hash: 0a37bf650c18799422dbbb7aec697afa6da3df20f07b59429a5d20b3e06eb017
+    path: patches/@sqlite.org__sqlite-wasm@3.53.4-build2.patch
+
 importers:
 
   .:
@@ -188,6 +193,9 @@ importers:
       '@gonvex/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@sqlite.org/sqlite-wasm':
+        specifier: 3.53.4-build2
+        version: 3.53.4-build2(patch_hash=0a37bf650c18799422dbbb7aec697afa6da3df20f07b59429a5d20b3e06eb017)
       dexie:
         specifier: ^4.4.4
         version: 4.4.4
@@ -319,6 +327,11 @@ importers:
         version: 4.1.6(@types/node@24.12.4)(jsdom@29.1.1)(vite@8.2.1(@types/node@24.12.4)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.0))
 
 packages:
+
+  '@sqlite.org/sqlite-wasm@3.53.4-build2':
+    resolution: {integrity: sha512-kQVArGJA4z7s56Dm8t+eTBXad4LiohuVj9pfgDNOcxa+Ic5xMrWlLPTq6cT0hw5S4MIvtpsraW+B0wD+IPvC7A==}
+    engines: {node: '>=22'}
+
 
   '@types/ungap__structured-clone@1.2.0':
     resolution: {integrity: sha512-ZoaihZNLeZSxESbk9PUAPZOlSpcKx81I1+4emtULDVmBLkYutTcMlCj2K9VNlf9EWODxdO6gkAqEaLorXwZQVA==}
@@ -3806,6 +3819,9 @@ packages:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
 
 snapshots:
+
+  '@sqlite.org/sqlite-wasm@3.53.4-build2(patch_hash=0a37bf650c18799422dbbb7aec697afa6da3df20f07b59429a5d20b3e06eb017)': {}
+
 
   '@types/ungap__structured-clone@1.2.0': {}
 

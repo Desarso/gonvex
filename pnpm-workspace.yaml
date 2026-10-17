@@ -7,3 +7,5 @@ allowBuilds:
   esbuild: true
   protobufjs: true
   sharp: true
+patchedDependencies:
+  '@sqlite.org/sqlite-wasm@3.53.4-build2': patches/@sqlite.org__sqlite-wasm@3.53.4-build2.patch

@@ -1,0 +1,9 @@
+{
+  "archive": "https://sqlite.org/2026/sqlite-wasm-3540100.zip",
+  "archiveSha3_256": "87e24f6a4588692310b7942dc2fa7c7275bb9ba2e01d553e4115aa4a904a0050",
+  "moduleSha256": "7f66120f5bb79d0646af88f5c27510ed26d731e801d96e4024d24878dec5a86a",
+  "extractedSha256": "b6f90d7424403d2f8df52f9db88f70ea9b574c6119d9bca53041bcfe94395512",
+  "upstreamRecoveryFix": "ea1d55e202",
+  "license": "SQLite public domain",
+  "changes": "No VFS logic changes. Replaces the initializer in the pinned npm browser module during package bootstrap."
+}
