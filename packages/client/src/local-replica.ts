@@ -884,6 +884,15 @@ export class LocalReplica implements LocalReplicaView {
 
   residencyVersion(): number { return this.residencyVersionValue; }
 
+  /** Aggregate-only counters. Never serializes rows, IDs, scopes or drafts. */
+  memoryCounters() {
+    return { replicaRows: this.residentCount, replicaBytes: this.residentBytes,
+      replicaMetadataBytes: this.metadataBytes(), replicaWindows: this.liveQueries.size,
+      retainedWindows: this.retainedWindows.size, pendingCommands: this.pendingCommands.size,
+      queuedStorageOperations: this.applicationJobs.length };
+  }
+
+
   dependencyVersion(tables: readonly string[]): string {
     const entities = new Set(tables);
     return JSON.stringify([this.scopeActivationGeneration, this.scopeLoaded,

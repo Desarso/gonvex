@@ -13,6 +13,16 @@
     "./sqlite": {
       "types": "./dist/sqlite.d.ts",
       "default": "./dist/sqlite.js"
+    },
+    "./sqlite/broker": {
+      "types": "./dist/sqlite-broker.d.ts",
+      "default": "./dist/sqlite-broker.js"
+    },
+    "./sqlite/owner-worker": {
+      "default": "./dist/sqlite-owner-worker.js"
+    },
+    "./sqlite/router-worker": {
+      "default": "./dist/sqlite-router-worker.js"
     }
   },
   "types": "./dist/index.d.ts",

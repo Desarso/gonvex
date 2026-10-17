@@ -1539,6 +1539,13 @@ export class GonvexClient {
     return this.localExecutor?.prepare?.(ref.path) ?? Promise.resolve();
   }
 
+  /** Cheap production diagnostics without retaining or decoding customer data. */
+  memoryCounters() {
+    return { ...this.replica.memoryCounters(), querySubscriptions: this.querySubscriptions.size,
+      replicaSubscriptions: this.replicaSubscriptions.size, pendingCalls: this.pendingCalls.size,
+      outboxHead: this.intentsSnapshotValue.length };
+  }
+
   /** The single normalized authoritative + optimistic application data store. */
   get localReplica(): LocalReplicaView {
     return this.replicaView;
@@ -5743,3 +5750,5 @@ function localIntentDependencies(transaction: LocalTransactionResult): IntentDep
     writes: transaction.patches.map(patch => ({ entity: patch.entity, rowId: patch.rowId })),
   };
 }
+export { ByteLedger, BoundedByteCache, ByteBudgetError } from './byte-budget.js';
+export type { ByteBudgetSnapshot } from './byte-budget.js';

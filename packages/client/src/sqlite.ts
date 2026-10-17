@@ -8,3 +8,7 @@ export { SQLiteTypedReplicaEngine, SQLiteReplicaEngineError, sqlitePayloadBytes 
 export type { SQLiteTypedWrite, SQLiteTypedPage } from './sqlite-typed-engine.js';
 export { openOfficialSQLiteHost, officialSQLiteDatabase } from './sqlite-official-host.js';
 export type { OfficialSQLiteHost } from './sqlite-official-host.js';
+export { sqliteTypedRowLayout, sqliteTypedReplicaStorage } from './sqlite-typed-row-layout.js';
+export { SQLiteReplicaBroker, SQLiteBrokerError } from './sqlite-broker.js';
+export type { SQLiteBrokerOptions, SQLiteBrokerState } from './sqlite-broker.js';
+export { ReplicaSetDigest } from './replica-set-digest.js';
