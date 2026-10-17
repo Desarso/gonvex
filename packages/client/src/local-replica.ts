@@ -418,6 +418,7 @@ export class LocalReplica implements LocalReplicaView {
   private notifiedFreshness: ReplicaFreshness = "verifying";
   private persistence = Promise.resolve();
   private storageSequence = 0;
+  private storageSynchronization?: { scope: string; generation: number; started: boolean; operation: Promise<void> };
   private application = Promise.resolve();
   private applicationRunning = false;
   private disposed = false;
@@ -515,6 +516,7 @@ export class LocalReplica implements LocalReplicaView {
   }
 
   private releaseMemory(): void {
+    this.storageSynchronization = undefined;
     this.entities = new Map();
     this.liveQueries = new Map();
     this.pendingCommands.clear();
@@ -768,19 +770,28 @@ export class LocalReplica implements LocalReplicaView {
    * acknowledged cursor or publish a half-applied transaction. */
   synchronizeStorage(): Promise<void> {
     if (!this.storage?.readChanges) return Promise.resolve();
-    const scope = this.scopeValue;
-    const application = this.enqueueApplication(async () => {
-      if (!this.scopeLoaded || scope !== this.scopeValue || !this.storage?.readChanges) return;
+    const scope = this.scopeValue, generation = this.scopeActivationGeneration;
+    const current = this.storageSynchronization;
+    const sameScope = current?.scope === scope && current.generation === generation;
+    if (sameScope && !current.started) return current.operation;
+    const entry = { scope, generation, started: false, operation: Promise.resolve() };
+    this.storageSynchronization = entry;
+    const operation = this.enqueueApplication(async () => {
+      entry.started = true;
+      if (!this.scopeLoaded || scope !== this.scopeValue || generation !== this.scopeActivationGeneration) return;
       await this.persistence;
-      const entities = new Map(this.entities);
-      const windows = new Map(this.liveQueries);
-      if (!await this.mergeStoredChanges(entities, windows)) return;
-      this.entities = entities;
-      this.liveQueries = windows;
-      this.notify(true);
-    }, true);
-
-    return application;
+      const entities = new Map(this.entities), windows = new Map(this.liveQueries);
+      const changed = await this.mergeStoredChanges(entities, windows);
+      if (this.disposed || !this.scopeLoaded || scope !== this.scopeValue || generation !== this.scopeActivationGeneration) return;
+      if (changed) { this.entities = entities; this.liveQueries = windows; this.notify(true); }
+    // A burst before execution shares one read. Calls during an active read
+    // share one later job, since that transaction may predate their peer commit.
+    // Its normal priority lets already queued writes progress between reads.
+    }, !sameScope);
+    entry.operation = operation;
+    const release = () => { if (this.storageSynchronization === entry) this.storageSynchronization = undefined; };
+    void operation.then(release, release);
+    return operation;
   }
 
   private async mergeStoredChanges(entities: Map<string, Map<string, ReplicaRow>>, windows: Map<string, ReplicaWindow>, committed?: ReplicaStorageChanges): Promise<boolean> {
