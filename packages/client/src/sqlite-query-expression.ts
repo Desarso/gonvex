@@ -133,7 +133,7 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
           // Materialize that set once, rather than correlating it per root row.
           // Normalized id is String(row[key]), matching related-membership keys.
           const member = alias === 'r0' && e.column === plan.key ? `${alias}.id` : `gv_str(${left})`;
-          return `(gv_present(${left}) AND ${member} IN (SELECT gv_str(${right}) FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(e.relation.table)} AND gv_present(${right}) AND ${expression(e.relation.where, related)}))`;
+          return `(NULLIF(${left},'null') IS NOT NULL AND ${member} IN (SELECT gv_str(${right}) FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(e.relation.table)} AND NULLIF(${right},'null') IS NOT NULL AND ${expression(e.relation.where, related)}))`;
         }
         const right = bind(resolve(e.value));
         if (e.operator === 'eq') return `(${left} IS ${right})`;
@@ -169,7 +169,7 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
       if (kind === 'missingReferences') {
         where.push('(' + refs.map(ref => {
           const related = 'r' + (++aliasCount), foreign = value(root, ref.foreignKey);
-          return `(gv_present(${foreign}) AND NOT EXISTS (SELECT 1 FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(ref.table)} AND ${related}.id=gv_str(${foreign})))`;
+          return `(NULLIF(${foreign},'null') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(ref.table)} AND ${related}.id=gv_str(${foreign})))`;
         }).join(' OR ') + ')');
         return { sql: `SELECT 1 FROM replica_rows ${root} WHERE ${conditions()} LIMIT 1`, bindings };
       }
@@ -180,7 +180,7 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
           const related = 'r' + (++aliasCount);
           selected = `COALESCE(NULLIF((SELECT ${value(related, ref.column)} FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(ref.table)} AND ${related}.id=gv_str(${value(root, ref.foreignKey)}) LIMIT 1),'null'),${bind(encode(ref.fallback ?? null))})`;
         } else selected = value(root, name);
-        return `gv_order(${selected}) AS s${i}`;
+        return `NULLIF(${selected},'null') AS s${i}`;
       });
       projected.push(`${value(root, plan.key)} AS rk`, `${root}.position AS rp`);
       const ordering = (prefix: string) => [...fields.map((_, i) => `${prefix}s${i} COLLATE gv_json ${direction.toUpperCase()} NULLS ${direction === 'desc' ? 'FIRST' : 'LAST'}`), `${prefix}rk COLLATE gv_json ASC`, `${prefix}rp ASC`].join(',');
