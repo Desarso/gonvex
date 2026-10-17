@@ -151,3 +151,15 @@ it('replays the outbox in durable causal order and keeps receipts after acknowle
   expect(await engine.outbox('other')).toEqual([]);
   expect(await engine.count('s', 'tasks', 0, ['w', false])).toBe(2);
 });
+
+it('streams bounded bootstrap pages in one durable transaction and rolls back a failed source', async () => {
+  const { engine } = fixture(); await engine.open('owner');
+  const source = async function* () { yield [write('a', 1)]; yield [write('b', 2)]; };
+  expect(await engine.importScope('s', source())).toEqual({ rows: 2, sequence: 1 });
+  expect((await engine.page('s', plan)).rows.map(row => row._id)).toEqual(['a', 'b']);
+  await expect(engine.importScope('s', source())).rejects.toThrow('empty scope');
+  await expect(engine.importScope('other', (async function* () { yield [write('a', 1)]; throw Error('source unavailable'); })())).rejects.toThrow('source unavailable');
+  expect((await engine.page('other', plan)).rows).toEqual([]);
+  expect(await engine.count('other', 'tasks', 0, ['w', false])).toBe(0);
+  expect(await engine.outbox('other')).toEqual([]);
+});

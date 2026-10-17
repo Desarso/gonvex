@@ -14,6 +14,17 @@ const handlers = {
     }
     return { count, ms: performance.now() - begin, memoryBytes: host.memoryBytes() };
   },
+  async seedAll({ count }) {
+    const begin = performance.now();
+    const result = await engine.importScope('test-scope', (async function* () {
+      for (let offset = 0; offset < count; offset += 50) {
+        yield Array.from({ length: Math.min(50, count - offset) }, (_, index) => { const id = offset + index;
+          return { table: 'tasks', id: String(id), version: 1, row: { _id: String(id), name: `Task ${String(id).padStart(8, '0')} café 東京`, workspace: String(id % 10), due: id % 365, version: 1, description: 'Synthetic maintenance procedure. '.repeat(15) + (id % 997 === 0 ? 'rare-needle 🔧' : '') } };
+        });
+      }
+    })());
+    return { ...result, ms: performance.now() - begin, memoryBytes: host.memoryBytes() };
+  },
   async page(args) { const begin = performance.now(); const result = await engine.page('test-scope', { table: 'tasks', order: [{ field: 'due', direction: 'asc' }], limit: 50, select: ['name', 'due', 'workspace'], ...args }); return { ...result, ms: performance.now() - begin }; },
   async count() { return engine.count('test-scope', 'tasks', 0, ['3']); },
   async dirty() {

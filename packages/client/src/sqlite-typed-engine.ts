@@ -99,7 +99,8 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
     if (!table || typeof input.id !== 'string' || !input.id || !Number.isSafeInteger(input.version) || input.version < 0) fail('INVALID_ROW', 'Invalid SQLite row identity/version');
     if (input.row === null) return table;
     if (input.row[table.key] == null || String(input.row[table.key]) !== input.id) fail('INVALID_ROW', 'SQLite row key does not match its identity');
-    for (const [field, shape] of Object.entries(table.fields)) {
+    for (const field in table.fields) {
+      const shape = table.fields[field]!;
       const value = input.row[field];
       if (value != null && (shape.kind === 'text' && typeof value !== 'string' || shape.kind === 'number' && typeof value !== 'number' || shape.kind === 'boolean' && typeof value !== 'boolean'))
         fail('INVALID_ROW', 'SQLite field type differs from the generated schema');
@@ -119,6 +120,7 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
       const fields = Object.entries(table.fields);
       const columns = ['scope', 'id', 'body', 'version', ...fields.map(([field]) => sqliteFieldName(field)), ...(table.search ?? []).map((_, i) => 's' + i)];
       const selects: string[] = [], bindings: unknown[] = [];
+      const select = `SELECT ${columns.map(() => '?').join(',')} WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND id=? AND version>=?)`;
       let end = offset;
       const batchRows = Math.max(1, Math.min(100, Math.floor(32000 / (columns.length + 4))));
       while (end < writes.length && end - offset < batchRows && writes[end]!.table === input.table && writes[end]!.row !== null) {
@@ -127,11 +129,17 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
           const value = item.row![field];
           return value == null ? null : shape.kind === 'json' ? JSON.stringify(value) : shape.kind === 'boolean' ? Number(value) : value;
         }), ...(table.search ?? []).map(field => String(item.row![field] ?? '').toLowerCase()));
-        selects.push(`SELECT ${columns.map(() => '?').join(',')} WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND id=? AND version>=?)`);
+        if (!selects.length || !this.db.runManyAsync) selects.push(select);
         bindings.push(scope, item.table, item.id, item.version);
         end++;
       }
-      await this.db.runAsync(`INSERT INTO ${tn}(${columns.map(q).join(',')}) ${selects.join(' UNION ALL ')} ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`, ...bindings);
+      const head = `INSERT INTO ${tn}(${columns.map(q).join(',')}) `;
+      const tail = ` ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`;
+      if (this.db.runManyAsync) {
+        const width = columns.length + 4, rows: unknown[][] = [];
+        for (let i = 0; i < bindings.length; i += width) rows.push(bindings.slice(i, i + width));
+        await this.db.runManyAsync(head + selects[0] + tail, rows);
+      } else await this.db.runAsync(head + selects.join(' UNION ALL ') + tail, ...bindings);
       offset = end;
     }
   }
@@ -161,6 +169,47 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
           await this.db.runAsync('INSERT INTO gv_intent_receipts VALUES(?,?,?,?)', admitted.scope, admitted.intent.id, payload, JSON.stringify(result));
           await this.db.runAsync('INSERT INTO gv_outbox VALUES(?,?,?,?)', admitted.scope, admitted.intent.id, JSON.stringify(admitted.intent.payload), result.sequence);
         }
+        await this.db.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1', result.sequence);
+      });
+      return result;
+    });
+  }
+  /** Stream a previously empty scope in bounded pages with one atomic commit.
+   * Only bootstrap uses this lane. Readers wait for activation, and a failed
+   * source or owner crash leaves the scope empty. The producer must stream
+   * rather than retaining the complete fixture. No outbox intent is accepted
+   * or acknowledged until the import transaction finishes. */
+  importScope(scope: string, source: AsyncIterable<readonly SQLiteTypedWrite[]>): Promise<{ sequence: number; rows: number }> {
+    if (!scope || scope.length > 512) throw new TypeError('Invalid SQLite import scope');
+    return this.enqueue(this.limits.batchBytes, async () => {
+      let result!: { sequence: number; rows: number };
+      await this.db.withTransactionAsync(async () => {
+        const previous = await this.fence();
+        if (previous >= Number.MAX_SAFE_INTEGER) fail('FENCED', 'SQLite storage sequence exhausted');
+        for (const entity of Object.keys(this.schema)) {
+          if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? LIMIT 1`, scope))
+            fail('INVALID_ROW', 'Bootstrap import requires an empty scope');
+        }
+        for (const table of ['gv_tombstones', 'gv_intent_receipts', 'gv_outbox'])
+          if (await this.db.getFirstAsync(`SELECT 1 FROM ${table} WHERE scope=? LIMIT 1`, scope))
+            fail('INVALID_ROW', 'Bootstrap import cannot replace pending work or tombstones');
+        let rows = 0, sliceStarted = performance.now();
+        for await (const page of source) {
+          sqlitePayloadBytes(page, this.limits.batchBytes);
+          if (!Array.isArray(page) || page.length > 512) fail('BUDGET', 'SQLite import page exceeds row budget');
+          const admitted = JSON.parse(JSON.stringify(page)) as SQLiteTypedWrite[];
+          await this.writeBatch(scope, admitted);
+          rows += admitted.length;
+          if (!Number.isSafeInteger(rows)) fail('BUDGET', 'SQLite import row count exhausted');
+          // Promise-only ingestion monopolizes a worker task, withholding both
+          // progress messages and idle GC for the entire bootstrap. Yield real
+          // event-loop tasks within the ingestion slice budget.
+          if (performance.now() - sliceStarted >= 8) {
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            sliceStarted = performance.now();
+          }
+        }
+        result = { sequence: previous + 1, rows };
         await this.db.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1', result.sequence);
       });
       return result;
@@ -244,6 +293,17 @@ CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
       // Receipt retention is independent. A delayed tab retry must still see
       // the original result after server delivery has left the outbox.
     }));
+  }
+  integrity(): Promise<string> {
+    return this.enqueue(256, async () => {
+      let result = '';
+      await this.db.withTransactionAsync(async () => {
+        await this.fence();
+        const row = await this.db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
+        result = row?.integrity_check ?? 'unavailable';
+      });
+      return result;
+    });
   }
   stats() { return { pendingOperations: this.pending, pendingBytes: this.pendingBytes, epoch: this.epoch }; }
 }

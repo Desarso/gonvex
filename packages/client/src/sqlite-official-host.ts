@@ -82,6 +82,20 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
       try { bind(statement, values); while (statement.step()) { /* No retained output. */ } }
       finally { statement.finalize(); }
     },
+    async runManyAsync(sql, rows) {
+      check(); if (rows.length > 512) throw new SQLiteBridgeBudgetError('rows');
+      const statement = db.prepare(sql);
+      try {
+        for (const row of rows) {
+          let size = 0;
+          for (const value of row) size += typeof value === 'string' ? value.length * 2 + 32 : value instanceof Uint8Array ? value.byteLength + 32 : 16;
+          if (size > budget.maxBytes) throw new SQLiteBridgeBudgetError('text');
+          bind(statement, row as unknown[]);
+          while (statement.step()) { /* No output staging. */ }
+          statement.reset(true);
+        }
+      } finally { statement.finalize(); }
+    },
     async getAllAsync<T>(sql: string, ...values: unknown[]) { return read<T>(sql, values, false); },
     async getFirstAsync<T>(sql: string, ...values: unknown[]) { return read<T>(sql, values, true)[0] ?? null; },
     async withTransactionAsync(run) {
