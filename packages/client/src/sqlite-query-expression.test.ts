@@ -38,7 +38,7 @@ it('keeps routing, data and table names as bound parameters in independently exe
   const compiled=compileSQLiteLiveQuery({...plan,table:'a strange table',sort:{...plan.sort!,defaultColumn:'a".column',allowedColumns:['a".column']}},{workspace,offset:99,limit:5},scope);
   expect(compiled.supported).toBe(true);
   if(!compiled.supported)throw Error('Expected a compiled window');
-  for(const statement of [compiled.rows,compiled.count,compiled.missingSortFields].filter(Boolean)){
+  for(const statement of [compiled.rows,compiled.combined,compiled.count,compiled.missingSortFields].filter(Boolean)){
     expect(statement!.sql).not.toContain(scope);
     expect(statement!.sql).not.toContain(workspace);
     expect(statement!.sql).not.toContain('a strange table');

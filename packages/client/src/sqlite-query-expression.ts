@@ -11,6 +11,9 @@ export type SQLiteLiveStatement = { sql: string; bindings: Binding[] };
 export type SQLiteLivePlan = {
   supported: true;
   rows: SQLiteLiveStatement;
+  /** First row: [0,null,total,missingSort,missingRefs]. Remaining rows:
+   * [1,canonicalRow,null,null,null], in the public sort order. */
+  combined: SQLiteLiveStatement;
   count?: SQLiteLiveStatement;
   missingSortFields?: SQLiteLiveStatement;
   missingReferences?: SQLiteLiveStatement;
@@ -96,7 +99,7 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
   };
   const rootUnion = disjunction(plan.where);
   try {
-    const build = (kind: 'rows' | 'count' | 'missingSortFields' | 'missingReferences'): SQLiteLiveStatement => {
+    const build = (kind: 'rows' | 'count' | 'missingSortFields' | 'missingReferences' | 'combined'): SQLiteLiveStatement => {
       const bindings: Binding[] = [];
       const bind = (value: Binding) => { bindings.push(value); return '?' + bindings.length; };
       let aliasCount = 0;
@@ -184,10 +187,25 @@ export function compileSQLiteLiveQuery(plan: LiveQueryPlan, args: Record<string,
       });
       projected.push(`${value(root, plan.key)} AS rk`, `${root}.position AS rp`);
       const ordering = (prefix: string) => [...fields.map((_, i) => `${prefix}s${i} COLLATE gv_json ${direction.toUpperCase()} NULLS ${direction === 'desc' ? 'FIRST' : 'LAST'}`), `${prefix}rk COLLATE gv_json ASC`, `${prefix}rp ASC`].join(',');
+      if (kind === 'combined') {
+        // Spillable intermediates contain keys and scalar sort values, never
+        // whole task JSON. Count and both preflights share one filtered scan.
+        const missingSort = plainFields.length ? '(' + plainFields.map(name => value(root, name) + ' IS NULL').join(' OR ') + ')' : '0';
+        const missingRefs = refs.length ? '(' + refs.map(ref => {
+          const related = 'r' + (++aliasCount), foreign = value(root, ref.foreignKey);
+          return `(NULLIF(${foreign},'null') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM replica_rows ${related} WHERE ${related}.scope=${bind(scope)} AND ${related}.entity=${bind(ref.table)} AND ${related}.id=gv_str(${foreign})))`;
+        }).join(' OR ') + ')' : '0';
+        const names = [...fields.map((_, i) => 's' + i), 'rk', 'rp'];
+        const summaryOrder = names.map(name => 'NULL AS ' + name).join(',');
+        const pageOrder = names.map(name => 'page.' + name).join(',');
+        const total = plan.window!.count === 'exact' ? 'count(*)' : 'NULL';
+        const sql = `WITH filtered AS MATERIALIZED (SELECT ${root}.id,${projected.join(',')},${missingSort} AS ms,${missingRefs} AS mr FROM replica_rows ${root} WHERE ${conditions()}),page AS MATERIALIZED (SELECT * FROM filtered ORDER BY ${ordering('')} LIMIT ${bind(limit)} OFFSET ${bind(offset)}) SELECT kind,value,total,missingSortFields,missingReferences FROM (SELECT 0 AS kind,NULL AS value,${total} AS total,COALESCE(max(ms),0) AS missingSortFields,COALESCE(max(mr),0) AS missingReferences,${summaryOrder} FROM filtered UNION ALL SELECT 1,result.value,NULL,NULL,NULL,${pageOrder} FROM page JOIN replica_rows result ON result.scope=${bind(scope)} AND result.entity=${bind(plan.table)} AND result.id=page.id) ORDER BY kind ASC,${ordering('')}`;
+        return { sql, bindings };
+      }
       const sql = `WITH page AS MATERIALIZED (SELECT ${root}.id,${projected.join(',')} FROM replica_rows ${root} WHERE ${conditions()} ORDER BY ${ordering('')} LIMIT ${bind(limit)} OFFSET ${bind(offset)}) SELECT result.value FROM page JOIN replica_rows result ON result.scope=${bind(scope)} AND result.entity=${bind(plan.table)} AND result.id=page.id ORDER BY ${ordering('page.')}`;
       return { sql, bindings };
     };
-    return { supported: true, rows: build('rows'), ...(plan.window.count === 'exact' ? { count: build('count') } : {}),
+    return { supported: true, rows: build('rows'), combined: build('combined'), ...(plan.window.count === 'exact' ? { count: build('count') } : {}),
       ...(plainFields.length ? { missingSortFields: build('missingSortFields') } : {}),
       ...(refs.length ? { missingReferences: build('missingReferences') } : {}),
       dependencies: liveQueryDependencies(plan), searchSourcesPartial: Boolean(search && plan.search?.sources?.length), offset, limit };
