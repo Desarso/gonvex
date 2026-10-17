@@ -453,15 +453,16 @@ export class LocalReplica implements LocalReplicaView {
   }
   // Share only idempotent disk reads. Server writes, cursors and Reducer
   // transactions keep their original ordered application jobs.
-  private readonly pendingRetains = new Map<string, Promise<void>>();
-  private enqueueRetain(key: string, run: () => Promise<void>): Promise<void> {
+  private readonly pendingRetains = new Map<string, { operation: Promise<void>; rowOwners: number }>();
+  private enqueueRetain(key: string, run: () => Promise<void>) {
     const existing = this.pendingRetains.get(key);
     if (existing) return existing;
     const operation = this.enqueueApplication(run, true, { key, skipped: undefined });
-    this.pendingRetains.set(key, operation);
-    const release = () => { if (this.pendingRetains.get(key) === operation) this.pendingRetains.delete(key); };
+    const entry = { operation, rowOwners: 0 };
+    this.pendingRetains.set(key, entry);
+    const release = () => { if (this.pendingRetains.get(key) === entry) this.pendingRetains.delete(key); };
     void operation.then(release, release);
-    return operation;
+    return entry;
   }
   /** Drop only an idempotent disk restore that has not started. Never cancel a
    * durable application job or interrupt an active read transaction. */
@@ -650,12 +651,14 @@ export class LocalReplica implements LocalReplicaView {
 
   retainRows(entity:string,ids:readonly string[]):()=>void {
     const scopeGeneration=this.scopeActivationGeneration;
+    let pendingRead: { key: string; entry: { operation: Promise<void>; rowOwners: number } } | undefined;
     let retained=this.retainedRows.get(entity);
     if(!retained){retained=new Map();this.retainedRows.set(entity,retained);}
     for(const id of ids){retained.set(id,(retained.get(id)??0)+1);this.refreshPin(entity,id);}
     if (this.scopeLoaded && this.storage?.loadEntityRows
       && ids.some(id => !this.entities.get(entity)?.has(id))) {
-    this.enqueueRetain(JSON.stringify([scopeGeneration, 'rows', entity, [...ids].sort()]), async()=>{
+    const key = JSON.stringify([scopeGeneration, 'rows', entity, [...ids].sort()]);
+    const entry = this.enqueueRetain(key, async()=>{
       if(!this.scopeLoaded || !this.storage?.loadEntityRows || scopeGeneration!==this.scopeActivationGeneration)return;
       const missing=ids.filter(id=>!this.entities.get(entity)?.has(id) && this.retainedRows.get(entity)?.has(id));
       if(!missing.length)return;
@@ -666,6 +669,8 @@ export class LocalReplica implements LocalReplicaView {
       this.entities=new Map(this.entities).set(entity,next);
       this.markEntityChanged(entity,missing);this.notify(true);
     });
+    entry.rowOwners++;
+    pendingRead = { key, entry };
     }
 
     let released=false;
@@ -674,6 +679,8 @@ export class LocalReplica implements LocalReplicaView {
       const current=this.retainedRows.get(entity);
       for(const id of ids){const count=current?.get(id)??0;if(count>1)current!.set(id,count-1);else current?.delete(id);this.refreshPin(entity,id);}
       if(!current?.size)this.retainedRows.delete(entity);
+      if (pendingRead && --pendingRead.entry.rowOwners === 0
+        && this.pendingRetains.get(pendingRead.key) === pendingRead.entry) this.cancelQueuedRetain(pendingRead.key);
       this.trimResidentRows();
     };
   }
