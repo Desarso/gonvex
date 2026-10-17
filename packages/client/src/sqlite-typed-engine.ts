@@ -3,7 +3,7 @@ import { compileSQLiteTypedSchema, sqliteIdentifier as q, sqliteTableName, sqlit
 import { compileSQLiteTypedPage, type SQLitePagePlan, type SQLiteKeyset } from './sqlite-typed-query.js';
 
 export class SQLiteReplicaEngineError extends Error {
-  constructor(readonly code: 'FENCED' | 'SCHEMA_MISMATCH' | 'BUDGET' | 'INTENT_CONFLICT' | 'INVALID_ROW', message: string) { super(message); this.name = 'SQLiteReplicaEngineError'; }
+  constructor(readonly code: 'FENCED' | 'SCHEMA_MISMATCH' | 'BUDGET' | 'INTENT_CONFLICT' | 'INVALID_ROW' | 'PAGE_CHANGED', message: string) { super(message); this.name = 'SQLiteReplicaEngineError'; }
 }
 export type SQLiteTypedWrite = { table: string; id: string; version: number; row: Record<string, unknown> | null };
 export type SQLiteTypedPage = { rows: Record<string, unknown>[]; cursor: SQLiteKeyset | null; bytes: number; sequence: number };
@@ -74,8 +74,9 @@ export class SQLiteTypedReplicaEngine {
         await this.db.execAsync(`CREATE TABLE IF NOT EXISTS gv_storage_meta(id INTEGER PRIMARY KEY CHECK(id=1), schema TEXT NOT NULL, epoch INTEGER NOT NULL, owner TEXT NOT NULL, sequence INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS gv_tombstones(scope TEXT NOT NULL, entity TEXT NOT NULL, id TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY(scope,entity,id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_intent_receipts(scope TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(scope,id)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(scope,id)) WITHOUT ROWID;`);
-        const signature = JSON.stringify(this.schema);
+CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, sequence INTEGER NOT NULL, PRIMARY KEY(scope,id)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS gv_outbox_sequence ON gv_outbox(scope,sequence);`);
+        const signature = JSON.stringify({ format: 2, tables: this.schema });
         const old = await this.db.getFirstAsync<{ schema: string; epoch: number }>('SELECT schema,epoch FROM gv_storage_meta WHERE id=1');
         if (old && old.schema !== signature) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
         await this.db.execAsync(ddl.tables + '\n' + ddl.indexes + '\n' + ddl.search);
@@ -93,38 +94,45 @@ CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payl
     if (!lease || lease.epoch !== this.epoch || lease.owner !== this.owner) fail('FENCED', 'SQLite owner epoch is stale');
     return lease.sequence;
   }
-  private async write(scope: string, input: SQLiteTypedWrite): Promise<void> {
+  private validateWrite(input: SQLiteTypedWrite) {
     const table = Object.hasOwn(this.schema, input.table) && this.schema[input.table];
     if (!table || typeof input.id !== 'string' || !input.id || !Number.isSafeInteger(input.version) || input.version < 0) fail('INVALID_ROW', 'Invalid SQLite row identity/version');
-    const tn = q(sqliteTableName(input.table));
-    const old = await this.db.getFirstAsync<{ rid: number; version: number }>(`SELECT rid,version FROM ${tn} WHERE scope=? AND id=?`, scope, input.id);
-    const tombstone = await this.db.getFirstAsync<{ version: number }>('SELECT version FROM gv_tombstones WHERE scope=? AND entity=? AND id=?', scope, input.table, input.id);
-    if (Math.max(old?.version ?? -1, tombstone?.version ?? -1) > input.version || tombstone?.version === input.version && input.row !== null) return;
-    if (input.row === null) {
-      await this.db.runAsync(`DELETE FROM ${tn} WHERE scope=? AND id=?`, scope, input.id);
-      await this.db.runAsync('INSERT INTO gv_tombstones VALUES(?,?,?,?) ON CONFLICT(scope,entity,id) DO UPDATE SET version=excluded.version', scope, input.table, input.id, input.version);
-      return;
-    }
-    await this.db.runAsync('DELETE FROM gv_tombstones WHERE scope=? AND entity=? AND id=?', scope, input.table, input.id);
+    if (input.row === null) return table;
     if (input.row[table.key] == null || String(input.row[table.key]) !== input.id) fail('INVALID_ROW', 'SQLite row key does not match its identity');
-    const fields = Object.entries(table.fields), values: unknown[] = [];
-    for (const [field, shape] of fields) {
+    for (const [field, shape] of Object.entries(table.fields)) {
       const value = input.row[field];
-      if (value == null) { values.push(null); continue; }
-      if (shape.kind === 'text' && typeof value !== 'string' || shape.kind === 'number' && typeof value !== 'number' || shape.kind === 'boolean' && typeof value !== 'boolean')
+      if (value != null && (shape.kind === 'text' && typeof value !== 'string' || shape.kind === 'number' && typeof value !== 'number' || shape.kind === 'boolean' && typeof value !== 'boolean'))
         fail('INVALID_ROW', 'SQLite field type differs from the generated schema');
-      values.push(shape.kind === 'json' ? JSON.stringify(value) : shape.kind === 'boolean' ? Number(value) : value);
     }
-    const searchValues = (table.search ?? []).map(field => String(input.row![field] ?? '').toLowerCase());
-    const columns = ['scope', 'id', 'body', 'version', ...fields.map(([field]) => sqliteFieldName(field)), ...(table.search ?? []).map((_, i) => 's' + i)];
-    await this.db.runAsync(`INSERT INTO ${tn}(${columns.map(q).join(',')}) VALUES(${columns.map(() => '?').join(',')}) ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')}`,
-      scope, input.id, JSON.stringify(input.row), input.version, ...values, ...searchValues);
-    if (table.search?.length) {
-      const fn = q(sqliteSearchName(input.table));
-      const row = await this.db.getFirstAsync<{ rid: number }>(`SELECT rid FROM ${tn} WHERE scope=? AND id=?`, scope, input.id);
-      await this.db.runAsync(`DELETE FROM ${fn} WHERE rowid=?`, row!.rid);
-      await this.db.runAsync(`INSERT INTO ${fn}(rowid,${table.search.map((_, i) => q('s' + i)).join(',')}) VALUES(${table.search.map(() => '?').concat('?').join(',')})`,
-        row!.rid, ...searchValues);
+    return table;
+  }
+  private async writeBatch(scope: string, writes: readonly SQLiteTypedWrite[]): Promise<void> {
+    // Preserve transaction order, including delete/reinsert chains. Only
+    // consecutive upserts for the same generated table share a SQL statement.
+    for (let offset = 0; offset < writes.length;) {
+      const input = writes[offset]!, table = this.validateWrite(input), tn = q(sqliteTableName(input.table));
+      if (input.row === null) {
+        await this.db.runAsync('INSERT INTO gv_tombstones VALUES(?,?,?,?) ON CONFLICT(scope,entity,id) DO UPDATE SET version=max(version,excluded.version)', scope, input.table, input.id, input.version);
+        await this.db.runAsync(`DELETE FROM ${tn} WHERE scope=? AND id=? AND version<=?`, scope, input.id, input.version);
+        offset++; continue;
+      }
+      const fields = Object.entries(table.fields);
+      const columns = ['scope', 'id', 'body', 'version', ...fields.map(([field]) => sqliteFieldName(field)), ...(table.search ?? []).map((_, i) => 's' + i)];
+      const selects: string[] = [], bindings: unknown[] = [];
+      let end = offset;
+      const batchRows = Math.max(1, Math.min(100, Math.floor(32000 / (columns.length + 4))));
+      while (end < writes.length && end - offset < batchRows && writes[end]!.table === input.table && writes[end]!.row !== null) {
+        const item = writes[end]!; this.validateWrite(item);
+        bindings.push(scope, item.id, JSON.stringify(item.row), item.version, ...fields.map(([field, shape]) => {
+          const value = item.row![field];
+          return value == null ? null : shape.kind === 'json' ? JSON.stringify(value) : shape.kind === 'boolean' ? Number(value) : value;
+        }), ...(table.search ?? []).map(field => String(item.row![field] ?? '').toLowerCase()));
+        selects.push(`SELECT ${columns.map(() => '?').join(',')} WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND id=? AND version>=?)`);
+        bindings.push(scope, item.table, item.id, item.version);
+        end++;
+      }
+      await this.db.runAsync(`INSERT INTO ${tn}(${columns.map(q).join(',')}) ${selects.join(' UNION ALL ')} ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`, ...bindings);
+      offset = end;
     }
   }
   /** A durable delivery uses the same immutable ID on every retry. The receipt
@@ -146,11 +154,12 @@ CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payl
             result = JSON.parse(receipt.result); return;
           }
         }
-        for (const write of admitted.writes) await this.write(admitted.scope, write);
+        await this.writeBatch(admitted.scope, admitted.writes);
+        if (previous >= Number.MAX_SAFE_INTEGER) fail('FENCED', 'SQLite storage sequence exhausted');
         result = { sequence: previous + 1 };
         if (admitted.intent) {
           await this.db.runAsync('INSERT INTO gv_intent_receipts VALUES(?,?,?,?)', admitted.scope, admitted.intent.id, payload, JSON.stringify(result));
-          await this.db.runAsync('INSERT INTO gv_outbox VALUES(?,?,?)', admitted.scope, admitted.intent.id, JSON.stringify(admitted.intent.payload));
+          await this.db.runAsync('INSERT INTO gv_outbox VALUES(?,?,?,?)', admitted.scope, admitted.intent.id, JSON.stringify(admitted.intent.payload), result.sequence);
         }
         await this.db.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1', result.sequence);
       });
@@ -165,6 +174,7 @@ CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payl
       let result!: SQLiteTypedPage;
       await this.db.withTransactionAsync(async () => {
         const sequence = await this.fence();
+        if (admitted.after && admitted.after.sequence !== sequence) fail('PAGE_CHANGED', 'SQLite keyset belongs to an older replica snapshot');
         let selectedStatement = statement;
         if (admitted.search) {
           // Inspect at most 1025 matching rowids. A common term uses the native
@@ -191,7 +201,7 @@ CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payl
           }));
         };
         result = { rows: records.map(decode), sequence, bytes: outputBytes,
-          cursor: last ? { id: String(last.id), values: admitted.order.map((_, i) => last['k' + i] as string | number | null) } : null };
+          cursor: last ? { id: String(last.id), sequence, values: admitted.order.map((_, i) => last['k' + i] as string | number | null) } : null };
       });
       return result;
     });
@@ -210,6 +220,30 @@ CREATE TABLE IF NOT EXISTS gv_outbox(scope TEXT NOT NULL, id TEXT NOT NULL, payl
       });
       return n;
     });
+  }
+  outbox(scope: string, afterSequence = 0, limit = 32): Promise<{ id: string; payload: unknown; sequence: number }[]> {
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 32) throw new TypeError('Invalid SQLite outbox page');
+    return this.enqueue(1024, async () => {
+      let result!: { id: string; payload: unknown; sequence: number }[];
+      await this.db.withTransactionAsync(async () => {
+        await this.fence();
+        const rows = await this.db.getAllAsync<{ id: string; payload: string; sequence: number }>('SELECT id,payload,sequence FROM gv_outbox WHERE scope=? AND sequence>? ORDER BY sequence LIMIT ?', scope, afterSequence, limit);
+        sqlitePayloadBytes(rows, this.limits.pageBytes);
+        result = rows.map(row => ({ ...row, payload: JSON.parse(row.payload) }));
+      });
+      return result;
+    });
+  }
+  acknowledge(scope: string, ids: readonly string[]): Promise<void> {
+    const bytes = sqlitePayloadBytes({ scope, ids }, 16_384);
+    if (ids.length > 32 || ids.some(id => typeof id !== 'string' || !id || id.length > 128)) throw new TypeError('Invalid SQLite intent acknowledgment');
+    const admitted = [...ids];
+    return this.enqueue(bytes, () => this.db.withTransactionAsync(async () => {
+      await this.fence();
+      if (admitted.length) await this.db.runAsync(`DELETE FROM gv_outbox WHERE scope=? AND id IN (${admitted.map(() => '?').join(',')})`, scope, ...admitted);
+      // Receipt retention is independent. A delayed tab retry must still see
+      // the original result after server delivery has left the outbox.
+    }));
   }
   stats() { return { pendingOperations: this.pending, pendingBytes: this.pendingBytes, epoch: this.epoch }; }
 }

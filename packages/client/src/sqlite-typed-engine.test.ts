@@ -132,3 +132,22 @@ it('rejects scalar affinity coercion and arbitrary comparison operators', () => 
   expect(() => compileSQLiteTypedPage(schema, 's', { ...plan, where: { field: 'workspace', op: 'eq', value: 1 } })).toThrow('declared field type');
   expect(() => compileSQLiteTypedPage(schema, 's', { ...plan, where: { field: 'due', op: 'constructor', value: 1 } as any })).toThrow('comparison');
 });
+
+it('invalidates a keyset after a durable write instead of skipping changing rows', async () => {
+  const { engine } = fixture(); await engine.open('a'); await engine.apply('s', [write('a', 1), write('b', 2), write('c', 3)]);
+  const first = await engine.page('s', plan);
+  await engine.apply('s', [{ ...write('a', 4), version: 2 }]);
+  await expect(engine.page('s', { ...plan, after: first.cursor! })).rejects.toMatchObject({ code: 'PAGE_CHANGED' });
+});
+
+it('replays the outbox in durable causal order and keeps receipts after acknowledgment', async () => {
+  const { engine } = fixture(); await engine.open('a');
+  await engine.apply('s', [write('a', 1)], { id: 'z', payload: { create: 'a' } });
+  await engine.apply('s', [write('b', 2)], { id: 'a', payload: { create: 'b' } });
+  expect((await engine.outbox('s')).map(row => row.id)).toEqual(['z', 'a']);
+  await engine.acknowledge('s', ['z']);
+  await engine.apply('s', [write('a', 1)], { id: 'z', payload: { create: 'a' } });
+  expect((await engine.outbox('s')).map(row => row.id)).toEqual(['a']);
+  expect(await engine.outbox('other')).toEqual([]);
+  expect(await engine.count('s', 'tasks', 0, ['w', false])).toBe(2);
+});

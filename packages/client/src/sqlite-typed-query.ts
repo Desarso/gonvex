@@ -5,7 +5,7 @@ export type SQLitePredicate =
   | { op: 'and' | 'or'; children: readonly SQLitePredicate[] }
   | { op: 'relation'; field: string; table: string; relatedField: string; where?: SQLitePredicate };
 export type SQLiteOrder = { field: string; direction: 'asc' | 'desc' };
-export type SQLiteKeyset = { values: readonly SQLiteBinding[]; id: string };
+export type SQLiteKeyset = { values: readonly SQLiteBinding[]; id: string; sequence: number };
 export type SQLitePagePlan = {
   table: string;
   where?: SQLitePredicate;
@@ -28,7 +28,7 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
   if (!table) throw new TypeError('Unknown SQLite table');
   if (!Number.isSafeInteger(plan.limit) || plan.limit < 1 || plan.limit > 256) throw new RangeError('SQLite page limit must be 1..256');
   if (!plan.order.length || plan.order.length > 8) throw new RangeError('SQLite page requires 1..8 order fields');
-  if (plan.after && (plan.after.values.length !== plan.order.length || typeof plan.after.id !== 'string')) throw new TypeError('Invalid SQLite keyset');
+  if (plan.after && (plan.after.values.length !== plan.order.length || typeof plan.after.id !== 'string' || !Number.isSafeInteger(plan.after.sequence) || plan.after.sequence < 0)) throw new TypeError('Invalid SQLite keyset');
   if (plan.select && !Array.isArray(plan.select)) throw new TypeError('Invalid SQLite projection');
   const projection = plan.select ? [...new Set([table.key, ...plan.select])] : undefined;
   if (projection && (projection.length > 64 || projection.some(name => !Object.hasOwn(table.fields, name)))) throw new TypeError('Invalid SQLite projection');

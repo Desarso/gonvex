@@ -64,6 +64,9 @@ export function compileSQLiteTypedSchema(schema: SQLiteTypedSchema): { tables: s
       // JS Unicode rules; SQLite never calls JS to filter or compare a row.
       search.push(`CREATE VIRTUAL TABLE IF NOT EXISTS ${fn} USING fts5(${cols.join(',')},tokenize='trigram case_sensitive 1');`);
       search.push(`CREATE TRIGGER IF NOT EXISTS ${q(name + '_fts_d')} AFTER DELETE ON ${tn} BEGIN DELETE FROM ${fn} WHERE rowid=OLD.rid; END;`);
+      const inserted = `INSERT INTO ${fn}(rowid,${cols.join(',')}) VALUES(NEW.rid,${cols.map(column => 'NEW.' + column).join(',')});`;
+      search.push(`CREATE TRIGGER IF NOT EXISTS ${q(name + '_fts_a')} AFTER INSERT ON ${tn} BEGIN ${inserted} END;`,
+        `CREATE TRIGGER IF NOT EXISTS ${q(name + '_fts_u')} AFTER UPDATE ON ${tn} BEGIN DELETE FROM ${fn} WHERE rowid=OLD.rid; ${inserted} END;`);
     }
   }
   return { tables: tables.join('\n'), indexes: indexes.join('\n'), search: search.join('\n') };
