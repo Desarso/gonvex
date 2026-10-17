@@ -11,9 +11,20 @@ import type { ReducerReadView as ReplicaReducerReadView } from "@gonvex/local-ru
 export interface SQLiteReplicaDatabase {
   execAsync(sql: string): Promise<void>;
   runAsync(sql: string, ...params: unknown[]): Promise<unknown>;
+  /** Reuse one prepared statement for an already admitted bounded batch. */
+  runManyAsync?(sql: string, rows: readonly (readonly unknown[])[]): Promise<void>;
   getFirstAsync<T>(sql: string, ...params: unknown[]): Promise<T | null>;
   getAllAsync<T>(sql: string, ...params: unknown[]): Promise<T[]>;
   withTransactionAsync(task: () => Promise<void>): Promise<void>;
+}
+
+/** Alternate physical canonical layout. Metadata, authority and commit semantics
+ * stay shared with the native/mobile adapter. Install and writes run inside the
+ * caller's existing transaction, never in a second database or cache. */
+export interface SQLiteReplicaRowLayout {
+  install(database: SQLiteReplicaDatabase): Promise<void>;
+  upsert(database: SQLiteReplicaDatabase, scope: string, entity: string,
+    rows: readonly { id: string; row: ReplicaRow | null }[]): Promise<void>;
 }
 
 type EntityRecord = {
@@ -38,13 +49,25 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
   private readonly commits: SQLiteReplicaCommits;
   readonly supportsResidentLookup = true;
 
-  constructor(private readonly database: SQLiteReplicaDatabase) { this.commits = new SQLiteReplicaCommits(database); }
+  constructor(private readonly database: SQLiteReplicaDatabase, private readonly rowLayout?: SQLiteReplicaRowLayout) { this.commits = new SQLiteReplicaCommits(database); }
 
   private initialize() {
     return (this.initialized ??= this.migrateSchema().then(() => this.commits.initialize()));
   }
 
   private async migrateSchema() {
+    if (this.rowLayout) {
+      await this.database.withTransactionAsync(async () => {
+        await this.rowLayout!.install(this.database);
+        await this.database.execAsync(`CREATE TABLE IF NOT EXISTS _gonvex_replica_queries (
+          scope TEXT NOT NULL, signature TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(scope,signature));
+          CREATE TABLE IF NOT EXISTS _gonvex_replica_meta (
+          scope TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(scope,key));
+          CREATE TABLE IF NOT EXISTS _gonvex_replica_retired_epochs (
+          scope TEXT NOT NULL, epoch TEXT NOT NULL, PRIMARY KEY(scope,epoch));`);
+      });
+      return;
+    }
     const storedVersion = await this.database.getFirstAsync<{
       user_version: number;
     }>("PRAGMA user_version");
@@ -609,6 +632,18 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
       );
       await this.commits.reset(scope);
       for (const [entity, rows] of Object.entries(snapshot.entities)) {
+        if (this.rowLayout) {
+          let page: { id: string; row: ReplicaRow }[] = [], bytes = 0;
+          for (const [id, row] of Object.entries(rows)) {
+            const size = JSON.stringify(row).length * 2 + 256;
+            if (page.length && (page.length >= 100 || bytes + size > 262144)) {
+              await this.rowLayout.upsert(this.database, scope, entity, page); page = []; bytes = 0;
+            }
+            page.push({ id, row }); bytes += size;
+          }
+          if (page.length) await this.rowLayout.upsert(this.database, scope, entity, page);
+          continue;
+        }
         let params: string[] = [], batchCount = 0, textBytes = 0;
         const flush = async () => {
           if (!batchCount) return;
@@ -697,7 +732,8 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         id,
         JSON.stringify(row),
       ]);
-      await this.database.runAsync(
+      if (this.rowLayout) await this.rowLayout.upsert(this.database, scope, entity, versions);
+      else await this.database.runAsync(
         `INSERT INTO _gonvex_replica_entities (scope,entity,id,value) VALUES ${batch.map(() => "(?,?,?,?)").join(",")} ON CONFLICT(scope,entity,id) DO UPDATE SET value=excluded.value`,
         ...params,
       );

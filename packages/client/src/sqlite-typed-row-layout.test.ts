@@ -1,0 +1,86 @@
+import { afterEach, expect, it } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
+import { sqliteTypedReplicaStorage } from './sqlite-typed-row-layout.js';
+import { SQLiteLocalReplicaStorage, type SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
+import { compileSQLiteTypedPage } from './sqlite-typed-query.js';
+import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
+const schema: SQLiteTypedSchema = { tasks: { key: '_id', fields: { _id: { kind: 'text' }, name: { kind: 'text' }, due: { kind: 'number' }, done: { kind: 'boolean' } }, indexes: [{ columns: ['due'] }], search: ['name'], counts: [{ columns: ['done'] }] } };
+const connections: DatabaseSync[] = [];
+afterEach(() => { for (const db of connections.splice(0)) db.close(); });
+function fixture() {
+  const db = new DatabaseSync(':memory:'); connections.push(db);
+  const host: SQLiteReplicaDatabase = {
+    async execAsync(sql) { db.exec(sql); },
+    async runAsync(sql, ...params) { return db.prepare(sql).run(...params as any[]); },
+    async getFirstAsync<T>(sql: string, ...params: unknown[]) { return db.prepare(sql).get(...params as any[]) as T ?? null; },
+    async getAllAsync<T>(sql: string, ...params: unknown[]) { return db.prepare(sql).all(...params as any[]) as T[]; },
+    async withTransactionAsync(run) { db.exec('BEGIN'); try { await run(); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; } },
+  };
+  return { db, host, storage: sqliteTypedReplicaStorage(host, schema) };
+}
+const empty = { entities: {}, liveQueries: {} };
+const cursor = (revision: number, epoch = 'e') => ({ revision, epoch });
+it('stores the canonical corpus only in typed tables and serves the shared adapter through a view', async () => {
+  const { db, storage } = fixture();
+  await storage.replaceSnapshot({ entities: { tasks: { a: { _id: 'a', name: 'Café 東京', due: 2, done: false }, b: { _id: 'b', name: 'Second', due: 1, done: true } } }, liveQueries: {}, cursor: cursor(1) }, 's');
+  expect(db.prepare("SELECT type FROM sqlite_master WHERE name='_gonvex_replica_entities'").get()!.type).toBe('view');
+  const plan = compileSQLiteTypedPage(schema, 's', { table: 'tasks', order: [{ field: 'due', direction: 'asc' }], search: 'café', limit: 50 });
+  expect(db.prepare(plan.sql).all(...plan.bindings).map(row => row.id)).toEqual(['a']);
+  expect((await storage.loadWorkingSet('s', { maxRows: 1, maxBytes: 4096 }))!.residentPartialTables).toEqual(['tasks']);
+  expect((await storage.loadEntityRows('s', 'tasks', ['a']))[0]!.row.name).toBe('Café 東京');
+  expect(await storage.loadEntityRows('other', 'tasks', ['a'])).toEqual([]);
+});
+it('preserves field-level authority, canonical tombstones, epoch fences and adjacent change receipts', async () => {
+  const { storage, host } = fixture();
+  const apply = (revision: number, fields: Record<string, any>, operation: 'insert' | 'update' | 'delete' = 'update', epoch = 'e') => storage.applyTransaction({ cursor: cursor(revision, epoch), changes: [{ entity: 'tasks', id: 'a', operation, ...(operation === 'delete' ? {} : { newValue: fields }) }] }, empty, 's');
+  await apply(10, { _id: 'a', name: 'new' }, 'insert');
+  await apply(5, { _id: 'a', name: 'old', due: 3 });
+  expect((await storage.loadEntityRows('s', 'tasks', ['a']))[0]!.row).toEqual({ _id: 'a', name: 'new', due: 3 });
+  const receipt = await apply(11, {}, 'delete');
+  expect(receipt).toMatchObject({ previousSequence: 2, sequence: 3, changes: { entities: { tasks: { a: null } } } });
+  await apply(9, { _id: 'a', name: 'stale' }, 'insert');
+  expect(await storage.loadEntityRows('s', 'tasks', ['a'])).toEqual([]);
+  await apply(1, { _id: 'a', name: 'next' }, 'insert', 'next');
+  const reopened = sqliteTypedReplicaStorage(host, schema);
+  await expect(reopened.applyTransaction({ cursor: cursor(12), changes: [] }, empty, 's')).rejects.toThrow('obsolete');
+  expect((await reopened.loadEntityRows('s', 'tasks', ['a']))[0]!.row.name).toBe('next');
+});
+it('rolls back rows, FTS, counts and metadata on a bad row in the same commit', async () => {
+  const { db, storage } = fixture();
+  await storage.replaceSnapshot({ ...empty, entities: { tasks: { a: { _id: 'a', name: 'original', due: 1, done: false } } } }, 's');
+  await expect(storage.applyTransaction({ cursor: cursor(2), changes: [
+    { entity: 'tasks', id: 'a', operation: 'update', newValue: { name: 'bad replacement', done: true } },
+    { entity: 'tasks', id: 'b', operation: 'insert', newValue: { _id: 'b', due: 'wrong type' } },
+  ] }, empty, 's')).rejects.toThrow('type');
+  expect((await storage.loadEntityRows('s', 'tasks', ['a']))[0]!.row.name).toBe('original');
+  const query = compileSQLiteTypedPage(schema, 's', { table: 'tasks', order: [{ field: 'due', direction: 'asc' }], search: 'original', limit: 50 });
+  expect(db.prepare(query.sql).all(...query.bindings)).toHaveLength(1);
+  expect((await storage.readChanges('s', 1)).sequence).toBe(1);
+  expect(db.prepare('PRAGMA integrity_check').get()!.integrity_check).toBe('ok');
+});
+it('serves portable reducer reads through the same typed canonical values', async () => {
+  const { storage } = fixture();
+  await storage.replaceSnapshot({ ...empty, entities: { tasks: { a: { _id: 'a', name: 'first', due: 1 }, b: { _id: 'b', name: 'second', due: 2 } } } }, 's');
+  const result = await storage.withReadView('s', { tasks: { key: '_id', complete: true } }, view => view.select({ table: 'tasks', where: { column: 'due', op: 'eq', value: 2 } }));
+  expect(result.rows).toEqual([{ _id: 'b', name: 'second', due: 2 }]);
+  expect(result.complete).toBe(true);
+});
+it('rejects schema changes and generic SQLite databases without deleting pending data', async () => {
+  const { storage, host } = fixture();
+  await storage.replaceSnapshot({ ...empty, entities: { tasks: { a: { _id: 'a', name: 'keep' } } } }, 's');
+  const incompatible = sqliteTypedReplicaStorage(host, { ...schema, tasks: { ...schema.tasks!, search: undefined } });
+  await expect(incompatible.load('s')).rejects.toThrow('migration');
+  expect((await storage.loadEntityRows('s', 'tasks', ['a']))[0]!.row.name).toBe('keep');
+  const other = fixture(); const legacy = new SQLiteLocalReplicaStorage(other.host);
+  await legacy.replaceSnapshot({ ...empty, entities: { tasks: { a: { _id: 'a', name: 'legacy' } } } }, 's');
+  await expect(other.storage.load('s')).rejects.toThrow('verified migration');
+  expect((await legacy.load('s'))!.entities.tasks!.a!.name).toBe('legacy');
+});
+it('clears only the selected scope, including tombstones, FTS and legacy lookup keys', async () => {
+  const { storage, db } = fixture();
+  for (const scope of ['a', 'b']) await storage.replaceSnapshot({ ...empty, entities: { tasks: { r: { _id: 'r', name: 'needle', due: 1 } } } }, scope);
+  await storage.clear('a');
+  expect(await storage.loadEntityRows('a', 'tasks', ['r'])).toEqual([]);
+  expect(await storage.loadEntityRows('b', 'tasks', ['r'])).toHaveLength(1);
+  expect(db.prepare("SELECT count(*) n FROM _gonvex_replica_lookup WHERE scope='a'").get()!.n).toBe(0);
+});
