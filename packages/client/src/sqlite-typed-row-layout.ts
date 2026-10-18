@@ -1,3 +1,4 @@
+import {sqliteTypedIndexSQL} from './sqlite-typed-schema.js';
 import {sqliteEntityAliasSchema,sqlitePhysicalEntityScope,sqliteQueryEntityScopes} from './sqlite-entity-scope.js';
 import { readSQLitePortablePage } from './sqlite-portable-page.js';
 import { fail } from './sqlite-admission.js';
@@ -53,7 +54,8 @@ CREATE TABLE IF NOT EXISTS gv_canonical_tombstones(scope TEXT NOT NULL,entity TE
       await installSQLiteTypedBodyFence(db, schema);
       await db.execAsync('DROP TRIGGER IF EXISTS gv_canonical_delete; DROP VIEW IF EXISTS _gonvex_replica_entities;');
       await db.execAsync(sqliteNativeViewSchema);
-      await db.execAsync(ddl.tables + '\n' + ddl.indexes + '\n' + ddl.search);
+      await db.execAsync(ddl.tables);
+      await db.execAsync(await sqliteTypedIndexSQL(db,schema) + '\n' + ddl.search);
       const branches: string[] = [];
       for (const entity of Object.keys(schema)) {
         const table = sqliteTableName(entity), name = q(table), entitySQL = literal(entity);

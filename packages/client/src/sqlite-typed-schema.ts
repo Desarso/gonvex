@@ -46,7 +46,7 @@ export function validateSQLiteTypedSchema(schema: SQLiteTypedSchema): void {
  * ingest. Count and FTS maintenance always shares the row write transaction. */
 export function compileSQLiteTypedSchema(schema: SQLiteTypedSchema): { tables: string; indexes: string; search: string } {
   validateSQLiteTypedSchema(schema);
-  const tables: string[] = ['CREATE TABLE IF NOT EXISTS gv_fts_deferred(scope TEXT NOT NULL,entity TEXT NOT NULL,PRIMARY KEY(scope,entity)) WITHOUT ROWID;'], indexes: string[] = [], search: string[] = [];
+  const tables: string[] = ['CREATE TABLE IF NOT EXISTS gv_snapshot_index_deferred(entity TEXT PRIMARY KEY) WITHOUT ROWID;', 'CREATE TABLE IF NOT EXISTS gv_fts_deferred(scope TEXT NOT NULL,entity TEXT NOT NULL,PRIMARY KEY(scope,entity)) WITHOUT ROWID;'], indexes: string[] = [], search: string[] = [];
   for (const [entity, table] of Object.entries(schema)) {
     const name = sqliteTableName(entity), tn = q(name);
     const fields = Object.entries(table.fields).map(([field, shape]) =>
@@ -82,4 +82,15 @@ export function compileSQLiteTypedSchema(schema: SQLiteTypedSchema): { tables: s
     }
   }
   return { tables: tables.join('\n'), indexes: indexes.join('\n'), search: search.join('\n') };
+}
+
+/** Keep restart-time setup from rebuilding indexes over an invisible import.
+ * The admission marker is durable; publication or final cancellation restores
+ * the index in the same transaction that removes the marker. */
+export async function sqliteTypedIndexSQL(db:import('./sqlite-replica-storage.js').SQLiteReplicaDatabase,schema:SQLiteTypedSchema):Promise<string>{
+ const deferred=await db.getAllAsync<{entity:string}>('SELECT json_quote(entity) entity FROM gv_snapshot_index_deferred LIMIT 65');
+ if(deferred.length>64)throw new RangeError('Deferred SQLite index entities exceed allowance');
+ const excluded=new Set(deferred.map(row=>JSON.parse(row.entity) as string));
+ if(!excluded.size)return compileSQLiteTypedSchema(schema).indexes;
+ return Object.entries(schema).filter(([entity])=>!excluded.has(entity)).map(([entity,table])=>compileSQLiteTypedSchema({[entity]:table}).indexes).join('\n');
 }

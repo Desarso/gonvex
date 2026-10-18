@@ -2,7 +2,7 @@ import {ByteLedger,BoundedByteCache} from './byte-budget.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
 import {sqlitePhysicalEntityScope} from './sqlite-entity-scope.js';
 import {sqliteBodySkeletonSQL,sqliteRowBodySQL} from './sqlite-typed-body.js';
-import {sqliteFieldName,sqliteIdentifier as q,sqliteTableName,sqliteSearchName,type SQLiteTypedSchema} from './sqlite-typed-schema.js';
+import {sqliteFieldName,sqliteIdentifier as q,sqliteTableName,sqliteSearchName,compileSQLiteTypedSchema,type SQLiteTypedSchema} from './sqlite-typed-schema.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 const literal=(value:string)=>value.includes('\u0000')?"CAST(X'"+[...new TextEncoder().encode(value)].map(byte=>byte.toString(16).padStart(2,'0')).join('')+"' AS TEXT)":"'"+value.replaceAll("'","''")+"'";
 const path=(field:string)=>literal('$.'+JSON.stringify(field));
@@ -12,22 +12,25 @@ export const typedSnapshotSchema=`CREATE TABLE IF NOT EXISTS gv_snapshot_typed(
 /** Generated SQL consumes the same bounded frame as the hash/membership stage.
  * Only the tiny skeleton lives in the typed row; the generic stage keeps its
  * identity/hash/position and no second row body. */
-export function compileSQLiteTypedSnapshot(schema:SQLiteTypedSchema):{check:string;insert:string}[]{
+type SnapshotWritePlan={check:string;insert:string;maxRid:string;fts?:string};
+export function compileSQLiteTypedSnapshot(schema:SQLiteTypedSchema):SnapshotWritePlan[]{
  return Object.entries(schema).filter(([,table])=>table.fields[table.key]?.kind==='text'&&Object.keys(table.fields).length<=128).map(([entity,table])=>{
-  const target=`b.scope=NEW.scope AND b.subscription=json_extract(NEW.value,'$.id') AND b.snapshot=json_extract(NEW.value,'$.snapshotId') AND b.entity=${literal(entity)}`;
-  const fields=Object.entries(table.fields),extract=(field:string)=>`json_extract(j.value,${path(field)})`;
-  const checks=[`json_type(j.value,${path(table.key)})='text'`];
+  const target=`b.scope=i.scope AND b.subscription=json_extract(i.value,'$.id') AND b.snapshot=json_extract(i.value,'$.snapshotId') AND b.entity=${literal(entity)}`;
+  const fields=Object.entries(table.fields),extract=(field:string)=>`json_extract(r.body,${path(field)})`;
+  const checks=[`json_type(r.body,${path(table.key)})='text'`];
   for(const [field,shape]of fields)if(shape.kind!=='json'){
-   const type=`json_type(j.value,${path(field)})`,types=shape.kind==='text'?"'text'":shape.kind==='boolean'?"'true','false'":"'integer','real'";
+   const type=`json_type(r.body,${path(field)})`,types=shape.kind==='text'?"'text'":shape.kind==='boolean'?"'true','false'":"'integer','real'";
    checks.push(`(${type} IS NULL OR ${type} IN ('null',${types}))`);
    if(shape.kind==='number')checks.push(`(${type} IS NULL OR ${type}='null' OR abs(${extract(field)})<=1.7976931348623157e308)`);
   }
-  const values=fields.map(([field,shape])=>shape.kind==='json'?`CASE WHEN json_type(j.value,${path(field)}) IS NULL OR json_type(j.value,${path(field)})='null' THEN NULL ELSE json_quote(${extract(field)}) END`:extract(field));
+  const values=fields.map(([field,shape])=>shape.kind==='json'?`CASE WHEN json_type(r.body,${path(field)}) IS NULL OR json_type(r.body,${path(field)})='null' THEN NULL ELSE json_quote(${extract(field)}) END`:extract(field));
   values.push(...(table.search??[]).map(field=>`coalesce(gv_ingress_lower_fast(coalesce(${extract(field)},'')),gv_ingress_lower(coalesce(${extract(field)},'')))`));
   const columns=['scope','id','body','version',...fields.map(([field])=>sqliteFieldName(field)),...(table.search??[]).map((_,i)=>'s'+i)];
-  return {check:`SELECT 1 FROM gv_snapshot_fast_input i JOIN gv_snapshot_typed b ON ${target.replaceAll('NEW.','i.')} JOIN json_each(i.value,'$.canonicalRows') j WHERE CASE WHEN ${checks.join(' AND ')} THEN 0 ELSE 1 END LIMIT 1`,
- insert:`INSERT INTO ${q(sqliteTableName(entity))}(${columns.map(q).join(',')}) SELECT b.physical,${extract(table.key)},${sqliteBodySkeletonSQL('j.value',table)},CAST(json_extract(i.value,'$.cursor.revision') AS INTEGER),${values.join(',')}
- FROM gv_snapshot_fast_input i JOIN gv_snapshot_typed b ON ${target.replaceAll('NEW.','i.')} JOIN json_each(i.value,'$.canonicalRows') j WHERE (SELECT replay FROM gv_snapshot_fast_state WHERE id=1)=0`};
+  const input=`WITH input AS MATERIALIZED(SELECT b.physical,jsonb(j.value) body FROM gv_snapshot_fast_input i JOIN gv_snapshot_typed b ON ${target} JOIN json_each(i.value,'$.canonicalRows') j)`;
+  return {check:`${input} SELECT 1 FROM input r WHERE CASE WHEN ${checks.join(' AND ')} THEN 0 ELSE 1 END LIMIT 1`,
+ insert:`${input} INSERT INTO ${q(sqliteTableName(entity))}(${columns.map(q).join(',')}) SELECT r.physical,${extract(table.key)},${sqliteBodySkeletonSQL('r.body',table)},CAST((SELECT json_extract(value,'$.cursor.revision') FROM gv_snapshot_fast_input WHERE id=1) AS INTEGER),${values.join(',')}
+ FROM input r WHERE (SELECT replay FROM gv_snapshot_fast_state WHERE id=1)=0`,maxRid:`SELECT coalesce(max(rid),0) rid FROM ${q(sqliteTableName(entity))}`,
+ ...(table.search?.length?{fts:`INSERT INTO ${q(sqliteSearchName(entity))}(rowid,${table.search.map((_,i)=>q('s'+i)).join(',')}) SELECT rid,${table.search.map((_,i)=>q('s'+i)).join(',')} FROM ${q(sqliteTableName(entity))} NOT INDEXED WHERE scope=? AND rid>? ORDER BY rid`}:{})};
  });
 }
 /** Owner-only setup, before accepting the first credited frame. Trusted native
@@ -41,7 +44,13 @@ export async function prepareSQLiteTypedSnapshot(db:SQLiteReplicaDatabase,schema
  if(await db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE name='gv_snapshot_activation_receipts' AND type='table'")&&await db.getFirstAsync('SELECT 1 FROM gv_snapshot_activation_receipts WHERE scope=? AND subscription=? AND snapshot=?',input.scope,input.subscription,input.snapshot))fail('PAGE_CHANGED','Snapshot publication receipt already exists');
  if(await db.getFirstAsync('SELECT 1 FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=?',input.scope,input.subscription,input.snapshot))fail('PAGE_CHANGED','Cannot bind an already started snapshot');
  const n=await db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_typed');if(n!.n>=64)fail('BUDGET','Collect obsolete typed snapshot stages first');
- const physical='\u0000typed-snapshot:'+crypto.randomUUID();if(table.search?.length)await db.runAsync('INSERT INTO gv_fts_deferred VALUES(?,?)',physical,input.entity);await db.runAsync('INSERT INTO gv_snapshot_typed VALUES(?,?,?,?,?)',input.scope,input.subscription,input.snapshot,input.entity,physical);return physical;
+ const existing=await db.getFirstAsync<{n:number}>(`SELECT count(*) n FROM (SELECT 1 FROM ${q(sqliteTableName(input.entity))} LIMIT 513)`);
+ if(existing!.n<=512){
+  const markers=await db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_index_deferred');if(markers!.n>=64)fail('BUDGET','Deferred index entities exceed allowance');
+  await db.runAsync('INSERT OR IGNORE INTO gv_snapshot_index_deferred VALUES(?)',input.entity);
+  for(let i=0;i<table.indexes.length;i++)await db.execAsync(`DROP INDEX IF EXISTS ${q(sqliteTableName(input.entity)+'_i_'+i)}`);
+ }
+ const physical='\u0000typed-snapshot:'+crypto.randomUUID();await db.runAsync('INSERT INTO gv_snapshot_typed VALUES(?,?,?,?,?)',input.scope,input.subscription,input.snapshot,input.entity,physical);return physical;
 }
 
 /** Caller owns the snapshot publication transaction. Existing authority stays
@@ -72,7 +81,9 @@ export async function activateSQLiteTypedSnapshot(db:SQLiteReplicaDatabase,schem
   await db.runAsync(`DELETE FROM ${name} WHERE scope=? AND id IN (SELECT id FROM temp.gv_snapshot_overlap)`,physical);
   await db.runAsync(`INSERT INTO ${name}(${columns.map(q).join(',')}) SELECT ?,${rest} FROM ${name} old WHERE old.scope=?
    AND (EXISTS(SELECT 1 FROM temp.gv_snapshot_overlap o WHERE o.id=old.id) OR NOT EXISTS(SELECT 1 FROM gv_snapshot_rows s WHERE ${selection} AND s.id=old.id))`,physical,previous,...args);
-  if(table.search?.length){
+  const indexes=compileSQLiteTypedSchema({[input.entity]:table}).indexes;if(indexes)await db.execAsync(indexes);
+  await db.runAsync('DELETE FROM gv_snapshot_index_deferred WHERE entity=?',input.entity);
+  if(table.search?.length&&await db.getFirstAsync('SELECT 1 FROM gv_fts_deferred WHERE scope=? AND entity=?',physical,input.entity)){
    const columns=table.search.map((_,i)=>q('s'+i)).join(','),fts=q(sqliteSearchName(input.entity));
    let after=0;for(;;){const last=(await db.getFirstAsync<{last:number|null}>(`SELECT max(rid) last FROM (SELECT rid FROM ${name} NOT INDEXED WHERE scope=? AND rid>? ORDER BY rid LIMIT 512)`,physical,after))?.last;if(last==null)break;
     await db.runAsync(`INSERT INTO ${fts}(rowid,${columns}) SELECT rid,${columns} FROM ${name} NOT INDEXED WHERE scope=? AND rid>? AND rid<=? ORDER BY rid`,physical,after,last);after=last;
@@ -87,15 +98,23 @@ export async function activateSQLiteTypedSnapshot(db:SQLiteReplicaDatabase,schem
 
 export class SQLiteTypedSnapshotWriter {
  private readonly ledger=new ByteLedger(262144);
- private readonly plans=new BoundedByteCache<string,{check:string;insert:string}>('typed-snapshot-plans',262144,16,this.ledger);
+ private readonly plans=new BoundedByteCache<string,SnapshotWritePlan>('typed-snapshot-plans',262144,16,this.ledger);
  constructor(private readonly db:SQLiteReplicaDatabase,private readonly schema:SQLiteTypedSchema){}
  stats(){return this.plans.stats();}
  async append(){
   const db=this.db,schema=this.schema;
-  const row=await db.getFirstAsync<{entity:string;key:string}>(`SELECT b.entity,json_extract(i.value,'$.key') key FROM gv_snapshot_fast_input i JOIN gv_snapshot_typed b ON b.scope=i.scope AND b.subscription=json_extract(i.value,'$.id') AND b.snapshot=json_extract(i.value,'$.snapshotId')`);
+  const row=await db.getFirstAsync<{entity:string;key:string;physical:string;replay:number}>(`SELECT b.entity,json_extract(i.value,'$.key') key,json_quote(b.physical) physical,(SELECT replay FROM gv_snapshot_fast_state WHERE id=1) replay FROM gv_snapshot_fast_input i JOIN gv_snapshot_typed b ON b.scope=i.scope AND b.subscription=json_extract(i.value,'$.id') AND b.snapshot=json_extract(i.value,'$.snapshotId')`);
   if(!row)return;const table=Object.hasOwn(schema,row.entity)&&schema[row.entity];if(!table||row.key!==table.key)fail('INVALID_ROW','Unknown typed snapshot entity or mismatched key');
-  let plan=this.plans.get(row.entity);if(!plan){plan=compileSQLiteTypedSnapshot({[row.entity]:table})[0];if(!plan)fail('INVALID_ROW','Unsupported typed snapshot entity');this.plans.put(row.entity,plan,(row.entity.length+plan.check.length+plan.insert.length)*2+512);}
-  if(await db.getFirstAsync(plan.check))fail('INVALID_ROW','Snapshot field type differs from generated schema');await db.runAsync(plan.insert);
+  if(row.replay)return;
+  let plan=this.plans.get(row.entity);if(!plan){plan=compileSQLiteTypedSnapshot({[row.entity]:table})[0];if(!plan)fail('INVALID_ROW','Unsupported typed snapshot entity');this.plans.put(row.entity,plan,(row.entity.length+plan.check.length+plan.insert.length+plan.maxRid.length+(plan.fts?.length??0))*2+512);}
+  if(await db.getFirstAsync(plan.check))fail('INVALID_ROW','Snapshot field type differs from generated schema');
+  const physical=JSON.parse(row.physical) as string;
+  if(plan.fts&&!await db.getFirstAsync('SELECT 1 FROM gv_fts_deferred WHERE scope=? AND entity=?',physical,row.entity)){
+   const before=(await db.getFirstAsync<{rid:number}>(plan.maxRid))!.rid;
+   await db.runAsync('INSERT INTO gv_fts_deferred VALUES(?,?)',physical,row.entity);
+   await db.runAsync(plan.insert);await db.runAsync(plan.fts,physical,before);
+   await db.runAsync('DELETE FROM gv_fts_deferred WHERE scope=? AND entity=?',physical,row.entity);
+  }else await db.runAsync(plan.insert);
  }
 }
 
@@ -118,7 +137,10 @@ export async function discardSQLiteTypedSnapshot(db:SQLiteReplicaDatabase,schema
   if(await db.getFirstAsync(`SELECT 1 FROM ${name} WHERE scope=? LIMIT 1`,physical))return false;
  }
  await db.runAsync('DELETE FROM gv_fts_deferred WHERE scope=? AND entity=?',physical,row.entity);
- await db.runAsync('DELETE FROM gv_snapshot_typed WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);return true;
+ await db.runAsync('DELETE FROM gv_snapshot_typed WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);
+ if(!await db.getFirstAsync('SELECT 1 FROM gv_snapshot_typed WHERE entity=? LIMIT 1',row.entity)&&await db.getFirstAsync('SELECT 1 FROM gv_snapshot_index_deferred WHERE entity=?',row.entity)){
+  const indexes=compileSQLiteTypedSchema({[row.entity]:schema[row.entity]!}).indexes;if(indexes)await db.execAsync(indexes);await db.runAsync('DELETE FROM gv_snapshot_index_deferred WHERE entity=?',row.entity);
+ }return true;
 }
 
 

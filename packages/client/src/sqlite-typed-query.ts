@@ -128,7 +128,7 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
   }).join('') : ',' + sqliteRowBodySQL(table) + ' AS body';
   const keyColumns=orderColumns.map((column,i)=>`,${column} AS ${q('k'+i)}`).join('');
   const resultColumns=keysOnly?`t.rid,t.id${overlay?.root?keyColumns:''}`:`t.id,t.version${selected}${keyColumns}`;
-  return {sql:`SELECT ${resultColumns}${overlay?.root?`,${field(plan.table,'t',table.key)} AS ${q('__gv_key')}`:''} FROM ${rootSource} t WHERE ${where.map(term=>'('+term+')').join(' AND ')} ORDER BY ${ordering.join(',')},${field(plan.table,'t',table.key)} ASC${keysOnly?'':` LIMIT ${bind(plan.limit)}`}`,bindings};
+  return {sql:`SELECT ${resultColumns}${overlay?.root?`,${field(plan.table,'t',table.key)} AS ${q('__gv_key')}`:''} FROM ${rootSource} t${plan.search&&access==='trigram'&&(!overlay||overlay.root)?' NOT INDEXED':''} WHERE ${where.map(term=>'('+term+')').join(' AND ')} ORDER BY ${ordering.join(',')},${field(plan.table,'t',table.key)} ASC${keysOnly?'':` LIMIT ${bind(plan.limit)}`}`,bindings};
 }
 
 /** Each indexed arm admits only its first N candidates before the final

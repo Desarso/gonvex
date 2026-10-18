@@ -24,6 +24,7 @@ struct Pending {
     acked: Option<u64>,
     in_flight: VecDeque<(u64, usize)>,
     last_sent: bool,
+    buffered: Option<(Vec<u8>, u64, bool)>,
     ready: Option<ServerMessage>,
 }
 
@@ -65,6 +66,7 @@ impl SnapshotDelivery {
                 acked: None,
                 in_flight: VecDeque::new(),
                 last_sent: false,
+                buffered: None,
                 ready: None,
             },
         );
@@ -146,6 +148,8 @@ impl SnapshotDelivery {
 
     /// A socket turn encodes at most eight bounded frames. Across all active
     /// subscriptions only 512 KiB may await a durable client acknowledgement.
+    /// A subscription may retain one unsent frame (at most 128 KiB); exact
+    /// admission fills the byte window without reserving a maximum-size frame.
     pub(crate) fn pump(&mut self) -> DeliveryBatch {
         let mut bytes: usize = self
             .pending
@@ -166,28 +170,35 @@ impl SnapshotDelivery {
                 .iter_mut()
                 .filter(|(_, pending)| !pending.last_sent)
             {
-                if count == IN_FLIGHT_FRAMES || bytes + FRAME_LIMIT > IN_FLIGHT_BYTES {
+                if count == IN_FLIGHT_FRAMES || bytes == IN_FLIGHT_BYTES {
                     break 'pump;
                 }
-                let encoded = pending
-                    .pages
-                    .next()
-                    .ok_or("snapshot iterator ended without final frame")
-                    .and_then(|page| {
-                        let ServerMessage::ReplicaSnapshotEncodedPage { sequence, last, .. } =
-                            &page
-                        else {
-                            unreachable!()
-                        };
-                        let encoded =
-                            serde_json::to_vec(&page).map_err(|_| "snapshot encoding failed")?;
-                        if encoded.len() > FRAME_LIMIT {
-                            return Err("snapshot row exceeds native frame budget");
-                        }
-                        Ok((encoded, *sequence, *last))
-                    });
+                let encoded = pending.buffered.take().map(Ok).unwrap_or_else(|| {
+                    pending
+                        .pages
+                        .next()
+                        .ok_or("snapshot iterator ended without final frame")
+                        .and_then(|page| {
+                            let ServerMessage::ReplicaSnapshotEncodedPage {
+                                sequence, last, ..
+                            } = &page
+                            else {
+                                unreachable!()
+                            };
+                            let encoded = serde_json::to_vec(&page)
+                                .map_err(|_| "snapshot encoding failed")?;
+                            if encoded.len() > FRAME_LIMIT {
+                                return Err("snapshot row exceeds native frame budget");
+                            }
+                            Ok((encoded, *sequence, *last))
+                        })
+                });
                 match encoded {
                     Ok((encoded, sequence, last)) => {
+                        if bytes + encoded.len() > IN_FLIGHT_BYTES {
+                            pending.buffered = Some((encoded, sequence, last));
+                            break 'pump;
+                        }
                         pending.sent = Some(sequence);
                         pending.last_sent = last;
                         pending.in_flight.push_back((sequence, encoded.len()));
@@ -280,6 +291,48 @@ mod tests {
         assert!(delivery.pump().frames.is_empty());
         delivery.acknowledge(id, "old-generation", 999).unwrap();
         assert!(delivery.pump().frames.is_empty());
+    }
+    #[test]
+    fn exact_frame_admission_fills_the_window_without_minting_credit() {
+        let mut delivery = SnapshotDelivery::default();
+        delivery.begin(snapshot("exact", 2000)).unwrap();
+        let frames = delivery.pump().frames;
+        assert_eq!(frames.len(), IN_FLIGHT_FRAMES);
+        assert!(frames.iter().map(Vec::len).sum::<usize>() <= IN_FLIGHT_BYTES);
+        let last: serde_json::Value = serde_json::from_slice(frames.last().unwrap()).unwrap();
+        assert!(
+            delivery
+                .acknowledge(
+                    "exact",
+                    last["snapshotId"].as_str().unwrap(),
+                    last["sequence"].as_u64().unwrap() + 1
+                )
+                .is_err()
+        );
+        assert!(delivery.pump().frames.is_empty());
+    }
+    #[test]
+    fn a_buffered_frame_is_not_sent_or_acknowledgeable_until_credit_returns() {
+        let mut delivery = SnapshotDelivery::default();
+        let mut input = snapshot("large", 8);
+        if let ServerMessage::ReplicaSnapshot { result, .. } = &mut input {
+            for row in result {
+                row["body"] = json!("x".repeat(100_000));
+            }
+        }
+        delivery.begin(input).unwrap();
+        let frames = delivery.pump().frames;
+        assert_eq!(frames.len(), 5);
+        let first: serde_json::Value = serde_json::from_slice(&frames[0]).unwrap();
+        let generation = first["snapshotId"].as_str().unwrap();
+        assert!(delivery.pending["large"].buffered.is_some());
+        assert!(delivery.acknowledge("large", generation, 5).is_err());
+        assert!(delivery.pump().frames.is_empty());
+        delivery.acknowledge("large", generation, 0).unwrap();
+        let next = delivery.pump().frames;
+        assert_eq!(next.len(), 1);
+        let next: serde_json::Value = serde_json::from_slice(&next[0]).unwrap();
+        assert_eq!(next["sequence"], 5);
     }
     #[test]
     fn final_ack_releases_latest_certificate_and_close_releases_credits() {

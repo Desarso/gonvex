@@ -50,7 +50,7 @@ export class SQLiteNativeIngress {
   this.entries++;this.wireBytes+=bytes.byteLength;
   const result=new Promise<SQLiteSnapshotReceipt>((resolve,reject)=>this.pending.push({bytes,resolve,reject}));
   if(!this.draining){this.draining=true;void this.drain();}
-  if(this.pending.length===maxFrames||this.wireBytes>maxWireBytes-frameBytes)this.releaseBatch?.();
+  if(this.pending.length===maxFrames||this.wireBytes===maxWireBytes)this.releaseBatch?.();
   return result;
  }
  private release(entry:Pending){this.entries--;this.wireBytes-=entry.bytes.byteLength;this.releasedBytes+=releaseOwnedSQLiteBytes(entry.bytes);}
@@ -60,7 +60,7 @@ export class SQLiteNativeIngress {
     await this.tasks.yield();
     // Network events can arrive on separate tasks. Wait at most four ms for
     // the bounded credit window instead of forcing a FULL sync after a partial batch.
-    if(this.pending.length<maxFrames&&this.wireBytes<=maxWireBytes-frameBytes&&!this.disposed)await new Promise<void>(resolve=>{
+    if(this.pending.length<maxFrames&&this.wireBytes<maxWireBytes&&!this.disposed)await new Promise<void>(resolve=>{
      const timer=setTimeout(()=>finish(),4);
      const finish=()=>{clearTimeout(timer);this.releaseBatch=undefined;resolve();};
      this.releaseBatch=finish;

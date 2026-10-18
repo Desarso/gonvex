@@ -65,3 +65,14 @@ it('collects retired physical rows without disturbing current counts, search or 
  expect(await f.engine.count('s','tasks',0,['snapshot update'])).toBe(1);expect((await f.engine.page('s',{table:'tasks',search:'snapshot update',order:[{field:'name',direction:'asc'}],textOrder:'binary',limit:1})).rows[0]?.id).toBe('fresh');
  await f.write(30,[{entity:'tasks',id:'fresh',operation:'update',newValue:{name:'later'}}]);expect((await f.canonical.loadEntityRows('s','tasks',['fresh']))[0].row.name).toBe('later');expect(await f.engine.integrity()).toBe('ok');
 });
+it('keeps first-page reads and search available after owner restart while bulk indexes remain deferred',async()=>{
+ const f=await fixture();await f.write(20,[{entity:'tasks',id:'visible',operation:'insert',newValue:{id:'visible',name:'visible café'}}]);
+ const {input}=await f.stage(Array.from({length:300},(_,i)=>({id:'staged-'+i,name:'stage '+i})));
+ const index=sqliteTableName('tasks')+'_i_0';expect(await f.db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",index)).toBeNull();
+ const next=new SQLiteTypedReplicaEngine(f.db,schema);await next.open('replacement');const canonical=sqliteTypedReplicaStorage(f.db,schema);await canonical.ready();
+ expect(await f.db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",index)).toBeNull();
+ expect((await next.page('s',{table:'tasks',search:'café',order:[{field:'name',direction:'asc'}],textOrder:'binary',limit:10})).rows.map(row=>row.id)).toEqual(['visible']);
+ const activation=new SQLiteSnapshotActivator(f.db,canonical,()=>next.verifyOwner(),schema);await activation.ready();await activation.activate(input);
+ expect(await f.db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",index)).toEqual({'1':1});expect(await f.db.getFirstAsync('SELECT 1 FROM gv_snapshot_index_deferred')).toBeNull();
+ expect((await next.page('s',{table:'tasks',search:'stage 299',order:[{field:'name',direction:'asc'}],textOrder:'binary',limit:10})).rows.map(row=>row.id)).toEqual(['staged-299']);expect(await next.integrity()).toBe('ok');
+});

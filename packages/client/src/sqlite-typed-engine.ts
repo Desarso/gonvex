@@ -1,3 +1,5 @@
+import {sqliteTypedIndexSQL} from './sqlite-typed-schema.js';
+import {sqliteSearchAccess} from './sqlite-search-access.js';
 import {sqliteEntityAliasSchema,sqlitePhysicalEntityScope,sqliteQueryEntityScopes} from './sqlite-entity-scope.js';
 import {assertSQLiteMembership} from './sqlite-membership-plan.js';
 import {releaseOwnedSQLiteBytes} from './sqlite-owned-buffer.js';
@@ -151,7 +153,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         // Identical format-3/4/5 rows and receipts require no corpus rewrite.
         if (old && old.schema !== signature && ![3, 4, 5].some(format => old.schema === JSON.stringify({ format, tables: this.schema }))) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
         await this.db.execAsync(ddl.tables);
-        if (!await this.indexesDeferred() && (ddl.indexes || ddl.search)) await this.db.execAsync(ddl.indexes + '\n' + ddl.search);
+        if (!await this.indexesDeferred() && (ddl.indexes || ddl.search)) await this.db.execAsync(await sqliteTypedIndexSQL(this.db,this.schema) + '\n' + ddl.search);
         this.epoch = (old?.epoch ?? 0) + 1;
         if (!Number.isSafeInteger(this.epoch)) fail('FENCED', 'SQLite epoch exhausted');
         await this.db.runAsync('INSERT INTO gv_storage_meta VALUES(1,?,?,?,0) ON CONFLICT(id) DO UPDATE SET schema=excluded.schema,epoch=excluded.epoch,owner=excluded.owner', signature, this.epoch, owner);
@@ -609,19 +611,8 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         if (admitted.after && admitted.after.sequence !== sequence) fail('PAGE_CHANGED', 'SQLite keyset belongs to an older replica snapshot');
         await assertSQLiteMembership(this.db,this.schema,scope,admitted);
         const resolved=await sqliteQueryEntityScopes(this.db,scope,admitted),physical=resolved.physical;
-        let access: 'trigram' | 'ordered' = await this.indexesDeferred() ? 'ordered' : 'trigram';
-        let selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access,false,scope,undefined,resolved.sources);
-        if (admitted.search && access === 'trigram') {
-          // Inspect at most 1025 matching rowids. A common term uses the native
-          // sort/filter index and stops at the requested page, avoiding a huge
-          // FTS candidate materialization followed by a global sort.
-          const table = this.schema[admitted.table]!;
-          const pattern = '*' + admitted.search.toLowerCase().replace(/[\[\]*?]/g, char => char === '[' ? '[[]' : char === ']' ? '[]]' : '[' + char + ']') + '*';
-          const candidates = Array.from(admitted.search).length < 3 ? 1025 : (await this.db.getFirstAsync<{ n: number }>(
-            `SELECT count(*) n FROM (${(table.search ?? []).map((_, i) => `SELECT rowid FROM (SELECT rowid FROM ${q(sqliteSearchName(admitted.table))} WHERE ${q('s' + i)} GLOB ? LIMIT 1025)`).join(' UNION ')} LIMIT 1025)`,
-            ...(table.search ?? []).map(() => pattern)))!.n;
-          if (candidates > 1024) { access = 'ordered'; selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access,false,scope,undefined,resolved.sources); }
-        }
+        const access=await this.indexesDeferred()?'ordered':await sqliteSearchAccess(this.db,this.schema,admitted);
+        let selectedStatement=compileSQLiteTypedPage(this.schema,physical,admitted,access,false,scope,undefined,resolved.sources);
         // The host must enforce a column byte limit before decoding as well.
         const fields = admitted.select ? [...new Set([this.schema[admitted.table]!.key, ...admitted.select])] : undefined;
         let records: Record<string, unknown>[], outputBytes: number, limit = admitted.limit;
