@@ -258,7 +258,8 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
     }
   }
   private async insertBootstrapEntity(scope: string, entity: string, encoded: string | undefined, normalized: string): Promise<void> {
-    const sql = this.compiledPlan('insert:' + this.jsonEach + ':' + (encoded === undefined ? 'scratch:' : 'wire:') + entity, () => {
+    const nativeFold = encoded === undefined && this.db.ingressUnicodeFold === true;
+    const sql = this.compiledPlan('insert:' + this.jsonEach + ':' + (encoded === undefined ? 'scratch:' : 'wire:') + (nativeFold ? 'ascii-fold:' : '') + entity, () => {
     const source = encoded === undefined ? sqliteEncodedFrameValueSQL : 'jsonb(?)';
     const table = this.schema[entity]!, tn = q(sqliteTableName(entity));
     const fields = Object.entries(table.fields);
@@ -272,13 +273,20 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         SELECT CAST(key AS INTEGER) pos,jsonb_extract(value,'$.row') row,
           json_extract(value,'$.id') id,json_extract(value,'$.version') version
         FROM ${this.jsonEach}(${source}) WHERE json_extract(value,'$.table')=?
-      ), normalized AS MATERIALIZED (SELECT jsonb(?) value) INSERT INTO ${tn}(${columns.map(q).join(',')})
-      SELECT ?,id,${sqliteBodySkeletonSQL("row", table)},version,${values.concat((table.search ?? []).map((_, i) => `json_extract(normalized.value, '$[' || pos || '][${i}]')`)).join(',')}
-      FROM input CROSS JOIN normalized WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND gv_tombstones.id=input.id AND gv_tombstones.version>=input.version)
+      )${nativeFold ? '' : ', normalized AS MATERIALIZED (SELECT jsonb(?) value)'} INSERT INTO ${tn}(${columns.map(q).join(',')})
+      SELECT ?,id,${sqliteBodySkeletonSQL("row", table)},version,${values.concat((table.search ?? []).map((name, i) => {
+        if (!nativeFold) return `json_extract(normalized.value, '$[' || pos || '][${i}]')`;
+        const value=`coalesce(json_extract(row,${path(name)}),'')`;
+        // SQLite lower is exactly ECMAScript lowercase for ASCII. UTF-8 byte
+        // length differs from character length for non-ASCII or embedded NUL,
+        // which takes the exact Unicode host callback only at insertion.
+        return `CASE WHEN length(CAST(${value} AS BLOB))=length(${value}) THEN lower(${value}) ELSE gv_ingress_lower(${value}) END`;
+      })).join(',')}
+      FROM input${nativeFold ? '' : ' CROSS JOIN normalized'} WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND gv_tombstones.id=input.id AND gv_tombstones.version>=input.version)
       ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`;
     })!;
     const insertAt = performance.now();
-    await this.db.runAsync(sql, ...(encoded === undefined ? [entity, normalized, scope, scope, entity] : [encoded, entity, normalized, scope, scope, entity]));
+    await this.db.runAsync(sql, ...(encoded === undefined ? (nativeFold ? [entity, scope, scope, entity] : [entity, normalized, scope, scope, entity]) : [encoded, entity, normalized, scope, scope, entity]));
     this.profile.sqliteInsertMs += performance.now() - insertAt;
   }
 

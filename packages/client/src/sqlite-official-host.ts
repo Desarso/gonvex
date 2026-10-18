@@ -6,7 +6,7 @@ export type OfficialSQLiteHost = {
   database: SQLiteReplicaDatabase;
   memoryBytes(): number;
   statementBytes(): number;
-  takeProfile(): { prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
+  takeProfile(): { ingressFoldCalls:number; ingressFoldUTF16Bytes:number; prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
   close(): void;
 };
 
@@ -49,7 +49,7 @@ PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=3000;`);
 export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
   budget = { maxRows: 512, maxBytes: 262_144 }): OfficialSQLiteHost {
   let transaction = false, closed = false, statementBytes = 0;
-  const profile = { prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 };
+  const profile = { ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 };
   const statements = new Map<string, { statement: PreparedStatement; bytes: number }>();
   const statementBudget = 262144, maxStatements = 4;
   function retire(sql: string) {
@@ -118,7 +118,9 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
       throw error;
     } finally { if (!retain) statement.finalize(); }
   }
+  db.createFunction('gv_ingress_lower', (_context: unknown, value: unknown) => { const text=String(value??''); profile.ingressFoldCalls++; profile.ingressFoldUTF16Bytes+=text.length*2; return text.toLowerCase(); }, { arity: 1, deterministic: true, directOnly: true });
   const database: SQLiteReplicaDatabase = {
+    ingressUnicodeFold: true,
     async execAsync(sql) { check(); db.exec(sql); },
     async runAsync(sql, ...values) {
       check();

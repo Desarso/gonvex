@@ -12,6 +12,8 @@ import type { ReadCoverage as ReplicaReadCoverage } from "./indexeddb-read-view.
 import type { ReducerReadView as ReplicaReducerReadView } from "@gonvex/local-runtime/portable";
 
 export interface SQLiteReplicaDatabase {
+  /** Exact ECMAScript Unicode fold supplied by a host only for ingress SQL. */
+  readonly ingressUnicodeFold?: true;
   execAsync(sql: string): Promise<void>;
   runAsync(sql: string, ...params: unknown[]): Promise<unknown>;
   getFirstAsync<T>(sql: string, ...params: unknown[]): Promise<T | null>;

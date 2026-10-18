@@ -111,7 +111,7 @@ it('profiles native transaction boundaries using fixed numeric counters and rese
   const result = host.takeProfile();
   expect(result).toMatchObject({ commits: 1, rollbacks: 1 });
   for (const value of Object.values(result)) expect(Number.isFinite(value) && value >= 0).toBe(true);
-  expect(host.takeProfile()).toEqual({ prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
+  expect(host.takeProfile()).toEqual({ ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
   expect((await host.database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM profile_probe'))!.n).toBe(0);
 });
 
@@ -296,4 +296,26 @@ it('atomically commits canonical rows with replay receipts on the composed owner
   const next=new SQLiteTypedReplicaEngine(database,schema);await next.open('two');
   expect(await next.executeStorageOnce('s','request',input,async()=>{throw Error('must not repeat');})).toEqual(first);
   await expect(engine.executeStorageOnce('s','new',{},write)).rejects.toMatchObject({code:'FENCED'});
+});
+
+it('folds ASCII natively and uses the exact Unicode ingress fallback without normalization frames',async()=>{
+  const native=fixture().host,portable=fixture().host;
+  const schema={records:{key:'_id',fields:{_id:{kind:'text'},title:{kind:'text'},description:{kind:'text'},rank:{kind:'number'}},indexes:[{columns:['rank']}],search:['title','description'],searchContent:'external'}} as const;
+  const values=['ASCII TEXT','İSTANBUL','ΟΣ ΟΣΑ','CAFÉ 東京 🔧','ẞ Straße','A\u0000B','',null,undefined];
+  const rows=values.map((title,rank)=>({_id:String(rank),rank,description:'Synthetic Maintenance PROCEDURE. '.repeat(15),...(title===undefined?{}:{title})}));
+  const folded=new SQLiteTypedReplicaEngine(native.database,schema);
+  const {ingressUnicodeFold:_capability,...fallback}=portable.database;
+  const projected=new SQLiteTypedReplicaEngine(fallback,schema);
+  for(const engine of [folded,projected]){await engine.open('owner');await engine.importScope('s',(async function*(){for(const row of rows)yield JSON.stringify([{table:'records',id:row._id,version:1,row}]);})());}
+  expect(folded.takeProfile()).toMatchObject({nativeFrames:rows.length,searchProjectionMs:0,normalizationMs:0});
+  expect(native.takeProfile().ingressFoldCalls).toBe(5);
+  const table=sqliteTableName('records');
+  const actual=await native.database.getAllAsync(`SELECT s0,s1 FROM ${q(table)} ORDER BY rid`);
+  const expected=await portable.database.getAllAsync(`SELECT s0,s1 FROM ${q(table)} ORDER BY rid`);
+  expect(actual).toEqual(expected);
+  for(const search of ['ascii','i̇stan','ος','οσα','café','東京','🔧','ß','procedure']){
+    const plan={table:'records',search,order:[{field:'rank',direction:'asc' as const}],limit:50};
+    expect((await folded.page('s',plan)).rows,search).toEqual((await projected.page('s',plan)).rows);
+  }
+  expect(await folded.integrity()).toBe('ok');
 });

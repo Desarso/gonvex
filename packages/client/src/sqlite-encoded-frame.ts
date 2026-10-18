@@ -101,7 +101,7 @@ export async function writeSQLiteEncodedFrame(db: SQLiteReplicaDatabase, schema:
     for (const { entity } of entities as { entity: string }[]) {
       const table = schema[entity]!;
       let normalized = '[]';
-      if (table.search?.length) {
+      if (table.search?.length && !db.ingressUnicodeFold) {
         let timed = performance.now();
         const records = await db.getAllAsync<Record<string, unknown>>(`SELECT CAST(key AS INTEGER) pos,${table.search.map((name,index)=>`json_extract(value,${path('row',name)}) s${index}`).join(',')} FROM ${each}(${sqliteEncodedFrameValueSQL}) WHERE json_extract(value,'$.table')=? ORDER BY CAST(key AS INTEGER)`, entity);
         projectionMs += performance.now() - timed; timed = performance.now();

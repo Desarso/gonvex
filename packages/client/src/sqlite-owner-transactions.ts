@@ -7,6 +7,7 @@ export function sqliteOwnerTransactions(database: SQLiteReplicaDatabase): SQLite
   let depth=0, serial=0, poison:{error:unknown}|undefined;
   const checkPoison = () => { if(poison)throw poison.error; };
   return {
+    ...(database.ingressUnicodeFold ? {ingressUnicodeFold:true as const} : {}),
     execAsync:sql=>database.execAsync(sql),
     runAsync:(sql,...params)=>database.runAsync(sql,...params),
     getAllAsync:<T>(sql:string,...params:unknown[])=>database.getAllAsync<T>(sql,...params),
