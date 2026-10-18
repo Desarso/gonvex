@@ -6,6 +6,7 @@ import {artifactHashFromAuthResult,developerSessionTokenFromAuthResult,localIden
 import {GonvexClientError,reducerErrorClassFromMessage} from './client-error.js';
 import {sqlitePayloadBytes} from './sqlite-admission.js';
 
+type AdmissionFrame={generation:number;serial:number;value:ArrayBuffer|ServerMessage;bytes:number;release():void};
 type Options=GonvexClientAuth&{controlOnly?:boolean;public?:boolean;ownerHost:SQLiteTransportHost;clientContract?:ClientContract;reserve(bytes:number):()=>void;releaseAuth?:()=>void};
 export type SQLiteLiveQueryUpdate={result:JsonValue;subscriptionRevision:{epoch:string;sequence:number};windowRevision?:string;replicaScope?:string}|{error:string};
 type ControlWatch={live?:true;ref:FunctionReference;args:JsonValue;wireId?:string;authSerial?:number;release():void;receive(value:{result:JsonValue}|SQLiteLiveQueryUpdate):void};
@@ -21,6 +22,7 @@ export class SQLiteNativeTransport {
  private latestAuth?:string;private activeAuth?:string;private authInFlight=true;private installing=false;private closed=false;private disposed=false;private quarantined=false;
  private capabilities:ServerCapabilities={};private artifact='';private watermark=0;private watermarkFence='';private session:'unavailable'|'authenticated'='unavailable';
  private readonly ephemeral=crypto.randomUUID();private readonly pending=new Map<string,Pending>();private waiting=0;private readonly controlWatches=new Set<ControlWatch>();private readonly nativeErrors=new Map<string,NativeError>();
+ private readonly admissionFrames:AdmissionFrame[]=[];private admissionBytes=0;
  private tokenCancel?:()=>void;
  private retry?:ReturnType<typeof setTimeout>;private authTimer?:ReturnType<typeof setTimeout>;private refreshed=false;private refreshedToken?:string;private sendTimer?:ReturnType<typeof setTimeout>;private reconnectAttempts=0;private connectionCount=0;private hasEver=false;
  constructor(private readonly url:string,private readonly options:Options){this.auth={project:options.project,tenant:options.tenant,identity:options.identity,token:options.token,fetchToken:options.fetchToken};}
@@ -35,12 +37,12 @@ export class SQLiteNativeTransport {
   const socket=this.socket=new WebSocket(this.url);socket.binaryType='arraybuffer';this.authInFlight=true;this.installing=false;this.latestAuth=undefined;this.activeAuth=undefined;
   socket.addEventListener('open',()=>{if(!this.current(socket,generation))return;this.hasEver=true;this.connectionCount++;this.refreshed=false;this.refreshedToken=undefined;void this.authenticate(socket,generation,false);});
   socket.addEventListener('message',event=>{if(!this.current(socket,generation))return;try{
-   if(event.data instanceof ArrayBuffer){if(!this.quarantined&&(!this.authInFlight||this.installing))this.options.ownerHost.binary(event.data,generation);return;}
+   if(event.data instanceof ArrayBuffer){if(!this.quarantined&&this.installing)this.queueAdmission(event.data,generation);else if(!this.quarantined&&!this.authInFlight)this.options.ownerHost.binary(event.data,generation);return;}
    if(typeof event.data!=='string'||event.data.length*2>262144)throw Object.assign(Error('Native control frame exceeds decode budget'),{code:'BUDGET'});
    const message=JSON.parse(event.data) as ServerMessage;if(!message||typeof message!=='object'||typeof message.type!=='string')throw Error('Invalid native control frame');
    this.receive(socket,generation,message);
   }catch(failure){this.options.ownerHost.failed(failure);socket.close();}});
-  socket.addEventListener('close',()=>{if(!this.current(socket,generation))return;this.socket=undefined;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.session='unavailable';this.authInFlight=true;this.installing=false;this.clearAuthTimer();this.options.ownerHost.disconnected();
+  socket.addEventListener('close',()=>{if(!this.current(socket,generation))return;this.socket=undefined;this.clearAdmission();this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.session='unavailable';this.authInFlight=true;this.installing=false;this.clearAuthTimer();this.options.ownerHost.disconnected();
    this.rejectAll(error('Connection interrupted; the dispatched outcome may be unknown','disconnected'));this.rejectNativeErrors(Error('Error report connection interrupted'));
    if(!this.closed&&!this.quarantined){const delay=Math.min(30000,250*2**Math.min(this.reconnectAttempts++,7));this.retry=setTimeout(()=>{this.retry=undefined;this.connect();},delay);}
   });
@@ -50,13 +52,13 @@ export class SQLiteNativeTransport {
  }
  setAuth(input:GonvexClientAuth){
   if(this.disposed)throw error('Native transport was disposed','closed');
-  this.identityRevision++;this.authSerial++;this.quarantined=false;this.auth={...this.auth,...input};this.refreshed=false;this.refreshedToken=undefined;this.latestAuth=undefined;this.activeAuth=undefined;
+  this.clearAdmission();this.identityRevision++;this.authSerial++;this.quarantined=false;this.auth={...this.auth,...input};this.refreshed=false;this.refreshedToken=undefined;this.latestAuth=undefined;this.activeAuth=undefined;
   this.rejectAll(error('Credentials changed while the operation was pending','superseded'));this.rejectNativeErrors(Error('Error report credentials changed'));
   const socket=this.socket;if(socket?.readyState===1)void this.authenticate(socket,this.generation,false);else this.connect();
  }
  private async authenticate(socket:WebSocket,generation:number,forceRefresh:boolean){
   if(!this.current(socket,generation)||socket.readyState!==1)return;const serial=++this.authSerial;this.tokenCancel?.();this.tokenCancel=undefined;
-  this.authInFlight=true;this.installing=false;this.session='unavailable';this.latestAuth=undefined;this.clearAuthTimer();
+  this.clearAdmission();this.authInFlight=true;this.installing=false;this.session='unavailable';this.latestAuth=undefined;this.clearAuthTimer();
   try{this.options.ownerHost.authenticating(this.scope(),generation);}catch(failure){this.options.ownerHost.failed(failure);socket.close();return;}
   this.authTimer=setTimeout(()=>{if(this.current(socket,generation)&&serial===this.authSerial)socket.close();},30000);
   try{
@@ -95,10 +97,10 @@ export class SQLiteNativeTransport {
    const current=()=>this.current(socket,generation)&&serial===this.authSerial&&this.activeAuth===message.id&&!this.latestAuth;
    const fence=JSON.stringify([this.scope(),directive?.visibilityScope??'',directive?.epoch??'']);if(fence!==this.watermarkFence){this.watermarkFence=fence;this.watermark=0;}
    void this.options.ownerHost.session({connectionGeneration:generation,directive,identity,artifactHash:this.artifact,intentScope:this.scope(),lastOnlineAtMs:Date.now(),capabilities:this.capabilities},current).then(()=>{
-    if(!current())return;this.clearAuthTimer();this.authInFlight=false;this.installing=false;this.reconnectAttempts=0;this.refreshed=false;this.refreshedToken=undefined;this.session=directive&&identity?'authenticated':'unavailable';this.options.ownerHost.authenticated?.();this.flush();
+    if(!current())return;this.clearAuthTimer();this.authInFlight=false;this.installing=false;this.reconnectAttempts=0;this.refreshed=false;this.refreshedToken=undefined;this.session=directive&&identity?'authenticated':'unavailable';try{this.drainAdmission(generation,serial);}catch(error){this.options.ownerHost.failed(error);socket.close();return;}this.options.ownerHost.authenticated?.();this.flush();
    },failure=>{if(current()){this.options.ownerHost.failed(failure);socket.close();}});return;
   }
-  if(message.type.startsWith('replica.')){if(!this.quarantined&&(!this.authInFlight||this.installing))this.options.ownerHost.frame(message,generation);return;}
+  if(message.type.startsWith('replica.')){if(!this.quarantined&&this.installing)this.queueAdmission(message,generation);else if(!this.quarantined&&!this.authInFlight)this.options.ownerHost.frame(message,generation);return;}
   if(!('id'in message)||typeof message.id!=='string')return;if(message.type==='error.ack'){const report=this.nativeErrors.get(message.id);if(report?.sent)this.finishNativeError(report,message.error?Error(message.error):undefined);return;}
   const watched=[...this.controlWatches].find(watch=>watch.wireId===message.id&&watch.authSerial===this.authSerial);
   if(watched){if(message.type==='query.result'){sqlitePayloadBytes(message.result,131072);if(watched.live){const revision=message.subscriptionRevision;if(!revision||typeof revision.epoch!=='string'||!revision.epoch||revision.epoch.length>256||!Number.isSafeInteger(revision.sequence)||revision.sequence<0||message.windowRevision!==undefined&&(typeof message.windowRevision!=='string'||message.windowRevision.length>128)||message.replicaScope!==undefined&&(typeof message.replicaScope!=='string'||message.replicaScope.length>512))throw Error('Live window requires a bounded authoritative revision');watched.receive({result:message.result,subscriptionRevision:revision,...(message.windowRevision!==undefined?{windowRevision:message.windowRevision}:{}),...(message.replicaScope!==undefined?{replicaScope:message.replicaScope}:{})});}else watched.receive({result:message.result});}else if(message.type==='query.error')watched.receive({error:message.error.slice(0,512)});return;}
@@ -117,7 +119,13 @@ export class SQLiteNativeTransport {
   }
   this.settle(pending);
  }
- private deny(generation:number,message:string,code?:string){this.rejectNativeErrors(Error('Error reporting session was denied'));this.options.ownerHost.authError?.(message,{definitive:true,code});this.quarantined=true;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.latestAuth=undefined;this.activeAuth=undefined;this.authInFlight=false;this.installing=false;this.session='unavailable';this.clearAuthTimer();this.options.ownerHost.quarantined?.(generation);for(const pending of [...this.pending.values()])if(!pending.public)this.finish(pending,undefined,error(message,'auth'));this.flush();}
+ private clearAdmission(){for(const frame of this.admissionFrames)frame.release();this.admissionFrames.length=0;this.admissionBytes=0;}
+ private queueAdmission(value:ArrayBuffer|ServerMessage,generation:number){
+  if(!(value instanceof ArrayBuffer)&&value.type==='replica.watermark'){if(!Number.isSafeInteger(value.revision)||value.revision<0)throw Error('Invalid pending replica watermark');const last=this.admissionFrames.at(-1);if(last&&!(last.value instanceof ArrayBuffer)&&last.value.type==='replica.watermark'){last.value={...last.value,revision:Math.max(last.value.revision,value.revision)};return;}}
+  const bytes=(value instanceof ArrayBuffer?value.byteLength:sqlitePayloadBytes(value,262144))+512;if(value instanceof ArrayBuffer&&value.byteLength>131072||this.admissionFrames.length>=64||this.admissionBytes+bytes>1048576)throw Object.assign(Error('Native admission frame allowance exceeded'),{code:'BUDGET'});const release=this.options.reserve(bytes);this.admissionFrames.push({generation,serial:this.authSerial,value,bytes,release});this.admissionBytes+=bytes;
+ }
+ private drainAdmission(generation:number,serial:number){try{for(const frame of this.admissionFrames){if(frame.generation!==generation||frame.serial!==serial)continue;if(frame.value instanceof ArrayBuffer)this.options.ownerHost.binary(frame.value,generation);else this.options.ownerHost.frame(frame.value,generation);}}finally{this.clearAdmission();}}
+ private deny(generation:number,message:string,code?:string){this.clearAdmission();this.rejectNativeErrors(Error('Error reporting session was denied'));this.options.ownerHost.authError?.(message,{definitive:true,code});this.quarantined=true;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.latestAuth=undefined;this.activeAuth=undefined;this.authInFlight=false;this.installing=false;this.session='unavailable';this.clearAuthTimer();this.options.ownerHost.quarantined?.(generation);for(const pending of [...this.pending.values()])if(!pending.public)this.finish(pending,undefined,error(message,'auth'));this.flush();}
  private settle(pending:Pending){if(!pending.answered)return;if(pending.kind!=='query'){
   if(pending.control&&this.capabilities.controlWatermark===1&&!pending.controlReady)return;
   if(!pending.control&&!this.options.public&&this.capabilities.replicaWatermark===1&&pending.revision!==undefined&&pending.revision>this.watermark)return;
@@ -184,5 +192,5 @@ export class SQLiteNativeTransport {
  localSessionState(){return this.session;}
  connectionState():ConnectionState{const values=[...this.pending.values()];return {isWebSocketConnected:this.socket?.readyState===1,hasEverConnected:this.hasEver,connectionCount:this.connectionCount,connectionRetries:this.reconnectAttempts,hasInflightRequests:!!values.length,inflightReducers:values.filter(p=>p.kind==='reducer').length,inflightActions:values.filter(p=>p.kind==='action').length,inflightOneShotQueries:values.filter(p=>p.kind==='query').length};}
  dispose(){if(this.disposed)return;this.close();for(const watch of this.controlWatches)watch.release();this.controlWatches.clear();this.disposed=true;this.auth={};this.options.releaseAuth?.();}
- close(){if(this.closed)return;this.closed=true;this.identityRevision++;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;clearTimeout(this.sendTimer);this.sendTimer=undefined;this.session='unavailable';this.clearAuthTimer();clearTimeout(this.retry);this.retry=undefined;this.rejectAll(error('Native client closed; a dispatched outcome may be unknown','closed'));this.rejectNativeErrors(Error('Native error reporting client closed'));const socket=this.socket;this.socket=undefined;socket?.close();this.options.ownerHost.disconnected();}
+ close(){this.clearAdmission();if(this.closed)return;this.closed=true;this.identityRevision++;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;clearTimeout(this.sendTimer);this.sendTimer=undefined;this.session='unavailable';this.clearAuthTimer();clearTimeout(this.retry);this.retry=undefined;this.rejectAll(error('Native client closed; a dispatched outcome may be unknown','closed'));this.rejectNativeErrors(Error('Native error reporting client closed'));const socket=this.socket;this.socket=undefined;socket?.close();this.options.ownerHost.disconnected();}
 }

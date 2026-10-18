@@ -209,5 +209,5 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  disconnected(){this.stop();this.options.sessions.disconnected(this.options.connection);}
  failed(error:unknown){this.stop();this.options.failed(error);}
  close(){this.stop();this.sources.clear();this.sourceBytes=0;this.startBytes=0;this.closingBytes=0;}
- stats(){return {sources:this.sources.size,sourceBytes:this.sourceBytes+this.startBytes+this.closingBytes,queued:this.queued,queuedBytes:this.queuedBytes,ingress:this.state?.ingress.stats()};}
+ stats(){return {sources:this.sources.size,opening:[...this.sources.values()].filter(source=>source.opening).length,watermark:this.state?.watermark,sourceBytes:this.sourceBytes+this.startBytes+this.closingBytes,queued:this.queued,queuedBytes:this.queuedBytes,ingress:this.state?.ingress.stats()};}
 }

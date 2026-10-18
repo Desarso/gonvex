@@ -41,8 +41,8 @@ export class SQLiteReducerDelivery {
  private now(){const now=(this.options.now??Date.now)();if(!Number.isSafeInteger(now)||now<0)throw new TypeError('Invalid intent delivery clock');return now;}
  private run<T>(expected:Admission,run:()=>Promise<T>){return waitForSQLiteOwnerAdmission(()=>this.options.owner.runOwner(262144,async()=>{await this.initialized;this.check(expected);return run();}),()=>this.check(expected));}
  private async flushSafety(expected:Admission){
-  const rows=await this.run(expected,()=>this.options.owner.database.getAllAsync<{command:string}>('SELECT command FROM gv_reducer_delivery_settlements WHERE scope=? AND safety_settled=0 ORDER BY command LIMIT 8',expected.intentScope));
-  for(const row of rows){this.check(expected);await this.options.safety.settle(expected.intentScope,row.command);await this.run(expected,()=>this.options.owner.database.runAsync('UPDATE gv_reducer_delivery_settlements SET safety_settled=1 WHERE scope=? AND command=?',expected.intentScope,row.command));}
+  const rows=await this.run(expected,()=>this.options.owner.database.getAllAsync<{command:string;status:'accepted'|'rejected';error:string|null}>("SELECT d.command,d.status,CASE WHEN d.status='rejected' THEN substr(json_extract(j.value,'$.lastError'),1,512) END error FROM gv_reducer_delivery_settlements d LEFT JOIN gv_reducer_journal j ON j.scope=d.scope AND j.id=d.intent_id WHERE d.scope=? AND d.safety_settled=0 ORDER BY d.command LIMIT 8",expected.intentScope));
+  for(const row of rows){this.check(expected);await this.options.safety.settle(expected.intentScope,row.command,{status:row.status,...(row.error?{error:row.error}:{})});await this.run(expected,()=>this.options.owner.database.runAsync('UPDATE gv_reducer_delivery_settlements SET safety_settled=1 WHERE scope=? AND command=?',expected.intentScope,row.command));}
  }
  drainOnce():Promise<{sent:number;nextDelay:number|null}>{
   if(this.active)return this.active;

@@ -7,13 +7,12 @@ import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 
 type Phase='unavailable'|'authenticating'|'online'|'offline'|'quarantined';
 type Connection={id:string;intentScope:string;transportGeneration:number;revision:number;phase:Phase;session?:LocalReplicaSession;bytes:number};
+export type WorkerSessionStorage={loadSession(scope:string):Promise<LocalReplicaSession|undefined>;saveSession(scope:string,session:LocalReplicaSession|undefined,options:{current():boolean;ifAbsent?:boolean}):Promise<void>};
 type Options={
  artifactHash:string;offlineMaxAgeMs:number|null;
- database:SQLiteReplicaDatabase;canonical:Pick<SQLiteLocalReplicaStorage,'loadSession'|'saveSession'>;
  safety:Pick<SQLiteSafetyJournal,'session'|'sessionRevoked'|'saveSession'|'revokeSession'>;
  runOwner<T>(bytes:number,run:()=>Promise<T>):Promise<T>;
- fence():Promise<unknown>;
-};
+} & ({storage:WorkerSessionStorage}|{database:SQLiteReplicaDatabase;canonical:Pick<SQLiteLocalReplicaStorage,'loadSession'|'saveSession'>;fence():Promise<unknown>});
 const maxConnections=8,maxTabs=64,maxSessionBytes=32768,maxBytes=maxConnections*(maxSessionBytes+2048)+maxTabs*512;
 const clone=<T>(value:T):T=>JSON.parse(JSON.stringify(value));
 function key(value:string,max:number){if(typeof value!=='string'||!value||value.length>max)throw new TypeError('Invalid worker session identity');}
@@ -26,12 +25,14 @@ export class SQLiteWorkerSessions {
  private readonly connections=new Map<string,Connection>();
  private readonly tabs=new Map<string,string>();
  private readonly ledger=new ByteLedger(maxBytes+2097152+64*128);
+ private readonly storage:WorkerSessionStorage;
  private nextRevision=0;
  private refusals=0;
  private durability=Promise.resolve();
  private pendingOperations=0;
  private pendingBytes=0;
  constructor(private readonly options:Options){
+  this.storage='storage'in options?options.storage:{loadSession:scope=>options.runOwner(0,()=>options.canonical.loadSession(scope)),saveSession:(scope,session,guard)=>options.runOwner(sqlitePayloadBytes(session??{},32768),()=>options.database.withTransactionAsync(async()=>{await options.fence();if(!guard.current())fail('FENCED','Worker session admission changed');if(guard.ifAbsent&&await options.canonical.loadSession(scope))fail('FENCED','A newer native session won cached migration');await options.canonical.saveSession(scope,session);if(!guard.current())fail('FENCED','Worker session admission changed');}))};
   key(options.artifactHash,256);
   if(options.offlineMaxAgeMs!==null&&(!Number.isSafeInteger(options.offlineMaxAgeMs)||options.offlineMaxAgeMs<0))throw new TypeError('Invalid offline editing window');
   this.ledger.register('worker-sessions',()=>this.stats());
@@ -71,7 +72,7 @@ export class SQLiteWorkerSessions {
   if(record.phase==='quarantined')return false;if(record.phase==='online')return true;
   await this.durability;this.check(record,revision,isCurrent);
   if(await this.options.safety.sessionRevoked(scope)){this.check(record,revision,isCurrent);record.session=undefined;record.phase='quarantined';record.bytes=2048;return false;}
-  const saved=await this.options.safety.session(scope)??await this.options.runOwner(0,()=>this.options.canonical.loadSession(scope));
+  const saved=await this.options.safety.session(scope)??await this.storage.loadSession(scope);
   this.check(record,revision,isCurrent);if(!saved)return false;
   const session=clone(saved),bytes=this.validate(session);
   // A concurrent definitive denial must win even when fallback loading waited.
@@ -90,10 +91,10 @@ export class SQLiteWorkerSessions {
   return this.persist(bytes,async()=>{
    this.check(record,revision,isCurrent);if(record.phase!=='authenticating'||record.session)return false;
    if(await this.options.safety.sessionRevoked(intentScope))return false;this.check(record,revision,isCurrent);
-   const saved=await this.options.safety.session(intentScope)??await this.options.runOwner(0,()=>this.options.canonical.loadSession(intentScope));this.check(record,revision,isCurrent);if(saved)return false;
+   const saved=await this.options.safety.session(intentScope)??await this.storage.loadSession(intentScope);this.check(record,revision,isCurrent);if(saved)return false;
    const current=()=>this.current(record,revision,isCurrent)&&record.phase==='authenticating';
    await this.options.safety.saveSession(intentScope,session,false,current);this.check(record,revision,isCurrent);
-   await this.options.runOwner(bytes,()=>this.options.database.withTransactionAsync(async()=>{await this.options.fence();this.check(record,revision,isCurrent);if(await this.options.canonical.loadSession(intentScope))fail('FENCED','A newer native session won cached migration');await this.options.canonical.saveSession(intentScope,session);this.check(record,revision,isCurrent);}));return true;
+   await this.storage.saveSession(intentScope,session,{current,ifAbsent:true});return true;
   });
  }
  async activate(id:string,input:SQLiteTransportSession,isCurrent:()=>boolean){
@@ -106,10 +107,7 @@ export class SQLiteWorkerSessions {
   return this.persist(bytes,async()=>{
   this.check(record,revision,isCurrent);
   await this.options.safety.saveSession(record.intentScope,session,true,current);this.check(record,revision,isCurrent);
-  await this.options.runOwner(bytes,()=>this.options.database.withTransactionAsync(async()=>{
-   await this.options.fence();this.check(record,revision,isCurrent);
-   await this.options.canonical.saveSession(record.intentScope,session);this.check(record,revision,isCurrent);
-  }));
+  await this.storage.saveSession(record.intentScope,session,{current});
   this.check(record,revision,isCurrent);record.session=session;record.bytes=2048+bytes;record.phase='online';record.revision=this.revision();return true;
   });
  }
@@ -119,7 +117,7 @@ export class SQLiteWorkerSessions {
   const source=this.connection(id);if(generation!==source.transportGeneration)return Promise.resolve();
   const scope=source.intentScope;key(scope,512);
   for(const record of this.connections.values())if(record.intentScope===scope){record.revision=this.revision();record.session=undefined;record.phase='quarantined';record.bytes=2048;}
-  return this.persist(512,async()=>{await this.options.safety.revokeSession(scope);await this.options.runOwner(0,()=>this.options.database.withTransactionAsync(async()=>{await this.options.fence();await this.options.canonical.saveSession(scope,undefined);}));});
+  return this.persist(512,async()=>{await this.options.safety.revokeSession(scope);await this.storage.saveSession(scope,undefined,{current:()=>true});});
  }
  resolveTab(tab:string,write=false,now=Date.now()){
   const id=this.tabs.get(tab);if(!id)fail('FENCED','Tab has no authenticated worker connection');

@@ -1,3 +1,5 @@
+import {IDBFactory,IDBKeyRange} from 'fake-indexeddb';
+import {IndexedDBIntentLedger} from './indexeddb-intent-ledger.js';
 import {DatabaseSync} from 'node:sqlite';
 import {expect,it,vi} from 'vitest';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
@@ -6,7 +8,7 @@ vi.mock('./sqlite-official-host.js',()=>({openOfficialSQLiteHost:async()=>mocked
 import {installSQLiteOwner,type SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
 const schema={records:{key:'id',fields:{id:{kind:'text'},n:{kind:'number'}},indexes:[]}} as const;
 it('runs generated-program network waits outside the fenced SQL queue and preserves caller identity through disk phases',async()=>{
- const sql=new DatabaseSync(':memory:');const raw:SQLiteReplicaDatabase={async execAsync(query){sql.exec(query);},async runAsync(query,...args){return sql.prepare(query).run(...args as any[]);},async getFirstAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).get(...args as any[]) as T??null;},async getAllAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).all(...args as any[]) as T[];},async withTransactionAsync(run){sql.exec('BEGIN');try{await run();sql.exec('COMMIT');}catch(error){sql.exec('ROLLBACK');throw error;}}};
+ vi.stubGlobal('navigator',{locks:{request:async(_name:string,_options:unknown,run:()=>Promise<void>)=>run()}});vi.stubGlobal('indexedDB',new IDBFactory());vi.stubGlobal('IDBKeyRange',IDBKeyRange);const sql=new DatabaseSync(':memory:');const raw:SQLiteReplicaDatabase={async execAsync(query){sql.exec(query);},async runAsync(query,...args){return sql.prepare(query).run(...args as any[]);},async getFirstAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).get(...args as any[]) as T??null;},async getAllAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).all(...args as any[]) as T[];},async withTransactionAsync(run){sql.exec('BEGIN');try{await run();sql.exec('COMMIT');}catch(error){sql.exec('ROLLBACK');throw error;}}};
  const close=vi.fn();mocked.host={database:raw,memoryBytes:()=>0,close};let release!:(value:unknown)=>void;const network=new Promise(resolve=>{release=resolve;});
  const awaiting=new Map<string,(value:any)=>void>(),changes:any[]=[],callers:any[]=[];let serial=0,context!:SQLiteOwnerProgramContext;
  vi.stubGlobal('postMessage',(message:any)=>{if(message.type==='change'){changes.push(message);queueMicrotask(()=>(globalThis as any).onmessage?.({data:{type:'change-ack',protocol:2,token:'owner',tab:message.to,notification:message.notification,epoch:message.epoch,sequence:message.sequence}}));}else{awaiting.get(message.id)?.(message);awaiting.delete(message.id);}});
@@ -22,13 +24,14 @@ it('runs generated-program network waits outside the fenced SQL queue and preser
   expect((await request('clientCall',{method:'increment',id:'a'},'write-tab','write-a')).value).toEqual(writes[0].value);expect(changes.filter(change=>change.to==='write-tab'&&!change.reset)).toHaveLength(3);
   expect((await request('clientCall',{method:'void'})).value).toBeNull();release({network:'finished'});expect((await pending).value).toEqual({network:'finished'});
   await expect(context.runOwner(2097153,async()=>null)).rejects.toMatchObject({code:'BUSY'});
+  const replacement=new IndexedDBIntentLedger();expect((await replacement.claim('fallback-owner')).epoch).toBe(2);const forbidden=vi.fn(async()=>{throw Error('Old SQL callback must not run');});await expect(context.runOwner(0,forbidden)).rejects.toMatchObject({code:'FENCED'});expect(forbidden).not.toHaveBeenCalled();replacement.close();
   await dispose();await dispose();expect(close).toHaveBeenCalledOnce();await expect(context.runOwner(0,async()=>null)).rejects.toMatchObject({code:'FENCED'});
  }finally{await dispose();interval.mockRestore();vi.unstubAllGlobals();delete (globalThis as any).onmessage;sql.close();}
 });
 
 it('prepares lazy reducer chunks outside the owner queue and fences a changed tab session before retry',async()=>{
  const {PortableReducerRuntime}=await import('@gonvex/local-runtime/portable'),{reducer,schema:validators,getRow}=await import('@gonvex/module-sdk'),{SQLiteReducerOwner}=await import('./sqlite-reducer-owner.js');
- const sql=new DatabaseSync(':memory:');const raw:SQLiteReplicaDatabase={async execAsync(query){sql.exec(query);},async runAsync(query,...args){return sql.prepare(query).run(...args as any[]);},async getFirstAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).get(...args as any[]) as T??null;},async getAllAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).all(...args as any[]) as T[];},async withTransactionAsync(run){sql.exec('BEGIN');try{await run();sql.exec('COMMIT');}catch(error){sql.exec('ROLLBACK');throw error;}}};
+ vi.stubGlobal('navigator',{locks:{request:async(_name:string,_options:unknown,run:()=>Promise<void>)=>run()}});vi.stubGlobal('indexedDB',new IDBFactory());vi.stubGlobal('IDBKeyRange',IDBKeyRange);const sql=new DatabaseSync(':memory:');const raw:SQLiteReplicaDatabase={async execAsync(query){sql.exec(query);},async runAsync(query,...args){return sql.prepare(query).run(...args as any[]);},async getFirstAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).get(...args as any[]) as T??null;},async getAllAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).all(...args as any[]) as T[];},async withTransactionAsync(run){sql.exec('BEGIN');try{await run();sql.exec('COMMIT');}catch(error){sql.exec('ROLLBACK');throw error;}}};
  mocked.host={database:raw,memoryBytes:()=>0,close(){}};const awaiting=new Map<string,(value:any)=>void>();let serial=0,generation='session-one',loads=0,executions=0,release!:(value:any)=>void;
  const loading=new Promise<any>(resolve=>{release=resolve;});let endpoint!:InstanceType<typeof SQLiteReducerOwner>,owner!:SQLiteOwnerProgramContext;let persistence:{entered:()=>void;wait:Promise<void>}|undefined;
  const runtime=new PortableReducerRuntime({schema:{records:{key:'id',columns:{id:{type:'text',nullable:false},n:{type:'bigint',nullable:false}}}},artifactHash:'artifact',reducers:{increment:async()=>{loads++;return loading;}}});

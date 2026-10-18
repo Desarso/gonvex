@@ -42,9 +42,9 @@ export async function openOfficialSQLiteHost(): Promise<OfficialSQLiteHost> {
     await host.database.execAsync(`PRAGMA locking_mode=EXCLUSIVE;
 PRAGMA page_size=4096; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;
 PRAGMA temp_store=FILE; PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL;
-PRAGMA hard_heap_limit=33554432; PRAGMA wal_autocheckpoint=256;
+PRAGMA hard_heap_limit=33554432; PRAGMA wal_autocheckpoint=4096;
 PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=3000;`);
-    for (const [pragma, expected] of [['locking_mode', 'exclusive'], ['journal_mode', 'wal'], ['synchronous', 2], ['page_size', 4096], ['cache_size', -2048], ['temp_store', 1], ['hard_heap_limit', 33554432]] as const) {
+    for (const [pragma, expected] of [['locking_mode', 'exclusive'], ['journal_mode', 'wal'], ['synchronous', 2], ['page_size', 4096], ['cache_size', -2048], ['temp_store', 1], ['hard_heap_limit', 33554432], ['wal_autocheckpoint', 4096]] as const) {
       const row = await host.database.getFirstAsync<Record<string, unknown>>('PRAGMA ' + pragma);
       if (!row || Object.values(row)[0] !== expected) throw new Error('SQLite storage mode invariant failed: ' + pragma);
     }

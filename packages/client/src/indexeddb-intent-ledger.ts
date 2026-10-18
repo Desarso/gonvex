@@ -18,12 +18,15 @@ const digest=async(value:string)=>Array.from(new Uint8Array(await crypto.subtle.
  * pending envelope and published predictions commit in one strict transaction.
  * Independent safety acceptance precedes this operation in the owner program.
  * This class deliberately owns no in-memory pending-intent or row corpus. */
+type TransactionTask={bytes:number;run:()=>Promise<unknown>;resolve(value:unknown):void;reject(error:unknown):void};
+type TransactionTasks={queue:TransactionTask[];bytes:number;closed:boolean};
 export class IndexedDBIntentLedger {
+ private readonly transactionTasks=new WeakMap<IDBTransaction,TransactionTasks>();
  private opening?:Promise<IDBDatabase>;private closed=false;private owner?:Owner;
  constructor(private readonly name='gonvex-idb-intents-v1',protected readonly factory:IDBFactory=globalThis.indexedDB,protected readonly ranges:typeof IDBKeyRange=globalThis.IDBKeyRange){if(typeof name!=='string'||!name||name.length>256)throw new TypeError('Invalid IDB fallback database name');}
  private open(){if(this.closed)return Promise.reject(Object.assign(Error('IDB fallback ledger is closed'),{code:'FENCED'}));if(!this.opening)this.opening=new Promise<IDBDatabase>((resolve,reject)=>{
-  if(!this.factory||!this.ranges){reject(Object.assign(Error('IndexedDB fallback is unavailable'),{code:'UNSUPPORTED'}));return;}const request=this.factory.open(this.name,1);let blocked=false;
-  request.onupgradeneeded=()=>{if(blocked||this.closed){request.transaction!.abort();return;}const db=request.result;db.createObjectStore('meta',{keyPath:'key'});db.createObjectStore('receipts',{keyPath:['scope','command']});const pending=db.createObjectStore('pending',{keyPath:['scope','command']});pending.createIndex('scope-sequence',['scope','sequence'],{unique:true});db.createObjectStore('predicted',{keyPath:['scope','entity','id']});db.createObjectStore('canonical',{keyPath:['scope','entity','id']});};
+  if(!this.factory||!this.ranges){reject(Object.assign(Error('IndexedDB fallback is unavailable'),{code:'UNSUPPORTED'}));return;}const request=this.factory.open(this.name,2);let blocked=false;
+  request.onupgradeneeded=()=>{if(blocked||this.closed){request.transaction!.abort();return;}const db=request.result;if(!db.objectStoreNames.contains('meta')){db.createObjectStore('meta',{keyPath:'key'});db.createObjectStore('receipts',{keyPath:['scope','command']});const pending=db.createObjectStore('pending',{keyPath:['scope','command']});pending.createIndex('scope-sequence',['scope','sequence'],{unique:true});db.createObjectStore('predicted',{keyPath:['scope','entity','id']});db.createObjectStore('canonical',{keyPath:['scope','entity','id']});}db.createObjectStore('snapshots',{keyPath:['scope','source','snapshot']});const rows=db.createObjectStore('snapshotRows',{keyPath:['scope','source','snapshot','position']});rows.createIndex('identity',['scope','source','snapshot','id'],{unique:true});db.createObjectStore('snapshotMembers',{keyPath:['scope','source','snapshot','position']});db.createObjectStore('snapshotFrames',{keyPath:['scope','source','snapshot','sequence']});db.createObjectStore('windows',{keyPath:['scope','signature']});};
   request.onblocked=()=>{blocked=true;reject(Object.assign(Error('IDB fallback schema upgrade is blocked'),{code:'BUSY'}));};request.onerror=()=>reject(request.error??Error('Cannot open IDB fallback'));
   request.onsuccess=()=>{const db=request.result;if(blocked||this.closed){db.close();reject(Object.assign(Error('IDB fallback ledger is closed'),{code:'FENCED'}));return;}db.onversionchange=()=>{this.closed=true;db.close();};resolve(db);};
  }).catch(error=>{this.opening=undefined;throw error;});return this.opening;}
@@ -31,9 +34,31 @@ export class IndexedDBIntentLedger {
  protected async fence(tx:IDBTransaction,expected?:{epoch:number;sequence:number}){const owner=await result(tx.objectStore('meta').get('owner')) as Owner|undefined;if(!this.owner||!owner||this.owner.token!==owner.token||this.owner.epoch!==owner.epoch)fail('FENCED','IDB fallback owner changed');if(expected&&(expected.epoch!==owner.epoch||expected.sequence!==owner.sequence))fail('PAGE_CHANGED','IDB fallback snapshot changed');return owner;}
  async claim(token:string){if(typeof token!=='string'||!token||token.length>128)throw new TypeError('Invalid fallback owner token');let claimed!:Owner;await this.transaction(['meta'],'readwrite',async tx=>{const store=tx.objectStore('meta'),old=await result(store.get('owner')) as Owner|undefined;if(old&&(!Number.isSafeInteger(old.epoch)||old.epoch<1||old.epoch>=Number.MAX_SAFE_INTEGER||!Number.isSafeInteger(old.sequence)||old.sequence<0))fail('FENCED','IDB owner epoch exhausted');claimed={key:'owner',token,epoch:(old?.epoch??0)+1,sequence:old?.sequence??0};await result(store.put(claimed));});this.owner=claimed;return {epoch:claimed.epoch,sequence:claimed.sequence};}
  async generation(){return this.transaction(['meta'],'readonly',async tx=>{const owner=await this.fence(tx);return {epoch:owner.epoch,sequence:owner.sequence};});}
- protected async keepAlive<T>(tx:IDBTransaction,run:()=>Promise<T>):Promise<T>{
-  let active=true;const pump=()=>{if(!active)return;const pending=tx.objectStore('meta').get('owner');pending.onsuccess=pump;pending.onerror=()=>{active=false;};};pump();let timer:ReturnType<typeof setTimeout>|undefined;try{return await Promise.race([run(),new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>reject(Object.assign(Error('Independent fallback durability is pending'),{code:'BUSY'})),30000);})]);}finally{active=false;clearTimeout(timer);}
+ protected transactionTask<T>(tx:IDBTransaction,bytes:number,run:()=>Promise<T>):Promise<T>{
+  const tasks=this.transactionTasks.get(tx);if(!tasks)return run();if(tasks.closed)return Promise.reject(Object.assign(Error('Fallback transaction has finished'),{code:'FENCED'}));if(!Number.isSafeInteger(bytes)||bytes<1||tasks.queue.length>=128||tasks.bytes+bytes>2097152)return Promise.reject(Object.assign(Error('Fallback transaction work allowance exceeded'),{code:'BUDGET'}));
+  return new Promise<T>((resolve,reject)=>{tasks.queue.push({bytes,run,resolve:value=>resolve(value as T),reject});tasks.bytes+=bytes;});
  }
+ protected keepAlive<T>(tx:IDBTransaction,run:()=>Promise<T>,timeoutMs:number|null=30000):Promise<T>{
+  return new Promise<T>((resolve,reject)=>{
+   let outcome:{value:T}|{error:unknown}|undefined,timer:ReturnType<typeof setTimeout>|undefined,finished=false;const tasks:TransactionTasks={queue:[],bytes:0,closed:false};this.transactionTasks.set(tx,tasks);
+   const close=(error:unknown)=>{tasks.closed=true;for(const task of tasks.queue)task.reject(error);tasks.queue.length=0;tasks.bytes=0;clearTimeout(timer);};
+   const finish=()=>{if(finished)return;if(outcome){finished=true;close(Object.assign(Error('Fallback transaction has finished'),{code:'FENCED'}));if('error'in outcome)reject(outcome.error);else resolve(outcome.value);return;}
+    // Every queued disk phase begins in this IDB event task, including phases
+    // following async row-ID hashing inside a portable reducer.
+    for(const task of tasks.queue.splice(0)){tasks.bytes-=task.bytes;try{Promise.resolve(task.run()).then(task.resolve,task.reject);}catch(error){task.reject(error);}}
+    try{const pending=tx.objectStore('meta').get('owner');pending.onsuccess=finish;pending.onerror=()=>{if(finished)return;finished=true;const error=pending.error??Error('Fallback durability transaction aborted');close(error);reject(error);};}catch(error){finished=true;close(error);reject(error);}
+   };
+   try{Promise.resolve(run()).then(value=>{outcome={value};},error=>{outcome={error};});}catch(error){outcome={error};}
+   if(timeoutMs!==null)timer=setTimeout(()=>{outcome={error:Object.assign(Error('Independent fallback durability is pending'),{code:'BUSY'})};},timeoutMs);
+   // A pending request alone does not make a transaction active in an
+   // unrelated timer/crypto/network task. Resume through request success.
+   finish();
+  });
+ }
+ /** Cross-adapter fence for a primary SQL operation. Keep this lock until
+  * that callback finishes or its worker dies. A timer cannot release it while
+  * a callback in a different database could still commit later. */
+ async runFenced<T>(run:()=>Promise<T>):Promise<T>{return this.transaction(['meta'],'readwrite',async tx=>{await this.fence(tx);const value=await this.keepAlive(tx,run,null);await this.fence(tx);return value;});}
  private async fingerprint(input:SQLiteReducerInvocation,identityScope:string){sqlitePayloadBytes(input,131072);if(!identityScope||identityScope.length>512||!input.scope||input.scope.length>512||input.scope.includes('\u0000')||!input.path||input.path.length>1024||!input.commandId||input.commandId.length>256||!Number.isSafeInteger(input.now)||input.now<0||input.intentEntropy!==undefined&&(typeof input.intentEntropy!=='string'||input.intentEntropy.length>256))throw new TypeError('Invalid fallback intent identity');return digest(stable({...input,scope:identityScope}));}
  async reply(input:SQLiteReducerInvocation,identityScope:string,context:{identity:unknown;artifactHash:string}):Promise<SQLiteReducerReceipt|undefined>{sqlitePayloadBytes(context,65536);sqlitePayloadBytes(input,131072);const captured=JSON.parse(JSON.stringify(input)) as SQLiteReducerInvocation,provenance=stable(context),fingerprint=await this.fingerprint(captured,identityScope);return this.transaction(['meta','receipts'],'readonly',async tx=>{await this.fence(tx);const old=await result(tx.objectStore('receipts').get([identityScope,captured.commandId])) as Receipt|undefined;if(!old)return;if(old.fingerprint!==fingerprint)fail('INTENT_CONFLICT','Fallback command reused with different content');return old.context===provenance?old.value:{...old.value,result:null,queuedOnly:true};});}
  async commit(input:SQLiteReducerInvocation,prepared:SQLitePreparedReducer,identityScope:string,expected:{epoch:number;sequence:number},options:{predict?:boolean;recovered?:boolean;persist?(input:SQLiteReducerInvocation,prepared:SQLitePreparedReducer):Promise<void>}={}){

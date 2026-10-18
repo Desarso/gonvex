@@ -7,7 +7,7 @@ const mocked = vi.hoisted(() => ({ host: undefined as any }));
 vi.mock('./sqlite-official-host.js', () => ({ openOfficialSQLiteHost: async () => mocked.host }));
 
 it('routes restartable first-sync frames through the real owner queue and publishes only on verified activation', async () => {
-  const db = new DatabaseSync(':memory:');
+  vi.stubGlobal('navigator',{locks:{request:async(_name:string,_options:unknown,run:()=>Promise<void>)=>run()}});const db = new DatabaseSync(':memory:');
   const database: SQLiteReplicaDatabase = {
     async execAsync(sql) { db.exec(sql); },
     async runAsync(sql, ...args) { return db.prepare(sql).run(...args as any[]); },

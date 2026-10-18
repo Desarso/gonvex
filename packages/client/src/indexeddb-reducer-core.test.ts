@@ -4,15 +4,16 @@ import {PortableReducerRuntime} from '@gonvex/local-runtime/portable';
 import {reducer,schema,getRow} from '@gonvex/module-sdk';
 import {IndexedDBReplicaEngine} from './indexeddb-replica-engine.js';
 import {IndexedDBReducerCore} from './indexeddb-reducer-core.js';
-import type {SQLitePreparedReducer,SQLiteReducerInvocation} from './sqlite-reducer-core.js';
+import type {SQLitePreparedReducer,SQLiteReducerInvocation,SQLiteReducerReceipt} from './sqlite-reducer-core.js';
 const cleanup:Array<()=>void>=[];afterEach(()=>{for(const close of cleanup.splice(0))close();vi.restoreAllMocks();});
 const identity={auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}};
 const input:SQLiteReducerInvocation={scope:'visible',path:'increment',commandId:'command',args:{},now:100};
 async function fixture(){
+ let settledReply:((input:SQLiteReducerInvocation)=>Promise<SQLiteReducerReceipt|undefined>)|undefined;
  const factory=new IDBFactory(),engine=new IndexedDBReplicaEngine({tasks:{key:'id',fields:{id:{},n:{}}}},'fallback',factory,IDBKeyRange);cleanup.push(()=>engine.close());await engine.claim('one');await engine.applyCanonical('visible',{epoch:'e',revision:1},[{entity:'tasks',id:'a',row:{id:'a',n:1}}]);let executions=0,admission='one',blocked=false,prepared:SQLitePreparedReducer|undefined,persist:((value:SQLitePreparedReducer)=>Promise<void>)|undefined,body:(()=>Promise<void>)|undefined;
  const runtime=new PortableReducerRuntime({artifactHash:'artifact',schema:{tasks:{key:'id',columns:{id:{type:'text',nullable:false},n:{type:'bigint',nullable:false}}}},reducers:{increment:reducer({args:schema.any(),result:schema.any(),run:async ctx=>{executions++;const row=await getRow<{id:string;n:number}>(ctx.db,'tasks','id','a');await body?.();await ctx.db.update('tasks','a',{n:row!.n+1});return row!.n+1;}})}});
- const core=new IndexedDBReducerCore({engine,artifactHash:'artifact',runtime,context:async()=>({identity,intentScope:'identity',generation:admission,coverage:{tasks:{key:'id',complete:true}},predictionBlocked:blocked}),assertCurrent:(_scope,generation)=>{if(generation!==admission)throw Object.assign(Error('Admission changed'),{code:'FENCED'});},persist:async(_input,_context,value)=>{prepared=structuredClone(value);await persist?.(value);}});
- return {engine,core,runtime,get executions(){return executions;},get prepared(){return prepared;},set persist(value:typeof persist){persist=value;},set body(value:typeof body){body=value;},change(){admission='two';},block(){blocked=true;}};
+ const core=new IndexedDBReducerCore({engine,artifactHash:'artifact',runtime,context:async()=>({identity,intentScope:'identity',generation:admission,coverage:{tasks:{key:'id',complete:true}},predictionBlocked:blocked}),settledReply:input=>settledReply?.(input)??Promise.resolve(undefined),assertCurrent:(_scope,generation)=>{if(generation!==admission)throw Object.assign(Error('Admission changed'),{code:'FENCED'});},persist:async(_input,_context,value)=>{prepared=structuredClone(value);await persist?.(value);}});
+ return {engine,core,runtime,set settledReply(value:typeof settledReply){settledReply=value;},get executions(){return executions;},get prepared(){return prepared;},set persist(value:typeof persist){persist=value;},set body(value:typeof body){body=value;},change(){admission='two';},block(){blocked=true;}};
 }
 it('executes the shared portable body over IDB pages and replays the immutable reply without executing its own prediction',async()=>{
  const f=await fixture(),receipt=await f.core.invoke(input);expect(receipt.result).toBe(2);expect(f.executions).toBe(1);expect((await f.engine.entities('visible','tasks',['a'])).rows[0]?.value?.n).toBe(2);expect((await f.engine.page('identity')).entries).toHaveLength(1);await f.engine.claim('replacement-owner');expect(await f.core.invoke(input)).toEqual(receipt);expect(f.executions).toBe(1);expect(f.prepared?.receipt).toEqual(receipt);
@@ -52,4 +53,22 @@ it('drops an obsolete local prediction after business validation fails but keeps
 });
 it('aborts a storage read failure rather than publishing it as an unavailable business prediction',async()=>{
  const f=await fixture();await f.core.invoke(input);const generation=await f.engine.generation(),spy=vi.spyOn(f.engine,'readViewInTransaction').mockReturnValue({async select(){throw Error('disk read surrogate');}});await expect(f.core.rebase('visible')).rejects.toThrow('disk read surrogate');spy.mockRestore();expect(await f.engine.generation()).toEqual(generation);expect((await f.engine.entities('visible','tasks',['a'])).rows[0]?.value?.n).toBe(2);
+});
+
+it('retires another adapter\'s settlements before restoring pending safety bodies, with one final prediction rebase',async()=>{
+ const {SQLiteSafetyJournal}=await import('./sqlite-safety-journal.js'),{IndexedDBSafetyRecovery}=await import('./indexeddb-safety-recovery.js'),f=await fixture(),safety=new SQLiteSafetyJournal('safety',new IDBFactory(),IDBKeyRange);cleanup.push(()=>safety.close());
+ const session={directive:{protocolVersion:1 as const,scope:'tenant',visibilityScope:'visible',epoch:'e'},identity,artifactHash:'artifact'};f.persist=prepared=>safety.appendPrepared({...input,commandId:prepared.intent.idempotencyKey,now:prepared.intent.createdAt},prepared,session,'identity').then(()=>{});
+ const first=await f.core.invoke(input);await f.core.invoke({...input,commandId:'second',now:101});await safety.settle('identity','command',{status:'accepted'});
+ await f.engine.applyCanonical('visible',{epoch:'e',revision:2},[{entity:'tasks',id:'a',row:{id:'a',n:2}}]);
+ const recovery=new IndexedDBSafetyRecovery({engine:f.engine,core:f.core,safety,scope:'visible',intentScope:'identity',assertCurrent(){}});await recovery.recover();
+ expect((await f.engine.deliveryPage('identity')).records.map(record=>record.command)).toEqual(['second']);expect((await f.engine.entities('visible','tasks',['a'])).rows[0]?.value?.n).toBe(3);expect(await f.core.invoke(input)).toEqual(first);expect(f.executions).toBe(2);
+ recovery.close();await expect(recovery.recover()).rejects.toMatchObject({code:'FENCED'});
+});
+it('blocks fallback admission for a settled legacy command with no authoritative outcome instead of resending it',async()=>{
+ const {IndexedDBSafetyRecovery}=await import('./indexeddb-safety-recovery.js'),f=await fixture();await f.core.invoke(input);const recovery=new IndexedDBSafetyRecovery({engine:f.engine,core:f.core,scope:'visible',intentScope:'identity',assertCurrent(){},safety:{async settlements(){return [{command:'command',settled:true}];},async page(){throw Error('Must not restore before terminal reconciliation');}}});await expect(recovery.recover()).rejects.toMatchObject({code:'FENCED'});expect((await f.engine.deliveryPage('identity')).records).toHaveLength(1);expect(f.executions).toBe(1);
+});
+
+it('returns a settled original reply from the independent journal in an empty replacement adapter without executing the body',async()=>{
+ const {SQLiteSafetyJournal}=await import('./sqlite-safety-journal.js'),first=await fixture(),receipt=await first.core.invoke(input),safety=new SQLiteSafetyJournal('settled',new IDBFactory(),IDBKeyRange);cleanup.push(()=>safety.close());await safety.appendPrepared(input,first.prepared!,{directive:{protocolVersion:1,scope:'tenant',visibilityScope:'visible',epoch:'e'},identity,artifactHash:'artifact'},'identity');await safety.settle('identity','command',{status:'accepted'});
+ const replacement=await fixture();replacement.settledReply=input=>safety.settledReply(input,'identity',{identity,artifactHash:'artifact'});expect(await replacement.core.invoke(input)).toEqual(receipt);expect(replacement.executions).toBe(0);expect((await replacement.engine.deliveryPage('identity')).records).toEqual([]);expect((await replacement.engine.entities('visible','tasks',['a'])).rows[0]?.value?.n).toBe(1);await expect(replacement.core.invoke({...input,args:{changed:true}})).rejects.toMatchObject({code:'INTENT_CONFLICT'});
 });

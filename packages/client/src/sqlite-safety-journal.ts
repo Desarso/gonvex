@@ -2,7 +2,8 @@ import type {ReducerOutboxEntry} from './outbox.js';
 import type {LocalReplicaSession} from './local-replica.js';
 import type {SQLitePreparedReducer,SQLiteReducerInvocation} from './sqlite-reducer-core.js';
 import {decodedJSONBytes,fail,sqlitePayloadBytes} from './sqlite-admission.js';
-type Receipt={scope:string;command:string;hash:string;fingerprint:string;sequence:number;settled:boolean;legacyHash?:string;preparedHash?:string};
+export type SQLiteSafetyOutcome={status:'accepted'|'rejected';error?:string};
+type Receipt={replyHash?:string;replyContext?:string;outcome?:SQLiteSafetyOutcome;scope:string;command:string;hash:string;fingerprint:string;sequence:number;settled:boolean;legacyHash?:string;preparedHash?:string};
 type Header={sequence:number;scope:string;command:string;bytes:number};
 export type SQLiteSafetyEntry={invocation:SQLiteReducerInvocation;legacy?:ReducerOutboxEntry;prepared?:SQLitePreparedReducer};
 export type SQLiteSafetyPage={entries:SQLiteSafetyEntry[];nextSequence:number|null};
@@ -28,11 +29,11 @@ export class SQLiteSafetyJournal {
   if(this.closed)return Promise.reject(Error('Intent safety journal is closed'));
   if(!this.opening)this.opening=new Promise<IDBDatabase>((resolve,reject)=>{
    if(!this.factory||!this.ranges){reject(Object.assign(Error('Durable intent storage is unavailable'),{code:'UNSUPPORTED'}));return;}
-   let cancelled=false;const opening=this.factory.open(this.name,1);
+   let cancelled=false;const opening=this.factory.open(this.name,2);
    opening.onupgradeneeded=()=>{
     if(cancelled){opening.transaction!.abort();return;}
-    const db=opening.result,headers=db.createObjectStore('headers',{keyPath:'sequence',autoIncrement:true});headers.createIndex('scope-sequence',['scope','sequence']);
-    db.createObjectStore('bodies',{keyPath:'sequence'});db.createObjectStore('receipts',{keyPath:['scope','command']});db.createObjectStore('sessions',{keyPath:'scope'});
+    const db=opening.result;if(!db.objectStoreNames.contains('headers')){const headers=db.createObjectStore('headers',{keyPath:'sequence',autoIncrement:true});headers.createIndex('scope-sequence',['scope','sequence']);db.createObjectStore('bodies',{keyPath:'sequence'});db.createObjectStore('receipts',{keyPath:['scope','command']});db.createObjectStore('sessions',{keyPath:'scope'});}
+    db.createObjectStore('replies',{keyPath:['scope','command']});
    };
    opening.onerror=()=>reject(opening.error??Error('Cannot open intent safety journal'));
    opening.onblocked=()=>{cancelled=true;reject(Object.assign(Error('Intent safety journal upgrade is blocked'),{code:'BUSY'}));};
@@ -70,8 +71,8 @@ export class SQLiteSafetyJournal {
   if(!session?.directive||session.directive.protocolVersion!==1||!session.identity||typeof session.artifactHash!=='string')throw new TypeError('Durable command requires its authenticated session');
   // Hashing and snapshots happen before opening the IDB transaction. Awaiting
   // crypto inside that transaction could let the browser auto-commit it.
-  const digest=await hash(encoded.value),fingerprint=await hash(JSON.stringify({...owned,scope:intentScope})),legacyHash=legacyValue===undefined?undefined:await hash(legacyValue),preparedHash=preparedValue===undefined?undefined:await hash(preparedValue);
-  return this.transaction(['headers','bodies','receipts','sessions'],'readwrite',async tx=>{
+  const digest=await hash(encoded.value),fingerprint=await hash(JSON.stringify({...owned,scope:intentScope})),legacyHash=legacyValue===undefined?undefined:await hash(legacyValue),preparedHash=preparedValue===undefined?undefined:await hash(preparedValue),preparedReplyHash=preparedValue===undefined?undefined:await hash(JSON.stringify((JSON.parse(preparedValue) as SQLitePreparedReducer).receipt)),replyContext=await hash(JSON.stringify({artifactHash:JSON.parse(sessionValue).artifactHash,identity:JSON.parse(sessionValue).identity},(_key,value)=>value&&typeof value==='object'&&!Array.isArray(value)?Object.fromEntries(Object.keys(value).sort().map(key=>[key,value[key]])):value));
+  return this.transaction(['headers','bodies','receipts','sessions','replies'],'readwrite',async tx=>{
    const savedSession=await request(tx.objectStore('sessions').get(intentScope));
    if(savedSession?.revoked)fail('FENCED','Cached session was revoked');
    if(legacyValue!==undefined&&savedSession&&savedSession.value!==sessionValue)fail('FENCED','Recovery command session changed');
@@ -79,7 +80,9 @@ export class SQLiteSafetyJournal {
    if(previous){if(previous.fingerprint!==fingerprint||legacyHash!==undefined&&previous.legacyHash!==legacyHash||preparedHash!==undefined&&previous.preparedHash!==preparedHash)fail('INTENT_CONFLICT','Safety journal command reused with different content');return previous;}
    const sequence=Number(await request(tx.objectStore('headers').add({scope:intentScope,command:owned.commandId,bytes})));
    if(!Number.isSafeInteger(sequence)||sequence<1)fail('FENCED','Safety journal sequence exhausted');
-   const receipt:Receipt={scope:intentScope,command:owned.commandId,hash:digest,fingerprint,sequence,settled:false,...(legacyHash===undefined?{}:{legacyHash}),...(preparedHash===undefined?{}:{preparedHash})};
+   const originalReply=preparedValue===undefined?undefined:JSON.stringify((JSON.parse(preparedValue) as SQLitePreparedReducer).receipt);
+   const receipt:Receipt={...(originalReply===undefined?{}:{replyHash:preparedReplyHash,replyContext}),scope:intentScope,command:owned.commandId,hash:digest,fingerprint,sequence,settled:false,...(legacyHash===undefined?{}:{legacyHash}),...(preparedHash===undefined?{}:{preparedHash})};
+   if(originalReply!==undefined)await request(tx.objectStore('replies').add({scope:intentScope,command:owned.commandId,value:originalReply}));
    await request(tx.objectStore('bodies').add({sequence,value:encoded.value,...(legacyValue===undefined?{}:{legacyValue}),...(preparedValue===undefined?{}:{preparedValue})}));await request(receipts.add(receipt));await request(tx.objectStore('sessions').put({scope:intentScope,value:sessionValue}));return receipt;
   });
  }
@@ -144,11 +147,25 @@ export class SQLiteSafetyJournal {
  async session(ownerScope:string):Promise<LocalReplicaSession|undefined>{scope(ownerScope);return this.transaction(['sessions'],'readonly',async tx=>{const row=await request(tx.objectStore('sessions').get(ownerScope)) as {value?:string;revoked?:boolean}|undefined;if(!row||row.revoked)return;if(typeof row.value!=='string')fail('INTENT_CORRUPT','Invalid safety journal session');decodedJSONBytes(row.value,131072);return JSON.parse(row.value);});}
  /** Called only on an authoritative accepted/rejected result, never merely
   * because SQLite has durably queued or predicted this command. */
- async settle(ownerScope:string,commandID:string){
-  scope(ownerScope);if(typeof commandID!=='string'||!commandID||commandID.length>256)throw new TypeError('Invalid durable command ID');
+ /** Bounded terminal metadata remains after body retirement. A later adapter
+  * consults this before restoring stale pending records from its own database. */
+ async settlements(ownerScope:string,commands:readonly string[]){
+  scope(ownerScope);sqlitePayloadBytes(commands,32768);if(commands.length>128||commands.some(value=>typeof value!=='string'||!value||value.length>256))throw new TypeError('Invalid safety settlement page');const selected=[...commands];return this.transaction(['receipts'],'readonly',async tx=>{const output:Array<{command:string;settled:boolean;outcome?:SQLiteSafetyOutcome}>=[];for(const command of selected){const receipt=await request(tx.objectStore('receipts').get([ownerScope,command])) as Receipt|undefined;if(receipt?.outcome&&( !['accepted','rejected'].includes(receipt.outcome.status)||receipt.outcome.error!==undefined&&(typeof receipt.outcome.error!=='string'||receipt.outcome.error.length>512)))fail('INTENT_CORRUPT','Invalid safety settlement metadata');output.push({command,settled:receipt?.settled===true,...(receipt?.outcome?{outcome:receipt.outcome}:{})});}sqlitePayloadBytes(output,131072);return output;});
+ }
+ /** Terminal replies survive adapter replacement even after prepared bodies
+  * retire. A retry must not execute a settled command over canonical effects. */
+ async settledReply(input:SQLiteReducerInvocation,ownerScope:string,context:{identity:LocalReplicaSession['identity'];artifactHash:string}){
+  scope(ownerScope);const owned=JSON.parse(command(input).value) as SQLiteReducerInvocation;sqlitePayloadBytes(context,131072);const encodedContext=JSON.stringify(context,(_key,value)=>value&&typeof value==='object'&&!Array.isArray(value)?Object.fromEntries(Object.keys(value).sort().map(key=>[key,value[key]])):value),fingerprint=await hash(JSON.stringify({...owned,scope:ownerScope})),provenance=await hash(encodedContext);
+  const {receipt,reply}=await this.transaction(['receipts','replies'],'readonly',async tx=>{const receipt=await request(tx.objectStore('receipts').get([ownerScope,owned.commandId])) as Receipt|undefined;return {receipt,reply:receipt?.settled?await request(tx.objectStore('replies').get([ownerScope,owned.commandId])) as {value:string}|undefined:undefined};});
+  if(!receipt)return;if(receipt.fingerprint!==fingerprint)fail('INTENT_CONFLICT','Settled command reused with different content');if(!receipt.settled)return;
+  if(!reply?.value||!receipt.replyHash)fail('FENCED','Settled command lacks its original reply');decodedJSONBytes(reply.value,131072);if(await hash(reply.value)!==receipt.replyHash)fail('INTENT_CORRUPT','Settled original reply hash differs');const value=JSON.parse(reply.value) as SQLitePreparedReducer['receipt'];if(value.commandId!==owned.commandId)fail('INTENT_CORRUPT','Settled original reply identity differs');return receipt.replyContext===provenance?value:{...value,result:null,queuedOnly:true as const};
+ }
+ async settle(ownerScope:string,commandID:string,outcome?:SQLiteSafetyOutcome){
+  scope(ownerScope);if(typeof commandID!=='string'||!commandID||commandID.length>256)throw new TypeError('Invalid durable command ID');sqlitePayloadBytes(outcome??{},4096);if(outcome&&(!['accepted','rejected'].includes(outcome.status)||outcome.error!==undefined&&(typeof outcome.error!=='string'||outcome.error.length>512)))throw new TypeError('Invalid authoritative safety settlement');const captured=outcome?structuredClone(outcome):undefined;
   return this.transaction(['headers','bodies','receipts'],'readwrite',async tx=>{
-   const store=tx.objectStore('receipts'),receipt=await request(store.get([ownerScope,commandID])) as Receipt|undefined;if(!receipt||receipt.settled)return false;
-   await request(tx.objectStore('headers').delete(receipt.sequence));await request(tx.objectStore('bodies').delete(receipt.sequence));await request(store.put({...receipt,settled:true}));return true;
+   const store=tx.objectStore('receipts'),receipt=await request(store.get([ownerScope,commandID])) as Receipt|undefined;if(!receipt)return false;if(receipt.outcome&&captured&&receipt.outcome.status!==captured.status)fail('INTENT_CONFLICT','Safety settlement changed its authoritative outcome');
+   if(receipt.settled){if(!receipt.outcome&&captured)await request(store.put({...receipt,outcome:captured}));return false;}
+   await request(tx.objectStore('headers').delete(receipt.sequence));await request(tx.objectStore('bodies').delete(receipt.sequence));await request(store.put({...receipt,settled:true,...(captured?{outcome:captured}:{})}));return true;
   });
  }
  async count(ownerScope:string){scope(ownerScope);return this.transaction(['headers'],'readonly',tx=>request(tx.objectStore('headers').index('scope-sequence').count(this.ranges.bound([ownerScope,0],[ownerScope,Number.MAX_SAFE_INTEGER]))));}

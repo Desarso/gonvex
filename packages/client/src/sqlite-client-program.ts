@@ -60,7 +60,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   this.sessions=new SQLiteWorkerSessions({artifactHash:binding.artifactHash,offlineMaxAgeMs:binding.offlineMaxAgeMs,database:owner.database,canonical:owner.canonical,safety:this.safety,runOwner:owner.runOwner,fence:()=>owner.engine.verifyOwner()});
   this.windows=new SQLiteWindowStore(owner.database,()=>owner.engine.verifyOwner());this.liveWindows=new SQLiteLiveWindows(owner,binding.artifactHash);void owner.runOwner(0,()=>this.liveWindows.ready()).catch(()=>{});
   this.tokens=new SQLiteWorkerTokens({recipient:(id,key,exclude)=>[...(this.connections.get(id)?.tabs??[])].find(tab=>tab!==exclude&&this.tabs.get(tab)===id&&this.connections.get(id)?.identityKey===key),eligible:(tab,id,key)=>this.tabs.get(tab)===id&&this.connections.get(id)?.identityKey===key,notifyTab:tab=>owner.notifyTab(tab)});
-  this.reducer=new SQLiteReducerOwner(owner,{runtime:binding.runtime,artifactHash:binding.artifactHash,resolveTab:tab=>this.sessions.resolveTab(tab,true),context:scope=>this.context(scope),persistIntent:async(input,context,prepared)=>{
+  this.reducer=new SQLiteReducerOwner(owner,{runtime:binding.runtime,artifactHash:binding.artifactHash,resolveTab:tab=>this.sessions.resolveTab(tab,true),context:scope=>this.context(scope),settledReply:(input,context)=>this.safety.settledReply(input,context.intentScope,{identity:context.identity,artifactHash:binding.artifactHash}),persistIntent:async(input,context,prepared)=>{
    const saved=await owner.canonical.loadSession(context.intentScope);if(!saved||saved.directive.visibilityScope!==input.scope||saved.artifactHash!==binding.artifactHash)fail('FENCED','Intent recovery session changed');await this.safety.appendPrepared(input,prepared,saved,context.intentScope);
   }});
   this.legacy=new SQLiteLegacyBootstrap({owner,journal:this.reducer.journal,safety:this.safety,artifactHash:binding.artifactHash,replicaName:binding.legacyStorage?.replicaName??'gonvex-local-replica',outboxName:binding.legacyStorage?.outboxName??'gonvex-outbox'});
@@ -314,6 +314,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   for(const source of connection.sources.values())if(source.tabs.has(tabID)){this.releaseSourceInterest(connection,source,tabID);if(!source.tabs.size&&!source.eager)void this.closeSource(connection,source).catch(()=>{});}
   if(!connection.tabs.size){if(connection.lastScope)void this.maintenance.retire(connection.lastScope,[...connection.sources.values()].map(source=>source.id)).catch(()=>{});if(connection.timer)clearTimeout(connection.timer);clearTimeout(connection.reconnectTimer);clearTimeout(connection.migrationTimer);this.tokens.invalidate(id);connection.delivery.close();connection.client.dispose();connection.feed.close();this.sessions.close(id);this.connections.delete(id);}
  }
+ async diagnostics(){return {feeds:[...this.connections.values()].map(connection=>connection.feed.stats()),progress:await this.owner.database.getAllAsync('SELECT observed,applied,unclosed FROM gv_native_feed_progress LIMIT 8')};}
  budgets(){return this.ledger.snapshot();}
  close(){if(this.closed)return;this.closed=true;this.maintenance.close();for(const tab of [...this.tabs.keys()])this.detachTab(tab);this.tokens.close();this.legacy.close();this.safety.close();}
 }

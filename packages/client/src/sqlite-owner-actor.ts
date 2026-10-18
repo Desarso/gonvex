@@ -1,3 +1,5 @@
+import {OriginStorageWorkerLease} from './origin-storage-worker-lease.js';
+import {IndexedDBIntentLedger} from './indexeddb-intent-ledger.js';
 import type {ByteBudgetSnapshot} from './byte-budget.js';
 import {SQLitePendingSnapshotReader} from './sqlite-pending-snapshot-reader.js';
 import {SQLiteOwnerTabs} from './sqlite-owner-tabs.js';
@@ -21,6 +23,7 @@ export type SQLiteOwnerProgram={
   * every disk phase; server replies must never wait behind their own call. */
  call(args:unknown,caller:SQLiteOwnerCaller):Promise<unknown>;
  budgets?():ByteBudgetSnapshot[];
+ diagnostics?():Promise<unknown>;
  detachTab?(tabID:string):void;
  close?():Promise<void>|void;
 };
@@ -47,8 +50,10 @@ function sampleStartupMemory(stage:string){if(host&&startupMemory.length<3)start
 let canonical:SQLiteCanonicalDispatcher|undefined;
 let nativeReader:SQLiteNativeReplicaReader|undefined,pendingReader:SQLitePendingSnapshotReader|undefined;
 let snapshots:SQLiteSnapshotPages|undefined,activation:SQLiteSnapshotActivator|undefined;
+let originFenceMs=0,originFenceCalls=0;
 let lane = Promise.resolve(), operations = 0, bytes = 0,queuedOperations=0,queuedBytes=0,closed=false;
-let program:SQLiteOwnerProgram|undefined,ownerToken='';
+let program:SQLiteOwnerProgram|undefined,ownerToken='';const workerLease=new OriginStorageWorkerLease();const originFence=binding.createProgram?new IndexedDBIntentLedger():undefined;let originEpoch:number|undefined;
+const wireGeneration=(generation:{epoch:number;sequence:number})=>({...generation,epoch:originEpoch??generation.epoch});
 const ports = new Map<string, { port: MessagePort; seen: number; token: string }>();
 const tabs=new SQLiteOwnerTabs((to,change)=>{
  const message={type:'change',protocol,to,token:ownerToken,sentAt:Date.now(),...change};const peer=ports.get(to);
@@ -64,13 +69,16 @@ function scope(value: unknown): string {
   return value;
 }
 function publish(scope:string,generation:{epoch:number;sequence:number}){
- tabs.publish(scope,generation);
+ tabs.publish(scope,wireGeneration(generation));
 }
 function schedule<T>(size:number,run:()=>Promise<T>):Promise<T>{
  if(closed)return Promise.reject(Object.assign(Error('Storage owner is closed'),{code:'FENCED'}));
  if(!Number.isSafeInteger(size)||size<0||size>2097152)return Promise.reject(Object.assign(Error('Storage owner operation exceeds queue budget'),{code:'BUSY'}));
  if(queuedOperations>=64||queuedBytes+size>2097152)return Promise.reject(new SQLiteOwnerQueueBusyError());
- queuedOperations++;queuedBytes+=size;const operation=lane.then(async()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});return run();});
+ // The worker lifetime lock prevents a different adapter from claiming while
+ // SQL can still commit. Validate the durable epoch before each disk phase;
+ // pumping an IDB write transaction through every SQL phase doubles import IO.
+ queuedOperations++;queuedBytes+=size;const operation=lane.then(async()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});if(ownerToken&&!workerLease.stats().held)throw Object.assign(Error('Storage worker lease was released'),{code:'FENCED'});if(originFence&&originEpoch!==undefined){const start=performance.now();await originFence.generation();originFenceMs+=performance.now()-start;originFenceCalls++;}return run();});
  lane=operation.then(()=>undefined,()=>undefined);void operation.then(()=>{queuedOperations--;queuedBytes-=size;},()=>{queuedOperations--;queuedBytes-=size;});return operation;
 }
 async function execute(op: string, args: any, requestID:string) {
@@ -79,26 +87,29 @@ async function execute(op: string, args: any, requestID:string) {
     try {
       if(typeof args.owner!=='string'||!args.owner||args.owner.length>128)throw new TypeError('Invalid owner token');ownerToken=args.owner;
       if(args.schemaVersion!==undefined&&args.schemaVersion!==binding.schemaVersion)throw Object.assign(Error('Generated owner schema differs from browser binding'),{code:'SCHEMA_MISMATCH'});
-      host = await openOfficialSQLiteHost();sampleStartupMemory('host');
+      await workerLease.acquire();globalThis.postMessage({type:'progress',stage:'claiming-origin',sentAt:Date.now()});if(originFence)originEpoch=(await originFence.claim(args.owner)).epoch;globalThis.postMessage({type:'progress',stage:'claimed-origin',sentAt:Date.now()});
+      const initialize=async()=>{
+      globalThis.postMessage({type:'progress',stage:'opening-sqlite',sentAt:Date.now()});host = await openOfficialSQLiteHost();globalThis.postMessage({type:'progress',stage:'opened-sqlite',sentAt:Date.now()});sampleStartupMemory('host');
       const database=sqliteOwnerTransactions(host.database);
       engine = new SQLiteTypedReplicaEngine(database, binding.schema??args.schema as SQLiteTypedSchema, undefined, { onProgress: () => globalThis.postMessage({ type: 'progress', sentAt: Date.now() }) });
-      const epoch = await engine.open(args.owner);sampleStartupMemory('engine');
+      const epoch = await engine.open(args.owner);sampleStartupMemory('engine');globalThis.postMessage({type:'progress',stage:'opened-engine',sentAt:Date.now()});
       const storage=sqliteTypedReplicaStorage(database,engine.schema);
       canonical=new SQLiteCanonicalDispatcher(database,storage,engine);
       snapshots=new SQLiteSnapshotPages(database,()=>engine!.verifyOwner(),engine.schema);
       activation=new SQLiteSnapshotActivator(database,storage,()=>engine!.verifyOwner(),engine.schema);
-      await snapshots.ready();await activation.ready();sampleStartupMemory('canonical');
-      nativeReader=new SQLiteNativeReplicaReader(database,storage,engine);await nativeReader.ready();tabs.setGeneration(await engine.verifyOwner());
+      await snapshots.ready();await activation.ready();sampleStartupMemory('canonical');globalThis.postMessage({type:'progress',stage:'opened-canonical',sentAt:Date.now()});
+      nativeReader=new SQLiteNativeReplicaReader(database,storage,engine);await nativeReader.ready();tabs.setGeneration(wireGeneration(await engine.verifyOwner()));
       pendingReader=new SQLitePendingSnapshotReader({database,canonical:storage,snapshots,schema:engine.schema,fence:()=>engine!.verifyOwner()});await pendingReader.ready();
-      program=binding.createProgram?.({database,engine,notifyTab:tabID=>schedule(0,async()=>{if(typeof tabID!=='string'||!tabID||tabID.length>128)throw new TypeError('Invalid control recipient');tabs.notify(tabID,await engine!.verifyOwner());}),reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
+      program=binding.createProgram?.({database,engine,notifyTab:tabID=>schedule(0,async()=>{if(typeof tabID!=='string'||!tabID||tabID.length>128)throw new TypeError('Invalid control recipient');tabs.notify(tabID,wireGeneration(await engine!.verifyOwner()));}),reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
        runOwner:async(size,run,scopes=[])=>{
         if(!Array.isArray(scopes)||scopes.length>8||scopes.some(value=>typeof value!=='string'||!value||value.length>512))throw new TypeError('Invalid owner publication scope');
         return waitForSQLiteOwnerAdmission(()=>schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;}),()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});});
        }});
       if(program&&typeof program.call!=='function')throw new TypeError('Owner program factories must return synchronously; queue initialization through runOwner');
-      return { epoch, wasmBytes: host.memoryBytes() };
+      globalThis.postMessage({type:'progress',stage:'created-program',sentAt:Date.now()});return { epoch:originEpoch??epoch, wasmBytes: host.memoryBytes() };
+      };return await initialize();
     } catch (e) {
-      host?.close(); host = undefined; engine = undefined;
+      (host as OfficialSQLiteHost|undefined)?.close(); host = undefined; engine = undefined;
       const message = String((e as Error).message);
       if (/mode invariant/.test(message)) Object.assign(e as object, { code: 'STORAGE_MODE' });
       else if (['SecurityError','NotSupportedError','NotAllowedError'].includes((e as Error).name) || /not supported|unavailable|is not a function/i.test(message)) Object.assign(e as object, { code: 'UNSUPPORTED' });
@@ -122,7 +133,7 @@ async function execute(op: string, args: any, requestID:string) {
     case 'canonicalRead': return canonical!.read(args);
     case 'canonicalGeneration': return canonical!.generation(scope(args.scope),args.expected);
     case 'ping': return { ready: true };
-    case 'stats': return { ...engine.stats(),startupMemory,...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[] };
+    case 'stats': return { ...engine.stats(),originEpoch,originFenceMs,originFenceCalls,workerLease:workerLease.stats(),originFence:originFence?{bytes:1024,entries:1,maxBytes:1024,maxEntries:1}:null,startupMemory,...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[],programDiagnostics:await program?.diagnostics?.() };
     case 'integrity': return engine.integrity();
     case 'page': return engine.page(scope(args.scope), args.plan as SQLitePagePlan);
     case 'viewPage': return engine.viewPage(scope(args.scope), args.signature, args.plan as SQLitePagePlan, args.offset);
@@ -195,7 +206,7 @@ function admit(data: any, peer?: { port: MessagePort; token: string }, tab?: str
       if(!program)throw Object.assign(Error('This owner has no generated client program'),{code:'UNSUPPORTED'});
       const caller=peer?tab:data.tabID;
       if(typeof caller!=='string'||!caller||caller.length>128)throw new TypeError('Invalid owner client tab');
-      const value=await program.call(data.args,{tabID:caller,requestID:data.requestID??data.id,signal:tabs.register(caller)});reply(data.id,value,undefined,peer,tab);
+      await originFence?.generation();const value=await program.call(data.args,{tabID:caller,requestID:data.requestID??data.id,signal:tabs.register(caller)});await originFence?.generation();reply(data.id,value,undefined,peer,tab);
     }).catch(error=>reportFailure(data.id,error,peer,tab))
     : schedule(size,run).catch(error=>reportFailure(data.id,error,peer,tab));
   void work.then(()=>{operations--;bytes-=size;},()=>{operations--;bytes-=size;});
@@ -229,9 +240,9 @@ globalThis.onmessage = ({ data }) => {
 
 let disposal:Promise<void>|undefined;
 return ()=>disposal??=(async()=>{
- closed=true;clearInterval(timer);globalThis.onmessage=null;
+ closed=true;workerLease.cancelPending();clearInterval(timer);globalThis.onmessage=null;
  tabs.close();for(const peer of ports.values())peer.port.close();ports.clear();
- try{await program?.close?.();await lane;}finally{pendingReader?.close();host?.close();installed=false;}
+ try{await program?.close?.();await lane;}finally{pendingReader?.close();host?.close();originFence?.close();await workerLease.close();installed=false;}
 })();
 
 }

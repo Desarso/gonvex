@@ -23,6 +23,7 @@ type Options={
  /** Captured by the worker from its authenticated session and admitted plans.
   * Application arguments never select an identity or grant replica coverage. */
  context(scope:string):Promise<SQLiteReducerContext>;
+ settledReply?(input:SQLiteReducerInvocation,context:SQLiteReducerRecoveryContext):Promise<SQLiteReducerReceipt|undefined>;
 };
 const schema=`CREATE TABLE IF NOT EXISTS gv_reducer_invocations(scope TEXT NOT NULL,command_id TEXT NOT NULL,hash TEXT NOT NULL,receipt TEXT NOT NULL,PRIMARY KEY(scope,command_id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_reducer_reply_context(scope TEXT NOT NULL,command_id TEXT NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(scope,command_id)) WITHOUT ROWID;`;
@@ -57,7 +58,7 @@ export class SQLiteReducerCore {
   await this.ready();let receipt:SQLiteReducerReceipt|undefined,hash='',intentScope='',predictionBlocked=false;
   // A durable same-command reply remains available offline even when the
   // corresponding lazy reducer module has not been cached in this worker.
-  await this.options.database.withTransactionAsync(async()=>{await this.options.engine.verifyOwner();const captured=await this.context(owned.scope);intentScope=captured.intentScope;predictionBlocked=!!captured.predictionBlocked;hash=await digest(JSON.stringify({...owned,scope:intentScope}));receipt=await this.stored(intentScope,owned.commandId,hash,captured,owned.scope);});
+  await this.options.database.withTransactionAsync(async()=>{await this.options.engine.verifyOwner();const captured=await this.context(owned.scope);intentScope=captured.intentScope;predictionBlocked=!!captured.predictionBlocked;hash=await digest(JSON.stringify({...owned,scope:intentScope}));receipt=await this.stored(intentScope,owned.commandId,hash,captured,owned.scope)??await this.options.settledReply?.(owned,captured);await this.options.engine.verifyOwner();});
   if(receipt)return receipt;if(!predictionBlocked&&!this.options.runtime.isPrepared(owned.path))throw new SQLiteReducerPreparationRequiredError(owned.path);
   await this.options.database.withTransactionAsync(async()=>{
    const generation=await this.options.engine.verifyOwner(),captured=await this.context(owned.scope);if(captured.intentScope!==intentScope)fail('FENCED','Reducer durable identity changed');
