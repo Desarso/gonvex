@@ -1,7 +1,7 @@
 import { sqliteFieldName, sqliteIdentifier as q, type SQLiteTypedSchema, type SQLiteTypedTable } from './sqlite-typed-schema.js';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 
-export const sqliteTypedBodyFormat = 5;
+export const sqliteTypedBodyFormat = 6;
 const path = (field: string) => "'" + ('$.' + JSON.stringify(field)).replaceAll("'", "''") + "'";
 function replace(source: string, fields: readonly [string, string][]): string {
   // Stay below older native SQLite's 127 function-argument limit as well.
@@ -34,7 +34,7 @@ export async function installSQLiteTypedBodyFence(db: SQLiteReplicaDatabase, sch
   const signature = JSON.stringify({ format: sqliteTypedBodyFormat, tables: schema });
   const old = await db.getFirstAsync<{ schema: string; epoch: number }>('SELECT schema,epoch FROM gv_storage_meta WHERE id=1');
   if (old?.schema === signature) return;
-  if (old && ![3, 4].some(format => old.schema === JSON.stringify({ format, tables: schema }))) throw new Error('Typed body storage requires an explicit schema migration');
+  if (old && ![3, 4, 5].some(format => old.schema === JSON.stringify({ format, tables: schema }))) throw new Error('Typed body storage requires an explicit schema migration');
   if (old && (!Number.isSafeInteger(old.epoch + 1) || old.epoch < 0)) throw new Error('SQLite owner epoch exhausted');
   await db.runAsync("INSERT INTO gv_storage_meta VALUES(1,?,0,'canonical-layout',0) ON CONFLICT(id) DO UPDATE SET schema=excluded.schema,epoch=epoch+1,owner=excluded.owner", signature);
 }

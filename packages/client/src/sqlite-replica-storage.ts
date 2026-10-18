@@ -27,6 +27,7 @@ export interface SQLiteReplicaDatabase {
  * caller's existing transaction, never in a second database or cache. */
 export interface SQLiteReplicaRowLayout {
   install(database: SQLiteReplicaDatabase): Promise<void>;
+  readVersions?(database: SQLiteReplicaDatabase, scope: string, entity: string, ids: readonly string[]): Promise<ReadonlyMap<string,number>>;
   readPage?(database: SQLiteReplicaDatabase, scope: string, read: import('@gonvex/module-sdk').DataRead, after?: string, excluded?: readonly string[], columns?: readonly string[]): Promise<import('./paged-read-view.js').ReplicaReadPage>;
   assertOwner?(database: SQLiteReplicaDatabase): Promise<void>;
   afterCommit?(database: SQLiteReplicaDatabase): Promise<void>;
@@ -763,6 +764,8 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
           JSON.parse(record.value) as ReplicaRecordVersion,
         ]),
       );
+      const bases = cursor && this.rowLayout?.readVersions
+        ? await this.rowLayout.readVersions(this.database, scope, entity, batch.map(entry => entry.id)) : undefined;
       const versions: Array<{id:string;row:ReplicaRow|null;authority:ReplicaRecordVersion|undefined}> = [];
       for (const {id,row} of batch) {
         const old=previous.get(id)??null;
@@ -772,7 +775,9 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
           if(merged)previous.set(id,merged);else previous.delete(id);
           continue;
         }
-        const prior=authorities.get(authorityKey(id))??{epoch:cursor.epoch,fields:Object.fromEntries(Object.keys(old??{}).map(key=>[key,0]))};
+        const prior=authorities.get(authorityKey(id)) ?? (bases
+          ? {epoch:cursor.epoch,base:bases.get(id)??0,fields:{}}
+          : {epoch:cursor.epoch,fields:Object.fromEntries(Object.keys(old??{}).map(key=>[key,0]))});
         const merged=mergeReplicaRecord({row:old,authority:prior},row,cursor);
         versions.push({id,...merged});authorities.set(authorityKey(id),merged.authority);
         if(merged.row)previous.set(id,merged.row);else previous.delete(id);

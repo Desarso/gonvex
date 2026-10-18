@@ -39,3 +39,20 @@ it('preserves a repeated snapshot and its decoded row without rebuilding indexes
   const deleted = mergeReplicaRecord(newer, null, at(7));
   expect(mergeReplicaRecord(deleted, null, at(7))).toBe(deleted);
 });
+
+it('uses native baseline only for present fields and keeps later stamps sparse', () => {
+  const current = {row:{id:'a',name:'snapshot'},authority:{epoch:'e',base:10,fields:{}}};
+  const filled = mergeReplicaRecord(current,{name:'obsolete',description:'older projection'},at(5));
+  expect(filled.row).toEqual({id:'a',name:'snapshot',description:'older projection'});
+  expect(filled.authority).toEqual({epoch:'e',base:10,fields:{description:5}});
+  const next = mergeReplicaRecord(filled,{name:'newer'},at(12));
+  expect(next.authority).toEqual({epoch:'e',base:10,fields:{description:5,name:12}});
+  expect(mergeReplicaRecord(next,{name:'old'},at(11))).toBe(next);
+  expect(mergeReplicaRecord(next,null,at(11))).toBe(next);
+  expect(mergeReplicaRecord(current,null,at(9))).toBe(current);
+  expect(mergeReplicaRecord(current,{id:'a',name:'snapshot'},at(10))).toBe(current);
+  const baseline = mergeReplicaRecord(filled,{description:'now current'},at(10));
+  expect(baseline.authority.fields).toEqual({});
+  expect(mergeReplicaRecord(baseline,{description:'old'},at(9))).toBe(baseline);
+  expect(mergeReplicaRecord(next,{id:'a'},{epoch:'replacement',revision:1}).authority).toEqual({epoch:'replacement',fields:{id:1}});
+});

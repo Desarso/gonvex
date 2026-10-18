@@ -382,7 +382,7 @@ it('restores deferred indexes before an interactive write and never hides that w
   expect((await engine.outbox('s')).map(entry => entry.id)).toEqual(['intent']);
   expect(await engine.integrity()).toBe('ok');
 });
-it.each([3, 4])('upgrades format %i atomically without replacing canonical rows, pending intents or receipts', async format => {
+it.each([3, 4, 5])('upgrades format %i atomically without replacing canonical rows, pending intents or receipts', async format => {
   const { engine, host, db } = fixture(); await engine.open('first');
   const writes = [write('a', 1, 'Needle')], intent = { id: 'pending', payload: { create: 'a' } };
   const receipt = await engine.apply('s', writes, intent);
@@ -390,7 +390,7 @@ it.each([3, 4])('upgrades format %i atomically without replacing canonical rows,
   db.prepare(`UPDATE ${sqliteIdentifier(sqliteTableName('tasks'))} SET body=? WHERE id='a'`).run(JSON.stringify(writes[0]!.row));
   db.exec('DROP TABLE gv_storage_flags');
   const next = new SQLiteTypedReplicaEngine(host, schema); await next.open('second');
-  expect(JSON.parse(String(db.prepare('SELECT schema FROM gv_storage_meta').get()!.schema)).format).toBe(5);
+  expect(JSON.parse(String(db.prepare('SELECT schema FROM gv_storage_meta').get()!.schema)).format).toBe(6);
   expect(await next.apply('s', writes, intent)).toEqual(receipt);
   expect((await next.outbox('s')).map(entry => entry.id)).toEqual(['pending']);
   expect((await next.page('s', { ...plan, search: 'needle' })).rows.map(row => row._id)).toEqual(['a']);

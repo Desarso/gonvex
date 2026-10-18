@@ -23,6 +23,13 @@ export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRo
     return current;
   }
   return {
+    async readVersions(db, scope, entity, ids) {
+      if (!Object.hasOwn(schema, entity) || ids.length > 100) throw new RangeError('Invalid native authority page');
+      if (!ids.length) return new Map();
+      const physical = (await db.getFirstAsync<{physical:string}>('SELECT physical FROM gv_scope_alias WHERE scope=?',scope))?.physical ?? scope;
+      const rows = await db.getAllAsync<{id:string;version:number}>(`SELECT id,version FROM ${q(sqliteTableName(entity))} WHERE scope=? AND id IN (${ids.map(()=>'?').join(',')})`, physical, ...ids);
+      return new Map(rows.map(row => [row.id,row.version]));
+    },
     readPage: (db,scope,read,after,excluded,columns) => readSQLitePortablePage(db,schema,scope,read,after,excluded,columns),
     async assertOwner(db) { await assertOwner(db); },
     async afterCommit(db) {
@@ -82,7 +89,8 @@ END;`);
       const table = Object.hasOwn(schema, entity) && schema[entity];
       if (!table) throw new TypeError('Canonical write references an undeclared SQLite table');
       // Preserve per-field authority from the shared storage adapter. Version
-      // here is not a substitute for its independently retained field stamps.
+      // is the baseline for fields present in native imports; sparse metadata
+      // retains later per-field overrides. Preserve the baseline on updates.
       sqlitePayloadBytes(rows, 262144);
       const physical = (await db.getFirstAsync<{physical:string}>('SELECT physical FROM gv_scope_alias WHERE scope=?',scope))?.physical ?? scope;
       const fields = Object.entries(table.fields), name = q(sqliteTableName(entity));
@@ -109,7 +117,7 @@ END;`);
           ids.push(id); page.push('(' + columns.map(() => '?').join(',') + ')');
         }
         await db.runAsync(`DELETE FROM gv_canonical_tombstones WHERE scope=? AND entity=? AND id IN (${ids.map(() => '?').join(',')})`, scope, entity, ...ids);
-        await db.runAsync(`INSERT INTO ${name}(${columns.map(q).join(',')}) VALUES ${page.join(',')} ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')}`, ...values);
+        await db.runAsync(`INSERT INTO ${name}(${columns.map(q).join(',')}) VALUES ${page.join(',')} ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).filter(column => column !== 'version').map(column => `${q(column)}=excluded.${q(column)}`).join(',')}`, ...values);
       }
     },
   };

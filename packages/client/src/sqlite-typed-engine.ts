@@ -126,8 +126,8 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         const signature = JSON.stringify({ format: sqliteTypedBodyFormat, tables: this.schema });
         const old = await this.db.getFirstAsync<{ schema: string; epoch: number }>('SELECT schema,epoch FROM gv_storage_meta WHERE id=1');
         // Format 5 reads both legacy full bodies and typed-field skeletons.
-        // Identical format-3/4 rows and receipts require no corpus rewrite.
-        if (old && old.schema !== signature && ![3, 4].some(format => old.schema === JSON.stringify({ format, tables: this.schema }))) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
+        // Identical format-3/4/5 rows and receipts require no corpus rewrite.
+        if (old && old.schema !== signature && ![3, 4, 5].some(format => old.schema === JSON.stringify({ format, tables: this.schema }))) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
         await this.db.execAsync(ddl.tables);
         if (!await this.indexesDeferred() && (ddl.indexes || ddl.search)) await this.db.execAsync(ddl.indexes + '\n' + ddl.search);
         this.epoch = (old?.epoch ?? 0) + 1;

@@ -6,6 +6,9 @@ import type {ReplicaRow} from './local-replica.js';
 export type ReplicaRecordVersion = {
   epoch:string;
   fields:Record<string,number>;
+  /** Shared stamp for fields present in a native snapshot row; absent fields
+   * remain unknown. Explicit field stamps override this baseline. */
+  base?:number;
   deleted?:number;
 };
 export type VersionedReplicaRecord = {
@@ -21,7 +24,7 @@ export function mergeReplicaRecord(
   const prior = previous?.authority.epoch === cursor.epoch ? previous : undefined;
   const priorAuthority = prior?.authority;
   if (incoming === null) {
-    const newest = Math.max(priorAuthority?.deleted ?? -1, ...Object.values(priorAuthority?.fields ?? {}), -1);
+    const newest = Math.max(priorAuthority?.deleted ?? -1, priorAuthority?.base ?? -1, ...Object.values(priorAuthority?.fields ?? {}), -1);
     if (cursor.revision < newest || (prior?.row === null && priorAuthority?.deleted === cursor.revision)) return prior!;
     return {row:null,authority:{epoch:cursor.epoch,fields:{},deleted:cursor.revision}};
   }
@@ -40,7 +43,8 @@ export function mergeReplicaRecord(
   };
   if (authority.deleted !== undefined) delete mutableAuthority().deleted;
   for (const column of Object.keys(incoming)) {
-    if (cursor.revision < (authority.fields[column] ?? -1)) continue;
+    const stamp = authority.fields[column] ?? (Object.prototype.hasOwnProperty.call(row,column) ? authority.base ?? -1 : -1);
+    if (cursor.revision < stamp) continue;
     const value = incoming[column];
     const before = row[column];
     const equal = Object.is(before,value) || (before !== null && value !== null && typeof before === 'object' && typeof value === 'object' && JSON.stringify(before) === JSON.stringify(value));
@@ -48,7 +52,10 @@ export function mergeReplicaRecord(
       if (!copiedRow) { row = {...row}; copiedRow = true; }
       row[column] = value;
     }
-    if (authority.fields[column] !== cursor.revision) mutableAuthority().fields[column] = cursor.revision;
+    if (stamp !== cursor.revision) {
+      if (authority.base === cursor.revision) delete mutableAuthority().fields[column];
+      else mutableAuthority().fields[column] = cursor.revision;
+    }
   }
   if (prior && !copiedRow && !copiedAuthority) return prior;
   return {row,authority};

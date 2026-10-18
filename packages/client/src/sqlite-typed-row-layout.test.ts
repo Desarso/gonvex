@@ -206,3 +206,25 @@ it.each([false,true])('shares a published physical bootstrap scope with the cano
   expect(db.prepare("SELECT name FROM sqlite_master WHERE name='_gonvex_replica_lookup'").get()).toBeUndefined();
   expect(await engine.integrity()).toBe('ok');
 });
+
+it('merges native snapshot authority without expanding per-field stamps or downgrading its baseline', async () => {
+  const {db,host,storage} = fixture();
+  const engine = new SQLiteTypedReplicaEngine(host,schema); await engine.open('snapshot');
+  await engine.apply('s',[{table:'tasks',id:'a',version:10,row:{_id:'a',name:'snapshot'}}]);
+  const apply = (revision:number,newValue:Record<string,unknown>,operation:'update'|'delete'='update') => storage.applyTransaction({cursor:cursor(revision),changes:[{entity:'tasks',id:'a',operation,...(operation==='update'?{newValue}:{})}]},empty,'s');
+  await apply(5,{name:'stale',due:3});
+  expect((await storage.loadEntityRows('s','tasks',['a']))[0]!.row).toEqual({_id:'a',name:'snapshot',due:3});
+  expect(db.prepare(`SELECT version FROM ${sqliteIdentifier(sqliteTableName('tasks'))}`).get()!.version).toBe(10);
+  const meta = () => JSON.parse(String(db.prepare("SELECT value FROM _gonvex_replica_meta WHERE key=?").get('row:'+JSON.stringify(['tasks','a']))!.value));
+  expect(meta()).toEqual({epoch:'e',base:10,fields:{due:5}});
+  await apply(9,{},'delete');
+  expect(await storage.loadEntityRows('s','tasks',['a'])).toHaveLength(1);
+  const reopened = sqliteTypedReplicaStorage(host,schema);
+  await reopened.applyTransaction({cursor:cursor(12),changes:[{entity:'tasks',id:'a',operation:'update',newValue:{name:'newer'}}]},empty,'s');
+  await apply(11,{name:'stale again'});
+  expect((await storage.loadEntityRows('s','tasks',['a']))[0]!.row.name).toBe('newer');
+  expect(meta()).toEqual({epoch:'e',base:10,fields:{due:5,name:12}});
+  await apply(13,{},'delete');
+  await apply(12,{_id:'a',name:'resurrect'});
+  expect(await storage.loadEntityRows('s','tasks',['a'])).toHaveLength(0);
+});
