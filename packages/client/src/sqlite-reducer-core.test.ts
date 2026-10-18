@@ -64,6 +64,17 @@ it('rebases a causal prediction chain atomically over authority without changing
   expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(10);expect((await f.journal.summary('s')).rejected).toBe(1);
  }finally{f.sql.close();}
 });
+it('retains an unknown-outcome intent after inflight recovery instead of executing it over its own canonical commit',async()=>{
+ const f=await fixture();try{
+  const first=await f.core.invoke({scope:'s',path:'increment',commandId:'one',now:100,args:{id:'a'}}),second=await f.core.invoke({scope:'s',path:'increment',commandId:'two',now:101,args:{id:'a'}});
+  expect((await f.journal.claim('s',1000,8)).map(entry=>entry.id)).toEqual([first.intentId]);await f.journal.recoverInflight('s');expect((await f.journal.page('s')).entries[0]).toMatchObject({state:'pending',sentAt:1000});
+  const rebased=await f.core.rebase('s',async()=>{await f.canonical.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{id:'a',n:2}}]},{entities:{},liveQueries:{}},'s');});
+  expect(rebased).toMatchObject({replayed:1,retained:1});expect(f.calls).toBe(3);expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(3);
+  const reopened=new SQLiteReducerCore({...f.options,runtime:{isPrepared:()=>false,prepare:async()=>{throw Error('offline');},execute:async()=>{throw Error('must not rerun sent body');}}});
+  await f.journal.update('s',second.intentId,['pending'],entry=>({...entry,state:'inflight',sentAt:1001}));expect(await reopened.rebase('s')).toMatchObject({replayed:0,retained:2});expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(3);
+  expect(await reopened.invoke({scope:'s',path:'increment',commandId:'one',now:100,args:{id:'a'}})).toEqual(first);expect(await reopened.invoke({scope:'s',path:'increment',commandId:'two',now:101,args:{id:'a'}})).toEqual(second);
+ }finally{f.sql.close();}
+});
 it('rolls back authority, acknowledgments and predictions on a cold module or a storage failure',async()=>{
  const f=await fixture();try{
   const input={scope:'s',path:'increment',commandId:'one',now:100,args:{id:'a'}};const first=await f.core.invoke(input),before=await f.engine.verifyOwner();
@@ -80,14 +91,22 @@ it('rolls back authority, acknowledgments and predictions on a cold module or a 
   await expect(cold.rebase('s')).rejects.toThrow('disk I/O error surrogate');expect(await f.engine.verifyOwner()).toEqual(generation);
  }finally{f.sql.close();}
 });
-it('retains inflight predictions and keeps a locally unavailable intent durable without predicting its obsolete patch',async()=>{
+it('retains inflight predictions across recovery without asking an unavailable local body to execute',async()=>{
  const f=await fixture();try{
   const first=await f.core.invoke({scope:'s',path:'increment',commandId:'one',now:100,args:{id:'a'}});
   await f.journal.claim('s',1000);expect(await f.core.rebase('s')).toMatchObject({replayed:0,retained:1});expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(2);
   await f.journal.recoverInflight('s');
   const unavailable=new SQLiteReducerCore({...f.options,runtime:{isPrepared:()=>true,prepare:async()=>{},execute:async()=>{throw Error('local validation no longer holds');}}});
-  expect(await unavailable.rebase('s')).toMatchObject({unavailable:1});expect((await f.journal.summary('s')).queued).toBe(1);expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(1);expect((await f.journal.page('s')).entries[0].patches).toEqual([]);
+  expect(await unavailable.rebase('s')).toMatchObject({unavailable:0,retained:1});expect((await f.journal.summary('s')).queued).toBe(1);expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(2);expect((await f.journal.page('s')).entries[0].patches).toEqual([{entity:'tasks',rowId:'a',op:'patch',fields:{n:2}}]);
   expect((await f.journal.page('s')).entries[0].id).toBe(first.intentId);
+ }finally{f.sql.close();}
+});
+
+it('keeps an unsent locally unavailable intent durable without predicting its obsolete patch',async()=>{
+ const f=await fixture();try{
+  const first=await f.core.invoke({scope:'s',path:'increment',commandId:'one',now:100,args:{id:'a'}});
+  const unavailable=new SQLiteReducerCore({...f.options,runtime:{isPrepared:()=>true,prepare:async()=>{},execute:async()=>{throw Error('local validation no longer holds');}}});
+  expect(await unavailable.rebase('s')).toMatchObject({unavailable:1,retained:0});expect((await f.journal.summary('s')).queued).toBe(1);expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(1);expect((await f.journal.page('s')).entries[0].patches).toEqual([]);expect((await f.journal.page('s')).entries[0].id).toBe(first.intentId);
  }finally{f.sql.close();}
 });
 

@@ -86,7 +86,10 @@ export class SQLiteReducerCore {
     for(const entry of page.entries){
      if(entry.state==='rejected')continue;
      let patches=entry.patches??[];
-     if(entry.localExecution&&entry.state!=='inflight'&&entry.state!=='committed'){
+     // A recovered pending delivery may already have committed on the server.
+     // Its first-send fence survives recovery/backoff; executing its body again
+     // over that canonical commit would predict the same intent twice.
+     if(entry.localExecution&&entry.sentAt===undefined&&entry.state!=='inflight'&&entry.state!=='committed'){
       if(!this.options.runtime.isPrepared(entry.path))throw new SQLiteReducerPreparationRequiredError(entry.path);
       const execution:LocalExecution={...entry.localExecution,scope,identity:structuredClone(captured.identity),artifactHash:this.options.artifactHash};
       let readFailure:{error:unknown}|undefined;

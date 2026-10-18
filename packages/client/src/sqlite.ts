@@ -39,3 +39,4 @@ export {markSQLiteStagingCommit} from './sqlite-owner-transactions.js';
 
 export {SQLiteNativeFeed} from './sqlite-native-feed.js';
 export type {SQLiteFeedSource} from './sqlite-native-feed.js';
+export {SQLiteReducerDelivery} from './sqlite-reducer-delivery.js';

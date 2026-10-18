@@ -5309,7 +5309,8 @@ function countPendingCalls(calls: Map<string, PendingCall>, kind: "reducer" | "a
  * 0.5.2-staging.15 send no class: their server errors stay rejections, as
  * before, except the two cases the legacy runtime could only express in prose.
  */
-function deliveryErrorClass(error: unknown): OutboxErrorClass {
+/** @internal Shared by the SQLite owner delivery loop. */
+export function deliveryErrorClass(error: unknown): OutboxErrorClass {
   if (!(error instanceof GonvexClientError)) return "transient";
   switch (error.code) {
     case "server": return error.errorClass ?? "rejected";
