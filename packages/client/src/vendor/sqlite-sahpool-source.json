@@ -5,8 +5,15 @@
   "extractedSha256": "b6f90d7424403d2f8df52f9db88f70ea9b574c6119d9bca53041bcfe94395512",
   "upstreamRecoveryFix": "ea1d55e202",
   "license": "SQLite public domain",
-  "changes": "No VFS logic changes. Replaces the initializer in the pinned npm browser module during package bootstrap.",
+  "changes": "Pinned upstream SAH-pool recovery fix; packaging guards 12 disabled debug-log calls before allocating their arguments.",
   "npmPackage": "3.53.4-build2",
   "npmBrowserModuleSha256": "5c056c0c455a9558ccef1b72bdedd620bf4a819b5e6de438df253c166900ab55",
-  "npmWasmSha256": "2ee8f3dab694532afc8840e07703127287662d08b74e6ff50491ce63f00d5752"
+  "npmWasmSha256": "2ee8f3dab694532afc8840e07703127287662d08b74e6ff50491ce63f00d5752",
+  "packagedBrowserModuleSha256": "8d945c2dbd4509ebf0ab0b8c05a265bdb4ff63110968a1046d116c08b75d4d17",
+  "packagingTransforms": [
+    {
+      "name": "sahpool-disabled-debug-log-guards",
+      "sites": 12
+    }
+  ]
 }

@@ -1,3 +1,4 @@
+import { guardSQLiteSahpoolLogging } from './sqlite-log-guards.mjs';
 import { createRequire } from 'node:module';
 import { readFile, writeFile, mkdir, copyFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -14,7 +15,9 @@ await mkdir(root + '/dist/vendor', { recursive: true });
 for (const [source, name, expected] of files) {
   const data = await readFile(distribution + '/' + source);
   if (createHash('sha256').update(data).digest('hex') !== expected) throw Error('SQLite asset differs from pinned patched source: ' + source);
-  await writeFile(root + '/dist/vendor/' + name, data);
+  const output = source === 'index.mjs' ? Buffer.from(guardSQLiteSahpoolLogging(data.toString('utf8'))) : data;
+  if (source === 'index.mjs' && createHash('sha256').update(output).digest('hex') !== provenance.packagedBrowserModuleSha256) throw Error('SQLite packaged logging transform differs from pinned hash');
+  await writeFile(root + '/dist/vendor/' + name, output);
 }
 await writeFile(root + '/dist/vendor/sqlite3.d.mts', "export { default } from '@sqlite.org/sqlite-wasm';\n");
 await copyFile(root + '/src/vendor/sqlite-sahpool-source.json', root + '/dist/vendor/sqlite-source.json');
