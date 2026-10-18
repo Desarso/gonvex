@@ -93,7 +93,7 @@ export class SQLiteNativeTransport {
    const current=()=>this.current(socket,generation)&&serial===this.authSerial&&this.activeAuth===message.id&&!this.latestAuth;
    const fence=JSON.stringify([this.scope(),directive?.visibilityScope??'',directive?.epoch??'']);if(fence!==this.watermarkFence){this.watermarkFence=fence;this.watermark=0;}
    void this.options.ownerHost.session({connectionGeneration:generation,directive,identity,artifactHash:this.artifact,intentScope:this.scope(),lastOnlineAtMs:Date.now(),capabilities:this.capabilities},current).then(()=>{
-    if(!current())return;this.clearAuthTimer();this.authInFlight=false;this.installing=false;this.reconnectAttempts=0;this.refreshed=false;this.refreshedToken=undefined;this.session=directive&&identity?'authenticated':'unavailable';this.flush();
+    if(!current())return;this.clearAuthTimer();this.authInFlight=false;this.installing=false;this.reconnectAttempts=0;this.refreshed=false;this.refreshedToken=undefined;this.session=directive&&identity?'authenticated':'unavailable';this.options.ownerHost.authenticated?.();this.flush();
    },failure=>{if(current()){this.options.ownerHost.failed(failure);socket.close();}});return;
   }
   if(message.type.startsWith('replica.')){if(!this.quarantined&&(!this.authInFlight||this.installing))this.options.ownerHost.frame(message,generation);return;}
@@ -162,6 +162,7 @@ export class SQLiteNativeTransport {
  query<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={}):Promise<T>{return this.invoke('query',ref,args);}
  action<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={}):Promise<T>{return this.invoke('action',ref,args);}
  callOwnerReducer<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue,command:string):Promise<T>{if(!command||command.length>256)return Promise.reject(Error('Invalid durable command ID'));return this.invoke('reducer',ref,args,command);}
+ authenticationState(){return this.quarantined?'denied':this.activeAuth&&!this.authInFlight?'authenticated':this.socket?'authenticating':'unavailable';}
  localSessionState(){return this.session;}
  connectionState():ConnectionState{const values=[...this.pending.values()];return {isWebSocketConnected:this.socket?.readyState===1,hasEverConnected:this.hasEver,connectionCount:this.connectionCount,connectionRetries:this.reconnectAttempts,hasInflightRequests:!!values.length,inflightReducers:values.filter(p=>p.kind==='reducer').length,inflightActions:values.filter(p=>p.kind==='action').length,inflightOneShotQueries:values.filter(p=>p.kind==='query').length};}
  dispose(){if(this.disposed)return;this.close();for(const watch of this.controlWatches)watch.release();this.controlWatches.clear();this.disposed=true;this.auth={};this.options.releaseAuth?.();}

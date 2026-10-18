@@ -18,6 +18,7 @@ export type SQLiteTransportHost={
  /** Definitive authorization denial. Fence reads/writes immediately; persist
   * revocation separately from retaining the identity's unsent commands. */
  quarantined?(generation:number):void;
+ authenticated?():void;
  authError?(message:string,details:{definitive:boolean;code?:string}):void;
  developerCredential?(token:string):void;
  disconnected():void;
