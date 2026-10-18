@@ -4,6 +4,47 @@ import type { SQLiteTypedSchema, SQLiteTypedTable } from './sqlite-typed-schema.
 const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
 const path = (...parts: string[]) => literal('$.' + parts.map(name => JSON.stringify(name)).join('.'));
 
+/** The grammar has already passed SQLite json_valid. Scan only structural
+ * invariants, without constructing rows or decoding text values. Object-key
+ * sets are bounded by the caller's decoded-byte admission and die per frame. */
+export function encodedFrameHasCanonicalStructure(text: string): boolean {
+  const stack: Array<{ keys?: Set<string>; key: boolean }> = [];
+  for (let i = 0; i < text.length; i++) {
+    const char = text.charCodeAt(i);
+    if (char === 34) {
+      const start = i; let escaped = false;
+      while (++i < text.length) {
+        if (text.charCodeAt(i) === 92) { escaped = true; i++; }
+        else if (text.charCodeAt(i) === 34) break;
+      }
+      const parent = stack.at(-1);
+      if (parent?.keys && parent.key) {
+        const key = escaped ? JSON.parse(text.slice(start, i + 1)) as string : text.slice(start + 1, i);
+        if (parent.keys.has(key)) return false;
+        parent.keys.add(key); parent.key = false;
+      } else if (stack.length > 32) return false;
+    } else if (char === 123 || char === 91) {
+      if (stack.length > 32) return false;
+      stack.push(char === 123 ? { keys: new Set(), key: true } : { key: false });
+    } else if (char === 125 || char === 93) stack.pop();
+    else if (char === 44) { const parent = stack.at(-1); if (parent?.keys) parent.key = true; }
+    else if (char === 45 || char >= 48 && char <= 57) {
+      if (stack.length > 32) return false;
+      const start = i;
+      while (i + 1 < text.length) {
+        const next = text.charCodeAt(i + 1);
+        if (next >= 48 && next <= 57 || next === 43 || next === 45 || next === 46 || next === 69 || next === 101) i++;
+        else break;
+      }
+      if (!Number.isFinite(Number(text.slice(start, i + 1)))) return false;
+    } else if (char === 110 || char === 116 || char === 102) {
+      if (stack.length > 32) return false;
+      i += char === 102 ? 4 : 3;
+    }
+  }
+  return stack.length === 0;
+}
+
 export function compileSQLiteEncodedFrameValidation(table: SQLiteTypedTable, each: 'json_each' | 'jsonb_each'): string | undefined {
   if (table.fields[table.key]?.kind !== 'text' || Object.keys(table.fields).length > 128) return;
   const id = "json_extract(value,'$.id')", version = "json_extract(value,'$.version')";
@@ -35,11 +76,7 @@ export async function writeSQLiteEncodedFrame(db: SQLiteReplicaDatabase, schema:
   if (shape?.kind !== 'array') return;
   const size = await db.getFirstAsync<{ n: number; bad: number }>(`SELECT count(*) n,coalesce(sum(type<>'object'),0) bad FROM ${each}(jsonb(?))`, encoded);
   if (!size || size.n > 512 || size.bad) return;
-  const structure = await db.getFirstAsync<{ duplicate: number; nonfinite: number; tooDeep: number }>(`WITH RECURSIVE tree AS MATERIALIZED (
-    SELECT id,parent,key,type,atom FROM json_tree(jsonb(?))
-  ), depths(id,depth) AS (SELECT id,0 FROM tree WHERE parent IS NULL UNION ALL SELECT t.id,d.depth+1 FROM tree t JOIN depths d ON t.parent=d.id WHERE d.depth<33) SELECT EXISTS(SELECT 1 FROM tree WHERE key IS NOT NULL GROUP BY parent,key HAVING count(*)>1) duplicate,
-    EXISTS(SELECT 1 FROM tree WHERE type IN ('integer','real') AND NOT(atom<=1.7976931348623157e308 AND atom>=-1.7976931348623157e308)) nonfinite,EXISTS(SELECT 1 FROM depths WHERE depth>32) tooDeep`, encoded);
-  if (structure?.duplicate || structure?.nonfinite || structure?.tooDeep) return;
+  if (!encodedFrameHasCanonicalStructure(encoded)) return;
   const entities = await db.getAllAsync<{ entity: unknown }>(`SELECT DISTINCT json_extract(value,'$.table') entity FROM ${each}(jsonb(?))`, encoded);
   if (entities.length > 32) return;
   // Validate every table before inserting any of them. The caller's enclosing
