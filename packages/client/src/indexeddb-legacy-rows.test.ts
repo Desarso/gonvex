@@ -8,3 +8,7 @@ it('rolls the imported row and progress marker back together on a late storage f
  await expect(engine.importLegacyRows(key,'e',1,null,[row],JSON.stringify(['visible','tasks','a']),true)).rejects.toMatchObject({name:'QuotaExceededError'});spy.mockRestore();expect(await engine.legacyProgress(key)).toBeUndefined();expect((await engine.committedEntities({scope:'visible',entity:'tasks',ids:['a'],epoch:'e'})).rows[0]?.value).toBeNull();
  expect(await engine.importLegacyRows(key,'e',1,null,[row],JSON.stringify(['visible','tasks','a']),true)).toMatchObject({seen:1,copied:1,finished:true});expect((await engine.committedEntities({scope:'visible',entity:'tasks',ids:['a'],epoch:'e'})).rows[0]?.value).toEqual({id:'a',title:'Offline'});
 });
+it('does not publish a page after its authenticated migration admission changes',async()=>{
+ const engine=new IndexedDBLiveWindows({tasks:{key:'id',fields:{id:{},title:{}}}},'legacy-fenced',new IDBFactory(),IDBKeyRange);closes.push(()=>engine.close());await engine.claim('owner');const key='old\u00002\u0000visible',row={scope:'visible',entity:'tasks',id:'a',row:{id:'a',title:'Offline'},authority:{epoch:'e',base:1,fields:{}},sourceHash:'a'.repeat(64)};
+ await expect(engine.importLegacyRows(key,'e',1,null,[row],JSON.stringify(['visible','tasks','a']),true,()=>false)).rejects.toMatchObject({code:'FENCED'});expect(await engine.legacyProgress(key)).toBeUndefined();
+});

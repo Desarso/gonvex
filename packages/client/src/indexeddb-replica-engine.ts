@@ -45,10 +45,10 @@ export class IndexedDBReplicaEngine extends IndexedDBIntentLedger {
  /** Merge a fenced source page and its verification marker in one durable IDB
   * transaction. Per-field stamps are replayed oldest first, so a newer native
   * field or tombstone can never be overwritten by an old projected row. */
- async importLegacyRows(key:string,epoch:string,total:number,after:string|null,rows:readonly IndexedDBLegacyRow[],next:string|null,finished:boolean){
+ async importLegacyRows(key:string,epoch:string,total:number,after:string|null,rows:readonly IndexedDBLegacyRow[],next:string|null,finished:boolean,current:()=>boolean=()=>true){
   sqlitePayloadBytes({key,epoch,total,after,rows,next,finished},262144);if(!key||key.length>1024||!epoch||epoch.length>256||!Number.isSafeInteger(total)||total<0||rows.length>16||typeof finished!=='boolean')throw new TypeError('Invalid fallback legacy page');
   const owned=structuredClone(rows);return this.atomic(undefined,async tx=>this.transactionTask(tx,262144,async()=>{
-   const meta=tx.objectStore('meta'),marker='legacy-rows:'+key,old=(await request(meta.get(marker)) as {value:IndexedDBLegacyProgress}|undefined)?.value;
+   if(!current())fail('FENCED','Fallback legacy row admission changed');const meta=tx.objectStore('meta'),marker='legacy-rows:'+key,old=(await request(meta.get(marker)) as {value:IndexedDBLegacyProgress}|undefined)?.value;
    if(old&&(old.epoch!==epoch||old.total!==total||old.after!==after||old.finished))fail('FENCED','Fallback legacy migration advanced or changed');
    const progress:IndexedDBLegacyProgress=old?{...old}:{key,epoch,total,seen:0,copied:0,deferred:0,ignored:0,after:null,root:'0'.repeat(64),finished:false};
    if(progress.seen+owned.length>total)fail('INTENT_CORRUPT','Fallback legacy source exceeds its fenced count');
@@ -69,7 +69,7 @@ export class IndexedDBReplicaEngine extends IndexedDBIntentLedger {
     }
     progress.root=await this.hashValue(progress.root+JSON.stringify({entity:source.entity,id:source.id,source:source.sourceHash,target:targetHash,status}));progress.seen++;
    }
-   progress.after=next;progress.finished=finished;if(finished&&progress.seen!==total)fail('INTENT_CORRUPT','Fallback legacy source count changed');await request(meta.put({key:marker,value:progress}));return progress;
+   progress.after=next;progress.finished=finished;if(finished&&progress.seen!==total)fail('INTENT_CORRUPT','Fallback legacy source count changed');if(!current())fail('FENCED','Fallback legacy row admission changed');await request(meta.put({key:marker,value:progress}));return progress;
   })).then(result=>result.value);
  }
  async atomic<T>(expected:Generation|undefined,run:(tx:IDBTransaction)=>Promise<T>){const generation=expected?{...expected}:undefined;return this.transaction(['meta','canonical','predicted','pending','receipts','snapshots','snapshotRows','snapshotMembers','snapshotFrames','windows','dependencies','intentStates'],'readwrite',async tx=>{const owner=await this.fence(tx,generation),value=await this.keepAlive(tx,()=>run(tx));await this.fence(tx);await this.bump(tx,owner);return {value,generation:{epoch:owner.epoch,sequence:owner.sequence+1}};});}
