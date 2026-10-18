@@ -1,0 +1,22 @@
+import {expect,it} from 'vitest';
+import {SQLiteOwnerTabs,type SQLiteOwnerChange} from './sqlite-owner-tabs.js';
+it('bounds a frozen tab to one queued message through 100,000 commits and delivers the latest reset on acknowledgement',()=>{
+ const sent:Array<{tab:string;change:SQLiteOwnerChange}>=[],tabs=new SQLiteOwnerTabs((tab,change)=>sent.push({tab,change}));tabs.register('frozen');
+ for(let sequence=1;sequence<=100000;sequence++)tabs.publish(sequence%2?'tasks':'members',{epoch:1,sequence});
+ expect(sent).toHaveLength(1);expect(tabs.stats()).toMatchObject({entries:1,inFlight:1,pending:1,sent:1});expect(tabs.stats().bytes).toBeLessThan(4096);
+ tabs.acknowledge('frozen',sent[0].change.notification,{epoch:1,sequence:999});expect(sent).toHaveLength(1);
+ tabs.acknowledge('frozen',sent[0].change.notification,sent[0].change);expect(sent).toHaveLength(2);expect(sent[1].change).toMatchObject({scope:'*',reset:true,epoch:1,sequence:100000});
+ tabs.acknowledge('frozen',sent[0].change.notification,sent[0].change);expect(sent).toHaveLength(2);tabs.acknowledge('frozen',sent[1].change.notification,sent[1].change);expect(tabs.stats()).toMatchObject({inFlight:0,pending:0});tabs.close();
+});
+it('releases expired subscriptions and aborts their calls, then resets a resumed tab to the current generation',()=>{
+ const sent:SQLiteOwnerChange[]=[],dropped:string[]=[],tabs=new SQLiteOwnerTabs((_tab,change)=>sent.push(change),tab=>dropped.push(tab)),signal=tabs.register('tab',100);
+ tabs.publish('tasks',{epoch:2,sequence:5});tabs.expire(30200);expect(signal.aborted).toBe(true);expect(dropped).toEqual(['tab']);expect(tabs.stats().entries).toBe(0);
+ const resumed=tabs.register('tab',30300);expect(resumed.aborted).toBe(false);expect(sent.at(-1)).toMatchObject({scope:'*',reset:true,epoch:2,sequence:5});
+ tabs.publish('tasks',{epoch:1,sequence:999});expect(sent).toHaveLength(2);tabs.close();expect(resumed.aborted).toBe(true);expect(tabs.stats().bytes).toBe(0);
+});
+it('keeps same-scope coalescing precise and bounds tab metadata before admission',()=>{
+ const sent:Array<{tab:string;change:SQLiteOwnerChange}>=[],tabs=new SQLiteOwnerTabs((tab,change)=>sent.push({tab,change}));
+ for(let n=0;n<64;n++)tabs.register('tab-'+n);expect(()=>tabs.register('extra')).toThrow('allowance');
+ tabs.publish('tasks',{epoch:1,sequence:1});tabs.publish('tasks',{epoch:1,sequence:2});tabs.publish('tasks',{epoch:1,sequence:3});expect(sent).toHaveLength(64);
+ tabs.acknowledge('tab-0',sent[0].change.notification,sent[0].change);expect(sent.at(-1)!.change).toMatchObject({scope:'tasks',sequence:3});expect(sent.at(-1)!.change.reset).toBeUndefined();expect(tabs.stats().bytes).toBeLessThanOrEqual(tabs.stats().maxBytes);tabs.close();
+});

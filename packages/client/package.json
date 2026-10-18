@@ -31,6 +31,10 @@
     "./sqlite/storage": {
       "types": "./dist/broker-sqlite-storage.d.ts",
       "default": "./dist/broker-sqlite-storage.js"
+    },
+    "./sqlite/owner": {
+      "types": "./dist/sqlite-owner-actor.d.ts",
+      "default": "./dist/sqlite-owner-actor.js"
     }
   },
   "types": "./dist/index.d.ts",

@@ -4,7 +4,7 @@ import type {SQLiteCanonicalGeneration,SQLiteCanonicalReply} from './sqlite-cano
 import {sqlitePayloadBytes} from './sqlite-admission.js';
 export type SQLiteCanonicalTransport={
   request<T=unknown>(op:string,args:unknown):Promise<T>;
-  subscribeChanges(listener:(scope:string,sequence:number)=>void):()=>void;
+  subscribeChanges(listener:(scope:string,sequence:number,reset?:boolean)=>void):()=>void;
 };
 const empty={entities:{},liveQueries:{}};
 const cursorOnly=(snapshot:ReplicaSnapshot)=>({...empty,...(snapshot.cursor?{cursor:snapshot.cursor}:{})});
@@ -20,9 +20,10 @@ export type SQLiteBoundedReplicaStorage=LocalReplicaStorage&{
 export function brokerSQLiteStorage(transport:SQLiteCanonicalTransport):SQLiteBoundedReplicaStorage{
   let disposed=false;
   const subscriptions=new Set<()=>void>();
-  const request=<T>(op:string,args:unknown):Promise<T>=>{
+  const usedScopes=new Set<string>();
+  const request=async<T>(op:string,args:unknown):Promise<T>=>{
     if(disposed)return Promise.reject(Error('SQLite replica adapter is closed'));
-    sqlitePayloadBytes(args,262144);return transport.request<T>(op,args);
+    sqlitePayloadBytes(args,262144);const scope=(args as {scope?:unknown})?.scope;if(typeof scope==='string'){if(!scope||scope.length>512)throw new TypeError('Invalid replica storage scope');usedScopes.delete(scope);if(usedScopes.size>=128)usedScopes.delete(usedScopes.values().next().value!);usedScopes.add(scope);}return transport.request<T>(op,args);
   };
   const call=async<T>(method:string,args:unknown[],scope='default'):Promise<T>=>{
     const result=await request<SQLiteCanonicalReply>('canonicalCall',{scope,method,args:args.map(value=>value===undefined?null:value)});
@@ -56,7 +57,7 @@ export function brokerSQLiteStorage(transport:SQLiteCanonicalTransport):SQLiteBo
     clear:(scope='default')=>call('clear',[scope],scope),
     subscribePeer(listener){
       if(disposed)throw Error('SQLite replica adapter is closed');
-      const unsubscribe=transport.subscribeChanges(scope=>listener(scope));
+      const unsubscribe=transport.subscribeChanges((scope,_sequence,reset)=>{if(reset)for(const selected of [...usedScopes])listener(selected);else listener(scope);});
       const release=()=>{subscriptions.delete(release);unsubscribe();};subscriptions.add(release);return release;
     },
     async withReadView(scope,coverage,run){
@@ -76,6 +77,6 @@ export function brokerSQLiteStorage(transport:SQLiteCanonicalTransport):SQLiteBo
         await request('canonicalGeneration',{scope,expected});return result;
       }finally{active=false;}
     },
-    dispose(){if(disposed)return;disposed=true;for(const release of subscriptions)release();subscriptions.clear();},
+    dispose(){if(disposed)return;disposed=true;for(const release of subscriptions)release();subscriptions.clear();usedScopes.clear();},
   };
 }

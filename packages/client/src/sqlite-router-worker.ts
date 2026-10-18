@@ -1,3 +1,4 @@
+import {sqliteWorkerProtocol as protocol} from './sqlite-worker-protocol.js';
 import {sqliteRequestBytes} from './sqlite-request-frame.js';
 // Optional SharedWorker entry. This router holds only bounded ports and
 // heartbeat timestamps. It never imports SQLite, schema, rows or application code.
@@ -14,7 +15,7 @@ shared.onconnect = ({ ports: [port] }) => {
   const handshake = setTimeout(() => { finish(); if (!id) port.close(); }, 5000);
   port.onmessage = ({ data: m, ports }) => {
     if (!id) {
-      if (m?.type !== 'hello' || m.protocol !== 1 || typeof m.tab !== 'string' || m.tab.length > 128 || peers.size >= maxPeers && !peers.has(m.tab)) { finish(); port.close(); return; }
+      if (m?.type !== 'hello' || m.protocol !== protocol || typeof m.tab !== 'string' || m.tab.length > 128 || peers.size >= maxPeers && !peers.has(m.tab)) { finish(); port.close(); return; }
       id = m.tab; peers.get(id!)?.port.close(); peers.set(id!, { port, seen: Date.now() });
       finish(); post(port, { type: 'pong' }); return;
     }
@@ -28,7 +29,7 @@ shared.onconnect = ({ ports: [port] }) => {
       if (target && attached) target.port.postMessage({ type: 'attach', from: id, token: m.token }, [attached]);
       else attached?.close();
     }
-    else if (m?.type === 'request' && m.protocol === 1 && typeof m.to === 'string') {
+    else if (m?.type === 'request' && m.protocol === protocol && typeof m.to === 'string') {
       const target = peers.get(m.to);
       try {
         sqliteRequestBytes(m.op,m.args,262144);
@@ -36,7 +37,7 @@ shared.onconnect = ({ ports: [port] }) => {
         const transfer=encoded instanceof Uint8Array&&encoded.buffer instanceof ArrayBuffer?[encoded.buffer]:[];
         if(target)target.port.postMessage({...m,from:id},transfer);
       } catch { /* Malformed or disconnected peers retry through the owner path. */ }
-    } else if (m?.type === 'reply' && m.protocol === 1 && typeof m.to === 'string') {
+    } else if (m?.type === 'reply' && m.protocol === protocol && typeof m.to === 'string') {
       const target = peers.get(m.to); if (target) post(target.port, m);
     }
   };

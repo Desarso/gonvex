@@ -94,3 +94,13 @@ it('routes bounded native reads without legacy membership hydration and releases
 });
 
 it('native read pages never emit a committed-change notification',()=>{for(const op of ['nativeWindowPage','nativeEntityPage','page','viewPage','windowPage','windowHeader','canonicalRead','canonicalGeneration'])expect(sqliteOperationPublishes(op,{scope:'s'})).toBe(false);expect(sqliteOperationPublishes('snapshotActivate',{scope:'s'})).toBe(true);});
+
+it('fans a coalesced reset over the bounded recent scopes even when a listener refreshes its scope',async()=>{
+ let notify!:(scope:string,sequence:number,reset?:boolean)=>void;
+ const storage=brokerSQLiteStorage({async request<T>(){return {value:null} as T;},subscribeChanges(listener){notify=listener;return()=>{};}});
+ for(let n=0;n<130;n++)await storage.loadSession!('scope-'+n);
+ const seen:string[]=[];storage.subscribePeer!(scope=>{seen.push(scope);void storage.loadSession!(scope);});
+ notify('*',1,true);expect(seen).toEqual(Array.from({length:128},(_,n)=>'scope-'+(n+2)));
+ seen.length=0;notify('*',2,false);expect(seen).toEqual(['*']);
+ await expect(storage.loadSession!('x'.repeat(513))).rejects.toThrow('Invalid replica storage scope');storage.dispose();
+});

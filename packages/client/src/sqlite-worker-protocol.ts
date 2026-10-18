@@ -1,5 +1,7 @@
+// Internal worker IPC; independent of the negotiated application wire contract.
+export const sqliteWorkerProtocol=2;
 // Both broker paths and the dedicated owner use one operation contract.
-export const sqliteWorkerOperations: ReadonlySet<string> = new Set(['nativeWindowPage','nativeEntityPage','snapshotActivate','snapshotAppendEncoded','snapshotAppend','snapshotRead','snapshotDiscard','canonicalCall', 'canonicalRead', 'canonicalGeneration', 'page', 'viewPage', 'count', 'apply', 'outbox', 'acknowledge', 'ping', 'stats', 'integrity', 'windowBegin', 'windowAppend', 'windowPublish', 'windowHeader', 'windowPage', 'windowHashes', 'windowCollect', 'bootstrapBegin', 'bootstrapAppend', 'bootstrapFinish']);
+export const sqliteWorkerOperations: ReadonlySet<string> = new Set(['clientCall','nativeWindowPage','nativeEntityPage','snapshotActivate','snapshotAppendEncoded','snapshotAppend','snapshotRead','snapshotDiscard','canonicalCall', 'canonicalRead', 'canonicalGeneration', 'page', 'viewPage', 'count', 'apply', 'outbox', 'acknowledge', 'ping', 'stats', 'integrity', 'windowBegin', 'windowAppend', 'windowPublish', 'windowHeader', 'windowPage', 'windowHashes', 'windowCollect', 'bootstrapBegin', 'bootstrapAppend', 'bootstrapFinish']);
 
 export const sqlitePublishingOperations: ReadonlySet<string> = new Set(['snapshotActivate','apply', 'acknowledge', 'bootstrapFinish']);
 

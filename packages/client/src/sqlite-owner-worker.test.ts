@@ -20,7 +20,7 @@ it('routes restartable first-sync frames through the real owner queue and publis
   mocked.host = { database, memoryBytes: () => 0, close: async () => {} };
   const awaiting = new Map<string, (reply: any) => void>(), changes: any[] = [];
   vi.stubGlobal('postMessage', (message: any) => {
-    if (message.type === 'change') changes.push(message);
+    if (message.type === 'change'){if(!message.reset)changes.push(message);queueMicrotask(()=>(globalThis as any).onmessage?.({data:{type:'change-ack',protocol:2,token:'one',tab:'owner-tab',notification:message.notification,epoch:message.epoch,sequence:message.sequence}}));}
     else { const resolve = awaiting.get(message.id); awaiting.delete(message.id); resolve?.(message); }
   });
   const interval = vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as any);
@@ -29,10 +29,10 @@ it('routes restartable first-sync frames through the real owner queue and publis
     await import('./sqlite-owner-worker.js');
     interval.mockRestore();
     const request = (op: string, args: unknown, key=String(++id),requestID?:string) => new Promise<any>(resolve => { awaiting.set(key, resolve);
-      (globalThis as any).onmessage({ data: { id: key, op, args,requestID } });
+      (globalThis as any).onmessage({ data: { id: key, op, args,requestID,tabID:'owner-tab' } });
     });
     const schema = { tasks: { key: '_id', fields: { _id: { kind: 'text' }, name: { kind: 'text' } }, indexes: [], search: ['name'], counts: [{ columns: ['name'] }] } };
-    expect((await request('open', { protocol: 1, owner: 'one', schema })).error).toBeUndefined();
+    expect((await request('open', { protocol:2, owner: 'one', schema })).error).toBeUndefined();
     expect((await request('bootstrapBegin', { scope: 's', token: 'first' })).value.nextPage).toBe(0);
     const encoded = JSON.stringify([{ table: 'tasks', id: 'a', version: 1, row: { _id: 'a', name: 'Needle' } }]);
     // Concurrent requests must preserve the actor's FIFO transaction order.

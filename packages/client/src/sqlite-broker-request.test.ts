@@ -55,8 +55,8 @@ it('bounds change subscriptions and releases their retained listeners',()=>{
   const broker=client() as any;broker.options={};const calls:number[]=[];
   const release=broker.subscribeChanges((_scope:string,sequence:number)=>calls.push(sequence));
   broker.subscribeChanges(()=>{throw Error('observer');});
-  broker.receiveControl({protocol:1,type:'change',scope:'s',sequence:3});expect(calls).toEqual([3]);
-  release();broker.receiveControl({protocol:1,type:'change',scope:'s',sequence:4});expect(calls).toEqual([3]);
+  broker.receiveControl({protocol:2,type:'change',scope:'s',sequence:3});expect(calls).toEqual([3]);
+  release();broker.receiveControl({protocol:2,type:'change',scope:'s',sequence:4});expect(calls).toEqual([3]);
   const releases=Array.from({length:63},()=>broker.subscribeChanges(()=>{}));
   expect(()=>broker.subscribeChanges(()=>{})).toThrow('listener budget');
   for(const close of releases)close();expect(broker.stats().listeners).toBe(1);
@@ -84,13 +84,33 @@ it('admits encoded native snapshot bytes under the same immutable transport budg
 it('preserves a caller request ID through owner forwarding independently of transport correlation IDs',async()=>{
  const broker=client() as any,forwarded:any[]=[],generation={ready:true,token:'owner',worker:{postMessage(message:any){forwarded.push(message);queueMicrotask(()=>{const pending=broker.workerCalls.get(message.id);broker.workerCalls.delete(message.id);pending.resolve({sequence:7});});}}};
  broker.generation=generation;broker.workerCalls=new Map();broker.reply=vi.fn();
- const message={type:'request',protocol:1,token:'owner',from:'follower',id:'follower:r:1',op:'canonicalCall',args:{scope:'s',method:'clear',args:['s']}};
+ const message={type:'request',protocol:2,token:'owner',from:'follower',id:'follower:r:1',op:'canonicalCall',args:{scope:'s',method:'clear',args:['s']}};
  await broker.serve(message);await broker.serve(message);
  expect(forwarded.map(value=>value.requestID)).toEqual(['follower:r:1','follower:r:1']);expect(forwarded[0].id).not.toBe(forwarded[1].id);expect(broker.reply).toHaveBeenCalledTimes(2);
 });
 it('deduplicates port/channel changes under a bounded scope ledger and rejects older owner epochs',()=>{
  const broker=client() as any,calls:number[]=[];broker.options={onChange:(_scope:string,sequence:number)=>calls.push(sequence)};broker.owner={epoch:2};
- const message={protocol:1,type:'change',scope:'s',sequence:4,epoch:2};broker.receiveControl(message);broker.receiveControl(message);broker.receiveControl({...message,sequence:3});broker.receiveControl({...message,epoch:1,sequence:100});expect(calls).toEqual([4]);
+ const message={protocol:2,type:'change',scope:'s',sequence:4,epoch:2};broker.receiveControl(message);broker.receiveControl(message);broker.receiveControl({...message,sequence:3});broker.receiveControl({...message,epoch:1,sequence:100});expect(calls).toEqual([4]);
  broker.receiveControl({...message,epoch:3,sequence:1});expect(calls).toEqual([4,1]);
  for(let n=0;n<1000;n++)broker.receiveControl({...message,scope:'scope-'+n});expect(broker.stats().changeScopes).toBe(128);expect(broker.stats().changeBytes).toBeLessThanOrEqual(262144);
+});
+
+it('sends only one outstanding heartbeat and announces an unchanged owner only on demand',()=>{
+ const broker=client() as any;broker.options={};broker.owner={id:'owner',token:'owner-token',epoch:1,seen:Date.now()};broker.broadcast=vi.fn();
+ for(let n=0;n<10000;n++)broker.sendHeartbeat();expect(broker.broadcast).toHaveBeenCalledOnce();
+ broker.receiveReply({type:'tab-pong',protocol:2,to:'test',token:'owner-token',sentAt:Date.now()});broker.sendHeartbeat();expect(broker.broadcast).toHaveBeenCalledTimes(2);
+ const generation={ready:true,token:'owned',epoch:2,lastProgress:Date.now()};broker.generation=generation;broker.broadcast.mockClear();
+ for(let n=0;n<10000;n++)broker.announce(generation);expect(broker.broadcast).toHaveBeenCalledOnce();broker.announce(generation,true);expect(broker.broadcast).toHaveBeenCalledTimes(2);
+});
+
+it('distinguishes a global reset from a literal star scope and acknowledges duplicate deliveries',()=>{
+ const broker=client() as any,calls:boolean[]=[];broker.options={onChange:(_scope:string,_sequence:number,reset:boolean)=>calls.push(reset)};broker.owner={epoch:1};broker.acknowledgeChange=vi.fn();
+ const message={protocol:2,type:'change',scope:'*',sequence:4,epoch:1,notification:1};
+ broker.receiveControl(message);broker.receiveControl({...message,reset:true,notification:2});broker.receiveControl({...message,reset:true,notification:2});
+ expect(calls).toEqual([false,true]);expect(broker.acknowledgeChange).toHaveBeenCalledTimes(3);
+});
+
+it('probes for an existing owner when a newly opened tab missed its original announcement',()=>{
+ const broker=client() as any;broker.broadcast=vi.fn();broker.sendHeartbeat=vi.fn();broker.tick();expect(broker.broadcast).toHaveBeenCalledWith({type:'probe'});
+ broker.broadcast.mockClear();broker.owner={id:'other',token:'known',epoch:1,seen:Date.now()};broker.tick();expect(broker.broadcast).not.toHaveBeenCalled();
 });
