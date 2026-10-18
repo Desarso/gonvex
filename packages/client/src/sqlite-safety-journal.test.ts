@@ -70,3 +70,11 @@ it('persists definitive revocation without deleting pending commands or allowing
   await reopened.saveSession('s',session,true);expect(await reopened.sessionRevoked('s')).toBe(false);await reopened.append(command(2),session,'s');expect(await reopened.count('s')).toBe(2);
  }finally{f.journal.close();reopened?.close();}
 });
+
+it('independently retains and verifies a native prepared intent and original reply across journal reopen',async()=>{
+ const f=fixture(),input=command(1),prepared={intent:{id:7,scope:'s',path:input.path,args:input.args,idempotencyKey:input.commandId,entityKeys:[],patches:[{entity:'tasks',rowId:'stable',op:'insert' as const,fields:{id:'stable',title:'Synthetic'}}],localExecution:{scope:'s',commandId:input.commandId,now:input.now,artifactHash:'artifact',identity:session.identity},createdAt:input.now,attempts:0,nextAttemptAt:input.now,state:'pending' as const},receipt:{intentId:7,commandId:input.commandId,result:{id:'stable'},originalGeneration:{epoch:1,sequence:5}}};
+ try{await f.journal.appendPrepared(input,prepared,session,'s');f.journal.close();const restored=f.reopen();try{
+  expect((await restored.page('s')).entries).toEqual([{invocation:input,prepared}]);await expect(restored.appendPrepared(input,{...prepared,receipt:{...prepared.receipt,result:{id:'different'}}},session,'s')).rejects.toMatchObject({code:'INTENT_CONFLICT'});
+  expect(await restored.count('s')).toBe(1);await restored.settle('s',input.commandId);expect((await restored.page('s')).entries).toEqual([]);
+ }finally{restored.close();}}finally{f.journal.close();}
+});

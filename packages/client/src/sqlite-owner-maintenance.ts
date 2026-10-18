@@ -1,3 +1,4 @@
+import {SQLiteDeferredReplicaFrames} from './sqlite-deferred-replica-frames.js';
 import {SQLiteFeedGroups} from './sqlite-feed-groups.js';
 import {sqlitePayloadBytes} from './sqlite-admission.js';
 import {collectSQLiteRetiredEntityRows} from './sqlite-typed-snapshot.js';
@@ -8,11 +9,11 @@ import type {SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
  * No corpus, stale-generation list or cleanup promise queue lives in JS. */
 export class SQLiteOwnerMaintenance {
  private readonly initialized:Promise<void>;private readonly windows:SQLiteWindowStore;
- private readonly groups:SQLiteFeedGroups;private phase=0;private timer?:ReturnType<typeof setTimeout>;private active?:Promise<{more:boolean}>;private closed=false;
+ private readonly groups:SQLiteFeedGroups;private readonly deferred:SQLiteDeferredReplicaFrames;private phase=0;private timer?:ReturnType<typeof setTimeout>;private active?:Promise<{more:boolean}>;private closed=false;
  constructor(private readonly owner:SQLiteOwnerProgramContext,private readonly onError:(error:unknown)=>void){
-  this.windows=new SQLiteWindowStore(owner.database,()=>owner.engine.verifyOwner());this.groups=new SQLiteFeedGroups(owner.database,()=>owner.engine.verifyOwner());
+  this.windows=new SQLiteWindowStore(owner.database,()=>owner.engine.verifyOwner());this.groups=new SQLiteFeedGroups(owner.database,()=>owner.engine.verifyOwner());this.deferred=new SQLiteDeferredReplicaFrames(owner.database,'maintenance',()=>owner.engine.verifyOwner());
   this.initialized=owner.runOwner(0,async()=>{
-   await this.groups.ready();await this.groups.recover();await owner.snapshots.ready();await owner.activation.ready();await this.windows.ready();
+   await this.deferred.ready();await this.deferred.recoverCanceled();await this.groups.ready();await this.groups.recover();await owner.snapshots.ready();await owner.activation.ready();await this.windows.ready();
    await owner.database.withTransactionAsync(async()=>{await owner.engine.verifyOwner();
     await owner.database.execAsync('CREATE TABLE IF NOT EXISTS gv_snapshot_cleanup_queue(scope TEXT NOT NULL,subscription TEXT NOT NULL,snapshot TEXT NOT NULL,PRIMARY KEY(scope,subscription,snapshot)) WITHOUT ROWID');
     await owner.database.runAsync(`INSERT OR IGNORE INTO gv_snapshot_cleanup_queue SELECT b.scope,b.subscription,b.snapshot FROM gv_snapshot_typed b WHERE NOT EXISTS(SELECT 1 FROM gv_snapshot_stages s WHERE s.scope=b.scope AND s.subscription=b.subscription AND s.snapshot=b.snapshot)`);
@@ -42,8 +43,8 @@ export class SQLiteOwnerMaintenance {
    if(this.closed)return {more:false};let more=false;
    await this.owner.database.withTransactionAsync(async()=>{
     await this.owner.engine.verifyOwner();
-    for(let attempt=0;attempt<4;attempt++){
-     const phase=this.phase;this.phase=(phase+1)%4;
+    for(let attempt=0;attempt<5;attempt++){
+     const phase=this.phase;this.phase=(phase+1)%5;
      if(phase===0){
       const window=await this.owner.database.getFirstAsync<{scope:string;signature:string;generation:string}>(`SELECT g.scope,g.signature,g.generation FROM gv_window_generations g WHERE NOT EXISTS(SELECT 1 FROM gv_windows w WHERE w.scope=g.scope AND w.signature=g.signature AND w.generation=g.generation) ORDER BY g.scope,g.signature,g.generation LIMIT 1`);
       if(window){await this.windows.collect(window.scope,window.signature,window.generation);more=true;return;}
@@ -51,7 +52,7 @@ export class SQLiteOwnerMaintenance {
       const queued=await this.owner.database.getFirstAsync<{scope:string;subscription:string;snapshot:string}>('SELECT scope,subscription,snapshot FROM gv_snapshot_cleanup_queue ORDER BY scope,subscription,snapshot LIMIT 1');
       const stage=queued??await this.owner.database.getFirstAsync<{scope:string;subscription:string;snapshot:string}>('SELECT scope,subscription,snapshot FROM gv_snapshot_stages WHERE discarded=1 ORDER BY scope,subscription,snapshot LIMIT 1');
       if(stage){if(await this.owner.snapshots.discard(stage.scope,stage.subscription,stage.snapshot))await this.owner.database.runAsync('DELETE FROM gv_snapshot_cleanup_queue WHERE scope=? AND subscription=? AND snapshot=?',stage.scope,stage.subscription,stage.snapshot);more=true;return;}
-     }else if(phase===2&&await this.groups.collect()){more=true;return;}else if(phase===3&&await this.owner.database.getFirstAsync('SELECT 1 FROM gv_entity_retired LIMIT 1')){
+     }else if(phase===2&&await this.groups.collect()){more=true;return;}else if(phase===3&&await this.deferred.collectCanceled()){more=true;return;}else if(phase===4&&await this.owner.database.getFirstAsync('SELECT 1 FROM gv_entity_retired LIMIT 1')){
       await collectSQLiteRetiredEntityRows(this.owner.database,this.owner.engine.schema,128);more=true;return;
      }
     }

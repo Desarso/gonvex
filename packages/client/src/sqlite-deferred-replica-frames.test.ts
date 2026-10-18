@@ -25,3 +25,9 @@ it('bounds read pages and disk admission and detects corrupted durable frame bod
  const corrupt={...delta(1),upserts:[{id:'tampered'}]};await f.db.runAsync('UPDATE gv_deferred_replica_frames SET body=? WHERE revision=1',new TextEncoder().encode(JSON.stringify(corrupt)));await expect(f.store.read('s','signature','e')).rejects.toMatchObject({code:'INTENT_CORRUPT'});
  const small=fixture({maxBytes:1,maxFrames:100});await expect(small.store.append('s','signature',delta(1))).rejects.toMatchObject({code:'BUDGET'});expect(await small.store.summary('s')).toEqual({bytes:0,frames:0});
 });
+
+it('reclaims canceled incarnations in128-record pages while preserving a replacement source and its accounting',async()=>{
+ const f=fixture();await f.store.ready();await f.db.withTransactionAsync(async()=>{for(let n=0;n<260;n++)await f.store.append('s','old-incarnation',delta(n));});await f.store.recoverCanceled();await f.store.append('s','replacement-incarnation',delta(20));await expect(f.store.append('s','old-incarnation',delta(300))).rejects.toMatchObject({code:'FENCED'});
+ for(const remaining of [133,5,1]){expect(await f.store.collectCanceled()).toBe(true);expect((await f.store.summary('s')).frames).toBe(remaining);expect((await f.store.read('s','replacement-incarnation','e')).map(frame=>frame.revision)).toEqual([20]);}expect(await f.store.collectCanceled()).toBe(false);
+ await f.store.cancel('s','replacement-incarnation');expect(await f.store.collectCanceled()).toBe(true);expect(await f.store.summary('s')).toEqual({frames:0,bytes:0});
+});

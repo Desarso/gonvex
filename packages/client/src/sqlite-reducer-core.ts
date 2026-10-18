@@ -1,3 +1,4 @@
+import type {ReducerOutboxEntry} from './outbox.js';
 import type {LocalExecution,LocalTransactionResult,LocalPatch} from '@gonvex/local-runtime';
 import type {PortableReducerRuntime} from '@gonvex/local-runtime/portable';
 import type {ReadCoverage} from '@gonvex/local-runtime/read-view';
@@ -12,7 +13,8 @@ export class SQLiteReducerPreparationRequiredError extends Error {
  readonly code='MODULE_REQUIRED';
  constructor(readonly path:string){super('Prepare the reducer module outside the SQLite owner queue');this.name='SQLiteReducerPreparationRequiredError';}
 }
-export type SQLiteReducerReceipt={intentId:number;commandId:string;result:JsonValue;originalGeneration:{epoch:number;sequence:number}};
+export type SQLiteReducerReceipt={intentId:number;commandId:string;result:JsonValue;queuedOnly?:true;originalGeneration:{epoch:number;sequence:number}};
+export type SQLitePreparedReducer={intent:ReducerOutboxEntry;receipt:SQLiteReducerReceipt};
 export type SQLiteReducerContext={identity:LocalExecution['identity'];coverage:ReadCoverage;intentScope:string};
 type Options={
  database:SQLiteReplicaDatabase;engine:SQLiteTypedReplicaEngine;journal:SQLiteIntentJournal;predictions:SQLitePredictions;
@@ -43,7 +45,7 @@ export class SQLiteReducerCore {
  }
  /** This may load a chunk; call it outside context.runOwner. */
  prepare(path:string){if(typeof path!=='string'||!path||path.length>1024)throw new TypeError('Invalid reducer path');return this.options.runtime.prepare(path);}
- async invoke(input:SQLiteReducerInvocation,persist?: (input:Readonly<SQLiteReducerInvocation>,context:SQLiteReducerContext)=>Promise<void>):Promise<SQLiteReducerReceipt>{
+ async invoke(input:SQLiteReducerInvocation,persist?: (input:Readonly<SQLiteReducerInvocation>,context:SQLiteReducerContext,prepared:SQLitePreparedReducer)=>Promise<void>):Promise<SQLiteReducerReceipt>{
   sqlitePayloadBytes(input,131072);
   if(typeof input.scope!=='string'||!input.scope||input.scope.length>512||input.scope.includes('\u0000')||typeof input.path!=='string'||!input.path||input.path.length>1024||typeof input.commandId!=='string'||!input.commandId||input.commandId.length>256||!Number.isSafeInteger(input.now)||input.now<0||input.intentEntropy!==undefined&&(typeof input.intentEntropy!=='string'||input.intentEntropy.length>256))throw new TypeError('Invalid local reducer invocation');
   // Retain only admitted known envelope fields. Arbitrary extra fields cannot
@@ -58,21 +60,45 @@ export class SQLiteReducerCore {
    const generation=await this.options.engine.verifyOwner(),captured=await this.context(owned.scope);if(captured.intentScope!==intentScope)fail('FENCED','Reducer durable identity changed');
    const old=await this.stored(intentScope,owned.commandId,hash);if(old){receipt=old;return;}
    const execution:LocalExecution={scope:owned.scope,commandId:owned.commandId,now:owned.now,artifactHash:this.options.artifactHash,identity:structuredClone(captured.identity),...(owned.intentEntropy===undefined?{}:{intentEntropy:owned.intentEntropy})};
-   const transaction:LocalTransactionResult=await this.options.predictions.withReadView(owned.scope,captured.coverage,view=>this.options.runtime.execute(owned.path,owned.args,view,execution));sqlitePayloadBytes(transaction,262144);
-   const dependencies={reads:transaction.readRows??[],writes:transaction.patches.map(patch=>({entity:patch.entity,rowId:patch.rowId})),scans:transaction.scanTables??transaction.readTables};
-   const intent=await this.options.journal.append({scope:intentScope,path:owned.path,args:owned.args,idempotencyKey:owned.commandId,entityKeys:[],dependencies,patches:transaction.patches,localExecution:execution,createdAt:owned.now,attempts:0,nextAttemptAt:owned.now,state:'pending',...(transaction.coalesceKey?{coalesceKey:transaction.coalesceKey}:{})});
-   await this.options.predictions.apply(owned.scope,intent.id,transaction.patches);
+   let transaction:LocalTransactionResult|undefined;
+   try{transaction=await this.options.predictions.withReadView(owned.scope,captured.coverage,view=>this.options.runtime.execute(owned.path,owned.args,view,execution));}
+   catch(error){if(!(error instanceof Error&&(error.name==='IncompleteReplicaError'||'code' in error&&error.code==='replica-read-budget')))throw error;}
+   if(transaction)sqlitePayloadBytes(transaction,262144);
+   // Missing coverage is an explicit queued-only command, never an invented
+   // result or partial prediction. Its barrier preserves causal delivery.
+   const patches=transaction?.patches??[],dependencies=transaction?{reads:transaction.readRows??[],writes:patches.map(patch=>({entity:patch.entity,rowId:patch.rowId})),scans:transaction.scanTables??transaction.readTables}:undefined;
+   const draft:Omit<ReducerOutboxEntry,'id'>={scope:intentScope,path:owned.path,args:owned.args,idempotencyKey:owned.commandId,entityKeys:transaction?[]:['__gonvex_local_intents'],...(dependencies?{dependencies}:{}),patches,localExecution:execution,createdAt:owned.now,attempts:0,nextAttemptAt:owned.now,state:'pending',...(transaction?.coalesceKey?{coalesceKey:transaction.coalesceKey}:{})};
+   const intent=await this.options.journal.append(draft);
+   await this.options.predictions.apply(owned.scope,intent.id,patches);
    if(generation.sequence>=Number.MAX_SAFE_INTEGER)fail('FENCED','Storage sequence exhausted');
-   receipt={intentId:intent.id,commandId:owned.commandId,result:transaction.result,originalGeneration:{epoch:generation.epoch,sequence:generation.sequence+1}};
+   receipt={intentId:intent.id,commandId:owned.commandId,result:transaction?.result??null,...(!transaction?{queuedOnly:true as const}:{}),originalGeneration:{epoch:generation.epoch,sequence:generation.sequence+1}};
    sqlitePayloadBytes(receipt,131072);const stored=JSON.stringify(receipt);decodedJSONBytes(stored,131072);if(new TextEncoder().encode(stored).byteLength>130000)fail('BUDGET','Reducer receipt exceeds native wire budget');
    // The local body and all row/intent/reply admission have succeeded. Make
    // the independent recovery copy durable before this SQL transaction can
    // commit. A crash or later SQL failure leaves that command recoverable.
-   await persist?.(structuredClone(owned),structuredClone(captured));
+   await persist?.(structuredClone(owned),structuredClone(captured),{intent:{...draft,id:intent.id},receipt:structuredClone(receipt)});
    await this.options.engine.verifyOwner();
    await this.options.database.runAsync('INSERT INTO gv_reducer_invocations VALUES(?,?,?,?)',intentScope,owned.commandId,hash,stored);
    await this.options.database.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1',receipt.originalGeneration.sequence);
   });return receipt!;
+ }
+ /** Restore an independently verified prepared envelope before new work.
+  * The SQL sequence is private and may be reallocated. The original public
+  * receipt remains immutable. Restored commands have unknown send outcomes:
+  * replaying their portable body over fresh authority could double predict. */
+ async recover(input:SQLiteReducerInvocation,prepared:SQLitePreparedReducer):Promise<SQLiteReducerReceipt>{
+  sqlitePayloadBytes({input,prepared},262144);await this.ready();let restored!:SQLiteReducerReceipt;
+  await this.options.database.withTransactionAsync(async()=>{
+   const generation=await this.options.engine.verifyOwner(),captured=await this.context(input.scope),entry=prepared.intent;
+   if(entry.scope!==captured.intentScope||entry.idempotencyKey!==input.commandId||entry.path!==input.path||JSON.stringify(entry.args)!==JSON.stringify(input.args)||entry.createdAt!==input.now||prepared.receipt.commandId!==input.commandId||entry.localExecution?.commandId!==input.commandId||entry.localExecution.artifactHash!==this.options.artifactHash||JSON.stringify(entry.localExecution.identity)!==JSON.stringify(captured.identity))fail('FENCED','Prepared recovery identity or artifact changed');
+   const hash=await digest(JSON.stringify({scope:captured.intentScope,path:input.path,commandId:input.commandId,args:input.args,now:input.now,...(input.intentEntropy===undefined?{}:{intentEntropy:input.intentEntropy})})),old=await this.stored(captured.intentScope,input.commandId,hash);
+   if(old){restored=old;return;}
+   const {id:_id,...draft}=entry,intent=await this.options.journal.append({...draft,state:entry.state==='inflight'?'pending':entry.state,sentAt:entry.sentAt??input.now,localExecution:{...entry.localExecution,scope:input.scope}});
+   const patches:LocalPatch[]=(entry.patches??[]).map(patch=>{const entity=patch.entity??patch.collection;if(!entity)fail('INTENT_CORRUPT','Prepared patch has no entity');return patch.op==='delete'?{entity,rowId:patch.rowId,op:'delete'}:{entity,rowId:patch.rowId,op:patch.op==='upsert'?'insert':patch.op,fields:patch.fields as Record<string,JsonValue>};});
+   if(entry.state!=='rejected')await this.options.predictions.apply(input.scope,intent.id,patches);
+   const encoded=JSON.stringify(prepared.receipt);decodedJSONBytes(encoded,131072);await this.options.database.runAsync('INSERT INTO gv_reducer_invocations VALUES(?,?,?,?)',captured.intentScope,input.commandId,hash,encoded);
+   if(generation.sequence>=Number.MAX_SAFE_INTEGER)fail('FENCED','Storage sequence exhausted');await this.options.database.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1',generation.sequence+1);restored=structuredClone(prepared.receipt);
+  });return restored;
  }
  /** Rebuild derived predictions over a new authoritative base, atomically with
   * the trusted owner's canonical commit/ack callback. Only a bounded intent
@@ -94,7 +120,7 @@ export class SQLiteReducerCore {
      // A recovered pending delivery may already have committed on the server.
      // Its first-send fence survives recovery/backoff; executing its body again
      // over that canonical commit would predict the same intent twice.
-     if(entry.localExecution&&entry.sentAt===undefined&&entry.state!=='inflight'&&entry.state!=='committed'){
+     if(entry.localExecution&&!entry.entityKeys.includes('__gonvex_local_intents')&&entry.sentAt===undefined&&entry.state!=='inflight'&&entry.state!=='committed'){
       if(!this.options.runtime.isPrepared(entry.path))throw new SQLiteReducerPreparationRequiredError(entry.path);
       const execution:LocalExecution={...entry.localExecution,scope,identity:structuredClone(captured.identity),artifactHash:this.options.artifactHash};
       let readFailure:{error:unknown}|undefined;

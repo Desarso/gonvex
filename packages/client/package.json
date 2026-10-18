@@ -35,6 +35,14 @@
     "./sqlite/owner": {
       "types": "./dist/sqlite-owner-actor.d.ts",
       "default": "./dist/sqlite-owner-actor.js"
+    },
+    "./sqlite/browser": {
+      "types": "./dist/sqlite-browser-client.d.ts",
+      "default": "./dist/sqlite-browser-client.js"
+    },
+    "./sqlite/program": {
+      "types": "./dist/sqlite-client-program.d.ts",
+      "default": "./dist/sqlite-client-program.js"
     }
   },
   "types": "./dist/index.d.ts",

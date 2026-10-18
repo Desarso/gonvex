@@ -125,3 +125,17 @@ it('keeps durable Reducer replay but reports a single-shot refusal as an unknown
  const durable=broker.request('clientCall',{method:'reducer',path:'tasks/change'}),call=broker.pending.values().next().value;broker.send(call);broker.owner.token='new';broker.send(call);expect(broker.serve).toHaveBeenCalledTimes(3);broker.receiveReply({protocol:2,to:'test',token:'new',id:call.id,value:'original'});expect(await durable).toBe('original');
  const single=broker.request('clientCall',{method:'action',path:'external/run'});void single.catch(()=>{});const sent=broker.pending.values().next().value;broker.receiveReply({protocol:2,to:'test',token:'new',id:sent.id,error:{code:'BUSY',message:'delivery interrupted'}});await expect(single).rejects.toMatchObject({code:'FENCED',outcome:'unknown'});expect(broker.pending.size).toBe(0);
 });
+
+it('joins an identical stable reducer request even at capacity, rejects changed content and keeps its command ID in replay',async()=>{
+ const broker=client() as any;broker.owner={id:'test',token:'owner',epoch:1,seen:Date.now()};broker.send=vi.fn();const input={method:'reducer',path:'tasks/change',args:{id:'a'},now:100};
+ const pending=broker.request('clientCall',input,90000,'stable-command'),others=Array.from({length:15},(_,n)=>broker.request('clientCall',{...input,now:101+n}));expect(broker.pending.size).toBe(16);expect(broker.request('clientCall',input,90000,'stable-command')).toBe(pending);
+ await expect(broker.request('clientCall',{...input,args:{id:'b'}},90000,'stable-command')).rejects.toMatchObject({code:'INTENT_CONFLICT'});await expect(broker.request('clientCall',input)).rejects.toMatchObject({code:'BUDGET'});expect(broker.pending.get('stable-command').args).toEqual(input);
+ for(const call of [...broker.pending.values()])broker.receiveReply({protocol:2,to:'test',token:'owner',id:call.id,value:call.id});expect(await pending).toBe('stable-command');await Promise.all(others);expect(broker.pendingBytes).toBe(0);
+ await expect(broker.request('clientCall',{method:'action',path:'external'},90000,'stable-command')).rejects.toMatchObject({code:'OPERATION'});
+});
+
+it('delivers fresh credited control hints at the same SQL generation while rejecting duplicate notifications',()=>{
+ const broker=client() as any,calls:string[]=[];broker.options={onChange:(scope:string)=>calls.push(scope)};broker.owner={epoch:1};broker.acknowledgeChange=vi.fn();
+ const message={protocol:2,type:'change',scope:'@control',sequence:4,epoch:1,notification:1};broker.receiveControl(message);broker.receiveControl({...message,notification:2});broker.receiveControl({...message,notification:2});broker.receiveControl(message);expect(calls).toEqual(['@control','@control']);
+ const reset={...message,scope:'*',reset:true,notification:3};broker.receiveControl(reset);broker.receiveControl({...reset,notification:4});broker.receiveControl({...reset,notification:4});expect(calls).toEqual(['@control','@control','*','*']);expect(broker.acknowledgeChange).toHaveBeenCalledTimes(7);
+});

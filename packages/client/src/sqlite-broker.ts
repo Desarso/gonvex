@@ -8,7 +8,8 @@ const ownershipLock = 'gonvex-sqlite-owner-v1';
 const controlName = 'gonvex-sqlite-control-v1';
 export type SQLiteBrokerState = 'opening' | 'ready' | 'pending' | 'unavailable' | 'closed';
 export type SQLiteBrokerOptions = {
-  schema: SQLiteTypedSchema;
+  schema?: SQLiteTypedSchema;
+  schemaVersion?:string;
   workerURL?: URL;
   hubURL?: URL;
   /** Static new Worker(new URL(..., import.meta.url)) factories let bundlers
@@ -20,7 +21,7 @@ export type SQLiteBrokerOptions = {
 };
 type Owner = { id: string; token: string; epoch: number; seen: number; opening?: boolean };
 type Generation = { token: string; worker: Worker; ready: boolean; epoch: number; release(): void; channel: BroadcastChannel; lastProgress: number;announced?:boolean };
-type Call = { id: string; op: string; args: unknown; bytes: number; lastSent: number; replay:boolean;sentToken?:string; timer: ReturnType<typeof setTimeout>; resolve(value: any): void; reject(error: unknown): void };
+type Call = { promise?:Promise<any>;id: string; op: string; args: unknown; bytes: number; lastSent: number; replay:boolean;sentToken?:string; timer: ReturnType<typeof setTimeout>; resolve(value: any): void; reject(error: unknown): void };
 type WorkerCall = { generation: Generation; resolve(value: any): void; reject(error: unknown): void };
 export class SQLiteBrokerError extends Error {
   constructor(readonly code: string, message: string, readonly outcome: 'rejected' | 'unknown' = 'rejected') { super(message); this.name = 'SQLiteBrokerError'; }
@@ -41,7 +42,7 @@ export class SQLiteReplicaBroker {
   private readonly replies = new BroadcastChannel(controlName + ':reply:' + this.tabID);
   private readonly changeListeners=new Set<(scope:string,sequence:number,reset?:boolean)=>void>();
   subscribeChanges(listener:(scope:string,sequence:number,reset?:boolean)=>void):()=>void{if(this.changeListeners.size>=64)throw error('BUDGET','Storage change listener budget exceeded');this.changeListeners.add(listener);return ()=>{this.changeListeners.delete(listener);};}
-  private readonly lastChanges=new Map<string,{epoch:number;sequence:number;bytes:number}>();
+  private readonly lastChanges=new Map<string,{epoch:number;sequence:number;bytes:number;notification?:number}>();
   private lastChangeBytes=0;
   private heartbeatToken?:string;
   private readonly pending = new Map<string, Call>();
@@ -69,7 +70,7 @@ export class SQLiteReplicaBroker {
   private readonly onResume = () => this.onPageShow();
   constructor(private readonly options: SQLiteBrokerOptions) {
     if(!options.workerURL&&!options.createWorker)throw new TypeError('SQLite broker requires its dedicated worker');
-    sqlitePayloadBytes(options.schema, 1_048_576);
+    if(options.schema!==undefined)sqlitePayloadBytes(options.schema,1_048_576);if(options.schemaVersion!==undefined&&!/^[0-9a-f]{64}$/.test(options.schemaVersion)||options.schema===undefined&&options.schemaVersion===undefined)throw new TypeError('SQLite broker requires generated schema metadata');
     this.control.onmessage = event => this.receiveControl(event.data);
     this.replies.onmessage = event => this.receiveReply(event.data);
     this.connectHub();
@@ -82,7 +83,7 @@ export class SQLiteReplicaBroker {
     else {this.elect();this.broadcast({type:'probe'});}
   }
   get state() { return this.stateValue; }
-  stats() { return { state: this.stateValue, owner: this.owner?.id, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size,changeScopes:this.lastChanges.size,changeBytes:this.lastChangeBytes }; }
+  stats() { return { state: this.stateValue, owner: this.owner?.id, ownerEpoch:this.owner?.epoch, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size,changeScopes:this.lastChanges.size,changeBytes:this.lastChangeBytes }; }
   private setState(state: SQLiteBrokerState) {
     if (state === this.stateValue) return;
     this.stateValue = state;
@@ -131,11 +132,12 @@ export class SQLiteReplicaBroker {
       try{if(m.epoch!==undefined){
         if(!Number.isSafeInteger(m.epoch)||m.epoch<0||this.owner&&m.epoch<this.owner.epoch)return;
         const changeKey=(m.reset?'r:':'s:')+m.scope;const previous=this.lastChanges.get(changeKey);
-        if(previous&&(m.epoch<previous.epoch||m.epoch===previous.epoch&&m.sequence<=previous.sequence))return;
+        const freshControl=(m.scope==='@control'||m.reset===true)&&Number.isSafeInteger(m.notification)&&m.notification>0&&m.notification>(previous?.notification??0);
+        if(previous&&(m.epoch<previous.epoch||m.epoch===previous.epoch&&(m.sequence<previous.sequence||m.sequence===previous.sequence&&!freshControl)))return;
         if(previous){this.lastChanges.delete(changeKey);this.lastChangeBytes-=previous.bytes;}
         const bytes=m.scope.length*2+160;
         while(this.lastChanges.size>=128||this.lastChangeBytes+bytes>262144){const key=this.lastChanges.keys().next().value!;this.lastChangeBytes-=this.lastChanges.get(key)!.bytes;this.lastChanges.delete(key);}
-        this.lastChanges.set(changeKey,{epoch:m.epoch,sequence:m.sequence,bytes});this.lastChangeBytes+=bytes;
+        this.lastChanges.set(changeKey,{epoch:m.epoch,sequence:m.sequence,bytes,...(Number.isSafeInteger(m.notification)?{notification:m.notification}:{})});this.lastChangeBytes+=bytes;
       }
       try { this.options.onChange?.(m.scope, m.sequence,m.reset===true); } catch { /* Observer only. */ }
       for(const listener of this.changeListeners)try{listener(m.scope,m.sequence,m.reset===true);}catch{/* Observer only. */}
@@ -241,7 +243,7 @@ export class SQLiteReplicaBroker {
       };
       worker.onerror = () => { this.setState('pending'); this.stop(g); };
       try {
-        const opened = await this.workerCall(g, 'open', { schema: this.options.schema, owner: token, protocol });
+        const opened = await this.workerCall(g, 'open', { ...(this.options.schema?{schema:this.options.schema}:{}),...(this.options.schemaVersion?{schemaVersion:this.options.schemaVersion}:{}),owner:token,protocol });
         if (this.generation === g) {
           g.epoch = opened.epoch; g.ready = true;this.heartbeatToken=undefined; this.announce(g);this.sendHeartbeat(); this.resend();
         }
@@ -354,18 +356,20 @@ export class SQLiteReplicaBroker {
     if (m.error) call.reject(error(m.error.code, m.error.message, m.error.outcome));
     else call.resolve(m.value);
   }
-  request<T = unknown>(op: string, args: unknown = {}, timeoutMs = 90000): Promise<T> {
+  request<T = unknown>(op: string, args: unknown = {}, timeoutMs = 90000,requestID?:string): Promise<T> {
     if (this.closed || this.failed) return Promise.reject(error('UNAVAILABLE', 'Storage is unavailable'));
     if (!publicOperations.has(op)) return Promise.reject(error('OPERATION', 'Unsupported storage operation'));
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) return Promise.reject(error('BUDGET', 'Invalid storage deadline'));
     let bytes: number;
     try { bytes = sqliteRequestBytes(op,args,262144); }
     catch (e) { return Promise.reject(e); }
+    if(requestID!==undefined&&(typeof requestID!=='string'||!/^[A-Za-z0-9:_-]{1,256}$/.test(requestID)||op!=='clientCall'||!args||typeof args!=='object'||(args as {method?:unknown}).method!=='reducer'))return Promise.reject(error('OPERATION','Stable request IDs require a durable reducer call'));
+    if(requestID!==undefined){const previous=this.pending.get(requestID);if(previous){if(previous.op!==op||JSON.stringify(previous.args)!==JSON.stringify(args))return Promise.reject(error('INTENT_CONFLICT','Pending intent ID reused with different content'));return previous.promise??Promise.reject(error('BUSY','Intent request admission is completing'));}}
     if (this.pending.size >= 16 || this.pendingBytes + bytes > 2097152) return Promise.reject(error('BUDGET', 'Storage request budget exceeded'));
     // Immutable replay payload. Public durable writes additionally require an
     // immutable intent ID, checked by the worker's transactional receipt ledger.
-    const admitted = structuredClone(args), id = this.tabID + ':r:' + ++this.serial;
-    return new Promise<T>((resolve, reject) => {
+    const admitted = structuredClone(args), id = requestID??this.tabID + ':r:' + ++this.serial;
+    const promise=new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         const call = this.pending.get(id); if (!call) return;
         this.pending.delete(id); this.pendingBytes -= call.bytes;
@@ -374,7 +378,7 @@ export class SQLiteReplicaBroker {
       const replay=!(op==='clientCall'&&!!admitted&&typeof admitted==='object'&&['action','token'].includes(String((admitted as {method?:unknown}).method)));
       const call: Call = { id, op, args: admitted, bytes, replay,lastSent: 0, timer, resolve, reject };
       this.pending.set(id, call); this.pendingBytes += bytes; this.send(call);
-    });
+    });const admittedCall=this.pending.get(id);if(admittedCall)admittedCall.promise=promise;return promise;
   }
   private fail(reason: unknown) {
     this.failed = true; this.setState('unavailable');

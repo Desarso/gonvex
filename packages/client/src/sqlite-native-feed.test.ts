@@ -139,3 +139,8 @@ it('rolls the whole terminal group back when a later membership digest fails',as
  f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:[],digest:'sum128-v1:'+'0'.repeat(32)},1);f.feed.frame({type:'replica.watermark',revision:12},1);
  await vi.waitFor(()=>expect(f.failures).toHaveLength(1));expect((await f.runOwner(0,()=>f.canonical.loadEntityRows('visible','tasks',['a','b']))).map(entry=>entry.row)).toEqual(rows);await f.feed.assertReadable({scope:'visible',epoch:'e'});expect(f.watermarks).toEqual([10]);expect(await f.runOwner(0,()=>f.engine.integrity())).toBe('ok');
 });
+
+it('rebases predictions once for an entire completed authority group, including its membership and ready certificate',async()=>{
+ let rebases=0;const f=await fixture({async authority(_scope,mutate){rebases++;await mutate();}});await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();rebases=0;
+ f.transaction(12);f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:[],digest:await digest([changed,rows[1]])},1);await f.ready(12,[changed,rows[1]]);f.feed.frame({type:'replica.watermark',revision:12},1);await f.feed.assertReadable();expect(rebases).toBe(1);expect(f.failures).toEqual([]);expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0].row).toEqual(changed);expect(f.watermarks).toEqual([10,12]);
+});

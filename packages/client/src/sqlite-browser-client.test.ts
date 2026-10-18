@@ -1,0 +1,46 @@
+import {afterEach,expect,it,vi} from 'vitest';
+import {SQLiteBrowserClient} from './sqlite-browser-client.js';
+import type {SQLiteReplicaBroker} from './sqlite-broker.js';
+const cleanup:Array<()=>void>=[];afterEach(()=>{for(const close of cleanup.splice(0))close();vi.restoreAllMocks();});
+function fixture(fetchToken?:()=>Promise<string|null>){
+ let epoch=1,identity='a',connection='',tokenPending=false,closed=false;const changes=new Set<(...args:any[])=>void>(),calls:Array<{input:any;requestID?:string}>=[],responses:any[]=[];
+ let handler:((input:any)=>Promise<unknown>|unknown)|undefined;
+ const broker={async request<T>(_op:string,input:any,_timeout?:number,requestID?:string):Promise<T>{
+  calls.push({input:structuredClone(input),requestID});if(handler){const result=await handler(input);if(result!==undefined)return result as T;}
+  if(input.method==='connect'){identity=input.auth.identity?.sub??'public';connection=identity+':'+epoch;tokenPending=true;return {connection,identityKey:identity} as T;}
+  if(input.method==='controls')return {tokens:tokenPending?[{id:'token:'+connection,connection,identityKey:identity,forceRefreshToken:false}]:[],status:{connected:true},session:'authenticated',failure:null} as T;
+  if(input.method==='token'){responses.push(input.response);tokenPending=false;return null as T;}
+  if(input.method==='watchReplica')return {id:'source:'+input.path,signature:identity+':'+input.path} as T;
+  if(input.method==='replicaPage')return {generation:{epoch,sequence:1},rows:[{id:'row',value:{id:'row',identity}}],window:{generation:'window',total:1,header:{}}} as T;
+  if(input.method==='replicaPendingPage')return null as T;
+  if(input.method==='unwatchReplica'||input.method==='auth')return null as T;
+  if(input.method==='reducer')return {commandId:requestID,result:2} as T;
+  if(input.method==='query')return {identity} as T;
+  throw Error('Unexpected mock RPC '+input.method);
+ },subscribeChanges(listener:(...args:any[])=>void){changes.add(listener);return ()=>{changes.delete(listener);};},stats(){return {ownerEpoch:epoch} as ReturnType<SQLiteReplicaBroker['stats']>;},close(){closed=true;}};
+ const client=new SQLiteBrowserClient('ws://private-synthetic.test/ws',{broker,auth:{project:'project',tenant:'tenant',identity:{sub:'a'}},fetchToken});cleanup.push(()=>client.close());
+ return {client,calls,responses,get closed(){return closed;},set handler(next:typeof handler){handler=next;},change(){for(const notify of changes)notify('scope',1);},replaceOwner(){epoch++;connection='';tokenPending=false;for(const notify of changes)notify('*',1,true);}};
+}
+it('services a single selected-tab token request, shares a watch, retains a bounded stable page snapshot and restores after owner change',async()=>{
+ const fetchToken=vi.fn(async()=> 'opaque'),f=fixture(fetchToken),one=f.client.watchReplica({path:'tasks/all'}),two=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>{one.close();two.close();});
+ const page=await one.page({limit:10});await vi.waitFor(()=>expect(f.responses).toHaveLength(1));expect(fetchToken).toHaveBeenCalledTimes(1);expect(one.snapshot()).toBe(one.snapshot());expect(one.snapshot().page).toBe(page);expect(f.calls.filter(call=>call.input.method==='watchReplica')).toHaveLength(1);
+ f.change();expect(one.snapshot().stale).toBe(true);expect(one.snapshot().page).toBe(page);await vi.waitFor(async()=>{await f.client.pollControls();expect(f.responses).toHaveLength(1);});
+ f.replaceOwner();await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='connect')).toHaveLength(2));await two.page();expect(f.calls.filter(call=>call.input.method==='watchReplica')).toHaveLength(2);one.close();expect(two.snapshot().page).toBeDefined();two.close();await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='unwatchReplica')).toHaveLength(1));expect(f.client.budgets().find(value=>value.name==='browser-row-pages')?.bytes).toBe(0);
+});
+it('fences stale page and credential results across an identity change and releases held providers on close',async()=>{
+ let release!: (value:string)=>void;const held=new Promise<string>(resolve=>{release=resolve;}),fetch=vi.fn().mockImplementationOnce(()=>held).mockResolvedValue('new-token'),f=fixture(fetch),watch=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>watch.close());await watch.page();await vi.waitFor(()=>expect(fetch).toHaveBeenCalledTimes(1));
+ await f.client.setAuth({identity:{sub:'b'}});expect(watch.snapshot().page).toBeUndefined();release('old-token');await vi.waitFor(()=>expect(f.responses).toHaveLength(1));expect(f.responses[0]).toMatchObject({identityKey:'b',token:'new-token'});expect((await watch.page())?.rows[0].value).toMatchObject({identity:'b'});
+ let finish!:()=>void;const barrier=new Promise<void>(resolve=>{finish=resolve;});f.handler=async input=>{if(input.method==='query'){await barrier;return {identity:'b'};}};const result=f.client.query({path:'oneShot'});void result.catch(()=>{});await vi.waitFor(()=>expect(f.calls.some(call=>call.input.method==='query')).toBe(true));await f.client.setAuth({identity:{sub:'c'}});finish();await expect(result).rejects.toMatchObject({code:'FENCED'});f.client.close();expect(f.closed).toBe(true);expect(watch.snapshot().page).toBeUndefined();
+});
+it('serializes last-watch cancellation with a new lease and preserves pinned pages when admission fails',async()=>{
+ const f=fixture(),first=f.client.watchReplica({path:'tasks/all'});await first.page();let release!:()=>void;const waiting=new Promise<void>(resolve=>{release=resolve;});f.handler=async input=>{if(input.method==='unwatchReplica'){await waiting;return null;}};first.close();await vi.waitFor(()=>expect(f.calls.some(call=>call.input.method==='unwatchReplica')).toBe(true));const replacement=f.client.watchReplica({path:'tasks/all'}),pending=replacement.page();cleanup.push(()=>replacement.close());await new Promise(resolve=>setTimeout(resolve,0));expect(f.calls.filter(call=>call.input.method==='watchReplica')).toHaveLength(1);release();await pending;expect(f.calls.filter(call=>call.input.method==='watchReplica')).toHaveLength(2);expect(replacement.snapshot().page).toBeDefined();
+ const before=replacement.snapshot().page;f.handler=async input=>input.method==='replicaPage'?{rows:[{id:'giant',value:{text:'x'.repeat(150000)}}]}:undefined;await expect(replacement.page()).rejects.toMatchObject({code:'BUDGET'});expect(replacement.snapshot().page).toBe(before);expect(f.client.budgets().every(value=>value.bytes<=value.maxBytes)).toBe(true);
+});
+it('bounds requests before waiting for a connection and preserves the caller command ID for immutable retries',async()=>{
+ const f=fixture();await f.client.connect();const args={id:'a'};const result=await f.client.reducer({path:'tasks/change'},args,{commandId:'stable-command',now:100});expect(result.commandId).toBe('stable-command');expect(f.calls.find(call=>call.input.method==='reducer')?.requestID).toBe('stable-command');expect(()=>f.client.reducer({path:'tasks/change'},{},{commandId:'stable-command'})).toThrow('original invocation time');
+ let release!:()=>void;const waiting=new Promise<void>(resolve=>{release=resolve;});f.handler=async input=>{if(input.method==='query'){await waiting;return null;}};const pending=Array.from({length:16},()=>f.client.query({path:'bounded'}));await expect(f.client.query({path:'excess'})).rejects.toMatchObject({code:'BUDGET'});release();await Promise.all(pending);expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.bytes).toBe(0);
+});
+
+it('cancels a token provider which never settles when the facade closes',async()=>{
+ const provider=vi.fn(()=>new Promise<string|null>(()=>{})),f=fixture(provider);await f.client.connect();await vi.waitFor(()=>expect(provider).toHaveBeenCalledOnce());expect(f.client.budgets().find(value=>value.name==='browser-token-requests')?.entries).toBe(1);f.client.close();await new Promise(resolve=>setTimeout(resolve,0));expect(f.client.budgets().find(value=>value.name==='browser-token-requests')?.entries).toBe(0);expect(f.responses).toEqual([]);
+});

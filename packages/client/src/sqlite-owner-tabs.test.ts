@@ -22,6 +22,11 @@ it('keeps same-scope coalescing precise and bounds tab metadata before admission
 });
 it('targets credited control hints and keeps frozen hints bounded while preserving later data changes',()=>{
  const sent:Array<{tab:string;change:SQLiteOwnerChange}>=[],tabs=new SQLiteOwnerTabs((tab,change)=>sent.push({tab,change}));tabs.register('provider');tabs.register('other');
- for(let n=0;n<10000;n++)tabs.notify('provider',{epoch:1,sequence:0});expect(sent).toHaveLength(1);expect(sent[0]).toMatchObject({tab:'provider',change:{scope:'@control',sequence:0}});expect(tabs.stats()).toMatchObject({inFlight:1,pending:0});
+ for(let n=0;n<10000;n++)tabs.notify('provider',{epoch:1,sequence:0});expect(sent).toHaveLength(1);expect(sent[0]).toMatchObject({tab:'provider',change:{scope:'@control',sequence:0}});expect(tabs.stats()).toMatchObject({inFlight:1,pending:1});
  tabs.publish('tasks',{epoch:1,sequence:1});tabs.notify('provider',{epoch:1,sequence:1});expect(sent.filter(item=>item.tab==='provider')).toHaveLength(1);tabs.acknowledge('provider',sent[0].change.notification,sent[0].change);expect(sent.at(-1)).toMatchObject({tab:'provider',change:{scope:'*',reset:true,sequence:1}});expect(tabs.stats().bytes).toBeLessThan(4096);tabs.drop('provider');expect(()=>tabs.notify('provider',{epoch:1,sequence:1})).toThrow('detached');tabs.close();
+});
+
+it('preserves a fresh control hint that arrives after polling but before the previous notification is acknowledged',()=>{
+ const sent:any[]=[],tabs=new SQLiteOwnerTabs((tab,change)=>sent.push({tab,change}));tabs.setGeneration({epoch:1,sequence:4});tabs.register('provider');const initial=sent[0];
+ tabs.notify('provider',{epoch:1,sequence:4});expect(sent).toHaveLength(1);expect(tabs.stats().pending).toBe(1);tabs.acknowledge('provider',initial.change.notification,initial.change);expect(sent).toHaveLength(2);expect(sent[1].change.scope).toBe('@control');expect(sent[1].change.notification).toBeGreaterThan(initial.change.notification);tabs.close();
 });

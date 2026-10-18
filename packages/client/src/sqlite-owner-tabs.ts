@@ -39,7 +39,7 @@ export class SQLiteOwnerTabs {
   for(const [id,tab]of this.tabs){
    if(target!==undefined&&id!==target)continue;
    const previous=tab.pending??tab.inFlight;
-   if(previous&&(compare(generation,previous)<0||compare(generation,previous)===0&&(previous.reset||previous.scope===scope)))continue;
+   if(previous&&(compare(generation,previous)<0||compare(generation,previous)===0&&(previous.reset||previous.scope===scope)&&!(target!==undefined&&scope==='@control')))continue;
    if(!tab.inFlight){this.deliver(id,tab,{scope,...generation});continue;}
    const reset=!!tab.pending&&(tab.pending.reset||tab.pending.scope!==scope);
    tab.pending={...generation,scope:reset?'*':scope,...(reset?{reset:true as const}:{})};

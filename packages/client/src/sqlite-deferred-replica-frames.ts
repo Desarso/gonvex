@@ -5,6 +5,7 @@ type Delta=Extract<ServerMessage,{type:'replica.delta'}>;
 export type SQLiteDeferredReplicaFrame={revision:number;frame:Delta};
 const encoder=new TextEncoder(),decoder=new TextDecoder('utf-8',{fatal:true});
 const schema=`CREATE TABLE IF NOT EXISTS gv_deferred_replica_frames(scope TEXT NOT NULL,signature TEXT NOT NULL,artifact TEXT NOT NULL,epoch TEXT NOT NULL,revision INTEGER NOT NULL,body BLOB NOT NULL,hash TEXT NOT NULL,bytes INTEGER NOT NULL,PRIMARY KEY(scope,signature,artifact,epoch,revision)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gv_deferred_replica_canceled(scope TEXT NOT NULL,signature TEXT NOT NULL,PRIMARY KEY(scope,signature)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS gv_deferred_replica_retire ON gv_deferred_replica_frames(scope,signature,epoch,revision,artifact);
 CREATE TABLE IF NOT EXISTS gv_deferred_replica_usage(scope TEXT PRIMARY KEY,bytes INTEGER NOT NULL CHECK(bytes>=0),frames INTEGER NOT NULL CHECK(frames>=0)) WITHOUT ROWID;`;
 function identity(scope:string,signature:string,epoch?:string){if(typeof scope!=='string'||!scope||scope.length>512||scope.includes('\u0000')||typeof signature!=='string'||!signature||signature.length>4096||epoch!==undefined&&(typeof epoch!=='string'||!epoch||epoch.length>256))throw new TypeError('Invalid deferred replica identity');}
@@ -25,7 +26,7 @@ export class SQLiteDeferredReplicaFrames {
   if(frame.type!=='replica.delta'||typeof frame.id!=='string'||!frame.id||frame.id.length>256||!Number.isSafeInteger(frame.cursor?.revision)||frame.cursor.revision<0||typeof frame.digest!=='string'||!/^(sum128-v1:[0-9a-f]{32}|xor1:[0-9a-f]{64})$/.test(frame.digest))throw new TypeError('Invalid deferred replica delta');
   const encoded=JSON.stringify(frame),owned=JSON.parse(encoded) as Delta,bytes=encoder.encode(encoded);if(bytes.byteLength>131072)fail('BUDGET','Deferred replica frame wire budget exceeded');const charge=bytes.byteLength+(scope.length+signature.length+this.artifact.length+owned.cursor.epoch.length)*8+512;const hash=await digest(semantic(owned));await this.ready();let inserted=false;
   await this.db.withTransactionAsync(async()=>{
-   await this.fence();const args=[scope,signature,this.artifact,owned.cursor.epoch,owned.cursor.revision];
+   await this.fence();if(await this.db.getFirstAsync('SELECT 1 FROM gv_deferred_replica_canceled WHERE scope=? AND signature=?',scope,signature))fail('FENCED','Deferred source incarnation was canceled');const args=[scope,signature,this.artifact,owned.cursor.epoch,owned.cursor.revision];
    const old=await this.db.getFirstAsync<{hash:string}>('SELECT hash FROM gv_deferred_replica_frames WHERE scope=? AND signature=? AND artifact=? AND epoch=? AND revision=?',...args);
    if(old){if(old.hash!==hash)fail('INTENT_CONFLICT','Deferred replica revision changed its payload');return;}
    const usage=await this.db.getFirstAsync<{bytes:number;frames:number}>('SELECT bytes,frames FROM gv_deferred_replica_usage WHERE scope=?',scope);
@@ -58,6 +59,18 @@ export class SQLiteDeferredReplicaFrames {
    if(size!.n){await this.db.runAsync(`DELETE FROM gv_deferred_replica_frames WHERE ${selection} AND (artifact,revision) IN (SELECT artifact,revision FROM gv_deferred_replica_frames WHERE ${selection} ORDER BY revision,artifact LIMIT 128)`,...args,...args);if(!await this.db.getFirstAsync('UPDATE gv_deferred_replica_usage SET bytes=bytes-?,frames=frames-? WHERE scope=? AND bytes>=? AND frames>=? RETURNING frames',size!.bytes,size!.n,scope,size!.bytes,size!.n))fail('INTENT_CORRUPT','Deferred replica accounting differs');}
    result={removed:size!.n,remaining:!!await this.db.getFirstAsync(`SELECT 1 FROM gv_deferred_replica_frames WHERE ${selection} LIMIT 1`,...args)};
   });return result;
+ }
+ /** Canceled incarnation IDs are never reused by a later source. No new
+  * frames may enter this identity once the owner schedules retirement. */
+ async cancel(scope:string,signature:string){identity(scope,signature);await this.ready();await this.fence();await this.db.runAsync('INSERT OR IGNORE INTO gv_deferred_replica_canceled VALUES(?,?)',scope,signature);}
+ async recoverCanceled(){await this.ready();await this.fence();await this.db.runAsync('INSERT OR IGNORE INTO gv_deferred_replica_canceled SELECT DISTINCT scope,signature FROM gv_deferred_replica_frames');}
+ async collectCanceled(){await this.ready();await this.fence();let found=false;
+  await this.db.withTransactionAsync(async()=>{
+   const target=await this.db.getFirstAsync<{scope:string;signature:string}>('SELECT scope,signature FROM gv_deferred_replica_canceled ORDER BY scope,signature LIMIT 1');if(!target)return;found=true;
+   const size=await this.db.getFirstAsync<{bytes:number;n:number}>('SELECT coalesce(sum(bytes),0) bytes,count(*) n FROM (SELECT bytes FROM gv_deferred_replica_frames WHERE scope=? AND signature=? ORDER BY artifact,epoch,revision LIMIT 128)',target.scope,target.signature);
+   if(size?.n){await this.db.runAsync('DELETE FROM gv_deferred_replica_frames WHERE scope=? AND signature=? AND (artifact,epoch,revision) IN (SELECT artifact,epoch,revision FROM gv_deferred_replica_frames WHERE scope=? AND signature=? ORDER BY artifact,epoch,revision LIMIT 128)',target.scope,target.signature,target.scope,target.signature);if(!await this.db.getFirstAsync('UPDATE gv_deferred_replica_usage SET bytes=bytes-?,frames=frames-? WHERE scope=? AND bytes>=? AND frames>=? RETURNING scope',size.bytes,size.n,target.scope,size.bytes,size.n))fail('INTENT_CORRUPT','Canceled deferred accounting differs');}
+   if(!await this.db.getFirstAsync('SELECT 1 FROM gv_deferred_replica_frames WHERE scope=? AND signature=? LIMIT 1',target.scope,target.signature))await this.db.runAsync('DELETE FROM gv_deferred_replica_canceled WHERE scope=? AND signature=?',target.scope,target.signature);
+  });return found;
  }
  async summary(scope:string){identity(scope,'summary');await this.ready();await this.fence();return await this.db.getFirstAsync<{bytes:number;frames:number}>('SELECT bytes,frames FROM gv_deferred_replica_usage WHERE scope=?',scope)??{bytes:0,frames:0};}
 }

@@ -1,5 +1,6 @@
 import {DatabaseSync} from 'node:sqlite';
 import {expect,it,vi} from 'vitest';
+import {SQLiteTransientBudget} from './sqlite-transient-budget.js';
 import {SQLiteNativeIngress} from './sqlite-native-ingress.js';
 import {sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
@@ -119,4 +120,13 @@ it('bounds frames waiting outside the SQL FIFO and cancels a closed control gate
   const frames=Array.from({length:8},(_,n)=>ingress.accept(wire(n),gate)),waiting=Promise.allSettled([...frames,ingress.flush()]);
   await expect(ingress.accept(wire(9),gate)).rejects.toMatchObject({code:'BUDGET'});await new Promise(resolve=>setTimeout(resolve,10));expect(f.commits).toBe(0);expect(ingress.stats().entries).toBe(8);ingress.close();expect((await waiting).every(result=>result.status==='rejected')).toBe(true);expect(ingress.stats()).toMatchObject({entries:0,bytes:0});release();await new Promise(resolve=>setTimeout(resolve,10));expect(f.commits).toBe(0);expect(f.acks).toEqual([]);
  }finally{ingress.close();release();f.sql.close();}
+});
+
+it('shares ingress admission across connections and releases reservations on cancellation and rollback',async()=>{
+ const test=fixture(),budget=new SQLiteTransientBudget(514,2);let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;}),first=new SQLiteNativeIngress({...test.options,reserve:bytes=>budget.reserve(bytes)}),second=new SQLiteNativeIngress({...test.options,reserve:bytes=>budget.reserve(bytes)});
+ try{
+  const a=first.accept(wire(0),gate),b=second.accept(wire(1),gate);void a.catch(()=>{});void b.catch(()=>{});expect(budget.stats()).toMatchObject({bytes:514,entries:2});await expect(second.accept(wire(2),gate)).rejects.toMatchObject({code:'BUDGET'});expect(budget.stats().refusals).toBe(1);
+  first.close();second.close();release();await Promise.allSettled([a,b]);expect(budget.stats()).toMatchObject({bytes:0,entries:0});expect(test.acks).toEqual([]);
+  const third=new SQLiteNativeIngress({...test.options,reserve:bytes=>budget.reserve(bytes)});try{await expect(third.accept(wire(255))).rejects.toThrow('malformed frame');expect(budget.stats()).toMatchObject({bytes:0,entries:0});}finally{third.close();}
+ }finally{first.close();second.close();test.sql.close();}
 });

@@ -1,3 +1,4 @@
+import type {ByteBudgetSnapshot} from './byte-budget.js';
 import {SQLitePendingSnapshotReader} from './sqlite-pending-snapshot-reader.js';
 import {SQLiteOwnerTabs} from './sqlite-owner-tabs.js';
 import {SQLiteNativeReplicaReader} from './sqlite-native-replica-reader.js';
@@ -19,6 +20,7 @@ export type SQLiteOwnerProgram={
  /** Network waits must stay outside the SQL FIFO. Use context.runOwner for
   * every disk phase; server replies must never wait behind their own call. */
  call(args:unknown,caller:SQLiteOwnerCaller):Promise<unknown>;
+ budgets?():ByteBudgetSnapshot[];
  detachTab?(tabID:string):void;
  close?():Promise<void>|void;
 };
@@ -28,7 +30,7 @@ export type SQLiteOwnerProgramContext={
  /** Metadata-only hint; receiver polls bounded controls through clientCall. */
  notifyTab(tabID:string):Promise<void>;
 };
-export type SQLiteOwnerBinding={schema?:SQLiteTypedSchema;createProgram?(context:SQLiteOwnerProgramContext):SQLiteOwnerProgram};
+export type SQLiteOwnerBinding={schema?:SQLiteTypedSchema;schemaVersion?:string;createProgram?(context:SQLiteOwnerProgramContext):SQLiteOwnerProgram};
 let installed=false;
 /** Generated worker entries supply their schema and portable client program.
  * The factory is synchronous. It may start initialization through runOwner,
@@ -74,6 +76,7 @@ async function execute(op: string, args: any, requestID:string) {
     if (host || args?.protocol !== protocol) throw Object.assign(new Error('Incompatible storage worker protocol'), { code: 'PROTOCOL' });
     try {
       if(typeof args.owner!=='string'||!args.owner||args.owner.length>128)throw new TypeError('Invalid owner token');ownerToken=args.owner;
+      if(args.schemaVersion!==undefined&&args.schemaVersion!==binding.schemaVersion)throw Object.assign(Error('Generated owner schema differs from browser binding'),{code:'SCHEMA_MISMATCH'});
       host = await openOfficialSQLiteHost();
       const database=sqliteOwnerTransactions(host.database);
       engine = new SQLiteTypedReplicaEngine(database, binding.schema??args.schema as SQLiteTypedSchema, undefined, { onProgress: () => globalThis.postMessage({ type: 'progress', sentAt: Date.now() }) });
@@ -117,7 +120,7 @@ async function execute(op: string, args: any, requestID:string) {
     case 'canonicalRead': return canonical!.read(args);
     case 'canonicalGeneration': return canonical!.generation(scope(args.scope),args.expected);
     case 'ping': return { ready: true };
-    case 'stats': return { ...engine.stats(),...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats(),pendingPages:pendingReader?.budgets()??[] };
+    case 'stats': return { ...engine.stats(),...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[] };
     case 'integrity': return engine.integrity();
     case 'page': return engine.page(scope(args.scope), args.plan as SQLitePagePlan);
     case 'viewPage': return engine.viewPage(scope(args.scope), args.signature, args.plan as SQLitePagePlan, args.offset);

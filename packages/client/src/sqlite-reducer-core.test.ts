@@ -2,7 +2,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {expect,it,vi} from 'vitest';
 import {reducer,schema,getRow} from '@gonvex/module-sdk';
 import {PortableReducerRuntime} from '@gonvex/local-runtime/portable';
-import {SQLiteReducerCore} from './sqlite-reducer-core.js';
+import {SQLiteReducerCore,type SQLitePreparedReducer} from './sqlite-reducer-core.js';
 import {SQLitePredictions} from './sqlite-predictions.js';
 import {SQLiteIntentJournal} from './sqlite-intent-journal.js';
 import {SQLiteTypedReplicaEngine} from './sqlite-typed-engine.js';
@@ -16,7 +16,7 @@ async function fixture(){
  const sql=new DatabaseSync(':memory:');const db=sqliteOwnerTransactions({async execAsync(query){sql.exec(query);},async runAsync(query,...args){return sql.prepare(query).run(...args as any[]);},async getFirstAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).get(...args as any[]) as T??null;},async getAllAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).all(...args as any[]) as T[];},async withTransactionAsync(run){sql.exec('BEGIN');try{await run();sql.exec('COMMIT');}catch(error){sql.exec('ROLLBACK');throw error;}}} satisfies SQLiteReplicaDatabase);
  const engine=new SQLiteTypedReplicaEngine(db,typed);await engine.open('core');const canonical=sqliteTypedReplicaStorage(db,typed);await canonical.ready();await canonical.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'tasks',id:'a',operation:'insert',newValue:{id:'a',n:1}}]},{entities:{},liveQueries:{}},'s');
  const fence=()=>engine.verifyOwner(),journal=new SQLiteIntentJournal(db,fence),predictions=new SQLitePredictions(db,canonical,typed,fence);let calls=0;
- const runtime=new PortableReducerRuntime({schema:local,artifactHash:'artifact',reducers:{increment:reducer({args:schema.any(),result:schema.any(),run:async(ctx,args:any)=>{calls++;const before=await getRow<{id:string;n:number}>(ctx.db,'tasks','id',args.id);if(!before)throw Error('missing task');await ctx.db.update('tasks',args.id,{n:before.n+1});if(args.fail)throw Error('reducer failed');return {id:args.id,n:before.n+1,member:ctx.member!.id};}}),giantReply:reducer({args:schema.any(),result:schema.any(),run:async()=> '東京'.repeat(30000)}),create:reducer({args:schema.any(),result:schema.any(),run:async ctx=>ctx.db.insert('tasks',{n:10})})}});
+ const runtime=new PortableReducerRuntime({schema:local,artifactHash:'artifact',reducers:{scan:reducer({args:schema.any(),result:schema.any(),run:async ctx=>{calls++;await ctx.db.update('tasks','a',{n:99});return await ctx.db.select({table:'tasks'});}}),increment:reducer({args:schema.any(),result:schema.any(),run:async(ctx,args:any)=>{calls++;const before=await getRow<{id:string;n:number}>(ctx.db,'tasks','id',args.id);if(!before)throw Error('missing task');await ctx.db.update('tasks',args.id,{n:before.n+1});if(args.fail)throw Error('reducer failed');return {id:args.id,n:before.n+1,member:ctx.member!.id};}}),giantReply:reducer({args:schema.any(),result:schema.any(),run:async()=> '東京'.repeat(30000)}),create:reducer({args:schema.any(),result:schema.any(),run:async ctx=>ctx.db.insert('tasks',{n:10})})}});
  const options={database:db,engine,journal,predictions,runtime,artifactHash:'artifact',async context(scope:string){if(scope!=='s')throw Error('unauthenticated scope');return {intentScope:'s',identity,coverage:{tasks:{key:'id',complete:true}}};}},core=new SQLiteReducerCore(options);await core.ready();return {sql,db,engine,canonical,journal,predictions,core,options,get calls(){return calls;}};
 }
 it('executes the same generated reducer against predictions and atomically queues an intent without changing canonical rows',async()=>{
@@ -147,5 +147,25 @@ it('keeps queued commands and original replies in the stable identity scope acro
   const offline=new SQLiteReducerCore({...options,runtime:{isPrepared:()=>false,prepare:async()=>{throw Error('offline');},execute:async()=>{throw Error('must not execute');}}});
   expect(await offline.invoke({...input,scope:active})).toEqual(first);expect(await core.rebase(active)).toMatchObject({replayed:1});expect((await f.predictions.entities(active,'tasks',['a']))[0].row.n).toBe(11);
   expect((await core.invoke({...input,scope:active,commandId:'next',now:101})).result).toMatchObject({n:12});const queued=(await f.journal.page(intentScope)).entries;expect(queued).toHaveLength(2);expect(queued.every(entry=>entry.scope===intentScope&&entry.localExecution!.scope===active)).toBe(true);expect(await core.invoke({...input,scope:active})).toEqual(first);
+ }finally{f.sql.close();}
+});
+
+it('restores prepared predictions and the exact original reply without loading or rerunning a reducer body',async()=>{
+ const before=await fixture(),after=await fixture();try{
+  const input={scope:'s',path:'increment',commandId:'survives-opfs-loss',now:100,args:{id:'a'}};let prepared!:SQLitePreparedReducer;
+  const receipt=await before.core.invoke(input,async(_input,_context,value)=>{prepared=structuredClone(value);});expect(receipt.result).toMatchObject({n:2});
+  const offline=new SQLiteReducerCore({...after.options,runtime:{isPrepared:()=>false,prepare:async()=>{throw Error('module unavailable');},execute:async()=>{throw Error('must not execute');}}});
+  await after.canonical.applyTransaction({cursor:{epoch:'e',revision:12},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{id:'a',n:2}}]},{entities:{},liveQueries:{}},'s');
+  expect(await offline.recover(input,prepared)).toEqual(receipt);expect(await offline.invoke(input)).toEqual(receipt);expect(after.calls).toBe(0);expect((await after.journal.page('s')).entries[0]).toMatchObject({idempotencyKey:input.commandId,sentAt:100,state:'pending'});
+  expect(await offline.rebase('s')).toMatchObject({retained:1,replayed:0});expect((await after.predictions.entities('s','tasks',['a']))[0].row.n).toBe(2);expect(await offline.recover(input,prepared)).toEqual(receipt);expect((await after.journal.summary('s')).count).toBe(1);
+  await expect(offline.recover({...input,args:{id:'other'}},prepared)).rejects.toMatchObject({code:'FENCED'});expect(await after.engine.integrity()).toBe('ok');
+ }finally{before.sql.close();after.sql.close();}
+});
+
+it('durably queues missing-coverage commands without a fabricated result or partial local patches',async()=>{
+ const f=await fixture();try{
+  const core=new SQLiteReducerCore({...f.options,async context(){return {intentScope:'s',identity,coverage:{}};}}),input={scope:'s',path:'scan',commandId:'missing-coverage',now:100,args:{}};
+  const receipt=await core.invoke(input);expect(receipt).toMatchObject({queuedOnly:true,result:null});expect(f.calls).toBe(1);expect((await f.journal.page('s')).entries[0]).toMatchObject({entityKeys:['__gonvex_local_intents'],patches:[],localExecution:{commandId:input.commandId}});expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(1);
+  expect(await core.rebase('s')).toMatchObject({retained:1,replayed:0});expect(f.calls).toBe(1);expect(await core.invoke(input)).toEqual(receipt);expect((await f.journal.readyBatch('s',1000)).map(entry=>entry.idempotencyKey)).toEqual([input.commandId]);
  }finally{f.sql.close();}
 });

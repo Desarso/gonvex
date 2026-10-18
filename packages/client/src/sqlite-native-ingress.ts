@@ -4,11 +4,12 @@ import {SQLiteTaskYield} from './sqlite-task-yield.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
 import type {SQLiteSnapshotPages,SQLiteSnapshotReceipt} from './sqlite-snapshot-pages.js';
 
-type Pending={bytes:Uint8Array;gate:Promise<void>;done:Promise<SQLiteSnapshotReceipt>;resolve(value:SQLiteSnapshotReceipt):void;reject(error:unknown):void};
+type Pending={bytes:Uint8Array;releaseReservation?:()=>void;gate:Promise<void>;done:Promise<SQLiteSnapshotReceipt>;resolve(value:SQLiteSnapshotReceipt):void;reject(error:unknown):void};
 type Options={
  database:SQLiteReplicaDatabase;
  snapshots:Pick<SQLiteSnapshotPages,'appendEncodedReceipt'>&Partial<Pick<SQLiteSnapshotPages,'ready'>>;
  scope:string;
+ reserve?(bytes:number):()=>void;
  /** The same owner FIFO used by queries, reducers and every storage operation. */
  runOwner<T>(operation:()=>Promise<T>):Promise<T>;
  /** Publish a staging generation inside the same durable batch. This must
@@ -55,10 +56,11 @@ export class SQLiteNativeIngress {
   if(!bytes.byteLength||bytes.byteLength>frameBytes||this.entries===maxFrames||this.wireBytes+bytes.byteLength>maxWireBytes){
    this.refusals++;return Promise.reject(Object.assign(new Error('Snapshot connection exceeded its credit budget'),{code:'BUDGET'}));
   }
-  try{bytes=copyOwnedSQLiteBytes(buffer);}catch(error){return Promise.reject(error);}
+  let releaseReservation:(()=>void)|undefined;
+  try{releaseReservation=this.options.reserve?.(bytes.byteLength+metadataBytes);bytes=copyOwnedSQLiteBytes(buffer);}catch(error){releaseReservation?.();return Promise.reject(error);}
   this.entries++;this.wireBytes+=bytes.byteLength;
   let resolve!:(value:SQLiteSnapshotReceipt)=>void,reject!:(error:unknown)=>void;
-  const result=new Promise<SQLiteSnapshotReceipt>((yes,no)=>{resolve=yes;reject=no;});this.pending.push({bytes,gate,done:result,resolve,reject});
+  const result=new Promise<SQLiteSnapshotReceipt>((yes,no)=>{resolve=yes;reject=no;});this.pending.push({bytes,releaseReservation,gate,done:result,resolve,reject});
   if(!this.draining){this.draining=true;void this.drain();}
   if(this.pending.length===maxFrames||this.wireBytes===maxWireBytes)this.releaseBatch?.();
   return result;
@@ -82,6 +84,7 @@ export class SQLiteNativeIngress {
   // DOM event backing stores never enter this queue; native consumers have
   // finished with this private byte snapshot before its reference is dropped.
   entry.bytes=emptyBytes;
+  entry.releaseReservation?.();entry.releaseReservation=undefined;
  }
  private async drain(){
   try{

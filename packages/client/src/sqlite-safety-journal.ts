@@ -1,10 +1,10 @@
 import type {ReducerOutboxEntry} from './outbox.js';
 import type {LocalReplicaSession} from './local-replica.js';
-import type {SQLiteReducerInvocation} from './sqlite-reducer-core.js';
+import type {SQLitePreparedReducer,SQLiteReducerInvocation} from './sqlite-reducer-core.js';
 import {decodedJSONBytes,fail,sqlitePayloadBytes} from './sqlite-admission.js';
-type Receipt={scope:string;command:string;hash:string;fingerprint:string;sequence:number;settled:boolean;legacyHash?:string};
+type Receipt={scope:string;command:string;hash:string;fingerprint:string;sequence:number;settled:boolean;legacyHash?:string;preparedHash?:string};
 type Header={sequence:number;scope:string;command:string;bytes:number};
-export type SQLiteSafetyEntry={invocation:SQLiteReducerInvocation;legacy?:ReducerOutboxEntry};
+export type SQLiteSafetyEntry={invocation:SQLiteReducerInvocation;legacy?:ReducerOutboxEntry;prepared?:SQLitePreparedReducer};
 export type SQLiteSafetyPage={entries:SQLiteSafetyEntry[];nextSequence:number|null};
 const request=<T>(value:IDBRequest<T>)=>new Promise<T>((resolve,reject)=>{value.onsuccess=()=>resolve(value.result);value.onerror=()=>reject(value.error??Error('Intent journal request failed'));});
 function scope(value:string){if(typeof value!=='string'||!value||value.length>512)throw new TypeError('Invalid durable command scope');}
@@ -48,6 +48,13 @@ export class SQLiteSafetyJournal {
   try{const result=await run(tx);await completion;return result;}catch(error){try{tx.abort();}catch{/* Already completed or aborted. */}await completion.catch(()=>{});throw error;}
  }
  append(input:SQLiteReducerInvocation,session:LocalReplicaSession,intentScope:string):Promise<Receipt>{return this.accept(input,session,intentScope);}
+ /** The prepared body and original reply are immutable independent recovery
+  * data, not a second replica. Persist before SQLite can acknowledge locally. */
+ appendPrepared(input:SQLiteReducerInvocation,prepared:SQLitePreparedReducer,session:LocalReplicaSession,intentScope:string):Promise<Receipt>{
+  sqlitePayloadBytes(prepared,262144);const {intent,receipt}=prepared;
+  if(intent.idempotencyKey!==input.commandId||intent.path!==input.path||JSON.stringify(intent.args)!==JSON.stringify(input.args)||intent.scope!==intentScope||intent.localExecution?.artifactHash!==session.artifactHash||JSON.stringify(intent.localExecution.identity)!==JSON.stringify(session.identity)||receipt.commandId!==input.commandId||receipt.intentId!==intent.id)throw new TypeError('Prepared intent differs from its recovery command');
+  return this.accept(input,session,intentScope,undefined,JSON.stringify(prepared));
+ }
  /** Preserve the complete fenced legacy envelope, including its original
   * identity scope, retry state, stable IDs and execution metadata. */
  appendLegacy(input:SQLiteReducerInvocation,legacy:ReducerOutboxEntry,session:LocalReplicaSession,intentScope:string):Promise<Receipt>{
@@ -55,23 +62,23 @@ export class SQLiteSafetyJournal {
   if(legacy.idempotencyKey!==input.commandId||legacy.path!==input.path||JSON.stringify(legacy.args)!==JSON.stringify(input.args)||typeof legacy.scope!=='string'||!legacy.scope||!Number.isSafeInteger(legacy.id)||legacy.id<1)throw new TypeError('Legacy intent differs from its recovery command');
   return this.accept(input,session,intentScope,JSON.stringify(legacy));
  }
- private async accept(input:SQLiteReducerInvocation,session:LocalReplicaSession,intentScope:string,legacyValue?:string):Promise<Receipt>{
+ private async accept(input:SQLiteReducerInvocation,session:LocalReplicaSession,intentScope:string,legacyValue?:string,preparedValue?:string):Promise<Receipt>{
   scope(intentScope);const encoded=command(input),owned=JSON.parse(encoded.value) as SQLiteReducerInvocation;
-  const legacyBytes=legacyValue===undefined?0:decodedJSONBytes(legacyValue,131072),bytes=encoded.bytes+legacyBytes+512;
+  const legacyBytes=legacyValue===undefined?0:decodedJSONBytes(legacyValue,131072),preparedBytes=preparedValue===undefined?0:decodedJSONBytes(preparedValue,262144),bytes=encoded.bytes+legacyBytes+preparedBytes+512;
   if(bytes+64>262144)fail('BUDGET','Recovery envelope exceeds safety journal page budget');
   sqlitePayloadBytes(session,131072);const sessionValue=JSON.stringify(session);decodedJSONBytes(sessionValue,131072);
   if(!session?.directive||session.directive.protocolVersion!==1||!session.identity||typeof session.artifactHash!=='string')throw new TypeError('Durable command requires its authenticated session');
   // Hashing and snapshots happen before opening the IDB transaction. Awaiting
   // crypto inside that transaction could let the browser auto-commit it.
-  const digest=await hash(encoded.value),fingerprint=await hash(JSON.stringify({...owned,scope:intentScope})),legacyHash=legacyValue===undefined?undefined:await hash(legacyValue);
+  const digest=await hash(encoded.value),fingerprint=await hash(JSON.stringify({...owned,scope:intentScope})),legacyHash=legacyValue===undefined?undefined:await hash(legacyValue),preparedHash=preparedValue===undefined?undefined:await hash(preparedValue);
   return this.transaction(['headers','bodies','receipts','sessions'],'readwrite',async tx=>{
    if((await request(tx.objectStore('sessions').get(intentScope)))?.revoked)fail('FENCED','Cached session was revoked');
    const receipts=tx.objectStore('receipts'),previous=await request(receipts.get([intentScope,owned.commandId])) as Receipt|undefined;
-   if(previous){if(previous.fingerprint!==fingerprint||legacyHash!==undefined&&previous.legacyHash!==legacyHash)fail('INTENT_CONFLICT','Safety journal command reused with different content');return previous;}
+   if(previous){if(previous.fingerprint!==fingerprint||legacyHash!==undefined&&previous.legacyHash!==legacyHash||preparedHash!==undefined&&previous.preparedHash!==preparedHash)fail('INTENT_CONFLICT','Safety journal command reused with different content');return previous;}
    const sequence=Number(await request(tx.objectStore('headers').add({scope:intentScope,command:owned.commandId,bytes})));
    if(!Number.isSafeInteger(sequence)||sequence<1)fail('FENCED','Safety journal sequence exhausted');
-   const receipt:Receipt={scope:intentScope,command:owned.commandId,hash:digest,fingerprint,sequence,settled:false,...(legacyHash===undefined?{}:{legacyHash})};
-   await request(tx.objectStore('bodies').add({sequence,value:encoded.value,...(legacyValue===undefined?{}:{legacyValue})}));await request(receipts.add(receipt));await request(tx.objectStore('sessions').put({scope:intentScope,value:sessionValue}));return receipt;
+   const receipt:Receipt={scope:intentScope,command:owned.commandId,hash:digest,fingerprint,sequence,settled:false,...(legacyHash===undefined?{}:{legacyHash}),...(preparedHash===undefined?{}:{preparedHash})};
+   await request(tx.objectStore('bodies').add({sequence,value:encoded.value,...(legacyValue===undefined?{}:{legacyValue}),...(preparedValue===undefined?{}:{preparedValue})}));await request(receipts.add(receipt));await request(tx.objectStore('sessions').put({scope:intentScope,value:sessionValue}));return receipt;
   });
  }
  async page(ownerScope:string,after=0,limit=8):Promise<SQLiteSafetyPage>{
@@ -88,8 +95,8 @@ export class SQLiteSafetyJournal {
    });
    const entries:SQLiteSafetyEntry[]=[],checks:Array<{value:string;hash:string}>=[];
    for(const header of headers){
-    const body=await request(tx.objectStore('bodies').get(header.sequence)) as {value:string;legacyValue?:string}|undefined;if(!body)fail('FENCED','Safety journal body is missing');
-    const size=decodedJSONBytes(body.value,131072)+(body.legacyValue===undefined?0:decodedJSONBytes(body.legacyValue,131072))+512;
+    const body=await request(tx.objectStore('bodies').get(header.sequence)) as {value:string;legacyValue?:string;preparedValue?:string}|undefined;if(!body)fail('FENCED','Safety journal body is missing');
+    const size=decodedJSONBytes(body.value,131072)+(body.legacyValue===undefined?0:decodedJSONBytes(body.legacyValue,131072))+(body.preparedValue===undefined?0:decodedJSONBytes(body.preparedValue,262144))+512;
     if(size!==header.bytes)fail('INTENT_CORRUPT','Safety journal body size differs');
     const invocation=JSON.parse(body.value) as SQLiteReducerInvocation;if(invocation.commandId!==header.command)fail('INTENT_CORRUPT','Safety journal identity differs');
     const receipt=await request(tx.objectStore('receipts').get([ownerScope,header.command])) as Receipt|undefined;if(!receipt||receipt.sequence!==header.sequence||receipt.settled)fail('INTENT_CORRUPT','Safety journal receipt differs');
@@ -97,7 +104,10 @@ export class SQLiteSafetyJournal {
     let legacy:ReducerOutboxEntry|undefined;
     if(body.legacyValue!==undefined){if(!receipt.legacyHash)fail('INTENT_CORRUPT','Legacy recovery hash is missing');checks.push({value:body.legacyValue,hash:receipt.legacyHash});legacy=JSON.parse(body.legacyValue);if(legacy!.idempotencyKey!==invocation.commandId||legacy!.path!==invocation.path)fail('INTENT_CORRUPT','Legacy recovery identity differs');}
     else if(receipt.legacyHash)fail('INTENT_CORRUPT','Legacy recovery body is missing');
-    entries.push({invocation,...(legacy===undefined?{}:{legacy})});
+    let prepared:SQLitePreparedReducer|undefined;
+    if(body.preparedValue!==undefined){if(!receipt.preparedHash)fail('INTENT_CORRUPT','Prepared recovery hash is missing');checks.push({value:body.preparedValue,hash:receipt.preparedHash});prepared=JSON.parse(body.preparedValue) as SQLitePreparedReducer;if(prepared.intent.idempotencyKey!==invocation.commandId||prepared.receipt.commandId!==invocation.commandId||prepared.intent.path!==invocation.path)fail('INTENT_CORRUPT','Prepared recovery identity differs');}
+    else if(receipt.preparedHash)fail('INTENT_CORRUPT','Prepared recovery body is missing');
+    entries.push({invocation,...(legacy===undefined?{}:{legacy}),...(prepared===undefined?{}:{prepared})});
    }
    const last=headers.at(-1)?.sequence??after,more=last===Number.MAX_SAFE_INTEGER?undefined:await request(index.getKey(this.ranges.bound([ownerScope,last],[ownerScope,Number.MAX_SAFE_INTEGER],true,false)));
    sqlitePayloadBytes(entries,262144);return {entries,nextSequence:more===undefined?null:last,checks};

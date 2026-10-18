@@ -1,7 +1,7 @@
 import type {JsonValue} from '@gonvex/protocol';
 import type {PortableReducerRuntime} from '@gonvex/local-runtime/portable';
 import type {SQLiteOwnerCaller,SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
-import {SQLiteReducerCore,SQLiteReducerPreparationRequiredError,type SQLiteReducerReceipt,type SQLiteReducerInvocation,type SQLiteReducerContext} from './sqlite-reducer-core.js';
+import {SQLiteReducerCore,SQLiteReducerPreparationRequiredError,type SQLiteReducerReceipt,type SQLiteReducerInvocation,type SQLiteReducerContext,type SQLitePreparedReducer} from './sqlite-reducer-core.js';
 import {SQLiteIntentJournal} from './sqlite-intent-journal.js';
 import {SQLitePredictions} from './sqlite-predictions.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
@@ -12,7 +12,7 @@ export type SQLiteReducerOwnerOptions={
  resolveTab(tabID:string):SQLiteTabAdmission;
  context(scope:string):Promise<SQLiteReducerContext>;
  /** Independent local recovery durability, before the SQLite intent commits. */
- persistIntent?(input:Readonly<SQLiteReducerInvocation>,context:SQLiteReducerContext):Promise<void>;
+ persistIntent?(input:Readonly<SQLiteReducerInvocation>,context:SQLiteReducerContext,prepared:SQLitePreparedReducer):Promise<void>;
 };
 export type SQLiteOwnerReducerCall={path:string;args:JsonValue;now:number;intentEntropy?:string};
 /** The native client program composes this endpoint with its authenticated
@@ -61,7 +61,7 @@ export class SQLiteReducerOwner {
    const current=this.admission(caller.tabID);
    if(current.scope!==admitted.scope||current.generation!==admitted.generation)fail('FENCED','Reducer caller session changed');
    const check=()=>{if(caller.signal.aborted)fail('FENCED','Reducer caller is detached');const current=this.admission(caller.tabID);if(current.scope!==admitted.scope||current.generation!==admitted.generation)fail('FENCED','Reducer caller session changed');};
-   const receipt=await this.core.invoke({scope:admitted.scope,path:owned.path,args:owned.args,now:owned.now,...(owned.intentEntropy===undefined?{}:{intentEntropy:owned.intentEntropy}),commandId:caller.requestID},async(input,context)=>{check();await this.options.persistIntent?.(input,context);check();});
+   const receipt=await this.core.invoke({scope:admitted.scope,path:owned.path,args:owned.args,now:owned.now,...(owned.intentEntropy===undefined?{}:{intentEntropy:owned.intentEntropy}),commandId:caller.requestID},async(input,context,prepared)=>{check();await this.options.persistIntent?.(input,context,prepared);check();});
    check();return receipt;
   });
  }
