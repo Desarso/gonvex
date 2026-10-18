@@ -54,6 +54,7 @@ it('imports encoded frames with deferred FTS using the pinned official WASM', as
   const { host } = fixture();
   const schema = { records: { key: '_id', fields: { _id: { kind: 'text' }, title: { kind: 'text' }, rank: { kind: 'number' } }, indexes: [{ columns: ['rank'] }], search: ['title'] } } as const;
   const engine = new SQLiteTypedReplicaEngine(host.database, schema); await engine.open('owner');
+  expect(engine.stats().binaryJSONFrames).toBe(1);
   await engine.importScope('fresh', (async function* () { yield JSON.stringify([{ table: 'records', id: 'r', version: 1, row: { _id: 'r', title: '東京 café', rank: 1 } }]); })());
   expect((await engine.page('fresh', { table: 'records', search: 'café', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows).toHaveLength(1);
 });

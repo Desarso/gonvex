@@ -46,6 +46,7 @@ export class SQLiteTypedReplicaEngine {
   private owner = '';
   private initialized = false;
   private windows?: SQLiteWindowStore;
+  private jsonEach: 'json_each' | 'jsonb_each' = 'json_each';
   private readonly profile = { frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
   takeProfile() { const result = { ...this.profile }; for (const key of Object.keys(this.profile) as Array<keyof typeof this.profile>) this.profile[key] = 0; return result; }
   constructor(private readonly db: SQLiteReplicaDatabase, readonly schema: SQLiteTypedSchema,
@@ -80,6 +81,18 @@ CREATE TABLE IF NOT EXISTS gv_scope_alias(scope TEXT PRIMARY KEY,physical TEXT N
 CREATE TABLE IF NOT EXISTS gv_bootstrap(scope TEXT PRIMARY KEY,token TEXT UNIQUE NOT NULL,physical TEXT NOT NULL,next_page INTEGER NOT NULL,rows INTEGER NOT NULL,root TEXT NOT NULL,base_sequence INTEGER NOT NULL,complete INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(token,page)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;`);
+        // Newer hosts can keep frame children binary instead of serializing
+        // every object to text and reparsing it for each extracted field.
+        // Built-in JSON modules register lazily, so pragma_module_list is not
+        // a capability inventory before first use. Probe the operation itself.
+        try {
+          const probe = await this.db.getFirstAsync<{ kind: string }>("SELECT typeof(value) kind FROM jsonb_each('[{}]')");
+          if (probe?.kind !== 'blob') throw new Error('Unexpected binary JSON table result');
+          this.jsonEach = 'jsonb_each';
+        } catch (error) {
+          if (!/no such table: jsonb_each/i.test(String((error as Error).message))) throw error;
+          this.jsonEach = 'json_each';
+        }
         const signature = JSON.stringify({ format: 4, tables: this.schema });
         const old = await this.db.getFirstAsync<{ schema: string; epoch: number }>('SELECT schema,epoch FROM gv_storage_meta WHERE id=1');
         // Format 4 adds an index-deferral journal. Format 3 has identical rows
@@ -219,12 +232,12 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
       await this.db.runAsync(`WITH input AS MATERIALIZED (
         SELECT CAST(key AS INTEGER) pos,jsonb_extract(value,'$.row') row,
           json_extract(value,'$.id') id,json_extract(value,'$.version') version
-        FROM json_each(jsonb(?)) WHERE json_extract(value,'$.table')=?
-      ) INSERT INTO ${tn}(${columns.map(q).join(',')})
-      SELECT ?,id,json(row),version,${values.concat((table.search ?? []).map((_, i) => `json_extract(?, '$[' || pos || '][${i}]')`)).join(',')}
-      FROM input WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND gv_tombstones.id=input.id AND gv_tombstones.version>=input.version)
+        FROM ${this.jsonEach}(jsonb(?)) WHERE json_extract(value,'$.table')=?
+      ), normalized AS MATERIALIZED (SELECT jsonb(?) value) INSERT INTO ${tn}(${columns.map(q).join(',')})
+      SELECT ?,id,json(row),version,${values.concat((table.search ?? []).map((_, i) => `json_extract(normalized.value, '$[' || pos || '][${i}]')`)).join(',')}
+      FROM input CROSS JOIN normalized WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND gv_tombstones.id=input.id AND gv_tombstones.version>=input.version)
       ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`,
-      encoded, entity, scope, ...(table.search ?? []).map(() => normalized), scope, entity);
+      encoded, entity, normalized, scope, scope, entity);
       this.profile.sqliteInsertMs += performance.now() - insertAt;
     }
   }
@@ -614,5 +627,5 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
   windowCollect(scope: string, signature: string, generation: string) {
     return this.membership({ scope, signature, generation }, (store, a) => store.collect(a.scope, a.signature, a.generation));
   }
-  stats() { return { pendingOperations: this.pending, pendingBytes: this.pendingBytes, epoch: this.epoch }; }
+  stats() { return { pendingOperations: this.pending, pendingBytes: this.pendingBytes, epoch: this.epoch, binaryJSONFrames: Number(this.jsonEach === 'jsonb_each') }; }
 }
