@@ -34,6 +34,7 @@ export interface SQLiteReplicaDatabase {
  * caller's existing transaction, never in a second database or cache. */
 export interface SQLiteReplicaRowLayout {
   install(database: SQLiteReplicaDatabase): Promise<void>;
+  readEntityRows?(database: SQLiteReplicaDatabase, scope: string, entity: string, ids: readonly string[], maxBytes: number): Promise<Array<{ id: string; value: string }>>;
   readVersions?(database: SQLiteReplicaDatabase, scope: string, entity: string, ids: readonly string[]): Promise<ReadonlyMap<string,number>>;
   readPage?(database: SQLiteReplicaDatabase, scope: string, read: import('@gonvex/module-sdk').DataRead, after?: string, excluded?: readonly string[], columns?: readonly string[]): Promise<import('./paged-read-view.js').ReplicaReadPage>;
   assertOwner?(database: SQLiteReplicaDatabase): Promise<void>;
@@ -371,6 +372,12 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     if(ids.length>128||!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>131072)fail('BUDGET','Invalid native entity page budget');
     await this.initialize();await this.rowLayout?.assertOwner?.(this.database);
     if(!ids.length)return [];
+    const typed = this.rowLayout?.readEntityRows;
+    if (typed) {
+      const records = await typed(this.database, scope, entity, ids, maxBytes);
+      const result = records.filter(record => record.value !== 'null').map(record => { decodedJSONBytes(record.value, maxBytes); return { id: record.id, row: JSON.parse(record.value) as ReplicaRow }; });
+      sqlitePayloadBytes(result, maxBytes); return result;
+    }
     const where=`scope=? AND entity=? AND id IN (${ids.map(()=>'?').join(',')})`,args=[scope,entity,...ids];
     const size=await this.database.getFirstAsync<{bytes:number}>(`SELECT coalesce(sum(length(CAST(value AS BLOB))*2+128),0) bytes FROM _gonvex_replica_entities WHERE ${where}`,...args);
     if(!size||size.bytes>maxBytes)fail('BUDGET','Native entity bodies exceed page budget');
@@ -390,12 +397,10 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     const result: Array<{ id: string; row: ReplicaRow }> = [];
     for (let offset = 0; offset < ids.length; offset += 256) {
       const batch = ids.slice(offset, offset + 256);
-      const rows = await this.database.getAllAsync<EntityRecord>(
-        `SELECT scope, entity, id, value FROM _gonvex_replica_entities WHERE scope = ? AND entity = ? AND id IN (${batch.map(() => "?").join(",")})`,
-        scope,
-        entity,
-        ...batch,
-      );
+      const rows = this.rowLayout?.readEntityRows
+        ? await this.rowLayout.readEntityRows(this.database, scope, entity, batch, 262144)
+        : await this.database.getAllAsync<EntityRecord>(
+          `SELECT scope, entity, id, value FROM _gonvex_replica_entities WHERE scope = ? AND entity = ? AND id IN (${batch.map(() => "?").join(",")})`, scope, entity, ...batch);
       const byId = new Map(rows.map((row) => [row.id, row]));
       for (const id of batch) {
         const row = byId.get(id);

@@ -46,9 +46,18 @@ export class SQLiteIndexedDBMigrationSource {
  stores(){if(this.closed)fail('FENCED','Migration source is closed');return Array.from(this.db.objectStoreNames).filter(name=>name!==markerStore);}
  private store(name:string){if(this.closed)fail('FENCED','Migration source is closed');if(name===markerStore||!this.db.objectStoreNames.contains(name))throw new TypeError('Unknown migration source store');return this.db.transaction(name,'readonly').objectStore(name);}
  count(store:string){return result(this.store(store).count());}
+ async get(store:string,key:IDBValidKey,maxBytes=65536){if(!Number.isSafeInteger(maxBytes)||maxBytes<1024||maxBytes>262144)throw new RangeError('Invalid legacy record budget');const value=await result(this.store(store).get(structuredClone(key)));if(value!==undefined)sqlitePayloadBytes(value,maxBytes);return value;}
+ private scopeRange(scope:string,after?:IDBValidKey){if(typeof scope!=='string'||!scope||scope.length>512)throw new TypeError('Invalid legacy replica scope');if(after!==undefined&&(!Array.isArray(after)||after[0]!==scope))throw new TypeError('Legacy continuation differs from its scope');return this.ranges.bound(after??[scope],[scope,[]],after!==undefined,true);}
+ countScope(store:string,scope:string){return result(this.store(store).count(this.scopeRange(scope)));}
+ /** Restrict by the compound primary key before cloning any values. An old
+  * giant window or another account's rows never enter this migration page. */
+ scopePage(store:string,scope:string,after?:IDBValidKey,limit=16,maxBytes=131072){return this.readPage(store,this.scopeRange(scope,after),limit,maxBytes);}
  async page(store:string,after?:IDBValidKey,limit=32,maxBytes=262144):Promise<SQLiteMigrationSourcePage>{
+  return this.readPage(store,after===undefined?undefined:this.ranges.lowerBound(structuredClone(after),true),limit,maxBytes);
+ }
+ private async readPage(store:string,range:IDBKeyRange|undefined,limit:number,maxBytes:number):Promise<SQLiteMigrationSourcePage>{
   if(!Number.isSafeInteger(limit)||limit<1||limit>128||!Number.isSafeInteger(maxBytes)||maxBytes<1024||maxBytes>262144)throw new TypeError('Invalid migration source page budget');
-  const range=after===undefined?undefined:this.ranges.lowerBound(structuredClone(after),true),source=this.store(store);
+  const source=this.store(store);
   return new Promise((resolve,reject)=>{
    const records:SQLiteMigrationSourcePage['records']=[];let bytes=64;const cursor=source.openCursor(range);
    cursor.onerror=()=>reject(cursor.error??Error('Migration source cursor failed'));

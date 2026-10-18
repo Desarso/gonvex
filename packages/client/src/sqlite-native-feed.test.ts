@@ -144,3 +144,7 @@ it('rebases predictions once for an entire completed authority group, including 
  let rebases=0;const f=await fixture({async authority(_scope,mutate){rebases++;await mutate();}});await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();rebases=0;
  f.transaction(12);f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:[],digest:await digest([changed,rows[1]])},1);await f.ready(12,[changed,rows[1]]);f.feed.frame({type:'replica.watermark',revision:12},1);await f.feed.assertReadable();expect(rebases).toBe(1);expect(f.failures).toEqual([]);expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0].row).toEqual(changed);expect(f.watermarks).toEqual([10,12]);
 });
+
+it('fences cached canonical rows after admission moves to a new database epoch, including offline reads',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();f.feed.authenticating('identity',2);await f.feed.session({...f.session,connectionGeneration:2,directive:{...f.session.directive,epoch:'replacement-epoch'}},()=>true);await expect(f.feed.assertReadable()).rejects.toMatchObject({code:'PAGE_CHANGED'});f.feed.disconnected();await expect(f.feed.assertReadable({scope:'visible',epoch:'replacement-epoch'})).rejects.toMatchObject({code:'PAGE_CHANGED'});expect(f.failures).toEqual([]);
+});

@@ -53,6 +53,10 @@ it('prepares lazy reducer chunks outside the owner queue and fences a changed ta
   let persisted!:()=>void,resume!:()=>void;const entered=new Promise<void>(resolve=>{persisted=resolve;});persistence={entered:persisted,wait:new Promise<void>(resolve=>{resume=resolve;})};
   const pendingCommit=request('clientCall',{...invocation,now:101},'fenced-during-persistence');await entered;generation='session-three';resume();expect((await pendingCommit).error.code).toBe('FENCED');expect((await endpoint.journal.summary('s')).count).toBe(1);expect((await endpoint.predictions.entities('s','records',['a']))[0].row.n).toBe(2);expect(sql.prepare('SELECT 1 FROM gv_reducer_invocations WHERE command_id=?').get('fenced-during-persistence')).toBeUndefined();
 
+  persistence=undefined;let enteredReply!:()=>void,releaseReply!:()=>void;const replyEntered=new Promise<void>(resolve=>{enteredReply=resolve;}),replyBarrier=new Promise<void>(resolve=>{releaseReply=resolve;}),write=owner.database.runAsync.bind(owner.database);
+  const held=vi.spyOn(owner.database,'runAsync').mockImplementation(async(query,...args)=>{const value=await write(query,...args);if(query.startsWith('INSERT INTO gv_reducer_reply_context')&&args[1]==='fenced-after-receipt'){enteredReply();await replyBarrier;}return value;});
+  const afterReceipt=request('clientCall',{...invocation,now:102},'fenced-after-receipt');await replyEntered;expect(sql.prepare('SELECT 1 FROM gv_reducer_invocations WHERE command_id=?').get('fenced-after-receipt')).toBeDefined();generation='session-four';releaseReply();expect((await afterReceipt).error.code).toBe('FENCED');held.mockRestore();expect(sql.prepare('SELECT 1 FROM gv_reducer_invocations WHERE command_id=?').get('fenced-after-receipt')).toBeUndefined();expect(sql.prepare('SELECT 1 FROM gv_reducer_reply_context WHERE command_id=?').get('fenced-after-receipt')).toBeUndefined();expect((await endpoint.journal.summary('s')).count).toBe(1);
+
   await dispose();
  }finally{await dispose();interval.mockRestore();vi.unstubAllGlobals();delete (globalThis as any).onmessage;sql.close();}
 });

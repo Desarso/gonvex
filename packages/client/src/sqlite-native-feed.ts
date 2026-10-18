@@ -62,6 +62,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  authenticating(intentScope:string,generation:number){this.stop();this.startBytes=0;this.options.sessions.authenticating(this.options.connection,intentScope,generation);for(const source of this.sources.values()){source.start=undefined;source.opening=true;source.deferredKey=crypto.randomUUID();}}
  async session(input:SQLiteTransportSession,isCurrent:()=>boolean){
   this.stop();if(!input.directive){await this.options.sessions.activate(this.options.connection,input,isCurrent);return;}
+  if(input.capabilities.replicaNativeRows!==1)throw Object.assign(Error('Server requires the legacy replica adapter'),{code:'UNSUPPORTED'});
   const {owner}=this.options;let state!:State;
   const ingress=new SQLiteNativeIngress({database:owner.database,snapshots:owner.snapshots,scope:input.directive.visibilityScope,reserve:this.options.reserve,
    runOwner:run=>this.run(state,524288,async()=>{await this.initialized;return run();}),
@@ -175,10 +176,11 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   const state=this.state;
   if(!state){
    if(!cached)fail('FENCED','Native feed unavailable');sqlitePayloadBytes(cached,4096);
-   await this.options.owner.runOwner(0,async()=>{await this.options.owner.engine.verifyOwner();const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',cached.scope,cached.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Cached feed requires reconciliation of its unfinished group');});return;
+   await this.options.owner.runOwner(0,async()=>{await this.options.owner.engine.verifyOwner();await this.readableEpoch(cached.scope,cached.epoch);const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',cached.scope,cached.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Cached feed requires reconciliation of its unfinished group');});return;
   }
-  await state.gate;await state.ingress.flush();await this.run(state,0,async()=>{if(await this.groups.pending(state.stream))fail('PAGE_CHANGED','Native feed awaits its terminal watermark');const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Native feed awaits its terminal watermark');});
+  await state.gate;await state.ingress.flush();await this.run(state,0,async()=>{await this.readableEpoch(state.scope,state.epoch);if(await this.groups.pending(state.stream))fail('PAGE_CHANGED','Native feed awaits its terminal watermark');const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Native feed awaits its terminal watermark');});
  }
+ private async readableEpoch(scope:string,epoch:string){const current=await this.options.owner.database.getFirstAsync<{value:string}>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='currentEpoch'",scope);if(current&&current.value!==epoch)fail('PAGE_CHANGED','Canonical rows need the newly admitted database epoch');}
  /** Only an authenticated registered source can select a pending disk stage.
   * This is display metadata, never a complete replica coverage certificate. */
  async pendingSource(id:string){const state=this.state;if(!state)return;await state.gate;await state.ingress.flush();this.check(state);const source=this.source(id);return source.start?{snapshot:source.start.snapshotId,subscription:source.id,entity:source.entity}:undefined;}

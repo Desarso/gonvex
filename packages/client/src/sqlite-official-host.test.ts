@@ -4,6 +4,8 @@ import {initializePinnedSQLite} from '../test/sqlite-wasm-host.mjs';
 import { officialSQLiteDatabase, openOfficialSQLiteHost } from './sqlite-official-host.js';
 import { sqliteSearchName, sqliteTableName, sqliteIdentifier as q } from './sqlite-typed-schema.js';
 import { SQLiteTypedReplicaEngine } from './sqlite-typed-engine.js';
+import { sqliteTypedReplicaStorage } from './sqlite-typed-row-layout.js';
+import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
 
 const sqlite3 = await initializePinnedSQLite();
 const databases: Database[] = [];
@@ -114,7 +116,9 @@ it('profiles native transaction boundaries using fixed numeric counters and rese
   for (const value of Object.values(result)) {
     for (const number of typeof value==='object'?Object.values(value):[value]) expect(Number.isFinite(number) && number >= 0).toBe(true);
   }
-  expect(host.takeProfile()).toEqual({ vfs:{viewHits:0,viewMisses:0,heapResets:0,maxViewEntries:0,numberReadCalls:0,numberWriteCalls:0,viewEntries:0,viewMaxEntries:4096}, execCalls:0,execMs:0,ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
+  const {sqlite: memory,...reset}=host.takeProfile();
+  expect(memory!.allocated).toBeGreaterThan(0);expect(memory!.peakAllocated).toBeGreaterThanOrEqual(memory!.allocated);
+  expect(reset).toEqual({ vfs:{viewHits:0,viewMisses:0,heapResets:0,maxViewEntries:0,numberReadCalls:0,numberWriteCalls:0,viewEntries:0,viewMaxEntries:4096}, execCalls:0,execMs:0,ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
   expect((await host.database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM profile_probe'))!.n).toBe(0);
 });
 
@@ -339,4 +343,28 @@ it('preserves embedded NUL and Unicode in raw text and private alias metadata in
  const schema={records:{key:'id',fields:{id:{kind:'text'},text:{kind:'text'}},indexes:[]}} as const,engine=new SQLiteTypedReplicaEngine(host.database,schema);await engine.open('nul-owner');await engine.beginBootstrap('s','one');const state=await engine.appendBootstrap('s','one',0,JSON.stringify([{table:'records',id:'r',version:1,row:{id:'r',text:value}}]));await engine.finishBootstrap('s','one',{pages:state.nextPage,rows:state.rows,root:state.root});
  expect((await engine.page('s',{table:'records',order:[{field:'id',direction:'asc'}],textOrder:'binary',select:['id','text'],limit:1})).rows).toEqual([{id:'r',text:value}]);
  const alias=await host.database.getFirstAsync<{physical:string}>('SELECT physical FROM gv_scope_alias WHERE scope=?','s');expect(alias!.physical).toBe(physical);expect((await host.database.getFirstAsync<{n:number}>('SELECT count(DISTINCT scope) n FROM '+q(sqliteTableName('records'))))!.n).toBe(1);
+});
+
+it('opens and reopens a full generated schema without returning its signature across the bounded bridge', async () => {
+  const { host } = fixture();
+  const schema: SQLiteTypedSchema = Object.fromEntries(Array.from({ length: 319 }, (_, i) => [`records${i}`, {
+    key: '_id', indexes: [], fields: { _id: { kind: 'text' }, ...Object.fromEntries(Array.from({ length: 16 }, (_, n) => [`generatedField${n}`, { kind: 'text' }])) },
+  }]));
+  const signature = JSON.stringify({ format: 6, tables: schema });
+  expect(signature.length * 2).toBeGreaterThan(262144);
+  const engine = new SQLiteTypedReplicaEngine(host.database, schema);
+  await engine.open('first');
+  await engine.apply('s', [{ table: 'records0', id: 'a', version: 1, row: { _id: 'a', generatedField0: 'retained' } }]);
+  await sqliteTypedReplicaStorage(host.database, schema).ready();
+  const reopened = new SQLiteTypedReplicaEngine(host.database, schema);
+  await reopened.open('second');
+  await sqliteTypedReplicaStorage(host.database, schema).ready();
+  expect((await reopened.page('s', { table: 'records0', textOrder: 'binary', order: [{ field: '_id', direction: 'asc' }], limit: 1 })).rows).toEqual([{ _id: 'a', generatedField0: 'retained' }]);
+  // Legacy signatures must pass the same bounded comparison, without a rewrite.
+  await host.database.runAsync('UPDATE gv_storage_meta SET schema=?', JSON.stringify({ format: 5, tables: schema }));
+  await host.database.runAsync('UPDATE gv_canonical_layout SET signature=?', JSON.stringify({ format: 5, schema }));
+  await sqliteTypedReplicaStorage(host.database, schema).ready();
+  await new SQLiteTypedReplicaEngine(host.database, schema).open('third');
+  await host.database.runAsync('UPDATE gv_storage_meta SET schema=?', JSON.stringify({ format: 6, tables: {} }));
+  await expect(new SQLiteTypedReplicaEngine(host.database, schema).open('incompatible')).rejects.toMatchObject({ code: 'SCHEMA_MISMATCH' });
 });

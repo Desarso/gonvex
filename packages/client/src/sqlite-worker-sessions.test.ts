@@ -92,3 +92,10 @@ it('restores a legacy session without an online timestamp for reads, with the ex
   const {lastOnlineAtMs:_,...legacy}=saved;await f.canonical.saveSession('identity\u0000a',legacy);expect(await f.registry.restore('one')).toBe(true);expect(f.registry.resolveTab('tab').scope).toBe('visible');expect(()=>f.registry.resolveTab('tab',true,6001)).toThrow('Offline editing window expired');
  }finally{f.close();}
 });
+
+it('imports a fenced cached session before network admission without refreshing its offline timestamp or admitting frames',async()=>{
+ const f=await fixture();try{expect(await f.registry.importCached('one',saved)).toBe(true);expect(await f.safety.session('identity\u0000a')).toEqual(saved);expect(await f.canonical.loadSession('identity\u0000a')).toEqual(saved);expect(await f.registry.restore('one')).toBe(true);expect(f.registry.resolveTab('tab',true,2000)).toMatchObject({online:false,scope:'visible'});expect(f.registry.admitsFrames('one',1)).toBe(false);expect(await f.registry.importCached('one',saved)).toBe(false);expect(()=>f.registry.resolveTab('tab',true,6001)).toThrow('expired');}finally{f.close();}
+});
+it('does not let cached migration revive revocation or overwrite a newer authoritative admission',async()=>{
+ const f=await fixture();try{await f.safety.revokeSession('identity\u0000a');expect(await f.registry.importCached('one',saved)).toBe(false);expect(await f.canonical.loadSession('identity\u0000a')).toBeUndefined();await f.registry.activate('one',{...admitted(),lastOnlineAtMs:3000},()=>true);expect(await f.registry.importCached('one',saved)).toBe(false);expect((await f.safety.session('identity\u0000a'))?.lastOnlineAtMs).toBe(3000);expect((await f.canonical.loadSession('identity\u0000a'))?.lastOnlineAtMs).toBe(3000);}finally{f.close();}
+});

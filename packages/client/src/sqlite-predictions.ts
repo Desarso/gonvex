@@ -112,7 +112,7 @@ export class SQLitePredictions {
  /** Coverage is established by the owner's authorized collection plans. Row
   * presence alone never grants a complete scan or missing-row conclusion. */
  async withReadView<T>(ownerScope:string,coverage:ReadCoverage,run:(view:ReducerReadView)=>Promise<T>):Promise<T>{
-  scope(ownerScope);sqlitePayloadBytes(coverage,65536);await this.ready();let result!:T;
+  scope(ownerScope);sqlitePayloadBytes(coverage,524288);await this.ready();let result!:T;
   await this.db.withTransactionAsync(async()=>{await this.fence();result=await run(pagedReplicaReadView(coverage,(read,after,excluded)=>readSQLitePortablePage(this.db,this.tables,ownerScope,read,after,excluded,coverage[read.table]?.columns,physical(ownerScope))));});return result;
  }
  /** Rebase clears only derived predictions. Intent bodies/receipts remain

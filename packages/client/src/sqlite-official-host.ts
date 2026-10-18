@@ -10,7 +10,7 @@ export type OfficialSQLiteHost = {
   readonly nativeHash:boolean;
   readonly nativeReceipt:boolean;
   readonly nativeSnapshot:boolean;
-  takeProfile(): { vfs?:Record<string,number>; ingressFoldCalls:number; ingressFoldUTF16Bytes:number; execMs:number;execCalls:number;prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
+  takeProfile(): { sqlite?:{allocated:number;peakAllocated:number;schema:number;cache:number;statements:number}; vfs?:Record<string,number>; ingressFoldCalls:number; ingressFoldUTF16Bytes:number; execMs:number;execCalls:number;prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
   close(): void;
 };
 
@@ -186,7 +186,18 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
       finally { transaction = false; }
     },
   };
+  function nativeMemory() {
+    check();
+    return sqlite3.wasm.scopedAllocCall(() => {
+      const current=sqlite3.wasm.scopedAlloc(4), high=sqlite3.wasm.scopedAlloc(4);
+      const {capi,wasm}=sqlite3;
+      if(capi.sqlite3_status(capi.SQLITE_STATUS_MEMORY_USED,current,high,0))throw Error('SQLite memory status unavailable');
+      const allocated=wasm.peek32(current),peakAllocated=wasm.peek32(high);
+      const read=(kind:1|2|3)=>{if(capi.sqlite3_db_status(db.pointer!,kind,current,high,0))throw Error('SQLite database status unavailable');return wasm.peek32(current);};
+      return {allocated,peakAllocated,schema:read(capi.SQLITE_DBSTATUS_SCHEMA_USED),cache:read(capi.SQLITE_DBSTATUS_CACHE_USED),statements:read(capi.SQLITE_DBSTATUS_STMT_USED)};
+    });
+  }
   return { database, nativeFastFold,nativeHash,nativeReceipt,nativeSnapshot, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes,
-    takeProfile() { const vfs=(sqlite3 as unknown as {__gonvexVFSProfile?:()=>Record<string,number>}).__gonvexVFSProfile?.();const result = { ...profile,...(vfs?{vfs}:{}) }; for (const key of Object.keys(profile) as Array<keyof typeof profile>) profile[key] = 0; return result; },
+    takeProfile() { const vfs=(sqlite3 as unknown as {__gonvexVFSProfile?:()=>Record<string,number>}).__gonvexVFSProfile?.();const result = { ...profile,sqlite:nativeMemory(),...(vfs?{vfs}:{}) }; for (const key of Object.keys(profile) as Array<keyof typeof profile>) profile[key] = 0; return result; },
     close() { if (!closed) { closed = true; for (const sql of statements.keys()) retire(sql); db.close(); } } };
 }

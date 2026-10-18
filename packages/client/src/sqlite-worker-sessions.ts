@@ -81,6 +81,21 @@ export class SQLiteWorkerSessions {
   // remain quarantined until activate publishes a durable online session.
   if(record.phase!=='authenticating')record.phase='offline';return true;
  }
+ /** Seed a fenced legacy cache only before this identity has any native
+  * session. The shared durability lane orders this against authoritative auth,
+  * and a revocation marker can never be revived by an old database. */
+ async importCached(id:string,input:LocalReplicaSession,isCurrent:()=>boolean=()=>true):Promise<boolean>{
+  const session=clone(input),bytes=this.validate(session),record=this.connection(id),revision=record.revision,intentScope=record.intentScope;key(intentScope,512);
+  if(record.phase!=='authenticating'||record.session)return false;
+  return this.persist(bytes,async()=>{
+   this.check(record,revision,isCurrent);if(record.phase!=='authenticating'||record.session)return false;
+   if(await this.options.safety.sessionRevoked(intentScope))return false;this.check(record,revision,isCurrent);
+   const saved=await this.options.safety.session(intentScope)??await this.options.runOwner(0,()=>this.options.canonical.loadSession(intentScope));this.check(record,revision,isCurrent);if(saved)return false;
+   const current=()=>this.current(record,revision,isCurrent)&&record.phase==='authenticating';
+   await this.options.safety.saveSession(intentScope,session,false,current);this.check(record,revision,isCurrent);
+   await this.options.runOwner(bytes,()=>this.options.database.withTransactionAsync(async()=>{await this.options.fence();this.check(record,revision,isCurrent);if(await this.options.canonical.loadSession(intentScope))fail('FENCED','A newer native session won cached migration');await this.options.canonical.saveSession(intentScope,session);this.check(record,revision,isCurrent);}));return true;
+  });
+ }
  async activate(id:string,input:SQLiteTransportSession,isCurrent:()=>boolean){
   sqlitePayloadBytes(input,65536);if(!Number.isSafeInteger(input.lastOnlineAtMs)||input.lastOnlineAtMs<0)throw new TypeError('Invalid authenticated session time');const record=this.connection(id),revision=record.revision;
   if(record.phase!=='authenticating'||input.connectionGeneration!==record.transportGeneration||input.intentScope!==record.intentScope)fail('FENCED','Obsolete worker session result');

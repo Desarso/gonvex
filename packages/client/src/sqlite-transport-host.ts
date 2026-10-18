@@ -5,6 +5,9 @@ export type SQLiteTransportSession={connectionGeneration:number;directive?:Repli
  * installs its owner host; IndexedDB/mobile use the existing client host.
  * Session authorization remains in GonvexClient's correlated auth machine. */
 export type SQLiteTransportHost={
+ /** Restore only the known identity cache while the socket is still opening.
+  * This cannot admit native frames or confer authoritative online status. */
+ opening?(intentScope:string,generation:number):void;
  /** Pause/attribute incoming replica frames before even an async token fetch. */
  authenticating(intentScope:string,generation:number):void;
  session(session:SQLiteTransportSession,isCurrent:()=>boolean):Promise<void>;

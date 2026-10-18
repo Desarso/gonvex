@@ -17,8 +17,6 @@ const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
  * relation is a SQL view, not a duplicate durable JSON corpus. Both Expo and
  * browser hosts use the same schema and authority merge implementation. */
 export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRowLayout {
-  const ddl = compileSQLiteTypedSchema(schema);
-  const signature = JSON.stringify({ format: 6, schema });
   let lease: { epoch: number; owner: string } | undefined;
   async function assertOwner(db: SQLiteReplicaDatabase) {
     const current = await db.getFirstAsync<{ epoch: number; owner: string; sequence: number }>('SELECT epoch,owner,sequence FROM gv_storage_meta WHERE id=1');
@@ -26,6 +24,22 @@ export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRo
     return current;
   }
   return {
+    async readEntityRows(db, scope, entity, ids, maxBytes) {
+      const table = Object.hasOwn(schema, entity) && schema[entity];
+      if (!table) throw new TypeError('Canonical read references an undeclared SQLite table');
+      if (!ids.length) return [];
+      if (ids.length > 256) throw new RangeError('Canonical entity read exceeds page budget');
+      const physical = await sqlitePhysicalEntityScope(db, scope, entity);
+      const body = sqliteRowBodySQL(table, 't');
+      const from = `${q(sqliteTableName(entity))} t WHERE t.scope=? AND t.id IN (${ids.map(() => '?').join(',')})`;
+      const args = [physical, ...ids];
+      const size = await db.getFirstAsync<{ bytes: number }>(`SELECT coalesce(sum(length(CAST(${body} AS BLOB))*2+length(t.id)*2+128),0) bytes FROM ${from}`, ...args);
+      if (!size || size.bytes > maxBytes) fail('BUDGET', 'Native entity bodies exceed page budget');
+      // Restrict to the generated physical table before preparing the plan.
+      // Expanding the all-table compatibility view for one row retains SQL
+      // plans proportional to the entire application schema.
+      return db.getAllAsync<{ id: string; value: string }>(`SELECT t.id,${body} value FROM ${from}`, ...args);
+    },
     async readVersions(db, scope, entity, ids) {
       if (!Object.hasOwn(schema, entity) || ids.length > 100) throw new RangeError('Invalid native authority page');
       if (!ids.length) return new Map();
@@ -41,6 +55,8 @@ export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRo
       await db.runAsync('UPDATE gv_storage_meta SET sequence=sequence+1 WHERE id=1');
     },
     async install(db) {
+      const ddl = compileSQLiteTypedSchema(schema);
+      const signature = JSON.stringify({ format: 6, schema });
       const flags = await db.getFirstAsync("SELECT name FROM sqlite_master WHERE type='table' AND name='gv_storage_flags'");
       if (flags && await db.getFirstAsync("SELECT value FROM gv_storage_flags WHERE name='bootstrap-indexes'")) throw new Error('Finish or abort the restartable bootstrap before installing the canonical adapter');
       const legacy = await db.getFirstAsync<{ type: string }>("SELECT type FROM sqlite_master WHERE name='_gonvex_replica_entities'");
@@ -50,8 +66,15 @@ CREATE TABLE IF NOT EXISTS gv_scope_alias(scope TEXT PRIMARY KEY,physical TEXT N
 ${sqliteEntityAliasSchema}
 CREATE INDEX IF NOT EXISTS gv_scope_alias_physical ON gv_scope_alias(physical);
 CREATE TABLE IF NOT EXISTS gv_canonical_tombstones(scope TEXT NOT NULL,entity TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(scope,entity,id)) WITHOUT ROWID;`);
-      const previous = await db.getFirstAsync<{ signature: string }>('SELECT signature FROM gv_canonical_layout WHERE id=1');
-      if (previous && previous.signature !== signature && previous.signature !== JSON.stringify({ format: 1, schema }) && previous.signature !== JSON.stringify({ format: 2, schema }) && previous.signature !== JSON.stringify({ format: 3, schema }) && previous.signature !== JSON.stringify({ format: 4, schema }) && previous.signature !== JSON.stringify({format:5,schema})) throw new Error('Typed canonical layout requires an explicit schema migration');
+      const previous = await db.getFirstAsync<{ matches: number }>('SELECT signature=? matches FROM gv_canonical_layout WHERE id=1', signature);
+      if (previous && !previous.matches) {
+        let compatible = false;
+        for (const format of [1, 2, 3, 4, 5]) {
+          const match = await db.getFirstAsync<{ matches: number }>('SELECT signature=? matches FROM gv_canonical_layout WHERE id=1', JSON.stringify({ format, schema }));
+          if (match?.matches) { compatible = true; break; }
+        }
+        if (!compatible) throw new Error('Typed canonical layout requires an explicit schema migration');
+      }
       await installSQLiteTypedBodyFence(db, schema);
       await db.execAsync('DROP TRIGGER IF EXISTS gv_canonical_delete; DROP VIEW IF EXISTS _gonvex_replica_entities;');
       await db.execAsync(sqliteNativeViewSchema);

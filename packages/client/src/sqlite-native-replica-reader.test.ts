@@ -8,10 +8,10 @@ import {SQLiteWindowStore} from './sqlite-window-store.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
 const schema={tasks:{key:'id',fields:{id:{kind:'text'},name:{kind:'text'}},indexes:[]}} as const;
 async function fixture(n=300,text='value'){
- const sql=new DatabaseSync(':memory:');let decodedBodies=0;
+ const sql=new DatabaseSync(':memory:');let decodedBodies=0,compatibilityReads=0;
  const db=sqliteOwnerTransactions({async execAsync(query){sql.exec(query);},async runAsync(query,...args){return sql.prepare(query).run(...args as any[]);},
  async getFirstAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).get(...args as any[]) as T??null;},
- async getAllAsync<T>(query:string,...args:unknown[]){const result=sql.prepare(query).all(...args as any[]) as T[];if(query.startsWith('SELECT scope,entity,id,value'))decodedBodies+=result.length;return result;},
+ async getAllAsync<T>(query:string,...args:unknown[]){const result=sql.prepare(query).all(...args as any[]) as T[];if(query.startsWith('SELECT scope,entity,id,value')||query.startsWith('SELECT t.id,'))decodedBodies+=result.length;if(query.includes('FROM _gonvex_replica_entities'))compatibilityReads++;return result;},
  async withTransactionAsync(run){sql.exec('BEGIN');try{await run();sql.exec('COMMIT');}catch(error){sql.exec('ROLLBACK');throw error;}}} satisfies SQLiteReplicaDatabase);
  const engine=new SQLiteTypedReplicaEngine(db,schema);await engine.open('reader');const canonical=sqliteTypedReplicaStorage(db,schema),windows=new SQLiteWindowStore(db,()=>engine.verifyOwner()),reader=new SQLiteNativeReplicaReader(db,canonical,engine);await reader.ready();
  const batch=Math.max(1,Math.min(50,Math.floor(100000/(text.length*2+1024))));
@@ -21,13 +21,14 @@ async function fixture(n=300,text='value'){
   let progress;for(let offset=0;offset<n;offset+=100)progress=await windows.append('s','collection',generation,offset/100,JSON.stringify({ids:Array.from({length:Math.min(100,n-offset)},(_,i)=>String(offset+i))}));
   await windows.publish('s','collection',progress!);
  }
- await publish('one');return {sql,db,engine,canonical,reader,publish,get decodedBodies(){return decodedBodies;}};
+ await publish('one');return {sql,db,engine,canonical,reader,publish,get decodedBodies(){return decodedBodies;},get compatibilityReads(){return compatibilityReads;}};
 }
 it('reads a bounded ordered native page, retaining tombstone slots without fetching the membership corpus',async()=>{
  const f=await fixture();try{
   await f.canonical.applyTransaction({cursor:{epoch:'e',revision:3},changes:[{entity:'tasks',id:'1',operation:'delete'},{entity:'tasks',id:'2',operation:'update',newValue:{id:'2',name:'newer'}}]},{entities:{},liveQueries:{}},'s');
   const before=f.decodedBodies;const first=await f.reader.window({scope:'s',signature:'collection',limit:3});
-  expect(first).toMatchObject({window:{generation:'one',total:300},offset:0,nextOffset:3,rows:[{id:'0',value:{id:'0',name:'value'}},{id:'1',value:null},{id:'2',value:{id:'2',name:'newer'}}]});expect(f.decodedBodies-before).toBe(3); // Two bodies and one SQL tombstone, never the 300-member corpus.
+  expect(first).toMatchObject({window:{generation:'one',total:300},offset:0,nextOffset:3,rows:[{id:'0',value:{id:'0',name:'value'}},{id:'1',value:null},{id:'2',value:{id:'2',name:'newer'}}]});expect(f.decodedBodies-before).toBe(2); // Only two live bodies, never the tombstone or the 300-member corpus.
+  expect(f.compatibilityReads).toBe(0); // A point read never expands the full-schema compatibility view.
   const next=await f.reader.window({scope:'s',signature:'collection',generation:'one',offset:3,limit:3,expected:first!.generation});expect(next!.rows.map(row=>row.id)).toEqual(['3','4','5']);
   await expect(f.reader.window({scope:'s',signature:'collection',offset:3})).rejects.toThrow('generation');
   await f.publish('two');await expect(f.reader.window({scope:'s',signature:'collection',generation:'one',offset:3})).rejects.toMatchObject({code:'PAGE_CHANGED'});

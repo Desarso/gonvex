@@ -169,3 +169,30 @@ it('durably queues missing-coverage commands without a fabricated result or part
   expect(await core.rebase('s')).toMatchObject({retained:1,replayed:0});expect(f.calls).toBe(1);expect(await core.invoke(input)).toEqual(receipt);expect((await f.journal.readyBatch('s',1000)).map(entry=>entry.idempotencyKey)).toEqual([input.commandId]);
  }finally{f.sql.close();}
 });
+
+it('does not reset every typed prediction table during first sync when there are no intents or predictions',async()=>{
+ const f=await fixture();try{const reset=vi.spyOn(f.predictions,'reset');expect(await f.core.rebase('s',async()=>{await f.canonical.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{id:'a',n:2}}]},{entities:{},liveQueries:{}},'s');})).toMatchObject({replayed:0,retained:0});expect(reset).not.toHaveBeenCalled();expect((await f.canonical.loadEntityRows('s','tasks',['a']))[0].row.n).toBe(2);}finally{f.sql.close();}
+});
+
+it('keeps prepared commands queueable across an artifact or permission change without exposing stale predictions or replies',async()=>{
+ const before=await fixture(),after=await fixture();try{
+  const input={scope:'s',path:'increment',commandId:'updated-artifact',now:100,args:{id:'a'}};let prepared!:SQLitePreparedReducer;await before.core.invoke(input,async(_input,_context,value)=>{prepared=structuredClone(value);});
+  const changed=new SQLiteReducerCore({...after.options,artifactHash:'new-artifact',async context(){return {intentScope:'s',identity:{...identity,member:{...identity.member,permissions:{tasks:false}}},coverage:{}};},runtime:{isPrepared:()=>false,prepare:async()=>{throw Error('old module unavailable');},execute:async()=>{throw Error('must not execute');}}});
+  const receipt=await changed.recover(input,prepared);expect(receipt).toMatchObject({queuedOnly:true,result:null});expect((await after.predictions.entities('s','tasks',['a']))[0].row.n).toBe(1);expect((await after.journal.page('s')).entries[0]).toMatchObject({patches:[],localExecution:{artifactHash:'artifact'},sentAt:100});expect(await changed.rebase('s')).toMatchObject({retained:1,replayed:0});expect(await changed.invoke(input)).toEqual(receipt);
+  const differentAccount=new SQLiteReducerCore({...after.options,async context(){return {intentScope:'s',identity:{...identity,auth:{account:{id:'another-account'}}},coverage:{}};}});await expect(differentAccount.recover(input,prepared)).rejects.toMatchObject({code:'FENCED'});expect((await after.journal.summary('s')).count).toBe(1);
+ }finally{before.sql.close();after.sql.close();}
+});
+it('restores a migrated legacy intent in place with its stable IDs and unknown-send fence, without inventing an original local result',async()=>{
+ const f=await fixture();try{
+  const input={scope:'s',path:'increment',commandId:'legacy-command',now:100,args:{id:'a'}},legacy={id:77,scope:'s',path:input.path,args:input.args,idempotencyKey:input.commandId,entityKeys:[],patches:[{entity:'tasks',rowId:'a',op:'patch' as const,fields:{n:2}}],localExecution:{scope:'s',commandId:input.commandId,now:100,artifactHash:'artifact',identity},createdAt:101,attempts:2,nextAttemptAt:200,state:'inflight' as const,sentAt:150};
+  const {id:_,...draft}=legacy,migrated=await f.journal.append({...draft,state:'pending'});const receipt=await f.core.recoverLegacy(input,legacy);expect(receipt).toMatchObject({queuedOnly:true,result:null,commandId:input.commandId});expect(f.calls).toBe(0);expect((await f.journal.page('s')).entries).toHaveLength(1);expect((await f.journal.page('s')).entries[0]).toMatchObject({id:migrated.id,idempotencyKey:input.commandId,sentAt:150,createdAt:101,state:'pending'});expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(2);expect(await f.core.recoverLegacy(input,legacy)).toEqual(receipt);expect(await f.core.invoke(input)).toEqual(receipt);expect(f.calls).toBe(0);
+ }finally{f.sql.close();}
+});
+
+it('redacts an existing original reply after permission change while retaining it for its original admitted context',async()=>{
+ const f=await fixture();try{
+  const input={scope:'s',path:'increment',commandId:'permission-context',now:100,args:{id:'a'}};let prepared!:SQLitePreparedReducer;const original=await f.core.invoke(input,async(_input,_context,value)=>{prepared=structuredClone(value);});
+  const changed=new SQLiteReducerCore({...f.options,async context(){return {intentScope:'s',identity:{...identity,member:{...identity.member,permissions:{tasks:false}}},coverage:{}};}});expect(await changed.invoke(input)).toMatchObject({queuedOnly:true,result:null});expect(await changed.recover(input,prepared)).toMatchObject({queuedOnly:true,result:null});await changed.rebase('s');expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(1);expect((await f.journal.page('s')).entries[0]).toMatchObject({patches:[],sentAt:100});
+  expect(await f.core.invoke(input)).toEqual(original);expect(JSON.parse((await f.db.getFirstAsync<{receipt:string}>('SELECT receipt FROM gv_reducer_invocations'))!.receipt)).toEqual(original);expect(f.calls).toBe(1);
+ }finally{f.sql.close();}
+});

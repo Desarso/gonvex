@@ -1881,6 +1881,7 @@ export class GonvexClient {
     const isReconnect = this.socket !== undefined;
     this.manuallyClosed = false;
     const generation = ++this.socketGeneration;
+    if(this.ownerHost?.opening)try{this.ownerHost.opening(this.outboxScope,generation);}catch(error){this.ownerHost.failed(error);return;}
     let transportUrl = this.url;
     if (this.publicTenant) {
       const publicUrl = new URL(this.url);

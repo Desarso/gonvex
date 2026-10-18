@@ -98,6 +98,10 @@ export class SQLiteIntentJournal {
   await this.db.withTransactionAsync(async()=>{await this.fence();const entries=await this.select('SELECT id,length(CAST(value AS BLOB))*2+128 bytes FROM gv_reducer_journal WHERE scope=? AND id>? ORDER BY id LIMIT ?',[ownerScope,after,limit]);
    const last=entries.at(-1)?.id??after,more=await this.db.getFirstAsync('SELECT 1 FROM gv_reducer_journal WHERE scope=? AND id>? LIMIT 1',ownerScope,last);result={entries,nextId:more?last:null};});return result;
  }
+ async find(ownerScope:string,command:string):Promise<ReducerOutboxEntry|undefined>{
+  scope(ownerScope);if(typeof command!=='string'||!command||command.length>256)throw new TypeError('Invalid intent command');await this.ready();let entry:ReducerOutboxEntry|undefined;
+  await this.db.withTransactionAsync(async()=>{await this.fence();entry=(await this.select('SELECT id,length(CAST(value AS BLOB))*2+128 bytes FROM gv_reducer_journal WHERE scope=? AND intent_key=?',[ownerScope,command]))[0];});return entry;
+ }
  async readyBatch(ownerScope:string,now:number,limit=8):Promise<ReducerOutboxEntry[]>{
   scope(ownerScope);this.limits(limit);if(!Number.isSafeInteger(now)||now<0)throw new TypeError('Invalid intent scheduling time');await this.ready();let result!:ReducerOutboxEntry[];
   await this.db.withTransactionAsync(async()=>{await this.fence();result=await this.select(`SELECT c.id,length(CAST(c.value AS BLOB))*2+128 bytes FROM gv_reducer_journal c INDEXED BY gv_reducer_journal_scope WHERE c.scope=? AND ${ready} ORDER BY c.id LIMIT ?`,[ownerScope,now,limit]);});return result;
