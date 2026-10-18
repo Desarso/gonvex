@@ -16,7 +16,7 @@ export class SQLiteReducerPreparationRequiredError extends Error {
 export type SQLiteReducerReceipt={intentId:number;commandId:string;result:JsonValue;queuedOnly?:true;originalGeneration:{epoch:number;sequence:number}};
 export type SQLitePreparedReducer={intent:ReducerOutboxEntry;receipt:SQLiteReducerReceipt};
 export type SQLiteReducerRecoveryContext=Pick<SQLiteReducerContext,'identity'|'intentScope'>;
-export type SQLiteReducerContext={identity:LocalExecution['identity'];coverage:ReadCoverage;intentScope:string};
+export type SQLiteReducerContext={identity:LocalExecution['identity'];coverage:ReadCoverage;intentScope:string;predictionBlocked?:boolean};
 type Options={
  database:SQLiteReplicaDatabase;engine:SQLiteTypedReplicaEngine;journal:SQLiteIntentJournal;predictions:SQLitePredictions;
  runtime:Pick<PortableReducerRuntime,'execute'|'prepare'|'isPrepared'>;artifactHash:string;
@@ -54,17 +54,17 @@ export class SQLiteReducerCore {
   // Retain only admitted known envelope fields. Arbitrary extra fields cannot
   // become identity, execution metadata or a different retry fingerprint.
   const encoded=JSON.stringify({scope:input.scope,path:input.path,commandId:input.commandId,args:input.args,now:input.now,...(input.intentEntropy===undefined?{}:{intentEntropy:input.intentEntropy})}),owned=JSON.parse(encoded) as SQLiteReducerInvocation;
-  await this.ready();let receipt:SQLiteReducerReceipt|undefined,hash='',intentScope='';
+  await this.ready();let receipt:SQLiteReducerReceipt|undefined,hash='',intentScope='',predictionBlocked=false;
   // A durable same-command reply remains available offline even when the
   // corresponding lazy reducer module has not been cached in this worker.
-  await this.options.database.withTransactionAsync(async()=>{await this.options.engine.verifyOwner();const captured=await this.context(owned.scope);intentScope=captured.intentScope;hash=await digest(JSON.stringify({...owned,scope:intentScope}));receipt=await this.stored(intentScope,owned.commandId,hash,captured,owned.scope);});
-  if(receipt)return receipt;if(!this.options.runtime.isPrepared(owned.path))throw new SQLiteReducerPreparationRequiredError(owned.path);
+  await this.options.database.withTransactionAsync(async()=>{await this.options.engine.verifyOwner();const captured=await this.context(owned.scope);intentScope=captured.intentScope;predictionBlocked=!!captured.predictionBlocked;hash=await digest(JSON.stringify({...owned,scope:intentScope}));receipt=await this.stored(intentScope,owned.commandId,hash,captured,owned.scope);});
+  if(receipt)return receipt;if(!predictionBlocked&&!this.options.runtime.isPrepared(owned.path))throw new SQLiteReducerPreparationRequiredError(owned.path);
   await this.options.database.withTransactionAsync(async()=>{
    const generation=await this.options.engine.verifyOwner(),captured=await this.context(owned.scope);if(captured.intentScope!==intentScope)fail('FENCED','Reducer durable identity changed');
    const old=await this.stored(intentScope,owned.commandId,hash,captured,owned.scope);if(old){receipt=old;return;}
    const execution:LocalExecution={scope:owned.scope,commandId:owned.commandId,now:owned.now,artifactHash:this.options.artifactHash,identity:structuredClone(captured.identity),...(owned.intentEntropy===undefined?{}:{intentEntropy:owned.intentEntropy})};
    let transaction:LocalTransactionResult|undefined;
-   try{transaction=await this.options.predictions.withReadView(owned.scope,captured.coverage,view=>this.options.runtime.execute(owned.path,owned.args,view,execution));}
+   try{if(!captured.predictionBlocked)transaction=await this.options.predictions.withReadView(owned.scope,captured.coverage,view=>this.options.runtime.execute(owned.path,owned.args,view,execution));}
    catch(error){if(!(error instanceof Error&&(error.name==='IncompleteReplicaError'||'code' in error&&error.code==='replica-read-budget')))throw error;}
    if(transaction)sqlitePayloadBytes(transaction,262144);
    // Missing coverage is an explicit queued-only command, never an invented
@@ -136,7 +136,7 @@ export class SQLiteReducerCore {
      // A recovered pending delivery may already have committed on the server.
      // Its first-send fence survives recovery/backoff; executing its body again
      // over that canonical commit would predict the same intent twice.
-     if(entry.localExecution&&!entry.entityKeys.includes('__gonvex_local_intents')&&entry.sentAt===undefined&&entry.state!=='inflight'&&entry.state!=='committed'){
+     if(!captured.predictionBlocked&&entry.localExecution&&!entry.entityKeys.includes('__gonvex_local_intents')&&entry.sentAt===undefined&&entry.state!=='inflight'&&entry.state!=='committed'){
       if(!this.options.runtime.isPrepared(entry.path))throw new SQLiteReducerPreparationRequiredError(entry.path);
       const execution:LocalExecution={...entry.localExecution,scope,identity:structuredClone(captured.identity),artifactHash:this.options.artifactHash};
       let readFailure:{error:unknown}|undefined;

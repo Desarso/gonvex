@@ -37,7 +37,7 @@ it('serializes last-watch cancellation with a new lease and preserves pinned pag
  const before=replacement.snapshot().page;f.handler=async input=>input.method==='replicaPage'?{rows:[{id:'giant',value:{text:'x'.repeat(150000)}}]}:undefined;await expect(replacement.page()).rejects.toMatchObject({code:'BUDGET'});expect(replacement.snapshot().page).toBe(before);expect(f.client.budgets().every(value=>value.bytes<=value.maxBytes)).toBe(true);
 });
 it('bounds requests before waiting for a connection and preserves the caller command ID for immutable retries',async()=>{
- const f=fixture();await f.client.connect();const args={id:'a'};const result=await f.client.reducer({path:'tasks/change'},args,{commandId:'stable-command',now:100});expect(result.commandId).toBe('stable-command');expect(f.calls.find(call=>call.input.method==='reducer')?.requestID).toBe('stable-command');expect(()=>f.client.reducer({path:'tasks/change'},{},{commandId:'stable-command'})).toThrow('original invocation time');
+ const f=fixture();await f.client.connect();const args={id:'a'};const result=await f.client.invokeReducer({path:'tasks/change'},args,{commandId:'stable-command',now:100});expect(result.commandId).toBe('stable-command');expect(f.calls.find(call=>call.input.method==='reducer')?.requestID).toBe('stable-command');expect(()=>f.client.invokeReducer({path:'tasks/change'},{},{commandId:'stable-command'})).toThrow('original invocation time');
  let release!:()=>void;const waiting=new Promise<void>(resolve=>{release=resolve;});f.handler=async input=>{if(input.method==='query'){await waiting;return null;}};const pending=Array.from({length:16},()=>f.client.query({path:'bounded'}));await expect(f.client.query({path:'excess'})).rejects.toMatchObject({code:'BUDGET'});release();await Promise.all(pending);expect(f.client.budgets().find(value=>value.name==='browser-request-admission')?.bytes).toBe(0);
 });
 
@@ -65,4 +65,12 @@ it('updates the main-thread token provider without cloning a function to the own
 it('waits for correlated authoritative authentication, rejects superseded waiters and cancels on close',async()=>{
  const f=fixture();let authentication='authenticating';f.handler=async input=>{if(input.method==='controls')return {tokens:[],status:{isWebSocketConnected:true},authentication,session:'unavailable',failure:null};};const first=f.client.authenticate({token:'first'});void first.catch(()=>{});await vi.waitFor(()=>expect(f.calls.some(call=>call.input.method==='auth')).toBe(true));const second=f.client.authenticate({token:'second'});void second.catch(()=>{});await expect(first).rejects.toMatchObject({code:'superseded'});authentication='authenticated';f.change();await expect(second).resolves.toBeUndefined();expect(f.client.localSessionState()).toBe('unavailable');
  authentication='authenticating';const closing=f.client.authenticate({token:'third'});void closing.catch(()=>{});await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='auth')).toHaveLength(3));f.client.close();await expect(closing).rejects.toMatchObject({code:'closed'});
+});
+
+it('keeps reducer receipts internal while returning the public local result or queued outcome',async()=>{
+ const f=fixture(),ref={kind:'reducer' as const,path:'tasks/change'};expect(await f.client.reducer(ref,{id:'a'})).toBe(2);f.handler=async input=>{if(input.method==='reducer')return {commandId:'queued-command',result:null,queuedOnly:true};};expect(await f.client.reducer(ref,{})).toEqual({status:'queued',reducerId:'queued-command'});
+});
+
+it('preserves an already displayed first page while its pending stage becomes canonical',async()=>{
+ const f=fixture(),watch=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>watch.close());const first=await watch.page();expect(await watch.pendingPage()).toBeNull();expect(watch.snapshot().page).toBe(first);
 });
