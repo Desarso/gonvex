@@ -27,6 +27,10 @@
     "./sqlite-module": {
       "types": "./dist/vendor/sqlite3.d.mts",
       "default": "./dist/vendor/sqlite3.mjs"
+    },
+    "./sqlite/storage": {
+      "types": "./dist/broker-sqlite-storage.d.ts",
+      "default": "./dist/broker-sqlite-storage.js"
     }
   },
   "types": "./dist/index.d.ts",

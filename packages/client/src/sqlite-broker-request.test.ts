@@ -5,7 +5,7 @@ import { SQLiteReplicaBroker } from './sqlite-broker.js';
 // replaced at its boundary; real multi-tab tests cover the actual transports.
 function client() {
   const broker = Object.assign(Object.create(SQLiteReplicaBroker.prototype), {
-    closed: false, failed: false, pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
+    closed: false, failed: false, changeListeners:new Set(), pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
     send: vi.fn((call: any) => {
       clearTimeout(call.timer); broker.pending.delete(call.id); broker.pendingBytes -= call.bytes;
       call.resolve({ accepted: call.op, args: call.args });
@@ -49,4 +49,15 @@ it('accepts actual progress only from the current ready worker without settling 
     expect(generation.lastProgress).toBe(2800); expect(broker.announce).toHaveBeenCalledTimes(2);
     expect(broker.pending.size).toBe(0);
   } finally { now.mockRestore(); }
+});
+
+it('bounds change subscriptions and releases their retained listeners',()=>{
+  const broker=client() as any;broker.options={};const calls:number[]=[];
+  const release=broker.subscribeChanges((_scope:string,sequence:number)=>calls.push(sequence));
+  broker.subscribeChanges(()=>{throw Error('observer');});
+  broker.receiveControl({protocol:1,type:'change',scope:'s',sequence:3});expect(calls).toEqual([3]);
+  release();broker.receiveControl({protocol:1,type:'change',scope:'s',sequence:4});expect(calls).toEqual([3]);
+  const releases=Array.from({length:63},()=>broker.subscribeChanges(()=>{}));
+  expect(()=>broker.subscribeChanges(()=>{})).toThrow('listener budget');
+  for(const close of releases)close();expect(broker.stats().listeners).toBe(1);
 });

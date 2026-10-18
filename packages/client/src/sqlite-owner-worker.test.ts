@@ -26,8 +26,7 @@ it('routes restartable first-sync frames through the real owner queue and publis
   try {
     await import('./sqlite-owner-worker.js');
     interval.mockRestore();
-    const request = (op: string, args: unknown) => new Promise<any>(resolve => {
-      const key = String(++id); awaiting.set(key, resolve);
+    const request = (op: string, args: unknown, key=String(++id)) => new Promise<any>(resolve => { awaiting.set(key, resolve);
       (globalThis as any).onmessage({ data: { id: key, op, args } });
     });
     const schema = { tasks: { key: '_id', fields: { _id: { kind: 'text' }, name: { kind: 'text' } }, indexes: [], search: ['name'], counts: [{ columns: ['name'] }] } };
@@ -51,6 +50,18 @@ it('routes restartable first-sync frames through the real owner queue and publis
     expect((await request('page', { scope: 's', plan: { table: 'tasks', order: [{ field: '_id', direction: 'asc' }], textOrder: 'binary', limit: 2, search: 'needle' } })).value.rows.map((row: any) => row._id)).toEqual(['a']);
     expect((await request('bootstrapFinish', { scope: 's', token: 'first', expected })).value.complete).toBe(true);
     expect((await request('count', { scope: 's', entity: 'tasks', group: 0, values: ['Needle'] })).value).toBe(1);
+    const canonicalPage={scope:'s',method:'readViewPage',args:['s','grid',{table:'tasks',order:[{field:'_id',direction:'asc'}],textOrder:'binary',limit:2},0]};
+    expect((await request('canonicalCall',canonicalPage)).value.value.rows[0].name).toBe('Needle');
+    const published=changes.length;
+    const canonicalWrite={scope:'s',method:'applyTransaction',args:[{cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{name:'Updated needle'}}]},{entities:{},liveQueries:{}},'s']};
+    const write=request('canonicalCall',canonicalWrite,'canonical-retry');
+    const following=request('page',{scope:'s',plan:{table:'tasks',order:[{field:'_id',direction:'asc'}],textOrder:'binary',limit:2,search:'updated'}});
+    const committed=await write;
+    expect(committed.error).toBeUndefined();expect((await following).value.rows[0].name).toBe('Updated needle');
+    expect((await request('canonicalCall',canonicalWrite,'canonical-retry')).value).toEqual(committed.value);
+    const generation=(await request('canonicalGeneration',{scope:'s'})).value;
+    expect((await request('canonicalRead',{scope:'s',expected:generation,coverage:{tasks:{key:'_id',complete:true}},read:{table:'tasks',where:{column:'name',op:'eq',value:'Updated needle'}}})).value.value.rows[0].name).toBe('Updated needle');
+    expect(changes.length).toBe(published+2); // Two deliveries, one durable write.
   } finally {
     interval.mockRestore(); vi.unstubAllGlobals(); delete (globalThis as any).onmessage; db.close();
   }

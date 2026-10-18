@@ -1,4 +1,7 @@
-import { sqliteWorkerOperations as publicOperations, sqlitePublishingOperations } from './sqlite-worker-protocol.js';
+import {SQLiteCanonicalDispatcher} from './sqlite-canonical-dispatch.js';
+import {sqliteTypedReplicaStorage} from './sqlite-typed-row-layout.js';
+import {sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
+import { sqliteWorkerOperations as publicOperations, sqliteOperationPublishes } from './sqlite-worker-protocol.js';
 import { openOfficialSQLiteHost, type OfficialSQLiteHost } from './sqlite-official-host.js';
 import { SQLiteTypedReplicaEngine, sqlitePayloadBytes, type SQLiteTypedWrite } from './sqlite-typed-engine.js';
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
@@ -7,6 +10,7 @@ import type { SQLitePagePlan } from './sqlite-typed-query.js';
 // Dedicated worker entry. The broker is the only producer. OPFS initialization
 // is lazy and occurs only after the tab has acquired the origin ownership lock.
 let host: OfficialSQLiteHost | undefined, engine: SQLiteTypedReplicaEngine | undefined;
+let canonical:SQLiteCanonicalDispatcher|undefined;
 let lane = Promise.resolve(), operations = 0, bytes = 0;
 const ports = new Map<string, { port: MessagePort; seen: number; token: string }>();
 
@@ -17,13 +21,15 @@ function scope(value: unknown): string {
   if (typeof value !== 'string' || !value || value.length > 512) throw new TypeError('Invalid storage scope');
   return value;
 }
-async function execute(op: string, args: any) {
+async function execute(op: string, args: any, requestID:string) {
   if (op === 'open') {
     if (host || args?.protocol !== 1) throw Object.assign(new Error('Incompatible storage worker protocol'), { code: 'PROTOCOL' });
     try {
       host = await openOfficialSQLiteHost();
-      engine = new SQLiteTypedReplicaEngine(host.database, args.schema as SQLiteTypedSchema, undefined, { onProgress: () => globalThis.postMessage({ type: 'progress', sentAt: Date.now() }) });
+      const database=sqliteOwnerTransactions(host.database);
+      engine = new SQLiteTypedReplicaEngine(database, args.schema as SQLiteTypedSchema, undefined, { onProgress: () => globalThis.postMessage({ type: 'progress', sentAt: Date.now() }) });
       const epoch = await engine.open(args.owner);
+      canonical=new SQLiteCanonicalDispatcher(database,sqliteTypedReplicaStorage(database,engine.schema),engine);
       return { epoch, wasmBytes: host.memoryBytes() };
     } catch (e) {
       host?.close(); host = undefined; engine = undefined;
@@ -35,6 +41,9 @@ async function execute(op: string, args: any) {
   }
   if (!host || !engine) throw Object.assign(new Error('Storage owner is not ready'), { code: 'FENCED' });
   switch (op) {
+    case 'canonicalCall': return canonical!.call(requestID,args);
+    case 'canonicalRead': return canonical!.read(args);
+    case 'canonicalGeneration': return canonical!.generation(scope(args.scope),args.expected);
     case 'ping': return { ready: true };
     case 'stats': return { ...engine.stats(), wasmBytes: host.memoryBytes(), clients: ports.size };
     case 'integrity': return engine.integrity();
@@ -76,9 +85,9 @@ function admit(data: any, peer?: { port: MessagePort; token: string }, tab?: str
   operations++; bytes += size;
   const run = lane.then(async () => {
     try {
-      const value = await execute(data.op, data.args);
+      const value = await execute(data.op, data.args, data.id);
       reply(data.id, value, undefined, peer, tab);
-      if (sqlitePublishingOperations.has(data.op) && typeof data.args.scope === 'string') {
+      if (sqliteOperationPublishes(data.op,data.args) && typeof data.args.scope === 'string') {
         const change = { type: 'change', protocol: 1, scope: data.args.scope, sequence: (value as {sequence?: number}).sequence ?? 0 };
         globalThis.postMessage(change);
         for (const p of ports.values()) p.port.postMessage(change);

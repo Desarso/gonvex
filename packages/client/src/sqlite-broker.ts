@@ -1,4 +1,4 @@
-import { sqliteWorkerOperations as publicOperations, sqlitePublishingOperations } from './sqlite-worker-protocol.js';
+import { sqliteWorkerOperations as publicOperations, sqliteOperationPublishes } from './sqlite-worker-protocol.js';
 import { sqlitePayloadBytes } from './sqlite-typed-engine.js';
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
 
@@ -33,6 +33,8 @@ export class SQLiteReplicaBroker {
   readonly tabID = crypto.randomUUID();
   private readonly control = new BroadcastChannel(controlName);
   private readonly replies = new BroadcastChannel(controlName + ':reply:' + this.tabID);
+  private readonly changeListeners=new Set<(scope:string,sequence:number)=>void>();
+  subscribeChanges(listener:(scope:string,sequence:number)=>void):()=>void{if(this.changeListeners.size>=64)throw error('BUDGET','Storage change listener budget exceeded');this.changeListeners.add(listener);return ()=>{this.changeListeners.delete(listener);};}
   private readonly pending = new Map<string, Call>();
   private readonly workerCalls = new Map<string, WorkerCall>();
   private readonly inflight = new Map<string, { generation: Generation; bytes: number }>();
@@ -70,7 +72,7 @@ export class SQLiteReplicaBroker {
     else this.elect();
   }
   get state() { return this.stateValue; }
-  stats() { return { state: this.stateValue, owner: this.owner?.id, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes }; }
+  stats() { return { state: this.stateValue, owner: this.owner?.id, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size }; }
   private setState(state: SQLiteBrokerState) {
     if (state === this.stateValue) return;
     this.stateValue = state;
@@ -113,6 +115,7 @@ export class SQLiteReplicaBroker {
     if (m.type === 'probe' && this.generation?.ready) void this.pulse();
     if (m.type === 'change' && typeof m.scope === 'string' && m.scope.length <= 512 && Number.isSafeInteger(m.sequence)) {
       try { this.options.onChange?.(m.scope, m.sequence); } catch { /* Observer only. */ }
+      for(const listener of this.changeListeners)try{listener(m.scope,m.sequence);}catch{/* Observer only. */}
     }
   }
   private connectDirect() {
@@ -184,7 +187,7 @@ export class SQLiteReplicaBroker {
         if (this.generation !== g) return;
         const m = event.data;
         if (m.type === 'progress') { this.progress(g, m.sentAt); return; }
-        if (m.type === 'change') { this.broadcast(m); return; }
+        if (m.type === 'change') { this.receiveControl(m); this.broadcast(m); return; }
         if (m.type === 'storage-fault') { this.cooldown = Date.now() + 1000; this.setState('pending'); this.stop(g); return; }
         const p = this.workerCalls.get(m.id);
         if (!p || p.generation !== g) return;
@@ -288,7 +291,7 @@ export class SQLiteReplicaBroker {
       const value = await this.workerCall(g, m.op, m.args);
       if (this.generation !== g) return;
       sqlitePayloadBytes(value, 262144); this.reply(m, value);
-      if (sqlitePublishingOperations.has(m.op) && typeof m.args?.scope === 'string') this.broadcast({ type: 'change', scope: m.args.scope, sequence: value?.sequence ?? 0 });
+      if (sqliteOperationPublishes(m.op,m.args) && typeof m.args?.scope === 'string') this.broadcast({ type: 'change', scope: m.args.scope, sequence: value?.sequence ?? 0 });
     } catch (e) { if (this.generation === g) this.reply(m, undefined, e); }
     finally { const retained = this.inflight.get(key); if (retained?.generation === g) { this.inflightBytes -= retained.bytes; this.inflight.delete(key); } }
   }
@@ -331,7 +334,7 @@ export class SQLiteReplicaBroker {
     if (this.closed) return;
     this.fail(error('CLOSED', 'Storage broker closed', 'unknown'));
     this.election?.abort(); if (this.generation) this.stop(this.generation);
-    this.closed = true; clearInterval(this.timer);
+    this.closed = true; this.changeListeners.clear(); clearInterval(this.timer);
     this.direct?.port.postMessage({ type: 'bye' }); this.direct?.port.close();
     this.port?.postMessage({ type: 'bye' }); this.port?.close(); this.control.close(); this.replies.close();
     globalThis.removeEventListener('pagehide', this.onPageHide); globalThis.removeEventListener('pageshow', this.onPageShow);
