@@ -1,6 +1,6 @@
 import {sqliteRequestBytes,sqliteTransferRequest} from './sqlite-request-frame.js';
 import { sqliteWorkerOperations as publicOperations, sqliteOperationPublishes } from './sqlite-worker-protocol.js';
-import { sqlitePayloadBytes } from './sqlite-typed-engine.js';
+import { sqlitePayloadBytes } from './sqlite-admission.js';
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
 
 const protocol = 1;

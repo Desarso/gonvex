@@ -62,6 +62,15 @@ it('routes restartable first-sync frames through the real owner queue and publis
     const generation=(await request('canonicalGeneration',{scope:'s'})).value;
     expect((await request('canonicalRead',{scope:'s',expected:generation,coverage:{tasks:{key:'_id',complete:true}},read:{table:'tasks',where:{column:'name',op:'eq',value:'Updated needle'}}})).value.value.rows[0].name).toBe('Updated needle');
     expect(changes.length).toBe(published+2); // Two deliveries, one durable write.
+    const {replicaSumDigest,replicaRowsHashes}=await import('./replica-integrity.js');
+    const rows=[{_id:'a',name:'old snapshot'}],digest=replicaSumDigest(await replicaRowsHashes(rows,'_id'));
+    const stage={type:'replica.snapshotPage',id:'source',snapshotId:'disk',key:'_id',scope:'tenant',visibilityScope:'s',cursor:{epoch:'e',revision:1},sequence:0,last:true,result:rows,digest};
+    expect((await request('snapshotAppend',{scope:'s',page:stage})).value.complete).toBe(true);
+    expect((await request('snapshotRead',{scope:'s',subscription:'source',snapshot:'disk'})).value.rows[0].row.name).toBe('old snapshot');
+    expect((await request('canonicalCall',canonicalPage)).value.value.rows[0].name).toBe('Updated needle');
+    expect(changes.length).toBe(published+2); // Isolated stages do not publish canonical changes.
+    expect((await request('snapshotDiscard',{scope:'s',subscription:'source',snapshot:'disk'})).value.removed).toBe(true);
+
   } finally {
     interval.mockRestore(); vi.unstubAllGlobals(); delete (globalThis as any).onmessage; db.close();
   }

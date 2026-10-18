@@ -1,3 +1,4 @@
+import {SQLiteSnapshotPages} from './sqlite-snapshot-pages.js';
 import {sqliteRequestBytes} from './sqlite-request-frame.js';
 import {SQLiteCanonicalDispatcher} from './sqlite-canonical-dispatch.js';
 import {sqliteTypedReplicaStorage} from './sqlite-typed-row-layout.js';
@@ -12,6 +13,7 @@ import type { SQLitePagePlan } from './sqlite-typed-query.js';
 // is lazy and occurs only after the tab has acquired the origin ownership lock.
 let host: OfficialSQLiteHost | undefined, engine: SQLiteTypedReplicaEngine | undefined;
 let canonical:SQLiteCanonicalDispatcher|undefined;
+let snapshots:SQLiteSnapshotPages|undefined;
 let lane = Promise.resolve(), operations = 0, bytes = 0;
 const ports = new Map<string, { port: MessagePort; seen: number; token: string }>();
 
@@ -31,6 +33,7 @@ async function execute(op: string, args: any, requestID:string) {
       engine = new SQLiteTypedReplicaEngine(database, args.schema as SQLiteTypedSchema, undefined, { onProgress: () => globalThis.postMessage({ type: 'progress', sentAt: Date.now() }) });
       const epoch = await engine.open(args.owner);
       canonical=new SQLiteCanonicalDispatcher(database,sqliteTypedReplicaStorage(database,engine.schema),engine);
+      snapshots=new SQLiteSnapshotPages(database,()=>engine!.verifyOwner());
       return { epoch, wasmBytes: host.memoryBytes() };
     } catch (e) {
       host?.close(); host = undefined; engine = undefined;
@@ -42,6 +45,9 @@ async function execute(op: string, args: any, requestID:string) {
   }
   if (!host || !engine) throw Object.assign(new Error('Storage owner is not ready'), { code: 'FENCED' });
   switch (op) {
+    case 'snapshotAppend': return snapshots!.append(scope(args.scope),args.page);
+    case 'snapshotRead': return snapshots!.read(scope(args.scope),args.subscription,args.snapshot,args.after,args.limit);
+    case 'snapshotDiscard': return {removed:await snapshots!.discard(scope(args.scope),args.subscription,args.snapshot)};
     case 'canonicalCall': return canonical!.call(requestID,args);
     case 'canonicalRead': return canonical!.read(args);
     case 'canonicalGeneration': return canonical!.generation(scope(args.scope),args.expected);

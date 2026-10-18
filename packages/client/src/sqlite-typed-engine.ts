@@ -138,6 +138,11 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       return this.epoch;
     });
   }
+  /** Owner-actor components use this fence inside their own serialized SQL
+   * transaction. It does not grant a second operation lane or connection. */
+  async verifyOwner():Promise<{epoch:number;sequence:number}>{
+    return {epoch:this.epoch,sequence:await this.fence()};
+  }
   private async fence(): Promise<number> {
     if (!this.initialized) fail('FENCED', 'SQLite owner is not ready');
     const lease = await this.db.getFirstAsync<{ epoch: number; owner: string; sequence: number }>('SELECT epoch,owner,sequence FROM gv_storage_meta WHERE id=1');
