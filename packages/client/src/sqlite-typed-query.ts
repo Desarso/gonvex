@@ -11,6 +11,8 @@ export type SQLiteOrder = { field: string; direction: 'asc' | 'desc' };
 export type SQLiteKeyset = { values: readonly SQLiteBinding[]; id: string; sequence: number };
 export type SQLitePagePlan = {
   table: string;
+  /** SDK-admitted window membership, under the same logical replica scope. */
+  membership?:{signature:string;generation:string;requireComplete?:boolean};
   where?: SQLitePredicate;
   order: readonly SQLiteOrder[];
   after?: SQLiteKeyset;
@@ -26,9 +28,10 @@ export type SQLiteTypedStatement = { sql: string; bindings: SQLiteBinding[] };
 
 /** Keyset predicates use PostgreSQL's ASC NULLS LAST / DESC NULLS FIRST and
  * an ascending identity tie-break. No OFFSET or WASM-to-JS sort callback. */
-export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan, access: 'trigram' | 'ordered' = 'trigram', keysOnly = false): SQLiteTypedStatement {
+export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan, access: 'trigram' | 'ordered' = 'trigram', keysOnly = false,logicalScope=scope): SQLiteTypedStatement {
   const table = Object.hasOwn(schema, plan.table) && schema[plan.table];
   if (!table) throw new TypeError('Unknown SQLite table');
+  if(plan.membership&&(typeof plan.membership.signature!=='string'||!plan.membership.signature||plan.membership.signature.length>4096||typeof plan.membership.generation!=='string'||!plan.membership.generation||plan.membership.generation.length>128||plan.membership.requireComplete!==undefined&&typeof plan.membership.requireComplete!=='boolean'))throw new TypeError('Invalid native membership plan');
   if (!Number.isSafeInteger(plan.limit) || plan.limit < 1 || plan.limit > 256) throw new RangeError('SQLite page limit must be 1..256');
   if (!plan.order.length || plan.order.length > 8) throw new RangeError('SQLite page requires 1..8 order fields');
   if (plan.after && (plan.after.values.length !== plan.order.length || typeof plan.after.id !== 'string' || !Number.isSafeInteger(plan.after.sequence) || plan.after.sequence < 0)) throw new TypeError('Invalid SQLite keyset');
@@ -73,6 +76,7 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
     return `${column} ${operators[input.op]} ${bind(input.value)}`;
   };
   const where = [`t.scope=${bind(scope)}`, predicate(plan.table, 't', plan.where)];
+  if(plan.membership)where.push(`EXISTS(SELECT 1 FROM gv_window_members m WHERE m.scope=${bind(logicalScope)} AND m.signature=${bind(plan.membership.signature)} AND m.generation=${bind(plan.membership.generation)} AND m.id=t.id)`);
   for (const order of plan.order) {
     const shape = table.fields[order.field];
     if (!shape || !['asc', 'desc'].includes(order.direction) || shape.kind === 'json') throw new TypeError('Unsupported SQLite sort');
@@ -114,7 +118,7 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
 
 /** Native-only view construction. Its unbounded SELECT must only be consumed
  * by INSERT...SELECT in the owner connection, never by a JS row reader. */
-export function compileSQLiteTypedView(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan): SQLiteTypedStatement {
+export function compileSQLiteTypedView(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan,logicalScope=scope): SQLiteTypedStatement {
   if (plan.after) throw new TypeError('Position views do not accept a keyset');
-  return compileSQLiteTypedPage(schema, scope, plan, 'ordered', true);
+  return compileSQLiteTypedPage(schema, scope, plan, 'ordered', true,logicalScope);
 }

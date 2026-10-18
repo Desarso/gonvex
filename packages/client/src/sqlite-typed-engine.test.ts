@@ -522,3 +522,23 @@ it.each([false,true])('reuses one bounded private ingress backing store and clea
  expect((await engine.page('s',plan)).rows.map(row=>row._id)).toEqual(rollback?[]:['a','b']);
  expect(engine.stats()).toMatchObject({pendingOperations:0,pendingBytes:0,ingressEntries:1,ingressBytes:131072,ingressMaxBytes:131072});
 });
+
+it('constrains indexed pages to an exact native membership and fences stale generations before reading rows',async()=>{
+ const {engine}=fixture();await engine.open('owner');await engine.apply('s',[write('a',1),write('b',2),write('c',3),write('d',4)]);
+ const header={signature:'selected',entity:'tasks',key:'_id',kind:'replica' as const,completeness:'complete' as const,source:'server' as const};
+ await engine.windowBegin('s',header,'one');const progress=await engine.windowAppend('s','selected','one',0,JSON.stringify({ids:['b','d']}));await engine.windowPublish('s','selected',progress);
+ const constrained={...plan,membership:{signature:'selected',generation:'one',requireComplete:true},limit:1};
+ const first=await engine.page('s',constrained);expect(first.rows.map(row=>row._id)).toEqual(['b']);expect((await engine.page('s',{...constrained,after:first.cursor!})).rows.map(row=>row._id)).toEqual(['d']);
+ expect((await engine.viewPage('s','filtered',constrained,1)).rows.map(row=>row._id)).toEqual(['d']);expect((await engine.viewPage('s','filtered',constrained,0)).total).toBe(2);
+ await expect(engine.page('other',constrained)).rejects.toMatchObject({code:'PAGE_CHANGED'});
+ await expect(engine.page('s',{...constrained,table:'assignments',order:[{field:'_id',direction:'asc'}],textOrder:'binary'})).rejects.toMatchObject({code:'INVALID_ROW'});
+ await engine.windowBegin('s',{...header,completeness:'partial'},'two');const next=await engine.windowAppend('s','selected','two',0,JSON.stringify({ids:['a']}));await engine.windowPublish('s','selected',next);
+ await expect(engine.page('s',{...constrained,after:first.cursor!})).rejects.toMatchObject({code:'PAGE_CHANGED'});
+ await expect(engine.page('s',{...constrained,membership:{...constrained.membership,generation:'two'}})).rejects.toMatchObject({code:'PAGE_CHANGED'});
+});
+
+it('keeps logical membership constraints when rows live in an activated bootstrap alias',async()=>{
+ const {engine}=fixture();await engine.open('owner');await engine.beginBootstrap('s','bulk');const state=await engine.appendBootstrap('s','bulk',0,JSON.stringify([write('a',1),write('b',2),write('c',3)]));await engine.finishBootstrap('s','bulk',{pages:state.nextPage,rows:state.rows,root:state.root});
+ const header={signature:'member-set',entity:'tasks',key:'_id',kind:'replica' as const,completeness:'complete' as const,source:'server' as const};await engine.windowBegin('s',header,'one');const progress=await engine.windowAppend('s','member-set','one',0,JSON.stringify({ids:['b']}));await engine.windowPublish('s','member-set',progress);
+ const memberPlan={...plan,membership:{signature:'member-set',generation:'one'}};expect((await engine.page('s',memberPlan)).rows.map(row=>row._id)).toEqual(['b']);expect((await engine.viewPage('s','aliased-members',memberPlan)).rows.map(row=>row._id)).toEqual(['b']);
+});

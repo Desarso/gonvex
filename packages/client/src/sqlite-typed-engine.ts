@@ -1,3 +1,4 @@
+import {assertSQLiteMembership} from './sqlite-membership-plan.js';
 import {releaseOwnedSQLiteBytes} from './sqlite-owned-buffer.js';
 import { yieldSQLiteTask } from './sqlite-task-yield.js';
 import { ByteLedger, BoundedByteCache } from './byte-budget.js';
@@ -596,9 +597,10 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       await this.db.withTransactionAsync(async () => {
         const sequence = await this.fence();
         if (admitted.after && admitted.after.sequence !== sequence) fail('PAGE_CHANGED', 'SQLite keyset belongs to an older replica snapshot');
+        await assertSQLiteMembership(this.db,this.schema,scope,admitted);
         const physical = await this.physicalScope(scope);
         let access: 'trigram' | 'ordered' = await this.indexesDeferred() ? 'ordered' : 'trigram';
-        let selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access);
+        let selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access,false,scope);
         if (admitted.search && access === 'trigram') {
           // Inspect at most 1025 matching rowids. A common term uses the native
           // sort/filter index and stops at the requested page, avoiding a huge
@@ -608,7 +610,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
           const candidates = Array.from(admitted.search).length < 3 ? 1025 : (await this.db.getFirstAsync<{ n: number }>(
             `SELECT count(*) n FROM (${(table.search ?? []).map((_, i) => `SELECT rowid FROM (SELECT rowid FROM ${q(sqliteSearchName(admitted.table))} WHERE ${q('s' + i)} GLOB ? LIMIT 1025)`).join(' UNION ')} LIMIT 1025)`,
             ...(table.search ?? []).map(() => pattern)))!.n;
-          if (candidates > 1024) { access = 'ordered'; selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access); }
+          if (candidates > 1024) { access = 'ordered'; selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access,false,scope); }
         }
         // The host must enforce a column byte limit before decoding as well.
         const fields = admitted.select ? [...new Set([this.schema[admitted.table]!.key, ...admitted.select])] : undefined;
@@ -620,7 +622,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
           } catch (error) {
             if (!pageBudgetError(error) || limit === 1) throw error;
             limit = Math.max(1, Math.floor(limit / 2));
-            selectedStatement = compileSQLiteTypedPage(this.schema, physical, { ...admitted, limit }, access);
+            selectedStatement = compileSQLiteTypedPage(this.schema, physical, { ...admitted, limit }, access,false,scope);
           }
         }
         const last = records.at(-1);
