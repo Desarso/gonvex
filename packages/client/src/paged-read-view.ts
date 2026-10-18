@@ -12,8 +12,14 @@ import {
   projectDataRows,
   type ReadCoverage,
 } from "@gonvex/local-runtime/read-view";
+import { sqlitePayloadBytes } from './sqlite-admission.js';
+import { orderDataRows } from '@gonvex/local-runtime/portable';
 import type { ReducerReadView } from "@gonvex/local-runtime/portable";
 
+export class ReplicaReadBudgetError extends Error {
+  readonly code = 'replica-read-budget';
+  constructor() { super('Local reducer read exceeds its bounded result allowance'); this.name = 'ReplicaReadBudgetError'; }
+}
 export type ReplicaReadPage = { id: string; row: JsonObject }[];
 export type ReplicaReadRequest = DataRead;
 export type ReplicaReadCoverage = ReadCoverage;
@@ -24,7 +30,9 @@ export type ReplicaReducerReadView = ReducerReadView;
 export function pagedReplicaReadView(
   coverage: ReadCoverage,
   page: (read: DataRead, after: string | undefined) => Promise<ReplicaReadPage>,
+  budget = { maxRows: 512, maxBytes: 262144 },
 ): ReducerReadView {
+  if (![budget.maxRows, budget.maxBytes].every(value => Number.isSafeInteger(value) && value > 0)) throw new RangeError('Positive reducer read budgets required');
   return {
     async select(input, excludedRowIds = []) {
       const read = orderedDataRead({
@@ -66,6 +74,18 @@ export function pagedReplicaReadView(
         fieldsComplete &&= selected.complete;
         const unprojected = await view.select({ ...read, columns: executionReadColumns(read, known?.key ?? '_id') }, excludedRowIds);
         rows.push(...unprojected.rows);
+        // Keep only the global top K after each primary-key page. A limit of
+        // seven must not retain thousands of page-local candidates. Sorting
+        // uses the exact portable comparator, including the identity tie-break.
+        if (read.limit !== undefined && rows.length > read.limit) {
+          orderDataRows(rows, read); rows.length = read.limit;
+        }
+        if (rows.length > budget.maxRows) throw new ReplicaReadBudgetError();
+        try { sqlitePayloadBytes(rows, budget.maxBytes); }
+        catch (error) {
+          if (error && typeof error === 'object' && 'code' in error && error.code === 'BUDGET') throw new ReplicaReadBudgetError();
+          throw error;
+        }
         if (primaryKeys?.every(id => excludedRowIds.includes(id) || foundKeys.has(id))) break;
       }
       return {

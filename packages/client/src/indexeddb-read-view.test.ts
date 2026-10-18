@@ -161,3 +161,20 @@ it('combines many pages once and preserves global sort, projection, exclusions a
   const expected=rows.filter(row=>row._id!=='010').sort((a,b)=>b.score-a.score).slice(0,7).map(({_id,score})=>({_id,score}));
   expect(result).toEqual({rows:expected,complete:true});expect(page).toHaveBeenCalledTimes(26);
 });
+
+it('retains only global top K across a large scan under a small reducer result budget', async () => {
+  const rows = Array.from({length:2000},(_,n)=>({_id:String(n).padStart(4,'0'),score:(n*137)%2000,extra:'unrequested'}));
+  const page = async (_read: unknown, after?: string) => rows.slice(after ? Number(after)+1 : 0, (after ? Number(after)+1 : 0)+25).map(row=>({id:row._id,row}));
+  const view = pagedReplicaReadView({tasks:{key:'_id',complete:true}},page,{maxRows:7,maxBytes:4096});
+  const result = await view.select({table:'tasks',columns:['_id','score'],orderBy:[{column:'score',direction:'desc'}],limit:7},['0000']);
+  const expected = rows.filter(row=>row._id!=='0000').sort((a,b)=>b.score-a.score).slice(0,7).map(({_id,score})=>({_id,score}));
+  expect(result).toEqual({rows:expected,complete:true});
+});
+it('fails explicitly rather than silently truncating an oversized reducer read', async () => {
+  const rows = Array.from({length:10},(_,n)=>({id:String(n),row:{_id:String(n),payload:'x'.repeat(100)}}));
+  const page = async (_read: unknown, after?: string) => after ? [] : rows;
+  const coverage = {tasks:{key:'_id',complete:true}};
+  await expect(pagedReplicaReadView(coverage,page,{maxRows:7,maxBytes:4096}).select({table:'tasks'})).rejects.toMatchObject({code:'replica-read-budget'});
+  await expect(pagedReplicaReadView(coverage,page,{maxRows:20,maxBytes:512}).select({table:'tasks'})).rejects.toMatchObject({code:'replica-read-budget'});
+  expect((await pagedReplicaReadView(coverage,page,{maxRows:7,maxBytes:4096}).select({table:'tasks',limit:1})).rows).toHaveLength(1);
+});
