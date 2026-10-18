@@ -412,3 +412,9 @@ it('rolls back an interrupted deferred FTS build and resumes the same verified m
   expect((await next.page('s', { ...plan, search: 'needle' })).rows.map(row => row._id)).toEqual(['a']);
   expect(await next.integrity()).toBe('ok');
 });
+
+it('rejects undeclared or invalid FTS detail policies before generating SQL', () => {
+  const table = schema.tasks!;
+  expect(() => compileSQLiteTypedSchema({ tasks: { ...table, searchDetail: 'invalid' as any } })).toThrow('search detail');
+  expect(() => compileSQLiteTypedSchema({ tasks: { ...table, search: undefined, searchDetail: 'none' } })).toThrow('search detail');
+});

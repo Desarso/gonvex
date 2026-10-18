@@ -6,8 +6,11 @@ let engine: SQLiteTypedReplicaEngine;
 const schema = { tasks: { key: '_id', fields: { _id: { kind: 'text' }, name: { kind: 'text' }, workspace: { kind: 'text' }, due: { kind: 'number' }, version: { kind: 'number' }, description: { kind: 'text' } }, indexes: [{ columns: ['workspace', 'due'] }, { columns: ['due'] }, { columns: ['name'] }], search: ['name', 'description'], counts: [{ columns: ['workspace'] }] } } as const;
 const generated = { fixtureMs: 0, wireEncodeMs: 0 };
 const handlers = {
-  async profile() { const result = { ...engine.takeProfile(), ...generated, wasmBytes: host.memoryBytes(), statementBytes: host.statementBytes() }; generated.fixtureMs = 0; generated.wireEncodeMs = 0; return result; },
-  async open() { host = await openOfficialSQLiteHost(); engine = new SQLiteTypedReplicaEngine(host.database, schema); const epoch = await engine.open('browser-proof'); return { epoch, memoryBytes: host.memoryBytes() }; },
+  async profile() { const result = { ...engine.takeProfile(), ...generated, transactions: host.takeProfile(), wasmBytes: host.memoryBytes(), statementBytes: host.statementBytes() }; generated.fixtureMs = 0; generated.wireEncodeMs = 0; return result; },
+  async open({ searchDetail = 'full' } = {}) {
+    if (!['full', 'column', 'none'].includes(searchDetail)) throw new TypeError('Invalid benchmark FTS detail');
+    const selectedSchema = searchDetail === 'full' ? schema : { tasks: { ...schema.tasks, searchDetail } };
+    host = await openOfficialSQLiteHost(); engine = new SQLiteTypedReplicaEngine(host.database, selectedSchema); const epoch = await engine.open('browser-proof'); return { epoch, memoryBytes: host.memoryBytes() }; },
   async seed({ start = 0, count = 1000 }) {
     const begin = performance.now();
     for (let offset = start; offset < start + count; offset += 50) {

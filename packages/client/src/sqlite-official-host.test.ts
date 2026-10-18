@@ -102,3 +102,37 @@ it('resumes a deferred bootstrap in official WASM and builds searchable indexes 
   expect(page.rows.map(row => row._id)).toEqual(Array.from({ length: 10 }, (_, n) => String(n)));
   expect(await next.integrity()).toBe('ok');
 });
+
+it('profiles native transaction boundaries using fixed numeric counters and resets them', async () => {
+  const { host } = fixture();
+  await host.database.withTransactionAsync(async () => { await host.database.execAsync('CREATE TABLE profile_probe(n)'); });
+  await expect(host.database.withTransactionAsync(async () => { throw new Error('abort'); })).rejects.toThrow('abort');
+  const result = host.takeProfile();
+  expect(result).toMatchObject({ commits: 1, rollbacks: 1 });
+  for (const value of Object.values(result)) expect(Number.isFinite(value) && value >= 0).toBe(true);
+  expect(host.takeProfile()).toEqual({ beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
+  expect((await host.database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM profile_probe'))!.n).toBe(0);
+});
+
+it.each(['full', 'column', 'none'] as const)('preserves literal substring queries and trigger maintenance with FTS detail=%s', async searchDetail => {
+  const { host } = fixture();
+  const schema = { records: { key: '_id', fields: { _id: { kind: 'text' }, title: { kind: 'text' }, description: { kind: 'text' }, rank: { kind: 'number' } }, indexes: [{ columns: ['rank'] }], search: ['title', 'description'], searchDetail } } as const;
+  const engine = new SQLiteTypedReplicaEngine(host.database, schema); await engine.open('owner');
+  const rows = [
+    { _id: 'a', title: 'Needle café 東京', description: 'Inspect *pump? [A] 100% back\\slash', rank: 1 },
+    { _id: 'b', title: 'Other', description: 'A long phrase and NEEDLE 🔧', rank: 2 },
+    { _id: 'c', title: '[A] needle', description: 'Unrelated text', rank: 3 },
+  ];
+  await engine.importScope('s', (async function* () { yield JSON.stringify(rows.map(row => ({ table: 'records', id: row._id, version: 1, row }))); })());
+  const terms = ['needle', 'NEEDLE', '東京', 'café', '🔧', '*pump?', '[A]', '100%', 'back\\slash', 'long phrase', 'absent'];
+  for (const search of terms) {
+    const expected = rows.filter(row => [row.title, row.description].some(value => value.toLowerCase().includes(search.toLowerCase()))).map(row => row._id);
+    expect((await engine.page('s', { table: 'records', search, order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows.map(row => row._id), search).toEqual(expected);
+  }
+  await engine.apply('s', [
+    { table: 'records', id: 'a', version: 2, row: { ...rows[0], title: 'Updated', description: 'Fresh phrase' } },
+    { table: 'records', id: 'b', version: 2, row: null },
+  ]);
+  expect((await engine.page('s', { table: 'records', search: 'needle', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows.map(row => row._id)).toEqual(['c']);
+  expect((await engine.page('s', { table: 'records', search: 'Fresh phrase', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows.map(row => row._id)).toEqual(['a']);
+});

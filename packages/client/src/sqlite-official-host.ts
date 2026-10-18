@@ -6,6 +6,7 @@ export type OfficialSQLiteHost = {
   database: SQLiteReplicaDatabase;
   memoryBytes(): number;
   statementBytes(): number;
+  takeProfile(): { beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
   close(): void;
 };
 
@@ -47,6 +48,7 @@ PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=3000;`);
 export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
   budget = { maxRows: 512, maxBytes: 262_144 }): OfficialSQLiteHost {
   let transaction = false, closed = false, statementBytes = 0;
+  const profile = { beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 };
   const statements = new Map<string, { statement: PreparedStatement; bytes: number }>();
   const statementBudget = 262144, maxStatements = 4;
   function retire(sql: string) {
@@ -115,11 +117,25 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
     async withTransactionAsync(run) {
       check(); if (transaction) throw new Error('Overlapping SQLite operation outside owner FIFO');
       transaction = true; let began = false;
-      try { db.exec('BEGIN IMMEDIATE'); began = true; await run(); db.exec('COMMIT'); }
-      catch (error) { if (began) try { db.exec('ROLLBACK'); } catch { /* Preserve original failure. */ } throw error; }
+      try {
+        let started = performance.now();
+        try { db.exec('BEGIN IMMEDIATE'); began = true; } finally { profile.beginMs += performance.now() - started; }
+        started = performance.now();
+        try { await run(); } finally { profile.callbackMs += performance.now() - started; }
+        started = performance.now();
+        try { db.exec('COMMIT'); profile.commits++; } finally { profile.commitMs += performance.now() - started; }
+      } catch (error) {
+        if (began) {
+          const started = performance.now();
+          try { db.exec('ROLLBACK'); profile.rollbacks++; } catch { /* Preserve original failure. */ }
+          finally { profile.rollbackMs += performance.now() - started; }
+        }
+        throw error;
+      }
       finally { transaction = false; }
     },
   };
   return { database, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes,
+    takeProfile() { const result = { ...profile }; for (const key of Object.keys(profile) as Array<keyof typeof profile>) profile[key] = 0; return result; },
     close() { if (!closed) { closed = true; for (const sql of statements.keys()) retire(sql); db.close(); } } };
 }

@@ -6,6 +6,8 @@ export type SQLiteTypedTable = {
   fields: Readonly<Record<string, SQLiteField>>;
   indexes: readonly { columns: readonly string[] }[];
   search?: readonly string[];
+  /** GLOB-only substring plans do not need token positions. */
+  searchDetail?: 'full' | 'column' | 'none';
   counts?: readonly { columns: readonly string[] }[];
 };
 export type SQLiteTypedSchema = Readonly<Record<string, SQLiteTypedTable>>;
@@ -31,6 +33,7 @@ export function validateSQLiteTypedSchema(schema: SQLiteTypedSchema): void {
         throw new TypeError('SQLite index/count requires distinct fields');
       for (const field of index.columns) if (!Object.hasOwn(table.fields, field)) throw new TypeError('Unknown SQLite indexed field');
     }
+    if (table.searchDetail !== undefined && (!table.search?.length || !['full', 'column', 'none'].includes(table.searchDetail))) throw new TypeError('Invalid SQLite search detail');
     if (table.search && (!table.search.length || new Set(table.search).size !== table.search.length)) throw new TypeError('Search requires distinct fields');
     for (const field of table.search ?? []) if (table.fields[field]?.kind !== 'text') throw new TypeError('Search fields must be text');
   }
@@ -62,7 +65,7 @@ export function compileSQLiteTypedSchema(schema: SQLiteTypedSchema): { tables: s
       const cols = table.search.map((_, i) => q('s' + i));
       // Content lives in this index. Lowercasing happens once on ingestion using
       // JS Unicode rules; SQLite never calls JS to filter or compare a row.
-      search.push(`CREATE VIRTUAL TABLE IF NOT EXISTS ${fn} USING fts5(${cols.join(',')},tokenize='trigram case_sensitive 1');`);
+      search.push(`CREATE VIRTUAL TABLE IF NOT EXISTS ${fn} USING fts5(${cols.join(',')},tokenize='trigram case_sensitive 1'${table.searchDetail ? ',detail=' + table.searchDetail : ''});`);
       search.push(`CREATE TRIGGER IF NOT EXISTS ${q(name + '_fts_d')} AFTER DELETE ON ${tn} BEGIN DELETE FROM ${fn} WHERE rowid=OLD.rid; END;`);
       const inserted = `INSERT INTO ${fn}(rowid,${cols.join(',')}) VALUES(NEW.rid,${cols.map(column => 'NEW.' + column).join(',')});`;
       search.push(`CREATE TRIGGER IF NOT EXISTS ${q(name + '_fts_a')} AFTER INSERT ON ${tn} BEGIN ${inserted} END;`,
