@@ -184,6 +184,7 @@ export function orderDataRows(rows: JsonObject[], read: DataRead): void {
 /** Shared reducer execution with no SQL engine and no collection snapshot copies. */
 export class PortableReducerRuntime {
   private readonly definitions = new Map<string, Promise<ReducerDefinition<any, any>>>();
+  private readonly prepared = new Set<string>();
   constructor(private readonly options: PortableReducerOptions) {}
 
   private definition(path: string): Promise<ReducerDefinition<any, any>> {
@@ -192,11 +193,15 @@ export class PortableReducerRuntime {
     if (typeof entry !== 'function') return Promise.resolve(entry);
     let pending = this.definitions.get(path);
     if (!pending) {
-      pending = Promise.resolve().then(entry).catch(error => { this.definitions.delete(path); throw error; });
+      pending = Promise.resolve().then(entry).then(definition => { this.prepared.add(path); return definition; }).catch(error => { this.definitions.delete(path); this.prepared.delete(path); throw error; });
       this.definitions.set(path, pending);
     }
     return pending;
   }
+
+  /** Allows a disk owner to refuse a cold module before opening a transaction.
+   * The host preloads it outside its SQL FIFO, then retries the same command. */
+  isPrepared(path: string): boolean { const entry=this.options.reducers[path]; return !!entry && (typeof entry!=='function' || this.prepared.has(path)); }
 
   async prepare(path: string): Promise<void> { await this.definition(path); }
 

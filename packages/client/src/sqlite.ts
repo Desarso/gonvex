@@ -21,5 +21,8 @@ export type {SQLiteNativeWindowRead,SQLiteNativeWindowResult,SQLiteNativeEntityR
 export {SQLiteIntentJournal} from './sqlite-intent-journal.js';
 export type {SQLiteIntentReceipt,SQLiteIntentPage} from './sqlite-intent-journal.js';
 export {SQLitePredictions} from './sqlite-predictions.js';
-export {SQLiteReducerCore} from './sqlite-reducer-core.js';
+export {SQLiteReducerCore,SQLiteReducerPreparationRequiredError} from './sqlite-reducer-core.js';
 export type {SQLiteReducerInvocation,SQLiteReducerReceipt} from './sqlite-reducer-core.js';
+
+export {SQLiteReducerOwner} from './sqlite-reducer-owner.js';
+export type {SQLiteReducerOwnerOptions,SQLiteOwnerReducerCall,SQLiteTabAdmission} from './sqlite-reducer-owner.js';

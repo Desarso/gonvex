@@ -25,3 +25,30 @@ it('runs generated-program network waits outside the fenced SQL queue and preser
   await dispose();await dispose();expect(close).toHaveBeenCalledOnce();await expect(context.runOwner(0,async()=>null)).rejects.toMatchObject({code:'FENCED'});
  }finally{await dispose();interval.mockRestore();vi.unstubAllGlobals();delete (globalThis as any).onmessage;sql.close();}
 });
+
+it('prepares lazy reducer chunks outside the owner queue and fences a changed tab session before retry',async()=>{
+ const {PortableReducerRuntime}=await import('@gonvex/local-runtime/portable'),{reducer,schema:validators,getRow}=await import('@gonvex/module-sdk'),{SQLiteReducerOwner}=await import('./sqlite-reducer-owner.js');
+ const sql=new DatabaseSync(':memory:');const raw:SQLiteReplicaDatabase={async execAsync(query){sql.exec(query);},async runAsync(query,...args){return sql.prepare(query).run(...args as any[]);},async getFirstAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).get(...args as any[]) as T??null;},async getAllAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).all(...args as any[]) as T[];},async withTransactionAsync(run){sql.exec('BEGIN');try{await run();sql.exec('COMMIT');}catch(error){sql.exec('ROLLBACK');throw error;}}};
+ mocked.host={database:raw,memoryBytes:()=>0,close(){}};const awaiting=new Map<string,(value:any)=>void>();let serial=0,generation='session-one',loads=0,executions=0,release!:(value:any)=>void;
+ const loading=new Promise<any>(resolve=>{release=resolve;});let endpoint!:InstanceType<typeof SQLiteReducerOwner>;
+ const runtime=new PortableReducerRuntime({schema:{records:{key:'id',columns:{id:{type:'text',nullable:false},n:{type:'bigint',nullable:false}}}},artifactHash:'artifact',reducers:{increment:async()=>{loads++;return loading;}}});
+ vi.stubGlobal('postMessage',(message:any)=>{if(message.type==='change')queueMicrotask(()=>(globalThis as any).onmessage?.({data:{type:'change-ack',protocol:2,token:'owner',tab:message.to,notification:message.notification,epoch:message.epoch,sequence:message.sequence}}));else{awaiting.get(message.id)?.(message);awaiting.delete(message.id);}});
+ const interval=vi.spyOn(globalThis,'setInterval').mockImplementation(()=>0 as any);
+ const dispose=installSQLiteOwner({schema,createProgram(ctx){
+  void ctx.runOwner(0,()=>ctx.canonical.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'records',id:'a',operation:'insert',newValue:{id:'a',n:1}}]},{entities:{},liveQueries:{}},'s').then(()=>{}));
+  endpoint=new SQLiteReducerOwner(ctx,{runtime,artifactHash:'artifact',resolveTab(){return {scope:'s',generation};},async context(){return {identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}},coverage:{records:{key:'id',complete:true}}};}});
+  return {call(args:any,caller){return endpoint.invoke(args,caller);}};
+ }});interval.mockRestore();
+ const request=(op:string,args:any={},requestID='command-'+(++serial))=>new Promise<any>(resolve=>{const id='transport-'+(++serial);awaiting.set(id,resolve);(globalThis as any).onmessage({data:{id,requestID,tabID:'tab',op,args}});});
+ try{
+  expect((await request('open',{protocol:2,owner:'owner'})).error).toBeUndefined();
+  const invocation={path:'increment',args:{id:'a'},now:100};const pending=request('clientCall',invocation,'same-command');
+  await vi.waitFor(()=>expect(loads).toBe(1));expect((await request('ping')).value).toEqual({ready:true});
+  generation='session-two';release(reducer({args:validators.any(),result:validators.any(),run:async ctx=>{executions++;const row=await getRow<{id:string;n:number}>(ctx.db,'records','id','a');await ctx.db.update('records','a',{n:row!.n+1});return row!.n+1;}}));
+  expect((await pending).error.code).toBe('FENCED');expect(executions).toBe(0);
+  const replies=await Promise.all([request('clientCall',invocation,'same-command'),request('clientCall',invocation,'same-command')]);expect(replies[0].value).toEqual(replies[1].value);expect(replies[0].value.result).toBe(2);expect(executions).toBe(1);expect(loads).toBe(1);
+  expect((await request('page',{scope:'s',plan:{table:'records',order:[{field:'n',direction:'asc'}],limit:1}})).value.rows[0].n).toBe(1);
+  expect((await request('nativeEntityPage',{scope:'s',entity:'records',ids:['a','missing']})).value.rows).toEqual([{id:'a',value:{id:'a',n:2}},{id:'missing',value:null}]);
+  await dispose();
+ }finally{await dispose();interval.mockRestore();vi.unstubAllGlobals();delete (globalThis as any).onmessage;sql.close();}
+});

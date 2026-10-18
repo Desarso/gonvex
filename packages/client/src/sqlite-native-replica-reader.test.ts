@@ -50,3 +50,14 @@ it('fences changed committed generations and displaced owners, and bounds entity
   await f.db.runAsync("UPDATE gv_storage_meta SET epoch=epoch+1,owner='replacement' WHERE id=1");await expect(f.reader.window({scope:'s',signature:'collection'})).rejects.toMatchObject({code:'FENCED'});
  }finally{f.sql.close();}
 });
+
+it('reads predicted replacements and tombstones through the same bounded window and entity slots',async()=>{
+ const {SQLitePredictions}=await import('./sqlite-predictions.js'),f=await fixture(3);try{
+  const predictions=new SQLitePredictions(f.db,f.canonical,schema,()=>f.engine.verifyOwner());await predictions.ready();f.reader.usePredictions(predictions);
+  await predictions.apply('s',1,[{entity:'tasks',rowId:'0',op:'patch',fields:{name:'predicted'}},{entity:'tasks',rowId:'1',op:'delete'},{entity:'tasks',rowId:'local',op:'insert',fields:{id:'local',name:'offline'}}]);
+  const page=await f.reader.window({scope:'s',signature:'collection',limit:3});expect(page!.rows).toEqual([{id:'0',value:{id:'0',name:'predicted'}},{id:'1',value:null},{id:'2',value:{id:'2',name:'value'}}]);
+  expect((await f.reader.entities({scope:'s',entity:'tasks',ids:['local','1','0']})).rows).toEqual([{id:'local',value:{id:'local',name:'offline'}},{id:'1',value:null},{id:'0',value:{id:'0',name:'predicted'}}]);
+  expect((await f.canonical.loadEntityRows('s','tasks',['0']))[0].row.name).toBe('value');
+  await predictions.reset('s');expect((await f.reader.entities({scope:'s',entity:'tasks',ids:['0','1','local']})).rows.map(row=>row.value?.name??null)).toEqual(['value','value',null]);
+ }finally{f.sql.close();}
+});

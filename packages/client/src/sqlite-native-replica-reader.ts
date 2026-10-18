@@ -1,3 +1,4 @@
+import type {SQLitePredictions} from './sqlite-predictions.js';
 import type {ReplicaRow} from './local-replica.js';
 import type {SQLiteCanonicalGeneration} from './sqlite-canonical-dispatch.js';
 import type {SQLiteLocalReplicaStorage,SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
@@ -15,10 +16,13 @@ export type SQLiteNativeEntityResult={generation:SQLiteCanonicalGeneration;rows:
  * as null slots, so paging cannot skip or duplicate a following member. */
 export class SQLiteNativeReplicaReader {
  private readonly windows:SQLiteWindowStore;
+ private predictions?:Pick<SQLitePredictions,'entities'|'ready'>;
+ /** Installed by the generated owner program before admitting UI reads. */
+ usePredictions(predictions:Pick<SQLitePredictions,'entities'|'ready'>){if(this.predictions&&this.predictions!==predictions)throw Error('Native reader already has its prediction store');this.predictions=predictions;}
  constructor(private readonly db:SQLiteReplicaDatabase,private readonly canonical:SQLiteLocalReplicaStorage,private readonly engine:SQLiteTypedReplicaEngine){
   this.windows=new SQLiteWindowStore(db,()=>engine.verifyOwner());
  }
- async ready(){await this.canonical.ready();await this.windows.ready();}
+ async ready(){await this.canonical.ready();await this.windows.ready();await this.predictions?.ready();}
  private scope(scope:unknown):asserts scope is string{if(typeof scope!=='string'||!scope||scope.length>512)throw new TypeError('Invalid native replica scope');}
  private async generation(expected?:SQLiteCanonicalGeneration){
   if(expected!==undefined&&(!expected||!Number.isSafeInteger(expected.epoch)||expected.epoch<0||!Number.isSafeInteger(expected.sequence)||expected.sequence<0))throw new TypeError('Invalid native replica generation');
@@ -27,7 +31,7 @@ export class SQLiteNativeReplicaReader {
   return current;
  }
  private async values(scope:string,entity:string,ids:readonly string[]):Promise<SQLiteEntitySlot[]>{
-  const values=await this.canonical.loadBoundedEntityRows(scope,entity,ids),byID=new Map(values.map(entry=>[entry.id,entry.row]));
+  const values=await (this.predictions?this.predictions.entities(scope,entity,ids):this.canonical.loadBoundedEntityRows(scope,entity,ids)),byID=new Map(values.map(entry=>[entry.id,entry.row]));
   return ids.map(id=>({id,value:byID.get(id)??null}));
  }
  async entities(input:SQLiteNativeEntityRead):Promise<SQLiteNativeEntityResult>{

@@ -33,9 +33,10 @@ describe('portable reducer executor',()=>{
     const used = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(definition);
     const unused = vi.fn().mockResolvedValue(definition);
     const runtime = new PortableReducerRuntime({ schema: tables, artifactHash: 'artifact-1', reducers: { used, unused } });
-    expect(used).not.toHaveBeenCalled();
+    expect(used).not.toHaveBeenCalled();expect(runtime.isPrepared('used')).toBe(false);
     await expect(runtime.prepare('used')).rejects.toThrow('offline');
-    await Promise.all([runtime.prepare('used'), runtime.prepare('used')]);
+    expect(runtime.isPrepared('used')).toBe(false);
+    await Promise.all([runtime.prepare('used'), runtime.prepare('used')]);expect(runtime.isPrepared('used')).toBe(true);expect(runtime.isPrepared('unused')).toBe(false);expect(runtime.isPrepared('missing')).toBe(false);
     expect((await runtime.execute('used', {}, source({}), execution)).result).toBe('done');
     expect(used).toHaveBeenCalledTimes(2);
     expect(unused).not.toHaveBeenCalled();

@@ -22,7 +22,7 @@ export type SQLiteOwnerProgram={
  close?():Promise<void>|void;
 };
 export type SQLiteOwnerProgramContext={
- database:SQLiteReplicaDatabase;engine:SQLiteTypedReplicaEngine;canonical:SQLiteLocalReplicaStorage;snapshots:SQLiteSnapshotPages;activation:SQLiteSnapshotActivator;
+ database:SQLiteReplicaDatabase;engine:SQLiteTypedReplicaEngine;reader:SQLiteNativeReplicaReader;canonical:SQLiteLocalReplicaStorage;snapshots:SQLiteSnapshotPages;activation:SQLiteSnapshotActivator;
  runOwner<T>(bytes:number,run:()=>Promise<T>,publishScopes?:readonly string[]):Promise<T>;
 };
 export type SQLiteOwnerBinding={schema?:SQLiteTypedSchema;createProgram?(context:SQLiteOwnerProgramContext):SQLiteOwnerProgram};
@@ -80,7 +80,7 @@ async function execute(op: string, args: any, requestID:string) {
       activation=new SQLiteSnapshotActivator(database,storage,()=>engine!.verifyOwner(),engine.schema);
       await snapshots.ready();await activation.ready();
       nativeReader=new SQLiteNativeReplicaReader(database,storage,engine);await nativeReader.ready();tabs.setGeneration(await engine.verifyOwner());
-      program=binding.createProgram?.({database,engine,canonical:storage,snapshots,activation,
+      program=binding.createProgram?.({database,engine,reader:nativeReader,canonical:storage,snapshots,activation,
        runOwner:async(size,run,scopes=[])=>{
         if(!Array.isArray(scopes)||scopes.length>8||scopes.some(value=>typeof value!=='string'||!value||value.length>512))throw new TypeError('Invalid owner publication scope');
         return schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;});
