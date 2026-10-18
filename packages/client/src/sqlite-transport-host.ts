@@ -1,5 +1,6 @@
 import type {ReplicaDirective,ServerCapabilities,ServerMessage} from '@gonvex/protocol';
 import type {LocalExecution} from '@gonvex/local-runtime';
+import type {SupportCommand} from './index.js';
 export type SQLiteTransportSession={connectionGeneration:number;directive?:ReplicaDirective;identity?:LocalExecution['identity'];artifactHash:string;intentScope:string;lastOnlineAtMs:number;capabilities:Readonly<ServerCapabilities>};
 /** Internal dedicated-worker boundary. The generated native client always
  * installs its owner host; IndexedDB/mobile use the existing client host.
@@ -21,6 +22,7 @@ export type SQLiteTransportHost={
  authenticated?():void;
  authError?(message:string,details:{definitive:boolean;code?:string}):void;
  developerCredential?(token:string):void;
+ supportCommand?(command:SupportCommand):void;
  disconnected():void;
  failed(error:unknown):void;
 };

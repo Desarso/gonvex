@@ -27,6 +27,16 @@ function fixture(auth:Partial<GonvexClientAuth>={},session?:(input:SQLiteTranspo
  async function authenticate(){const auth=await open();socket.receive({type:'auth.result',id:auth.id,result});await vi.waitFor(()=>expect(client.localSessionState()).toBe('authenticated'));return auth;}
  return {client,socket,budget,host,sessions,failures,frames,binary,authenticating,opening,quarantines,open,authenticate};
 }
+it('forwards bounded support commands only from an admitted socket',async()=>{
+ const f=fixture(),commands:unknown[]=[];f.host.supportCommand=command=>commands.push(command);
+ f.socket.receive({type:'support.command',id:'early',result:{kind:'inspect'}});
+ await f.authenticate();
+ f.socket.receive({type:'support.command',id:'current',result:{kind:'inspect',payload:{task:'synthetic'}}});
+ expect(commands).toEqual([{id:'current',kind:'inspect',payload:{task:'synthetic'}}]);
+ f.client.setAuth({token:'changed'});
+ f.socket.receive({type:'support.command',id:'stale',result:{kind:'inspect'}});
+ expect(commands).toHaveLength(1);
+});
 it('restores before socket open and forwards native frames only after correlated durable admission',async()=>{
  let release!:()=>void;const held=new Promise<void>(resolve=>{release=resolve;}),f=fixture({},async()=>held);
  expect(f.opening).toEqual(['identity\0ws://private.test/ws\0project\0tenant\0\0account']);

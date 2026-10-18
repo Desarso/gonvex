@@ -87,6 +87,15 @@ it('delivers each authoritative rejection once and acknowledges only delivered n
  const f=fixture(),events:unknown[]=[];const event={sequence:1,reducerId:'command',path:'tasks/change',error:'denied',errorClass:'rejected'};f.handler=async input=>{if(input.method==='controls')return {tokens:[],status:{},session:'authenticated',failure:null,rejections:[event]};if(input.method==='rejectionsAck')return null;};await f.client.connect();await f.client.pollControls();expect(f.calls.some(call=>call.input.method==='rejectionsAck')).toBe(false);
  const release=f.client.onReducerRejection(value=>{events.push(value);throw Error('observer failure');});await f.client.pollControls();await f.client.pollControls();expect(events).toEqual([event]);expect(f.calls.filter(call=>call.input.method==='rejectionsAck').every(call=>call.input.sequence===1)).toBe(true);release();
 });
+it('delivers support commands once per tab after a listener mounts and reads the durable outbox count',async()=>{
+ const f=fixture(),commands:unknown[]=[];const command={sequence:1,id:'support-1',kind:'inspect',payload:{task:'synthetic'}};
+ f.handler=async input=>{if(input.method==='controls')return {tokens:[],status:{},session:'authenticated',failure:null,supportCommands:[command]};if(input.method==='supportAck')return null;if(input.method==='outboxCount')return 2;};
+ await f.client.connect();await f.client.pollControls();expect(f.calls.some(call=>call.input.method==='supportAck')).toBe(false);
+ const release=f.client.onSupportCommand(value=>commands.push(value));await f.client.pollControls();await f.client.pollControls();
+ expect(commands).toEqual([{id:'support-1',kind:'inspect',payload:{task:'synthetic'}}]);
+ expect(f.calls.filter(call=>call.input.method==='supportAck').every(call=>call.input.sequence===1)).toBe(true);
+ expect(await f.client.outboxCount()).toBe(2);release();
+});
 
 it('creates inert bounded React watches and releases their page/source with the last subscription',async()=>{
  const f=fixture(),args={workspace:'original'},watch=f.client.watchReplica({path:'tasks/all'},args,{deferStart:true});args.workspace='mutated';const empty=watch.snapshot();expect(watch.snapshot()).toBe(empty);expect(f.calls).toEqual([]);expect(f.client.budgets().find(value=>value.name==='browser-watch-metadata')?.entries).toBe(0);

@@ -101,6 +101,12 @@ export class SQLiteNativeTransport {
    },failure=>{if(current()){this.options.ownerHost.failed(failure);socket.close();}});return;
   }
   if(message.type.startsWith('replica.')){if(!this.quarantined&&this.installing)this.queueAdmission(message,generation);else if(!this.quarantined&&!this.authInFlight)this.options.ownerHost.frame(message,generation);return;}
+  if(message.type==='support.command'){
+   if(this.quarantined||this.authInFlight||this.session!=='authenticated')return;
+   const value=message.result&&typeof message.result==='object'&&!Array.isArray(message.result)?message.result as Record<string,JsonValue>:{};
+   const command={id:message.id,kind:String(value.kind??''),payload:value.payload??null};
+   sqlitePayloadBytes(command,8192);this.options.ownerHost.supportCommand?.(command);return;
+  }
   if(!('id'in message)||typeof message.id!=='string')return;if(message.type==='error.ack'){const report=this.nativeErrors.get(message.id);if(report?.sent)this.finishNativeError(report,message.error?Error(message.error):undefined);return;}
   const watched=[...this.controlWatches].find(watch=>watch.wireId===message.id&&watch.authSerial===this.authSerial);
   if(watched){if(message.type==='query.result'){sqlitePayloadBytes(message.result,131072);if(watched.live){const revision=message.subscriptionRevision;if(!revision||typeof revision.epoch!=='string'||!revision.epoch||revision.epoch.length>256||!Number.isSafeInteger(revision.sequence)||revision.sequence<0||message.windowRevision!==undefined&&(typeof message.windowRevision!=='string'||message.windowRevision.length>128)||message.replicaScope!==undefined&&(typeof message.replicaScope!=='string'||message.replicaScope.length>512))throw Error('Live window requires a bounded authoritative revision');watched.receive({result:message.result,subscriptionRevision:revision,...(message.windowRevision!==undefined?{windowRevision:message.windowRevision}:{}),...(message.replicaScope!==undefined?{replicaScope:message.replicaScope}:{})});}else watched.receive({result:message.result});}else if(message.type==='query.error')watched.receive({error:message.error.slice(0,512)});return;}

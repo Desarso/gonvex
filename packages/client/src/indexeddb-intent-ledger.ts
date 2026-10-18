@@ -109,5 +109,12 @@ export class IndexedDBIntentLedger {
   // transaction open while hashing. Atomic rebase uses the managed write TX.
   await this.verifyPending(page.records);await this.generation();return {entries:page.records.map(record=>record.prepared),nextSequence:page.nextSequence};
  }
+ async pendingCount(scope:string){
+  if(!scope||scope.length>512)throw new TypeError('Invalid fallback intent scope');
+  return this.transaction(['meta','pending'],'readonly',async tx=>{
+   await this.fence(tx);
+   return new Promise<number>((resolve,reject)=>{let count=0;const cursor=tx.objectStore('pending').index('scope-sequence').openCursor(this.ranges.bound([scope,0],[scope,Number.MAX_SAFE_INTEGER]));cursor.onerror=()=>reject(cursor.error);cursor.onsuccess=()=>{const entry=cursor.result;if(!entry){resolve(count);return;}const row=entry.value as IndexedDBPendingIntent,state=row.delivery?.state??row.prepared.intent.state;if(state==='pending'||state==='inflight'||state==='committed')count++;entry.continue();};});
+  });
+ }
  close(){if(this.closed)return;this.closed=true;this.owner=undefined;void this.opening?.then(db=>db.close(),()=>{});}
 }
