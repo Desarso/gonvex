@@ -19,9 +19,14 @@ try {
   for (let trial = 0; trial < output.trials; trial++) {
     for (const compression of trial % 2 ? [true, false] : [false, true]) {
       const proc = spawn(binary, [path], { stdio: ['ignore', 'pipe', 'inherit'] });
+      // Retained so readiness fails if the server exits first and cleanup never waits on a missed event.
+      const exited = once(proc, 'exit');
       const sockets = [];
       try {
-        const [address] = await once(proc.stdout, 'data');
+        const [address] = await Promise.race([
+          once(proc.stdout, 'data'),
+          exited.then(([code, signal]) => { throw new Error(`ws_deflate exited before readiness: ${code ?? signal}`); }),
+        ]);
         for (let i = 0; i < count; i++) {
           const ws = new WebSocket(`ws://${String(address).trim()}/ws?compression=${Number(compression)}`, { perMessageDeflate: compression });
           await once(ws, 'open'); sockets.push(ws);
@@ -53,7 +58,8 @@ try {
         console.log(JSON.stringify({ trial, compression, ...measurement }));
       } finally {
         for (const ws of sockets) ws.terminate();
-        proc.kill(); await once(proc, 'exit');
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill();
+        await exited.catch(() => undefined);
       }
     }
   }

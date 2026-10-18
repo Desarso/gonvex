@@ -10,16 +10,23 @@ pub(crate) struct Agreement {
 
 // Invalid HTTP extension syntax rejects the handshake. Invalid/unsupported PMD
 // parameters decline only that offer, allowing the client's next fallback.
+// RFC 7230 list syntax permits empty members; a field without any extension is invalid.
 pub(crate) fn negotiate(headers: &HeaderMap) -> Result<Option<Agreement>, ()> {
     let mut selected = None;
+    let (mut present, mut members) = (false, 0usize);
     for value in headers.get_all(SEC_WEBSOCKET_EXTENSIONS) {
+        present = true;
         let mut parser = Parser(value.to_str().map_err(|_| ())?.as_bytes());
         loop {
             parser.ows();
+            if parser.take(b',') {
+                continue;
+            }
             if parser.0.is_empty() {
-                return Err(());
+                break;
             }
             let name = parser.token()?;
+            members += 1;
             let mut valid = true;
             let mut seen = 0u8;
             let mut server_window = 12;
@@ -94,6 +101,9 @@ pub(crate) fn negotiate(headers: &HeaderMap) -> Result<Option<Agreement>, ()> {
                 return Err(());
             }
         }
+    }
+    if present && members == 0 {
+        return Err(());
     }
     Ok(selected)
 }
@@ -265,12 +275,25 @@ mod tests {
         );
         assert_eq!(negotiate(&headers).unwrap().unwrap().server_window, 9);
         assert!(select("unknown; p=token").unwrap().is_none());
+        for empty_members in [
+            "permessage-deflate,",
+            ",permessage-deflate",
+            " , permessage-deflate , ,",
+            "permessage-deflate,,other",
+        ] {
+            assert!(select(empty_members).unwrap().is_some(), "{empty_members}");
+        }
+        let mut headers = HeaderMap::new();
+        headers.append(SEC_WEBSOCKET_EXTENSIONS, ",".parse().unwrap());
+        headers.append(
+            SEC_WEBSOCKET_EXTENSIONS,
+            "permessage-deflate".parse().unwrap(),
+        );
+        assert!(negotiate(&headers).unwrap().is_some());
         for bad in [
             "",
             ",",
-            "permessage-deflate,",
-            ",permessage-deflate",
-            "permessage-deflate,,other",
+            " , ,\t",
             "permessage-deflate;",
             "permessage-deflate; =12",
             "permessage-deflate; x=",
