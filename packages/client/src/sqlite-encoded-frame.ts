@@ -1,22 +1,7 @@
-import { BoundedByteCache, ByteLedger } from './byte-budget.js';
 import { decodedJSONBytes, fail } from './sqlite-admission.js';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import type { SQLiteTypedSchema, SQLiteTypedTable } from './sqlite-typed-schema.js';
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
-const keyCache = new BoundedByteCache<number,{raw:Uint8Array;key:string}>('sqlite-wire-keys',8192,32,new ByteLedger(8192));
-export const sqliteEncodedKeyCacheStats = () => keyCache.stats();
-function decodeUTF8Key(bytes: Uint8Array,start:number,end:number,escaped:boolean):string {
-  const length=end-start+1;
-  const decode = () => escaped ? JSON.parse(utf8Decoder.decode(bytes.subarray(start,end+1))) as string : utf8Decoder.decode(bytes.subarray(start+1,end));
-  if (length>256) return decode();
-  let hash=2166136261;
-  for(let i=start;i<=end;i++)hash=Math.imul(hash^bytes[i]!,16777619)>>>0;
-  const cached=keyCache.get(hash);
-  if(cached?.raw.length===length){let equal=true;for(let i=0;i<length;i++)if(cached.raw[i]!==bytes[start+i]){equal=false;break;}if(equal)return cached.key;}
-  // Own only the small raw key token, never a view retaining its wire frame.
-  const key=decode(),raw=bytes.slice(start,end+1);
-  keyCache.put(hash,{raw,key},raw.byteLength+key.length*2+160);return key;
-}
 const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
 const path = (...parts: string[]) => literal('$.' + parts.map(name => JSON.stringify(name)).join('.'));
 export const sqliteEncodedFrameValueSQL = '(SELECT value FROM main.gv_input_frame WHERE id=1)';
@@ -38,7 +23,7 @@ export function encodedFrameHasCanonicalStructure(text: string | Uint8Array): bo
       }
       const parent = stack.at(-1);
       if (parent?.keys && parent.key) {
-        const key = text instanceof Uint8Array ? decodeUTF8Key(text,start,i,escaped) : escaped ? JSON.parse(slice(start, i + 1)) as string : slice(start + 1, i);
+        const key = escaped ? JSON.parse(slice(start, i + 1)) as string : slice(start + 1, i);
         if (parent.keys.has(key)) return false;
         parent.keys.add(key); parent.key = false;
       } else if (stack.length > 32) return false;
