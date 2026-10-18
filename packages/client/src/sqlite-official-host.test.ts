@@ -230,3 +230,24 @@ it('imports owned UTF-8 frames and preserves canonical fallback and transaction 
   expect(await host.database.getFirstAsync('SELECT count(*) n FROM main.gv_input_frame')).toEqual({ n: 0 });
   expect(await engine.integrity()).toBe('ok');
 });
+
+it('resumes native UTF-8 bootstrap frames with exact raw receipts and atomic duplicate rejection', async () => {
+  const {host}=fixture();
+  const schema={records:{key:'_id',fields:{_id:{kind:'text'},title:{kind:'text'},rank:{kind:'number'}},indexes:[{columns:['rank']}],search:['title']}} as const;
+  const engine=new SQLiteTypedReplicaEngine(host.database,schema);await engine.open('one');await engine.beginBootstrap('s','token');
+  const frame=(...ids:string[])=>JSON.stringify(ids.map(id=>({table:'records',id,version:1,row:{_id:id,title:'CAFÉ 東京 '+id,rank:1}})));
+  const text=frame('a'),input=new TextEncoder().encode(text);
+  const pending=engine.appendBootstrap('s','token',0,input);input.fill(0);
+  const first=await pending;
+  expect(await engine.appendBootstrap('s','token',0,text)).toEqual(first);
+  expect(engine.takeProfile()).toMatchObject({nativeFrames:1,parseMs:0,reencodeMs:0});
+  await expect(engine.appendBootstrap('s','token',1,frame('b','b'))).rejects.toMatchObject({code:'INVALID_ROW'});
+  await expect(engine.appendBootstrapBatch('s','token',(async function*(){yield {page:1,encoded:frame('b')};yield {page:2,encoded:frame('a')};})())).rejects.toMatchObject({code:'INVALID_ROW'});
+  expect(await engine.beginBootstrap('s','token')).toEqual(first);
+  await expect(engine.appendBootstrap('s','token',0,frame('different'))).rejects.toMatchObject({code:'INTENT_CONFLICT'});
+  const next=new SQLiteTypedReplicaEngine(host.database,schema);await next.open('two');
+  const second=await next.appendBootstrap('s','token',1,new TextEncoder().encode(frame('b')));
+  await next.finishBootstrap('s','token',{pages:second.nextPage,rows:second.rows,root:second.root});
+  expect((await next.page('s',{table:'records',search:'café',order:[{field:'rank',direction:'asc'}],limit:50})).rows.map(row=>row._id)).toEqual(['a','b']);
+  expect(await next.integrity()).toBe('ok');
+});

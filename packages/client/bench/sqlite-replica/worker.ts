@@ -37,7 +37,7 @@ const handlers = {
     return { count, ms: performance.now() - begin, memoryBytes: host.memoryBytes() };
   },
   async bootstrapOpen({ token }) { return engine.beginBootstrap('test-scope', token); },
-  async bootstrapSeed({ token, start, count }) {
+  async bootstrapSeed({ token, start, count, encoded: encodedInput = false, utf8 = false }) {
     let state;
     // Worker replacement cadence is independent of the bounded commit credit.
     // Never enlarge a transaction just to keep a worker alive for more rows.
@@ -45,6 +45,7 @@ const handlers = {
       const end = Math.min(group + 1000, start + count);
       state = await engine.appendBootstrapBatch('test-scope', token, (async function* () {
         for (let offset = group; offset < end; offset += 100) {
+          if(encodedInput){const at=performance.now();const encoded=(utf8?fixtureUTF8Writes:fixtureEncodedWrites)(offset,Math.min(100,end-offset));generated.wireEncodeMs+=performance.now()-at;yield {page:offset/100,encoded};continue;}
           let timed = performance.now(); const writes = fixtureWrites(offset, Math.min(100, end - offset));
           generated.fixtureMs += performance.now() - timed; timed = performance.now();
           const encoded = JSON.stringify(writes); generated.wireEncodeMs += performance.now() - timed;

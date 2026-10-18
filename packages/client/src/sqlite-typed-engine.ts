@@ -16,8 +16,8 @@ export type SQLiteTypedViewPage = { rows: Record<string, unknown>[]; sequence: n
 export type SQLiteBootstrapState = { token: string; nextPage: number; rows: number; root: string; complete: boolean };
 type SQLiteBootstrapRecord = { scope: string; token: string; physical: string; next_page: number; rows: number; root: string; base_sequence: number; complete: number };
 function bootstrapState(row: SQLiteBootstrapRecord): SQLiteBootstrapState { return { token: row.token, nextPage: row.next_page, rows: row.rows, root: row.root, complete: !!row.complete }; }
-async function sha256(text: string): Promise<string> {
-  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+async function sha256(text: string | Uint8Array): Promise<string> {
+  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', (typeof text === 'string' ? new TextEncoder().encode(text) : text as Uint8Array<ArrayBuffer>)));
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
 /** JSON.parse owns this graph: no accessors, cycles or foreign prototypes.
@@ -338,12 +338,14 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       }); return state;
     });
   }
-  appendBootstrap(scope: string, token: string, page: number, encoded: string): Promise<SQLiteBootstrapState> {
-    return this.appendBootstrapBatch(scope, token, (async function* () { yield { page, encoded }; })());
+  appendBootstrap(scope: string, token: string, page: number, encoded: string | Uint8Array): Promise<SQLiteBootstrapState> {
+    if ((typeof encoded === 'string' ? encoded.length*2>this.limits.batchBytes : !(encoded instanceof Uint8Array) || !(encoded.buffer instanceof ArrayBuffer) || encoded.byteLength*2>this.limits.batchBytes)) return Promise.reject(new SQLiteReplicaEngineError('BUDGET','Invalid SQLite bootstrap frame'));
+    const owned = typeof encoded === 'string' ? encoded : encoded.slice();
+    return this.appendBootstrapBatch(scope, token, (async function* () { yield { page, encoded: owned }; })());
   }
   /** A bounded streamed credit group commits together. The producer yields one
    * frame at a time; it never needs a 1,000-row object or worker message. */
-  appendBootstrapBatch(scope: string, token: string, source: AsyncIterable<{ page: number; encoded: string }>): Promise<SQLiteBootstrapState> {
+  appendBootstrapBatch(scope: string, token: string, source: AsyncIterable<{ page: number; encoded: string | Uint8Array }>): Promise<SQLiteBootstrapState> {
     sqlitePayloadBytes({ scope, token }, 2048);
     return this.enqueue(Math.min(this.limits.queuedBytes, this.limits.batchBytes * 2), async () => {
       let state: SQLiteBootstrapState | undefined;
@@ -351,8 +353,9 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       await this.db.withTransactionAsync(async () => {
         let pages = 0, bytes = 0;
         for await (const frame of source) {
-          const page = frame.page, encoded = frame.encoded;
-          if (++pages > 16 || typeof encoded !== 'string' || (bytes += encoded.length * 2) > this.limits.queuedBytes) fail('BUDGET', 'Bootstrap credit group exceeds budget');
+          const page = frame.page, input = frame.encoded;
+          if (++pages > 16 || typeof input !== 'string' && (!(input instanceof Uint8Array) || !(input.buffer instanceof ArrayBuffer)) || (bytes += input.length * 2) > this.limits.queuedBytes || input.length*2>this.limits.batchBytes) fail('BUDGET', 'Bootstrap credit group exceeds budget');
+          const encoded = typeof input === 'string' ? input : input.slice();
           state = await this.appendBootstrapPage(scope, token, page, encoded);
         }
         if (!state) fail('INVALID_ROW', 'Empty bootstrap credit group');
@@ -361,15 +364,9 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       return state!;
     });
   }
-  private async appendBootstrapPage(scope: string, token: string, page: number, encoded: string): Promise<SQLiteBootstrapState> {
-    if (typeof encoded !== 'string' || encoded.length * 2 > this.limits.batchBytes || !Number.isSafeInteger(page) || page < 0) throw new RangeError('Invalid SQLite bootstrap page');
-    const frameAt = performance.now(), parseAt = performance.now();
-    const admitted = JSON.parse(encoded) as SQLiteTypedWrite[];
-    this.profile.parseMs += performance.now() - parseAt;
-    const validationAt = performance.now();
-    parsedPayloadBytes(admitted, this.limits.batchBytes);
-    if (!Array.isArray(admitted) || admitted.length > 512 || admitted.some(write => write.row === null)) fail('INVALID_ROW', 'Bootstrap accepts bounded live rows only');
-    this.profile.validationMs += performance.now() - validationAt;
+  private async appendBootstrapPage(scope: string, token: string, page: number, encoded: string | Uint8Array): Promise<SQLiteBootstrapState> {
+    if (encoded.length * 2 > this.limits.batchBytes || !Number.isSafeInteger(page) || page < 0) throw new RangeError('Invalid SQLite bootstrap page');
+    const frameAt = performance.now();
     let hashAt = performance.now();
     const hash = await sha256(encoded);
     this.profile.hashMs += performance.now() - hashAt;
@@ -382,6 +379,25 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       return bootstrapState(old);
     }
     if (old.complete || page !== old.next_page) fail('PAGE_CHANGED', 'Bootstrap page is out of sequence');
+    let count = 0, duplicatesChecked = false;
+    const native = await writeSQLiteEncodedFrame(this.db,this.schema,this.jsonEach,encoded,this.limits.batchBytes,async(entity,normalized)=>{
+      if (!duplicatesChecked) {
+        if (await this.db.getFirstAsync(`SELECT 1 FROM ${this.jsonEach}(${sqliteEncodedFrameValueSQL}) GROUP BY json_extract(value,'$.table'),json_extract(value,'$.id') HAVING count(*)>1 LIMIT 1`)) fail('INVALID_ROW','Duplicate bootstrap row');
+        duplicatesChecked = true;
+      }
+      if (await this.db.getFirstAsync(`SELECT 1 FROM ${this.jsonEach}(${sqliteEncodedFrameValueSQL}) w JOIN ${q(sqliteTableName(entity))} t ON t.scope=? AND t.id=json_extract(w.value,'$.id') WHERE json_extract(w.value,'$.table')=? LIMIT 1`,old.physical,entity)) fail('INVALID_ROW','Duplicate bootstrap row');
+      await this.insertBootstrapEntity(old.physical,entity,undefined,normalized);
+    },entity=>this.compiledPlan('validate:'+this.jsonEach+':'+entity,()=>compileSQLiteEncodedFrameValidation(this.schema[entity]!,this.jsonEach)));
+    if (native) {
+      count=native.rows; this.profile.nativeFrames++; this.profile.nativeValidationMs+=native.validationMs;
+      this.profile.searchProjectionMs+=native.projectionMs; this.profile.normalizationMs+=native.normalizationMs;
+    } else {
+      const parseAt=performance.now();
+      const admitted=JSON.parse(typeof encoded==='string'?encoded:new TextDecoder('utf-8',{fatal:true}).decode(encoded)) as SQLiteTypedWrite[];
+      this.profile.parseMs+=performance.now()-parseAt;
+      const validationAt=performance.now(); parsedPayloadBytes(admitted,this.limits.batchBytes);
+      if (!Array.isArray(admitted)||admitted.length>512||admitted.some(write=>write.row===null)) fail('INVALID_ROW','Bootstrap accepts bounded live rows only');
+      this.profile.validationMs+=performance.now()-validationAt;
     const groups = new Map<string, string[]>(), seen = new Set<string>();
     for (const write of admitted) {
       this.validateWrite(write);
@@ -391,12 +407,14 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
     }
     for (const [entity, ids] of groups) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? AND id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, old.physical, ...ids)) fail('INVALID_ROW', 'Duplicate bootstrap row');
     await this.writeBootstrapFrame(old.physical, admitted);
+      count = admitted.length;
+    }
     hashAt = performance.now();
-    const root = await sha256(old.root + hash), rows = old.rows + admitted.length;
+    const root = await sha256(old.root + hash), rows = old.rows + count;
     this.profile.hashMs += performance.now() - hashAt;
     await this.db.runAsync('INSERT INTO gv_bootstrap_pages VALUES(?,?,?)', token, page, hash);
     await this.db.runAsync('UPDATE gv_bootstrap SET next_page=?,rows=?,root=? WHERE scope=? AND token=?', page + 1, rows, root, scope, token);
-    this.profile.frames++; this.profile.rows += admitted.length;
+    this.profile.frames++; this.profile.rows += count;
     this.profile.frameMs += performance.now() - frameAt;
     return { token, nextPage: page + 1, rows, root, complete: false };
   }
