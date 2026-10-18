@@ -1,9 +1,7 @@
 import type {JsonValue} from '@gonvex/protocol';
-import type {LocalExecution} from '@gonvex/local-runtime';
-import type {ReadCoverage} from '@gonvex/local-runtime/read-view';
 import type {PortableReducerRuntime} from '@gonvex/local-runtime/portable';
 import type {SQLiteOwnerCaller,SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
-import {SQLiteReducerCore,SQLiteReducerPreparationRequiredError,type SQLiteReducerReceipt} from './sqlite-reducer-core.js';
+import {SQLiteReducerCore,SQLiteReducerPreparationRequiredError,type SQLiteReducerReceipt,type SQLiteReducerContext} from './sqlite-reducer-core.js';
 import {SQLiteIntentJournal} from './sqlite-intent-journal.js';
 import {SQLitePredictions} from './sqlite-predictions.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
@@ -12,7 +10,7 @@ export type SQLiteReducerOwnerOptions={
  runtime:Pick<PortableReducerRuntime,'prepare'|'execute'|'isPrepared'>;artifactHash:string;
  /** Owned by the authenticated worker session registry, never by call args. */
  resolveTab(tabID:string):SQLiteTabAdmission;
- context(scope:string):Promise<{identity:LocalExecution['identity'];coverage:ReadCoverage}>;
+ context(scope:string):Promise<SQLiteReducerContext>;
 };
 export type SQLiteOwnerReducerCall={path:string;args:JsonValue;now:number;intentEntropy?:string};
 /** The native client program composes this endpoint with its authenticated
@@ -54,7 +52,7 @@ export class SQLiteReducerOwner {
  }
  async invoke(input:SQLiteOwnerReducerCall,caller:SQLiteOwnerCaller):Promise<SQLiteReducerReceipt>{
   const bytes=sqlitePayloadBytes(input,131072);
-  if(!caller||typeof caller.tabID!=='string'||!caller.tabID||caller.tabID.length>128||typeof caller.requestID!=='string'||!caller.requestID||caller.requestID.length>128)throw new TypeError('Invalid reducer caller');
+  if(!caller||typeof caller.tabID!=='string'||!caller.tabID||caller.tabID.length>128||typeof caller.requestID!=='string'||!caller.requestID||caller.requestID.length>256)throw new TypeError('Invalid reducer caller');
   const owned=JSON.parse(JSON.stringify(input)) as SQLiteOwnerReducerCall,admitted=this.admission(caller.tabID);
   return this.run(bytes,admitted.scope,async()=>{
    if(caller.signal.aborted)fail('FENCED','Reducer caller is detached');

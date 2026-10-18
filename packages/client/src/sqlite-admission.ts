@@ -1,7 +1,7 @@
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
 
 export class SQLiteReplicaEngineError extends Error {
-  constructor(readonly code: 'FENCED' | 'SCHEMA_MISMATCH' | 'BUDGET' | 'INTENT_CONFLICT' | 'INVALID_ROW' | 'PAGE_CHANGED', message: string) { super(message); this.name = 'SQLiteReplicaEngineError'; }
+  constructor(readonly code: 'FENCED' | 'SCHEMA_MISMATCH' | 'BUDGET' | 'INTENT_CONFLICT' | 'INTENT_CORRUPT' | 'INVALID_ROW' | 'PAGE_CHANGED', message: string) { super(message); this.name = 'SQLiteReplicaEngineError'; }
 }
 export function pageBudgetError(error: unknown): boolean { return !!error && typeof error === 'object' && 'code' in error && (error.code === 'BUDGET' || error.code === 'sqlite-bridge-budget'); }
 export function fail(code: SQLiteReplicaEngineError['code'], message: string): never { throw new SQLiteReplicaEngineError(code, message); }

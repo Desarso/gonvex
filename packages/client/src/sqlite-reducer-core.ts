@@ -13,12 +13,13 @@ export class SQLiteReducerPreparationRequiredError extends Error {
  constructor(readonly path:string){super('Prepare the reducer module outside the SQLite owner queue');this.name='SQLiteReducerPreparationRequiredError';}
 }
 export type SQLiteReducerReceipt={intentId:number;commandId:string;result:JsonValue;originalGeneration:{epoch:number;sequence:number}};
+export type SQLiteReducerContext={identity:LocalExecution['identity'];coverage:ReadCoverage;intentScope:string};
 type Options={
  database:SQLiteReplicaDatabase;engine:SQLiteTypedReplicaEngine;journal:SQLiteIntentJournal;predictions:SQLitePredictions;
  runtime:Pick<PortableReducerRuntime,'execute'|'prepare'|'isPrepared'>;artifactHash:string;
  /** Captured by the worker from its authenticated session and admitted plans.
   * Application arguments never select an identity or grant replica coverage. */
- context(scope:string):Promise<{identity:LocalExecution['identity'];coverage:ReadCoverage}>;
+ context(scope:string):Promise<SQLiteReducerContext>;
 };
 const schema=`CREATE TABLE IF NOT EXISTS gv_reducer_invocations(scope TEXT NOT NULL,command_id TEXT NOT NULL,hash TEXT NOT NULL,receipt TEXT NOT NULL,PRIMARY KEY(scope,command_id)) WITHOUT ROWID;`;
 async function digest(text:string){return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text))),byte=>byte.toString(16).padStart(2,'0')).join('');}
@@ -35,6 +36,7 @@ export class SQLiteReducerCore {
    await this.options.journal.ready();await this.options.predictions.ready();await this.options.database.withTransactionAsync(async()=>{await this.options.engine.verifyOwner();await this.options.database.execAsync(schema);});
   })().catch(error=>{this.initialized=undefined;throw error;});}return this.initialized;
  }
+ private async context(scope:string){const captured=await this.options.context(scope);sqlitePayloadBytes(captured,131072);if(typeof captured.intentScope!=='string'||!captured.intentScope||captured.intentScope.length>512)throw new TypeError('Invalid durable identity scope');return captured;}
  private async stored(scope:string,command:string,hash:string):Promise<SQLiteReducerReceipt|undefined>{
   const old=await this.options.database.getFirstAsync<{hash:string;receipt:string}>('SELECT hash,receipt FROM gv_reducer_invocations WHERE scope=? AND command_id=?',scope,command);
   if(!old)return;if(old.hash!==hash)fail('INTENT_CONFLICT','Reducer command reused with different invocation');decodedJSONBytes(old.receipt,131072);return JSON.parse(old.receipt);
@@ -43,27 +45,27 @@ export class SQLiteReducerCore {
  prepare(path:string){if(typeof path!=='string'||!path||path.length>1024)throw new TypeError('Invalid reducer path');return this.options.runtime.prepare(path);}
  async invoke(input:SQLiteReducerInvocation):Promise<SQLiteReducerReceipt>{
   sqlitePayloadBytes(input,131072);
-  if(typeof input.scope!=='string'||!input.scope||input.scope.length>512||input.scope.includes('\u0000')||typeof input.path!=='string'||!input.path||input.path.length>1024||typeof input.commandId!=='string'||!input.commandId||input.commandId.length>128||!Number.isSafeInteger(input.now)||input.now<0||input.intentEntropy!==undefined&&(typeof input.intentEntropy!=='string'||input.intentEntropy.length>256))throw new TypeError('Invalid local reducer invocation');
+  if(typeof input.scope!=='string'||!input.scope||input.scope.length>512||input.scope.includes('\u0000')||typeof input.path!=='string'||!input.path||input.path.length>1024||typeof input.commandId!=='string'||!input.commandId||input.commandId.length>256||!Number.isSafeInteger(input.now)||input.now<0||input.intentEntropy!==undefined&&(typeof input.intentEntropy!=='string'||input.intentEntropy.length>256))throw new TypeError('Invalid local reducer invocation');
   // Retain only admitted known envelope fields. Arbitrary extra fields cannot
   // become identity, execution metadata or a different retry fingerprint.
-  const encoded=JSON.stringify({scope:input.scope,path:input.path,commandId:input.commandId,args:input.args,now:input.now,...(input.intentEntropy===undefined?{}:{intentEntropy:input.intentEntropy})}),owned=JSON.parse(encoded) as SQLiteReducerInvocation,hash=await digest(encoded);
-  await this.ready();let receipt:SQLiteReducerReceipt|undefined;
+  const encoded=JSON.stringify({scope:input.scope,path:input.path,commandId:input.commandId,args:input.args,now:input.now,...(input.intentEntropy===undefined?{}:{intentEntropy:input.intentEntropy})}),owned=JSON.parse(encoded) as SQLiteReducerInvocation;
+  await this.ready();let receipt:SQLiteReducerReceipt|undefined,hash='',intentScope='';
   // A durable same-command reply remains available offline even when the
   // corresponding lazy reducer module has not been cached in this worker.
-  await this.options.database.withTransactionAsync(async()=>{await this.options.engine.verifyOwner();await this.options.context(owned.scope);receipt=await this.stored(owned.scope,owned.commandId,hash);});
+  await this.options.database.withTransactionAsync(async()=>{await this.options.engine.verifyOwner();const captured=await this.context(owned.scope);intentScope=captured.intentScope;hash=await digest(JSON.stringify({...owned,scope:intentScope}));receipt=await this.stored(intentScope,owned.commandId,hash);});
   if(receipt)return receipt;if(!this.options.runtime.isPrepared(owned.path))throw new SQLiteReducerPreparationRequiredError(owned.path);
   await this.options.database.withTransactionAsync(async()=>{
-   const generation=await this.options.engine.verifyOwner(),captured=await this.options.context(owned.scope);sqlitePayloadBytes(captured,131072);
-   const old=await this.stored(owned.scope,owned.commandId,hash);if(old){receipt=old;return;}
+   const generation=await this.options.engine.verifyOwner(),captured=await this.context(owned.scope);if(captured.intentScope!==intentScope)fail('FENCED','Reducer durable identity changed');
+   const old=await this.stored(intentScope,owned.commandId,hash);if(old){receipt=old;return;}
    const execution:LocalExecution={scope:owned.scope,commandId:owned.commandId,now:owned.now,artifactHash:this.options.artifactHash,identity:structuredClone(captured.identity),...(owned.intentEntropy===undefined?{}:{intentEntropy:owned.intentEntropy})};
    const transaction:LocalTransactionResult=await this.options.predictions.withReadView(owned.scope,captured.coverage,view=>this.options.runtime.execute(owned.path,owned.args,view,execution));sqlitePayloadBytes(transaction,262144);
    const dependencies={reads:transaction.readRows??[],writes:transaction.patches.map(patch=>({entity:patch.entity,rowId:patch.rowId})),scans:transaction.scanTables??transaction.readTables};
-   const intent=await this.options.journal.append({scope:owned.scope,path:owned.path,args:owned.args,idempotencyKey:owned.commandId,entityKeys:[],dependencies,patches:transaction.patches,localExecution:execution,createdAt:owned.now,attempts:0,nextAttemptAt:owned.now,state:'pending',...(transaction.coalesceKey?{coalesceKey:transaction.coalesceKey}:{})});
+   const intent=await this.options.journal.append({scope:intentScope,path:owned.path,args:owned.args,idempotencyKey:owned.commandId,entityKeys:[],dependencies,patches:transaction.patches,localExecution:execution,createdAt:owned.now,attempts:0,nextAttemptAt:owned.now,state:'pending',...(transaction.coalesceKey?{coalesceKey:transaction.coalesceKey}:{})});
    await this.options.predictions.apply(owned.scope,intent.id,transaction.patches);
    if(generation.sequence>=Number.MAX_SAFE_INTEGER)fail('FENCED','Storage sequence exhausted');
    receipt={intentId:intent.id,commandId:owned.commandId,result:transaction.result,originalGeneration:{epoch:generation.epoch,sequence:generation.sequence+1}};
    sqlitePayloadBytes(receipt,131072);const stored=JSON.stringify(receipt);decodedJSONBytes(stored,131072);if(new TextEncoder().encode(stored).byteLength>130000)fail('BUDGET','Reducer receipt exceeds native wire budget');
-   await this.options.database.runAsync('INSERT INTO gv_reducer_invocations VALUES(?,?,?,?)',owned.scope,owned.commandId,hash,stored);
+   await this.options.database.runAsync('INSERT INTO gv_reducer_invocations VALUES(?,?,?,?)',intentScope,owned.commandId,hash,stored);
    await this.options.database.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1',receipt.originalGeneration.sequence);
   });return receipt!;
  }
@@ -76,11 +78,11 @@ export class SQLiteReducerCore {
   if(typeof scope!=='string'||!scope||scope.length>512||scope.includes('\u0000'))throw new TypeError('Invalid reducer scope');
   await this.ready();let result!:{replayed:number;retained:number;unavailable:number;generation:{epoch:number;sequence:number}};
   await this.options.database.withTransactionAsync(async()=>{
-   await this.options.engine.verifyOwner();await this.options.context(scope);await authority?.();
-   const captured=await this.options.context(scope);sqlitePayloadBytes(captured,131072);
+   await this.options.engine.verifyOwner();const before=await this.context(scope);await authority?.();
+   const captured=await this.context(scope);if(captured.intentScope!==before.intentScope)fail('FENCED','Rebase durable identity changed');
    await this.options.predictions.reset(scope);let after=0,replayed=0,retained=0,unavailable=0;
    for(;;){
-    const page=await this.options.journal.page(scope,after,8);
+    const page=await this.options.journal.page(captured.intentScope,after,8);
     for(const entry of page.entries){
      if(entry.state==='rejected')continue;
      let patches=entry.patches??[];
@@ -98,7 +100,7 @@ export class SQLiteReducerCore {
       if(transaction)sqlitePayloadBytes(transaction,262144);
       patches=transaction?.patches??[];
       const dependencies=transaction?{reads:transaction.readRows??[],writes:transaction.patches.map(patch=>({entity:patch.entity,rowId:patch.rowId})),scans:transaction.scanTables??transaction.readTables}:entry.dependencies;
-      const updated=await this.options.journal.update(scope,entry.id,[entry.state],before=>({...before,patches,localExecution:execution,...(dependencies?{dependencies}:{})}));
+      const updated=await this.options.journal.update(captured.intentScope,entry.id,[entry.state],before=>({...before,patches,localExecution:execution,...(dependencies?{dependencies}:{})}));
       if(!updated)fail('FENCED','Intent changed during prediction replay');
       if(transaction)replayed++;else unavailable++;
      }else retained++;

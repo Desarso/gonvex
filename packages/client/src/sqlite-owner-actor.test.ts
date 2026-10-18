@@ -36,7 +36,7 @@ it('prepares lazy reducer chunks outside the owner queue and fences a changed ta
  const interval=vi.spyOn(globalThis,'setInterval').mockImplementation(()=>0 as any);
  const dispose=installSQLiteOwner({schema,createProgram(ctx){
   void ctx.runOwner(0,()=>ctx.canonical.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'records',id:'a',operation:'insert',newValue:{id:'a',n:1}}]},{entities:{},liveQueries:{}},'s').then(()=>{}));
-  endpoint=new SQLiteReducerOwner(ctx,{runtime,artifactHash:'artifact',resolveTab(){return {scope:'s',generation};},async context(){return {identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}},coverage:{records:{key:'id',complete:true}}};}});
+  endpoint=new SQLiteReducerOwner(ctx,{runtime,artifactHash:'artifact',resolveTab(){return {scope:'s',generation};},async context(){return {intentScope:'s',identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}},coverage:{records:{key:'id',complete:true}}};}});
   return {call(args:any,caller){return endpoint.invoke(args,caller);}};
  }});interval.mockRestore();
  const request=(op:string,args:any={},requestID='command-'+(++serial))=>new Promise<any>(resolve=>{const id='transport-'+(++serial);awaiting.set(id,resolve);(globalThis as any).onmessage({data:{id,requestID,tabID:'tab',op,args}});});

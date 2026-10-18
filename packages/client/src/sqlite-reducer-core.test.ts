@@ -17,7 +17,7 @@ async function fixture(){
  const engine=new SQLiteTypedReplicaEngine(db,typed);await engine.open('core');const canonical=sqliteTypedReplicaStorage(db,typed);await canonical.ready();await canonical.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'tasks',id:'a',operation:'insert',newValue:{id:'a',n:1}}]},{entities:{},liveQueries:{}},'s');
  const fence=()=>engine.verifyOwner(),journal=new SQLiteIntentJournal(db,fence),predictions=new SQLitePredictions(db,canonical,typed,fence);let calls=0;
  const runtime=new PortableReducerRuntime({schema:local,artifactHash:'artifact',reducers:{increment:reducer({args:schema.any(),result:schema.any(),run:async(ctx,args:any)=>{calls++;const before=await getRow<{id:string;n:number}>(ctx.db,'tasks','id',args.id);if(!before)throw Error('missing task');await ctx.db.update('tasks',args.id,{n:before.n+1});if(args.fail)throw Error('reducer failed');return {id:args.id,n:before.n+1,member:ctx.member!.id};}}),giantReply:reducer({args:schema.any(),result:schema.any(),run:async()=> '東京'.repeat(30000)}),create:reducer({args:schema.any(),result:schema.any(),run:async ctx=>ctx.db.insert('tasks',{n:10})})}});
- const options={database:db,engine,journal,predictions,runtime,artifactHash:'artifact',async context(scope:string){if(scope!=='s')throw Error('unauthenticated scope');return {identity,coverage:{tasks:{key:'id',complete:true}}};}},core=new SQLiteReducerCore(options);await core.ready();return {sql,db,engine,canonical,journal,predictions,core,options,get calls(){return calls;}};
+ const options={database:db,engine,journal,predictions,runtime,artifactHash:'artifact',async context(scope:string){if(scope!=='s')throw Error('unauthenticated scope');return {intentScope:'s',identity,coverage:{tasks:{key:'id',complete:true}}};}},core=new SQLiteReducerCore(options);await core.ready();return {sql,db,engine,canonical,journal,predictions,core,options,get calls(){return calls;}};
 }
 it('executes the same generated reducer against predictions and atomically queues an intent without changing canonical rows',async()=>{
  const f=await fixture();try{
@@ -108,3 +108,16 @@ it('replays a long causal chain through bounded pages rather than loading the ba
   expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(260);expect(pages).toBe(32);paged.mockRestore();
  }finally{vi.restoreAllMocks();f.sql.close();}
 },30000);
+
+it('keeps queued commands and original replies in the stable identity scope across visibility changes',async()=>{
+ const f=await fixture();try{
+  const intentScope='identity\u0000deployment\u0000tenant\u0000account';let active='s';
+  const options={...f.options,async context(scope:string){if(scope!==active)throw Error('obsolete visibility');return {intentScope,identity,coverage:{tasks:{key:'id',complete:true}}};}};
+  const core=new SQLiteReducerCore(options),input={scope:'s',path:'increment',commandId:'same',now:100,args:{id:'a'}};const first=await core.invoke(input);
+  expect((await f.journal.summary(intentScope)).count).toBe(1);expect((await f.journal.summary('s')).count).toBe(0);
+  await f.canonical.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'insert',newValue:{id:'a',n:10}}]},{entities:{},liveQueries:{}},'new-visible');active='new-visible';
+  const offline=new SQLiteReducerCore({...options,runtime:{isPrepared:()=>false,prepare:async()=>{throw Error('offline');},execute:async()=>{throw Error('must not execute');}}});
+  expect(await offline.invoke({...input,scope:active})).toEqual(first);expect(await core.rebase(active)).toMatchObject({replayed:1});expect((await f.predictions.entities(active,'tasks',['a']))[0].row.n).toBe(11);
+  expect((await core.invoke({...input,scope:active,commandId:'next',now:101})).result).toMatchObject({n:12});const queued=(await f.journal.page(intentScope)).entries;expect(queued).toHaveLength(2);expect(queued.every(entry=>entry.scope===intentScope&&entry.localExecution!.scope===active)).toBe(true);expect(await core.invoke({...input,scope:active})).toEqual(first);
+ }finally{f.sql.close();}
+});
