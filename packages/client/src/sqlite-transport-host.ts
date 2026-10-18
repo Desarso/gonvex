@@ -12,6 +12,9 @@ export type SQLiteTransportHost={
  binary(frame:ArrayBuffer,generation:number):void;
  /** True only when the native host owns this frame's durable processing. */
  frame(message:ServerMessage,generation:number):boolean;
+ /** Definitive authorization denial. Fence reads/writes immediately; persist
+  * revocation separately from retaining the identity's unsent commands. */
+ quarantined?(generation:number):void;
  disconnected():void;
  failed(error:unknown):void;
 };

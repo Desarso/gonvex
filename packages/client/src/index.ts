@@ -3794,6 +3794,7 @@ export class GonvexClient {
   }
 
   private quarantineReplicaScope() {
+    try{this.ownerHost?.quarantined?.(this.socketGeneration);}catch(error){this.ownerHost?.failed(error);}
     this.outboxScopeGeneration += 1;
     this.authenticatedSocketGeneration = 0;
     this.localIdentity = undefined;

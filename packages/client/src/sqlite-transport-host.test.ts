@@ -19,7 +19,7 @@ const identity={auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'m
 const directive={protocolVersion:1,scope:'tenant',visibilityScope:'visible',epoch:'e'};
 const authResult=(id:string,replica=directive)=>({type:'auth.result',id,result:{localIdentity:identity,replica,artifactHash:'artifact'}});
 function fixture(session:SQLiteTransportHost['session']=async()=>{}){
- const host:SQLiteTransportHost={authenticating:vi.fn(),session:vi.fn(session),binary:vi.fn(),frame:vi.fn(message=>message.type.startsWith('replica.')),disconnected:vi.fn(),failed:vi.fn()};
+ const host:SQLiteTransportHost={authenticating:vi.fn(),session:vi.fn(session),binary:vi.fn(),frame:vi.fn(message=>message.type.startsWith('replica.')),quarantined:vi.fn(),disconnected:vi.fn(),failed:vi.fn()};
  const client=new GonvexClient('ws://private.test/ws',{ownerHost:host,errorReporting:false,project:'project',tenant:'tenant',token:'opaque',identity:{sub:'account'}});clients.push(client);client.connect();const socket=Socket.instances.at(-1)!;socket.open();socket.receive({type:'session.ready',capabilities:{replicaNativeRows:1,replicaWatermark:1}});return {host,client,socket,auth:()=>socket.sent.filter(value=>value.type==='auth').at(-1)};
 }
 const flush=()=>new Promise(resolve=>setTimeout(resolve,0));
@@ -59,4 +59,10 @@ it('resets the durable completion fence when server epoch or visibility changes'
  f.client.setAuth({token:'renewed'});f.socket.receive(authResult(f.auth().id,{...directive,epoch:'new-epoch',visibilityScope:'new-visible'}));await flush();let settled=false;
  const pending=f.client.callOwnerReducer({kind:'reducer',path:'tasks/change'}, {},'next',0).then(result=>{settled=true;return result;});void pending.catch(()=>{});const sent=f.socket.sent.filter(value=>value.type==='reducer.call').at(-1);
  f.socket.receive({type:'reducer.result',id:sent.id,result:1,originCommandId:'next',committedRevision:1});await flush();expect(settled).toBe(false);f.client.advanceOwnerWatermark(1);expect(await pending).toBe(1);
+});
+
+it('fences the worker session for a definitive revocation but preserves transient reconnect authorization',async()=>{
+ const f=fixture();f.socket.receive(authResult(f.auth().id));await flush();
+ f.socket.receive({type:'auth.error',id:'session-expired',error:'temporarily expired',code:'expired'});expect(f.host.quarantined).not.toHaveBeenCalled();
+ f.socket.receive({type:'auth.error',id:'membership-changed',error:'membership removed',code:'member_removed'});expect(f.host.quarantined).toHaveBeenCalledWith(1);expect(f.client.localSessionState()).toBe('unavailable');
 });

@@ -59,3 +59,14 @@ it('keeps one recovery receipt when a stable identity receives a new visibility 
   await expect(f.journal.append({...moved,args:{text:'different'}},updated,identityScope)).rejects.toMatchObject({code:'INTENT_CONFLICT'});
  }finally{f.journal.close();}
 });
+
+it('persists definitive revocation without deleting pending commands or allowing legacy restore to revive it',async()=>{
+ const f=fixture();let reopened:SQLiteSafetyJournal|undefined;try{
+  await f.journal.append(command(1),session,'s');await f.journal.revokeSession('s');f.journal.close();reopened=f.reopen();
+  expect(await reopened.session('s')).toBeUndefined();expect(await reopened.sessionRevoked('s')).toBe(true);expect(await reopened.count('s')).toBe(1);
+  await expect(reopened.append(command(2),session,'s')).rejects.toMatchObject({code:'FENCED'});
+  await expect(reopened.saveSession('s',session)).rejects.toMatchObject({code:'FENCED'});
+  await expect(reopened.saveSession('s',session,true,()=>false)).rejects.toMatchObject({code:'FENCED'});expect(await reopened.sessionRevoked('s')).toBe(true);
+  await reopened.saveSession('s',session,true);expect(await reopened.sessionRevoked('s')).toBe(false);await reopened.append(command(2),session,'s');expect(await reopened.count('s')).toBe(2);
+ }finally{f.journal.close();reopened?.close();}
+});

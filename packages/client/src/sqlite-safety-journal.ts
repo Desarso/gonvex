@@ -65,6 +65,7 @@ export class SQLiteSafetyJournal {
   // crypto inside that transaction could let the browser auto-commit it.
   const digest=await hash(encoded.value),fingerprint=await hash(JSON.stringify({...owned,scope:intentScope})),legacyHash=legacyValue===undefined?undefined:await hash(legacyValue);
   return this.transaction(['headers','bodies','receipts','sessions'],'readwrite',async tx=>{
+   if((await request(tx.objectStore('sessions').get(intentScope)))?.revoked)fail('FENCED','Cached session was revoked');
    const receipts=tx.objectStore('receipts'),previous=await request(receipts.get([intentScope,owned.commandId])) as Receipt|undefined;
    if(previous){if(previous.fingerprint!==fingerprint||legacyHash!==undefined&&previous.legacyHash!==legacyHash)fail('INTENT_CONFLICT','Safety journal command reused with different content');return previous;}
    const sequence=Number(await request(tx.objectStore('headers').add({scope:intentScope,command:owned.commandId,bytes})));
@@ -104,8 +105,24 @@ export class SQLiteSafetyJournal {
   for(const check of result.checks)if(await hash(check.value)!==check.hash)fail('INTENT_CORRUPT','Safety journal command hash differs');
   return {entries:result.entries,nextSequence:result.nextSequence};
  }
- async saveSession(ownerScope:string,session:LocalReplicaSession){scope(ownerScope);sqlitePayloadBytes(session,131072);const value=JSON.stringify(session);decodedJSONBytes(value,131072);if(!session?.directive||session.directive.protocolVersion!==1||!session.identity||typeof session.artifactHash!=='string')throw new TypeError('Invalid durable session');await this.transaction(['sessions'],'readwrite',async tx=>{await request(tx.objectStore('sessions').put({scope:ownerScope,value}));});}
- async session(ownerScope:string):Promise<LocalReplicaSession|undefined>{scope(ownerScope);return this.transaction(['sessions'],'readonly',async tx=>{const row=await request(tx.objectStore('sessions').get(ownerScope)) as {value:string}|undefined;if(!row)return;decodedJSONBytes(row.value,131072);return JSON.parse(row.value);});}
+ /** Only a fresh correlated server admission may replace a revocation marker.
+  * A migration or command replay must never revive cached authorization. */
+ async saveSession(ownerScope:string,session:LocalReplicaSession,authoritative=false,isCurrent:()=>boolean=()=>true){
+  scope(ownerScope);sqlitePayloadBytes(session,131072);const value=JSON.stringify(session);decodedJSONBytes(value,131072);
+  if(!session?.directive||session.directive.protocolVersion!==1||!session.identity||typeof session.artifactHash!=='string')throw new TypeError('Invalid durable session');
+  await this.transaction(['sessions'],'readwrite',async tx=>{
+   const store=tx.objectStore('sessions');
+   if(!isCurrent())fail('FENCED','Session admission changed');
+   const old=await request(store.get(ownerScope));
+   if(old?.revoked&&!authoritative)fail('FENCED','Cached session was revoked');
+   if(!isCurrent())fail('FENCED','Session admission changed');
+   await request(store.put({scope:ownerScope,value}));
+   if(!isCurrent())fail('FENCED','Session admission changed');
+  });
+ }
+ async revokeSession(ownerScope:string){scope(ownerScope);await this.transaction(['sessions'],'readwrite',async tx=>{await request(tx.objectStore('sessions').put({scope:ownerScope,revoked:true}));});}
+ async sessionRevoked(ownerScope:string){scope(ownerScope);return this.transaction(['sessions'],'readonly',async tx=>!!(await request(tx.objectStore('sessions').get(ownerScope)))?.revoked);}
+ async session(ownerScope:string):Promise<LocalReplicaSession|undefined>{scope(ownerScope);return this.transaction(['sessions'],'readonly',async tx=>{const row=await request(tx.objectStore('sessions').get(ownerScope)) as {value?:string;revoked?:boolean}|undefined;if(!row||row.revoked)return;if(typeof row.value!=='string')fail('INTENT_CORRUPT','Invalid safety journal session');decodedJSONBytes(row.value,131072);return JSON.parse(row.value);});}
  /** Called only on an authoritative accepted/rejected result, never merely
   * because SQLite has durably queued or predicted this command. */
  async settle(ownerScope:string,commandID:string){

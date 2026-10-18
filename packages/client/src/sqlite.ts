@@ -32,3 +32,4 @@ export {SQLiteIndexedDBMigrationSource} from './sqlite-idb-migration-source.js';
 export type {SQLiteMigrationSourcePage} from './sqlite-idb-migration-source.js';
 export {SQLiteLegacyIntentMigration} from './sqlite-legacy-intent-migration.js';
 export type {SQLiteTransportHost,SQLiteTransportSession} from './sqlite-transport-host.js';
+export {SQLiteWorkerSessions} from './sqlite-worker-sessions.js';
