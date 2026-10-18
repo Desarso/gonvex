@@ -24,8 +24,12 @@ export class IndexedDBReplicaWindows extends IndexedDBReplicaEngine {
   * reads bounded window headers, never their membership or row bodies. */
  async readCoverage(scope:string,epoch:string,artifactHash:string):Promise<ReadCoverage>{
   if(!scope||scope.length>512||!epoch||epoch.length>256||!artifactHash||artifactHash.length>256)throw new TypeError('Invalid fallback coverage admission');
-  return this.transaction(['meta','windows'],'readonly',async tx=>{
-   await this.fence(tx);const progress=await request(tx.objectStore('meta').get('feed-progress:'+scope)) as {epoch:string;unclosed:number;applied:number}|undefined;
+  return this.transaction(['meta','windows'],'readonly',async tx=>{await this.fence(tx);return this.readCoverageInTransaction(tx,scope,epoch,artifactHash);});
+ }
+ async readCoverageInTransaction(tx:IDBTransaction,scope:string,epoch:string,artifactHash:string):Promise<ReadCoverage>{
+  if(!scope||scope.length>512||!epoch||epoch.length>256||!artifactHash||artifactHash.length>256)throw new TypeError('Invalid fallback coverage admission');
+  return this.transactionTask(tx,524288,async()=>{
+   const progress=await request(tx.objectStore('meta').get('feed-progress:'+scope)) as {epoch:string;unclosed:number;applied:number}|undefined;
    if(progress&&(progress.epoch!==epoch||progress.unclosed>progress.applied))return {};
    const coverage:Record<string,ReadCoverage[string]>={},range=this.ranges.bound([scope],[scope,[]]);
    await new Promise<void>((resolve,reject)=>{let seen=0;const cursor=tx.objectStore('windows').openCursor(range);cursor.onerror=()=>reject(cursor.error);cursor.onsuccess=()=>{const entry=cursor.result;if(!entry){resolve();return;}try{if(++seen>128)fail('BUDGET','Fallback coverage exceeds source allowance');const window=entry.value as Window,header=window.header;if(header.entityCoverage==='complete'&&header.completeness==='complete'&&header.cursor?.epoch===epoch&&header.cursor.revision>=(progress?.applied??0)&&header.artifactHash===artifactHash){const prior=coverage[header.entity];coverage[header.entity]={key:header.key,complete:true,columns:[...new Set([...(prior?.columns??[]),...(header.columns??[])])]};}entry.continue();}catch(error){reject(error);}};});

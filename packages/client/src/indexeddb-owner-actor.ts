@@ -1,4 +1,4 @@
-import {IndexedDBFeedStore} from './indexeddb-feed-store.js';
+import {IndexedDBLiveWindows} from './indexeddb-live-windows.js';
 import {OriginStorageWorkerLease} from './origin-storage-worker-lease.js';
 import {SQLiteOwnerTabs} from './sqlite-owner-tabs.js';
 import {sqliteRequestBytes} from './sqlite-request-frame.js';
@@ -6,14 +6,14 @@ import {sqliteWorkerProtocol as protocol} from './sqlite-worker-protocol.js';
 import type {SQLiteTypedSchema} from './sqlite-typed-schema.js';
 import type {SQLiteOwnerCaller,SQLiteOwnerProgram} from './sqlite-owner-actor.js';
 import {sqlitePayloadBytes,fail} from './sqlite-admission.js';
-export type IndexedDBOwnerProgramContext={engine:IndexedDBFeedStore;schema:SQLiteTypedSchema;runOwner<T>(bytes:number,run:()=>Promise<T>,scopes?:readonly string[]):Promise<T>;notifyTab(tab:string):Promise<void>};
+export type IndexedDBOwnerProgramContext={engine:IndexedDBLiveWindows;schema:SQLiteTypedSchema;runOwner<T>(bytes:number,run:()=>Promise<T>,scopes?:readonly string[]):Promise<T>;notifyTab(tab:string):Promise<void>};
 export type IndexedDBOwnerBinding={schema:SQLiteTypedSchema;schemaVersion:string;createProgram(context:IndexedDBOwnerProgramContext):SQLiteOwnerProgram};
 let installed=false;
 /** Pure IndexedDB dedicated owner. It shares the primary worker's non-stealable
  * lifetime lease and durable origin epoch, without importing SQLite or WASM. */
 export function installIndexedDBOwner(binding:IndexedDBOwnerBinding){
  if(typeof globalThis.postMessage!=='function'||'document'in globalThis||'onconnect'in globalThis)throw Error('IndexedDB owner requires a dedicated worker');if(installed)throw Error('Only one IndexedDB owner may run in a worker');installed=true;
- let engine:IndexedDBFeedStore|undefined,program:SQLiteOwnerProgram|undefined,token='',closed=false,lane=Promise.resolve(),queued=0,queuedBytes=0,operations=0,operationBytes=0;
+ let engine:IndexedDBLiveWindows|undefined,program:SQLiteOwnerProgram|undefined,token='',closed=false,lane=Promise.resolve(),queued=0,queuedBytes=0,operations=0,operationBytes=0;
  const lease=new OriginStorageWorkerLease(),ports=new Map<string,{port:MessagePort}>();
  const send=(tab:string,message:unknown)=>{const peer=ports.get(tab);if(peer)peer.port.postMessage(message);else globalThis.postMessage(message);};
  const tabs=new SQLiteOwnerTabs((to,change)=>send(to,{type:'change',protocol,to,token,sentAt:Date.now(),...change}),tab=>{ports.get(tab)?.port.close();ports.delete(tab);try{program?.detachTab?.(tab);}catch{globalThis.postMessage({type:'storage-fault'});}}),timer=setInterval(()=>tabs.expire(),5000);
@@ -27,7 +27,7 @@ export function installIndexedDBOwner(binding:IndexedDBOwnerBinding){
  };
  const execute=async(op:string,args:any)=>{
   if(op==='open'){
-   if(engine||args?.protocol!==protocol||args.schemaVersion!==binding.schemaVersion||typeof args.owner!=='string'||!args.owner||args.owner.length>128)throw Object.assign(Error('Incompatible IndexedDB worker binding'),{code:'SCHEMA_MISMATCH'});token=args.owner;await lease.acquire();globalThis.postMessage({type:'progress',stage:'opening-indexeddb',sentAt:Date.now()});engine=new IndexedDBFeedStore(binding.schema);const generation=await engine.claimAdapter(token,'indexeddb');await engine.discardFeedStaging();tabs.setGeneration(generation);program=binding.createProgram({engine,schema:binding.schema,runOwner,notifyTab:tab=>queue(0,async()=>{tabs.notify(tab,await engine!.generation());})});if(!program||typeof program.call!=='function')throw new TypeError('IndexedDB program factory must be synchronous');return {epoch:generation.epoch,wasmBytes:0,adapter:'indexeddb'};
+   if(engine||args?.protocol!==protocol||args.schemaVersion!==binding.schemaVersion||typeof args.owner!=='string'||!args.owner||args.owner.length>128)throw Object.assign(Error('Incompatible IndexedDB worker binding'),{code:'SCHEMA_MISMATCH'});token=args.owner;await lease.acquire();globalThis.postMessage({type:'progress',stage:'opening-indexeddb',sentAt:Date.now()});engine=new IndexedDBLiveWindows(binding.schema);const generation=await engine.claimAdapter(token,'indexeddb');await engine.discardFeedStaging();tabs.setGeneration(generation);program=binding.createProgram({engine,schema:binding.schema,runOwner,notifyTab:tab=>queue(0,async()=>{tabs.notify(tab,await engine!.generation());})});if(!program||typeof program.call!=='function')throw new TypeError('IndexedDB program factory must be synchronous');return {epoch:generation.epoch,wasmBytes:0,adapter:'indexeddb'};
   }
   if(!engine||!program)fail('FENCED','IndexedDB owner is not ready');
   if(op==='ping')return {ready:true};
