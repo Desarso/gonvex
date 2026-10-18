@@ -286,6 +286,42 @@ pub async fn resolve(
     transaction: &mut TenantTransaction,
     session: &TenantSession,
     plan: &VisibilityPlan,
+    revision: u64,
+) -> Result<ResolvedVisibility, VisibilityError> {
+    resolve_member(transaction, session, plan, revision, true).await
+}
+
+/// SQL windows enforce set membership in their SQL predicate. Never fetch the
+/// entire tenant membership into Rust before executing a bounded query.
+pub async fn resolve_for_query(
+    transaction: &mut TenantTransaction,
+    session: &TenantSession,
+    plan: &VisibilityPlan,
+    revision: u64,
+) -> Result<ResolvedVisibility, VisibilityError> {
+    resolve_member(transaction, session, plan, revision, false).await
+}
+
+/// Related SQL predicates share the same admitted member and database snapshot.
+pub fn resolve_related_query(
+    plan: &VisibilityPlan,
+    member: &ResolvedVisibility,
+) -> Result<ResolvedVisibility, VisibilityError> {
+    plan.validate()?;
+    let mut resolved = member.clone();
+    resolved.sets.clear();
+    resolved.fingerprint = visibility_fingerprint(
+        plan, &resolved.direct, &resolved.role, &resolved.permissions, &resolved.sets,
+    );
+    Ok(resolved)
+}
+
+async fn resolve_member(
+    transaction: &mut TenantTransaction,
+    session: &TenantSession,
+    plan: &VisibilityPlan,
+    revision: u64,
+    materialize: bool,
 ) -> Result<ResolvedVisibility, VisibilityError> {
     plan.validate()?;
     let row = sqlx::query(
@@ -299,17 +335,20 @@ pub async fn resolve(
     let member_id: String = row.get("id");
     let role: String = row.get("role");
     let permissions = row.try_get::<Json<Value>, _>("permissions")?.0;
-    let revision: i64 =
-        sqlx::query_scalar("SELECT revision FROM _gonvex_sync_clock WHERE singleton = true")
-            .fetch_one(&mut **transaction.transaction())
-            .await?;
     let direct = BTreeMap::from([
         ("account.id".to_owned(), session.identity.account.id.clone()),
         ("member.id".to_owned(), member_id),
         ("tenant.id".to_owned(), session.route.tenant_id.clone()),
     ]);
     let mut sets = BTreeMap::new();
+    let mut active = BTreeSet::new();
+    if materialize {
+        active_visibility_sets(&plan.predicate, &role, &mut active);
+    }
     for (name, set) in &plan.sets {
+        if !active.contains(name) {
+            continue;
+        }
         let (statement, parameters) = compile_set(set, &direct)?;
         let mut query = sqlx::query(&statement);
         for parameter in &parameters {
@@ -324,7 +363,7 @@ pub async fn resolve(
     }
     let fingerprint = visibility_fingerprint(plan, &direct, &role, &permissions, &sets);
     Ok(ResolvedVisibility {
-        revision: revision.max(0) as u64,
+        revision,
         direct,
         role,
         permissions,
@@ -913,6 +952,24 @@ mod tests {
                     .change_affects("taskUsers", "insert", &[]));
             }
         }
+    }
+
+    #[test]
+    fn bounded_sql_visibility_keeps_membership_in_sql_without_materialized_ids() {
+        let plan = dependency_plan(serde_json::json!({"operator":"inSet","column":"id","set":"assigned"}));
+        let member = dependency_member("member");
+        let related = resolve_related_query(&plan, &member).unwrap();
+        assert!(related.sets.is_empty());
+        assert_eq!(related.revision, member.revision);
+        let mut parameters = Vec::new();
+        let sql = compile_predicate(&plan, &related, "r", &mut parameters).unwrap();
+        assert!(sql.contains("r.\"id\" IN (SELECT DISTINCT"));
+        assert!(sql.contains("\"taskUsers\" AS v0"));
+        assert_eq!(parameters, vec![Value::String("member-1".to_owned())]);
+        // Set changes still invalidate the exact server window. An empty Rust
+        // set must never imply public access or suppress a dependency.
+        assert!(plan.resolved_dependency_columns(&related).change_affects("taskUsers", "delete", &[]));
+        assert_ne!(related.fingerprint, member.fingerprint);
     }
 
     #[test]

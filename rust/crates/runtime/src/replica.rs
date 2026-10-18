@@ -354,8 +354,8 @@ impl Runtime {
         let mut transaction = control
             .begin_tenant_transaction(&session.route, true)
             .await?;
-        let resolved = visibility::resolve(&mut transaction, session, plan).await?;
         let clock = clock_in_transaction(&mut transaction).await?;
+        let resolved = visibility::resolve(&mut transaction, session, plan, clock.revision).await?;
         let rows = query_rows(&mut transaction, definition, plan, &resolved, args).await?;
         let resume_changes = if let Some(after) =
             after.filter(|after| *after >= clock.retained_revision && *after < clock.revision)
