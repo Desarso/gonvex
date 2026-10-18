@@ -1,8 +1,22 @@
 import { decodedJSONBytes } from './sqlite-admission.js';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
-import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
+import type { SQLiteTypedSchema, SQLiteTypedTable } from './sqlite-typed-schema.js';
 const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
 const path = (...parts: string[]) => literal('$.' + parts.map(name => JSON.stringify(name)).join('.'));
+
+export function compileSQLiteEncodedFrameValidation(table: SQLiteTypedTable, each: 'json_each' | 'jsonb_each'): string | undefined {
+  if (table.fields[table.key]?.kind !== 'text' || Object.keys(table.fields).length > 128) return;
+  const id = "json_extract(value,'$.id')", version = "json_extract(value,'$.version')";
+  const checks = ["json_type(value,'$.id')='text'", `length(${id})>0`,
+    "json_type(value,'$.version') IN ('integer','real')", `${version}>=0 AND ${version}<=9007199254740991 AND ${version}=CAST(${version} AS INTEGER)`,
+    "json_type(value,'$.row')='object'", `json_type(value,${path('row',table.key)})='text'`, `json_extract(value,${path('row',table.key)})=${id}`];
+  for (const [name, field] of Object.entries(table.fields)) if (field.kind !== 'json') {
+    const type = `json_type(value,${path('row',name)})`;
+    const types = field.kind === 'text' ? "'text'" : field.kind === 'boolean' ? "'true','false'" : "'integer','real'";
+    checks.push(`(${type} IS NULL OR ${type} IN ('null',${types}))`);
+  }
+  return `SELECT count(*) bad FROM ${each}(jsonb(?)) WHERE json_extract(value,'$.table')=? AND CASE WHEN ${checks.map(check => '('+check+')').join(' AND ')} THEN 0 ELSE 1 END`;
+}
 
 /** The common wire path never creates a complete row graph. SQL checks strict
  * JSON, numeric finiteness, key uniqueness and declared field types before
@@ -12,6 +26,7 @@ const path = (...parts: string[]) => literal('$.' + parts.map(name => JSON.strin
 export async function writeSQLiteEncodedFrame(db: SQLiteReplicaDatabase, schema: SQLiteTypedSchema,
   each: 'json_each' | 'jsonb_each', encoded: string, maxBytes: number,
   insert: (entity: string, encoded: string, normalized: string) => Promise<void>,
+  validationSQL: (entity: string) => string | undefined,
 ): Promise<{ rows: number; validationMs: number; projectionMs: number; normalizationMs: number } | undefined> {
   const began = performance.now();
   decodedJSONBytes(encoded, maxBytes);
@@ -31,18 +46,8 @@ export async function writeSQLiteEncodedFrame(db: SQLiteReplicaDatabase, schema:
   // transaction is still the rollback boundary for a later native failure.
   for (const { entity } of entities) {
     if (typeof entity !== 'string' || !Object.hasOwn(schema, entity)) return;
-    const table = schema[entity]!;
-    if (table.fields[table.key]?.kind !== 'text' || Object.keys(table.fields).length > 128) return;
-    const id = "json_extract(value,'$.id')", version = "json_extract(value,'$.version')";
-    const checks = ["json_type(value,'$.id')='text'", `length(${id})>0`,
-      "json_type(value,'$.version') IN ('integer','real')", `${version}>=0 AND ${version}<=9007199254740991 AND ${version}=CAST(${version} AS INTEGER)`,
-      "json_type(value,'$.row')='object'", `json_type(value,${path('row',table.key)})='text'`, `json_extract(value,${path('row',table.key)})=${id}`];
-    for (const [name, field] of Object.entries(table.fields)) if (field.kind !== 'json') {
-      const type = `json_type(value,${path('row',name)})`;
-      const types = field.kind === 'text' ? "'text'" : field.kind === 'boolean' ? "'true','false'" : "'integer','real'";
-      checks.push(`(${type} IS NULL OR ${type} IN ('null',${types}))`);
-    }
-    const invalid = await db.getFirstAsync<{ bad: number }>(`SELECT count(*) bad FROM ${each}(jsonb(?)) WHERE json_extract(value,'$.table')=? AND CASE WHEN ${checks.map(check => '('+check+')').join(' AND ')} THEN 0 ELSE 1 END`, encoded, entity);
+    const sql = validationSQL(entity); if (!sql) return;
+    const invalid = await db.getFirstAsync<{ bad: number }>(sql, encoded, entity);
     if (invalid?.bad) return;
   }
   const validationMs = performance.now() - began;

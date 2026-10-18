@@ -177,3 +177,20 @@ it('checks external FTS content consistency in addition to SQLite page integrity
   expect(await host.database.getFirstAsync('PRAGMA integrity_check')).toEqual({ integrity_check: 'ok' });
   await expect(engine.integrity()).rejects.toThrow();
 });
+
+it('reuses complex read plans under the shared cap while releasing inputs and live cursors', async () => {
+  const { host } = fixture({ maxRows: 2, maxBytes: 256 });
+  const sql = 'SELECT ? value /* ' + 'validation'.repeat(100) + ' */';
+  expect(await host.database.getFirstAsync(sql, 'first')).toEqual({ value: 'first' });
+  expect(host.statementBytes()).toBeGreaterThan(0);
+  expect(await host.database.getFirstAsync(sql, 'second')).toEqual({ value: 'second' });
+  expect(await host.database.getFirstAsync(sql)).toEqual({ value: null });
+  await expect(host.database.getFirstAsync(sql, 'x'.repeat(1000))).rejects.toMatchObject({ code: 'sqlite-bridge-budget' });
+  expect(await host.database.getFirstAsync(sql, 'recovered')).toEqual({ value: 'recovered' });
+  for (let n = 0; n < 100; n++) {
+    expect(await host.database.getFirstAsync(sql + ' /* '+n+' */', n)).toEqual({ value: n });
+    expect(host.statementBytes()).toBeLessThanOrEqual(262144);
+  }
+  await host.database.withTransactionAsync(async () => { expect(await host.database.getFirstAsync(sql, 'inside')).toEqual({ value: 'inside' }); });
+  host.close(); expect(host.statementBytes()).toBe(0);
+});

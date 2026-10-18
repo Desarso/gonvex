@@ -1,4 +1,5 @@
-import { writeSQLiteEncodedFrame } from './sqlite-encoded-frame.js';
+import { ByteLedger, BoundedByteCache } from './byte-budget.js';
+import { compileSQLiteEncodedFrameValidation, writeSQLiteEncodedFrame } from './sqlite-encoded-frame.js';
 import { sqliteTypedBodyFormat, sqliteBodySkeleton, sqliteBodySkeletonSQL } from './sqlite-typed-body.js';
 import { readSQLiteTypedView } from './sqlite-native-view.js';
 import { SQLiteReplicaEngineError, sqlitePayloadBytes, decodedJSONBytes, decodedPageBytes, pageBudgetError, fail } from './sqlite-admission.js';
@@ -50,13 +51,22 @@ export class SQLiteTypedReplicaEngine {
   private windows?: SQLiteWindowStore;
   private jsonEach: 'json_each' | 'jsonb_each' = 'json_each';
   private lastProgress = -Infinity;
+  private readonly plans = new BoundedByteCache<string, string>('sqlite-plans', 262144, 4, new ByteLedger(262144));
   private readonly profile = { nativeValidationMs: 0, searchProjectionMs: 0, nativeFrames: 0, frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
   takeProfile() { const result = { ...this.profile }; for (const key of Object.keys(this.profile) as Array<keyof typeof this.profile>) this.profile[key] = 0; return result; }
   constructor(private readonly db: SQLiteReplicaDatabase, readonly schema: SQLiteTypedSchema,
     private readonly limits = { operations: 64, queuedBytes: 2_097_152, batchBytes: 262_144, pageBytes: 262_144 },
     private readonly controls: { onProgress?: () => void } = {}) {
-    compileSQLiteTypedSchema(schema);
+    sqlitePayloadBytes(schema, 1048576);
+    const freeze = (value: any): any => { if (value && typeof value === 'object') { for (const key of Object.keys(value)) freeze(value[key]); Object.freeze(value); } return value; };
+    this.schema = freeze(JSON.parse(JSON.stringify(schema)));
+    compileSQLiteTypedSchema(this.schema);
     for (const value of Object.values(limits)) if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('Positive SQLite limits required');
+  }
+  private compiledPlan(key: string, create: () => string | undefined): string | undefined {
+    const previous = this.plans.get(key); if (previous !== undefined) return previous;
+    const sql = create(); if (sql === undefined) return;
+    this.plans.put(key, sql, (key.length + sql.length) * 2 + 128); return sql;
   }
   private progress() {
     if (!this.controls.onProgress) return;
@@ -240,6 +250,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
     }
   }
   private async insertBootstrapEntity(scope: string, entity: string, encoded: string, normalized: string): Promise<void> {
+    const sql = this.compiledPlan('insert:' + this.jsonEach + ':' + entity, () => {
     const table = this.schema[entity]!, tn = q(sqliteTableName(entity));
     const fields = Object.entries(table.fields);
     const columns = ['scope', 'id', 'body', 'version', ...fields.map(([name]) => sqliteFieldName(name)), ...(table.search ?? []).map((_, i) => 's' + i)];
@@ -248,16 +259,17 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
       const extract = `json_extract(row,${path(name)})`;
       return shape.kind === 'json' ? `CASE WHEN json_type(row,${path(name)}) IS NULL OR json_type(row,${path(name)})='null' THEN NULL ELSE json_quote(${extract}) END` : extract;
     });
-    const insertAt = performance.now();
-    await this.db.runAsync(`WITH input AS MATERIALIZED (
+      return `WITH input AS MATERIALIZED (
         SELECT CAST(key AS INTEGER) pos,jsonb_extract(value,'$.row') row,
           json_extract(value,'$.id') id,json_extract(value,'$.version') version
         FROM ${this.jsonEach}(jsonb(?)) WHERE json_extract(value,'$.table')=?
       ), normalized AS MATERIALIZED (SELECT jsonb(?) value) INSERT INTO ${tn}(${columns.map(q).join(',')})
       SELECT ?,id,${sqliteBodySkeletonSQL("row", table)},version,${values.concat((table.search ?? []).map((_, i) => `json_extract(normalized.value, '$[' || pos || '][${i}]')`)).join(',')}
       FROM input CROSS JOIN normalized WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND gv_tombstones.id=input.id AND gv_tombstones.version>=input.version)
-      ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`,
-      encoded, entity, normalized, scope, scope, entity);
+      ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`;
+    })!;
+    const insertAt = performance.now();
+    await this.db.runAsync(sql, encoded, entity, normalized, scope, scope, entity);
     this.profile.sqliteInsertMs += performance.now() - insertAt;
   }
 
@@ -444,7 +456,8 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
           if (typeof page === 'string') {
             if (page.length * 2 > this.limits.batchBytes) fail('BUDGET', 'SQLite encoded import page exceeds byte budget');
             const native = await writeSQLiteEncodedFrame(this.db, this.schema, this.jsonEach, page, this.limits.batchBytes,
-              (entity, encoded, normalized) => this.insertBootstrapEntity(physical, entity, encoded, normalized));
+              (entity, encoded, normalized) => this.insertBootstrapEntity(physical, entity, encoded, normalized),
+              entity => this.compiledPlan('validate:' + this.jsonEach + ':' + entity, () => compileSQLiteEncodedFrameValidation(this.schema[entity]!, this.jsonEach)));
             if (native) {
               nativeRows = native.rows; this.profile.nativeFrames++;
               this.profile.nativeValidationMs += native.validationMs; this.profile.searchProjectionMs += native.projectionMs;
@@ -640,5 +653,5 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
   windowCollect(scope: string, signature: string, generation: string) {
     return this.membership({ scope, signature, generation }, (store, a) => store.collect(a.scope, a.signature, a.generation));
   }
-  stats() { return { pendingOperations: this.pending, pendingBytes: this.pendingBytes, epoch: this.epoch, binaryJSONFrames: Number(this.jsonEach === 'jsonb_each') }; }
+  stats() { return { pendingOperations: this.pending, pendingBytes: this.pendingBytes, epoch: this.epoch, binaryJSONFrames: Number(this.jsonEach === 'jsonb_each'), planBytes: this.plans.stats().bytes, planEntries: this.plans.stats().entries }; }
 }

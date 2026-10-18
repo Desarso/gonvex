@@ -480,3 +480,24 @@ it('preserves invalid-frame rollback, finite-number and depth admission on the n
   await expect(engine.importScope('deep', (async function* () { yield '[{"table":"tasks","id":"a","version":1,"row":{"_id":"a","data":' + nested + '}}]'; })())).rejects.toThrow('structure');
   await expect(engine.importScope('infinite', (async function* () { yield '[{"table":"tasks","id":"a","version":1,"row":{"_id":"a","extra":{"n":1e999}}}]'; })())).rejects.toThrow('Nonfinite');
 });
+
+it('owns immutable schema metadata and bounds compiled import plans across entities', async () => {
+  const { host } = fixture();
+  const supplied = Object.fromEntries(Array.from({ length: 6 }, (_, index) => ['entity' + index, { key: '_id', fields: { _id: { kind: 'text' }, value: { kind: 'number' } }, indexes: [] }])) as SQLiteTypedSchema;
+  const engine = new SQLiteTypedReplicaEngine(host, supplied);
+  (supplied.entity0!.fields.value as any).kind = 'text';
+  expect(Object.isFrozen(engine.schema.entity0!.fields)).toBe(true);
+  expect(Reflect.set(engine.schema.entity0!.fields.value!, 'kind', 'text')).toBe(false);
+  await engine.open('owner');
+  await engine.importScope('s', (async function* () {
+    for (let index = 0; index < 6; index++) {
+      expect(engine.stats().planEntries).toBeLessThanOrEqual(4);
+      expect(engine.stats().planBytes).toBeLessThanOrEqual(262144);
+      yield JSON.stringify([{ table: 'entity' + index, id: 'a', version: 1, row: { _id: 'a', value: index } }]);
+    }
+  })());
+  expect(engine.takeProfile().nativeFrames).toBe(6);
+  expect(engine.stats().planEntries).toBeLessThanOrEqual(4);
+  expect(engine.stats().planBytes).toBeGreaterThan(0);
+  expect((await engine.page('s', { table: 'entity0', order: [{ field: 'value', direction: 'asc' }], limit: 2 })).rows).toEqual([{ _id: 'a', value: 0 }]);
+});

@@ -44,7 +44,8 @@ PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=3000;`);
 }
 
 /** Official oo1 bridge shared by the owner and real-WASM tests. Statements are
- * read statements are finalized immediately; write plans use a byte-capped LRU. */
+ * complex read and write plans share one byte-capped LRU. Cursors and bound
+ * inputs are released before any plan is retained. */
 export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
   budget = { maxRows: 512, maxBytes: 262_144 }): OfficialSQLiteHost {
   let transaction = false, closed = false, statementBytes = 0;
@@ -55,13 +56,34 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
     const cached = statements.get(sql); if (!cached) return;
     statements.delete(sql); statementBytes -= cached.bytes; cached.statement.finalize();
   }
+  function cachedPlan(sql: string) {
+    const cached = statements.get(sql);
+    if (cached) { statements.delete(sql); statements.set(sql, cached); }
+    return cached;
+  }
+  function remember(sql: string, statement: PreparedStatement, cached: { statement: PreparedStatement; bytes: number } | undefined): boolean {
+    statement.reset(true); // No cached plan owns a bound input or live cursor.
+    const size = sql.length * 2 + 128 + sqlite3.capi.sqlite3_stmt_status(statement.pointer!, sqlite3.capi.SQLITE_STMTSTATUS_MEMUSED, 0);
+    if (cached) {
+      statementBytes += size - cached.bytes; cached.bytes = size;
+      while (statementBytes > statementBudget) retire(statements.keys().next().value!);
+      return true;
+    }
+    if (size > statementBudget) return false;
+    while (statements.size >= maxStatements || statementBytes + size > statementBudget) retire(statements.keys().next().value!);
+    statements.set(sql, { statement, bytes: size }); statementBytes += size; return true;
+  }
   function check() { if (closed) throw new Error('SQLite host closed'); }
   function bind(statement: PreparedStatement, values: unknown[]) {
     for (const value of values) if (value !== null && typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean' && !(value instanceof Uint8Array)) throw new TypeError('Invalid SQLite binding');
     if (values.length) statement.bind(values as BindableValue[]);
   }
   function read<T>(sql: string, values: unknown[], first: boolean): T[] {
-    check(); const statement = db.prepare(sql);
+    check();
+    // Complex repeated validation/page reads share the same four-plan cap.
+    // Tiny one-off metadata reads do not displace those plans.
+    const eligible = sql.length > 512, cached = eligible ? cachedPlan(sql) : undefined;
+    const statement = cached?.statement ?? db.prepare(sql); let retain = !!cached;
     try {
       bind(statement, values);
       const rows: T[] = []; let bytes = 0;
@@ -81,32 +103,23 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
         rows.push(Object.fromEntries(entries) as T);
         if (first) break;
       }
+      if (eligible) retain = remember(sql, statement, cached);
       return rows;
-    } finally { statement.finalize(); }
+    } catch (error) {
+      if (cached) { retire(sql); retain = true; }
+      throw error;
+    } finally { if (!retain) statement.finalize(); }
   }
   const database: SQLiteReplicaDatabase = {
     async execAsync(sql) { check(); db.exec(sql); },
     async runAsync(sql, ...values) {
       check();
-      let cached = statements.get(sql);
-      if (cached) { statements.delete(sql); statements.set(sql, cached); }
+      const cached = cachedPlan(sql);
       const statement = cached?.statement ?? db.prepare(sql);
       let retain = !!cached;
       try {
         bind(statement, values); while (statement.step()) { /* No retained output. */ }
-        statement.reset(true); // Never retain bound row strings or buffers.
-        const size = sql.length * 2 + 128 + sqlite3.capi.sqlite3_stmt_status(statement.pointer!, sqlite3.capi.SQLITE_STMTSTATUS_MEMUSED, 0);
-        if (cached) {
-          // SQLite may recompile after a schema/index change. Charge the new
-          // native plan as well as its SQL key before retaining it again.
-          statementBytes += size - cached.bytes; cached.bytes = size;
-          while (statementBytes > statementBudget) retire(statements.keys().next().value!);
-        } else {
-          if (size <= statementBudget) {
-            while (statements.size >= maxStatements || statementBytes + size > statementBudget) retire(statements.keys().next().value!);
-            statements.set(sql, { statement, bytes: size }); statementBytes += size; retain = true;
-          }
-        }
+        retain = remember(sql, statement, cached);
       } catch (e) {
         if (cached) { retire(sql); retain = true; }
         throw e;
