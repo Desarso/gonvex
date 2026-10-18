@@ -31,3 +31,4 @@ export type {SQLiteSafetyPage,SQLiteSafetyEntry} from './sqlite-safety-journal.j
 export {SQLiteIndexedDBMigrationSource} from './sqlite-idb-migration-source.js';
 export type {SQLiteMigrationSourcePage} from './sqlite-idb-migration-source.js';
 export {SQLiteLegacyIntentMigration} from './sqlite-legacy-intent-migration.js';
+export type {SQLiteTransportHost,SQLiteTransportSession} from './sqlite-transport-host.js';

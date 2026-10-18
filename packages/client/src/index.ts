@@ -1,3 +1,5 @@
+import type {SQLiteTransportHost,SQLiteTransportSession} from './sqlite-transport-host.js';
+import {sqlitePayloadBytes} from './sqlite-admission.js';
 import { readIsCovered, primaryReadKeys } from "@gonvex/local-runtime/read-view";
 import type { DataRead } from "@gonvex/module-sdk";
 import type {
@@ -583,6 +585,8 @@ export type GonvexClientOptions = GonvexClientAuth & {
   outbox?: { databaseName?: string; enabled?: boolean; store?: OutboxStore; retry?: OutboxRetryOptions };
   /** Transactional normalized store used by Replica Collections and Live Queries. */
   localReplica?: { storage?: LocalReplicaStorage; maxResidentRows?:number; maxResidentBytes?:number };
+  /** @internal Installed only by the generated dedicated owner program. */
+  ownerHost?:SQLiteTransportHost;
   errorReporting?: false | Omit<ErrorReporterOptions, "transport" | "project" | "tenant">;
   timeouts?: GonvexTimeoutOptions;
 };
@@ -611,6 +615,8 @@ const maxReplicaBatchOpens = 256;
 // normally settle in a few milliseconds.
 
 export class GonvexClient {
+  private readonly ownerHost?:SQLiteTransportHost;
+  private ownerWatermarkFence='';
   private readonly localTableBindings = new Map<string, { signatures: string[]; columns: string[] }>();
   private readonly localBinding?: GonvexClientOptions["localRuntime"];
   private readonly localExecutor?: LocalExecutor;
@@ -746,6 +752,11 @@ export class GonvexClient {
   private lastOnlineAtMs = 0;
 
   constructor(private readonly url: string, options: GonvexClientOptions = {}) {
+    this.ownerHost=options.ownerHost;
+    if(this.ownerHost){
+      if(typeof globalThis.postMessage!=='function'||'document'in globalThis||'onconnect'in globalThis)throw new TypeError('Native transport hosts require a dedicated owner worker');
+      options={...options,clientContract:options.clientContract??options.localRuntime?.clientContract,localRuntime:undefined,localReplica:undefined,outbox:{enabled:false}};
+    }
     this.controlOnly = options.role === "control";
     if (this.controlOnly && options.public) throw new Error("Control connections cannot be public tenant connections");
     if (this.controlOnly) {
@@ -1877,6 +1888,7 @@ export class GonvexClient {
       transportUrl = publicUrl.toString();
     }
     const socket = new WebSocket(transportUrl);
+    if(this.ownerHost)socket.binaryType='arraybuffer';
     this.socket = socket;
     this.serverCapabilities = {};
     socket.addEventListener("open", () => {
@@ -1898,6 +1910,7 @@ export class GonvexClient {
     });
     socket.addEventListener("close", () => {
       if (this.socket !== socket || this.manuallyClosed) return;
+      try{this.ownerHost?.disconnected();}catch(error){this.ownerHost?.failed(error);}
       this.flushTelemetry();
       this.isWebSocketConnected = false;
       this.replica.setFreshness("offline");
@@ -1929,14 +1942,28 @@ export class GonvexClient {
     });
     socket.addEventListener("message", (event) => {
       if (this.socket !== socket) return;
+      if(event.data instanceof ArrayBuffer){
+        if(this.ownerHost)try{this.ownerHost.binary(event.data,generation);}catch(error){this.ownerHost.failed(error);socket.close();}
+        return;
+      }
       let message: ServerMessage;
       try {
         message = JSON.parse(String(event.data)) as ServerMessage;
       } catch {
         return;
       }
+      if(this.ownerHost&&message.type!=='auth.result'&&message.type!=='auth.error'&&message.type!=='session.ready'){
+        try{if(this.ownerHost.frame(message,generation))return;}catch(error){this.ownerHost.failed(error);socket.close();return;}
+      }
       if (message.type === "session.ready") {
         this.serverCapabilities = message.capabilities ?? {};
+        if(this.ownerHost){
+          if(!this.authInFlight&&!this.auth.token&&!this.auth.tenant){
+            const current=()=>this.socket===socket&&this.socketGeneration===generation&&!this.manuallyClosed;
+            void this.activateOwnerSession({connectionGeneration:generation,directive:message.replica,artifactHash:this.activeArtifactHashValue,intentScope:this.outboxScope,lastOnlineAtMs:Date.now(),capabilities:this.serverCapabilities},current);
+          }
+          return;
+        }
         if (this.controlOnly) {
           this.flushPendingMessages();
           return;
@@ -2080,6 +2107,12 @@ export class GonvexClient {
           this.authRefreshedToken = undefined;
           const directive = this.controlOnly ? undefined : replicaDirectiveFromAuthResult(message.result);
           const localIdentity = this.controlOnly ? undefined : localIdentityFromAuthResult(message.result);
+          if(this.ownerHost){
+            const authGeneration=this.outboxScopeGeneration;
+            const current=()=>this.socket===socket&&this.activeAuthFrameId===message.id&&this.latestAuthFrameId===undefined&&authGeneration===this.outboxScopeGeneration&&!this.manuallyClosed;
+            void this.activateOwnerSession({connectionGeneration:generation,directive,identity:localIdentity,artifactHash:this.activeArtifactHashValue,intentScope:this.outboxScope,lastOnlineAtMs:this.lastOnlineAtMs,capabilities:this.serverCapabilities},current,message.id,reauthenticatedSameSocket&&!subscriptionsPreserved);
+            return;
+          }
           if (localIdentity) {
             this.localIdentity = localIdentity;
             void this.localExecutor?.ready.catch(() => undefined);
@@ -2243,6 +2276,7 @@ export class GonvexClient {
   }
 
   close() {
+    if(!this.manuallyClosed)try{this.ownerHost?.disconnected();}catch(error){this.ownerHost?.failed(error);}
     this.snapshotDeferredFrames = [];
     this.snapshotDeferredBytes = 0;
     for (const subscription of this.replicaSubscriptions.values()) {
@@ -3454,6 +3488,44 @@ export class GonvexClient {
     this.emitReplicaMessage(subscription, message, scope);
   }
 
+  private async activateOwnerSession(session:SQLiteTransportSession,current:()=>boolean,authID?:string,reopenQueries=false){
+    try{
+      if(!current())return;const fence=JSON.stringify([session.intentScope,session.directive?.visibilityScope??'',session.directive?.epoch??'']);
+      if(fence!==this.ownerWatermarkFence){this.ownerWatermarkFence=fence;this.processedReplicaWatermarkRevision=0;}
+      await this.ownerHost!.session(session,current);if(!current())return;
+      this.authInFlight=false;this.setLocalSessionState(session.directive&&session.identity?'authenticated':'unavailable');
+      if(reopenQueries)this.resumeQuerySubscriptions(true);else this.resumeQuerySubscriptions();
+      if(authID)this.settleManagedAuthAttempt(authID);this.flushPendingMessages();
+    }catch(error){
+      if(!current())return;
+      if(authID)this.settleManagedAuthAttempt(authID,error instanceof Error?error.message:'Native session persistence failed');
+      this.ownerHost!.failed(error);this.socket?.close();
+    }
+  }
+  /** @internal Native ingress ACKs and subscription opens use this same
+   * authenticated socket, never an application-owned parallel transport. */
+  sendOwnerMessage(message:ClientMessage){if(!this.ownerHost)throw new Error('No dedicated owner transport host');sqlitePayloadBytes(message,131072);this.send(message);}
+  /** @internal Delivery of an already durable owner-journal intent. The owner
+   * journal, rather than the legacy client outbox, owns unknown outcomes. */
+  callOwnerReducer<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue,commandID:string,timeoutMs=this.timeouts.reducerTimeoutMs):Promise<T>{
+    if(!this.ownerHost)return Promise.reject(Error('No dedicated owner transport host'));
+    sqlitePayloadBytes({ref,args,commandID},131072);if(!commandID||commandID.length>256)return Promise.reject(new TypeError('Invalid owner intent command'));
+    return this.call<T>('reducer',ref,args,timeoutMs,randomID(),commandID);
+  }
+  /** @internal Only after the native host has durably applied all earlier
+   * transactions may pending calls retire their authoritative predictions. */
+  advanceOwnerWatermark(revision:number){
+    if(!this.ownerHost)throw new Error('No dedicated owner transport host');if(!Number.isSafeInteger(revision)||revision<0)throw new TypeError('Invalid owner watermark');
+    this.completeReplicaWatermark(revision);
+  }
+  private completeReplicaWatermark(revision:number){
+    this.processedReplicaWatermarkRevision=Math.max(this.processedReplicaWatermarkRevision,revision);
+    for(const pending of this.pendingCalls.values()){
+      if((pending.kind!=='reducer'&&pending.kind!=='action')||pending.committedRevision===undefined||pending.committedRevision>this.processedReplicaWatermarkRevision)continue;
+      const complete=pending.completeAfterReplicaWatermark;pending.completeAfterReplicaWatermark=undefined;complete?.();
+    }
+  }
+
   private async handleReplicaWatermark(revision: number) {
     if (!Number.isSafeInteger(revision) || revision < 0) return;
     const eligibleSignatures: string[] = [];
@@ -3466,20 +3538,7 @@ export class GonvexClient {
       eligibleSignatures.push(subscription.key);
     }
     await this.replica.advanceWatermark(revision, eligibleSignatures, this.replicaScope);
-    this.processedReplicaWatermarkRevision = Math.max(
-      this.processedReplicaWatermarkRevision,
-      revision,
-    );
-    for (const pending of this.pendingCalls.values()) {
-      if (
-        (pending.kind !== "reducer" && pending.kind !== "action")
-        || pending.committedRevision === undefined
-        || pending.committedRevision > this.processedReplicaWatermarkRevision
-      ) continue;
-      const complete = pending.completeAfterReplicaWatermark;
-      pending.completeAfterReplicaWatermark = undefined;
-      complete?.();
-    }
+    this.completeReplicaWatermark(revision);
   }
 
   private emitReplicaMessage(subscription: ReplicaSubscription, message: ReplicaMessage, scope = this.replicaScope) {
@@ -4954,6 +5013,7 @@ export class GonvexClient {
     this.flushTelemetry();
     if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project && !this.auth.fetchToken) return;
     this.authInFlight = true;
+    if(this.ownerHost)try{this.ownerHost.authenticating(this.outboxScope,this.socketGeneration);}catch(error){this.ownerHost.failed(error);this.socket?.close();return;}
     this.authRetriedAfterError = false;
     this.authRefreshedToken = undefined;
     this.armAuthWatchdog();
@@ -4979,7 +5039,7 @@ export class GonvexClient {
       controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
       device: this.telemetryDevice,
-		capabilities: { replicaSetDigest: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
+		capabilities: { ...(this.ownerHost?{replicaNativeRows:1 as const}:{}), replicaSetDigest: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
     });
   }
 
