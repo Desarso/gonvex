@@ -171,6 +171,17 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    default:fail('INVALID_ROW','Unexpected native replica control');
   }
  }
+ /** UI reads may use the last committed cohort while a newer feed group is
+  * staged. The caller must hold the same owner transaction for this guard and
+  * the row read. No network/control/ingress drain belongs on a cached read.
+  * A bootstrap that has already changed one canonical source remains blocked
+  * until its terminal cohort closes. This does not grant reducer coverage. */
+ async assertCommittedReadable(cached:{scope:string;epoch:string}){
+  if(!this.options.owner.database.ownerTransactionDepth)throw Error('Committed read guard requires an owner transaction');
+  sqlitePayloadBytes(cached,4096);await this.options.owner.engine.verifyOwner();await this.readableEpoch(cached.scope,cached.epoch);
+  const progress=await this.options.owner.database.getFirstAsync<{unclosed:number;applied:number}>('SELECT unclosed,applied FROM gv_native_feed_progress WHERE scope=? AND epoch=?',cached.scope,cached.epoch);
+  if(progress?.unclosed&&progress.unclosed>progress.applied)fail('PAGE_CHANGED','Committed feed requires reconciliation of its unfinished cohort');
+ }
  /** A verified read cannot expose half a transaction/membership feed group.
   * Pending first-sync pages use their separate incomplete display contract. */
  async assertReadable(cached?:{scope:string;epoch:string}){

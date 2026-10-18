@@ -162,3 +162,16 @@ it('displays an earlier durable page while a later import batch waits outside SQ
   resume();await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();expect(f.sends).toHaveLength(2);expect(f.failures).toEqual([]);expect(await f.engine.integrity()).toBe('ok');reader.close();
  }finally{resume();}
 });
+
+it('reads the last committed cohort without draining a newer group, under the same SQL transaction',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ const read=()=>f.runOwner(131072,async()=>{let result;await f.db.withTransactionAsync(async()=>{await f.feed.assertCommittedReadable({scope:'visible',epoch:'e'});const windows=new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()),header=await windows.header('visible','tasks-all');result={rows:(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).map(entry=>entry.row),ids:(await windows.page('visible','tasks-all',header!.generation,0,10)).ids};});return result;});
+ await expect(f.feed.assertCommittedReadable({scope:'visible',epoch:'e'})).rejects.toThrow('requires an owner transaction');
+ f.transaction(12);f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:['b'],digest:await digest([changed])},1);await f.ready(12,[changed]);await expect(f.feed.assertReadable()).rejects.toMatchObject({code:'PAGE_CHANGED'});expect(await read()).toEqual({rows,ids:['a','b']});
+ f.feed.frame({type:'replica.watermark',revision:12},1);await f.feed.assertReadable();expect(await read()).toEqual({rows:[changed,rows[1]],ids:['a']});expect(f.failures).toEqual([]);
+});
+it('blocks committed reads through an activated but unfinished bootstrap cohort and after an epoch replacement',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();await expect(f.feed.assertReadable()).rejects.toMatchObject({code:'PAGE_CHANGED'});
+ const guard=(epoch='e')=>f.runOwner(0,()=>f.db.withTransactionAsync(()=>f.feed.assertCommittedReadable({scope:'visible',epoch})));
+ await expect(guard()).rejects.toMatchObject({code:'PAGE_CHANGED'});f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();await expect(guard()).resolves.toBeUndefined();await expect(guard('replacement')).rejects.toMatchObject({code:'PAGE_CHANGED'});
+});
