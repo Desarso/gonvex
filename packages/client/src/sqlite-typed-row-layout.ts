@@ -1,3 +1,4 @@
+import { installSQLiteTypedBodyFence, sqliteBodySkeleton, sqliteRowBodySQL } from './sqlite-typed-body.js';
 import { sqliteNativeViewSchema, readSQLiteTypedView } from './sqlite-native-view.js';
 import { compileSQLiteTypedView } from './sqlite-typed-query.js';
 import { SQLiteLocalReplicaStorage, type SQLiteReplicaDatabase, type SQLiteReplicaRowLayout } from './sqlite-replica-storage.js';
@@ -12,7 +13,7 @@ const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
  * browser hosts use the same schema and authority merge implementation. */
 export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRowLayout {
   const ddl = compileSQLiteTypedSchema(schema);
-  const signature = JSON.stringify({ format: 1, schema });
+  const signature = JSON.stringify({ format: 2, schema });
   return {
     async install(db) {
       const flags = await db.getFirstAsync("SELECT name FROM sqlite_master WHERE type='table' AND name='gv_storage_flags'");
@@ -22,10 +23,12 @@ export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRo
       await db.execAsync(`CREATE TABLE IF NOT EXISTS gv_canonical_layout(id INTEGER PRIMARY KEY CHECK(id=1),signature TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS gv_canonical_tombstones(scope TEXT NOT NULL,entity TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(scope,entity,id)) WITHOUT ROWID;`);
       const previous = await db.getFirstAsync<{ signature: string }>('SELECT signature FROM gv_canonical_layout WHERE id=1');
-      if (previous && previous.signature !== signature) throw new Error('Typed canonical layout requires an explicit schema migration');
+      if (previous && previous.signature !== signature && previous.signature !== JSON.stringify({ format: 1, schema })) throw new Error('Typed canonical layout requires an explicit schema migration');
+      await installSQLiteTypedBodyFence(db, schema);
+      await db.execAsync('DROP TRIGGER IF EXISTS gv_canonical_delete; DROP VIEW IF EXISTS _gonvex_replica_entities;');
       await db.execAsync(sqliteNativeViewSchema);
       await db.execAsync(ddl.tables + '\n' + ddl.indexes + '\n' + ddl.search);
-      await db.runAsync('INSERT OR IGNORE INTO gv_canonical_layout VALUES(1,?)', signature);
+      await db.runAsync('INSERT INTO gv_canonical_layout VALUES(1,?) ON CONFLICT(id) DO UPDATE SET signature=excluded.signature', signature);
       // This lookup serves legacy portable ReducerReadView predicates. Typed
       // view plans use the generated column indexes directly, without it.
       await db.execAsync(`CREATE TABLE IF NOT EXISTS _gonvex_replica_lookup (
@@ -35,12 +38,13 @@ CREATE INDEX IF NOT EXISTS _gonvex_replica_lookup_row ON _gonvex_replica_lookup(
       const branches: string[] = [];
       for (const entity of Object.keys(schema)) {
         const table = sqliteTableName(entity), name = q(table), entitySQL = literal(entity);
-        branches.push(`SELECT scope,${entitySQL} entity,id,body value,rid rowid FROM ${name}`);
+        branches.push(`SELECT scope,${entitySQL} entity,id,${sqliteRowBodySQL(schema[entity]!, "t")} value,rid rowid FROM ${name} t`);
         const drop = `DELETE FROM _gonvex_replica_lookup WHERE scope=OLD.scope AND entity=${entitySQL} AND id=OLD.id;`;
         const add = `INSERT INTO _gonvex_replica_lookup SELECT NEW.scope,${entitySQL},j.key,
  CASE WHEN j.type IN ('integer','real') THEN 'number' WHEN j.type IN ('true','false') THEN 'boolean' ELSE 'string' END,j.atom,NEW.id
- FROM json_each(NEW.body) j WHERE j.type IN ('integer','real','true','false') OR (j.type='text' AND length(j.atom)<=256);`;
-        await db.execAsync(`CREATE TRIGGER IF NOT EXISTS ${q(table + '_lookup_a')} AFTER INSERT ON ${name} BEGIN ${add} END;
+ FROM json_each(${sqliteRowBodySQL(schema[entity]!, "NEW")}) j WHERE j.type IN ('integer','real','true','false') OR (j.type='text' AND length(j.atom)<=256);`;
+        await db.execAsync(`DROP TRIGGER IF EXISTS ${q(table + '_lookup_a')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_u')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_d')};
+CREATE TRIGGER IF NOT EXISTS ${q(table + '_lookup_a')} AFTER INSERT ON ${name} BEGIN ${add} END;
 CREATE TRIGGER IF NOT EXISTS ${q(table + '_lookup_u')} AFTER UPDATE ON ${name} BEGIN ${drop} ${add} END;
 CREATE TRIGGER IF NOT EXISTS ${q(table + '_lookup_d')} AFTER DELETE ON ${name} BEGIN ${drop} END;`);
       }
@@ -82,7 +86,7 @@ END;`);
         while (offset < rows.length && page.length < maxRows && rows[offset]!.row !== null) {
           const { id, row } = rows[offset++]!;
           if (!id || String(row![table.key]) !== id) throw new TypeError('Canonical SQLite key differs from its row identity');
-          values.push(scope, id, JSON.stringify(row), 0, ...fields.map(([field, shape]) => {
+          values.push(scope, id, sqliteBodySkeleton(row!, table), 0, ...fields.map(([field, shape]) => {
             const value = row![field];
             if (value == null) return null;
             if (shape.kind !== 'json' && typeof value !== (shape.kind === 'text' ? 'string' : shape.kind === 'number' ? 'number' : 'boolean')) throw new TypeError('Canonical SQLite field type differs from schema');

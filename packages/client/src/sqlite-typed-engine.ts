@@ -1,3 +1,4 @@
+import { sqliteTypedBodyFormat, sqliteBodySkeleton, sqliteBodySkeletonSQL } from './sqlite-typed-body.js';
 import { readSQLiteTypedView } from './sqlite-native-view.js';
 import { SQLiteReplicaEngineError, sqlitePayloadBytes, decodedJSONBytes, decodedPageBytes, pageBudgetError, fail } from './sqlite-admission.js';
 export { SQLiteReplicaEngineError, sqlitePayloadBytes } from './sqlite-admission.js';
@@ -103,11 +104,11 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
           if (!/no such table: jsonb_each/i.test(String((error as Error).message))) throw error;
           this.jsonEach = 'json_each';
         }
-        const signature = JSON.stringify({ format: 4, tables: this.schema });
+        const signature = JSON.stringify({ format: sqliteTypedBodyFormat, tables: this.schema });
         const old = await this.db.getFirstAsync<{ schema: string; epoch: number }>('SELECT schema,epoch FROM gv_storage_meta WHERE id=1');
-        // Format 4 adds an index-deferral journal. Format 3 has identical rows
-        // and receipts: its upgrade neither decodes nor rewrites that corpus.
-        if (old && old.schema !== signature && old.schema !== JSON.stringify({ format: 3, tables: this.schema })) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
+        // Format 5 reads both legacy full bodies and typed-field skeletons.
+        // Identical format-3/4 rows and receipts require no corpus rewrite.
+        if (old && old.schema !== signature && ![3, 4].some(format => old.schema === JSON.stringify({ format, tables: this.schema }))) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
         await this.db.execAsync(ddl.tables);
         if (!await this.indexesDeferred() && (ddl.indexes || ddl.search)) await this.db.execAsync(ddl.indexes + '\n' + ddl.search);
         this.epoch = (old?.epoch ?? 0) + 1;
@@ -201,7 +202,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
       const batchRows = Math.max(1, Math.min(100, Math.floor(32000 / (columns.length + 4))));
       while (end < writes.length && end - offset < batchRows && writes[end]!.table === input.table && writes[end]!.row !== null) {
         const item = writes[end]!; this.validateWrite(item);
-        bindings.push(scope, item.id, JSON.stringify(item.row), item.version, ...fields.map(([field, shape]) => {
+        bindings.push(scope, item.id, sqliteBodySkeleton(item.row!, table), item.version, ...fields.map(([field, shape]) => {
           const value = item.row![field];
           return value == null ? null : shape.kind === 'json' ? JSON.stringify(value) : shape.kind === 'boolean' ? Number(value) : value;
         }), ...(table.search ?? []).map(field => String(item.row![field] ?? '').toLowerCase()));
@@ -247,7 +248,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
           json_extract(value,'$.id') id,json_extract(value,'$.version') version
         FROM ${this.jsonEach}(jsonb(?)) WHERE json_extract(value,'$.table')=?
       ), normalized AS MATERIALIZED (SELECT jsonb(?) value) INSERT INTO ${tn}(${columns.map(q).join(',')})
-      SELECT ?,id,json(row),version,${values.concat((table.search ?? []).map((_, i) => `json_extract(normalized.value, '$[' || pos || '][${i}]')`)).join(',')}
+      SELECT ?,id,${sqliteBodySkeletonSQL("row", table)},version,${values.concat((table.search ?? []).map((_, i) => `json_extract(normalized.value, '$[' || pos || '][${i}]')`)).join(',')}
       FROM input CROSS JOIN normalized WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND gv_tombstones.id=input.id AND gv_tombstones.version>=input.version)
       ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`,
       encoded, entity, normalized, scope, scope, entity);

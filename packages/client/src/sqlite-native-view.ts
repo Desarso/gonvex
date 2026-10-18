@@ -1,3 +1,4 @@
+import { sqliteRowBodySQL } from './sqlite-typed-body.js';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import type { SQLiteTypedViewPage } from './sqlite-typed-engine.js';
 import { sqlitePayloadBytes, decodedPageBytes, pageBudgetError } from './sqlite-admission.js';
@@ -39,7 +40,7 @@ export async function readSQLiteTypedView(database: SQLiteReplicaDatabase, schem
   const selected = fields ? fields.map((name, i) => {
     const path = ('$.' + JSON.stringify(name)).replaceAll("'", "''");
     return `t.${q(sqliteFieldName(name))} AS ${q('p' + i)},json_type(t.body,'${path}') AS ${q('h' + i)}`;
-  }).join(',') : 't.body';
+  }).join(',') : sqliteRowBodySQL(table) + ' AS body';
   let records: Record<string, unknown>[], bytes: number, limit = admitted.limit;
   for (;;) {
     try {

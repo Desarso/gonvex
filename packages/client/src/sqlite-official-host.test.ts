@@ -150,3 +150,14 @@ it('opens and imports a schema without optional secondary indexes or FTS', async
   expect((await engine.page('restartable', plan)).rows).toEqual([{ _id: 'b' }]);
   expect(await host.database.getFirstAsync('SELECT count(*) n FROM gv_storage_flags')).toEqual({ n: 0 });
 });
+
+it('reconstructs JSON subtypes and missing fields from typed skeletons in the official WASM', async () => {
+  const { host } = fixture();
+  const schema = { records: { key: '_id', fields: { _id: { kind: 'text' }, flag: { kind: 'boolean' }, data: { kind: 'json' }, name: { kind: 'text' }, rank: { kind: 'number' } }, indexes: [{ columns: ['rank'] }] } } as const;
+  const engine = new SQLiteTypedReplicaEngine(host.database, schema); await engine.open('owner');
+  const rows = [{ _id: 'a', flag: false, data: { values: [1, null, true], name: 'nested' }, name: 'body'.repeat(200), rank: 1, unknown: 'keep' }, { _id: 'b', flag: true, data: null, rank: 2 }];
+  await engine.importScope('s', (async function* () { yield JSON.stringify(rows.map(row => ({ table: 'records', id: row._id, version: 1, row }))); })());
+  const plan = { table: 'records', order: [{ field: 'rank', direction: 'asc' }], limit: 2 } as const;
+  expect((await engine.page('s', plan)).rows).toEqual(rows);
+  expect((await engine.viewPage('s', 'all', plan)).rows).toEqual(rows);
+});

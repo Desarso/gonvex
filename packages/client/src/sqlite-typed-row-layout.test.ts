@@ -1,5 +1,7 @@
 import { afterEach, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
+import { SQLiteTypedReplicaEngine } from './sqlite-typed-engine.js';
+import { sqliteIdentifier, sqliteTableName } from './sqlite-typed-schema.js';
 import { sqliteTypedReplicaStorage } from './sqlite-typed-row-layout.js';
 import { SQLiteLocalReplicaStorage, type SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import { compileSQLiteTypedPage } from './sqlite-typed-query.js';
@@ -101,4 +103,26 @@ it('serves bounded native positions from canonical authority and invalidates on 
   await storage.replaceSnapshot({ ...empty, entities: { tasks: { fresh: { _id: 'fresh', name: 'Fresh', due: 1 } } }, cursor: cursor(1, 'next') }, 's');
   expect((await storage.readViewPage('s', 'grid', view, 0)).rows).toEqual([{ _id: 'fresh', name: 'Fresh', due: 1 }]);
   expect(db.prepare('PRAGMA integrity_check').get()!.integrity_check).toBe('ok');
+});
+
+it('upgrades a legacy canonical body view and fences its old decoder without losing durable intent receipts', async () => {
+  const { db, host, storage } = fixture();
+  const a = { _id: 'a', name: 'legacy', due: 1, done: false };
+  await storage.replaceSnapshot({ ...empty, entities: { tasks: { a } } }, 's');
+  const oldOwner = new SQLiteTypedReplicaEngine(host, schema); await oldOwner.open('old');
+  const b = { _id: 'b', name: 'pending', due: 2, done: true };
+  const writes = [{ table: 'tasks', id: 'b', version: 1, row: b }], intent = { id: 'durable', payload: { create: 'b' } };
+  const receipt = await oldOwner.apply('s', writes, intent);
+  for (const row of [a, b]) db.prepare(`UPDATE ${sqliteIdentifier(sqliteTableName('tasks'))} SET body=? WHERE id=?`).run(JSON.stringify(row), row._id);
+  db.prepare('UPDATE gv_storage_meta SET schema=?').run(JSON.stringify({ format: 4, tables: schema }));
+  db.prepare('UPDATE gv_canonical_layout SET signature=?').run(JSON.stringify({ format: 1, schema }));
+  const upgraded = sqliteTypedReplicaStorage(host, schema);
+  expect((await upgraded.loadEntityRows('s', 'tasks', ['a', 'b'])).map(value => value.row)).toEqual([a, b]);
+  await expect(oldOwner.page('s', { table: 'tasks', order: [{ field: 'due', direction: 'asc' }], limit: 2 })).rejects.toMatchObject({ code: 'FENCED' });
+  const next = new SQLiteTypedReplicaEngine(host, schema); await next.open('new');
+  expect(await next.apply('s', writes, intent)).toEqual(receipt);
+  expect((await next.outbox('s')).map(value => value.id)).toEqual(['durable']);
+  await upgraded.applyTransaction({ cursor: cursor(2), changes: [{ entity: 'tasks', id: 'a', operation: 'update', newValue: { name: 'updated' } }] }, empty, 's');
+  expect((await upgraded.loadEntityRows('s', 'tasks', ['a']))[0]!.row).toEqual({ ...a, name: 'updated' });
+  expect(JSON.parse(String(db.prepare(`SELECT body FROM ${sqliteIdentifier(sqliteTableName('tasks'))} WHERE id='a'`).get()!.body))).toMatchObject({ name: null, due: null });
 });

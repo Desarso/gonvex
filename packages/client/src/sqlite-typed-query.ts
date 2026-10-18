@@ -1,3 +1,4 @@
+import { sqliteRowBodySQL } from './sqlite-typed-body.js';
 import { sqliteIdentifier as q, sqliteTableName, sqliteFieldName, sqliteSearchName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
 export type SQLiteBinding = string | number | null;
 export type SQLitePredicate =
@@ -107,7 +108,7 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
   const selected = projection ? projection.map((name, i) => {
     const path = ('$.' + JSON.stringify(name)).replaceAll("'", "''");
     return `,${field(plan.table, 't', name)} AS ${q('p' + i)},json_type(t.body,'${path}') AS ${q('h' + i)}`;
-  }).join('') : ',t.body';
+  }).join('') : ',' + sqliteRowBodySQL(table) + ' AS body';
   return { sql: `SELECT ${keysOnly ? 't.rid,t.id' : `t.id,t.version${selected}${orderColumns.map((column, i) => `,${column} AS ${q('k' + i)}`).join('')}`} FROM ${q(sqliteTableName(plan.table))} t WHERE ${where.map(term => '(' + term + ')').join(' AND ')} ORDER BY ${ordering.join(',')},${field(plan.table, 't', table.key)} ASC${keysOnly ? '' : ` LIMIT ${bind(plan.limit)}`}`, bindings };
 }
 

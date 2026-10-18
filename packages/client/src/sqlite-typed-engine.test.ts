@@ -381,14 +381,15 @@ it('restores deferred indexes before an interactive write and never hides that w
   expect((await engine.outbox('s')).map(entry => entry.id)).toEqual(['intent']);
   expect(await engine.integrity()).toBe('ok');
 });
-it('upgrades format 3 atomically without replacing canonical rows, pending intents or receipts', async () => {
+it.each([3, 4])('upgrades format %i atomically without replacing canonical rows, pending intents or receipts', async format => {
   const { engine, host, db } = fixture(); await engine.open('first');
   const writes = [write('a', 1, 'Needle')], intent = { id: 'pending', payload: { create: 'a' } };
   const receipt = await engine.apply('s', writes, intent);
-  db.prepare('UPDATE gv_storage_meta SET schema=? WHERE id=1').run(JSON.stringify({ format: 3, tables: schema }));
+  db.prepare('UPDATE gv_storage_meta SET schema=? WHERE id=1').run(JSON.stringify({ format, tables: schema }));
+  db.prepare(`UPDATE ${sqliteIdentifier(sqliteTableName('tasks'))} SET body=? WHERE id='a'`).run(JSON.stringify(writes[0]!.row));
   db.exec('DROP TABLE gv_storage_flags');
   const next = new SQLiteTypedReplicaEngine(host, schema); await next.open('second');
-  expect(JSON.parse(String(db.prepare('SELECT schema FROM gv_storage_meta').get()!.schema)).format).toBe(4);
+  expect(JSON.parse(String(db.prepare('SELECT schema FROM gv_storage_meta').get()!.schema)).format).toBe(5);
   expect(await next.apply('s', writes, intent)).toEqual(receipt);
   expect((await next.outbox('s')).map(entry => entry.id)).toEqual(['pending']);
   expect((await next.page('s', { ...plan, search: 'needle' })).rows.map(row => row._id)).toEqual(['a']);
@@ -438,4 +439,20 @@ it('reports rate-limited actual bootstrap progress without making telemetry a co
     expect(progress).toHaveBeenCalledTimes(3);
     expect((await engine.page('s', plan)).rows.map(row => row._id)).toEqual(['a', 'b']);
   } finally { now.mockRestore(); }
+});
+
+it('keeps generated field payloads only in typed columns and reconstructs exact bodies and projections', async () => {
+  const { engine, db } = fixture(); await engine.open('owner');
+  const rows = [
+    { _id: 'a', name: 'payload'.repeat(200), due: null, done: false, data: { name: 'nested', values: [1, null, true] }, extra: { untouched: 'value' } },
+    { _id: 'b', name: 'short', done: true, data: null },
+  ];
+  await engine.apply('s', rows.map(row => ({ table: 'tasks', id: row._id, version: 1, row })));
+  const stored = String(db.prepare(`SELECT body FROM ${sqliteIdentifier(sqliteTableName('tasks'))} WHERE id='a'`).get()!.body);
+  expect(JSON.parse(stored)).toEqual({ _id: null, name: null, due: null, done: null, data: null, extra: { untouched: 'value' } });
+  expect(stored.length).toBeLessThan(150);
+  const result = await engine.page('s', plan);
+  expect(result.rows).toEqual(rows); expect(Object.keys(result.rows[0]!)).toEqual(Object.keys(rows[0]!));
+  expect((await engine.page('s', { ...plan, select: ['name', 'due', 'done', 'data'] })).rows).toEqual(rows.map(({ extra, ...row }: any) => row));
+  expect((await engine.viewPage('s', 'all', plan, 0)).rows).toEqual(rows);
 });
