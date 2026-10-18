@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { SQLiteTypedReplicaEngine, sqlitePayloadBytes } from './sqlite-typed-engine.js';
 import { compileSQLiteTypedPage, type SQLitePagePlan } from './sqlite-typed-query.js';
@@ -418,4 +418,24 @@ it('rejects undeclared or invalid FTS detail policies before generating SQL', ()
   const table = schema.tasks!;
   expect(() => compileSQLiteTypedSchema({ tasks: { ...table, searchDetail: 'invalid' as any } })).toThrow('search detail');
   expect(() => compileSQLiteTypedSchema({ tasks: { ...table, search: undefined, searchDetail: 'none' } })).toThrow('search detail');
+});
+
+it('reports rate-limited actual bootstrap progress without making telemetry a commit prerequisite', async () => {
+  const { host } = fixture(); let clock = 0;
+  const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+  const progress = vi.fn(() => { throw new Error('recipient closed'); });
+  const engine = new SQLiteTypedReplicaEngine(host, schema, undefined, { onProgress: progress });
+  try {
+    await engine.open('owner'); clock = 1000;
+    await engine.beginBootstrap('s', 'first'); expect(progress).toHaveBeenCalledTimes(1);
+    await engine.appendBootstrap('s', 'first', 0, JSON.stringify([write('a', 1)]));
+    expect(progress).toHaveBeenCalledTimes(1);
+    clock = 1600;
+    const state = await engine.appendBootstrap('s', 'first', 1, JSON.stringify([write('b', 2)]));
+    expect(progress).toHaveBeenCalledTimes(2);
+    clock = 2200;
+    await engine.finishBootstrap('s', 'first', { pages: state.nextPage, rows: state.rows, root: state.root });
+    expect(progress).toHaveBeenCalledTimes(3);
+    expect((await engine.page('s', plan)).rows.map(row => row._id)).toEqual(['a', 'b']);
+  } finally { now.mockRestore(); }
 });

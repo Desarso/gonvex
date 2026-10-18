@@ -47,12 +47,22 @@ export class SQLiteTypedReplicaEngine {
   private initialized = false;
   private windows?: SQLiteWindowStore;
   private jsonEach: 'json_each' | 'jsonb_each' = 'json_each';
+  private lastProgress = -Infinity;
   private readonly profile = { frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
   takeProfile() { const result = { ...this.profile }; for (const key of Object.keys(this.profile) as Array<keyof typeof this.profile>) this.profile[key] = 0; return result; }
   constructor(private readonly db: SQLiteReplicaDatabase, readonly schema: SQLiteTypedSchema,
-    private readonly limits = { operations: 64, queuedBytes: 2_097_152, batchBytes: 262_144, pageBytes: 262_144 }) {
+    private readonly limits = { operations: 64, queuedBytes: 2_097_152, batchBytes: 262_144, pageBytes: 262_144 },
+    private readonly controls: { onProgress?: () => void } = {}) {
     compileSQLiteTypedSchema(schema);
     for (const value of Object.values(limits)) if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('Positive SQLite limits required');
+  }
+  private progress() {
+    if (!this.controls.onProgress) return;
+    const now = performance.now();
+    if (now - this.lastProgress < 500) return;
+    this.lastProgress = now;
+    // Lease telemetry must never roll back an admitted durable operation.
+    try { this.controls.onProgress(); } catch { /* A closed recipient is harmless. */ }
   }
   private enqueue<T>(bytes: number, task: () => Promise<T>): Promise<T> {
     if (this.pending >= this.limits.operations || this.pendingBytes + bytes > this.limits.queuedBytes)
@@ -112,6 +122,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
     if (!this.initialized) fail('FENCED', 'SQLite owner is not ready');
     const lease = await this.db.getFirstAsync<{ epoch: number; owner: string; sequence: number }>('SELECT epoch,owner,sequence FROM gv_storage_meta WHERE id=1');
     if (!lease || lease.epoch !== this.epoch || lease.owner !== this.owner) fail('FENCED', 'SQLite owner epoch is stale');
+    this.progress();
     return lease.sequence;
   }
   private async physicalScope(scope: string): Promise<string> {
@@ -140,7 +151,9 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
     if (!await this.indexesDeferred()) return;
     const ddl = compileSQLiteTypedSchema(this.schema);
     let timed = performance.now();
+    this.progress();
     if (ddl.indexes) await this.db.execAsync(ddl.indexes);
+    this.progress();
     this.profile.indexBuildMs += performance.now() - timed; timed = performance.now();
     if (ddl.search) await this.db.execAsync(ddl.search);
     for (const [entity, table] of Object.entries(this.schema)) if (table.search?.length) {
@@ -150,7 +163,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
         const last = (await this.db.getFirstAsync<{ last: number | null }>(`SELECT max(rid) last FROM (SELECT rid FROM ${tn} WHERE rid>? ORDER BY rid LIMIT 512)`, after))?.last;
         if (last == null) break;
         await this.db.runAsync(`INSERT INTO ${fn}(rowid,${columns}) SELECT rid,${columns} FROM ${tn} WHERE rid>? AND rid<=? ORDER BY rid`, after, last);
-        after = last;
+        after = last; this.progress();
         await new Promise<void>(resolve => setTimeout(resolve, 0));
       }
     }
@@ -431,6 +444,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
           }
           if (!Array.isArray(admitted) || admitted.length > 512) fail('BUDGET', 'SQLite import page exceeds row budget');
           await this.writeBootstrapFrame(physical, admitted);
+          this.progress();
           rows += admitted.length;
           if (!Number.isSafeInteger(rows)) fail('BUDGET', 'SQLite import row count exhausted');
           // Promise-only ingestion monopolizes a worker task, withholding both

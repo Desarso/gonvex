@@ -22,7 +22,7 @@ async function execute(op: string, args: any) {
     if (host || args?.protocol !== 1) throw Object.assign(new Error('Incompatible storage worker protocol'), { code: 'PROTOCOL' });
     try {
       host = await openOfficialSQLiteHost();
-      engine = new SQLiteTypedReplicaEngine(host.database, args.schema as SQLiteTypedSchema);
+      engine = new SQLiteTypedReplicaEngine(host.database, args.schema as SQLiteTypedSchema, undefined, { onProgress: () => globalThis.postMessage({ type: 'progress', sentAt: Date.now() }) });
       const epoch = await engine.open(args.owner);
       return { epoch, wasmBytes: host.memoryBytes() };
     } catch (e) {

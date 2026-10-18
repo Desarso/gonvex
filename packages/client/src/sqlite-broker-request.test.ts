@@ -33,3 +33,20 @@ it('admits restartable bootstrap operations through the same bounded replay chan
   await expect(broker.request('bootstrapAppend', { scope: 's', encoded: 'x'.repeat(131072) })).rejects.toMatchObject({ code: 'BUDGET' });
   expect(broker.stats()).toMatchObject({ pending: 0, pendingBytes: 0 });
 });
+
+it('accepts actual progress only from the current ready worker without settling requests', () => {
+  const broker = client() as any;
+  const generation = { ready: true, lastProgress: 1000 };
+  broker.generation = generation; broker.announce = vi.fn();
+  const now = vi.spyOn(Date, 'now').mockReturnValue(3000);
+  try {
+    broker.progress(generation, 2500); expect(generation.lastProgress).toBe(2500);
+    broker.progress(generation, 2400); broker.progress(generation, 5000);
+    broker.progress({ ...generation }, 2700); broker.progress(generation, NaN);
+    generation.ready = false; broker.progress(generation, 2700);
+    expect(generation.lastProgress).toBe(2500); expect(broker.announce).toHaveBeenCalledOnce();
+    generation.ready = true; broker.progress(generation, 2800);
+    expect(generation.lastProgress).toBe(2800); expect(broker.announce).toHaveBeenCalledTimes(2);
+    expect(broker.pending.size).toBe(0);
+  } finally { now.mockRestore(); }
+});

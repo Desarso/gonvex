@@ -136,6 +136,12 @@ export class SQLiteReplicaBroker {
     this.owner = { id: this.tabID, token: g.token, epoch: g.epoch, seen: g.lastProgress };
     this.setState('ready'); this.broadcast({ type: 'owner', owner: this.owner });
   }
+  private progress(g: Generation, sentAt: unknown) {
+    if (this.generation !== g || !g.ready || !Number.isSafeInteger(sentAt)) return;
+    const now = Date.now();
+    if ((sentAt as number) <= g.lastProgress || (sentAt as number) > now + 1000) return;
+    g.lastProgress = Math.min(now, sentAt as number); this.announce(g);
+  }
   private async pulse() {
     const g = this.generation; if (!g?.ready || this.workerCalls.size >= 65) return;
     // A regular queued response is itself a progress heartbeat. Avoid adding
@@ -177,6 +183,7 @@ export class SQLiteReplicaBroker {
       worker.onmessage = event => {
         if (this.generation !== g) return;
         const m = event.data;
+        if (m.type === 'progress') { this.progress(g, m.sentAt); return; }
         if (m.type === 'change') { this.broadcast(m); return; }
         if (m.type === 'storage-fault') { this.cooldown = Date.now() + 1000; this.setState('pending'); this.stop(g); return; }
         const p = this.workerCalls.get(m.id);
