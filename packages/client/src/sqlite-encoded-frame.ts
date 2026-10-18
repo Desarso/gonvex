@@ -1,6 +1,7 @@
-import { decodedJSONBytes } from './sqlite-admission.js';
+import { decodedJSONBytes, fail } from './sqlite-admission.js';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import type { SQLiteTypedSchema, SQLiteTypedTable } from './sqlite-typed-schema.js';
+const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
 const path = (...parts: string[]) => literal('$.' + parts.map(name => JSON.stringify(name)).join('.'));
 export const sqliteEncodedFrameValueSQL = '(SELECT value FROM main.gv_input_frame WHERE id=1)';
@@ -8,19 +9,21 @@ export const sqliteEncodedFrameValueSQL = '(SELECT value FROM main.gv_input_fram
 /** The grammar has already passed SQLite json_valid. Scan only structural
  * invariants, without constructing rows or decoding text values. Object-key
  * sets are bounded by the caller's decoded-byte admission and die per frame. */
-export function encodedFrameHasCanonicalStructure(text: string): boolean {
+export function encodedFrameHasCanonicalStructure(text: string | Uint8Array): boolean {
+  const code = (i: number) => typeof text === 'string' ? text.charCodeAt(i) : text[i]!;
+  const slice = (start: number, end: number) => typeof text === 'string' ? text.slice(start, end) : utf8Decoder.decode(text.subarray(start, end));
   const stack: Array<{ keys?: Set<string>; key: boolean }> = [];
   for (let i = 0; i < text.length; i++) {
-    const char = text.charCodeAt(i);
+    const char = code(i);
     if (char === 34) {
       const start = i; let escaped = false;
       while (++i < text.length) {
-        if (text.charCodeAt(i) === 92) { escaped = true; i++; }
-        else if (text.charCodeAt(i) === 34) break;
+        if (code(i) === 92) { escaped = true; i++; }
+        else if (code(i) === 34) break;
       }
       const parent = stack.at(-1);
       if (parent?.keys && parent.key) {
-        const key = escaped ? JSON.parse(text.slice(start, i + 1)) as string : text.slice(start + 1, i);
+        const key = escaped ? JSON.parse(slice(start, i + 1)) as string : slice(start + 1, i);
         if (parent.keys.has(key)) return false;
         parent.keys.add(key); parent.key = false;
       } else if (stack.length > 32) return false;
@@ -33,11 +36,11 @@ export function encodedFrameHasCanonicalStructure(text: string): boolean {
       if (stack.length > 32) return false;
       const start = i;
       while (i + 1 < text.length) {
-        const next = text.charCodeAt(i + 1);
+        const next = code(i + 1);
         if (next >= 48 && next <= 57 || next === 43 || next === 45 || next === 46 || next === 69 || next === 101) i++;
         else break;
       }
-      if (!Number.isFinite(Number(text.slice(start, i + 1)))) return false;
+      if (!Number.isFinite(Number(slice(start, i + 1)))) return false;
     } else if (char === 110 || char === 116 || char === 102) {
       if (stack.length > 32) return false;
       i += char === 102 ? 4 : 3;
@@ -66,17 +69,18 @@ export function compileSQLiteEncodedFrameValidation(table: SQLiteTypedTable, eac
  * Unusual/legacy inputs return to the canonical JS decoder, preserving its
  * duplicate-key and numeric-key semantics rather than changing them silently. */
 export async function writeSQLiteEncodedFrame(db: SQLiteReplicaDatabase, schema: SQLiteTypedSchema,
-  each: 'json_each' | 'jsonb_each', encoded: string, maxBytes: number,
+  each: 'json_each' | 'jsonb_each', encoded: string | Uint8Array, maxBytes: number,
   insert: (entity: string, normalized: string) => Promise<void>,
   validationSQL: (entity: string) => string | undefined,
 ): Promise<{ rows: number; validationMs: number; projectionMs: number; normalizationMs: number } | undefined> {
   const began = performance.now();
-  decodedJSONBytes(encoded, maxBytes);
+  if (typeof encoded === 'string') decodedJSONBytes(encoded, maxBytes);
+  else admitSQLiteUTF8Frame(encoded, maxBytes);
   await db.runAsync('DELETE FROM main.gv_input_frame');
   try {
     // Bind/encode the wire text once. All validation and extraction below read
     // one bounded native JSONB scratch row, removed before this method returns.
-    await db.runAsync('WITH source AS MATERIALIZED(SELECT ? value) INSERT INTO main.gv_input_frame SELECT 1,jsonb(value) FROM source WHERE json_valid(value)', encoded);
+    await db.runAsync('WITH source AS MATERIALIZED(SELECT CAST(? AS TEXT) value) INSERT INTO main.gv_input_frame SELECT 1,jsonb(value) FROM source WHERE json_valid(value)', encoded);
     const shape = await db.getFirstAsync<{ kind: string }>(`SELECT json_type(${sqliteEncodedFrameValueSQL}) kind`);
     if (shape?.kind !== 'array') return;
     const size = await db.getFirstAsync<{ n: number; bad: number }>(`SELECT count(*) n,coalesce(sum(type<>'object'),0) bad FROM ${each}(${sqliteEncodedFrameValueSQL})`);
@@ -109,4 +113,29 @@ export async function writeSQLiteEncodedFrame(db: SQLiteReplicaDatabase, schema:
     }
     return { rows: size.n, validationMs, projectionMs, normalizationMs };
   } finally { await db.runAsync('DELETE FROM main.gv_input_frame'); }
+}
+
+/** Wire-byte admission without a decoded frame allocation. Only strict UTF-8
+ * reaches SQLite; escaped JSON Unicode retains the legacy string semantics. */
+export function admitSQLiteUTF8Frame(input: Uint8Array, maxBytes: number): void {
+  let bytes = input.byteLength * 2 + 64, quoted = false, escaped = false;
+  if (bytes > maxBytes) fail('BUDGET', 'SQLite UTF-8 frame exceeds budget');
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i]!;
+    if (char >= 128) {
+      const length = char >= 194 && char <= 223 ? 2 : char >= 224 && char <= 239 ? 3 : char >= 240 && char <= 244 ? 4 : 0;
+      if (!length || i + length > input.length) fail('INVALID_ROW', 'Invalid UTF-8 frame');
+      const next = input[i + 1]!;
+      if (char === 224 && next < 160 || char === 237 && next >= 160 || char === 240 && next < 144 || char === 244 && next >= 144) fail('INVALID_ROW', 'Invalid UTF-8 frame');
+      for (let j = 1; j < length; j++) if ((input[i + j]! & 192) !== 128) fail('INVALID_ROW', 'Invalid UTF-8 frame');
+      i += length - 1; continue;
+    }
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === 92) escaped = true;
+      else if (char === 34) quoted = false;
+    } else if (char === 34) { quoted = true; bytes += 32; }
+    else if (char === 91 || char === 123 || char === 44 || char === 58) bytes += 64;
+    if (bytes > maxBytes) fail('BUDGET', 'Decoded SQLite page exceeds budget');
+  }
 }

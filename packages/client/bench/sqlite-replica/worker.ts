@@ -1,4 +1,4 @@
-import { fixtureWrites, fixtureEncodedWrites } from './fixture.mjs';
+import { fixtureWrites, fixtureEncodedWrites, fixtureUTF8Writes } from './fixture.mjs';
 import { openOfficialSQLiteHost } from '../../src/sqlite-official-host.js';
 import { SQLiteTypedReplicaEngine } from '../../src/sqlite-typed-engine.js';
 let host: Awaited<ReturnType<typeof openOfficialSQLiteHost>>;
@@ -55,19 +55,19 @@ const handlers = {
     return state;
   },
   async bootstrapFinish({ token, expected }) { return engine.finishBootstrap('test-scope',token,expected); },
-  async seedAll({ count, encoded = false }) {
+  async seedAll({ count, encoded = false, utf8 = false }) {
     const begin = performance.now(); importProfiling = true; phase('ingest');
     try {
     const result = await engine.importScope('test-scope', (async function* () {
       for (let offset = 0; offset < count; offset += 50) {
-        if (encoded) { const at = performance.now(); const frame = fixtureEncodedWrites(offset, Math.min(50, count - offset)); generated.wireEncodeMs += performance.now() - at; yield frame; continue; }
+        if (encoded) { const at = performance.now(); const frame = (utf8 ? fixtureUTF8Writes : fixtureEncodedWrites)(offset, Math.min(50, count - offset)); generated.wireEncodeMs += performance.now() - at; yield frame; continue; }
         const page = Array.from({ length: Math.min(50, count - offset) }, (_, index) => { const id = offset + index;
           return { table: 'tasks', id: String(id), version: 1, row: { _id: String(id), name: `Task ${String(id).padStart(8, '0')} café 東京`, workspace: String(id % 10), due: id % 365, version: 1, description: 'Synthetic maintenance procedure. '.repeat(15) + (id % 997 === 0 ? 'rare-needle 🔧' : '') } };
         });
         yield encoded ? JSON.stringify(page) : page;
       }
     })());
-    return { ...result, ms: performance.now() - begin, memoryBytes: host.memoryBytes(), producer: encoded ? 'encoded frames without row objects' : 'row objects', profile: { ...engine.takeProfile(), ...generated, transactions: host.takeProfile() } };
+    return { ...result, ms: performance.now() - begin, memoryBytes: host.memoryBytes(), producer: utf8 ? 'direct UTF-8 frames without row objects' : encoded ? 'encoded frames without row objects' : 'row objects', profile: { ...engine.takeProfile(), ...generated, transactions: host.takeProfile() } };
     } finally { importProfiling = false; }
   },
   async page(args) { const begin = performance.now(); const result = await engine.page('test-scope', { table: 'tasks', order: [{ field: 'due', direction: 'asc' }], limit: 50, select: ['name', 'due', 'workspace'], ...args }); return { ...result, ms: performance.now() - begin }; },

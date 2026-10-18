@@ -438,7 +438,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
    * source or owner crash leaves the scope empty. The producer must stream
    * rather than retaining the complete fixture. No outbox intent is accepted
    * or acknowledged until the import transaction finishes. */
-  importScope(scope: string, source: AsyncIterable<readonly SQLiteTypedWrite[] | string>): Promise<{ sequence: number; rows: number }> {
+  importScope(scope: string, source: AsyncIterable<readonly SQLiteTypedWrite[] | string | Uint8Array>): Promise<{ sequence: number; rows: number }> {
     if (!scope || scope.length > 512) throw new TypeError('Invalid SQLite import scope');
     return this.enqueue(this.limits.batchBytes, async () => {
       let result!: { sequence: number; rows: number };
@@ -459,9 +459,13 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         // this path the entire journal and corpus roll back together on error.
         await this.suspendBootstrapIndexes('atomic-import');
         let rows = 0, sliceStarted = performance.now();
-        for await (const page of source) {
+        for await (const input of source) {
+          // Public callers may retain their view while native work awaits.
+          // Snapshot only one admitted byte frame before the first await.
+          if (input instanceof Uint8Array && (input.byteLength * 2 > this.limits.batchBytes || !(input.buffer instanceof ArrayBuffer))) fail('BUDGET', 'SQLite byte import frame exceeds ownership or byte budget');
+          const page = input instanceof Uint8Array ? input.slice() : input;
           let nativeRows: number | undefined;
-          if (typeof page === 'string') {
+          if (typeof page === 'string' || page instanceof Uint8Array) {
             if (page.length * 2 > this.limits.batchBytes) fail('BUDGET', 'SQLite encoded import page exceeds byte budget');
             const native = await writeSQLiteEncodedFrame(this.db, this.schema, this.jsonEach, page, this.limits.batchBytes,
               (entity, normalized) => this.insertBootstrapEntity(physical, entity, undefined, normalized),
@@ -475,8 +479,8 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
           if (nativeRows !== undefined) rows += nativeRows;
           else {
             let admitted: SQLiteTypedWrite[];
-            if (typeof page === 'string') {
-              admitted = JSON.parse(page) as SQLiteTypedWrite[]; parsedPayloadBytes(admitted, this.limits.batchBytes);
+            if (typeof page === 'string' || page instanceof Uint8Array) {
+              admitted = JSON.parse(typeof page === 'string' ? page : new TextDecoder('utf-8', { fatal: true }).decode(page)) as SQLiteTypedWrite[]; parsedPayloadBytes(admitted, this.limits.batchBytes);
             } else {
               sqlitePayloadBytes(page, this.limits.batchBytes); admitted = JSON.parse(JSON.stringify(page)) as SQLiteTypedWrite[];
             }

@@ -209,3 +209,24 @@ it('binds each encoded frame once and releases its native scratch row before ret
   expect(await host.database.getFirstAsync("SELECT count(*) n FROM sqlite_temp_master WHERE name='gv_input_frame'")).toEqual({ n: 0 });
   expect((await engine.page('s', { table: 'records', order: [{ field: '_id', direction: 'asc' }], textOrder: 'binary', limit: 2 })).rows).toEqual([row]);
 });
+
+it('imports owned UTF-8 frames and preserves canonical fallback and transaction rollback', async () => {
+  const { host } = fixture();
+  const schema = { records: { key: '_id', fields: { _id: { kind: 'text' }, title: { kind: 'text' }, rank: { kind: 'number' } }, indexes: [{ columns: ['rank'] }], search: ['title'] } } as const;
+  const engine = new SQLiteTypedReplicaEngine(host.database, schema); await engine.open('owner');
+  const encode = (text: string) => new TextEncoder().encode(text);
+  await engine.importScope('s', (async function* () {
+    yield encode('[{"table":"records","id":"a","version":1,"row":{"_id":"a","title":"İSTANBUL café 東京 🔧","rank":1}}]');
+    yield encode('[{"table":"records","id":"b","version":1,"row":{"_id":"b","title":"old","title":"Canonical duplicate-key value","rank":2}}]');
+  })());
+  expect(engine.takeProfile().nativeFrames).toBe(1);
+  expect((await engine.page('s', { table: 'records', search: 'canonical', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows[0]!.title).toBe('Canonical duplicate-key value');
+  expect((await engine.page('s', { table: 'records', search: 'i̇stan', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows[0]!._id).toBe('a');
+  await expect(engine.importScope('invalid', (async function* () {
+    yield encode('[{"table":"records","id":"a","version":1,"row":{"_id":"a","rank":1}}]');
+    yield Uint8Array.from([91,34,237,160,128,34,93]);
+  })())).rejects.toMatchObject({ code: 'INVALID_ROW' });
+  expect((await engine.page('invalid', { table: 'records', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows).toEqual([]);
+  expect(await host.database.getFirstAsync('SELECT count(*) n FROM main.gv_input_frame')).toEqual({ n: 0 });
+  expect(await engine.integrity()).toBe('ok');
+});
