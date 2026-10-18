@@ -1,3 +1,4 @@
+import {sqliteEntityAliasSchema,sqlitePhysicalEntityScope,sqliteQueryEntityScopes} from './sqlite-entity-scope.js';
 import {assertSQLiteMembership} from './sqlite-membership-plan.js';
 import {releaseOwnedSQLiteBytes} from './sqlite-owned-buffer.js';
 import { yieldSQLiteTask } from './sqlite-task-yield.js';
@@ -126,6 +127,7 @@ CREATE TABLE IF NOT EXISTS gv_views(scope TEXT NOT NULL,signature TEXT NOT NULL,
 CREATE INDEX IF NOT EXISTS gv_views_recency ON gv_views(touched);
 CREATE TABLE IF NOT EXISTS gv_view_members(scope TEXT NOT NULL,signature TEXT NOT NULL,position INTEGER NOT NULL,rid INTEGER NOT NULL,PRIMARY KEY(scope,signature,position)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_scope_alias(scope TEXT PRIMARY KEY,physical TEXT NOT NULL) WITHOUT ROWID;
+${sqliteEntityAliasSchema}
 CREATE TABLE IF NOT EXISTS gv_bootstrap(scope TEXT PRIMARY KEY,token TEXT UNIQUE NOT NULL,physical TEXT NOT NULL,next_page INTEGER NOT NULL,rows INTEGER NOT NULL,root TEXT NOT NULL,base_sequence INTEGER NOT NULL,complete INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(token,page)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
@@ -170,9 +172,13 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
     this.progress();
     return lease.sequence;
   }
-  private async physicalScope(scope: string): Promise<string> {
+  private async physicalScope(scope: string,entity?:string): Promise<string> {
     if (!scope || scope.length > 512 || scope.startsWith('\u0000bootstrap:')) throw new TypeError('Invalid SQLite public scope');
-    return (await this.db.getFirstAsync<{ physical: string }>('SELECT physical FROM gv_scope_alias WHERE scope=?', scope))?.physical ?? scope;
+    return sqlitePhysicalEntityScope(this.db,scope,entity);
+  }
+  private async bootstrapRecord(scope:string,token?:string){
+    const row=await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT scope,token,json_quote(physical) physical,next_page,rows,root,base_sequence,complete FROM gv_bootstrap WHERE scope=?'+(token===undefined?'':' AND token=?'),scope,...(token===undefined?[]:[token]));
+    return row?{...row,physical:JSON.parse(row.physical) as string}:null;
   }
   private async indexesDeferred(): Promise<boolean> {
     return !!await this.db.getFirstAsync("SELECT value FROM gv_storage_flags WHERE name='bootstrap-indexes'");
@@ -228,14 +234,15 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
     }
     return table;
   }
-  private async writeBatch(scope: string, writes: readonly SQLiteTypedWrite[]): Promise<void> {
+  private async writeBatch(scope: string, writes: readonly SQLiteTypedWrite[],resolve=false): Promise<void> {
     // Preserve transaction order, including delete/reinsert chains. Only
     // consecutive upserts for the same generated table share a SQL statement.
     for (let offset = 0; offset < writes.length;) {
       const input = writes[offset]!, table = this.validateWrite(input), tn = q(sqliteTableName(input.table));
+      const writeScope=resolve?await this.physicalScope(scope,input.table):scope;
       if (input.row === null) {
-        await this.db.runAsync('INSERT INTO gv_tombstones VALUES(?,?,?,?) ON CONFLICT(scope,entity,id) DO UPDATE SET version=max(version,excluded.version)', scope, input.table, input.id, input.version);
-        await this.db.runAsync(`DELETE FROM ${tn} WHERE scope=? AND id=? AND version<=?`, scope, input.id, input.version);
+        await this.db.runAsync('INSERT INTO gv_tombstones VALUES(?,?,?,?) ON CONFLICT(scope,entity,id) DO UPDATE SET version=max(version,excluded.version)', writeScope, input.table, input.id, input.version);
+        await this.db.runAsync(`DELETE FROM ${tn} WHERE scope=? AND id=? AND version<=?`, writeScope, input.id, input.version);
         offset++; continue;
       }
       const fields = Object.entries(table.fields);
@@ -246,12 +253,12 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       const batchRows = Math.max(1, Math.min(100, Math.floor(32000 / (columns.length + 4))));
       while (end < writes.length && end - offset < batchRows && writes[end]!.table === input.table && writes[end]!.row !== null) {
         const item = writes[end]!; this.validateWrite(item);
-        bindings.push(scope, item.id, sqliteBodySkeleton(item.row!, table), item.version, ...fields.map(([field, shape]) => {
+        bindings.push(writeScope, item.id, sqliteBodySkeleton(item.row!, table), item.version, ...fields.map(([field, shape]) => {
           const value = item.row![field];
           return value == null ? null : shape.kind === 'json' ? JSON.stringify(value) : shape.kind === 'boolean' ? Number(value) : value;
         }), ...(table.search ?? []).map(field => String(item.row![field] ?? '').toLowerCase()));
         selects.push(select);
-        bindings.push(scope, item.table, item.id, item.version);
+        bindings.push(writeScope, item.table, item.id, item.version);
         end++;
       }
       const head = `INSERT INTO ${tn}(${columns.map(q).join(',')}) `;
@@ -336,7 +343,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
           }
         }
         await this.restoreBootstrapIndexes();
-        await this.writeBatch(await this.physicalScope(admitted.scope), admitted.writes);
+        await this.writeBatch(admitted.scope, admitted.writes,true);
         if (previous >= Number.MAX_SAFE_INTEGER) fail('FENCED', 'SQLite storage sequence exhausted');
         result = { sequence: previous + 1 };
         if (admitted.intent) {
@@ -384,7 +391,8 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       let state!: SQLiteBootstrapState;
       await this.db.withTransactionAsync(async () => {
         const sequence = await this.fence(), physical = await this.physicalScope(scope);
-        const old = await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT * FROM gv_bootstrap WHERE scope=?', scope);
+        if(await this.db.getFirstAsync('SELECT 1 FROM gv_entity_alias WHERE scope=? LIMIT 1',scope))fail('INVALID_ROW','Whole-scope bootstrap cannot replace an entity alias');
+        const old = await this.bootstrapRecord(scope);
         if (old) {
           if (old.token !== token) fail('INTENT_CONFLICT', 'Another bootstrap owns this scope');
           state = bootstrapState(old); return;
@@ -433,7 +441,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
     const hash = await sha256(encoded);
     this.profile.hashMs += performance.now() - hashAt;
     await this.fence();
-    const old = await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT * FROM gv_bootstrap WHERE scope=? AND token=?', scope, token);
+    const old = await this.bootstrapRecord(scope,token);
     if (!old) fail('INVALID_ROW', 'Bootstrap is not open');
     if (page < old.next_page) {
       const receipt = await this.db.getFirstAsync<{ hash: string }>('SELECT hash FROM gv_bootstrap_pages WHERE token=? AND page=?', token, page);
@@ -486,7 +494,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
     sqlitePayloadBytes({ scope, token }, 2048);
     return this.enqueue(2048, () => this.db.withTransactionAsync(async () => {
       await this.fence();
-      const old = await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT * FROM gv_bootstrap WHERE scope=? AND token=?', scope, token);
+      const old = await this.bootstrapRecord(scope,token);
       if (!old) return;
       if (old.complete) fail('INVALID_ROW', 'A published bootstrap cannot be discarded');
       for (const entity of Object.keys(this.schema)) await this.db.runAsync(`DELETE FROM ${q(sqliteTableName(entity))} WHERE scope=?`, old.physical);
@@ -501,7 +509,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       let state!: SQLiteBootstrapState;
       await this.db.withTransactionAsync(async () => {
         const sequence = await this.fence();
-        const old = await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT * FROM gv_bootstrap WHERE scope=? AND token=?', scope, token);
+        const old = await this.bootstrapRecord(scope,token);
         if (!old || old.rows !== expected.rows || old.next_page !== expected.pages || old.root !== expected.root) fail('INVALID_ROW', 'Bootstrap manifest does not match');
         if (!old.complete) {
           if (sequence !== old.base_sequence) fail('PAGE_CHANGED', 'Canonical writes raced bootstrap activation');
@@ -529,6 +537,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         await this.restoreBootstrapIndexes();
         if (previous >= Number.MAX_SAFE_INTEGER) fail('FENCED', 'SQLite storage sequence exhausted');
         const physical = await this.physicalScope(scope);
+        if(await this.db.getFirstAsync('SELECT 1 FROM gv_entity_alias WHERE scope=? LIMIT 1',scope))fail('INVALID_ROW','Whole-scope import cannot replace an entity alias');
         if (physical !== scope) fail('INVALID_ROW', 'Bootstrap import cannot replace an activated scope');
         for (const entity of Object.keys(this.schema)) {
           if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? LIMIT 1`, physical))
@@ -596,11 +605,12 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       let result!: SQLiteTypedPage;
       await this.db.withTransactionAsync(async () => {
         const sequence = await this.fence();
+        if(admitted.after?.predictionSequence!==undefined)throw new TypeError('Optimistic cursors require the prediction reader');
         if (admitted.after && admitted.after.sequence !== sequence) fail('PAGE_CHANGED', 'SQLite keyset belongs to an older replica snapshot');
         await assertSQLiteMembership(this.db,this.schema,scope,admitted);
-        const physical = await this.physicalScope(scope);
+        const resolved=await sqliteQueryEntityScopes(this.db,scope,admitted),physical=resolved.physical;
         let access: 'trigram' | 'ordered' = await this.indexesDeferred() ? 'ordered' : 'trigram';
-        let selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access,false,scope);
+        let selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access,false,scope,undefined,resolved.sources);
         if (admitted.search && access === 'trigram') {
           // Inspect at most 1025 matching rowids. A common term uses the native
           // sort/filter index and stops at the requested page, avoiding a huge
@@ -610,7 +620,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
           const candidates = Array.from(admitted.search).length < 3 ? 1025 : (await this.db.getFirstAsync<{ n: number }>(
             `SELECT count(*) n FROM (${(table.search ?? []).map((_, i) => `SELECT rowid FROM (SELECT rowid FROM ${q(sqliteSearchName(admitted.table))} WHERE ${q('s' + i)} GLOB ? LIMIT 1025)`).join(' UNION ')} LIMIT 1025)`,
             ...(table.search ?? []).map(() => pattern)))!.n;
-          if (candidates > 1024) { access = 'ordered'; selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access,false,scope); }
+          if (candidates > 1024) { access = 'ordered'; selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access,false,scope,undefined,resolved.sources); }
         }
         // The host must enforce a column byte limit before decoding as well.
         const fields = admitted.select ? [...new Set([this.schema[admitted.table]!.key, ...admitted.select])] : undefined;
@@ -622,7 +632,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
           } catch (error) {
             if (!pageBudgetError(error) || limit === 1) throw error;
             limit = Math.max(1, Math.floor(limit / 2));
-            selectedStatement = compileSQLiteTypedPage(this.schema, physical, { ...admitted, limit }, access,false,scope);
+            selectedStatement = compileSQLiteTypedPage(this.schema, physical, { ...admitted, limit }, access,false,scope,undefined,resolved.sources);
           }
         }
         const last = records.at(-1);
@@ -651,8 +661,8 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
     return this.enqueue(charge, async () => {
       let result!: SQLiteTypedViewPage;
       await this.db.withTransactionAsync(async () => {
-        const sequence = await this.fence(), physical = await this.physicalScope(scope);
-        result = await readSQLiteTypedView(this.db, this.schema, scope, physical, signature, admitted, offset, sequence, this.limits.pageBytes);
+        const sequence = await this.fence(),resolved=await sqliteQueryEntityScopes(this.db,scope,admitted),physical=resolved.physical;
+        result = await readSQLiteTypedView(this.db, this.schema, scope, physical, signature, admitted, offset, sequence, this.limits.pageBytes,sequence,undefined,resolved.sources);
       }); return result;
     });
   }
@@ -666,7 +676,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       let n = 0;
       await this.db.withTransactionAsync(async () => {
         await this.fence();
-        n = (await this.db.getFirstAsync<{ n: number }>(`SELECT n FROM ${q(sqliteCountName(entity, group))} WHERE scope=? AND bucket=${bucket}`, await this.physicalScope(scope), ...bindings))?.n ?? 0;
+        n = (await this.db.getFirstAsync<{ n: number }>(`SELECT n FROM ${q(sqliteCountName(entity, group))} WHERE scope=? AND bucket=${bucket}`, await this.physicalScope(scope,entity), ...bindings))?.n ?? 0;
       });
       return n;
     });

@@ -542,3 +542,37 @@ it('keeps logical membership constraints when rows live in an activated bootstra
  const header={signature:'member-set',entity:'tasks',key:'_id',kind:'replica' as const,completeness:'complete' as const,source:'server' as const};await engine.windowBegin('s',header,'one');const progress=await engine.windowAppend('s','member-set','one',0,JSON.stringify({ids:['b']}));await engine.windowPublish('s','member-set',progress);
  const memberPlan={...plan,membership:{signature:'member-set',generation:'one'}};expect((await engine.page('s',memberPlan)).rows.map(row=>row._id)).toEqual(['b']);expect((await engine.viewPage('s','aliased-members',memberPlan)).rows.map(row=>row._id)).toEqual(['b']);
 });
+
+it('activates entity-specific sources coherently for rows, relations, counts, canonical writes and predictions',async()=>{
+ const {sqliteTypedReplicaStorage}=await import('./sqlite-typed-row-layout.js'),{sqliteOwnerTransactions}=await import('./sqlite-owner-transactions.js'),{SQLitePredictions}=await import('./sqlite-predictions.js');
+ const {engine,host,db}=fixture();await engine.open('owner');const canonical=sqliteTypedReplicaStorage(sqliteOwnerTransactions(host),schema);await canonical.ready();
+ await engine.apply('s',[write('a',1,'old-a'),write('b',2,'old-b'),{table:'assignments',id:'old-assignment',version:1,row:{_id:'old-assignment',task:'b',member:'member'}}]);
+ await engine.apply('\u0000entity-stage:tasks',[{...write('a',3,'active-a'),row:{...write('a',3,'active-a').row,done:true}},write('c',4,'active-c')]);
+ await engine.apply('\u0000entity-stage:assignments',[{table:'assignments',id:'active-assignment',version:1,row:{_id:'active-assignment',task:'a',member:'member'}}]);
+ db.prepare('INSERT INTO gv_entity_alias VALUES(?,?,?)').run('s','tasks','\u0000entity-stage:tasks');db.prepare('INSERT INTO gv_entity_alias VALUES(?,?,?)').run('s','assignments','\u0000entity-stage:assignments');
+ expect((await engine.page('s',plan)).rows.map(row=>row._id)).toEqual(['a','c']);expect(await engine.count('s','tasks',0,['w',false])).toBe(1);
+ expect((await canonical.loadEntityRows('s','tasks',['a','b','c'])).map(row=>row.row.name)).toEqual(['active-a','active-c']);
+ const related={...plan,where:{op:'relation' as const,field:'_id',table:'assignments',relatedField:'task',where:{field:'member',op:'eq' as const,value:'member'}}};expect((await engine.page('s',related)).rows.map(row=>row._id)).toEqual(['a']);expect((await canonical.readViewPage('s','related',related)).rows.map(row=>row._id)).toEqual(['a']);
+ const wrapped=sqliteOwnerTransactions(host),predictions=new SQLitePredictions(wrapped,sqliteTypedReplicaStorage(wrapped,schema),schema,()=>engine.verifyOwner());await predictions.ready();
+ await predictions.apply('s',1,[{entity:'assignments',rowId:'active-assignment',op:'patch',fields:{member:'other'}},{entity:'assignments',rowId:'local-assignment',op:'insert',fields:{_id:'local-assignment',task:'c',member:'member'}}]);expect((await predictions.page('s',related)).rows.map(row=>row._id)).toEqual(['c']);
+ await canonical.applyTransaction({cursor:{epoch:'e',revision:5},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{name:'updated active'}}]},{entities:{},liveQueries:{}},'s');expect((await canonical.loadEntityRows('s','tasks',['a']))[0].row.name).toBe('updated active');
+ await engine.apply('s',[{...write('c',7,'changed through alias'),version:6}]);expect((await engine.page('s',plan)).rows.map(row=>row.name)).toEqual(['updated active','changed through alias']);
+ await canonical.applyTransaction({cursor:{epoch:'e',revision:10},changes:[{entity:'tasks',id:'a',operation:'delete'}]},{entities:{},liveQueries:{}},'s');expect(await canonical.loadEntityRows('s','tasks',['a'])).toEqual([]);expect(db.prepare(`SELECT count(*) n FROM ${sqliteIdentifier(sqliteTableName('tasks'))} WHERE scope='s'`).get()!.n).toBe(2); // Old physical rows stay hidden until verified cleanup.
+ await expect(engine.beginBootstrap('s','unsafe-whole-scope')).rejects.toMatchObject({code:'INVALID_ROW'});expect(await engine.integrity()).toBe('ok');
+});
+
+
+it('keeps concurrent unpublished bootstrap scopes distinct across restarts and cancellation',async()=>{
+ const {engine,host}=fixture();await engine.open('first');
+ await engine.beginBootstrap('left','left-stage');await engine.beginBootstrap('right','right-stage');
+ const left=await engine.appendBootstrap('left','left-stage',0,JSON.stringify([write('same',1,'left')]));
+ await engine.appendBootstrap('right','right-stage',0,JSON.stringify([write('same',2,'right')]));
+ const reopened=new SQLiteTypedReplicaEngine(host,schema);await reopened.open('second');
+ await reopened.finishBootstrap('left','left-stage',{pages:left.nextPage,rows:left.rows,root:left.root});
+ expect((await reopened.page('left',plan)).rows.map(row=>row.name)).toEqual(['left']);expect((await reopened.page('right',plan)).rows).toEqual([]);
+ await reopened.abortBootstrap('right','right-stage');
+ expect((await reopened.page('left',plan)).rows.map(row=>row.name)).toEqual(['left']);
+ await reopened.beginBootstrap('right','replacement');const replacement=await reopened.appendBootstrap('right','replacement',0,JSON.stringify([write('same',3,'replacement')]));
+ await reopened.finishBootstrap('right','replacement',{pages:replacement.nextPage,rows:replacement.rows,root:replacement.root});
+ expect((await reopened.page('right',plan)).rows.map(row=>row.name)).toEqual(['replacement']);expect(await reopened.integrity()).toBe('ok');
+});

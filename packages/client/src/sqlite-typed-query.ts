@@ -8,7 +8,7 @@ export type SQLitePredicate =
   | { op: 'in'; field: string; values: readonly (SQLiteBinding | boolean)[] }
   | { op: 'relation'; field: string; table: string; relatedField: string; where?: SQLitePredicate };
 export type SQLiteOrder = { field: string; direction: 'asc' | 'desc' };
-export type SQLiteKeyset = { values: readonly SQLiteBinding[]; id: string; sequence: number };
+export type SQLiteKeyset = { values: readonly SQLiteBinding[]; id: string; sequence: number;predictionSequence?:number };
 export type SQLitePagePlan = {
   table: string;
   /** SDK-admitted window membership, under the same logical replica scope. */
@@ -24,11 +24,12 @@ export type SQLitePagePlan = {
    * plans need generated, versioned collation keys before taking this path. */
   textOrder?: 'binary';
 };
+export type SQLiteQueryOverlay={scope:string;allowLocalInserts?:boolean;/** Internal bounded merge arm. */root?:'canonical'|'prediction'};
 export type SQLiteTypedStatement = { sql: string; bindings: SQLiteBinding[] };
 
 /** Keyset predicates use PostgreSQL's ASC NULLS LAST / DESC NULLS FIRST and
  * an ascending identity tie-break. No OFFSET or WASM-to-JS sort callback. */
-export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan, access: 'trigram' | 'ordered' = 'trigram', keysOnly = false,logicalScope=scope): SQLiteTypedStatement {
+export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan, access: 'trigram' | 'ordered' = 'trigram', keysOnly = false,logicalScope=scope,overlay?:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>): SQLiteTypedStatement {
   const table = Object.hasOwn(schema, plan.table) && schema[plan.table];
   if (!table) throw new TypeError('Unknown SQLite table');
   if(plan.membership&&(typeof plan.membership.signature!=='string'||!plan.membership.signature||plan.membership.signature.length>4096||typeof plan.membership.generation!=='string'||!plan.membership.generation||plan.membership.generation.length>128||plan.membership.requireComplete!==undefined&&typeof plan.membership.requireComplete!=='boolean'))throw new TypeError('Invalid native membership plan');
@@ -47,6 +48,14 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
     if (!Object.hasOwn(schema[entity]!.fields, name)) throw new TypeError('Unknown SQLite field');
     return `${alias}.${q(sqliteFieldName(name))}`;
   };
+  if(overlay&&(typeof overlay.scope!=='string'||!overlay.scope||overlay.scope.length>1024||overlay.allowLocalInserts!==undefined&&typeof overlay.allowLocalInserts!=='boolean'))throw new TypeError('Invalid typed query overlay');
+  const sourceScope=(entity:string)=>sources&&Object.hasOwn(sources,entity)?sources[entity]!:scope;
+  const source=(entity:string,root=false)=>{
+    const name=q(sqliteTableName(entity));if(!overlay||root&&overlay.root)return name;
+    return `(SELECT c.* FROM ${name} c WHERE c.scope=${bind(sourceScope(entity))} AND NOT EXISTS(SELECT 1 FROM gv_prediction_members p WHERE p.scope=${bind(logicalScope)} AND p.entity=${bind(entity)} AND p.id=c.id)
+ UNION ALL SELECT p.* FROM ${name} p WHERE p.scope=${bind(overlay.scope)} AND EXISTS(SELECT 1 FROM gv_prediction_members m WHERE m.scope=${bind(logicalScope)} AND m.entity=${bind(entity)} AND m.id=p.id AND m.deleted=0))`;
+  };
+  const rootSource=source(plan.table,true);
   let aliasId = 0;
   const predicate = (entity: string, alias: string, input?: SQLitePredicate): string => {
     if (!input) return '1';
@@ -63,7 +72,7 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
       const related = 'r' + ++aliasId;
       // Independent relation set uses (scope,relatedField,...) rather than a
       // correlated row scan. The parent field and scope remain indexable.
-      return `${field(entity, alias, input.field)} IN (SELECT ${field(input.table, related, input.relatedField)} FROM ${q(sqliteTableName(input.table))} ${related} WHERE ${related}.scope=${bind(scope)} AND ${predicate(input.table, related, input.where)})`;
+      return `${field(entity, alias, input.field)} IN (SELECT ${field(input.table, related, input.relatedField)} FROM ${source(input.table)} ${related} WHERE ${overlay?'1':`${related}.scope=${bind(sourceScope(input.table))}`} AND ${predicate(input.table, related, input.where)})`;
     }
     if (!('field' in input)) throw new TypeError('Unknown SQLite predicate');
     const column = field(entity, alias, input.field);
@@ -75,8 +84,12 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
     if (input.value === null && (input.op === 'eq' || input.op === 'ne')) return `${column} IS ${input.op === 'ne' ? 'NOT ' : ''}NULL`;
     return `${column} ${operators[input.op]} ${bind(input.value)}`;
   };
-  const where = [`t.scope=${bind(scope)}`, predicate(plan.table, 't', plan.where)];
-  if(plan.membership)where.push(`EXISTS(SELECT 1 FROM gv_window_members m WHERE m.scope=${bind(logicalScope)} AND m.signature=${bind(plan.membership.signature)} AND m.generation=${bind(plan.membership.generation)} AND m.id=t.id)`);
+  const where = [overlay&&!overlay.root?'1':`t.scope=${bind(overlay?.root==='prediction'?overlay.scope:sourceScope(plan.table))}`, predicate(plan.table, 't', plan.where)];
+  if(overlay?.root)where.push(`${overlay.root==='canonical'?'NOT ':''}EXISTS(SELECT 1 FROM gv_prediction_members p WHERE p.scope=${bind(logicalScope)} AND p.entity=${bind(plan.table)} AND p.id=t.id${overlay.root==='prediction'?' AND p.deleted=0':''})`);
+  if(plan.membership){
+    const member=`EXISTS(SELECT 1 FROM gv_window_members m WHERE m.scope=${bind(logicalScope)} AND m.signature=${bind(plan.membership.signature)} AND m.generation=${bind(plan.membership.generation)} AND m.id=t.id)`;
+    where.push(overlay?.allowLocalInserts?`(${member} OR (t.scope=${bind(overlay.scope)} AND NOT EXISTS(SELECT 1 FROM ${q(sqliteTableName(plan.table))} c WHERE c.scope=${bind(sourceScope(plan.table))} AND c.id=t.id)))`:member);
+  }
   for (const order of plan.order) {
     const shape = table.fields[order.field];
     if (!shape || !['asc', 'desc'].includes(order.direction) || shape.kind === 'json') throw new TypeError('Unsupported SQLite sort');
@@ -113,12 +126,24 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
     const path = ('$.' + JSON.stringify(name)).replaceAll("'", "''");
     return `,${field(plan.table, 't', name)} AS ${q('p' + i)},json_type(t.body,'${path}') AS ${q('h' + i)}`;
   }).join('') : ',' + sqliteRowBodySQL(table) + ' AS body';
-  return { sql: `SELECT ${keysOnly ? 't.rid,t.id' : `t.id,t.version${selected}${orderColumns.map((column, i) => `,${column} AS ${q('k' + i)}`).join('')}`} FROM ${q(sqliteTableName(plan.table))} t WHERE ${where.map(term => '(' + term + ')').join(' AND ')} ORDER BY ${ordering.join(',')},${field(plan.table, 't', table.key)} ASC${keysOnly ? '' : ` LIMIT ${bind(plan.limit)}`}`, bindings };
+  const keyColumns=orderColumns.map((column,i)=>`,${column} AS ${q('k'+i)}`).join('');
+  const resultColumns=keysOnly?`t.rid,t.id${overlay?.root?keyColumns:''}`:`t.id,t.version${selected}${keyColumns}`;
+  return {sql:`SELECT ${resultColumns}${overlay?.root?`,${field(plan.table,'t',table.key)} AS ${q('__gv_key')}`:''} FROM ${rootSource} t WHERE ${where.map(term=>'('+term+')').join(' AND ')} ORDER BY ${ordering.join(',')},${field(plan.table,'t',table.key)} ASC${keysOnly?'':` LIMIT ${bind(plan.limit)}`}`,bindings};
+}
+
+/** Each indexed arm admits only its first N candidates before the final
+ * merge. A root UNION wrapper can force SQLite to sort the entire corpus;
+ * nested relation sources still see both canonical and predicted values. */
+export function compileSQLiteOptimisticPage(schema:SQLiteTypedSchema,scope:string,plan:SQLitePagePlan,access:'trigram'|'ordered',keysOnly:boolean,logicalScope:string,overlay:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>):SQLiteTypedStatement{
+ const left=compileSQLiteTypedPage(schema,scope,plan,access,keysOnly,logicalScope,{...overlay,root:'canonical'},sources);
+ const right=compileSQLiteTypedPage(schema,scope,plan,access,keysOnly,logicalScope,{...overlay,root:'prediction'},sources);
+ const order=plan.order.map((value,index)=>`${q('k'+index)} ${value.direction.toUpperCase()} NULLS ${value.direction==='asc'?'LAST':'FIRST'}`).concat(q('__gv_key')+' ASC');
+ return {sql:`SELECT * FROM (${left.sql}) UNION ALL SELECT * FROM (${right.sql}) ORDER BY ${order.join(',')}${keysOnly?'':' LIMIT ?'}`,bindings:[...left.bindings,...right.bindings,...(keysOnly?[]:[plan.limit])]};
 }
 
 /** Native-only view construction. Its unbounded SELECT must only be consumed
  * by INSERT...SELECT in the owner connection, never by a JS row reader. */
-export function compileSQLiteTypedView(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan,logicalScope=scope): SQLiteTypedStatement {
+export function compileSQLiteTypedView(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan,logicalScope=scope,overlay?:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>): SQLiteTypedStatement {
   if (plan.after) throw new TypeError('Position views do not accept a keyset');
-  return compileSQLiteTypedPage(schema, scope, plan, 'ordered', true,logicalScope);
+  return overlay?compileSQLiteOptimisticPage(schema,scope,plan,'ordered',true,logicalScope,overlay,sources):compileSQLiteTypedPage(schema, scope, plan, 'ordered', true,logicalScope,undefined,sources);
 }

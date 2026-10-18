@@ -44,3 +44,32 @@ it('preserves missing-field coverage and rejects a patch of a missing row or ide
   await expect(f.predictions.apply('s',2,[{entity:'tasks',rowId:'01',op:'patch',fields:{id:'other'}}])).rejects.toThrow('identity');
  }finally{f.sql.close();}
 });
+
+it('walks typed optimistic keysets with filtering, substring search and exact replacement/deletion semantics',async()=>{
+ const f=await fixture();try{
+  await f.predictions.apply('s',1,[{entity:'tasks',rowId:'01',op:'patch',fields:{n:99,name:'café 東京'}},{entity:'tasks',rowId:'02',op:'delete'},{entity:'tasks',rowId:'new',op:'insert',fields:{id:'new',name:'offline edited',n:-1}}]);
+  const plan={table:'tasks',order:[{field:'n',direction:'asc' as const}],limit:7};let after:import('./sqlite-typed-query.js').SQLiteKeyset|undefined;const ids:string[]=[];
+  for(;;){const page=await f.predictions.page('s',{...plan,...(after?{after}:{})});ids.push(...page.rows.map(row=>String(row.id)));if(!page.cursor)break;after=page.cursor;}
+  expect(ids).toEqual(['new','00',...Array.from({length:17},(_,n)=>String(n+3).padStart(2,'0')),'01']);expect(new Set(ids).size).toBe(20);
+  expect((await f.predictions.page('s',{...plan,search:'東京'})).rows.map(row=>row.id)).toEqual(['01']);expect((await f.predictions.page('s',{...plan,search:'offline'})).rows.map(row=>row.id)).toEqual(['new']);
+  expect((await f.predictions.page('s',{...plan,where:{field:'n',op:'gte',value:19},select:['id','n']})).rows).toEqual([{id:'19',n:19},{id:'01',n:99}]);
+  expect((await f.predictions.page('s',{...plan,where:{op:'relation',field:'id',table:'tasks',relatedField:'id',where:{field:'n',op:'gte',value:90}}})).rows.map(row=>row.id)).toEqual(['01']);
+  const first=await f.predictions.page('s',plan);await f.predictions.apply('s',2,[{entity:'tasks',rowId:'03',op:'patch',fields:{n:-5}}]);await expect(f.predictions.page('s',{...plan,after:first.cursor!})).rejects.toMatchObject({code:'PAGE_CHANGED'});
+  await expect(f.engine.page('s',{...plan,after:first.cursor!})).rejects.toThrow('Optimistic cursors');expect((await f.canonical.loadEntityRows('s','tasks',['01']))[0].row.n).toBe(1);
+ }finally{f.sql.close();}
+});
+it('keeps optimistic position views on disk and invalidates them on a prediction-only generation',async()=>{
+ const f=await fixture();try{
+  const plan={table:'tasks',order:[{field:'n',direction:'asc' as const}],limit:3};const first=await f.predictions.viewPage('s','grid',plan,10);expect(first.total).toBe(20);expect(first.rows.map(row=>row.id)).toEqual(['10','11','12']);
+  const generation=await f.engine.verifyOwner();await f.predictions.apply('s',1,[{entity:'tasks',rowId:'01',op:'patch',fields:{n:99}},{entity:'tasks',rowId:'02',op:'delete'}]);expect(await f.engine.verifyOwner()).toEqual(generation);
+  const next=await f.predictions.viewPage('s','grid',plan,10);expect(next.total).toBe(19);expect(next.rows.map(row=>row.id)).toEqual(['12','13','14']);await f.predictions.reset('s');expect((await f.predictions.viewPage('s','grid',plan,10)).rows.map(row=>row.id)).toEqual(['10','11','12']);
+ }finally{f.sql.close();}
+});
+it('keeps admitted membership for replacements and permits only explicit matching local inserts outside it',async()=>{
+ const {SQLiteWindowStore}=await import('./sqlite-window-store.js'),f=await fixture();try{
+  const windows=new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner());const header={signature:'subset',entity:'tasks',key:'id',kind:'replica' as const,source:'server' as const,completeness:'complete' as const};await windows.begin('s',header,'one');const state=await windows.append('s','subset','one',0,JSON.stringify({ids:['00','01','02','03','04']}));await windows.publish('s','subset',state);
+  await f.predictions.apply('s',1,[{entity:'tasks',rowId:'01',op:'patch',fields:{n:-1}},{entity:'tasks',rowId:'02',op:'delete'},{entity:'tasks',rowId:'13',op:'patch',fields:{n:-99}},{entity:'tasks',rowId:'local',op:'insert',fields:{id:'local',name:'matching local',n:2}},{entity:'tasks',rowId:'outside',op:'insert',fields:{id:'outside',name:'outside predicate',n:99}}]);
+  const plan={table:'tasks',membership:{signature:'subset',generation:'one',requireComplete:true},where:{field:'n',op:'lt' as const,value:5},order:[{field:'n',direction:'asc' as const}],limit:50};
+  expect((await f.predictions.page('s',plan)).rows.map(row=>row.id)).toEqual(['01','00','03','04']);expect((await f.predictions.page('s',plan,true)).rows.map(row=>row.id)).toEqual(['01','00','local','03','04']);expect((await f.predictions.viewPage('s','subset-view',plan,0,true)).total).toBe(5);
+ }finally{f.sql.close();}
+});

@@ -1,3 +1,4 @@
+import {sqlitePhysicalEntityScope} from './sqlite-entity-scope.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
 import type {SQLiteTypedTable} from './sqlite-typed-schema.js';
 import {compileSQLiteTypedSchema,sqliteFieldName,sqliteIdentifier as q,sqliteSearchName,sqliteTableName} from './sqlite-typed-schema.js';
@@ -24,7 +25,7 @@ export async function insertFreshSnapshotRows(db:SQLiteReplicaDatabase,table:SQL
  }
  const invalid=await db.getFirstAsync(`SELECT 1 FROM gv_snapshot_rows s WHERE ${selection} AND CASE WHEN ${checks.join(' AND ')} THEN 0 ELSE 1 END LIMIT 1`,...args);
  if(invalid)fail('INVALID_ROW','Snapshot field type differs from the generated schema');
- const physical=(await db.getFirstAsync<{physical:string}>('SELECT physical FROM gv_scope_alias WHERE scope=?',source.scope))?.physical??source.scope;
+ const physical=await sqlitePhysicalEntityScope(db,source.scope,source.entity);
  await db.runAsync('DELETE FROM temp.gv_snapshot_overlap');
  await db.runAsync(`INSERT INTO temp.gv_snapshot_overlap SELECT s.id,s.position FROM gv_snapshot_rows s WHERE ${selection} AND (
   EXISTS(SELECT 1 FROM ${name} t WHERE t.scope=? AND t.id=s.id)

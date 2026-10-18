@@ -1,3 +1,4 @@
+import {sqlitePhysicalEntityScope} from './sqlite-entity-scope.js';
 import type { DataPredicate, DataRead, JsonObject } from '@gonvex/module-sdk';
 import type { ReplicaReadPage } from './paged-read-view.js';
 import { executionReadColumns, primaryReadKeys } from '@gonvex/local-runtime/read-view';
@@ -14,7 +15,7 @@ export async function readSQLitePortablePage(db: SQLiteReplicaDatabase, schema: 
   sqlitePayloadBytes({scope,read,excluded,coverageColumns:coverageColumns??null},65536);
   const table = Object.hasOwn(schema,read.table) && schema[read.table];
   if (!table) throw new TypeError('Portable read references an undeclared SQLite table');
-  const physical = (await db.getFirstAsync<{physical:string}>('SELECT physical FROM gv_scope_alias WHERE scope=?',scope))?.physical ?? scope;
+  const physical = await sqlitePhysicalEntityScope(db,scope,read.table);
   // Predictions use the same generated typed table and indexes in a private
   // physical scope. Markers exclude replaced/deleted canonical rows on disk.
   // Keep the original indexed source when this table has no predictions.

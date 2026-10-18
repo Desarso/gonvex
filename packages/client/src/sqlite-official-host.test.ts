@@ -329,3 +329,12 @@ it('reuses the small ingress statement cycle while preserving the same native by
  expect(host.takeProfile().prepares).toBe(0);expect(host.statementBytes()).toBeLessThanOrEqual(262144);
  host.close();expect(host.statementBytes()).toBe(0);
 });
+
+it('preserves embedded NUL and Unicode in raw text and private alias metadata in the packaged WASM',async()=>{
+ const {host}=fixture();const value='before\u0000after\u2028東京',physical='\u0000bootstrap:one';
+ await host.database.execAsync('CREATE TABLE nul_text(value TEXT)');await host.database.runAsync('INSERT INTO nul_text VALUES(?)',value);
+ expect(await host.database.getFirstAsync('SELECT value FROM nul_text')).toEqual({value});expect(await host.database.getFirstAsync('SELECT ? value',physical)).toEqual({value:physical});
+ const schema={records:{key:'id',fields:{id:{kind:'text'},text:{kind:'text'}},indexes:[]}} as const,engine=new SQLiteTypedReplicaEngine(host.database,schema);await engine.open('nul-owner');await engine.beginBootstrap('s','one');const state=await engine.appendBootstrap('s','one',0,JSON.stringify([{table:'records',id:'r',version:1,row:{id:'r',text:value}}]));await engine.finishBootstrap('s','one',{pages:state.nextPage,rows:state.rows,root:state.root});
+ expect((await engine.page('s',{table:'records',order:[{field:'id',direction:'asc'}],textOrder:'binary',select:['id','text'],limit:1})).rows).toEqual([{id:'r',text:value}]);
+ const alias=await host.database.getFirstAsync<{physical:string}>('SELECT physical FROM gv_scope_alias WHERE scope=?','s');expect(alias!.physical).toBe(physical);expect((await host.database.getFirstAsync<{n:number}>('SELECT count(DISTINCT scope) n FROM '+q(sqliteTableName('records'))))!.n).toBe(1);
+});

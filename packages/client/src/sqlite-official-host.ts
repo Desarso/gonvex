@@ -55,6 +55,7 @@ PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=3000;`);
  * inputs are released before any plan is retained. */
 export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
   budget = { maxRows: 512, maxBytes: 262_144 }): OfficialSQLiteHost {
+  const textDecoder=new TextDecoder('utf-8',{fatal:true});
   let transaction = false, closed = false, statementBytes = 0;
   const profile = { execMs:0,execCalls:0,ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 };
   const statements = new Map<string, { statement: PreparedStatement; bytes: number }>();
@@ -113,7 +114,14 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
           // Reserve conservatively before decoding UTF-8 or copying a blob.
           bytes += name.length * 2 + size * (type === 3 ? 2 : 1) + 32;
           if (bytes > budget.maxBytes) throw new SQLiteBridgeBudgetError('text');
-          entries.push([name, statement.get(index)]);
+          if(type===3){
+            // oo1's C-string conversion stops at embedded NUL. Decode the
+            // already-admitted byte span instead (also valid for private scope
+            // names and ordinary projected text containing control characters).
+            const pointer=Number(sqlite3.capi.sqlite3_column_blob(statement.pointer!,index));
+            if(size&&(!pointer||pointer+size>sqlite3.wasm.heap8u().byteLength))throw new Error('Invalid SQLite text span');
+            entries.push([name,textDecoder.decode(sqlite3.wasm.heap8u().subarray(pointer,pointer+size))]);
+          }else entries.push([name, statement.get(index)]);
         }
         rows.push(Object.fromEntries(entries) as T);
         if (first) break;

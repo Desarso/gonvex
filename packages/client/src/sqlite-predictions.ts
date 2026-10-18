@@ -1,3 +1,7 @@
+import {sqliteQueryEntityScopes} from './sqlite-entity-scope.js';
+import {readSQLiteOptimisticPage} from './sqlite-optimistic-query.js';
+import {readSQLiteTypedView} from './sqlite-native-view.js';
+import {compileSQLiteTypedPage,type SQLitePagePlan} from './sqlite-typed-query.js';
 import type {LocalPatch} from '@gonvex/local-runtime';
 import type {ReadCoverage} from '@gonvex/local-runtime/read-view';
 import type {ReducerReadView} from '@gonvex/local-runtime/portable';
@@ -9,7 +13,8 @@ import {pagedReplicaReadView} from './paged-read-view.js';
 import {readSQLitePortablePage} from './sqlite-portable-page.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 import type {ReplicaRow} from './local-replica.js';
-const schema=`CREATE TABLE IF NOT EXISTS gv_prediction_members(scope TEXT NOT NULL,entity TEXT NOT NULL,id TEXT NOT NULL,deleted INTEGER NOT NULL,intent_id INTEGER NOT NULL,PRIMARY KEY(scope,entity,id)) WITHOUT ROWID;
+const schema=`CREATE TABLE IF NOT EXISTS gv_prediction_versions(scope TEXT PRIMARY KEY,n INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gv_prediction_members(scope TEXT NOT NULL,entity TEXT NOT NULL,id TEXT NOT NULL,deleted INTEGER NOT NULL,intent_id INTEGER NOT NULL,PRIMARY KEY(scope,entity,id)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS gv_prediction_intents ON gv_prediction_members(scope,intent_id,entity,id);`;
 const physical=(scope:string)=>'\u0000prediction:'+scope;
 function scope(value:string){if(typeof value!=='string'||!value||value.length>512||value.includes('\u0000'))throw new TypeError('Invalid prediction scope');}
@@ -25,6 +30,30 @@ export class SQLitePredictions {
  ready(){
   if(!this.initialized){if(this.db.ownerTransactionDepth)throw new Error('Prepare predictions before an owner transaction');this.initialized=(async()=>{await this.canonical.ready();await this.db.withTransactionAsync(async()=>{await this.fence();await this.db.execAsync(schema);});})().catch(error=>{this.initialized=undefined;throw error;});}
   return this.initialized;
+ }
+ private async touch(ownerScope:string){const row=await this.db.getFirstAsync<{n:number}>('INSERT INTO gv_prediction_versions VALUES(?,1) ON CONFLICT(scope) DO UPDATE SET n=n+1 WHERE n<9007199254740991 RETURNING n',ownerScope);if(!row)fail('FENCED','Prediction generation exhausted');}
+ private async generation(ownerScope:string){
+  const fence=await this.fence() as {sequence?:number};if(!fence||!Number.isSafeInteger(fence.sequence)||fence.sequence!<0)fail('FENCED','Invalid optimistic query generation');
+  const version=await this.db.getFirstAsync<{n:number}>('SELECT n FROM gv_prediction_versions WHERE scope=?',ownerScope);
+  return {sequence:fence.sequence!,predictionSequence:version?.n??0};
+ }
+ /** The owner supplies a complete generated collection predicate before
+  * allowing local inserts outside its last server membership. */
+ async page(ownerScope:string,plan:SQLitePagePlan,allowLocalInserts=false){
+  scope(ownerScope);sqlitePayloadBytes({plan,allowLocalInserts},16384);if(plan.limit>128||typeof allowLocalInserts!=='boolean')throw new RangeError('Optimistic pages are bounded to 128 rows');const owned=structuredClone(plan);compileSQLiteTypedPage(this.tables,ownerScope,owned);await this.ready();
+  let result!:Awaited<ReturnType<typeof readSQLiteOptimisticPage>>;await this.db.withTransactionAsync(async()=>{
+   const generation=await this.generation(ownerScope),resolved=await sqliteQueryEntityScopes(this.db,ownerScope,owned),physicalScope=resolved.physical;
+   const pending=await this.db.getFirstAsync('SELECT 1 FROM gv_prediction_members WHERE scope=? LIMIT 1',ownerScope);
+   result=await readSQLiteOptimisticPage(this.db,this.tables,ownerScope,physicalScope,owned,generation.sequence,generation.predictionSequence,pending?{scope:physical(ownerScope),allowLocalInserts}:undefined,resolved.sources);
+  });return result;
+ }
+ async viewPage(ownerScope:string,signature:string,plan:SQLitePagePlan,offset=0,allowLocalInserts=false){
+  scope(ownerScope);sqlitePayloadBytes({signature,plan,offset,allowLocalInserts},16384);if(typeof signature!=='string'||!signature||signature.length>4096||!Number.isSafeInteger(offset)||offset<0||plan.limit>128||typeof allowLocalInserts!=='boolean')throw new TypeError('Invalid optimistic view page');const owned=structuredClone(plan);compileSQLiteTypedPage(this.tables,ownerScope,owned);await this.ready();
+  let result!:Awaited<ReturnType<typeof readSQLiteTypedView>>;await this.db.withTransactionAsync(async()=>{
+   const generation=await this.generation(ownerScope),resolved=await sqliteQueryEntityScopes(this.db,ownerScope,owned),physicalScope=resolved.physical;
+   const pending=await this.db.getFirstAsync('SELECT 1 FROM gv_prediction_members WHERE scope=? LIMIT 1',ownerScope);
+   result=await readSQLiteTypedView(this.db,this.tables,ownerScope,physicalScope,signature,owned,offset,generation.sequence,131072,`${generation.sequence}:${generation.predictionSequence}`,pending?{scope:physical(ownerScope),allowLocalInserts}:undefined,resolved.sources);
+  });return result;
  }
  async entities(ownerScope:string,entity:string,ids:readonly string[]):Promise<Array<{id:string;row:ReplicaRow}>>{
   scope(ownerScope);sqlitePayloadBytes({entity,ids},32768);if(!Object.hasOwn(this.tables,entity)||!Array.isArray(ids)||ids.length>128||ids.some(id=>typeof id!=='string'||!id))throw new TypeError('Invalid prediction entity page');await this.ready();let result!:Array<{id:string;row:ReplicaRow}>;
@@ -54,6 +83,7 @@ export class SQLitePredictions {
     await this.layout.upsert(this.db,physical(ownerScope),patch.entity,[{id:patch.rowId,row}]);
     await this.db.runAsync('INSERT INTO gv_prediction_members VALUES(?,?,?,?,?) ON CONFLICT(scope,entity,id) DO UPDATE SET deleted=excluded.deleted,intent_id=excluded.intent_id',ownerScope,patch.entity,patch.rowId,Number(row===null),intent);
    }
+   if(owned.length)await this.touch(ownerScope);
   });
  }
  /** Coverage is established by the owner's authorized collection plans. Row
@@ -67,7 +97,7 @@ export class SQLitePredictions {
  async reset(ownerScope:string):Promise<void>{
   scope(ownerScope);await this.ready();await this.db.withTransactionAsync(async()=>{
    await this.fence();for(const entity of Object.keys(this.tables))await this.db.runAsync(`DELETE FROM ${q(sqliteTableName(entity))} WHERE scope=?`,physical(ownerScope));
-   await this.db.runAsync('DELETE FROM gv_canonical_tombstones WHERE scope=?',physical(ownerScope));await this.db.runAsync('DELETE FROM gv_prediction_members WHERE scope=?',ownerScope);
+   await this.db.runAsync('DELETE FROM gv_canonical_tombstones WHERE scope=?',physical(ownerScope));await this.db.runAsync('DELETE FROM gv_prediction_members WHERE scope=?',ownerScope);await this.touch(ownerScope);
   });
  }
 }

@@ -3,7 +3,7 @@ import { sqliteRowBodySQL } from './sqlite-typed-body.js';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import type { SQLiteTypedViewPage } from './sqlite-typed-engine.js';
 import { sqlitePayloadBytes, decodedPageBytes, pageBudgetError } from './sqlite-admission.js';
-import { compileSQLiteTypedView, type SQLitePagePlan } from './sqlite-typed-query.js';
+import { compileSQLiteTypedView, type SQLitePagePlan,type SQLiteQueryOverlay } from './sqlite-typed-query.js';
 import { sqliteIdentifier as q, sqliteTableName, sqliteFieldName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
 
 export const sqliteNativeViewSchema = `CREATE TABLE IF NOT EXISTS gv_views(scope TEXT NOT NULL,signature TEXT NOT NULL,plan TEXT NOT NULL,sequence INTEGER NOT NULL,n INTEGER NOT NULL,touched INTEGER NOT NULL,PRIMARY KEY(scope,signature)) WITHOUT ROWID;
@@ -15,13 +15,14 @@ CREATE TABLE IF NOT EXISTS gv_view_members(scope TEXT NOT NULL,signature TEXT NO
  * This helper never publishes membership or rows outside that transaction. */
 export async function readSQLiteTypedView(database: SQLiteReplicaDatabase, schema: SQLiteTypedSchema,
   scope: string, physical: string, signature: string, admitted: SQLitePagePlan, offset: number, sequence: number,
-  pageBytes: number, generation = sequence): Promise<SQLiteTypedViewPage> {
+  pageBytes: number, generation:number|string = sequence,overlay?:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>): Promise<SQLiteTypedViewPage> {
   await assertSQLiteMembership(database,schema,scope,admitted);
-  const encoded = JSON.stringify(admitted);
-  let header = await database.getFirstAsync<{ plan: string; sequence: number; n: number }>('SELECT plan,sequence,n FROM gv_views WHERE scope=? AND signature=?', scope, signature);
+  physical=sources?.[admitted.table]??physical;
+  const encoded = overlay||sources?JSON.stringify({plan:admitted,overlay,sources}):JSON.stringify(admitted);
+  let header = await database.getFirstAsync<{ plan: string; sequence: number|string; n: number }>('SELECT plan,sequence,n FROM gv_views WHERE scope=? AND signature=?', scope, signature);
   if (!header || header.plan !== encoded || header.sequence !== generation) {
     await database.runAsync('DELETE FROM gv_view_members WHERE scope=? AND signature=?', scope, signature);
-    const statement = compileSQLiteTypedView(schema, physical, admitted,scope);
+    const statement = compileSQLiteTypedView(schema, physical, admitted,scope,overlay,sources);
     await database.runAsync(`INSERT INTO gv_view_members SELECT ?,?,row_number() OVER ()-1,rid FROM (${statement.sql})`, scope, signature, ...statement.bindings);
     const n = (await database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM gv_view_members WHERE scope=? AND signature=?', scope, signature))!.n;
     await database.runAsync('INSERT INTO gv_views VALUES(?,?,?,?,?,?) ON CONFLICT(scope,signature) DO UPDATE SET plan=excluded.plan,sequence=excluded.sequence,n=excluded.n,touched=excluded.touched', scope, signature, encoded, generation, n, Date.now());
@@ -46,8 +47,8 @@ export async function readSQLiteTypedView(database: SQLiteReplicaDatabase, schem
   let records: Record<string, unknown>[], bytes: number, limit = admitted.limit;
   for (;;) {
     try {
-      records = await database.getAllAsync<Record<string, unknown>>(`SELECT ${selected} FROM gv_view_members m JOIN ${q(sqliteTableName(admitted.table))} t ON t.scope=? AND t.rid=m.rid
-        WHERE m.scope=? AND m.signature=? AND m.position>=? AND m.position<? ORDER BY m.position`, physical, scope, signature, offset, offset + limit);
+      records = await database.getAllAsync<Record<string, unknown>>(`SELECT ${selected} FROM gv_view_members m JOIN ${q(sqliteTableName(admitted.table))} t ON ${overlay?'(t.scope=? OR t.scope=?)':'t.scope=?'} AND t.rid=m.rid
+        WHERE m.scope=? AND m.signature=? AND m.position>=? AND m.position<? ORDER BY m.position`, physical,...(overlay?[overlay.scope]:[]),scope, signature, offset, offset + limit);
       bytes = Math.max(sqlitePayloadBytes(records, pageBytes), decodedPageBytes(records, table, fields, pageBytes)); break;
     } catch (error) {
       if (!pageBudgetError(error) || limit === 1) throw error;
