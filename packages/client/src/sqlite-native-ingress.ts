@@ -1,5 +1,5 @@
 import {ByteLedger} from './byte-budget.js';
-import {releaseOwnedSQLiteBytes} from './sqlite-owned-buffer.js';
+import {releaseOwnedSQLiteBytes,takeOwnedSQLiteBytes} from './sqlite-owned-buffer.js';
 import {SQLiteTaskYield} from './sqlite-task-yield.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
 import type {SQLiteSnapshotPages,SQLiteSnapshotReceipt} from './sqlite-snapshot-pages.js';
@@ -16,6 +16,7 @@ type Options={
  activateVerified?(receipt:SQLiteSnapshotReceipt):Promise<void>;
 };
 const maxFrames=8,maxWireBytes=512*1024,frameBytes=128*1024,metadataBytes=128;
+const emptyBytes=new Uint8Array(0);
 function closed(){return Object.assign(new Error('Snapshot connection is closed'),{code:'FENCED'});}
 
 /** Owned WebSocket binary frames go directly to the SQLite owner. One task
@@ -42,18 +43,25 @@ export class SQLiteNativeIngress {
   * The caller must not read or reuse it after calling accept. */
  accept(buffer:ArrayBuffer):Promise<SQLiteSnapshotReceipt>{
   if(!(buffer instanceof ArrayBuffer))return Promise.reject(new TypeError('Snapshot requires an owned ArrayBuffer'));
-  const bytes=new Uint8Array(buffer);
+  let bytes=new Uint8Array(buffer);
   if(this.disposed){releaseOwnedSQLiteBytes(bytes);return Promise.reject(closed());}
   if(!bytes.byteLength||bytes.byteLength>frameBytes||this.entries===maxFrames||this.wireBytes+bytes.byteLength>maxWireBytes){
    this.refusals++;releaseOwnedSQLiteBytes(bytes);return Promise.reject(Object.assign(new Error('Snapshot connection exceeded its credit budget'),{code:'BUDGET'}));
   }
+  try{bytes=takeOwnedSQLiteBytes(buffer);}catch(error){return Promise.reject(error);}
   this.entries++;this.wireBytes+=bytes.byteLength;
   const result=new Promise<SQLiteSnapshotReceipt>((resolve,reject)=>this.pending.push({bytes,resolve,reject}));
   if(!this.draining){this.draining=true;void this.drain();}
   if(this.pending.length===maxFrames||this.wireBytes===maxWireBytes)this.releaseBatch?.();
   return result;
  }
- private release(entry:Pending){this.entries--;this.wireBytes-=entry.bytes.byteLength;this.releasedBytes+=releaseOwnedSQLiteBytes(entry.bytes);}
+ private release(entry:Pending){
+  const size=entry.bytes.byteLength;this.entries--;this.wireBytes-=size;this.releasedBytes+=size;
+  // Keep retired backing stores visible to the engine's external-memory GC.
+  // Detaching a DOM network buffer again with transfer(0) can leave resident
+  // pages accumulating even though its reported byteLength is already zero.
+  entry.bytes=emptyBytes;
+ }
  private async drain(){
   try{
    while(this.pending.length&&!this.disposed){

@@ -9,12 +9,12 @@ import {assertSQLiteMembership} from './sqlite-membership-plan.js';
  * prediction sources, including relations. Only one admitted page decodes. */
 export async function readSQLiteOptimisticPage(db:SQLiteReplicaDatabase,schema:SQLiteTypedSchema,scope:string,physical:string,plan:SQLitePagePlan,sequence:number,predictionSequence:number,overlay?:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>):Promise<SQLiteTypedPage>{
  if(plan.after&&(plan.after.sequence!==sequence||plan.after.predictionSequence!==predictionSequence))fail('PAGE_CHANGED','Optimistic keyset generation changed');
- await assertSQLiteMembership(db,schema,scope,plan);const table=schema[plan.table];if(!table)throw new TypeError('Unknown optimistic query table');
+ const membershipSource=await assertSQLiteMembership(db,schema,scope,plan);const table=schema[plan.table];if(!table)throw new TypeError('Unknown optimistic query table');
  const access=await sqliteSearchAccess(db,schema,plan);
  const fields=plan.select?[...new Set([table.key,...plan.select])]:undefined;let take=plan.limit,records:Record<string,unknown>[],bytes:number;
  for(;;){
   try{
-   const limited={...plan,limit:take};const statement=overlay?compileSQLiteOptimisticPage(schema,physical,limited,access,false,scope,overlay,sources):compileSQLiteTypedPage(schema,physical,limited,access,false,scope,undefined,sources);
+   const limited={...plan,limit:take};const statement=overlay?compileSQLiteOptimisticPage(schema,physical,limited,access,false,scope,overlay,sources,membershipSource):compileSQLiteTypedPage(schema,physical,limited,access,false,scope,undefined,sources,membershipSource);
    records=await db.getAllAsync<Record<string,unknown>>(statement.sql,...statement.bindings);bytes=Math.max(sqlitePayloadBytes(records,131072),decodedPageBytes(records,table,fields,131072));break;
   }catch(error){if(take===1||!pageBudgetError(error))throw error;take=Math.max(1,Math.floor(take/2));}
  }

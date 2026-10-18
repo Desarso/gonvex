@@ -609,10 +609,10 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         const sequence = await this.fence();
         if(admitted.after?.predictionSequence!==undefined)throw new TypeError('Optimistic cursors require the prediction reader');
         if (admitted.after && admitted.after.sequence !== sequence) fail('PAGE_CHANGED', 'SQLite keyset belongs to an older replica snapshot');
-        await assertSQLiteMembership(this.db,this.schema,scope,admitted);
+        const membershipSource=await assertSQLiteMembership(this.db,this.schema,scope,admitted);
         const resolved=await sqliteQueryEntityScopes(this.db,scope,admitted),physical=resolved.physical;
         const access=await this.indexesDeferred()?'ordered':await sqliteSearchAccess(this.db,this.schema,admitted);
-        let selectedStatement=compileSQLiteTypedPage(this.schema,physical,admitted,access,false,scope,undefined,resolved.sources);
+        let selectedStatement=compileSQLiteTypedPage(this.schema,physical,admitted,access,false,scope,undefined,resolved.sources,membershipSource);
         // The host must enforce a column byte limit before decoding as well.
         const fields = admitted.select ? [...new Set([this.schema[admitted.table]!.key, ...admitted.select])] : undefined;
         let records: Record<string, unknown>[], outputBytes: number, limit = admitted.limit;
@@ -623,7 +623,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
           } catch (error) {
             if (!pageBudgetError(error) || limit === 1) throw error;
             limit = Math.max(1, Math.floor(limit / 2));
-            selectedStatement = compileSQLiteTypedPage(this.schema, physical, { ...admitted, limit }, access,false,scope,undefined,resolved.sources);
+            selectedStatement = compileSQLiteTypedPage(this.schema, physical, { ...admitted, limit }, access,false,scope,undefined,resolved.sources,membershipSource);
           }
         }
         const last = records.at(-1);

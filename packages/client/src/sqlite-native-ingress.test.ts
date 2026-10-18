@@ -29,6 +29,7 @@ it('coalesces all eight available credits into one atomic owner transaction and 
  const test=fixture(),ingress=new SQLiteNativeIngress(test.options),buffers=Array.from({length:8},(_,sequence)=>wire(sequence));
  try{
   const work=buffers.map(buffer=>ingress.accept(buffer));expect(ingress.stats().entries).toBe(8);
+  if(typeof structuredClone==='function')expect(buffers.every(buffer=>buffer.byteLength===0)).toBe(true);
   const receipts=await Promise.all(work);expect(receipts.map(receipt=>receipt.ack.sequence)).toEqual([0,1,2,3,4,5,6,7]);
   expect(test.commits).toBe(1);expect(test.acks).toHaveLength(8);expect(test.sql.prepare('SELECT count(*) n FROM frames').get()).toEqual({n:8});
   expect(test.sql.prepare('SELECT count(*) n FROM activated').get()).toEqual({n:1});expect(ingress.stats()).toMatchObject({entries:0,bytes:0});
@@ -86,4 +87,10 @@ it('releases an unstarted queue on close and refuses oversize frames before admi
   const other=new SQLiteNativeIngress(test.options);
   try{await expect(other.accept(new ArrayBuffer(131073))).rejects.toMatchObject({code:'BUDGET'});expect(other.stats().bytes).toBe(0);}finally{other.close();}
  }finally{ingress.close();test.sql.close();}
+});
+
+it('drops settled queue references while retaining external-memory accounting for the owned backing store',async()=>{
+ const test=fixture(),append=test.options.snapshots.appendEncodedReceipt,inputs:Uint8Array[]=[];
+ test.options.snapshots.appendEncodedReceipt=async(...args)=>{inputs.push(args[1]);return append(...args);};const ingress=new SQLiteNativeIngress(test.options),source=wire(0);
+ try{await ingress.accept(source);expect(source.byteLength).toBe(0);expect(inputs[0].byteLength).toBe(1);expect(ingress.stats()).toMatchObject({entries:0,bytes:0,releasedBytes:1});}finally{ingress.close();test.sql.close();}
 });

@@ -76,7 +76,7 @@ async function execute(op: string, args: any, requestID:string) {
       const epoch = await engine.open(args.owner);
       const storage=sqliteTypedReplicaStorage(database,engine.schema);
       canonical=new SQLiteCanonicalDispatcher(database,storage,engine);
-      snapshots=new SQLiteSnapshotPages(database,()=>engine!.verifyOwner());
+      snapshots=new SQLiteSnapshotPages(database,()=>engine!.verifyOwner(),engine.schema);
       activation=new SQLiteSnapshotActivator(database,storage,()=>engine!.verifyOwner(),engine.schema);
       await snapshots.ready();await activation.ready();
       nativeReader=new SQLiteNativeReplicaReader(database,storage,engine);await nativeReader.ready();tabs.setGeneration(await engine.verifyOwner());

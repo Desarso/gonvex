@@ -8,7 +8,8 @@ const literal=(value:string)=>value.includes('\u0000')?"CAST(X'"+[...new TextEnc
 const path=(field:string)=>literal('$.'+JSON.stringify(field));
 export const typedSnapshotSchema=`CREATE TABLE IF NOT EXISTS gv_snapshot_typed(
  scope TEXT NOT NULL,subscription TEXT NOT NULL,snapshot TEXT NOT NULL,entity TEXT NOT NULL,physical TEXT NOT NULL UNIQUE,
- PRIMARY KEY(scope,subscription,snapshot)) WITHOUT ROWID;`;
+ PRIMARY KEY(scope,subscription,snapshot)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gv_snapshot_scope_clock(id INTEGER PRIMARY KEY CHECK(id=1),value INTEGER NOT NULL);`;
 /** Generated SQL consumes the same bounded frame as the hash/membership stage.
  * Only the tiny skeleton lives in the typed row; the generic stage keeps its
  * identity/hash/position and no second row body. */
@@ -50,7 +51,9 @@ export async function prepareSQLiteTypedSnapshot(db:SQLiteReplicaDatabase,schema
   await db.runAsync('INSERT OR IGNORE INTO gv_snapshot_index_deferred VALUES(?)',input.entity);
   for(let i=0;i<table.indexes.length;i++)await db.execAsync(`DROP INDEX IF EXISTS ${q(sqliteTableName(input.entity)+'_i_'+i)}`);
  }
- const physical='\u0000typed-snapshot:'+crypto.randomUUID();await db.runAsync('INSERT INTO gv_snapshot_typed VALUES(?,?,?,?,?)',input.scope,input.subscription,input.snapshot,input.entity,physical);return physical;
+ const clock=await db.getFirstAsync<{value:number}>('INSERT INTO gv_snapshot_scope_clock VALUES(1,1) ON CONFLICT(id) DO UPDATE SET value=value+1 WHERE value<9007199254740991 RETURNING value');
+ if(!clock||!Number.isSafeInteger(clock.value)||clock.value<1)fail('FENCED','Snapshot physical scope clock exhausted');
+ const physical='\u0000s:'+clock.value.toString(36);await db.runAsync('INSERT INTO gv_snapshot_typed VALUES(?,?,?,?,?)',input.scope,input.subscription,input.snapshot,input.entity,physical);return physical;
 }
 
 /** Caller owns the snapshot publication transaction. Existing authority stays

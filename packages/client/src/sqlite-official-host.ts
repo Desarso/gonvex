@@ -25,7 +25,8 @@ export async function openOfficialSQLiteHost(): Promise<OfficialSQLiteHost> {
     disable: { vfs: { opfs: true, 'opfs-vfs': true, 'opfs-wl': true } },
   };
   const { default: initialize } = await import('@gonvex/client/sqlite-module');
-  const sqlite3 = await initialize();
+  const initializePinned: (options?:{INITIAL_MEMORY:number})=>ReturnType<typeof initialize> = initialize;
+  const sqlite3 = await initializePinned({ INITIAL_MEMORY: 16 * 1024 * 1024 });
   // On failed initialization preserve existing files and the unsent outbox.
   const pool = await sqlite3.installOpfsSAHPoolVfs({ directory: '.gonvex-sqlite-v1', initialCapacity: 6, preserveOnInitFailure: true } as Parameters<typeof sqlite3.installOpfsSAHPoolVfs>[0]);
   let db: Database | undefined;

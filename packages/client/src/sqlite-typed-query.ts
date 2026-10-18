@@ -1,3 +1,4 @@
+import type {SQLiteMembershipSource} from './sqlite-membership-plan.js';
 import { sqliteRowBodySQL } from './sqlite-typed-body.js';
 import { sqliteIdentifier as q, sqliteTableName, sqliteFieldName, sqliteSearchName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
 export type SQLiteBinding = string | number | null;
@@ -29,7 +30,7 @@ export type SQLiteTypedStatement = { sql: string; bindings: SQLiteBinding[] };
 
 /** Keyset predicates use PostgreSQL's ASC NULLS LAST / DESC NULLS FIRST and
  * an ascending identity tie-break. No OFFSET or WASM-to-JS sort callback. */
-export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan, access: 'trigram' | 'ordered' = 'trigram', keysOnly = false,logicalScope=scope,overlay?:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>): SQLiteTypedStatement {
+export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan, access: 'trigram' | 'ordered' = 'trigram', keysOnly = false,logicalScope=scope,overlay?:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>,membershipSource?:SQLiteMembershipSource): SQLiteTypedStatement {
   const table = Object.hasOwn(schema, plan.table) && schema[plan.table];
   if (!table) throw new TypeError('Unknown SQLite table');
   if(plan.membership&&(typeof plan.membership.signature!=='string'||!plan.membership.signature||plan.membership.signature.length>4096||typeof plan.membership.generation!=='string'||!plan.membership.generation||plan.membership.generation.length>128||plan.membership.requireComplete!==undefined&&typeof plan.membership.requireComplete!=='boolean'))throw new TypeError('Invalid native membership plan');
@@ -87,7 +88,7 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
   const where = [overlay&&!overlay.root?'1':`t.scope=${bind(overlay?.root==='prediction'?overlay.scope:sourceScope(plan.table))}`, predicate(plan.table, 't', plan.where)];
   if(overlay?.root)where.push(`${overlay.root==='canonical'?'NOT ':''}EXISTS(SELECT 1 FROM gv_prediction_members p WHERE p.scope=${bind(logicalScope)} AND p.entity=${bind(plan.table)} AND p.id=t.id${overlay.root==='prediction'?' AND p.deleted=0':''})`);
   if(plan.membership){
-    const member=`EXISTS(SELECT 1 FROM gv_window_members m WHERE m.scope=${bind(logicalScope)} AND m.signature=${bind(plan.membership.signature)} AND m.generation=${bind(plan.membership.generation)} AND m.id=t.id)`;
+    const member=membershipSource?`EXISTS(SELECT 1 FROM gv_snapshot_rows m WHERE m.scope=${bind(logicalScope)} AND m.subscription=${bind(membershipSource.subscription)} AND m.snapshot=${bind(membershipSource.snapshot)} AND m.id=t.id)`:`EXISTS(SELECT 1 FROM gv_window_members m WHERE m.scope=${bind(logicalScope)} AND m.signature=${bind(plan.membership.signature)} AND m.generation=${bind(plan.membership.generation)} AND m.id=t.id)`;
     where.push(overlay?.allowLocalInserts?`(${member} OR (t.scope=${bind(overlay.scope)} AND NOT EXISTS(SELECT 1 FROM ${q(sqliteTableName(plan.table))} c WHERE c.scope=${bind(sourceScope(plan.table))} AND c.id=t.id)))`:member);
   }
   for (const order of plan.order) {
@@ -134,16 +135,16 @@ export function compileSQLiteTypedPage(schema: SQLiteTypedSchema, scope: string,
 /** Each indexed arm admits only its first N candidates before the final
  * merge. A root UNION wrapper can force SQLite to sort the entire corpus;
  * nested relation sources still see both canonical and predicted values. */
-export function compileSQLiteOptimisticPage(schema:SQLiteTypedSchema,scope:string,plan:SQLitePagePlan,access:'trigram'|'ordered',keysOnly:boolean,logicalScope:string,overlay:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>):SQLiteTypedStatement{
- const left=compileSQLiteTypedPage(schema,scope,plan,access,keysOnly,logicalScope,{...overlay,root:'canonical'},sources);
- const right=compileSQLiteTypedPage(schema,scope,plan,access,keysOnly,logicalScope,{...overlay,root:'prediction'},sources);
+export function compileSQLiteOptimisticPage(schema:SQLiteTypedSchema,scope:string,plan:SQLitePagePlan,access:'trigram'|'ordered',keysOnly:boolean,logicalScope:string,overlay:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>,membershipSource?:SQLiteMembershipSource):SQLiteTypedStatement{
+ const left=compileSQLiteTypedPage(schema,scope,plan,access,keysOnly,logicalScope,{...overlay,root:'canonical'},sources,membershipSource);
+ const right=compileSQLiteTypedPage(schema,scope,plan,access,keysOnly,logicalScope,{...overlay,root:'prediction'},sources,membershipSource);
  const order=plan.order.map((value,index)=>`${q('k'+index)} ${value.direction.toUpperCase()} NULLS ${value.direction==='asc'?'LAST':'FIRST'}`).concat(q('__gv_key')+' ASC');
  return {sql:`SELECT * FROM (${left.sql}) UNION ALL SELECT * FROM (${right.sql}) ORDER BY ${order.join(',')}${keysOnly?'':' LIMIT ?'}`,bindings:[...left.bindings,...right.bindings,...(keysOnly?[]:[plan.limit])]};
 }
 
 /** Native-only view construction. Its unbounded SELECT must only be consumed
  * by INSERT...SELECT in the owner connection, never by a JS row reader. */
-export function compileSQLiteTypedView(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan,logicalScope=scope,overlay?:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>): SQLiteTypedStatement {
+export function compileSQLiteTypedView(schema: SQLiteTypedSchema, scope: string, plan: SQLitePagePlan,logicalScope=scope,overlay?:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>,membershipSource?:SQLiteMembershipSource): SQLiteTypedStatement {
   if (plan.after) throw new TypeError('Position views do not accept a keyset');
-  return overlay?compileSQLiteOptimisticPage(schema,scope,plan,'ordered',true,logicalScope,overlay,sources):compileSQLiteTypedPage(schema, scope, plan, 'ordered', true,logicalScope,undefined,sources);
+  return overlay?compileSQLiteOptimisticPage(schema,scope,plan,'ordered',true,logicalScope,overlay,sources,membershipSource):compileSQLiteTypedPage(schema, scope, plan, 'ordered', true,logicalScope,undefined,sources,membershipSource);
 }

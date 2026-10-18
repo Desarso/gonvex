@@ -16,13 +16,13 @@ CREATE TABLE IF NOT EXISTS gv_view_members(scope TEXT NOT NULL,signature TEXT NO
 export async function readSQLiteTypedView(database: SQLiteReplicaDatabase, schema: SQLiteTypedSchema,
   scope: string, physical: string, signature: string, admitted: SQLitePagePlan, offset: number, sequence: number,
   pageBytes: number, generation:number|string = sequence,overlay?:SQLiteQueryOverlay,sources?:Readonly<Record<string,string>>): Promise<SQLiteTypedViewPage> {
-  await assertSQLiteMembership(database,schema,scope,admitted);
+  const membershipSource=await assertSQLiteMembership(database,schema,scope,admitted);
   physical=sources?.[admitted.table]??physical;
-  const encoded = overlay||sources?JSON.stringify({plan:admitted,overlay,sources}):JSON.stringify(admitted);
+  const encoded = overlay||sources||membershipSource?JSON.stringify({plan:admitted,overlay,sources,membershipSource}):JSON.stringify(admitted);
   let header = await database.getFirstAsync<{ plan: string; sequence: number|string; n: number }>('SELECT plan,sequence,n FROM gv_views WHERE scope=? AND signature=?', scope, signature);
   if (!header || header.plan !== encoded || header.sequence !== generation) {
     await database.runAsync('DELETE FROM gv_view_members WHERE scope=? AND signature=?', scope, signature);
-    const statement = compileSQLiteTypedView(schema, physical, admitted,scope,overlay,sources);
+    const statement = compileSQLiteTypedView(schema, physical, admitted,scope,overlay,sources,membershipSource);
     await database.runAsync(`INSERT INTO gv_view_members SELECT ?,?,row_number() OVER ()-1,rid FROM (${statement.sql})`, scope, signature, ...statement.bindings);
     const n = (await database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM gv_view_members WHERE scope=? AND signature=?', scope, signature))!.n;
     await database.runAsync('INSERT INTO gv_views VALUES(?,?,?,?,?,?) ON CONFLICT(scope,signature) DO UPDATE SET plan=excluded.plan,sequence=excluded.sequence,n=excluded.n,touched=excluded.touched', scope, signature, encoded, generation, n, Date.now());

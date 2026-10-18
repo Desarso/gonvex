@@ -78,11 +78,11 @@ export class SQLiteSnapshotActivator {
     let removedAfter=-1;
     for(;;){
      const removed=await this.db.getAllAsync<{id:string;position:number}>(`SELECT m.id,m.position FROM gv_windows w
-      JOIN gv_window_members m USING(scope,signature,generation)
+      JOIN gv_all_window_members m USING(scope,signature,generation)
       WHERE w.scope=? AND w.signature=? AND m.position>?
        AND NOT EXISTS(SELECT 1 FROM gv_snapshot_rows s WHERE s.scope=w.scope AND s.subscription=? AND s.snapshot=? AND s.id=m.id)
        AND NOT EXISTS(SELECT 1 FROM gv_windows other JOIN gv_window_generations g USING(scope,signature,generation)
-        JOIN gv_window_members kept USING(scope,signature,generation)
+        JOIN gv_all_window_members kept USING(scope,signature,generation)
         WHERE other.scope=w.scope AND other.signature<>w.signature AND kept.id=m.id AND json_extract(g.header,'$.entity')=?)
       ORDER BY m.position LIMIT 100`,owned.scope,owned.header.signature,removedAfter,owned.subscription,owned.snapshot,owned.header.entity);
      if(!removed.length)break;
@@ -92,7 +92,7 @@ export class SQLiteSnapshotActivator {
     await fresh?.restoreIndexes();
     await this.db.runAsync('DELETE FROM temp.gv_snapshot_overlap');
     // Membership and hash certificates move entirely inside SQLite.
-    await this.windows.publishSnapshot(owned.scope,owned.header,owned.subscription,owned.snapshot);
+    await this.windows.publishSnapshot(owned.scope,owned.header,owned.subscription,owned.snapshot,!!typed);
    });
    await this.db.runAsync('INSERT INTO gv_snapshot_activation_receipts VALUES(?,?,?,?,?)',owned.scope,owned.subscription,owned.snapshot,encoded,JSON.stringify(receipt));
   });return receipt;

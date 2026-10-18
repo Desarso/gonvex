@@ -56,11 +56,20 @@ const handlers = {
     return state;
   },
   async bootstrapFinish({ token, expected }) { return engine.finishBootstrap('test-scope',token,expected); },
-  async seedAll({ count, encoded = false, utf8 = false }) {
+  async seedAll({ count, encoded = false, utf8 = false, producer,recycleBuffers=false }: {count:number;encoded?:boolean;utf8?:boolean;producer?:MessagePort;recycleBuffers?:boolean}) {
     const begin = performance.now(); importProfiling = true; phase('ingest');
     try {
     const result = await engine.importScope('test-scope', (async function* () {
+      let released:ArrayBuffer|undefined;
       for (let offset = 0; offset < count; offset += 50) {
+        if(producer) {
+          const frame=await new Promise<Uint8Array>((resolve,reject)=>{
+            const timeout=setTimeout(()=>reject(Error('External producer deadline')),30000);
+            producer.onmessage=({data})=>{clearTimeout(timeout);if(data.offset!==offset||!(data.frame instanceof Uint8Array))reject(Error(data.error??'Invalid producer frame'));else resolve(data.frame);};
+            producer.postMessage({offset,count:Math.min(50,count-offset),buffer:released},released?[released]:[]);
+          });
+          yield frame;if(recycleBuffers)released=frame.buffer as ArrayBuffer;continue;
+        }
         if (encoded) { const at = performance.now(); const frame = (utf8 ? fixtureUTF8Writes : fixtureEncodedWrites)(offset, Math.min(50, count - offset)); generated.wireEncodeMs += performance.now() - at; yield frame; continue; }
         const page = Array.from({ length: Math.min(50, count - offset) }, (_, index) => { const id = offset + index;
           return { table: 'tasks', id: String(id), version: 1, row: { _id: String(id), name: `Task ${String(id).padStart(8, '0')} café 東京`, workspace: String(id % 10), due: id % 365, version: 1, description: 'Synthetic maintenance procedure. '.repeat(15) + (id % 997 === 0 ? 'rare-needle 🔧' : '') } };
@@ -68,8 +77,8 @@ const handlers = {
         yield encoded ? JSON.stringify(page) : page;
       }
     })());
-    return { ...result, ms: performance.now() - begin, memoryBytes: host.memoryBytes(), producer: utf8 ? 'direct UTF-8 frames without row objects' : encoded ? 'encoded frames without row objects' : 'row objects', profile: { ...engine.takeProfile(), ...generated, transactions: host.takeProfile() } };
-    } finally { importProfiling = false; }
+    return { ...result, ms: performance.now() - begin, memoryBytes: host.memoryBytes(), producer: producer ? recycleBuffers?'transferred recycled UTF-8 buffer from external producer':'transferred UTF-8 frames from external producer' : utf8 ? 'direct UTF-8 frames without row objects' : encoded ? 'encoded frames without row objects' : 'row objects', profile: { ...engine.takeProfile(), ...generated, transactions: host.takeProfile() } };
+    } finally { producer?.close(); importProfiling = false; }
   },
   async page(args) { const begin = performance.now(); const result = await engine.page('test-scope', { table: 'tasks', order: [{ field: 'due', direction: 'asc' }], limit: 50, select: ['name', 'due', 'workspace'], ...args }); return { ...result, ms: performance.now() - begin }; },
   async count() { return engine.count('test-scope', 'tasks', 0, ['3']); },

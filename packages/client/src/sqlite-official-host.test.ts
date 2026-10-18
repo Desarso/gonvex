@@ -111,8 +111,10 @@ it('profiles native transaction boundaries using fixed numeric counters and rese
   await expect(host.database.withTransactionAsync(async () => { throw new Error('abort'); })).rejects.toThrow('abort');
   const result = host.takeProfile();
   expect(result).toMatchObject({ commits: 1, rollbacks: 1 });
-  for (const value of Object.values(result)) expect(Number.isFinite(value) && value >= 0).toBe(true);
-  expect(host.takeProfile()).toEqual({ execCalls:0,execMs:0,ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
+  for (const value of Object.values(result)) {
+    for (const number of typeof value==='object'?Object.values(value):[value]) expect(Number.isFinite(number) && number >= 0).toBe(true);
+  }
+  expect(host.takeProfile()).toEqual({ vfs:{viewHits:0,viewMisses:0,heapResets:0,maxViewEntries:0,numberReadCalls:0,numberWriteCalls:0,viewEntries:0,viewMaxEntries:4096}, execCalls:0,execMs:0,ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
   expect((await host.database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM profile_probe'))!.n).toBe(0);
 });
 

@@ -4131,6 +4131,8 @@ if (Module['wasmBinary']) wasmBinary = Module['wasmBinary'];
 
 // end include: postlibrary.js
 
+function gv_sah_read_js(file,dest,n,lo,hi) { var io=Module['gonvexSahNumberIO']; return io?io.xRead(file,dest,n,(lo>>>0)+(hi>>>0)*4294967296):10; }
+function gv_sah_write_js(file,src,n,lo,hi) { var io=Module['gonvexSahNumberIO']; return io?io.xWrite(file,src,n,(lo>>>0)+(hi>>>0)*4294967296):10; }
 
 // Imports from the Wasm binary.
 var _sqlite3_status64,
@@ -4394,6 +4396,8 @@ var _sqlite3_status64,
   _malloc,
   _free,
   _realloc,
+  _gv_sah_read_pointer,
+  _gv_sah_write_pointer,
   _emscripten_builtin_memalign,
   __emscripten_stack_restore,
   __emscripten_stack_alloc,
@@ -4663,6 +4667,8 @@ function assignWasmExports(wasmExports) {
   _malloc = Module['_malloc'] = wasmExports['malloc'];
   _free = Module['_free'] = wasmExports['free'];
   _realloc = Module['_realloc'] = wasmExports['realloc'];
+  _gv_sah_read_pointer = Module['_gv_sah_read_pointer'] = wasmExports['gv_sah_read_pointer'];
+  _gv_sah_write_pointer = Module['_gv_sah_write_pointer'] = wasmExports['gv_sah_write_pointer'];
   _emscripten_builtin_memalign = wasmExports['emscripten_builtin_memalign'];
   __emscripten_stack_restore = wasmExports['_emscripten_stack_restore'];
   __emscripten_stack_alloc = wasmExports['_emscripten_stack_alloc'];
@@ -4741,6 +4747,10 @@ var wasmImports = {
   fd_sync: _fd_sync,
   /** @export */
   fd_write: _fd_write,
+  /** @export */
+  gv_sah_read_js,
+  /** @export */
+  gv_sah_write_js,
   /** @export */
   memory: wasmMemory
 };
@@ -15359,6 +15369,22 @@ globalThis.sqlite3ApiBootstrap.initializers.push(function(sqlite3){
      Impls for the sqlite3_io_methods methods. Maintenance reminder:
      members are in alphabetical order to simplify finding them.
   */
+  // Borrowed views are used synchronously. Heap growth invalidates the entire
+  // bounded cache; no row data or owned copies are retained by this cache.
+  const gvOptions={at:0},gvViews=new Map();let gvHeap=null;
+  const gvViewStats={viewHits:0,viewMisses:0,heapResets:0,maxViewEntries:0,numberReadCalls:0,numberWriteCalls:0};
+  sqlite3.__gonvexVFSProfile=()=>{const out={...gvViewStats,viewEntries:gvViews.size,viewMaxEntries:4096};for(const key of Object.keys(gvViewStats))gvViewStats[key]=0;return out;};
+  const gvView=(pointer,n)=>{
+    const heap=wasm.heap8u();
+    if(gvHeap!==heap.buffer){gvViews.clear();gvHeap=heap.buffer;gvViewStats.heapResets++;}
+    const key=Number(pointer),old=gvViews.get(key);
+    if(old && old.length===n){gvViewStats.viewHits++;return old;}
+    gvViewStats.viewMisses++;
+    const view=new Uint8Array(heap.buffer,key,n);
+    if(gvViews.size>=4096)gvViews.delete(gvViews.keys().next().value);
+    gvViews.set(key,view);gvViewStats.maxViewEntries=Math.max(gvViewStats.maxViewEntries,gvViews.size);return view;
+  };
+
   const ioMethods = {
     xCheckReservedLock: function(pFile,pOut){
       const pool = getPoolForPFile(pFile);
@@ -15425,8 +15451,8 @@ globalThis.sqlite3ApiBootstrap.initializers.push(function(sqlite3){
       if(pool.loggingEnabled) pool.log(`xRead ${file.path} ${n} @ ${offset64}`);
       try {
         const nRead = file.sah.read(
-          wasm.heap8u().subarray(Number(pDest), Number(pDest)+n),
-          {at: HEADER_OFFSET_DATA + Number(offset64)}
+          gvView(pDest,n),
+          (gvOptions.at=HEADER_OFFSET_DATA+Number(offset64),gvOptions)
         );
         if(nRead < n){
           wasm.heap8u().fill(0, Number(pDest) + nRead, Number(pDest) + n);
@@ -15480,8 +15506,8 @@ globalThis.sqlite3ApiBootstrap.initializers.push(function(sqlite3){
       if(pool.loggingEnabled) pool.log(`xWrite ${file.path} ${n} ${offset64}`);
       try{
         const nBytes = file.sah.write(
-          wasm.heap8u().subarray(Number(pSrc), Number(pSrc)+n),
-          { at: HEADER_OFFSET_DATA + Number(offset64) }
+          gvView(pSrc,n),
+          (gvOptions.at=HEADER_OFFSET_DATA+Number(offset64),gvOptions)
         );
         return n===nBytes ? 0 : toss("Unknown write() failure.");
       }catch(e){
@@ -15490,8 +15516,13 @@ globalThis.sqlite3ApiBootstrap.initializers.push(function(sqlite3){
     }
   }/*ioMethods*/;
 
+  Module['gonvexSahNumberIO']={
+   xRead(file,dest,n,offset){if(typeof offset!=='number')throw Error('Non-numeric SAH offset');gvViewStats.numberReadCalls++;return ioMethods.xRead(file,dest,n,offset);},
+   xWrite(file,src,n,offset){if(typeof offset!=='number')throw Error('Non-numeric SAH offset');gvViewStats.numberWriteCalls++;return ioMethods.xWrite(file,src,n,offset);}
+  };
   const opfsIoMethods = new capi.sqlite3_io_methods();
   opfsIoMethods.$iVersion = 1;
+  if(typeof wasm.exports.gv_sah_read_pointer!=='function'||typeof wasm.exports.gv_sah_write_pointer!=='function')throw Error('Pinned SAH offset bridge is missing');
   sqlite3.vfs.installVfs({
     io: {struct: opfsIoMethods, methods: ioMethods}
   });
@@ -15621,7 +15652,9 @@ globalThis.sqlite3ApiBootstrap.initializers.push(function(sqlite3){
     if( sqlite3.capi.sqlite3_vfs_find(vfsName)){
       toss3("VFS name is already registered:", vfsName);
     }
-    const opfsVfs = new capi.sqlite3_vfs();
+    opfsIoMethods.$xRead=wasm.exports.gv_sah_read_pointer();
+  opfsIoMethods.$xWrite=wasm.exports.gv_sah_write_pointer();
+  const opfsVfs = new capi.sqlite3_vfs();
     /* We fetch the default VFS so that we can inherit some
        methods from it. */
     const pDVfs = capi.sqlite3_vfs_find(null);

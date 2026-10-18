@@ -15,15 +15,16 @@ export type SQLiteSnapshotMetadata=Omit<SnapshotPage,'result'|'digest'>;
 export type SQLiteSnapshotStage={metadata:string;next_page:number;rows:number;bytes:number;receipt:Uint8Array;complete:number;digest:string|null;discarded:number};
 export type SQLiteSnapshotReceipt={progress:SQLiteSnapshotProgress;ack:{type:'replica.snapshotAck';id:string;snapshotId:string;sequence:number}};
 export type SQLiteSnapshotProgress={snapshotId:string;nextPage:number;rows:number;complete:boolean;digest?:string};
+export const sqliteSnapshotRowsSchema=`CREATE TABLE IF NOT EXISTS gv_snapshot_rows(
+ scope TEXT NOT NULL,subscription TEXT NOT NULL,snapshot TEXT NOT NULL,id TEXT NOT NULL,
+ position INTEGER NOT NULL,body TEXT NOT NULL,hash TEXT NOT NULL,
+ PRIMARY KEY(scope,subscription,snapshot,id),UNIQUE(scope,subscription,snapshot,position)) WITHOUT ROWID;`;
 const schema=`CREATE TABLE IF NOT EXISTS gv_snapshot_input(id INTEGER PRIMARY KEY CHECK(id=1),value BLOB NOT NULL,hash TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS gv_snapshot_stages(
  scope TEXT NOT NULL,subscription TEXT NOT NULL,snapshot TEXT NOT NULL,metadata TEXT NOT NULL,
  next_page INTEGER NOT NULL,rows INTEGER NOT NULL,bytes INTEGER NOT NULL,receipt BLOB NOT NULL,
  complete INTEGER NOT NULL,digest TEXT,discarded INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,subscription,snapshot)) WITHOUT ROWID;
- CREATE TABLE IF NOT EXISTS gv_snapshot_rows(
- scope TEXT NOT NULL,subscription TEXT NOT NULL,snapshot TEXT NOT NULL,id TEXT NOT NULL,
- position INTEGER NOT NULL,body TEXT NOT NULL,hash TEXT NOT NULL,
- PRIMARY KEY(scope,subscription,snapshot,id),UNIQUE(scope,subscription,snapshot,position)) WITHOUT ROWID;
+ ${sqliteSnapshotRowsSchema}
  CREATE TABLE IF NOT EXISTS gv_snapshot_frames(
  scope TEXT NOT NULL,subscription TEXT NOT NULL,snapshot TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,
  PRIMARY KEY(scope,subscription,snapshot,page)) WITHOUT ROWID;`;
@@ -162,8 +163,9 @@ export class SQLiteSnapshotPages {
   await this.db.withTransactionAsync(async()=>{
    await this.fence();
    await this.db.runAsync('UPDATE gv_snapshot_stages SET discarded=1 WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);
-   const rows=await this.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM (SELECT id FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? LIMIT 128)',scope,subscription,snapshot);
-   await this.db.runAsync('DELETE FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? AND id IN (SELECT id FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? LIMIT 128)',scope,subscription,snapshot,scope,subscription,snapshot);
+   const retained=await this.db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gv_snapshot_window_alias'")&&await this.db.getFirstAsync('SELECT 1 FROM gv_snapshot_window_alias WHERE scope=? AND subscription=? AND snapshot=? LIMIT 1',scope,subscription,snapshot);
+   const rows=retained?{n:0}:await this.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM (SELECT id FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? LIMIT 128)',scope,subscription,snapshot);
+   if(!retained)await this.db.runAsync('DELETE FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? AND id IN (SELECT id FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? LIMIT 128)',scope,subscription,snapshot,scope,subscription,snapshot);
    const typedRemoved=await discardSQLiteTypedSnapshot(this.db,this.typedSchema,scope,subscription,snapshot);
    if((rows?.n??0)<128&&typedRemoved){
     await this.db.runAsync('DELETE FROM gv_snapshot_frames WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);

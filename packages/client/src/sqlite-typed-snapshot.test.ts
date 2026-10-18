@@ -76,3 +76,28 @@ it('keeps first-page reads and search available after owner restart while bulk i
  expect(await f.db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",index)).toEqual({'1':1});expect(await f.db.getFirstAsync('SELECT 1 FROM gv_snapshot_index_deferred')).toBeNull();
  expect((await next.page('s',{table:'tasks',search:'stage 299',order:[{field:'name',direction:'asc'}],textOrder:'binary',limit:10})).rows.map(row=>row.id)).toEqual(['staged-299']);expect(await next.integrity()).toBe('ok');
 });
+it('reuses certified memberships and hashes after staging cleanup, including predicted pages and shared-source collection',async()=>{
+ const {SQLiteWindowStore}=await import('./sqlite-window-store.js'),{SQLitePredictions}=await import('./sqlite-predictions.js'),f=await fixture(),windows=new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner());
+ const rows=Array.from({length:300},(_,i)=>({id:String(i).padStart(3,'0'),name:'Stage '+String(i).padStart(3,'0')})),{input}=await f.stage(rows);await f.activator.activate(input);
+ expect(await f.db.getFirstAsync('SELECT count(*) n FROM gv_window_members')).toEqual({n:0});expect(await f.db.getFirstAsync('SELECT count(*) n FROM gv_window_hashes')).toEqual({n:0});
+ const page=await windows.page('s','collection','one',297,3);expect(page.ids).toEqual(['297','298','299']);expect(Object.keys(page.hashes)).toEqual(page.ids);expect((await windows.hashPage('s','collection','one','297',2)).map(row=>row.id)).toEqual(['298','299']);
+ const plan={table:'tasks',membership:{signature:'collection',generation:'one',requireComplete:true},order:[{field:'name',direction:'asc' as const}],textOrder:'binary' as const,limit:3};expect((await f.engine.page('s',plan)).rows.map(row=>row.id)).toEqual(['000','001','002']);expect((await f.engine.viewPage('s','aliased-deep',plan,299)).rows.map(row=>row.id)).toEqual(['299']);
+ const predictions=new SQLitePredictions(f.db,f.canonical,schema,()=>f.engine.verifyOwner());await predictions.ready();await predictions.apply('s',1,[{entity:'tasks',rowId:'000',op:'delete'},{entity:'tasks',rowId:'local',op:'insert',fields:{id:'local',name:'Stage -1'}}]);expect((await predictions.page('s',plan,true)).rows.map(row=>row.id)).toEqual(['local','001','002']);await predictions.reset('s');
+ await windows.publishSnapshot('s',{...input.header,signature:'retained'},'collection','one',true);
+ expect(await f.stager.discard('s','collection','one')).toBe(true);expect((await windows.page('s','collection','one',297,3)).ids).toEqual(page.ids);expect(await f.db.getFirstAsync('SELECT count(*) n FROM gv_snapshot_rows')).toEqual({n:300});
+ const next=await f.stage(rows.slice(0,50),'two');await f.activator.activate(next.input);expect((await windows.page('s','collection','two',49,1)).ids).toEqual(['049']);
+ expect(await windows.collect('s','collection','one')).toEqual({remaining:false});expect((await windows.page('s','retained','one',297,3)).ids).toEqual(page.ids);
+ const empty=await windows.begin('s',{...input.header,signature:'retained'},'empty');await windows.publish('s','retained',empty);
+ let calls=0;while((await windows.collect('s','retained','one')).remaining){expect(++calls).toBeLessThan(4);}expect(calls).toBe(2);expect(await f.db.getFirstAsync('SELECT count(*) n FROM gv_snapshot_rows')).toEqual({n:50});expect((await f.engine.page('s',{...plan,membership:{...plan.membership,generation:'two'}})).rows).toHaveLength(3);expect(await f.engine.integrity()).toBe('ok');
+});
+it('allocates compact physical scopes durably without reusing a retired scope and fails closed on clock exhaustion',async()=>{
+ const f=await fixture(),one=await f.stage([{id:'one',name:'one'}]);await f.activator.activate(one.input);
+ const physical=async(snapshot:string)=>JSON.parse((await f.db.getFirstAsync<{physical:string}>('SELECT json_quote(physical) physical FROM gv_snapshot_typed WHERE snapshot=?',snapshot))!.physical) as string;
+ const first=await physical('one');expect(first).toBe('\u0000s:1');
+ await expect(f.db.withTransactionAsync(async()=>{await f.stager.prepareTyped({scope:'s',subscription:'collection',snapshot:'aborted',entity:'tasks'});throw Error('rollback');})).rejects.toThrow('rollback');
+ expect(await f.db.getFirstAsync('SELECT 1 FROM gv_snapshot_typed WHERE snapshot=?','aborted')).toBeNull();
+ const two=await f.stage([{id:'two',name:'two'}],'two');expect(await physical('two')).toBe('\u0000s:2');await f.activator.activate(two.input);
+ await f.stager.discard('s','collection','one');expect(await f.stager.prepareTyped({scope:'s',subscription:'collection',snapshot:'three',entity:'tasks'})).toBe('\u0000s:3');
+ await f.db.runAsync('UPDATE gv_snapshot_scope_clock SET value=?',Number.MAX_SAFE_INTEGER);await expect(f.stager.prepareTyped({scope:'s',subscription:'collection',snapshot:'exhausted',entity:'tasks'})).rejects.toMatchObject({code:'FENCED'});
+ expect((await f.canonical.loadEntityRows('s','tasks',['two']))[0].row.name).toBe('two');expect(await f.engine.integrity()).toBe('ok');
+});

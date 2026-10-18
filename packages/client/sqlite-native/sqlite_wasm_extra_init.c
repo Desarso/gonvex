@@ -180,3 +180,29 @@ static int gv_install(sqlite3 *db,char **error,const sqlite3_api_routines *api){
   return rc;
 }
 int sqlite3_wasm_extra_init(const char *unused){(void)unused;return sqlite3_auto_extension((void(*)(void))gv_install);}
+
+/* Keep i64 offsets inside WASM. JS SyncAccessHandle takes an exact Number,
+** so splitting a checked offset into two i32 arguments avoids allocating a
+** BigInt at every read/write callback without changing any I/O boundary. */
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <stdint.h>
+EM_JS(int,gv_sah_read_js,(int file,int dest,int n,unsigned int lo,unsigned int hi),{
+  var io=Module['gonvexSahNumberIO'];
+  return io?io.xRead(file,dest,n,(lo>>>0)+(hi>>>0)*4294967296):10;
+});
+EM_JS(int,gv_sah_write_js,(int file,int src,int n,unsigned int lo,unsigned int hi),{
+  var io=Module['gonvexSahNumberIO'];
+  return io?io.xWrite(file,src,n,(lo>>>0)+(hi>>>0)*4294967296):10;
+});
+static int gv_sah_read(sqlite3_file *file,void *dest,int n,sqlite3_int64 offset){
+  if(offset<0||offset>9007199254740991LL)return SQLITE_IOERR_SEEK;
+  return gv_sah_read_js((int)(uintptr_t)file,(int)(uintptr_t)dest,n,(unsigned int)offset,(unsigned int)((sqlite3_uint64)offset>>32));
+}
+static int gv_sah_write(sqlite3_file *file,const void *src,int n,sqlite3_int64 offset){
+  if(offset<0||offset>9007199254740991LL)return SQLITE_IOERR_SEEK;
+  return gv_sah_write_js((int)(uintptr_t)file,(int)(uintptr_t)src,n,(unsigned int)offset,(unsigned int)((sqlite3_uint64)offset>>32));
+}
+EMSCRIPTEN_KEEPALIVE int gv_sah_read_pointer(void){return (int)(uintptr_t)&gv_sah_read;}
+EMSCRIPTEN_KEEPALIVE int gv_sah_write_pointer(void){return (int)(uintptr_t)&gv_sah_write;}
+#endif

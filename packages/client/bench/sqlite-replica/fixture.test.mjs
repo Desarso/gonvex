@@ -22,3 +22,13 @@ test('emits direct UTF-8 frames with identical bytes and SHA-256', () => {
   }
   for (const count of [-1, 513, Infinity, 1.5]) assert.throws(() => fixtureUTF8Writes(0,count));
 });
+
+test('reuses a bounded producer buffer without changing wire bytes',()=>{
+ const reusable=new Uint8Array(512*1024+2);
+ for(const start of [0,997,99950])for(const count of [0,1,50,512]){
+  const frame=fixtureUTF8Writes(start,count,reusable);
+  assert.equal(frame.buffer,reusable.buffer);
+  assert.deepEqual(Buffer.from(frame),Buffer.from(JSON.stringify(fixtureWrites(start,count))));
+ }
+ assert.throws(()=>fixtureUTF8Writes(0,50,new Uint8Array(1)),/capacity/);
+});

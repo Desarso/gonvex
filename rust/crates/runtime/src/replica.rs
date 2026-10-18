@@ -1515,7 +1515,12 @@ mod tests {
 
     #[test]
     fn native_snapshot_wire_fixture_matches_canonical_hashes() {
-        let mut rows:Vec<Value>=(0..1200).map(|id|serde_json::json!({"id":format!("row-{id:04}"),"text":"café 東京 😀".repeat(20),"nested":{"é":"nfc","é":"nfd"}})).collect();
+        let count = std::env::var("GONVEX_NATIVE_FRAME_ROWS")
+            .ok()
+            .map(|value| value.parse::<usize>().unwrap())
+            .unwrap_or(1200);
+        assert!((1200..=100000).contains(&count));
+        let mut rows:Vec<Value>=(0..count).map(|id|serde_json::json!({"id":format!("row-{id:04}"),"text":"café 東京 😀".repeat(20),"nested":{"é":"nfc","é":"nfd"}})).collect();
         rows.push(serde_json::json!({"id":"controls","text":"\u{2028}\u{2029}\0\n\t\r\u{1f}","value":9007199254740993u64}));
         let mut sum = gonvex_protocol::replica_digest::ReplicaSetDigest::default();
         let hashes: Vec<_> = rows.iter().map(row_hash).collect();
@@ -1525,6 +1530,7 @@ mod tests {
         let mut snapshot = paged_fixture(rows.clone());
         if let ServerMessage::ReplicaSnapshot { metadata, .. } = &mut snapshot {
             metadata.insert("pageDigest".into(), Value::String(sum.digest()));
+            metadata.insert("maxRows".into(), Value::from(rows.len() as u64));
         }
         let pages: Vec<_> = SnapshotPages::native(snapshot).collect();
         assert!(pages.len() > 1);
@@ -1547,6 +1553,16 @@ mod tests {
             observed.extend(canonical_rows.iter().map(|row| hex_digest(row.as_bytes())));
         }
         assert_eq!(observed, hashes);
+        if let Ok(path) = std::env::var("GONVEX_NATIVE_FRAME_LINES") {
+            use std::io::Write;
+            let mut output = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+            for page in &pages {
+                serde_json::to_writer(&mut output, page).unwrap();
+                output.write_all(b"\n").unwrap();
+            }
+            output.flush().unwrap();
+            std::fs::write(format!("{path}.manifest.json"),serde_json::to_vec(&serde_json::json!({"rows":rows.len(),"frames":pages.len(),"digest":sum.digest()})).unwrap()).unwrap();
+        }
         if let Ok(path) = std::env::var("GONVEX_NATIVE_FRAME_FIXTURE") {
             std::fs::write(path,serde_json::to_vec(&serde_json::json!({"frames":pages,"rows":rows,"hashes":hashes,"digest":sum.digest()})).unwrap()).unwrap();
         }

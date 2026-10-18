@@ -25,9 +25,10 @@ const encoder = new TextEncoder();
 const ordinaryUTF8 = encoder.encode(ordinaryDescription);
 const rareUTF8 = encoder.encode(rareDescription);
 /** Direct byte transport fixture: no full UTF-16 frame or row-object graph. */
-export function fixtureUTF8Writes(start, count) {
+export function fixtureUTF8Writes(start, count, reusable) {
   if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(count) || count < 0 || count > 512 || !Number.isSafeInteger(start + count)) throw Error('Invalid fixture frame');
-  const bytes = new Uint8Array(count * 1024 + 2); let at = 0;
+  if(reusable!==undefined&&(!(reusable instanceof Uint8Array)||reusable.byteLength<count*1024+2))throw Error('Fixture buffer capacity');
+  const bytes = reusable ?? new Uint8Array(count * 1024 + 2); let at = 0;
   const text = value => { const encoded = encoder.encodeInto(value, bytes.subarray(at)); if (encoded.read !== value.length) throw Error('Fixture frame overflow'); at += encoded.written; };
   bytes[at++] = 91;
   for (let index = 0; index < count; index++) {
