@@ -14,16 +14,16 @@ CREATE TABLE IF NOT EXISTS gv_view_members(scope TEXT NOT NULL,signature TEXT NO
  * This helper never publishes membership or rows outside that transaction. */
 export async function readSQLiteTypedView(database: SQLiteReplicaDatabase, schema: SQLiteTypedSchema,
   scope: string, physical: string, signature: string, admitted: SQLitePagePlan, offset: number, sequence: number,
-  pageBytes: number): Promise<SQLiteTypedViewPage> {
+  pageBytes: number, generation = sequence): Promise<SQLiteTypedViewPage> {
   const encoded = JSON.stringify(admitted);
   let header = await database.getFirstAsync<{ plan: string; sequence: number; n: number }>('SELECT plan,sequence,n FROM gv_views WHERE scope=? AND signature=?', scope, signature);
-  if (!header || header.plan !== encoded || header.sequence !== sequence) {
+  if (!header || header.plan !== encoded || header.sequence !== generation) {
     await database.runAsync('DELETE FROM gv_view_members WHERE scope=? AND signature=?', scope, signature);
     const statement = compileSQLiteTypedView(schema, physical, admitted);
     await database.runAsync(`INSERT INTO gv_view_members SELECT ?,?,row_number() OVER ()-1,rid FROM (${statement.sql})`, scope, signature, ...statement.bindings);
     const n = (await database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM gv_view_members WHERE scope=? AND signature=?', scope, signature))!.n;
-    await database.runAsync('INSERT INTO gv_views VALUES(?,?,?,?,?,?) ON CONFLICT(scope,signature) DO UPDATE SET plan=excluded.plan,sequence=excluded.sequence,n=excluded.n,touched=excluded.touched', scope, signature, encoded, sequence, n, Date.now());
-    header = { plan: encoded, sequence, n };
+    await database.runAsync('INSERT INTO gv_views VALUES(?,?,?,?,?,?) ON CONFLICT(scope,signature) DO UPDATE SET plan=excluded.plan,sequence=excluded.sequence,n=excluded.n,touched=excluded.touched', scope, signature, encoded, generation, n, Date.now());
+    header = { plan: encoded, sequence: generation, n };
     // A global disk-header cap also bounds retained plans across scopes.
     // Evict one exact view, never scan or decode its member IDs in JS.
     const count = (await database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM gv_views'))!.n;

@@ -180,3 +180,29 @@ it('rolls canonical rows and both commit clocks back when the shared clock is ex
   expect(db.prepare("SELECT value FROM _gonvex_replica_meta WHERE scope='s' AND key='sequence'").get()!.value).toBe(before);
   expect(db.prepare('SELECT sequence FROM gv_storage_meta').get()!.sequence).toBe(Number.MAX_SAFE_INTEGER);
 });
+
+it.each([false,true])('shares a published physical bootstrap scope with the canonical adapter, installed first=%s', async installedFirst => {
+  const { db, host } = fixture();
+  const engine = new SQLiteTypedReplicaEngine(host,schema); await engine.open('owner');
+  const storage = sqliteTypedReplicaStorage(host,schema);
+  const plan = {table:'tasks',order:[{field:'due',direction:'asc' as const}],limit:10};
+  if (installedFirst) expect((await storage.readViewPage('s','grid',plan)).rows).toEqual([]);
+  await engine.beginBootstrap('s','generation');
+  const state = await engine.appendBootstrap('s','generation',0,JSON.stringify([{table:'tasks',id:'a',version:1,row:{_id:'a',name:'Bootstrapped café',due:2,done:false}}]));
+  await engine.finishBootstrap('s','generation',{pages:state.nextPage,rows:state.rows,root:state.root});
+  const expected = {_id:'a',name:'Bootstrapped café',due:2,done:false};
+  expect((await storage.loadEntityRows('s','tasks',['a']))[0]!.row).toEqual(expected);
+  expect((await storage.withReadView('s',{tasks:{key:'_id',complete:true}},view=>view.select({table:'tasks',where:{column:'due',op:'eq',value:2}}))).rows).toEqual([expected]);
+  expect((await storage.readViewPage('s','grid',plan)).rows).toEqual([expected]);
+  expect((await storage.readViewPage('other','grid',plan)).rows).toEqual([]);
+  await storage.applyTransaction({cursor:cursor(1),changes:[{entity:'tasks',id:'a',operation:'update',newValue:{due:1,name:'Updated café'}}]},empty,'s');
+  expect((await engine.page('s',{...plan,search:'updated'})).rows[0]!.due).toBe(1);
+  expect((await storage.withReadView('s',{tasks:{key:'_id',complete:true}},view=>view.select({table:'tasks',where:{column:'due',op:'eq',value:1}}))).rows[0]!.name).toBe('Updated café');
+  const physical = db.prepare('SELECT physical FROM gv_scope_alias WHERE scope=?').get('s')!.physical;
+  expect(db.prepare(`SELECT scope FROM ${sqliteIdentifier(sqliteTableName('tasks'))}`).all()).toEqual([{scope:physical}]);
+  await storage.applyTransaction({cursor:cursor(2),changes:[{entity:'tasks',id:'a',operation:'delete'}]},empty,'s');
+  expect((await engine.page('s',plan)).rows).toEqual([]);
+  expect(await storage.loadEntityRows('s','tasks',['a'])).toEqual([]);
+  expect(db.prepare('SELECT count(*) n FROM _gonvex_replica_lookup WHERE scope=?').get('s')!.n).toBe(0);
+  expect(await engine.integrity()).toBe('ok');
+});
