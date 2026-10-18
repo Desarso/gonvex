@@ -6,7 +6,7 @@ export type OfficialSQLiteHost = {
   database: SQLiteReplicaDatabase;
   memoryBytes(): number;
   statementBytes(): number;
-  takeProfile(): { beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
+  takeProfile(): { prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
   close(): void;
 };
 
@@ -49,7 +49,7 @@ PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=3000;`);
 export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
   budget = { maxRows: 512, maxBytes: 262_144 }): OfficialSQLiteHost {
   let transaction = false, closed = false, statementBytes = 0;
-  const profile = { beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 };
+  const profile = { prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 };
   const statements = new Map<string, { statement: PreparedStatement; bytes: number }>();
   const statementBudget = 262144, maxStatements = 4;
   function retire(sql: string) {
@@ -73,17 +73,25 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
     while (statements.size >= maxStatements || statementBytes + size > statementBudget) retire(statements.keys().next().value!);
     statements.set(sql, { statement, bytes: size }); statementBytes += size; return true;
   }
+  function prepare(sql: string) {
+    const started = performance.now();
+    try { return db.prepare(sql); }
+    finally { profile.prepareMs += performance.now() - started; profile.prepares++; }
+  }
   function check() { if (closed) throw new Error('SQLite host closed'); }
   function bind(statement: PreparedStatement, values: unknown[]) {
     for (const value of values) if (value !== null && typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean' && !(value instanceof Uint8Array)) throw new TypeError('Invalid SQLite binding');
-    if (values.length) statement.bind(values as BindableValue[]);
+    for (const value of values) if (typeof value === 'string') profile.boundTextUTF16Bytes += value.length * 2;
+    const started = performance.now();
+    try { if (values.length) statement.bind(values as BindableValue[]); }
+    finally { profile.bindMs += performance.now() - started; }
   }
   function read<T>(sql: string, values: unknown[], first: boolean): T[] {
     check();
     // Complex repeated validation/page reads share the same four-plan cap.
     // Tiny one-off metadata reads do not displace those plans.
     const eligible = sql.length > 512, cached = eligible ? cachedPlan(sql) : undefined;
-    const statement = cached?.statement ?? db.prepare(sql); let retain = !!cached;
+    const statement = cached?.statement ?? prepare(sql); let retain = !!cached;
     try {
       bind(statement, values);
       const rows: T[] = []; let bytes = 0;
@@ -115,7 +123,7 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
     async runAsync(sql, ...values) {
       check();
       const cached = cachedPlan(sql);
-      const statement = cached?.statement ?? db.prepare(sql);
+      const statement = cached?.statement ?? prepare(sql);
       let retain = !!cached;
       try {
         bind(statement, values); while (statement.step()) { /* No retained output. */ }

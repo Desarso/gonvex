@@ -111,7 +111,7 @@ it('profiles native transaction boundaries using fixed numeric counters and rese
   const result = host.takeProfile();
   expect(result).toMatchObject({ commits: 1, rollbacks: 1 });
   for (const value of Object.values(result)) expect(Number.isFinite(value) && value >= 0).toBe(true);
-  expect(host.takeProfile()).toEqual({ beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
+  expect(host.takeProfile()).toEqual({ prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
   expect((await host.database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM profile_probe'))!.n).toBe(0);
 });
 
