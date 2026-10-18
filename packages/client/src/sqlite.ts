@@ -18,3 +18,5 @@ export type { SQLiteWindowHeader, SQLiteWindowProgress, SQLiteWindowPage } from 
 
 export {SQLiteNativeReplicaReader} from './sqlite-native-replica-reader.js';
 export type {SQLiteNativeWindowRead,SQLiteNativeWindowResult,SQLiteNativeEntityRead,SQLiteNativeEntityResult,SQLiteEntitySlot} from './sqlite-native-replica-reader.js';
+export {SQLiteIntentJournal} from './sqlite-intent-journal.js';
+export type {SQLiteIntentReceipt,SQLiteIntentPage} from './sqlite-intent-journal.js';
