@@ -1,3 +1,4 @@
+import { writeSQLiteEncodedFrame } from './sqlite-encoded-frame.js';
 import { sqliteTypedBodyFormat, sqliteBodySkeleton, sqliteBodySkeletonSQL } from './sqlite-typed-body.js';
 import { readSQLiteTypedView } from './sqlite-native-view.js';
 import { SQLiteReplicaEngineError, sqlitePayloadBytes, decodedJSONBytes, decodedPageBytes, pageBudgetError, fail } from './sqlite-admission.js';
@@ -49,7 +50,7 @@ export class SQLiteTypedReplicaEngine {
   private windows?: SQLiteWindowStore;
   private jsonEach: 'json_each' | 'jsonb_each' = 'json_each';
   private lastProgress = -Infinity;
-  private readonly profile = { frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
+  private readonly profile = { nativeValidationMs: 0, searchProjectionMs: 0, nativeFrames: 0, frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
   takeProfile() { const result = { ...this.profile }; for (const key of Object.keys(this.profile) as Array<keyof typeof this.profile>) this.profile[key] = 0; return result; }
   constructor(private readonly db: SQLiteReplicaDatabase, readonly schema: SQLiteTypedSchema,
     private readonly limits = { operations: 64, queuedBytes: 2_097_152, batchBytes: 262_144, pageBytes: 262_144 },
@@ -230,20 +231,25 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
     const encoded = JSON.stringify(writes);
     this.profile.reencodeMs += performance.now() - reencodeAt;
     for (const entity of entities) {
-      const table = this.schema[entity]!, tn = q(sqliteTableName(entity));
-      const fields = Object.entries(table.fields);
-      const columns = ['scope', 'id', 'body', 'version', ...fields.map(([name]) => sqliteFieldName(name)), ...(table.search ?? []).map((_, i) => 's' + i)];
-      const path = (name: string) => "'" + ('$.' + JSON.stringify(name)).replaceAll("'", "''") + "'";
-      const values = fields.map(([name, shape]) => {
-        const extract = `json_extract(row,${path(name)})`;
-        return shape.kind === 'json' ? `CASE WHEN json_type(row,${path(name)}) IS NULL OR json_type(row,${path(name)})='null' THEN NULL ELSE json_quote(${extract}) END` : extract;
-      });
+      const table = this.schema[entity]!;
       const normalizeAt = performance.now();
       const normalized = JSON.stringify(writes.map(write => write.table === entity
         ? (table.search ?? []).map(name => String(write.row![name] ?? '').toLowerCase()) : []));
       this.profile.normalizationMs += performance.now() - normalizeAt;
-      const insertAt = performance.now();
-      await this.db.runAsync(`WITH input AS MATERIALIZED (
+      await this.insertBootstrapEntity(scope, entity, encoded, normalized);
+    }
+  }
+  private async insertBootstrapEntity(scope: string, entity: string, encoded: string, normalized: string): Promise<void> {
+    const table = this.schema[entity]!, tn = q(sqliteTableName(entity));
+    const fields = Object.entries(table.fields);
+    const columns = ['scope', 'id', 'body', 'version', ...fields.map(([name]) => sqliteFieldName(name)), ...(table.search ?? []).map((_, i) => 's' + i)];
+    const path = (name: string) => "'" + ('$.' + JSON.stringify(name)).replaceAll("'", "''") + "'";
+    const values = fields.map(([name, shape]) => {
+      const extract = `json_extract(row,${path(name)})`;
+      return shape.kind === 'json' ? `CASE WHEN json_type(row,${path(name)}) IS NULL OR json_type(row,${path(name)})='null' THEN NULL ELSE json_quote(${extract}) END` : extract;
+    });
+    const insertAt = performance.now();
+    await this.db.runAsync(`WITH input AS MATERIALIZED (
         SELECT CAST(key AS INTEGER) pos,jsonb_extract(value,'$.row') row,
           json_extract(value,'$.id') id,json_extract(value,'$.version') version
         FROM ${this.jsonEach}(jsonb(?)) WHERE json_extract(value,'$.table')=?
@@ -252,9 +258,9 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
       FROM input CROSS JOIN normalized WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND gv_tombstones.id=input.id AND gv_tombstones.version>=input.version)
       ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`,
       encoded, entity, normalized, scope, scope, entity);
-      this.profile.sqliteInsertMs += performance.now() - insertAt;
-    }
+    this.profile.sqliteInsertMs += performance.now() - insertAt;
   }
+
   /** A durable delivery uses the same immutable ID on every retry. The receipt
    * is separate from the outbox, so retiring delivery cannot forget dedupe. */
   apply(scope: string, writes: readonly SQLiteTypedWrite[], intent?: { id: string; payload: unknown }): Promise<{ sequence: number }> {
@@ -434,19 +440,29 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
         await this.suspendBootstrapIndexes('atomic-import');
         let rows = 0, sliceStarted = performance.now();
         for await (const page of source) {
-          let admitted: SQLiteTypedWrite[];
+          let nativeRows: number | undefined;
           if (typeof page === 'string') {
             if (page.length * 2 > this.limits.batchBytes) fail('BUDGET', 'SQLite encoded import page exceeds byte budget');
-            admitted = JSON.parse(page) as SQLiteTypedWrite[];
-            parsedPayloadBytes(admitted, this.limits.batchBytes);
-          } else {
-            sqlitePayloadBytes(page, this.limits.batchBytes);
-            admitted = JSON.parse(JSON.stringify(page)) as SQLiteTypedWrite[];
+            const native = await writeSQLiteEncodedFrame(this.db, this.schema, this.jsonEach, page, this.limits.batchBytes,
+              (entity, encoded, normalized) => this.insertBootstrapEntity(physical, entity, encoded, normalized));
+            if (native) {
+              nativeRows = native.rows; this.profile.nativeFrames++;
+              this.profile.nativeValidationMs += native.validationMs; this.profile.searchProjectionMs += native.projectionMs;
+              this.profile.normalizationMs += native.normalizationMs;
+            }
           }
-          if (!Array.isArray(admitted) || admitted.length > 512) fail('BUDGET', 'SQLite import page exceeds row budget');
-          await this.writeBootstrapFrame(physical, admitted);
+          if (nativeRows !== undefined) rows += nativeRows;
+          else {
+            let admitted: SQLiteTypedWrite[];
+            if (typeof page === 'string') {
+              admitted = JSON.parse(page) as SQLiteTypedWrite[]; parsedPayloadBytes(admitted, this.limits.batchBytes);
+            } else {
+              sqlitePayloadBytes(page, this.limits.batchBytes); admitted = JSON.parse(JSON.stringify(page)) as SQLiteTypedWrite[];
+            }
+            if (!Array.isArray(admitted) || admitted.length > 512) fail('BUDGET', 'SQLite import page exceeds row budget');
+            await this.writeBootstrapFrame(physical, admitted); rows += admitted.length;
+          }
           this.progress();
-          rows += admitted.length;
           if (!Number.isSafeInteger(rows)) fail('BUDGET', 'SQLite import row count exhausted');
           // Promise-only ingestion monopolizes a worker task, withholding both
           // progress messages and idle GC for the entire bootstrap. Yield real

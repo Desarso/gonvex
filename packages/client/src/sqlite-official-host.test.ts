@@ -160,6 +160,7 @@ it('reconstructs JSON subtypes and missing fields from typed skeletons in the of
   const engine = new SQLiteTypedReplicaEngine(host.database, schema); await engine.open('owner');
   const rows = [{ _id: 'a', flag: false, data: { values: [1, null, true], name: 'nested' }, name: 'body'.repeat(200), rank: 1, unknown: 'keep' }, { _id: 'b', flag: true, data: null, rank: 2 }];
   await engine.importScope('s', (async function* () { yield JSON.stringify(rows.map(row => ({ table: 'records', id: row._id, version: 1, row }))); })());
+  expect(engine.takeProfile().nativeFrames).toBe(1);
   const plan = { table: 'records', order: [{ field: 'rank', direction: 'asc' }], limit: 2 } as const;
   expect((await engine.page('s', plan)).rows).toEqual(rows);
   expect((await engine.viewPage('s', 'all', plan)).rows).toEqual(rows);

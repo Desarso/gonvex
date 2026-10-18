@@ -314,6 +314,7 @@ it('preserves JSON scalar types, duplicate-key semantics and Unicode in native b
   const encoded = '[{"table":"tasks","id":"a","version":1,"row":{"_id":"a","name":"ignored","name":"İ CAFÉ 東京","due":2,"done":true,"data":"plain"}},' +
     '{"table":"tasks","id":"b","version":1,"row":{"_id":"b","due":3,"data":[1,null,{"x":false}]}}]';
   await engine.importScope('s', (async function* () { yield encoded; })());
+  expect(engine.takeProfile().nativeFrames).toBe(0);
   const result = await engine.page('s', { ...plan, select: ['name', 'data', 'done'] });
   expect(result.rows).toEqual([{ _id: 'a', name: 'İ CAFÉ 東京', data: 'plain', done: true }, { _id: 'b', data: [1, null, { x: false }] }]);
   expect((await engine.page('s', { ...plan, search: 'i\u0307 café' })).rows).toHaveLength(1);
@@ -455,4 +456,27 @@ it('keeps generated field payloads only in typed columns and reconstructs exact 
   expect(result.rows).toEqual(rows); expect(Object.keys(result.rows[0]!)).toEqual(Object.keys(rows[0]!));
   expect((await engine.page('s', { ...plan, select: ['name', 'due', 'done', 'data'] })).rows).toEqual(rows.map(({ extra, ...row }: any) => row));
   expect((await engine.viewPage('s', 'all', plan, 0)).rows).toEqual(rows);
+});
+
+it('ingests mixed-table encoded frames natively while decoding only search projections', async () => {
+  const { engine } = fixture(); await engine.open('owner');
+  const task = { _id: 'a', name: 'İ CAFÉ 東京', data: [1, null, { flag: false }], done: false, due: 1 };
+  const assignment = { _id: 'x', task: 'a', member: 'm' };
+  await engine.importScope('s', (async function* () { yield JSON.stringify([
+    { table: 'assignments', id: 'x', version: 1, row: assignment }, { table: 'tasks', id: 'a', version: 1, row: task },
+  ]); })());
+  expect(engine.takeProfile()).toMatchObject({ nativeFrames: 1 });
+  expect((await engine.page('s', { ...plan, search: 'i\u0307 café' })).rows).toEqual([task]);
+  expect((await engine.page('s', { table: 'assignments', order: [{ field: '_id', direction: 'asc' }], textOrder: 'binary', limit: 2 })).rows).toEqual([assignment]);
+});
+it('preserves invalid-frame rollback, finite-number and depth admission on the native wire path', async () => {
+  const { engine } = fixture(); await engine.open('owner');
+  await expect(engine.importScope('s', (async function* () {
+    yield JSON.stringify([write('a', 1)]);
+    yield JSON.stringify([{ ...write('b', 2), row: { _id: 'b', done: 'wrong' } }]);
+  })())).rejects.toThrow('field type');
+  expect((await engine.page('s', plan)).rows).toEqual([]);
+  const nested = '['.repeat(40) + '0' + ']'.repeat(40);
+  await expect(engine.importScope('deep', (async function* () { yield '[{"table":"tasks","id":"a","version":1,"row":{"_id":"a","data":' + nested + '}}]'; })())).rejects.toThrow('structure');
+  await expect(engine.importScope('infinite', (async function* () { yield '[{"table":"tasks","id":"a","version":1,"row":{"_id":"a","extra":{"n":1e999}}}]'; })())).rejects.toThrow('Nonfinite');
 });
