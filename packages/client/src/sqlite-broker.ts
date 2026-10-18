@@ -15,12 +15,14 @@ export type SQLiteBrokerOptions = {
   /** Static new Worker(new URL(..., import.meta.url)) factories let bundlers
    * fingerprint worker graphs. Only the elected tab invokes createWorker. */
   createWorker?():Worker;
+  /** A generated IndexedDB owner with the same authenticated client contract. */
+  createFallbackWorker?():Worker;
   createHub?():SharedWorker;
   onState?(state: SQLiteBrokerState): void;
   onChange?(scope: string, sequence: number,reset?:boolean): void;
 };
 type Owner = { id: string; token: string; epoch: number; seen: number; opening?: boolean };
-type Generation = { token: string; worker: Worker; ready: boolean; epoch: number; release(): void; channel: BroadcastChannel; lastProgress: number;announced?:boolean };
+type Generation = { token: string; worker: Worker; adapter:'sqlite'|'indexeddb';ready: boolean; epoch: number; release(): void; channel: BroadcastChannel; lastProgress: number;announced?:boolean };
 type Call = { promise?:Promise<any>;id: string; op: string; args: unknown; bytes: number; lastSent: number; replay:boolean;sentToken?:string; timer: ReturnType<typeof setTimeout>; resolve(value: any): void; reject(error: unknown): void };
 type WorkerCall = { generation: Generation; resolve(value: any): void; reject(error: unknown): void };
 export class SQLiteBrokerError extends Error {
@@ -29,6 +31,10 @@ export class SQLiteBrokerError extends Error {
 const error = (code: string, message: string, outcome?: 'rejected' | 'unknown') => new SQLiteBrokerError(code, message, outcome);
 
 const permanent = new Set(['SCHEMA_MISMATCH', 'STORAGE_MODE', 'UNSUPPORTED', 'PROTOCOL']);
+function recoverablePrimaryOpen(error:unknown){
+  const value=error as {code?:string;message?:string};
+  return ['UNSUPPORTED','STORAGE_MODE','QUOTA'].includes(String(value?.code))||/\b(opfs|quota|storage access|private mode|securityerror|notallowederror)\b/i.test(String(value?.message??''));
+}
 
 /** One elected dedicated worker per origin. Never opens SQLite on the main
  * thread, in a follower, or in the optional SharedWorker router. A timeout is
@@ -59,6 +65,7 @@ export class SQLiteReplicaBroker {
   private failed = false;
   private stateValue: SQLiteBrokerState = 'opening';
   private cooldown = 0;
+  private adapter:'sqlite'|'indexeddb'='sqlite';
   private hub?: SharedWorker;
   private port?: MessagePort;
   private lastHubReply = 0;
@@ -83,7 +90,7 @@ export class SQLiteReplicaBroker {
     else {this.elect();this.broadcast({type:'probe'});}
   }
   get state() { return this.stateValue; }
-  stats() { return { state: this.stateValue, owner: this.owner?.id, ownerEpoch:this.owner?.epoch, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size,changeScopes:this.lastChanges.size,changeBytes:this.lastChangeBytes }; }
+  stats() { return { state: this.stateValue, adapter:this.generation?.adapter??this.adapter, owner: this.owner?.id, ownerEpoch:this.owner?.epoch, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size,changeScopes:this.lastChanges.size,changeBytes:this.lastChangeBytes }; }
   private setState(state: SQLiteBrokerState) {
     if (state === this.stateValue) return;
     this.stateValue = state;
@@ -224,9 +231,9 @@ export class SQLiteReplicaBroker {
       if (this.closed || this.failed) return;
       let release!: () => void;
       const released = new Promise<void>(resolve => { release = resolve; });
-      const worker = this.options.createWorker?.()??new Worker(this.options.workerURL!, { type: 'module' });
+      const adapter=this.adapter,worker = adapter==='indexeddb'?this.options.createFallbackWorker!():this.options.createWorker?.()??new Worker(this.options.workerURL!, { type: 'module' });
       const token = crypto.randomUUID(), channel = new BroadcastChannel(controlName + ':owner:' + token);
-      const g: Generation = { token, worker, channel, release, ready: false, epoch: 0, lastProgress: Date.now() };
+      const g: Generation = { token, worker, adapter, channel, release, ready: false, epoch: 0, lastProgress: Date.now() };
       this.generation = g;
       channel.onmessage = event => { void this.serve(event.data); };
       worker.onmessage = event => {
@@ -248,7 +255,10 @@ export class SQLiteReplicaBroker {
           g.epoch = opened.epoch; g.ready = true;this.heartbeatToken=undefined; this.announce(g);this.sendHeartbeat(); this.resend();
         }
       } catch (e) {
-        if (permanent.has((e as SQLiteBrokerError).code)) this.fail(e);
+        if(adapter==='sqlite'&&this.options.createFallbackWorker&&recoverablePrimaryOpen(e)){
+          this.adapter='indexeddb';this.setState('pending');this.cooldown=0;
+        }
+        else if (permanent.has((e as SQLiteBrokerError).code)) this.fail(e);
         else { this.setState('pending'); this.cooldown = Date.now() + 1000; }
         this.stop(g);
       }

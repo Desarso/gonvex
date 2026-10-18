@@ -139,3 +139,15 @@ it('delivers fresh credited control hints at the same SQL generation while rejec
  const message={protocol:2,type:'change',scope:'@control',sequence:4,epoch:1,notification:1};broker.receiveControl(message);broker.receiveControl({...message,notification:2});broker.receiveControl({...message,notification:2});broker.receiveControl(message);expect(calls).toEqual(['@control','@control']);
  const reset={...message,scope:'*',reset:true,notification:3};broker.receiveControl(reset);broker.receiveControl({...reset,notification:4});broker.receiveControl({...reset,notification:4});expect(calls).toEqual(['@control','@control','*','*']);expect(broker.acknowledgeChange).toHaveBeenCalledTimes(7);
 });
+
+it('elects the generated IndexedDB owner after an OPFS startup refusal',async()=>{
+ const originalDocument=globalThis.document,originalNavigator=globalThis.navigator;
+ const channels:any[]=[];class Channel{onmessage?:Function;constructor(_name:string){channels.push(this);}postMessage(_value:unknown){}close(){}}
+ const workers:{kind:string;terminated:boolean}[]=[];
+ const makeWorker=(kind:string)=>{const state={kind,terminated:false};workers.push(state);return {onmessage:null as null|((event:{data:any})=>void),onerror:null as null|(()=>void),postMessage(this:any,message:any){if(message.op==='open')queueMicrotask(()=>this.onmessage?.({data:{id:message.id,sentAt:Date.now(),...(kind==='sqlite'?{error:{code:'UNSUPPORTED',message:'OPFS is unavailable'}}:{value:{epoch:2,adapter:'indexeddb'}})}}));else if(message.op==='ping')queueMicrotask(()=>this.onmessage?.({data:{id:message.id,sentAt:Date.now(),value:{ready:true}}}));},terminate(){state.terminated=true;}} as unknown as Worker;};
+ vi.stubGlobal('BroadcastChannel',Channel);vi.stubGlobal('document',{addEventListener(){},removeEventListener(){}});vi.stubGlobal('addEventListener',()=>{});vi.stubGlobal('removeEventListener',()=>{});
+ vi.stubGlobal('navigator',{locks:{request:async(_name:string,_options:unknown,run:()=>Promise<void>)=>run()}});
+ const broker=new SQLiteReplicaBroker({schemaVersion:'a'.repeat(64),createWorker:()=>makeWorker('sqlite'),createFallbackWorker:()=>makeWorker('indexeddb')});
+ try{await vi.waitFor(()=>expect(broker.stats()).toMatchObject({state:'ready',adapter:'indexeddb',ownerEpoch:2}),{timeout:3000});expect(workers.map(worker=>worker.kind)).toEqual(['sqlite','indexeddb']);expect(workers[0]?.terminated).toBe(true);}
+ finally{broker.close();vi.unstubAllGlobals();if(originalDocument)vi.stubGlobal('document',originalDocument);if(originalNavigator)vi.stubGlobal('navigator',originalNavigator);for(const channel of channels)channel.close();}
+});
