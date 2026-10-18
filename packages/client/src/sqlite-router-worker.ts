@@ -1,3 +1,4 @@
+import {sqliteRequestBytes} from './sqlite-request-frame.js';
 // Optional SharedWorker entry. This router holds only bounded ports and
 // heartbeat timestamps. It never imports SQLite, schema, rows or application code.
 const peers = new Map<string, { port: MessagePort; seen: number }>();
@@ -28,7 +29,13 @@ shared.onconnect = ({ ports: [port] }) => {
       else attached?.close();
     }
     else if (m?.type === 'request' && m.protocol === 1 && typeof m.to === 'string') {
-      const target = peers.get(m.to); if (target) post(target.port, { ...m, from: id });
+      const target = peers.get(m.to);
+      try {
+        sqliteRequestBytes(m.op,m.args,262144);
+        const encoded=m.op==='bootstrapAppend'?m.args?.encoded:undefined;
+        const transfer=encoded instanceof Uint8Array&&encoded.buffer instanceof ArrayBuffer?[encoded.buffer]:[];
+        if(target)target.port.postMessage({...m,from:id},transfer);
+      } catch { /* Malformed or disconnected peers retry through the owner path. */ }
     } else if (m?.type === 'reply' && m.protocol === 1 && typeof m.to === 'string') {
       const target = peers.get(m.to); if (target) post(target.port, m);
     }

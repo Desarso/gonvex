@@ -1,3 +1,4 @@
+import {sqliteRequestBytes} from './sqlite-request-frame.js';
 import {SQLiteCanonicalDispatcher} from './sqlite-canonical-dispatch.js';
 import {sqliteTypedReplicaStorage} from './sqlite-typed-row-layout.js';
 import {sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
@@ -79,7 +80,7 @@ function admit(data: any, peer?: { port: MessagePort; token: string }, tab?: str
   let size: number;
   try {
     if (typeof data?.id !== 'string' || data.id.length > 256 || typeof data.op !== 'string') throw new TypeError('Invalid worker request');
-    size = sqlitePayloadBytes(data.args, data.op === 'open' ? 1048576 : 262144);
+    size = sqliteRequestBytes(data.op,data.args,data.op === 'open' ? 1048576 : 262144);
     if (operations >= 64 || bytes + size > 2097152) throw Object.assign(new Error('Storage worker queue is full'), { code: 'BUSY' });
   } catch (e) { reply(data?.id, undefined, e, peer, tab); return; }
   operations++; bytes += size;

@@ -1,3 +1,4 @@
+import {sqliteRequestBytes,sqliteTransferRequest} from './sqlite-request-frame.js';
 import { sqliteWorkerOperations as publicOperations, sqliteOperationPublishes } from './sqlite-worker-protocol.js';
 import { sqlitePayloadBytes } from './sqlite-typed-engine.js';
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
@@ -236,7 +237,7 @@ export class SQLiteReplicaBroker {
     const id = this.tabID + ':w:' + ++this.serial;
     return new Promise((resolve, reject) => {
       this.workerCalls.set(id, { generation: g, resolve, reject });
-      try { g.worker.postMessage({ id, op, args }); }
+      try { const outgoing=sqliteTransferRequest(op,args);g.worker.postMessage({ id, op, args:outgoing.args },outgoing.transfer); }
       catch (e) { this.workerCalls.delete(id); reject(e); }
     });
   }
@@ -261,8 +262,8 @@ export class SQLiteReplicaBroker {
     call.lastSent = Date.now();
     const m = { type: 'request', protocol, from: this.tabID, token: this.owner.token, id: call.id, op: call.op, args: call.args };
     if (this.owner.id === this.tabID) { void this.serve(m); return; }
-    if (this.direct?.ready && this.direct.token === this.owner.token) this.direct.port.postMessage(m);
-    else if (this.port) this.port.postMessage({ ...m, to: this.owner.id });
+    if (this.direct?.ready && this.direct.token === this.owner.token) { const outgoing=sqliteTransferRequest(call.op,call.args);this.direct.port.postMessage({...m,args:outgoing.args},outgoing.transfer); }
+    else if (this.port) { const outgoing=sqliteTransferRequest(call.op,call.args);this.port.postMessage({ ...m,args:outgoing.args, to: this.owner.id },outgoing.transfer); }
     else {
       const channel = new BroadcastChannel(controlName + ':owner:' + this.owner.token);
       channel.postMessage(m); channel.close();
@@ -283,7 +284,7 @@ export class SQLiteReplicaBroker {
     if (this.inflight.has(key)) return;
     let bytes: number;
     try {
-      bytes = sqlitePayloadBytes(m.args, 262144);
+      bytes = sqliteRequestBytes(m.op,m.args,262144);
       if (this.inflight.size >= 64 || this.inflightBytes + bytes > 2097152) throw error('BUSY', 'Storage queue is full');
     } catch (e) { this.reply(m, undefined, e); return; }
     this.inflight.set(key, { generation: g, bytes }); this.inflightBytes += bytes;
@@ -309,7 +310,7 @@ export class SQLiteReplicaBroker {
     if (!publicOperations.has(op)) return Promise.reject(error('OPERATION', 'Unsupported storage operation'));
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) return Promise.reject(error('BUDGET', 'Invalid storage deadline'));
     let bytes: number;
-    try { bytes = sqlitePayloadBytes(args, 262144); }
+    try { bytes = sqliteRequestBytes(op,args,262144); }
     catch (e) { return Promise.reject(e); }
     if (this.pending.size >= 16 || this.pendingBytes + bytes > 2097152) return Promise.reject(error('BUDGET', 'Storage request budget exceeded'));
     // Immutable replay payload. Public durable writes additionally require an

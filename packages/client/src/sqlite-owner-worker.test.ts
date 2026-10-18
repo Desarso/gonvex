@@ -34,7 +34,7 @@ it('routes restartable first-sync frames through the real owner queue and publis
     expect((await request('bootstrapBegin', { scope: 's', token: 'first' })).value.nextPage).toBe(0);
     const encoded = JSON.stringify([{ table: 'tasks', id: 'a', version: 1, row: { _id: 'a', name: 'Needle' } }]);
     // Concurrent requests must preserve the actor's FIFO transaction order.
-    const frame = request('bootstrapAppend', { scope: 's', token: 'first', page: 0, encoded });
+    const frame = request('bootstrapAppend', { scope: 's', token: 'first', page: 0, encoded:new TextEncoder().encode(encoded) });
     const count = request('count', { scope: 's', entity: 'tasks', group: 0, values: ['Needle'] });
     expect((await frame).value.rows).toBe(1); expect(await count).toMatchObject({ value: 0 });
     expect(changes).toHaveLength(0);

@@ -61,3 +61,15 @@ it('bounds change subscriptions and releases their retained listeners',()=>{
   expect(()=>broker.subscribeChanges(()=>{})).toThrow('listener budget');
   for(const close of releases)close();expect(broker.stats().listeners).toBe(1);
 });
+
+it('admits binary bootstrap frames and snapshots bytes before retaining replay requests', async()=>{
+  const broker=client(); const input=new TextEncoder().encode('[{"row":"東京"}]');
+  const result=await broker.request<any>('bootstrapAppend',{scope:'s',token:'t',page:0,encoded:input});
+  const expected=input.slice();input.fill(0);
+  expect(result.args.encoded).toEqual(expected);
+  await expect(broker.request('apply',{scope:'s',encoded:expected})).rejects.toMatchObject({code:'INVALID_ROW'});
+  await expect(broker.request('bootstrapAppend',{scope:'s',encoded:new Uint8Array(131072)})).rejects.toMatchObject({code:'BUDGET'});
+  let read=false;
+  await expect(broker.request('bootstrapAppend',{encoded:expected,get scope(){read=true;return 's';}})).rejects.toMatchObject({code:'INVALID_ROW'});
+  expect(read).toBe(false);expect(broker.stats()).toMatchObject({pending:0,pendingBytes:0});
+});
