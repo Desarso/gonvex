@@ -14,7 +14,7 @@ export type { SQLiteBrokerOptions, SQLiteBrokerState } from './sqlite-broker.js'
 export { ReplicaSetDigest } from './replica-set-digest.js';
 export { lowerSQLiteLivePlan } from './sqlite-plan-lowering.js';
 export { SQLiteWindowStore } from './sqlite-window-store.js';
-export type { SQLiteWindowHeader, SQLiteWindowProgress, SQLiteWindowPage } from './sqlite-window-store.js';
+export type { SQLiteWindowHeader, SQLiteWindowProgress, SQLiteWindowPage,SQLiteWindowDelta } from './sqlite-window-store.js';
 
 export {SQLiteNativeReplicaReader} from './sqlite-native-replica-reader.js';
 export type {SQLiteNativeWindowRead,SQLiteNativeWindowResult,SQLiteNativeEntityRead,SQLiteNativeEntityResult,SQLiteEntitySlot} from './sqlite-native-replica-reader.js';

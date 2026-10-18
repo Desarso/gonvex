@@ -139,13 +139,18 @@ export class SQLiteSnapshotPages {
   await this.db.runAsync('UPDATE gv_snapshot_stages SET next_page=?,rows=?,bytes=?,receipt=?,complete=?,digest=? WHERE scope=? AND subscription=? AND snapshot=?',next.next_page,rows,bytes,next.receipt,next.complete,next.digest,scope,metadata.id,metadata.snapshotId);
   return progress(metadata.snapshotId,next);
  }
- async read(scope:string,subscription:string,snapshot:string,after=-1,limit=128){
+ async read(scope:string,subscription:string,snapshot:string,after=-1,limit=128){const {complete:_,receivedRows:__,nextPage:___,...page}=await this.readPage(scope,subscription,snapshot,after,limit,false);return page;}
+ /** Committed first-sync pages are readable before the final set certificate.
+  * This is a pending delivery view, never complete coverage or reducer admission.
+  * The owner must merge newer canonical authority before publishing values. */
+ readPending(scope:string,subscription:string,snapshot:string,after=-1,limit=128){return this.readPage(scope,subscription,snapshot,after,limit,true);}
+ private async readPage(scope:string,subscription:string,snapshot:string,after:number,limit:number,pending:boolean){
   identity(scope,subscription,snapshot);
   if(!Number.isSafeInteger(after)||after< -1||!Number.isSafeInteger(limit)||limit<1||limit>128)throw new RangeError('Invalid snapshot page');
-  await this.initialize();let output!:{rows:Array<{id:string;position:number;row:ReplicaRow;hash:string}>;nextPosition:number|null};
+  await this.initialize();let output!:{rows:Array<{id:string;position:number;row:ReplicaRow;hash:string}>;nextPosition:number|null;complete:boolean;receivedRows:number;nextPage:number};
   await this.db.withTransactionAsync(async()=>{
    await this.fence();const stage=await this.stage(scope,subscription,snapshot);
-   if(!stage?.complete||stage.discarded)fail('PAGE_CHANGED','Snapshot has not been verified or was discarded');
+   if(!stage||!pending&&!stage.complete||stage.discarded)fail('PAGE_CHANGED','Snapshot has not been verified or was discarded');
    const typedBody=await sqliteTypedSnapshotBody(this.db,this.typedSchema,scope,subscription,snapshot);
    let take=limit;
    for(;;){try{
@@ -154,7 +159,7 @@ export class SQLiteSnapshotPages {
     let bytes=64;for(const entry of entries){bytes+=entry.id.length*2+256+decodedJSONBytes(entry.body,262144-bytes);if(bytes>262144)fail('BUDGET','Snapshot decoded page exceeds budget');}
     const rows=entries.map(({id,position,body,hash})=>({id,position,row:JSON.parse(body) as ReplicaRow,hash}));
     const last=entries.at(-1)?.position??after;
-    output={rows,nextPosition:last+1<stage.rows?last:null};sqlitePayloadBytes(output,262144);break;
+    output={rows,nextPosition:last+1<stage.rows?last:null,complete:!!stage.complete,receivedRows:stage.rows,nextPage:stage.next_page};sqlitePayloadBytes(output,262144);break;
    }catch(error){if(!pageBudgetError(error)||take===1)throw error;take=Math.max(1,Math.floor(take/2));}}
   });return output;
  }

@@ -70,6 +70,17 @@ const handlers={
   const resolved=await sqliteQueryEntityScopes(database,scope,plan),membershipSource=await assertSQLiteMembership(database,schema,scope,plan);const compiled=compileSQLiteOptimisticPage(schema,resolved.physical,plan,'trigram',false,scope,{scope:'\u0000prediction:'+scope,allowLocalInserts:true},resolved.sources,membershipSource);const explanation=(await database.getAllAsync<{detail:string}>('EXPLAIN QUERY PLAN '+compiled.sql,...compiled.bindings)).map(row=>row.detail);
   timings.sort((a,b)=>a-b);return {checks,explanation,iterations:timings.length,p50:timings[Math.floor(timings.length*.5)],p95:timings[Math.floor(timings.length*.95)],deepMs,searchMs,emptyMs,total:deep.total,deepFirstID:deep.rows[0]?.id,canonicalSortValues:'Mostly absent value fields, plus unsafe-integer control: ASC NULLS LAST and binary ID ties',firstIDs:first!.rows.slice(0,4).map(row=>row.id),searchIDs:search.rows.map(row=>row.id),profile:host.takeProfile(),wasmBytes:host.memoryBytes()};
  },
+ async delta({row,deleted,digest}:{row:{id:string;text:string;value:number};deleted:string;digest:string}){
+  const {replicaRowsHashes}=await import('../../src/replica-integrity.js');const hashes=await replicaRowsHashes([row],'id');
+  const windows=new SQLiteWindowStore(database,()=>engine.verifyOwner()),initial=await windows.header(scope,'native-sync-control');if(!initial)throw Error('Missing native collection');
+  const input={scope,signature:'native-sync-control',generation:initial.generation,cursor:{epoch:'e',revision:30},upserts:[{id:row.id,hash:hashes[row.id]!}],deleted:[deleted],digest};
+  const before=await engine.verifyOwner();let mutations=0;host.takeProfile();const at=performance.now();
+  const apply=()=>windows.applyDelta(input,async()=>{mutations++;await canonical.applyTransaction({cursor:input.cursor,changes:[{entity:'rows',id:row.id,operation:'insert',newValue:row},{entity:'rows',id:deleted,operation:'delete'}]},{entities:{},liveQueries:{}},scope);});
+  const first=await apply(),ms=performance.now()-at,replay=await apply(),after=await engine.verifyOwner();
+  const current=await windows.header(scope,input.signature),values=await canonical.loadEntityRows(scope,'rows',[row.id,deleted]),members=await windows.page(scope,input.signature,initial.generation,99998,2),profile=host.takeProfile();
+  if(first.rows!==100000||replay.changed||mutations!==1||after.sequence!==before.sequence+1||current?.header.aggregateDigest!==digest||values.length!==1||values[0].id!==row.id||members.ids.at(-1)!==row.id)throw Error('Native delta composition failed');
+  return {first,replay,mutations,ms,after,before,digest:current.header.aggregateDigest,tail:members.ids,profile,wasmBytes:host.memoryBytes(),integrity:await engine.integrity()};
+ },
  async prepareFault(){await database.execAsync('CREATE TABLE IF NOT EXISTS gv_fault_probe(id INTEGER PRIMARY KEY,body BLOB NOT NULL)');return true;},
  async dirtyFault(){
   const write=(id:string)=>({table:'rows',id,version:1,row:{id,text:'Synthetic dirty transaction'}});

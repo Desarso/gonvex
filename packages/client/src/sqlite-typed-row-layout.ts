@@ -1,4 +1,4 @@
-import {sqliteSnapshotWindowAliasSchema} from './sqlite-window-store.js';
+import {sqliteWindowAuxiliarySchema} from './sqlite-window-store.js';
 import {sqliteTypedIndexSQL} from './sqlite-typed-schema.js';
 import {sqliteEntityAliasSchema,sqlitePhysicalEntityScope,sqliteQueryEntityScopes} from './sqlite-entity-scope.js';
 import { readSQLitePortablePage } from './sqlite-portable-page.js';
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS gv_canonical_tombstones(scope TEXT NOT NULL,entity TE
       await installSQLiteTypedBodyFence(db, schema);
       await db.execAsync('DROP TRIGGER IF EXISTS gv_canonical_delete; DROP VIEW IF EXISTS _gonvex_replica_entities;');
       await db.execAsync(sqliteNativeViewSchema);
-      await db.execAsync(ddl.tables+'\n'+sqliteSnapshotWindowAliasSchema);
+      await db.execAsync(ddl.tables+'\n'+sqliteWindowAuxiliarySchema);
       await db.execAsync(await sqliteTypedIndexSQL(db,schema) + '\n' + ddl.search);
       const branches: string[] = [];
       for (const entity of Object.keys(schema)) {
@@ -86,7 +86,7 @@ END;`);
     },
     async resetViews(db, scope) {
       if(await db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gv_windows'")) {
-        for(const table of ['gv_windows','gv_window_generations','gv_window_members','gv_window_hashes','gv_window_frames','gv_snapshot_window_alias'])await db.runAsync('DELETE FROM '+table+' WHERE scope=?',scope);
+        for(const table of ['gv_windows','gv_window_generations','gv_window_members','gv_window_hashes','gv_window_frames','gv_snapshot_window_alias','gv_window_mutations','gv_window_certificates','gv_window_delta_receipts'])await db.runAsync('DELETE FROM '+table+' WHERE scope=?',scope);
       }
       await db.runAsync('DELETE FROM gv_view_members WHERE scope=?', scope);
       await db.runAsync('DELETE FROM gv_views WHERE scope=?', scope);

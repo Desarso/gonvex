@@ -101,3 +101,33 @@ it('allocates compact physical scopes durably without reusing a retired scope an
  await f.db.runAsync('UPDATE gv_snapshot_scope_clock SET value=?',Number.MAX_SAFE_INTEGER);await expect(f.stager.prepareTyped({scope:'s',subscription:'collection',snapshot:'exhausted',entity:'tasks'})).rejects.toMatchObject({code:'FENCED'});
  expect((await f.canonical.loadEntityRows('s','tasks',['two']))[0].row.name).toBe('two');expect(await f.engine.integrity()).toBe('ok');
 });
+
+it('stores native delta overlays without copying shared source certificates or overwriting newer canonical values',async()=>{
+ const {SQLiteWindowStore}=await import('./sqlite-window-store.js');const f=await fixture(),rows=Array.from({length:300},(_,n)=>({id:String(n).padStart(3,'0'),name:'Source '+n}));
+ const {input}=await f.stage(rows);await f.activator.activate(input);const windows=new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner());await windows.publishSnapshot('s',{...input.header,signature:'other'},'collection','one',true);await f.stager.discard('s','collection','one');
+ const sourceHashes=await replicaRowsHashes(rows,'id'),updated={id:'001',name:'Delta source'},inserted={id:'new',name:'New delta row'},newHashes=await replicaRowsHashes([updated,inserted],'id');const next={...sourceHashes,...newHashes};delete next['000'];
+ await f.write(30,[{entity:'tasks',id:'001',operation:'update',newValue:{id:'001',name:'Newer authoritative value'}}]);
+ const delta={scope:'s',signature:'collection',generation:'one',cursor:{epoch:'e',revision:20},upserts:Object.entries(newHashes).map(([id,hash])=>({id,hash})),deleted:['000'],digest:replicaSumDigest(next)};
+ let mutations=0;const before=await f.engine.verifyOwner();
+ const apply=()=>windows.applyDelta(delta,async()=>{mutations++;await f.write(delta.cursor.revision,[{entity:'tasks',id:updated.id,operation:'update',newValue:updated},{entity:'tasks',id:inserted.id,operation:'insert',newValue:inserted}]);});
+ expect(await apply()).toEqual({changed:true,rows:300});expect(await apply()).toEqual({changed:false,rows:300});expect(mutations).toBe(1);expect((await f.engine.verifyOwner()).sequence).toBe(before.sequence+1);
+ expect((await windows.page('s','collection','one',0,2)).ids).toEqual(['001','002']);expect((await windows.page('s','other','one',0,2)).ids).toEqual(['000','001']);expect((await windows.hashPage('s','other','one','000',1))[0]?.hash).toBe(sourceHashes['001']);expect((await windows.hashPage('s','collection','one','000',1))[0]?.hash).toBe(newHashes['001']);
+ expect((await f.canonical.loadEntityRows('s','tasks',['001']))[0].row.name).toBe('Newer authoritative value');expect((await windows.header('s','collection'))?.header.cursor?.revision).toBe(20);expect(await f.db.getFirstAsync('SELECT count(*) n FROM gv_snapshot_rows')).toEqual({n:300});
+ const empty=await windows.begin('s',{...input.header,signature:'other'},'empty');await windows.publish('s','other',empty);let collections=0;while((await windows.collect('s','other','one')).remaining){expect(++collections).toBeLessThan(4);}expect(await f.db.getFirstAsync('SELECT count(*) n FROM gv_snapshot_rows')).toEqual({n:300});expect((await windows.page('s','collection','one',299,1)).ids).toEqual(['new']);expect(await f.db.getFirstAsync("SELECT count(*) n FROM gv_window_members WHERE signature='collection'")).toEqual({n:0});expect(await f.db.getFirstAsync('SELECT count(*) n FROM gv_window_mutations')).toEqual({n:3});
+ const plan={table:'tasks',membership:{signature:'collection',generation:'one',requireComplete:true},order:[{field:'id',direction:'asc' as const}],textOrder:'binary' as const,limit:3};expect((await f.engine.page('s',plan)).rows.map(row=>row.id)).toEqual(['001','002','003']);
+ const without={...next};delete without['001'];await windows.applyDelta({...delta,cursor:{epoch:'e',revision:21},upserts:[],deleted:['001'],digest:replicaSumDigest(without)});expect((await f.engine.page('s',plan)).rows.map(row=>row.id)).toEqual(['002','003','004']);
+ await windows.applyDelta({...delta,cursor:{epoch:'e',revision:22},upserts:[{id:'001',hash:newHashes['001']}],deleted:[],digest:replicaSumDigest(next)});expect((await windows.page('s','collection','one',299,1)).ids).toEqual(['001']);expect((await f.engine.page('s',plan)).rows.map(row=>row.id)).toEqual(['001','002','003']);
+ const final=await windows.begin('s',{...input.header,cursor:{epoch:'e',revision:31}},'empty');await windows.publish('s','collection',final);collections=0;while((await windows.collect('s','collection','one')).remaining){expect(++collections).toBeLessThan(4);}expect(await f.db.getFirstAsync('SELECT count(*) n FROM gv_snapshot_rows')).toEqual({n:0});expect(await f.db.getFirstAsync('SELECT count(*) n FROM gv_window_mutations')).toEqual({n:0});expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('reads a committed first-sync page before the final certificate without granting complete coverage',async()=>{
+ const f=await fixture(),rows=[{id:'first',name:'First received page café 東京'},{id:'second',name:'Second received page'},{id:'last',name:'Last frame'}],digest=replicaSumDigest(await replicaRowsHashes(rows,'id'));
+ await f.stager.prepareTyped({scope:'s',subscription:'collection',snapshot:'progressive',entity:'tasks'});
+ const metadata={type:'replica.snapshotEncodedPage',id:'collection',snapshotId:'progressive',scope:'tenant',visibilityScope:'s',key:'id',cursor:{epoch:'e',revision:10}};
+ const frame=(part:typeof rows,sequence:number,last=false)=>new TextEncoder().encode(JSON.stringify({...metadata,sequence,last,canonicalRows:part.map(row=>JSON.stringify(stable(row))),...(last?{digest}:{})}));
+ await f.stager.appendEncoded('s',frame(rows.slice(0,2),0));
+ const pending=await f.stager.readPending('s','collection','progressive',-1,1);expect(pending).toMatchObject({complete:false,receivedRows:2,nextPage:1,nextPosition:0});expect(pending.rows.map(entry=>entry.row)).toEqual([rows[0]]);expect((await f.canonical.loadEntityRows('s','tasks',['first']))).toEqual([]);await expect(f.stager.read('s','collection','progressive')).rejects.toMatchObject({code:'PAGE_CHANGED'});
+ await f.stager.appendEncoded('s',frame(rows.slice(2),1,true));expect(await f.stager.readPending('s','collection','progressive',1,1)).toMatchObject({complete:true,receivedRows:3,nextPage:2,nextPosition:null});
+ await f.activator.activate({scope:'s',subscription:'collection',snapshot:'progressive',header:{signature:'collection',entity:'tasks',key:'id',kind:'replica',source:'server',completeness:'complete',cursor:metadata.cursor,aggregateDigest:digest}});
+ await expect(f.stager.readPending('s','collection','progressive')).rejects.toMatchObject({code:'PAGE_CHANGED'});expect((await f.canonical.loadEntityRows('s','tasks',['first']))[0].row).toEqual(rows[0]);
+});
