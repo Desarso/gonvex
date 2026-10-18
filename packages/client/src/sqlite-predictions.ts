@@ -1,4 +1,4 @@
-import {sqliteQueryEntityScopes} from './sqlite-entity-scope.js';
+import {sqlitePhysicalEntityScope,sqliteQueryEntityScopes} from './sqlite-entity-scope.js';
 import {readSQLiteOptimisticPage} from './sqlite-optimistic-query.js';
 import {readSQLiteTypedView} from './sqlite-native-view.js';
 import {compileSQLiteTypedPage,type SQLitePagePlan} from './sqlite-typed-query.js';
@@ -82,6 +82,13 @@ export class SQLitePredictions {
     return {id:entry.id,row:{...(entry.row??pending),...Object.fromEntries(keys.filter(key=>key.startsWith('1')).map(key=>key.slice(1)).filter(key=>Object.hasOwn(pending,key)).map(key=>[key,pending[key]!]))}};
    });sqlitePayloadBytes(result,131072);
   });return result;
+ }
+ /** Recovery may have its durable envelope before canonical rows return.
+  * Test the whole prediction without decoding row bodies or publishing a
+  * partial transaction. Unknown outcomes wait for their missing bases. */
+ async canApply(ownerScope:string,patches:readonly LocalPatch[]):Promise<boolean>{
+  scope(ownerScope);sqlitePayloadBytes(patches,262144);if(patches.length>512)throw new RangeError('Invalid prediction batch');await this.ready();await this.fence();const present=new Map<string,boolean>();
+  for(const patch of patches){if(!Object.hasOwn(this.tables,patch.entity))throw new TypeError('Unknown prediction entity');const key=JSON.stringify([patch.entity,patch.rowId]);let exists=present.get(key);if(exists===undefined){const marker=await this.db.getFirstAsync<{deleted:number}>('SELECT deleted FROM gv_prediction_members WHERE scope=? AND entity=? AND id=?',ownerScope,patch.entity,patch.rowId);exists=marker?marker.deleted===0:!!await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(patch.entity))} WHERE scope=? AND id=? LIMIT 1`,await sqlitePhysicalEntityScope(this.db,ownerScope,patch.entity),patch.rowId);}if(patch.op==='patch'&&!exists)return false;present.set(key,patch.op!=='delete');}return true;
  }
  async apply(ownerScope:string,intent:number,patches:readonly LocalPatch[]):Promise<void>{
   scope(ownerScope);sqlitePayloadBytes(patches,262144);if(!Number.isSafeInteger(intent)||intent<1||!Array.isArray(patches)||patches.length>512)throw new TypeError('Invalid prediction batch');

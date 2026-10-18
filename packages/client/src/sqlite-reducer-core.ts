@@ -109,7 +109,7 @@ export class SQLiteReducerCore {
    const intent=existing?await this.options.journal.update(captured.intentScope,existing.id,[existing.state],()=>({...admitted,id:existing.id})):await this.options.journal.append(admitted);
    if(!intent)fail('FENCED','Recovered intent lost its delivery state');
    const patches:LocalPatch[]=(admitted.patches??[]).map(patch=>{const entity=patch.entity??patch.collection;if(!entity)fail('INTENT_CORRUPT','Prepared patch has no entity');return patch.op==='delete'?{entity,rowId:patch.rowId,op:'delete'}:{entity,rowId:patch.rowId,op:patch.op==='upsert'?'insert':patch.op,fields:patch.fields as Record<string,JsonValue>};});
-   if(state!=='rejected')await this.options.predictions.apply(input.scope,intent.id,patches);
+   if(state!=='rejected'&&await this.options.predictions.canApply(input.scope,patches))await this.options.predictions.apply(input.scope,intent.id,patches);
    const receipt=replyCompatible?prepared.receipt:{...prepared.receipt,result:null,queuedOnly:true as const};
    if(!old){const encoded=JSON.stringify(prepared.receipt);decodedJSONBytes(encoded,131072);await this.options.database.runAsync('INSERT INTO gv_reducer_invocations VALUES(?,?,?,?)',captured.intentScope,input.commandId,hash,encoded);await this.options.database.runAsync('INSERT INTO gv_reducer_reply_context VALUES(?,?,?)',captured.intentScope,input.commandId,await digest(canonicalContext(execution?.scope??input.scope,execution?.artifactHash??this.options.artifactHash,execution?.identity??captured.identity)));}
    if(generation.sequence>=Number.MAX_SAFE_INTEGER)fail('FENCED','Storage sequence exhausted');await this.options.database.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1',generation.sequence+1);restored=structuredClone(receipt);
@@ -158,7 +158,7 @@ export class SQLiteReducerCore {
       const entity=patch.entity??patch.collection;if(!entity)throw new TypeError('Intent prediction has no entity');
       return patch.op==='delete'?{entity,rowId:patch.rowId,op:'delete'}:{entity,rowId:patch.rowId,op:patch.op==='upsert'?'insert':patch.op,fields:patch.fields as Record<string,JsonValue>};
      });
-     await this.options.predictions.apply(scope,entry.id,local);
+     if(await this.options.predictions.canApply(scope,local))await this.options.predictions.apply(scope,entry.id,local);else unavailable++;
     }
     if(page.nextId===null)break;after=page.nextId;
    }
