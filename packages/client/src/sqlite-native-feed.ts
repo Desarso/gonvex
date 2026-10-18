@@ -183,7 +183,13 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  private async readableEpoch(scope:string,epoch:string){const current=await this.options.owner.database.getFirstAsync<{value:string}>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='currentEpoch'",scope);if(current&&current.value!==epoch)fail('PAGE_CHANGED','Canonical rows need the newly admitted database epoch');}
  /** Only an authenticated registered source can select a pending disk stage.
   * This is display metadata, never a complete replica coverage certificate. */
- async pendingSource(id:string){const state=this.state;if(!state)return;await state.gate;await state.ingress.flush();this.check(state);const source=this.source(id);return source.start?{snapshot:source.start.snapshotId,subscription:source.id,entity:source.entity}:undefined;}
+ pendingSource(id:string){
+  const state=this.state;if(!state)return;const source=this.source(id);if(!source.start)return;this.check(state);
+  // This header is installed only after its fenced SQL preparation commits.
+  // Display already committed pages without waiting for later wire controls,
+  // a lazy reducer download or the rest of an in-progress import.
+  return {snapshot:source.start.snapshotId,subscription:source.id,entity:source.entity};
+ }
  quarantined(generation:number){this.stop();void this.options.sessions.quarantine(this.options.connection,generation).catch(error=>this.options.failed(error));}
  disconnected(){this.stop();this.options.sessions.disconnected(this.options.connection);}
  failed(error:unknown){this.stop();this.options.failed(error);}

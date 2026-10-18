@@ -72,7 +72,9 @@ export class SQLiteSafetyJournal {
   // crypto inside that transaction could let the browser auto-commit it.
   const digest=await hash(encoded.value),fingerprint=await hash(JSON.stringify({...owned,scope:intentScope})),legacyHash=legacyValue===undefined?undefined:await hash(legacyValue),preparedHash=preparedValue===undefined?undefined:await hash(preparedValue);
   return this.transaction(['headers','bodies','receipts','sessions'],'readwrite',async tx=>{
-   if((await request(tx.objectStore('sessions').get(intentScope)))?.revoked)fail('FENCED','Cached session was revoked');
+   const savedSession=await request(tx.objectStore('sessions').get(intentScope));
+   if(savedSession?.revoked)fail('FENCED','Cached session was revoked');
+   if(legacyValue!==undefined&&savedSession&&savedSession.value!==sessionValue)fail('FENCED','Recovery command session changed');
    const receipts=tx.objectStore('receipts'),previous=await request(receipts.get([intentScope,owned.commandId])) as Receipt|undefined;
    if(previous){if(previous.fingerprint!==fingerprint||legacyHash!==undefined&&previous.legacyHash!==legacyHash||preparedHash!==undefined&&previous.preparedHash!==preparedHash)fail('INTENT_CONFLICT','Safety journal command reused with different content');return previous;}
    const sequence=Number(await request(tx.objectStore('headers').add({scope:intentScope,command:owned.commandId,bytes})));
@@ -129,6 +131,13 @@ export class SQLiteSafetyJournal {
    await request(store.put({scope:ownerScope,value}));
    if(!isCurrent())fail('FENCED','Session admission changed');
   });
+ }
+ /** Migration cannot replace a newer admission or revive a revoked one.
+  * The comparison and first insert share the same independent transaction. */
+ async seedSession(ownerScope:string,session:LocalReplicaSession){
+  scope(ownerScope);sqlitePayloadBytes(session,131072);const value=JSON.stringify(session);decodedJSONBytes(value,131072);
+  if(!session?.directive||session.directive.protocolVersion!==1||!session.identity||typeof session.artifactHash!=='string')throw new TypeError('Invalid durable session');
+  return this.transaction(['sessions'],'readwrite',async tx=>{const store=tx.objectStore('sessions'),old=await request(store.get(ownerScope));if(old){if(old.revoked)fail('FENCED','Cached session was revoked');if(old.value!==value)fail('FENCED','A newer session won legacy migration');return;}await request(store.add({scope:ownerScope,value}));});
  }
  async revokeSession(ownerScope:string){scope(ownerScope);await this.transaction(['sessions'],'readwrite',async tx=>{await request(tx.objectStore('sessions').put({scope:ownerScope,revoked:true}));});}
  async sessionRevoked(ownerScope:string){scope(ownerScope);return this.transaction(['sessions'],'readonly',async tx=>!!(await request(tx.objectStore('sessions').get(ownerScope)))?.revoked);}

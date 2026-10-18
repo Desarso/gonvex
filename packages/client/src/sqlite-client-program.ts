@@ -15,14 +15,18 @@ import {SQLiteNativeFeed} from './sqlite-native-feed.js';
 import {SQLiteReducerOwner} from './sqlite-reducer-owner.js';
 import {SQLiteReducerDelivery} from './sqlite-reducer-delivery.js';
 import {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
+import {SQLiteLegacyBootstrap} from './sqlite-legacy-bootstrap.js';
+import type {LocalReplicaSession} from './local-replica.js';
 import {SQLiteWindowStore} from './sqlite-window-store.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 type Auth=Pick<GonvexClientAuth,'project'|'tenant'|'token'|'identity'>;
 type Source={id:string;signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;eager:boolean;bytes:number;closing?:Promise<void>};
-type Connection={authVersion:number;route:Omit<Auth,'token'>;id:string;url:string;identityKey:string;client:SQLiteNativeTransport;feed:SQLiteNativeFeed;delivery:SQLiteReducerDelivery;tabs:Set<string>;sources:Map<string,Source>;sourceBytes:number;restoring?:Promise<void>;denied?:boolean;admissionKey?:{generation:string;value:Promise<string>};recovered?:boolean;recovering?:Promise<void>;lastScope?:string;reconnectTimer?:ReturnType<typeof setTimeout>;reconnectAttempts?:number;timer?:ReturnType<typeof setTimeout>;failure?:{code:string;message:string}};
+type ControlSource={signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;value?:JsonValue;error?:string;version:number;bytes:number;resultBytes:number;close():void};
+type Connection={authVersion:number;authError?:{id:string;message:string;definitive:boolean;code?:string};developer?:{id:string;token:string;acked:Set<string>};route:Omit<Auth,'token'>;id:string;url:string;identityKey:string;client:SQLiteNativeTransport;feed:SQLiteNativeFeed;delivery:SQLiteReducerDelivery;tabs:Set<string>;sources:Map<string,Source>;sourceBytes:number;controls:Map<string,ControlSource>;controlBytes:number;restoring?:Promise<void>;migrationBlocked?:unknown;restoreScope?:string;restoreGeneration?:number;migrationTimer?:ReturnType<typeof setTimeout>;migrationSession?:LocalReplicaSession;denied?:boolean;admissionKey?:{generation:string;value:Promise<string>};recovered?:boolean;recovering?:Promise<void>;lastScope?:string;reconnectTimer?:ReturnType<typeof setTimeout>;reconnectAttempts?:number;timer?:ReturnType<typeof setTimeout>;failure?:{code:string;message:string}};
 type Binding={artifactHash:string;clientContract?:ClientContract;runtime:Pick<PortableReducerRuntime,'prepare'|'execute'|'isPrepared'>;
  /** Generated public refs plus SDK-owned __local collections. No app RPC
   * supplies its own function metadata, authorization, SQL or visibility plan. */
+ legacyStorage?:{replicaName:string;outboxName:string};
  references:readonly FunctionReference[];collections:readonly string[];offlineMaxAgeMs:number|null;
 };
 const stable=(value:JsonValue):string=>value===null||typeof value!=='object'?JSON.stringify(value):Array.isArray(value)?'['+value.map(stable).join(',')+']':'{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+stable(value[key]!)).join(',')+'}';
@@ -37,8 +41,8 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  private readonly safety=new SQLiteSafetyJournal();private readonly sessions:SQLiteWorkerSessions;private readonly tokens:SQLiteWorkerTokens;
  private readonly reducer:SQLiteReducerOwner;private readonly windows:SQLiteWindowStore;
  private readonly references=new Map<string,FunctionReference>();private readonly connections=new Map<string,Connection>();private readonly tabs=new Map<string,string>();
- private readonly maintenance:SQLiteOwnerMaintenance;
- private readonly ledger=new ByteLedger(16777216);private readonly transient=new SQLiteTransientBudget();private readonly transport=new SQLiteTransientBudget(2097152,256);private readonly transportAuth=new SQLiteTransientBudget(524288,8);private readonly catalogBytes:number;
+ private readonly maintenance:SQLiteOwnerMaintenance;private readonly legacy:SQLiteLegacyBootstrap;
+ private readonly ledger=new ByteLedger(20971520);private readonly transient=new SQLiteTransientBudget();private readonly transport=new SQLiteTransientBudget(2097152,256);private readonly transportAuth=new SQLiteTransientBudget(524288,8);private readonly catalogBytes:number;
  private connecting=Promise.resolve();private closed=false;
  constructor(private readonly owner:SQLiteOwnerProgramContext,private readonly binding:Binding){
   text(binding.artifactHash,256);sqlitePayloadBytes(binding.clientContract??{},65536);this.catalogBytes=sqlitePayloadBytes({references:binding.references,collections:binding.collections},2097152)+binding.references.length*64;if(this.catalogBytes>2097152)fail('BUDGET','Generated native function catalog exceeds its metadata allowance');if(binding.references.length>4096||binding.collections.length>4096)fail('BUDGET','Generated native function catalog exceeds budget');
@@ -52,15 +56,17 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   this.reducer=new SQLiteReducerOwner(owner,{runtime:binding.runtime,artifactHash:binding.artifactHash,resolveTab:tab=>this.sessions.resolveTab(tab,true),context:scope=>this.context(scope),persistIntent:async(input,context,prepared)=>{
    const saved=await owner.canonical.loadSession(context.intentScope);if(!saved||saved.directive.visibilityScope!==input.scope||saved.artifactHash!==binding.artifactHash)fail('FENCED','Intent recovery session changed');await this.safety.appendPrepared(input,prepared,saved,context.intentScope);
   }});
+  this.legacy=new SQLiteLegacyBootstrap({owner,journal:this.reducer.journal,safety:this.safety,artifactHash:binding.artifactHash,replicaName:binding.legacyStorage?.replicaName??'gonvex-local-replica',outboxName:binding.legacyStorage?.outboxName??'gonvex-outbox'});
   this.ledger.register('native-function-catalog',()=>({name:'native-function-catalog',bytes:this.catalogBytes,entries:this.references.size,maxBytes:2097152,maxEntries:4096,evictions:0,refusals:0}));
   this.ledger.register('native-source-interests',()=>({name:'native-source-interests',bytes:[...this.connections.values()].reduce((sum,value)=>sum+value.sourceBytes,0),entries:[...this.connections.values()].reduce((sum,value)=>sum+value.sources.size,0),maxBytes:2097152,maxEntries:1024,evictions:0,refusals:0}));
+  this.ledger.register('native-control-watches',()=>({name:'native-control-watches',bytes:[...this.connections.values()].reduce((sum,connection)=>sum+connection.controlBytes,0),entries:[...this.connections.values()].reduce((sum,connection)=>sum+connection.controls.size,0),maxBytes:2097152,maxEntries:256,evictions:0,refusals:0}));
   this.ledger.register('native-source-descriptors',()=>({name:'native-source-descriptors',bytes:[...this.connections.values()].reduce((sum,value)=>sum+value.feed.stats().sourceBytes,0),entries:[...this.connections.values()].reduce((sum,value)=>sum+value.feed.stats().sources,0),maxBytes:2097152,maxEntries:1024,evictions:0,refusals:0}));
   this.ledger.register('native-transient',()=>this.transient.stats());
   this.ledger.register('native-transport',()=>({...this.transport.stats(),name:'native-transport'}));
   this.ledger.register('native-transport-auth',()=>({...this.transportAuth.stats(),name:'native-transport-auth'}));
   this.ledger.register('native-intent-deliveries',()=>({name:'native-intent-deliveries',bytes:[...this.connections.values()].reduce((sum,value)=>sum+value.delivery.stats().bytes,0),entries:[...this.connections.values()].reduce((sum,value)=>sum+value.delivery.stats().entries,0),maxBytes:2621440,maxEntries:64,evictions:0,refusals:0}));
   for(const snapshot of this.sessions.budgets())this.ledger.register(snapshot.name,()=>this.sessions.budgets().find(value=>value.name===snapshot.name)!);this.ledger.register('worker-token-requests',()=>this.tokens.stats());
-  this.ledger.register('native-connections',()=>({name:'native-connections',bytes:this.connections.size*8192+this.tabs.size*512,entries:this.connections.size+this.tabs.size,maxBytes:98304,maxEntries:72,evictions:0,refusals:0}));
+  this.ledger.register('native-connections',()=>({name:'native-connections',bytes:this.connections.size*8192+this.tabs.size*512+[...this.connections.values()].reduce((sum,connection)=>sum+(connection.developer?.token.length??0)*2,0),entries:this.connections.size+this.tabs.size,maxBytes:360448,maxEntries:72,evictions:0,refusals:0}));
   this.maintenance=new SQLiteOwnerMaintenance(owner,error=>{for(const connection of this.connections.values()){connection.failure={code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)};this.notify(connection);}});this.maintenance.start();
  }
  private ref(path:unknown,kind?:string){text(path,1024);const ref=this.references.get(path);if(!ref||kind&&ref.kind!==kind||ref.authorization==='internal')fail('INVALID_ROW','Unknown generated native function');return ref;}
@@ -110,15 +116,38 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
   if(this.closed||this.connections.get(connection.id)!==connection)return;if(connection.timer)clearTimeout(connection.timer);
   connection.timer=setTimeout(()=>{connection.timer=undefined;void this.recover(connection).then(()=>connection.delivery.drainOnce()).then(result=>{this.notify(connection);if(result.nextDelay!==null)this.scheduleDelivery(connection,result.nextDelay);},error=>{if(this.closed)return;connection.failure={code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)};this.notify(connection);this.scheduleDelivery(connection,1000);});},Math.min(60000,Math.max(0,delay)));
  }
+ private scheduleMigration(connection:Connection,delay=0){
+  clearTimeout(connection.migrationTimer);if(this.closed||!connection.migrationSession||this.connections.get(connection.id)!==connection)return;
+  connection.migrationTimer=setTimeout(()=>{connection.migrationTimer=undefined;const admitted=this.admission(connection),session=connection.migrationSession;if(!admitted||!session)return;if(connection.restoring){this.scheduleMigration(connection,100);return;}
+   void this.legacy.step(admitted.intentScope,session).then(result=>{if(!result.verified)this.scheduleMigration(connection,100);},error=>{if(this.closed||this.connections.get(connection.id)!==connection)return;connection.failure={code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)};this.notify(connection);});
+  },delay);
+ }
+ private async watchControl(connection:Connection,ref:FunctionReference,args:JsonValue,tab:string){
+  if(ref.scope!=='control'||ref.kind!=='query'||ref.delivery==='replica')fail('INVALID_ROW','Expected a generated Control query');
+  const encoded=stable(args),signature=await digest(connection.id+'\0'+ref.path+'\0'+encoded);if(this.tabs.get(tab)!==connection.id)fail('FENCED','Control watch caller detached');
+  let source=connection.controls.get(signature);if(!source){const bytes=sqlitePayloadBytes({path:ref.path,args},16384)+512;if(connection.controls.size>=32||connection.controlBytes+bytes+64>262144)fail('BUDGET','Control watch allowance exceeded');
+   source={signature,ref,args:JSON.parse(encoded),tabs:new Set(),version:0,bytes,resultBytes:0,close:()=>{}};const selected=source;
+   source.close=connection.client.watchControl(ref,source.args,value=>{
+    if(this.connections.get(connection.id)!==connection||connection.controls.get(signature)!==selected)return;
+    let resultBytes:number;try{resultBytes=sqlitePayloadBytes(value,131072);if(connection.controlBytes-selected.resultBytes+resultBytes>262144)fail('BUDGET','Control result allowance exceeded');}catch{selected.error='Control result exceeds its byte budget';selected.version++;this.notify(connection);return;}
+    connection.controlBytes+=resultBytes-selected.resultBytes;selected.resultBytes=resultBytes;selected.value='result'in value?value.result:undefined;selected.error='error'in value?value.error:undefined;selected.version++;this.notify(connection);
+   });connection.controls.set(signature,source);connection.controlBytes+=bytes;
+  }
+  if(!source.tabs.has(tab)){if(connection.controlBytes+64>262144)fail('BUDGET','Control interest allowance exceeded');source.tabs.add(tab);connection.controlBytes+=64;}return {signature};
+ }
+ private unwatchControl(connection:Connection,source:ControlSource,tab:string){
+  if(!source.tabs.delete(tab))return;connection.controlBytes-=64;if(source.tabs.size)return;connection.controls.delete(source.signature);connection.controlBytes-=source.bytes+source.resultBytes;source.close();
+ }
  private async addSource(connection:Connection,ref:FunctionReference,args:JsonValue,tab?:string,eager=false):Promise<Source>{
   if(ref.delivery!=='replica'||!ref.replica)fail('INVALID_ROW','Expected a generated Replica Collection');const encoded=stable(args),signature=await digest(this.binding.artifactHash+'\0'+connection.id+'\0'+ref.path+'\0'+encoded);let source=connection.sources.get(signature);
   if(source?.closing){await source.closing.catch(()=>{});return this.addSource(connection,ref,args,tab,eager);}
   if(tab&&this.tabs.get(tab)!==connection.id)fail('FENCED','Native source caller detached');
   if(!source){
-   const bytes=sqlitePayloadBytes({path:ref.path,args},16384)+1024;if(connection.sources.size>=128||connection.sourceBytes+bytes>262144)fail('BUDGET','Native subscription allowance exceeded');
-   source={id:'source:'+signature,signature,ref,args:JSON.parse(encoded),tabs:new Set(),eager,bytes};connection.sources.set(signature,source);connection.sourceBytes+=bytes;
+   const bytes=sqlitePayloadBytes({path:ref.path,args},16384)+1024;if(connection.sources.size>=128||connection.sourceBytes+bytes+(tab?64:0)>262144)fail('BUDGET','Native subscription allowance exceeded');
+   source={id:'source:'+signature,signature,ref,args:JSON.parse(encoded),tabs:new Set(),eager,bytes};
    const completeEntity=!Object.keys(ref.replica.equalFilters??{}).length&&!ref.replica.excludeWhenSet?.length;
    connection.feed.register({id:source.id,signature,entity:ref.replica.table,key:ref.replica.key,path:ref.path,...(completeEntity?{completeEntity:true}:{}),...(ref.replica.columns?{columns:[...ref.replica.columns]}:{})});
+   connection.sources.set(signature,source);connection.sourceBytes+=bytes;
    if(connection.client.localSessionState()==='authenticated')this.openSource(connection,source);
   }
   if(tab&&!source.tabs.has(tab)){if(connection.sourceBytes+64>262144)fail('BUDGET','Native source interests exceed budget');source.tabs.add(tab);connection.sourceBytes+=64;}source.eager||=eager;return source;
@@ -139,11 +168,33 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
     if(this.connections.size>=8)fail('BUDGET','Native connection allowance exceeded');this.sessions.open(id);
     let record!:Connection;
     const feed=new SQLiteNativeFeed({owner:this.owner,sessions:this.sessions,connection:id,artifactHash:this.binding.artifactHash,reserve:bytes=>this.transient.reserve(bytes),prepare:path=>this.reducer.core.prepare(path),authority:(scope,mutate)=>this.reducer.core.rebase(scope,mutate).then(()=>{}),send:message=>record.client.sendOwnerMessage(message),advanceWatermark:revision=>{record.reconnectAttempts=0;record.failure=undefined;record.client.advanceOwnerWatermark(revision);this.notify(record);},failed:error=>this.feedFailed(record,error)});
-    const restore=(scope:string,generation:number)=>{feed.authenticating(scope,generation);const restoring=this.sessions.restore(id).then(()=>{},()=>{});record.restoring=restoring;void restoring.then(()=>{if(record.restoring===restoring)record.restoring=undefined;this.notify(record);});};
-    const host={opening:restore,authenticating:restore,session:async(session:any,current:()=>boolean)=>{const previous=this.admission(record);if(previous&&JSON.stringify(previous.identity)!==JSON.stringify(session.identity))record.authVersion++;await feed.session(session,current);record.denied=false;record.recovered=false;await this.recover(record);if(record.lastScope&&record.lastScope!==session.directive?.visibilityScope)void this.maintenance.retire(record.lastScope,[...record.sources.values()].map(source=>source.id)).catch(()=>{});record.lastScope=session.directive?.visibilityScope;if(!session.directive)record.failure=undefined;if(session.directive&&session.identity){for(const source of record.sources.values())if(!source.closing)this.openSource(record,source);this.scheduleDelivery(record);}this.notify(record);},binary:(frame:ArrayBuffer,generation:number)=>feed.binary(frame,generation),frame:(message:any,generation:number)=>feed.frame(message,generation),quarantined:(generation:number)=>{record.denied=true;feed.quarantined(generation);this.notify(record);},disconnected:()=>{feed.disconnected();this.notify(record);},failed:(error:unknown)=>feed.failed(error)};
+    const restore=(scope:string,generation:number)=>{
+     feed.authenticating(scope,generation);record.restoreScope=scope;record.restoreGeneration=generation;
+     const current=()=>!this.closed&&this.connections.get(id)===record&&record.restoreScope===scope&&record.restoreGeneration===generation;
+     const prior=record.restoring;
+     const restoring=(async()=>{await prior?.catch(()=>{});if(!current())return;
+      const saved=await this.safety.session(scope)??await this.owner.runOwner(0,()=>this.owner.canonical.loadSession(scope));
+      let selected:LocalReplicaSession|undefined;
+      try{selected=await this.legacy.prepare(scope,saved?.artifactHash===this.binding.artifactHash?saved:undefined,current);}catch(error){if((error as any)?.code!=='SCHEMA_MISMATCH')throw error;}
+      if(!current())return;
+      if(selected){record.migrationSession=selected;record.recovered=false;}
+      try{await this.sessions.restore(id,current);}catch(error){if((error as any)?.code!=='SCHEMA_MISMATCH')throw error;}
+     })();record.restoring=restoring;void restoring.then(()=>{if(record.restoring===restoring){record.restoring=undefined;record.migrationBlocked=undefined;}this.scheduleMigration(record);this.notify(record);},error=>{record.migrationBlocked=error;record.failure={code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)};this.notify(record);});
+    };
+    const host={opening:restore,authenticating:restore,session:async(session:any,current:()=>boolean)=>{
+     await record.restoring?.catch(()=>{});const previous=this.admission(record);if(previous&&JSON.stringify(previous.identity)!==JSON.stringify(session.identity))record.authVersion++;
+     const cutover=(async()=>{await feed.session(session,current);
+      if(session.directive&&session.identity){const saved=await this.owner.runOwner(0,()=>this.owner.canonical.loadSession(session.intentScope));if(!saved)fail('FENCED','Native session disappeared before legacy cutover');await this.legacy.prepare(session.intentScope,saved,current);record.migrationSession=saved;}
+      record.denied=false;record.recovered=false;await this.recover(record);
+      if(record.lastScope&&record.lastScope!==session.directive?.visibilityScope)void this.maintenance.retire(record.lastScope,[...record.sources.values()].map(source=>source.id)).catch(()=>{});record.lastScope=session.directive?.visibilityScope;
+      if(!session.directive)record.failure=undefined;
+      if(session.directive&&session.identity){for(const source of [...record.sources.values()].sort((a,b)=>Number(!!b.tabs.size)-Number(!!a.tabs.size)))if(!source.closing)this.openSource(record,source);this.scheduleDelivery(record);this.scheduleMigration(record);}
+      this.notify(record);
+     })();record.restoring=cutover;try{await cutover;record.migrationBlocked=undefined;}catch(error){record.migrationBlocked=error;throw error;}finally{if(record.restoring===cutover)record.restoring=undefined;}
+    },binary:(frame:ArrayBuffer,generation:number)=>feed.binary(frame,generation),frame:(message:any,generation:number)=>feed.frame(message,generation),quarantined:(generation:number)=>{record.denied=true;for(const source of record.controls.values())if(source.ref.authorization!=='public'){record.controlBytes-=source.resultBytes;source.resultBytes=0;source.value=undefined;source.error='Session unavailable';source.version++;}feed.quarantined(generation);this.notify(record);},authError:(message:string,details:{definitive:boolean;code?:string})=>{record.authError={id:crypto.randomUUID(),message:message.slice(0,512),...details,...(details.code?{code:details.code.slice(0,128)}:{})};this.notify(record);},developerCredential:(token:string)=>{record.developer={id:crypto.randomUUID(),token,acked:new Set()};this.notify(record);},disconnected:()=>{feed.disconnected();this.notify(record);},failed:(error:unknown)=>feed.failed(error)};
     const client=new SQLiteNativeTransport(url.href,{...auth,reserve:bytes=>this.transport.reserve(bytes),releaseAuth:this.transportAuth.reserve(65536),clientContract:this.binding.clientContract,ownerHost:host,fetchToken:request=>this.tokens.fetch(id,identityKey,request.forceRefreshToken)});
     const delivery=new SQLiteReducerDelivery({owner:this.owner,reducer:this.reducer,safety:this.safety,admission:()=>{const current=this.admission(record);return current&&{scope:current.scope,intentScope:current.intentScope,generation:current.generation,online:current.online};},send:entry=>client.callOwnerReducer({...this.ref(entry.path,'reducer'),artifactHash:entry.localExecution?.artifactHash??this.binding.artifactHash,intentEntropy:entry.localExecution?.intentEntropy},entry.args as JsonValue,entry.idempotencyKey),updateRequired:message=>{record.failure={code:'SCHEMA_MISMATCH',message};this.notify(record);}});
-    record=connection={authVersion:0,route:{project:auth.project,tenant:auth.tenant,identity:auth.identity},id,url:url.href,identityKey,client,feed,delivery,tabs:new Set(),sources:new Map(),sourceBytes:0};this.connections.set(id,record);
+    record=connection={authVersion:0,route:{project:auth.project,tenant:auth.tenant,identity:auth.identity},id,url:url.href,identityKey,client,feed,delivery,tabs:new Set(),sources:new Map(),sourceBytes:0,controls:new Map(),controlBytes:0};this.connections.set(id,record);
     for(const path of this.binding.collections){const ref=this.ref(path);if(ref.replica?.maxRows!==undefined&&ref.replica.maxRows>0&&ref.replica.maxRows<=1000)await this.addSource(record,ref,{},undefined,true);}
    }
    if(this.tabs.size>=64&&!this.tabs.has(caller.tabID))fail('BUDGET','Native tab allowance exceeded');this.tabs.set(caller.tabID,id);connection.tabs.add(caller.tabID);this.sessions.attachTab(caller.tabID,id);
@@ -153,7 +204,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  async call(value:unknown,caller:SQLiteOwnerCaller):Promise<unknown>{
   sqlitePayloadBytes(value,131072);if(!value||typeof value!=='object'||Array.isArray(value))throw new TypeError('Invalid native client request');const input=structuredClone(value) as any;if(this.closed||caller.signal.aborted)fail('FENCED','Native client is closed');
   if(input.method==='connect')return this.connect(input,caller);
-  const connection=this.connection(caller.tabID);if(['entities','replicaPage','replicaPendingPage','reducer'].includes(input.method))await connection.restoring;
+  const connection=this.connection(caller.tabID);if(['entities','replicaPage','replicaPendingPage','reducer'].includes(input.method)){await connection.restoring;if(connection.migrationBlocked)throw connection.migrationBlocked;}
   switch(input.method){
    case 'controls':{
     const admitted=this.admission(connection);let key:string|null|undefined;
@@ -165,8 +216,12 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
      key=await connection.admissionKey!.value;
      if(this.admission(connection)?.generation!==admitted.generation)fail('FENCED','Control admission changed');
     }else if(connection.denied||!connection.restoring)key=null;
-    return {tokens:this.tokens.poll(caller.tabID),status:connection.client.connectionState(),session:admitted?admitted.online?'authenticated':'restored':connection.client.localSessionState(),...(key!==undefined?{admissionKey:key}:{}),failure:connection.failure??null};
+    return {tokens:this.tokens.poll(caller.tabID),status:connection.client.connectionState(),session:admitted?admitted.online?'authenticated':'restored':connection.client.localSessionState(),...(key!==undefined?{admissionKey:key}:{}),failure:connection.failure??null,authError:connection.authError??null,...(connection.developer&&!connection.developer.acked.has(caller.tabID)?{developerCredential:{id:connection.developer.id,token:connection.developer.token}}:{})};
    }
+   case 'credentialAck':if(connection.developer&&input.id===connection.developer.id)connection.developer.acked.add(caller.tabID);return null;
+   case 'watchControl':return this.watchControl(connection,this.ref(input.path,'query'),input.args??{},caller.tabID);
+   case 'unwatchControl':{const source=connection.controls.get(input.signature);if(source)this.unwatchControl(connection,source,caller.tabID);return null;}
+   case 'controlState':{const source=connection.controls.get(input.signature);if(!source?.tabs.has(caller.tabID))fail('FENCED','Tab does not own that Control watch');if(input.afterVersion===source.version)return {version:source.version};return {version:source.version,...(source.value!==undefined?{result:source.value}:{}),...(source.error?{error:source.error}:{})};}
    case 'token':this.tokens.respond(caller.tabID,input.response);return null;
    case 'auth':{
     const auth=input.auth??{};sqlitePayloadBytes(auth,65536);if(Object.keys(auth).some(field=>!['token'].includes(field)))throw new TypeError('Native identity changes require a new connection');if(auth.token!==undefined&&(typeof auth.token!=='string'||auth.token.length>16384))throw new TypeError('Invalid native token');if(!connection.route.identity)return this.connect({url:connection.url,auth:{...connection.route,...auth}},caller);connection.authVersion++;this.tokens.invalidate(connection.id);connection.client.setAuth(auth);return null;
@@ -178,7 +233,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    }
    case 'replicaPendingPage':{
     text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that source');const admitted=this.checkCaller(caller,connection),pending=await connection.feed.pendingSource(source.id);if(!pending)return null;
-    return this.owner.runOwner(131072,async()=>{const current=()=>{this.checkCaller(caller,connection,admitted.generation);return connection.sources.get(source.signature)===source&&(source.eager||source.tabs.has(caller.tabID));};if(!current())fail('FENCED','Pending source detached');if(await this.owner.database.getFirstAsync('SELECT 1 FROM gv_snapshot_activation_receipts WHERE scope=? AND subscription=? AND snapshot=?',admitted.scope,pending.subscription,pending.snapshot)){if(input.expected)fail('PAGE_CHANGED','Pending source has become canonical');return null;}return this.owner.pendingReader.page({scope:admitted.scope,...pending,after:input.after,limit:input.limit,expected:input.expected},current);});
+    return this.owner.runOwner(131072,async()=>{const current=()=>{this.checkCaller(caller,connection,admitted.generation);return connection.sources.get(source.signature)===source&&(source.eager||source.tabs.has(caller.tabID));};if(!current())fail('FENCED','Pending source detached');if(!await this.owner.database.getFirstAsync('SELECT 1 FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=? AND discarded=0',admitted.scope,pending.subscription,pending.snapshot)){if(input.expected)fail('PAGE_CHANGED','Pending source was replaced');return null;}if(await this.owner.database.getFirstAsync('SELECT 1 FROM gv_snapshot_activation_receipts WHERE scope=? AND subscription=? AND snapshot=?',admitted.scope,pending.subscription,pending.snapshot)){if(input.expected)fail('PAGE_CHANGED','Pending source has become canonical');return null;}return this.owner.pendingReader.page({scope:admitted.scope,...pending,after:input.after,limit:input.limit,expected:input.expected},current);});
    }
    case 'replicaPage':{
     text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that source');const admission=this.checkCaller(caller,connection);await this.readable(connection,admission);return this.owner.runOwner(131072,async()=>{this.checkCaller(caller,connection,admission.generation);const result=await this.owner.reader.window({scope:admission.scope,signature:source.signature,offset:input.offset,limit:input.limit,generation:input.generation,expected:input.expected});this.checkCaller(caller,connection,admission.generation);if(connection.sources.get(source.signature)!==source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Native source was detached');return result??null;});
@@ -191,10 +246,11 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    default:fail('INVALID_ROW','Unknown native client operation');
   }
  }
- detachTab(tabID:string){const id=this.tabs.get(tabID);if(!id)return;this.tabs.delete(tabID);this.sessions.detachTab(tabID);const connection=this.connections.get(id);if(!connection)return;connection.tabs.delete(tabID);this.tokens.detachTab(tabID);
+ detachTab(tabID:string){const id=this.tabs.get(tabID);if(!id)return;this.tabs.delete(tabID);this.sessions.detachTab(tabID);const connection=this.connections.get(id);if(!connection)return;connection.tabs.delete(tabID);connection.developer?.acked.delete(tabID);this.tokens.detachTab(tabID);
+  for(const source of [...connection.controls.values()])this.unwatchControl(connection,source,tabID);
   for(const source of connection.sources.values())if(source.tabs.delete(tabID)){connection.sourceBytes-=64;if(!source.tabs.size&&!source.eager)void this.closeSource(connection,source).catch(()=>{});}
-  if(!connection.tabs.size){if(connection.lastScope)void this.maintenance.retire(connection.lastScope,[...connection.sources.values()].map(source=>source.id)).catch(()=>{});if(connection.timer)clearTimeout(connection.timer);clearTimeout(connection.reconnectTimer);this.tokens.invalidate(id);connection.delivery.close();connection.client.dispose();connection.feed.close();this.sessions.close(id);this.connections.delete(id);}
+  if(!connection.tabs.size){if(connection.lastScope)void this.maintenance.retire(connection.lastScope,[...connection.sources.values()].map(source=>source.id)).catch(()=>{});if(connection.timer)clearTimeout(connection.timer);clearTimeout(connection.reconnectTimer);clearTimeout(connection.migrationTimer);this.tokens.invalidate(id);connection.delivery.close();connection.client.dispose();connection.feed.close();this.sessions.close(id);this.connections.delete(id);}
  }
  budgets(){return this.ledger.snapshot();}
- close(){if(this.closed)return;this.closed=true;this.maintenance.close();for(const tab of [...this.tabs.keys()])this.detachTab(tab);this.tokens.close();this.safety.close();}
+ close(){if(this.closed)return;this.closed=true;this.maintenance.close();for(const tab of [...this.tabs.keys()])this.detachTab(tab);this.tokens.close();this.legacy.close();this.safety.close();}
 }

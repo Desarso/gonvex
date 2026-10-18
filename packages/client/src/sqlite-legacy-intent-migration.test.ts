@@ -4,6 +4,8 @@ import {IDBFactory,IDBKeyRange} from 'fake-indexeddb';
 import {SQLiteIndexedDBMigrationSource} from './sqlite-idb-migration-source.js';
 import {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
 import {SQLiteIntentJournal} from './sqlite-intent-journal.js';
+import {SQLiteLegacyBootstrap} from './sqlite-legacy-bootstrap.js';
+import type {SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
 import {SQLiteLegacyIntentMigration} from './sqlite-legacy-intent-migration.js';
 import {SQLiteTypedReplicaEngine} from './sqlite-typed-engine.js';
 import {sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
@@ -15,11 +17,11 @@ const session:LocalReplicaSession={directive:{protocolVersion:1,scope:'tenant',v
 const tables={tasks:{key:'id',fields:{id:{kind:'text'},title:{kind:'text'}},indexes:[]}} as const;
 async function sqlite(safety:SQLiteSafetyJournal){
  const sql=new DatabaseSync(':memory:');const db=sqliteOwnerTransactions({async execAsync(query){sql.exec(query);},async runAsync(query,...args){return sql.prepare(query).run(...args as any[]);},async getFirstAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).get(...args as any[]) as T??null;},async getAllAsync<T>(query:string,...args:unknown[]){return sql.prepare(query).all(...args as any[]) as T[];},async withTransactionAsync(run){sql.exec('BEGIN');try{await run();sql.exec('COMMIT');}catch(error){sql.exec('ROLLBACK');throw error;}}} satisfies SQLiteReplicaDatabase);
- const engine=new SQLiteTypedReplicaEngine(db,tables);await engine.open('migrate');const canonical=sqliteTypedReplicaStorage(db,tables),journal=new SQLiteIntentJournal(db,()=>engine.verifyOwner());await canonical.ready();await journal.ready();const migration=new SQLiteLegacyIntentMigration({database:db,canonical,journal,safety,fence:()=>engine.verifyOwner()});return {sql,db,journal,canonical,migration};
+ const engine=new SQLiteTypedReplicaEngine(db,tables);await engine.open('migrate');const canonical=sqliteTypedReplicaStorage(db,tables),journal=new SQLiteIntentJournal(db,()=>engine.verifyOwner());await canonical.ready();await journal.ready();const migration=new SQLiteLegacyIntentMigration({database:db,canonical,journal,safety,fence:()=>engine.verifyOwner()});return {sql,db,engine,journal,canonical,migration};
 }
 async function source(factory:IDBFactory){
- const db=await new Promise<IDBDatabase>((resolve,reject)=>{const opening=factory.open('old-outbox',20);opening.onupgradeneeded=()=>opening.result.createObjectStore('entries',{keyPath:'id'});opening.onsuccess=()=>resolve(opening.result);opening.onerror=()=>reject(opening.error);});
- await new Promise<void>((resolve,reject)=>{const tx=db.transaction('entries','readwrite');for(let n=1;n<=30;n++)tx.objectStore('entries').add({id:n,scope:n%7===0?'foreign-account':identityScope,path:'tasks/create',idempotencyKey:'intent-'+n,args:{title:'Synthetic '+n},entityKeys:['tasks:stable-'+n],patches:[{entity:'tasks',rowId:'stable-'+n,op:'insert',fields:{id:'stable-'+n,title:'Synthetic '+n}}],localExecution:{scope:'visible',commandId:'intent-'+n,now:100+n,identity:session.identity,artifactHash:'old-artifact'},createdAt:100+n,attempts:n===1?2:0,nextAttemptAt:100+n,state:n===1?'inflight':n===2?'failed':n===3?'rejected':'pending',...(n===1?{sentAt:110}:{})});tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error);});db.close();return (await SQLiteIndexedDBMigrationSource.open('old-outbox',factory,IDBKeyRange))!;
+ const db=await new Promise<IDBDatabase>((resolve,reject)=>{const opening=factory.open('old-outbox',20);opening.onupgradeneeded=()=>opening.result.createObjectStore('entries',{keyPath:'id'}).createIndex('scope','scope');opening.onsuccess=()=>resolve(opening.result);opening.onerror=()=>reject(opening.error);});
+ await new Promise<void>((resolve,reject)=>{const tx=db.transaction('entries','readwrite');for(let n=1;n<=30;n++)tx.objectStore('entries').add({id:n,scope:n%7===0?'foreign-account':identityScope,path:'tasks/create',idempotencyKey:'intent-'+n,args:{title:n%7===0?'x'.repeat(200000):'Synthetic '+n},entityKeys:['tasks:stable-'+n],patches:[{entity:'tasks',rowId:'stable-'+n,op:'insert',fields:{id:'stable-'+n,title:'Synthetic '+n}}],localExecution:{scope:'visible',commandId:'intent-'+n,now:100+n,identity:session.identity,artifactHash:'old-artifact'},createdAt:100+n,attempts:n===1?2:0,nextAttemptAt:100+n,state:n===1?'inflight':n===2?'failed':n===3?'rejected':'pending',...(n===1?{sentAt:110}:{})});tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error);});db.close();return (await SQLiteIndexedDBMigrationSource.open('old-outbox',factory,IDBKeyRange))!;
 }
 it('moves fenced sessions and original offline intents before replica rows, with exact identity isolation and resumable settlement',async()=>{
  const factory=new IDBFactory(),safety=new SQLiteSafetyJournal('safety',factory,IDBKeyRange),legacy=await source(factory),f=await sqlite(safety);let recovered:Awaited<ReturnType<typeof sqlite>>|undefined;
@@ -43,4 +45,29 @@ it('keeps independent recovery durable when the SQLite cutover rolls back late, 
   expect((await f.journal.summary(identityScope)).count).toBe(0);expect(await f.canonical.loadSession(identityScope)).toBeUndefined();expect(await safety.count(identityScope)).toBe(26);expect(await legacy.count('entries')).toBe(30);
   await f.db.execAsync('DROP TRIGGER fail_cutover');expect(await f.migration.migrate(input)).toMatchObject({copied:26,alreadyCopied:false});expect((await f.journal.summary(identityScope)).count).toBe(26);
  }finally{f.sql.close();legacy.close();safety.close();}
+});
+
+it('automatically cuts over the session and scoped intents before copying rows, without hydrating legacy windows',async()=>{
+ const factory=new IDBFactory(),safety=new SQLiteSafetyJournal('safety',factory,IDBKeyRange),legacy=await source(factory),f=await sqlite(safety);legacy.close();
+ const old=await new Promise<IDBDatabase>((resolve,reject)=>{const opening=factory.open('old-replica',50);opening.onupgradeneeded=()=>{opening.result.createObjectStore('meta',{keyPath:['scope','key']});opening.result.createObjectStore('entities',{keyPath:['scope','entity','id']});opening.result.createObjectStore('windows',{keyPath:['scope','signature']});};opening.onsuccess=()=>resolve(opening.result);opening.onerror=()=>reject(opening.error);});
+ await new Promise<void>((resolve,reject)=>{const tx=old.transaction(['meta','entities','windows'],'readwrite');tx.objectStore('meta').put({scope:identityScope,key:'session',value:JSON.stringify(session)});tx.objectStore('entities').put({scope:'visible',entity:'tasks',id:'a',value:JSON.stringify({id:'a',title:'Offline row'}),authority:{epoch:'e',base:1,fields:{}}});tx.objectStore('windows').put({scope:'visible',signature:'huge',value:'x'.repeat(1000000)});tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error);});old.close();
+ let lane=Promise.resolve();const owner={database:f.db,engine:f.engine,canonical:f.canonical,runOwner<T>(_bytes:number,run:()=>Promise<T>){const next=lane.then(run);lane=next.then(()=>{},()=>{});return next;}} as SQLiteOwnerProgramContext;
+ const bootstrap=new SQLiteLegacyBootstrap({owner,journal:f.journal,safety,artifactHash:'artifact',replicaName:'old-replica',outboxName:'old-outbox',factory,ranges:IDBKeyRange});
+ try{
+  expect(await bootstrap.prepare(identityScope)).toEqual(session);expect((await f.journal.summary(identityScope)).count).toBe(26);
+  expect(await f.canonical.loadEntityRows('visible','tasks',['a'])).toEqual([]);
+  expect(await bootstrap.step(identityScope,session)).toMatchObject({verified:true,progress:{seen:1,copied:1}});
+  expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0].row).toEqual({id:'a',title:'Offline row'});
+  expect(await bootstrap.prepare(identityScope)).toEqual(session);expect((await f.journal.summary(identityScope)).count).toBe(26);
+  expect(await f.engine.integrity()).toBe('ok');
+ }finally{bootstrap.close();safety.close();f.sql.close();}
+});
+it('never replaces a newer durable admission or revives a revoked cache during legacy cutover',async()=>{
+ const factory=new IDBFactory(),safety=new SQLiteSafetyJournal('safety',factory,IDBKeyRange),legacy=await source(factory),f=await sqlite(safety);
+ try{
+  const newer={...session,lastOnlineAtMs:999};await safety.saveSession(identityScope,newer,true);await f.canonical.saveSession(identityScope,newer);
+  await expect(f.migration.migrate({source:legacy,store:'entries',identityScope,session})).rejects.toMatchObject({code:'FENCED'});
+  expect(await safety.session(identityScope)).toEqual(newer);expect(await f.canonical.loadSession(identityScope)).toEqual(newer);expect(await safety.count(identityScope)).toBe(0);
+  await safety.revokeSession(identityScope);await expect(f.migration.migrate({source:legacy,store:'entries',identityScope,session:newer})).rejects.toMatchObject({code:'FENCED'});expect(await safety.sessionRevoked(identityScope)).toBe(true);
+ }finally{legacy.close();safety.close();f.sql.close();}
 });

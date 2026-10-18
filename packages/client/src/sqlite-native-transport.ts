@@ -7,6 +7,7 @@ import {GonvexClientError,reducerErrorClassFromMessage} from './client-error.js'
 import {sqlitePayloadBytes} from './sqlite-admission.js';
 
 type Options=GonvexClientAuth&{ownerHost:SQLiteTransportHost;clientContract?:ClientContract;reserve(bytes:number):()=>void;releaseAuth?:()=>void};
+type ControlWatch={ref:FunctionReference;args:JsonValue;wireId?:string;authSerial?:number;release():void;receive(value:{result:JsonValue}|{error:string}):void};
 type Pending={id:string;kind:'query'|'reducer'|'action';path:string;command?:string;control:boolean;public:boolean;wire?:string;sent:boolean;result?:JsonValue;answered:boolean;revision?:number;controlReady:boolean;timer?:ReturnType<typeof setTimeout>;resolve(value:JsonValue):void;reject(error:Error):void;release():void};
 const error=(message:string,code:'auth'|'closed'|'disconnected'|'superseded'|'timeout')=>new GonvexClientError(message,{code});
 /** Dedicated-owner wire transport. It has no legacy replica, IndexedDB engine,
@@ -17,7 +18,7 @@ export class SQLiteNativeTransport {
  private auth:GonvexClientAuth;private socket?:WebSocket;private generation=0;private authSerial=0;private identityRevision=0;
  private latestAuth?:string;private activeAuth?:string;private authInFlight=true;private installing=false;private closed=false;private disposed=false;private quarantined=false;
  private capabilities:ServerCapabilities={};private artifact='';private watermark=0;private watermarkFence='';private session:'unavailable'|'authenticated'='unavailable';
- private readonly ephemeral=crypto.randomUUID();private readonly pending=new Map<string,Pending>();private waiting=0;
+ private readonly ephemeral=crypto.randomUUID();private readonly pending=new Map<string,Pending>();private waiting=0;private readonly controlWatches=new Set<ControlWatch>();
  private tokenCancel?:()=>void;
  private retry?:ReturnType<typeof setTimeout>;private authTimer?:ReturnType<typeof setTimeout>;private refreshed=false;private refreshedToken?:string;private sendTimer?:ReturnType<typeof setTimeout>;private reconnectAttempts=0;private connectionCount=0;private hasEver=false;
  constructor(private readonly url:string,private readonly options:Options){this.auth={project:options.project,tenant:options.tenant,identity:options.identity,token:options.token,fetchToken:options.fetchToken};}
@@ -74,7 +75,7 @@ export class SQLiteNativeTransport {
   if(message.type==='auth.result'||message.type==='auth.error'){
    const unsolicited=message.type==='auth.error'&&(message.id==='membership-changed'||message.id==='session-expired');
    if(unsolicited){
-    if(['revoked','member_removed','account_disabled'].includes(message.code??'')){this.deny(generation,message.error);return;}
+    if(['revoked','member_removed','account_disabled'].includes(message.code??'')){this.deny(generation,message.error,message.code);return;}
     if(message.id==='membership-changed'){this.options.ownerHost.quarantined?.(generation);this.session='unavailable';this.activeAuth=undefined;void this.authenticate(socket,generation,false);return;}
     if(!this.authInFlight)void this.authenticate(socket,generation,true);return;
    }
@@ -83,12 +84,12 @@ export class SQLiteNativeTransport {
     this.latestAuth=undefined;this.activeAuth=undefined;
     if(message.code!=='transient'&&!this.refreshed&&this.auth.fetchToken&&!['revoked','member_removed','account_disabled'].includes(message.code??'')){this.refreshed=true;void this.authenticate(socket,generation,true);return;}
     const definitive=['revoked','member_removed','account_disabled'].includes(message.code??'')||message.code==='credential_rejected'&&(this.refreshedToken===this.auth.token&&!!this.refreshedToken||/^gvx_(dev|imp)_/.test(this.auth.token??''));
-    if(definitive)this.deny(generation,message.error);else socket.close();return;
+    if(definitive)this.deny(generation,message.error,message.code);else{this.options.ownerHost.authError?.(message.error,{definitive:false,code:message.code});socket.close();}return;
    }
    this.latestAuth=undefined;this.activeAuth=message.id;this.clearAuthTimer();const serial=this.authSerial;this.installing=true;
    const directive=replicaDirectiveFromAuthResult(message.result),identity=localIdentityFromAuthResult(message.result);
    this.artifact=artifactHashFromAuthResult(message.result)??this.artifact;
-   const developer=developerSessionTokenFromAuthResult(message.result);if(developer)this.auth={...this.auth,token:developer,fetchToken:undefined};
+   const developer=developerSessionTokenFromAuthResult(message.result);if(developer){if(developer.length>16384)throw Error('Developer credential exceeds admission budget');this.auth={...this.auth,token:developer,fetchToken:undefined};this.options.ownerHost.developerCredential?.(developer);}
    const current=()=>this.current(socket,generation)&&serial===this.authSerial&&this.activeAuth===message.id&&!this.latestAuth;
    const fence=JSON.stringify([this.scope(),directive?.visibilityScope??'',directive?.epoch??'']);if(fence!==this.watermarkFence){this.watermarkFence=fence;this.watermark=0;}
    void this.options.ownerHost.session({connectionGeneration:generation,directive,identity,artifactHash:this.artifact,intentScope:this.scope(),lastOnlineAtMs:Date.now(),capabilities:this.capabilities},current).then(()=>{
@@ -96,7 +97,10 @@ export class SQLiteNativeTransport {
    },failure=>{if(current()){this.options.ownerHost.failed(failure);socket.close();}});return;
   }
   if(message.type.startsWith('replica.')){if(!this.quarantined&&(!this.authInFlight||this.installing))this.options.ownerHost.frame(message,generation);return;}
-  if(!('id'in message)||typeof message.id!=='string')return;const pending=this.pending.get(message.id);if(!pending||!pending.sent)return;
+  if(!('id'in message)||typeof message.id!=='string')return;
+  const watched=[...this.controlWatches].find(watch=>watch.wireId===message.id&&watch.authSerial===this.authSerial);
+  if(watched){if(message.type==='query.result'){sqlitePayloadBytes(message.result,131072);watched.receive({result:message.result});}else if(message.type==='query.error')watched.receive({error:message.error.slice(0,512)});return;}
+  const pending=this.pending.get(message.id);if(!pending||!pending.sent)return;
   if(message.type==='control.watermark'){pending.controlReady=true;this.settle(pending);return;}
   if(message.type===pending.kind+'.error'&&'error'in message){const classification=pending.kind==='reducer'?reducerErrorClassFromMessage(message as {error:string;class?:ReducerErrorClass}):undefined;
    this.finish(pending,undefined,new GonvexClientError(String(message.error),{code:'server',path:pending.path,operation:pending.kind,...(classification?{errorClass:classification,retryable:'retryable'in message?Boolean(message.retryable):classification==='transient'||classification==='unauthenticated'}:{})}));return;
@@ -111,7 +115,7 @@ export class SQLiteNativeTransport {
   }
   this.settle(pending);
  }
- private deny(generation:number,message:string){this.quarantined=true;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.latestAuth=undefined;this.activeAuth=undefined;this.authInFlight=false;this.installing=false;this.session='unavailable';this.clearAuthTimer();this.options.ownerHost.quarantined?.(generation);for(const pending of [...this.pending.values()])if(!pending.public)this.finish(pending,undefined,error(message,'auth'));this.flush();}
+ private deny(generation:number,message:string,code?:string){this.options.ownerHost.authError?.(message,{definitive:true,code});this.quarantined=true;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.latestAuth=undefined;this.activeAuth=undefined;this.authInFlight=false;this.installing=false;this.session='unavailable';this.clearAuthTimer();this.options.ownerHost.quarantined?.(generation);for(const pending of [...this.pending.values()])if(!pending.public)this.finish(pending,undefined,error(message,'auth'));this.flush();}
  private settle(pending:Pending){if(!pending.answered)return;if(pending.kind!=='query'){
   if(pending.control&&this.capabilities.controlWatermark===1&&!pending.controlReady)return;
   if(!pending.control&&this.capabilities.replicaWatermark===1&&pending.revision!==undefined&&pending.revision>this.watermark)return;
@@ -124,7 +128,17 @@ export class SQLiteNativeTransport {
   if(!pending.control&&this.session!=='authenticated')continue;
   if(socket.bufferedAmount>524288){if(!this.sendTimer)this.sendTimer=setTimeout(()=>{this.sendTimer=undefined;this.flush();},5);continue;}
   const wire=pending.wire;pending.wire=undefined;pending.sent=true;try{socket.send(wire);}catch{this.finish(pending,undefined,error('Native send interrupted; its outcome may be unknown','disconnected'));socket.close();}
+ }for(const watch of this.controlWatches){
+  if(watch.wireId&&watch.authSerial===this.authSerial||this.authInFlight&&watch.ref.authorization!=='public'||this.quarantined&&watch.ref.authorization!=='public')continue;
+  if(socket.bufferedAmount>524288){if(!this.sendTimer)this.sendTimer=setTimeout(()=>{this.sendTimer=undefined;this.flush();},5);break;}
+  const id=crypto.randomUUID();this.sendNow({type:'query.subscribe',id,path:watch.ref.path,args:watch.args,scope:'control'});watch.wireId=id;watch.authSerial=this.authSerial;
  }}
+ watchControl(ref:FunctionReference,args:JsonValue,receive:ControlWatch['receive']){
+  if(ref.kind!=='query'||ref.scope!=='control'||ref.delivery==='replica')throw new TypeError('Control watches require generated Control queries');
+  const bytes=sqlitePayloadBytes({ref:ref.path,args},16384)+512;if(this.controlWatches.size>=32)throw Object.assign(Error('Native control watch allowance exceeded'),{code:'BUDGET'});
+  const release=this.options.reserve(bytes),watch:ControlWatch={ref,args,receive,release};try{watch.args=structuredClone(args);this.controlWatches.add(watch);this.connect();this.flush();}catch(error){this.controlWatches.delete(watch);release();throw error;}let closed=false;
+  return ()=>{if(closed)return;closed=true;this.controlWatches.delete(watch);release();if(watch.wireId&&watch.authSerial===this.authSerial&&this.socket?.readyState===1)this.sendNow({type:'query.unsubscribe',id:watch.wireId});};
+ }
  private finish(pending:Pending,value?:JsonValue,failure?:Error){if(this.pending.get(pending.id)!==pending)return;this.pending.delete(pending.id);clearTimeout(pending.timer);pending.wire=undefined;pending.release();if(failure)pending.reject(failure);else pending.resolve(value!);}
  private rejectAll(reason:Error){for(const pending of [...this.pending.values()])this.finish(pending,undefined,reason);}
  private async invoke<T extends JsonValue>(kind:Pending['kind'],ref:FunctionReference,args:JsonValue,command?:string):Promise<T>{
@@ -150,6 +164,6 @@ export class SQLiteNativeTransport {
  callOwnerReducer<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue,command:string):Promise<T>{if(!command||command.length>256)return Promise.reject(Error('Invalid durable command ID'));return this.invoke('reducer',ref,args,command);}
  localSessionState(){return this.session;}
  connectionState():ConnectionState{const values=[...this.pending.values()];return {isWebSocketConnected:this.socket?.readyState===1,hasEverConnected:this.hasEver,connectionCount:this.connectionCount,connectionRetries:this.reconnectAttempts,hasInflightRequests:!!values.length,inflightReducers:values.filter(p=>p.kind==='reducer').length,inflightActions:values.filter(p=>p.kind==='action').length,inflightOneShotQueries:values.filter(p=>p.kind==='query').length};}
- dispose(){if(this.disposed)return;this.close();this.disposed=true;this.auth={};this.options.releaseAuth?.();}
+ dispose(){if(this.disposed)return;this.close();for(const watch of this.controlWatches)watch.release();this.controlWatches.clear();this.disposed=true;this.auth={};this.options.releaseAuth?.();}
  close(){if(this.closed)return;this.closed=true;this.identityRevision++;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;clearTimeout(this.sendTimer);this.sendTimer=undefined;this.session='unavailable';this.clearAuthTimer();clearTimeout(this.retry);this.retry=undefined;this.rejectAll(error('Native client closed; a dispatched outcome may be unknown','closed'));const socket=this.socket;this.socket=undefined;socket?.close();this.options.ownerHost.disconnected();}
 }

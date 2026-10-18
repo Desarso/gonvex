@@ -53,3 +53,11 @@ it('clears protected pages on worker admission changes and fences a late page wi
  f.admit('new-permissions');await f.client.pollControls();expect(watch.snapshot().page).toBeUndefined();release();await rejected;expect(watch.snapshot().page).toBeUndefined();expect(f.calls.filter(call=>call.input.method==='connect')).toHaveLength(connections);
  f.handler=undefined;await watch.page();expect(watch.snapshot().page).toBeDefined();f.admit(null);await f.client.pollControls();expect(watch.snapshot().page).toBeUndefined();
 });
+
+it('delivers correlated auth errors and developer credentials once, ACKs the secret, and retains no token in status',async()=>{
+ const f=fixture(),errors:unknown[]=[],credentials:string[]=[];f.handler=async input=>{if(input.method==='controls')return {tokens:[],status:{isWebSocketConnected:true},session:'authenticated',failure:null,authError:{id:'error',message:'Denied',definitive:true,code:'revoked'},developerCredential:{id:'credential',token:'gvx_dev_synthetic'}};if(input.method==='credentialAck')return null;};
+ const stopErrors=f.client.onAuthError((message,details)=>errors.push({message,...details})),stopCredentials=f.client.onDeveloperCredential(token=>credentials.push(token));await f.client.pollControls();await f.client.pollControls();expect(errors).toEqual([{message:'Denied',definitive:true,code:'revoked'}]);expect(credentials).toEqual(['gvx_dev_synthetic']);expect(f.calls.some(call=>call.input.method==='credentialAck'&&call.input.id==='credential')).toBe(true);expect(JSON.stringify(f.client.status())).not.toContain('gvx_dev');stopErrors();stopCredentials();
+});
+it('updates the main-thread token provider without cloning a function to the owner',async()=>{
+ const old=vi.fn(async()=> 'old'),next=vi.fn(async()=> 'next'),f=fixture(old);await f.client.connect();await vi.waitFor(()=>expect(f.responses).toHaveLength(1));await f.client.setAuth({fetchToken:next});f.replaceOwner();await vi.waitFor(()=>expect(f.responses).toHaveLength(2));expect(next).toHaveBeenCalledOnce();expect(f.responses.at(-1).token).toBe('next');expect(f.calls.every(call=>!('fetchToken'in(call.input.auth??{})))).toBe(true);
+});

@@ -52,6 +52,26 @@ export class SQLiteIndexedDBMigrationSource {
  /** Restrict by the compound primary key before cloning any values. An old
   * giant window or another account's rows never enter this migration page. */
  scopePage(store:string,scope:string,after?:IDBValidKey,limit=16,maxBytes=131072){return this.readPage(store,this.scopeRange(scope,after),limit,maxBytes);}
+ /** Select a legacy outbox identity through its scope index before reading
+  * bodies. The continuation is the primary key within that one index key. */
+ async indexedScopePage(store:string,scope:string,after?:IDBValidKey,limit=16,maxBytes=131072):Promise<SQLiteMigrationSourcePage>{
+  if(typeof scope!=='string'||!scope||scope.length>512||!Number.isSafeInteger(limit)||limit<1||limit>128||!Number.isSafeInteger(maxBytes)||maxBytes<1024||maxBytes>262144)throw new TypeError('Invalid legacy indexed page');
+  if(after!==undefined&&(typeof after!=='number'||!Number.isSafeInteger(after)||after<1))throw new TypeError('Invalid legacy outbox continuation');
+  const source=this.store(store);if(!source.indexNames.contains('scope'))throw Object.assign(Error('Legacy outbox has no authenticated scope index'),{code:'UNSUPPORTED'});
+  return new Promise((resolve,reject)=>{
+   const records:SQLiteMigrationSourcePage['records']=[];let bytes=64;const cursor=source.index('scope').openCursor(this.ranges.only(scope));
+   cursor.onerror=()=>reject(cursor.error??Error('Migration scope cursor failed'));
+   cursor.onsuccess=()=>{const row=cursor.result;if(!row){resolve({records,nextKey:null});return;}
+    // Keys are inspected before row.value is accessed. No foreign scope body
+    // or an earlier page body is cloned into the SDK.
+    if(typeof row.primaryKey!=='number'||!Number.isSafeInteger(row.primaryKey)||row.primaryKey<1){reject(new TypeError('Invalid legacy outbox key'));return;}
+    if(typeof after==='number'&&row.primaryKey<after){row.continuePrimaryKey(scope,after);return;}
+    if(row.primaryKey===after){row.continue();return;}
+    if(records.length>=limit){resolve({records,nextKey:records.at(-1)!.key});return;}
+    try{const entry={key:row.primaryKey,value:row.value},size=sqlitePayloadBytes(entry,maxBytes);if(bytes+size>maxBytes){if(!records.length)fail('BUDGET','Legacy source record exceeds migration page budget');resolve({records,nextKey:records.at(-1)!.key});return;}bytes+=size;records.push(entry);row.continue();}catch(error){reject(error);}
+   };
+  });
+ }
  async page(store:string,after?:IDBValidKey,limit=32,maxBytes=262144):Promise<SQLiteMigrationSourcePage>{
   return this.readPage(store,after===undefined?undefined:this.ranges.lowerBound(structuredClone(after),true),limit,maxBytes);
  }

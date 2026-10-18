@@ -148,3 +148,17 @@ it('rebases predictions once for an entire completed authority group, including 
 it('fences cached canonical rows after admission moves to a new database epoch, including offline reads',async()=>{
  const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();f.feed.authenticating('identity',2);await f.feed.session({...f.session,connectionGeneration:2,directive:{...f.session.directive,epoch:'replacement-epoch'}},()=>true);await expect(f.feed.assertReadable()).rejects.toMatchObject({code:'PAGE_CHANGED'});f.feed.disconnected();await expect(f.feed.assertReadable({scope:'visible',epoch:'replacement-epoch'})).rejects.toMatchObject({code:'PAGE_CHANGED'});expect(f.failures).toEqual([]);
 });
+
+it('displays an earlier durable page while a later import batch waits outside SQL for a lazy reducer',async()=>{
+ const {SQLitePendingSnapshotReader}=await import('./sqlite-pending-snapshot-reader.js');let resume!:()=>void,preparing=false,first=true;const held=new Promise<void>(resolve=>{resume=resolve;});
+ const f=await fixture({authority:async(_scope,run)=>{if(first){first=false;throw new SQLiteReducerPreparationRequiredError('lazy.reducer');}await run();},prepare:async()=>{preparing=true;await held;}});
+ try{
+  await f.start();await f.append(rows.slice(0,1),0,false);await vi.waitFor(()=>expect(f.sends).toHaveLength(1));
+  await f.append(rows.slice(1),1,true);await vi.waitFor(()=>expect(preparing).toBe(true));
+  const pointer=f.feed.pendingSource('source');expect(pointer).toEqual({snapshot:'base',subscription:'source',entity:'tasks'});
+  const reader=new SQLitePendingSnapshotReader({database:f.db,canonical:f.canonical,snapshots:f.owner.snapshots,schema,fence:()=>f.engine.verifyOwner()});await reader.ready();
+  const page=await f.runOwner(131072,()=>reader.page({scope:'visible',...pointer!,limit:10}));
+  expect(page).toMatchObject({complete:false,serverVerified:false,receivedRows:1,rows:[{id:'a',value:rows[0]}]});expect(f.sends).toHaveLength(1);
+  resume();await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();expect(f.sends).toHaveLength(2);expect(f.failures).toEqual([]);expect(await f.engine.integrity()).toBe('ok');reader.close();
+ }finally{resume();}
+});

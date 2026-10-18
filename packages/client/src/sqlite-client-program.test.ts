@@ -12,6 +12,7 @@ import {SQLiteSnapshotActivator} from './sqlite-snapshot-activation.js';
 import {SQLiteNativeReplicaReader} from './sqlite-native-replica-reader.js';
 import {SQLitePendingSnapshotReader} from './sqlite-pending-snapshot-reader.js';
 import {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
+import {reducerOutboxScope} from './client-auth-wire.js';
 import {SQLiteClientProgram} from './sqlite-client-program.js';
 import {replicaRowsHashes,replicaSumDigest} from './replica-integrity.js';
 import type {SQLiteOwnerProgramContext,SQLiteOwnerCaller} from './sqlite-owner-actor.js';
@@ -35,12 +36,12 @@ const refs:FunctionReference[]=[{kind:'query',path:'__local.tasks',delivery:'rep
 const caller=(tabID:string,requestID=crypto.randomUUID()):SQLiteOwnerCaller=>({tabID,requestID,signal:new AbortController().signal});
 const connect={method:'connect',url:'ws://synthetic-private.test/ws',auth:{project:'project',tenant:'tenant',identity:{sub:'provider-account'}}};
 const rowDigest=async(row:{id:string;n:number})=>replicaSumDigest(await replicaRowsHashes([row],'id'));
-async function fixture(autoEager=true){
+async function fixture(autoEager=true,background=false){
  vi.stubGlobal('indexedDB',new IDBFactory());vi.stubGlobal('IDBKeyRange',IDBKeyRange);vi.stubGlobal('WebSocket',Socket);vi.stubGlobal('postMessage',()=>{});Socket.instances=[];
  const raw=new sqlite.oo1.DB(':memory:'),host=officialSQLiteDatabase(sqlite,raw),db=sqliteOwnerTransactions(host.database),engine=new SQLiteTypedReplicaEngine(db,typed);await engine.open('program');const canonical=sqliteTypedReplicaStorage(db,typed);await canonical.ready();const fence=()=>engine.verifyOwner(),snapshots=new SQLiteSnapshotPages(db,fence,typed),activation=new SQLiteSnapshotActivator(db,canonical,fence,typed),reader=new SQLiteNativeReplicaReader(db,canonical,engine),pendingReader=new SQLitePendingSnapshotReader({database:db,canonical,snapshots,schema:typed,fence});
  let lane=Promise.resolve(),executions=0;const hints:string[]=[],owner={database:db,engine,canonical,snapshots,activation,reader,pendingReader,async notifyTab(tab:string){hints.push(tab);},runOwner<T>(_bytes:number,run:()=>Promise<T>){const next=lane.then(run);lane=next.then(()=>{},()=>{});return next;}} as SQLiteOwnerProgramContext;
  const runtime=new PortableReducerRuntime({schema:{tasks:{key:'id',columns:{id:{type:'text',nullable:false},n:{type:'bigint',nullable:false}}}},artifactHash:'artifact',reducers:{'tasks.increment':reducer({args:schema.any(),result:schema.any(),run:async ctx=>{executions++;const row=await getRow<{id:string;n:number}>(ctx.db,'tasks','id','a');await ctx.db.update('tasks','a',{n:row!.n+1});return row!.n+1;}}),'tasks.addAll':reducer({args:schema.any(),result:schema.any(),run:async ctx=>{const rows=await ctx.db.select<{id:string;n:number}>({table:'tasks'}),n=rows.reduce((total,row)=>total+row.n,0)+1;await ctx.db.update('tasks','a',{n});return n;}})}});
- const program=new SQLiteClientProgram(owner,{artifactHash:'artifact',runtime,references:refs,collections:autoEager?['__local.tasks']:[],offlineMaxAgeMs:5000});cleanup.push(async()=>{program.close();await lane;await new Promise(resolve=>setTimeout(resolve,0));raw.close();});
+ const program=new SQLiteClientProgram(owner,{artifactHash:'artifact',runtime,references:background?[...refs,{...refs[0]!,path:'__local.backgroundTasks'}]:refs,collections:autoEager?background?['__local.backgroundTasks','__local.tasks']:['__local.tasks']:[],offlineMaxAgeMs:5000});cleanup.push(async()=>{program.close();await lane;await new Promise(resolve=>setTimeout(resolve,0));raw.close();});
  const call=(input:unknown,tab='one',request?:string)=>program.call(input,caller(tab,request));
  async function authenticate(withholdFinal=false){
   const response=await call(connect);if(!autoEager)await call({method:'watchReplica',path:'__local.tasks',args:{}});const socket=Socket.instances.at(-1)!;socket.open();await vi.waitFor(async()=>expect((await call({method:'controls'}) as any).tokens).toHaveLength(1));const request=(await call({method:'controls'}) as any).tokens[0];expect(hints).toContain('one');await call({method:'token',response:{...request,token:'opaque'}});await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==='auth')).toBe(true));const auth=socket.sent.find(message=>message.type==='auth');socket.receive({type:'session.ready',capabilities:{replicaNativeRows:1,replicaWatermark:1}});socket.receive({type:'auth.result',id:auth.id,result:{artifactHash:'artifact',localIdentity:identity,replica:{protocolVersion:1,scope:'tenant',visibilityScope:'visible',epoch:'e'}}});await vi.waitFor(()=>expect(socket.sent.some(message=>message.type==='replica.open')).toBe(true));
@@ -104,4 +105,29 @@ it('recovers an independently durable legacy rejection in place and retires its 
 it('restores cached pages and durable offline edits before a replacement socket can open',async()=>{
  const f=await fixture();await f.authenticate();f.program.detachTab('one');await f.call(connect);const replacement=Socket.instances.at(-1)!;expect(replacement.readyState).toBe(0);const source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});expect((await f.call({method:'replicaPage',signature:source.signature,limit:10}) as any).rows[0].value.n).toBe(1);expect((await f.call({method:'controls'}) as any).session).toBe('restored');
  const receipt:any=await f.call({method:'reducer',path:'tasks.increment',args:{},now:100},'one','cold-offline-command');expect(receipt.result).toBe(2);expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value.n).toBe(2);expect(replacement.sent).toEqual([]);expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('opens a visible source before eager-only dependencies so its first page arrives first',async()=>{
+ const f=await fixture(true,true);await f.call(connect);const source:any=await f.call({method:'watchReplica',path:'__local.tasks',args:{}});const {socket}=await f.authenticate(true);
+ expect(socket.sent.filter(message=>message.type==='replica.open').map(message=>message.path)).toEqual(['__local.tasks','__local.backgroundTasks']);
+ expect(await f.call({method:'replicaPendingPage',signature:source.signature})).toMatchObject({complete:false,receivedRows:1,rows:[{id:'a',value:{id:'a',n:1}}]});
+});
+
+it('automatically imports the fenced legacy outbox before admitting cold offline commands',async()=>{
+ const f=await fixture(),scope=reducerOutboxScope(connect.url,connect.auth,'unused'),session={directive:{protocolVersion:1 as const,scope:'tenant',visibilityScope:'visible',epoch:'e'},identity,artifactHash:'artifact',lastOnlineAtMs:Date.now()};
+ const open=(name:string,version:number,upgrade:(db:IDBDatabase)=>void)=>new Promise<IDBDatabase>((resolve,reject)=>{const request=indexedDB.open(name,version);request.onupgradeneeded=()=>upgrade(request.result);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});
+ const replica=await open('gonvex-local-replica',50,db=>{db.createObjectStore('meta',{keyPath:['scope','key']});db.createObjectStore('entities',{keyPath:['scope','entity','id']});});
+ await new Promise<void>((resolve,reject)=>{const tx=replica.transaction(['meta','entities'],'readwrite');tx.objectStore('meta').put({scope,key:'session',value:JSON.stringify(session)});tx.objectStore('entities').put({scope:'visible',entity:'tasks',id:'a',value:JSON.stringify({id:'a',n:1}),authority:{epoch:'e',base:1,fields:{}}});tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error);});replica.close();
+ const queue=await open('gonvex-outbox',20,db=>db.createObjectStore('entries',{keyPath:'id'}).createIndex('scope','scope'));
+ await new Promise<void>((resolve,reject)=>{const tx=queue.transaction('entries','readwrite');tx.objectStore('entries').put({id:1,scope,path:'tasks.increment',args:{},idempotencyKey:'legacy-offline',entityKeys:[],patches:[],localExecution:{scope:'visible',commandId:'legacy-offline',now:100,identity,artifactHash:'old-artifact'},createdAt:100,attempts:0,nextAttemptAt:100,state:'pending'});tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error);});queue.close();
+ await f.call(connect);const receipt:any=await f.call({method:'reducer',path:'tasks.increment',args:{},now:101},'one','new-offline');expect(receipt.queuedOnly).toBe(true);
+ const commands=await f.owner.runOwner(0,()=>f.db.getAllAsync<{command_id:string}>('SELECT command_id FROM gv_reducer_invocations ORDER BY command_id'));
+ expect(commands.map(row=>row.command_id)).toEqual(['legacy-offline','new-offline']);expect(Socket.instances[0]!.sent).toEqual([]);
+ await vi.waitFor(async()=>expect((await f.call({method:'entities',entity:'tasks',ids:['a']}) as any).rows[0].value).toEqual({id:'a',n:1}));expect(await f.engine.integrity()).toBe('ok');
+});
+
+it('shares live Control queries between tabs and clears protected results on definitive denial',async()=>{
+ const f=await fixture(),{socket}=await f.authenticate();await f.call(connect,'two');const input={method:'watchControl',path:'control.tenants.mine',args:{}};const one:any=await f.call(input),two:any=await f.call(input,'two');expect(two).toEqual(one);const subscriptions=socket.sent.filter(message=>message.type==='query.subscribe');expect(subscriptions).toHaveLength(1);socket.receive({type:'query.result',id:subscriptions[0].id,result:[{id:'tenant',name:'Synthetic'}]});const state:any=await f.call({method:'controlState',signature:one.signature});expect(state.result).toEqual([{id:'tenant',name:'Synthetic'}]);expect(await f.call({method:'controlState',signature:one.signature,afterVersion:state.version})).toEqual({version:state.version});
+ await f.call({method:'unwatchControl',signature:one.signature});expect(socket.sent.filter(message=>message.type==='query.unsubscribe')).toHaveLength(0);await expect(f.call({method:'controlState',signature:one.signature})).rejects.toMatchObject({code:'FENCED'});
+ socket.receive({type:'auth.error',id:'membership-changed',error:'Revoked',code:'revoked'});expect((await f.call({method:'controlState',signature:one.signature},'two') as any).result).toBeUndefined();expect(socket.sent.filter(message=>message.type==='query.subscribe')).toHaveLength(1);await f.call({method:'unwatchControl',signature:one.signature},'two');expect(f.program.budgets().find(value=>value.name==='native-control-watches')?.bytes).toBe(0);
 });
