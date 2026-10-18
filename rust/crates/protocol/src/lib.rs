@@ -166,6 +166,9 @@ pub struct ClientCapabilities {
     /// Client understands sum128-v1 Replica Collection integrity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_set_digest: Option<u8>,
+    /// Canonical row strings in credit-limited binary snapshot frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_native_rows: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_snapshot_pages: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -321,6 +324,14 @@ pub enum ClientMessage {
     ReplicaOpenMany { opens: Vec<ReplicaOpenRequest> },
     #[serde(rename = "replica.close")]
     ReplicaClose { id: String },
+    /// Cumulative durable staging acknowledgement for this snapshot only.
+    #[serde(rename = "replica.snapshotAck")]
+    ReplicaSnapshotAck {
+        id: String,
+        #[serde(rename = "snapshotId")]
+        snapshot_id: String,
+        sequence: u64,
+    },
     #[serde(rename = "reducer.call")]
     ReducerCall(ReducerCallRequest),
     #[serde(rename = "reducer.callMany")]
@@ -425,6 +436,9 @@ pub struct ServerCapabilities {
     /// sum128-v1 is selected only when both peers advertise version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_set_digest: Option<u8>,
+    /// Canonical row strings in credit-limited binary snapshot frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_native_rows: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_snapshot_pages: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -647,6 +661,20 @@ pub enum ServerMessage {
         #[serde(flatten)]
         metadata: BTreeMap<String, Value>,
     },
+    #[serde(rename = "replica.snapshotEncodedPage")]
+    ReplicaSnapshotEncodedPage {
+        #[serde(rename = "snapshotId")]
+        snapshot_id: String,
+        sequence: u64,
+        last: bool,
+        id: String,
+        #[serde(rename = "canonicalRows")]
+        canonical_rows: Vec<String>,
+        cursor: ReplicaCursor,
+        key: String,
+        #[serde(flatten)]
+        metadata: BTreeMap<String, Value>,
+    },
     #[serde(rename = "replica.delta")]
     ReplicaDelta {
         id: String,
@@ -728,6 +756,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn native_snapshot_capabilities_frames_and_ack_round_trip() {
+        round_trip_client(
+            r#"{"type":"auth","id":"a","capabilities":{"replicaNativeRows":1,"replicaSetDigest":1,"replicaSnapshotPages":1}}"#,
+        );
+        round_trip_server(r#"{"type":"session.ready","capabilities":{"replicaNativeRows":1}}"#);
+        round_trip_client(
+            r#"{"type":"replica.snapshotAck","id":"a","snapshotId":"s","sequence":3}"#,
+        );
+        round_trip_server(
+            r#"{"type":"replica.snapshotEncodedPage","id":"a","snapshotId":"s","sequence":0,"last":true,"canonicalRows":["{\"id\":\"a\"}"],"key":"id","cursor":{"epoch":"e","revision":1},"digest":"final"}"#,
+        );
+    }
 
     #[test]
     fn snapshot_pages_capabilities_and_frames_round_trip() {

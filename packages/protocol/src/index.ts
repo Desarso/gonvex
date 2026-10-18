@@ -176,6 +176,8 @@ export type ReplicaDirective = {
 export type ServerCapabilities = {
   /** Negotiated sum128-v1 Replica Collection integrity. */
   replicaSetDigest?: 1;
+  /** Binary canonical row strings with cumulative durable staging credits. */
+  replicaNativeRows?: 1;
   replicaSnapshotPages?: 1;
   /** Accepts cursor + xor1 row-hash digest, with needHashes repair. */
   replicaResume?: 1;
@@ -249,6 +251,8 @@ export type ReplicaReady = {
 export type ClientCapabilities = {
   /** Accepts sum128-v1 when the runtime also advertises version 1. */
   replicaSetDigest?: 1;
+  /** Binary canonical row strings with cumulative durable staging credits. */
+  replicaNativeRows?: 1;
   /** Accepts atomically activated replica.snapshotPage frames. */
   replicaSnapshotPages?: 1;
   /** Honors auth.result subscriptionsPreserved on an in-place refresh. */
@@ -307,6 +311,7 @@ export type ClientMessage =
   | { type: "replica.openMany"; opens: ReplicaOpenRequest[] }
   | { type: "query.subscribeMany"; subscribes: QuerySubscribeRequest[] }
   | { type: "replica.close"; id: string }
+  | { type: "replica.snapshotAck"; id: string; snapshotId: string; sequence: number }
   | {
     type: "reducer.call";
     id: string;
@@ -501,6 +506,26 @@ export type ServerMessage =
     id: string;
     path?: string;
     result: JsonValue[];
+    cursor: ReplicaCursor;
+    key: string;
+    orderBy?: string;
+    orderDirection?: "asc" | "desc";
+    mode?: "eager" | "progressive";
+    maxRows?: number;
+    maxBytes?: number;
+    digest?: string;
+    truncated?: boolean;
+  }
+  | {
+    type: "replica.snapshotEncodedPage";
+    snapshotId: string;
+    scope: string;
+    visibilityScope: string;
+    sequence: number;
+    last: boolean;
+    id: string;
+    path?: string;
+    canonicalRows: string[];
     cursor: ReplicaCursor;
     key: string;
     orderBy?: string;

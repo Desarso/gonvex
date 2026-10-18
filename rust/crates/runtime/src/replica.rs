@@ -1249,6 +1249,7 @@ pub(crate) struct SnapshotPages {
     rows: std::iter::Peekable<std::vec::IntoIter<Value>>,
     sequence: u64,
     finished: bool,
+    native_rows: bool,
 }
 
 impl SnapshotPages {
@@ -1279,13 +1280,36 @@ impl SnapshotPages {
             rows: result.into_iter().peekable(),
             sequence: 0,
             finished: false,
+            native_rows: false,
         }
+    }
+
+    pub(crate) fn native(message: ServerMessage) -> Self {
+        let mut pages = Self::new(message);
+        pages.native_rows = true;
+        pages
+    }
+
+    pub(crate) fn identity(&self) -> (&str, &str) {
+        (&self.id, &self.snapshot_id)
     }
 
     fn page(&self, result: Vec<Value>, last: bool) -> ServerMessage {
         let mut metadata = self.metadata.clone();
         if last {
             metadata.insert("digest".to_owned(), self.digest.clone());
+        }
+        if self.native_rows {
+            return ServerMessage::ReplicaSnapshotEncodedPage {
+                id: self.id.clone(),
+                snapshot_id: self.snapshot_id.clone(),
+                cursor: self.cursor.clone(),
+                key: self.key.clone(),
+                sequence: self.sequence,
+                last,
+                canonical_rows: result.iter().map(stable_json).collect(),
+                metadata,
+            };
         }
         ServerMessage::ReplicaSnapshotPage {
             id: self.id.clone(),
@@ -1347,9 +1371,19 @@ impl Iterator for SnapshotPages {
             + 1;
         let mut rows = Vec::new();
         while let Some(row) = self.rows.peek() {
-            let row_bytes = json_byte_len(row) + usize::from(!rows.is_empty());
+            let row_bytes = (if self.native_rows {
+                json_string_byte_len(&stable_json(row))
+            } else {
+                json_byte_len(row)
+            }) + usize::from(!rows.is_empty());
             if !rows.is_empty()
-                && (bytes + row_bytes > SNAPSHOT_PAGE_BYTES || rows.len() == SNAPSHOT_PAGE_ROWS)
+                && (bytes + row_bytes
+                    > if self.native_rows {
+                        64 * 1024
+                    } else {
+                        SNAPSHOT_PAGE_BYTES
+                    }
+                    || rows.len() == SNAPSHOT_PAGE_ROWS)
             {
                 break;
             }
@@ -1476,6 +1510,45 @@ mod tests {
                 ("maxBytes".into(), Value::from(100_000_000)),
                 ("truncated".into(), Value::Bool(false)),
             ]),
+        }
+    }
+
+    #[test]
+    fn native_snapshot_wire_fixture_matches_canonical_hashes() {
+        let mut rows:Vec<Value>=(0..1200).map(|id|serde_json::json!({"id":format!("row-{id:04}"),"text":"café 東京 😀".repeat(20),"nested":{"é":"nfc","é":"nfd"}})).collect();
+        rows.push(serde_json::json!({"id":"controls","text":"\u{2028}\u{2029}\0\n\t\r\u{1f}","value":9007199254740993u64}));
+        let mut sum = gonvex_protocol::replica_digest::ReplicaSetDigest::default();
+        let hashes: Vec<_> = rows.iter().map(row_hash).collect();
+        for hash in &hashes {
+            sum.add(hash).unwrap();
+        }
+        let mut snapshot = paged_fixture(rows.clone());
+        if let ServerMessage::ReplicaSnapshot { metadata, .. } = &mut snapshot {
+            metadata.insert("pageDigest".into(), Value::String(sum.digest()));
+        }
+        let pages: Vec<_> = SnapshotPages::native(snapshot).collect();
+        assert!(pages.len() > 1);
+        let mut observed = Vec::new();
+        for (sequence, page) in pages.iter().enumerate() {
+            assert!(serde_json::to_vec(page).unwrap().len() <= 64 * 1024);
+            let ServerMessage::ReplicaSnapshotEncodedPage {
+                canonical_rows,
+                sequence: actual,
+                last,
+                metadata,
+                ..
+            } = page
+            else {
+                panic!("native frame");
+            };
+            assert_eq!(*actual, sequence as u64);
+            assert_eq!(*last, sequence == pages.len() - 1);
+            assert_eq!(metadata.contains_key("digest"), *last);
+            observed.extend(canonical_rows.iter().map(|row| hex_digest(row.as_bytes())));
+        }
+        assert_eq!(observed, hashes);
+        if let Ok(path) = std::env::var("GONVEX_NATIVE_FRAME_FIXTURE") {
+            std::fs::write(path,serde_json::to_vec(&serde_json::json!({"frames":pages,"rows":rows,"hashes":hashes,"digest":sum.digest()})).unwrap()).unwrap();
         }
     }
 
