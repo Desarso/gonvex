@@ -7,9 +7,10 @@ const schema = { tasks: { key: '_id', fields: { _id: { kind: 'text' }, name: { k
 const generated = { fixtureMs: 0, wireEncodeMs: 0 };
 const handlers = {
   async profile() { const result = { ...engine.takeProfile(), ...generated, transactions: host.takeProfile(), wasmBytes: host.memoryBytes(), statementBytes: host.statementBytes() }; generated.fixtureMs = 0; generated.wireEncodeMs = 0; return result; },
-  async open({ searchDetail = 'full' } = {}) {
+  async open({ searchDetail = 'full', searchContent = 'internal' } = {}) {
     if (!['full', 'column', 'none'].includes(searchDetail)) throw new TypeError('Invalid benchmark FTS detail');
-    const selectedSchema = searchDetail === 'full' ? schema : { tasks: { ...schema.tasks, searchDetail } };
+    if (!['internal', 'external'].includes(searchContent)) throw new TypeError('Invalid benchmark FTS content');
+    const selectedSchema = { tasks: { ...schema.tasks, ...(searchDetail === 'full' ? {} : { searchDetail }), ...(searchContent === 'internal' ? {} : { searchContent }) } };
     host = await openOfficialSQLiteHost(); engine = new SQLiteTypedReplicaEngine(host.database, selectedSchema); const epoch = await engine.open('browser-proof'); return { epoch, memoryBytes: host.memoryBytes() }; },
   async seed({ start = 0, count = 1000 }) {
     const begin = performance.now();

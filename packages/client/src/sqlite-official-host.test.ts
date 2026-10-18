@@ -1,6 +1,7 @@
 import { afterEach, expect, it } from 'vitest';
 import initialize, { type Database } from '@sqlite.org/sqlite-wasm';
 import { officialSQLiteDatabase, openOfficialSQLiteHost } from './sqlite-official-host.js';
+import { sqliteSearchName, sqliteTableName, sqliteIdentifier as q } from './sqlite-typed-schema.js';
 import { SQLiteTypedReplicaEngine } from './sqlite-typed-engine.js';
 
 const sqlite3 = await initialize();
@@ -114,9 +115,9 @@ it('profiles native transaction boundaries using fixed numeric counters and rese
   expect((await host.database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM profile_probe'))!.n).toBe(0);
 });
 
-it.each(['full', 'column', 'none'] as const)('preserves literal substring queries and trigger maintenance with FTS detail=%s', async searchDetail => {
+it.each([['full', false], ['column', false], ['none', false], ['full', true], ['column', true], ['none', true]] as const)('preserves literal substring queries and trigger maintenance with FTS detail=%s external=%s', async (searchDetail, external) => {
   const { host } = fixture();
-  const schema = { records: { key: '_id', fields: { _id: { kind: 'text' }, title: { kind: 'text' }, description: { kind: 'text' }, rank: { kind: 'number' } }, indexes: [{ columns: ['rank'] }], search: ['title', 'description'], searchDetail } } as const;
+  const schema = { records: { key: '_id', fields: { _id: { kind: 'text' }, title: { kind: 'text' }, description: { kind: 'text' }, rank: { kind: 'number' } }, indexes: [{ columns: ['rank'] }], search: ['title', 'description'], searchDetail, ...(external ? { searchContent: 'external' as const } : {}) } } as const;
   const engine = new SQLiteTypedReplicaEngine(host.database, schema); await engine.open('owner');
   const rows = [
     { _id: 'a', title: 'Needle café 東京', description: 'Inspect *pump? [A] 100% back\\slash', rank: 1 },
@@ -124,6 +125,7 @@ it.each(['full', 'column', 'none'] as const)('preserves literal substring querie
     { _id: 'c', title: '[A] needle', description: 'Unrelated text', rank: 3 },
   ];
   await engine.importScope('s', (async function* () { yield JSON.stringify(rows.map(row => ({ table: 'records', id: row._id, version: 1, row }))); })());
+  expect(await host.database.getFirstAsync("SELECT count(*) n FROM sqlite_master WHERE type='table' AND name GLOB '*_fts_content'")).toEqual({ n: external ? 0 : 1 });
   const terms = ['needle', 'NEEDLE', '東京', 'café', '🔧', '*pump?', '[A]', '100%', 'back\\slash', 'long phrase', 'absent'];
   for (const search of terms) {
     const expected = rows.filter(row => [row.title, row.description].some(value => value.toLowerCase().includes(search.toLowerCase()))).map(row => row._id);
@@ -135,6 +137,7 @@ it.each(['full', 'column', 'none'] as const)('preserves literal substring querie
   ]);
   expect((await engine.page('s', { table: 'records', search: 'needle', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows.map(row => row._id)).toEqual(['c']);
   expect((await engine.page('s', { table: 'records', search: 'Fresh phrase', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows.map(row => row._id)).toEqual(['a']);
+  expect(await engine.integrity()).toBe('ok');
 });
 
 it('opens and imports a schema without optional secondary indexes or FTS', async () => {
@@ -160,4 +163,16 @@ it('reconstructs JSON subtypes and missing fields from typed skeletons in the of
   const plan = { table: 'records', order: [{ field: 'rank', direction: 'asc' }], limit: 2 } as const;
   expect((await engine.page('s', plan)).rows).toEqual(rows);
   expect((await engine.viewPage('s', 'all', plan)).rows).toEqual(rows);
+});
+
+it('checks external FTS content consistency in addition to SQLite page integrity', async () => {
+  const { host } = fixture();
+  const schema = { records: { key: '_id', fields: { _id: { kind: 'text' }, name: { kind: 'text' } }, indexes: [], search: ['name'], searchContent: 'external' } } as const;
+  const engine = new SQLiteTypedReplicaEngine(host.database, schema); await engine.open('owner');
+  await engine.apply('s', [{ table: 'records', id: 'a', version: 1, row: { _id: 'a', name: 'Needle' } }]);
+  expect(await engine.integrity()).toBe('ok');
+  const fn = q(sqliteSearchName('records'));
+  await host.database.runAsync(`INSERT INTO ${fn}(${fn},rowid,s0) SELECT 'delete',rid,s0 FROM ${q(sqliteTableName('records'))}`);
+  expect(await host.database.getFirstAsync('PRAGMA integrity_check')).toEqual({ integrity_check: 'ok' });
+  await expect(engine.integrity()).rejects.toThrow();
 });

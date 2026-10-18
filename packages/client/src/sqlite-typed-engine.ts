@@ -587,6 +587,11 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
         await this.fence();
         const row = await this.db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
         result = row?.integrity_check ?? 'unavailable';
+        if (!await this.indexesDeferred()) for (const [entity, table] of Object.entries(this.schema)) if (table.searchContent === 'external') {
+          const name = q(sqliteSearchName(entity));
+          await this.db.runAsync(`INSERT INTO ${name}(${name},rank) VALUES('integrity-check',1)`);
+          this.progress();
+        }
       });
       return result;
     });
