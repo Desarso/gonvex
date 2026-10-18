@@ -22,7 +22,7 @@ export type SQLiteCollectionPageResult=SQLiteTypedPage&{generation:string};
 type Page=SQLiteNativeWindowResult|SQLitePendingSnapshotPage|SQLiteNativeEntityResult|SQLiteCollectionPageResult|null;
 type WatchSnapshot={page:Page|undefined;stale:boolean;version:number};
 type Watch={state:WatchSnapshot;retiring?:Promise<void>;key:string;lease:string;path:string;args:JsonValue;bytes:number;refs:number;source?:{id:string;signature:string};bound:number;opening?:Promise<void>;listeners:Set<()=>void>;unpin?:()=>void;stale:boolean;version:number};
-export type SQLiteBrowserOptions={broker:Broker;artifactHash?:string;auth?:Auth;fetchToken?:GonvexClientAuth['fetchToken']};
+export type SQLiteBrowserOptions={broker:Broker;artifactHash?:string;role?:'control';public?:{tenant:string};auth?:Auth;fetchToken?:GonvexClientAuth['fetchToken']};
 export type SQLiteReplicaPageOptions={offset?:number;limit?:number;generation?:string;expected?:SQLiteNativeWindowResult['generation']};
 export type SQLiteReplicaWatch={
  /** A mounted watch retains one bounded page, never a collection-sized list. */
@@ -40,7 +40,7 @@ const stable=(value:JsonValue):string=>value===null||typeof value!=='object'?JSO
  * and fallback; this primitive itself never silently creates another adapter. */
 export class SQLiteBrowserClient {
  private fetchToken?:GonvexClientAuth['fetchToken'];private readonly controlListeners=new Set<()=>void>();private readonly authListeners=new Set<(message:string,details:{definitive:boolean;code?:string})=>void>();private readonly credentialListeners=new Set<(token:string)=>void>();private authSerial=0;private readonly authWaiters=new Set<()=>void>();private lastAuthError?:string;private lastCredential?:string;
- private auth:Auth;private closed=false;private revision=0;private dataRevision=0;private admissionKey?:string|null;private epoch?:number;private handle?:Handle;private connecting?:Promise<Handle>;private connectingRevision=0;
+ private readonly publicTenant?:string;private auth:Auth;private closed=false;private revision=0;private dataRevision=0;private admissionKey?:string|null;private epoch?:number;private handle?:Handle;private connecting?:Promise<Handle>;private connectingRevision=0;
  private readonly watches=new Map<string,Watch>();private watchBytes=0;
  private readonly ledger=new ByteLedger(12582912);private readonly entityView:SQLiteBrowserEntities;private readonly controlQueries:SQLiteBrowserControls;
  private readonly requests=new SQLiteTransientBudget(2097152,16);
@@ -49,7 +49,7 @@ export class SQLiteBrowserClient {
  private readonly releaseChanges:()=>void;private controlsValue?:Pick<Controls,'status'|'session'|'failure'|'authentication'>;
  constructor(readonly url:string,private readonly options:SQLiteBrowserOptions){
   const parsed=new URL(url);if(!['ws:','wss:'].includes(parsed.protocol)||parsed.username||parsed.password||parsed.hash)throw new TypeError('Invalid native browser URL');
-  sqlitePayloadBytes(options.auth??{},65536);this.auth=structuredClone(options.auth??{});this.fetchToken=options.fetchToken;this.controlQueries=new SQLiteBrowserControls(input=>this.rpc(input),this.ledger);this.entityView=new SQLiteBrowserEntities((entity,ids,expected)=>this.entities(entity,ids,expected),this.ledger,error=>{if(this.closed)return;this.controlsValue={...this.controlsValue,status:this.controlsValue?.status,session:this.controlsValue?.session??'unavailable',failure:{code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)}};for(const listener of this.controlListeners)try{listener();}catch{/* Observer only. */}});
+  sqlitePayloadBytes(options.auth??{},65536);this.auth=structuredClone(options.auth??{});if(options.public){if(options.role==='control'||!options.public.tenant.trim()||!this.auth.project?.trim()||this.auth.token||this.auth.identity||this.auth.tenant||options.fetchToken)throw new TypeError('Public clients require fixed project/tenant routing without account credentials');this.publicTenant=options.public.tenant.trim();this.auth.tenant=this.publicTenant;parsed.searchParams.set('public','1');this.url=parsed.href;}this.fetchToken=options.fetchToken;this.controlQueries=new SQLiteBrowserControls(input=>this.rpc(input),this.ledger);this.entityView=new SQLiteBrowserEntities((entity,ids,expected)=>this.entities(entity,ids,expected),this.ledger,error=>{if(this.closed)return;this.controlsValue={...this.controlsValue,status:this.controlsValue?.status,session:this.controlsValue?.session??'unavailable',failure:{code:String((error as any)?.code??'SQLITE'),message:String((error as any)?.message??error).slice(0,512)}};for(const listener of this.controlListeners)try{listener();}catch{/* Observer only. */}});
   this.ledger.register('browser-watch-metadata',()=>({name:'browser-watch-metadata',bytes:this.watchBytes,entries:this.watches.size,maxBytes:524288,maxEntries:64,evictions:0,refusals:0}));
   this.ledger.register('browser-request-admission',()=>({...this.requests.stats(),name:'browser-request-admission'}));
   this.ledger.register('browser-observers',()=>({name:'browser-observers',bytes:(this.controlListeners.size+this.authListeners.size+this.credentialListeners.size)*128+this.authWaiters.size*256,entries:this.controlListeners.size+this.authListeners.size+this.credentialListeners.size,maxBytes:14336,maxEntries:104,evictions:0,refusals:0}));
@@ -73,14 +73,14 @@ export class SQLiteBrowserClient {
  }
  connect():Promise<Handle>{
   if(this.closed)return Promise.reject(Object.assign(Error('Native browser client is closed'),{code:'FENCED'}));if(this.handle)return Promise.resolve(this.handle);if(this.connecting){const pending=this.connecting,pendingRevision=this.connectingRevision;return pending.then(handle=>this.handle?handle:this.connect(),error=>{if(!this.closed&&pendingRevision!==this.revision)return this.connect();throw error;});}
-  const revision=this.revision,operation=this.options.broker.request<Handle>('clientCall',{method:'connect',url:this.url,auth:this.auth,artifactHash:this.options.artifactHash}).then(handle=>{this.current(revision);this.handle=handle;this.epoch=this.options.broker.stats().ownerEpoch;
+  const revision=this.revision,operation=this.options.broker.request<Handle>('clientCall',{method:'connect',url:this.url,auth:this.auth,...(this.options.role?{role:this.options.role}:{}),...(this.publicTenant?{public:true}:{}),artifactHash:this.options.artifactHash}).then(handle=>{this.current(revision);this.handle=handle;this.epoch=this.options.broker.stats().ownerEpoch;
    // Credential hints must be serviced while authentication is waiting. Never
    // put a token fetch behind the durable connection/session readiness barrier.
    queueMicrotask(()=>{void this.pollControls().catch(()=>{});for(const watch of this.watches.values())void this.open(watch).catch(()=>{});});return handle;
   });this.connecting=operation;this.connectingRevision=revision;void operation.then(()=>{if(this.connecting===operation)this.connecting=undefined;},()=>{if(this.connecting===operation)this.connecting=undefined;});return operation;
  }
  async setAuth(input:GonvexClientAuth){
-  this.current(this.revision);this.authSerial++;for(const listener of this.controlListeners)try{listener();}catch{/* Observer only. */}
+  this.current(this.revision);if(this.publicTenant&&(input.token||input.fetchToken||input.identity||Object.hasOwn(input,'tenant')&&input.tenant!==this.publicTenant||Object.hasOwn(input,'project')&&input.project!==this.auth.project))throw new TypeError('Public client routing is fixed');this.authSerial++;for(const listener of this.controlListeners)try{listener();}catch{/* Observer only. */}
   if(Object.hasOwn(input,'fetchToken'))this.fetchToken=input.fetchToken;const auth:Auth={};for(const key of ['project','tenant','identity','token'] as const)if(Object.hasOwn(input,key))Object.assign(auth,{[key]:input[key]});
   sqlitePayloadBytes(auth,65536);const identity=stable({project:Object.hasOwn(auth,'project')?auth.project??null:this.auth.project??null,tenant:Object.hasOwn(auth,'tenant')?auth.tenant??null:this.auth.tenant??null,identity:Object.hasOwn(auth,'identity')?auth.identity as JsonValue??null:this.auth.identity as JsonValue??null});
   const old=stable({project:this.auth.project??null,tenant:this.auth.tenant??null,identity:this.auth.identity as JsonValue??null});this.auth={...this.auth,...structuredClone(auth)};
@@ -147,7 +147,7 @@ export class SQLiteBrowserClient {
  invokeReducer(ref:Pick<FunctionReference,'path'>,args:JsonValue={},options:{now?:number;intentEntropy?:string;commandId?:string}={}):Promise<SQLiteReducerReceipt>{if(options.commandId&&options.now===undefined)throw new TypeError('Retryable reducers require their original invocation time');return this.rpc({method:'reducer',path:ref.path,args,now:options.now??Date.now(),intentEntropy:options.intentEntropy},options.commandId??crypto.randomUUID());}
  reducer<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args:Args,options:CallOptions&{offline:'queue'}):Promise<T|QueuedReducerOutcome>;
  reducer<T extends JsonValue=JsonValue,Args extends JsonValue=JsonValue>(ref:FunctionReference<Args,T>,args?:Args,options?:CallOptions):Promise<T>;
- async reducer<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={},_options:CallOptions={}):Promise<T|QueuedReducerOutcome>{const receipt=await this.invokeReducer(ref,args);return receipt.queuedOnly?{status:'queued',reducerId:receipt.commandId}:receipt.result as T;}
+ async reducer<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={},_options:CallOptions={}):Promise<T|QueuedReducerOutcome>{if(this.publicTenant&&(_options.offline==='queue'||_options.optimistic?.length))throw new GonvexClientError('Public reducers are online-only',{code:'disconnected',path:ref.path,operation:'reducer'});const receipt=await this.invokeReducer(ref,args);return receipt.queuedOnly?{status:'queued',reducerId:receipt.commandId}:receipt.result as T;}
  prepareReducer(ref:Pick<FunctionReference,'path'>):Promise<void>{return this.rpc({method:'prepareReducer',path:ref.path});}
  query<T extends JsonValue>(ref:Pick<FunctionReference,'path'>,args:JsonValue={}):Promise<T>{return this.rpc({method:'query',path:ref.path,args});}
  action<T extends JsonValue>(ref:Pick<FunctionReference,'path'>,args:JsonValue={}):Promise<T>{return this.rpc({method:'action',path:ref.path,args});}

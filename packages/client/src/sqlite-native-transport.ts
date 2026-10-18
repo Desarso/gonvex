@@ -6,7 +6,7 @@ import {artifactHashFromAuthResult,developerSessionTokenFromAuthResult,localIden
 import {GonvexClientError,reducerErrorClassFromMessage} from './client-error.js';
 import {sqlitePayloadBytes} from './sqlite-admission.js';
 
-type Options=GonvexClientAuth&{ownerHost:SQLiteTransportHost;clientContract?:ClientContract;reserve(bytes:number):()=>void;releaseAuth?:()=>void};
+type Options=GonvexClientAuth&{controlOnly?:boolean;public?:boolean;ownerHost:SQLiteTransportHost;clientContract?:ClientContract;reserve(bytes:number):()=>void;releaseAuth?:()=>void};
 type ControlWatch={ref:FunctionReference;args:JsonValue;wireId?:string;authSerial?:number;release():void;receive(value:{result:JsonValue}|{error:string}):void};
 type Pending={id:string;kind:'query'|'reducer'|'action';path:string;command?:string;control:boolean;public:boolean;wire?:string;sent:boolean;result?:JsonValue;answered:boolean;revision?:number;controlReady:boolean;timer?:ReturnType<typeof setTimeout>;resolve(value:JsonValue):void;reject(error:Error):void;release():void};
 const error=(message:string,code:'auth'|'closed'|'disconnected'|'superseded'|'timeout')=>new GonvexClientError(message,{code});
@@ -62,7 +62,7 @@ export class SQLiteNativeTransport {
    if(!this.current(socket,generation)||serial!==this.authSerial)return;
    if(token!==undefined&&(typeof token!=='string'||token.length>16384))throw Error('Invalid native authentication token');
    this.auth={...this.auth,token};if(this.scope()!==previousScope)this.options.ownerHost.authenticating(this.scope(),generation);const id=this.latestAuth=crypto.randomUUID();
-   this.sendNow({type:'auth',id,token,project:this.auth.project,tenant:this.auth.tenant,controlOnly:!this.auth.tenant,...(this.options.clientContract?{clientContract:this.options.clientContract.version}:{}),
+   this.sendNow({type:'auth',id,token,project:this.auth.project,tenant:this.auth.tenant,controlOnly:this.options.controlOnly||!this.auth.tenant,...(this.options.public?{public:true}:{}),...(this.options.clientContract?{clientContract:this.options.clientContract.version}:{}),
     capabilities:{replicaNativeRows:1,replicaSetDigest:1,replicaSnapshotPages:1,tenantControl:1,replicaReadyMany:1,replicaWatermark:1}});
    this.flush();
   }catch{if(this.current(socket,generation)&&serial===this.authSerial)socket.close();}
@@ -118,14 +118,14 @@ export class SQLiteNativeTransport {
  private deny(generation:number,message:string,code?:string){this.options.ownerHost.authError?.(message,{definitive:true,code});this.quarantined=true;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.latestAuth=undefined;this.activeAuth=undefined;this.authInFlight=false;this.installing=false;this.session='unavailable';this.clearAuthTimer();this.options.ownerHost.quarantined?.(generation);for(const pending of [...this.pending.values()])if(!pending.public)this.finish(pending,undefined,error(message,'auth'));this.flush();}
  private settle(pending:Pending){if(!pending.answered)return;if(pending.kind!=='query'){
   if(pending.control&&this.capabilities.controlWatermark===1&&!pending.controlReady)return;
-  if(!pending.control&&this.capabilities.replicaWatermark===1&&pending.revision!==undefined&&pending.revision>this.watermark)return;
+  if(!pending.control&&!this.options.public&&this.capabilities.replicaWatermark===1&&pending.revision!==undefined&&pending.revision>this.watermark)return;
  }this.finish(pending,pending.result!);}
  advanceOwnerWatermark(revision:number){if(!Number.isSafeInteger(revision)||revision<0)throw Error('Invalid native terminal watermark');this.watermark=Math.max(this.watermark,revision);for(const pending of this.pending.values())this.settle(pending);}
  private sendNow(message:ClientMessage){const wire=JSON.stringify(message);if(wire.length*2>262144)throw Error('Native outbound frame exceeds budget');if(this.socket?.readyState!==1)throw error('Native socket is unavailable','disconnected');this.socket.send(wire);}
  sendOwnerMessage(message:ClientMessage){sqlitePayloadBytes(message,131072);if(this.quarantined)throw error('Native session is quarantined','auth');if(this.authInFlight&&!this.installing)throw error('Native admission is pending','disconnected');this.sendNow(message);}
  private flush(){const socket=this.socket;if(socket?.readyState!==1)return;for(const pending of this.pending.values()){
-  if(pending.sent||!pending.wire||this.authInFlight&&!pending.public)continue;
-  if(!pending.control&&this.session!=='authenticated')continue;
+  if(pending.sent||!pending.wire||this.authInFlight&&(!pending.public||this.options.public))continue;
+  if(!pending.control&&!this.options.public&&this.session!=='authenticated')continue;
   if(socket.bufferedAmount>524288){if(!this.sendTimer)this.sendTimer=setTimeout(()=>{this.sendTimer=undefined;this.flush();},5);continue;}
   const wire=pending.wire;pending.wire=undefined;pending.sent=true;try{socket.send(wire);}catch{this.finish(pending,undefined,error('Native send interrupted; its outcome may be unknown','disconnected'));socket.close();}
  }for(const watch of this.controlWatches){
@@ -154,7 +154,7 @@ export class SQLiteNativeTransport {
    const id=crypto.randomUUID(),wire=JSON.stringify({type:kind+'.call',id,path:ref.path,args,...(ref.scope==='control'?{scope:'control'}:{}),...(kind==='reducer'?{idempotencyKey:command??id,...(ref.artifactHash?{artifactHash:ref.artifactHash}:{}),...(ref.receiptPath?{receiptPath:ref.receiptPath}:{}),...(ref.intentEntropy?{intentEntropy:ref.intentEntropy}:{}),...(this.options.clientContract?{clientContract:this.options.clientContract.version}:{})}:{})});
    if(wire.length*2>131072)throw Error('Native invocation exceeds wire budget');
    const metadata=releaseMetadata,payload=releasePayload;releaseMetadata=undefined;releasePayload=undefined;
-   this.waiting--;waiting=false;return await new Promise<T>((resolve,reject)=>{const pending:Pending={id,kind,path:ref.path,...(kind==='reducer'?{command:command??id}:{}),control:ref.scope==='control',public:ref.scope==='control'&&ref.authorization==='public',wire,sent:false,answered:false,controlReady:false,resolve:value=>resolve(value as T),reject,release:()=>{metadata();payload();}};
+   this.waiting--;waiting=false;return await new Promise<T>((resolve,reject)=>{const pending:Pending={id,kind,path:ref.path,...(kind==='reducer'?{command:command??id}:{}),control:ref.scope==='control',public:this.options.public||ref.scope==='control'&&ref.authorization==='public',wire,sent:false,answered:false,controlReady:false,resolve:value=>resolve(value as T),reject,release:()=>{metadata();payload();}};
     pending.timer=setTimeout(()=>this.finish(pending,undefined,new GonvexClientError('Native operation timed out; a dispatched outcome may be unknown',{code:'timeout',path:ref.path,operation:kind})),Math.max(1,deadline-Date.now()));this.pending.set(id,pending);this.flush();
    });
   }finally{if(waiting)this.waiting--;releasePayload?.();releaseMetadata?.();}
