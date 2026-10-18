@@ -1,6 +1,6 @@
 import type {ReducerOutboxEntry,ReducerOutboxState,IntentDependencies} from './outbox.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
-import {decodedJSONBytes,fail,sqlitePayloadBytes} from './sqlite-admission.js';
+import {decodedJSONBytes,fail,sqlitePayloadBytes,pageBudgetError} from './sqlite-admission.js';
 type Draft=Omit<ReducerOutboxEntry,'id'>;
 export type SQLiteIntentReceipt={id:number;idempotencyKey:string};
 export type SQLiteIntentPage={entries:ReducerOutboxEntry[];nextId:number|null};
@@ -44,7 +44,7 @@ function admit(draft:Draft){
   for(const row of [...deps.reads,...deps.writes])if(!row||typeof row.entity!=='string'||!row.entity||row.entity.length>256||typeof row.rowId!=='string'||!row.rowId||row.rowId.length>1024)throw new TypeError('Invalid intent row dependency');
   for(const table of deps.scans)if(typeof table!=='string'||!table||table.length>256)throw new TypeError('Invalid intent scan dependency');
  }
- const encoded=JSON.stringify(draft);decodedJSONBytes(encoded,131072);return encoded;
+ const encoded=JSON.stringify(draft);decodedJSONBytes(encoded,131072);if(new TextEncoder().encode(encoded).byteLength>130000)fail('BUDGET','Intent wire body exceeds native bridge budget');return encoded;
 }
 async function hash(text:string){const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));return Array.from(bytes,byte=>byte.toString(16).padStart(2,'0')).join('');}
 
@@ -87,7 +87,7 @@ export class SQLiteIntentJournal {
    // next body when a page's conservative wire allowance is exhausted.
    if(bytes+candidate.bytes>262144){if(!entries.length)fail('BUDGET','Intent exceeds delivery page budget');break;}
    const row=await this.db.getFirstAsync<{value:string}>('SELECT value FROM gv_reducer_journal WHERE id=?',candidate.id);
-   if(!row)fail('FENCED','Intent disappeared during owner read');const size=decodedJSONBytes(row.value,262144-bytes);if(bytes+size>262144)fail('BUDGET','Decoded intent exceeds delivery page budget');
+   if(!row)fail('FENCED','Intent disappeared during owner read');let size:number;try{size=decodedJSONBytes(row.value,262144-bytes);}catch(error){if(entries.length&&pageBudgetError(error))break;throw error;}
    const entry=JSON.parse(row.value) as ReducerOutboxEntry;bytes+=size;entries.push(entry);
   }
   sqlitePayloadBytes(entries,262144);return entries;

@@ -10,11 +10,21 @@ import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
  * pushed down. The portable reader always applies the complete predicate and
  * exact ordering, so unsupported transforms retain their existing semantics. */
 export async function readSQLitePortablePage(db: SQLiteReplicaDatabase, schema: SQLiteTypedSchema,
-  scope: string, read: DataRead, after?: string, excluded: readonly string[] = [], coverageColumns?: readonly string[]): Promise<ReplicaReadPage> {
+  scope: string, read: DataRead, after?: string, excluded: readonly string[] = [], coverageColumns?: readonly string[], predictionScope?:string): Promise<ReplicaReadPage> {
   sqlitePayloadBytes({scope,read,excluded,coverageColumns:coverageColumns??null},65536);
   const table = Object.hasOwn(schema,read.table) && schema[read.table];
   if (!table) throw new TypeError('Portable read references an undeclared SQLite table');
   const physical = (await db.getFirstAsync<{physical:string}>('SELECT physical FROM gv_scope_alias WHERE scope=?',scope))?.physical ?? scope;
+  // Predictions use the same generated typed table and indexes in a private
+  // physical scope. Markers exclude replaced/deleted canonical rows on disk.
+  // Keep the original indexed source when this table has no predictions.
+  const typed=q(sqliteTableName(read.table));let source=typed,sourceBindings:unknown[]=[];
+  if(predictionScope&&await db.getFirstAsync('SELECT 1 FROM gv_prediction_members WHERE scope=? AND entity=? LIMIT 1',scope,read.table)){
+    // UNION columns must have exactly the typed table's original order.
+    source=`(SELECT b.* FROM ${typed} b WHERE b.scope=? AND NOT EXISTS(SELECT 1 FROM gv_prediction_members p WHERE p.scope=? AND p.entity=? AND p.id=b.id)
+     UNION ALL SELECT rid,? AS scope,id,body,version,${[...Object.keys(table.fields).map(sqliteFieldName),...(table.search??[]).map((_,i)=>'s'+i)].map(q).join(',')} FROM ${typed} WHERE scope=?)`;
+    sourceBindings=[physical,scope,read.table,physical,predictionScope];
+  }
   let fieldsComplete = true;
   if (after === undefined) {
     const required = new Set(read.columns ?? coverageColumns ?? []);
@@ -36,7 +46,7 @@ export async function readSQLitePortablePage(db: SQLiteReplicaDatabase, schema: 
       let restriction='';
       if (keys) { restriction+=' AND t.id IN (SELECT value FROM json_each(?))'; params.push(JSON.stringify(keys)); }
       if (excluded.length) { restriction+=' AND t.id NOT IN (SELECT value FROM json_each(?))'; params.push(JSON.stringify(excluded)); }
-      const incomplete=await db.getFirstAsync<{missing:number}>(`SELECT EXISTS(SELECT 1 FROM ${q(sqliteTableName(read.table))} t WHERE t.scope=?${restriction} AND (${absent.join(' OR ')})) missing`,...params);
+      const incomplete=await db.getFirstAsync<{missing:number}>(`SELECT EXISTS(SELECT 1 FROM ${source} t WHERE t.scope=?${restriction} AND (${absent.join(' OR ')})) missing`,...sourceBindings,...params);
       fieldsComplete=!incomplete?.missing;
     }
   }
@@ -82,7 +92,7 @@ export async function readSQLitePortablePage(db: SQLiteReplicaDatabase, schema: 
   let limit=256, records: Record<string,unknown>[];
   for (;;) {
     try {
-      records=await db.getAllAsync(`SELECT t.id,${selected} FROM ${q(sqliteTableName(read.table))} t WHERE t.scope=? AND t.id>? AND (${where}) ORDER BY t.id LIMIT ?`,...bindings,limit);
+      records=await db.getAllAsync(`SELECT t.id,${selected} FROM ${source} t WHERE t.scope=? AND t.id>? AND (${where}) ORDER BY t.id LIMIT ?`,...sourceBindings,...bindings,limit);
       sqlitePayloadBytes(records,262144);
       if (fields) decodedPageBytes(records,table,fields,262144);
       else { let bytes=0; for (const row of records) bytes+=decodedJSONBytes(String(row.body),262144-bytes); }

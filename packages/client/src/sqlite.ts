@@ -20,3 +20,6 @@ export {SQLiteNativeReplicaReader} from './sqlite-native-replica-reader.js';
 export type {SQLiteNativeWindowRead,SQLiteNativeWindowResult,SQLiteNativeEntityRead,SQLiteNativeEntityResult,SQLiteEntitySlot} from './sqlite-native-replica-reader.js';
 export {SQLiteIntentJournal} from './sqlite-intent-journal.js';
 export type {SQLiteIntentReceipt,SQLiteIntentPage} from './sqlite-intent-journal.js';
+export {SQLitePredictions} from './sqlite-predictions.js';
+export {SQLiteReducerCore} from './sqlite-reducer-core.js';
+export type {SQLiteReducerInvocation,SQLiteReducerReceipt} from './sqlite-reducer-core.js';
