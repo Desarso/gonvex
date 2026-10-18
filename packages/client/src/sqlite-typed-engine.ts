@@ -1,3 +1,4 @@
+import {releaseOwnedSQLiteBytes} from './sqlite-owned-buffer.js';
 import { yieldSQLiteTask } from './sqlite-task-yield.js';
 import { ByteLedger, BoundedByteCache } from './byte-budget.js';
 import { compileSQLiteEncodedFrameValidation, sqliteEncodedFrameValueSQL, writeSQLiteEncodedFrame } from './sqlite-encoded-frame.js';
@@ -53,7 +54,7 @@ export class SQLiteTypedReplicaEngine {
   private jsonEach: 'json_each' | 'jsonb_each' = 'json_each';
   private lastProgress = -Infinity;
   private readonly plans = new BoundedByteCache<string, string>('sqlite-plans', 262144, 4, new ByteLedger(262144));
-  private readonly profile = { yieldMs: 0, yields: 0, nativeValidationMs: 0, searchProjectionMs: 0, nativeFrames: 0, frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
+  private readonly profile = { releasedIngressBytes:0, yieldMs: 0, yields: 0, nativeValidationMs: 0, searchProjectionMs: 0, nativeFrames: 0, frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
   takeProfile() { const result = { ...this.profile }; for (const key of Object.keys(this.profile) as Array<keyof typeof this.profile>) this.profile[key] = 0; return result; }
   constructor(private readonly db: SQLiteReplicaDatabase, readonly schema: SQLiteTypedSchema,
     private readonly limits = { operations: 64, queuedBytes: 2_097_152, batchBytes: 262_144, pageBytes: 262_144 },
@@ -377,8 +378,9 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
   }
   appendBootstrap(scope: string, token: string, page: number, encoded: string | Uint8Array): Promise<SQLiteBootstrapState> {
     if ((typeof encoded === 'string' ? encoded.length*2>this.limits.batchBytes : !(encoded instanceof Uint8Array) || !(encoded.buffer instanceof ArrayBuffer) || encoded.byteLength*2>this.limits.batchBytes)) return Promise.reject(new SQLiteReplicaEngineError('BUDGET','Invalid SQLite bootstrap frame'));
-    const owned = typeof encoded === 'string' ? encoded : encoded.slice();
-    return this.appendBootstrapBatch(scope, token, (async function* () { yield { page, encoded: owned }; })());
+    const owned = typeof encoded === 'string' ? encoded : new Uint8Array(encoded);
+    const result=this.appendBootstrapBatch(scope, token, (async function* () { yield { page, encoded: owned }; })());
+    return typeof owned==='string'?result:result.finally(()=>{this.profile.releasedIngressBytes+=releaseOwnedSQLiteBytes(owned);});
   }
   /** A bounded streamed credit group commits together. The producer yields one
    * frame at a time; it never needs a 1,000-row object or worker message. */
@@ -392,8 +394,9 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         for await (const frame of source) {
           const page = frame.page, input = frame.encoded;
           if (++pages > 16 || typeof input !== 'string' && (!(input instanceof Uint8Array) || !(input.buffer instanceof ArrayBuffer)) || (bytes += input.length * 2) > this.limits.queuedBytes || input.length*2>this.limits.batchBytes) fail('BUDGET', 'Bootstrap credit group exceeds budget');
-          const encoded = typeof input === 'string' ? input : input.slice();
-          state = await this.appendBootstrapPage(scope, token, page, encoded);
+          const encoded = typeof input === 'string' ? input : new Uint8Array(input);
+          try{state = await this.appendBootstrapPage(scope, token, page, encoded);}
+          finally{this.profile.releasedIngressBytes+=releaseOwnedSQLiteBytes(encoded);}
         }
         if (!state) fail('INVALID_ROW', 'Empty bootstrap credit group');
       });
@@ -520,7 +523,8 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
           // Public callers may retain their view while native work awaits.
           // Snapshot only one admitted byte frame before the first await.
           if (input instanceof Uint8Array && (input.byteLength * 2 > this.limits.batchBytes || !(input.buffer instanceof ArrayBuffer))) fail('BUDGET', 'SQLite byte import frame exceeds ownership or byte budget');
-          const page = input instanceof Uint8Array ? input.slice() : input;
+          const page = input instanceof Uint8Array ? new Uint8Array(input) : input;
+          try {
           let nativeRows: number | undefined;
           if (typeof page === 'string' || page instanceof Uint8Array) {
             if (page.length * 2 > this.limits.batchBytes) fail('BUDGET', 'SQLite encoded import page exceeds byte budget');
@@ -553,6 +557,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
             await this.yieldTask();
             sliceStarted = performance.now();
           }
+          }finally{this.profile.releasedIngressBytes+=releaseOwnedSQLiteBytes(page);}
         }
         await this.restoreBootstrapIndexes();
         result = { sequence: previous + 1, rows };
