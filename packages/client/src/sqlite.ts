@@ -5,7 +5,7 @@ export type { SQLiteTypedSchema, SQLiteTypedTable, SQLiteField } from './sqlite-
 export { compileSQLiteTypedPage, compileSQLiteTypedView } from './sqlite-typed-query.js';
 export type { SQLitePredicate, SQLitePagePlan, SQLiteKeyset, SQLiteOrder, SQLiteTypedStatement, SQLiteBinding } from './sqlite-typed-query.js';
 export { SQLiteTypedReplicaEngine, SQLiteReplicaEngineError, sqlitePayloadBytes } from './sqlite-typed-engine.js';
-export type { SQLiteTypedWrite, SQLiteTypedPage, SQLiteTypedViewPage } from './sqlite-typed-engine.js';
+export type { SQLiteTypedWrite, SQLiteTypedPage, SQLiteTypedViewPage, SQLiteBootstrapState } from './sqlite-typed-engine.js';
 export { openOfficialSQLiteHost, officialSQLiteDatabase } from './sqlite-official-host.js';
 export type { OfficialSQLiteHost } from './sqlite-official-host.js';
 export { sqliteTypedRowLayout, sqliteTypedReplicaStorage } from './sqlite-typed-row-layout.js';

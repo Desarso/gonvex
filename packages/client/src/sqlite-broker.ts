@@ -1,4 +1,4 @@
-import { sqliteWorkerOperations as publicOperations } from './sqlite-worker-protocol.js';
+import { sqliteWorkerOperations as publicOperations, sqlitePublishingOperations } from './sqlite-worker-protocol.js';
 import { sqlitePayloadBytes } from './sqlite-typed-engine.js';
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
 
@@ -281,7 +281,7 @@ export class SQLiteReplicaBroker {
       const value = await this.workerCall(g, m.op, m.args);
       if (this.generation !== g) return;
       sqlitePayloadBytes(value, 262144); this.reply(m, value);
-      if ((m.op === 'apply' || m.op === 'acknowledge') && typeof m.args?.scope === 'string') this.broadcast({ type: 'change', scope: m.args.scope, sequence: value?.sequence ?? 0 });
+      if (sqlitePublishingOperations.has(m.op) && typeof m.args?.scope === 'string') this.broadcast({ type: 'change', scope: m.args.scope, sequence: value?.sequence ?? 0 });
     } catch (e) { if (this.generation === g) this.reply(m, undefined, e); }
     finally { const retained = this.inflight.get(key); if (retained?.generation === g) { this.inflightBytes -= retained.bytes; this.inflight.delete(key); } }
   }

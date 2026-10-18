@@ -1,4 +1,4 @@
-import { sqliteWorkerOperations as publicOperations } from './sqlite-worker-protocol.js';
+import { sqliteWorkerOperations as publicOperations, sqlitePublishingOperations } from './sqlite-worker-protocol.js';
 import { openOfficialSQLiteHost, type OfficialSQLiteHost } from './sqlite-official-host.js';
 import { SQLiteTypedReplicaEngine, sqlitePayloadBytes, type SQLiteTypedWrite } from './sqlite-typed-engine.js';
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
@@ -47,6 +47,9 @@ async function execute(op: string, args: any) {
     case 'windowPage': return engine.windowPage(scope(args.scope), args.signature, args.generation, args.offset, args.limit);
     case 'windowHashes': return engine.windowHashes(scope(args.scope), args.signature, args.generation, args.after, args.limit);
     case 'windowCollect': return engine.windowCollect(scope(args.scope), args.signature, args.generation);
+    case 'bootstrapBegin': return engine.beginBootstrap(scope(args.scope), args.token);
+    case 'bootstrapAppend': return engine.appendBootstrap(scope(args.scope), args.token, args.page, args.encoded);
+    case 'bootstrapFinish': return engine.finishBootstrap(scope(args.scope), args.token, args.expected);
     case 'count': return engine.count(scope(args.scope), args.entity, args.group, args.values);
     case 'apply': {
       if (!args.intent || typeof args.intent.id !== 'string') throw new TypeError('Broker writes require an immutable durable intent ID');
@@ -75,7 +78,7 @@ function admit(data: any, peer?: { port: MessagePort; token: string }, tab?: str
     try {
       const value = await execute(data.op, data.args);
       reply(data.id, value, undefined, peer, tab);
-      if ((data.op === 'apply' || data.op === 'acknowledge') && typeof data.args.scope === 'string') {
+      if (sqlitePublishingOperations.has(data.op) && typeof data.args.scope === 'string') {
         const change = { type: 'change', protocol: 1, scope: data.args.scope, sequence: (value as {sequence?: number}).sequence ?? 0 };
         globalThis.postMessage(change);
         for (const p of ports.values()) p.port.postMessage(change);

@@ -25,3 +25,11 @@ it('admits staged membership operations and rejects internal owner operations', 
   }
   await expect(broker.request('open', { owner: 'intruder' })).rejects.toMatchObject({ code: 'OPERATION' });
 });
+
+it('admits restartable bootstrap operations through the same bounded replay channel', async () => {
+  const broker = client();
+  for (const op of ['bootstrapBegin', 'bootstrapAppend', 'bootstrapFinish'])
+    await expect(broker.request(op, { scope: 's', token: 'first-sync' })).resolves.toMatchObject({ accepted: op });
+  await expect(broker.request('bootstrapAppend', { scope: 's', encoded: 'x'.repeat(131072) })).rejects.toMatchObject({ code: 'BUDGET' });
+  expect(broker.stats()).toMatchObject({ pending: 0, pendingBytes: 0 });
+});
