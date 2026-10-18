@@ -1,3 +1,6 @@
+import { sqlitePayloadBytes } from './sqlite-admission.js';
+import type { SQLitePagePlan } from './sqlite-typed-query.js';
+import type { SQLiteTypedViewPage } from './sqlite-typed-engine.js';
 import { SQLiteReplicaCommits } from "./sqlite-replica-commits.js";
 import type {
   ReplicaWindow, LocalReplicaStorage, ReplicaScope, ReplicaRow,
@@ -21,6 +24,9 @@ export interface SQLiteReplicaDatabase {
  * caller's existing transaction, never in a second database or cache. */
 export interface SQLiteReplicaRowLayout {
   install(database: SQLiteReplicaDatabase): Promise<void>;
+  resetViews?(database: SQLiteReplicaDatabase, scope: string): Promise<void>;
+  readViewPage?(database: SQLiteReplicaDatabase, scope: string, signature: string, plan: SQLitePagePlan,
+    offset: number, sequence: number): Promise<SQLiteTypedViewPage>;
   upsert(database: SQLiteReplicaDatabase, scope: string, entity: string,
     rows: readonly { id: string; row: ReplicaRow | null }[]): Promise<void>;
 }
@@ -200,6 +206,21 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     await this.database.execAsync(`INSERT OR REPLACE INTO _gonvex_replica_lookup
       SELECT e.scope,e.entity,j.key,CASE WHEN j.type IN ('integer','real') THEN 'number' WHEN j.type IN ('true','false') THEN 'boolean' ELSE 'string' END,j.atom,e.id
       FROM _gonvex_replica_entities e,json_each(e.value) j WHERE j.type IN ('integer','real','true','false') OR (j.type='text' AND length(j.atom)<=256)`);
+  }
+
+  /** Bounded native positions over the authoritative canonical corpus. Callers
+   * serialize this operation through the same storage actor as canonical writes.
+   * This does not establish coverage or include pending optimistic predictions. */
+  async readViewPage(scope: string, signature: string, plan: SQLitePagePlan, offset = 0): Promise<SQLiteTypedViewPage> {
+    sqlitePayloadBytes({ scope, signature, plan, offset }, 16384);
+    if (!scope || scope.length > 512 || !signature || signature.length > 256 || !Number.isSafeInteger(offset) || offset < 0) throw new TypeError('Invalid canonical view position');
+    if (!this.rowLayout?.readViewPage) throw new Error('This SQLite layout has no typed view compiler');
+    const admitted = structuredClone(plan);
+    await this.initialize(); let result!: SQLiteTypedViewPage;
+    await this.database.withTransactionAsync(async () => {
+      result = await this.rowLayout!.readViewPage!(this.database, scope, signature, admitted, offset, await this.commits.sequence(scope));
+    });
+    return result;
   }
 
   async load(
@@ -493,6 +514,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
       await this.database.runAsync('DELETE FROM _gonvex_replica_entities WHERE scope=?',scope);
       await this.database.runAsync('DELETE FROM _gonvex_replica_queries WHERE scope=?',scope);
       await this.database.runAsync("DELETE FROM _gonvex_replica_meta WHERE scope=? AND (key='cursor' OR key LIKE 'row:%')",scope);
+      await this.rowLayout?.resetViews?.(this.database, scope);
       await this.commits.reset(scope);
     }
     await this.database.runAsync("INSERT OR REPLACE INTO _gonvex_replica_meta VALUES(?,'currentEpoch',?)",scope,cursor.epoch);
@@ -628,6 +650,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         `DELETE FROM _gonvex_replica_meta WHERE scope = ? AND (key = 'cursor' OR key LIKE 'row:%')`,
         scope,
       );
+      await this.rowLayout?.resetViews?.(this.database, scope);
       await this.commits.reset(scope);
       for (const [entity, rows] of Object.entries(snapshot.entities)) {
         if (this.rowLayout) {
@@ -871,6 +894,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         scope,
       );
       await this.database.runAsync('DELETE FROM _gonvex_replica_retired_epochs WHERE scope=?',scope);
+      await this.rowLayout?.resetViews?.(this.database, scope);
       await this.commits.reset(scope);
     });
   }

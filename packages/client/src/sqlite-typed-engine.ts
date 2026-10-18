@@ -1,11 +1,11 @@
+import { readSQLiteTypedView } from './sqlite-native-view.js';
+import { SQLiteReplicaEngineError, sqlitePayloadBytes, decodedJSONBytes, decodedPageBytes, pageBudgetError, fail } from './sqlite-admission.js';
+export { SQLiteReplicaEngineError, sqlitePayloadBytes } from './sqlite-admission.js';
 import { SQLiteWindowStore, type SQLiteWindowHeader, type SQLiteWindowProgress } from './sqlite-window-store.js';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import { compileSQLiteTypedSchema, sqliteIdentifier as q, sqliteTableName, sqliteFieldName, sqliteSearchName, sqliteCountName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
 import { compileSQLiteTypedPage, compileSQLiteTypedView, type SQLitePagePlan, type SQLiteKeyset } from './sqlite-typed-query.js';
 
-export class SQLiteReplicaEngineError extends Error {
-  constructor(readonly code: 'FENCED' | 'SCHEMA_MISMATCH' | 'BUDGET' | 'INTENT_CONFLICT' | 'INVALID_ROW' | 'PAGE_CHANGED', message: string) { super(message); this.name = 'SQLiteReplicaEngineError'; }
-}
 export type SQLiteTypedWrite = { table: string; id: string; version: number; row: Record<string, unknown> | null };
 export type SQLiteTypedPage = { rows: Record<string, unknown>[]; cursor: SQLiteKeyset | null; bytes: number; sequence: number };
 export type SQLiteTypedViewPage = { rows: Record<string, unknown>[]; sequence: number; bytes: number; offset: number; total: number; nextOffset: number | null };
@@ -16,75 +16,6 @@ async function sha256(text: string): Promise<string> {
   const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
-function pageBudgetError(error: unknown): boolean { return !!error && typeof error === 'object' && 'code' in error && (error.code === 'BUDGET' || error.code === 'sqlite-bridge-budget'); }
-function fail(code: SQLiteReplicaEngineError['code'], message: string): never { throw new SQLiteReplicaEngineError(code, message); }
-
-/** Conservative JS admission accounting before JSON serialization or cloning.
- * Only own plain JSON data is accepted, with bounded depth and property count. */
-export function sqlitePayloadBytes(value: unknown, maxBytes: number): number {
-  let bytes = 0, nodes = 0;
-  const stack = new Set<object>();
-  const visit = (current: unknown, depth: number): void => {
-    if (++nodes > 100_000 || depth > 32) fail('BUDGET', 'SQLite payload structure exceeds budget');
-    bytes += 16;
-    if (typeof current === 'string') bytes += current.length * 2;
-    else if (typeof current === 'number') { if (!Number.isFinite(current)) fail('INVALID_ROW', 'Nonfinite SQLite JSON number'); }
-    else if (current !== null && typeof current !== 'boolean') {
-      if (typeof current !== 'object' || !Array.isArray(current) && Object.getPrototypeOf(current) !== Object.prototype && Object.getPrototypeOf(current) !== null)
-        fail('INVALID_ROW', 'SQLite payload must be plain JSON data');
-      const object = current as object;
-      if (Array.isArray(object) && (object.length > 100_000 || object.length * 16 > maxBytes || Object.keys(object).length !== object.length)) fail('BUDGET', 'SQLite arrays must be dense and fit the byte budget');
-      if (stack.has(object)) fail('INVALID_ROW', 'Cyclic SQLite payload');
-      stack.add(object);
-      for (const key of Object.keys(object)) {
-        bytes += key.length * 2 + 16;
-        if (bytes > maxBytes) fail('BUDGET', 'SQLite payload byte budget exceeded');
-        const descriptor = Object.getOwnPropertyDescriptor(object, key)!;
-        if (!('value' in descriptor)) fail('INVALID_ROW', 'SQLite payload accessor rejected');
-        if (descriptor.value !== undefined || Array.isArray(object)) visit(descriptor.value, depth + 1);
-      }
-      stack.delete(object);
-    }
-    if (bytes > maxBytes) fail('BUDGET', 'SQLite payload byte budget exceeded');
-  };
-  visit(value, 0);
-  return bytes;
-}
-
-/** Charge decoded JSON before allocating its object graph. Canonical JSON is
- * already validated on ingestion. Strings reserve their encoded UTF-16 size;
- * each structural token reserves container/member/value overhead. This is an
- * intentionally conservative upper estimate, not a JS engine heap measurement. */
-function decodedJSONBytes(text: string, maxBytes: number): number {
-  let bytes = text.length * 2 + 64, quoted = false, escaped = false;
-  for (let i = 0; i < text.length; i++) {
-    const char = text.charCodeAt(i);
-    if (quoted) {
-      if (escaped) escaped = false;
-      else if (char === 92) escaped = true;
-      else if (char === 34) quoted = false;
-    } else if (char === 34) { quoted = true; bytes += 32; }
-    else if (char === 91 || char === 123 || char === 44 || char === 58) bytes += 64;
-    if (bytes > maxBytes) fail('BUDGET', 'Decoded SQLite page exceeds budget');
-  }
-  return bytes;
-}
-function decodedPageBytes(records: readonly Record<string, unknown>[], table: SQLiteTypedSchema[string], fields: readonly string[] | undefined, maxBytes: number): number {
-  let bytes = 64;
-  for (const record of records) {
-    bytes += 64;
-    if (!fields) bytes += decodedJSONBytes(String(record.body), maxBytes - bytes);
-    else for (let i = 0; i < fields.length; i++) {
-      if (record['h' + i] === null) continue;
-      const field = fields[i]!, value = record['p' + i];
-      bytes += field.length * 2 + 64;
-      bytes += value === null ? 16 : table.fields[field]!.kind === 'json' ? decodedJSONBytes(String(value), maxBytes - bytes) : typeof value === 'string' ? value.length * 2 + 32 : 16;
-    }
-    if (bytes > maxBytes) fail('BUDGET', 'Decoded SQLite page exceeds budget');
-  }
-  return bytes;
-}
-
 /** JSON.parse owns this graph: no accessors, cycles or foreign prototypes.
  * Avoid allocating a descriptor and key array for every field on the trusted
  * wire path. Still enforce graph/depth/finite-number budgets before ingestion. */
@@ -518,53 +449,11 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
     if (!signature || signature.length > 256 || !Number.isSafeInteger(offset) || offset < 0) throw new TypeError('Invalid SQLite view position');
     const admitted = JSON.parse(JSON.stringify(plan)) as SQLitePagePlan;
     compileSQLiteTypedView(this.schema, scope, admitted);
-    const encoded = JSON.stringify(admitted);
     return this.enqueue(charge, async () => {
       let result!: SQLiteTypedViewPage;
       await this.db.withTransactionAsync(async () => {
         const sequence = await this.fence(), physical = await this.physicalScope(scope);
-        let header = await this.db.getFirstAsync<{ plan: string; sequence: number; n: number }>('SELECT plan,sequence,n FROM gv_views WHERE scope=? AND signature=?', scope, signature);
-        if (!header || header.plan !== encoded || header.sequence !== sequence) {
-          await this.db.runAsync('DELETE FROM gv_view_members WHERE scope=? AND signature=?', scope, signature);
-          const statement = compileSQLiteTypedView(this.schema, physical, admitted);
-          await this.db.runAsync(`INSERT INTO gv_view_members SELECT ?,?,row_number() OVER ()-1,rid FROM (${statement.sql})`, scope, signature, ...statement.bindings);
-          const n = (await this.db.getFirstAsync<{ n: number }>('SELECT count(*) n FROM gv_view_members WHERE scope=? AND signature=?', scope, signature))!.n;
-          await this.db.runAsync('INSERT INTO gv_views VALUES(?,?,?,?,?,?) ON CONFLICT(scope,signature) DO UPDATE SET plan=excluded.plan,sequence=excluded.sequence,n=excluded.n,touched=excluded.touched', scope, signature, encoded, sequence, n, Date.now());
-          header = { plan: encoded, sequence, n };
-          // A global disk-header cap also bounds retained plans across scopes.
-          // Evict one exact view, never scan or decode its member IDs in JS.
-          const count = (await this.db.getFirstAsync<{ n: number }>('SELECT count(*) n FROM gv_views'))!.n;
-          if (count > 32) {
-            const oldest = await this.db.getFirstAsync<{ scope: string; signature: string }>('SELECT scope,signature FROM gv_views WHERE scope<>? OR signature<>? ORDER BY touched,scope,signature LIMIT 1', scope, signature);
-            if (oldest) {
-              await this.db.runAsync('DELETE FROM gv_view_members WHERE scope=? AND signature=?', oldest.scope, oldest.signature);
-              await this.db.runAsync('DELETE FROM gv_views WHERE scope=? AND signature=?', oldest.scope, oldest.signature);
-            }
-          }
-        } else await this.db.runAsync('UPDATE gv_views SET touched=? WHERE scope=? AND signature=?', Date.now(), scope, signature);
-        const table = this.schema[admitted.table]!;
-        const fields = admitted.select ? [...new Set([table.key, ...admitted.select])] : undefined;
-        const selected = fields ? fields.map((name, i) => {
-          const path = ('$.' + JSON.stringify(name)).replaceAll("'", "''");
-          return `t.${q(sqliteFieldName(name))} AS ${q('p' + i)},json_type(t.body,'${path}') AS ${q('h' + i)}`;
-        }).join(',') : 't.body';
-        let records: Record<string, unknown>[], bytes: number, limit = admitted.limit;
-        for (;;) {
-          try {
-            records = await this.db.getAllAsync<Record<string, unknown>>(`SELECT ${selected} FROM gv_view_members m JOIN ${q(sqliteTableName(admitted.table))} t ON t.scope=? AND t.rid=m.rid
-              WHERE m.scope=? AND m.signature=? AND m.position>=? AND m.position<? ORDER BY m.position`, physical, scope, signature, offset, offset + limit);
-            bytes = Math.max(sqlitePayloadBytes(records, this.limits.pageBytes), decodedPageBytes(records, table, fields, this.limits.pageBytes)); break;
-          } catch (error) {
-            if (!pageBudgetError(error) || limit === 1) throw error;
-            limit = Math.max(1, Math.floor(limit / 2));
-          }
-        }
-        const rows = records.map(record => !fields ? JSON.parse(String(record.body)) : Object.fromEntries(fields.flatMap((name, i) => {
-          if (record['h' + i] === null) return [];
-          const value = record['p' + i], kind = table.fields[name]!.kind;
-          return [[name, value === null ? null : kind === 'json' ? JSON.parse(String(value)) : kind === 'boolean' ? Boolean(value) : value]];
-        })));
-        result = { rows, sequence, bytes, offset, total: header.n, nextOffset: offset + rows.length < header.n ? offset + rows.length : null };
+        result = await readSQLiteTypedView(this.db, this.schema, scope, physical, signature, admitted, offset, sequence, this.limits.pageBytes);
       }); return result;
     });
   }

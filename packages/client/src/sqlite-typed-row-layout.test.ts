@@ -84,3 +84,21 @@ it('clears only the selected scope, including tombstones, FTS and legacy lookup 
   expect(await storage.loadEntityRows('b', 'tasks', ['r'])).toHaveLength(1);
   expect(db.prepare("SELECT count(*) n FROM _gonvex_replica_lookup WHERE scope='a'").get()!.n).toBe(0);
 });
+
+it('serves bounded native positions from canonical authority and invalidates on writes, resets and scope changes', async () => {
+  const { storage, db } = fixture();
+  const view = { table: 'tasks', order: [{ field: 'due', direction: 'asc' }], select: ['name', 'due'], limit: 2 } as const;
+  const entities = { tasks: Object.fromEntries(Array.from({ length: 300 }, (_, n) => [String(n), { _id: String(n), name: 'Task ' + n, due: n }])) };
+  await storage.replaceSnapshot({ ...empty, entities, cursor: cursor(1) }, 's');
+  const page = await storage.readViewPage('s', 'grid', view, 290);
+  expect(page).toMatchObject({ total: 300, offset: 290, nextOffset: 292 });
+  expect(page.rows.map(row => row._id)).toEqual(['290', '291']);
+  expect((await storage.readViewPage('other', 'grid', view, 0)).total).toBe(0);
+  await storage.applyTransaction({ cursor: cursor(2), changes: [{ entity: 'tasks', id: '290', operation: 'update', newValue: { due: -1 } }] }, empty, 's');
+  expect((await storage.readViewPage('s', 'grid', view, 0)).rows[0]?._id).toBe('290');
+  await storage.clear('s');
+  expect((await storage.readViewPage('s', 'grid', view, 0)).total).toBe(0);
+  await storage.replaceSnapshot({ ...empty, entities: { tasks: { fresh: { _id: 'fresh', name: 'Fresh', due: 1 } } }, cursor: cursor(1, 'next') }, 's');
+  expect((await storage.readViewPage('s', 'grid', view, 0)).rows).toEqual([{ _id: 'fresh', name: 'Fresh', due: 1 }]);
+  expect(db.prepare('PRAGMA integrity_check').get()!.integrity_check).toBe('ok');
+});

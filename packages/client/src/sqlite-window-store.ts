@@ -1,6 +1,6 @@
 import type { ReplicaWindow } from './local-replica.js';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
-import { sqlitePayloadBytes } from './sqlite-typed-engine.js';
+import { sqlitePayloadBytes } from './sqlite-admission.js';
 
 export type SQLiteWindowHeader = Omit<ReplicaWindow, 'ids' | 'hashes'>;
 export type SQLiteWindowProgress = { generation: string; pages: number; rows: number; root: string };

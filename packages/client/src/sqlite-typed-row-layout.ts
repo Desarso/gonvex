@@ -1,3 +1,5 @@
+import { sqliteNativeViewSchema, readSQLiteTypedView } from './sqlite-native-view.js';
+import { compileSQLiteTypedView } from './sqlite-typed-query.js';
 import { SQLiteLocalReplicaStorage, type SQLiteReplicaDatabase, type SQLiteReplicaRowLayout } from './sqlite-replica-storage.js';
 import type { ReplicaRow } from './local-replica.js';
 import { compileSQLiteTypedSchema, sqliteIdentifier as q, sqliteTableName, sqliteFieldName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
@@ -19,6 +21,7 @@ export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRo
 CREATE TABLE IF NOT EXISTS gv_canonical_tombstones(scope TEXT NOT NULL,entity TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(scope,entity,id)) WITHOUT ROWID;`);
       const previous = await db.getFirstAsync<{ signature: string }>('SELECT signature FROM gv_canonical_layout WHERE id=1');
       if (previous && previous.signature !== signature) throw new Error('Typed canonical layout requires an explicit schema migration');
+      await db.execAsync(sqliteNativeViewSchema);
       await db.execAsync(ddl.tables + '\n' + ddl.indexes + '\n' + ddl.search);
       await db.runAsync('INSERT OR IGNORE INTO gv_canonical_layout VALUES(1,?)', signature);
       // This lookup serves legacy portable ReducerReadView predicates. Typed
@@ -47,6 +50,14 @@ CREATE TRIGGER IF NOT EXISTS ${q(table + '_lookup_d')} AFTER DELETE ON ${name} B
 ${deletes}
 DELETE FROM gv_canonical_tombstones WHERE scope=OLD.scope AND entity=OLD.entity AND id=OLD.id;
 END;`);
+    },
+    async resetViews(db, scope) {
+      await db.runAsync('DELETE FROM gv_view_members WHERE scope=?', scope);
+      await db.runAsync('DELETE FROM gv_views WHERE scope=?', scope);
+    },
+    async readViewPage(db, scope, signature, plan, offset, sequence) {
+      compileSQLiteTypedView(schema, scope, plan);
+      return readSQLiteTypedView(db, schema, scope, scope, 'canonical:' + signature, plan, offset, sequence, 262144);
     },
     async upsert(db, scope, entity, rows) {
       const table = Object.hasOwn(schema, entity) && schema[entity];
