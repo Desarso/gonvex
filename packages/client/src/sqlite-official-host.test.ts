@@ -88,3 +88,16 @@ it('keeps staged memberships and certificate pages bounded in the official WASM'
   expect((await store.hashPage('s', 'grid', 'one', certificates.at(-1)!.id))[0]!.id).toBe(String(certificates.length).padStart(3, '0'));
   expect(await host.database.getFirstAsync('PRAGMA integrity_check')).toEqual({ integrity_check: 'ok' });
 });
+
+it('resumes a deferred bootstrap in official WASM and builds searchable indexes on activation', async () => {
+  const { host } = fixture();
+  const schema = { records: { key: '_id', fields: { _id: { kind: 'text' }, title: { kind: 'text' }, rank: { kind: 'number' } }, indexes: [{ columns: ['rank'] }], search: ['title'] } } as const;
+  const engine = new SQLiteTypedReplicaEngine(host.database, schema); await engine.open('first');
+  await engine.beginBootstrap('s', 'bulk');
+  const state = await engine.appendBootstrap('s', 'bulk', 0, JSON.stringify(Array.from({ length: 100 }, (_, n) => ({ table: 'records', id: String(n), version: 1, row: { _id: String(n), title: '東京 café ' + n, rank: n } }))));
+  const next = new SQLiteTypedReplicaEngine(host.database, schema); await next.open('second');
+  await next.finishBootstrap('s', 'bulk', { pages: state.nextPage, rows: state.rows, root: state.root });
+  const page = await next.page('s', { table: 'records', search: 'café', order: [{ field: 'rank', direction: 'asc' }], limit: 10 });
+  expect(page.rows.map(row => row._id)).toEqual(Array.from({ length: 10 }, (_, n) => String(n)));
+  expect(await next.integrity()).toBe('ok');
+});

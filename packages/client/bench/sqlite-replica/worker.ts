@@ -17,9 +17,16 @@ const handlers = {
   },
   async bootstrapOpen({ token }) { return engine.beginBootstrap('test-scope', token); },
   async bootstrapSeed({ token, start, count }) {
-    return engine.appendBootstrapBatch('test-scope', token, (async function* () {
-      for (let offset=start; offset<start+count; offset+=100) yield { page: offset/100, encoded: JSON.stringify(fixtureWrites(offset,Math.min(100,start+count-offset))) };
-    })());
+    let state;
+    // Worker replacement cadence is independent of the bounded commit credit.
+    // Never enlarge a transaction just to keep a worker alive for more rows.
+    for (let group = start; group < start + count; group += 1000) {
+      const end = Math.min(group + 1000, start + count);
+      state = await engine.appendBootstrapBatch('test-scope', token, (async function* () {
+        for (let offset = group; offset < end; offset += 100) yield { page: offset / 100, encoded: JSON.stringify(fixtureWrites(offset, Math.min(100, end - offset))) };
+      })());
+    }
+    return state;
   },
   async bootstrapFinish({ token, expected }) { return engine.finishBootstrap('test-scope',token,expected); },
   async seedAll({ count, encoded = false }) {

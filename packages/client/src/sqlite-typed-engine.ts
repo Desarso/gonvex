@@ -76,14 +76,18 @@ CREATE INDEX IF NOT EXISTS gv_views_recency ON gv_views(touched);
 CREATE TABLE IF NOT EXISTS gv_view_members(scope TEXT NOT NULL,signature TEXT NOT NULL,position INTEGER NOT NULL,rid INTEGER NOT NULL,PRIMARY KEY(scope,signature,position)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_scope_alias(scope TEXT PRIMARY KEY,physical TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_bootstrap(scope TEXT PRIMARY KEY,token TEXT UNIQUE NOT NULL,physical TEXT NOT NULL,next_page INTEGER NOT NULL,rows INTEGER NOT NULL,root TEXT NOT NULL,base_sequence INTEGER NOT NULL,complete INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(token,page)) WITHOUT ROWID;`);
-        const signature = JSON.stringify({ format: 3, tables: this.schema });
+CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(token,page)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;`);
+        const signature = JSON.stringify({ format: 4, tables: this.schema });
         const old = await this.db.getFirstAsync<{ schema: string; epoch: number }>('SELECT schema,epoch FROM gv_storage_meta WHERE id=1');
-        if (old && old.schema !== signature) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
-        await this.db.execAsync(ddl.tables + '\n' + ddl.indexes + '\n' + ddl.search);
+        // Format 4 adds an index-deferral journal. Format 3 has identical rows
+        // and receipts: its upgrade neither decodes nor rewrites that corpus.
+        if (old && old.schema !== signature && old.schema !== JSON.stringify({ format: 3, tables: this.schema })) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
+        await this.db.execAsync(ddl.tables);
+        if (!await this.indexesDeferred()) await this.db.execAsync(ddl.indexes + '\n' + ddl.search);
         this.epoch = (old?.epoch ?? 0) + 1;
         if (!Number.isSafeInteger(this.epoch)) fail('FENCED', 'SQLite epoch exhausted');
-        await this.db.runAsync('INSERT INTO gv_storage_meta VALUES(1,?,?,?,0) ON CONFLICT(id) DO UPDATE SET epoch=excluded.epoch,owner=excluded.owner', signature, this.epoch, owner);
+        await this.db.runAsync('INSERT INTO gv_storage_meta VALUES(1,?,?,?,0) ON CONFLICT(id) DO UPDATE SET schema=excluded.schema,epoch=excluded.epoch,owner=excluded.owner', signature, this.epoch, owner);
       });
       this.owner = owner; this.initialized = true;
       return this.epoch;
@@ -98,6 +102,41 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
   private async physicalScope(scope: string): Promise<string> {
     if (!scope || scope.length > 512 || scope.startsWith('\u0000bootstrap:')) throw new TypeError('Invalid SQLite public scope');
     return (await this.db.getFirstAsync<{ physical: string }>('SELECT physical FROM gv_scope_alias WHERE scope=?', scope))?.physical ?? scope;
+  }
+  private async indexesDeferred(): Promise<boolean> {
+    return !!await this.db.getFirstAsync("SELECT value FROM gv_storage_flags WHERE name='bootstrap-indexes'");
+  }
+  private async suspendBootstrapIndexes(token: string): Promise<void> {
+    if (await this.indexesDeferred()) return;
+    for (const entity of Object.keys(this.schema)) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} LIMIT 1`)) return;
+    for (const [entity, table] of Object.entries(this.schema)) {
+      const name = sqliteTableName(entity);
+      for (let i = 0; i < table.indexes.length; i++) await this.db.execAsync(`DROP INDEX IF EXISTS ${q(name + '_i_' + i)}`);
+      if (table.search?.length) {
+        for (const suffix of ['a', 'u', 'd']) await this.db.execAsync(`DROP TRIGGER IF EXISTS ${q(name + '_fts_' + suffix)}`);
+        await this.db.execAsync(`DROP TABLE IF EXISTS ${q(sqliteSearchName(entity))}`);
+      }
+    }
+    await this.db.runAsync("INSERT INTO gv_storage_flags VALUES('bootstrap-indexes',?)", token);
+  }
+  /** Journal removal and every rebuilt native index commit together. An
+   * interrupted build leaves durable deferral ready for the next owner. */
+  private async restoreBootstrapIndexes(): Promise<void> {
+    if (!await this.indexesDeferred()) return;
+    const ddl = compileSQLiteTypedSchema(this.schema);
+    await this.db.execAsync(ddl.indexes + '\n' + ddl.search);
+    for (const [entity, table] of Object.entries(this.schema)) if (table.search?.length) {
+      const tn = q(sqliteTableName(entity)), fn = q(sqliteSearchName(entity)), columns = table.search.map((_, i) => q('s' + i)).join(',');
+      let after = 0;
+      for (;;) {
+        const last = (await this.db.getFirstAsync<{ last: number | null }>(`SELECT max(rid) last FROM (SELECT rid FROM ${tn} WHERE rid>? ORDER BY rid LIMIT 512)`, after))?.last;
+        if (last == null) break;
+        await this.db.runAsync(`INSERT INTO ${fn}(rowid,${columns}) SELECT rid,${columns} FROM ${tn} WHERE rid>? AND rid<=? ORDER BY rid`, after, last);
+        after = last;
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+      }
+    }
+    await this.db.runAsync("DELETE FROM gv_storage_flags WHERE name='bootstrap-indexes'");
   }
   private validateWrite(input: SQLiteTypedWrite) {
     const table = Object.hasOwn(this.schema, input.table) && this.schema[input.table];
@@ -196,6 +235,7 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
             result = JSON.parse(receipt.result); return;
           }
         }
+        await this.restoreBootstrapIndexes();
         await this.writeBatch(await this.physicalScope(admitted.scope), admitted.writes);
         if (previous >= Number.MAX_SAFE_INTEGER) fail('FENCED', 'SQLite storage sequence exhausted');
         result = { sequence: previous + 1 };
@@ -228,6 +268,7 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
         for (const table of ['gv_outbox', 'gv_intent_receipts', 'gv_tombstones']) if (await this.db.getFirstAsync(`SELECT 1 FROM ${table} WHERE scope=? LIMIT 1`, scope)) fail('INVALID_ROW', 'Bootstrap cannot replace pending work');
         const stage = '\u0000bootstrap:' + token;
         await this.db.runAsync('INSERT INTO gv_bootstrap VALUES(?,?,?,0,0,?,?,0)', scope, token, stage, '0'.repeat(64), sequence);
+        await this.suspendBootstrapIndexes(token);
         state = { token, nextPage: 0, rows: 0, root: '0'.repeat(64), complete: false };
       }); return state;
     });
@@ -292,6 +333,7 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
       for (const entity of Object.keys(this.schema)) await this.db.runAsync(`DELETE FROM ${q(sqliteTableName(entity))} WHERE scope=?`, old.physical);
       await this.db.runAsync('DELETE FROM gv_bootstrap_pages WHERE token=?', token);
       await this.db.runAsync('DELETE FROM gv_bootstrap WHERE scope=? AND token=?', scope, token);
+      await this.restoreBootstrapIndexes();
     }));
   }
   finishBootstrap(scope: string, token: string, expected: { pages: number; rows: number; root: string }): Promise<SQLiteBootstrapState> {
@@ -305,6 +347,7 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
         if (!old.complete) {
           if (sequence !== old.base_sequence) fail('PAGE_CHANGED', 'Canonical writes raced bootstrap activation');
           if (sequence >= Number.MAX_SAFE_INTEGER) fail('FENCED', 'SQLite storage sequence exhausted');
+          await this.restoreBootstrapIndexes();
           await this.db.runAsync('INSERT INTO gv_scope_alias VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET physical=excluded.physical', scope, old.physical);
           await this.db.runAsync('UPDATE gv_bootstrap SET complete=1 WHERE scope=? AND token=?', scope, token);
           await this.db.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1', sequence + 1);
@@ -324,6 +367,7 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
       let result!: { sequence: number; rows: number };
       await this.db.withTransactionAsync(async () => {
         const previous = await this.fence();
+        await this.restoreBootstrapIndexes();
         if (previous >= Number.MAX_SAFE_INTEGER) fail('FENCED', 'SQLite storage sequence exhausted');
         const physical = await this.physicalScope(scope);
         if (physical !== scope) fail('INVALID_ROW', 'Bootstrap import cannot replace an activated scope');
@@ -400,9 +444,9 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
         const sequence = await this.fence();
         if (admitted.after && admitted.after.sequence !== sequence) fail('PAGE_CHANGED', 'SQLite keyset belongs to an older replica snapshot');
         const physical = await this.physicalScope(scope);
-        let access: 'trigram' | 'ordered' = 'trigram';
-        let selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted);
-        if (admitted.search) {
+        let access: 'trigram' | 'ordered' = await this.indexesDeferred() ? 'ordered' : 'trigram';
+        let selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access);
+        if (admitted.search && access === 'trigram') {
           // Inspect at most 1025 matching rowids. A common term uses the native
           // sort/filter index and stops at the requested page, avoiding a huge
           // FTS candidate materialization followed by a global sort.

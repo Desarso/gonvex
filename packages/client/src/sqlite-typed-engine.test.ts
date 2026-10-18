@@ -354,3 +354,61 @@ it('shrinks pages before decoding graphs whose aggregate expansion exceeds the p
   const next = await engine.page('s', { ...plan, limit: 4, after: page.cursor! });
   expect(next.rows.map(row => row._id)).toEqual(['2', '3']);
 });
+it('resumes deferred bootstrap indexes across owners and builds FTS before activation', async () => {
+  const { engine, host, db } = fixture(); await engine.open('first');
+  await engine.beginBootstrap('s', 'bulk');
+  const fts = sqliteTableName('tasks') + '_fts';
+  expect(db.prepare('SELECT name FROM sqlite_master WHERE name=?').get(fts)).toBeUndefined();
+  expect((await engine.page('s', { ...plan, search: 'café' })).rows).toEqual([]);
+  const state = await engine.appendBootstrap('s', 'bulk', 0, JSON.stringify([write('a', 1, 'Café 東京')]));
+  const next = new SQLiteTypedReplicaEngine(host, schema); await next.open('second');
+  expect(db.prepare('SELECT name FROM sqlite_master WHERE name=?').get(fts)).toBeUndefined();
+  await next.finishBootstrap('s', 'bulk', { pages: state.nextPage, rows: state.rows, root: state.root });
+  expect(db.prepare('SELECT name FROM sqlite_master WHERE name=?').get(fts)).toBeDefined();
+  expect((await next.page('s', { ...plan, search: 'café' })).rows.map(row => row._id)).toEqual(['a']);
+  expect(await next.count('s', 'tasks', 0, ['w', false])).toBe(1);
+  expect(db.prepare('SELECT count(*) n FROM gv_storage_flags').get()!.n).toBe(0);
+  expect(await next.integrity()).toBe('ok');
+});
+it('restores deferred indexes before an interactive write and never hides that write in bootstrap activation', async () => {
+  const { engine } = fixture(); await engine.open('owner'); await engine.beginBootstrap('s', 'bulk');
+  const state = await engine.appendBootstrap('s', 'bulk', 0, JSON.stringify([write('staged', 1, 'Hidden needle')]));
+  await engine.apply('s', [write('offline', 2, 'Visible needle')], { id: 'intent', payload: { create: 'offline' } });
+  await expect(engine.finishBootstrap('s', 'bulk', { pages: state.nextPage, rows: state.rows, root: state.root })).rejects.toMatchObject({ code: 'PAGE_CHANGED' });
+  expect((await engine.page('s', { ...plan, search: 'needle' })).rows.map(row => row._id)).toEqual(['offline']);
+  await engine.abortBootstrap('s', 'bulk');
+  expect((await engine.outbox('s')).map(entry => entry.id)).toEqual(['intent']);
+  expect(await engine.integrity()).toBe('ok');
+});
+it('upgrades format 3 atomically without replacing canonical rows, pending intents or receipts', async () => {
+  const { engine, host, db } = fixture(); await engine.open('first');
+  const writes = [write('a', 1, 'Needle')], intent = { id: 'pending', payload: { create: 'a' } };
+  const receipt = await engine.apply('s', writes, intent);
+  db.prepare('UPDATE gv_storage_meta SET schema=? WHERE id=1').run(JSON.stringify({ format: 3, tables: schema }));
+  db.exec('DROP TABLE gv_storage_flags');
+  const next = new SQLiteTypedReplicaEngine(host, schema); await next.open('second');
+  expect(JSON.parse(String(db.prepare('SELECT schema FROM gv_storage_meta').get()!.schema)).format).toBe(4);
+  expect(await next.apply('s', writes, intent)).toEqual(receipt);
+  expect((await next.outbox('s')).map(entry => entry.id)).toEqual(['pending']);
+  expect((await next.page('s', { ...plan, search: 'needle' })).rows.map(row => row._id)).toEqual(['a']);
+  await expect(engine.apply('s', [write('b', 1)])).rejects.toMatchObject({ code: 'FENCED' });
+});
+
+it('rolls back an interrupted deferred FTS build and resumes the same verified manifest', async () => {
+  const { host, db } = fixture();
+  let failBuild = false;
+  const injected = { ...host, async runAsync(sql: string, ...args: unknown[]) {
+    if (failBuild && sql.startsWith('INSERT INTO') && sql.includes('_fts')) { failBuild = false; throw new Error('injected index build interruption'); }
+    return host.runAsync(sql, ...args);
+  } };
+  const engine = new SQLiteTypedReplicaEngine(injected, schema); await engine.open('first'); await engine.beginBootstrap('s', 'bulk');
+  const state = await engine.appendBootstrap('s', 'bulk', 0, JSON.stringify([write('a', 1, 'Needle café')]));
+  const expected = { pages: state.nextPage, rows: state.rows, root: state.root }; failBuild = true;
+  await expect(engine.finishBootstrap('s', 'bulk', expected)).rejects.toThrow('injected index build interruption');
+  expect(db.prepare('SELECT count(*) n FROM gv_scope_alias').get()!.n).toBe(0);
+  expect(db.prepare('SELECT count(*) n FROM gv_storage_flags').get()!.n).toBe(1);
+  const next = new SQLiteTypedReplicaEngine(host, schema); await next.open('second');
+  await next.finishBootstrap('s', 'bulk', expected);
+  expect((await next.page('s', { ...plan, search: 'needle' })).rows.map(row => row._id)).toEqual(['a']);
+  expect(await next.integrity()).toBe('ok');
+});

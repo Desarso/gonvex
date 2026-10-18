@@ -15,6 +15,8 @@ export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRo
   const signature = JSON.stringify({ format: 1, schema });
   return {
     async install(db) {
+      const flags = await db.getFirstAsync("SELECT name FROM sqlite_master WHERE type='table' AND name='gv_storage_flags'");
+      if (flags && await db.getFirstAsync("SELECT value FROM gv_storage_flags WHERE name='bootstrap-indexes'")) throw new Error('Finish or abort the restartable bootstrap before installing the canonical adapter');
       const legacy = await db.getFirstAsync<{ type: string }>("SELECT type FROM sqlite_master WHERE name='_gonvex_replica_entities'");
       if (legacy?.type === 'table') throw new Error('Existing generic SQLite rows require a verified migration before typed storage opens');
       await db.execAsync(`CREATE TABLE IF NOT EXISTS gv_canonical_layout(id INTEGER PRIMARY KEY CHECK(id=1),signature TEXT NOT NULL);
