@@ -504,7 +504,7 @@ it('owns immutable schema metadata and bounds compiled import plans across entit
   expect((await engine.page('s', { table: 'entity0', order: [{ field: 'value', direction: 'asc' }], limit: 2 })).rows).toEqual([{ _id: 'a', value: 0 }]);
 });
 
-it.each([false,true])('releases only private ingress backing stores after settled work (rollback=%s)',async rollback=>{
+it.each([false,true])('reuses one bounded private ingress backing store and clears settled work (rollback=%s)',async rollback=>{
  const {host}=fixture(),buffers:Uint8Array[]=[];
  const instrumented={...host,async runAsync(sql:string,...params:unknown[]){
   if(sql.startsWith('WITH source')&&params[0] instanceof Uint8Array)buffers.push(params[0]);
@@ -512,11 +512,13 @@ it.each([false,true])('releases only private ingress backing stores after settle
  }};
  const engine=new SQLiteTypedReplicaEngine(instrumented,schema);await engine.open('owner');
  const source=new TextEncoder().encode(JSON.stringify([write('a',1,'owned café 東京')])),before=source.slice();
- const operation=engine.importScope('s',(async function*(){yield source;if(rollback)yield new Uint8Array([128]);})());
+ const second=new TextEncoder().encode(JSON.stringify([write('b',2)]));
+ const operation=engine.importScope('s',(async function*(){yield source;yield second;if(rollback)yield new Uint8Array([128]);})());
  if(rollback)await expect(operation).rejects.toThrow('UTF-8');else await operation;
  expect(source).toEqual(before);expect(source.byteLength).toBe(before.byteLength);
- expect(buffers.length).toBeGreaterThan(0);for(const privateCopy of buffers)expect(privateCopy.byteLength).toBe(0);
- expect(engine.takeProfile().releasedIngressBytes).toBeGreaterThanOrEqual(before.byteLength);
- expect((await engine.page('s',plan)).rows.map(row=>row._id)).toEqual(rollback?[]:['a']);
- expect(engine.stats()).toMatchObject({pendingOperations:0,pendingBytes:0});
+ expect(buffers).toHaveLength(2);expect(buffers[0]!.buffer).toBe(buffers[1]!.buffer);
+ for(const privateCopy of buffers)expect(privateCopy.every(byte=>byte===0)).toBe(true);
+ expect(engine.takeProfile().copiedIngressBytes).toBeGreaterThanOrEqual(before.byteLength+second.byteLength);
+ expect((await engine.page('s',plan)).rows.map(row=>row._id)).toEqual(rollback?[]:['a','b']);
+ expect(engine.stats()).toMatchObject({pendingOperations:0,pendingBytes:0,ingressEntries:1,ingressBytes:131072,ingressMaxBytes:131072});
 });

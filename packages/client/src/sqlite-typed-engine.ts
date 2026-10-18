@@ -54,16 +54,34 @@ export class SQLiteTypedReplicaEngine {
   private jsonEach: 'json_each' | 'jsonb_each' = 'json_each';
   private lastProgress = -Infinity;
   private readonly plans = new BoundedByteCache<string, string>('sqlite-plans', 262144, 4, new ByteLedger(262144));
-  private readonly profile = { releasedIngressBytes:0, yieldMs: 0, yields: 0, nativeValidationMs: 0, searchProjectionMs: 0, nativeFrames: 0, frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
+  private ingressScratch?:Uint8Array;
+  private ingressBorrowed=false;
+  private readonly ingressLedger:ByteLedger;
+  private readonly profile = { copiedIngressBytes:0,releasedIngressBytes:0, yieldMs: 0, yields: 0, nativeValidationMs: 0, searchProjectionMs: 0, nativeFrames: 0, frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
   takeProfile() { const result = { ...this.profile }; for (const key of Object.keys(this.profile) as Array<keyof typeof this.profile>) this.profile[key] = 0; return result; }
   constructor(private readonly db: SQLiteReplicaDatabase, readonly schema: SQLiteTypedSchema,
     private readonly limits = { operations: 64, queuedBytes: 2_097_152, batchBytes: 262_144, pageBytes: 262_144 },
     private readonly controls: { onProgress?: () => void } = {}) {
+    const maxIngressBytes=Math.max(1,Math.floor(limits.batchBytes/2));
+    this.ingressLedger=new ByteLedger(maxIngressBytes);
+    this.ingressLedger.register('sqlite-ingress-scratch',()=>({name:'sqlite-ingress-scratch',bytes:this.ingressScratch?.byteLength??0,maxBytes:maxIngressBytes,entries:Number(!!this.ingressScratch),maxEntries:1,evictions:0,refusals:0}));
     sqlitePayloadBytes(schema, 1048576);
     const freeze = (value: any): any => { if (value && typeof value === 'object') { for (const key of Object.keys(value)) freeze(value[key]); Object.freeze(value); } return value; };
     this.schema = freeze(JSON.parse(JSON.stringify(schema)));
     compileSQLiteTypedSchema(this.schema);
     for (const value of Object.values(limits)) if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('Positive SQLite limits required');
+  }
+  /** Only the owner FIFO borrows this bounded slab. Native bindings settle
+   * before reuse, and the used range is cleared on both success and failure. */
+  private copyIngress(input:Uint8Array):Uint8Array {
+    if(this.ingressBorrowed)fail('FENCED','Overlapping native ingress frame');
+    if(input.byteLength*2>this.limits.batchBytes)fail('BUDGET','SQLite ingress copy exceeds budget');
+    this.ingressScratch??=new Uint8Array(this.ingressLedger.maxBytes);
+    this.ingressScratch.set(input);this.ingressBorrowed=true;this.profile.copiedIngressBytes+=input.byteLength;
+    return this.ingressScratch.subarray(0,input.byteLength);
+  }
+  private returnIngress(input:unknown){
+    if(input instanceof Uint8Array&&input.buffer===this.ingressScratch?.buffer){input.fill(0);this.ingressBorrowed=false;}
   }
   private compiledPlan(key: string, create: () => string | undefined): string | undefined {
     const previous = this.plans.get(key); if (previous !== undefined) return previous;
@@ -394,9 +412,9 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         for await (const frame of source) {
           const page = frame.page, input = frame.encoded;
           if (++pages > 16 || typeof input !== 'string' && (!(input instanceof Uint8Array) || !(input.buffer instanceof ArrayBuffer)) || (bytes += input.length * 2) > this.limits.queuedBytes || input.length*2>this.limits.batchBytes) fail('BUDGET', 'Bootstrap credit group exceeds budget');
-          const encoded = typeof input === 'string' ? input : new Uint8Array(input);
+          const encoded = typeof input === 'string' ? input : this.copyIngress(input);
           try{state = await this.appendBootstrapPage(scope, token, page, encoded);}
-          finally{this.profile.releasedIngressBytes+=releaseOwnedSQLiteBytes(encoded);}
+          finally{this.returnIngress(encoded);}
         }
         if (!state) fail('INVALID_ROW', 'Empty bootstrap credit group');
       });
@@ -523,7 +541,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
           // Public callers may retain their view while native work awaits.
           // Snapshot only one admitted byte frame before the first await.
           if (input instanceof Uint8Array && (input.byteLength * 2 > this.limits.batchBytes || !(input.buffer instanceof ArrayBuffer))) fail('BUDGET', 'SQLite byte import frame exceeds ownership or byte budget');
-          const page = input instanceof Uint8Array ? new Uint8Array(input) : input;
+          const page = input instanceof Uint8Array ? this.copyIngress(input) : input;
           try {
           let nativeRows: number | undefined;
           if (typeof page === 'string' || page instanceof Uint8Array) {
@@ -557,7 +575,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
             await this.yieldTask();
             sliceStarted = performance.now();
           }
-          }finally{this.profile.releasedIngressBytes+=releaseOwnedSQLiteBytes(page);}
+          }finally{this.returnIngress(page);}
         }
         await this.restoreBootstrapIndexes();
         result = { sequence: previous + 1, rows };
@@ -727,5 +745,5 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
   windowCollect(scope: string, signature: string, generation: string) {
     return this.membership({ scope, signature, generation }, (store, a) => store.collect(a.scope, a.signature, a.generation));
   }
-  stats() { return { pendingOperations: this.pending, pendingBytes: this.pendingBytes, epoch: this.epoch, binaryJSONFrames: Number(this.jsonEach === 'jsonb_each'), planBytes: this.plans.stats().bytes, planEntries: this.plans.stats().entries }; }
+  stats() { return { ingressBytes:this.ingressLedger.bytes,ingressMaxBytes:this.ingressLedger.maxBytes,ingressEntries:Number(!!this.ingressScratch),pendingOperations: this.pending, pendingBytes: this.pendingBytes, epoch: this.epoch, binaryJSONFrames: Number(this.jsonEach === 'jsonb_each'), planBytes: this.plans.stats().bytes, planEntries: this.plans.stats().entries }; }
 }
