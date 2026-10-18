@@ -1,3 +1,4 @@
+import { yieldSQLiteTask } from './sqlite-task-yield.js';
 import { ByteLedger, BoundedByteCache } from './byte-budget.js';
 import { compileSQLiteEncodedFrameValidation, sqliteEncodedFrameValueSQL, writeSQLiteEncodedFrame } from './sqlite-encoded-frame.js';
 import { sqliteTypedBodyFormat, sqliteBodySkeleton, sqliteBodySkeletonSQL } from './sqlite-typed-body.js';
@@ -70,7 +71,7 @@ export class SQLiteTypedReplicaEngine {
   }
   private async yieldTask(): Promise<void> {
     const started = performance.now();
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    await yieldSQLiteTask();
     this.profile.yieldMs += performance.now() - started; this.profile.yields++;
   }
   private progress() {
