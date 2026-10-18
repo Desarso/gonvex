@@ -17,10 +17,11 @@ import {SQLiteReducerDelivery} from './sqlite-reducer-delivery.js';
 import {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
 import {SQLiteLegacyBootstrap} from './sqlite-legacy-bootstrap.js';
 import type {LocalReplicaSession} from './local-replica.js';
+import {sqliteCollectionPagePlan} from './sqlite-collection-plan.js';
 import {SQLiteWindowStore} from './sqlite-window-store.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 type Auth=Pick<GonvexClientAuth,'project'|'tenant'|'token'|'identity'>;
-type Source={id:string;signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;eager:boolean;bytes:number;closing?:Promise<void>};
+type Source={id:string;signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;leases:Map<string,Set<string>>;eager:boolean;bytes:number;closing?:Promise<void>};
 type ControlSource={signature:string;ref:FunctionReference;args:JsonValue;tabs:Set<string>;value?:JsonValue;error?:string;version:number;bytes:number;resultBytes:number;close():void};
 type Connection={authVersion:number;authError?:{id:string;message:string;definitive:boolean;code?:string};developer?:{id:string;token:string;acked:Set<string>};route:Omit<Auth,'token'>;id:string;url:string;identityKey:string;client:SQLiteNativeTransport;feed:SQLiteNativeFeed;delivery:SQLiteReducerDelivery;tabs:Set<string>;sources:Map<string,Source>;sourceBytes:number;controls:Map<string,ControlSource>;controlBytes:number;restoring?:Promise<void>;migrationBlocked?:unknown;restoreScope?:string;restoreGeneration?:number;migrationTimer?:ReturnType<typeof setTimeout>;migrationSession?:LocalReplicaSession;denied?:boolean;admissionKey?:{generation:string;value:Promise<string>};recovered?:boolean;recovering?:Promise<void>;lastScope?:string;reconnectTimer?:ReturnType<typeof setTimeout>;reconnectAttempts?:number;timer?:ReturnType<typeof setTimeout>;failure?:{code:string;message:string}};
 type Binding={artifactHash:string;clientContract?:ClientContract;runtime:Pick<PortableReducerRuntime,'prepare'|'execute'|'isPrepared'>;
@@ -139,20 +140,21 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  private unwatchControl(connection:Connection,source:ControlSource,tab:string){
   if(!source.tabs.delete(tab))return;connection.controlBytes-=64;if(source.tabs.size)return;connection.controls.delete(source.signature);connection.controlBytes-=source.bytes+source.resultBytes;source.close();
  }
- private async addSource(connection:Connection,ref:FunctionReference,args:JsonValue,tab?:string,eager=false):Promise<Source>{
-  if(ref.delivery!=='replica'||!ref.replica)fail('INVALID_ROW','Expected a generated Replica Collection');const encoded=stable(args),signature=await digest(this.binding.artifactHash+'\0'+connection.id+'\0'+ref.path+'\0'+encoded);let source=connection.sources.get(signature);
-  if(source?.closing){await source.closing.catch(()=>{});return this.addSource(connection,ref,args,tab,eager);}
+ private async addSource(connection:Connection,ref:FunctionReference,args:JsonValue,tab?:string,eager=false,lease='default'):Promise<Source>{
+  if(tab)text(lease,128);if(ref.delivery!=='replica'||!ref.replica)fail('INVALID_ROW','Expected a generated Replica Collection');const encoded=stable(args),signature=await digest(this.binding.artifactHash+'\0'+connection.id+'\0'+ref.path+'\0'+encoded);let source=connection.sources.get(signature);
+  if(source?.closing){await source.closing.catch(()=>{});return this.addSource(connection,ref,args,tab,eager,lease);}
   if(tab&&this.tabs.get(tab)!==connection.id)fail('FENCED','Native source caller detached');
   if(!source){
-   const bytes=sqlitePayloadBytes({path:ref.path,args},16384)+1024;if(connection.sources.size>=128||connection.sourceBytes+bytes+(tab?64:0)>262144)fail('BUDGET','Native subscription allowance exceeded');
-   source={id:'source:'+signature,signature,ref,args:JSON.parse(encoded),tabs:new Set(),eager,bytes};
+   const bytes=sqlitePayloadBytes({path:ref.path,args},16384)+1024;if(connection.sources.size>=128||connection.sourceBytes+bytes+(tab?192:0)>262144)fail('BUDGET','Native subscription allowance exceeded');
+   source={id:'source:'+signature,signature,ref,args:JSON.parse(encoded),tabs:new Set(),leases:new Map(),eager,bytes};
    const completeEntity=!Object.keys(ref.replica.equalFilters??{}).length&&!ref.replica.excludeWhenSet?.length;
    connection.feed.register({id:source.id,signature,entity:ref.replica.table,key:ref.replica.key,path:ref.path,...(completeEntity?{completeEntity:true}:{}),...(ref.replica.columns?{columns:[...ref.replica.columns]}:{})});
    connection.sources.set(signature,source);connection.sourceBytes+=bytes;
    if(connection.client.localSessionState()==='authenticated')this.openSource(connection,source);
   }
-  if(tab&&!source.tabs.has(tab)){if(connection.sourceBytes+64>262144)fail('BUDGET','Native source interests exceed budget');source.tabs.add(tab);connection.sourceBytes+=64;}source.eager||=eager;return source;
+  if(tab){text(lease,128);let leases=source.leases.get(tab);if(!leases?.has(lease)){if((leases?.size??0)>=64||connection.sourceBytes+192>262144)fail('BUDGET','Native source interests exceed budget');if(!leases)source.leases.set(tab,leases=new Set());leases.add(lease);source.tabs.add(tab);connection.sourceBytes+=192;}}source.eager||=eager;return source;
  }
+ private releaseSourceInterest(connection:Connection,source:Source,tab:string,lease?:string){const leases=source.leases.get(tab);if(!leases)return;if(lease===undefined){connection.sourceBytes-=leases.size*192;leases.clear();}else if(leases.delete(lease))connection.sourceBytes-=192;if(!leases.size){source.leases.delete(tab);source.tabs.delete(tab);}}
  private closeSource(connection:Connection,source:Source):Promise<void>{
   if(source.closing)return source.closing;
   source.closing=connection.feed.closeSource(source.id).catch(error=>{if((error as any)?.code!=='FENCED')throw error;}).finally(()=>{if(connection.sources.get(source.signature)===source){connection.sources.delete(source.signature);connection.sourceBytes-=source.bytes;}});return source.closing;
@@ -205,7 +207,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  async call(value:unknown,caller:SQLiteOwnerCaller):Promise<unknown>{
   sqlitePayloadBytes(value,131072);if(!value||typeof value!=='object'||Array.isArray(value))throw new TypeError('Invalid native client request');const input=structuredClone(value) as any;if(this.closed||caller.signal.aborted)fail('FENCED','Native client is closed');
   if(input.method==='connect')return this.connect(input,caller);
-  const connection=this.connection(caller.tabID);if(['entities','replicaPage','replicaPendingPage','reducer'].includes(input.method)){await connection.restoring;if(connection.migrationBlocked)throw connection.migrationBlocked;}
+  const connection=this.connection(caller.tabID);if(['entities','replicaPage','replicaPendingPage','collectionPage','reducer'].includes(input.method)){await connection.restoring;if(connection.migrationBlocked)throw connection.migrationBlocked;}
   switch(input.method){
    case 'controls':{
     const admitted=this.admission(connection);let key:string|null|undefined;
@@ -228,8 +230,8 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
    case 'auth':{
     const auth=input.auth??{};sqlitePayloadBytes(auth,65536);if(Object.keys(auth).some(field=>!['token'].includes(field)))throw new TypeError('Native identity changes require a new connection');if(auth.token!==undefined&&(typeof auth.token!=='string'||auth.token.length>16384))throw new TypeError('Invalid native token');if(!connection.route.identity)return this.connect({url:connection.url,auth:{...connection.route,...auth}},caller);connection.authVersion++;this.tokens.invalidate(connection.id);connection.client.setAuth(auth);return null;
    }
-   case 'watchReplica':{const source=await this.addSource(connection,this.ref(input.path,'query'),input.args??{},caller.tabID);return {id:source.id,signature:source.signature};}
-   case 'unwatchReplica':{text(input.signature,128);const source=connection.sources.get(input.signature);if(source){if(source.tabs.delete(caller.tabID))connection.sourceBytes-=64;if(!source.tabs.size&&!source.eager){await this.closeSource(connection,source);}}return null;}
+   case 'watchReplica':{const source=await this.addSource(connection,this.ref(input.path,'query'),input.args??{},caller.tabID,false,input.lease??'default');return {id:source.id,signature:source.signature};}
+   case 'unwatchReplica':{text(input.signature,128);const source=connection.sources.get(input.signature);if(source){this.releaseSourceInterest(connection,source,caller.tabID,input.lease??'default');if(!source.tabs.size&&!source.eager){await this.closeSource(connection,source);}}return null;}
    case 'entities':{
     const admission=this.checkCaller(caller,connection);await this.readable(connection,admission);return this.owner.runOwner(131072,async()=>{this.checkCaller(caller,connection,admission.generation);const result=await this.owner.reader.entities({scope:admission.scope,entity:input.entity,ids:input.ids,expected:input.expected});this.checkCaller(caller,connection,admission.generation);return result;});
    }
@@ -241,6 +243,14 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
     text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that source');const admission=this.checkCaller(caller,connection);await this.readable(connection,admission);return this.owner.runOwner(131072,async()=>{this.checkCaller(caller,connection,admission.generation);const result=await this.owner.reader.window({scope:admission.scope,signature:source.signature,offset:input.offset,limit:input.limit,generation:input.generation,expected:input.expected});this.checkCaller(caller,connection,admission.generation);if(connection.sources.get(source.signature)!==source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Native source was detached');return result??null;});
    }
    case 'prepareReducer':{const ref=this.ref(input.path,'reducer');if(ref.localExecution===1)await this.reducer.core.prepare(ref.path);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Reducer preparation caller detached');return null;}
+   case 'collectionPage':{
+    text(input.signature,128);const source=connection.sources.get(input.signature);if(!source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Tab does not own that collection');const admitted=this.checkCaller(caller,connection);await this.readable(connection,admitted);
+    return this.owner.runOwner(131072,async()=>{const owns=()=>{this.checkCaller(caller,connection,admitted.generation);if(connection.sources.get(source.signature)!==source||!source.eager&&!source.tabs.has(caller.tabID))fail('FENCED','Native collection was detached');};owns();const header=await this.windows.header(admitted.scope,source.signature);if(!header) return null;
+     if(input.generation!==undefined&&input.generation!==header.generation)fail('PAGE_CHANGED','Collection membership changed');const context=await this.context(admitted.scope),lowered=sqliteCollectionPagePlan(source.ref,source.args,input.plan,{signature:source.signature,generation:header.generation},new Set(Object.keys(context.coverage)));
+     if(input.plan.after&&input.generation===undefined)throw new TypeError('Collection keyset continuation requires its window generation');if(input.plan.search&&source.ref.replica?.columns&&this.owner.engine.schema[lowered.plan.table]?.search?.some(field=>!source.ref.replica!.columns!.includes(field)))fail('INVALID_ROW','Search requires undeclared collection columns');
+     const page=await this.reducer.predictions.page(admitted.scope,lowered.plan,lowered.allowLocalInserts);owns();return {...page,generation:header.generation};
+    });
+   }
    case 'reducer':{const ref=this.ref(input.path,'reducer');if(ref.scope==='control'){const version=connection.authVersion,result=await connection.client.callOwnerReducer(ref,input.args??{},caller.requestID);if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id||version!==connection.authVersion)fail('FENCED','Control caller session changed');sqlitePayloadBytes(result,131072);return {commandId:caller.requestID,result};}await this.recover(connection);if(ref.localExecution!==1)fail('INVALID_ROW','Native reducer has no generated portable body');let receipt;try{receipt=await this.reducer.invoke({path:ref.path,args:input.args??{},now:input.now,intentEntropy:input.intentEntropy},caller);}catch(error){connection.recovered=false;throw error;}this.scheduleDelivery(connection);return receipt;}
    case 'query':case 'action':{
     const ref=this.ref(input.path,input.method==='query'?'query':'action');if(ref.delivery==='replica'||ref.delivery==='live'&&ref.scope!=='control')fail('INVALID_ROW','Reactive reads require bounded native subscriptions');const version=connection.authVersion;if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id)fail('FENCED','Remote caller detached');const result=await (input.method==='query'?connection.client.query(ref,input.args??{}):connection.client.action(ref,input.args??{}));if(caller.signal.aborted||this.tabs.get(caller.tabID)!==connection.id||version!==connection.authVersion)fail('FENCED','Remote caller session changed');sqlitePayloadBytes(result,131072);return result;
@@ -251,7 +261,7 @@ export class SQLiteClientProgram implements SQLiteOwnerProgram {
  }
  detachTab(tabID:string){const id=this.tabs.get(tabID);if(!id)return;this.tabs.delete(tabID);this.sessions.detachTab(tabID);const connection=this.connections.get(id);if(!connection)return;connection.tabs.delete(tabID);connection.developer?.acked.delete(tabID);this.tokens.detachTab(tabID);
   for(const source of [...connection.controls.values()])this.unwatchControl(connection,source,tabID);
-  for(const source of connection.sources.values())if(source.tabs.delete(tabID)){connection.sourceBytes-=64;if(!source.tabs.size&&!source.eager)void this.closeSource(connection,source).catch(()=>{});}
+  for(const source of connection.sources.values())if(source.tabs.has(tabID)){this.releaseSourceInterest(connection,source,tabID);if(!source.tabs.size&&!source.eager)void this.closeSource(connection,source).catch(()=>{});}
   if(!connection.tabs.size){if(connection.lastScope)void this.maintenance.retire(connection.lastScope,[...connection.sources.values()].map(source=>source.id)).catch(()=>{});if(connection.timer)clearTimeout(connection.timer);clearTimeout(connection.reconnectTimer);clearTimeout(connection.migrationTimer);this.tokens.invalidate(id);connection.delivery.close();connection.client.dispose();connection.feed.close();this.sessions.close(id);this.connections.delete(id);}
  }
  budgets(){return this.ledger.snapshot();}

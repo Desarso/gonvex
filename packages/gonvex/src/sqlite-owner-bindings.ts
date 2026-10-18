@@ -11,7 +11,8 @@ export function sqliteOwnerReferences(manifest:Manifest) {
 }
 /** Static worker factories keep the application module and portable bodies in
  * the elected dedicated worker graph. Followers import the bounded RPC facade. */
-export function sqliteOwnerBindings(manifest:Manifest):Record<string,string>{
+export function sqliteOwnerBindings(manifest:Manifest,legacyStorage={replicaName:'gonvex-local-replica',outboxName:'gonvex-outbox'}):Record<string,string>{
+ for(const name of [legacyStorage.replicaName,legacyStorage.outboxName])if(typeof name!=='string'||!name||name.length>256)throw new TypeError('Invalid legacy client storage name');if(legacyStorage.replicaName===legacyStorage.outboxName)throw new TypeError('Replica and outbox storage names must differ');
  if(!manifest.module?.hash||!Object.values(manifest.functions).some(entry=>entry.replica))return {};
  const reducers=Object.values(manifest.functions).some(entry=>entry.localExecution===1),collections=Object.entries(manifest.functions).filter(([path,entry])=>path.startsWith('__local.')&&entry.replica).map(([path,entry])=>({kind:'query',path,delivery:'replica',replica:entry.replica}));
  const contract=manifest.module.files['client-contract.json'];
@@ -26,13 +27,20 @@ import type {FunctionReference} from "@gonvex/client";
 const references=${JSON.stringify(sqliteOwnerReferences(manifest))} as unknown as readonly FunctionReference[];
 const collections=${JSON.stringify(collections.map(ref=>ref.path))};
 const runtime=${reducers?`new PortableReducerRuntime({schema:localSchema,reducers:localReducers,artifactHash:${JSON.stringify(manifest.module.hash)}})`:'{isPrepared:()=>false,prepare:async()=>{throw Error("No portable Reducer registered");},execute:async()=>{throw Error("No portable Reducer registered");}}'};
-installSQLiteOwner({schema:sqliteSchema,schemaVersion:sqliteSchemaVersion,createProgram:owner=>new SQLiteClientProgram(owner,{runtime,clientContract:${JSON.stringify(clientContract)},artifactHash:${JSON.stringify(manifest.module.hash)},references,collections,offlineMaxAgeMs:${JSON.stringify(offline)}})});
+installSQLiteOwner({schema:sqliteSchema,schemaVersion:sqliteSchemaVersion,createProgram:owner=>new SQLiteClientProgram(owner,{runtime,legacyStorage:${JSON.stringify(legacyStorage)},clientContract:${JSON.stringify(clientContract)},artifactHash:${JSON.stringify(manifest.module.hash)},references,collections,offlineMaxAgeMs:${JSON.stringify(offline)}})});
+`,
+  'sqlite-client.ts':`${header}import {SQLiteBrowserClient} from "@gonvex/client/sqlite/browser";
+import type {GonvexClientOptions} from "@gonvex/client";
+import {sqliteBrowserOptions} from "./sqlite-browser.js";
+export class GonvexClient extends SQLiteBrowserClient {constructor(url:string,options:GonvexClientOptions={}){super(url,sqliteBrowserOptions({auth:{project:options.project,tenant:options.tenant,identity:options.identity,token:options.token},fetchToken:options.fetchToken}));}}
+export {createFirebaseAuthAdapter} from "@gonvex/client";
 `,
   'sqlite-router-worker.ts':`${header}import "@gonvex/client/sqlite/router-worker";\n`,
   'sqlite-browser.ts':`${header}import {SQLiteBrowserClient,type SQLiteBrowserOptions} from "@gonvex/client/sqlite/browser";
 import {SQLiteReplicaBroker} from "@gonvex/client/sqlite/broker";
 import {sqliteSchemaVersion} from "./sqlite-schema-version.js";
-export function createSQLiteBrowserClient(url:string,options:Omit<SQLiteBrowserOptions,"broker">={}) {return new SQLiteBrowserClient(url,{...options,artifactHash:${JSON.stringify(manifest.module.hash)},broker:new SQLiteReplicaBroker({schemaVersion:sqliteSchemaVersion,createWorker:()=>new Worker(new URL("./sqlite-client-worker.ts",import.meta.url),{type:"module"}),createHub:()=>new SharedWorker(new URL("./sqlite-router-worker.ts",import.meta.url),{type:"module",name:"gonvex-sqlite-router-v1"})})});}
+export function sqliteBrowserOptions(options:Omit<SQLiteBrowserOptions,"broker">={}) {return {...options,artifactHash:${JSON.stringify(manifest.module.hash)},broker:new SQLiteReplicaBroker({schemaVersion:sqliteSchemaVersion,createWorker:()=>new Worker(new URL("./sqlite-client-worker.ts",import.meta.url),{type:"module"}),createHub:()=>new SharedWorker(new URL("./sqlite-router-worker.ts",import.meta.url),{type:"module",name:"gonvex-sqlite-router-v1"})})};}
+export function createSQLiteBrowserClient(url:string,options:Omit<SQLiteBrowserOptions,"broker">={}) {return new SQLiteBrowserClient(url,sqliteBrowserOptions(options));}
 `,
  };
 }

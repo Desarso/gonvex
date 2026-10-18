@@ -18,9 +18,9 @@ test('emits and typechecks dedicated-owner/browser graphs against the published 
  outputs['api.ts']='export const api={list:{kind:"query",path:"list",delivery:"replica",replica:'+JSON.stringify(declaration)+'},rename:{kind:"reducer",path:"rename",localExecution:1}} as const;';
  outputs['local-reducers.ts']='import {reducer,schema} from "@gonvex/module-sdk";export const localReducers={rename:reducer({args:schema.any(),result:schema.any(),run:async()=>null})};';
  for(const [name,body] of Object.entries(outputs))await writeFile(join(root,name),body);
- const program=ts.createProgram([join(root,'sqlite-client-worker.ts'),join(root,'sqlite-browser.ts')],{module:ts.ModuleKind.NodeNext,moduleResolution:ts.ModuleResolutionKind.NodeNext,target:ts.ScriptTarget.ES2022,strict:true,skipLibCheck:true,noEmit:true,types:[]});
+ const program=ts.createProgram([join(root,'sqlite-client-worker.ts'),join(root,'sqlite-browser.ts'),join(root,'sqlite-client.ts')],{module:ts.ModuleKind.NodeNext,moduleResolution:ts.ModuleResolutionKind.NodeNext,target:ts.ScriptTarget.ES2022,strict:true,skipLibCheck:true,noEmit:true,types:[]});
  assert.equal(ts.getPreEmitDiagnostics(program).map(value=>ts.flattenDiagnosticMessageText(value.messageText,'\n')).join('\n'),'');
- assert.match(outputs['sqlite-client-worker.ts'],/new SQLiteClientProgram/);assert.match(outputs['sqlite-client-worker.ts'],/offlineMaxAgeMs:1800000/);assert.match(outputs['sqlite-client-worker.ts'],/new PortableReducerRuntime/);assert.doesNotMatch(outputs['sqlite-browser.ts'],/PortableReducerRuntime|localReducers|sqlite-module|GonvexClient|sqlite-schema\.js/);
+ assert.match(outputs['sqlite-client.ts'],/extends SQLiteBrowserClient/);assert.doesNotMatch(outputs['sqlite-client.ts'],/localRuntime|new.*BaseClient/);assert.match(outputs['sqlite-client-worker.ts'],/new SQLiteClientProgram/);assert.match(outputs['sqlite-client-worker.ts'],/offlineMaxAgeMs:1800000/);assert.match(outputs['sqlite-client-worker.ts'],/new PortableReducerRuntime/);assert.doesNotMatch(outputs['sqlite-browser.ts'],/PortableReducerRuntime|localReducers|sqlite-module|GonvexClient|sqlite-schema\.js/);
  assert.match(outputs['sqlite-browser.ts'],/new Worker\(new URL\("\.\/sqlite-client-worker.ts"/);assert.equal(outputs['sqlite-router-worker.ts'].includes('sqlite/router-worker'),true);
 });
 test('readonly projects receive a worker without importing nonexistent portable reducer files',()=>{
@@ -42,4 +42,8 @@ test('emits a plain public owner catalog without traversing the React API or adm
  const worker=sqliteOwnerBindings(input)['sqlite-client-worker.ts'];
  assert.doesNotMatch(worker,/import.*api\.js|function visit|references\.set/);
  assert.match(worker,/const references=\[/);
+});
+
+test('binds historical storage names in worker code rather than accepting a browser RPC database selector',()=>{
+ const output=sqliteOwnerBindings(manifest,{replicaName:'app-cache',outboxName:'app-queue'});assert.match(output['sqlite-client-worker.ts'],/legacyStorage:\{"replicaName":"app-cache","outboxName":"app-queue"\}/);assert.doesNotMatch(output['sqlite-client.ts'],/app-cache|app-queue/);assert.throws(()=>sqliteOwnerBindings(manifest,{replicaName:'same',outboxName:'same'}),/must differ/);
 });

@@ -74,3 +74,7 @@ it('keeps reducer receipts internal while returning the public local result or q
 it('preserves an already displayed first page while its pending stage becomes canonical',async()=>{
  const f=fixture(),watch=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>watch.close());const first=await watch.page();expect(await watch.pendingPage()).toBeNull();expect(watch.snapshot().page).toBe(first);
 });
+
+it('keeps separately filtered view pages pinned independently while sharing the owner source through distinct leases',async()=>{
+ const f=fixture();f.handler=async input=>{if(input.method==='collectionPage')return {rows:[{id:'a',n:input.plan.where.value}],sequence:1,bytes:32,cursor:null,generation:'window'};};const one=f.client.watchReplica({path:'tasks/all'},{},{view:'grid'}),two=f.client.watchReplica({path:'tasks/all'},{},{view:'board'});cleanup.push(()=>{one.close();two.close();});const plan={order:[{field:'n',direction:'asc' as const}],limit:10};const first=await one.queryPage({...plan,where:{field:'n',op:'gte',value:1}}),second=await two.queryPage({...plan,where:{field:'n',op:'gte',value:2}});expect(one.snapshot().page).toBe(first);expect(two.snapshot().page).toBe(second);const opens=f.calls.filter(call=>call.input.method==='watchReplica');expect(opens).toHaveLength(2);expect(opens[0].input.lease).not.toBe(opens[1].input.lease);one.close();await vi.waitFor(()=>expect(f.calls.some(call=>call.input.method==='unwatchReplica'&&call.input.lease===opens[0].input.lease)).toBe(true));expect(two.snapshot().page).toBe(second);
+});
