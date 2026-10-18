@@ -56,3 +56,18 @@ it('uses native baseline only for present fields and keeps later stamps sparse',
   expect(mergeReplicaRecord(baseline,{description:'old'},at(9))).toBe(baseline);
   expect(mergeReplicaRecord(next,{id:'a'},{epoch:'replacement',revision:1}).authority).toEqual({epoch:'replacement',fields:{id:1}});
 });
+
+it('treats prototype-like column names as own JSON data and authority stamps',()=>{
+  const row=JSON.parse('{"id":"a","__proto__":{"data":1},"constructor":"record value"}');
+  const current=mergeReplicaRecord(undefined,row,at(8));
+  expect(Object.getPrototypeOf(current.row)).toBe(Object.prototype);
+  expect(Object.getOwnPropertyDescriptor(current.row,'__proto__')?.value).toEqual({data:1});
+  expect(Object.getOwnPropertyDescriptor(current.authority.fields,'__proto__')?.value).toBe(8);
+  expect(current.authority.fields.constructor).toBe(8);
+  expect(mergeReplicaRecord(current,JSON.parse('{"__proto__":{"data":2},"constructor":"obsolete"}'),at(7))).toBe(current);
+  expect(mergeReplicaRecord(current,null,at(7))).toBe(current);
+  const next=mergeReplicaRecord(current,JSON.parse('{"__proto__":{"data":2}}'),at(9));
+  expect(next.row).toEqual(JSON.parse('{"id":"a","__proto__":{"data":2},"constructor":"record value"}'));
+  expect(Object.getPrototypeOf(next.row)).toBe(Object.prototype);
+  expect((Object.prototype as any).data).toBeUndefined();
+});

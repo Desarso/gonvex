@@ -43,18 +43,18 @@ export function mergeReplicaRecord(
   };
   if (authority.deleted !== undefined) delete mutableAuthority().deleted;
   for (const column of Object.keys(incoming)) {
-    const stamp = authority.fields[column] ?? (Object.prototype.hasOwnProperty.call(row,column) ? authority.base ?? -1 : -1);
+    const stamp = Object.prototype.hasOwnProperty.call(authority.fields,column) ? authority.fields[column]! : (Object.prototype.hasOwnProperty.call(row,column) ? authority.base ?? -1 : -1);
     if (cursor.revision < stamp) continue;
     const value = incoming[column];
     const before = row[column];
     const equal = Object.is(before,value) || (before !== null && value !== null && typeof before === 'object' && typeof value === 'object' && JSON.stringify(before) === JSON.stringify(value));
     if (!equal || !Object.prototype.hasOwnProperty.call(row,column)) {
       if (!copiedRow) { row = {...row}; copiedRow = true; }
-      row[column] = value;
+      Object.defineProperty(row,column,{value,writable:true,enumerable:true,configurable:true});
     }
     if (stamp !== cursor.revision) {
       if (authority.base === cursor.revision) delete mutableAuthority().fields[column];
-      else mutableAuthority().fields[column] = cursor.revision;
+      else Object.defineProperty(mutableAuthority().fields,column,{value:cursor.revision,writable:true,enumerable:true,configurable:true});
     }
   }
   if (prior && !copiedRow && !copiedAuthority) return prior;
