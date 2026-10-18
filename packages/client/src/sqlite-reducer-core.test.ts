@@ -30,6 +30,15 @@ it('executes the same generated reducer against predictions and atomically queue
   const reopened=new SQLiteReducerCore(f.options);expect(await reopened.invoke(first)).toEqual(receipt);expect(f.calls).toBe(2);
  }finally{f.sql.close();}
 });
+it('persists independent recovery only after local validation and before the SQLite commit, retaining it on a late SQL failure',async()=>{
+ const f=await fixture(),recovery:any[]=[];try{
+  const persist=vi.fn(async(input,context)=>{expect(f.db.ownerTransactionDepth).toBeGreaterThan(0);expect(context.intentScope).toBe('s');recovery.push(structuredClone(input));}),input={scope:'s',path:'increment',commandId:'durable',now:100,args:{id:'a'}};
+  await expect(f.core.invoke({...input,args:{id:'a',fail:true}},persist)).rejects.toThrow('reducer failed');expect(persist).not.toHaveBeenCalled();expect((await f.journal.summary('s')).count).toBe(0);
+  await f.db.execAsync("CREATE TRIGGER fail_original_receipt BEFORE INSERT ON gv_reducer_invocations BEGIN SELECT RAISE(ABORT,'late receipt failure');END;");
+  await expect(f.core.invoke(input,persist)).rejects.toThrow('late receipt failure');expect(recovery).toEqual([input]);expect((await f.journal.summary('s')).count).toBe(0);expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(1);
+  await f.db.execAsync('DROP TRIGGER fail_original_receipt');const saved=await f.core.invoke(input,persist);expect(saved.result).toMatchObject({n:2});expect(persist).toHaveBeenCalledTimes(2);expect(await f.core.invoke(input,persist)).toEqual(saved);expect(persist).toHaveBeenCalledTimes(2);
+ }finally{f.sql.close();}
+});
 it('rolls back failed reducers and later persistence failures, including their predictions, receipts and generation',async()=>{
  const f=await fixture();try{
   const before=await f.engine.verifyOwner();await expect(f.core.invoke({scope:'s',path:'increment',commandId:'failed',now:100,args:{id:'a',fail:true}})).rejects.toThrow('reducer failed');expect((await f.journal.summary('s')).count).toBe(0);expect((await f.predictions.entities('s','tasks',['a']))[0].row.n).toBe(1);expect(await f.engine.verifyOwner()).toEqual(before);

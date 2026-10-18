@@ -31,10 +31,13 @@ export class SQLiteOwnerTabs {
   if(this.serial>=Number.MAX_SAFE_INTEGER)fail('FENCED','Owner notification sequence exhausted');
   tab.inFlight={...value,notification:++this.serial};tab.sentAt=Date.now();this.sent++;this.send(id,tab.inFlight);
  }
- publish(scope:string,generation:Generation){
+ /** Control hints share the same one-inflight/one-pending credit as data. */
+ notify(id:string,generation:Generation){if(!this.tabs.has(id))fail('FENCED','Control recipient is detached');this.publish('@control',generation,id);}
+ publish(scope:string,generation:Generation,target?:string){
   if(this.closed)return;if(!scope||scope.length>512||!Number.isSafeInteger(generation.epoch)||generation.epoch<0||!Number.isSafeInteger(generation.sequence)||generation.sequence<0)throw new TypeError('Invalid committed owner change');
   if(this.latest&&compare(generation,this.latest)<0)return;this.setGeneration(generation);
   for(const [id,tab]of this.tabs){
+   if(target!==undefined&&id!==target)continue;
    const previous=tab.pending??tab.inFlight;
    if(previous&&(compare(generation,previous)<0||compare(generation,previous)===0&&(previous.reset||previous.scope===scope)))continue;
    if(!tab.inFlight){this.deliver(id,tab,{scope,...generation});continue;}

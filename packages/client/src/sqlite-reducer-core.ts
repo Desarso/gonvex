@@ -43,7 +43,7 @@ export class SQLiteReducerCore {
  }
  /** This may load a chunk; call it outside context.runOwner. */
  prepare(path:string){if(typeof path!=='string'||!path||path.length>1024)throw new TypeError('Invalid reducer path');return this.options.runtime.prepare(path);}
- async invoke(input:SQLiteReducerInvocation):Promise<SQLiteReducerReceipt>{
+ async invoke(input:SQLiteReducerInvocation,persist?: (input:Readonly<SQLiteReducerInvocation>,context:SQLiteReducerContext)=>Promise<void>):Promise<SQLiteReducerReceipt>{
   sqlitePayloadBytes(input,131072);
   if(typeof input.scope!=='string'||!input.scope||input.scope.length>512||input.scope.includes('\u0000')||typeof input.path!=='string'||!input.path||input.path.length>1024||typeof input.commandId!=='string'||!input.commandId||input.commandId.length>256||!Number.isSafeInteger(input.now)||input.now<0||input.intentEntropy!==undefined&&(typeof input.intentEntropy!=='string'||input.intentEntropy.length>256))throw new TypeError('Invalid local reducer invocation');
   // Retain only admitted known envelope fields. Arbitrary extra fields cannot
@@ -65,6 +65,11 @@ export class SQLiteReducerCore {
    if(generation.sequence>=Number.MAX_SAFE_INTEGER)fail('FENCED','Storage sequence exhausted');
    receipt={intentId:intent.id,commandId:owned.commandId,result:transaction.result,originalGeneration:{epoch:generation.epoch,sequence:generation.sequence+1}};
    sqlitePayloadBytes(receipt,131072);const stored=JSON.stringify(receipt);decodedJSONBytes(stored,131072);if(new TextEncoder().encode(stored).byteLength>130000)fail('BUDGET','Reducer receipt exceeds native wire budget');
+   // The local body and all row/intent/reply admission have succeeded. Make
+   // the independent recovery copy durable before this SQL transaction can
+   // commit. A crash or later SQL failure leaves that command recoverable.
+   await persist?.(structuredClone(owned),structuredClone(captured));
+   await this.options.engine.verifyOwner();
    await this.options.database.runAsync('INSERT INTO gv_reducer_invocations VALUES(?,?,?,?)',intentScope,owned.commandId,hash,stored);
    await this.options.database.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1',receipt.originalGeneration.sequence);
   });return receipt!;

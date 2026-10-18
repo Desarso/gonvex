@@ -1,7 +1,7 @@
 import type {JsonValue} from '@gonvex/protocol';
 import type {PortableReducerRuntime} from '@gonvex/local-runtime/portable';
 import type {SQLiteOwnerCaller,SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
-import {SQLiteReducerCore,SQLiteReducerPreparationRequiredError,type SQLiteReducerReceipt,type SQLiteReducerContext} from './sqlite-reducer-core.js';
+import {SQLiteReducerCore,SQLiteReducerPreparationRequiredError,type SQLiteReducerReceipt,type SQLiteReducerInvocation,type SQLiteReducerContext} from './sqlite-reducer-core.js';
 import {SQLiteIntentJournal} from './sqlite-intent-journal.js';
 import {SQLitePredictions} from './sqlite-predictions.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
@@ -11,6 +11,8 @@ export type SQLiteReducerOwnerOptions={
  /** Owned by the authenticated worker session registry, never by call args. */
  resolveTab(tabID:string):SQLiteTabAdmission;
  context(scope:string):Promise<SQLiteReducerContext>;
+ /** Independent local recovery durability, before the SQLite intent commits. */
+ persistIntent?(input:Readonly<SQLiteReducerInvocation>,context:SQLiteReducerContext):Promise<void>;
 };
 export type SQLiteOwnerReducerCall={path:string;args:JsonValue;now:number;intentEntropy?:string};
 /** The native client program composes this endpoint with its authenticated
@@ -58,7 +60,9 @@ export class SQLiteReducerOwner {
    if(caller.signal.aborted)fail('FENCED','Reducer caller is detached');
    const current=this.admission(caller.tabID);
    if(current.scope!==admitted.scope||current.generation!==admitted.generation)fail('FENCED','Reducer caller session changed');
-   return this.core.invoke({scope:admitted.scope,path:owned.path,args:owned.args,now:owned.now,...(owned.intentEntropy===undefined?{}:{intentEntropy:owned.intentEntropy}),commandId:caller.requestID});
+   const check=()=>{if(caller.signal.aborted)fail('FENCED','Reducer caller is detached');const current=this.admission(caller.tabID);if(current.scope!==admitted.scope||current.generation!==admitted.generation)fail('FENCED','Reducer caller session changed');};
+   const receipt=await this.core.invoke({scope:admitted.scope,path:owned.path,args:owned.args,now:owned.now,...(owned.intentEntropy===undefined?{}:{intentEntropy:owned.intentEntropy}),commandId:caller.requestID},async(input,context)=>{check();await this.options.persistIntent?.(input,context);check();});
+   check();return receipt;
   });
  }
  /** Internal server reconciliation only. This callback is never deserialized

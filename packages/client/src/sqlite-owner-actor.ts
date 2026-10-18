@@ -25,6 +25,8 @@ export type SQLiteOwnerProgram={
 export type SQLiteOwnerProgramContext={
  database:SQLiteReplicaDatabase;engine:SQLiteTypedReplicaEngine;reader:SQLiteNativeReplicaReader;pendingReader:SQLitePendingSnapshotReader;canonical:SQLiteLocalReplicaStorage;snapshots:SQLiteSnapshotPages;activation:SQLiteSnapshotActivator;
  runOwner<T>(bytes:number,run:()=>Promise<T>,publishScopes?:readonly string[]):Promise<T>;
+ /** Metadata-only hint; receiver polls bounded controls through clientCall. */
+ notifyTab(tabID:string):Promise<void>;
 };
 export type SQLiteOwnerBinding={schema?:SQLiteTypedSchema;createProgram?(context:SQLiteOwnerProgramContext):SQLiteOwnerProgram};
 let installed=false;
@@ -82,7 +84,7 @@ async function execute(op: string, args: any, requestID:string) {
       await snapshots.ready();await activation.ready();
       nativeReader=new SQLiteNativeReplicaReader(database,storage,engine);await nativeReader.ready();tabs.setGeneration(await engine.verifyOwner());
       pendingReader=new SQLitePendingSnapshotReader({database,canonical:storage,snapshots,schema:engine.schema,fence:()=>engine!.verifyOwner()});await pendingReader.ready();
-      program=binding.createProgram?.({database,engine,reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
+      program=binding.createProgram?.({database,engine,notifyTab:tabID=>schedule(0,async()=>{if(typeof tabID!=='string'||!tabID||tabID.length>128)throw new TypeError('Invalid control recipient');tabs.notify(tabID,await engine!.verifyOwner());}),reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
        runOwner:async(size,run,scopes=[])=>{
         if(!Array.isArray(scopes)||scopes.length>8||scopes.some(value=>typeof value!=='string'||!value||value.length>512))throw new TypeError('Invalid owner publication scope');
         return schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;});

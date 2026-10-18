@@ -40,3 +40,5 @@ export {markSQLiteStagingCommit} from './sqlite-owner-transactions.js';
 export {SQLiteNativeFeed} from './sqlite-native-feed.js';
 export type {SQLiteFeedSource} from './sqlite-native-feed.js';
 export {SQLiteReducerDelivery} from './sqlite-reducer-delivery.js';
+export {SQLiteWorkerTokens} from './sqlite-worker-tokens.js';
+export type {SQLiteTokenRequest} from './sqlite-worker-tokens.js';
