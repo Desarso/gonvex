@@ -6,6 +6,7 @@ export type OfficialSQLiteHost = {
   database: SQLiteReplicaDatabase;
   memoryBytes(): number;
   statementBytes(): number;
+  readonly nativeFastFold:boolean;
   takeProfile(): { ingressFoldCalls:number; ingressFoldUTF16Bytes:number; prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
   close(): void;
 };
@@ -118,9 +119,12 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
       throw error;
     } finally { if (!retain) statement.finalize(); }
   }
+  let nativeFastFold=false;
+  try{nativeFastFold=db.selectValue('SELECT gv_ingress_fast_contract()')==='ascii-latin1-cjk-v1';}catch{/* Standard official hosts use the exact JS ingress fallback. */}
   db.createFunction('gv_ingress_lower', (_context: unknown, value: unknown) => { const text=String(value??''); profile.ingressFoldCalls++; profile.ingressFoldUTF16Bytes+=text.length*2; return text.toLowerCase(); }, { arity: 1, deterministic: true, directOnly: true });
   const database: SQLiteReplicaDatabase = {
     ingressUnicodeFold: true,
+    ...(nativeFastFold ? {ingressNativeFastFold:true as const} : {}),
     async execAsync(sql) { check(); db.exec(sql); },
     async runAsync(sql, ...values) {
       check();
@@ -158,7 +162,7 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
       finally { transaction = false; }
     },
   };
-  return { database, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes,
+  return { database, nativeFastFold, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes,
     takeProfile() { const result = { ...profile }; for (const key of Object.keys(profile) as Array<keyof typeof profile>) profile[key] = 0; return result; },
     close() { if (!closed) { closed = true; for (const sql of statements.keys()) retire(sql); db.close(); } } };
 }

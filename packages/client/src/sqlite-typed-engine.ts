@@ -259,7 +259,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
   }
   private async insertBootstrapEntity(scope: string, entity: string, encoded: string | undefined, normalized: string): Promise<void> {
     const nativeFold = encoded === undefined && this.db.ingressUnicodeFold === true;
-    const sql = this.compiledPlan('insert:' + this.jsonEach + ':' + (encoded === undefined ? 'scratch:' : 'wire:') + (nativeFold ? 'ascii-fold:' : '') + entity, () => {
+    const sql = this.compiledPlan('insert:' + this.jsonEach + ':' + (encoded === undefined ? 'scratch:' : 'wire:') + (nativeFold ? this.db.ingressNativeFastFold ? 'native-fast-fold:' : 'ascii-fold:' : '') + entity, () => {
     const source = encoded === undefined ? sqliteEncodedFrameValueSQL : 'jsonb(?)';
     const table = this.schema[entity]!, tn = q(sqliteTableName(entity));
     const fields = Object.entries(table.fields);
@@ -277,6 +277,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       SELECT ?,id,${sqliteBodySkeletonSQL("row", table)},version,${values.concat((table.search ?? []).map((name, i) => {
         if (!nativeFold) return `json_extract(normalized.value, '$[' || pos || '][${i}]')`;
         const value=`coalesce(json_extract(row,${path(name)}),'')`;
+        if(this.db.ingressNativeFastFold)return `coalesce(gv_ingress_lower_fast(${value}),gv_ingress_lower(${value}))`;
         // SQLite lower is exactly ECMAScript lowercase for ASCII. UTF-8 byte
         // length differs from character length for non-ASCII or embedded NUL,
         // which takes the exact Unicode host callback only at insertion.

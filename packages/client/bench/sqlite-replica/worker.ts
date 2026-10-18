@@ -26,7 +26,7 @@ const handlers = {
         return database.withTransactionAsync(async () => { await run(); phase('commit'); }).then(result => { phase('ready'); return result; });
       },
     };
-    engine = new SQLiteTypedReplicaEngine(observed, selectedSchema); const epoch = await engine.open('browser-proof'); return { epoch, memoryBytes: host.memoryBytes() }; },
+    engine = new SQLiteTypedReplicaEngine(observed, selectedSchema); const epoch = await engine.open('browser-proof'); return { epoch, memoryBytes: host.memoryBytes(), nativeFastFold:host.nativeFastFold,sqliteVersion:(await host.database.getFirstAsync<{version:string}>('SELECT sqlite_version() version'))?.version }; },
   async seed({ start = 0, count = 1000 }) {
     const begin = performance.now();
     for (let offset = start; offset < start + count; offset += 50) {
