@@ -3,6 +3,8 @@ import { openOfficialSQLiteHost } from '../../src/sqlite-official-host.js';
 import { SQLiteTypedReplicaEngine } from '../../src/sqlite-typed-engine.js';
 let host: Awaited<ReturnType<typeof openOfficialSQLiteHost>>;
 let engine: SQLiteTypedReplicaEngine;
+let importProfiling = false;
+const phase = (value: string) => globalThis.postMessage({ phase: value });
 const schema = { tasks: { key: '_id', fields: { _id: { kind: 'text' }, name: { kind: 'text' }, workspace: { kind: 'text' }, due: { kind: 'number' }, version: { kind: 'number' }, description: { kind: 'text' } }, indexes: [{ columns: ['workspace', 'due'] }, { columns: ['due'] }, { columns: ['name'] }], search: ['name', 'description'], counts: [{ columns: ['workspace'] }] } } as const;
 const generated = { fixtureMs: 0, wireEncodeMs: 0 };
 const handlers = {
@@ -11,7 +13,20 @@ const handlers = {
     if (!['full', 'column', 'none'].includes(searchDetail)) throw new TypeError('Invalid benchmark FTS detail');
     if (!['internal', 'external'].includes(searchContent)) throw new TypeError('Invalid benchmark FTS content');
     const selectedSchema = { tasks: { ...schema.tasks, ...(searchDetail === 'full' ? {} : { searchDetail }), ...(searchContent === 'internal' ? {} : { searchContent }) } };
-    host = await openOfficialSQLiteHost(); engine = new SQLiteTypedReplicaEngine(host.database, selectedSchema); const epoch = await engine.open('browser-proof'); return { epoch, memoryBytes: host.memoryBytes() }; },
+    host = await openOfficialSQLiteHost();
+    const database = host.database;
+    const observed = { ...database,
+      async execAsync(sql: string) {
+        if (importProfiling && sql.startsWith('CREATE INDEX')) phase('indexes');
+        if (importProfiling && sql.startsWith('CREATE VIRTUAL TABLE')) phase('fts');
+        return database.execAsync(sql);
+      },
+      withTransactionAsync(run: () => Promise<void>) {
+        if (!importProfiling) return database.withTransactionAsync(run);
+        return database.withTransactionAsync(async () => { await run(); phase('commit'); }).then(result => { phase('ready'); return result; });
+      },
+    };
+    engine = new SQLiteTypedReplicaEngine(observed, selectedSchema); const epoch = await engine.open('browser-proof'); return { epoch, memoryBytes: host.memoryBytes() }; },
   async seed({ start = 0, count = 1000 }) {
     const begin = performance.now();
     for (let offset = start; offset < start + count; offset += 50) {
@@ -41,7 +56,8 @@ const handlers = {
   },
   async bootstrapFinish({ token, expected }) { return engine.finishBootstrap('test-scope',token,expected); },
   async seedAll({ count, encoded = false }) {
-    const begin = performance.now();
+    const begin = performance.now(); importProfiling = true; phase('ingest');
+    try {
     const result = await engine.importScope('test-scope', (async function* () {
       for (let offset = 0; offset < count; offset += 50) {
         const page = Array.from({ length: Math.min(50, count - offset) }, (_, index) => { const id = offset + index;
@@ -51,6 +67,7 @@ const handlers = {
       }
     })());
     return { ...result, ms: performance.now() - begin, memoryBytes: host.memoryBytes(), profile: { ...engine.takeProfile(), transactions: host.takeProfile() } };
+    } finally { importProfiling = false; }
   },
   async page(args) { const begin = performance.now(); const result = await engine.page('test-scope', { table: 'tasks', order: [{ field: 'due', direction: 'asc' }], limit: 50, select: ['name', 'due', 'workspace'], ...args }); return { ...result, ms: performance.now() - begin }; },
   async count() { return engine.count('test-scope', 'tasks', 0, ['3']); },
