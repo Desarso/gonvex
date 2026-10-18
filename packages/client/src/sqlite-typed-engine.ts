@@ -1,4 +1,4 @@
-import {sqliteTypedIndexSQL} from './sqlite-typed-schema.js';
+import {installSQLiteTypedSchema} from './sqlite-typed-schema.js';
 import {sqliteSearchAccess} from './sqlite-search-access.js';
 import {sqliteEntityAliasSchema,sqlitePhysicalEntityScope,sqliteQueryEntityScopes} from './sqlite-entity-scope.js';
 import {assertSQLiteMembership} from './sqlite-membership-plan.js';
@@ -118,7 +118,6 @@ export class SQLiteTypedReplicaEngine {
     if (!owner || owner.length > 128) throw new TypeError('Invalid SQLite owner');
     return this.enqueue(256, async () => {
       if (this.initialized) throw new Error('SQLite owner already opened');
-      const ddl = compileSQLiteTypedSchema(this.schema);
       await this.db.withTransactionAsync(async () => {
         await this.db.execAsync(`CREATE TABLE IF NOT EXISTS gv_storage_meta(id INTEGER PRIMARY KEY CHECK(id=1), schema TEXT NOT NULL, epoch INTEGER NOT NULL, owner TEXT NOT NULL, sequence INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS gv_tombstones(scope TEXT NOT NULL, entity TEXT NOT NULL, id TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY(scope,entity,id)) WITHOUT ROWID;
@@ -159,8 +158,7 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
           }
           if (!compatible) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
         }
-        await this.db.execAsync(ddl.tables);
-        if (!await this.indexesDeferred() && (ddl.indexes || ddl.search)) await this.db.execAsync(await sqliteTypedIndexSQL(this.db,this.schema) + '\n' + ddl.search);
+        await installSQLiteTypedSchema(this.db,this.schema,!await this.indexesDeferred());
         this.epoch = (old?.epoch ?? 0) + 1;
         if (!Number.isSafeInteger(this.epoch)) fail('FENCED', 'SQLite epoch exhausted');
         await this.db.runAsync('INSERT INTO gv_storage_meta VALUES(1,?,?,?,0) ON CONFLICT(id) DO UPDATE SET schema=excluded.schema,epoch=excluded.epoch,owner=excluded.owner', signature, this.epoch, owner);

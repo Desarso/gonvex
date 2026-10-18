@@ -1,5 +1,4 @@
 import {sqliteWindowAuxiliarySchema} from './sqlite-window-store.js';
-import {sqliteTypedIndexSQL} from './sqlite-typed-schema.js';
 import {sqliteEntityAliasSchema,sqlitePhysicalEntityScope,sqliteQueryEntityScopes} from './sqlite-entity-scope.js';
 import { readSQLitePortablePage } from './sqlite-portable-page.js';
 import { fail } from './sqlite-admission.js';
@@ -8,7 +7,7 @@ import { sqliteNativeViewSchema, readSQLiteTypedView } from './sqlite-native-vie
 import { compileSQLiteTypedView } from './sqlite-typed-query.js';
 import { SQLiteLocalReplicaStorage, type SQLiteReplicaDatabase, type SQLiteReplicaRowLayout } from './sqlite-replica-storage.js';
 import type { ReplicaRow } from './local-replica.js';
-import { compileSQLiteTypedSchema, sqliteIdentifier as q, sqliteTableName, sqliteFieldName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
+import { installSQLiteTypedSchema, sqliteIdentifier as q, sqliteTableName, sqliteFieldName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
 import { sqlitePayloadBytes } from './sqlite-typed-engine.js';
 
 const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
@@ -23,7 +22,44 @@ export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRo
     if (!lease || current?.epoch !== lease.epoch || current.owner !== lease.owner) fail('FENCED', 'Canonical SQLite owner was replaced');
     return current;
   }
+  async function prepareCompatibilityView(db: SQLiteReplicaDatabase) {
+    await assertOwner(db);
+    if (await db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE type='view' AND name='_gonvex_replica_entities'")) return;
+    const branches: string[] = [];
+    for (const entity of Object.keys(schema)) {
+      const table = sqliteTableName(entity), name = q(table), entitySQL = literal(entity);
+      const values = ['id', 'body', 'version', ...Object.keys(schema[entity]!.fields).map(sqliteFieldName), ...(schema[entity]!.search ?? []).map((_, i) => 's' + i)].map(field => 't.' + q(field)).join(',');
+      // Reconstruct each body's typed fields once, outside the three scope
+      // alias branches. The compatibility view must not retain three copies
+      // of every generated JSON expression in SQLite's schema tree.
+      const view = q(table + '_canonical');
+      await db.execAsync(`DROP VIEW IF EXISTS ${view}; CREATE VIEW ${view} AS SELECT t.scope,${entitySQL} entity,t.id,${sqliteRowBodySQL(schema[entity]!, "t")} value,t.rid rowid FROM (
+ SELECT t.* FROM ${name} t
+ WHERE NOT EXISTS(SELECT 1 FROM gv_scope_alias a WHERE a.physical=t.scope OR a.scope=t.scope)
+ AND NOT EXISTS(SELECT 1 FROM gv_entity_alias a WHERE a.entity=${entitySQL} AND (a.physical=t.scope OR a.scope=t.scope))
+ UNION ALL SELECT t.rid,a.scope,${values} FROM gv_scope_alias a JOIN ${name} t ON t.scope=a.physical
+ WHERE NOT EXISTS(SELECT 1 FROM gv_entity_alias e WHERE e.scope=a.scope AND e.entity=${entitySQL})
+ UNION ALL SELECT t.rid,a.scope,${values} FROM gv_entity_alias a JOIN ${name} t ON t.scope=a.physical WHERE a.entity=${entitySQL}) t`);
+      branches.push(`SELECT scope,entity,id,value,rowid FROM ${view}`);
+    }
+    branches.push("SELECT scope,entity,id,'null' value,NULL rowid FROM gv_canonical_tombstones");
+    if (branches.length > 500) throw new RangeError('Typed canonical schema exceeds SQLite compound table limit');
+    await db.execAsync(`CREATE VIEW IF NOT EXISTS _gonvex_replica_entities AS ${branches.join(' UNION ALL ')};`);
+    const deletes = Object.keys(schema).map(entity => `DELETE FROM ${q(sqliteTableName(entity))} WHERE scope=coalesce((SELECT physical FROM gv_entity_alias WHERE scope=OLD.scope AND entity=${literal(entity)}),(SELECT physical FROM gv_scope_alias WHERE scope=OLD.scope),OLD.scope) AND id=OLD.id AND OLD.entity=${literal(entity)};`).join('\n');
+    await db.execAsync(`CREATE TRIGGER IF NOT EXISTS gv_canonical_delete INSTEAD OF DELETE ON _gonvex_replica_entities BEGIN
+${deletes}
+DELETE FROM gv_canonical_tombstones WHERE scope=OLD.scope AND entity=OLD.entity AND id=OLD.id;
+END;`);
+  }
   return {
+    prepareCompatibilityView,
+    async clearScope(db, scope) {
+      for (const entity of Object.keys(schema)) {
+        const physical = await sqlitePhysicalEntityScope(db, scope, entity);
+        await db.runAsync(`DELETE FROM ${q(sqliteTableName(entity))} WHERE scope=?`, physical);
+      }
+      await db.runAsync('DELETE FROM gv_canonical_tombstones WHERE scope=?', scope);
+    },
     async initializeSequences(db) {
       // Scope discovery must not expand every generated row reconstruction.
       // It is metadata-only and creates no decoded rows or JS scope corpus.
@@ -69,7 +105,6 @@ export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRo
       await db.runAsync('UPDATE gv_storage_meta SET sequence=sequence+1 WHERE id=1');
     },
     async install(db) {
-      const ddl = compileSQLiteTypedSchema(schema);
       const signature = JSON.stringify({ format: 6, schema });
       const flags = await db.getFirstAsync("SELECT name FROM sqlite_master WHERE type='table' AND name='gv_storage_flags'");
       if (flags && await db.getFirstAsync("SELECT value FROM gv_storage_flags WHERE name='bootstrap-indexes'")) throw new Error('Finish or abort the restartable bootstrap before installing the canonical adapter');
@@ -92,37 +127,17 @@ CREATE TABLE IF NOT EXISTS gv_canonical_tombstones(scope TEXT NOT NULL,entity TE
       await installSQLiteTypedBodyFence(db, schema);
       await db.execAsync('DROP TRIGGER IF EXISTS gv_canonical_delete; DROP VIEW IF EXISTS _gonvex_replica_entities;');
       await db.execAsync(sqliteNativeViewSchema);
-      await db.execAsync(ddl.tables+'\n'+sqliteWindowAuxiliarySchema);
-      await db.execAsync(await sqliteTypedIndexSQL(db,schema) + '\n' + ddl.search);
-      const branches: string[] = [];
+      await installSQLiteTypedSchema(db,schema);
+      await db.execAsync(sqliteWindowAuxiliarySchema);
       for (const entity of Object.keys(schema)) {
-        const table = sqliteTableName(entity), name = q(table), entitySQL = literal(entity);
-        const values = ['id', 'body', 'version', ...Object.keys(schema[entity]!.fields).map(sqliteFieldName), ...(schema[entity]!.search ?? []).map((_, i) => 's' + i)].map(field => 't.' + q(field)).join(',');
-        // Reconstruct each body's typed fields once, outside the three scope
-        // alias branches. The compatibility view must not retain three copies
-        // of every generated JSON expression in SQLite's schema tree.
-        branches.push(`SELECT t.scope,${entitySQL} entity,t.id,${sqliteRowBodySQL(schema[entity]!, "t")} value,t.rid rowid FROM (
- SELECT t.* FROM ${name} t
- WHERE NOT EXISTS(SELECT 1 FROM gv_scope_alias a WHERE a.physical=t.scope OR a.scope=t.scope)
- AND NOT EXISTS(SELECT 1 FROM gv_entity_alias a WHERE a.entity=${entitySQL} AND (a.physical=t.scope OR a.scope=t.scope))
- UNION ALL SELECT t.rid,a.scope,${values} FROM gv_scope_alias a JOIN ${name} t ON t.scope=a.physical
- WHERE NOT EXISTS(SELECT 1 FROM gv_entity_alias e WHERE e.scope=a.scope AND e.entity=${entitySQL})
- UNION ALL SELECT t.rid,a.scope,${values} FROM gv_entity_alias a JOIN ${name} t ON t.scope=a.physical WHERE a.entity=${entitySQL}) t`);
-        await db.execAsync(`DROP TRIGGER IF EXISTS ${q(table + '_lookup_a')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_u')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_d')};`);
+        const table = sqliteTableName(entity);
+        await db.execAsync(`DROP VIEW IF EXISTS ${q(table + '_canonical')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_a')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_u')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_d')};`);
       }
       // Portable reads use generated columns and their native indexes. Remove
       // the legacy scalar-copy index atomically only after its triggers retire.
       await db.execAsync(`DROP TRIGGER IF EXISTS gv_canonical_alias_insert; DROP TRIGGER IF EXISTS gv_canonical_alias_update;
 DROP TABLE IF EXISTS _gonvex_replica_lookup;`);
       await db.runAsync('INSERT INTO gv_canonical_layout VALUES(1,?) ON CONFLICT(id) DO UPDATE SET signature=excluded.signature', signature);
-      branches.push("SELECT scope,entity,id,'null' value,NULL rowid FROM gv_canonical_tombstones");
-      if (branches.length > 500) throw new RangeError('Typed canonical schema exceeds SQLite compound table limit');
-      await db.execAsync(`CREATE VIEW IF NOT EXISTS _gonvex_replica_entities AS ${branches.join(' UNION ALL ')};`);
-      const deletes = Object.keys(schema).map(entity => `DELETE FROM ${q(sqliteTableName(entity))} WHERE scope=coalesce((SELECT physical FROM gv_entity_alias WHERE scope=OLD.scope AND entity=${literal(entity)}),(SELECT physical FROM gv_scope_alias WHERE scope=OLD.scope),OLD.scope) AND id=OLD.id AND OLD.entity=${literal(entity)};`).join('\n');
-      await db.execAsync(`CREATE TRIGGER IF NOT EXISTS gv_canonical_delete INSTEAD OF DELETE ON _gonvex_replica_entities BEGIN
-${deletes}
-DELETE FROM gv_canonical_tombstones WHERE scope=OLD.scope AND entity=OLD.entity AND id=OLD.id;
-END;`);
       lease = await db.getFirstAsync<{ epoch: number; owner: string }>('SELECT epoch,owner FROM gv_storage_meta WHERE id=1') ?? undefined;
     },
     async resetViews(db, scope) {

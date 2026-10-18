@@ -35,6 +35,8 @@ const schema = `CREATE TEMP TABLE IF NOT EXISTS _gonvex_live_overlay (
  * The connection must have the compiler's JS-semantic functions/collation and
  * bounded result/native/temp storage installed. This helper neither creates a
  * database nor establishes visibility, coverage, migration or transport credit.
+ * Typed storage callers first await canonical.prepareCompatibilityRows();
+ * native bounded readers do not construct this broad compatibility relation.
  * Pending rows exist only in a transaction-local TEMP overlay. Canonical rows
  * are never overwritten by predictions. Limits fail explicitly, not by dropping
  * intents. Large journals need disk paging before this can serve arbitrary use.

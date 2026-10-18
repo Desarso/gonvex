@@ -34,6 +34,8 @@ export interface SQLiteReplicaDatabase {
  * caller's existing transaction, never in a second database or cache. */
 export interface SQLiteReplicaRowLayout {
   install(database: SQLiteReplicaDatabase): Promise<void>;
+  prepareCompatibilityView?(database: SQLiteReplicaDatabase): Promise<void>;
+  clearScope?(database: SQLiteReplicaDatabase, scope: string): Promise<void>;
   initializeSequences?(database: SQLiteReplicaDatabase): Promise<void>;
   readEntityRows?(database: SQLiteReplicaDatabase, scope: string, entity: string, ids: readonly string[], maxBytes: number): Promise<Array<{ id: string; value: string }>>;
   readVersions?(database: SQLiteReplicaDatabase, scope: string, entity: string, ids: readonly string[]): Promise<ReadonlyMap<string,number>>;
@@ -74,6 +76,16 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
 
   async ready(): Promise<void> {
     await this.initialize(); await this.rowLayout?.assertOwner?.(this.database);
+  }
+  /** Legacy snapshot/normalized-SQL consumers explicitly prepare the broad
+   * relation. Native bounded reads operate directly on generated tables. */
+  async prepareCompatibilityRows(): Promise<void> {
+    await this.initialize();
+    if (this.rowLayout?.prepareCompatibilityView) await this.withFencedTransaction(() => this.rowLayout!.prepareCompatibilityView!(this.database));
+  }
+  private async clearEntityRows(scope: string): Promise<void> {
+    if (this.rowLayout?.clearScope) await this.rowLayout.clearScope(this.database, scope);
+    else await this.database.runAsync('DELETE FROM _gonvex_replica_entities WHERE scope=?', scope);
   }
   private withFencedTransaction(run: () => Promise<void>) {
     return this.database.withTransactionAsync(async () => {
@@ -255,6 +267,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     scope: ReplicaScope = defaultReplicaScope,
   ): Promise<ReplicaSnapshot | undefined> {
     await this.initialize();
+    await this.prepareCompatibilityRows();
     await this.rowLayout?.assertOwner?.(this.database);
     const cursor = await this.database.getFirstAsync<MetaRecord>(
       `SELECT scope, key, value FROM _gonvex_replica_meta WHERE scope = ? AND key = 'cursor'`,
@@ -295,6 +308,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     budget: { maxRows: number; maxBytes: number },
   ): Promise<ReplicaSnapshot | undefined> {
     await this.initialize();
+    await this.prepareCompatibilityRows();
     await this.rowLayout?.assertOwner?.(this.database);
     let snapshot: ReplicaSnapshot | undefined;
     await this.withFencedTransaction(async () => {
@@ -539,6 +553,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
 
   async readChanges(scope: string, afterSequence: number, interest?: Parameters<NonNullable<LocalReplicaStorage['readChanges']>>[2]): Promise<ReplicaStorageChanges> {
     await this.initialize();
+    await this.prepareCompatibilityRows();
     await this.rowLayout?.assertOwner?.(this.database);return this.commits.readChanges(scope,afterSequence,interest);
   }
 
@@ -569,7 +584,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
       throw new Error('This tab has an obsolete replica epoch. Reconnect before continuing.');
     if(current){
       await this.database.runAsync('INSERT OR IGNORE INTO _gonvex_replica_retired_epochs VALUES(?,?)',scope,current.epoch);
-      await this.database.runAsync('DELETE FROM _gonvex_replica_entities WHERE scope=?',scope);
+      await this.clearEntityRows(scope);
       await this.database.runAsync('DELETE FROM _gonvex_replica_queries WHERE scope=?',scope);
       await this.database.runAsync("DELETE FROM _gonvex_replica_meta WHERE scope=? AND (key='cursor' OR key LIKE 'row:%')",scope);
       await this.rowLayout?.resetViews?.(this.database, scope);
@@ -698,13 +713,11 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     scope: ReplicaScope = defaultReplicaScope,
   ): Promise<void> {
     await this.initialize();
+    await this.prepareCompatibilityRows();
     await this.rowLayout?.assertOwner?.(this.database);
     await this.commits.commit(scope, async () => {
       await this.acceptEpoch(scope,snapshot.cursor);
-      await this.database.runAsync(
-        `DELETE FROM _gonvex_replica_entities WHERE scope = ?`,
-        scope,
-      );
+      await this.clearEntityRows(scope);
       await this.database.runAsync(
         `DELETE FROM _gonvex_replica_queries WHERE scope = ?`,
         scope,
@@ -971,10 +984,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     await this.initialize();
     await this.rowLayout?.assertOwner?.(this.database);
     await this.commits.commit(scope, async () => {
-      await this.database.runAsync(
-        `DELETE FROM _gonvex_replica_entities WHERE scope = ?`,
-        scope,
-      );
+      await this.clearEntityRows(scope);
       await this.database.runAsync(
         `DELETE FROM _gonvex_replica_queries WHERE scope = ?`,
         scope,

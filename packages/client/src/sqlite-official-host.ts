@@ -6,6 +6,7 @@ export type OfficialSQLiteHost = {
   database: SQLiteReplicaDatabase;
   memoryBytes(): number;
   statementBytes(): number;
+  memoryStats?(): {allocated:number;peakAllocated:number;schema:number;cache:number;statements:number};
   readonly nativeFastFold:boolean;
   readonly nativeHash:boolean;
   readonly nativeReceipt:boolean;
@@ -197,7 +198,7 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
       return {allocated,peakAllocated,schema:read(capi.SQLITE_DBSTATUS_SCHEMA_USED),cache:read(capi.SQLITE_DBSTATUS_CACHE_USED),statements:read(capi.SQLITE_DBSTATUS_STMT_USED)};
     });
   }
-  return { database, nativeFastFold,nativeHash,nativeReceipt,nativeSnapshot, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes,
+  return { database, nativeFastFold,nativeHash,nativeReceipt,nativeSnapshot, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes, memoryStats:nativeMemory,
     takeProfile() { const vfs=(sqlite3 as unknown as {__gonvexVFSProfile?:()=>Record<string,number>}).__gonvexVFSProfile?.();const result = { ...profile,sqlite:nativeMemory(),...(vfs?{vfs}:{}) }; for (const key of Object.keys(profile) as Array<keyof typeof profile>) profile[key] = 0; return result; },
     close() { if (!closed) { closed = true; for (const sql of statements.keys()) retire(sql); db.close(); } } };
 }

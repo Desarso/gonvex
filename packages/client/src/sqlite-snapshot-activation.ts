@@ -27,7 +27,7 @@ export class SQLiteSnapshotActivator {
  private async initialize(){
   if(this.initialized)return;
   if(this.db.ownerTransactionDepth)fail('FENCED','Prepare snapshot activation before ingress transactions');
-  await this.canonical.ready();await this.windows.ready();
+  await this.canonical.ready();if(!this.schema)await this.canonical.prepareCompatibilityRows();await this.windows.ready();
   await this.db.withTransactionAsync(async()=>{await this.fence();await this.db.execAsync(receiptSchema);await this.db.execAsync(snapshotOverlapSchema);});this.initialized=true;
  }
  ready(){return this.initialize();}

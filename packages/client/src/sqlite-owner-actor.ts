@@ -42,6 +42,8 @@ export function installSQLiteOwner(binding:SQLiteOwnerBinding={}):()=>Promise<vo
 // Dedicated worker entry. The broker is the only producer. OPFS initialization
 // is lazy and occurs only after the tab has acquired the origin ownership lock.
 let host: OfficialSQLiteHost | undefined, engine: SQLiteTypedReplicaEngine | undefined;
+const startupMemory:Array<{stage:string;wasmBytes:number;sqlite:ReturnType<NonNullable<OfficialSQLiteHost['memoryStats']>>|null}>=[];
+function sampleStartupMemory(stage:string){if(host&&startupMemory.length<3)startupMemory.push({stage,wasmBytes:host.memoryBytes(),sqlite:host.memoryStats?.()??null});}
 let canonical:SQLiteCanonicalDispatcher|undefined;
 let nativeReader:SQLiteNativeReplicaReader|undefined,pendingReader:SQLitePendingSnapshotReader|undefined;
 let snapshots:SQLiteSnapshotPages|undefined,activation:SQLiteSnapshotActivator|undefined;
@@ -77,15 +79,15 @@ async function execute(op: string, args: any, requestID:string) {
     try {
       if(typeof args.owner!=='string'||!args.owner||args.owner.length>128)throw new TypeError('Invalid owner token');ownerToken=args.owner;
       if(args.schemaVersion!==undefined&&args.schemaVersion!==binding.schemaVersion)throw Object.assign(Error('Generated owner schema differs from browser binding'),{code:'SCHEMA_MISMATCH'});
-      host = await openOfficialSQLiteHost();
+      host = await openOfficialSQLiteHost();sampleStartupMemory('host');
       const database=sqliteOwnerTransactions(host.database);
       engine = new SQLiteTypedReplicaEngine(database, binding.schema??args.schema as SQLiteTypedSchema, undefined, { onProgress: () => globalThis.postMessage({ type: 'progress', sentAt: Date.now() }) });
-      const epoch = await engine.open(args.owner);
+      const epoch = await engine.open(args.owner);sampleStartupMemory('engine');
       const storage=sqliteTypedReplicaStorage(database,engine.schema);
       canonical=new SQLiteCanonicalDispatcher(database,storage,engine);
       snapshots=new SQLiteSnapshotPages(database,()=>engine!.verifyOwner(),engine.schema);
       activation=new SQLiteSnapshotActivator(database,storage,()=>engine!.verifyOwner(),engine.schema);
-      await snapshots.ready();await activation.ready();
+      await snapshots.ready();await activation.ready();sampleStartupMemory('canonical');
       nativeReader=new SQLiteNativeReplicaReader(database,storage,engine);await nativeReader.ready();tabs.setGeneration(await engine.verifyOwner());
       pendingReader=new SQLitePendingSnapshotReader({database,canonical:storage,snapshots,schema:engine.schema,fence:()=>engine!.verifyOwner()});await pendingReader.ready();
       program=binding.createProgram?.({database,engine,notifyTab:tabID=>schedule(0,async()=>{if(typeof tabID!=='string'||!tabID||tabID.length>128)throw new TypeError('Invalid control recipient');tabs.notify(tabID,await engine!.verifyOwner());}),reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
@@ -120,7 +122,7 @@ async function execute(op: string, args: any, requestID:string) {
     case 'canonicalRead': return canonical!.read(args);
     case 'canonicalGeneration': return canonical!.generation(scope(args.scope),args.expected);
     case 'ping': return { ready: true };
-    case 'stats': return { ...engine.stats(),...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[] };
+    case 'stats': return { ...engine.stats(),startupMemory,...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats(),nativeProfile:host.takeProfile?.(),pendingPages:pendingReader?.budgets()??[],program:program?.budgets?.()??[] };
     case 'integrity': return engine.integrity();
     case 'page': return engine.page(scope(args.scope), args.plan as SQLitePagePlan);
     case 'viewPage': return engine.viewPage(scope(args.scope), args.signature, args.plan as SQLitePagePlan, args.offset);

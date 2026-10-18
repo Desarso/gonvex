@@ -94,3 +94,19 @@ export async function sqliteTypedIndexSQL(db:import('./sqlite-replica-storage.js
  if(!excluded.size)return compileSQLiteTypedSchema(schema).indexes;
  return Object.entries(schema).filter(([entity])=>!excluded.has(entity)).map(([entity,table])=>compileSQLiteTypedSchema({[entity]:table}).indexes).join('\n');
 }
+
+/** Install in bounded entity-sized SQL chunks. Building one concatenated DDL
+ * corpus retains temporary strings proportional to the whole app schema. All
+ * chunks still belong to the caller's single fenced transaction. */
+export async function installSQLiteTypedSchema(db:import('./sqlite-replica-storage.js').SQLiteReplicaDatabase,schema:SQLiteTypedSchema,indexes=true):Promise<void>{
+ validateSQLiteTypedSchema(schema);
+ await db.execAsync('CREATE TABLE IF NOT EXISTS gv_snapshot_index_deferred(entity TEXT PRIMARY KEY) WITHOUT ROWID; CREATE TABLE IF NOT EXISTS gv_fts_deferred(scope TEXT NOT NULL,entity TEXT NOT NULL,PRIMARY KEY(scope,entity)) WITHOUT ROWID;');
+ const deferred=await db.getAllAsync<{entity:string}>('SELECT json_quote(entity) entity FROM gv_snapshot_index_deferred LIMIT 513');
+ if(deferred.length>512)throw new RangeError('Deferred SQLite index entities exceed allowance');
+ const excluded=new Set(deferred.map(row=>JSON.parse(row.entity) as string));
+ for(const [entity,table]of Object.entries(schema)){
+  const ddl=compileSQLiteTypedSchema({[entity]:table});
+  await db.execAsync(ddl.tables);
+  if(indexes){const sql=(excluded.has(entity)?'':ddl.indexes)+'\n'+ddl.search;if(sql.trim())await db.execAsync(sql);}
+ }
+}

@@ -244,3 +244,21 @@ it('discovers existing logical scopes without expanding generated row bodies', a
   expect(discovery).not.toMatch(/jsonb_replace|json_extract/);
   expect((await canonical.loadEntityRows('existing', 'tasks', ['a']))[0].row).toEqual({ _id: 'a', name: 'retained' });
 });
+
+it('keeps native reads, epoch replacement and scope clear independent of the broad compatibility view', async () => {
+  const {db,host,storage}=fixture();await storage.ready();
+  const view=()=>db.prepare("SELECT 1 FROM sqlite_master WHERE type='view' AND name='_gonvex_replica_entities'").get();
+  expect(view()).toBeUndefined();
+  const apply=(scope:string,epoch:string,id:string)=>storage.applyTransaction({cursor:{epoch,revision:1},changes:[{entity:'tasks',id,operation:'insert' as const,newValue:{_id:id,name:id}}]},empty,scope);
+  await apply('selected','e','a');await apply('other','e','b');
+  expect(await storage.loadBoundedEntityRows('selected','tasks',['a'])).toEqual([{id:'a',row:{_id:'a',name:'a'}}]);
+  await apply('selected','new','c');
+  expect(await storage.loadBoundedEntityRows('selected','tasks',['a','c'])).toEqual([{id:'c',row:{_id:'c',name:'c'}}]);
+  await storage.clear('selected');expect(await storage.loadEntityRows('selected','tasks',['c'])).toEqual([]);
+  expect(await storage.loadEntityRows('other','tasks',['b'])).toEqual([{id:'b',row:{_id:'b',name:'b'}}]);expect(view()).toBeUndefined();
+  const execute=host.execAsync.bind(host);const spy=vi.spyOn(host,'execAsync').mockImplementation(async sql=>{if(sql.includes('CREATE TRIGGER IF NOT EXISTS gv_canonical_delete'))throw Error('late compatibility failure');return execute(sql);});
+  await expect(storage.prepareCompatibilityRows()).rejects.toThrow('late compatibility failure');
+  expect(view()).toBeUndefined();expect(db.prepare("SELECT count(*) n FROM sqlite_master WHERE type='view' AND name LIKE '%_canonical'").get()?.n).toBe(0);
+  spy.mockRestore();await storage.prepareCompatibilityRows();expect(view()).toBeDefined();
+  expect(db.prepare("SELECT id FROM _gonvex_replica_entities WHERE scope='other'").all()).toEqual([{id:'b'}]);
+});
