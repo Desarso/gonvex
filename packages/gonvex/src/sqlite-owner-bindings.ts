@@ -29,6 +29,16 @@ const collections=${JSON.stringify(collections.map(ref=>ref.path))};
 const runtime=${reducers?`new PortableReducerRuntime({schema:localSchema,reducers:localReducers,artifactHash:${JSON.stringify(manifest.module.hash)}})`:'{isPrepared:()=>false,prepare:async()=>{throw Error("No portable Reducer registered");},execute:async()=>{throw Error("No portable Reducer registered");}}'};
 installSQLiteOwner({schema:sqliteSchema,schemaVersion:sqliteSchemaVersion,createProgram:owner=>new SQLiteClientProgram(owner,{runtime,legacyStorage:${JSON.stringify(legacyStorage)},clientContract:${JSON.stringify(clientContract)},artifactHash:${JSON.stringify(manifest.module.hash)},references,collections,offlineMaxAgeMs:${JSON.stringify(offline)}})});
 `,
+  'indexeddb-client-worker.ts':`${header}import {installIndexedDBOwner} from "@gonvex/client/sqlite/indexeddb-owner";
+import {IndexedDBClientProgram} from "@gonvex/client/sqlite/indexeddb-program";
+import {sqliteSchema,sqliteSchemaVersion} from "./sqlite-schema.js";
+${reducers?'import {PortableReducerRuntime} from "@gonvex/local-runtime/portable";\nimport {localSchema} from "./local-schema.js";\nimport {localReducers} from "./local-reducers.js";':''}
+import type {FunctionReference} from "@gonvex/client";
+const references=${JSON.stringify(sqliteOwnerReferences(manifest))} as unknown as readonly FunctionReference[];
+const collections=${JSON.stringify(collections.map(ref=>ref.path))};
+const runtime=${reducers?`new PortableReducerRuntime({schema:localSchema,reducers:localReducers,artifactHash:${JSON.stringify(manifest.module.hash)}})`:'{isPrepared:()=>false,prepare:async()=>{throw Error("No portable Reducer registered");},execute:async()=>{throw Error("No portable Reducer registered");}}'};
+installIndexedDBOwner({schema:sqliteSchema,schemaVersion:sqliteSchemaVersion,createProgram:owner=>new IndexedDBClientProgram(owner,{runtime,legacyStorage:${JSON.stringify(legacyStorage)},clientContract:${JSON.stringify(clientContract)},artifactHash:${JSON.stringify(manifest.module.hash)},references,collections,offlineMaxAgeMs:${JSON.stringify(offline)}})});
+`,
   'sqlite-client.ts':`${header}import {SQLiteBrowserClient} from "@gonvex/client/sqlite/browser";
 import type {GonvexClientOptions} from "@gonvex/client";
 import {sqliteBrowserOptions} from "./sqlite-browser.js";
@@ -39,7 +49,7 @@ export {createFirebaseAuthAdapter} from "@gonvex/client";
   'sqlite-browser.ts':`${header}import {SQLiteBrowserClient,type SQLiteBrowserOptions} from "@gonvex/client/sqlite/browser";
 import {SQLiteReplicaBroker} from "@gonvex/client/sqlite/broker";
 import {sqliteSchemaVersion} from "./sqlite-schema-version.js";
-export function sqliteBrowserOptions(options:Omit<SQLiteBrowserOptions,"broker">={}) {return {...options,artifactHash:${JSON.stringify(manifest.module.hash)},broker:new SQLiteReplicaBroker({schemaVersion:sqliteSchemaVersion,createWorker:()=>new Worker(new URL("./sqlite-client-worker.ts",import.meta.url),{type:"module"}),createHub:()=>new SharedWorker(new URL("./sqlite-router-worker.ts",import.meta.url),{type:"module",name:"gonvex-sqlite-router-v1"})})};}
+export function sqliteBrowserOptions(options:Omit<SQLiteBrowserOptions,"broker">={}) {return {...options,artifactHash:${JSON.stringify(manifest.module.hash)},broker:new SQLiteReplicaBroker({schemaVersion:sqliteSchemaVersion,createWorker:()=>new Worker(new URL("./sqlite-client-worker.ts",import.meta.url),{type:"module"}),createFallbackWorker:()=>new Worker(new URL("./indexeddb-client-worker.ts",import.meta.url),{type:"module"}),createHub:()=>new SharedWorker(new URL("./sqlite-router-worker.ts",import.meta.url),{type:"module",name:"gonvex-sqlite-router-v1"})})};}
 export function createSQLiteBrowserClient(url:string,options:Omit<SQLiteBrowserOptions,"broker">={}) {return new SQLiteBrowserClient(url,sqliteBrowserOptions(options));}
 `,
  };

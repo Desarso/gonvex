@@ -1,0 +1,13 @@
+import {afterEach,expect,it} from 'vitest';
+import {IDBFactory,IDBKeyRange} from 'fake-indexeddb';
+import {IndexedDBLegacyBootstrap} from './indexeddb-legacy-bootstrap.js';
+import {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
+const closes:Array<()=>void>=[];afterEach(()=>{for(const close of closes.splice(0))close();});
+const session={directive:{protocolVersion:1 as const,scope:'tenant',visibilityScope:'visible',epoch:'epoch'},identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}},artifactHash:'artifact',lastOnlineAtMs:100};
+const complete=(tx:IDBTransaction)=>new Promise<void>((resolve,reject)=>{tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error);});
+it('fences old IndexedDB and durably imports a cached session and queued intent before admission',async()=>{
+ const factory=new IDBFactory(),safety=new SQLiteSafetyJournal('safety',factory,IDBKeyRange);closes.push(()=>safety.close());
+ const replica=await new Promise<IDBDatabase>((resolve,reject)=>{const opening=factory.open('old-replica',1);opening.onupgradeneeded=()=>{opening.result.createObjectStore('meta',{keyPath:['scope','key']});opening.result.createObjectStore('entities',{keyPath:['scope','entity','id']});};opening.onsuccess=()=>resolve(opening.result);opening.onerror=()=>reject(opening.error);});let tx=replica.transaction('meta','readwrite');tx.objectStore('meta').put({scope:'identity',key:'session',value:JSON.stringify(session)});await complete(tx);replica.close();
+ const outbox=await new Promise<IDBDatabase>((resolve,reject)=>{const opening=factory.open('old-outbox',1);opening.onupgradeneeded=()=>{const entries=opening.result.createObjectStore('entries',{keyPath:'id',autoIncrement:true});entries.createIndex('scope','scope');};opening.onsuccess=()=>resolve(opening.result);opening.onerror=()=>reject(opening.error);});tx=outbox.transaction('entries','readwrite');tx.objectStore('entries').add({id:1,scope:'identity',path:'tasks.add',args:{title:'offline'},idempotencyKey:'command',createdAt:100,attempts:0,nextAttemptAt:100,state:'pending',entityKeys:[],patches:[]});await complete(tx);outbox.close();
+ const bootstrap=new IndexedDBLegacyBootstrap(safety,'artifact','old-replica','old-outbox',factory,IDBKeyRange);closes.push(()=>bootstrap.close());expect(await bootstrap.prepare('identity')).toEqual(session);expect(await safety.session('identity')).toEqual(session);expect((await safety.page('identity',0)).entries).toMatchObject([{legacy:{idempotencyKey:'command'}}]);expect(await bootstrap.prepare('identity')).toEqual(session);expect((await safety.page('identity',0)).entries).toHaveLength(1);
+});

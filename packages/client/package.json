@@ -43,6 +43,14 @@
     "./sqlite/program": {
       "types": "./dist/sqlite-client-program.d.ts",
       "default": "./dist/sqlite-client-program.js"
+    },
+    "./sqlite/indexeddb-owner": {
+      "types": "./dist/indexeddb-owner-actor.d.ts",
+      "default": "./dist/indexeddb-owner-actor.js"
+    },
+    "./sqlite/indexeddb-program": {
+      "types": "./dist/indexeddb-client-program.d.ts",
+      "default": "./dist/indexeddb-client-program.js"
     }
   },
   "types": "./dist/index.d.ts",
