@@ -359,13 +359,16 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
     return this.enqueue(bytes,async()=>{
       let result!:T;
       await this.db.withTransactionAsync(async()=>{
-        await this.fence();const hash=await sha256(encoded);
+        const previous=await this.fence();const hash=await sha256(encoded);
         const old=await this.db.getFirstAsync<{hash:string;result:string}>('SELECT hash,result FROM gv_owner_receipts WHERE scope=? AND id=?',scope,id);
         if(old){if(old.hash!==hash)fail('INTENT_CONFLICT','Owner request ID reused with different content');const receipt=JSON.parse(old.result) as {hasValue:boolean;value:T};result=receipt.hasValue?receipt.value:undefined as T;return;}
         result=await run(admitted);sqlitePayloadBytes(result??null,this.limits.pageBytes);
         const stored=JSON.stringify({hasValue:result!==undefined,value:result??null});
         if(stored.length*2>this.limits.pageBytes)fail('BUDGET','Owner operation receipt exceeds budget');
         await this.db.runAsync('INSERT INTO gv_owner_receipts VALUES(?,?,?,?)',scope,id,hash,stored);
+        // Metadata-only adapter writes also change a captured owner read view.
+        // Row commits already advance this clock; exact receipt replay does not.
+        if(await this.fence()===previous){if(previous>=Number.MAX_SAFE_INTEGER)fail('FENCED','SQLite storage sequence exhausted');await this.db.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1',previous+1);}
       });return result;
     });
   }

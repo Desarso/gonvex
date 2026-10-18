@@ -97,20 +97,24 @@ function admit(data: any, peer?: { port: MessagePort; token: string }, tab?: str
   let size: number;
   try {
     if (typeof data?.id !== 'string' || data.id.length > 256 || typeof data.op !== 'string') throw new TypeError('Invalid worker request');
+    if(data.requestID!==undefined&&(typeof data.requestID!=='string'||!data.requestID||data.requestID.length>256||peer&&data.requestID!==data.id))throw new TypeError('Invalid durable worker request ID');
     size = sqliteRequestBytes(data.op,data.args,data.op === 'open' ? 1048576 : 262144);
     if (operations >= 64 || bytes + size > 2097152) throw Object.assign(new Error('Storage worker queue is full'), { code: 'BUSY' });
   } catch (e) { reply(data?.id, undefined, e, peer, tab); return; }
   operations++; bytes += size;
   const run = lane.then(async () => {
     try {
-      const value = await execute(data.op, data.args, data.id);
-      const publishes=sqliteOperationPublishes(data.op,data.args)&&typeof data.args.scope==='string';
+      const writes=sqliteOperationPublishes(data.op,data.args)&&typeof data.args?.scope==='string';
+      const before=writes&&engine?await engine.verifyOwner():undefined;
+      const value = await execute(data.op, data.args, data.requestID??data.id);
+
       // Canonical per-scope receipts and the global storage fence have distinct
       // clocks. Peers reconcile against the current global committed clock.
-      const generation=publishes?await engine!.verifyOwner():undefined;
+      const after=before?await engine!.verifyOwner():undefined;
+      const generation=after&&after.sequence!==before!.sequence?after:undefined;
       reply(data.id, value, undefined, peer, tab);
       if (generation) {
-        const change = { type: 'change', protocol: 1, scope: data.args.scope, sequence:generation.sequence };
+        const change = { type: 'change', protocol: 1, scope: data.args.scope, sequence:generation.sequence,epoch:generation.epoch };
         globalThis.postMessage(change);
         for (const p of ports.values()) p.port.postMessage(change);
       }

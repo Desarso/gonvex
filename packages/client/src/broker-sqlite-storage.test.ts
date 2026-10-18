@@ -92,3 +92,5 @@ it('routes bounded native reads without legacy membership hydration and releases
  expect(calls.map(call=>call.op)).toEqual(['nativeWindowPage','nativeEntityPage']);storage.dispose();
  await expect(storage.readNativeWindowPage({scope:'s',signature:'large'})).rejects.toThrow('closed');
 });
+
+it('native read pages never emit a committed-change notification',()=>{for(const op of ['nativeWindowPage','nativeEntityPage','page','viewPage','windowPage','windowHeader','canonicalRead','canonicalGeneration'])expect(sqliteOperationPublishes(op,{scope:'s'})).toBe(false);expect(sqliteOperationPublishes('snapshotActivate',{scope:'s'})).toBe(true);});

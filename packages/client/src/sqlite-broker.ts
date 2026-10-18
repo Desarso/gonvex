@@ -1,5 +1,5 @@
 import {sqliteRequestBytes,sqliteTransferRequest} from './sqlite-request-frame.js';
-import { sqliteWorkerOperations as publicOperations, sqliteOperationPublishes } from './sqlite-worker-protocol.js';
+import { sqliteWorkerOperations as publicOperations } from './sqlite-worker-protocol.js';
 import { sqlitePayloadBytes } from './sqlite-admission.js';
 import type { SQLiteTypedSchema } from './sqlite-typed-schema.js';
 
@@ -9,8 +9,12 @@ const controlName = 'gonvex-sqlite-control-v1';
 export type SQLiteBrokerState = 'opening' | 'ready' | 'pending' | 'unavailable' | 'closed';
 export type SQLiteBrokerOptions = {
   schema: SQLiteTypedSchema;
-  workerURL: URL;
+  workerURL?: URL;
   hubURL?: URL;
+  /** Static new Worker(new URL(..., import.meta.url)) factories let bundlers
+   * fingerprint worker graphs. Only the elected tab invokes createWorker. */
+  createWorker?():Worker;
+  createHub?():SharedWorker;
   onState?(state: SQLiteBrokerState): void;
   onChange?(scope: string, sequence: number): void;
 };
@@ -36,6 +40,8 @@ export class SQLiteReplicaBroker {
   private readonly replies = new BroadcastChannel(controlName + ':reply:' + this.tabID);
   private readonly changeListeners=new Set<(scope:string,sequence:number)=>void>();
   subscribeChanges(listener:(scope:string,sequence:number)=>void):()=>void{if(this.changeListeners.size>=64)throw error('BUDGET','Storage change listener budget exceeded');this.changeListeners.add(listener);return ()=>{this.changeListeners.delete(listener);};}
+  private readonly lastChanges=new Map<string,{epoch:number;sequence:number;bytes:number}>();
+  private lastChangeBytes=0;
   private readonly pending = new Map<string, Call>();
   private readonly workerCalls = new Map<string, WorkerCall>();
   private readonly inflight = new Map<string, { generation: Generation; bytes: number }>();
@@ -60,6 +66,7 @@ export class SQLiteReplicaBroker {
   private readonly onFreeze = () => this.handoff();
   private readonly onResume = () => this.onPageShow();
   constructor(private readonly options: SQLiteBrokerOptions) {
+    if(!options.workerURL&&!options.createWorker)throw new TypeError('SQLite broker requires its dedicated worker');
     sqlitePayloadBytes(options.schema, 1_048_576);
     this.control.onmessage = event => this.receiveControl(event.data);
     this.replies.onmessage = event => this.receiveReply(event.data);
@@ -73,17 +80,17 @@ export class SQLiteReplicaBroker {
     else this.elect();
   }
   get state() { return this.stateValue; }
-  stats() { return { state: this.stateValue, owner: this.owner?.id, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size }; }
+  stats() { return { state: this.stateValue, owner: this.owner?.id, ownsWorker: !!this.generation, pending: this.pending.size, pendingBytes: this.pendingBytes, ownerOperations: this.inflight.size, ownerBytes: this.inflightBytes, listeners:this.changeListeners.size,changeScopes:this.lastChanges.size,changeBytes:this.lastChangeBytes }; }
   private setState(state: SQLiteBrokerState) {
     if (state === this.stateValue) return;
     this.stateValue = state;
     try { this.options.onState?.(state); } catch { /* Observer cannot alter ownership. */ }
   }
   private connectHub() {
-    if (!this.options.hubURL || typeof SharedWorker === 'undefined') return;
+    if ((!this.options.hubURL&&!this.options.createHub) || typeof SharedWorker === 'undefined') return;
     try {
       this.port?.close();
-      this.hub = new SharedWorker(this.options.hubURL, { type: 'module', name: 'gonvex-sqlite-router-v1' });
+      this.hub = this.options.createHub?.()??new SharedWorker(this.options.hubURL!, { type: 'module', name: 'gonvex-sqlite-router-v1' });
       this.port = this.hub.port;
       this.port.onmessage = event => {
         const m = event.data;
@@ -114,7 +121,16 @@ export class SQLiteReplicaBroker {
     }
     if (m.type === 'gone' && this.owner?.token === m.token) { this.owner = undefined; this.setState('pending'); this.resend(); }
     if (m.type === 'probe' && this.generation?.ready) void this.pulse();
-    if (m.type === 'change' && typeof m.scope === 'string' && m.scope.length <= 512 && Number.isSafeInteger(m.sequence)) {
+    if (m.type === 'change' && typeof m.scope === 'string' && m.scope.length <= 512 && Number.isSafeInteger(m.sequence)&&m.sequence>=0) {
+      if(m.epoch!==undefined){
+        if(!Number.isSafeInteger(m.epoch)||m.epoch<0||this.owner&&m.epoch<this.owner.epoch)return;
+        const previous=this.lastChanges.get(m.scope);
+        if(previous&&(m.epoch<previous.epoch||m.epoch===previous.epoch&&m.sequence<=previous.sequence))return;
+        if(previous){this.lastChanges.delete(m.scope);this.lastChangeBytes-=previous.bytes;}
+        const bytes=m.scope.length*2+160;
+        while(this.lastChanges.size>=128||this.lastChangeBytes+bytes>262144){const key=this.lastChanges.keys().next().value!;this.lastChangeBytes-=this.lastChanges.get(key)!.bytes;this.lastChanges.delete(key);}
+        this.lastChanges.set(m.scope,{epoch:m.epoch,sequence:m.sequence,bytes});this.lastChangeBytes+=bytes;
+      }
       try { this.options.onChange?.(m.scope, m.sequence); } catch { /* Observer only. */ }
       for(const listener of this.changeListeners)try{listener(m.scope,m.sequence);}catch{/* Observer only. */}
     }
@@ -179,7 +195,7 @@ export class SQLiteReplicaBroker {
       if (this.closed || this.failed) return;
       let release!: () => void;
       const released = new Promise<void>(resolve => { release = resolve; });
-      const worker = new Worker(this.options.workerURL, { type: 'module' });
+      const worker = this.options.createWorker?.()??new Worker(this.options.workerURL!, { type: 'module' });
       const token = crypto.randomUUID(), channel = new BroadcastChannel(controlName + ':owner:' + token);
       const g: Generation = { token, worker, channel, release, ready: false, epoch: 0, lastProgress: Date.now() };
       this.generation = g;
@@ -232,12 +248,12 @@ export class SQLiteReplicaBroker {
       });
     } finally { this.recovering = false; }
   }
-  private workerCall(g: Generation, op: string, args: unknown): Promise<any> {
+  private workerCall(g: Generation, op: string, args: unknown, requestID?:string): Promise<any> {
     if (this.generation !== g) return Promise.reject(error('FENCED', 'Storage owner changed', 'unknown'));
     const id = this.tabID + ':w:' + ++this.serial;
     return new Promise((resolve, reject) => {
       this.workerCalls.set(id, { generation: g, resolve, reject });
-      try { const outgoing=sqliteTransferRequest(op,args);g.worker.postMessage({ id, op, args:outgoing.args },outgoing.transfer); }
+      try { const outgoing=sqliteTransferRequest(op,args);g.worker.postMessage({ id, op, requestID:requestID??id, args:outgoing.args },outgoing.transfer); }
       catch (e) { this.workerCalls.delete(id); reject(e); }
     });
   }
@@ -289,10 +305,10 @@ export class SQLiteReplicaBroker {
     } catch (e) { this.reply(m, undefined, e); return; }
     this.inflight.set(key, { generation: g, bytes }); this.inflightBytes += bytes;
     try {
-      const value = await this.workerCall(g, m.op, m.args);
+      const value = await this.workerCall(g, m.op, m.args,m.id);
       if (this.generation !== g) return;
       sqlitePayloadBytes(value, 262144); this.reply(m, value);
-      if (sqliteOperationPublishes(m.op,m.args) && typeof m.args?.scope === 'string') this.broadcast({ type: 'change', scope: m.args.scope, sequence: value?.sequence ?? 0 });
+      // The worker publishes the fenced global clock after commit on every route.
     } catch (e) { if (this.generation === g) this.reply(m, undefined, e); }
     finally { const retained = this.inflight.get(key); if (retained?.generation === g) { this.inflightBytes -= retained.bytes; this.inflight.delete(key); } }
   }
@@ -335,7 +351,7 @@ export class SQLiteReplicaBroker {
     if (this.closed) return;
     this.fail(error('CLOSED', 'Storage broker closed', 'unknown'));
     this.election?.abort(); if (this.generation) this.stop(this.generation);
-    this.closed = true; this.changeListeners.clear(); clearInterval(this.timer);
+    this.closed = true; this.changeListeners.clear();this.lastChanges.clear();this.lastChangeBytes=0; clearInterval(this.timer);
     this.direct?.port.postMessage({ type: 'bye' }); this.direct?.port.close();
     this.port?.postMessage({ type: 'bye' }); this.port?.close(); this.control.close(); this.replies.close();
     globalThis.removeEventListener('pagehide', this.onPageHide); globalThis.removeEventListener('pageshow', this.onPageShow);

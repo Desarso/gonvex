@@ -28,8 +28,8 @@ it('routes restartable first-sync frames through the real owner queue and publis
   try {
     await import('./sqlite-owner-worker.js');
     interval.mockRestore();
-    const request = (op: string, args: unknown, key=String(++id)) => new Promise<any>(resolve => { awaiting.set(key, resolve);
-      (globalThis as any).onmessage({ data: { id: key, op, args } });
+    const request = (op: string, args: unknown, key=String(++id),requestID?:string) => new Promise<any>(resolve => { awaiting.set(key, resolve);
+      (globalThis as any).onmessage({ data: { id: key, op, args,requestID } });
     });
     const schema = { tasks: { key: '_id', fields: { _id: { kind: 'text' }, name: { kind: 'text' } }, indexes: [], search: ['name'], counts: [{ columns: ['name'] }] } };
     expect((await request('open', { protocol: 1, owner: 'one', schema })).error).toBeUndefined();
@@ -56,38 +56,44 @@ it('routes restartable first-sync frames through the real owner queue and publis
     expect((await request('canonicalCall',canonicalPage)).value.value.rows[0].name).toBe('Needle');
     const published=changes.length;
     const canonicalWrite={scope:'s',method:'applyTransaction',args:[{cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{name:'Updated needle'}}]},{entities:{},liveQueries:{}},'s']};
-    const write=request('canonicalCall',canonicalWrite,'canonical-retry');
+    const write=request('canonicalCall',canonicalWrite,'transport-one','canonical-retry');
     const following=request('page',{scope:'s',plan:{table:'tasks',order:[{field:'_id',direction:'asc'}],textOrder:'binary',limit:2,search:'updated'}});
     const committed=await write;
     expect(committed.error).toBeUndefined();expect((await following).value.rows[0].name).toBe('Updated needle');
     expect((await request('canonicalCall',canonicalWrite,'canonical-retry')).value).toEqual(committed.value);
     const generation=(await request('canonicalGeneration',{scope:'s'})).value;
     expect((await request('canonicalRead',{scope:'s',expected:generation,coverage:{tasks:{key:'_id',complete:true}},read:{table:'tasks',where:{column:'name',op:'eq',value:'Updated needle'}}})).value.value.rows[0].name).toBe('Updated needle');
-    expect(changes.length).toBe(published+2); // Two deliveries, one durable write.
+    expect(changes.length).toBe(published+1); // Replay returns the receipt without another change event.
     const {replicaSumDigest,replicaRowsHashes}=await import('./replica-integrity.js');
     const rows=[{_id:'a',name:'old snapshot'}],digest=replicaSumDigest(await replicaRowsHashes(rows,'_id'));
     const stage={type:'replica.snapshotPage',id:'source',snapshotId:'disk',key:'_id',scope:'tenant',visibilityScope:'s',cursor:{epoch:'e',revision:1},sequence:0,last:true,result:rows,digest};
     expect((await request('snapshotAppend',{scope:'s',page:stage})).value.complete).toBe(true);
     expect((await request('snapshotRead',{scope:'s',subscription:'source',snapshot:'disk'})).value.rows[0].row.name).toBe('old snapshot');
     expect((await request('canonicalCall',canonicalPage)).value.value.rows[0].name).toBe('Updated needle');
-    expect(changes.length).toBe(published+2); // Isolated stages do not publish canonical changes.
+    expect(changes.length).toBe(published+1); // Isolated stages do not publish canonical changes.
     expect((await request('snapshotDiscard',{scope:'s',subscription:'source',snapshot:'disk'})).value.removed).toBe(true);
     const encodedSnapshot=new TextEncoder().encode(JSON.stringify({...stage,type:'replica.snapshotEncodedPage',result:undefined,canonicalRows:rows.map(row=>JSON.stringify(row))}));
     expect((await request('snapshotAppendEncoded',{scope:'s',encoded:encodedSnapshot})).value.complete).toBe(true);
     expect((await request('snapshotRead',{scope:'s',subscription:'source',snapshot:'disk'})).value.rows[0].row.name).toBe('old snapshot');
-    expect(changes.length).toBe(published+2);
+    expect(changes.length).toBe(published+1);
     const header={signature:'native-collection',entity:'tasks',key:'_id',kind:'replica',source:'server',completeness:'complete',cursor:stage.cursor,aggregateDigest:digest};
     const activation=await request('snapshotActivate',{scope:'s',subscription:'source',snapshot:'disk',header});
     expect(activation.error).toBeUndefined();expect(activation.value.changes).toMatchObject({reset:true,entities:{},windows:{}});
     expect((await request('windowPage',{scope:'s',signature:header.signature,generation:'disk',offset:0})).value.ids).toEqual(['a']);
     expect((await request('canonicalCall',canonicalPage)).value.value.rows[0].name).toBe('Updated needle');
-    expect(changes.length).toBe(published+3);
+    expect(changes.length).toBe(published+2);
     expect(changes.at(-1).sequence).toBe((await request('canonicalGeneration',{scope:'s'})).value.sequence);
-    const native=await request('nativeWindowPage',{scope:'s',signature:header.signature,limit:50});
+    const beforeReads=changes.length;const native=await request('nativeWindowPage',{scope:'s',signature:header.signature,limit:50});
     expect(native.error).toBeUndefined();expect(native.value).toMatchObject({window:{generation:'disk',total:1,header},offset:0,nextOffset:null,rows:[{id:'a',value:{_id:'a',name:'Updated needle'}}]});
     expect((await request('nativeEntityPage',{scope:'s',entity:'tasks',ids:['missing','a'],expected:native.value.generation})).value.rows).toEqual([{id:'missing',value:null},{id:'a',value:{_id:'a',name:'Updated needle'}}]);
     expect((await request('nativeWindowPage',{scope:'s',signature:header.signature,generation:'old'})).error.code).toBe('PAGE_CHANGED');
-    expect((await request('nativeEntityPage',{scope:'s',entity:'tasks',ids:['a'],expected:{epoch:999,sequence:0}})).error.code).toBe('PAGE_CHANGED');
+    expect((await request('nativeEntityPage',{scope:'s',entity:'tasks',ids:['a'],expected:{epoch:999,sequence:0}})).error.code).toBe('PAGE_CHANGED');expect(changes.length).toBe(beforeReads);
+    const oldClock=(await request('canonicalGeneration',{scope:'identity'})).value;
+    const session={scope:'identity',method:'saveSession',args:['identity',null]};
+    await request('canonicalCall',session,'session-transport-one','session-stable');
+    const newClock=(await request('canonicalGeneration',{scope:'identity'})).value;expect(newClock.sequence).toBe(oldClock.sequence+1);
+    const beforeReplay=changes.length;await request('canonicalCall',session,'session-transport-two','session-stable');
+    expect((await request('canonicalGeneration',{scope:'identity'})).value).toEqual(newClock);expect(changes.length).toBe(beforeReplay);
 
   } finally {
     interval.mockRestore(); vi.unstubAllGlobals(); delete (globalThis as any).onmessage; db.close();

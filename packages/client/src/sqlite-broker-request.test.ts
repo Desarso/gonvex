@@ -5,7 +5,7 @@ import { SQLiteReplicaBroker } from './sqlite-broker.js';
 // replaced at its boundary; real multi-tab tests cover the actual transports.
 function client() {
   const broker = Object.assign(Object.create(SQLiteReplicaBroker.prototype), {
-    closed: false, failed: false, changeListeners:new Set(), pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
+    closed: false, failed: false, changeListeners:new Set(),lastChanges:new Map(),lastChangeBytes:0, pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
     send: vi.fn((call: any) => {
       clearTimeout(call.timer); broker.pending.delete(call.id); broker.pendingBytes -= call.bytes;
       call.resolve({ accepted: call.op, args: call.args });
@@ -79,4 +79,18 @@ it('admits encoded native snapshot bytes under the same immutable transport budg
  const result=await broker.request<any>('snapshotAppendEncoded',{scope:'s',encoded});
  const expected=encoded.slice();encoded.fill(0);expect(result.args.encoded).toEqual(expected);
  await expect(broker.request('snapshotAppendEncoded',{scope:'s',encoded:new Uint8Array(131072)})).rejects.toMatchObject({code:'BUDGET'});
+});
+
+it('preserves a caller request ID through owner forwarding independently of transport correlation IDs',async()=>{
+ const broker=client() as any,forwarded:any[]=[],generation={ready:true,token:'owner',worker:{postMessage(message:any){forwarded.push(message);queueMicrotask(()=>{const pending=broker.workerCalls.get(message.id);broker.workerCalls.delete(message.id);pending.resolve({sequence:7});});}}};
+ broker.generation=generation;broker.workerCalls=new Map();broker.reply=vi.fn();
+ const message={type:'request',protocol:1,token:'owner',from:'follower',id:'follower:r:1',op:'canonicalCall',args:{scope:'s',method:'clear',args:['s']}};
+ await broker.serve(message);await broker.serve(message);
+ expect(forwarded.map(value=>value.requestID)).toEqual(['follower:r:1','follower:r:1']);expect(forwarded[0].id).not.toBe(forwarded[1].id);expect(broker.reply).toHaveBeenCalledTimes(2);
+});
+it('deduplicates port/channel changes under a bounded scope ledger and rejects older owner epochs',()=>{
+ const broker=client() as any,calls:number[]=[];broker.options={onChange:(_scope:string,sequence:number)=>calls.push(sequence)};broker.owner={epoch:2};
+ const message={protocol:1,type:'change',scope:'s',sequence:4,epoch:2};broker.receiveControl(message);broker.receiveControl(message);broker.receiveControl({...message,sequence:3});broker.receiveControl({...message,epoch:1,sequence:100});expect(calls).toEqual([4]);
+ broker.receiveControl({...message,epoch:3,sequence:1});expect(calls).toEqual([4,1]);
+ for(let n=0;n<1000;n++)broker.receiveControl({...message,scope:'scope-'+n});expect(broker.stats().changeScopes).toBe(128);expect(broker.stats().changeBytes).toBeLessThanOrEqual(262144);
 });
