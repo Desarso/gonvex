@@ -59,6 +59,12 @@ impl SnapshotDelivery {
         self.pending.remove(id);
     }
 
+    pub(crate) fn close_subscription(&mut self, id: &str) -> Option<ServerMessage> {
+        self.remove(id);
+        self.native
+            .then(|| ServerMessage::ReplicaClosed { id: id.to_owned() })
+    }
+
     pub(crate) fn begin(&mut self, snapshot: ServerMessage) -> Result<(), &'static str> {
         self.native = true;
         let pages = SnapshotPages::native(snapshot);
@@ -437,6 +443,29 @@ mod tests {
         );
         assert_eq!(delivery.acknowledge("one",frame["snapshotId"].as_str().unwrap(),0).unwrap().unwrap(),serde_json::from_value::<ServerMessage>(json!({"type":"replica.ready","id":"one","cursor":{"epoch":"e","revision":9},"digest":"new"})).unwrap());
     }
+    #[test]
+    fn closing_native_subscription_releases_credits_and_confirms_before_future_frames() {
+        let mut delivery = SnapshotDelivery::default();
+        assert!(delivery.close_subscription("legacy").is_none());
+        delivery.begin(snapshot("closing", 2000)).unwrap();
+        let initial = delivery.pump();
+        assert!(!initial.frames.is_empty());
+        let old: serde_json::Value = serde_json::from_slice(&initial.frames[0]).unwrap();
+        assert!(
+            matches!(delivery.close_subscription("closing"), Some(ServerMessage::ReplicaClosed { id }) if id=="closing")
+        );
+        assert!(delivery.pump().frames.is_empty());
+        assert!(delivery
+            .acknowledge("closing", old["snapshotId"].as_str().unwrap(), 0)
+            .unwrap()
+            .is_none());
+        delivery.begin(snapshot("replacement", 1)).unwrap();
+        let next = delivery.pump();
+        assert_eq!(next.frames.len(), 1);
+        let frame: serde_json::Value = serde_json::from_slice(&next.frames[0]).unwrap();
+        assert_eq!(frame["id"], "replacement");
+    }
+
     #[test]
     fn oversized_rows_fail_explicitly_without_losing_other_deliveries() {
         let mut delivery = SnapshotDelivery::default();

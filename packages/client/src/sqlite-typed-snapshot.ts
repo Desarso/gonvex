@@ -44,10 +44,13 @@ export async function prepareSQLiteTypedSnapshot(db:SQLiteReplicaDatabase,schema
  if(old){if(old.entity!==input.entity)fail('INTENT_CONFLICT','Typed snapshot entity changed');return JSON.parse(old.physical) as string;}
  if(await db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE name='gv_snapshot_activation_receipts' AND type='table'")&&await db.getFirstAsync('SELECT 1 FROM gv_snapshot_activation_receipts WHERE scope=? AND subscription=? AND snapshot=?',input.scope,input.subscription,input.snapshot))fail('PAGE_CHANGED','Snapshot publication receipt already exists');
  if(await db.getFirstAsync('SELECT 1 FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=?',input.scope,input.subscription,input.snapshot))fail('PAGE_CHANGED','Cannot bind an already started snapshot');
- const n=await db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_typed');if(n!.n>=64)fail('BUDGET','Collect obsolete typed snapshot stages first');
+ const n=await db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_typed');// Eight admitted connections may each own128 bounded source descriptors.
+ // Stages live on disk; allow one obsolete generation per active source for
+ // bounded idle cleanup, rather than rejecting a second45-table tenant.
+ if(n!.n>=2048)fail('BUDGET','Collect obsolete typed snapshot stages first');
  const existing=await db.getFirstAsync<{n:number}>(`SELECT count(*) n FROM (SELECT 1 FROM ${q(sqliteTableName(input.entity))} LIMIT 513)`);
  if(existing!.n<=512){
-  const markers=await db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_index_deferred');if(markers!.n>=64)fail('BUDGET','Deferred index entities exceed allowance');
+  const markers=await db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_index_deferred');if(markers!.n>=512)fail('BUDGET','Deferred index entities exceed allowance');
   await db.runAsync('INSERT OR IGNORE INTO gv_snapshot_index_deferred VALUES(?)',input.entity);
   for(let i=0;i<table.indexes.length;i++)await db.execAsync(`DROP INDEX IF EXISTS ${q(sqliteTableName(input.entity)+'_i_'+i)}`);
  }

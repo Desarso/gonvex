@@ -2762,7 +2762,12 @@ async fn websocket(
                 }
                 Ok(ClientMessage::ReplicaClose { id }) => {
                     replicas.remove(&id);
-                    snapshot_delivery.remove(&id);
+                    // Confirmation precedes pumping any later binary frames.
+                    if let Some(closed) = snapshot_delivery.close_subscription(&id) {
+                        if send_json(&mut socket, &closed).await.is_err() {
+                            return;
+                        }
+                    }
                     if send_snapshot_frames(&mut socket, &mut snapshot_delivery)
                         .await
                         .is_err()

@@ -20,7 +20,7 @@ export type SQLiteBrokerOptions = {
 };
 type Owner = { id: string; token: string; epoch: number; seen: number; opening?: boolean };
 type Generation = { token: string; worker: Worker; ready: boolean; epoch: number; release(): void; channel: BroadcastChannel; lastProgress: number;announced?:boolean };
-type Call = { id: string; op: string; args: unknown; bytes: number; lastSent: number; timer: ReturnType<typeof setTimeout>; resolve(value: any): void; reject(error: unknown): void };
+type Call = { id: string; op: string; args: unknown; bytes: number; lastSent: number; replay:boolean;sentToken?:string; timer: ReturnType<typeof setTimeout>; resolve(value: any): void; reject(error: unknown): void };
 type WorkerCall = { generation: Generation; resolve(value: any): void; reject(error: unknown): void };
 export class SQLiteBrokerError extends Error {
   constructor(readonly code: string, message: string, readonly outcome: 'rejected' | 'unknown' = 'rejected') { super(message); this.name = 'SQLiteBrokerError'; }
@@ -117,13 +117,13 @@ export class SQLiteReplicaBroker {
       const o = m.owner as Owner;
       if (!Number.isSafeInteger(o.epoch) || o.epoch < 0 || typeof o.id !== 'string' ||!o.id||o.id.length>128|| typeof o.token !== 'string'||!o.token||o.token.length>128 || !Number.isFinite(o.seen)) return;
       if (!this.owner || o.epoch > this.owner.epoch || o.epoch === this.owner.epoch && o.seen >= this.owner.seen) {
-        const changed=this.owner?.token!==o.token;if(changed)this.heartbeatToken=undefined;
+        const changed=this.owner?.token!==o.token;if(changed){if(this.owner)this.fenceSingleShots(this.owner.token);this.heartbeatToken=undefined;}
         this.owner = { ...o, seen: Math.min(Date.now(), o.seen) };
         if (!o.opening) this.setState('ready');
         this.connectDirect();if(changed)this.sendHeartbeat(); this.resend();
       }
     }
-    if (m.type === 'gone' && this.owner?.token === m.token) { this.owner = undefined; this.setState('pending'); this.resend(); }
+    if (m.type === 'gone' && this.owner?.token === m.token) { this.fenceSingleShots(m.token);this.owner = undefined; this.setState('pending'); this.resend(); }
     if (m.type === 'probe' && this.generation?.ready) void this.pulse(true);
     if(['tab-heartbeat','tab-bye','change-ack'].includes(m.type)&&this.generation?.ready&&m.token===this.generation.token&&typeof m.tab==='string'&&m.tab.length<=128)this.generation.worker.postMessage(m);
     if(m.type==='change'&&m.to!==undefined&&m.to!==this.tabID)return;
@@ -286,7 +286,7 @@ export class SQLiteReplicaBroker {
   }
   private stop(g: Generation) {
     if (this.generation !== g) return;
-    this.generation = undefined;
+    this.generation = undefined;this.fenceSingleShots(g.token);
     g.worker.terminate(); g.channel.close();
     for (const [id, call] of this.workerCalls) if (call.generation === g) { call.reject(error('FENCED', 'Storage owner changed', 'unknown')); this.workerCalls.delete(id); }
     this.inflight.clear(); this.inflightBytes = 0;
@@ -300,9 +300,14 @@ export class SQLiteReplicaBroker {
     if (this.generation) this.stop(this.generation);
     if (!this.closed) this.setState('pending');
   }
+  private rejectSingleShot(call:Call){
+    if(!this.pending.has(call.id))return;this.pending.delete(call.id);this.pendingBytes-=call.bytes;clearTimeout(call.timer);call.reject(error('FENCED','This request was interrupted after dispatch; its outcome is unknown','unknown'));
+  }
+  private fenceSingleShots(token:string){for(const call of this.pending.values())if(!call.replay&&call.sentToken===token)this.rejectSingleShot(call);}
   private send(call: Call) {
     if (!this.owner || this.owner.opening || this.closed) return;
-    call.lastSent = Date.now();
+    if(!call.replay&&call.sentToken){if(call.sentToken!==this.owner.token)this.rejectSingleShot(call);return;}
+    call.sentToken=this.owner.token;call.lastSent = Date.now();
     const m = { type: 'request', protocol, from: this.tabID, token: this.owner.token, id: call.id, op: call.op, args: call.args };
     if (this.owner.id === this.tabID) { void this.serve(m); return; }
     if (this.direct?.ready && this.direct.token === this.owner.token) { const outgoing=sqliteTransferRequest(call.op,call.args);this.direct.port.postMessage({...m,args:outgoing.args},outgoing.transfer); }
@@ -344,7 +349,7 @@ export class SQLiteReplicaBroker {
     if(m.type==='change'||m.type==='tab-pong'){if(m.token!==this.owner?.token)return;this.noteOwner(m.sentAt);if(m.type==='change')this.receiveControl(m);else this.heartbeatToken=undefined;return;}
     const call = this.pending.get(m.id); if (!call) return;
     if (m.token !== this.owner?.token) return;this.noteOwner(m.sentAt);
-    if (m.error?.code === 'BUSY' || m.error?.code === 'FENCED') { call.lastSent = Date.now(); return; }
+    if (m.error?.code === 'BUSY' || m.error?.code === 'FENCED') { if(!call.replay){this.rejectSingleShot(call);return;}call.lastSent = Date.now(); return; }
     this.pending.delete(call.id); this.pendingBytes -= call.bytes; clearTimeout(call.timer);
     if (m.error) call.reject(error(m.error.code, m.error.message, m.error.outcome));
     else call.resolve(m.value);
@@ -366,7 +371,8 @@ export class SQLiteReplicaBroker {
         this.pending.delete(id); this.pendingBytes -= call.bytes;
         this.setState('pending'); reject(error('TIMEOUT', 'Storage commit outcome is unknown; retry the same intent ID', 'unknown'));
       }, timeoutMs);
-      const call: Call = { id, op, args: admitted, bytes, lastSent: 0, timer, resolve, reject };
+      const replay=!(op==='clientCall'&&!!admitted&&typeof admitted==='object'&&['action','token'].includes(String((admitted as {method?:unknown}).method)));
+      const call: Call = { id, op, args: admitted, bytes, replay,lastSent: 0, timer, resolve, reject };
       this.pending.set(id, call); this.pendingBytes += bytes; this.send(call);
     });
   }

@@ -36,7 +36,7 @@ export class SQLiteReducerCore {
    await this.options.journal.ready();await this.options.predictions.ready();await this.options.database.withTransactionAsync(async()=>{await this.options.engine.verifyOwner();await this.options.database.execAsync(schema);});
   })().catch(error=>{this.initialized=undefined;throw error;});}return this.initialized;
  }
- private async context(scope:string){const captured=await this.options.context(scope);sqlitePayloadBytes(captured,131072);if(typeof captured.intentScope!=='string'||!captured.intentScope||captured.intentScope.length>512)throw new TypeError('Invalid durable identity scope');return captured;}
+ private async context(scope:string){const captured=await this.options.context(scope);sqlitePayloadBytes(captured,524288);if(typeof captured.intentScope!=='string'||!captured.intentScope||captured.intentScope.length>512)throw new TypeError('Invalid durable identity scope');return captured;}
  private async stored(scope:string,command:string,hash:string):Promise<SQLiteReducerReceipt|undefined>{
   const old=await this.options.database.getFirstAsync<{hash:string;receipt:string}>('SELECT hash,receipt FROM gv_reducer_invocations WHERE scope=? AND command_id=?',scope,command);
   if(!old)return;if(old.hash!==hash)fail('INTENT_CONFLICT','Reducer command reused with different invocation');decodedJSONBytes(old.receipt,131072);return JSON.parse(old.receipt);

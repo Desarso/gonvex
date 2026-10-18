@@ -69,7 +69,7 @@ it('owns binary credits immediately but waits for durable authentication before 
 it('rolls back a cold prediction rebase, loads its chunk outside the SQL queue and retries atomically',async()=>{
  let cold=false,loads=0,release!:()=>void,entered!:()=>void;const loading=new Promise<void>(resolve=>{release=resolve;}),waiting=new Promise<void>(resolve=>{entered=resolve;});
  const f=await fixture({async authority(_scope,mutate){if(cold)throw new SQLiteReducerPreparationRequiredError('tasks/increment');await mutate();},async prepare(path){expect(path).toBe('tasks/increment');loads++;entered();await loading;cold=false;}});
- await f.start();await f.append(rows,0,true);await f.ready();await f.feed.assertReadable();cold=true;f.transaction();await waiting;
+ await f.start();await f.append(rows,0,true);await f.ready();await f.feed.assertReadable();cold=true;f.transaction();f.feed.frame({type:'replica.watermark',revision:12},1);await waiting;
  expect((await f.runOwner(0,()=>f.canonical.loadEntityRows('visible','tasks',['a'])))[0].row).toEqual(rows[0]);expect(await f.runOwner(0,()=>f.engine.integrity())).toBe('ok');
  release();f.feed.frame({type:'replica.watermark',revision:12},1);await f.feed.assertReadable();expect(loads).toBe(1);expect(f.failures).toEqual([]);expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0].row).toEqual(changed);
 });
@@ -110,9 +110,32 @@ it('keeps admitted frames and their credits while another bounded owner operatio
  vi.spyOn(f.owner,'runOwner').mockImplementation(async(...args:any[])=>{if(refused++<2)throw new SQLiteOwnerQueueBusyError();return (original as any)(...args);});
  await f.start();await f.append(rows,0,true);await f.ready();await f.feed.assertReadable();expect(f.failures).toEqual([]);expect(f.sends).toHaveLength(1);expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).length).toBe(2);expect(refused).toBeGreaterThan(2);
 });
+it('retires a closing source only after its earlier binary frame commits and the server acknowledges cancellation',async()=>{
+ const f=await fixture();await f.start();await f.append(rows.slice(0,1),0,false);let closed=false;const pending=f.feed.closeSource('source').then(()=>{closed=true;});expect(f.sends.at(-1).type).toBe('replica.close');expect(closed).toBe(false);expect(f.feed.stats().sources).toBe(1);f.feed.frame({type:'replica.closed',id:'source'},1);await pending;await f.feed.assertReadable();expect(f.failures).toEqual([]);expect(f.feed.stats().sources).toBe(0);expect(f.sends.filter(frame=>frame.type==='replica.snapshotAck')).toHaveLength(1);expect(await f.db.getFirstAsync('SELECT 1 FROM gv_snapshot_stages')).toBeNull();expect(await f.engine.integrity()).toBe('ok');
+});
+it('releases a pending source close when its connection changes, without leaking a reply waiter',async()=>{
+ const f=await fixture();await f.start();await f.feed.assertReadable();const closing=f.feed.closeSource('source');void closing.catch(()=>{});f.feed.disconnected();await expect(closing).rejects.toMatchObject({code:'FENCED'});expect(f.feed.stats().sources).toBe(0);expect(f.failures).toEqual([]);
+});
+it('rolls back canonical writes when same-socket admission changes during an awaited disk phase',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();const original=f.canonical.applyTransaction.bind(f.canonical);let entered!:()=>void,release!:()=>void;const waiting=new Promise<void>(resolve=>{entered=resolve;}),barrier=new Promise<void>(resolve=>{release=resolve;});
+ vi.spyOn(f.canonical,'applyTransaction').mockImplementation(async(...args)=>{const result=await original(...args);entered();await barrier;return result;});f.transaction();f.feed.frame({type:'replica.watermark',revision:12},1);await waiting;f.feed.authenticating('identity',1);release();await vi.waitFor(()=>expect(f.feed.stats().queued).toBe(0));expect(f.failures).toEqual([]);expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0].row).toEqual(rows[0]);expect((await f.db.getFirstAsync<{applied:number}>('SELECT applied FROM gv_native_feed_progress'))?.applied).toBe(10);
+});
 it('hashes canonical delta text before number decoding and rejects oversized or malformed controls before parsing',async()=>{
  const text='{"id":"unsafe","n":9007199254740993,"name":"東京"}',frame={type:'replica.delta' as const,id:'source',cursor:cursor(12),canonicalUpserts:[text],deleted:[]};
  const decoded=await decodeSQLiteNativeDelta(frame,'id');const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text))),byte=>byte.toString(16).padStart(2,'0')).join('');expect(decoded[0].hash).toBe(hash);expect(decoded[0].row.n).toBe(9007199254740992);
  const parse=vi.spyOn(JSON,'parse');await expect(decodeSQLiteNativeDelta({...frame,canonicalUpserts:[' '.repeat(200000)]},'id')).rejects.toMatchObject({code:'BUDGET'});expect(parse).not.toHaveBeenCalled();parse.mockRestore();await expect(decodeSQLiteNativeDelta({...frame,canonicalUpserts:[text,text]},'id')).rejects.toMatchObject({code:'INVALID_ROW'});
  expect(()=>decodeSQLiteNativeTransaction({type:'replica.transactionEncoded',cursor:cursor(12),canonicalChanges:[stable({entity:'other',id:'a',operation:'delete'})]},{tasks:'id'})).toThrow('Invalid native transaction');
+});
+
+it('serves the last consistent offline page after disconnect between transaction, delta and watermark',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ f.transaction(12);f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:['b'],digest:await digest([changed])},1);await f.ready(12,[changed]);await expect(f.feed.assertReadable()).rejects.toMatchObject({code:'PAGE_CHANGED'});
+ expect((await f.runOwner(0,()=>f.canonical.loadEntityRows('visible','tasks',['a','b']))).map(entry=>entry.row)).toEqual(rows);
+ f.feed.disconnected();await f.feed.assertReadable({scope:'visible',epoch:'e'});expect((await f.runOwner(0,()=>f.canonical.loadEntityRows('visible','tasks',['a','b']))).map(entry=>entry.row)).toEqual(rows);
+ expect((await f.runOwner(0,()=>new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all')))?.header.cursor).toEqual(cursor(10));expect(f.watermarks).toEqual([10]);expect(f.failures).toEqual([]);
+});
+it('rolls the whole terminal group back when a later membership digest fails',async()=>{
+ const f=await fixture();await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();f.transaction(12);
+ f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:[],digest:'sum128-v1:'+'0'.repeat(32)},1);f.feed.frame({type:'replica.watermark',revision:12},1);
+ await vi.waitFor(()=>expect(f.failures).toHaveLength(1));expect((await f.runOwner(0,()=>f.canonical.loadEntityRows('visible','tasks',['a','b']))).map(entry=>entry.row)).toEqual(rows);await f.feed.assertReadable({scope:'visible',epoch:'e'});expect(f.watermarks).toEqual([10]);expect(await f.runOwner(0,()=>f.engine.integrity())).toBe('ok');
 });

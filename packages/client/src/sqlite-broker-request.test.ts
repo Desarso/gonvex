@@ -114,3 +114,14 @@ it('probes for an existing owner when a newly opened tab missed its original ann
  const broker=client() as any;broker.broadcast=vi.fn();broker.sendHeartbeat=vi.fn();broker.tick();expect(broker.broadcast).toHaveBeenCalledWith({type:'probe'});
  broker.broadcast.mockClear();broker.owner={id:'other',token:'known',epoch:1,seen:Date.now()};broker.tick();expect(broker.broadcast).not.toHaveBeenCalled();
 });
+it('never resends an Action or a correlated token reply after dispatch, including across owner replacement',async()=>{
+ for(const method of ['action','token']){
+  const broker=client() as any;broker.owner={id:'test',token:'old-owner',epoch:1,seen:Date.now()};broker.send=SQLiteReplicaBroker.prototype['send'];broker.serve=vi.fn(async()=>{});
+  const pending=broker.request('clientCall',{method,path:'external/run'});void pending.catch(()=>{});const call=broker.pending.values().next().value;expect(broker.serve).toHaveBeenCalledOnce();broker.send(call);broker.send(call);expect(broker.serve).toHaveBeenCalledOnce();broker.owner.token='new-owner';broker.send(call);await expect(pending).rejects.toMatchObject({code:'FENCED',outcome:'unknown'});expect(broker.serve).toHaveBeenCalledOnce();expect(broker.pendingBytes).toBe(0);expect(broker.pending.size).toBe(0);
+ }
+});
+it('keeps durable Reducer replay but reports a single-shot refusal as an unknown outcome',async()=>{
+ const broker=client() as any;broker.owner={id:'test',token:'old',epoch:1,seen:Date.now()};broker.send=SQLiteReplicaBroker.prototype['send'];broker.serve=vi.fn(async()=>{});
+ const durable=broker.request('clientCall',{method:'reducer',path:'tasks/change'}),call=broker.pending.values().next().value;broker.send(call);broker.owner.token='new';broker.send(call);expect(broker.serve).toHaveBeenCalledTimes(3);broker.receiveReply({protocol:2,to:'test',token:'new',id:call.id,value:'original'});expect(await durable).toBe('original');
+ const single=broker.request('clientCall',{method:'action',path:'external/run'});void single.catch(()=>{});const sent=broker.pending.values().next().value;broker.receiveReply({protocol:2,to:'test',token:'new',id:sent.id,error:{code:'BUSY',message:'delivery interrupted'}});await expect(single).rejects.toMatchObject({code:'FENCED',outcome:'unknown'});expect(broker.pending.size).toBe(0);
+});

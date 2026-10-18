@@ -567,6 +567,7 @@ export type ServerMessage =
     hashes?: Record<string, string>;
     digest?: string;
   }
+  | { type: "replica.closed"; id: string }
   | ({ type: "replica.ready" } & ReplicaReady)
   | { type: "replica.readyMany"; ready: ReplicaReady[] }
   | {

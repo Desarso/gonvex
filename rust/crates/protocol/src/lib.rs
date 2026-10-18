@@ -716,6 +716,8 @@ pub enum ServerMessage {
         #[serde(flatten)]
         metadata: BTreeMap<String, Value>,
     },
+    #[serde(rename = "replica.closed")]
+    ReplicaClosed { id: String },
     #[serde(rename = "replica.readyMany")]
     ReplicaReadyMany { ready: Vec<Value> },
     #[serde(rename = "replica.needHashes")]
@@ -923,6 +925,7 @@ mod tests {
 
     #[test]
     fn canonical_transaction_controls_round_trip_without_decoding_rows() {
+        round_trip_server(r#"{"type":"replica.closed","id":"source"}"#);
         round_trip_server(
             r#"{"type":"replica.transactionEncoded","cursor":{"epoch":"e","revision":7},"originCommandId":"intent","canonicalChanges":["{\"entity\":\"tasks\",\"id\":\"a\",\"operation\":\"insert\",\"newValue\":{\"n\":9007199254740993}}"]}"#,
         );

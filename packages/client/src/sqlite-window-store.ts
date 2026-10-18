@@ -8,6 +8,9 @@ import { sqlitePayloadBytes } from './sqlite-admission.js';
 export type SQLiteWindowHeader = Omit<ReplicaWindow, 'ids' | 'hashes'> & {
   /** Generated unfiltered source only; never inferred from a peer frame. */
   entityCoverage?: 'complete';
+  /** Actual generated projection at certification, not a later module's guess. */
+  columns?:readonly string[];
+  artifactHash?:string;
 };
 export type SQLiteWindowProgress = { generation: string; pages: number; rows: number; root: string };
 export type SQLiteWindowPage = { generation: string; total: number; ids: string[]; hashes: Record<string, string>; nextOffset: number | null };
