@@ -87,7 +87,7 @@ async function execute(op: string, args: any, requestID:string) {
     try {
       if(typeof args.owner!=='string'||!args.owner||args.owner.length>128)throw new TypeError('Invalid owner token');ownerToken=args.owner;
       if(args.schemaVersion!==undefined&&args.schemaVersion!==binding.schemaVersion)throw Object.assign(Error('Generated owner schema differs from browser binding'),{code:'SCHEMA_MISMATCH'});
-      await workerLease.acquire();globalThis.postMessage({type:'progress',stage:'claiming-origin',sentAt:Date.now()});if(originFence)originEpoch=(await originFence.claim(args.owner)).epoch;globalThis.postMessage({type:'progress',stage:'claimed-origin',sentAt:Date.now()});
+      await workerLease.acquire();globalThis.postMessage({type:'progress',stage:'claiming-origin',sentAt:Date.now()});if(originFence)originEpoch=(await originFence.claimAdapter(args.owner,'sqlite')).epoch;globalThis.postMessage({type:'progress',stage:'claimed-origin',sentAt:Date.now()});
       const initialize=async()=>{
       globalThis.postMessage({type:'progress',stage:'opening-sqlite',sentAt:Date.now()});host = await openOfficialSQLiteHost();globalThis.postMessage({type:'progress',stage:'opened-sqlite',sentAt:Date.now()});sampleStartupMemory('host');
       const database=sqliteOwnerTransactions(host.database);

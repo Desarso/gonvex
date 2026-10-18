@@ -6,6 +6,16 @@ const identity={auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'m
 const command=(n:number)=>({scope:'visible',commandId:'command-'+n,path:'tasks.create',args:{id:'row-'+n},now:100+n});
 const prepared=(n:number):SQLitePreparedReducer=>({intent:{id:n+1,scope:'identity',idempotencyKey:command(n).commandId,path:'tasks.create',args:command(n).args,createdAt:100+n,attempts:0,nextAttemptAt:100+n,state:'pending',entityKeys:['tasks:row-'+n],patches:[{entity:'tasks',rowId:'row-'+n,op:'upsert',fields:{id:'row-'+n,n}}],localExecution:{...context,scope:'visible',commandId:command(n).commandId,now:100+n}},receipt:{intentId:n+1,commandId:command(n).commandId,result:{id:'row-'+n},originalGeneration:{epoch:1,sequence:n+1}}});
 function fixture(){const factory=new IDBFactory();return {factory,ledger:new IndexedDBIntentLedger('fallback',factory,IDBKeyRange),open:()=>new IndexedDBIntentLedger('fallback',factory,IDBKeyRange)};}
+it('keeps the accepted fallback adapter across owner failover without advancing a refused SQL epoch',async()=>{
+ const f=fixture(),fallback=f.open(),replacement=f.open();try{
+  expect(await f.ledger.claimAdapter('sql','sqlite')).toEqual({epoch:1,sequence:0});
+  expect(await fallback.claimAdapter('fallback','indexeddb')).toEqual({epoch:2,sequence:0});
+  await expect(replacement.claimAdapter('later-sql','sqlite')).rejects.toMatchObject({code:'STORAGE_MODE'});
+  expect(await fallback.generation()).toEqual({epoch:2,sequence:0});
+  expect(await replacement.claimAdapter('later-fallback','indexeddb')).toEqual({epoch:3,sequence:0});
+  await expect(fallback.generation()).rejects.toMatchObject({code:'FENCED'});
+ }finally{f.ledger.close();fallback.close();replacement.close();}
+});
 it('atomically retains a prediction, queued intent and immutable original result across owner replacement',async()=>{
  const f=fixture();let reopened:IndexedDBIntentLedger|undefined;try{const first=await f.ledger.claim('one'),input=command(0),envelope=prepared(0);expect(await f.ledger.commit(input,envelope,'identity',first)).toEqual(envelope.receipt);expect((await f.ledger.entities('visible','tasks',['row-0'])).rows).toEqual([{id:'row-0',value:{id:'row-0',n:0}}]);
   const generation=await f.ledger.generation();expect(await f.ledger.commit(input,envelope,'identity',first)).toEqual(envelope.receipt);expect(await f.ledger.generation()).toEqual(generation);f.ledger.close();reopened=f.open();await reopened.claim('two');expect(await reopened.reply(input,'identity',context)).toEqual(envelope.receipt);expect((await reopened.page('identity')).entries).toEqual([envelope]);expect(await reopened.reply({...input,scope:'moved-visible'},'identity',context)).toEqual(envelope.receipt);expect(await reopened.reply(input,'identity',{...context,artifactHash:'new-artifact'})).toMatchObject({result:null,queuedOnly:true});await expect(reopened.reply({...input,args:{id:'different'}},'identity',context)).rejects.toMatchObject({code:'INTENT_CONFLICT'});

@@ -42,6 +42,21 @@ export class IndexedDBIntentLedger {
  protected async transaction<T>(stores:string[],mode:IDBTransactionMode,run:(tx:IDBTransaction)=>Promise<T>):Promise<T>{const db=await this.open();if(this.closed)fail('FENCED','IDB fallback ledger is closed');let tx:IDBTransaction;try{tx=db.transaction(stores,mode,{durability:mode==='readwrite'?'strict':'default'});}catch(error){if(!(error instanceof TypeError))throw error;tx=db.transaction(stores,mode);}const done=new Promise<void>((resolve,reject)=>{tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error??Error('IDB fallback transaction aborted'));tx.onerror=()=>{};});try{const value=await run(tx);await done;return value;}catch(error){try{tx.abort();}catch{/* Already completed. */}await done.catch(()=>{});throw error;}}
  protected async fence(tx:IDBTransaction,expected?:{epoch:number;sequence:number}){const owner=await result(tx.objectStore('meta').get('owner')) as Owner|undefined;if(!this.owner||!owner||this.owner.token!==owner.token||this.owner.epoch!==owner.epoch)fail('FENCED','IDB fallback owner changed');if(expected&&(expected.epoch!==owner.epoch||expected.sequence!==owner.sequence))fail('PAGE_CHANGED','IDB fallback snapshot changed');return owner;}
  async claim(token:string){if(typeof token!=='string'||!token||token.length>128)throw new TypeError('Invalid fallback owner token');let claimed!:Owner;await this.transaction(['meta'],'readwrite',async tx=>{const store=tx.objectStore('meta'),old=await result(store.get('owner')) as Owner|undefined;if(old&&(!Number.isSafeInteger(old.epoch)||old.epoch<1||old.epoch>=Number.MAX_SAFE_INTEGER||!Number.isSafeInteger(old.sequence)||old.sequence<0))fail('FENCED','IDB owner epoch exhausted');claimed={key:'owner',token,epoch:(old?.epoch??0)+1,sequence:old?.sequence??0};await result(store.put(claimed));});this.owner=claimed;return {epoch:claimed.epoch,sequence:claimed.sequence};}
+ /** Once fallback has accepted an owner, a later election cannot reopen an
+  * older SQL replica. Promotion back to SQLite needs a verified migration. */
+ async claimAdapter(token:string,adapter:'sqlite'|'indexeddb'){
+  if(typeof token!=='string'||!token||token.length>128)throw new TypeError('Invalid storage owner token');
+  let claimed!:Owner;
+  await this.transaction(['meta'],'readwrite',async tx=>{
+   const store=tx.objectStore('meta'),choice=await result(store.get('adapter')) as {key:string;value:string}|undefined;
+   if(choice&&choice.value!=='sqlite'&&choice.value!=='indexeddb')fail('FENCED','Invalid durable storage adapter choice');
+   if(adapter==='sqlite'&&choice?.value==='indexeddb')throw Object.assign(Error('IndexedDB owns the active replica until verified migration'),{code:'STORAGE_MODE'});
+   const old=await result(store.get('owner')) as Owner|undefined;
+   if(old&&(!Number.isSafeInteger(old.epoch)||old.epoch<1||old.epoch>=Number.MAX_SAFE_INTEGER||!Number.isSafeInteger(old.sequence)||old.sequence<0))fail('FENCED','IDB owner epoch exhausted');
+   claimed={key:'owner',token,epoch:(old?.epoch??0)+1,sequence:old?.sequence??0};
+   await result(store.put(claimed));await result(store.put({key:'adapter',value:adapter}));
+  });this.owner=claimed;return {epoch:claimed.epoch,sequence:claimed.sequence};
+ }
  async generation(){return this.transaction(['meta'],'readonly',async tx=>{const owner=await this.fence(tx);return {epoch:owner.epoch,sequence:owner.sequence};});}
  protected transactionTask<T>(tx:IDBTransaction,bytes:number,run:()=>Promise<T>):Promise<T>{
   const tasks=this.transactionTasks.get(tx);if(!tasks)return run();if(tasks.closed)return Promise.reject(Object.assign(Error('Fallback transaction has finished'),{code:'FENCED'}));if(!Number.isSafeInteger(bytes)||bytes<1||tasks.queue.length>=128||tasks.bytes+bytes>2097152)return Promise.reject(Object.assign(Error('Fallback transaction work allowance exceeded'),{code:'BUDGET'}));
