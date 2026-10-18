@@ -46,6 +46,8 @@ export class SQLiteTypedReplicaEngine {
   private owner = '';
   private initialized = false;
   private windows?: SQLiteWindowStore;
+  private readonly profile = { frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
+  takeProfile() { const result = { ...this.profile }; for (const key of Object.keys(this.profile) as Array<keyof typeof this.profile>) this.profile[key] = 0; return result; }
   constructor(private readonly db: SQLiteReplicaDatabase, readonly schema: SQLiteTypedSchema,
     private readonly limits = { operations: 64, queuedBytes: 2_097_152, batchBytes: 262_144, pageBytes: 262_144 }) {
     compileSQLiteTypedSchema(schema);
@@ -124,7 +126,10 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
   private async restoreBootstrapIndexes(): Promise<void> {
     if (!await this.indexesDeferred()) return;
     const ddl = compileSQLiteTypedSchema(this.schema);
-    await this.db.execAsync(ddl.indexes + '\n' + ddl.search);
+    let timed = performance.now();
+    await this.db.execAsync(ddl.indexes);
+    this.profile.indexBuildMs += performance.now() - timed; timed = performance.now();
+    await this.db.execAsync(ddl.search);
     for (const [entity, table] of Object.entries(this.schema)) if (table.search?.length) {
       const tn = q(sqliteTableName(entity)), fn = q(sqliteSearchName(entity)), columns = table.search.map((_, i) => q('s' + i)).join(',');
       let after = 0;
@@ -136,6 +141,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
         await new Promise<void>(resolve => setTimeout(resolve, 0));
       }
     }
+    this.profile.ftsBuildMs += performance.now() - timed;
     await this.db.runAsync("DELETE FROM gv_storage_flags WHERE name='bootstrap-indexes'");
   }
   private validateWrite(input: SQLiteTypedWrite) {
@@ -193,7 +199,9 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
     for (const write of writes) { this.validateWrite(write); entities.add(write.table); }
     // Re-encode the admitted graph once. JSON duplicate-key semantics must be
     // JSON.parse's last-key-wins semantics, not SQLite's first-key lookup.
+    const reencodeAt = performance.now();
     const encoded = JSON.stringify(writes);
+    this.profile.reencodeMs += performance.now() - reencodeAt;
     for (const entity of entities) {
       const table = this.schema[entity]!, tn = q(sqliteTableName(entity));
       const fields = Object.entries(table.fields);
@@ -203,8 +211,11 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
         const extract = `json_extract(row,${path(name)})`;
         return shape.kind === 'json' ? `CASE WHEN json_type(row,${path(name)}) IS NULL OR json_type(row,${path(name)})='null' THEN NULL ELSE json_quote(${extract}) END` : extract;
       });
+      const normalizeAt = performance.now();
       const normalized = JSON.stringify(writes.map(write => write.table === entity
         ? (table.search ?? []).map(name => String(write.row![name] ?? '').toLowerCase()) : []));
+      this.profile.normalizationMs += performance.now() - normalizeAt;
+      const insertAt = performance.now();
       await this.db.runAsync(`WITH input AS MATERIALIZED (
         SELECT CAST(key AS INTEGER) pos,jsonb_extract(value,'$.row') row,
           json_extract(value,'$.id') id,json_extract(value,'$.version') version
@@ -214,6 +225,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
       FROM input WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND gv_tombstones.id=input.id AND gv_tombstones.version>=input.version)
       ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`,
       encoded, entity, scope, ...(table.search ?? []).map(() => normalized), scope, entity);
+      this.profile.sqliteInsertMs += performance.now() - insertAt;
     }
   }
   /** A durable delivery uses the same immutable ID on every retry. The receipt
@@ -282,6 +294,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
     sqlitePayloadBytes({ scope, token }, 2048);
     return this.enqueue(Math.min(this.limits.queuedBytes, this.limits.batchBytes * 2), async () => {
       let state: SQLiteBootstrapState | undefined;
+      const creditAt = performance.now();
       await this.db.withTransactionAsync(async () => {
         let pages = 0, bytes = 0;
         for await (const frame of source) {
@@ -291,15 +304,22 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
         }
         if (!state) fail('INVALID_ROW', 'Empty bootstrap credit group');
       });
+      this.profile.creditMs += performance.now() - creditAt;
       return state!;
     });
   }
   private async appendBootstrapPage(scope: string, token: string, page: number, encoded: string): Promise<SQLiteBootstrapState> {
     if (typeof encoded !== 'string' || encoded.length * 2 > this.limits.batchBytes || !Number.isSafeInteger(page) || page < 0) throw new RangeError('Invalid SQLite bootstrap page');
+    const frameAt = performance.now(), parseAt = performance.now();
     const admitted = JSON.parse(encoded) as SQLiteTypedWrite[];
+    this.profile.parseMs += performance.now() - parseAt;
+    const validationAt = performance.now();
     parsedPayloadBytes(admitted, this.limits.batchBytes);
     if (!Array.isArray(admitted) || admitted.length > 512 || admitted.some(write => write.row === null)) fail('INVALID_ROW', 'Bootstrap accepts bounded live rows only');
+    this.profile.validationMs += performance.now() - validationAt;
+    let hashAt = performance.now();
     const hash = await sha256(encoded);
+    this.profile.hashMs += performance.now() - hashAt;
     await this.fence();
     const old = await this.db.getFirstAsync<SQLiteBootstrapRecord>('SELECT * FROM gv_bootstrap WHERE scope=? AND token=?', scope, token);
     if (!old) fail('INVALID_ROW', 'Bootstrap is not open');
@@ -318,9 +338,13 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
     }
     for (const [entity, ids] of groups) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? AND id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, old.physical, ...ids)) fail('INVALID_ROW', 'Duplicate bootstrap row');
     await this.writeBootstrapFrame(old.physical, admitted);
+    hashAt = performance.now();
     const root = await sha256(old.root + hash), rows = old.rows + admitted.length;
+    this.profile.hashMs += performance.now() - hashAt;
     await this.db.runAsync('INSERT INTO gv_bootstrap_pages VALUES(?,?,?)', token, page, hash);
     await this.db.runAsync('UPDATE gv_bootstrap SET next_page=?,rows=?,root=? WHERE scope=? AND token=?', page + 1, rows, root, scope, token);
+    this.profile.frames++; this.profile.rows += admitted.length;
+    this.profile.frameMs += performance.now() - frameAt;
     return { token, nextPage: page + 1, rows, root, complete: false };
   }
   abortBootstrap(scope: string, token: string): Promise<void> {

@@ -4,7 +4,9 @@ import { SQLiteTypedReplicaEngine } from '../../src/sqlite-typed-engine.js';
 let host: Awaited<ReturnType<typeof openOfficialSQLiteHost>>;
 let engine: SQLiteTypedReplicaEngine;
 const schema = { tasks: { key: '_id', fields: { _id: { kind: 'text' }, name: { kind: 'text' }, workspace: { kind: 'text' }, due: { kind: 'number' }, version: { kind: 'number' }, description: { kind: 'text' } }, indexes: [{ columns: ['workspace', 'due'] }, { columns: ['due'] }, { columns: ['name'] }], search: ['name', 'description'], counts: [{ columns: ['workspace'] }] } } as const;
+const generated = { fixtureMs: 0, wireEncodeMs: 0 };
 const handlers = {
+  async profile() { const result = { ...engine.takeProfile(), ...generated, wasmBytes: host.memoryBytes(), statementBytes: host.statementBytes() }; generated.fixtureMs = 0; generated.wireEncodeMs = 0; return result; },
   async open() { host = await openOfficialSQLiteHost(); engine = new SQLiteTypedReplicaEngine(host.database, schema); const epoch = await engine.open('browser-proof'); return { epoch, memoryBytes: host.memoryBytes() }; },
   async seed({ start = 0, count = 1000 }) {
     const begin = performance.now();
@@ -23,7 +25,12 @@ const handlers = {
     for (let group = start; group < start + count; group += 1000) {
       const end = Math.min(group + 1000, start + count);
       state = await engine.appendBootstrapBatch('test-scope', token, (async function* () {
-        for (let offset = group; offset < end; offset += 100) yield { page: offset / 100, encoded: JSON.stringify(fixtureWrites(offset, Math.min(100, end - offset))) };
+        for (let offset = group; offset < end; offset += 100) {
+          let timed = performance.now(); const writes = fixtureWrites(offset, Math.min(100, end - offset));
+          generated.fixtureMs += performance.now() - timed; timed = performance.now();
+          const encoded = JSON.stringify(writes); generated.wireEncodeMs += performance.now() - timed;
+          yield { page: offset / 100, encoded };
+        }
       })());
     }
     return state;
