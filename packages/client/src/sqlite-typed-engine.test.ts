@@ -576,3 +576,18 @@ it('keeps concurrent unpublished bootstrap scopes distinct across restarts and c
  await reopened.finishBootstrap('right','replacement',{pages:replacement.nextPage,rows:replacement.rows,root:replacement.root});
  expect((await reopened.page('right',plan)).rows.map(row=>row.name)).toEqual(['replacement']);expect(await reopened.integrity()).toBe('ok');
 });
+
+it('reopens more than 64 deferred source entities without restoring their in-progress indexes', async () => {
+  const { host } = fixture();
+  const many = Object.fromEntries(Array.from({ length: 70 }, (_, n) => ['source' + n, { key: '_id', fields: { _id: { kind: 'text' as const }, name: { kind: 'text' as const } }, indexes: [{ columns: ['name'] }] }]));
+  await new SQLiteTypedReplicaEngine(host, many).open('initial');
+  await host.withTransactionAsync(async () => {
+    for (const entity of Object.keys(many)) {
+      await host.execAsync('DROP INDEX ' + sqliteIdentifier(sqliteTableName(entity) + '_i_0'));
+      await host.runAsync('INSERT INTO gv_snapshot_index_deferred VALUES(?)', entity);
+    }
+  });
+  await new SQLiteTypedReplicaEngine(host, many).open('recovered');
+  expect(await host.getFirstAsync('SELECT count(*) n FROM gv_snapshot_index_deferred')).toEqual({ n: 70 });
+  expect(await host.getFirstAsync("SELECT count(*) n FROM sqlite_master WHERE type='index' AND name LIKE '%_i_0'")).toEqual({ n: 0 });
+});

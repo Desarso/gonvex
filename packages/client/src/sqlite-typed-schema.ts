@@ -88,8 +88,8 @@ export function compileSQLiteTypedSchema(schema: SQLiteTypedSchema): { tables: s
  * The admission marker is durable; publication or final cancellation restores
  * the index in the same transaction that removes the marker. */
 export async function sqliteTypedIndexSQL(db:import('./sqlite-replica-storage.js').SQLiteReplicaDatabase,schema:SQLiteTypedSchema):Promise<string>{
- const deferred=await db.getAllAsync<{entity:string}>('SELECT json_quote(entity) entity FROM gv_snapshot_index_deferred LIMIT 65');
- if(deferred.length>64)throw new RangeError('Deferred SQLite index entities exceed allowance');
+ const deferred=await db.getAllAsync<{entity:string}>('SELECT json_quote(entity) entity FROM gv_snapshot_index_deferred LIMIT 513');
+ if(deferred.length>512)throw new RangeError('Deferred SQLite index entities exceed allowance');
  const excluded=new Set(deferred.map(row=>JSON.parse(row.entity) as string));
  if(!excluded.size)return compileSQLiteTypedSchema(schema).indexes;
  return Object.entries(schema).filter(([entity])=>!excluded.has(entity)).map(([entity,table])=>compileSQLiteTypedSchema({[entity]:table}).indexes).join('\n');

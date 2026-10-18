@@ -1,4 +1,4 @@
-import {afterEach,expect,it} from 'vitest';
+import {afterEach,expect,it,vi} from 'vitest';
 import {initializePinnedSQLite} from '../test/sqlite-wasm-host.mjs';
 import {officialSQLiteDatabase} from './sqlite-official-host.js';
 import {SQLiteTypedReplicaEngine} from './sqlite-typed-engine.js';
@@ -130,4 +130,16 @@ it('reads a committed first-sync page before the final certificate without grant
  await f.stager.appendEncoded('s',frame(rows.slice(2),1,true));expect(await f.stager.readPending('s','collection','progressive',1,1)).toMatchObject({complete:true,receivedRows:3,nextPage:2,nextPosition:null});
  await f.activator.activate({scope:'s',subscription:'collection',snapshot:'progressive',header:{signature:'collection',entity:'tasks',key:'id',kind:'replica',source:'server',completeness:'complete',cursor:metadata.cursor,aggregateDigest:digest}});
  await expect(f.stager.readPending('s','collection','progressive')).rejects.toMatchObject({code:'PAGE_CHANGED'});expect((await f.canonical.loadEntityRows('s','tasks',['first']))[0].row).toEqual(rows[0]);
+});
+
+it('keeps indexes installed for an empty source instead of dropping and rebuilding the application schema',async()=>{
+ const f=await fixture(),commands:string[]=[];
+ const execute=f.db.execAsync.bind(f.db);vi.spyOn(f.db,'execAsync').mockImplementation(async sql=>{commands.push(sql);return execute(sql);});
+ const {input}=await f.stage([],'empty');
+ const index=sqliteTableName('tasks')+'_i_0';
+ expect(await f.db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",index)).toEqual({'1':1});
+ expect(await f.db.getFirstAsync('SELECT 1 FROM gv_snapshot_index_deferred')).toBeNull();
+ await f.activator.activate(input);
+ expect(commands.join('\n')).not.toMatch(/DROP INDEX|CREATE INDEX/);
+ expect(await f.engine.integrity()).toBe('ok');
 });

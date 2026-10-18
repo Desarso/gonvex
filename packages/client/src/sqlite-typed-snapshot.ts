@@ -48,12 +48,6 @@ export async function prepareSQLiteTypedSnapshot(db:SQLiteReplicaDatabase,schema
  // Stages live on disk; allow one obsolete generation per active source for
  // bounded idle cleanup, rather than rejecting a second45-table tenant.
  if(n!.n>=2048)fail('BUDGET','Collect obsolete typed snapshot stages first');
- const existing=await db.getFirstAsync<{n:number}>(`SELECT count(*) n FROM (SELECT 1 FROM ${q(sqliteTableName(input.entity))} LIMIT 513)`);
- if(existing!.n<=512){
-  const markers=await db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_index_deferred');if(markers!.n>=512)fail('BUDGET','Deferred index entities exceed allowance');
-  await db.runAsync('INSERT OR IGNORE INTO gv_snapshot_index_deferred VALUES(?)',input.entity);
-  for(let i=0;i<table.indexes.length;i++)await db.execAsync(`DROP INDEX IF EXISTS ${q(sqliteTableName(input.entity)+'_i_'+i)}`);
- }
  const clock=await db.getFirstAsync<{value:number}>('INSERT INTO gv_snapshot_scope_clock VALUES(1,1) ON CONFLICT(id) DO UPDATE SET value=value+1 WHERE value<9007199254740991 RETURNING value');
  if(!clock||!Number.isSafeInteger(clock.value)||clock.value<1)fail('FENCED','Snapshot physical scope clock exhausted');
  const physical='\u0000s:'+clock.value.toString(36);await db.runAsync('INSERT INTO gv_snapshot_typed VALUES(?,?,?,?,?)',input.scope,input.subscription,input.snapshot,input.entity,physical);return physical;
@@ -87,8 +81,10 @@ export async function activateSQLiteTypedSnapshot(db:SQLiteReplicaDatabase,schem
   await db.runAsync(`DELETE FROM ${name} WHERE scope=? AND id IN (SELECT id FROM temp.gv_snapshot_overlap)`,physical);
   await db.runAsync(`INSERT INTO ${name}(${columns.map(q).join(',')}) SELECT ?,${rest} FROM ${name} old WHERE old.scope=?
    AND (EXISTS(SELECT 1 FROM temp.gv_snapshot_overlap o WHERE o.id=old.id) OR NOT EXISTS(SELECT 1 FROM gv_snapshot_rows s WHERE ${selection} AND s.id=old.id))`,physical,previous,...args);
-  const indexes=compileSQLiteTypedSchema({[input.entity]:table}).indexes;if(indexes)await db.execAsync(indexes);
-  await db.runAsync('DELETE FROM gv_snapshot_index_deferred WHERE entity=?',input.entity);
+  if(input.rows&&await db.getFirstAsync('SELECT 1 FROM gv_snapshot_index_deferred WHERE entity=?',input.entity)){
+   const indexes=compileSQLiteTypedSchema({[input.entity]:table}).indexes;if(indexes)await db.execAsync(indexes);
+   await db.runAsync('DELETE FROM gv_snapshot_index_deferred WHERE entity=?',input.entity);
+  }
   if(table.search?.length&&await db.getFirstAsync('SELECT 1 FROM gv_fts_deferred WHERE scope=? AND entity=?',physical,input.entity)){
    const columns=table.search.map((_,i)=>q('s'+i)).join(','),fts=q(sqliteSearchName(input.entity));
    let after=0;for(;;){const last=(await db.getFirstAsync<{last:number|null}>(`SELECT max(rid) last FROM (SELECT rid FROM ${name} NOT INDEXED WHERE scope=? AND rid>? ORDER BY rid LIMIT 512)`,physical,after))?.last;if(last==null)break;
@@ -109,11 +105,19 @@ export class SQLiteTypedSnapshotWriter {
  stats(){return this.plans.stats();}
  async append(){
   const db=this.db,schema=this.schema;
-  const row=await db.getFirstAsync<{entity:string;key:string;physical:string;replay:number}>(`SELECT b.entity,json_extract(i.value,'$.key') key,json_quote(b.physical) physical,(SELECT replay FROM gv_snapshot_fast_state WHERE id=1) replay FROM gv_snapshot_fast_input i JOIN gv_snapshot_typed b ON b.scope=i.scope AND b.subscription=json_extract(i.value,'$.id') AND b.snapshot=json_extract(i.value,'$.snapshotId')`);
+  const row=await db.getFirstAsync<{entity:string;key:string;physical:string;replay:number;rows:number}>(`SELECT json_array_length(i.value,'$.canonicalRows') rows,b.entity,json_extract(i.value,'$.key') key,json_quote(b.physical) physical,(SELECT replay FROM gv_snapshot_fast_state WHERE id=1) replay FROM gv_snapshot_fast_input i JOIN gv_snapshot_typed b ON b.scope=i.scope AND b.subscription=json_extract(i.value,'$.id') AND b.snapshot=json_extract(i.value,'$.snapshotId')`);
   if(!row)return;const table=Object.hasOwn(schema,row.entity)&&schema[row.entity];if(!table||row.key!==table.key)fail('INVALID_ROW','Unknown typed snapshot entity or mismatched key');
-  if(row.replay)return;
+  if(row.replay||row.rows===0)return;
   let plan=this.plans.get(row.entity);if(!plan){plan=compileSQLiteTypedSnapshot({[row.entity]:table})[0];if(!plan)fail('INVALID_ROW','Unsupported typed snapshot entity');this.plans.put(row.entity,plan,(row.entity.length+plan.check.length+plan.insert.length+plan.maxRid.length+(plan.fts?.length??0))*2+512);}
   if(await db.getFirstAsync(plan.check))fail('INVALID_ROW','Snapshot field type differs from generated schema');
+  if(!await db.getFirstAsync('SELECT 1 FROM gv_snapshot_index_deferred WHERE entity=?',row.entity)){
+   const existing=await db.getFirstAsync<{n:number}>(`SELECT count(*) n FROM (SELECT 1 FROM ${q(sqliteTableName(row.entity))} LIMIT 513)`);
+   if(existing!.n<=512){
+    const markers=await db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_index_deferred');if(markers!.n>=512)fail('BUDGET','Deferred index entities exceed allowance');
+    await db.runAsync('INSERT INTO gv_snapshot_index_deferred VALUES(?)',row.entity);
+    for(let i=0;i<table.indexes.length;i++)await db.execAsync(`DROP INDEX IF EXISTS ${q(sqliteTableName(row.entity)+'_i_'+i)}`);
+   }
+  }
   const physical=JSON.parse(row.physical) as string;
   if(plan.fts&&!await db.getFirstAsync('SELECT 1 FROM gv_fts_deferred WHERE scope=? AND entity=?',physical,row.entity)){
    const before=(await db.getFirstAsync<{rid:number}>(plan.maxRid))!.rid;
