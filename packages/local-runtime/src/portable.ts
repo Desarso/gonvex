@@ -167,7 +167,7 @@ export function orderDataRows(rows: JsonObject[], read: DataRead): void {
       };
       const left = sortValue(a),
         right = sortValue(b);
-      if (left === right) continue;
+      if (left === right || left == null && right == null) continue;
       const direction = order.direction === "desc" ? -1 : 1;
       const nullFirst =
         (order.nulls ?? (direction === 1 ? "last" : "first")) === "first";

@@ -24,6 +24,7 @@ export interface SQLiteReplicaDatabase {
  * caller's existing transaction, never in a second database or cache. */
 export interface SQLiteReplicaRowLayout {
   install(database: SQLiteReplicaDatabase): Promise<void>;
+  readPage?(database: SQLiteReplicaDatabase, scope: string, read: import('@gonvex/module-sdk').DataRead, after?: string, excluded?: readonly string[], columns?: readonly string[]): Promise<import('./paged-read-view.js').ReplicaReadPage>;
   assertOwner?(database: SQLiteReplicaDatabase): Promise<void>;
   afterCommit?(database: SQLiteReplicaDatabase): Promise<void>;
   resetViews?(database: SQLiteReplicaDatabase, scope: string): Promise<void>;
@@ -404,7 +405,8 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     let result!: T;
     await this.withFencedTransaction(async () => {
       result = await run(
-        pagedReplicaReadView(coverage, async (read, after) => {
+        pagedReplicaReadView(coverage, async (read, after, excluded) => {
+          if (this.rowLayout?.readPage) return this.rowLayout.readPage(this.database,scope,read,after,excluded,coverage[read.table]?.columns);
           const key = coverage[read.table]?.key ?? "_id";
           const predicate = read.where;
           const exact =

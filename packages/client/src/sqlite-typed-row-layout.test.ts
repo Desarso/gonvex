@@ -84,7 +84,7 @@ it('clears only the selected scope, including tombstones, FTS and legacy lookup 
   await storage.clear('a');
   expect(await storage.loadEntityRows('a', 'tasks', ['r'])).toEqual([]);
   expect(await storage.loadEntityRows('b', 'tasks', ['r'])).toHaveLength(1);
-  expect(db.prepare("SELECT count(*) n FROM _gonvex_replica_lookup WHERE scope='a'").get()!.n).toBe(0);
+  expect(db.prepare("SELECT name FROM sqlite_master WHERE name='_gonvex_replica_lookup'").get()).toBeUndefined();
 });
 
 it('serves bounded native positions from canonical authority and invalidates on writes, resets and scope changes', async () => {
@@ -129,7 +129,7 @@ it('upgrades a legacy canonical body view and fences its old decoder without los
   expect(JSON.parse(String(db.prepare(`SELECT body FROM ${sqliteIdentifier(sqliteTableName('tasks'))} WHERE id='a'`).get()!.body))).toMatchObject({ name: null, due: null });
 });
 
-it('indexes pre-existing typed imports on canonical installation without decoding corpus rows', async () => {
+it('reads pre-existing typed imports natively without a scalar-copy index', async () => {
   const { db, host } = fixture();
   const engine = new SQLiteTypedReplicaEngine(host, schema); await engine.open('importer');
   await engine.importScope('s', (async function* () {
@@ -145,10 +145,10 @@ it('indexes pre-existing typed imports on canonical installation without decodin
   const result = await storage.withReadView('s',{tasks:{key:'_id',complete:true}},view=>view.select({table:'tasks',where:{column:'due',op:'eq',value:599}}));
   expect(result).toEqual({rows:[{_id:'599',name:'Imported 599',due:599,done:false}],complete:true});
   expect(Math.max(...reads)).toBeLessThanOrEqual(1);
-  expect(db.prepare('SELECT count(DISTINCT id) n FROM _gonvex_replica_lookup WHERE scope=?').get('s')!.n).toBe(600);
-  // A format-2 installation may already have rows but an incomplete lookup.
+  expect(db.prepare("SELECT name FROM sqlite_master WHERE name='_gonvex_replica_lookup'").get()).toBeUndefined();
+  // Upgrade an older installation with a partial legacy scalar-copy index.
   db.prepare('UPDATE gv_canonical_layout SET signature=?').run(JSON.stringify({format:2,schema}));
-  db.prepare('DELETE FROM _gonvex_replica_lookup WHERE id=?').run('599');
+  db.exec("CREATE TABLE _gonvex_replica_lookup(id TEXT PRIMARY KEY); INSERT INTO _gonvex_replica_lookup VALUES('stale')");
   const repaired = sqliteTypedReplicaStorage(host,schema);
   expect((await repaired.withReadView('s',{tasks:{key:'_id',complete:true}},view=>view.select({table:'tasks',where:{column:'due',op:'eq',value:599}}))).rows).toEqual(result.rows);
   expect(await engine.integrity()).toBe('ok');
@@ -203,6 +203,6 @@ it.each([false,true])('shares a published physical bootstrap scope with the cano
   await storage.applyTransaction({cursor:cursor(2),changes:[{entity:'tasks',id:'a',operation:'delete'}]},empty,'s');
   expect((await engine.page('s',plan)).rows).toEqual([]);
   expect(await storage.loadEntityRows('s','tasks',['a'])).toEqual([]);
-  expect(db.prepare('SELECT count(*) n FROM _gonvex_replica_lookup WHERE scope=?').get('s')!.n).toBe(0);
+  expect(db.prepare("SELECT name FROM sqlite_master WHERE name='_gonvex_replica_lookup'").get()).toBeUndefined();
   expect(await engine.integrity()).toBe('ok');
 });

@@ -20,7 +20,7 @@ export class ReplicaReadBudgetError extends Error {
   readonly code = 'replica-read-budget';
   constructor() { super('Local reducer read exceeds its bounded result allowance'); this.name = 'ReplicaReadBudgetError'; }
 }
-export type ReplicaReadPage = { id: string; row: JsonObject }[];
+export type ReplicaReadPage = { id: string; row: JsonObject }[] & { fieldsComplete?: boolean };
 export type ReplicaReadRequest = DataRead;
 export type ReplicaReadCoverage = ReadCoverage;
 export type ReplicaReducerReadView = ReducerReadView;
@@ -29,7 +29,7 @@ export type ReplicaReducerReadView = ReducerReadView;
  * transaction. Only rows needed by this reducer cross the native bridge. */
 export function pagedReplicaReadView(
   coverage: ReadCoverage,
-  page: (read: DataRead, after: string | undefined) => Promise<ReplicaReadPage>,
+  page: (read: DataRead, after: string | undefined, excludedRowIds?: readonly string[]) => Promise<ReplicaReadPage>,
   budget = { maxRows: 512, maxBytes: 262144 },
 ): ReducerReadView {
   if (![budget.maxRows, budget.maxBytes].every(value => Number.isSafeInteger(value) && value > 0)) throw new RangeError('Positive reducer read budgets required');
@@ -48,7 +48,8 @@ export function pagedReplicaReadView(
       let rows: JsonObject[] = [];
       const primaryKeys = primaryReadKeys(read, known?.key ?? '_id');
       for (;;) {
-        const entries = await page(read, after);
+        const entries = await page(read, after, excludedRowIds);
+        fieldsComplete &&= entries.fieldsComplete !== false;
         if (!entries.length) break;
         const last = entries.at(-1)!.id;
         if (last === after)

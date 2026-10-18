@@ -1,5 +1,5 @@
+import { readSQLitePortablePage } from './sqlite-portable-page.js';
 import { fail } from './sqlite-admission.js';
-import { yieldSQLiteTask } from './sqlite-task-yield.js';
 import { installSQLiteTypedBodyFence, sqliteBodySkeleton, sqliteRowBodySQL } from './sqlite-typed-body.js';
 import { sqliteNativeViewSchema, readSQLiteTypedView } from './sqlite-native-view.js';
 import { compileSQLiteTypedView } from './sqlite-typed-query.js';
@@ -15,7 +15,7 @@ const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
  * browser hosts use the same schema and authority merge implementation. */
 export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRowLayout {
   const ddl = compileSQLiteTypedSchema(schema);
-  const signature = JSON.stringify({ format: 4, schema });
+  const signature = JSON.stringify({ format: 5, schema });
   let lease: { epoch: number; owner: string } | undefined;
   async function assertOwner(db: SQLiteReplicaDatabase) {
     const current = await db.getFirstAsync<{ epoch: number; owner: string; sequence: number }>('SELECT epoch,owner,sequence FROM gv_storage_meta WHERE id=1');
@@ -23,6 +23,7 @@ export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRo
     return current;
   }
   return {
+    readPage: (db,scope,read,after,excluded,columns) => readSQLitePortablePage(db,schema,scope,read,after,excluded,columns),
     async assertOwner(db) { await assertOwner(db); },
     async afterCommit(db) {
       const current = await assertOwner(db);
@@ -39,60 +40,24 @@ CREATE TABLE IF NOT EXISTS gv_scope_alias(scope TEXT PRIMARY KEY,physical TEXT N
 CREATE INDEX IF NOT EXISTS gv_scope_alias_physical ON gv_scope_alias(physical);
 CREATE TABLE IF NOT EXISTS gv_canonical_tombstones(scope TEXT NOT NULL,entity TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(scope,entity,id)) WITHOUT ROWID;`);
       const previous = await db.getFirstAsync<{ signature: string }>('SELECT signature FROM gv_canonical_layout WHERE id=1');
-      if (previous && previous.signature !== signature && previous.signature !== JSON.stringify({ format: 1, schema }) && previous.signature !== JSON.stringify({ format: 2, schema }) && previous.signature !== JSON.stringify({ format: 3, schema })) throw new Error('Typed canonical layout requires an explicit schema migration');
+      if (previous && previous.signature !== signature && previous.signature !== JSON.stringify({ format: 1, schema }) && previous.signature !== JSON.stringify({ format: 2, schema }) && previous.signature !== JSON.stringify({ format: 3, schema }) && previous.signature !== JSON.stringify({ format: 4, schema })) throw new Error('Typed canonical layout requires an explicit schema migration');
       await installSQLiteTypedBodyFence(db, schema);
       await db.execAsync('DROP TRIGGER IF EXISTS gv_canonical_delete; DROP VIEW IF EXISTS _gonvex_replica_entities;');
       await db.execAsync(sqliteNativeViewSchema);
       await db.execAsync(ddl.tables + '\n' + ddl.indexes + '\n' + ddl.search);
-      // This lookup serves legacy portable ReducerReadView predicates. Typed
-      // view plans use the generated column indexes directly, without it.
-      await db.execAsync(`CREATE TABLE IF NOT EXISTS _gonvex_replica_lookup (
- scope TEXT NOT NULL,entity TEXT NOT NULL,column_name TEXT NOT NULL,kind TEXT NOT NULL,scalar BLOB NOT NULL,id TEXT NOT NULL,
- PRIMARY KEY(scope,entity,column_name,kind,scalar,id));
-CREATE INDEX IF NOT EXISTS _gonvex_replica_lookup_row ON _gonvex_replica_lookup(scope,entity,id);`);
       const branches: string[] = [];
       for (const entity of Object.keys(schema)) {
         const table = sqliteTableName(entity), name = q(table), entitySQL = literal(entity);
         branches.push(`SELECT * FROM (
  SELECT t.scope,${entitySQL} entity,t.id,${sqliteRowBodySQL(schema[entity]!, "t")} value,t.rid rowid FROM ${name} t WHERE NOT EXISTS(SELECT 1 FROM gv_scope_alias a WHERE a.physical=t.scope)
  UNION ALL SELECT a.scope,${entitySQL},t.id,${sqliteRowBodySQL(schema[entity]!, "t")},t.rid FROM gv_scope_alias a JOIN ${name} t ON t.scope=a.physical)`);
-        const drop = `DELETE FROM _gonvex_replica_lookup WHERE scope=coalesce((SELECT scope FROM gv_scope_alias WHERE physical=OLD.scope),OLD.scope) AND entity=${entitySQL} AND id=OLD.id;`;
-        const add = `INSERT INTO _gonvex_replica_lookup SELECT coalesce((SELECT scope FROM gv_scope_alias WHERE physical=NEW.scope),NEW.scope),${entitySQL},j.key,
- CASE WHEN j.type IN ('integer','real') THEN 'number' WHEN j.type IN ('true','false') THEN 'boolean' ELSE 'string' END,j.atom,NEW.id
- FROM json_each(${sqliteRowBodySQL(schema[entity]!, "NEW")}) j WHERE j.type IN ('integer','real','true','false') OR (j.type='text' AND length(j.atom)<=256);`;
-        await db.execAsync(`DROP TRIGGER IF EXISTS ${q(table + '_lookup_a')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_u')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_d')};
-CREATE TRIGGER IF NOT EXISTS ${q(table + '_lookup_a')} AFTER INSERT ON ${name} BEGIN ${add} END;
-CREATE TRIGGER IF NOT EXISTS ${q(table + '_lookup_u')} AFTER UPDATE ON ${name} BEGIN ${drop} ${add} END;
-CREATE TRIGGER IF NOT EXISTS ${q(table + '_lookup_d')} AFTER DELETE ON ${name} BEGIN ${drop} END;`);
+        await db.execAsync(`DROP TRIGGER IF EXISTS ${q(table + '_lookup_a')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_u')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_d')};`);
       }
-      // Typed imports can precede adapter installation. Triggers alone would
-      // leave those rows absent from portable equality/relation reads. Build
-      // the compatibility scalar index natively in bounded rowid slices, in
-      // the same installation transaction as the signature and triggers.
-      if (previous?.signature !== signature) {
-        for (const entity of Object.keys(schema)) {
-          const name = q(sqliteTableName(entity)); let after = 0;
-          await db.runAsync('DELETE FROM _gonvex_replica_lookup WHERE entity=?', entity);
-          for (;;) {
-            const batch = await db.getFirstAsync<{ last: number | null }>(`SELECT max(rid) last FROM (SELECT rid FROM ${name} WHERE rid>? ORDER BY rid LIMIT 256)`, after);
-            if (batch?.last == null) break;
-            await db.runAsync(`INSERT INTO _gonvex_replica_lookup SELECT coalesce((SELECT scope FROM gv_scope_alias WHERE physical=t.scope),t.scope),?,j.key,
- CASE WHEN j.type IN ('integer','real') THEN 'number' WHEN j.type IN ('true','false') THEN 'boolean' ELSE 'string' END,j.atom,t.id
- FROM ${name} t,json_each(${sqliteRowBodySQL(schema[entity]!, 't')}) j WHERE t.rid>? AND t.rid<=? AND (j.type IN ('integer','real','true','false') OR (j.type='text' AND length(j.atom)<=256))`, entity, after, batch.last);
-            after = batch.last; await yieldSQLiteTask();
-          }
-        }
-      }
-      await db.runAsync('INSERT INTO gv_canonical_layout VALUES(1,?) ON CONFLICT(id) DO UPDATE SET signature=excluded.signature', signature);
+      // Portable reads use generated columns and their native indexes. Remove
+      // the legacy scalar-copy index atomically only after its triggers retire.
       await db.execAsync(`DROP TRIGGER IF EXISTS gv_canonical_alias_insert; DROP TRIGGER IF EXISTS gv_canonical_alias_update;
-CREATE TRIGGER gv_canonical_alias_insert AFTER INSERT ON gv_scope_alias BEGIN
- DELETE FROM _gonvex_replica_lookup WHERE scope=NEW.scope;
- UPDATE OR REPLACE _gonvex_replica_lookup SET scope=NEW.scope WHERE scope=NEW.physical;
-END;
-CREATE TRIGGER gv_canonical_alias_update AFTER UPDATE ON gv_scope_alias WHEN OLD.physical<>NEW.physical BEGIN
- DELETE FROM _gonvex_replica_lookup WHERE scope=NEW.scope;
- UPDATE OR REPLACE _gonvex_replica_lookup SET scope=NEW.scope WHERE scope=NEW.physical;
-END;`);
+DROP TABLE IF EXISTS _gonvex_replica_lookup;`);
+      await db.runAsync('INSERT INTO gv_canonical_layout VALUES(1,?) ON CONFLICT(id) DO UPDATE SET signature=excluded.signature', signature);
       branches.push("SELECT scope,entity,id,'null' value,NULL rowid FROM gv_canonical_tombstones");
       if (branches.length > 500) throw new RangeError('Typed canonical schema exceeds SQLite compound table limit');
       await db.execAsync(`CREATE VIEW IF NOT EXISTS _gonvex_replica_entities AS ${branches.join(' UNION ALL ')};`);
