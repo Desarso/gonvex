@@ -2,6 +2,7 @@ import {mergeReplicaRecord,type VersionedReplicaRecord} from './replica-record.j
 import {indexedDBPredictedRow,type IndexedDBPrediction} from './indexeddb-predictions.js';
 import type {SQLitePendingSnapshotGeneration,SQLitePendingSnapshotPage} from './sqlite-pending-snapshot-reader.js';
 import type {ReplicaRow} from './local-replica.js';
+import type {ReadCoverage} from '@gonvex/local-runtime/read-view';
 import type {SQLiteNativeWindowRead,SQLiteNativeWindowResult} from './sqlite-native-replica-reader.js';
 import type {SQLiteWindowHeader} from './sqlite-window-store.js';
 import {IndexedDBReplicaEngine} from './indexeddb-replica-engine.js';
@@ -19,6 +20,18 @@ const hash=async(value:string)=>Array.from(new Uint8Array(await crypto.subtle.di
  * disk. Unverified pages are display-only. Publication merges canonical values
  * and switches the ordered window inside the reducer's atomic rebase. */
 export class IndexedDBReplicaWindows extends IndexedDBReplicaEngine {
+ /** Only certified full-entity windows grant reducer scan coverage. This
+  * reads bounded window headers, never their membership or row bodies. */
+ async readCoverage(scope:string,epoch:string,artifactHash:string):Promise<ReadCoverage>{
+  if(!scope||scope.length>512||!epoch||epoch.length>256||!artifactHash||artifactHash.length>256)throw new TypeError('Invalid fallback coverage admission');
+  return this.transaction(['meta','windows'],'readonly',async tx=>{
+   await this.fence(tx);const progress=await request(tx.objectStore('meta').get('feed-progress:'+scope)) as {epoch:string;unclosed:number;applied:number}|undefined;
+   if(progress&&(progress.epoch!==epoch||progress.unclosed>progress.applied))return {};
+   const coverage:Record<string,ReadCoverage[string]>={},range=this.ranges.bound([scope],[scope,[]]);
+   await new Promise<void>((resolve,reject)=>{let seen=0;const cursor=tx.objectStore('windows').openCursor(range);cursor.onerror=()=>reject(cursor.error);cursor.onsuccess=()=>{const entry=cursor.result;if(!entry){resolve();return;}try{if(++seen>128)fail('BUDGET','Fallback coverage exceeds source allowance');const window=entry.value as Window,header=window.header;if(header.entityCoverage==='complete'&&header.completeness==='complete'&&header.cursor?.epoch===epoch&&header.cursor.revision>=(progress?.applied??0)&&header.artifactHash===artifactHash){const prior=coverage[header.entity];coverage[header.entity]={key:header.key,complete:true,columns:[...new Set([...(prior?.columns??[]),...(header.columns??[])])]};}entry.continue();}catch(error){reject(error);}};});
+   sqlitePayloadBytes(coverage,524288);return coverage;
+  });
+ }
  private key(input:Identity){sqlitePayloadBytes(input,4096);if(!input.scope||input.scope.length>512||!input.source||input.source.length>256||!input.snapshot||input.snapshot.length>128)throw new TypeError('Invalid fallback snapshot identity');return [input.scope,input.source,input.snapshot];}
  async beginSnapshot(input:Identity,header:SQLiteWindowHeader,budget:{maxRows:number;maxBytes:number}){
   const key=this.key(input);sqlitePayloadBytes(header,32768);if(!header.signature||header.signature.length>4096||!header.cursor||!header.cursor.epoch||!Number.isSafeInteger(header.cursor.revision)||header.cursor.revision<0||!Object.hasOwn(this.schema,header.entity)||this.schema[header.entity]!.key!==header.key||!header.columns?.includes(header.key)||header.columns.some(column=>!Object.hasOwn(this.schema[header.entity]!.fields,column))||!Number.isSafeInteger(budget.maxRows)||budget.maxRows<0||!Number.isSafeInteger(budget.maxBytes)||budget.maxBytes<0)throw new TypeError('Invalid generated fallback snapshot');
