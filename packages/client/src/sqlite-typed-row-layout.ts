@@ -2,7 +2,7 @@ import {sqliteWindowAuxiliarySchema} from './sqlite-window-store.js';
 import {sqliteEntityAliasSchema,sqlitePhysicalEntityScope,sqliteQueryEntityScopes} from './sqlite-entity-scope.js';
 import { readSQLitePortablePage } from './sqlite-portable-page.js';
 import { fail } from './sqlite-admission.js';
-import { installSQLiteTypedBodyFence, sqliteBodySkeleton, sqliteRowBodySQL } from './sqlite-typed-body.js';
+import { installSQLiteTypedBodyFence, sqliteBodySkeleton, sqliteRowBodySQL, sqliteRowProjectionSQL } from './sqlite-typed-body.js';
 import { sqliteNativeViewSchema, readSQLiteTypedView } from './sqlite-native-view.js';
 import { compileSQLiteTypedView } from './sqlite-typed-query.js';
 import { SQLiteLocalReplicaStorage, type SQLiteReplicaDatabase, type SQLiteReplicaRowLayout } from './sqlite-replica-storage.js';
@@ -74,13 +74,13 @@ END;`);
       for (let offset = 0; offset < scopes.length; offset += 128) groups.push('SELECT scope FROM (' + scopes.slice(offset, offset + 128).join(' UNION ') + ')');
       await db.runAsync(`INSERT OR IGNORE INTO _gonvex_replica_meta SELECT scope,'sequence','0' FROM (${groups.join(' UNION ')}) WHERE instr(scope,char(0))=0`);
     },
-    async readEntityRows(db, scope, entity, ids, maxBytes) {
+    async readEntityRows(db, scope, entity, ids, maxBytes, columns) {
       const table = Object.hasOwn(schema, entity) && schema[entity];
       if (!table) throw new TypeError('Canonical read references an undeclared SQLite table');
       if (!ids.length) return [];
       if (ids.length > 256) throw new RangeError('Canonical entity read exceeds page budget');
       const physical = await sqlitePhysicalEntityScope(db, scope, entity);
-      const body = sqliteRowBodySQL(table, 't');
+      const body = columns ? sqliteRowProjectionSQL(table,columns,'t') : sqliteRowBodySQL(table, 't');
       const from = `${q(sqliteTableName(entity))} t WHERE t.scope=? AND t.id IN (${ids.map(() => '?').join(',')})`;
       const args = [physical, ...ids];
       const size = await db.getFirstAsync<{ bytes: number }>(`SELECT coalesce(sum(length(CAST(${body} AS BLOB))*2+length(t.id)*2+128),0) bytes FROM ${from}`, ...args);

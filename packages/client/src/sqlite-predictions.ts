@@ -56,12 +56,12 @@ export class SQLitePredictions {
    result=await readSQLiteTypedView(this.db,this.tables,ownerScope,physicalScope,signature,owned,offset,generation.sequence,131072,`${generation.sequence}:${generation.predictionSequence}`,pending?{scope:physical(ownerScope),allowLocalInserts}:undefined,resolved.sources);
   });return result;
  }
- async entities(ownerScope:string,entity:string,ids:readonly string[]):Promise<Array<{id:string;row:ReplicaRow}>>{
+ async entities(ownerScope:string,entity:string,ids:readonly string[],columns?:readonly string[]):Promise<Array<{id:string;row:ReplicaRow}>>{
   scope(ownerScope);sqlitePayloadBytes({entity,ids},32768);if(!Object.hasOwn(this.tables,entity)||!Array.isArray(ids)||ids.length>128||ids.some(id=>typeof id!=='string'||!id))throw new TypeError('Invalid prediction entity page');await this.ready();let result!:Array<{id:string;row:ReplicaRow}>;
   await this.db.withTransactionAsync(async()=>{
    await this.fence();const markers=await this.db.getAllAsync<{id:string;deleted:number}>('SELECT id,deleted FROM gv_prediction_members WHERE scope=? AND entity=? AND id IN (SELECT value FROM json_each(?))',ownerScope,entity,JSON.stringify(ids)),byID=new Map(markers.map(marker=>[marker.id,marker]));
-   const base=await this.canonical.loadBoundedEntityRows(ownerScope,entity,ids.filter(id=>!byID.has(id)));
-   const predicted=await this.canonical.loadBoundedEntityRows(physical(ownerScope),entity,ids.filter(id=>byID.get(id)?.deleted===0));
+   const base=await this.canonical.loadBoundedEntityRows(ownerScope,entity,ids.filter(id=>!byID.has(id)),131072,columns);
+   const predicted=await this.canonical.loadBoundedEntityRows(physical(ownerScope),entity,ids.filter(id=>byID.get(id)?.deleted===0),131072,columns);
    const values=new Map([...base,...predicted].map(entry=>[entry.id,entry]));result=ids.flatMap(id=>{const entry=values.get(id);return entry?[entry]:[];});sqlitePayloadBytes(result,131072);
   });return result;
  }

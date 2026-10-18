@@ -262,3 +262,11 @@ it('keeps native reads, epoch replacement and scope clear independent of the bro
   spy.mockRestore();await storage.prepareCompatibilityRows();expect(view()).toBeDefined();
   expect(db.prepare("SELECT id FROM _gonvex_replica_entities WHERE scope='other'").all()).toEqual([{id:'b'}]);
 });
+
+it('projects typed fields before body reconstruction and preserves missing/null/boolean values beside a huge field',async()=>{
+ const {storage}=fixture();await storage.applyTransaction({cursor:cursor(1),changes:[{entity:'tasks',id:'a',operation:'insert',newValue:{_id:'a',name:'x'.repeat(80000),due:null,done:false}}]},empty,'s');await storage.applyTransaction({cursor:cursor(2),changes:[{entity:'tasks',id:'b',operation:'insert',newValue:{_id:'b',name:'x'.repeat(80000),done:true}}]},empty,'s');await expect(storage.loadBoundedEntityRows('s','tasks',['a'])).rejects.toMatchObject({code:'BUDGET'});
+ expect(await storage.loadBoundedEntityRows('s','tasks',['a','b'],4096,['due','done'])).toEqual([{id:'a',row:{_id:'a',due:null,done:false}},{id:'b',row:{_id:'b',done:true}}]);
+});
+it('projects generic SQLite bodies before JS decoding with exact JSON/null/boolean types',async()=>{
+ const {host}=fixture(),storage=new SQLiteLocalReplicaStorage(host),row={id:'a',detail:'x'.repeat(80000),nil:null,done:false,obj:{nested:true},arr:[null,1,'東京']};await storage.replaceSnapshot({entities:{tasks:{a:row}},liveQueries:{},cursor:cursor(1)},'s');await expect(storage.loadBoundedEntityRows('s','tasks',['a'])).rejects.toMatchObject({code:'BUDGET'});expect(await storage.loadBoundedEntityRows('s','tasks',['a'],4096,['id','nil','done','obj','arr','missing'])).toEqual([{id:'a',row:{id:'a',nil:null,done:false,obj:{nested:true},arr:[null,1,'東京']}}]);
+});

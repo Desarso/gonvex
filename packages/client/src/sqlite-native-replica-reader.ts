@@ -30,8 +30,8 @@ export class SQLiteNativeReplicaReader {
   if(expected&&(expected.epoch!==current.epoch||expected.sequence!==current.sequence))fail('PAGE_CHANGED','Native replica generation changed');
   return current;
  }
- private async values(scope:string,entity:string,ids:readonly string[]):Promise<SQLiteEntitySlot[]>{
-  const values=await (this.predictions?this.predictions.entities(scope,entity,ids):this.canonical.loadBoundedEntityRows(scope,entity,ids)),byID=new Map(values.map(entry=>[entry.id,entry.row]));
+ private async values(scope:string,entity:string,ids:readonly string[],columns?:readonly string[]):Promise<SQLiteEntitySlot[]>{
+  const values=await (this.predictions?this.predictions.entities(scope,entity,ids,columns):this.canonical.loadBoundedEntityRows(scope,entity,ids,131072,columns)),byID=new Map(values.map(entry=>[entry.id,entry.row]));
   return ids.map(id=>({id,value:byID.get(id)??null}));
  }
  async entities(input:SQLiteNativeEntityRead):Promise<SQLiteNativeEntityResult>{
@@ -56,7 +56,7 @@ export class SQLiteNativeReplicaReader {
    for(;;){
     try{
      const members=await this.windows.page(input.scope,input.signature,window.generation,offset,take);
-     result={generation,window:{generation:window.generation,header:window.header,total:members.total},offset,nextOffset:members.nextOffset,rows:await this.values(input.scope,window.header.entity,members.ids)};
+     result={generation,window:{generation:window.generation,header:window.header,total:members.total},offset,nextOffset:members.nextOffset,rows:await this.values(input.scope,window.header.entity,members.ids,window.header.columns)};
      sqlitePayloadBytes(result,131072);break;
     }catch(error){if(take===1||!pageBudgetError(error))throw error;take=Math.max(1,Math.floor(take/2));}
    }

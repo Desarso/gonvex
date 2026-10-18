@@ -37,7 +37,7 @@ export interface SQLiteReplicaRowLayout {
   prepareCompatibilityView?(database: SQLiteReplicaDatabase): Promise<void>;
   clearScope?(database: SQLiteReplicaDatabase, scope: string): Promise<void>;
   initializeSequences?(database: SQLiteReplicaDatabase): Promise<void>;
-  readEntityRows?(database: SQLiteReplicaDatabase, scope: string, entity: string, ids: readonly string[], maxBytes: number): Promise<Array<{ id: string; value: string }>>;
+  readEntityRows?(database: SQLiteReplicaDatabase, scope: string, entity: string, ids: readonly string[], maxBytes: number, columns?:readonly string[]): Promise<Array<{ id: string; value: string }>>;
   readVersions?(database: SQLiteReplicaDatabase, scope: string, entity: string, ids: readonly string[]): Promise<ReadonlyMap<string,number>>;
   readPage?(database: SQLiteReplicaDatabase, scope: string, read: import('@gonvex/module-sdk').DataRead, after?: string, excluded?: readonly string[], columns?: readonly string[]): Promise<import('./paged-read-view.js').ReplicaReadPage>;
   assertOwner?(database: SQLiteReplicaDatabase): Promise<void>;
@@ -383,20 +383,22 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
 
   /** Native UI pages preflight body bytes inside SQLite, then admit decoded
    * structure before JSON.parse. A huge row never creates a huge JS graph. */
-  async loadBoundedEntityRows(scope:string,entity:string,ids:readonly string[],maxBytes=131072){
+  async loadBoundedEntityRows(scope:string,entity:string,ids:readonly string[],maxBytes=131072,columns?:readonly string[]){
+    if(columns&&(!Array.isArray(columns)||columns.length>128||columns.some(column=>typeof column!=='string'||!column||column.length>256)))throw new TypeError('Invalid entity projection');
     if(ids.length>128||!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>131072)fail('BUDGET','Invalid native entity page budget');
     await this.initialize();await this.rowLayout?.assertOwner?.(this.database);
     if(!ids.length)return [];
     const typed = this.rowLayout?.readEntityRows;
     if (typed) {
-      const records = await typed(this.database, scope, entity, ids, maxBytes);
+      const records = await typed(this.database, scope, entity, ids, maxBytes,columns);
       const result = records.filter(record => record.value !== 'null').map(record => { decodedJSONBytes(record.value, maxBytes); return { id: record.id, row: JSON.parse(record.value) as ReplicaRow }; });
       sqlitePayloadBytes(result, maxBytes); return result;
     }
     const where=`scope=? AND entity=? AND id IN (${ids.map(()=>'?').join(',')})`,args=[scope,entity,...ids];
-    const size=await this.database.getFirstAsync<{bytes:number}>(`SELECT coalesce(sum(length(CAST(value AS BLOB))*2+128),0) bytes FROM _gonvex_replica_entities WHERE ${where}`,...args);
+    const body=columns?`(SELECT json_group_object(j.key,json(CASE j.type WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' WHEN 'object' THEN j.value WHEN 'array' THEN j.value ELSE json_quote(j.value) END)) FROM json_each(e.value) j WHERE j.key IN (SELECT value FROM json_each(?)))`:'e.value',bindings=columns?[JSON.stringify(columns),...args]:args;
+    const size=await this.database.getFirstAsync<{bytes:number}>(`SELECT coalesce(sum(length(CAST(${body} AS BLOB))*2+128),0) bytes FROM _gonvex_replica_entities e WHERE ${where}`,...bindings);
     if(!size||size.bytes>maxBytes)fail('BUDGET','Native entity bodies exceed page budget');
-    const records=await this.database.getAllAsync<EntityRecord>(`SELECT scope,entity,id,value FROM _gonvex_replica_entities WHERE ${where}`,...args);
+    const records=await this.database.getAllAsync<EntityRecord>(`SELECT scope,entity,id,${body} value FROM _gonvex_replica_entities e WHERE ${where} AND e.value<>'null'`,...bindings);
     const result:Array<{id:string;row:ReplicaRow}>=[];let bytes=64;
     for(const record of records)if(record.value!=='null'){
       bytes+=record.id.length*2+128+decodedJSONBytes(record.value,maxBytes-bytes);

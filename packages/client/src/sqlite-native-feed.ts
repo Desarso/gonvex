@@ -17,6 +17,8 @@ type Source=SQLiteFeedSource&{deferredKey:string;bytes:number;start?:Start;openi
 type State={stream:string;generation:number;scope:string;epoch:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;watermark?:number};
 type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;connection:string;artifactHash:string;
  reserve?(bytes:number):()=>void;
+ windowsPending?(scope:string,epoch:string,revision:number):Promise<boolean>;
+ publishWindows?(scope:string,epoch:string,revision:number):Promise<void>;
  send(message:ClientMessage):void;advanceWatermark(revision:number):void;failed(error:unknown):void;
  /** Rebase derived predictions in the same transaction as canonical authority. */
  authority?(scope:string,mutate:()=>Promise<void>):Promise<void>;
@@ -70,7 +72,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    sendAck:ack=>{this.check(state);this.options.send(ack);},
    activateVerified:async receipt=>{
     this.check(state);const source=this.source(receipt.ack.id),start=source.start;if(!start||start.snapshotId!==receipt.ack.snapshotId)fail('FENCED','Snapshot has no matching start header');
-    const header:SQLiteWindowHeader={signature:source.signature,entity:source.entity,key:source.key,kind:'replica',source:'server',cursor:start.cursor,aggregateDigest:receipt.progress.digest,completeness:start.truncated?'partial':'complete',...(start.mode?{mode:start.mode}:{}),...(source.completeEntity&&!start.truncated?{entityCoverage:'complete' as const}:{}),columns:source.columns??[source.key],artifactHash:this.options.artifactHash};
+    const header:SQLiteWindowHeader={signature:source.signature,entity:source.entity,key:source.key,kind:'replica',source:'server',cursor:start.cursor,aggregateDigest:receipt.progress.digest,completeness:start.truncated?'partial':'complete',...(start.mode?{mode:start.mode}:{}),...(source.completeEntity&&!start.truncated?{entityCoverage:'complete' as const}:{}),columns:source.columns??Object.keys(owner.engine.schema[source.entity]!.fields),artifactHash:this.options.artifactHash};
     await owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,0,0,?) ON CONFLICT(scope,epoch) DO UPDATE SET unclosed=CASE WHEN excluded.unclosed>applied THEN max(unclosed,excluded.unclosed) ELSE unclosed END',state.scope,state.epoch,start.cursor.revision);
     await this.mutate(state.scope,async()=>{await owner.activation.activate({scope:state.scope,subscription:source.id,snapshot:start.snapshotId,header});});
     await this.replay(state,source);
@@ -121,6 +123,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     else if(frame.type==='replica.delta')await this.applyDelta(state,this.source(frame.id),frame);
     else await this.windows.confirmReady(state.scope,this.source(frame.id).signature,frame.cursor,frame.digest,frame.truncated??false);
    });
+   await this.options.publishWindows?.(state.scope,state.epoch,revision);
    // A terminal watermark certifies quiet active sources as well as changed
    // ones. Closed windows keep their last observed cursor and cannot grant
    // reducer completeness after authority has advanced beyond them.
@@ -128,7 +131,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
     WHERE g.scope=? AND json_extract(g.header,'$.cursor.epoch')=? AND (g.signature,g.generation) IN
      (SELECT w.signature,w.generation FROM gv_windows w WHERE w.scope=? AND w.signature IN (SELECT value FROM json_each(?)))`,revision,state.scope,state.epoch,state.scope,JSON.stringify([...this.sources.values()].filter(source=>!source.closing).map(source=>source.signature)));
    await this.options.owner.database.runAsync('INSERT INTO gv_native_feed_progress VALUES(?,?,?, ?,0) ON CONFLICT(scope,epoch) DO UPDATE SET observed=max(observed,excluded.observed),applied=max(applied,excluded.applied),unclosed=0',state.scope,state.epoch,revision,revision);if(!pending||pending.applied<revision||pending.unclosed)await markSQLiteStagingCommit(this.options.owner.database,()=>this.options.owner.engine.verifyOwner());applied=true;
-   };if(pending?.unclosed||await this.groups.pending(state.stream))await this.mutate(state.scope,publish);else await publish();
+   };if(pending?.unclosed||await this.groups.pending(state.stream)||await this.options.windowsPending?.(state.scope,state.epoch,revision))await this.mutate(state.scope,publish);else await publish();
   }));this.check(state);if(applied)this.options.advanceWatermark(revision);
  }
  private async process(state:State,message:ServerMessage):Promise<void>{

@@ -27,6 +27,14 @@ export function sqliteRowBodySQL(table: SQLiteTypedTable, alias = 't'): string {
     return [name, value];
   }));
 }
+/** Reconstruct only declared page fields. Presence comes from the compact
+ * body skeleton, so missing and explicit null remain distinct without reading
+ * unrelated large typed columns into a JSON body or the JS heap. */
+export function sqliteRowProjectionSQL(table:SQLiteTypedTable,columns:readonly string[],alias='t'):string{
+ const selected=[...new Set([table.key,...columns])];if(selected.length>128||selected.some(name=>!Object.hasOwn(table.fields,name)))throw new TypeError('Invalid typed entity projection');
+ const parts=selected.map(name=>{const shape=table.fields[name]!,column=`${alias}.${q(sqliteFieldName(name))}`,value=shape.kind==='json'?`coalesce(${column},'null')`:shape.kind==='boolean'?`CASE WHEN ${column} IS NULL THEN 'null' WHEN ${column}<>0 THEN 'true' ELSE 'false' END`:`json_quote(${column})`;return `SELECT '${name.replaceAll("'","''")}' k,${value} v WHERE json_type(${alias}.body,${path(name)}) IS NOT NULL`;});
+ return `(SELECT json_group_object(k,json(v)) FROM (${parts.join(' UNION ALL ')}))`;
+}
 /** Canonical and typed-engine entry points must fence old body decoders even
  * when they share a physical database. Existing full bodies remain readable. */
 export async function installSQLiteTypedBodyFence(db: SQLiteReplicaDatabase, schema: SQLiteTypedSchema): Promise<void> {
