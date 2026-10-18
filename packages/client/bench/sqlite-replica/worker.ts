@@ -38,18 +38,18 @@ const handlers = {
   },
   async bootstrapOpen({ token }) { return engine.beginBootstrap('test-scope', token); },
   async bootstrapSeed({ token, start, count, encoded: encodedInput = false, utf8 = false }) {
-    let state;
+    let state; const frameRows=encodedInput?50:100,creditRows=encodedInput?800:1000;
     // Worker replacement cadence is independent of the bounded commit credit.
     // Never enlarge a transaction just to keep a worker alive for more rows.
-    for (let group = start; group < start + count; group += 1000) {
-      const end = Math.min(group + 1000, start + count);
+    for (let group = start; group < start + count; group += creditRows) {
+      const end = Math.min(group + creditRows, start + count);
       state = await engine.appendBootstrapBatch('test-scope', token, (async function* () {
-        for (let offset = group; offset < end; offset += 100) {
-          if(encodedInput){const at=performance.now();const encoded=(utf8?fixtureUTF8Writes:fixtureEncodedWrites)(offset,Math.min(100,end-offset));generated.wireEncodeMs+=performance.now()-at;yield {page:offset/100,encoded};continue;}
-          let timed = performance.now(); const writes = fixtureWrites(offset, Math.min(100, end - offset));
+        for (let offset = group; offset < end; offset += frameRows) {
+          if(encodedInput){const at=performance.now();const encoded=(utf8?fixtureUTF8Writes:fixtureEncodedWrites)(offset,Math.min(frameRows,end-offset));generated.wireEncodeMs+=performance.now()-at;yield {page:offset/frameRows,encoded};continue;}
+          let timed = performance.now(); const writes = fixtureWrites(offset, Math.min(frameRows, end - offset));
           generated.fixtureMs += performance.now() - timed; timed = performance.now();
           const encoded = JSON.stringify(writes); generated.wireEncodeMs += performance.now() - timed;
-          yield { page: offset / 100, encoded };
+          yield { page: offset / frameRows, encoded };
         }
       })());
     }
