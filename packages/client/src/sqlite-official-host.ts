@@ -28,6 +28,9 @@ export async function openOfficialSQLiteHost(): Promise<OfficialSQLiteHost> {
   let db: Database | undefined;
   try {
     db = new pool.OpfsSAHPoolDb('/replica.sqlite');
+    // Capability discovery may prepare a statement and read the schema. Set
+    // single-owner WAL locking before constructing that bridge as well.
+    db.exec('PRAGMA locking_mode=EXCLUSIVE');
     const host = officialSQLiteDatabase(sqlite3, db);
     // EXCLUSIVE must precede the very first database read for single-connection
     // WAL without shared-memory methods. A mode mismatch is a startup failure.
@@ -120,7 +123,7 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
     } finally { if (!retain) statement.finalize(); }
   }
   let nativeFastFold=false;
-  try{nativeFastFold=db.selectValue('SELECT gv_ingress_fast_contract()')==='ascii-latin1-cjk-v1';}catch{/* Standard official hosts use the exact JS ingress fallback. */}
+  try{nativeFastFold=db.selectValue('SELECT gv_ingress_fast_contract()')==='ascii-latin1-cjk-v1';}catch(error){if(!/no such function: gv_ingress_fast_contract/.test(String((error as Error).message)))throw error;}
   db.createFunction('gv_ingress_lower', (_context: unknown, value: unknown) => { const text=String(value??''); profile.ingressFoldCalls++; profile.ingressFoldUTF16Bytes+=text.length*2; return text.toLowerCase(); }, { arity: 1, deterministic: true, directOnly: true });
   const database: SQLiteReplicaDatabase = {
     ingressUnicodeFold: true,
