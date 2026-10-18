@@ -1424,6 +1424,71 @@ impl Iterator for SnapshotPages {
     }
 }
 
+/// Native control rows stay canonical strings through JS envelope decoding.
+/// In particular int64 values and source hashes must not pass through f64 JSON.
+pub(crate) fn native_control_message(
+    message: &ServerMessage,
+) -> Result<Option<ServerMessage>, &'static str> {
+    match message {
+        ServerMessage::ReplicaDelta {
+            id,
+            cursor,
+            payload,
+        } => {
+            let rows = match payload.get("upserts") {
+                Some(Value::Array(rows)) => rows.as_slice(),
+                None => &[],
+                _ => return Err("invalid native delta rows"),
+            };
+            let mut encoded: BTreeMap<String, Value> = payload
+                .iter()
+                .filter(|(key, _)| key.as_str() != "upserts")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            encoded.insert(
+                "canonicalUpserts".into(),
+                Value::Array(
+                    rows.iter()
+                        .map(|row| Value::String(stable_json(row)))
+                        .collect(),
+                ),
+            );
+            Ok(Some(ServerMessage::ReplicaDelta {
+                id: id.clone(),
+                cursor: cursor.clone(),
+                payload: encoded,
+            }))
+        }
+        ServerMessage::ReplicaTransaction {
+            cursor,
+            origin_command_id,
+            provenance,
+            changes,
+        } => {
+            let canonical_changes = changes
+                .iter()
+                .map(|change| {
+                    let mut value = serde_json::to_value(change)
+                        .map_err(|_| "native transaction encoding failed")?;
+                    // Canonical storage merges against its own prior row. The old
+                    // projection is unnecessary and could double every wire row.
+                    if let Value::Object(object) = &mut value {
+                        object.remove("oldValue");
+                    }
+                    Ok(stable_json(&value))
+                })
+                .collect::<Result<Vec<_>, &'static str>>()?;
+            Ok(Some(ServerMessage::ReplicaTransactionEncoded {
+                cursor: cursor.clone(),
+                origin_command_id: origin_command_id.clone(),
+                provenance: provenance.clone(),
+                canonical_changes,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn replica_delta(
     id: &str,
     path: &str,
@@ -1537,6 +1602,70 @@ mod tests {
                 ("truncated".into(), Value::Bool(false)),
             ]),
         }
+    }
+
+    #[test]
+    fn native_control_rows_preserve_exact_wire_values_and_omit_old_projection() {
+        let row = serde_json::json!({"id":"a","n":9007199254740993u64,"text":"café 東京 😀\u{2028}","nested":{"null":null}});
+        let cursor = ReplicaCursor {
+            epoch: "epoch".into(),
+            revision: 17,
+        };
+        let delta = ServerMessage::ReplicaDelta {
+            id: "open".into(),
+            cursor: cursor.clone(),
+            payload: BTreeMap::from([
+                ("upserts".into(), Value::Array(vec![row.clone()])),
+                ("deleted".into(), serde_json::json!(["gone"])),
+                ("digest".into(), Value::String("receipt".into())),
+            ]),
+        };
+        let Some(ServerMessage::ReplicaDelta { payload, .. }) =
+            native_control_message(&delta).unwrap()
+        else {
+            panic!("encoded delta")
+        };
+        assert!(!payload.contains_key("upserts"));
+        assert_eq!(
+            payload["canonicalUpserts"],
+            serde_json::json!([stable_json(&row)])
+        );
+        assert_eq!(payload["deleted"], serde_json::json!(["gone"]));
+        assert!(
+            matches!(delta, ServerMessage::ReplicaDelta {ref payload,..} if payload.contains_key("upserts"))
+        );
+        let transaction:ServerMessage=serde_json::from_value(serde_json::json!({
+            "type":"replica.transaction","cursor":cursor,"originCommandId":"command",
+            "changes":[{"entity":"tasks","id":"a","operation":"update","changedColumns":["n","text"],"oldValue":{"n":1},"newValue":row}]
+        })).unwrap();
+        let Some(ServerMessage::ReplicaTransactionEncoded {
+            canonical_changes,
+            origin_command_id,
+            cursor,
+            ..
+        }) = native_control_message(&transaction).unwrap()
+        else {
+            panic!("encoded transaction")
+        };
+        assert_eq!(origin_command_id.as_deref(), Some("command"));
+        assert_eq!(cursor.revision, 17);
+        let encoded = &canonical_changes[0];
+        assert!(encoded.contains("9007199254740993"));
+        let change: Value = serde_json::from_str(encoded).unwrap();
+        assert_eq!(change["newValue"]["n"].as_u64(), Some(9007199254740993));
+        assert!(change.get("oldValue").is_none());
+        assert_eq!(change["changedColumns"], serde_json::json!(["n", "text"]));
+        assert!(
+            native_control_message(&ServerMessage::ReplicaWatermark { revision: 17 })
+                .unwrap()
+                .is_none()
+        );
+        let invalid = ServerMessage::ReplicaDelta {
+            id: "bad".into(),
+            cursor,
+            payload: BTreeMap::from([("upserts".into(), Value::Null)]),
+        };
+        assert!(native_control_message(&invalid).is_err());
     }
 
     #[test]

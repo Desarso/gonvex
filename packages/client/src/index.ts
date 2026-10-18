@@ -1946,10 +1946,16 @@ export class GonvexClient {
         if(this.ownerHost)try{this.ownerHost.binary(event.data,generation);}catch(error){this.ownerHost.failed(error);socket.close();}
         return;
       }
+      if(this.ownerHost&&typeof event.data==='string'&&event.data.length*2>262144){this.ownerHost.failed(Object.assign(new Error('Native control frame exceeds decode budget'),{code:'BUDGET'}));socket.close();return;}
       let message: ServerMessage;
       try {
         message = JSON.parse(String(event.data)) as ServerMessage;
       } catch {
+        if(this.ownerHost){this.ownerHost.failed(Object.assign(new Error('Invalid native control JSON'),{code:'INVALID_ROW'}));socket.close();}
+        return;
+      }
+      if(!message||typeof message!=='object'||Array.isArray(message)||typeof message.type!=='string'){
+        if(this.ownerHost){this.ownerHost.failed(Object.assign(new Error('Invalid native control envelope'),{code:'INVALID_ROW'}));socket.close();}
         return;
       }
       if(this.ownerHost&&message.type!=='auth.result'&&message.type!=='auth.error'&&message.type!=='session.ready'){

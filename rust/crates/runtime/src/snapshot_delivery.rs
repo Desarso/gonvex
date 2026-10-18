@@ -38,10 +38,17 @@ pub(crate) struct DeliveryBatch {
 
 #[derive(Default)]
 pub(crate) struct SnapshotDelivery {
+    native: bool,
     pending: BTreeMap<String, Pending>,
 }
 
 impl SnapshotDelivery {
+    pub(crate) fn set_native(&mut self, enabled: bool) {
+        self.native = enabled;
+    }
+    pub(crate) fn native(&self) -> bool {
+        self.native
+    }
     pub(crate) fn clear(&mut self) {
         self.pending.clear();
     }
@@ -53,6 +60,7 @@ impl SnapshotDelivery {
     }
 
     pub(crate) fn begin(&mut self, snapshot: ServerMessage) -> Result<(), &'static str> {
+        self.native = true;
         let pages = SnapshotPages::native(snapshot);
         let start = pages.start();
         if serde_json::to_vec(&start)

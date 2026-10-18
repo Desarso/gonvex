@@ -1982,6 +1982,7 @@ async fn websocket(
                         snapshot_pages_negotiated(capabilities.as_ref());
                     replica_native_rows_enabled =
                         snapshot_delivery::negotiated(capabilities.as_ref());
+                    snapshot_delivery.set_native(replica_native_rows_enabled);
                     replica_sum_digest_enabled =
                         capabilities.as_ref().and_then(|c| c.replica_set_digest) == Some(1);
                     if !replica_sum_digest_enabled {
@@ -4034,6 +4035,11 @@ async fn send_connection_json(
         }
         Ok(())
     } else {
+        if delivery.native() {
+            if let Some(encoded) = replica::native_control_message(message).map_err(|_| ())? {
+                return send_json(socket, &encoded).await;
+            }
+        }
         send_json(socket, message).await
     }
 }

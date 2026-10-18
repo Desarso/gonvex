@@ -98,6 +98,10 @@ async function execute(op: string, args: any, requestID:string) {
     }
   }
   if (!host || !engine) throw Object.assign(new Error('Storage owner is not ready'), { code: 'FENCED' });
+  // A generated authenticated program is the sole data boundary. Raw broker
+  // operations are for standalone storage hosts, never an alternate path by
+  // which a tab can select another identity's scope or grant itself authority.
+  if (program && !['ping','stats','integrity'].includes(op)) throw Object.assign(new Error('Use the authenticated generated client program'), {code:'OPERATION'});
   switch (op) {
     case 'nativeWindowPage': return (await nativeReader!.window({...args,scope:scope(args.scope)}))??null;
     case 'nativeEntityPage': return nativeReader!.entities({...args,scope:scope(args.scope)});

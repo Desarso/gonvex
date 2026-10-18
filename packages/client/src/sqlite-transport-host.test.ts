@@ -66,3 +66,10 @@ it('fences the worker session for a definitive revocation but preserves transien
  f.socket.receive({type:'auth.error',id:'session-expired',error:'temporarily expired',code:'expired'});expect(f.host.quarantined).not.toHaveBeenCalled();
  f.socket.receive({type:'auth.error',id:'membership-changed',error:'membership removed',code:'member_removed'});expect(f.host.quarantined).toHaveBeenCalledWith(1);expect(f.client.localSessionState()).toBe('unavailable');
 });
+
+it('contains malformed native envelopes and refuses oversized text before allocating a parsed graph',async()=>{
+ for(const data of ['null','[]','{}','{"broken']){
+  const f=fixture();f.socket.receive(authResult(f.auth().id));await flush();f.socket.emit('message',{data});expect(f.host.failed).toHaveBeenCalledWith(expect.objectContaining({code:'INVALID_ROW'}));expect(f.socket.readyState).toBe(3);
+ }
+ const f=fixture();f.socket.receive(authResult(f.auth().id));await flush();const parse=vi.spyOn(JSON,'parse');f.socket.emit('message',{data:'x'.repeat(131073)});expect(parse).not.toHaveBeenCalled();expect(f.host.failed).toHaveBeenCalledWith(expect.objectContaining({code:'BUDGET'}));expect(f.socket.readyState).toBe(3);parse.mockRestore();
+});

@@ -151,6 +151,17 @@ export class SQLiteWindowStore {
       await this.db.runAsync('INSERT INTO gv_windows VALUES(?,?,?) ON CONFLICT(scope,signature) DO UPDATE SET generation=excluded.generation', scope, signature, expected.generation);
     });
   }
+  /** A server ready can certify unchanged membership at a newer cursor. It
+   * cannot change a digest, epoch, completeness or generation without rows. */
+  async confirmReady(scope:string,signature:string,cursor:{epoch:string;revision:number},digest:string,truncated=false):Promise<void>{
+    identity(scope,signature);sqlitePayloadBytes({cursor,digest,truncated},16384);
+    if(!cursor||!cursor.epoch||!Number.isSafeInteger(cursor.revision)||cursor.revision<0||typeof digest!=='string'||typeof truncated!=='boolean')throw new TypeError('Invalid native ready certificate');
+    await this.initialize();await this.db.withTransactionAsync(async()=>{
+      await this.fence();const current=await this.header(scope,signature),header=current?.header;
+      if(!current||!header?.cursor||header.cursor.epoch!==cursor.epoch||header.cursor.revision>cursor.revision||header.aggregateDigest!==digest||header.completeness!==(truncated?'partial':'complete'))conflict('Ready differs from verified native membership');
+      await this.db.runAsync('UPDATE gv_window_generations SET header=? WHERE scope=? AND signature=? AND generation=?',JSON.stringify({...header,cursor}),scope,signature,current.generation);
+    });
+  }
   async header(scope: string, signature: string): Promise<(SQLiteWindowProgress & { header: SQLiteWindowHeader; uniqueRows: number }) | undefined> {
     identity(scope, signature); await this.initialize(); let output: (SQLiteWindowProgress & { header: SQLiteWindowHeader; uniqueRows: number }) | undefined;
     await this.db.withTransactionAsync(async () => {

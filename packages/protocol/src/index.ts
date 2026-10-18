@@ -560,6 +560,8 @@ export type ServerMessage =
     path?: string;
     cursor: ReplicaCursor;
     upserts?: JsonValue[];
+    /** Native capability only; replaces upserts without parsing row bodies. */
+    canonicalUpserts?: string[];
     deleted?: string[];
     originCommandIds?: string[];
     hashes?: Record<string, string>;
@@ -567,6 +569,14 @@ export type ServerMessage =
   }
   | ({ type: "replica.ready" } & ReplicaReady)
   | { type: "replica.readyMany"; ready: ReplicaReady[] }
+  | {
+    /** Native capability only. Row numbers retain their exact wire encoding. */
+    type: "replica.transactionEncoded";
+    cursor: ReplicaCursor;
+    originCommandId?: string;
+    provenance?: PublicInvocationProvenance;
+    canonicalChanges: string[];
+  }
   | { type: "replica.watermark"; revision: number }
   | { type: "replica.needHashes"; id: string; path?: string }
   // Client-local status frame emitted when a formerly authoritative materialized

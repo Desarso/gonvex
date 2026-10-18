@@ -637,6 +637,20 @@ pub enum ServerMessage {
         provenance: Option<PublicInvocationProvenance>,
         changes: Vec<ReplicaChange>,
     },
+    #[serde(rename = "replica.transactionEncoded")]
+    ReplicaTransactionEncoded {
+        cursor: ReplicaCursor,
+        #[serde(
+            default,
+            rename = "originCommandId",
+            skip_serializing_if = "Option::is_none"
+        )]
+        origin_command_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<PublicInvocationProvenance>,
+        #[serde(rename = "canonicalChanges")]
+        canonical_changes: Vec<String>,
+    },
     #[serde(rename = "replica.watermark")]
     ReplicaWatermark { revision: u64 },
     #[serde(rename = "replica.snapshot")]
@@ -905,6 +919,13 @@ mod tests {
         ] {
             round_trip_server(frame);
         }
+    }
+
+    #[test]
+    fn canonical_transaction_controls_round_trip_without_decoding_rows() {
+        round_trip_server(
+            r#"{"type":"replica.transactionEncoded","cursor":{"epoch":"e","revision":7},"originCommandId":"intent","canonicalChanges":["{\"entity\":\"tasks\",\"id\":\"a\",\"operation\":\"insert\",\"newValue\":{\"n\":9007199254740993}}"]}"#,
+        );
     }
 
     #[test]

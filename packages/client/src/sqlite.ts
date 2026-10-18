@@ -36,3 +36,6 @@ export {SQLiteWorkerSessions} from './sqlite-worker-sessions.js';
 export {SQLitePendingSnapshotReader} from './sqlite-pending-snapshot-reader.js';
 export type {SQLitePendingSnapshotRead,SQLitePendingSnapshotPage,SQLitePendingSnapshotGeneration} from './sqlite-pending-snapshot-reader.js';
 export {markSQLiteStagingCommit} from './sqlite-owner-transactions.js';
+
+export {SQLiteNativeFeed} from './sqlite-native-feed.js';
+export type {SQLiteFeedSource} from './sqlite-native-feed.js';
