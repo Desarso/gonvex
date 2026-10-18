@@ -2,6 +2,7 @@ import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
 import type {SQLitePagePlan,SQLitePredicate} from './sqlite-typed-query.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 export const sqliteEntityAliasSchema=`CREATE TABLE IF NOT EXISTS gv_entity_alias(scope TEXT NOT NULL,entity TEXT NOT NULL,physical TEXT NOT NULL,PRIMARY KEY(scope,entity)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gv_entity_retired(scope TEXT NOT NULL,entity TEXT NOT NULL,physical TEXT NOT NULL,PRIMARY KEY(entity,physical)) WITHOUT ROWID;
 CREATE UNIQUE INDEX IF NOT EXISTS gv_entity_alias_physical ON gv_entity_alias(physical,entity);`;
 /** Entity activation may replace one large table while other table aliases
  * and the existing whole-scope bootstrap mapping remain intact. */

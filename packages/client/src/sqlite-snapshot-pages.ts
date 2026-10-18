@@ -1,4 +1,6 @@
-import {fastSnapshotSchema} from './sqlite-fast-snapshot.js';
+import type {SQLiteTypedSchema} from './sqlite-typed-schema.js';
+import {prepareSQLiteTypedSnapshot,sqliteTypedSnapshotBody,discardSQLiteTypedSnapshot} from './sqlite-typed-snapshot.js';
+import {compileFastSnapshotSchema} from './sqlite-fast-snapshot.js';
 import {SQLiteEncodedSnapshotPages} from './sqlite-encoded-snapshot.js';
 import type {ReplicaRow} from './local-replica.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
@@ -40,13 +42,17 @@ async function hashFrame(encoded:string){return [...new Uint8Array(await crypto.
 export class SQLiteSnapshotPages {
  private initialized=false;
  private encoded?:SQLiteEncodedSnapshotPages;
- constructor(private readonly db:SQLiteReplicaDatabase,private readonly fence:()=>Promise<unknown>){}
+ constructor(private readonly db:SQLiteReplicaDatabase,private readonly fence:()=>Promise<unknown>,private readonly typedSchema?:SQLiteTypedSchema){}
  private async initialize(){
   if(this.initialized)return;
   if(this.db.ownerTransactionDepth)fail('FENCED','Prepare snapshot staging before ingress transactions');
-  await this.db.withTransactionAsync(async()=>{await this.fence();await this.db.execAsync(schema);if(this.db.ingressNativeSnapshot)await this.db.execAsync(fastSnapshotSchema);});this.initialized=true;
+  await this.db.withTransactionAsync(async()=>{await this.fence();await this.db.execAsync(schema);if(this.db.ingressNativeSnapshot)await this.db.execAsync(compileFastSnapshotSchema(this.typedSchema));});this.initialized=true;
  }
  ready(){return this.initialize();}
+ async prepareTyped(input:{scope:string;subscription:string;snapshot:string;entity:string}){
+  await this.initialize();if(!this.typedSchema)fail('INVALID_ROW','Typed snapshot schema was not installed');let physical!:string;
+  await this.db.withTransactionAsync(async()=>{await this.fence();physical=await prepareSQLiteTypedSnapshot(this.db,this.typedSchema!,input);});return physical;
+ }
  private stage(scope:string,subscription:string,snapshot:string){return this.db.getFirstAsync<SQLiteSnapshotStage>('SELECT metadata,next_page,rows,bytes,receipt,complete,digest,discarded FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);}
  async append(scope:string,input:SnapshotPage):Promise<SQLiteSnapshotProgress>{
   sqlitePayloadBytes(input,262144);identity(scope,input.id,input.snapshotId);
@@ -61,6 +67,7 @@ export class SQLiteSnapshotPages {
   await this.initialize();let output!:SQLiteSnapshotProgress;
   await this.db.withTransactionAsync(async()=>{
    await this.fence();
+   if(this.db.ingressNativeSnapshot&&await this.db.getFirstAsync('SELECT 1 FROM gv_snapshot_typed WHERE scope=? AND subscription=? AND snapshot=?',scope,page.id,page.snapshotId))fail('INVALID_ROW','Typed snapshots require canonical encoded frames');
    const {result,digest,...metadata}=page;sqlitePayloadBytes(metadata,16384);
    const prepared=await this.prepareFrame(scope,metadata,frameHash);
    if('snapshotId'in prepared){output=prepared;return;}
@@ -94,7 +101,7 @@ export class SQLiteSnapshotPages {
  async appendEncodedReceipt(scope:string,input:Uint8Array,joinOwnerTransaction=false):Promise<SQLiteSnapshotReceipt>{
   this.encoded??=new SQLiteEncodedSnapshotPages(this.db,this.fence,{
    initialize:()=>this.initialize(),prepare:(...args)=>this.prepareFrame(...args),finish:(...args)=>this.finishFrame(...args),
-  });
+  },this.typedSchema);
   return this.encoded.appendReceipt(scope,input,joinOwnerTransaction);
  }
  private async prepareFrame(scope:string,metadata:SQLiteSnapshotMetadata,frameHash:string):Promise<SQLiteSnapshotStage|SQLiteSnapshotProgress>{
@@ -138,9 +145,10 @@ export class SQLiteSnapshotPages {
   await this.db.withTransactionAsync(async()=>{
    await this.fence();const stage=await this.stage(scope,subscription,snapshot);
    if(!stage?.complete||stage.discarded)fail('PAGE_CHANGED','Snapshot has not been verified or was discarded');
+   const typedBody=await sqliteTypedSnapshotBody(this.db,this.typedSchema,scope,subscription,snapshot);
    let take=limit;
    for(;;){try{
-    const entries=await this.db.getAllAsync<{id:string;position:number;body:string;hash:string}>('SELECT id,position,body,hash FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? AND position>? ORDER BY position LIMIT ?',scope,subscription,snapshot,after,take);
+    const entries=await this.db.getAllAsync<{id:string;position:number;body:string;hash:string}>('SELECT id,position,'+(typedBody?typedBody+' body':'body')+',hash FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? AND position>? ORDER BY position LIMIT ?',scope,subscription,snapshot,after,take);
     if(!entries.length&&after+1<stage.rows)fail('INVALID_ROW','Verified snapshot lost rows');
     let bytes=64;for(const entry of entries){bytes+=entry.id.length*2+256+decodedJSONBytes(entry.body,262144-bytes);if(bytes>262144)fail('BUDGET','Snapshot decoded page exceeds budget');}
     const rows=entries.map(({id,position,body,hash})=>({id,position,row:JSON.parse(body) as ReplicaRow,hash}));
@@ -156,7 +164,8 @@ export class SQLiteSnapshotPages {
    await this.db.runAsync('UPDATE gv_snapshot_stages SET discarded=1 WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);
    const rows=await this.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM (SELECT id FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? LIMIT 128)',scope,subscription,snapshot);
    await this.db.runAsync('DELETE FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? AND id IN (SELECT id FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? LIMIT 128)',scope,subscription,snapshot,scope,subscription,snapshot);
-   if((rows?.n??0)<128){
+   const typedRemoved=await discardSQLiteTypedSnapshot(this.db,this.typedSchema,scope,subscription,snapshot);
+   if((rows?.n??0)<128&&typedRemoved){
     await this.db.runAsync('DELETE FROM gv_snapshot_frames WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);
     await this.db.runAsync('DELETE FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);removed=true;
    }

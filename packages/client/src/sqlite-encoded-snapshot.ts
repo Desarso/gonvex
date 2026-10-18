@@ -1,3 +1,5 @@
+import {SQLiteTypedSnapshotWriter} from './sqlite-typed-snapshot.js';
+import type {SQLiteTypedSchema} from './sqlite-typed-schema.js';
 import {appendFastSnapshot} from './sqlite-fast-snapshot.js';
 import {ByteLedger} from './byte-budget.js';
 import {admitSQLiteUTF8Frame,encodedFrameHasCanonicalStructure} from './sqlite-encoded-frame.js';
@@ -31,15 +33,17 @@ const keyedSQL=`WITH input AS MATERIALIZED(${rowsSQL}),keyed AS MATERIALIZED(
  * bounded (id,hash) frame receipts. */
 export class SQLiteEncodedSnapshotPages {
  private scratch?:Uint8Array;
+ private readonly typedWriter?:SQLiteTypedSnapshotWriter;
  private busy=false;
  private nativeReceiptFrames=0;
  private nativeReceiptRows=0;
  private decodedHashRows=0;
  private readonly ledger=new ByteLedger(131072);
- constructor(private readonly db:SQLiteReplicaDatabase,private readonly fence:()=>Promise<unknown>,private readonly backend:Backend){
+ constructor(private readonly db:SQLiteReplicaDatabase,private readonly fence:()=>Promise<unknown>,private readonly backend:Backend,typedSchema?:SQLiteTypedSchema){
+  if(typedSchema)this.typedWriter=new SQLiteTypedSnapshotWriter(db,typedSchema);
   this.ledger.register('snapshot-wire-scratch',()=>({name:'snapshot-wire-scratch',bytes:this.scratch?.byteLength??0,maxBytes:131072,entries:Number(!!this.scratch),maxEntries:1,evictions:0,refusals:0}));
  }
- stats(){return {wireBytes:this.ledger.bytes,wireMaxBytes:this.ledger.maxBytes,wireEntries:Number(!!this.scratch),nativeReceiptFrames:this.nativeReceiptFrames,nativeReceiptRows:this.nativeReceiptRows,decodedHashRows:this.decodedHashRows};}
+ stats(){return {wireBytes:this.ledger.bytes,wireMaxBytes:this.ledger.maxBytes,wireEntries:Number(!!this.scratch),nativeReceiptFrames:this.nativeReceiptFrames,nativeReceiptRows:this.nativeReceiptRows,decodedHashRows:this.decodedHashRows,...(this.typedWriter?{typedPlans:this.typedWriter.stats()}:{})};}
  async appendReceipt(scope:string,input:Uint8Array,joinOwnerTransaction=false):Promise<SQLiteSnapshotReceipt>{
   if(!joinOwnerTransaction)return this.consume(scope,input,false);
   if(!this.db.ownerTransactionDepth||!this.db.joinOwnerTransactionAsync)fail('FENCED','Snapshot batch requires an active owner transaction');
@@ -60,7 +64,7 @@ export class SQLiteEncodedSnapshotPages {
    await this.backend.initialize();
    if(this.db.ingressNativeSnapshot){
     if(!encodedFrameHasCanonicalStructure(owned))fail('INVALID_ROW','Invalid encoded snapshot frame');
-    const result=await appendFastSnapshot(this.db,this.fence,scope,owned,joinOwnerTransaction);
+    const result=await appendFastSnapshot(this.db,this.fence,scope,owned,joinOwnerTransaction,this.typedWriter);
     this.nativeReceiptRows+=result.rows;if(result.newFrame)this.nativeReceiptFrames++;
     return result.receipt;
    }

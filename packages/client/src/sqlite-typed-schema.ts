@@ -46,7 +46,7 @@ export function validateSQLiteTypedSchema(schema: SQLiteTypedSchema): void {
  * ingest. Count and FTS maintenance always shares the row write transaction. */
 export function compileSQLiteTypedSchema(schema: SQLiteTypedSchema): { tables: string; indexes: string; search: string } {
   validateSQLiteTypedSchema(schema);
-  const tables: string[] = [], indexes: string[] = [], search: string[] = [];
+  const tables: string[] = ['CREATE TABLE IF NOT EXISTS gv_fts_deferred(scope TEXT NOT NULL,entity TEXT NOT NULL,PRIMARY KEY(scope,entity)) WITHOUT ROWID;'], indexes: string[] = [], search: string[] = [];
   for (const [entity, table] of Object.entries(schema)) {
     const name = sqliteTableName(entity), tn = q(name);
     const fields = Object.entries(table.fields).map(([field, shape]) =>
@@ -73,10 +73,12 @@ export function compileSQLiteTypedSchema(schema: SQLiteTypedSchema): { tables: s
       const deleted = table.searchContent === 'external'
         ? `INSERT INTO ${fn}(${fn},rowid,${cols.join(',')}) VALUES('delete',OLD.rid,${cols.map(column => 'OLD.' + column).join(',')});`
         : `DELETE FROM ${fn} WHERE rowid=OLD.rid;`;
-      search.push(`CREATE TRIGGER IF NOT EXISTS ${q(name + '_fts_d')} AFTER DELETE ON ${tn} BEGIN ${deleted} END;`);
+      const enabled=(alias:string)=>`NOT EXISTS(SELECT 1 FROM gv_fts_deferred WHERE scope=${alias}.scope AND entity='${entity.replaceAll("'","''")}')`;
+      search.push(...['a','u','d'].map(suffix=>`DROP TRIGGER IF EXISTS ${q(name+'_fts_'+suffix)};`));
+      search.push(`CREATE TRIGGER IF NOT EXISTS ${q(name + '_fts_d')} AFTER DELETE ON ${tn} WHEN ${enabled('OLD')} BEGIN ${deleted} END;`);
       const inserted = `INSERT INTO ${fn}(rowid,${cols.join(',')}) VALUES(NEW.rid,${cols.map(column => 'NEW.' + column).join(',')});`;
-      search.push(`CREATE TRIGGER IF NOT EXISTS ${q(name + '_fts_a')} AFTER INSERT ON ${tn} BEGIN ${inserted} END;`,
-        `CREATE TRIGGER IF NOT EXISTS ${q(name + '_fts_u')} AFTER UPDATE ON ${tn} BEGIN ${deleted} ${inserted} END;`);
+      search.push(`CREATE TRIGGER IF NOT EXISTS ${q(name + '_fts_a')} AFTER INSERT ON ${tn} WHEN ${enabled('NEW')} BEGIN ${inserted} END;`,
+        `CREATE TRIGGER IF NOT EXISTS ${q(name + '_fts_u')} AFTER UPDATE ON ${tn} WHEN ${enabled('OLD')} AND ${enabled('NEW')} BEGIN ${deleted} ${inserted} END;`);
     }
   }
   return { tables: tables.join('\n'), indexes: indexes.join('\n'), search: search.join('\n') };

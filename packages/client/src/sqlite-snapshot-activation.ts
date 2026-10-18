@@ -1,3 +1,4 @@
+import {activateSQLiteTypedSnapshot} from './sqlite-typed-snapshot.js';
 import {insertFreshSnapshotRows,snapshotOverlapSchema} from './sqlite-snapshot-native-rows.js';
 import type {SQLiteTypedSchema} from './sqlite-typed-schema.js';
 import type {ReplicaRow,ReplicaStorageCommit} from './local-replica.js';
@@ -48,17 +49,19 @@ export class SQLiteSnapshotActivator {
     ||owned.header.aggregateDigest!==stage.digest||owned.header.completeness!==(metadata.truncated?'partial':'complete'))fail('INVALID_ROW','Snapshot activation does not match its certificate');
    receipt=await this.canonical.commitSnapshotActivation(owned.scope,metadata.cursor,async(merge,sequence)=>{
     const table=this.schema&&Object.hasOwn(this.schema,owned.header.entity)?this.schema[owned.header.entity]:undefined;
-    const fresh=table?await insertFreshSnapshotRows(this.db,table,{...owned,entity:owned.header.entity,revision:metadata.cursor.revision,sequence}):undefined;
+    const typed=this.schema?await activateSQLiteTypedSnapshot(this.db,this.schema,{...owned,entity:owned.header.entity,sequence,rows:stage.rows}):undefined;
+    const fresh=typed??(table?await insertFreshSnapshotRows(this.db,table,{...owned,entity:owned.header.entity,revision:metadata.cursor.revision,sequence}):undefined);
+    const body=typed?.body??'body';
     const overlap=fresh===undefined?'':' AND EXISTS(SELECT 1 FROM temp.gv_snapshot_overlap o WHERE o.id=gv_snapshot_rows.id)';
     let after=-1,seen=fresh?.freshRows??0;
     for(;;){
      // Size-only probes prevent decoding 100 individually large rows at once.
-     const sizes=await this.db.getAllAsync<{position:number;bytes:number}>('SELECT position,length(CAST(body AS BLOB))*2+256 bytes FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? AND position>?'+overlap+' ORDER BY position LIMIT 100',owned.scope,owned.subscription,owned.snapshot,after);
+     const sizes=await this.db.getAllAsync<{position:number;bytes:number}>('SELECT position,length(CAST('+body+' AS BLOB))*2+256 bytes FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? AND position>?'+overlap+' ORDER BY position LIMIT 100',owned.scope,owned.subscription,owned.snapshot,after);
      if(!sizes.length)break;
      let limit=0,bytes=0;
      for(const size of sizes){if(bytes+size.bytes>196608)break;bytes+=size.bytes;limit++;}
      if(!limit)fail('BUDGET','Snapshot row exceeds canonical merge budget');
-     const entries=await this.db.getAllAsync<{id:string;body:string;position:number}>('SELECT id,body,position FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? AND position>?'+overlap+' ORDER BY position LIMIT ?',owned.scope,owned.subscription,owned.snapshot,after,limit);
+     const entries=await this.db.getAllAsync<{id:string;body:string;position:number}>('SELECT id,'+body+(typed?' body': '')+',position FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=? AND position>?'+overlap+' ORDER BY position LIMIT ?',owned.scope,owned.subscription,owned.snapshot,after,limit);
      let decoded=64;
      for(let i=0;i<entries.length;i++){
       const entry=entries[i]!;
@@ -69,7 +72,6 @@ export class SQLiteSnapshotActivator {
      await merge(owned.header.entity,rows);
      seen+=rows.length;after=entries.at(-1)!.position;
     }
-    await this.db.runAsync('DELETE FROM temp.gv_snapshot_overlap');
     if(seen!==stage.rows)fail('INVALID_ROW','Verified snapshot lost canonical rows');
     // Retire removed members only when no other native window retains them.
     // The shared authority merge preserves newer values and newer tombstones.
@@ -88,6 +90,7 @@ export class SQLiteSnapshotActivator {
      removedAfter=removed.at(-1)!.position;
     }
     await fresh?.restoreIndexes();
+    await this.db.runAsync('DELETE FROM temp.gv_snapshot_overlap');
     // Membership and hash certificates move entirely inside SQLite.
     await this.windows.publishSnapshot(owned.scope,owned.header,owned.subscription,owned.snapshot);
    });

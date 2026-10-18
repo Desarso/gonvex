@@ -1,3 +1,5 @@
+import {type SQLiteTypedSnapshotWriter,typedSnapshotSchema} from './sqlite-typed-snapshot.js';
+import type {SQLiteTypedSchema} from './sqlite-typed-schema.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
 import type {SQLiteSnapshotMetadata,SQLiteSnapshotReceipt} from './sqlite-snapshot-pages.js';
 import {ReplicaSetDigest} from './replica-set-digest.js';
@@ -30,7 +32,7 @@ const required=['id','snapshotId','scope','visibilityScope','key','cursor.epoch'
  * is SDK-private; this SQL never accepts application SQL or entity table names.
  * Pure native hash/receipt functions must be explicitly marked innocuous by
  * the pinned host. JS callbacks remain DIRECTONLY and are never called here. */
-export const fastSnapshotSchema=`CREATE TABLE IF NOT EXISTS gv_snapshot_fast_input(
+export function compileFastSnapshotSchema(schema?:SQLiteTypedSchema){return `${typedSnapshotSchema}CREATE TABLE IF NOT EXISTS gv_snapshot_fast_input(
  id INTEGER PRIMARY KEY CHECK(id=1),scope TEXT NOT NULL,value BLOB NOT NULL,hash TEXT NOT NULL,
  zero BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS gv_snapshot_fast_state(id INTEGER PRIMARY KEY CHECK(id=1),metadata TEXT NOT NULL,n INTEGER NOT NULL,bytes INTEGER NOT NULL,replay INTEGER NOT NULL,before_rows INTEGER NOT NULL);
@@ -39,6 +41,7 @@ DROP TRIGGER IF EXISTS gv_snapshot_fast_cleanup;
 CREATE TRIGGER gv_snapshot_fast_cleanup AFTER DELETE ON gv_snapshot_fast_input BEGIN DELETE FROM gv_snapshot_fast_state; END;
 CREATE TRIGGER gv_snapshot_fast_append AFTER INSERT ON gv_snapshot_fast_input BEGIN
  ${guard(`NOT coalesce(json_type(NEW.value)='object' AND ${f('type')}='replica.snapshotEncodedPage' AND ${t('canonicalRows')}='array' AND (${required}) AND ${f('visibilityScope')}=NEW.scope AND ${safeInteger('sequence')} AND ${safeInteger('cursor.revision')} AND ${t('last')} IN ('true','false'),0)`,'INVALID_ROW','Invalid native snapshot header')}
+ ${schema?'':guard(`EXISTS(SELECT 1 FROM gv_snapshot_typed b WHERE b.scope=NEW.scope AND b.subscription=${id} AND b.snapshot=${snapshot})`,'INVALID_ROW','Typed snapshot requires its generated schema')}
  ${guard(`${t('result')} IS NOT NULL OR ${t('hashes')} IS NOT NULL`,'INVALID_ROW','Unexpected snapshot row representation')}
  ${['maxRows','maxBytes'].map(name=>guard(`${t(name)} IS NOT NULL AND NOT coalesce(${safeInteger(name)},0)`,'INVALID_ROW','Invalid snapshot budget')).join('\n')}
  ${['mode','orderBy','orderDirection','path','digest'].map(name=>guard(`${t(name)} IS NOT NULL AND ${t(name)}<>'text'`,'INVALID_ROW','Invalid snapshot metadata')).join('\n')}
@@ -58,13 +61,14 @@ CREATE TRIGGER gv_snapshot_fast_append AFTER INSERT ON gv_snapshot_fast_input BE
  ${guard(`NOT EXISTS(SELECT 1 FROM gv_snapshot_stages WHERE ${selected}) AND (SELECT count(*) FROM gv_snapshot_stages WHERE scope=NEW.scope AND subscription=${id})>=2`,'BUDGET','Collect obsolete snapshot stages first')}
  INSERT INTO gv_snapshot_stages SELECT NEW.scope,${id},${snapshot},${slot('metadata')},0,0,0,NEW.zero,0,NULL,0 WHERE NOT EXISTS(SELECT 1 FROM gv_snapshot_stages WHERE ${selected});
  UPDATE gv_snapshot_fast_state SET replay=${sequence}<${stage},before_rows=(SELECT rows FROM gv_snapshot_stages WHERE ${selected}) WHERE id=1;
- INSERT INTO gv_snapshot_rows SELECT NEW.scope,${id},${snapshot},${key('value')},${slot('before_rows')}+CAST(key AS INTEGER),value,gv_ingress_sha256(value) FROM ${rows} WHERE ${newFrame};
+ INSERT INTO gv_snapshot_rows SELECT NEW.scope,${id},${snapshot},${key('value')},${slot('before_rows')}+CAST(key AS INTEGER),${schema?`CASE WHEN EXISTS(SELECT 1 FROM gv_snapshot_typed b WHERE b.scope=NEW.scope AND b.subscription=${id} AND b.snapshot=${snapshot}) THEN '{}' ELSE value END`:'value'},gv_ingress_sha256(value) FROM ${rows} WHERE ${newFrame};
  UPDATE gv_snapshot_stages SET receipt=coalesce((SELECT gv_ingress_receipt_step(gv_snapshot_stages.receipt,hash,1) FROM gv_snapshot_rows WHERE ${selected} AND position>=${slot('before_rows')} AND position<${slot('before_rows')}+${slot('n')}),receipt),rows=rows+${slot('n')},bytes=bytes+${slot('bytes')} WHERE ${selected} AND ${newFrame};
  ${guard(`EXISTS(SELECT 1 FROM gv_snapshot_stages WHERE ${selected} AND (rows<>gv_ingress_receipt_count(receipt) OR rows>9007199254740991 OR bytes>9007199254740991 OR coalesce(${f('maxRows')},0)>0 AND rows>${f('maxRows')} OR coalesce(${f('maxBytes')},0)>0 AND bytes>${f('maxBytes')}))`,'BUDGET','snapshot-page-budget-exceeded')}
  ${guard(`${newFrame} AND (${last}) AND EXISTS(SELECT 1 FROM gv_snapshot_stages WHERE ${selected} AND CASE WHEN ${f('digest')} LIKE 'sum128-v1:%' THEN gv_ingress_receipt_digest(receipt) WHEN ${f('digest')} LIKE 'xor1:%' THEN gv_ingress_receipt_xor(receipt) ELSE NULL END IS NOT ${f('digest')})`,'INVALID_ROW','snapshot-page-integrity-mismatch')}
  INSERT INTO gv_snapshot_frames SELECT NEW.scope,${id},${snapshot},${sequence},NEW.hash WHERE ${newFrame};
  UPDATE gv_snapshot_stages SET next_page=${sequence}+1,complete=(${last}),digest=CASE WHEN (${last}) THEN ${f('digest')} ELSE NULL END WHERE ${selected} AND ${newFrame};
-END;`;
+END;`;}
+export const fastSnapshotSchema=compileFastSnapshotSchema();
 
 function fastFailure(error:unknown):never{
  const message=String((error as Error).message),known=message.match(/GV_SNAPSHOT_(BUDGET|INVALID_ROW|PAGE_CHANGED|INTENT_CONFLICT):([^\n]*)/);
@@ -73,13 +77,14 @@ function fastFailure(error:unknown):never{
  throw error;
 }
 const zero=new ReplicaSetDigest().encode();
-export async function appendFastSnapshot(db:SQLiteReplicaDatabase,fence:()=>Promise<unknown>,scope:string,bytes:Uint8Array,join:boolean):Promise<{receipt:SQLiteSnapshotReceipt;rows:number;newFrame:boolean}>{
+export async function appendFastSnapshot(db:SQLiteReplicaDatabase,fence:()=>Promise<unknown>,scope:string,bytes:Uint8Array,join:boolean,typedWriter?:SQLiteTypedSnapshotWriter):Promise<{receipt:SQLiteSnapshotReceipt;rows:number;newFrame:boolean}>{
  let output!:{receipt:SQLiteSnapshotReceipt;rows:number;newFrame:boolean};
  const run=async()=>{
   await fence();await db.runAsync('DELETE FROM gv_snapshot_fast_input');
   try{
    await db.runAsync(`WITH wire AS MATERIALIZED(SELECT CAST(? AS TEXT) raw)
     INSERT INTO gv_snapshot_fast_input(id,scope,value,hash,zero) SELECT 1,?,jsonb(raw),gv_ingress_sha256(raw),? FROM wire WHERE json_valid(raw)`,bytes,scope,zero);
+   await typedWriter?.append();
    const row=await db.getFirstAsync<{metadata:string;n:number;replay:number;next_page:number;rows:number;complete:number;digest:string|null;sequence:number}>(`SELECT c.metadata,c.n,c.replay,s.next_page,s.rows,s.complete,s.digest,json_extract(i.value,'$.sequence') sequence FROM gv_snapshot_fast_input i JOIN gv_snapshot_fast_state c USING(id)
     JOIN gv_snapshot_stages s ON s.scope=i.scope AND s.subscription=json_extract(i.value,'$.id') AND s.snapshot=json_extract(i.value,'$.snapshotId') WHERE i.id=1`);
    if(!row)fail('INVALID_ROW','Invalid native snapshot JSON');
