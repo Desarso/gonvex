@@ -1,3 +1,5 @@
+import type { SQLitePagePlan } from './sqlite-typed-query.js';
+import type { SQLiteTypedViewPage } from './sqlite-typed-engine.js';
 import { admitOwnedReplicaRow, compactReplicaRow, mergeCompactReplicaRow } from "./compact-row.js";
 import { RowRecency } from "./row-recency.js";
 import { ResidentMap } from "./resident-map.js";
@@ -123,6 +125,9 @@ export type ReplicaWindowDelta = {
  * implementations use one readwrite transaction over the same stores.
  */
 export interface LocalReplicaStorage {
+  /** SDK-internal native page operation. Coverage and optimistic overlay
+   * eligibility remain the client's responsibility; this reads canonical rows. */
+  readViewPage?(scope: string, signature: string, plan: SQLitePagePlan, offset?: number): Promise<SQLiteTypedViewPage>;
   loadWorkingSet?(scope:string,budget:{maxRows:number;maxBytes:number;preferredWindows?:readonly string[]}):Promise<ReplicaSnapshot | undefined>;
   loadWindowRows?(scope:string,signature:string):Promise<{window:ReplicaWindow;rows:ReplicaRow[]} | undefined>;
   loadEntityRows?(scope:string,entity:string,ids:readonly string[]):Promise<Array<{id:string;row:ReplicaRow}>>;

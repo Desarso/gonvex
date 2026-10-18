@@ -10,19 +10,19 @@ export type RemoteStorageLimits = {
   timeoutMs: number;
   readView: RemoteReadLimits;
 };
-const methods = ['load', 'readChanges', 'loadWorkingSet', 'loadWindowRows', 'loadEntityRows', 'loadSession', 'saveSession',
+const methods = ['load', 'readViewPage', 'readChanges', 'loadWorkingSet', 'loadWindowRows', 'loadEntityRows', 'loadSession', 'saveSession',
   'applyTransaction', 'advanceWatermark', 'replaceSnapshot', 'replaceWindow', 'applyWindowDelta', 'removeWindow', 'clear'] as const;
 type Method = typeof methods[number];
 type Request = { id: number; method: Method | 'readView'; args: unknown[]; readPort?: MessagePort };
-type Reply = { id: number; value?: unknown; error?: { name: string; message: string } };
+type Reply = { id: number; value?: unknown; error?: { name: string; message: string; code?: string } };
 const noop = () => {};
 function validate(limits: RemoteStorageLimits) {
   for (const value of [limits.maxInputBytes, limits.maxQueuedBytes, limits.maxOperations, limits.maxResultBytes, limits.timeoutMs])
     if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('Positive finite storage-channel limits required');
 }
-function restored(error: { name: string; message: string }) {
+function restored(error: { name: string; message: string; code?: string }) {
   const value = error.name === 'RangeError' ? new RangeError(error.message) : new Error(error.message);
-  value.name = error.name; return value;
+  value.name = error.name; if (error.code) Object.assign(value, { code: error.code }); return value;
 }
 function snapshotCursor(snapshot: ReplicaSnapshot): ReplicaSnapshot {
   return { entities: {}, liveQueries: {}, ...(snapshot.cursor ? { cursor: snapshot.cursor } : {}) };
@@ -72,6 +72,7 @@ export function remoteSQLiteStorage(port: MessagePort, limits: RemoteStorageLimi
     ownsWorkingSetRows: true,
     ownsHydrationRows: true,
     load: scope => request('load', [scope]),
+    readViewPage: (scope, signature, plan, offset = 0) => request('readViewPage', [scope, signature, plan, offset]),
     // The proxy intentionally does not advertise supportsResidentLookup.
     // LocalReplica supplies bounded row IDs instead of an uncloneable callback.
     readChanges: (scope, sequence, interest) => request('readChanges', [scope, sequence, interest]),
@@ -124,7 +125,7 @@ export function serveSQLiteStorage(port: MessagePort, storage: SQLiteLocalReplic
   const queue: Array<{ request: Request; bytes: number }> = [];
   let queuedBytes = 0, active = false, disposed = false, draining: Promise<void> = Promise.resolve();
   function reply(id: number, value?: unknown, error?: unknown) {
-    if (error) port.postMessage({ id, error: { name: error instanceof Error ? error.name : 'Error', message: String(error instanceof Error ? error.message : error).slice(0, 2048) } } satisfies Reply);
+    if (error) port.postMessage({ id, error: { name: error instanceof Error ? error.name : 'Error', message: String(error instanceof Error ? error.message : error).slice(0, 2048), ...(typeof (error as { code?: unknown })?.code === 'string' ? { code: (error as { code: string }).code } : {}) } } satisfies Reply);
     else { readViewMessageBytes(value, limits.maxResultBytes); port.postMessage({ id, value } satisfies Reply); }
   }
   async function drain() {

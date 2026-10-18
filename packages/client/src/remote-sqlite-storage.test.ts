@@ -1,3 +1,4 @@
+import { sqliteTypedReplicaStorage } from './sqlite-typed-row-layout';
 import { afterEach, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { SQLiteLocalReplicaStorage, type SQLiteReplicaDatabase } from './sqlite-replica-storage';
@@ -6,7 +7,7 @@ const limits:RemoteStorageLimits={maxInputBytes:16384,maxQueuedBytes:32768,maxOp
  readView:{maxInputBytes:16384,maxResultBytes:16384,maxResultRows:2,maxViewBytes:32768,timeoutMs:500}};
 const cleanup:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const close of cleanup.splice(0))await close();});
-function fixture(options=limits,hostOptions=options){
+function fixture(options=limits,hostOptions=options,typed=false){
  const native=new DatabaseSync(':memory:'),events:string[]=[];
  const db:SQLiteReplicaDatabase={
   async execAsync(sql){native.exec(sql);},
@@ -15,7 +16,7 @@ function fixture(options=limits,hostOptions=options){
   async getFirstAsync<T>(sql,...args){return (native.prepare(sql).get(...args as any[]) as T)??null;},
   async withTransactionAsync(run){native.exec('BEGIN');events.push('begin');try{await run();native.exec('COMMIT');events.push('commit');}catch(error){native.exec('ROLLBACK');events.push('rollback');throw error;}}
  };
- const local=new SQLiteLocalReplicaStorage(db),channel=new MessageChannel();
+ const local=typed ? sqliteTypedReplicaStorage(db,{tasks:{key:'_id',fields:{_id:{kind:'text'},name:{kind:'text'},due:{kind:'number'}},indexes:[{columns:['due']}]}}) : new SQLiteLocalReplicaStorage(db),channel=new MessageChannel();
  const host=serveSQLiteStorage(channel.port2,local,hostOptions),remote=remoteSQLiteStorage(channel.port1,options);
  cleanup.push(async()=>{remote.dispose();await host.dispose();native.close();});
  return {local,remote,events};
@@ -101,4 +102,25 @@ it('forwards committed authority and bounded peer reconciliation through the act
  expect(stale).toMatchObject({previousSequence:1,sequence:2,changes:{entities:{tasks:{t:{name:'Fresh'}}}}});
  const changes=await remote.readChanges!('s',0,{rows:{tasks:['t']},windows:[],availableRows:0,availableBytes:0,maxRows:1,maxBytes:10000});
  expect(changes.entities.tasks!.t!.name).toBe('Fresh');expect(changes.sequence).toBe(2);
+});
+
+it('serves deep native pages through the same FIFO actor as canonical writes',async()=>{
+ const {local,remote}=fixture(limits,limits,true);
+ await local.replaceSnapshot({entities:{tasks:Object.fromEntries(Array.from({length:200},(_,n)=>[String(n),{_id:String(n),name:'Task '+n,due:n}]))},liveQueries:{},cursor:{epoch:'e',revision:1}},'s');
+ const plan={table:'tasks',order:[{field:'due',direction:'asc'}],select:['name'],limit:2} as const;
+ const first=remote.readViewPage!('s','grid',plan,190);
+ const write=remote.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'190',operation:'update',newValue:{due:-1}}]},empty,'s');
+ const last=remote.readViewPage!('s','grid',plan,0);
+ const [before,,after]=await Promise.all([first,write,last]);
+ expect(before.rows.map(row=>row._id)).toEqual(['190','191']);
+ expect(after.rows.map(row=>row._id)).toEqual(['190','0']);
+ expect(after.sequence).toBeGreaterThan(before.sequence);
+ expect(before.total).toBe(200);expect(after.total).toBe(200);
+});
+it('preserves native budget failure codes across the actor and continues with a narrow projection',async()=>{
+ const {local,remote}=fixture(limits,limits,true);
+ await local.replaceSnapshot({entities:{tasks:{wide:{_id:'wide',name:'Wide',due:1,data:Array.from({length:5000},()=>null)}}},liveQueries:{}},'s');
+ const plan={table:'tasks',order:[{field:'due',direction:'asc'}],limit:1} as const;
+ await expect(remote.readViewPage!('s','full',plan,0)).rejects.toMatchObject({code:'BUDGET'});
+ expect((await remote.readViewPage!('s','narrow',{...plan,select:['name']},0)).rows).toEqual([{_id:'wide',name:'Wide'}]);
 });
