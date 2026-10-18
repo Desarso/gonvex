@@ -49,7 +49,7 @@ const handlers = {
         yield encoded ? JSON.stringify(page) : page;
       }
     })());
-    return { ...result, ms: performance.now() - begin, memoryBytes: host.memoryBytes() };
+    return { ...result, ms: performance.now() - begin, memoryBytes: host.memoryBytes(), profile: { ...engine.takeProfile(), transactions: host.takeProfile() } };
   },
   async page(args) { const begin = performance.now(); const result = await engine.page('test-scope', { table: 'tasks', order: [{ field: 'due', direction: 'asc' }], limit: 50, select: ['name', 'due', 'workspace'], ...args }); return { ...result, ms: performance.now() - begin }; },
   async count() { return engine.count('test-scope', 'tasks', 0, ['3']); },

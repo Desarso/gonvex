@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
         // and receipts: its upgrade neither decodes nor rewrites that corpus.
         if (old && old.schema !== signature && old.schema !== JSON.stringify({ format: 3, tables: this.schema })) fail('SCHEMA_MISMATCH', 'SQLite layout requires an explicit migration');
         await this.db.execAsync(ddl.tables);
-        if (!await this.indexesDeferred()) await this.db.execAsync(ddl.indexes + '\n' + ddl.search);
+        if (!await this.indexesDeferred() && (ddl.indexes || ddl.search)) await this.db.execAsync(ddl.indexes + '\n' + ddl.search);
         this.epoch = (old?.epoch ?? 0) + 1;
         if (!Number.isSafeInteger(this.epoch)) fail('FENCED', 'SQLite epoch exhausted');
         await this.db.runAsync('INSERT INTO gv_storage_meta VALUES(1,?,?,?,0) ON CONFLICT(id) DO UPDATE SET schema=excluded.schema,epoch=excluded.epoch,owner=excluded.owner', signature, this.epoch, owner);
@@ -140,9 +140,9 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
     if (!await this.indexesDeferred()) return;
     const ddl = compileSQLiteTypedSchema(this.schema);
     let timed = performance.now();
-    await this.db.execAsync(ddl.indexes);
+    if (ddl.indexes) await this.db.execAsync(ddl.indexes);
     this.profile.indexBuildMs += performance.now() - timed; timed = performance.now();
-    await this.db.execAsync(ddl.search);
+    if (ddl.search) await this.db.execAsync(ddl.search);
     for (const [entity, table] of Object.entries(this.schema)) if (table.search?.length) {
       const tn = q(sqliteTableName(entity)), fn = q(sqliteSearchName(entity)), columns = table.search.map((_, i) => q('s' + i)).join(',');
       let after = 0;
@@ -415,18 +415,9 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
         for (const table of ['gv_tombstones', 'gv_intent_receipts', 'gv_outbox'])
           if (await this.db.getFirstAsync(`SELECT 1 FROM ${table} WHERE scope=? LIMIT 1`, scope))
             fail('INVALID_ROW', 'Bootstrap import cannot replace pending work or tombstones');
-        // Only a completely empty canonical database may defer global indexes.
-        // Existing scopes keep every index/trigger available throughout import.
-        let deferIndexes = true;
-        for (const entity of Object.keys(this.schema)) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} LIMIT 1`)) { deferIndexes = false; break; }
-        if (deferIndexes) for (const [entity, table] of Object.entries(this.schema)) {
-          const name = sqliteTableName(entity);
-          for (let i = 0; i < table.indexes.length; i++) await this.db.execAsync(`DROP INDEX IF EXISTS ${q(name + '_i_' + i)}`);
-          if (table.search?.length) {
-            for (const suffix of ['a', 'u', 'd']) await this.db.execAsync(`DROP TRIGGER IF EXISTS ${q(name + '_fts_' + suffix)}`);
-            await this.db.execAsync(`DROP TABLE IF EXISTS ${q(sqliteSearchName(entity))}`);
-          }
-        }
+        // The same journaled index builder serves both bootstrap paths. In
+        // this path the entire journal and corpus roll back together on error.
+        await this.suspendBootstrapIndexes('atomic-import');
         let rows = 0, sliceStarted = performance.now();
         for await (const page of source) {
           let admitted: SQLiteTypedWrite[];
@@ -450,21 +441,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
             sliceStarted = performance.now();
           }
         }
-        if (deferIndexes) {
-          const ddl = compileSQLiteTypedSchema(this.schema);
-          await this.db.execAsync(ddl.indexes + '\n' + ddl.search);
-          for (const [entity, table] of Object.entries(this.schema)) if (table.search?.length) {
-            const tn = q(sqliteTableName(entity)), fn = q(sqliteSearchName(entity)), columns = table.search.map((_, i) => q('s' + i)).join(',');
-            let after = 0;
-            for (;;) {
-              const last = (await this.db.getFirstAsync<{ last: number | null }>(`SELECT max(rid) last FROM (SELECT rid FROM ${tn} WHERE rid>? ORDER BY rid LIMIT 512)`, after))?.last;
-              if (last == null) break;
-              await this.db.runAsync(`INSERT INTO ${fn}(rowid,${columns}) SELECT rid,${columns} FROM ${tn} WHERE rid>? AND rid<=? ORDER BY rid`, after, last);
-              after = last;
-              await new Promise<void>(resolve => setTimeout(resolve, 0));
-            }
-          }
-        }
+        await this.restoreBootstrapIndexes();
         result = { sequence: previous + 1, rows };
         await this.db.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1', result.sequence);
       });

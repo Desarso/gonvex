@@ -136,3 +136,17 @@ it.each(['full', 'column', 'none'] as const)('preserves literal substring querie
   expect((await engine.page('s', { table: 'records', search: 'needle', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows.map(row => row._id)).toEqual(['c']);
   expect((await engine.page('s', { table: 'records', search: 'Fresh phrase', order: [{ field: 'rank', direction: 'asc' }], limit: 50 })).rows.map(row => row._id)).toEqual(['a']);
 });
+
+it('opens and imports a schema without optional secondary indexes or FTS', async () => {
+  const { host } = fixture();
+  const engine = new SQLiteTypedReplicaEngine(host.database, { records: { key: '_id', fields: { _id: { kind: 'text' } }, indexes: [] } });
+  await engine.open('owner');
+  await engine.importScope('atomic', (async function* () { yield JSON.stringify([{ table: 'records', id: 'a', version: 1, row: { _id: 'a' } }]); })());
+  await engine.beginBootstrap('restartable', 'token');
+  const state = await engine.appendBootstrap('restartable', 'token', 0, JSON.stringify([{ table: 'records', id: 'b', version: 1, row: { _id: 'b' } }]));
+  await engine.finishBootstrap('restartable', 'token', { pages: state.nextPage, rows: state.rows, root: state.root });
+  const plan = { table: 'records', order: [{ field: '_id', direction: 'asc' }], textOrder: 'binary', limit: 2 } as const;
+  expect((await engine.page('atomic', plan)).rows).toEqual([{ _id: 'a' }]);
+  expect((await engine.page('restartable', plan)).rows).toEqual([{ _id: 'b' }]);
+  expect(await host.database.getFirstAsync('SELECT count(*) n FROM gv_storage_flags')).toEqual({ n: 0 });
+});

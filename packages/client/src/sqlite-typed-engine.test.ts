@@ -175,6 +175,7 @@ it('restores deferred indexes after bootstrap failure and maintains FTS on later
   const before = db.prepare("SELECT name FROM sqlite_master WHERE type IN ('index','trigger') ORDER BY name").all();
   await expect(engine.importScope('fresh', (async function* () { yield [write('a', 1, 'needle')]; throw Error('broken frame'); })())).rejects.toThrow('broken frame');
   expect(db.prepare("SELECT name FROM sqlite_master WHERE type IN ('index','trigger') ORDER BY name").all()).toEqual(before);
+  expect(db.prepare("SELECT count(*) n FROM gv_storage_flags").get()!.n).toBe(0);
   await engine.importScope('fresh', (async function* () { yield JSON.stringify([write('a', 1, 'needle')]); })());
   expect((await engine.page('fresh', { ...plan, search: 'needle' })).rows).toHaveLength(1);
   await engine.apply('fresh', [write('b', 2, 'needle two')]);
