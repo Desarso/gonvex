@@ -15,6 +15,8 @@ it('routes restartable first-sync frames through the real owner queue and publis
     async getAllAsync<T>(sql: string, ...args: unknown[]) { return db.prepare(sql).all(...args as any[]) as T[]; },
     async withTransactionAsync(run) { db.exec('BEGIN'); try { await run(); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; } },
   };
+  db.function('gv_ingress_sha256',value=>value===null?null:createHash('sha256').update(typeof value==='string'?value:value as Uint8Array).digest('hex'));
+  Object.assign(database,{ingressNativeHash:true});
   mocked.host = { database, memoryBytes: () => 0, close: async () => {} };
   const awaiting = new Map<string, (reply: any) => void>(), changes: any[] = [];
   vi.stubGlobal('postMessage', (message: any) => {
@@ -70,6 +72,11 @@ it('routes restartable first-sync frames through the real owner queue and publis
     expect((await request('canonicalCall',canonicalPage)).value.value.rows[0].name).toBe('Updated needle');
     expect(changes.length).toBe(published+2); // Isolated stages do not publish canonical changes.
     expect((await request('snapshotDiscard',{scope:'s',subscription:'source',snapshot:'disk'})).value.removed).toBe(true);
+    const encodedSnapshot=new TextEncoder().encode(JSON.stringify({...stage,type:'replica.snapshotEncodedPage',result:undefined,canonicalRows:rows.map(row=>JSON.stringify(row))}));
+    expect((await request('snapshotAppendEncoded',{scope:'s',encoded:encodedSnapshot})).value.complete).toBe(true);
+    expect((await request('snapshotRead',{scope:'s',subscription:'source',snapshot:'disk'})).value.rows[0].row.name).toBe('old snapshot');
+    expect(changes.length).toBe(published+2);
+
 
   } finally {
     interval.mockRestore(); vi.unstubAllGlobals(); delete (globalThis as any).onmessage; db.close();

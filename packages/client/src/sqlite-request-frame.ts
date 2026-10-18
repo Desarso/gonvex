@@ -1,7 +1,7 @@
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 
 function frame(op:string,args:unknown):Uint8Array|undefined {
-  if(op!=='bootstrapAppend'||!args||typeof args!=='object')return;
+  if(op!=='bootstrapAppend'&&op!=='snapshotAppendEncoded'||!args||typeof args!=='object')return;
   const descriptor=Object.getOwnPropertyDescriptor(args,'encoded');
   if(!descriptor||!('value'in descriptor))return;
   const encoded=descriptor.value;

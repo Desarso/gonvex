@@ -3,8 +3,8 @@ import {sqliteRequestBytes,sqliteTransferRequest} from './sqlite-request-frame.j
 it('transfers each bounded delivery without detaching immutable replay bytes',()=>{
   const encoded=new TextEncoder().encode('東京'),args={scope:'s',encoded};
   expect(sqliteRequestBytes('bootstrapAppend',args,1024)).toBeGreaterThan(encoded.byteLength*2);
-  for(let i=0;i<2;i++) {
-    const outgoing=sqliteTransferRequest('bootstrapAppend',args);
+  for(const op of ['bootstrapAppend','snapshotAppendEncoded'])for(let i=0;i<2;i++) {
+    const outgoing=sqliteTransferRequest(op,args);
     const result=structuredClone(outgoing.args,{transfer:outgoing.transfer}) as typeof args;
     expect(result.encoded).toEqual(encoded);expect(encoded.byteLength).toBe(6);
     expect((outgoing.args as typeof args).encoded.byteLength).toBe(0);

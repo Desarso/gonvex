@@ -9,6 +9,7 @@ export function sqliteOwnerTransactions(database: SQLiteReplicaDatabase): SQLite
   return {
     ...(database.ingressUnicodeFold ? {ingressUnicodeFold:true as const} : {}),
     ...(database.ingressNativeFastFold ? {ingressNativeFastFold:true as const} : {}),
+    ...(database.ingressNativeHash ? {ingressNativeHash:true as const} : {}),
     execAsync:sql=>database.execAsync(sql),
     runAsync:(sql,...params)=>database.runAsync(sql,...params),
     getAllAsync:<T>(sql:string,...params:unknown[])=>database.getAllAsync<T>(sql,...params),

@@ -1,3 +1,4 @@
+import {SQLiteEncodedSnapshotPages} from './sqlite-encoded-snapshot.js';
 import type {ReplicaRow} from './local-replica.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
 import {decodedJSONBytes,fail,pageBudgetError,sqlitePayloadBytes} from './sqlite-admission.js';
@@ -6,10 +7,11 @@ import {ReplicaSetDigest} from './replica-set-digest.js';
 import {sameSnapshotPageMetadata,type SnapshotPage} from './snapshot-pages.js';
 import {yieldSQLiteTask} from './sqlite-task-yield.js';
 
-type Metadata=Omit<SnapshotPage,'result'|'digest'>;
-type Stage={metadata:string;next_page:number;rows:number;bytes:number;receipt:Uint8Array;complete:number;digest:string|null;discarded:number};
+export type SQLiteSnapshotMetadata=Omit<SnapshotPage,'result'|'digest'>;
+export type SQLiteSnapshotStage={metadata:string;next_page:number;rows:number;bytes:number;receipt:Uint8Array;complete:number;digest:string|null;discarded:number};
 export type SQLiteSnapshotProgress={snapshotId:string;nextPage:number;rows:number;complete:boolean;digest?:string};
-const schema=`CREATE TABLE IF NOT EXISTS gv_snapshot_stages(
+const schema=`CREATE TABLE IF NOT EXISTS gv_snapshot_input(id INTEGER PRIMARY KEY CHECK(id=1),value BLOB NOT NULL,hash TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS gv_snapshot_stages(
  scope TEXT NOT NULL,subscription TEXT NOT NULL,snapshot TEXT NOT NULL,metadata TEXT NOT NULL,
  next_page INTEGER NOT NULL,rows INTEGER NOT NULL,bytes INTEGER NOT NULL,receipt BLOB NOT NULL,
  complete INTEGER NOT NULL,digest TEXT,discarded INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,subscription,snapshot)) WITHOUT ROWID;
@@ -21,7 +23,7 @@ const schema=`CREATE TABLE IF NOT EXISTS gv_snapshot_stages(
  scope TEXT NOT NULL,subscription TEXT NOT NULL,snapshot TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,
  PRIMARY KEY(scope,subscription,snapshot,page)) WITHOUT ROWID;`;
 const encoder=new TextEncoder();
-const progress=(snapshotId:string,stage:Stage):SQLiteSnapshotProgress=>({snapshotId,nextPage:stage.next_page,rows:stage.rows,complete:!!stage.complete,...(stage.digest?{digest:stage.digest}:{})});
+const progress=(snapshotId:string,stage:SQLiteSnapshotStage):SQLiteSnapshotProgress=>({snapshotId,nextPage:stage.next_page,rows:stage.rows,complete:!!stage.complete,...(stage.digest?{digest:stage.digest}:{})});
 function identity(scope:string,subscription:string,snapshot:string){
  if(typeof scope!=='string'||!scope||scope.length>512||typeof subscription!=='string'||!subscription||subscription.length>256||typeof snapshot!=='string'||!snapshot||snapshot.length>128)throw new TypeError('Invalid snapshot identity');
 }
@@ -34,12 +36,13 @@ async function hashFrame(encoded:string){return [...new Uint8Array(await crypto.
  * retained, and an incomplete stage can never grant reducer coverage. */
 export class SQLiteSnapshotPages {
  private initialized=false;
+ private encoded?:SQLiteEncodedSnapshotPages;
  constructor(private readonly db:SQLiteReplicaDatabase,private readonly fence:()=>Promise<unknown>){}
  private async initialize(){
   if(this.initialized)return;
   await this.db.withTransactionAsync(async()=>{await this.fence();await this.db.execAsync(schema);});this.initialized=true;
  }
- private stage(scope:string,subscription:string,snapshot:string){return this.db.getFirstAsync<Stage>('SELECT metadata,next_page,rows,bytes,receipt,complete,digest,discarded FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);}
+ private stage(scope:string,subscription:string,snapshot:string){return this.db.getFirstAsync<SQLiteSnapshotStage>('SELECT metadata,next_page,rows,bytes,receipt,complete,digest,discarded FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);}
  async append(scope:string,input:SnapshotPage):Promise<SQLiteSnapshotProgress>{
   sqlitePayloadBytes(input,262144);identity(scope,input.id,input.snapshotId);
   // Snapshot caller ownership before the first async boundary.
@@ -52,25 +55,11 @@ export class SQLiteSnapshotPages {
   const frameHash=await hashFrame(encoded);
   await this.initialize();let output!:SQLiteSnapshotProgress;
   await this.db.withTransactionAsync(async()=>{
-   await this.fence();let stage=await this.stage(scope,page.id,page.snapshotId);
+   await this.fence();
    const {result,digest,...metadata}=page;sqlitePayloadBytes(metadata,16384);
-   if(stage){
-    if(stage.discarded)fail('PAGE_CHANGED','Snapshot is being discarded');
-    if(!sameSnapshotPageMetadata(metadata,JSON.parse(stage.metadata) as Metadata))fail('INTENT_CONFLICT','Snapshot metadata changed');
-    if(page.sequence<stage.next_page){
-     const receipt=await this.db.getFirstAsync<{hash:string}>('SELECT hash FROM gv_snapshot_frames WHERE scope=? AND subscription=? AND snapshot=? AND page=?',scope,page.id,page.snapshotId,page.sequence);
-     if(receipt?.hash!==frameHash)fail('INTENT_CONFLICT','Snapshot page replay changed its payload');
-     output=progress(page.snapshotId,stage);return;
-    }
-    if(stage.complete)fail('PAGE_CHANGED','Snapshot is already verified');
-   }else{
-    if(page.sequence!==0)fail('PAGE_CHANGED','Snapshot must start at page zero');
-    const active=(await this.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_stages WHERE scope=? AND subscription=?',scope,page.id))!.n;
-    if(active>=2)fail('BUDGET','Collect obsolete snapshot stages first');
-    stage={metadata:JSON.stringify(metadata),next_page:0,rows:0,bytes:0,receipt:new ReplicaSetDigest().encode(),complete:0,digest:null,discarded:0};
-    await this.db.runAsync('INSERT INTO gv_snapshot_stages VALUES(?,?,?,?,0,0,0,?,0,NULL,0)',scope,page.id,page.snapshotId,stage.metadata,stage.receipt);
-   }
-   if(page.sequence!==stage.next_page)fail('PAGE_CHANGED','Snapshot page arrived out of sequence');
+   const prepared=await this.prepareFrame(scope,metadata,frameHash);
+   if('snapshotId'in prepared){output=prepared;return;}
+   const stage=prepared;
    const bodies=result.map(row=>JSON.stringify(row));
    let bytes=stage.bytes;for(const body of bodies)bytes+=encoder.encode(body).byteLength;
    const rows=stage.rows+result.length;
@@ -90,15 +79,49 @@ export class SQLiteSnapshotPages {
     }
     await this.db.runAsync(`INSERT INTO gv_snapshot_rows VALUES ${Array.from({length:count},()=>'(?,?,?,?,?,?,?)').join(',')}`,...values);
    }
-   if(page.last){
-    const actual=digest?.startsWith('sum128-v1:')?state.digest():digest?.startsWith('xor1:')?state.legacyDigest():undefined;
-    if(!actual||actual!==digest)throw new TypeError('snapshot-page-integrity-mismatch');
-   }
-   const next={...stage,next_page:page.sequence+1,rows,bytes,receipt:state.encode(),complete:Number(page.last),digest:page.last?digest!:null};
-   await this.db.runAsync('INSERT INTO gv_snapshot_frames VALUES(?,?,?,?,?)',scope,page.id,page.snapshotId,page.sequence,frameHash);
-   await this.db.runAsync('UPDATE gv_snapshot_stages SET next_page=?,rows=?,bytes=?,receipt=?,complete=?,digest=? WHERE scope=? AND subscription=? AND snapshot=?',next.next_page,rows,bytes,next.receipt,next.complete,next.digest,scope,page.id,page.snapshotId);
-   output=progress(page.snapshotId,next);
+   output=await this.finishFrame(scope,metadata,digest,frameHash,stage,state,result.length,bytes-stage.bytes);
   });return output;
+ }
+ stats(){return this.encoded?.stats()??{wireBytes:0,wireMaxBytes:131072,wireEntries:0};}
+ async appendEncoded(scope:string,input:Uint8Array):Promise<SQLiteSnapshotProgress>{
+  this.encoded??=new SQLiteEncodedSnapshotPages(this.db,this.fence,{
+   initialize:()=>this.initialize(),prepare:(...args)=>this.prepareFrame(...args),finish:(...args)=>this.finishFrame(...args),
+  });
+  return this.encoded.append(scope,input);
+ }
+ private async prepareFrame(scope:string,metadata:SQLiteSnapshotMetadata,frameHash:string):Promise<SQLiteSnapshotStage|SQLiteSnapshotProgress>{
+  identity(scope,metadata.id,metadata.snapshotId);sqlitePayloadBytes(metadata,16384);
+  let stage=await this.stage(scope,metadata.id,metadata.snapshotId);
+  if(stage){
+   if(stage.discarded)fail('PAGE_CHANGED','Snapshot is being discarded');
+   if(!sameSnapshotPageMetadata(metadata,JSON.parse(stage.metadata) as SQLiteSnapshotMetadata))fail('INTENT_CONFLICT','Snapshot metadata changed');
+   if(metadata.sequence<stage.next_page){
+    const receipt=await this.db.getFirstAsync<{hash:string}>('SELECT hash FROM gv_snapshot_frames WHERE scope=? AND subscription=? AND snapshot=? AND page=?',scope,metadata.id,metadata.snapshotId,metadata.sequence);
+    if(receipt?.hash!==frameHash)fail('INTENT_CONFLICT','Snapshot page replay changed its payload');
+    return progress(metadata.snapshotId,stage);
+   }
+   if(stage.complete)fail('PAGE_CHANGED','Snapshot is already verified');
+  }else{
+   if(metadata.sequence!==0)fail('PAGE_CHANGED','Snapshot must start at page zero');
+   const active=(await this.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_snapshot_stages WHERE scope=? AND subscription=?',scope,metadata.id))!.n;
+   if(active>=2)fail('BUDGET','Collect obsolete snapshot stages first');
+   stage={metadata:JSON.stringify(metadata),next_page:0,rows:0,bytes:0,receipt:new ReplicaSetDigest().encode(),complete:0,digest:null,discarded:0};
+   await this.db.runAsync('INSERT INTO gv_snapshot_stages VALUES(?,?,?,?,0,0,0,?,0,NULL,0)',scope,metadata.id,metadata.snapshotId,stage.metadata,stage.receipt);
+  }
+  if(metadata.sequence!==stage.next_page)fail('PAGE_CHANGED','Snapshot page arrived out of sequence');
+  return stage;
+ }
+ private async finishFrame(scope:string,metadata:SQLiteSnapshotMetadata,digest:string|undefined,frameHash:string,stage:SQLiteSnapshotStage,state:ReplicaSetDigest,addedRows:number,addedBytes:number):Promise<SQLiteSnapshotProgress>{
+  const rows=stage.rows+addedRows,bytes=stage.bytes+addedBytes;
+  if(!Number.isSafeInteger(rows)||!Number.isSafeInteger(bytes)||state.count!==rows||metadata.maxRows&&rows>metadata.maxRows||metadata.maxBytes&&bytes>metadata.maxBytes)fail('BUDGET','snapshot-page-budget-exceeded');
+  if(metadata.last){
+   const actual=digest?.startsWith('sum128-v1:')?state.digest():digest?.startsWith('xor1:')?state.legacyDigest():undefined;
+   if(!actual||actual!==digest)throw new TypeError('snapshot-page-integrity-mismatch');
+  }
+  const next={...stage,next_page:metadata.sequence+1,rows,bytes,receipt:state.encode(),complete:Number(metadata.last),digest:metadata.last?digest!:null};
+  await this.db.runAsync('INSERT INTO gv_snapshot_frames VALUES(?,?,?,?,?)',scope,metadata.id,metadata.snapshotId,metadata.sequence,frameHash);
+  await this.db.runAsync('UPDATE gv_snapshot_stages SET next_page=?,rows=?,bytes=?,receipt=?,complete=?,digest=? WHERE scope=? AND subscription=? AND snapshot=?',next.next_page,rows,bytes,next.receipt,next.complete,next.digest,scope,metadata.id,metadata.snapshotId);
+  return progress(metadata.snapshotId,next);
  }
  async read(scope:string,subscription:string,snapshot:string,after=-1,limit=128){
   identity(scope,subscription,snapshot);

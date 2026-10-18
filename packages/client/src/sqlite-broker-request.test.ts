@@ -73,3 +73,10 @@ it('admits binary bootstrap frames and snapshots bytes before retaining replay r
   await expect(broker.request('bootstrapAppend',{encoded:expected,get scope(){read=true;return 's';}})).rejects.toMatchObject({code:'INVALID_ROW'});
   expect(read).toBe(false);expect(broker.stats()).toMatchObject({pending:0,pendingBytes:0});
 });
+
+it('admits encoded native snapshot bytes under the same immutable transport budget',async()=>{
+ const broker=client(),encoded=new TextEncoder().encode('{"type":"replica.snapshotEncodedPage"}');
+ const result=await broker.request<any>('snapshotAppendEncoded',{scope:'s',encoded});
+ const expected=encoded.slice();encoded.fill(0);expect(result.args.encoded).toEqual(expected);
+ await expect(broker.request('snapshotAppendEncoded',{scope:'s',encoded:new Uint8Array(131072)})).rejects.toMatchObject({code:'BUDGET'});
+});

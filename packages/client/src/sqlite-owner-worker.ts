@@ -45,6 +45,7 @@ async function execute(op: string, args: any, requestID:string) {
   }
   if (!host || !engine) throw Object.assign(new Error('Storage owner is not ready'), { code: 'FENCED' });
   switch (op) {
+    case 'snapshotAppendEncoded': return snapshots!.appendEncoded(scope(args.scope),args.encoded);
     case 'snapshotAppend': return snapshots!.append(scope(args.scope),args.page);
     case 'snapshotRead': return snapshots!.read(scope(args.scope),args.subscription,args.snapshot,args.after,args.limit);
     case 'snapshotDiscard': return {removed:await snapshots!.discard(scope(args.scope),args.subscription,args.snapshot)};
@@ -52,7 +53,7 @@ async function execute(op: string, args: any, requestID:string) {
     case 'canonicalRead': return canonical!.read(args);
     case 'canonicalGeneration': return canonical!.generation(scope(args.scope),args.expected);
     case 'ping': return { ready: true };
-    case 'stats': return { ...engine.stats(), wasmBytes: host.memoryBytes(), clients: ports.size };
+    case 'stats': return { ...engine.stats(),...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size };
     case 'integrity': return engine.integrity();
     case 'page': return engine.page(scope(args.scope), args.plan as SQLitePagePlan);
     case 'viewPage': return engine.viewPage(scope(args.scope), args.signature, args.plan as SQLitePagePlan, args.offset);

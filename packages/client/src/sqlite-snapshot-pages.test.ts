@@ -1,4 +1,5 @@
 import {afterEach,expect,it} from 'vitest';
+import {createHash} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import type {JsonValue} from '@gonvex/protocol';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
@@ -94,4 +95,59 @@ it('adapts verified read pages to decoded byte limits and rejects oversized ingr
  const bad={...page([{id:'only'}]),id:'budget',maxRows:1};await stager.append('s',bad);
  await expect(stager.append('s',{...bad,sequence:1,result:[{id:'second'}]})).rejects.toMatchObject({code:'BUDGET'});
  expect(db.prepare("SELECT rows FROM gv_snapshot_stages WHERE subscription='budget'").get()!.rows).toBe(1);
+});
+
+function nativeFixture(){
+ const fixtureValue=fixture(),receipts:Array<Record<string,unknown>[]> = [];
+ fixtureValue.db.function('gv_ingress_sha256',value=>value===null?null:createHash('sha256').update(typeof value==='string'?value:value as Uint8Array).digest('hex'));
+ const host:SQLiteReplicaDatabase={...fixtureValue.host,ingressNativeHash:true,async getAllAsync<T>(sql:string,...params:unknown[]){
+  const rows=await fixtureValue.host.getAllAsync<T>(sql,...params);
+  receipts.push(rows as Record<string,unknown>[]);return rows;
+ }};
+ return {...fixtureValue,receipts,stager:new SQLiteSnapshotPages(host,fixtureValue.fence)};
+}
+function encodedPage(rows:JsonValue[],sequence=0,last=false,digest?:string){
+ const {result,...metadata}=page(rows,sequence,last,digest);
+ return new TextEncoder().encode(JSON.stringify({...metadata,type:'replica.snapshotEncodedPage',canonicalRows:rows.map(row=>JSON.stringify(row))}));
+}
+it('stages native canonical row strings without delivering row bodies through the bridge',async()=>{
+ const {stager,receipts,db}=nativeFixture(),rows=Array.from({length:200},(_,n)=>({id:String(n),text:'café 東京 😀 '+n,config:{value:n}}));
+ const state=await certificate(rows);
+ // The wire contract requires stable key order, unlike ordinary JSON.stringify.
+ const canonical=(value:any):string=>value===null||typeof value!=='object'?JSON.stringify(value):Array.isArray(value)?'['+value.map(canonical).join(',')+']':'{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+canonical(value[key])).join(',')+'}';
+ const frame=(start:number,end:number,sequence:number,last=false)=>{
+  const {result,...metadata}=page([],sequence,last,last?state.digest():undefined);
+  return new TextEncoder().encode(JSON.stringify({...metadata,type:'replica.snapshotEncodedPage',canonicalRows:rows.slice(start,end).map(canonical)}));
+ };
+ const input=frame(0,100,0),before=input.slice(),pending=stager.appendEncoded('s',input);input.fill(0);
+ expect(await pending).toMatchObject({rows:100,nextPage:1,complete:false});
+ expect(await stager.appendEncoded('s',frame(100,200,1,true))).toMatchObject({rows:200,nextPage:2,complete:true,digest:state.digest()});
+ expect(await stager.appendEncoded('s',before)).toMatchObject({rows:200,complete:true});
+ expect(receipts).toHaveLength(2);
+ for(const batch of receipts){expect(batch).toHaveLength(100);for(const receipt of batch)expect(Object.keys(receipt).sort()).toEqual(['hash','id']);}
+ expect(stager.stats()).toEqual({wireBytes:131072,wireMaxBytes:131072,wireEntries:1});
+ expect(db.prepare('SELECT count(*) n FROM gv_snapshot_input').get()!.n).toBe(0);
+ expect((await stager.read('s','collection','snapshot')).rows.map(row=>row.row)).toEqual(rows.slice(0,128));
+});
+it('rejects native duplicate rows and wrong certificates atomically and remains usable',async()=>{
+ const {stager,db}=nativeFixture(),rows=[{id:'a'}],digest=(await certificate(rows)).digest();
+ await stager.appendEncoded('s',encodedPage(rows));
+ const before=db.prepare('SELECT * FROM gv_snapshot_stages').get();
+ await expect(stager.appendEncoded('s',encodedPage([{id:'a'}],1,true,digest))).rejects.toThrow('duplicate-snapshot-key');
+ await expect(stager.appendEncoded('s',encodedPage([{id:'b'},{id:'b'}],1))).rejects.toThrow('duplicate-snapshot-key');
+ await expect(stager.appendEncoded('s',encodedPage([{id:'b'}],1,true,'sum128-v1:'+'0'.repeat(32)))).rejects.toThrow('integrity-mismatch');
+ expect(db.prepare('SELECT * FROM gv_snapshot_stages').get()).toEqual(before);
+ expect(db.prepare('SELECT count(*) n FROM gv_snapshot_input').get()!.n).toBe(0);
+ expect(await stager.appendEncoded('s',encodedPage([],1,true,digest))).toMatchObject({complete:true,rows:1});
+});
+it('requires native hashing and strict scoped wire metadata before exposing any rows',async()=>{
+ const legacy=fixture();await expect(legacy.stager.appendEncoded('s',encodedPage([]))).rejects.toMatchObject({code:'UNSUPPORTED'});
+ const {stager,db}=nativeFixture();
+ await expect(stager.appendEncoded('s',new Uint8Array([128]))).rejects.toThrow('UTF-8');
+ await expect(stager.appendEncoded('other',encodedPage([{id:'a'}]))).rejects.toMatchObject({code:'INVALID_ROW'});
+ const wire=JSON.parse(new TextDecoder().decode(encodedPage([{id:'a'}])));
+ for(const invalid of [{...wire,result:[]},{...wire,canonicalRows:[{id:'a'}]},{...wire,canonicalRows:['not JSON']},{...wire,key:''},{...wire,last:1}])
+  await expect(stager.appendEncoded('s',new TextEncoder().encode(JSON.stringify(invalid)))).rejects.toMatchObject({code:'INVALID_ROW'});
+ expect(db.prepare('SELECT count(*) n FROM gv_snapshot_rows').get()!.n).toBe(0);
+ expect(db.prepare('SELECT count(*) n FROM gv_snapshot_input').get()!.n).toBe(0);
 });

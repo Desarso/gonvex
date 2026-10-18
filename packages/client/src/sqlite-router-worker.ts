@@ -32,7 +32,7 @@ shared.onconnect = ({ ports: [port] }) => {
       const target = peers.get(m.to);
       try {
         sqliteRequestBytes(m.op,m.args,262144);
-        const encoded=m.op==='bootstrapAppend'?m.args?.encoded:undefined;
+        const encoded=['bootstrapAppend','snapshotAppendEncoded'].includes(m.op)?m.args?.encoded:undefined;
         const transfer=encoded instanceof Uint8Array&&encoded.buffer instanceof ArrayBuffer?[encoded.buffer]:[];
         if(target)target.port.postMessage({...m,from:id},transfer);
       } catch { /* Malformed or disconnected peers retry through the owner path. */ }
