@@ -17,6 +17,8 @@ export type IndexedDBReplicaSchema=Readonly<Record<string,{key:string;fields:Rea
 type Canonical={scope:string;entity:string;id:string;row:ReplicaRow|null;authority:ReplicaRecordVersion};
 type Predicted={scope:string;entity:string;id:string;row:ReplicaRow|null};
 export type IndexedDBCanonicalChange={entity:string;id:string;row:ReplicaRow|null};
+export type IndexedDBLegacyRow={scope:string;entity:string;id:string;row:ReplicaRow|null;authority?:ReplicaRecordVersion;sourceHash:string};
+export type IndexedDBLegacyProgress={key:string;epoch:string;total:number;seen:number;copied:number;deferred:number;ignored:number;after:string|null;root:string;finished:boolean};
 const request=<T>(value:IDBRequest<T>)=>new Promise<T>((resolve,reject)=>{value.onsuccess=()=>resolve(value.result);value.onerror=()=>reject(value.error??Error('IndexedDB replica request failed'));});
 /** The fallback shares the strict intent database and owner fence. Canonical
  * values, predictions and reducer reads stay on disk. Primary-key pages retain
@@ -39,6 +41,37 @@ export class IndexedDBReplicaEngine extends IndexedDBIntentLedger {
   const {owned,at}=this.captureAuthority(scope,cursor,changes),meta=tx.objectStore('meta'),key='canonical:'+scope,old=await request(meta.get(key)) as {epoch:string;revision:number}|undefined;if(old&&old.epoch!==at.epoch)fail('FENCED','Fallback authority requires its admitted epoch');const rows=tx.objectStore('canonical');for(const change of owned){const rowKey=[scope,change.entity,change.id],before=await request(rows.get(rowKey)) as Canonical|undefined,value=mergeReplicaRecord(before,change.row,at);sqlitePayloadBytes(value,262144);await request(rows.put({scope,entity:change.entity,id:change.id,...value} satisfies Canonical));}await request(meta.put({key,epoch:at.epoch,revision:Math.max(old?.revision??0,at.revision)}));
  }
  async applyCanonical(scope:string,cursor:ReplicaCursor,changes:readonly IndexedDBCanonicalChange[],expected?:Generation){const {owned,at}=this.captureAuthority(scope,cursor,changes),generation=expected?{...expected}:undefined;const result=await this.atomic(generation,tx=>this.authorityInTransaction(tx,scope,at,owned));return result.generation;}
+ async legacyProgress(key:string){if(!key||key.length>1024)throw new TypeError('Invalid fallback migration key');return this.transaction(['meta'],'readonly',async tx=>{await this.fence(tx);return (await request(tx.objectStore('meta').get('legacy-rows:'+key)) as {value:IndexedDBLegacyProgress}|undefined)?.value;});}
+ /** Merge a fenced source page and its verification marker in one durable IDB
+  * transaction. Per-field stamps are replayed oldest first, so a newer native
+  * field or tombstone can never be overwritten by an old projected row. */
+ async importLegacyRows(key:string,epoch:string,total:number,after:string|null,rows:readonly IndexedDBLegacyRow[],next:string|null,finished:boolean){
+  sqlitePayloadBytes({key,epoch,total,after,rows,next,finished},262144);if(!key||key.length>1024||!epoch||epoch.length>256||!Number.isSafeInteger(total)||total<0||rows.length>16||typeof finished!=='boolean')throw new TypeError('Invalid fallback legacy page');
+  const owned=structuredClone(rows);return this.atomic(undefined,async tx=>this.transactionTask(tx,262144,async()=>{
+   const meta=tx.objectStore('meta'),marker='legacy-rows:'+key,old=(await request(meta.get(marker)) as {value:IndexedDBLegacyProgress}|undefined)?.value;
+   if(old&&(old.epoch!==epoch||old.total!==total||old.after!==after||old.finished))fail('FENCED','Fallback legacy migration advanced or changed');
+   const progress:IndexedDBLegacyProgress=old?{...old}:{key,epoch,total,seen:0,copied:0,deferred:0,ignored:0,after:null,root:'0'.repeat(64),finished:false};
+   if(progress.seen+owned.length>total)fail('INTENT_CORRUPT','Fallback legacy source exceeds its fenced count');
+   const scope=key.split('\u0000').at(-1);if(!scope)fail('INTENT_CORRUPT','Fallback legacy migration scope missing');const canonicalKey='canonical:'+scope,canonical=(await request(meta.get(canonicalKey))) as {epoch:string}|undefined;if(canonical&&canonical.epoch!==epoch)fail('PAGE_CHANGED','Fallback legacy rows await their admitted epoch');if(!canonical)await request(meta.put({key:canonicalKey,epoch,revision:0}));
+   const store=tx.objectStore('canonical');for(const source of owned){if(source.scope!==key.split('\u0000').at(-1)||typeof source.id!=='string'||!source.id||source.id.length>1024||typeof source.entity!=='string'||!source.entity||source.entity.length>256||!/^[0-9a-f]{64}$/.test(source.sourceHash))fail('INTENT_CORRUPT','Fallback legacy row differs from source page');
+    let status='copied',targetHash='';const table=Object.hasOwn(this.schema,source.entity)?this.schema[source.entity]:undefined;
+    if(!table){progress.ignored++;status='ignored';}
+    else if(!source.authority||source.authority.epoch!==epoch){progress.deferred++;status='deferred';}
+    else{
+     const authority=source.authority;if(!authority.fields||typeof authority.fields!=='object'||Array.isArray(authority.fields)||[...Object.values(authority.fields),...(authority.base===undefined?[]:[authority.base]),...(authority.deleted===undefined?[]:[authority.deleted])].some(value=>!Number.isSafeInteger(value)||value<0))fail('INTENT_CORRUPT','Fallback legacy row has invalid authority');
+     const row=source.row===null?null:Object.fromEntries(Object.entries(source.row).filter(([field])=>Object.hasOwn(table.fields,field))) as ReplicaRow;
+     if(row&&String(row[table.key])!==source.id)fail('INTENT_CORRUPT','Fallback legacy row key differs');
+     const identity=[source.scope,source.entity,source.id],before=await request(store.get(identity)) as Canonical|undefined;let merged:ReturnType<typeof mergeReplicaRecord>|undefined=before;
+     if(row===null){if(authority.deleted===undefined)fail('INTENT_CORRUPT','Fallback legacy tombstone has no stamp');merged=mergeReplicaRecord(merged,null,{epoch,revision:authority.deleted});}
+     else{const groups=new Map<number,ReplicaRow>();for(const [field,value] of Object.entries(row)){const revision=Object.hasOwn(authority.fields,field)?authority.fields[field]:authority.base;if(revision===undefined)fail('INTENT_CORRUPT','Fallback legacy field has no stamp');groups.set(revision,{...(groups.get(revision)??{}),[field]:value});}for(const revision of [...groups.keys()].sort((a,b)=>a-b))merged=mergeReplicaRecord(merged,groups.get(revision)!,{epoch,revision});}
+     if(!merged)fail('INTENT_CORRUPT','Fallback legacy merge produced no row');await request(store.put({scope:source.scope,entity:source.entity,id:source.id,...merged} satisfies Canonical));const actual=await request(store.get(identity)) as Canonical|undefined;if(JSON.stringify(actual?.row)!==JSON.stringify(merged.row)||JSON.stringify(actual?.authority)!==JSON.stringify(merged.authority))fail('INTENT_CORRUPT','Fallback legacy row verification differs');
+     targetHash=await this.hashValue({row:actual!.row,authority:actual!.authority});progress.copied++;
+    }
+    progress.root=await this.hashValue(progress.root+JSON.stringify({entity:source.entity,id:source.id,source:source.sourceHash,target:targetHash,status}));progress.seen++;
+   }
+   progress.after=next;progress.finished=finished;if(finished&&progress.seen!==total)fail('INTENT_CORRUPT','Fallback legacy source count changed');await request(meta.put({key:marker,value:progress}));return progress;
+  })).then(result=>result.value);
+ }
  async atomic<T>(expected:Generation|undefined,run:(tx:IDBTransaction)=>Promise<T>){const generation=expected?{...expected}:undefined;return this.transaction(['meta','canonical','predicted','pending','receipts','snapshots','snapshotRows','snapshotMembers','snapshotFrames','windows','dependencies','intentStates'],'readwrite',async tx=>{const owner=await this.fence(tx,generation),value=await this.keepAlive(tx,()=>run(tx));await this.fence(tx);await this.bump(tx,owner);return {value,generation:{epoch:owner.epoch,sequence:owner.sequence+1}};});}
  async metadataAtomic<T>(expected:Generation|undefined,run:(tx:IDBTransaction)=>Promise<T>){const captured=expected?{...expected}:undefined;return this.transaction(['meta','pending','dependencies','intentStates'],'readwrite',async tx=>{await this.fence(tx,captured);const value=await this.keepAlive(tx,()=>run(tx));await this.fence(tx);return value;});}
  async updateDeliveryInTransaction(tx:IDBTransaction,scope:string,command:string,expectedHash:string,states:readonly string[],patch:IndexedDBDelivery){validateIndexedDBDelivery(patch);sqlitePayloadBytes({scope,command,expectedHash,states},8192);const owned=structuredClone(patch),allowed=[...states];return this.transactionTask(tx,8192,async()=>{const store=tx.objectStore('pending'),entry=await request(store.get([scope,command])) as IndexedDBPendingIntent|undefined;if(!entry||entry.hash!==expectedHash||!allowed.includes(entry.delivery?.state??entry.prepared.intent.state))fail('FENCED','Fallback intent delivery changed');const delivery={...entry.delivery,...owned};validateIndexedDBDelivery(delivery);await request(store.put({...entry,delivery}));const effective={...indexedDBEffectiveIntent(entry),...delivery};await writeIndexedDBIntentDependencies(tx,scope,command,entry.sequence,effective,effective.state,this.ranges);return effective;});}
