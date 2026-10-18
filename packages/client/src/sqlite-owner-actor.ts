@@ -6,7 +6,7 @@ import {SQLiteSnapshotPages} from './sqlite-snapshot-pages.js';
 import {sqliteRequestBytes} from './sqlite-request-frame.js';
 import {SQLiteCanonicalDispatcher} from './sqlite-canonical-dispatch.js';
 import {sqliteTypedReplicaStorage} from './sqlite-typed-row-layout.js';
-import {sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
+import {waitForSQLiteOwnerAdmission,SQLiteOwnerQueueBusyError,sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
 import { sqliteWorkerOperations as publicOperations, sqliteOperationPublishes,sqliteWorkerProtocol as protocol } from './sqlite-worker-protocol.js';
 import { openOfficialSQLiteHost, type OfficialSQLiteHost } from './sqlite-official-host.js';
 import { SQLiteTypedReplicaEngine, sqlitePayloadBytes, type SQLiteTypedWrite } from './sqlite-typed-engine.js';
@@ -64,7 +64,8 @@ function publish(scope:string,generation:{epoch:number;sequence:number}){
 }
 function schedule<T>(size:number,run:()=>Promise<T>):Promise<T>{
  if(closed)return Promise.reject(Object.assign(Error('Storage owner is closed'),{code:'FENCED'}));
- if(!Number.isSafeInteger(size)||size<0||size>2097152||queuedOperations>=64||queuedBytes+size>2097152)return Promise.reject(Object.assign(Error('Storage owner queue is full'),{code:'BUSY'}));
+ if(!Number.isSafeInteger(size)||size<0||size>2097152)return Promise.reject(Object.assign(Error('Storage owner operation exceeds queue budget'),{code:'BUSY'}));
+ if(queuedOperations>=64||queuedBytes+size>2097152)return Promise.reject(new SQLiteOwnerQueueBusyError());
  queuedOperations++;queuedBytes+=size;const operation=lane.then(async()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});return run();});
  lane=operation.then(()=>undefined,()=>undefined);void operation.then(()=>{queuedOperations--;queuedBytes-=size;},()=>{queuedOperations--;queuedBytes-=size;});return operation;
 }
@@ -87,7 +88,7 @@ async function execute(op: string, args: any, requestID:string) {
       program=binding.createProgram?.({database,engine,notifyTab:tabID=>schedule(0,async()=>{if(typeof tabID!=='string'||!tabID||tabID.length>128)throw new TypeError('Invalid control recipient');tabs.notify(tabID,await engine!.verifyOwner());}),reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
        runOwner:async(size,run,scopes=[])=>{
         if(!Array.isArray(scopes)||scopes.length>8||scopes.some(value=>typeof value!=='string'||!value||value.length>512))throw new TypeError('Invalid owner publication scope');
-        return schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;});
+        return waitForSQLiteOwnerAdmission(()=>schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;}),()=>{if(closed)throw Object.assign(Error('Storage owner is closed'),{code:'FENCED'});});
        }});
       if(program&&typeof program.call!=='function')throw new TypeError('Owner program factories must return synchronously; queue initialization through runOwner');
       return { epoch, wasmBytes: host.memoryBytes() };

@@ -50,3 +50,15 @@ export async function markSQLiteStagingCommit(database:SQLiteReplicaDatabase,fen
  if(!next)throw Object.assign(Error('Staging publication owner changed or sequence exhausted'),{code:'FENCED'});
  return {epoch:current.epoch,sequence:next.sequence};
 }
+
+/** Admission failed before the operation entered the SQL FIFO. This is the
+ * only BUSY error that an internal feed may retry without recovery/replay. */
+export class SQLiteOwnerQueueBusyError extends Error {
+ readonly code='BUSY';
+ constructor(){super('Storage owner queue is full');this.name='SQLiteOwnerQueueBusyError';}
+}
+/** Callers already own bounded ingress/intent slots. Wait outside the FIFO
+ * rather than closing their socket when another connection uses its credits. */
+export async function waitForSQLiteOwnerAdmission<T>(submit:()=>Promise<T>,assertCurrent:()=>void):Promise<T>{
+ for(;;){assertCurrent();try{return await submit();}catch(error){if(!(error instanceof SQLiteOwnerQueueBusyError))throw error;await new Promise<void>(resolve=>setTimeout(resolve,5));}}
+}

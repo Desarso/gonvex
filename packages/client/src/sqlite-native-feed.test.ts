@@ -3,7 +3,7 @@ import {GonvexClient} from './index.js';
 import {IDBFactory,IDBKeyRange} from 'fake-indexeddb';
 import {initializePinnedSQLite} from '../test/sqlite-wasm-host.mjs';
 import {officialSQLiteDatabase} from './sqlite-official-host.js';
-import {sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
+import {SQLiteOwnerQueueBusyError,sqliteOwnerTransactions} from './sqlite-owner-transactions.js';
 import {SQLiteTypedReplicaEngine} from './sqlite-typed-engine.js';
 import {sqliteTypedReplicaStorage} from './sqlite-typed-row-layout.js';
 import {SQLiteSnapshotPages} from './sqlite-snapshot-pages.js';
@@ -24,7 +24,7 @@ const cursor=(revision:number)=>({epoch:'e',revision});
 const stable=(row:Record<string,unknown>)=>JSON.stringify(Object.fromEntries(Object.keys(row).sort().map(key=>[key,row[key]])));
 const rows=[{id:'a',name:'Before café 東京',n:1},{id:'b',name:'Second',n:2}],changed={id:'a',name:'Newer canonical',n:12};
 const digest=async(values=rows)=>replicaSumDigest(await replicaRowsHashes(values,'id'));
-async function fixture(extra:Partial<ConstructorParameters<typeof SQLiteNativeFeed>[0]>={}){
+async function fixture(extra:Partial<ConstructorParameters<typeof SQLiteNativeFeed>[0]>={},completeEntity=false){
  const raw=new sqlite.oo1.DB(':memory:'),host=officialSQLiteDatabase(sqlite,raw),db=sqliteOwnerTransactions(host.database),engine=new SQLiteTypedReplicaEngine(db,schema);await engine.open('feed');const canonical=sqliteTypedReplicaStorage(db,schema);await canonical.ready();
  const fence=()=>engine.verifyOwner(),snapshots=new SQLiteSnapshotPages(db,fence,schema),activation=new SQLiteSnapshotActivator(db,canonical,fence,schema),safety=new SQLiteSafetyJournal('feed',new IDBFactory(),IDBKeyRange);
  let lane=Promise.resolve();const runOwner=<T>(_bytes:number,run:()=>Promise<T>)=>{const next=lane.then(run);lane=next.then(()=>{},()=>{});return next;};
@@ -32,14 +32,14 @@ async function fixture(extra:Partial<ConstructorParameters<typeof SQLiteNativeFe
  const owner={database:db,engine,canonical,snapshots,activation,runOwner} as SQLiteOwnerProgramContext;
  const sends:any[]=[],watermarks:number[]=[],failures:unknown[]=[];const feed=new SQLiteNativeFeed({owner,sessions,connection:'one',artifactHash:'artifact',send:message=>sends.push(message),advanceWatermark:revision=>watermarks.push(revision),failed:error=>failures.push(error),...extra});
  cleanup.push(()=>{feed.close();safety.close();raw.close();});
- feed.register({id:'source',signature:'tasks-all',entity:'tasks',key:'id',path:'tasks/all'});feed.authenticating('identity',1);
+ feed.register({id:'source',signature:'tasks-all',entity:'tasks',key:'id',path:'tasks/all',...(completeEntity?{completeEntity:true as const}:{})});feed.authenticating('identity',1);
  const session={connectionGeneration:1,directive:{protocolVersion:1 as const,scope:'tenant',visibilityScope:'visible',epoch:'e'},identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}},artifactHash:'artifact',intentScope:'identity',lastOnlineAtMs:1000,capabilities:{replicaNativeRows:1}};
  await feed.session(session,()=>true);
  const start=async()=>{feed.frame({type:'replica.snapshotStart',id:'source',snapshotId:'base',scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',digest:await digest(),path:'tasks/all'},1);};
  const append=async(part:typeof rows,sequence:number,last:boolean)=>{feed.binary(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:'source',snapshotId:'base',scope:'tenant',visibilityScope:'visible',cursor:cursor(10),key:'id',sequence,last,canonicalRows:part.map(stable),path:'tasks/all',...(last?{digest:await digest()}:{})})).buffer,1);};
  const ready=async(revision=10,values=rows)=>feed.frame({type:'replica.ready',id:'source',cursor:cursor(revision),digest:await digest(values)},1);
  const transaction=(revision=12)=>feed.frame({type:'replica.transactionEncoded',cursor:cursor(revision),originCommandId:'intent',canonicalChanges:[stable({entity:'tasks',id:'a',operation:'update',newValue:{...changed,n:revision}})]},1);
- return {db,engine,canonical,feed,sends,watermarks,failures,start,append,ready,transaction,session,sessions,safety,runOwner};
+ return {owner,db,engine,canonical,feed,sends,watermarks,failures,start,append,ready,transaction,session,sessions,safety,runOwner};
 }
 it('joins auth, source start, binary staging, newer canonical data, disk deltas and terminal watermark without deadlock',async()=>{
  const f=await fixture();await f.start();await f.append(rows.slice(0,1),0,false);await vi.waitFor(()=>expect(f.sends).toHaveLength(1));
@@ -98,6 +98,17 @@ it('processes authenticated GClient socket events through the WASM feed and sett
   socket.receive({type:'replica.transactionEncoded',cursor:cursor(12),canonicalChanges:[stable({entity:'tasks',id:'a',operation:'update',newValue:changed})]});socket.receive({type:'replica.delta',id:'source',cursor:cursor(12),canonicalUpserts:[stable(changed)],deleted:[],digest:await digest([changed,rows[1]])});socket.receive({type:'replica.watermark',revision:12});
   expect(await pending).toEqual({ok:true});expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0].row).toEqual(changed);expect(f.failures).toEqual([]);expect(client.localReplica.snapshot().entities).toEqual({});expect(await f.engine.integrity()).toBe('ok');
  }finally{client.close();vi.unstubAllGlobals();}
+});
+it('prunes old orphans through real typed native activation only when the generated source declares complete entity coverage',async()=>{
+ const f=await fixture({},true);
+ await f.canonical.applyTransaction({cursor:cursor(5),changes:[{entity:'tasks',id:'orphan',operation:'insert',newValue:{id:'orphan',name:'removed before source',n:5}}]},{entities:{},liveQueries:{}},'visible');
+ await f.canonical.applyTransaction({cursor:cursor(25),changes:[{entity:'tasks',id:'newer',operation:'insert',newValue:{id:'newer',name:'newer authority',n:25}}]},{entities:{},liveQueries:{}},'visible');
+ await f.start();await f.append(rows,0,true);await f.ready();await f.feed.assertReadable();expect(f.failures).toEqual([]);expect((await f.canonical.loadEntityRows('visible','tasks',['orphan','newer','a','b'])).map(entry=>entry.id)).toEqual(['newer','a','b']);expect((await new SQLiteWindowStore(f.db,()=>f.engine.verifyOwner()).header('visible','tasks-all'))?.header.entityCoverage).toBe('complete');expect(await f.engine.integrity()).toBe('ok');
+});
+it('keeps admitted frames and their credits while another bounded owner operation temporarily fills the SQL queue',async()=>{
+ const f=await fixture(),original=f.owner.runOwner.bind(f.owner);let refused=0;
+ vi.spyOn(f.owner,'runOwner').mockImplementation(async(...args:any[])=>{if(refused++<2)throw new SQLiteOwnerQueueBusyError();return (original as any)(...args);});
+ await f.start();await f.append(rows,0,true);await f.ready();await f.feed.assertReadable();expect(f.failures).toEqual([]);expect(f.sends).toHaveLength(1);expect((await f.canonical.loadEntityRows('visible','tasks',['a','b'])).length).toBe(2);expect(refused).toBeGreaterThan(2);
 });
 it('hashes canonical delta text before number decoding and rejects oversized or malformed controls before parsing',async()=>{
  const text='{"id":"unsafe","n":9007199254740993,"name":"東京"}',frame={type:'replica.delta' as const,id:'source',cursor:cursor(12),canonicalUpserts:[text],deleted:[]};

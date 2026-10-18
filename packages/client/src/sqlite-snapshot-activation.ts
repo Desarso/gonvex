@@ -1,3 +1,5 @@
+import {sqlitePhysicalEntityScope} from './sqlite-entity-scope.js';
+import {sqliteIdentifier,sqliteTableName} from './sqlite-typed-schema.js';
 import {activateSQLiteTypedSnapshot} from './sqlite-typed-snapshot.js';
 import {insertFreshSnapshotRows,snapshotOverlapSchema} from './sqlite-snapshot-native-rows.js';
 import type {SQLiteTypedSchema} from './sqlite-typed-schema.js';
@@ -32,6 +34,7 @@ export class SQLiteSnapshotActivator {
  async activate(input:Input):Promise<ReplicaStorageCommit>{
   sqlitePayloadBytes(input,16384);
   if(!input.scope||input.scope.length>512||!input.subscription||input.subscription.length>256||!input.snapshot||input.snapshot.length>128||input.header.kind!=='replica'
+   ||input.header.entityCoverage!==undefined&&(input.header.entityCoverage!=='complete'||input.header.completeness!=='complete')
    ||!input.header.cursor||input.header.source!=='server'||'ids'in input.header||'hashes'in input.header)throw new TypeError('Invalid snapshot activation');
   const encoded=JSON.stringify(input),owned=JSON.parse(encoded) as Input;
   await this.initialize();let receipt!:ReplicaStorageCommit;
@@ -88,6 +91,22 @@ export class SQLiteSnapshotActivator {
      if(!removed.length)break;
      await merge(owned.header.entity,removed.map(entry=>({id:entry.id,row:null})));
      removedAfter=removed.at(-1)!.position;
+    }
+    if(owned.header.entityCoverage==='complete'){
+     // A row received between an older source certificate and disconnect may
+     // never have belonged to that old membership. A complete generated source
+     // must reconcile the canonical corpus too, rather than only old members.
+     // Authority merge keeps rows/fields newer than this snapshot's cursor.
+     const typedTable=this.schema&&Object.hasOwn(this.schema,owned.header.entity)?this.schema[owned.header.entity]:undefined;
+     const physical=typedTable?await sqlitePhysicalEntityScope(this.db,owned.scope,owned.header.entity):owned.scope;
+     const relation=typedTable?sqliteIdentifier(sqliteTableName(owned.header.entity)):'_gonvex_replica_entities';
+     const restriction=typedTable?'':' AND t.entity=? AND t.value<>\'null\'';
+     let after='';for(;;){
+      const missing=await this.db.getAllAsync<{id:string}>(`SELECT t.id FROM ${relation} t WHERE t.scope=? AND t.id>?${restriction}
+       AND NOT EXISTS(SELECT 1 FROM gv_snapshot_rows s WHERE s.scope=? AND s.subscription=? AND s.snapshot=? AND s.id=t.id)
+       ORDER BY t.id LIMIT 100`,physical,after,...(typedTable?[]:[owned.header.entity]),owned.scope,owned.subscription,owned.snapshot);
+      if(!missing.length)break;await merge(owned.header.entity,missing.map(({id})=>({id,row:null})));after=missing.at(-1)!.id;
+     }
     }
     await fresh?.restoreIndexes();
     await this.db.runAsync('DELETE FROM temp.gv_snapshot_overlap');

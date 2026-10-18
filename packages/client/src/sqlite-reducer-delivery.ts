@@ -1,3 +1,4 @@
+import {waitForSQLiteOwnerAdmission} from './sqlite-owner-transactions.js';
 import type {JsonValue} from '@gonvex/protocol';
 import type {SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
 import type {SQLiteReducerOwner} from './sqlite-reducer-owner.js';
@@ -36,7 +37,7 @@ export class SQLiteReducerDelivery {
  private admission(){const admission=this.options.admission();if(!admission||!admission.online||this.closed||this.updateBlocked)return;sqlitePayloadBytes(admission,4096);if(!admission.scope||admission.scope.length>512||!admission.intentScope||admission.intentScope.length>512||!admission.generation||admission.generation.length>128)throw new TypeError('Invalid delivery admission');return {...admission};}
  private check(expected:Admission){const current=this.admission();if(!current||current.scope!==expected.scope||current.intentScope!==expected.intentScope||current.generation!==expected.generation)fail('FENCED','Intent delivery admission changed');}
  private now(){const now=(this.options.now??Date.now)();if(!Number.isSafeInteger(now)||now<0)throw new TypeError('Invalid intent delivery clock');return now;}
- private run<T>(expected:Admission,run:()=>Promise<T>){return this.options.owner.runOwner(2097152,async()=>{await this.initialized;this.check(expected);return run();});}
+ private run<T>(expected:Admission,run:()=>Promise<T>){return waitForSQLiteOwnerAdmission(()=>this.options.owner.runOwner(262144,async()=>{await this.initialized;this.check(expected);return run();}),()=>this.check(expected));}
  private async flushSafety(expected:Admission){
   const rows=await this.run(expected,()=>this.options.owner.database.getAllAsync<{command:string}>('SELECT command FROM gv_reducer_delivery_settlements WHERE scope=? AND safety_settled=0 ORDER BY command LIMIT 8',expected.intentScope));
   for(const row of rows){this.check(expected);await this.options.safety.settle(expected.intentScope,row.command);await this.run(expected,()=>this.options.owner.database.runAsync('UPDATE gv_reducer_delivery_settlements SET safety_settled=1 WHERE scope=? AND command=?',expected.intentScope,row.command));}

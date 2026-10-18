@@ -21,13 +21,13 @@ async function fixture(native=false){
  const db=sqliteOwnerTransactions(raw),engine=new SQLiteTypedReplicaEngine(db,schema);await engine.open('activation');
  const canonical=sqliteTypedReplicaStorage(db,schema);await canonical.ready();
  const fence=()=>engine.verifyOwner(),stager=new SQLiteSnapshotPages(db,fence),windows=new SQLiteWindowStore(db,fence),activator=new SQLiteSnapshotActivator(db,canonical,fence,native?schema:undefined);
- async function stage(rows:ReplicaRow[],snapshot='one',last=true){
+ async function stage(rows:ReplicaRow[],snapshot='one',last=true,revision=10){
   const digest=replicaSumDigest(await replicaRowsHashes(rows,'id'));
   for(let offset=0;offset<rows.length;offset+=50){
    const final=last&&offset+50>=rows.length;
-   await stager.append('s',{type:'replica.snapshotPage',id:'collection',snapshotId:snapshot,scope:'tenant',visibilityScope:'s',key:'id',cursor:{epoch:'e',revision:10},sequence:offset/50,last:final,result:rows.slice(offset,offset+50),...(final?{digest}:{}),maxRows:10000,maxBytes:10000000});
+   await stager.append('s',{type:'replica.snapshotPage',id:'collection',snapshotId:snapshot,scope:'tenant',visibilityScope:'s',key:'id',cursor:{epoch:'e',revision},sequence:offset/50,last:final,result:rows.slice(offset,offset+50),...(final?{digest}:{}),maxRows:10000,maxBytes:10000000});
   }
-  const header:SQLiteWindowHeader={signature:'collection',entity:'tasks',key:'id',kind:'replica',source:'server',completeness:'complete',cursor:{epoch:'e',revision:10},aggregateDigest:digest};
+  const header:SQLiteWindowHeader={signature:'collection',entity:'tasks',key:'id',kind:'replica',source:'server',completeness:'complete',cursor:{epoch:'e',revision},aggregateDigest:digest};
   return {scope:'s',subscription:'collection',snapshot,header};
  }
  const write=(revision:number,changes:any[])=>canonical.applyTransaction({cursor:{epoch:'e',revision},changes},{entities:{},liveQueries:{}},'s');
@@ -162,4 +162,22 @@ it('requires initialization before a parent ingress transaction so rollback cann
   await test.db.withTransactionAsync(async()=>{await test.activator.activate(input);});
   expect((await test.windows.header('s','collection'))?.rows).toBe(1);
  }finally{test.sql.close();}
+});
+it('prunes disconnected canonical orphans only for a generated complete entity source and preserves newer authority',async()=>{
+ for(const native of [false,true]){
+  const f=await fixture(native);try{
+   const first=await f.stage([{id:'old-member',name:'old window'}]);await f.activator.activate(first);
+   await f.write(15,[{entity:'tasks',id:'orphan',operation:'insert',newValue:{id:'orphan',name:'arrived outside old membership'}}]);await f.write(25,[{entity:'tasks',id:'newer',operation:'insert',newValue:{id:'newer',name:'newer than replacement'}}]);
+   const replacement=await f.stage([{id:'kept',name:'replacement'}],'replacement',true,20);
+   replacement.header.entityCoverage='complete';await f.activator.activate(replacement);
+   expect((await f.canonical.loadEntityRows('s','tasks',['old-member','orphan','newer','kept'])).map(entry=>entry.id)).toEqual(['newer','kept']);
+   expect((await f.windows.page('s','collection','replacement',0,10)).ids).toEqual(['kept']);expect(await f.engine.integrity()).toBe('ok');
+  }finally{f.sql.close();}
+ }
+});
+it('keeps canonical rows outside a filtered source and refuses a partial full-entity claim',async()=>{
+ const f=await fixture();try{
+  await f.write(5,[{entity:'tasks',id:'outside',operation:'insert',newValue:{id:'outside',name:'another source'}}]);const source=await f.stage([{id:'inside',name:'filtered'}]);await f.activator.activate(source);expect((await f.canonical.loadEntityRows('s','tasks',['outside']))[0].row.name).toBe('another source');
+  const invalid=await f.stage([{id:'next',name:'partial'}],'partial');invalid.header.entityCoverage='complete';invalid.header.completeness='partial';await expect(f.activator.activate(invalid)).rejects.toThrow('Invalid snapshot activation');expect((await f.canonical.loadEntityRows('s','tasks',['outside']))[0].row.name).toBe('another source');
+ }finally{f.sql.close();}
 });

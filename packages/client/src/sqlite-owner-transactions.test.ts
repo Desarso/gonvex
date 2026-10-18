@@ -59,3 +59,9 @@ it('publishes staging generations only inside a fenced transaction and rolls the
  await expect(f.database.withTransactionAsync(async()=>{await markSQLiteStagingCommit(f.database,async()=>({epoch:0,sequence:5}));})).rejects.toMatchObject({code:'FENCED'});expect(await fence()).toEqual({epoch:1,sequence:5});
  await f.database.runAsync('UPDATE gv_storage_meta SET sequence=9007199254740991');await expect(f.database.withTransactionAsync(async()=>{await markSQLiteStagingCommit(f.database,fence);})).rejects.toMatchObject({code:'FENCED'});
 });
+it('waits only for pre-execution owner admission and never retries an unknown SQLite outcome',async()=>{
+ const {SQLiteOwnerQueueBusyError,waitForSQLiteOwnerAdmission}=await import('./sqlite-owner-transactions.js');let attempts=0,writes=0;
+ expect(await waitForSQLiteOwnerAdmission(async()=>{if(attempts++<2)throw new SQLiteOwnerQueueBusyError();writes++;return 'committed';},()=>{})).toBe('committed');expect(attempts).toBe(3);expect(writes).toBe(1);
+ attempts=0;await expect(waitForSQLiteOwnerAdmission(async()=>{attempts++;throw Object.assign(Error('late storage BUSY'),{code:'BUSY'});},()=>{})).rejects.toThrow('late storage BUSY');expect(attempts).toBe(1);
+ let current=true;await expect(waitForSQLiteOwnerAdmission(async()=>{current=false;throw new SQLiteOwnerQueueBusyError();},()=>{if(!current)throw Object.assign(Error('admission changed'),{code:'FENCED'});})).rejects.toMatchObject({code:'FENCED'});
+});

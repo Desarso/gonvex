@@ -6,12 +6,12 @@ import {SQLiteNativeIngress} from './sqlite-native-ingress.js';
 import {SQLiteWindowStore,type SQLiteWindowHeader} from './sqlite-window-store.js';
 import {SQLiteDeferredReplicaFrames} from './sqlite-deferred-replica-frames.js';
 import {decodeSQLiteNativeDelta,decodeSQLiteNativeTransaction} from './sqlite-native-control.js';
-import {markSQLiteStagingCommit} from './sqlite-owner-transactions.js';
+import {waitForSQLiteOwnerAdmission,markSQLiteStagingCommit} from './sqlite-owner-transactions.js';
 import {SQLiteReducerPreparationRequiredError} from './sqlite-reducer-core.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 type Start=Extract<ServerMessage,{type:'replica.snapshotStart'}>;
 type Delta=Extract<ServerMessage,{type:'replica.delta'}>;
-export type SQLiteFeedSource={id:string;signature:string;entity:string;key:string;path:string};
+export type SQLiteFeedSource={id:string;signature:string;entity:string;key:string;path:string;completeEntity?:true};
 type Source=SQLiteFeedSource&{start?:Start;opening:boolean};
 type State={generation:number;scope:string;epoch:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;watermark?:number};
 type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;connection:string;artifactHash:string;
@@ -40,11 +40,11 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  /** Called by the trusted generated program before sending replica.open.
   * Application RPCs cannot supply an entity, visibility scope or SQL plan. */
  register(input:SQLiteFeedSource){
-  const bytes=sqlitePayloadBytes(input,16384);if(!input.id||input.id.length>256||!input.signature||input.signature.length>4096||!input.path||input.path.length>1024||!Object.hasOwn(this.options.owner.engine.schema,input.entity)||this.options.owner.engine.schema[input.entity]!.key!==input.key)throw new TypeError('Invalid generated native source');
+  const bytes=sqlitePayloadBytes(input,16384);if(input.completeEntity!==undefined&&input.completeEntity!==true||!input.id||input.id.length>256||!input.signature||input.signature.length>4096||!input.path||input.path.length>1024||!Object.hasOwn(this.options.owner.engine.schema,input.entity)||this.options.owner.engine.schema[input.entity]!.key!==input.key)throw new TypeError('Invalid generated native source');
   if(this.sources.has(input.id))throw new TypeError('Native source already registered');if(this.sources.size>=128||this.sourceBytes+bytes>262144)fail('BUDGET','Native source registry exceeded budget');
   this.sources.set(input.id,{...structuredClone(input),opening:true});this.sourceBytes+=bytes;
  }
- unregister(id:string){const source=this.sources.get(id);if(!source)return;this.sources.delete(id);if(source.start)this.startBytes-=sqlitePayloadBytes(source.start,16384);this.sourceBytes-=sqlitePayloadBytes({id:source.id,signature:source.signature,entity:source.entity,key:source.key,path:source.path},16384);}
+ unregister(id:string){const source=this.sources.get(id);if(!source)return;this.sources.delete(id);if(source.start)this.startBytes-=sqlitePayloadBytes(source.start,16384);this.sourceBytes-=sqlitePayloadBytes({id:source.id,signature:source.signature,entity:source.entity,key:source.key,path:source.path,...(source.completeEntity?{completeEntity:true}:{} )},16384);}
  private source(id:string){const source=this.sources.get(id);if(!source)fail('FENCED','Native frame has no generated subscription');return source;}
  private check(state:State){if(this.state!==state||state.closed||state.admission===undefined)fail('FENCED','Native feed admission changed');this.options.sessions.assertFrameAdmission(this.options.connection,state.generation,state.admission);}
  private stop(){const state=this.state;if(state){state.closed=true;state.ingress.close();}this.state=undefined;}
@@ -58,7 +58,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    sendAck:ack=>{this.check(state);this.options.send(ack);},
    activateVerified:async receipt=>{
     this.check(state);const source=this.source(receipt.ack.id),start=source.start;if(!start||start.snapshotId!==receipt.ack.snapshotId)fail('FENCED','Snapshot has no matching start header');
-    const header:SQLiteWindowHeader={signature:source.signature,entity:source.entity,key:source.key,kind:'replica',source:'server',cursor:start.cursor,aggregateDigest:receipt.progress.digest,completeness:start.truncated?'partial':'complete',...(start.mode?{mode:start.mode}:{})};
+    const header:SQLiteWindowHeader={signature:source.signature,entity:source.entity,key:source.key,kind:'replica',source:'server',cursor:start.cursor,aggregateDigest:receipt.progress.digest,completeness:start.truncated?'partial':'complete',...(start.mode?{mode:start.mode}:{}),...(source.completeEntity&&!start.truncated?{entityCoverage:'complete' as const}:{})};
     await this.mutate(state.scope,async()=>{await owner.activation.activate({scope:state.scope,subscription:source.id,snapshot:start.snapshotId,header});});
     await this.replay(state,source);
    }});
@@ -78,7 +78,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  private cursor(state:State,cursor:ReplicaCursor){if(!cursor||cursor.epoch!==state.epoch||!Number.isSafeInteger(cursor.revision)||cursor.revision<0)fail('FENCED','Native feed cursor changed epoch');}
  private async run<T>(state:State,bytes:number,run:()=>Promise<T>):Promise<T>{
   const loaded=new Set<string>();let preparationBytes=0;
-  for(;;){try{return await this.options.owner.runOwner(bytes,async()=>{this.check(state);return run();},[state.scope]);}
+  for(;;){try{return await waitForSQLiteOwnerAdmission(()=>this.options.owner.runOwner(bytes,async()=>{this.check(state);return run();},[state.scope]),()=>this.check(state));}
    catch(error){if(!(error instanceof SQLiteReducerPreparationRequiredError)||!this.options.prepare)throw error;
     if(loaded.has(error.path))fail('FENCED','Prepared native feed reducer remains unavailable');preparationBytes+=error.path.length*2+128;
     if(loaded.size>=128||preparationBytes>131072)fail('BUDGET','Native feed reducer preparation exceeded budget');loaded.add(error.path);await this.options.prepare(error.path);
