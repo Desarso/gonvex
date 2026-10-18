@@ -4000,6 +4000,9 @@ async fn send_snapshot_frames(
     delivery: &mut snapshot_delivery::SnapshotDelivery,
 ) -> Result<(), ()> {
     let batch = delivery.pump();
+    for start in batch.starts {
+        send_json(socket, &start).await?;
+    }
     for frame in batch.frames {
         socket
             .send(Message::Binary(frame.into()))
@@ -4126,12 +4129,27 @@ mod tests {
             .await
             .unwrap();
         let mut pages = Vec::new();
+        let mut start = None;
         while let Ok(Some(message)) =
             tokio::time::timeout(std::time::Duration::from_millis(100), socket.next()).await
         {
             let message = message.unwrap();
+            if message.is_text() {
+                let header: serde_json::Value =
+                    serde_json::from_slice(&message.into_data()).unwrap();
+                assert_eq!(header["type"], "replica.snapshotStart");
+                assert!(pages.is_empty());
+                assert!(start.is_none());
+                start = Some(header);
+                continue;
+            }
             assert!(message.is_binary());
-            pages.push(serde_json::from_slice::<serde_json::Value>(&message.into_data()).unwrap());
+            let page = serde_json::from_slice::<serde_json::Value>(&message.into_data()).unwrap();
+            assert_eq!(
+                Some(&page["snapshotId"]),
+                start.as_ref().map(|header| &header["snapshotId"])
+            );
+            pages.push(page);
         }
         assert!(!pages.is_empty() && pages.len() <= 8);
         assert!(!pages.last().unwrap()["last"].as_bool().unwrap());

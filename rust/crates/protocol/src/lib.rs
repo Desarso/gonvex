@@ -648,6 +648,18 @@ pub enum ServerMessage {
         #[serde(flatten)]
         metadata: BTreeMap<String, Value>,
     },
+    /// Native capability only: bind the generated typed destination before
+    /// the first credited binary frame, without parsing its row strings in JS.
+    #[serde(rename = "replica.snapshotStart")]
+    ReplicaSnapshotStart {
+        #[serde(rename = "snapshotId")]
+        snapshot_id: String,
+        id: String,
+        cursor: ReplicaCursor,
+        key: String,
+        #[serde(flatten)]
+        metadata: BTreeMap<String, Value>,
+    },
     #[serde(rename = "replica.snapshotPage")]
     ReplicaSnapshotPage {
         #[serde(rename = "snapshotId")]
@@ -765,6 +777,9 @@ mod tests {
         round_trip_server(r#"{"type":"session.ready","capabilities":{"replicaNativeRows":1}}"#);
         round_trip_client(
             r#"{"type":"replica.snapshotAck","id":"a","snapshotId":"s","sequence":3}"#,
+        );
+        round_trip_server(
+            r#"{"type":"replica.snapshotStart","id":"a","snapshotId":"s","key":"id","cursor":{"epoch":"e","revision":1},"scope":"tenant","visibilityScope":"visible","digest":"sum128-v1:00000000000000000000000000000000"}"#,
         );
         round_trip_server(
             r#"{"type":"replica.snapshotEncodedPage","id":"a","snapshotId":"s","sequence":0,"last":true,"canonicalRows":["{\"id\":\"a\"}"],"key":"id","cursor":{"epoch":"e","revision":1},"digest":"final"}"#,

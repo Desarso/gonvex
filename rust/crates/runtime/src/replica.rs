@@ -1294,6 +1294,32 @@ impl SnapshotPages {
         (&self.id, &self.snapshot_id)
     }
 
+    pub(crate) fn start(&self) -> ServerMessage {
+        let mut metadata = self.metadata.clone();
+        metadata.retain(|name, _| {
+            matches!(
+                name.as_str(),
+                "path"
+                    | "scope"
+                    | "visibilityScope"
+                    | "orderBy"
+                    | "orderDirection"
+                    | "mode"
+                    | "maxRows"
+                    | "maxBytes"
+                    | "truncated"
+            )
+        });
+        metadata.insert("digest".to_owned(), self.digest.clone());
+        ServerMessage::ReplicaSnapshotStart {
+            snapshot_id: self.snapshot_id.clone(),
+            id: self.id.clone(),
+            cursor: self.cursor.clone(),
+            key: self.key.clone(),
+            metadata,
+        }
+    }
+
     fn page(&self, result: Vec<Value>, last: bool) -> ServerMessage {
         let mut metadata = self.metadata.clone();
         if last {

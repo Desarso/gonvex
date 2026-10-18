@@ -176,7 +176,7 @@ export type ReplicaDirective = {
 export type ServerCapabilities = {
   /** Negotiated sum128-v1 Replica Collection integrity. */
   replicaSetDigest?: 1;
-  /** Binary canonical row strings with cumulative durable staging credits. */
+  /** Explicit start metadata, then binary canonical rows with durable staging credits. */
   replicaNativeRows?: 1;
   replicaSnapshotPages?: 1;
   /** Accepts cursor + xor1 row-hash digest, with needHashes repair. */
@@ -251,7 +251,7 @@ export type ReplicaReady = {
 export type ClientCapabilities = {
   /** Accepts sum128-v1 when the runtime also advertises version 1. */
   replicaSetDigest?: 1;
-  /** Binary canonical row strings with cumulative durable staging credits. */
+  /** Explicit start metadata, then binary canonical rows with durable staging credits. */
   replicaNativeRows?: 1;
   /** Accepts atomically activated replica.snapshotPage frames. */
   replicaSnapshotPages?: 1;
@@ -494,6 +494,24 @@ export type ServerMessage =
     maxBytes?: number;
     hashes?: Record<string, string>;
     digest?: string;
+    truncated?: boolean;
+  }
+  | {
+    /** Only under replicaNativeRows:1. Typed admission precedes binary rows. */
+    type: "replica.snapshotStart";
+    id: string;
+    snapshotId: string;
+    scope: string;
+    visibilityScope: string;
+    cursor: ReplicaCursor;
+    key: string;
+    digest: string;
+    path?: string;
+    orderBy?: string;
+    orderDirection?: "asc" | "desc";
+    mode?: "eager" | "progressive";
+    maxRows?: number;
+    maxBytes?: number;
     truncated?: boolean;
   }
   | {

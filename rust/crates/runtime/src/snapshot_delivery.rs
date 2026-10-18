@@ -19,6 +19,7 @@ pub(crate) fn negotiated(caps: Option<&ClientCapabilities>) -> bool {
 
 struct Pending {
     pages: SnapshotPages,
+    start: Option<ServerMessage>,
     snapshot: String,
     sent: Option<u64>,
     acked: Option<u64>,
@@ -30,6 +31,7 @@ struct Pending {
 
 #[derive(Default)]
 pub(crate) struct DeliveryBatch {
+    pub(crate) starts: Vec<ServerMessage>,
     pub(crate) frames: Vec<Vec<u8>>,
     pub(crate) errors: Vec<ServerMessage>,
 }
@@ -52,6 +54,14 @@ impl SnapshotDelivery {
 
     pub(crate) fn begin(&mut self, snapshot: ServerMessage) -> Result<(), &'static str> {
         let pages = SnapshotPages::native(snapshot);
+        let start = pages.start();
+        if serde_json::to_vec(&start)
+            .map_err(|_| "native snapshot header encoding failed")?
+            .len()
+            > 16 * 1024
+        {
+            return Err("native snapshot metadata limit exceeded");
+        }
         let (id, snapshot) = pages.identity();
         let (id, snapshot) = (id.to_owned(), snapshot.to_owned());
         if !self.pending.contains_key(&id) && self.pending.len() == SUBSCRIPTION_LIMIT {
@@ -61,6 +71,7 @@ impl SnapshotDelivery {
             id,
             Pending {
                 pages,
+                start: Some(start),
                 snapshot,
                 sent: None,
                 acked: None,
@@ -199,6 +210,9 @@ impl SnapshotDelivery {
                             pending.buffered = Some((encoded, sequence, last));
                             break 'pump;
                         }
+                        if let Some(start) = pending.start.take() {
+                            batch.starts.push(start);
+                        }
                         pending.sent = Some(sequence);
                         pending.last_sent = last;
                         pending.in_flight.push_back((sequence, encoded.len()));
@@ -271,6 +285,43 @@ mod tests {
         assert!(!negotiated(Some(&caps)));
     }
     #[test]
+    fn typed_start_precedes_first_binary_only_once_and_never_contains_rows() {
+        let mut delivery = SnapshotDelivery::default();
+        delivery.begin(snapshot("typed", 2000)).unwrap();
+        let batch = delivery.pump();
+        assert_eq!(batch.starts.len(), 1);
+        assert!(!batch.frames.is_empty());
+        let start = serde_json::to_value(&batch.starts[0]).unwrap();
+        let first: serde_json::Value = serde_json::from_slice(&batch.frames[0]).unwrap();
+        assert_eq!(start["type"], "replica.snapshotStart");
+        assert_eq!(start["snapshotId"], first["snapshotId"]);
+        assert_eq!(start["key"], first["key"]);
+        for field in ["result", "canonicalRows", "hashes"] {
+            assert!(start.get(field).is_none());
+        }
+        let last: serde_json::Value = serde_json::from_slice(batch.frames.last().unwrap()).unwrap();
+        delivery
+            .acknowledge(
+                "typed",
+                last["snapshotId"].as_str().unwrap(),
+                last["sequence"].as_u64().unwrap(),
+            )
+            .unwrap();
+        assert!(delivery.pump().starts.is_empty());
+    }
+    #[test]
+    fn oversized_start_metadata_is_rejected_before_retaining_a_delivery() {
+        let mut source = snapshot("large-header", 1);
+        if let ServerMessage::ReplicaSnapshot { metadata, .. } = &mut source {
+            metadata.insert("path".into(), json!("x".repeat(17 * 1024)));
+        }
+        let mut delivery = SnapshotDelivery::default();
+        assert!(delivery.begin(source).is_err());
+        assert!(delivery.is_empty());
+        let batch = delivery.pump();
+        assert!(batch.starts.is_empty() && batch.frames.is_empty());
+    }
+    #[test]
     fn credits_are_connection_bounded_and_duplicate_acks_do_not_mint_more() {
         let mut delivery = SnapshotDelivery::default();
         delivery.begin(snapshot("one", 2000)).unwrap();
@@ -300,15 +351,13 @@ mod tests {
         assert_eq!(frames.len(), IN_FLIGHT_FRAMES);
         assert!(frames.iter().map(Vec::len).sum::<usize>() <= IN_FLIGHT_BYTES);
         let last: serde_json::Value = serde_json::from_slice(frames.last().unwrap()).unwrap();
-        assert!(
-            delivery
-                .acknowledge(
-                    "exact",
-                    last["snapshotId"].as_str().unwrap(),
-                    last["sequence"].as_u64().unwrap() + 1
-                )
-                .is_err()
-        );
+        assert!(delivery
+            .acknowledge(
+                "exact",
+                last["snapshotId"].as_str().unwrap(),
+                last["sequence"].as_u64().unwrap() + 1
+            )
+            .is_err());
         assert!(delivery.pump().frames.is_empty());
     }
     #[test]
