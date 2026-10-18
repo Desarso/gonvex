@@ -126,3 +126,28 @@ it('upgrades a legacy canonical body view and fences its old decoder without los
   expect((await upgraded.loadEntityRows('s', 'tasks', ['a']))[0]!.row).toEqual({ ...a, name: 'updated' });
   expect(JSON.parse(String(db.prepare(`SELECT body FROM ${sqliteIdentifier(sqliteTableName('tasks'))} WHERE id='a'`).get()!.body))).toMatchObject({ name: null, due: null });
 });
+
+it('indexes pre-existing typed imports on canonical installation without decoding corpus rows', async () => {
+  const { db, host } = fixture();
+  const engine = new SQLiteTypedReplicaEngine(host, schema); await engine.open('importer');
+  await engine.importScope('s', (async function* () {
+    for (let start=0;start<600;start+=50) yield JSON.stringify(Array.from({length:50},(_,n)=>{
+      const id=String(start+n);return {table:'tasks',id,version:1,row:{_id:id,name:'Imported '+id,due:start+n,done:false}};
+    }));
+  })());
+  const reads: number[] = [];
+  const guarded: SQLiteReplicaDatabase = {...host, async getAllAsync<T>(sql: string,...params: unknown[]) {
+    const result = await host.getAllAsync<T>(sql,...params); reads.push(result.length); return result;
+  }};
+  const storage = sqliteTypedReplicaStorage(guarded,schema);
+  const result = await storage.withReadView('s',{tasks:{key:'_id',complete:true}},view=>view.select({table:'tasks',where:{column:'due',op:'eq',value:599}}));
+  expect(result).toEqual({rows:[{_id:'599',name:'Imported 599',due:599,done:false}],complete:true});
+  expect(Math.max(...reads)).toBeLessThanOrEqual(1);
+  expect(db.prepare('SELECT count(DISTINCT id) n FROM _gonvex_replica_lookup WHERE scope=?').get('s')!.n).toBe(600);
+  // A format-2 installation may already have rows but an incomplete lookup.
+  db.prepare('UPDATE gv_canonical_layout SET signature=?').run(JSON.stringify({format:2,schema}));
+  db.prepare('DELETE FROM _gonvex_replica_lookup WHERE id=?').run('599');
+  const repaired = sqliteTypedReplicaStorage(host,schema);
+  expect((await repaired.withReadView('s',{tasks:{key:'_id',complete:true}},view=>view.select({table:'tasks',where:{column:'due',op:'eq',value:599}}))).rows).toEqual(result.rows);
+  expect(await engine.integrity()).toBe('ok');
+});
