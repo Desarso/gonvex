@@ -1,3 +1,4 @@
+import {readFileSync} from 'node:fs';
 import { expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { ReplicaSetDigest } from './replica-set-digest.js';
@@ -32,4 +33,13 @@ it('rejects invalid hashes, underflow and malformed receipts without modifying t
   const invalid = initial.slice(); invalid[0] = 2;
   expect(() => ReplicaSetDigest.decode(invalid)).toThrow('format');
   expect(() => ReplicaSetDigest.decode(new Uint8Array(1))).toThrow('length');
+});
+
+it('matches the shared Rust/TypeScript receipt fixture byte for byte',()=>{
+  const fixture=JSON.parse(readFileSync(new URL('../../protocol/fixtures/replica-set-digest.json',import.meta.url),'utf8'));
+  const digest=new ReplicaSetDigest();
+  for(const mutation of fixture.mutations) mutation.op==='add'?digest.add(mutation.hash):digest.remove(mutation.hash);
+  expect(digest.count).toBe(fixture.count);expect(digest.digest()).toBe(fixture.digest);expect(digest.legacyDigest()).toBe(fixture.legacy);
+  expect(Buffer.from(digest.encode()).toString('hex')).toBe(fixture.receipt);
+  expect(ReplicaSetDigest.decode(new Uint8Array(Buffer.from(fixture.receipt,'hex'))).digest()).toBe(fixture.digest);
 });

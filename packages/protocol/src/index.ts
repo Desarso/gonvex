@@ -174,6 +174,8 @@ export type ReplicaDirective = {
 };
 
 export type ServerCapabilities = {
+  /** Negotiated sum128-v1 Replica Collection integrity. */
+  replicaSetDigest?: 1;
   replicaSnapshotPages?: 1;
   /** Accepts cursor + xor1 row-hash digest, with needHashes repair. */
   replicaResume?: 1;
@@ -245,6 +247,8 @@ export type ReplicaReady = {
 };
 
 export type ClientCapabilities = {
+  /** Accepts sum128-v1 when the runtime also advertises version 1. */
+  replicaSetDigest?: 1;
   /** Accepts atomically activated replica.snapshotPage frames. */
   replicaSnapshotPages?: 1;
   /** Honors auth.result subscriptionsPreserved on an in-place refresh. */

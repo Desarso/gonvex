@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gonvex_postgres::{TenantSession, TenantTransaction};
+use gonvex_protocol::replica_digest::ReplicaSetDigest;
 use gonvex_protocol::{
     PublicInvocationProvenance, ReplicaChange, ReplicaCursor, ReplicaOpenRequest, ServerMessage,
 };
@@ -27,6 +28,8 @@ pub enum ReplicaError {
     FunctionMissing(String),
     #[error("visibility plan required for table {0:?}")]
     VisibilityMissing(String),
+    #[error("sum128-v1 replica integrity was not negotiated")]
+    DigestNotNegotiated,
     #[error("replica arguments must be an object")]
     InvalidArguments,
     #[error("replica row is missing key {0:?}")]
@@ -58,9 +61,55 @@ pub struct ReplicaSubscription {
     pub cursor: ReplicaCursor,
     pub rows: BTreeMap<String, Value>,
     pub hashes: BTreeMap<String, String>,
-    pub aggregate: Option<[u8; 32]>,
+    pub aggregate: Option<ReplicaAggregate>,
     pub truncated: bool,
     pub resolved: ResolvedVisibility,
+}
+
+impl ReplicaSubscription {
+    pub(crate) fn require_legacy_digest(&mut self) {
+        if matches!(self.aggregate, Some(ReplicaAggregate::Sum(_))) {
+            self.aggregate = Some(ReplicaAggregate::Legacy(aggregate_bytes(&self.hashes)));
+        }
+    }
+}
+
+pub enum ReplicaAggregate {
+    Legacy([u8; 32]),
+    Sum(Box<ReplicaSetDigest>),
+}
+impl ReplicaAggregate {
+    fn from_hashes(hashes: &BTreeMap<String, String>, sum: bool) -> Self {
+        if sum {
+            let mut state = Box::<ReplicaSetDigest>::default();
+            for hash in hashes.values() {
+                state.add(hash).expect("server-generated SHA-256");
+            }
+            Self::Sum(state)
+        } else {
+            Self::Legacy(aggregate_bytes(hashes))
+        }
+    }
+    fn change(&mut self, hash: &str, remove: bool) {
+        match self {
+            Self::Legacy(bytes) => xor_hash(bytes, hash),
+            Self::Sum(state) => if remove {
+                state.remove(hash)
+            } else {
+                state.add(hash)
+            }
+            .expect("server-generated row hash and membership"),
+        }
+    }
+    fn digest(&self) -> String {
+        match self {
+            Self::Legacy(bytes) => format_aggregate(bytes),
+            Self::Sum(state) => state.digest(),
+        }
+    }
+    fn is_sum(&self) -> bool {
+        matches!(self, Self::Sum(_))
+    }
 }
 
 struct Snapshot {
@@ -98,6 +147,16 @@ impl Runtime {
         session: &TenantSession,
         request: ReplicaOpenRequest,
     ) -> Result<ReplicaOpenResult, ReplicaError> {
+        self.open_replica_negotiated(session, request, false).await
+    }
+
+    pub(crate) async fn open_replica_negotiated(
+        &self,
+        session: &TenantSession,
+        request: ReplicaOpenRequest,
+        sum_enabled: bool,
+    ) -> Result<ReplicaOpenResult, ReplicaError> {
+        let sum = requested_sum_digest(&request, sum_enabled)?;
         if session.is_anonymous() {
             return Err(ReplicaError::PublicSession(
                 "authenticate with an active tenant before opening a Replica Collection".to_owned(),
@@ -132,7 +191,7 @@ impl Runtime {
         let aggregate = request
             .digest
             .as_deref()
-            .is_some_and(|digest| digest.starts_with("xor1:"));
+            .is_some_and(|digest| digest.starts_with("xor1:") || sum);
         let mut snapshot = self
             .replica_snapshot_for_resume(
                 session,
@@ -147,9 +206,10 @@ impl Runtime {
             )
             .await?;
         let cursor = cursor_for(&snapshot.clock, &definition, &directive.visibility_scope);
-        let resume_aggregate = aggregate.then(|| aggregate_bytes(&snapshot.hashes));
+        let resume_aggregate =
+            aggregate.then(|| ReplicaAggregate::from_hashes(&snapshot.hashes, sum));
         let digest = if let Some(aggregate) = &resume_aggregate {
-            format_aggregate(aggregate)
+            aggregate.digest()
         } else {
             hashes_digest(&snapshot.hashes)
         };
@@ -439,7 +499,9 @@ impl Runtime {
                 subscription.rows = snapshot.by_key;
                 subscription.hashes = snapshot.hashes;
                 if subscription.aggregate.is_some() {
-                    subscription.aggregate = Some(aggregate_bytes(&subscription.hashes));
+                    let sum = subscription.aggregate.as_ref().unwrap().is_sum();
+                    subscription.aggregate =
+                        Some(ReplicaAggregate::from_hashes(&subscription.hashes, sum));
                 }
                 subscription.truncated = snapshot.truncated;
                 subscription.resolved = snapshot.resolved;
@@ -491,10 +553,10 @@ impl Runtime {
                     let new_hash = new_projection.as_ref().map(row_hash);
                     if let Some(aggregate) = &mut subscription.aggregate {
                         if let Some(previous) = subscription.hashes.get(&change.row_id) {
-                            xor_hash(aggregate, previous);
+                            aggregate.change(previous, true);
                         }
                         if let Some(hash) = &new_hash {
-                            xor_hash(aggregate, hash);
+                            aggregate.change(hash, false);
                         }
                     }
                     if new_visible {
@@ -871,6 +933,20 @@ fn row_key(row: &Value, key: &str) -> Result<String, ReplicaError> {
     }
 }
 
+fn requested_sum_digest(
+    request: &ReplicaOpenRequest,
+    negotiated: bool,
+) -> Result<bool, ReplicaError> {
+    let sum = request
+        .digest
+        .as_deref()
+        .is_some_and(|digest| digest.starts_with("sum128-v1:"));
+    if sum && !negotiated {
+        return Err(ReplicaError::DigestNotNegotiated);
+    }
+    Ok(sum)
+}
+
 fn row_hash(row: &Value) -> String {
     hex_digest(stable_json(row).as_bytes())
 }
@@ -896,7 +972,15 @@ fn verify_resume_hashes(
         request.digest.as_deref()
             == Some(
                 if aggregate {
-                    aggregate_digest(hashes)
+                    if request
+                        .digest
+                        .as_deref()
+                        .is_some_and(|digest| digest.starts_with("sum128-v1:"))
+                    {
+                        ReplicaAggregate::from_hashes(hashes, true).digest()
+                    } else {
+                        aggregate_digest(hashes)
+                    }
                 } else {
                     hashes_digest(hashes)
                 }
@@ -942,7 +1026,7 @@ fn format_aggregate(aggregate: &[u8; 32]) -> String {
 
 fn subscription_digest(subscription: &ReplicaSubscription) -> String {
     if let Some(aggregate) = &subscription.aggregate {
-        format_aggregate(aggregate)
+        aggregate.digest()
     } else {
         hashes_digest(&subscription.hashes)
     }
@@ -1686,6 +1770,46 @@ mod tests {
         )?
         .is_none());
         Ok(())
+    }
+
+    #[test]
+    fn negotiated_sum_digest_resume_and_incremental_changes() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../packages/protocol/fixtures/replica-set-digest.json"
+        ))
+        .unwrap();
+        let mut hashes = BTreeMap::new();
+        let mut aggregate = ReplicaAggregate::from_hashes(&hashes, true);
+        for (i, mutation) in fixture["mutations"].as_array().unwrap().iter().enumerate() {
+            let hash = mutation["hash"].as_str().unwrap();
+            let remove = mutation["op"] == "remove";
+            aggregate.change(hash, remove);
+            if remove {
+                hashes.retain(|_, value| value != hash);
+            } else {
+                hashes.insert(i.to_string(), hash.to_owned());
+            }
+            assert_eq!(
+                aggregate.digest(),
+                ReplicaAggregate::from_hashes(&hashes, true).digest()
+            );
+        }
+        assert_eq!(aggregate.digest(), fixture["digest"].as_str().unwrap());
+        let mut request:ReplicaOpenRequest=serde_json::from_value(serde_json::json!({"id":"sum","path":"tasks.all","args":{},"digest":aggregate.digest()})).unwrap();
+        assert!(matches!(
+            requested_sum_digest(&request, false),
+            Err(ReplicaError::DigestNotNegotiated)
+        ));
+        assert!(requested_sum_digest(&request, true).unwrap());
+        assert!(verify_resume_hashes(&request, Some(&hashes), true).is_none());
+        request.digest = Some(format!("sum128-v1:{}", "00".repeat(16)));
+        assert!(matches!(
+            verify_resume_hashes(&request, Some(&hashes), true),
+            Some(ServerMessage::ReplicaNeedHashes { .. })
+        ));
+        request.digest = Some(aggregate_digest(&hashes));
+        assert!(!requested_sum_digest(&request, false).unwrap());
+        assert!(verify_resume_hashes(&request, Some(&hashes), true).is_none());
     }
 
     #[test]

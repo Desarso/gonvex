@@ -1326,6 +1326,7 @@ async fn websocket(
     let mut telemetry_device = None;
     let mut telemetry_batch_enabled = false;
     let mut replica_snapshot_pages_enabled = false;
+    let mut replica_sum_digest_enabled = false;
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
     let mut connected_client_contract: Option<u64> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
@@ -1350,6 +1351,7 @@ async fn websocket(
         replica: None,
         capabilities: Some(ServerCapabilities {
             replica_snapshot_pages: Some(1),
+            replica_set_digest: Some(1),
             replica_resume: Some(1),
             query_resume: Some(1),
             preserve_subscriptions: Some(1),
@@ -1945,6 +1947,10 @@ async fn websocket(
                     }
                     replica_snapshot_pages_enabled =
                         snapshot_pages_negotiated(capabilities.as_ref());
+                    replica_sum_digest_enabled = capabilities.as_ref().and_then(|c| c.replica_set_digest)==Some(1);
+                    if !replica_sum_digest_enabled {
+                        for subscription in replicas.values_mut() { subscription.require_legacy_digest(); }
+                    }
                     telemetry_device = device.clone();
                     telemetry_batch_enabled =
                         capabilities.as_ref().and_then(|c| c.telemetry_batch) == Some(1);
@@ -2496,7 +2502,7 @@ async fn websocket(
                         Some(&request.path),
                     );
                     let messages = if let Some(session) = tenant_session.as_ref() {
-                        match runtime.open_replica(session, request.clone()).await {
+                        match runtime.open_replica_negotiated(session, request.clone(),replica_sum_digest_enabled).await {
                             Ok(opened) => {
                                 if let Some(subscription) = opened.subscription {
                                     replicas.insert(subscription.id.clone(), subscription);
@@ -2557,7 +2563,7 @@ async fn websocket(
                         );
                     }
                     let messages = if let Some(session) = tenant_session.as_ref() {
-                        let outcomes = open_replica_batch(&runtime, session, opens).await;
+                        let outcomes = open_replica_batch(&runtime, session, opens,replica_sum_digest_enabled).await;
                         install_replica_open_outcomes(&mut replicas, outcomes)
                     } else {
                         opens
@@ -3681,11 +3687,12 @@ async fn open_replica_batch(
     runtime: &Runtime,
     session: &TenantSession,
     opens: Vec<ReplicaOpenRequest>,
+    sum_enabled:bool,
 ) -> Vec<ReplicaOpenOutcome<replica::ReplicaSubscription, replica::ReplicaError>> {
     collect_bounded_ordered(opens, REPLICA_OPEN_CONCURRENCY, |request| async move {
         let request_for_open = request.clone();
         let opened = runtime
-            .open_replica(session, request_for_open)
+            .open_replica_negotiated(session, request_for_open,sum_enabled)
             .await
             .map(|opened| {
                 let subscription = opened

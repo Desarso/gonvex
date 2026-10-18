@@ -479,3 +479,43 @@ it('allows a fresh subscription after actual close while discarding only its pre
   expect((client as any).snapshotPageSubscriptions.size).toBe(0);
   expect(observer).toHaveBeenCalledTimes(1);
 });
+
+it('verifies a negotiated sum128 snapshot and rejects a changed final certificate',async()=>{
+  const {replicaSumDigest}=await import('./replica-integrity');
+  const rows=[{id:'a',name:'café 東京'},{id:'b',name:'😀'}];
+  const frames=await pages(rows,'sum',true);
+  const digest=replicaSumDigest(await replicaRowsHashes(rows,'id'));
+  frames[frames.length-1]!.digest=digest;
+  const stager=new SnapshotPageStager(frames[0]!);
+  for(let i=0;i<frames.length-1;i++)expect(await stager.append(frames[i]!)).toBeUndefined();
+  expect((await stager.append(frames.at(-1)!))!.digest).toBe(digest);
+  const bad=new SnapshotPageStager(frames[0]!);
+  for(let i=0;i<frames.length-1;i++)await bad.append(frames[i]!);
+  await expect(bad.append({...frames.at(-1)!,digest:'sum128-v1:'+'0'.repeat(32)})).rejects.toThrow('integrity-mismatch');
+});
+
+it('negotiates sum128 on cold open, verifies snapshot/delta readiness and resumes without membership uploads',async()=>{
+  const {replicaSumDigest}=await import('./replica-integrity');
+  const {client,socket,open}=await setup({replicaSnapshotPages:1,replicaResume:1,replicaSetDigest:1});
+  expect(socket.sent.find(message=>message.type==='auth').capabilities.replicaSetDigest).toBe(1);
+  expect(open.digest).toBe('sum128-v1:'+'0'.repeat(32));
+  const rows=[{id:'a',value:'café 東京'},{id:'b',value:1}];
+  const frames=await pages(rows,open.id,true);
+  const digest=replicaSumDigest(await replicaRowsHashes(rows,'id'));
+  frames[1]!.digest=digest;
+  for(const frame of frames){socket.receive(frame);await settled(client);}
+  socket.receive({type:'replica.ready',id:open.id,cursor:base.cursor,digest});await settled(client);
+  expect(client.localReplica.entity('tasks','a')?.value).toBe('café 東京');
+  const changes=[{id:'a',value:'new 😀'}],cursor={epoch:'e',revision:11};
+  const nextDigest=replicaSumDigest(await replicaRowsHashes(changes,'id'));
+  socket.receive({type:'replica.delta',id:open.id,cursor,upserts:changes,deleted:['b'],digest:nextDigest});await settled(client);
+  socket.receive({type:'replica.ready',id:open.id,cursor,digest:nextDigest});await settled(client);
+  expect(client.localReplica.entity('tasks','a')?.value).toBe('new 😀');
+  const state=client as any;
+  const signature=client.replicaSignature(reference,{});
+  const resume=state.replicaOpenRequest({id:open.id,key:signature,path:reference.path,args:{},forceFullIntegrity:false});
+  expect(resume).toEqual({id:open.id,path:reference.path,args:{},cursor,digest:nextDigest});
+  state.serverCapabilities={replicaResume:1};
+  expect(state.replicaOpenRequest({id:open.id,key:signature,path:reference.path,args:{},forceFullIntegrity:false}).digest).toMatch(/^xor1:/);
+  expect(socket.sent.filter(message=>message.type==='replica.open')).toHaveLength(1);
+});

@@ -4,11 +4,12 @@ import type { JsonValue } from "@gonvex/protocol";
 export async function replicaRowsHashes(
   rows: readonly JsonValue[],
   keyField: string,
+  yieldTask: () => Promise<void> = () => new Promise<void>(resolve => setTimeout(resolve,0)),
 ): Promise<Record<string, string>> {
   const seen = new Set<string>();
   const entries: Array<readonly [string, string]> = [];
   for (let offset = 0; offset < rows.length; offset += 128) {
-    if (offset) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    if (offset) await yieldTask();
     entries.push(...await Promise.all(rows.slice(offset, offset + 128).map(async (row) => {
       const key = replicaRowKey(row, keyField);
       if (!key) throw new Error(`replica row is missing key ${JSON.stringify(keyField)}`);
@@ -77,6 +78,13 @@ export async function applyReplicaHashDelta(previous: Readonly<Record<string, st
   Object.assign(next, changed);
   for (const hash of Object.values(changed)) xorHash(bytes, hash);
   aggregates.set(next, formatAggregate(bytes));
+  const priorSum=sums.get(previous);
+  if(priorSum) {
+    let sum=BigInt("0x"+priorSum.slice(10));
+    for(const id of new Set([...deleted,...Object.keys(changed)])) if(Object.prototype.hasOwnProperty.call(previous,id)) sum-=hash128(previous[id]!);
+    for(const hash of Object.values(changed)) sum+=hash128(hash);
+    sums.set(next,formatSum(sum));
+  }
   return next;
 }
 
@@ -101,4 +109,19 @@ function aggregateBytes(digest: string) {
 }
 function formatAggregate(bytes: Uint8Array) {
   return `xor1:${Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+const sums=new WeakMap<object,string>();
+const sumMask=(1n<<128n)-1n;
+function hash128(hash:string):bigint {
+  if(!/^[0-9a-f]{64}$/.test(hash))throw new TypeError('Replica row hash must be canonical SHA-256 hex');
+  return BigInt('0x'+hash.slice(0,32));
+}
+function formatSum(sum:bigint){return 'sum128-v1:'+(sum&sumMask).toString(16).padStart(32,'0');}
+/** Legacy object-map adapter. Native storage maintains the same sum alongside
+ * its rows; this cache does not introduce a second per-row hash map. */
+export function replicaSumDigest(hashes:Readonly<Record<string,string>>):string {
+  const previous=sums.get(hashes);if(previous)return previous;
+  let sum=0n;for(const hash of Object.values(hashes))sum+=hash128(hash);
+  const digest=formatSum(sum);sums.set(hashes,digest);return digest;
 }

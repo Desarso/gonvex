@@ -15,7 +15,7 @@ import type {
   ReducerErrorClass,
 } from "@gonvex/protocol";
 import { SnapshotPageStager, type SnapshotPage } from "./snapshot-pages.js";
-import { applyReplicaHashDelta, replicaAggregateDigest, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
+import { applyReplicaHashDelta, replicaSumDigest, replicaAggregateDigest, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
 import type { LocalExecution, LocalSnapshot, LocalTransactionResult } from "@gonvex/local-runtime";
 import type { LocalExecutor, LocalRuntimeBinding } from "@gonvex/local-runtime/worker-client";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
@@ -3073,7 +3073,7 @@ export class GonvexClient {
       const materializedRows = rows.filter((row): row is ReplicaRow => asReplicaRow(row) !== undefined).map(row => asReplicaRow(row)!);
       let hashes: Record<string, string> | undefined;
       if (message.hashes && message.digest) {
-        const digest = verifiedSnapshot ? message.digest : message.digest.startsWith("xor1:")
+        const digest = verifiedSnapshot ? message.digest : message.digest.startsWith("sum128-v1:") ? replicaSumDigest(message.hashes) : message.digest.startsWith("xor1:")
           ? replicaAggregateDigest(message.hashes) : await replicaHashesDigest(message.hashes);
         if (digest === message.digest) hashes = message.hashes;
       }
@@ -3220,7 +3220,7 @@ export class GonvexClient {
         await this.handleReplicaMessage(subscription, { type: "replica.reset", id: subscription.id, path: subscription.path, reason: "integrity-missing" }, scope);
         return;
       }
-      const digest = message.digest?.startsWith("xor1:")
+      const digest = message.digest?.startsWith("sum128-v1:") ? replicaSumDigest(hashes) : message.digest?.startsWith("xor1:")
         ? window.aggregateDigest ?? replicaAggregateDigest(hashes)
         : await replicaHashesDigest(hashes);
       if (scope !== this.replicaScope || verificationGeneration !== subscription.verificationGeneration) return;
@@ -3579,7 +3579,11 @@ export class GonvexClient {
   private replicaOpenRequest(subscription: ReplicaSubscription): ReplicaOpenRequest {
     if (!subscription.forceFullIntegrity && this.serverCapabilities.replicaResume === 1) {
       const resume = this.replica.windowResumeState(subscription.key);
-      if (resume) return { id: subscription.id, path: subscription.path, args: subscription.args, ...resume };
+      if (resume) {
+        const hashes=this.replica.windowMetadata(subscription.key)?.hashes;
+        if(this.serverCapabilities.replicaSetDigest===1&&hashes)resume.digest=replicaSumDigest(hashes);
+        return { id: subscription.id, path: subscription.path, args: subscription.args, ...resume };
+      }
     }
     const window = this.replica.windowMetadata(subscription.key);
     const cursor = window?.cursor;
@@ -3598,7 +3602,7 @@ export class GonvexClient {
       keys,
       hashes,
       // Select aggregate verification on cold opens and integrity repair too.
-      digest: this.serverCapabilities.replicaResume === 1
+      digest: this.serverCapabilities.replicaSetDigest===1 ? replicaSumDigest(hashes??{}) : this.serverCapabilities.replicaResume === 1
         ? window?.aggregateDigest ?? replicaAggregateDigest({}) : undefined,
       fullIntegrity: fullIntegrity || undefined,
     };
@@ -4975,7 +4979,7 @@ export class GonvexClient {
       controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
       device: this.telemetryDevice,
-		capabilities: { replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
+		capabilities: { replicaSetDigest: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
     });
   }
 

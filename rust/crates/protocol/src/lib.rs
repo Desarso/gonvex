@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod replica_digest;
+
 pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +163,9 @@ pub struct BrowserTelemetryInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
+    /// Client understands sum128-v1 Replica Collection integrity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_set_digest: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_snapshot_pages: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -417,6 +422,9 @@ pub struct PerformanceTelemetryEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
+    /// sum128-v1 is selected only when both peers advertise version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_set_digest: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_snapshot_pages: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

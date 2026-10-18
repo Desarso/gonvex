@@ -46,3 +46,20 @@ it('applies deltas for row ids that shadow inherited Object properties', async (
   expect(next).toEqual(full);
   expect(replicaAggregateDigest(next)).toBe(replicaAggregateDigest({ ...full }));
 });
+
+it('updates negotiated sums reversibly without replacing legacy XOR integrity',async()=>{
+  const {replicaSumDigest,replicaAggregateDigest}=await import('./replica-integrity');
+  const {ReplicaSetDigest}=await import('./replica-set-digest');
+  const original=[{id:'a',value:'café 東京'},{id:'b',value:1}];
+  const hashes=await replicaRowsHashes(original,'id');
+  const expected=new ReplicaSetDigest();for(const hash of Object.values(hashes))expected.add(hash);
+  expect(replicaSumDigest(hashes)).toBe(expected.digest());
+  const changed=[{id:'a',value:'new 😀'},{id:'c',value:null}];
+  const next=await applyReplicaHashDelta(hashes,changed,['b'],'id');
+  const full=await replicaRowsHashes(changed,'id');
+  expect(replicaSumDigest(next)).toBe(replicaSumDigest(full));
+  expect(replicaAggregateDigest(next)).toBe(replicaAggregateDigest(full));
+  expect(replicaSumDigest(hashes)).toBe(expected.digest());
+  const empty=await applyReplicaHashDelta(next,[],['a','c'],'id');
+  expect(replicaSumDigest(empty)).toBe('sum128-v1:'+'0'.repeat(32));
+});

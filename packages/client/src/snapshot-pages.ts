@@ -1,5 +1,5 @@
 import type { ServerMessage } from "@gonvex/protocol";
-import { replicaAggregateDigest, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
+import { replicaSumDigest, replicaAggregateDigest, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
 
 export type SnapshotPage = Extract<ServerMessage, { type: "replica.snapshotPage" }>;
 type Snapshot = Extract<ServerMessage, { type: "replica.snapshot" }>;
@@ -26,7 +26,7 @@ export class SnapshotPageStager {
       || typeof page.visibilityScope !== "string" || !page.visibilityScope
       || !Number.isSafeInteger(page.cursor.revision) || page.cursor.revision < 0 || !page.cursor.epoch
       || !Array.isArray(result)
-      || !sameMetadata(metadata, this.first)
+      || !sameSnapshotPageMetadata(metadata, this.first)
       || (!page.last && (result.length === 0 || digest !== undefined))
       || result.length > 512) throw new Error("invalid-snapshot-page");
     const pageBytes = new TextEncoder().encode(JSON.stringify(page)).byteLength;
@@ -49,14 +49,14 @@ export class SnapshotPageStager {
     this.sequence += 1;
     if (!page.last) return undefined;
     this.finished = true;
-    const actual = digest?.startsWith("xor1:") ? replicaAggregateDigest(this.hashes) : await replicaHashesDigest(this.hashes);
+    const actual = digest?.startsWith("sum128-v1:") ? replicaSumDigest(this.hashes) : digest?.startsWith("xor1:") ? replicaAggregateDigest(this.hashes) : await replicaHashesDigest(this.hashes);
     if (!digest || actual !== digest) throw new Error("snapshot-page-integrity-mismatch");
     const { snapshotId, sequence, last, ...snapshot } = page;
     return { ...snapshot, type: "replica.snapshot", result: this.rows, hashes: this.hashes, digest };
   }
 }
 
-function sameMetadata(left: Omit<SnapshotPage, "result" | "digest">, right: Omit<SnapshotPage, "result" | "digest">) {
+export function sameSnapshotPageMetadata(left: Omit<SnapshotPage, "result" | "digest">, right: Omit<SnapshotPage, "result" | "digest">) {
   return left.id === right.id && left.snapshotId === right.snapshotId && left.path === right.path
     && left.key === right.key && left.mode === right.mode && left.orderBy === right.orderBy
     && left.orderDirection === right.orderDirection && left.maxRows === right.maxRows
