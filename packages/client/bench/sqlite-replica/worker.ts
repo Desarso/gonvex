@@ -58,7 +58,7 @@ const handlers = {
     await host.database.execAsync("CREATE TABLE IF NOT EXISTS crash_probe(id INTEGER PRIMARY KEY,value BLOB); BEGIN IMMEDIATE; INSERT INTO crash_probe VALUES(1,zeroblob(4194304));");
     return { dirty: true };
   },
-  async check() { return { integrity: await host.database.getFirstAsync('PRAGMA integrity_check'), probe: await host.database.getFirstAsync('SELECT count(*) n FROM crash_probe'), count: await engine.count('test-scope', 'tasks', 0, ['3']) }; },
+  async check() { return { ftsIntegrity: await engine.integrity(), integrity: await host.database.getFirstAsync('PRAGMA integrity_check'), probe: await host.database.getFirstAsync('SELECT count(*) n FROM crash_probe'), count: await engine.count('test-scope', 'tasks', 0, ['3']) }; },
   async close() { host.close(); return true; },
 };
 let lane = Promise.resolve();
