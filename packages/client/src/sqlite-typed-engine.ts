@@ -385,7 +385,9 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         if (await this.db.getFirstAsync(`SELECT 1 FROM ${this.jsonEach}(${sqliteEncodedFrameValueSQL}) GROUP BY json_extract(value,'$.table'),json_extract(value,'$.id') HAVING count(*)>1 LIMIT 1`)) fail('INVALID_ROW','Duplicate bootstrap row');
         duplicatesChecked = true;
       }
-      if (await this.db.getFirstAsync(`SELECT 1 FROM ${this.jsonEach}(${sqliteEncodedFrameValueSQL}) w JOIN ${q(sqliteTableName(entity))} t ON t.scope=? AND t.id=json_extract(w.value,'$.id') WHERE json_extract(w.value,'$.table')=? LIMIT 1`,old.physical,entity)) fail('INVALID_ROW','Duplicate bootstrap row');
+      // CROSS JOIN fixes the small wire frame as the outer loop. The ordinary
+      // join planner otherwise scans the growing scope for every frame.
+      if (await this.db.getFirstAsync(`SELECT 1 FROM ${this.jsonEach}(${sqliteEncodedFrameValueSQL}) w CROSS JOIN ${q(sqliteTableName(entity))} t ON t.scope=? AND t.id=json_extract(w.value,'$.id') WHERE json_extract(w.value,'$.table')=? LIMIT 1`,old.physical,entity)) fail('INVALID_ROW','Duplicate bootstrap row');
       await this.insertBootstrapEntity(old.physical,entity,undefined,normalized);
     },entity=>this.compiledPlan('validate:'+this.jsonEach+':'+entity,()=>compileSQLiteEncodedFrameValidation(this.schema[entity]!,this.jsonEach)));
     if (native) {
@@ -398,15 +400,15 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
       const validationAt=performance.now(); parsedPayloadBytes(admitted,this.limits.batchBytes);
       if (!Array.isArray(admitted)||admitted.length>512||admitted.some(write=>write.row===null)) fail('INVALID_ROW','Bootstrap accepts bounded live rows only');
       this.profile.validationMs+=performance.now()-validationAt;
-    const groups = new Map<string, string[]>(), seen = new Set<string>();
-    for (const write of admitted) {
-      this.validateWrite(write);
-      const key = JSON.stringify([write.table, write.id]);
-      if (seen.has(key)) fail('INVALID_ROW', 'Duplicate bootstrap row'); seen.add(key);
-      const ids = groups.get(write.table) ?? []; ids.push(write.id); groups.set(write.table, ids);
-    }
-    for (const [entity, ids] of groups) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? AND id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, old.physical, ...ids)) fail('INVALID_ROW', 'Duplicate bootstrap row');
-    await this.writeBootstrapFrame(old.physical, admitted);
+      const groups = new Map<string, string[]>(), seen = new Set<string>();
+      for (const write of admitted) {
+        this.validateWrite(write);
+        const key = JSON.stringify([write.table, write.id]);
+        if (seen.has(key)) fail('INVALID_ROW', 'Duplicate bootstrap row'); seen.add(key);
+        const ids = groups.get(write.table) ?? []; ids.push(write.id); groups.set(write.table, ids);
+      }
+      for (const [entity, ids] of groups) if (await this.db.getFirstAsync(`SELECT 1 FROM ${q(sqliteTableName(entity))} WHERE scope=? AND id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, old.physical, ...ids)) fail('INVALID_ROW', 'Duplicate bootstrap row');
+      await this.writeBootstrapFrame(old.physical, admitted);
       count = admitted.length;
     }
     hashAt = performance.now();

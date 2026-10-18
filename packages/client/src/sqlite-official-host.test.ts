@@ -251,3 +251,22 @@ it('resumes native UTF-8 bootstrap frames with exact raw receipts and atomic dup
   expect((await next.page('s',{table:'records',search:'café',order:[{field:'rank',direction:'asc'}],limit:50})).rows.map(row=>row._id)).toEqual(['a','b']);
   expect(await next.integrity()).toBe('ok');
 });
+
+it('drives resumable duplicate probes from each bounded frame with a scope/id index lookup',async()=>{
+  const {host}=fixture();const probes:string[]=[];
+  const database={...host.database,async getFirstAsync<T>(sql:string,...params:unknown[]){
+    if(sql.includes("json_extract(w.value,'$.id')")){
+      const plan=await host.database.getAllAsync<{detail:string}>('EXPLAIN QUERY PLAN '+sql,...params);
+      probes.push(plan.map(row=>row.detail).join('\n'));
+    }
+    return host.database.getFirstAsync<T>(sql,...params);
+  }};
+  const schema={records:{key:'_id',fields:{_id:{kind:'text'},rank:{kind:'number'}},indexes:[]}} as const;
+  const engine=new SQLiteTypedReplicaEngine(database,schema);await engine.open('owner');await engine.beginBootstrap('s','token');
+  for(let page=0;page<3;page++)await engine.appendBootstrap('s','token',page,JSON.stringify(Array.from({length:50},(_,n)=>{const id=String(page*50+n);return {table:'records',id,version:1,row:{_id:id,rank:n}};})));
+  expect(probes).toHaveLength(3);
+  for(const plan of probes){
+    expect(plan).toContain('scope=? AND id=?');
+    expect(plan.indexOf('SCAN w VIRTUAL TABLE')).toBeLessThan(plan.indexOf('SEARCH t USING'));
+  }
+});
