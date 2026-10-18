@@ -1,5 +1,5 @@
 import { ByteLedger, BoundedByteCache } from './byte-budget.js';
-import { compileSQLiteEncodedFrameValidation, writeSQLiteEncodedFrame } from './sqlite-encoded-frame.js';
+import { compileSQLiteEncodedFrameValidation, sqliteEncodedFrameValueSQL, writeSQLiteEncodedFrame } from './sqlite-encoded-frame.js';
 import { sqliteTypedBodyFormat, sqliteBodySkeleton, sqliteBodySkeletonSQL } from './sqlite-typed-body.js';
 import { readSQLiteTypedView } from './sqlite-native-view.js';
 import { SQLiteReplicaEngineError, sqlitePayloadBytes, decodedJSONBytes, decodedPageBytes, pageBudgetError, fail } from './sqlite-admission.js';
@@ -102,7 +102,9 @@ CREATE TABLE IF NOT EXISTS gv_view_members(scope TEXT NOT NULL,signature TEXT NO
 CREATE TABLE IF NOT EXISTS gv_scope_alias(scope TEXT PRIMARY KEY,physical TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_bootstrap(scope TEXT PRIMARY KEY,token TEXT UNIQUE NOT NULL,physical TEXT NOT NULL,next_page INTEGER NOT NULL,rows INTEGER NOT NULL,root TEXT NOT NULL,base_sequence INTEGER NOT NULL,complete INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(token,page)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;`);
+CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
+CREATE TEMP TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),value BLOB NOT NULL);
+PRAGMA temp.cache_size=-128;`);
         // Newer hosts can keep frame children binary instead of serializing
         // every object to text and reparsing it for each extracted field.
         // Built-in JSON modules register lazily, so pragma_module_list is not
@@ -249,8 +251,9 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
       await this.insertBootstrapEntity(scope, entity, encoded, normalized);
     }
   }
-  private async insertBootstrapEntity(scope: string, entity: string, encoded: string, normalized: string): Promise<void> {
-    const sql = this.compiledPlan('insert:' + this.jsonEach + ':' + entity, () => {
+  private async insertBootstrapEntity(scope: string, entity: string, encoded: string | undefined, normalized: string): Promise<void> {
+    const sql = this.compiledPlan('insert:' + this.jsonEach + ':' + (encoded === undefined ? 'scratch:' : 'wire:') + entity, () => {
+    const source = encoded === undefined ? sqliteEncodedFrameValueSQL : 'jsonb(?)';
     const table = this.schema[entity]!, tn = q(sqliteTableName(entity));
     const fields = Object.entries(table.fields);
     const columns = ['scope', 'id', 'body', 'version', ...fields.map(([name]) => sqliteFieldName(name)), ...(table.search ?? []).map((_, i) => 's' + i)];
@@ -262,14 +265,14 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
       return `WITH input AS MATERIALIZED (
         SELECT CAST(key AS INTEGER) pos,jsonb_extract(value,'$.row') row,
           json_extract(value,'$.id') id,json_extract(value,'$.version') version
-        FROM ${this.jsonEach}(jsonb(?)) WHERE json_extract(value,'$.table')=?
+        FROM ${this.jsonEach}(${source}) WHERE json_extract(value,'$.table')=?
       ), normalized AS MATERIALIZED (SELECT jsonb(?) value) INSERT INTO ${tn}(${columns.map(q).join(',')})
       SELECT ?,id,${sqliteBodySkeletonSQL("row", table)},version,${values.concat((table.search ?? []).map((_, i) => `json_extract(normalized.value, '$[' || pos || '][${i}]')`)).join(',')}
       FROM input CROSS JOIN normalized WHERE NOT EXISTS(SELECT 1 FROM gv_tombstones WHERE scope=? AND entity=? AND gv_tombstones.id=input.id AND gv_tombstones.version>=input.version)
       ON CONFLICT(scope,id) DO UPDATE SET ${columns.slice(2).map(column => `${q(column)}=excluded.${q(column)}`).join(',')} WHERE ${tn}.version<=excluded.version`;
     })!;
     const insertAt = performance.now();
-    await this.db.runAsync(sql, encoded, entity, normalized, scope, scope, entity);
+    await this.db.runAsync(sql, ...(encoded === undefined ? [entity, normalized, scope, scope, entity] : [encoded, entity, normalized, scope, scope, entity]));
     this.profile.sqliteInsertMs += performance.now() - insertAt;
   }
 
@@ -456,7 +459,7 @@ CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT
           if (typeof page === 'string') {
             if (page.length * 2 > this.limits.batchBytes) fail('BUDGET', 'SQLite encoded import page exceeds byte budget');
             const native = await writeSQLiteEncodedFrame(this.db, this.schema, this.jsonEach, page, this.limits.batchBytes,
-              (entity, encoded, normalized) => this.insertBootstrapEntity(physical, entity, encoded, normalized),
+              (entity, normalized) => this.insertBootstrapEntity(physical, entity, undefined, normalized),
               entity => this.compiledPlan('validate:' + this.jsonEach + ':' + entity, () => compileSQLiteEncodedFrameValidation(this.schema[entity]!, this.jsonEach)));
             if (native) {
               nativeRows = native.rows; this.profile.nativeFrames++;

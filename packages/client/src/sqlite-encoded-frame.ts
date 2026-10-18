@@ -3,6 +3,7 @@ import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import type { SQLiteTypedSchema, SQLiteTypedTable } from './sqlite-typed-schema.js';
 const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
 const path = (...parts: string[]) => literal('$.' + parts.map(name => JSON.stringify(name)).join('.'));
+export const sqliteEncodedFrameValueSQL = '(SELECT value FROM temp.gv_input_frame WHERE id=1)';
 
 /** The grammar has already passed SQLite json_valid. Scan only structural
  * invariants, without constructing rows or decoding text values. Object-key
@@ -56,7 +57,7 @@ export function compileSQLiteEncodedFrameValidation(table: SQLiteTypedTable, eac
     const types = field.kind === 'text' ? "'text'" : field.kind === 'boolean' ? "'true','false'" : "'integer','real'";
     checks.push(`(${type} IS NULL OR ${type} IN ('null',${types}))`);
   }
-  return `SELECT count(*) bad FROM ${each}(jsonb(?)) WHERE json_extract(value,'$.table')=? AND CASE WHEN ${checks.map(check => '('+check+')').join(' AND ')} THEN 0 ELSE 1 END`;
+  return `SELECT count(*) bad FROM ${each}(${sqliteEncodedFrameValueSQL}) WHERE json_extract(value,'$.table')=? AND CASE WHEN ${checks.map(check => '('+check+')').join(' AND ')} THEN 0 ELSE 1 END`;
 }
 
 /** The common wire path never creates a complete row graph. SQL checks strict
@@ -66,41 +67,46 @@ export function compileSQLiteEncodedFrameValidation(table: SQLiteTypedTable, eac
  * duplicate-key and numeric-key semantics rather than changing them silently. */
 export async function writeSQLiteEncodedFrame(db: SQLiteReplicaDatabase, schema: SQLiteTypedSchema,
   each: 'json_each' | 'jsonb_each', encoded: string, maxBytes: number,
-  insert: (entity: string, encoded: string, normalized: string) => Promise<void>,
+  insert: (entity: string, normalized: string) => Promise<void>,
   validationSQL: (entity: string) => string | undefined,
 ): Promise<{ rows: number; validationMs: number; projectionMs: number; normalizationMs: number } | undefined> {
   const began = performance.now();
   decodedJSONBytes(encoded, maxBytes);
-  if (!(await db.getFirstAsync<{ valid: number }>('SELECT json_valid(?) valid', encoded))?.valid) return;
-  const shape = await db.getFirstAsync<{ kind: string }>('SELECT json_type(?) kind', encoded);
-  if (shape?.kind !== 'array') return;
-  const size = await db.getFirstAsync<{ n: number; bad: number }>(`SELECT count(*) n,coalesce(sum(type<>'object'),0) bad FROM ${each}(jsonb(?))`, encoded);
-  if (!size || size.n > 512 || size.bad) return;
-  if (!encodedFrameHasCanonicalStructure(encoded)) return;
-  const entities = await db.getAllAsync<{ entity: unknown }>(`SELECT DISTINCT json_extract(value,'$.table') entity FROM ${each}(jsonb(?))`, encoded);
-  if (entities.length > 32) return;
-  // Validate every table before inserting any of them. The caller's enclosing
-  // transaction is still the rollback boundary for a later native failure.
-  for (const { entity } of entities) {
-    if (typeof entity !== 'string' || !Object.hasOwn(schema, entity)) return;
-    const sql = validationSQL(entity); if (!sql) return;
-    const invalid = await db.getFirstAsync<{ bad: number }>(sql, encoded, entity);
-    if (invalid?.bad) return;
-  }
-  const validationMs = performance.now() - began;
-  let projectionMs = 0, normalizationMs = 0;
-  for (const { entity } of entities as { entity: string }[]) {
-    const table = schema[entity]!;
-    let normalized = '[]';
-    if (table.search?.length) {
-      let timed = performance.now();
-      const records = await db.getAllAsync<Record<string, unknown>>(`SELECT CAST(key AS INTEGER) pos,${table.search.map((name,index)=>`json_extract(value,${path('row',name)}) s${index}`).join(',')} FROM ${each}(jsonb(?)) WHERE json_extract(value,'$.table')=? ORDER BY CAST(key AS INTEGER)`, encoded, entity);
-      projectionMs += performance.now() - timed; timed = performance.now();
-      const values: Array<string[] | null> = Array(size.n).fill(null);
-      for (const record of records) values[Number(record.pos)] = table.search.map((_,index)=>String(record['s'+index] ?? '').toLowerCase());
-      normalized = JSON.stringify(values); normalizationMs += performance.now() - timed;
+  await db.runAsync('DELETE FROM temp.gv_input_frame');
+  try {
+    // Bind/encode the wire text once. All validation and extraction below read
+    // one bounded native JSONB scratch row, removed before this method returns.
+    await db.runAsync('WITH source AS MATERIALIZED(SELECT ? value) INSERT INTO temp.gv_input_frame SELECT 1,jsonb(value) FROM source WHERE json_valid(value)', encoded);
+    const shape = await db.getFirstAsync<{ kind: string }>(`SELECT json_type(${sqliteEncodedFrameValueSQL}) kind`);
+    if (shape?.kind !== 'array') return;
+    const size = await db.getFirstAsync<{ n: number; bad: number }>(`SELECT count(*) n,coalesce(sum(type<>'object'),0) bad FROM ${each}(${sqliteEncodedFrameValueSQL})`);
+    if (!size || size.n > 512 || size.bad) return;
+    if (!encodedFrameHasCanonicalStructure(encoded)) return;
+    const entities = await db.getAllAsync<{ entity: unknown }>(`SELECT DISTINCT json_extract(value,'$.table') entity FROM ${each}(${sqliteEncodedFrameValueSQL})`);
+    if (entities.length > 32) return;
+    // Validate every table before inserting any of them. The caller's enclosing
+    // transaction is still the rollback boundary for a later native failure.
+    for (const { entity } of entities) {
+      if (typeof entity !== 'string' || !Object.hasOwn(schema, entity)) return;
+      const sql = validationSQL(entity); if (!sql) return;
+      const invalid = await db.getFirstAsync<{ bad: number }>(sql, entity);
+      if (invalid?.bad) return;
     }
-    await insert(entity, encoded, normalized);
-  }
-  return { rows: size.n, validationMs, projectionMs, normalizationMs };
+    const validationMs = performance.now() - began;
+    let projectionMs = 0, normalizationMs = 0;
+    for (const { entity } of entities as { entity: string }[]) {
+      const table = schema[entity]!;
+      let normalized = '[]';
+      if (table.search?.length) {
+        let timed = performance.now();
+        const records = await db.getAllAsync<Record<string, unknown>>(`SELECT CAST(key AS INTEGER) pos,${table.search.map((name,index)=>`json_extract(value,${path('row',name)}) s${index}`).join(',')} FROM ${each}(${sqliteEncodedFrameValueSQL}) WHERE json_extract(value,'$.table')=? ORDER BY CAST(key AS INTEGER)`, entity);
+        projectionMs += performance.now() - timed; timed = performance.now();
+        const values: Array<string[] | null> = Array(size.n).fill(null);
+        for (const record of records) values[Number(record.pos)] = table.search.map((_,index)=>String(record['s'+index] ?? '').toLowerCase());
+        normalized = JSON.stringify(values); normalizationMs += performance.now() - timed;
+      }
+      await insert(entity, normalized);
+    }
+    return { rows: size.n, validationMs, projectionMs, normalizationMs };
+  } finally { await db.runAsync('DELETE FROM temp.gv_input_frame'); }
 }

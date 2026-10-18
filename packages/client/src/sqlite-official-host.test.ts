@@ -194,3 +194,18 @@ it('reuses complex read plans under the shared cap while releasing inputs and li
   await host.database.withTransactionAsync(async () => { expect(await host.database.getFirstAsync(sql, 'inside')).toEqual({ value: 'inside' }); });
   host.close(); expect(host.statementBytes()).toBe(0);
 });
+
+it('binds each encoded frame once and releases its native scratch row before returning', async () => {
+  const { host } = fixture();
+  const engine = new SQLiteTypedReplicaEngine(host.database, { records: { key: '_id', fields: { _id: { kind: 'text' }, text: { kind: 'text' } }, indexes: [] } });
+  await engine.open('owner'); host.takeProfile();
+  const row = { _id: 'a', text: 'payload'.repeat(1000) };
+  const encoded = JSON.stringify([{ table: 'records', id: 'a', version: 1, row }]);
+  await engine.importScope('s', (async function* () { yield encoded; })());
+  const profile = host.takeProfile();
+  expect(profile.boundTextUTF16Bytes).toBeGreaterThanOrEqual(encoded.length * 2);
+  expect(profile.boundTextUTF16Bytes).toBeLessThan(encoded.length * 2 + 2048);
+  expect(await host.database.getFirstAsync('SELECT count(*) n FROM temp.gv_input_frame')).toEqual({ n: 0 });
+  expect(await host.database.getFirstAsync('PRAGMA temp.cache_size')).toEqual({ cache_size: -128 });
+  expect((await engine.page('s', { table: 'records', order: [{ field: '_id', direction: 'asc' }], textOrder: 'binary', limit: 2 })).rows).toEqual([row]);
+});

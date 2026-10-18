@@ -459,18 +459,19 @@ it('keeps generated field payloads only in typed columns and reconstructs exact 
 });
 
 it('ingests mixed-table encoded frames natively while decoding only search projections', async () => {
-  const { engine } = fixture(); await engine.open('owner');
+  const { engine, db } = fixture(); await engine.open('owner');
   const task = { _id: 'a', name: 'İ CAFÉ 東京', data: [1, null, { flag: false }], done: false, due: 1 };
   const assignment = { _id: 'x', task: 'a', member: 'm' };
   await engine.importScope('s', (async function* () { yield JSON.stringify([
     { table: 'assignments', id: 'x', version: 1, row: assignment }, { table: 'tasks', id: 'a', version: 1, row: task },
   ]); })());
   expect(engine.takeProfile()).toMatchObject({ nativeFrames: 1 });
+  expect(db.prepare("SELECT count(*) n FROM temp.gv_input_frame").get()!.n).toBe(0);
   expect((await engine.page('s', { ...plan, search: 'i\u0307 café' })).rows).toEqual([task]);
   expect((await engine.page('s', { table: 'assignments', order: [{ field: '_id', direction: 'asc' }], textOrder: 'binary', limit: 2 })).rows).toEqual([assignment]);
 });
 it('preserves invalid-frame rollback, finite-number and depth admission on the native wire path', async () => {
-  const { engine } = fixture(); await engine.open('owner');
+  const { engine, db } = fixture(); await engine.open('owner');
   await expect(engine.importScope('s', (async function* () {
     yield JSON.stringify([write('a', 1)]);
     yield JSON.stringify([{ ...write('b', 2), row: { _id: 'b', done: 'wrong' } }]);
@@ -479,6 +480,7 @@ it('preserves invalid-frame rollback, finite-number and depth admission on the n
   const nested = '['.repeat(40) + '0' + ']'.repeat(40);
   await expect(engine.importScope('deep', (async function* () { yield '[{"table":"tasks","id":"a","version":1,"row":{"_id":"a","data":' + nested + '}}]'; })())).rejects.toThrow('structure');
   await expect(engine.importScope('infinite', (async function* () { yield '[{"table":"tasks","id":"a","version":1,"row":{"_id":"a","extra":{"n":1e999}}}]'; })())).rejects.toThrow('Nonfinite');
+  expect(db.prepare("SELECT count(*) n FROM temp.gv_input_frame").get()!.n).toBe(0);
 });
 
 it('owns immutable schema metadata and bounds compiled import plans across entities', async () => {
