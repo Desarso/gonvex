@@ -118,7 +118,11 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
       throw error;
     } finally { if (!retain) statement.finalize(); }
   }
+  // One function per owned connection. No projection graph or re-encoded
+  // normalization frame crosses WASM; only a single search value lives in JS.
+  db.createFunction('gv_ingress_lower', (_context: unknown, value: unknown) => String(value ?? '').toLowerCase(), { arity: 1, deterministic: true, directOnly: true });
   const database: SQLiteReplicaDatabase = {
+    ingressUnicodeFold: true,
     async execAsync(sql) { check(); db.exec(sql); },
     async runAsync(sql, ...values) {
       check();

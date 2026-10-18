@@ -12,6 +12,9 @@ import type { ReadCoverage as ReplicaReadCoverage } from "./indexeddb-read-view.
 import type { ReducerReadView as ReplicaReducerReadView } from "@gonvex/local-runtime/portable";
 
 export interface SQLiteReplicaDatabase {
+  /** Host supplies gv_ingress_lower(text), matching ECMAScript toLowerCase.
+   * Used only while inserting search columns, never by query/sort plans. */
+  readonly ingressUnicodeFold?: true;
   execAsync(sql: string): Promise<void>;
   runAsync(sql: string, ...params: unknown[]): Promise<unknown>;
   getFirstAsync<T>(sql: string, ...params: unknown[]): Promise<T | null>;

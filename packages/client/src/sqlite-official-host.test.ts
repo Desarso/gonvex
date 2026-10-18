@@ -209,3 +209,24 @@ it('binds each encoded frame once and releases its native scratch row before ret
   expect(await host.database.getFirstAsync("SELECT count(*) n FROM sqlite_temp_master WHERE name='gv_input_frame'")).toEqual({ n: 0 });
   expect((await engine.page('s', { table: 'records', order: [{ field: '_id', direction: 'asc' }], textOrder: 'binary', limit: 2 })).rows).toEqual([row]);
 });
+
+it('folds ingress search text without projection frames and matches the portable host', async () => {
+  const native = fixture().host, portable = fixture().host;
+  const schema = { records: { key: '_id', fields: { _id: { kind: 'text' }, title: { kind: 'text' }, rank: { kind: 'number' } }, indexes: [{ columns: ['rank'] }], search: ['title'], searchContent: 'external' } } as const;
+  const rows = ['İSTANBUL', 'ΟΣ ΟΣΑ', 'CAFÉ 東京 🔧', 'ẞ Straße', '', null, undefined].map((title, rank) => ({ _id: String(rank), rank, ...(title === undefined ? {} : { title }) }));
+  const folded = new SQLiteTypedReplicaEngine(native.database, schema);
+  const { ingressUnicodeFold: _capability, ...fallback } = portable.database;
+  const projected = new SQLiteTypedReplicaEngine(fallback, schema);
+  for (const engine of [folded, projected]) {
+    await engine.open('owner');
+    await engine.importScope('s', (async function* () { for (const row of rows) yield JSON.stringify([{ table: 'records', id: row._id, version: 1, row }]); })());
+    expect(await engine.integrity()).toBe('ok');
+  }
+  expect(folded.takeProfile()).toMatchObject({ nativeFrames: rows.length, searchProjectionMs: 0, normalizationMs: 0 });
+  for (const search of ['i̇stan', 'ος', 'οσα', 'café', '東京', '🔧', 'ß', 'str']) {
+    const plan = { table: 'records', order: [{ field: 'rank', direction: 'asc' as const }], limit: 50, search };
+    const actual = (await folded.page('s', plan)).rows;
+    expect(actual, search).toEqual((await projected.page('s', plan)).rows);
+    expect(actual.map(row => row._id), search).toEqual(rows.filter(row => String(row.title ?? '').toLowerCase().includes(search)).map(row => row._id));
+  }
+});
