@@ -6,13 +6,18 @@ const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
 const path = (...parts: string[]) => literal('$.' + parts.map(name => JSON.stringify(name)).join('.'));
 export const sqliteEncodedFrameValueSQL = '(SELECT value FROM main.gv_input_frame WHERE id=1)';
 
+// This synchronous scanner never retains a frame. Reuse bounded offsets rather
+// than decode every ordinary field key into a short-lived JS string.
+const keyStarts = new Uint32Array(2048), keyEnds = new Uint32Array(2048);
+
 /** The grammar has already passed SQLite json_valid. Scan only structural
  * invariants, without constructing rows or decoding text values. Object-key
  * sets are bounded by the caller's decoded-byte admission and die per frame. */
 export function encodedFrameHasCanonicalStructure(text: string | Uint8Array): boolean {
   const code = (i: number) => typeof text === 'string' ? text.charCodeAt(i) : text[i]!;
   const slice = (start: number, end: number) => typeof text === 'string' ? text.slice(start, end) : utf8Decoder.decode(text.subarray(start, end));
-  const stack: Array<{ keys?: Set<string>; key: boolean }> = [];
+  const stack: Array<{ start: number; count: number; object: boolean; decoded?: Set<string>; key: boolean }> = [];
+  let keys = 0;
   for (let i = 0; i < text.length; i++) {
     const char = code(i);
     if (char === 34) {
@@ -22,25 +27,43 @@ export function encodedFrameHasCanonicalStructure(text: string | Uint8Array): bo
         else if (code(i) === 34) break;
       }
       const parent = stack.at(-1);
-      if (parent?.keys && parent.key) {
-        const key = escaped ? JSON.parse(slice(start, i + 1)) as string : slice(start + 1, i);
-        if (parent.keys.has(key)) return false;
-        parent.keys.add(key); parent.key = false;
+      if (parent?.object && parent.key) {
+        if (parent.count >= 128 || keys >= keyStarts.length) return false;
+        if (escaped && !parent.decoded) {
+          parent.decoded = new Set();
+          for (let k = parent.start; k < keys; k++) parent.decoded.add(slice(keyStarts[k]!, keyEnds[k]!));
+        }
+        if (parent.decoded) {
+          const key = escaped ? JSON.parse(slice(start, i + 1)) as string : slice(start + 1, i);
+          if (parent.decoded.has(key)) return false;
+          parent.decoded.add(key);
+        } else {
+          for (let k = parent.start; k < keys; k++) {
+            const previous = keyStarts[k]!, length = i - start - 1;
+            if (keyEnds[k]! - previous !== length) continue;
+            let same = true;
+            for (let j = 0; j < length; j++) if (code(previous + j) !== code(start + 1 + j)) { same = false; break; }
+            if (same) return false;
+          }
+        }
+        keyStarts[keys] = start + 1; keyEnds[keys++] = i; parent.count++; parent.key = false;
       } else if (stack.length > 32) return false;
     } else if (char === 123 || char === 91) {
       if (stack.length > 32) return false;
-      stack.push(char === 123 ? { keys: new Set(), key: true } : { key: false });
-    } else if (char === 125 || char === 93) stack.pop();
-    else if (char === 44) { const parent = stack.at(-1); if (parent?.keys) parent.key = true; }
+      stack.push({ start: keys, count: 0, object: char === 123, key: char === 123 });
+    } else if (char === 125 || char === 93) { const parent = stack.pop(); if (parent) keys = parent.start; }
+    else if (char === 44) { const parent = stack.at(-1); if (parent?.object) parent.key = true; }
     else if (char === 45 || char >= 48 && char <= 57) {
       if (stack.length > 32) return false;
-      const start = i;
+      const start = i; let exponent = false;
       while (i + 1 < text.length) {
         const next = code(i + 1);
-        if (next >= 48 && next <= 57 || next === 43 || next === 45 || next === 46 || next === 69 || next === 101) i++;
+        if (next >= 48 && next <= 57 || next === 43 || next === 45 || next === 46 || next === 69 || next === 101) { exponent ||= next === 69 || next === 101; i++; }
         else break;
       }
-      if (!Number.isFinite(Number(slice(start, i + 1)))) return false;
+      // Strict JSON grammar is already checked. At most 308 characters without
+      // an exponent cannot overflow binary64; avoid allocating numeric strings.
+      if ((exponent || i - start + 1 > 308) && !Number.isFinite(Number(slice(start, i + 1)))) return false;
     } else if (char === 110 || char === 116 || char === 102) {
       if (stack.length > 32) return false;
       i += char === 102 ? 4 : 3;

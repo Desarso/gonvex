@@ -27,3 +27,27 @@ it('admits strict UTF-8 byte frames without accepting overlong, surrogate or tru
     expect(() => admitSQLiteUTF8Frame(new TextEncoder().encode(JSON.stringify(String.fromCodePoint(codepoint))),4096)).not.toThrow();
   expect(() => admitSQLiteUTF8Frame(bytes, 40)).toThrow('budget');
 });
+
+it('releases nested key slots and retains exact escaped identity across repeated frames', () => {
+  const encode = new TextEncoder();
+  const examples = [
+    ['[{"prefix":0,"nested":{"a":1},"a":2}]', true],
+    ['[{"prefix":0,"nested":{"a":1},"prefix":2}]', false],
+    ['[{"a":0,"nested":{"b":1},"\\u0062":2,"b":3}]', false],
+    ['[{"\\u0061":0,"nested":{"b":1},"a":2}]', false],
+    [JSON.stringify(Array.from({length:200},()=>({a:1,b:{a:2,c:3},c:4}))), true],
+  ] as const;
+  for (let i=0;i<3;i++) for (const [text, result] of examples) {
+    expect(eligible(text)).toBe(result); expect(eligible(encode.encode(text))).toBe(result);
+  }
+  const wide = JSON.stringify(Object.fromEntries(Array.from({length:129},(_,i)=>['field'+i,i])));
+  expect(eligible(wide)).toBe(false); // Canonical decoder fallback, never truncation.
+  expect(eligible('{"a":1}')).toBe(true);
+});
+it('checks overflowing long numbers while admitting finite ordinary tokens without decoding', () => {
+  for (const token of ['9'.repeat(308), '-'+ '9'.repeat(307), '0.'+'9'.repeat(310), '1e308']) {
+    expect(Number.isFinite(Number(token))).toBe(true);
+    expect(eligible('[{"n":'+token+'}]')).toBe(true);
+  }
+  for (const token of ['9'.repeat(309), '-'+ '9'.repeat(309), '1e309']) expect(eligible('[{"n":'+token+'}]')).toBe(false);
+});
