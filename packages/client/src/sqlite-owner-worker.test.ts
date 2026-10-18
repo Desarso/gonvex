@@ -83,6 +83,11 @@ it('routes restartable first-sync frames through the real owner queue and publis
     expect((await request('canonicalCall',canonicalPage)).value.value.rows[0].name).toBe('Updated needle');
     expect(changes.length).toBe(published+3);
     expect(changes.at(-1).sequence).toBe((await request('canonicalGeneration',{scope:'s'})).value.sequence);
+    const native=await request('nativeWindowPage',{scope:'s',signature:header.signature,limit:50});
+    expect(native.error).toBeUndefined();expect(native.value).toMatchObject({window:{generation:'disk',total:1,header},offset:0,nextOffset:null,rows:[{id:'a',value:{_id:'a',name:'Updated needle'}}]});
+    expect((await request('nativeEntityPage',{scope:'s',entity:'tasks',ids:['missing','a'],expected:native.value.generation})).value.rows).toEqual([{id:'missing',value:null},{id:'a',value:{_id:'a',name:'Updated needle'}}]);
+    expect((await request('nativeWindowPage',{scope:'s',signature:header.signature,generation:'old'})).error.code).toBe('PAGE_CHANGED');
+    expect((await request('nativeEntityPage',{scope:'s',entity:'tasks',ids:['a'],expected:{epoch:999,sequence:0}})).error.code).toBe('PAGE_CHANGED');
 
   } finally {
     interval.mockRestore(); vi.unstubAllGlobals(); delete (globalThis as any).onmessage; db.close();

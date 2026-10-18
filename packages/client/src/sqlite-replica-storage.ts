@@ -1,4 +1,4 @@
-import { sqlitePayloadBytes } from './sqlite-admission.js';
+import { sqlitePayloadBytes,decodedJSONBytes,fail } from './sqlite-admission.js';
 import type { SQLitePagePlan } from './sqlite-typed-query.js';
 import type { SQLiteTypedViewPage } from './sqlite-typed-engine.js';
 import { SQLiteReplicaCommits } from "./sqlite-replica-commits.js";
@@ -363,6 +363,25 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
         };
     });
     return snapshot;
+  }
+
+  /** Native UI pages preflight body bytes inside SQLite, then admit decoded
+   * structure before JSON.parse. A huge row never creates a huge JS graph. */
+  async loadBoundedEntityRows(scope:string,entity:string,ids:readonly string[],maxBytes=131072){
+    if(ids.length>128||!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>131072)fail('BUDGET','Invalid native entity page budget');
+    await this.initialize();await this.rowLayout?.assertOwner?.(this.database);
+    if(!ids.length)return [];
+    const where=`scope=? AND entity=? AND id IN (${ids.map(()=>'?').join(',')})`,args=[scope,entity,...ids];
+    const size=await this.database.getFirstAsync<{bytes:number}>(`SELECT coalesce(sum(length(CAST(value AS BLOB))*2+128),0) bytes FROM _gonvex_replica_entities WHERE ${where}`,...args);
+    if(!size||size.bytes>maxBytes)fail('BUDGET','Native entity bodies exceed page budget');
+    const records=await this.database.getAllAsync<EntityRecord>(`SELECT scope,entity,id,value FROM _gonvex_replica_entities WHERE ${where}`,...args);
+    const result:Array<{id:string;row:ReplicaRow}>=[];let bytes=64;
+    for(const record of records)if(record.value!=='null'){
+      bytes+=record.id.length*2+128+decodedJSONBytes(record.value,maxBytes-bytes);
+      if(bytes>maxBytes)fail('BUDGET','Decoded native entities exceed page budget');
+      result.push({id:record.id,row:JSON.parse(record.value)});
+    }
+    sqlitePayloadBytes(result,maxBytes);return result;
   }
 
   async loadEntityRows(scope: string, entity: string, ids: readonly string[]) {

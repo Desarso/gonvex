@@ -1,3 +1,4 @@
+import type {SQLiteNativeWindowRead,SQLiteNativeWindowResult,SQLiteNativeEntityRead,SQLiteNativeEntityResult} from './sqlite-native-replica-reader.js';
 import type {LocalReplicaStorage,ReplicaSnapshot} from './local-replica.js';
 import type {SQLiteCanonicalGeneration,SQLiteCanonicalReply} from './sqlite-canonical-dispatch.js';
 import {sqlitePayloadBytes} from './sqlite-admission.js';
@@ -11,7 +12,12 @@ const cursorOnly=(snapshot:ReplicaSnapshot)=>({...empty,...(snapshot.cursor?{cur
 /** Bounded LocalReplica adapter for the elected worker. No SQLite or generated
  * schema loads in a follower. Multi-read callbacks hold a version-fenced view;
  * a commit/owner change rejects the whole read rather than mixing snapshots. */
-export function brokerSQLiteStorage(transport:SQLiteCanonicalTransport):LocalReplicaStorage&{dispose():void}{
+export type SQLiteBoundedReplicaStorage=LocalReplicaStorage&{
+ readNativeWindowPage(input:SQLiteNativeWindowRead):Promise<SQLiteNativeWindowResult|undefined>;
+ readNativeEntityPage(input:SQLiteNativeEntityRead):Promise<SQLiteNativeEntityResult>;
+ dispose():void;
+};
+export function brokerSQLiteStorage(transport:SQLiteCanonicalTransport):SQLiteBoundedReplicaStorage{
   let disposed=false;
   const subscriptions=new Set<()=>void>();
   const request=<T>(op:string,args:unknown):Promise<T>=>{
@@ -24,6 +30,8 @@ export function brokerSQLiteStorage(transport:SQLiteCanonicalTransport):LocalRep
   };
   return {
     ownsWorkingSetRows:true,ownsHydrationRows:true,
+    async readNativeWindowPage(input){return (await request<SQLiteNativeWindowResult|null>('nativeWindowPage',input))??undefined;},
+    readNativeEntityPage:input=>request<SQLiteNativeEntityResult>('nativeEntityPage',input),
     load:(scope='default')=>call('loadWorkingSet',[scope,{maxRows:128,maxBytes:131072}],scope),
     loadWorkingSet:(scope,budget)=>call('loadWorkingSet',[scope,budget],scope),
     loadEntityRows:(scope,entity,ids)=>{

@@ -1,3 +1,4 @@
+import {SQLiteNativeReplicaReader} from './sqlite-native-replica-reader.js';
 import {SQLiteSnapshotActivator} from './sqlite-snapshot-activation.js';
 import {SQLiteSnapshotPages} from './sqlite-snapshot-pages.js';
 import {sqliteRequestBytes} from './sqlite-request-frame.js';
@@ -14,6 +15,7 @@ import type { SQLitePagePlan } from './sqlite-typed-query.js';
 // is lazy and occurs only after the tab has acquired the origin ownership lock.
 let host: OfficialSQLiteHost | undefined, engine: SQLiteTypedReplicaEngine | undefined;
 let canonical:SQLiteCanonicalDispatcher|undefined;
+let nativeReader:SQLiteNativeReplicaReader|undefined;
 let snapshots:SQLiteSnapshotPages|undefined,activation:SQLiteSnapshotActivator|undefined;
 let lane = Promise.resolve(), operations = 0, bytes = 0;
 const ports = new Map<string, { port: MessagePort; seen: number; token: string }>();
@@ -38,6 +40,7 @@ async function execute(op: string, args: any, requestID:string) {
       snapshots=new SQLiteSnapshotPages(database,()=>engine!.verifyOwner());
       activation=new SQLiteSnapshotActivator(database,storage,()=>engine!.verifyOwner(),engine.schema);
       await snapshots.ready();await activation.ready();
+      nativeReader=new SQLiteNativeReplicaReader(database,storage,engine);await nativeReader.ready();
       return { epoch, wasmBytes: host.memoryBytes() };
     } catch (e) {
       host?.close(); host = undefined; engine = undefined;
@@ -49,6 +52,8 @@ async function execute(op: string, args: any, requestID:string) {
   }
   if (!host || !engine) throw Object.assign(new Error('Storage owner is not ready'), { code: 'FENCED' });
   switch (op) {
+    case 'nativeWindowPage': return (await nativeReader!.window({...args,scope:scope(args.scope)}))??null;
+    case 'nativeEntityPage': return nativeReader!.entities({...args,scope:scope(args.scope)});
     case 'snapshotActivate': return activation!.activate({...args,scope:scope(args.scope)});
     case 'snapshotAppendEncoded': return snapshots!.appendEncoded(scope(args.scope),args.encoded);
     case 'snapshotAppend': return snapshots!.append(scope(args.scope),args.page);

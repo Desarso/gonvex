@@ -84,3 +84,11 @@ it('clamps caller working-set allowances and rejects invalid change budgets',asy
   expect(Object.keys(working!.entities.records!).length).toBeLessThanOrEqual(256);
   await expect(f.request('canonicalCall',{scope:'s',method:'readChanges',args:['s',0,{maxRows:'unbounded',maxBytes:'unbounded'}]})).rejects.toThrow('budget');
 });
+it('routes bounded native reads without legacy membership hydration and releases them with the adapter',async()=>{
+ const calls:Array<{op:string;args:unknown}>=[];
+ const storage=brokerSQLiteStorage({async request<T>(op,args){calls.push({op,args});return (op==='nativeWindowPage'?null:{generation:{epoch:1,sequence:2},rows:[{id:'a',value:null}]}) as T;},subscribeChanges(){return()=>{};}});
+ expect(await storage.readNativeWindowPage({scope:'s',signature:'large',limit:50})).toBeUndefined();
+ expect((await storage.readNativeEntityPage({scope:'s',entity:'records',ids:['a']})).rows).toEqual([{id:'a',value:null}]);
+ expect(calls.map(call=>call.op)).toEqual(['nativeWindowPage','nativeEntityPage']);storage.dispose();
+ await expect(storage.readNativeWindowPage({scope:'s',signature:'large'})).rejects.toThrow('closed');
+});
