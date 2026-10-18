@@ -15,6 +15,7 @@ import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 import type {ReplicaRow} from './local-replica.js';
 const schema=`CREATE TABLE IF NOT EXISTS gv_prediction_versions(scope TEXT PRIMARY KEY,n INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_prediction_members(scope TEXT NOT NULL,entity TEXT NOT NULL,id TEXT NOT NULL,deleted INTEGER NOT NULL,intent_id INTEGER NOT NULL,PRIMARY KEY(scope,entity,id)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gv_prediction_fields(scope TEXT NOT NULL,entity TEXT NOT NULL,id TEXT NOT NULL,field TEXT NOT NULL,PRIMARY KEY(scope,entity,id,field)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS gv_prediction_intents ON gv_prediction_members(scope,intent_id,entity,id);`;
 const physical=(scope:string)=>'\u0000prediction:'+scope;
 function scope(value:string){if(typeof value!=='string'||!value||value.length>512||value.includes('\u0000'))throw new TypeError('Invalid prediction scope');}
@@ -64,6 +65,24 @@ export class SQLitePredictions {
    const values=new Map([...base,...predicted].map(entry=>[entry.id,entry]));result=ids.flatMap(id=>{const entry=values.get(id);return entry?[entry]:[];});sqlitePayloadBytes(result,131072);
   });return result;
  }
+ /** Merge only intent-touched fields over a freshly received canonical page.
+  * Full predicted rows contain the old base too; copying that base would hide
+  * newer untouched values arriving during first sync. Legacy predictions must
+  * be rebased from their durable intents before this path may publish them. */
+ async overlayRows(ownerScope:string,entity:string,rows:readonly {id:string;row:ReplicaRow|null}[]):Promise<Array<{id:string;row:ReplicaRow|null}>>{
+  scope(ownerScope);sqlitePayloadBytes({entity,rows},131072);if(!Object.hasOwn(this.tables,entity)||rows.length>128)throw new TypeError('Invalid predicted overlay page');const owned=JSON.parse(JSON.stringify(rows)) as typeof rows;await this.ready();let result!:Array<{id:string;row:ReplicaRow|null}>;
+  await this.db.withTransactionAsync(async()=>{
+   await this.fence();const ids=JSON.stringify(owned.map(row=>row.id));
+   const markers=await this.db.getAllAsync<{id:string;deleted:number}>('SELECT id,deleted FROM gv_prediction_members WHERE scope=? AND entity=? AND id IN (SELECT value FROM json_each(?))',ownerScope,entity,ids);
+   const predicted=await this.canonical.loadBoundedEntityRows(physical(ownerScope),entity,markers.filter(row=>!row.deleted).map(row=>row.id)),values=new Map(predicted.map(row=>[row.id,row.row])),byID=new Map(markers.map(row=>[row.id,row]));
+   const fields=await this.db.getAllAsync<{id:string;fields:string}>("SELECT id,json_group_array(field) fields FROM gv_prediction_fields WHERE scope=? AND entity=? AND id IN (SELECT value FROM json_each(?)) GROUP BY id",ownerScope,entity,ids),touched=new Map(fields.map(row=>[row.id,JSON.parse(row.fields) as string[]]));
+   result=owned.map(entry=>{
+    const marker=byID.get(entry.id);if(!marker)return entry;if(marker.deleted)return {id:entry.id,row:null};
+    const pending=values.get(entry.id),keys=touched.get(entry.id);if(!pending||!keys?.includes('0'))fail('PAGE_CHANGED','Rebase legacy predictions before reading pending source pages');
+    return {id:entry.id,row:{...(entry.row??pending),...Object.fromEntries(keys.filter(key=>key.startsWith('1')).map(key=>key.slice(1)).filter(key=>Object.hasOwn(pending,key)).map(key=>[key,pending[key]!]))}};
+   });sqlitePayloadBytes(result,131072);
+  });return result;
+ }
  async apply(ownerScope:string,intent:number,patches:readonly LocalPatch[]):Promise<void>{
   scope(ownerScope);sqlitePayloadBytes(patches,262144);if(!Number.isSafeInteger(intent)||intent<1||!Array.isArray(patches)||patches.length>512)throw new TypeError('Invalid prediction batch');
   // Snapshot every admitted input before the actor awaits initialization.
@@ -81,6 +100,10 @@ export class SQLitePredictions {
      if(String(row[table.key])!==patch.rowId)throw new TypeError('Prediction changes its row identity');
     }
     await this.layout.upsert(this.db,physical(ownerScope),patch.entity,[{id:patch.rowId,row}]);
+    if(patch.op!=='patch')await this.db.runAsync('DELETE FROM gv_prediction_fields WHERE scope=? AND entity=? AND id=?',ownerScope,patch.entity,patch.rowId);
+    // '0' marks a tracked (possibly empty) patch; '1'+field encodes every
+    // application key without reserving or colliding with a real field name.
+    if(patch.op!=='delete')await this.db.runAsync("INSERT OR IGNORE INTO gv_prediction_fields SELECT ?,?,?,field FROM (SELECT '0' field UNION ALL SELECT '1'||value FROM json_each(?))",ownerScope,patch.entity,patch.rowId,JSON.stringify(Object.keys(patch.fields!)));
     await this.db.runAsync('INSERT INTO gv_prediction_members VALUES(?,?,?,?,?) ON CONFLICT(scope,entity,id) DO UPDATE SET deleted=excluded.deleted,intent_id=excluded.intent_id',ownerScope,patch.entity,patch.rowId,Number(row===null),intent);
    }
    if(owned.length)await this.touch(ownerScope);
@@ -97,7 +120,7 @@ export class SQLitePredictions {
  async reset(ownerScope:string):Promise<void>{
   scope(ownerScope);await this.ready();await this.db.withTransactionAsync(async()=>{
    await this.fence();for(const entity of Object.keys(this.tables))await this.db.runAsync(`DELETE FROM ${q(sqliteTableName(entity))} WHERE scope=?`,physical(ownerScope));
-   await this.db.runAsync('DELETE FROM gv_canonical_tombstones WHERE scope=?',physical(ownerScope));await this.db.runAsync('DELETE FROM gv_prediction_members WHERE scope=?',ownerScope);await this.touch(ownerScope);
+   await this.db.runAsync('DELETE FROM gv_canonical_tombstones WHERE scope=?',physical(ownerScope));await this.db.runAsync('DELETE FROM gv_prediction_fields WHERE scope=?',ownerScope);await this.db.runAsync('DELETE FROM gv_prediction_members WHERE scope=?',ownerScope);await this.touch(ownerScope);
   });
  }
 }

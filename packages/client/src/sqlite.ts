@@ -33,3 +33,6 @@ export type {SQLiteMigrationSourcePage} from './sqlite-idb-migration-source.js';
 export {SQLiteLegacyIntentMigration} from './sqlite-legacy-intent-migration.js';
 export type {SQLiteTransportHost,SQLiteTransportSession} from './sqlite-transport-host.js';
 export {SQLiteWorkerSessions} from './sqlite-worker-sessions.js';
+export {SQLitePendingSnapshotReader} from './sqlite-pending-snapshot-reader.js';
+export type {SQLitePendingSnapshotRead,SQLitePendingSnapshotPage,SQLitePendingSnapshotGeneration} from './sqlite-pending-snapshot-reader.js';
+export {markSQLiteStagingCommit} from './sqlite-owner-transactions.js';

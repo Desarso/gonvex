@@ -29,11 +29,11 @@ it('coalesces all eight available credits into one atomic owner transaction and 
  const test=fixture(),ingress=new SQLiteNativeIngress(test.options),buffers=Array.from({length:8},(_,sequence)=>wire(sequence));
  try{
   const work=buffers.map(buffer=>ingress.accept(buffer));expect(ingress.stats().entries).toBe(8);
-  if(typeof structuredClone==='function')expect(buffers.every(buffer=>buffer.byteLength===0)).toBe(true);
+  expect(buffers.every(buffer=>buffer.byteLength===1)).toBe(true);for(const buffer of buffers)new Uint8Array(buffer).fill(255);
   const receipts=await Promise.all(work);expect(receipts.map(receipt=>receipt.ack.sequence)).toEqual([0,1,2,3,4,5,6,7]);
   expect(test.commits).toBe(1);expect(test.acks).toHaveLength(8);expect(test.sql.prepare('SELECT count(*) n FROM frames').get()).toEqual({n:8});
   expect(test.sql.prepare('SELECT count(*) n FROM activated').get()).toEqual({n:1});expect(ingress.stats()).toMatchObject({entries:0,bytes:0});
-  if(typeof ArrayBuffer.prototype.transfer==='function')expect(buffers.every(buffer=>buffer.byteLength===0)).toBe(true);
+  expect(buffers.every(buffer=>buffer.byteLength===1)).toBe(true);
  }finally{ingress.close();test.sql.close();}
 });
 it('rolls back the entire batch and returns no credit when any frame or activation fails',async()=>{
@@ -92,5 +92,31 @@ it('releases an unstarted queue on close and refuses oversize frames before admi
 it('drops settled queue references while retaining external-memory accounting for the owned backing store',async()=>{
  const test=fixture(),append=test.options.snapshots.appendEncodedReceipt,inputs:Uint8Array[]=[];
  test.options.snapshots.appendEncodedReceipt=async(...args)=>{inputs.push(args[1]);return append(...args);};const ingress=new SQLiteNativeIngress(test.options),source=wire(0);
- try{await ingress.accept(source);expect(source.byteLength).toBe(0);expect(inputs[0].byteLength).toBe(1);expect(ingress.stats()).toMatchObject({entries:0,bytes:0,releasedBytes:1});}finally{ingress.close();test.sql.close();}
+ try{await ingress.accept(source);expect(source.byteLength).toBe(1);expect(inputs[0].buffer).not.toBe(source);expect(inputs[0].byteLength).toBe(1);expect(ingress.stats()).toMatchObject({entries:0,bytes:0,releasedBytes:1});}finally{ingress.close();test.sql.close();}
+});
+
+it('publishes staging progress atomically before credit and rolls back the entire batch if publication fails',async()=>{
+ for(const fails of [false,true]){
+  const f=fixture();f.sql.exec('CREATE TABLE progress(n INTEGER)');let calls=0;
+  const ingress=new SQLiteNativeIngress({...f.options,async commitProgress(){expect(f.transaction).toBe(true);expect(f.sql.prepare('SELECT count(*) n FROM frames').get()).toEqual({n:2});calls++;await f.options.database.runAsync('INSERT INTO progress VALUES(1)');if(fails)throw Error('progress persistence failed');}});
+  try{
+   const results=await Promise.allSettled([ingress.accept(wire(0)),ingress.accept(wire(1))]);expect(calls).toBe(1);expect(results.every(result=>result.status===(fails?'rejected':'fulfilled'))).toBe(true);expect(f.acks).toHaveLength(fails?0:2);expect(f.sql.prepare('SELECT count(*) n FROM frames').get()).toEqual({n:fails?0:2});expect(f.sql.prepare('SELECT count(*) n FROM progress').get()).toEqual({n:fails?0:1});
+  }finally{ingress.close();f.sql.close();}
+ }
+});
+
+it('preserves wire control barriers without deadlocking coalesced binary frames or the SQL FIFO',async()=>{
+ const f=fixture(),order:Array<string|number>=[],ingress=new SQLiteNativeIngress({...f.options,async commitProgress(){order.push((f.sql.prepare('SELECT count(*) n FROM frames').get() as {n:number}).n);}});
+ try{
+  const first=ingress.accept(wire(0)),control=ingress.flush().then(()=>{order.push('control');});
+  const second=ingress.accept(wire(1),control),terminal=ingress.flush().then(()=>{order.push('terminal');});
+  await Promise.all([first,second,terminal]);expect(order).toEqual([1,'control',2,'terminal']);expect(f.commits).toBe(2);expect(f.acks).toHaveLength(2);expect(ingress.stats()).toMatchObject({entries:0,bytes:0});
+ }finally{ingress.close();f.sql.close();}
+});
+it('bounds frames waiting outside the SQL FIFO and cancels a closed control gate without touching disk',async()=>{
+ const f=fixture();let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;}),ingress=new SQLiteNativeIngress(f.options);
+ try{
+  const frames=Array.from({length:8},(_,n)=>ingress.accept(wire(n),gate)),waiting=Promise.allSettled([...frames,ingress.flush()]);
+  await expect(ingress.accept(wire(9),gate)).rejects.toMatchObject({code:'BUDGET'});await new Promise(resolve=>setTimeout(resolve,10));expect(f.commits).toBe(0);expect(ingress.stats().entries).toBe(8);ingress.close();expect((await waiting).every(result=>result.status==='rejected')).toBe(true);expect(ingress.stats()).toMatchObject({entries:0,bytes:0});release();await new Promise(resolve=>setTimeout(resolve,10));expect(f.commits).toBe(0);expect(f.acks).toEqual([]);
+ }finally{ingress.close();release();f.sql.close();}
 });

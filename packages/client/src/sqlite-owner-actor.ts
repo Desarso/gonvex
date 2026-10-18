@@ -1,3 +1,4 @@
+import {SQLitePendingSnapshotReader} from './sqlite-pending-snapshot-reader.js';
 import {SQLiteOwnerTabs} from './sqlite-owner-tabs.js';
 import {SQLiteNativeReplicaReader} from './sqlite-native-replica-reader.js';
 import {SQLiteSnapshotActivator} from './sqlite-snapshot-activation.js';
@@ -22,7 +23,7 @@ export type SQLiteOwnerProgram={
  close?():Promise<void>|void;
 };
 export type SQLiteOwnerProgramContext={
- database:SQLiteReplicaDatabase;engine:SQLiteTypedReplicaEngine;reader:SQLiteNativeReplicaReader;canonical:SQLiteLocalReplicaStorage;snapshots:SQLiteSnapshotPages;activation:SQLiteSnapshotActivator;
+ database:SQLiteReplicaDatabase;engine:SQLiteTypedReplicaEngine;reader:SQLiteNativeReplicaReader;pendingReader:SQLitePendingSnapshotReader;canonical:SQLiteLocalReplicaStorage;snapshots:SQLiteSnapshotPages;activation:SQLiteSnapshotActivator;
  runOwner<T>(bytes:number,run:()=>Promise<T>,publishScopes?:readonly string[]):Promise<T>;
 };
 export type SQLiteOwnerBinding={schema?:SQLiteTypedSchema;createProgram?(context:SQLiteOwnerProgramContext):SQLiteOwnerProgram};
@@ -38,7 +39,7 @@ export function installSQLiteOwner(binding:SQLiteOwnerBinding={}):()=>Promise<vo
 // is lazy and occurs only after the tab has acquired the origin ownership lock.
 let host: OfficialSQLiteHost | undefined, engine: SQLiteTypedReplicaEngine | undefined;
 let canonical:SQLiteCanonicalDispatcher|undefined;
-let nativeReader:SQLiteNativeReplicaReader|undefined;
+let nativeReader:SQLiteNativeReplicaReader|undefined,pendingReader:SQLitePendingSnapshotReader|undefined;
 let snapshots:SQLiteSnapshotPages|undefined,activation:SQLiteSnapshotActivator|undefined;
 let lane = Promise.resolve(), operations = 0, bytes = 0,queuedOperations=0,queuedBytes=0,closed=false;
 let program:SQLiteOwnerProgram|undefined,ownerToken='';
@@ -80,7 +81,8 @@ async function execute(op: string, args: any, requestID:string) {
       activation=new SQLiteSnapshotActivator(database,storage,()=>engine!.verifyOwner(),engine.schema);
       await snapshots.ready();await activation.ready();
       nativeReader=new SQLiteNativeReplicaReader(database,storage,engine);await nativeReader.ready();tabs.setGeneration(await engine.verifyOwner());
-      program=binding.createProgram?.({database,engine,reader:nativeReader,canonical:storage,snapshots,activation,
+      pendingReader=new SQLitePendingSnapshotReader({database,canonical:storage,snapshots,schema:engine.schema,fence:()=>engine!.verifyOwner()});await pendingReader.ready();
+      program=binding.createProgram?.({database,engine,reader:nativeReader,pendingReader,canonical:storage,snapshots,activation,
        runOwner:async(size,run,scopes=[])=>{
         if(!Array.isArray(scopes)||scopes.length>8||scopes.some(value=>typeof value!=='string'||!value||value.length>512))throw new TypeError('Invalid owner publication scope');
         return schedule(size,async()=>{const before=await engine!.verifyOwner();const value=await run();const after=await engine!.verifyOwner();if(after.sequence!==before.sequence)for(const selected of scopes)publish(selected,after);return value;});
@@ -108,7 +110,7 @@ async function execute(op: string, args: any, requestID:string) {
     case 'canonicalRead': return canonical!.read(args);
     case 'canonicalGeneration': return canonical!.generation(scope(args.scope),args.expected);
     case 'ping': return { ready: true };
-    case 'stats': return { ...engine.stats(),...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats() };
+    case 'stats': return { ...engine.stats(),...snapshots!.stats(),ingressNativeHash:Number(!!host.database.ingressNativeHash), wasmBytes: host.memoryBytes(), clients: ports.size,queuedOperations,queuedBytes,requests:operations,requestBytes:bytes,delivery:tabs.stats(),pendingPages:pendingReader?.budgets()??[] };
     case 'integrity': return engine.integrity();
     case 'page': return engine.page(scope(args.scope), args.plan as SQLitePagePlan);
     case 'viewPage': return engine.viewPage(scope(args.scope), args.signature, args.plan as SQLitePagePlan, args.offset);
@@ -217,7 +219,7 @@ let disposal:Promise<void>|undefined;
 return ()=>disposal??=(async()=>{
  closed=true;clearInterval(timer);globalThis.onmessage=null;
  tabs.close();for(const peer of ports.values())peer.port.close();ports.clear();
- try{await program?.close?.();await lane;}finally{host?.close();installed=false;}
+ try{await program?.close?.();await lane;}finally{pendingReader?.close();host?.close();installed=false;}
 })();
 
 }

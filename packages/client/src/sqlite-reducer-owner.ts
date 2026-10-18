@@ -25,7 +25,7 @@ export class SQLiteReducerOwner {
   const fence=()=>owner.engine.verifyOwner();
   this.journal=new SQLiteIntentJournal(owner.database,fence);
   this.predictions=new SQLitePredictions(owner.database,owner.canonical,owner.engine.schema,fence);
-  owner.reader.usePredictions(this.predictions);
+  owner.reader.usePredictions(this.predictions);owner.pendingReader.usePredictions(this.predictions);
   this.core=new SQLiteReducerCore({database:owner.database,engine:owner.engine,journal:this.journal,predictions:this.predictions,runtime:options.runtime,artifactHash:options.artifactHash,context:options.context});
   this.initialized=owner.runOwner(0,()=>this.core.ready());
   // The first call observes the same initialization error without a detached

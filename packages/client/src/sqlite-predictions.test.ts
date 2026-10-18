@@ -73,3 +73,15 @@ it('keeps admitted membership for replacements and permits only explicit matchin
   expect((await f.predictions.page('s',plan)).rows.map(row=>row.id)).toEqual(['01','00','03','04']);expect((await f.predictions.page('s',plan,true)).rows.map(row=>row.id)).toEqual(['01','00','local','03','04']);expect((await f.predictions.viewPage('s','subset-view',plan,0,true)).total).toBe(5);
  }finally{f.sql.close();}
 });
+
+it('preserves newly received untouched fields while applying only intent-owned fields to pending source pages',async()=>{
+ const f=await fixture();try{
+  await f.predictions.apply('s',1,[{entity:'tasks',rowId:'01',op:'patch',fields:{n:99}},{entity:'tasks',rowId:'02',op:'delete'},{entity:'tasks',rowId:'new',op:'insert',fields:{id:'new',name:'Offline new',n:3,data:null}}]);
+  const received=[{id:'01',row:{id:'01',name:'New server title',n:10,data:{fresh:true}}},{id:'02',row:f.rows[2]},{id:'new',row:{id:'new',name:'Server generated default',n:5,data:null}}];
+  expect(await f.predictions.overlayRows('s','tasks',received)).toEqual([{id:'01',row:{id:'01',name:'New server title',n:99,data:{fresh:true}}},{id:'02',row:null},{id:'new',row:{id:'new',name:'Offline new',n:3,data:null}}]);
+  await f.predictions.apply('s',2,[{entity:'tasks',rowId:'01',op:'patch',fields:{name:'Local title'}}]);expect((await f.predictions.overlayRows('s','tasks',received))[0].row).toEqual({id:'01',name:'Local title',n:99,data:{fresh:true}});
+  await f.predictions.apply('s',3,[{entity:'tasks',rowId:'03',op:'patch',fields:{}}]);const fresh=[{id:'03',row:{id:'03',name:'New untouched server title',n:900,data:null}}];expect(await f.predictions.overlayRows('s','tasks',fresh)).toEqual(fresh);
+  await f.db.runAsync('DELETE FROM gv_prediction_fields WHERE scope=? AND id=?','s','01');await expect(f.predictions.overlayRows('s','tasks',received)).rejects.toMatchObject({code:'PAGE_CHANGED'});
+  await f.predictions.reset('s');expect(await f.predictions.overlayRows('s','tasks',received)).toEqual(received);expect(await f.db.getFirstAsync('SELECT count(*) n FROM gv_prediction_fields')).toEqual({n:0});
+ }finally{f.sql.close();}
+});

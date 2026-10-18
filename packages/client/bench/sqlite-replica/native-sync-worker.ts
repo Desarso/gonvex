@@ -1,10 +1,11 @@
+import {SQLitePendingSnapshotReader} from '../../src/sqlite-pending-snapshot-reader.js';
 import {assertSQLiteMembership} from '../../src/sqlite-membership-plan.js';
 import {sqliteQueryEntityScopes} from '../../src/sqlite-entity-scope.js';
 import {compileSQLiteOptimisticPage} from '../../src/sqlite-typed-query.js';
 import {SQLitePredictions} from '../../src/sqlite-predictions.js';
 import {openOfficialSQLiteHost} from '../../src/sqlite-official-host.js';
 import {SQLiteTypedReplicaEngine} from '../../src/sqlite-typed-engine.js';
-import {sqliteOwnerTransactions} from '../../src/sqlite-owner-transactions.js';
+import {sqliteOwnerTransactions,markSQLiteStagingCommit} from '../../src/sqlite-owner-transactions.js';
 import {sqliteTypedReplicaStorage} from '../../src/sqlite-typed-row-layout.js';
 import {SQLiteSnapshotPages} from '../../src/sqlite-snapshot-pages.js';
 import {SQLiteSnapshotActivator} from '../../src/sqlite-snapshot-activation.js';
@@ -13,6 +14,7 @@ import {SQLiteWindowStore} from '../../src/sqlite-window-store.js';
 const schema={rows:{key:'id',fields:{id:{kind:'text'},text:{kind:'text'},nested:{kind:'json'},value:{kind:'number'}},indexes:[{columns:['id']},{columns:['text']},{columns:['value']}],search:['text'],searchDetail:'column',searchContent:'external'}} as const;
 const scope='visible';
 let host:Awaited<ReturnType<typeof openOfficialSQLiteHost>>,engine:SQLiteTypedReplicaEngine,database:ReturnType<typeof sqliteOwnerTransactions>,canonical:ReturnType<typeof sqliteTypedReplicaStorage>,snapshots:SQLiteSnapshotPages,activation:SQLiteSnapshotActivator,ingress:SQLiteNativeIngress,socket:WebSocket,manifest:any,header:any;
+let pendingReader:SQLitePendingSnapshotReader;
 let lane=Promise.resolve(),completed=false,started=0,verified=0,acks=0,activationMs=0;
 const runOwner=<T>(run:()=>Promise<T>):Promise<T>=>{const next=lane.then(run);lane=next.then(()=>{},()=>{});return next;};
 function failure(error:unknown){globalThis.postMessage({error:String((error as Error).stack??error)});socket?.close();ingress?.close();}
@@ -20,13 +22,13 @@ const handlers={
  async open(){
   host=await openOfficialSQLiteHost();database=sqliteOwnerTransactions(host.database);engine=new SQLiteTypedReplicaEngine(database,schema);await engine.open('native-sync-control');
   canonical=sqliteTypedReplicaStorage(database,schema);snapshots=new SQLiteSnapshotPages(database,()=>engine.verifyOwner(),schema);activation=new SQLiteSnapshotActivator(database,canonical,()=>engine.verifyOwner(),schema);
-  await snapshots.ready();await activation.ready();
+  await snapshots.ready();await activation.ready();pendingReader=new SQLitePendingSnapshotReader({database,canonical,snapshots,schema,fence:()=>engine.verifyOwner()});await pendingReader.ready();
   await canonical.applyTransaction({cursor:{epoch:'e',revision:20},changes:[{entity:'rows',id:'row-0000',operation:'insert',newValue:{id:'row-0000',text:'newer first page'}}]},{entities:{},liveQueries:{}},scope);
   return {sqliteVersion:(await database.getFirstAsync<{version:string}>('SELECT sqlite_version() version'))?.version,nativeHash:host.nativeHash,nativeReceipt:host.nativeReceipt,nativeSnapshot:host.nativeSnapshot,nativeFold:host.nativeFastFold,wasmBytes:host.memoryBytes()};
  },
  async connect({url}:{url:string}){
   host.takeProfile();started=performance.now();globalThis.postMessage({phase:'ingest'});socket=new WebSocket(url);socket.binaryType='arraybuffer';
-  ingress=new SQLiteNativeIngress({database,snapshots,scope,runOwner,sendAck(ack){acks++;socket.send(JSON.stringify(ack));},async activateVerified(receipt){
+  ingress=new SQLiteNativeIngress({database,snapshots,scope,runOwner,async commitProgress(){await markSQLiteStagingCommit(database,()=>engine.verifyOwner());},sendAck(ack){acks++;socket.send(JSON.stringify(ack));},async activateVerified(receipt){
    globalThis.postMessage({phase:'activation'});
    const at=performance.now();await activation.activate({scope,subscription:receipt.ack.id,snapshot:receipt.ack.snapshotId,header});activationMs+=performance.now()-at;verified++;
   }});
@@ -54,7 +56,7 @@ const handlers={
   socket.onclose=()=>{if(!completed)failure(Error('Native fixture socket closed before completion'));};
   return {started:true};
  },
- async page(){return engine.page(scope,{table:'rows',order:[{field:'id',direction:'asc'}],textOrder:'binary',limit:50});},
+ async page(){if(manifest&&!completed)try{const page=await pendingReader.page({scope,entity:'rows',subscription:manifest.id,snapshot:manifest.snapshotId,limit:50});if(page.rows.length)return {rows:page.rows.flatMap(row=>row.value?[row.value]:[]),pending:true,receivedRows:page.receivedRows,sourceMs:performance.now()-started};}catch(error){if((error as {code?:string}).code!=='PAGE_CHANGED')throw error;}return engine.page(scope,{table:'rows',order:[{field:'id',direction:'asc'}],textOrder:'binary',limit:50});},
  async optimistic({expectedDeepID,expectedFirstIDs,expectedCanonicalIDs}:{expectedDeepID:string;expectedFirstIDs:string[];expectedCanonicalIDs:string[]}){
   if(!completed)throw Error('Import must finish before query control');
   const predictions=new SQLitePredictions(database,canonical,schema,()=>engine.verifyOwner());await predictions.ready();host.takeProfile();

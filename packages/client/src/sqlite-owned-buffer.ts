@@ -9,12 +9,10 @@ export function releaseOwnedSQLiteBytes(value:unknown):number {
  try{buffer.transfer(0);return bytes;}catch{return 0;}
 }
 
-/** Move a network frame away from its event wrapper before queueing it. The
- * queue owns the backing store immediately; a caller can never mutate a
- * credited frame while it waits for the owner lane. */
-export function takeOwnedSQLiteBytes(buffer:ArrayBuffer):Uint8Array<ArrayBuffer>{
- const transferable=buffer as ArrayBuffer&{transfer?:()=>ArrayBuffer};
- if(typeof transferable.transfer==='function')return new Uint8Array(transferable.transfer());
- if(typeof structuredClone==='function')return new Uint8Array(structuredClone(buffer,{transfer:[buffer]}));
- return new Uint8Array(buffer.slice(0));
+/** Copy a credited DOM network buffer into ordinary SDK-owned storage before
+ * queueing it. Transferring the DOM backing store can retain native event/GC
+ * memory until a later collection. The bounded byte copy preserves accurate
+ * ownership and external-memory accounting without recycling the worker. */
+export function copyOwnedSQLiteBytes(buffer:ArrayBuffer):Uint8Array<ArrayBuffer>{
+ return new Uint8Array(new Uint8Array(buffer));
 }

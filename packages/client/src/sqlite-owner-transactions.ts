@@ -39,3 +39,14 @@ export function sqliteOwnerTransactions(database: SQLiteReplicaDatabase): SQLite
     },
   };
 }
+
+/** Stage progress invalidates owner read leases and notifies mounted pages.
+ * It is a local storage generation only: never a server/reducer watermark.
+ * The caller joins the same fenced owner TX which durably writes the frames. */
+export async function markSQLiteStagingCommit(database:SQLiteReplicaDatabase,fence:()=>Promise<{epoch:number;sequence:number}>){
+ if(!database.ownerTransactionDepth)throw Object.assign(Error('Staging publication requires an owner transaction'),{code:'FENCED'});
+ const current=await fence();if(!current||!Number.isSafeInteger(current.epoch)||current.epoch<0||!Number.isSafeInteger(current.sequence)||current.sequence<0)throw Object.assign(Error('Invalid owner generation'),{code:'FENCED'});
+ const next=await database.getFirstAsync<{sequence:number}>('UPDATE gv_storage_meta SET sequence=sequence+1 WHERE id=1 AND epoch=? AND sequence=? AND sequence<9007199254740991 RETURNING sequence',current.epoch,current.sequence);
+ if(!next)throw Object.assign(Error('Staging publication owner changed or sequence exhausted'),{code:'FENCED'});
+ return {epoch:current.epoch,sequence:next.sequence};
+}
