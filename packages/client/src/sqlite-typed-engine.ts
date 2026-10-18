@@ -52,7 +52,7 @@ export class SQLiteTypedReplicaEngine {
   private jsonEach: 'json_each' | 'jsonb_each' = 'json_each';
   private lastProgress = -Infinity;
   private readonly plans = new BoundedByteCache<string, string>('sqlite-plans', 262144, 4, new ByteLedger(262144));
-  private readonly profile = { nativeValidationMs: 0, searchProjectionMs: 0, nativeFrames: 0, frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
+  private readonly profile = { yieldMs: 0, yields: 0, nativeValidationMs: 0, searchProjectionMs: 0, nativeFrames: 0, frameMs: 0, parseMs: 0, validationMs: 0, hashMs: 0, reencodeMs: 0, normalizationMs: 0, sqliteInsertMs: 0, creditMs: 0, indexBuildMs: 0, ftsBuildMs: 0, frames: 0, rows: 0 };
   takeProfile() { const result = { ...this.profile }; for (const key of Object.keys(this.profile) as Array<keyof typeof this.profile>) this.profile[key] = 0; return result; }
   constructor(private readonly db: SQLiteReplicaDatabase, readonly schema: SQLiteTypedSchema,
     private readonly limits = { operations: 64, queuedBytes: 2_097_152, batchBytes: 262_144, pageBytes: 262_144 },
@@ -67,6 +67,11 @@ export class SQLiteTypedReplicaEngine {
     const previous = this.plans.get(key); if (previous !== undefined) return previous;
     const sql = create(); if (sql === undefined) return;
     this.plans.put(key, sql, (key.length + sql.length) * 2 + 128); return sql;
+  }
+  private async yieldTask(): Promise<void> {
+    const started = performance.now();
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    this.profile.yieldMs += performance.now() - started; this.profile.yields++;
   }
   private progress() {
     if (!this.controls.onProgress) return;
@@ -103,8 +108,7 @@ CREATE TABLE IF NOT EXISTS gv_scope_alias(scope TEXT PRIMARY KEY,physical TEXT N
 CREATE TABLE IF NOT EXISTS gv_bootstrap(scope TEXT PRIMARY KEY,token TEXT UNIQUE NOT NULL,physical TEXT NOT NULL,next_page INTEGER NOT NULL,rows INTEGER NOT NULL,root TEXT NOT NULL,base_sequence INTEGER NOT NULL,complete INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(token,page)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
-CREATE TEMP TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),value BLOB NOT NULL);
-PRAGMA temp.cache_size=-128;`);
+CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),value BLOB NOT NULL);`);
         // Newer hosts can keep frame children binary instead of serializing
         // every object to text and reparsing it for each extracted field.
         // Built-in JSON modules register lazily, so pragma_module_list is not
@@ -178,7 +182,7 @@ PRAGMA temp.cache_size=-128;`);
         if (last == null) break;
         await this.db.runAsync(`INSERT INTO ${fn}(rowid,${columns}) SELECT rid,${columns} FROM ${tn} WHERE rid>? AND rid<=? ORDER BY rid`, after, last);
         after = last; this.progress();
-        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        await this.yieldTask();
       }
     }
     this.profile.ftsBuildMs += performance.now() - timed;
@@ -484,7 +488,7 @@ PRAGMA temp.cache_size=-128;`);
           // progress messages and idle GC for the entire bootstrap. Yield real
           // event-loop tasks within the ingestion slice budget.
           if (performance.now() - sliceStarted >= 8) {
-            await new Promise<void>(resolve => setTimeout(resolve, 0));
+            await this.yieldTask();
             sliceStarted = performance.now();
           }
         }

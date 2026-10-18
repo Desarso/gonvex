@@ -3,7 +3,7 @@ import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
 import type { SQLiteTypedSchema, SQLiteTypedTable } from './sqlite-typed-schema.js';
 const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
 const path = (...parts: string[]) => literal('$.' + parts.map(name => JSON.stringify(name)).join('.'));
-export const sqliteEncodedFrameValueSQL = '(SELECT value FROM temp.gv_input_frame WHERE id=1)';
+export const sqliteEncodedFrameValueSQL = '(SELECT value FROM main.gv_input_frame WHERE id=1)';
 
 /** The grammar has already passed SQLite json_valid. Scan only structural
  * invariants, without constructing rows or decoding text values. Object-key
@@ -72,11 +72,11 @@ export async function writeSQLiteEncodedFrame(db: SQLiteReplicaDatabase, schema:
 ): Promise<{ rows: number; validationMs: number; projectionMs: number; normalizationMs: number } | undefined> {
   const began = performance.now();
   decodedJSONBytes(encoded, maxBytes);
-  await db.runAsync('DELETE FROM temp.gv_input_frame');
+  await db.runAsync('DELETE FROM main.gv_input_frame');
   try {
     // Bind/encode the wire text once. All validation and extraction below read
     // one bounded native JSONB scratch row, removed before this method returns.
-    await db.runAsync('WITH source AS MATERIALIZED(SELECT ? value) INSERT INTO temp.gv_input_frame SELECT 1,jsonb(value) FROM source WHERE json_valid(value)', encoded);
+    await db.runAsync('WITH source AS MATERIALIZED(SELECT ? value) INSERT INTO main.gv_input_frame SELECT 1,jsonb(value) FROM source WHERE json_valid(value)', encoded);
     const shape = await db.getFirstAsync<{ kind: string }>(`SELECT json_type(${sqliteEncodedFrameValueSQL}) kind`);
     if (shape?.kind !== 'array') return;
     const size = await db.getFirstAsync<{ n: number; bad: number }>(`SELECT count(*) n,coalesce(sum(type<>'object'),0) bad FROM ${each}(${sqliteEncodedFrameValueSQL})`);
@@ -108,5 +108,5 @@ export async function writeSQLiteEncodedFrame(db: SQLiteReplicaDatabase, schema:
       await insert(entity, normalized);
     }
     return { rows: size.n, validationMs, projectionMs, normalizationMs };
-  } finally { await db.runAsync('DELETE FROM temp.gv_input_frame'); }
+  } finally { await db.runAsync('DELETE FROM main.gv_input_frame'); }
 }

@@ -205,7 +205,7 @@ it('binds each encoded frame once and releases its native scratch row before ret
   const profile = host.takeProfile();
   expect(profile.boundTextUTF16Bytes).toBeGreaterThanOrEqual(encoded.length * 2);
   expect(profile.boundTextUTF16Bytes).toBeLessThan(encoded.length * 2 + 2048);
-  expect(await host.database.getFirstAsync('SELECT count(*) n FROM temp.gv_input_frame')).toEqual({ n: 0 });
-  expect(await host.database.getFirstAsync('PRAGMA temp.cache_size')).toEqual({ cache_size: -128 });
+  expect(await host.database.getFirstAsync('SELECT count(*) n FROM main.gv_input_frame')).toEqual({ n: 0 });
+  expect(await host.database.getFirstAsync("SELECT count(*) n FROM sqlite_temp_master WHERE name='gv_input_frame'")).toEqual({ n: 0 });
   expect((await engine.page('s', { table: 'records', order: [{ field: '_id', direction: 'asc' }], textOrder: 'binary', limit: 2 })).rows).toEqual([row]);
 });
