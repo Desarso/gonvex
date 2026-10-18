@@ -1,3 +1,4 @@
+import { fail } from './sqlite-admission.js';
 import { yieldSQLiteTask } from './sqlite-task-yield.js';
 import { installSQLiteTypedBodyFence, sqliteBodySkeleton, sqliteRowBodySQL } from './sqlite-typed-body.js';
 import { sqliteNativeViewSchema, readSQLiteTypedView } from './sqlite-native-view.js';
@@ -15,7 +16,19 @@ const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
 export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRowLayout {
   const ddl = compileSQLiteTypedSchema(schema);
   const signature = JSON.stringify({ format: 3, schema });
+  let lease: { epoch: number; owner: string } | undefined;
+  async function assertOwner(db: SQLiteReplicaDatabase) {
+    const current = await db.getFirstAsync<{ epoch: number; owner: string; sequence: number }>('SELECT epoch,owner,sequence FROM gv_storage_meta WHERE id=1');
+    if (!lease || current?.epoch !== lease.epoch || current.owner !== lease.owner) fail('FENCED', 'Canonical SQLite owner was replaced');
+    return current;
+  }
   return {
+    async assertOwner(db) { await assertOwner(db); },
+    async afterCommit(db) {
+      const current = await assertOwner(db);
+      if (!Number.isSafeInteger(current.sequence) || current.sequence >= Number.MAX_SAFE_INTEGER) fail('FENCED', 'SQLite storage sequence exhausted');
+      await db.runAsync('UPDATE gv_storage_meta SET sequence=sequence+1 WHERE id=1');
+    },
     async install(db) {
       const flags = await db.getFirstAsync("SELECT name FROM sqlite_master WHERE type='table' AND name='gv_storage_flags'");
       if (flags && await db.getFirstAsync("SELECT value FROM gv_storage_flags WHERE name='bootstrap-indexes'")) throw new Error('Finish or abort the restartable bootstrap before installing the canonical adapter');
@@ -75,6 +88,7 @@ CREATE TRIGGER IF NOT EXISTS ${q(table + '_lookup_d')} AFTER DELETE ON ${name} B
 ${deletes}
 DELETE FROM gv_canonical_tombstones WHERE scope=OLD.scope AND entity=OLD.entity AND id=OLD.id;
 END;`);
+      lease = await db.getFirstAsync<{ epoch: number; owner: string }>('SELECT epoch,owner FROM gv_storage_meta WHERE id=1') ?? undefined;
     },
     async resetViews(db, scope) {
       await db.runAsync('DELETE FROM gv_view_members WHERE scope=?', scope);

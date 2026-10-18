@@ -22,7 +22,7 @@ export class SQLiteReplicaCommits {
   private initialized?: Promise<void>;
   private active?: ReplicaStorageCommit;
   private committing = false;
-  constructor(private readonly database: SQLiteReplicaDatabase, private readonly onCommit?: (scope: string) => void) {}
+  constructor(private readonly database: SQLiteReplicaDatabase, private readonly onCommit?: (scope: string) => void, private readonly controls: { before?: () => Promise<void>; after?: () => Promise<void> } = {}) {}
   initialize() {
     return this.initialized ??= this.database.withTransactionAsync(async () => {
       const present=await this.database.getFirstAsync<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name='_gonvex_replica_changes'");
@@ -46,12 +46,14 @@ export class SQLiteReplicaCommits {
     this.committing = true;
     let receipt!: ReplicaStorageCommit;
     try { await this.database.withTransactionAsync(async () => {
+      await this.controls.before?.();
       const previous = integer((await this.database.getFirstAsync<{ value: string }>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='sequence'", scope))?.value);
       if (previous === Number.MAX_SAFE_INTEGER) throw new RangeError('SQLite replica sequence exhausted');
       receipt = { scope, previousSequence: previous, sequence: previous + 1, changes: { sequence: previous + 1, entities: Object.create(null), windows: Object.create(null) } };
       this.active = receipt;
       try {
         await run();
+        await this.controls.after?.();
         await this.database.runAsync("INSERT OR REPLACE INTO _gonvex_replica_meta VALUES(?,'sequence',?)", scope, String(receipt.sequence));
       } finally { this.active = undefined; }
     });
@@ -102,6 +104,7 @@ export class SQLiteReplicaCommits {
     await this.initialize();
     let result!: ReplicaStorageChanges;
     await this.database.withTransactionAsync(async () => {
+      await this.controls.before?.();
       const sequence = await this.sequence(scope);
       const reset = afterSequence < integer((await this.database.getFirstAsync<{ value: string }>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='resetSequence'", scope))?.value);
       if (sequence < afterSequence) throw new Error('SQLite replica sequence moved backwards');

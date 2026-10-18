@@ -24,6 +24,8 @@ export interface SQLiteReplicaDatabase {
  * caller's existing transaction, never in a second database or cache. */
 export interface SQLiteReplicaRowLayout {
   install(database: SQLiteReplicaDatabase): Promise<void>;
+  assertOwner?(database: SQLiteReplicaDatabase): Promise<void>;
+  afterCommit?(database: SQLiteReplicaDatabase): Promise<void>;
   resetViews?(database: SQLiteReplicaDatabase, scope: string): Promise<void>;
   readViewPage?(database: SQLiteReplicaDatabase, scope: string, signature: string, plan: SQLitePagePlan,
     offset: number, sequence: number): Promise<SQLiteTypedViewPage>;
@@ -50,19 +52,27 @@ const replicaSchemaVersion = 3;
  */
 export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
   private initialized?: Promise<void>;
+  private layoutReady = false;
   private readonly commits: SQLiteReplicaCommits;
   readonly supportsResidentLookup = true;
 
-  constructor(private readonly database: SQLiteReplicaDatabase, private readonly rowLayout?: SQLiteReplicaRowLayout) { this.commits = new SQLiteReplicaCommits(database); }
+  constructor(private readonly database: SQLiteReplicaDatabase, private readonly rowLayout?: SQLiteReplicaRowLayout) { this.commits = new SQLiteReplicaCommits(database, undefined, { before: () => rowLayout?.assertOwner?.(database) ?? Promise.resolve(), after: () => rowLayout?.afterCommit?.(database) ?? Promise.resolve() }); }
 
+  private withFencedTransaction(run: () => Promise<void>) {
+    return this.database.withTransactionAsync(async () => {
+      if (this.layoutReady) await this.rowLayout?.assertOwner?.(this.database);
+      await run();
+    });
+  }
   private initialize() {
     return (this.initialized ??= this.migrateSchema().then(() => this.commits.initialize()));
   }
 
   private async migrateSchema() {
     if (this.rowLayout) {
-      await this.database.withTransactionAsync(async () => {
+      await this.withFencedTransaction(async () => {
         await this.rowLayout!.install(this.database);
+        this.layoutReady = true;
         await this.database.execAsync(`CREATE TABLE IF NOT EXISTS _gonvex_replica_queries (
           scope TEXT NOT NULL, signature TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(scope,signature));
           CREATE TABLE IF NOT EXISTS _gonvex_replica_meta (
@@ -136,7 +146,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
       CREATE INDEX IF NOT EXISTS _gonvex_replica_lookup_row ON _gonvex_replica_lookup(scope,entity,id);
     `;
     if (!legacyEntities && !legacyQueries && !legacyMeta) {
-      await this.database.withTransactionAsync(async () => {
+      await this.withFencedTransaction(async () => {
         await this.database.execAsync(createTables);
         if ((storedVersion?.user_version ?? 0) < 3) await this.rebuildLookup();
         await this.database.execAsync(
@@ -148,7 +158,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     // The v1 tables had no namespace at all. Keep their contents available to
     // direct/default LocalReplica users, but never leave those rows in the
     // canonical tables where an authenticated scope could read them.
-    await this.database.withTransactionAsync(async () => {
+    await this.withFencedTransaction(async () => {
       if (legacyEntities)
         await this.database.execAsync(
           `ALTER TABLE _gonvex_replica_entities RENAME TO _gonvex_replica_entities_legacy_v1`,
@@ -216,8 +226,9 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     if (!scope || scope.length > 512 || !signature || signature.length > 256 || !Number.isSafeInteger(offset) || offset < 0) throw new TypeError('Invalid canonical view position');
     if (!this.rowLayout?.readViewPage) throw new Error('This SQLite layout has no typed view compiler');
     const admitted = structuredClone(plan);
-    await this.initialize(); let result!: SQLiteTypedViewPage;
-    await this.database.withTransactionAsync(async () => {
+    await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database); let result!: SQLiteTypedViewPage;
+    await this.withFencedTransaction(async () => {
       result = await this.rowLayout!.readViewPage!(this.database, scope, signature, admitted, offset, await this.commits.sequence(scope));
     });
     return result;
@@ -227,6 +238,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     scope: ReplicaScope = defaultReplicaScope,
   ): Promise<ReplicaSnapshot | undefined> {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     const cursor = await this.database.getFirstAsync<MetaRecord>(
       `SELECT scope, key, value FROM _gonvex_replica_meta WHERE scope = ? AND key = 'cursor'`,
       scope,
@@ -266,8 +278,9 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     budget: { maxRows: number; maxBytes: number },
   ): Promise<ReplicaSnapshot | undefined> {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     let snapshot: ReplicaSnapshot | undefined;
-    await this.database.withTransactionAsync(async () => {
+    await this.withFencedTransaction(async () => {
       const storageSequence = await this.commits.sequence(scope);
       const cursor = await this.database.getFirstAsync<MetaRecord>(
         `SELECT scope, key, value FROM _gonvex_replica_meta WHERE scope = ? AND key = 'cursor'`,
@@ -339,6 +352,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
 
   async loadEntityRows(scope: string, entity: string, ids: readonly string[]) {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     const result: Array<{ id: string; row: ReplicaRow }> = [];
     for (let offset = 0; offset < ids.length; offset += 256) {
       const batch = ids.slice(offset, offset + 256);
@@ -360,8 +374,9 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
 
   async loadWindowRows(scope: string, signature: string) {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     let result: { window: ReplicaWindow; rows: ReplicaRow[] } | undefined;
-    await this.database.withTransactionAsync(async () => {
+    await this.withFencedTransaction(async () => {
       const record = await this.database.getFirstAsync<QueryRecord>(
         `SELECT scope, signature, value FROM _gonvex_replica_queries WHERE scope = ? AND signature = ?`,
         scope,
@@ -385,8 +400,9 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     run: (view: ReplicaReducerReadView) => Promise<T>,
   ): Promise<T> {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     let result!: T;
-    await this.database.withTransactionAsync(async () => {
+    await this.withFencedTransaction(async () => {
       result = await run(
         pagedReplicaReadView(coverage, async (read, after) => {
           const key = coverage[read.table]?.key ?? "_id";
@@ -481,7 +497,8 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
   }
 
   async readChanges(scope: string, afterSequence: number, interest?: Parameters<NonNullable<LocalReplicaStorage['readChanges']>>[2]): Promise<ReplicaStorageChanges> {
-    await this.initialize();return this.commits.readChanges(scope,afterSequence,interest);
+    await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);return this.commits.readChanges(scope,afterSequence,interest);
   }
 
   private async currentEpoch(scope: string): Promise<{epoch:string;stored:boolean}|undefined> {
@@ -558,6 +575,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     scope: string,
   ): Promise<import("@gonvex/client").LocalReplicaSession | undefined> {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     const row = await this.database.getFirstAsync<MetaRecord>(
       `SELECT scope, key, value FROM _gonvex_replica_meta WHERE scope = ? AND key = 'session'`,
       scope,
@@ -570,6 +588,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     session: import("@gonvex/client").LocalReplicaSession | undefined,
   ): Promise<void> {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     if (session)
       await this.database.runAsync(
         `INSERT OR REPLACE INTO _gonvex_replica_meta (scope,key,value) VALUES (?, 'session', ?)`,
@@ -589,6 +608,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     scope: ReplicaScope = defaultReplicaScope,
   ): Promise<ReplicaStorageCommit> {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     return this.commits.commit(scope, async () => {
       await this.acceptEpoch(scope,transaction.cursor);
       const requestedDeletes = new Map<string, Set<string>>();
@@ -621,6 +641,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     scope: ReplicaScope = defaultReplicaScope,
   ): Promise<ReplicaMetadataCommit> {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     // Watermarks carry no row changes. Keep this transaction metadata-only so
     // advancing many retained windows does not rewrite the normalized corpus.
     return this.commits.commit(scope, async () => {
@@ -636,6 +657,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     scope: ReplicaScope = defaultReplicaScope,
   ): Promise<void> {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     await this.commits.commit(scope, async () => {
       await this.acceptEpoch(scope,snapshot.cursor);
       await this.database.runAsync(
@@ -782,6 +804,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     projection?: readonly ReplicaRow[],
   ): Promise<ReplicaStorageCommit> {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     return this.commits.commit(scope, async () => {
       await this.acceptEpoch(scope,window.cursor??snapshot.cursor);
       await this.assertEpoch(scope,window.cursor);
@@ -866,6 +889,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
     scope: ReplicaScope = defaultReplicaScope,
   ): Promise<void> {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     await this.commits.commit(scope, async () => {
       await this.assertEpoch(scope,snapshot.cursor);
       await this.database.runAsync(
@@ -880,6 +904,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
 
   async clear(scope: ReplicaScope = defaultReplicaScope): Promise<void> {
     await this.initialize();
+    await this.rowLayout?.assertOwner?.(this.database);
     await this.commits.commit(scope, async () => {
       await this.database.runAsync(
         `DELETE FROM _gonvex_replica_entities WHERE scope = ?`,

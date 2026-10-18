@@ -122,8 +122,10 @@ it('upgrades a legacy canonical body view and fences its old decoder without los
   const next = new SQLiteTypedReplicaEngine(host, schema); await next.open('new');
   expect(await next.apply('s', writes, intent)).toEqual(receipt);
   expect((await next.outbox('s')).map(value => value.id)).toEqual(['durable']);
-  await upgraded.applyTransaction({ cursor: cursor(2), changes: [{ entity: 'tasks', id: 'a', operation: 'update', newValue: { name: 'updated' } }] }, empty, 's');
-  expect((await upgraded.loadEntityRows('s', 'tasks', ['a']))[0]!.row).toEqual({ ...a, name: 'updated' });
+  await expect(upgraded.loadEntityRows('s','tasks',['a'])).rejects.toMatchObject({code:'FENCED'});
+  const currentStorage = sqliteTypedReplicaStorage(host,schema);
+  await currentStorage.applyTransaction({ cursor: cursor(2), changes: [{ entity: 'tasks', id: 'a', operation: 'update', newValue: { name: 'updated' } }] }, empty, 's');
+  expect((await currentStorage.loadEntityRows('s', 'tasks', ['a']))[0]!.row).toEqual({ ...a, name: 'updated' });
   expect(JSON.parse(String(db.prepare(`SELECT body FROM ${sqliteIdentifier(sqliteTableName('tasks'))} WHERE id='a'`).get()!.body))).toMatchObject({ name: null, due: null });
 });
 
@@ -150,4 +152,31 @@ it('indexes pre-existing typed imports on canonical installation without decodin
   const repaired = sqliteTypedReplicaStorage(host,schema);
   expect((await repaired.withReadView('s',{tasks:{key:'_id',complete:true}},view=>view.select({table:'tasks',where:{column:'due',op:'eq',value:599}}))).rows).toEqual(result.rows);
   expect(await engine.integrity()).toBe('ok');
+});
+
+it('invalidates typed continuations on canonical commits and fences a replaced canonical owner', async () => {
+  const { host } = fixture();
+  const engine = new SQLiteTypedReplicaEngine(host,schema); await engine.open('first');
+  await engine.apply('s',[{table:'tasks',id:'a',version:1,row:{_id:'a',due:1}},{table:'tasks',id:'b',version:1,row:{_id:'b',due:2}}]);
+  const storage = sqliteTypedReplicaStorage(host,schema);
+  const plan = {table:'tasks',order:[{field:'due',direction:'asc' as const}],limit:1};
+  const first = await engine.page('s',plan); expect(first.cursor).toBeDefined();
+  await storage.applyTransaction({cursor:cursor(1),changes:[{entity:'tasks',id:'b',operation:'update',newValue:{due:0}}]},empty,'s');
+  await expect(engine.page('s',{...plan,after:first.cursor!})).rejects.toMatchObject({code:'PAGE_CHANGED'});
+  expect((await engine.page('s',plan)).rows[0]!._id).toBe('b');
+  const next = new SQLiteTypedReplicaEngine(host,schema); await next.open('replacement');
+  await expect(storage.applyTransaction({cursor:cursor(2),changes:[{entity:'tasks',id:'b',operation:'update',newValue:{due:99}}]},empty,'s')).rejects.toMatchObject({code:'FENCED'});
+  await expect(storage.withReadView('s',{tasks:{key:'_id',complete:true}},view=>view.select({table:'tasks'}))).rejects.toMatchObject({code:'FENCED'});
+  expect((await next.page('s',plan)).rows[0]!.due).toBe(0);
+});
+
+it('rolls canonical rows and both commit clocks back when the shared clock is exhausted', async () => {
+  const { db, storage } = fixture();
+  await storage.replaceSnapshot({...empty,entities:{tasks:{a:{_id:'a',due:1}}}},'s');
+  const before = db.prepare("SELECT value FROM _gonvex_replica_meta WHERE scope='s' AND key='sequence'").get()!.value;
+  db.prepare('UPDATE gv_storage_meta SET sequence=?').run(Number.MAX_SAFE_INTEGER);
+  await expect(storage.applyTransaction({cursor:cursor(1),changes:[{entity:'tasks',id:'a',operation:'update',newValue:{due:99}}]},empty,'s')).rejects.toMatchObject({code:'FENCED'});
+  expect((await storage.loadEntityRows('s','tasks',['a']))[0]!.row.due).toBe(1);
+  expect(db.prepare("SELECT value FROM _gonvex_replica_meta WHERE scope='s' AND key='sequence'").get()!.value).toBe(before);
+  expect(db.prepare('SELECT sequence FROM gv_storage_meta').get()!.sequence).toBe(Number.MAX_SAFE_INTEGER);
 });
