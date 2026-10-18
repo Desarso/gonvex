@@ -1,3 +1,4 @@
+import {appendFastSnapshot} from './sqlite-fast-snapshot.js';
 import {ByteLedger} from './byte-budget.js';
 import {admitSQLiteUTF8Frame,encodedFrameHasCanonicalStructure} from './sqlite-encoded-frame.js';
 import {fail} from './sqlite-admission.js';
@@ -40,6 +41,13 @@ export class SQLiteEncodedSnapshotPages {
  }
  stats(){return {wireBytes:this.ledger.bytes,wireMaxBytes:this.ledger.maxBytes,wireEntries:Number(!!this.scratch),nativeReceiptFrames:this.nativeReceiptFrames,nativeReceiptRows:this.nativeReceiptRows,decodedHashRows:this.decodedHashRows};}
  async appendReceipt(scope:string,input:Uint8Array,joinOwnerTransaction=false):Promise<SQLiteSnapshotReceipt>{
+  if(!joinOwnerTransaction)return this.consume(scope,input,false);
+  if(!this.db.ownerTransactionDepth||!this.db.joinOwnerTransactionAsync)fail('FENCED','Snapshot batch requires an active owner transaction');
+  let output!:SQLiteSnapshotReceipt;
+  await this.db.joinOwnerTransactionAsync(async()=>{output=await this.consume(scope,input,true);});
+  return output;
+ }
+ private async consume(scope:string,input:Uint8Array,joinOwnerTransaction:boolean):Promise<SQLiteSnapshotReceipt>{
   if(!this.db.ingressNativeHash)throw Object.assign(new Error('Native snapshot hashing is unavailable'),{code:'UNSUPPORTED'});
   if(!(input instanceof Uint8Array)||!(input.buffer instanceof ArrayBuffer)||input.byteLength>this.ledger.maxBytes)fail('BUDGET','Snapshot wire frame exceeds budget');
   if(joinOwnerTransaction&&(!this.db.ownerTransactionDepth||!this.db.joinOwnerTransactionAsync))fail('FENCED','Snapshot batch requires an active owner transaction');
@@ -50,6 +58,12 @@ export class SQLiteEncodedSnapshotPages {
    admitSQLiteUTF8Frame(owned,262144);
    if(owned.includes(0))fail('INVALID_ROW','Unescaped NUL in snapshot JSON');
    await this.backend.initialize();
+   if(this.db.ingressNativeSnapshot){
+    if(!encodedFrameHasCanonicalStructure(owned))fail('INVALID_ROW','Invalid encoded snapshot frame');
+    const result=await appendFastSnapshot(this.db,this.fence,scope,owned,joinOwnerTransaction);
+    this.nativeReceiptRows+=result.rows;if(result.newFrame)this.nativeReceiptFrames++;
+    return result.receipt;
+   }
    const apply=async()=>{
     await this.fence();await this.db.runAsync('DELETE FROM main.gv_snapshot_input');
     try{
@@ -110,7 +124,7 @@ export class SQLiteEncodedSnapshotPages {
      output=await this.backend.finish(scope,metadata,digest,frameHash,prepared,state,size.n,size.bytes);
     }finally{await this.db.runAsync('DELETE FROM main.gv_snapshot_input');}
    };
-   if(joinOwnerTransaction)await this.db.joinOwnerTransactionAsync!(apply);else await this.db.withTransactionAsync(apply);
+   if(joinOwnerTransaction)await apply();else await this.db.withTransactionAsync(apply);
    this.nativeReceiptRows+=nativeRows;this.decodedHashRows+=decodedRows;if(usedNative)this.nativeReceiptFrames++;return {progress:output,ack};
   }finally{owned.fill(0);this.busy=false;}
  }

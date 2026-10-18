@@ -10,6 +10,7 @@ export function sqliteOwnerTransactions(database: SQLiteReplicaDatabase): SQLite
     get ownerTransactionDepth(){return depth;},
     ...(database.ingressUnicodeFold ? {ingressUnicodeFold:true as const} : {}),
     ...(database.ingressNativeFastFold ? {ingressNativeFastFold:true as const} : {}),
+    ...(database.ingressNativeSnapshot ? {ingressNativeSnapshot:true as const} : {}),
     ...(database.ingressNativeReceipt ? {ingressNativeReceipt:true as const} : {}),
     ...(database.ingressNativeHash ? {ingressNativeHash:true as const} : {}),
     execAsync:sql=>database.execAsync(sql),

@@ -164,17 +164,19 @@ static void gv_receipt_info(sqlite3_context *context,int argc,sqlite3_value **ar
  }
 }
 static void gv_receipt_contract(sqlite3_context *context,int argc,sqlite3_value **argv){(void)argc;(void)argv;sqlite3_result_text(context,"sum128-v1/receipt1",-1,SQLITE_STATIC);}
+static void gv_sql_contract(sqlite3_context *context,int argc,sqlite3_value **argv){(void)argc;(void)argv;sqlite3_result_text(context,"bounded-snapshot-v1",-1,SQLITE_STATIC);}
 static int gv_install(sqlite3 *db,char **error,const sqlite3_api_routines *api){
   int rc;(void)error;(void)api;
   rc=sqlite3_create_function_v2(db,"gv_ingress_lower_fast",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_DIRECTONLY,0,gv_fast_lower,0,0,0);
   if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_fast_contract",0,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS,0,gv_fast_contract,0,0,0);
-  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_sha256",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_DIRECTONLY,0,gv_sha256,0,0,0);
+  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_sha256",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS,0,gv_sha256,0,0,0);
   if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_hash_contract",0,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS,0,gv_hash_contract,0,0,0);
-  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_step",3,SQLITE_UTF8|SQLITE_DIRECTONLY,0,0,gv_receipt_step,gv_receipt_final,0);
-  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_count",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_DIRECTONLY,0,gv_receipt_info,0,0,0);
-  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_digest",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_DIRECTONLY,(void *)(intptr_t)1,gv_receipt_info,0,0,0);
-  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_xor",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_DIRECTONLY,(void *)(intptr_t)2,gv_receipt_info,0,0,0);
+  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_step",3,SQLITE_UTF8|SQLITE_INNOCUOUS,0,0,gv_receipt_step,gv_receipt_final,0);
+  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_count",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS,0,gv_receipt_info,0,0,0);
+  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_digest",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS,(void *)(intptr_t)1,gv_receipt_info,0,0,0);
+  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_xor",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS,(void *)(intptr_t)2,gv_receipt_info,0,0,0);
   if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_contract",0,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS,0,gv_receipt_contract,0,0,0);
+  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_sql_contract",0,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS,0,gv_sql_contract,0,0,0);
   return rc;
 }
 int sqlite3_wasm_extra_init(const char *unused){(void)unused;return sqlite3_auto_extension((void(*)(void))gv_install);}

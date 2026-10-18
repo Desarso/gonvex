@@ -17,6 +17,7 @@ export interface SQLiteReplicaDatabase {
   readonly ingressNativeFastFold?: true;
   readonly ingressNativeHash?: true;
   readonly ingressNativeReceipt?: true;
+  readonly ingressNativeSnapshot?: true;
   /** Present only on the owner actor composition host. */
   readonly ownerTransactionDepth?: number;
   /** Join the actor batch without a savepoint; any error poisons that batch. */

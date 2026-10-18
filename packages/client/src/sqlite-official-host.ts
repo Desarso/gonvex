@@ -9,7 +9,8 @@ export type OfficialSQLiteHost = {
   readonly nativeFastFold:boolean;
   readonly nativeHash:boolean;
   readonly nativeReceipt:boolean;
-  takeProfile(): { ingressFoldCalls:number; ingressFoldUTF16Bytes:number; execMs:number;execCalls:number;prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
+  readonly nativeSnapshot:boolean;
+  takeProfile(): { vfs?:Record<string,number>; ingressFoldCalls:number; ingressFoldUTF16Bytes:number; execMs:number;execCalls:number;prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
   close(): void;
 };
 
@@ -131,9 +132,12 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
   db.createFunction('gv_ingress_lower', (_context: unknown, value: unknown) => { const text=String(value??''); profile.ingressFoldCalls++; profile.ingressFoldUTF16Bytes+=text.length*2; return text.toLowerCase(); }, { arity: 1, deterministic: true, directOnly: true });
   let nativeReceipt=false;
   try{nativeReceipt=db.selectValue('SELECT gv_ingress_receipt_contract()')==='sum128-v1/receipt1';}catch(error){if(!/no such function: gv_ingress_receipt_contract/.test(String((error as Error).message)))throw error;}
+  let nativeSnapshot=false;
+  try{nativeSnapshot=nativeHash&&nativeReceipt&&db.selectValue('SELECT gv_ingress_sql_contract()')==='bounded-snapshot-v1';}catch(error){if(!/no such function: gv_ingress_sql_contract/.test(String((error as Error).message)))throw error;}
   const database: SQLiteReplicaDatabase = {
     ingressUnicodeFold: true,
     ...(nativeFastFold ? {ingressNativeFastFold:true as const} : {}),
+    ...(nativeSnapshot ? {ingressNativeSnapshot:true as const} : {}),
     ...(nativeReceipt ? {ingressNativeReceipt:true as const} : {}),
     ...(nativeHash ? {ingressNativeHash:true as const} : {}),
     async execAsync(sql) { check();const began=performance.now();profile.execCalls++;try{db.exec(sql);}finally{profile.execMs+=performance.now()-began;} },
@@ -173,7 +177,7 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
       finally { transaction = false; }
     },
   };
-  return { database, nativeFastFold,nativeHash,nativeReceipt, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes,
-    takeProfile() { const result = { ...profile }; for (const key of Object.keys(profile) as Array<keyof typeof profile>) profile[key] = 0; return result; },
+  return { database, nativeFastFold,nativeHash,nativeReceipt,nativeSnapshot, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes,
+    takeProfile() { const vfs=(sqlite3 as unknown as {__gonvexVFSProfile?:()=>Record<string,number>}).__gonvexVFSProfile?.();const result = { ...profile,...(vfs?{vfs}:{}) }; for (const key of Object.keys(profile) as Array<keyof typeof profile>) profile[key] = 0; return result; },
     close() { if (!closed) { closed = true; for (const sql of statements.keys()) retire(sql); db.close(); } } };
 }

@@ -179,3 +179,81 @@ it('joins an already admitted owner batch and rolls back its prior frame if a la
  const digest=(await certificate([{id:'a'}])).digest();
  expect((await stager.appendEncodedReceipt('s',encodedPage([{id:'a'}],0,true,digest))).progress).toMatchObject({complete:true,rows:1});
 });
+
+function fastFixture(){
+ const test=nativeFixture();
+ test.db.aggregate('gv_ingress_receipt_step',{start:null as Uint8Array|null,
+  step(state,seed,hash,direction){const digest=ReplicaSetDigest.decode((state??seed) as Uint8Array);if(direction===1)digest.add(String(hash));else digest.remove(String(hash));return digest.encode();},
+ });
+ test.db.function('gv_ingress_receipt_count',seed=>ReplicaSetDigest.decode(seed as Uint8Array).count);
+ test.db.function('gv_ingress_receipt_digest',seed=>ReplicaSetDigest.decode(seed as Uint8Array).digest());
+ test.db.function('gv_ingress_receipt_xor',seed=>ReplicaSetDigest.decode(seed as Uint8Array).legacyDigest());
+ const host=sqliteOwnerTransactions({...test.host,ingressNativeReceipt:true,ingressNativeSnapshot:true});
+ return {...test,host,stager:new SQLiteSnapshotPages(host,test.fence)};
+}
+it('stages and certifies inside SQLite with one bounded receipt and preserves codec replay metadata',async()=>{
+ const test=fastFixture(),rows=[{id:'a',text:'café 東京'},{id:'b',text:'next'}],state=await certificate(rows);
+ expect((await test.stager.appendEncoded('s',encodedPage(rows.slice(0,1)))).complete).toBe(false);
+ const final=await test.stager.appendEncoded('s',encodedPage(rows.slice(1),1,true,state.digest()));
+ expect(final).toMatchObject({complete:true,rows:2,digest:state.digest()});
+ expect(await test.stager.appendEncoded('s',encodedPage(rows.slice(0,1)))).toEqual(final);
+ expect(test.receipts).toEqual([]);
+ expect((await test.stager.read('s','collection','snapshot')).rows.map(row=>row.row)).toEqual(rows);
+ expect(test.db.prepare('SELECT count(*) n FROM gv_snapshot_fast_input').get()!.n).toBe(0);
+ const metadata=JSON.parse(test.db.prepare('SELECT metadata FROM gv_snapshot_stages').get()!.metadata as string);
+ expect(metadata).toMatchObject({type:'replica.snapshotPage',cursor:{epoch:'e',revision:10}});
+});
+it('rolls back invalid fast SQL frames and permits retry after a bad final certificate',async()=>{
+ const test=fastFixture(),rows=[{id:'a'}],digest=(await certificate(rows)).digest();
+ await test.stager.appendEncoded('s',encodedPage(rows));
+ await expect(test.stager.appendEncoded('s',encodedPage([{id:'a'}],1,true,digest))).rejects.toMatchObject({code:'INVALID_ROW'});
+ await expect(test.stager.appendEncoded('s',encodedPage([{id:'b'}],1,true,'sum128-v1:'+'0'.repeat(32)))).rejects.toMatchObject({code:'INVALID_ROW'});
+ expect(test.db.prepare('SELECT count(*) n FROM gv_snapshot_rows').get()!.n).toBe(1);
+ expect(await test.stager.appendEncoded('s',encodedPage([],1,true,digest))).toMatchObject({complete:true,rows:1});
+ const changed=JSON.parse(new TextDecoder().decode(encodedPage(rows)));changed.cursor.revision=11;
+ await expect(test.stager.appendEncoded('s',new TextEncoder().encode(JSON.stringify(changed)))).rejects.toMatchObject({code:'INTENT_CONFLICT'});
+});
+it('checks fast SQL header types, frame sequencing, scope, budgets and duplicate identities',async()=>{
+ const source=JSON.parse(new TextDecoder().decode(encodedPage([{id:'a'}])));
+ for(const changed of [{...source,last:1},{...source,visibilityScope:'other'},{...source,sequence:1},{...source,key:''},{...source,maxRows:-1},{...source,canonicalRows:['not JSON']},{...source,canonicalRows:[JSON.stringify({id:'a'}),JSON.stringify({id:'a'})]}]){
+  const test=fastFixture();await expect(test.stager.appendEncoded('s',new TextEncoder().encode(JSON.stringify(changed)))).rejects.toThrow();
+  expect(test.db.prepare('SELECT count(*) n FROM gv_snapshot_rows').get()!.n).toBe(0);
+ }
+});
+it('preserves optional metadata and zero sentinels identically across native SQL and compatibility staging',async()=>{
+ const rows=[{id:'a',name:'one'},{id:'b',name:'two'}],digest=(await certificate(rows)).digest();
+ for(const optional of [{truncated:false,mode:'progressive',orderBy:'id',orderDirection:'desc',path:'tasks.all',maxRows:0,maxBytes:0},{truncated:true,mode:'eager',maxRows:2,maxBytes:10000}]){
+  const fast=fastFixture(),compat=nativeFixture(),frames=[encodedPage(rows.slice(0,1)),encodedPage(rows.slice(1),1,true,digest)].map(bytes=>{
+   const frame={...JSON.parse(new TextDecoder().decode(bytes)),...optional};return new TextEncoder().encode(JSON.stringify(frame));
+  });
+  for(const frame of frames)expect(await fast.stager.appendEncoded('s',frame)).toEqual(await compat.stager.appendEncoded('s',frame));
+  const fastMeta=JSON.parse(fast.db.prepare('SELECT metadata FROM gv_snapshot_stages').get()!.metadata as string);
+  expect(fastMeta).toMatchObject(optional);expect(fastMeta.cursor).toEqual({epoch:'e',revision:10});
+  expect(await fast.stager.appendEncoded('s',frames[0]!)).toEqual(await compat.stager.appendEncoded('s',frames[0]!));
+  expect((await fast.stager.read('s','collection','snapshot')).rows).toEqual((await compat.stager.read('s','collection','snapshot')).rows);
+ }
+});
+it('poisons a joined fast SQL batch even if a duplicate-frame error is caught before the outer commit',async()=>{
+ const test=fastFixture();await test.stager.ready();
+ await expect(test.host.withTransactionAsync(async()=>{
+  await test.stager.appendEncodedReceipt('s',encodedPage([{id:'a'}]),true);
+  await expect(test.stager.appendEncodedReceipt('s',encodedPage([{id:'a'}],1,true,'sum128-v1:'+'0'.repeat(32)),true)).rejects.toMatchObject({code:'INVALID_ROW'});
+ })).rejects.toMatchObject({code:'INVALID_ROW'});
+ expect(test.db.prepare('SELECT count(*) n FROM gv_snapshot_rows').get()!.n).toBe(0);
+ expect(test.db.prepare('SELECT count(*) n FROM gv_snapshot_fast_state').get()!.n).toBe(0);
+});
+
+it('normalizes safe integer metadata spellings consistently in the SQLite-side stage',async()=>{
+ const test=fastFixture(),rows=[{id:'a'},{id:'b'}],digest=(await certificate(rows)).digest();
+ await test.stager.appendEncoded('s',encodedPage(rows.slice(0,1)));
+ const final=new TextDecoder().decode(encodedPage(rows.slice(1),1,true,digest)).replace('"revision":10','"revision":10.0').replace('"maxRows":10000','"maxRows":10000.0');
+ expect(await test.stager.appendEncoded('s',new TextEncoder().encode(final))).toMatchObject({complete:true,rows:2});
+});
+it('poisons the complete joined batch for malformed bytes before a frame reaches SQLite',async()=>{
+ const test=fastFixture();await test.stager.ready();
+ await expect(test.host.withTransactionAsync(async()=>{
+  await test.stager.appendEncodedReceipt('s',encodedPage([{id:'a'}]),true);
+  await expect(test.stager.appendEncodedReceipt('s',new Uint8Array([128]),true)).rejects.toMatchObject({code:'INVALID_ROW'});
+ })).rejects.toMatchObject({code:'INVALID_ROW'});
+ expect(test.db.prepare('SELECT count(*) n FROM gv_snapshot_rows').get()!.n).toBe(0);
+});

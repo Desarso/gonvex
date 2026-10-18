@@ -1,3 +1,4 @@
+import {fastSnapshotSchema} from './sqlite-fast-snapshot.js';
 import {SQLiteEncodedSnapshotPages} from './sqlite-encoded-snapshot.js';
 import type {ReplicaRow} from './local-replica.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
@@ -43,7 +44,7 @@ export class SQLiteSnapshotPages {
  private async initialize(){
   if(this.initialized)return;
   if(this.db.ownerTransactionDepth)fail('FENCED','Prepare snapshot staging before ingress transactions');
-  await this.db.withTransactionAsync(async()=>{await this.fence();await this.db.execAsync(schema);});this.initialized=true;
+  await this.db.withTransactionAsync(async()=>{await this.fence();await this.db.execAsync(schema);if(this.db.ingressNativeSnapshot)await this.db.execAsync(fastSnapshotSchema);});this.initialized=true;
  }
  ready(){return this.initialize();}
  private stage(scope:string,subscription:string,snapshot:string){return this.db.getFirstAsync<SQLiteSnapshotStage>('SELECT metadata,next_page,rows,bytes,receipt,complete,digest,discarded FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);}
