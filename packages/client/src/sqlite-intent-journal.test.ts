@@ -62,6 +62,7 @@ it('snapshots admitted drafts before awaiting and rejects oversize/invalid reque
  const f=await fixture();try{
   const input=draft(1),pending=f.journal.append(input);input.args.name='caller mutated';await pending;expect((await f.journal.page('s')).entries[0].args).toEqual({name:'Task 1'});
   await expect(f.journal.append(draft(2,{args:{text:'x'.repeat(100000)}}))).rejects.toMatchObject({code:'BUDGET'});
+  await expect(f.journal.append(draft(3,{args:{text:'東京'.repeat(30000)}}))).rejects.toMatchObject({code:'BUDGET'});
   await expect(f.journal.page('s',0,33)).rejects.toThrow('1..32');await expect(f.journal.readyBatch('s',NaN)).rejects.toThrow('time');expect((await f.journal.summary('s')).count).toBe(1);
  }finally{f.sql.close();}
 });
