@@ -7,7 +7,7 @@ import type {SQLiteSnapshotPages,SQLiteSnapshotReceipt} from './sqlite-snapshot-
 type Pending={bytes:Uint8Array;resolve(value:SQLiteSnapshotReceipt):void;reject(error:unknown):void};
 type Options={
  database:SQLiteReplicaDatabase;
- snapshots:Pick<SQLiteSnapshotPages,'appendEncodedReceipt'>;
+ snapshots:Pick<SQLiteSnapshotPages,'appendEncodedReceipt'>&Partial<Pick<SQLiteSnapshotPages,'ready'>>;
  scope:string;
  /** The same owner FIFO used by queries, reducers and every storage operation. */
  runOwner<T>(operation:()=>Promise<T>):Promise<T>;
@@ -60,6 +60,7 @@ export class SQLiteNativeIngress {
     try{
      const receipts=await this.options.runOwner(async()=>{
       if(this.disposed)throw closed();
+      await this.options.snapshots.ready?.();
       const receipts:SQLiteSnapshotReceipt[]=[];
       await this.options.database.withTransactionAsync(async()=>{
        for(const entry of batch){

@@ -75,7 +75,10 @@ export class SQLiteReplicaCommits {
   async rows(scope: string, entity: string, rows: readonly { id: string; row: ReplicaRow | null }[]) {
     const receipt = this.receipt(scope);
     await this.keys(scope, 'row', entity, rows.map(entry => entry.id));
-    for (const { id, row } of rows) (receipt.changes.entities[entity] ??= Object.create(null))[id] = row;
+    // Snapshot activation publishes one reset receipt. Its complete change-key
+    // index remains on disk; never retain all activated row values in a receipt.
+    if (!receipt.changes.reset)
+      for (const { id, row } of rows) (receipt.changes.entities[entity] ??= Object.create(null))[id] = row;
   }
   async window(scope: string, signature: string, window: ReplicaWindow | null) {
     await this.keys(scope, 'window', '', [signature]);

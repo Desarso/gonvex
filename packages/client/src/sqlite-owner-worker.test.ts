@@ -76,7 +76,13 @@ it('routes restartable first-sync frames through the real owner queue and publis
     expect((await request('snapshotAppendEncoded',{scope:'s',encoded:encodedSnapshot})).value.complete).toBe(true);
     expect((await request('snapshotRead',{scope:'s',subscription:'source',snapshot:'disk'})).value.rows[0].row.name).toBe('old snapshot');
     expect(changes.length).toBe(published+2);
-
+    const header={signature:'native-collection',entity:'tasks',key:'_id',kind:'replica',source:'server',completeness:'complete',cursor:stage.cursor,aggregateDigest:digest};
+    const activation=await request('snapshotActivate',{scope:'s',subscription:'source',snapshot:'disk',header});
+    expect(activation.error).toBeUndefined();expect(activation.value.changes).toMatchObject({reset:true,entities:{},windows:{}});
+    expect((await request('windowPage',{scope:'s',signature:header.signature,generation:'disk',offset:0})).value.ids).toEqual(['a']);
+    expect((await request('canonicalCall',canonicalPage)).value.value.rows[0].name).toBe('Updated needle');
+    expect(changes.length).toBe(published+3);
+    expect(changes.at(-1).sequence).toBe((await request('canonicalGeneration',{scope:'s'})).value.sequence);
 
   } finally {
     interval.mockRestore(); vi.unstubAllGlobals(); delete (globalThis as any).onmessage; db.close();

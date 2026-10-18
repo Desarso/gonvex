@@ -16,6 +16,8 @@ export interface SQLiteReplicaDatabase {
   readonly ingressUnicodeFold?: true;
   readonly ingressNativeFastFold?: true;
   readonly ingressNativeHash?: true;
+  /** Present only on the owner actor composition host. */
+  readonly ownerTransactionDepth?: number;
   execAsync(sql: string): Promise<void>;
   runAsync(sql: string, ...params: unknown[]): Promise<unknown>;
   getFirstAsync<T>(sql: string, ...params: unknown[]): Promise<T | null>;
@@ -730,6 +732,26 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
       }
       await this.saveCursor(scope,snapshot.cursor);
       await this.commits.indexReplacement(scope);
+    });
+  }
+
+  /** Owner-only composition point for verified native snapshot activation.
+   * Rows and the membership pointer publish in the same canonical commit.
+   * Every merge page stays bounded; the receipt is a reset, never a corpus. */
+  async commitSnapshotActivation(
+    scope: string, cursor: NonNullable<ReplicaSnapshot['cursor']>,
+    apply: (merge: (entity: string, rows: readonly {id:string;row:ReplicaRow|null}[]) => Promise<void>, sequence:number) => Promise<void>,
+  ): Promise<ReplicaStorageCommit> {
+    await this.initialize();await this.rowLayout?.assertOwner?.(this.database);
+    return this.commits.commit(scope,async()=>{
+      await this.acceptEpoch(scope,cursor);
+      await this.commits.reset(scope);
+      await apply(async(entity,rows)=>{
+        if(rows.length>100)throw new RangeError('Snapshot authority page exceeds budget');
+        sqlitePayloadBytes(rows,262144);
+        await this.writeRecords(scope,entity,rows,cursor);
+      },this.commits.changes(scope).sequence);
+      await this.saveCursor(scope,cursor);
     });
   }
 

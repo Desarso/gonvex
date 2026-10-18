@@ -41,8 +41,10 @@ export class SQLiteSnapshotPages {
  constructor(private readonly db:SQLiteReplicaDatabase,private readonly fence:()=>Promise<unknown>){}
  private async initialize(){
   if(this.initialized)return;
+  if(this.db.ownerTransactionDepth)fail('FENCED','Prepare snapshot staging before ingress transactions');
   await this.db.withTransactionAsync(async()=>{await this.fence();await this.db.execAsync(schema);});this.initialized=true;
  }
+ ready(){return this.initialize();}
  private stage(scope:string,subscription:string,snapshot:string){return this.db.getFirstAsync<SQLiteSnapshotStage>('SELECT metadata,next_page,rows,bytes,receipt,complete,digest,discarded FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);}
  async append(scope:string,input:SnapshotPage):Promise<SQLiteSnapshotProgress>{
   sqlitePayloadBytes(input,262144);identity(scope,input.id,input.snapshotId);

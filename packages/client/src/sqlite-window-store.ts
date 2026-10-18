@@ -28,6 +28,38 @@ export class SQLiteWindowStore {
   private initialized?: Promise<void>;
   constructor(private readonly db: SQLiteReplicaDatabase, private readonly fence: () => Promise<unknown> = async () => {}) {}
   private initialize() { return this.initialized ??= this.db.withTransactionAsync(async () => { await this.fence(); await this.db.execAsync(schema); }); }
+  ready(){return this.initialize();}
+  /** Copy an already verified disk stage without decoding any membership or
+   * hash corpus. The caller composes this with canonical rows in one owner TX. */
+  async publishSnapshot(scope:string,header:SQLiteWindowHeader,subscription:string,snapshot:string):Promise<SQLiteWindowProgress>{
+    identity(scope,header.signature,snapshot);sqlitePayloadBytes(header,16384);
+    if('ids'in header||'hashes'in header||!header.entity||!header.key||header.source!=='server')throw new TypeError('Invalid native snapshot header');
+    await this.initialize();let output!:SQLiteWindowProgress;
+    await this.db.withTransactionAsync(async()=>{
+      await this.fence();
+      const source=await this.db.getFirstAsync<{metadata:string;next_page:number;rows:number;complete:number;discarded:number;digest:string}>('SELECT metadata,next_page,rows,complete,discarded,digest FROM gv_snapshot_stages WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);
+      if(!source?.complete||source.discarded)conflict('Snapshot is not verified');
+      const metadata=JSON.parse(source.metadata) as {key:string;cursor:unknown};
+      if(metadata.key!==header.key||JSON.stringify(metadata.cursor)!==JSON.stringify(header.cursor)||header.aggregateDigest!==source.digest)conflict('Snapshot header does not match its certificate');
+      const count=await this.db.getFirstAsync<{n:number;last:number|null}>('SELECT count(*) n,max(position) last FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=?',scope,subscription,snapshot);
+      if(count?.n!==source.rows||(count?.last??-1)!==source.rows-1)conflict('Verified snapshot lost rows');
+      const oldRecord=await this.db.getFirstAsync<{header:string}>('SELECT g.header FROM gv_windows w JOIN gv_window_generations g USING(scope,signature,generation) WHERE w.scope=? AND w.signature=?',scope,header.signature);
+      const old=oldRecord?{header:JSON.parse(oldRecord.header) as SQLiteWindowHeader}:undefined;
+      if(old?.header.cursor&&header.cursor&&old.header.cursor.epoch===header.cursor.epoch&&old.header.cursor.revision>header.cursor.revision)conflict('Cannot publish an obsolete snapshot');
+      const encoded=JSON.stringify(header),root=await digest('native-snapshot-v1:'+source.metadata+':'+source.digest+':'+source.rows+':'+source.next_page);
+      const previous=await this.db.getFirstAsync<Stage>('SELECT * FROM gv_window_generations WHERE scope=? AND signature=? AND generation=?',scope,header.signature,snapshot);
+      if(previous){if(previous.discarded||previous.header!==encoded||previous.rows!==source.rows||previous.root!==root)conflict('Snapshot generation reused with another manifest');}
+      else{
+        const generations=await this.db.getFirstAsync<{n:number}>('SELECT count(*) n FROM gv_window_generations WHERE scope=? AND signature=?',scope,header.signature);
+        if((generations?.n??0)>=3)throw new RangeError('Window generation budget reached; collect obsolete generations first');
+        await this.db.runAsync('INSERT INTO gv_window_generations(scope,signature,generation,header,pages,rows,root,unique_rows) VALUES(?,?,?,?,?,?,?,?)',scope,header.signature,snapshot,encoded,source.next_page,source.rows,root,source.rows);
+        await this.db.runAsync('INSERT INTO gv_window_members SELECT scope,?,?,position,id FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=?',header.signature,snapshot,scope,subscription,snapshot);
+        await this.db.runAsync('INSERT INTO gv_window_hashes SELECT scope,?,?,id,hash FROM gv_snapshot_rows WHERE scope=? AND subscription=? AND snapshot=?',header.signature,snapshot,scope,subscription,snapshot);
+      }
+      await this.db.runAsync('INSERT INTO gv_windows VALUES(?,?,?) ON CONFLICT(scope,signature) DO UPDATE SET generation=excluded.generation',scope,header.signature,snapshot);
+      output={generation:snapshot,pages:source.next_page,rows:source.rows,root};
+    });return output;
+  }
   private async stage(scope: string, signature: string, generation: string): Promise<Stage> {
     const stage = await this.db.getFirstAsync<Stage>('SELECT generation,header,pages,rows,root,unique_rows,discarded FROM gv_window_generations WHERE scope=? AND signature=? AND generation=?', scope, signature, generation);
     if (!stage || stage.discarded) conflict('Window generation is not open');

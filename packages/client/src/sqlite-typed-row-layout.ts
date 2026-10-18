@@ -76,6 +76,9 @@ END;`);
       lease = await db.getFirstAsync<{ epoch: number; owner: string }>('SELECT epoch,owner FROM gv_storage_meta WHERE id=1') ?? undefined;
     },
     async resetViews(db, scope) {
+      if(await db.getFirstAsync("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gv_windows'")) {
+        for(const table of ['gv_windows','gv_window_generations','gv_window_members','gv_window_hashes','gv_window_frames'])await db.runAsync('DELETE FROM '+table+' WHERE scope=?',scope);
+      }
       await db.runAsync('DELETE FROM gv_view_members WHERE scope=?', scope);
       await db.runAsync('DELETE FROM gv_views WHERE scope=?', scope);
     },

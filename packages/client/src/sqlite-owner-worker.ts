@@ -1,3 +1,4 @@
+import {SQLiteSnapshotActivator} from './sqlite-snapshot-activation.js';
 import {SQLiteSnapshotPages} from './sqlite-snapshot-pages.js';
 import {sqliteRequestBytes} from './sqlite-request-frame.js';
 import {SQLiteCanonicalDispatcher} from './sqlite-canonical-dispatch.js';
@@ -13,7 +14,7 @@ import type { SQLitePagePlan } from './sqlite-typed-query.js';
 // is lazy and occurs only after the tab has acquired the origin ownership lock.
 let host: OfficialSQLiteHost | undefined, engine: SQLiteTypedReplicaEngine | undefined;
 let canonical:SQLiteCanonicalDispatcher|undefined;
-let snapshots:SQLiteSnapshotPages|undefined;
+let snapshots:SQLiteSnapshotPages|undefined,activation:SQLiteSnapshotActivator|undefined;
 let lane = Promise.resolve(), operations = 0, bytes = 0;
 const ports = new Map<string, { port: MessagePort; seen: number; token: string }>();
 
@@ -32,8 +33,11 @@ async function execute(op: string, args: any, requestID:string) {
       const database=sqliteOwnerTransactions(host.database);
       engine = new SQLiteTypedReplicaEngine(database, args.schema as SQLiteTypedSchema, undefined, { onProgress: () => globalThis.postMessage({ type: 'progress', sentAt: Date.now() }) });
       const epoch = await engine.open(args.owner);
-      canonical=new SQLiteCanonicalDispatcher(database,sqliteTypedReplicaStorage(database,engine.schema),engine);
+      const storage=sqliteTypedReplicaStorage(database,engine.schema);
+      canonical=new SQLiteCanonicalDispatcher(database,storage,engine);
       snapshots=new SQLiteSnapshotPages(database,()=>engine!.verifyOwner());
+      activation=new SQLiteSnapshotActivator(database,storage,()=>engine!.verifyOwner(),engine.schema);
+      await snapshots.ready();await activation.ready();
       return { epoch, wasmBytes: host.memoryBytes() };
     } catch (e) {
       host?.close(); host = undefined; engine = undefined;
@@ -45,6 +49,7 @@ async function execute(op: string, args: any, requestID:string) {
   }
   if (!host || !engine) throw Object.assign(new Error('Storage owner is not ready'), { code: 'FENCED' });
   switch (op) {
+    case 'snapshotActivate': return activation!.activate({...args,scope:scope(args.scope)});
     case 'snapshotAppendEncoded': return snapshots!.appendEncoded(scope(args.scope),args.encoded);
     case 'snapshotAppend': return snapshots!.append(scope(args.scope),args.page);
     case 'snapshotRead': return snapshots!.read(scope(args.scope),args.subscription,args.snapshot,args.after,args.limit);
@@ -94,9 +99,13 @@ function admit(data: any, peer?: { port: MessagePort; token: string }, tab?: str
   const run = lane.then(async () => {
     try {
       const value = await execute(data.op, data.args, data.id);
+      const publishes=sqliteOperationPublishes(data.op,data.args)&&typeof data.args.scope==='string';
+      // Canonical per-scope receipts and the global storage fence have distinct
+      // clocks. Peers reconcile against the current global committed clock.
+      const generation=publishes?await engine!.verifyOwner():undefined;
       reply(data.id, value, undefined, peer, tab);
-      if (sqliteOperationPublishes(data.op,data.args) && typeof data.args.scope === 'string') {
-        const change = { type: 'change', protocol: 1, scope: data.args.scope, sequence: (value as {sequence?: number}).sequence ?? 0 };
+      if (generation) {
+        const change = { type: 'change', protocol: 1, scope: data.args.scope, sequence:generation.sequence };
         globalThis.postMessage(change);
         for (const p of ports.values()) p.port.postMessage(change);
       }
