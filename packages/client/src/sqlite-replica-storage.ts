@@ -59,6 +59,9 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
 
   constructor(private readonly database: SQLiteReplicaDatabase, private readonly rowLayout?: SQLiteReplicaRowLayout) { this.commits = new SQLiteReplicaCommits(database, undefined, { before: () => rowLayout?.assertOwner?.(database) ?? Promise.resolve(), after: () => rowLayout?.afterCommit?.(database) ?? Promise.resolve() }); }
 
+  async ready(): Promise<void> {
+    await this.initialize(); await this.rowLayout?.assertOwner?.(this.database);
+  }
   private withFencedTransaction(run: () => Promise<void>) {
     return this.database.withTransactionAsync(async () => {
       if (this.layoutReady) await this.rowLayout?.assertOwner?.(this.database);

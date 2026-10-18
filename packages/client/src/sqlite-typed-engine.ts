@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS gv_scope_alias(scope TEXT PRIMARY KEY,physical TEXT N
 CREATE TABLE IF NOT EXISTS gv_bootstrap(scope TEXT PRIMARY KEY,token TEXT UNIQUE NOT NULL,physical TEXT NOT NULL,next_page INTEGER NOT NULL,rows INTEGER NOT NULL,root TEXT NOT NULL,base_sequence INTEGER NOT NULL,complete INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER NOT NULL,hash TEXT NOT NULL,PRIMARY KEY(token,page)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_storage_flags(name TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS gv_owner_receipts(scope TEXT NOT NULL,id TEXT NOT NULL,hash TEXT NOT NULL,result TEXT NOT NULL,PRIMARY KEY(scope,id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),value BLOB NOT NULL);`);
         // Newer hosts can keep frame children binary instead of serializing
         // every object to text and reparsing it for each extracted field.
@@ -311,6 +312,28 @@ CREATE TABLE IF NOT EXISTS gv_input_frame(id INTEGER PRIMARY KEY CHECK(id=1),val
         await this.db.runAsync('UPDATE gv_storage_meta SET sequence=? WHERE id=1', result.sequence);
       });
       return result;
+    });
+  }
+  /** Internal owner-actor operation: adapter rows, metadata and retry receipt
+   * share the same outer transaction. The actor supplies a composable host;
+   * application functions never receive this callback or a raw SQL channel. */
+  executeStorageOnce<T>(scope: string,id: string,payload: unknown,run:(admitted:unknown)=>Promise<T>):Promise<T> {
+    const bytes=sqlitePayloadBytes({scope,id,payload},this.limits.batchBytes);
+    if(!scope||scope.length>512||!id||id.length>256)throw new TypeError('Invalid owner operation');
+    const encoded=JSON.stringify(payload);
+    if(encoded.length*2>this.limits.batchBytes)return Promise.reject(new SQLiteReplicaEngineError('BUDGET','Owner operation wire budget exceeded'));
+    const admitted=JSON.parse(encoded) as unknown;
+    return this.enqueue(bytes,async()=>{
+      let result!:T;
+      await this.db.withTransactionAsync(async()=>{
+        await this.fence();const hash=await sha256(encoded);
+        const old=await this.db.getFirstAsync<{hash:string;result:string}>('SELECT hash,result FROM gv_owner_receipts WHERE scope=? AND id=?',scope,id);
+        if(old){if(old.hash!==hash)fail('INTENT_CONFLICT','Owner request ID reused with different content');const receipt=JSON.parse(old.result) as {hasValue:boolean;value:T};result=receipt.hasValue?receipt.value:undefined as T;return;}
+        result=await run(admitted);sqlitePayloadBytes(result??null,this.limits.pageBytes);
+        const stored=JSON.stringify({hasValue:result!==undefined,value:result??null});
+        if(stored.length*2>this.limits.pageBytes)fail('BUDGET','Owner operation receipt exceeds budget');
+        await this.db.runAsync('INSERT INTO gv_owner_receipts VALUES(?,?,?,?)',scope,id,hash,stored);
+      });return result;
     });
   }
   /** Restartable bootstrap keeps unverified rows in an invisible generation.

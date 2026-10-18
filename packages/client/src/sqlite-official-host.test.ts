@@ -270,3 +270,30 @@ it('drives resumable duplicate probes from each bounded frame with a scope/id in
     expect(plan.indexOf('SCAN w VIRTUAL TABLE')).toBeLessThan(plan.indexOf('SEARCH t USING'));
   }
 });
+
+it('atomically commits canonical rows with replay receipts on the composed owner host',async()=>{
+  const {sqliteOwnerTransactions}=await import('./sqlite-owner-transactions.js');
+  const {sqliteTypedReplicaStorage}=await import('./sqlite-typed-row-layout.js');
+  const {host}=fixture(),database=sqliteOwnerTransactions(host.database);
+  const schema={records:{key:'_id',fields:{_id:{kind:'text'},rank:{kind:'number'}},indexes:[{columns:['rank']}]}} as const;
+  const engine=new SQLiteTypedReplicaEngine(database,schema);await engine.open('one');
+  const storage=sqliteTypedReplicaStorage(database,schema);await storage.loadWorkingSet('s',{maxRows:1,maxBytes:1024});
+  const input={cursor:{epoch:'e',revision:1},changes:[{entity:'records',id:'a',operation:'insert' as const,newValue:{_id:'a',rank:1}}]};
+  let executions=0;
+  const write=()=>{executions++;return storage.applyTransaction(input,{entities:{},liveQueries:{}},'s');};
+  const first=await engine.executeStorageOnce('s','request',input,write);
+  expect(await engine.executeStorageOnce('s','request',input,write)).toEqual(first);expect(executions).toBe(1);
+  await expect(engine.executeStorageOnce('s','request',{changed:true},write)).rejects.toMatchObject({code:'INTENT_CONFLICT'});
+  await expect(engine.executeStorageOnce('s','abort',{},async()=>{
+    await storage.applyTransaction({...input,cursor:{epoch:'e',revision:2},changes:[{entity:'records',id:'a',operation:'update',newValue:{rank:99}}]},{entities:{},liveQueries:{}},'s');
+    throw new Error('outer abort');
+  })).rejects.toThrow('outer abort');
+  expect((await engine.page('s',{table:'records',order:[{field:'rank',direction:'asc'}],limit:1})).rows[0]!.rank).toBe(1);
+  expect(await host.database.getFirstAsync('SELECT count(*) n FROM gv_owner_receipts WHERE id=?','abort')).toEqual({n:0});
+  let voidCalls=0;
+  for(let n=0;n<2;n++)expect(await engine.executeStorageOnce('s','void',{},async()=>{voidCalls++;})).toBeUndefined();
+  expect(voidCalls).toBe(1);
+  const next=new SQLiteTypedReplicaEngine(database,schema);await next.open('two');
+  expect(await next.executeStorageOnce('s','request',input,async()=>{throw Error('must not repeat');})).toEqual(first);
+  await expect(engine.executeStorageOnce('s','new',{},write)).rejects.toMatchObject({code:'FENCED'});
+});
