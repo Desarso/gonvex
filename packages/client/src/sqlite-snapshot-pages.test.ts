@@ -123,6 +123,7 @@ it('stages native canonical row strings without delivering row bodies through th
  expect(await pending).toMatchObject({rows:100,nextPage:1,complete:false});
  expect(await stager.appendEncoded('s',frame(100,200,1,true))).toMatchObject({rows:200,nextPage:2,complete:true,digest:state.digest()});
  expect(await stager.appendEncoded('s',before)).toMatchObject({rows:200,complete:true});
+ expect(await stager.appendEncodedReceipt('s',before)).toMatchObject({ack:{type:'replica.snapshotAck',id:'collection',snapshotId:'snapshot',sequence:0},progress:{rows:200,complete:true}});
  expect(receipts).toHaveLength(2);
  for(const batch of receipts){expect(batch).toHaveLength(100);for(const receipt of batch)expect(Object.keys(receipt).sort()).toEqual(['hash','id']);}
  expect(stager.stats()).toEqual({wireBytes:131072,wireMaxBytes:131072,wireEntries:1});

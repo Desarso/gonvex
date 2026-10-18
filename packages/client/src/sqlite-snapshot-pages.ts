@@ -9,6 +9,7 @@ import {yieldSQLiteTask} from './sqlite-task-yield.js';
 
 export type SQLiteSnapshotMetadata=Omit<SnapshotPage,'result'|'digest'>;
 export type SQLiteSnapshotStage={metadata:string;next_page:number;rows:number;bytes:number;receipt:Uint8Array;complete:number;digest:string|null;discarded:number};
+export type SQLiteSnapshotReceipt={progress:SQLiteSnapshotProgress;ack:{type:'replica.snapshotAck';id:string;snapshotId:string;sequence:number}};
 export type SQLiteSnapshotProgress={snapshotId:string;nextPage:number;rows:number;complete:boolean;digest?:string};
 const schema=`CREATE TABLE IF NOT EXISTS gv_snapshot_input(id INTEGER PRIMARY KEY CHECK(id=1),value BLOB NOT NULL,hash TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS gv_snapshot_stages(
@@ -84,10 +85,13 @@ export class SQLiteSnapshotPages {
  }
  stats(){return this.encoded?.stats()??{wireBytes:0,wireMaxBytes:131072,wireEntries:0};}
  async appendEncoded(scope:string,input:Uint8Array):Promise<SQLiteSnapshotProgress>{
+  return (await this.appendEncodedReceipt(scope,input)).progress;
+ }
+ async appendEncodedReceipt(scope:string,input:Uint8Array):Promise<SQLiteSnapshotReceipt>{
   this.encoded??=new SQLiteEncodedSnapshotPages(this.db,this.fence,{
    initialize:()=>this.initialize(),prepare:(...args)=>this.prepareFrame(...args),finish:(...args)=>this.finishFrame(...args),
   });
-  return this.encoded.append(scope,input);
+  return this.encoded.appendReceipt(scope,input);
  }
  private async prepareFrame(scope:string,metadata:SQLiteSnapshotMetadata,frameHash:string):Promise<SQLiteSnapshotStage|SQLiteSnapshotProgress>{
   identity(scope,metadata.id,metadata.snapshotId);sqlitePayloadBytes(metadata,16384);

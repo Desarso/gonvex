@@ -3,7 +3,7 @@ import {admitSQLiteUTF8Frame,encodedFrameHasCanonicalStructure} from './sqlite-e
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 import {ReplicaSetDigest} from './replica-set-digest.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
-import type {SQLiteSnapshotMetadata,SQLiteSnapshotProgress,SQLiteSnapshotStage} from './sqlite-snapshot-pages.js';
+import type {SQLiteSnapshotMetadata,SQLiteSnapshotProgress,SQLiteSnapshotStage,SQLiteSnapshotReceipt} from './sqlite-snapshot-pages.js';
 
 type Backend={
  initialize():Promise<void>;
@@ -35,12 +35,12 @@ export class SQLiteEncodedSnapshotPages {
   this.ledger.register('snapshot-wire-scratch',()=>({name:'snapshot-wire-scratch',bytes:this.scratch?.byteLength??0,maxBytes:131072,entries:Number(!!this.scratch),maxEntries:1,evictions:0,refusals:0}));
  }
  stats(){return {wireBytes:this.ledger.bytes,wireMaxBytes:this.ledger.maxBytes,wireEntries:Number(!!this.scratch)};}
- async append(scope:string,input:Uint8Array):Promise<SQLiteSnapshotProgress>{
+ async appendReceipt(scope:string,input:Uint8Array):Promise<SQLiteSnapshotReceipt>{
   if(!this.db.ingressNativeHash)throw Object.assign(new Error('Native snapshot hashing is unavailable'),{code:'UNSUPPORTED'});
   if(!(input instanceof Uint8Array)||!(input.buffer instanceof ArrayBuffer)||input.byteLength>this.ledger.maxBytes)fail('BUDGET','Snapshot wire frame exceeds budget');
   if(this.busy)fail('FENCED','Snapshot frames must use the owner FIFO');
   this.scratch??=new Uint8Array(this.ledger.maxBytes);this.scratch.set(input);this.busy=true;
-  const owned=this.scratch.subarray(0,input.byteLength);let output!:SQLiteSnapshotProgress;
+  const owned=this.scratch.subarray(0,input.byteLength);let output!:SQLiteSnapshotProgress,ack!:SQLiteSnapshotReceipt['ack'];
   try{
    admitSQLiteUTF8Frame(owned,262144);
    if(owned.includes(0))fail('INVALID_ROW','Unescaped NUL in snapshot JSON');
@@ -69,6 +69,7 @@ export class SQLiteEncodedSnapshotPages {
      const digest=header.digestType===null?undefined:header.digestType==='text'?header.digest as string:fail('INVALID_ROW','Invalid snapshot digest');
      if(!metadata.last&&digest!==undefined)fail('INVALID_ROW','Snapshot digest arrived before the final frame');
      sqlitePayloadBytes(metadata,16384);
+     ack={type:'replica.snapshotAck',id:metadata.id,snapshotId:metadata.snapshotId,sequence:metadata.sequence};
      const frameHash=header.frameHash as string,prepared=await this.backend.prepare(scope,metadata,frameHash);
      if('snapshotId'in prepared){output=prepared;return;}
      const path='$.'+JSON.stringify(metadata.key);
@@ -88,7 +89,7 @@ export class SQLiteEncodedSnapshotPages {
      const state=ReplicaSetDigest.decode(prepared.receipt);for(const row of hashes)state.add(row.hash);
      output=await this.backend.finish(scope,metadata,digest,frameHash,prepared,state,size.n,size.bytes);
     }finally{await this.db.runAsync('DELETE FROM main.gv_snapshot_input');}
-   });return output;
+   });return {progress:output,ack};
   }finally{owned.fill(0);this.busy=false;}
  }
 }
