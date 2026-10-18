@@ -334,3 +334,23 @@ it('serializes membership staging with canonical writes, snapshots arguments and
   await expect(engine.windowCollect('s', 'grid', 'one')).rejects.toMatchObject({ code: 'FENCED' });
   expect((await replacement.windowPage('s', 'grid', 'one', 0)).ids).toEqual(['a']);
 });
+
+it('rejects a compact JSON graph before decoding it and still serves a bounded projection', async () => {
+  const { engine } = fixture(); await engine.open('owner');
+  await engine.apply('s', [{ ...write('wide', 1), row: { ...write('wide', 1).row, data: Array.from({ length: 5000 }, () => null) } }]);
+  await expect(engine.page('s', { ...plan, limit: 1 })).rejects.toMatchObject({ code: 'BUDGET' });
+  await expect(engine.viewPage('s', 'wide', { ...plan, limit: 1 }, 0)).rejects.toMatchObject({ code: 'BUDGET' });
+  const projected = await engine.viewPage('s', 'small', { ...plan, select: ['name'], limit: 1 }, 0);
+  expect(projected.rows).toEqual([{ _id: 'wide', name: 'wide' }]);
+  expect(projected.bytes).toBeGreaterThanOrEqual(sqlitePayloadBytes(projected.rows, 262144));
+  expect(await engine.integrity()).toBe('ok');
+});
+it('shrinks pages before decoding graphs whose aggregate expansion exceeds the page cap', async () => {
+  const { engine } = fixture(); await engine.open('owner');
+  for (let i = 0; i < 4; i++) await engine.apply('s', [{ ...write(String(i), i), row: { ...write(String(i), i).row, data: Array.from({ length: 1200 }, () => null) } }]);
+  const page = await engine.page('s', { ...plan, limit: 4 });
+  expect(page.rows.length).toBe(2);
+  expect(page.bytes).toBeGreaterThanOrEqual(sqlitePayloadBytes(page.rows, 262144));
+  const next = await engine.page('s', { ...plan, limit: 4, after: page.cursor! });
+  expect(next.rows.map(row => row._id)).toEqual(['2', '3']);
+});

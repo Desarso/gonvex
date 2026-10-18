@@ -51,6 +51,40 @@ export function sqlitePayloadBytes(value: unknown, maxBytes: number): number {
   return bytes;
 }
 
+/** Charge decoded JSON before allocating its object graph. Canonical JSON is
+ * already validated on ingestion. Strings reserve their encoded UTF-16 size;
+ * each structural token reserves container/member/value overhead. This is an
+ * intentionally conservative upper estimate, not a JS engine heap measurement. */
+function decodedJSONBytes(text: string, maxBytes: number): number {
+  let bytes = text.length * 2 + 64, quoted = false, escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text.charCodeAt(i);
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === 92) escaped = true;
+      else if (char === 34) quoted = false;
+    } else if (char === 34) { quoted = true; bytes += 32; }
+    else if (char === 91 || char === 123 || char === 44 || char === 58) bytes += 64;
+    if (bytes > maxBytes) fail('BUDGET', 'Decoded SQLite page exceeds budget');
+  }
+  return bytes;
+}
+function decodedPageBytes(records: readonly Record<string, unknown>[], table: SQLiteTypedSchema[string], fields: readonly string[] | undefined, maxBytes: number): number {
+  let bytes = 64;
+  for (const record of records) {
+    bytes += 64;
+    if (!fields) bytes += decodedJSONBytes(String(record.body), maxBytes - bytes);
+    else for (let i = 0; i < fields.length; i++) {
+      if (record['h' + i] === null) continue;
+      const field = fields[i]!, value = record['p' + i];
+      bytes += field.length * 2 + 64;
+      bytes += value === null ? 16 : table.fields[field]!.kind === 'json' ? decodedJSONBytes(String(value), maxBytes - bytes) : typeof value === 'string' ? value.length * 2 + 32 : 16;
+    }
+    if (bytes > maxBytes) fail('BUDGET', 'Decoded SQLite page exceeds budget');
+  }
+  return bytes;
+}
+
 /** JSON.parse owns this graph: no accessors, cycles or foreign prototypes.
  * Avoid allocating a descriptor and key array for every field on the trusted
  * wire path. Still enforce graph/depth/finite-number budgets before ingestion. */
@@ -449,11 +483,12 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
           if (candidates > 1024) { access = 'ordered'; selectedStatement = compileSQLiteTypedPage(this.schema, physical, admitted, access); }
         }
         // The host must enforce a column byte limit before decoding as well.
+        const fields = admitted.select ? [...new Set([this.schema[admitted.table]!.key, ...admitted.select])] : undefined;
         let records: Record<string, unknown>[], outputBytes: number, limit = admitted.limit;
         for (;;) {
           try {
             records = await this.db.getAllAsync<Record<string, unknown>>(selectedStatement.sql, ...selectedStatement.bindings);
-            outputBytes = sqlitePayloadBytes(records, this.limits.pageBytes); break;
+            outputBytes = Math.max(sqlitePayloadBytes(records, this.limits.pageBytes), decodedPageBytes(records, this.schema[admitted.table]!, fields, this.limits.pageBytes)); break;
           } catch (error) {
             if (!pageBudgetError(error) || limit === 1) throw error;
             limit = Math.max(1, Math.floor(limit / 2));
@@ -461,7 +496,6 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
           }
         }
         const last = records.at(-1);
-        const fields = admitted.select ? [...new Set([this.schema[admitted.table]!.key, ...admitted.select])] : undefined;
         const decode = (record: Record<string, unknown>): Record<string, unknown> => {
           if (!fields) return JSON.parse(String(record.body));
           return Object.fromEntries(fields.flatMap((field, i) => {
@@ -519,7 +553,7 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
           try {
             records = await this.db.getAllAsync<Record<string, unknown>>(`SELECT ${selected} FROM gv_view_members m JOIN ${q(sqliteTableName(admitted.table))} t ON t.scope=? AND t.rid=m.rid
               WHERE m.scope=? AND m.signature=? AND m.position>=? AND m.position<? ORDER BY m.position`, physical, scope, signature, offset, offset + limit);
-            bytes = sqlitePayloadBytes(records, this.limits.pageBytes); break;
+            bytes = Math.max(sqlitePayloadBytes(records, this.limits.pageBytes), decodedPageBytes(records, table, fields, this.limits.pageBytes)); break;
           } catch (error) {
             if (!pageBudgetError(error) || limit === 1) throw error;
             limit = Math.max(1, Math.floor(limit / 2));
@@ -560,6 +594,8 @@ CREATE TABLE IF NOT EXISTS gv_bootstrap_pages(token TEXT NOT NULL,page INTEGER N
           try {
             const rows = await this.db.getAllAsync<{ id: string; payload: string; sequence: number }>('SELECT id,payload,sequence FROM gv_outbox WHERE scope=? AND sequence>? ORDER BY sequence LIMIT ?', scope, afterSequence, count);
             sqlitePayloadBytes(rows, this.limits.pageBytes);
+            let decodedBytes = 64;
+            for (const row of rows) { decodedBytes += row.id.length * 2 + 128 + decodedJSONBytes(row.payload, this.limits.pageBytes - decodedBytes); if (decodedBytes > this.limits.pageBytes) fail('BUDGET', 'Decoded SQLite outbox page exceeds budget'); }
             result = rows.map(row => ({ ...row, payload: JSON.parse(row.payload) }));
             sqlitePayloadBytes(result, this.limits.pageBytes); break;
           } catch (error) {
