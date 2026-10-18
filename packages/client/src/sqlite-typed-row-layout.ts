@@ -24,6 +24,20 @@ export function sqliteTypedRowLayout(schema: SQLiteTypedSchema): SQLiteReplicaRo
     return current;
   }
   return {
+    async initializeSequences(db) {
+      // Scope discovery must not expand every generated row reconstruction.
+      // It is metadata-only and creates no decoded rows or JS scope corpus.
+      const scopes = Object.keys(schema).map(entity => `SELECT scope FROM ${q(sqliteTableName(entity))}`).concat([
+        'SELECT scope FROM gv_canonical_tombstones',
+        'SELECT scope FROM gv_scope_alias',
+        'SELECT scope FROM gv_entity_alias',
+        'SELECT scope FROM _gonvex_replica_queries',
+        "SELECT scope FROM _gonvex_replica_meta WHERE key='cursor'",
+      ]);
+      const groups: string[] = [];
+      for (let offset = 0; offset < scopes.length; offset += 128) groups.push('SELECT scope FROM (' + scopes.slice(offset, offset + 128).join(' UNION ') + ')');
+      await db.runAsync(`INSERT OR IGNORE INTO _gonvex_replica_meta SELECT scope,'sequence','0' FROM (${groups.join(' UNION ')}) WHERE instr(scope,char(0))=0`);
+    },
     async readEntityRows(db, scope, entity, ids, maxBytes) {
       const table = Object.hasOwn(schema, entity) && schema[entity];
       if (!table) throw new TypeError('Canonical read references an undeclared SQLite table');
@@ -83,13 +97,17 @@ CREATE TABLE IF NOT EXISTS gv_canonical_tombstones(scope TEXT NOT NULL,entity TE
       const branches: string[] = [];
       for (const entity of Object.keys(schema)) {
         const table = sqliteTableName(entity), name = q(table), entitySQL = literal(entity);
-        branches.push(`SELECT * FROM (
- SELECT t.scope,${entitySQL} entity,t.id,${sqliteRowBodySQL(schema[entity]!, "t")} value,t.rid rowid FROM ${name} t
+        const values = ['id', 'body', 'version', ...Object.keys(schema[entity]!.fields).map(sqliteFieldName), ...(schema[entity]!.search ?? []).map((_, i) => 's' + i)].map(field => 't.' + q(field)).join(',');
+        // Reconstruct each body's typed fields once, outside the three scope
+        // alias branches. The compatibility view must not retain three copies
+        // of every generated JSON expression in SQLite's schema tree.
+        branches.push(`SELECT t.scope,${entitySQL} entity,t.id,${sqliteRowBodySQL(schema[entity]!, "t")} value,t.rid rowid FROM (
+ SELECT t.* FROM ${name} t
  WHERE NOT EXISTS(SELECT 1 FROM gv_scope_alias a WHERE a.physical=t.scope OR a.scope=t.scope)
  AND NOT EXISTS(SELECT 1 FROM gv_entity_alias a WHERE a.entity=${entitySQL} AND (a.physical=t.scope OR a.scope=t.scope))
- UNION ALL SELECT a.scope,${entitySQL},t.id,${sqliteRowBodySQL(schema[entity]!, "t")},t.rid FROM gv_scope_alias a JOIN ${name} t ON t.scope=a.physical
+ UNION ALL SELECT t.rid,a.scope,${values} FROM gv_scope_alias a JOIN ${name} t ON t.scope=a.physical
  WHERE NOT EXISTS(SELECT 1 FROM gv_entity_alias e WHERE e.scope=a.scope AND e.entity=${entitySQL})
- UNION ALL SELECT a.scope,${entitySQL},t.id,${sqliteRowBodySQL(schema[entity]!, "t")},t.rid FROM gv_entity_alias a JOIN ${name} t ON t.scope=a.physical WHERE a.entity=${entitySQL})`);
+ UNION ALL SELECT t.rid,a.scope,${values} FROM gv_entity_alias a JOIN ${name} t ON t.scope=a.physical WHERE a.entity=${entitySQL}) t`);
         await db.execAsync(`DROP TRIGGER IF EXISTS ${q(table + '_lookup_a')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_u')}; DROP TRIGGER IF EXISTS ${q(table + '_lookup_d')};`);
       }
       // Portable reads use generated columns and their native indexes. Remove

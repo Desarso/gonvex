@@ -12,7 +12,7 @@ import { SQLiteReplicaEngineError, sqlitePayloadBytes, decodedJSONBytes, decoded
 export { SQLiteReplicaEngineError, sqlitePayloadBytes } from './sqlite-admission.js';
 import { SQLiteWindowStore, type SQLiteWindowHeader, type SQLiteWindowProgress } from './sqlite-window-store.js';
 import type { SQLiteReplicaDatabase } from './sqlite-replica-storage.js';
-import { compileSQLiteTypedSchema, sqliteIdentifier as q, sqliteTableName, sqliteFieldName, sqliteSearchName, sqliteCountName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
+import { compileSQLiteTypedSchema, validateSQLiteTypedSchema, sqliteIdentifier as q, sqliteTableName, sqliteFieldName, sqliteSearchName, sqliteCountName, type SQLiteTypedSchema } from './sqlite-typed-schema.js';
 import { compileSQLiteTypedPage, compileSQLiteTypedView, type SQLitePagePlan, type SQLiteKeyset } from './sqlite-typed-query.js';
 
 export type SQLiteTypedWrite = { table: string; id: string; version: number; row: Record<string, unknown> | null };
@@ -72,7 +72,7 @@ export class SQLiteTypedReplicaEngine {
     sqlitePayloadBytes(schema, 1048576);
     const freeze = (value: any): any => { if (value && typeof value === 'object') { for (const key of Object.keys(value)) freeze(value[key]); Object.freeze(value); } return value; };
     this.schema = freeze(JSON.parse(JSON.stringify(schema)));
-    compileSQLiteTypedSchema(this.schema);
+    validateSQLiteTypedSchema(this.schema);
     for (const value of Object.values(limits)) if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('Positive SQLite limits required');
   }
   /** Only the owner FIFO borrows this bounded slab. Native bindings settle

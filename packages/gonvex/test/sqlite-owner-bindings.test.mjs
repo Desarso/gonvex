@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import ts from 'typescript';
-import {sqliteOwnerBindings} from '../dist/sqlite-owner-bindings.js';
+import {sqliteOwnerBindings,sqliteOwnerReferences} from '../dist/sqlite-owner-bindings.js';
 import {sqliteBindings} from '../dist/sqlite-bindings.js';
 const local={things:{key:'id',columns:{id:{type:'text',nullable:false},title:{type:'text',nullable:true}}}};
 const declaration={table:'things',key:'id',columns:['id','title'],mode:'eager',maxRows:100,maxBytes:10000};
@@ -26,4 +26,20 @@ test('emits and typechecks dedicated-owner/browser graphs against the published 
 test('readonly projects receive a worker without importing nonexistent portable reducer files',()=>{
  const readonly=structuredClone(manifest);delete readonly.functions.rename;const outputs=sqliteOwnerBindings(readonly);assert.doesNotMatch(outputs['sqlite-client-worker.ts'],/local-schema|local-reducers|PortableReducerRuntime/);assert.match(outputs['sqlite-client-worker.ts'],/No portable Reducer registered/);
  const empty=structuredClone(readonly);empty.functions={};assert.deepEqual(sqliteOwnerBindings(empty),{});
+});
+
+test('emits a plain public owner catalog without traversing the React API or admitting unrelated internals',()=>{
+ const input=structuredClone(manifest);
+ input.functions.secret={kind:'reducer',internal:true,localExecution:1};
+ input.functions.list.args={type:'object',properties:{huge:{type:'string'}}};
+ input.functions.list.result={type:'array',items:{type:'string'}};
+ input.functions.rename.offline={mode:'allowed'};
+ const refs=sqliteOwnerReferences(input);
+ assert.deepEqual(refs.map(ref=>ref.path),['__local.things','list','rename']);
+ assert.equal(refs.find(ref=>ref.path==='list').replica.residency,'paged');
+ assert.deepEqual(refs.find(ref=>ref.path==='rename').offline,{mode:'allowed'});
+ assert.doesNotMatch(JSON.stringify(refs),/argsSchema|resultSchema|properties|huge|secret/);
+ const worker=sqliteOwnerBindings(input)['sqlite-client-worker.ts'];
+ assert.doesNotMatch(worker,/import.*api\.js|function visit|references\.set/);
+ assert.match(worker,/const references=\[/);
 });

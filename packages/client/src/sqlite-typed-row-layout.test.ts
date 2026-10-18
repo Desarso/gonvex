@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { SQLiteTypedReplicaEngine } from './sqlite-typed-engine.js';
 import { sqliteIdentifier, sqliteTableName } from './sqlite-typed-schema.js';
@@ -227,4 +227,20 @@ it('merges native snapshot authority without expanding per-field stamps or downg
   await apply(13,{},'delete');
   await apply(12,{_id:'a',name:'resurrect'});
   expect(await storage.loadEntityRows('s','tasks',['a'])).toHaveLength(0);
+});
+
+it('discovers existing logical scopes without expanding generated row bodies', async () => {
+  const { db, host } = fixture();
+  const engine = new SQLiteTypedReplicaEngine(host, schema); await engine.open('scope-discovery');
+  await engine.apply('existing', [{ table: 'tasks', id: 'a', version: 1, row: { _id: 'a', name: 'retained' } }]);
+  const statements: string[] = [];
+  const run = host.runAsync.bind(host);
+  vi.spyOn(host, 'runAsync').mockImplementation(async (sql, ...args) => { statements.push(sql); return run(sql, ...args); });
+  const canonical = sqliteTypedReplicaStorage(host, schema); await canonical.ready();
+  expect(db.prepare("SELECT value FROM _gonvex_replica_meta WHERE scope='existing' AND key='sequence'").get()?.value).toBe('0');
+  const discovery = statements.find(sql => sql.includes("SELECT scope,'sequence','0'"));
+  expect(discovery).toBeDefined();
+  expect(discovery).not.toContain('_gonvex_replica_entities');
+  expect(discovery).not.toMatch(/jsonb_replace|json_extract/);
+  expect((await canonical.loadEntityRows('existing', 'tasks', ['a']))[0].row).toEqual({ _id: 'a', name: 'retained' });
 });

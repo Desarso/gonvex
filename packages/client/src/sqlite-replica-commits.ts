@@ -22,7 +22,7 @@ export class SQLiteReplicaCommits {
   private initialized?: Promise<void>;
   private active?: ReplicaStorageCommit;
   private committing = false;
-  constructor(private readonly database: SQLiteReplicaDatabase, private readonly onCommit?: (scope: string) => void, private readonly controls: { before?: () => Promise<void>; after?: () => Promise<void> } = {}) {}
+  constructor(private readonly database: SQLiteReplicaDatabase, private readonly onCommit?: (scope: string) => void, private readonly controls: { before?: () => Promise<void>; after?: () => Promise<void>; initializeSequences?: () => Promise<void> } = {}) {}
   initialize() {
     return this.initialized ??= this.database.withTransactionAsync(async () => {
       const present=await this.database.getFirstAsync<{name:string}>("SELECT name FROM sqlite_master WHERE type='table' AND name='_gonvex_replica_changes'");
@@ -30,6 +30,7 @@ export class SQLiteReplicaCommits {
       await this.database.execAsync(schema);
       // Establish the logical zero sequence for existing scopes without reading
       // row payloads into JS. The table and these counters publish atomically.
+      if (this.controls.initializeSequences) { await this.controls.initializeSequences(); return; }
       await this.database.runAsync(`INSERT OR IGNORE INTO _gonvex_replica_meta
         SELECT scope,'sequence','0' FROM (
           SELECT scope FROM _gonvex_replica_entities UNION SELECT scope FROM _gonvex_replica_queries

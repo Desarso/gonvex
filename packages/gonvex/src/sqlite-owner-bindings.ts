@@ -1,4 +1,14 @@
 import type {Manifest} from './manifest-types.js';
+/** The owner needs an authorization catalog, not the React API's lazy getter
+ * graph. Emit plain references once and leave validation schemas in modules. */
+export function sqliteOwnerReferences(manifest:Manifest) {
+ return Object.entries(manifest.functions).filter(([path,entry])=>!entry.internal||path.startsWith('__local.')&&!!entry.replica).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([path,entry])=>({
+  kind:entry.kind,path,...(entry.replica?{delivery:'replica' as const,replica:{...entry.replica,residency:entry.replica.residency??'paged'}}:entry.delivery?{delivery:entry.delivery}:{}),
+  ...(entry.offline===undefined?{}:{offline:entry.offline}),...(entry.localExecution===undefined?{}:{localExecution:entry.localExecution}),
+  ...(entry.delivery==='live'&&entry.dependencies?.liveQueryPlan?{live:{entity:entry.dependencies.liveQueryPlan.table,key:entry.dependencies.liveQueryPlan.key,resultPath:entry.dependencies.liveQueryPlan.resultPath??[],plan:entry.dependencies.liveQueryPlan}}:{}),
+  ...(entry.kind==='reducer'&&entry.optimistic!==undefined?{optimistic:{transaction:entry.optimistic}}:{}),
+ }));
+}
 /** Static worker factories keep the application module and portable bodies in
  * the elected dedicated worker graph. Followers import the bounded RPC facade. */
 export function sqliteOwnerBindings(manifest:Manifest):Record<string,string>{
@@ -11,16 +21,12 @@ export function sqliteOwnerBindings(manifest:Manifest):Record<string,string>{
   'sqlite-client-worker.ts':`${header}import {installSQLiteOwner} from "@gonvex/client/sqlite/owner";
 import {SQLiteClientProgram} from "@gonvex/client/sqlite/program";
 import {sqliteSchema,sqliteSchemaVersion} from "./sqlite-schema.js";
-import {api} from "./api.js";
 ${reducers?'import {PortableReducerRuntime} from "@gonvex/local-runtime/portable";\nimport {localSchema} from "./local-schema.js";\nimport {localReducers} from "./local-reducers.js";':''}
 import type {FunctionReference} from "@gonvex/client";
-const references=new Map<string,FunctionReference>();
-function visit(value:unknown):void {if(!value||typeof value!=="object")return;if("kind" in value&&"path" in value){const ref=value as FunctionReference;if(ref.scope!=="control")references.set(ref.path,ref);return;}for(const child of Object.values(value))visit(child);}
-visit(api);
-const collections=${JSON.stringify(collections)} as const;
-for(const ref of collections)references.set(ref.path,ref);
+const references=${JSON.stringify(sqliteOwnerReferences(manifest))} as unknown as readonly FunctionReference[];
+const collections=${JSON.stringify(collections.map(ref=>ref.path))};
 const runtime=${reducers?`new PortableReducerRuntime({schema:localSchema,reducers:localReducers,artifactHash:${JSON.stringify(manifest.module.hash)}})`:'{isPrepared:()=>false,prepare:async()=>{throw Error("No portable Reducer registered");},execute:async()=>{throw Error("No portable Reducer registered");}}'};
-installSQLiteOwner({schema:sqliteSchema,schemaVersion:sqliteSchemaVersion,createProgram:owner=>new SQLiteClientProgram(owner,{runtime,clientContract:${JSON.stringify(clientContract)},artifactHash:${JSON.stringify(manifest.module.hash)},references:[...references.values()],collections:collections.map(ref=>ref.path),offlineMaxAgeMs:${JSON.stringify(offline)}})});
+installSQLiteOwner({schema:sqliteSchema,schemaVersion:sqliteSchemaVersion,createProgram:owner=>new SQLiteClientProgram(owner,{runtime,clientContract:${JSON.stringify(clientContract)},artifactHash:${JSON.stringify(manifest.module.hash)},references,collections,offlineMaxAgeMs:${JSON.stringify(offline)}})});
 `,
   'sqlite-router-worker.ts':`${header}import "@gonvex/client/sqlite/router-worker";\n`,
   'sqlite-browser.ts':`${header}import {SQLiteBrowserClient,type SQLiteBrowserOptions} from "@gonvex/client/sqlite/browser";

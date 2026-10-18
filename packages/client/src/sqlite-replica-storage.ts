@@ -34,6 +34,7 @@ export interface SQLiteReplicaDatabase {
  * caller's existing transaction, never in a second database or cache. */
 export interface SQLiteReplicaRowLayout {
   install(database: SQLiteReplicaDatabase): Promise<void>;
+  initializeSequences?(database: SQLiteReplicaDatabase): Promise<void>;
   readEntityRows?(database: SQLiteReplicaDatabase, scope: string, entity: string, ids: readonly string[], maxBytes: number): Promise<Array<{ id: string; value: string }>>;
   readVersions?(database: SQLiteReplicaDatabase, scope: string, entity: string, ids: readonly string[]): Promise<ReadonlyMap<string,number>>;
   readPage?(database: SQLiteReplicaDatabase, scope: string, read: import('@gonvex/module-sdk').DataRead, after?: string, excluded?: readonly string[], columns?: readonly string[]): Promise<import('./paged-read-view.js').ReplicaReadPage>;
@@ -69,7 +70,7 @@ export class SQLiteLocalReplicaStorage implements LocalReplicaStorage {
   private readonly commits: SQLiteReplicaCommits;
   readonly supportsResidentLookup = true;
 
-  constructor(private readonly database: SQLiteReplicaDatabase, private readonly rowLayout?: SQLiteReplicaRowLayout) { this.commits = new SQLiteReplicaCommits(database, undefined, { before: () => rowLayout?.assertOwner?.(database) ?? Promise.resolve(), after: () => rowLayout?.afterCommit?.(database) ?? Promise.resolve() }); }
+  constructor(private readonly database: SQLiteReplicaDatabase, private readonly rowLayout?: SQLiteReplicaRowLayout) { this.commits = new SQLiteReplicaCommits(database, undefined, { before: () => rowLayout?.assertOwner?.(database) ?? Promise.resolve(), after: () => rowLayout?.afterCommit?.(database) ?? Promise.resolve(), ...(rowLayout?.initializeSequences ? { initializeSequences: () => rowLayout.initializeSequences!(database) } : {}) }); }
 
   async ready(): Promise<void> {
     await this.initialize(); await this.rowLayout?.assertOwner?.(this.database);
