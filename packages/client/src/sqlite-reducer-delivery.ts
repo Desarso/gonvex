@@ -5,7 +5,7 @@ import type {SQLiteReducerOwner} from './sqlite-reducer-owner.js';
 import type {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
 import type {ReducerOutboxEntry,OutboxErrorClass} from './outbox.js';
 import {outboxBackoffMs} from './outbox.js';
-import {deliveryErrorClass,DEFAULT_OUTBOX_MAX_ATTEMPTS,DEFAULT_OUTBOX_RETRY_MAX_BACKOFF_MS} from './index.js';
+import {deliveryErrorClass,DEFAULT_OUTBOX_MAX_ATTEMPTS,DEFAULT_OUTBOX_RETRY_MAX_BACKOFF_MS} from './client-error.js';
 import {ByteLedger} from './byte-budget.js';
 import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 type Admission={scope:string;intentScope:string;generation:string;online:boolean};

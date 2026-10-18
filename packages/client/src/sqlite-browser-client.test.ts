@@ -3,12 +3,12 @@ import {SQLiteBrowserClient} from './sqlite-browser-client.js';
 import type {SQLiteReplicaBroker} from './sqlite-broker.js';
 const cleanup:Array<()=>void>=[];afterEach(()=>{for(const close of cleanup.splice(0))close();vi.restoreAllMocks();});
 function fixture(fetchToken?:()=>Promise<string|null>){
- let epoch=1,identity='a',connection='',tokenPending=false,closed=false;const changes=new Set<(...args:any[])=>void>(),calls:Array<{input:any;requestID?:string}>=[],responses:any[]=[];
+ let admissionKey:string|null|undefined;let epoch=1,identity='a',connection='',tokenPending=false,closed=false;const changes=new Set<(...args:any[])=>void>(),calls:Array<{input:any;requestID?:string}>=[],responses:any[]=[];
  let handler:((input:any)=>Promise<unknown>|unknown)|undefined;
  const broker={async request<T>(_op:string,input:any,_timeout?:number,requestID?:string):Promise<T>{
   calls.push({input:structuredClone(input),requestID});if(handler){const result=await handler(input);if(result!==undefined)return result as T;}
   if(input.method==='connect'){identity=input.auth.identity?.sub??'public';connection=identity+':'+epoch;tokenPending=true;return {connection,identityKey:identity} as T;}
-  if(input.method==='controls')return {tokens:tokenPending?[{id:'token:'+connection,connection,identityKey:identity,forceRefreshToken:false}]:[],status:{connected:true},session:'authenticated',failure:null} as T;
+  if(input.method==='controls')return {...(admissionKey!==undefined?{admissionKey}:{}),tokens:tokenPending?[{id:'token:'+connection,connection,identityKey:identity,forceRefreshToken:false}]:[],status:{connected:true},session:'authenticated',failure:null} as T;
   if(input.method==='token'){responses.push(input.response);tokenPending=false;return null as T;}
   if(input.method==='watchReplica')return {id:'source:'+input.path,signature:identity+':'+input.path} as T;
   if(input.method==='replicaPage')return {generation:{epoch,sequence:1},rows:[{id:'row',value:{id:'row',identity}}],window:{generation:'window',total:1,header:{}}} as T;
@@ -19,7 +19,7 @@ function fixture(fetchToken?:()=>Promise<string|null>){
   throw Error('Unexpected mock RPC '+input.method);
  },subscribeChanges(listener:(...args:any[])=>void){changes.add(listener);return ()=>{changes.delete(listener);};},stats(){return {ownerEpoch:epoch} as ReturnType<SQLiteReplicaBroker['stats']>;},close(){closed=true;}};
  const client=new SQLiteBrowserClient('ws://private-synthetic.test/ws',{broker,auth:{project:'project',tenant:'tenant',identity:{sub:'a'}},fetchToken});cleanup.push(()=>client.close());
- return {client,calls,responses,get closed(){return closed;},set handler(next:typeof handler){handler=next;},change(){for(const notify of changes)notify('scope',1);},replaceOwner(){epoch++;connection='';tokenPending=false;for(const notify of changes)notify('*',1,true);}};
+ return {client,calls,responses,get closed(){return closed;},set handler(next:typeof handler){handler=next;},admit(key:string|null){admissionKey=key;for(const notify of changes)notify('*',1,true);},change(){for(const notify of changes)notify('scope',1);},replaceOwner(){epoch++;connection='';tokenPending=false;for(const notify of changes)notify('*',1,true);}};
 }
 it('services a single selected-tab token request, shares a watch, retains a bounded stable page snapshot and restores after owner change',async()=>{
  const fetchToken=vi.fn(async()=> 'opaque'),f=fixture(fetchToken),one=f.client.watchReplica({path:'tasks/all'}),two=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>{one.close();two.close();});
@@ -43,4 +43,13 @@ it('bounds requests before waiting for a connection and preserves the caller com
 
 it('cancels a token provider which never settles when the facade closes',async()=>{
  const provider=vi.fn(()=>new Promise<string|null>(()=>{})),f=fixture(provider);await f.client.connect();await vi.waitFor(()=>expect(provider).toHaveBeenCalledOnce());expect(f.client.budgets().find(value=>value.name==='browser-token-requests')?.entries).toBe(1);f.client.close();await new Promise(resolve=>setTimeout(resolve,0));expect(f.client.budgets().find(value=>value.name==='browser-token-requests')?.entries).toBe(0);expect(f.responses).toEqual([]);
+});
+
+it('clears protected pages on worker admission changes and fences a late page without reconnecting the logical client',async()=>{
+ const f=fixture(),watch=f.client.watchReplica({path:'tasks/all'});cleanup.push(()=>watch.close());f.admit('old-permissions');await f.client.pollControls();const original=await watch.page();expect(watch.snapshot().page).toBe(original);
+ const connections=f.calls.filter(call=>call.input.method==='connect').length;
+ let release!:()=>void;const held=new Promise<void>(resolve=>{release=resolve;});f.handler=async input=>{if(input.method==='replicaPage'){await held;return {...original,rows:[{id:'old',value:{id:'old',protected:true}}]};}};
+ const pending=watch.page();const rejected=expect(pending).rejects.toMatchObject({code:'FENCED'});await vi.waitFor(()=>expect(f.calls.filter(call=>call.input.method==='replicaPage')).toHaveLength(2));
+ f.admit('new-permissions');await f.client.pollControls();expect(watch.snapshot().page).toBeUndefined();release();await rejected;expect(watch.snapshot().page).toBeUndefined();expect(f.calls.filter(call=>call.input.method==='connect')).toHaveLength(connections);
+ f.handler=undefined;await watch.page();expect(watch.snapshot().page).toBeDefined();f.admit(null);await f.client.pollControls();expect(watch.snapshot().page).toBeUndefined();
 });

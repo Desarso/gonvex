@@ -11,7 +11,7 @@ import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
 
 type Auth=Pick<GonvexClientAuth,'project'|'tenant'|'identity'|'token'>;
 type Broker=Pick<SQLiteReplicaBroker,'request'|'subscribeChanges'|'close'|'stats'>;
-type Controls={tokens:SQLiteTokenRequest[];status:unknown;session:string;failure:{code:string;message:string}|null};
+type Controls={admissionKey?:string|null;tokens:SQLiteTokenRequest[];status:unknown;session:string;failure:{code:string;message:string}|null};
 type Handle={connection:string;identityKey:string};
 type Page=SQLiteNativeWindowResult|SQLitePendingSnapshotPage|SQLiteNativeEntityResult|null;
 type WatchSnapshot={page:Page|undefined;stale:boolean;version:number};
@@ -32,7 +32,7 @@ const stable=(value:JsonValue):string=>value===null||typeof value!=='object'?JSO
  * The generated compatibility client installs this only with verified migration
  * and fallback; this primitive itself never silently creates another adapter. */
 export class SQLiteBrowserClient {
- private auth:Auth;private closed=false;private revision=0;private epoch?:number;private handle?:Handle;private connecting?:Promise<Handle>;private connectingRevision=0;
+ private auth:Auth;private closed=false;private revision=0;private dataRevision=0;private admissionKey?:string|null;private epoch?:number;private handle?:Handle;private connecting?:Promise<Handle>;private connectingRevision=0;
  private readonly watches=new Map<string,Watch>();private watchBytes=0;
  private readonly ledger=new ByteLedger(5242880);
  private readonly requests=new SQLiteTransientBudget(2097152,16);
@@ -54,8 +54,13 @@ export class SQLiteBrowserClient {
  }
  private current(revision:number){if(this.closed||revision!==this.revision)fail('FENCED','Native browser session changed');}
  private notify(watch:Watch){watch.version++;watch.state={page:this.pages.get(watch.key),stale:watch.stale,version:watch.version};for(const listener of watch.listeners)try{listener();}catch{/* Observer only. */}}
- private invalidate(identity:boolean){this.revision++;this.handle=undefined;this.controlsValue=undefined;
+ private invalidate(identity:boolean){this.revision++;this.dataRevision++;if(identity)this.admissionKey=undefined;this.handle=undefined;this.controlsValue=undefined;
   for(const watch of this.watches.values()){watch.bound=-1;watch.source=undefined;watch.opening=undefined;watch.stale=true;if(identity){watch.unpin?.();watch.unpin=undefined;this.pages.delete(watch.key);}this.notify(watch);}
+ }
+ private admit(key:string|null){
+  if(this.admissionKey===key)return;
+  const changed=this.admissionKey!==undefined||key===null;this.admissionKey=key;if(!changed)return;this.dataRevision++;
+  for(const watch of this.watches.values()){watch.unpin?.();watch.unpin=undefined;this.pages.delete(watch.key);watch.stale=true;this.notify(watch);}
  }
  connect():Promise<Handle>{
   if(this.closed)return Promise.reject(Object.assign(Error('Native browser client is closed'),{code:'FENCED'}));if(this.handle)return Promise.resolve(this.handle);if(this.connecting){const pending=this.connecting,pendingRevision=this.connectingRevision;return pending.then(handle=>this.handle?handle:this.connect(),error=>{if(!this.closed&&pendingRevision!==this.revision)return this.connect();throw error;});}
@@ -71,10 +76,10 @@ export class SQLiteBrowserClient {
   if(identity!==old||!this.auth.identity&&Object.hasOwn(auth,'token')){this.invalidate(true);await this.connect();return;}
   const revision=this.revision;await this.connect();this.current(revision);await this.options.broker.request('clientCall',{method:'auth',auth:{token:this.auth.token}});this.current(revision);void this.pollControls().catch(()=>{});
  }
- private async rpc<T>(input:unknown,commandID?:string):Promise<T>{const revision=this.revision;this.current(revision);const bytes=sqlitePayloadBytes(input,131072),release=this.requests.reserve(bytes+512);try{const owned=structuredClone(input);await this.connect();this.current(revision);const value=await this.options.broker.request<T>('clientCall',owned,90000,commandID);this.current(revision);return value;}finally{release();}}
+ private async rpc<T>(input:unknown,commandID?:string):Promise<T>{const revision=this.revision,dataRevision=this.dataRevision,tenant=!!input&&typeof input==='object'&&'method'in input&&['entities','replicaPage','replicaPendingPage','reducer'].includes(String(input.method));this.current(revision);const bytes=sqlitePayloadBytes(input,131072),release=this.requests.reserve(bytes+512);try{const owned=structuredClone(input);await this.connect();this.current(revision);const value=await this.options.broker.request<T>('clientCall',owned,90000,commandID);this.current(revision);if(tenant&&dataRevision!==this.dataRevision)fail('FENCED','Native page admission changed');return value;}finally{release();}}
  pollControls():Promise<void>{
   if(this.closed)return Promise.resolve();if(this.polling){this.pollAgain=true;return this.polling;}
-  const operation=(async()=>{do{this.pollAgain=false;const revision=this.revision,handle=await this.connect(),controls=await this.options.broker.request<Controls>('clientCall',{method:'controls'});this.current(revision);sqlitePayloadBytes(controls,65536);this.controlsValue={status:controls.status,session:controls.session,failure:controls.failure};
+  const operation=(async()=>{do{this.pollAgain=false;const revision=this.revision,handle=await this.connect(),controls=await this.options.broker.request<Controls>('clientCall',{method:'controls'});this.current(revision);sqlitePayloadBytes(controls,65536);if(controls.admissionKey!==undefined)this.admit(controls.admissionKey);this.controlsValue={status:controls.status,session:controls.session,failure:controls.failure};
    for(const request of controls.tokens){if(request.connection!==handle.connection||request.identityKey!==handle.identityKey||this.tokenRequests.has(request.id))continue;if(this.tokenRequests.size>=8)fail('BUDGET','Native browser token request budget exhausted');this.tokenRequests.add(request.id);
     void (async()=>{try{let timer:ReturnType<typeof setTimeout>|undefined;let token:string|null;try{token=this.options.fetchToken?await Promise.race([this.options.fetchToken({forceRefreshToken:request.forceRefreshToken}),new Promise<never>((_,reject)=>{this.tokenCancels.set(request.id,()=>reject(Error('Native token request canceled')));timer=setTimeout(()=>reject(Error('Native token provider timed out')),30000);})]):this.auth.token??null;}finally{clearTimeout(timer);}this.current(revision);if(token!==null&&(typeof token!=='string'||token.length>16384))throw new TypeError('Invalid native browser token');await this.options.broker.request('clientCall',{method:'token',response:{...request,token}});}catch{if(!this.closed&&revision===this.revision)await this.options.broker.request('clientCall',{method:'token',response:{...request,error:'Token provider unavailable'}}).catch(()=>{});}finally{this.tokenRequests.delete(request.id);this.tokenCancels.delete(request.id);}})();
    }
@@ -94,7 +99,7 @@ export class SQLiteBrowserClient {
   sqlitePayloadBytes({path:ref.path,args},16384);const key=stable({path:ref.path,args});let watch=this.watches.get(key);
   if(!watch){const bytes=sqlitePayloadBytes({key,args,path:ref.path},65536)+2048;if(this.watches.size>=64||this.watchBytes+bytes>524288)fail('BUDGET','Native browser watch budget exhausted');watch={state:{page:undefined,stale:true,version:0},key,path:ref.path,args:JSON.parse(stable(args)),bytes,refs:0,bound:-1,listeners:new Set(),stale:true,version:0};this.watches.set(key,watch);this.watchBytes+=bytes;}
   const selected=watch;if(selected.refs>=64)fail('BUDGET','Native watch lease budget exhausted');selected.refs++;let closed=false;const listeners=new Set<()=>void>();void this.open(selected).catch(()=>{});
-  const read=async<T extends Page>(method:string,options:unknown):Promise<T>=>{if(closed)fail('FENCED','Native watch is closed');await this.open(selected);const value=await this.rpc<T>({method,signature:selected.source!.signature,...options as object});if(closed)fail('FENCED','Native watch closed during read');this.store(selected,value);return value;};
+  const read=async<T extends Page>(method:string,options:unknown):Promise<T>=>{const revision=this.revision,dataRevision=this.dataRevision;if(closed)fail('FENCED','Native watch is closed');await this.open(selected);const value=await this.rpc<T>({method,signature:selected.source!.signature,...options as object});if(closed)fail('FENCED','Native watch closed during read');this.current(revision);if(dataRevision!==this.dataRevision)fail('FENCED','Native watch admission changed');this.store(selected,value);return value;};
   return {page:(options={})=>read('replicaPage',options),pendingPage:(options={})=>read('replicaPendingPage',options),snapshot:()=>selected.state,subscribe:listener=>{if(closed)fail('FENCED','Native watch is closed');if(selected.listeners.size>=32)fail('BUDGET','Native watch listener budget exhausted');const wrapped=()=>listener();listeners.add(wrapped);selected.listeners.add(wrapped);return ()=>{listeners.delete(wrapped);selected.listeners.delete(wrapped);};},close:()=>{if(closed)return;closed=true;for(const listener of listeners)selected.listeners.delete(listener);listeners.clear();if(--selected.refs)return;selected.state={page:undefined,stale:true,version:selected.version+1};selected.unpin?.();selected.unpin=undefined;this.pages.delete(selected.key);
    const retirement=(async()=>{try{await selected.opening;if(selected.refs)return;if(selected.source)await this.rpc({method:'unwatchReplica',signature:selected.source.signature});selected.source=undefined;selected.bound=-1;}finally{if(this.watches.get(selected.key)===selected&&!selected.refs){this.watches.delete(selected.key);this.watchBytes-=selected.bytes;}}})();selected.retiring=retirement;void retirement.then(()=>{if(selected.retiring===retirement)selected.retiring=undefined;},()=>{if(selected.retiring===retirement)selected.retiring=undefined;});}};
  }

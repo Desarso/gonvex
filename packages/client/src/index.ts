@@ -1,3 +1,6 @@
+import {GonvexClientError, deliveryErrorClass, reducerErrorClassFromMessage, DEFAULT_OUTBOX_MAX_ATTEMPTS, DEFAULT_OUTBOX_RETRY_MAX_BACKOFF_MS, type GonvexClientErrorCode} from "./client-error.js";
+export {GonvexClientError, deliveryErrorClass, DEFAULT_OUTBOX_MAX_ATTEMPTS, DEFAULT_OUTBOX_RETRY_MAX_BACKOFF_MS, type GonvexClientErrorCode} from "./client-error.js";
+import {localIdentityFromAuthResult, authIdentityKey, sameAuthTokenIdentity, reducerOutboxScope, replicaDirectiveFromAuthResult, developerSessionTokenFromAuthResult, artifactHashFromAuthResult} from "./client-auth-wire.js";
 import type {SQLiteTransportHost,SQLiteTransportSession} from './sqlite-transport-host.js';
 import {sqlitePayloadBytes} from './sqlite-admission.js';
 import { readIsCovered, primaryReadKeys } from "@gonvex/local-runtime/read-view";
@@ -311,47 +314,6 @@ export type FunctionReference<Args extends JsonValue = JsonValue, Result extends
   };
 };
 
-export type GonvexClientErrorCode = "server" | "timeout" | "disconnected" | "closed" | "auth" | "superseded";
-
-/**
- * Typed error for every rejected Gonvex operation. `code` distinguishes
- * server-side failures from transport-level ones so apps can decide whether
- * a retry is safe:
- *
- * - `server`: the runtime executed the function and returned an error.
- * - `timeout`: no response arrived within the operation timeout. For
- *   reducers/actions the write may or may not have been applied.
- * - `disconnected`: the socket dropped while the operation was pending.
- *   Reducers/actions fail closed unless a reducer opted into the outbox.
- * - `closed`: the client was explicitly closed.
- * - `auth`: authentication was rejected.
- * - `superseded`: the operation belonged to an authentication scope that the
- *   caller replaced before the operation completed.
- */
-export class GonvexClientError extends Error {
-  readonly code: GonvexClientErrorCode;
-  readonly path?: string;
-  readonly operation?: "query" | "reducer" | "action";
-  /**
-   * For `server` Reducer errors: the runtime's classification, or a legacy
-   * inference when an older runtime sent none. Undefined means a legacy
-   * runtime's unclassified error, which is handled as a rejection.
-   */
-  readonly errorClass?: ReducerErrorClass;
-  /** True when the same call (same idempotency key) may succeed later. */
-  readonly retryable?: boolean;
-
-  constructor(message: string, options: { code: GonvexClientErrorCode; path?: string; operation?: "query" | "reducer" | "action"; errorClass?: ReducerErrorClass; retryable?: boolean }) {
-    super(message);
-    this.name = "GonvexClientError";
-    this.code = options.code;
-    this.path = options.path;
-    this.operation = options.operation;
-    if (options.errorClass) this.errorClass = options.errorClass;
-    if (options.retryable !== undefined) this.retryable = options.retryable;
-  }
-}
-
 /** One durable reducer intent, as exposed to application UI. */
 export type OutboxIntent = {
   /** The reducer id / idempotency key. Stable across retries, reloads and tabs. */
@@ -464,8 +426,6 @@ export type ResetLocalReplicaResult = {
   resubscribed: number;
 };
 
-export const DEFAULT_OUTBOX_MAX_ATTEMPTS = 10;
-export const DEFAULT_OUTBOX_RETRY_MAX_BACKOFF_MS = 60_000;
 
 export type ConnectionState = {
   isWebSocketConnected: boolean;
@@ -5305,33 +5265,6 @@ function countPendingCalls(calls: Map<string, PendingCall>, kind: "reducer" | "a
   return count;
 }
 
-/**
- * How the outbox treats one failed delivery. Runtimes before
- * 0.5.2-staging.15 send no class: their server errors stay rejections, as
- * before, except the two cases the legacy runtime could only express in prose.
- */
-/** @internal Shared by the SQLite owner delivery loop. */
-export function deliveryErrorClass(error: unknown): OutboxErrorClass {
-  if (!(error instanceof GonvexClientError)) return "transient";
-  switch (error.code) {
-    case "server": return error.errorClass ?? "rejected";
-    case "timeout": return "transient";
-    default: return "network";
-  }
-}
-
-const legacyUnauthenticatedReducerError = "authenticate with an active tenant before calling a Reducer";
-
-function reducerErrorClassFromMessage(message: { error: string; class?: ReducerErrorClass }): ReducerErrorClass | undefined {
-  if (message.class === "rejected" || message.class === "transient" || message.class === "update_required" || message.class === "unauthenticated") {
-    return message.class;
-  }
-  // Legacy runtimes: the only structured signals were these literal messages.
-  if (/STALE_REDUCER_ARTIFACT|CLIENT_UPDATE_REQUIRED/.test(message.error)) return "update_required";
-  if (message.error === legacyUnauthenticatedReducerError) return "unauthenticated";
-  return undefined;
-}
-
 function positiveOr(value: number | undefined, fallback: number) {
   return typeof value === "number" && value > 0 ? value : fallback;
 }
@@ -5582,13 +5515,6 @@ function applyLocalPatches(snapshot: LocalSnapshot, patches: readonly Optimistic
   }
 }
 
-function localIdentityFromAuthResult(result: JsonValue): LocalExecution["identity"] | undefined {
-  if (!result || typeof result !== "object" || Array.isArray(result)) return;
-  const identity = result.localIdentity as LocalExecution["identity"] | undefined;
-  if (!identity?.auth?.account?.id || !identity.tenant?.id || !identity.member?.id) return;
-  return structuredClone(identity);
-}
-
 function authFromOptions(options: GonvexClientOptions): GonvexClientAuth {
   return {
     project: options.project,
@@ -5606,101 +5532,12 @@ function normalizeQuerySubscriptionRetentionMs(value: number | undefined): numbe
   return Math.max(0, Math.min(5 * 60_000, Math.floor(value)));
 }
 
-function authIdentityKey(auth: GonvexClientAuth) {
-  if (auth.token) {
-    const tokenIdentity = authIdentityKeyFromToken(auth);
-    if (tokenIdentity) {
-      // Conflicting account credentials cannot reuse either account's cache.
-      if (auth.identity?.sub && !tokenIdentity.endsWith(`\u0000${auth.identity.sub}`)) return "";
-      return tokenIdentity;
-    }
-  }
-  // Token-free fallback: an explicit identity hint carries the same claims a
-  // token would supply, so both paths derive the same key for the same Account.
-  const hint = auth.identity;
-  if (hint && typeof hint.sub === "string" && hint.sub.trim()) {
-    return [auth.project ?? "", auth.tenant ?? "", hint.iss ?? "", hint.sub].join("\u0000");
-  }
-  return "";
-}
-
-function authIdentityKeyFromToken(auth: GonvexClientAuth) {
-  if (!auth.token) return "";
-  const parts = auth.token.split(".");
-  if (parts.length < 2) return "";
-  try {
-    const encoded = parts[1]!.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=");
-    const payload = JSON.parse(globalThis.atob(padded)) as { sub?: unknown; iss?: unknown };
-    if (typeof payload.sub !== "string" || !payload.sub.trim()) return "";
-    return [
-      auth.project ?? "",
-      auth.tenant ?? "",
-      typeof payload.iss === "string" ? payload.iss : "",
-      payload.sub,
-    ].join("\u0000");
-  } catch {
-    return "";
-  }
-}
-
-function sameAuthTokenIdentity(left: GonvexClientAuth, right: GonvexClientAuth) {
-  const leftIdentity = authIdentityKey(left);
-  const rightIdentity = authIdentityKey(right);
-  return leftIdentity !== "" && leftIdentity === rightIdentity;
-}
-
-function reducerOutboxScope(url: string, auth: GonvexClientAuth, ephemeralScope: string) {
-  const identity = authIdentityKey(auth);
-  if (identity) return ["identity", url, identity].join("\u0000");
-  if (auth.token || auth.identity || auth.fetchToken) {
-    // Opaque tokens (or credentials installed before tenant selection) do not
-    // expose a stable Account key. A per-client scope preserves current-session
-    // queue semantics without ever restoring those rows under another Account.
-    return ["ephemeral-auth", url, ephemeralScope].join("\u0000");
-  }
-  // Anonymous/dev-auth clients still need a stable namespace, but it must be
-  // isolated by deployment and tenant. Once an authenticated identity is
-  // installed, applyAuth switches away from this scope before restoring or
-  // sending its durable reducers.
-  return ["anonymous", url, auth.project ?? "", auth.tenant ?? ""].join("\u0000");
-}
-
 function isEphemeralOutboxScope(scope: string) {
   return scope.startsWith("ephemeral-auth\u0000");
 }
 
 function isJsonRecord(value: unknown): value is Record<string, JsonValue> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function replicaDirectiveFromAuthResult(result: JsonValue): ReplicaDirective | undefined {
-  if (!isJsonRecord(result) || !isJsonRecord(result.replica)) return undefined;
-  const directive = result.replica;
-  if (
-    directive.protocolVersion !== 1
-    || typeof directive.scope !== "string"
-    || typeof directive.visibilityScope !== "string"
-    || typeof directive.epoch !== "string"
-  ) return undefined;
-  return {
-    protocolVersion: 1,
-    scope: directive.scope,
-    visibilityScope: directive.visibilityScope,
-    epoch: directive.epoch,
-  };
-}
-
-function developerSessionTokenFromAuthResult(result: JsonValue): string | undefined {
-  if (!isJsonRecord(result)) return undefined;
-  const token = result.developerSessionToken;
-  return typeof token === "string" && token.startsWith("gvx_dev_") ? token : undefined;
-}
-
-function artifactHashFromAuthResult(result: JsonValue): string | undefined {
-  if (!isJsonRecord(result)) return undefined;
-  const hash = result.artifactHash;
-  return typeof hash === "string" && hash.length > 0 ? hash : undefined;
 }
 
 function hasOwn<T extends object>(value: T, key: PropertyKey) {

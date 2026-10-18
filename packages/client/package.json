@@ -51,10 +51,11 @@
     "bench:sync-engine": "pnpm build && node bench/sync-engine/run.mjs",
     "bench:sync-engine:chromium": "pnpm build && node bench/sync-engine/chromium.mjs",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
-    "test": "pnpm build && vitest run",
+    "test": "pnpm build && vitest run && pnpm test:node",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bench:sync-engine:check": "node --test bench/sync-engine/statistics.checks.mjs",
-    "sqlite:rebuild": "node scripts/rebuild-sqlite.mjs"
+    "sqlite:rebuild": "node scripts/rebuild-sqlite.mjs",
+    "test:node": "node --test scripts/sqlite-log-guards.test.mjs bench/sqlite-replica/fixture.test.mjs bench/sync-engine/statistics.checks.mjs test/sqlite-sahpool.checks.mjs"
   },
   "dependencies": {
     "@gonvex/local-runtime": "workspace:*",
