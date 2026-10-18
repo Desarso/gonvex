@@ -41,7 +41,8 @@
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "test": "pnpm build && vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "bench:sync-engine:check": "node --test bench/sync-engine/statistics.checks.mjs"
+    "bench:sync-engine:check": "node --test bench/sync-engine/statistics.checks.mjs",
+    "sqlite:rebuild": "node scripts/rebuild-sqlite.mjs"
   },
   "dependencies": {
     "@gonvex/local-runtime": "workspace:*",

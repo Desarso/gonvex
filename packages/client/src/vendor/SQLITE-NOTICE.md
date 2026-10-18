@@ -1,7 +1,9 @@
 # SQLite distribution notices
 
-The bundled sqlite3.mjs and sqlite3.wasm come from the pinned @sqlite.org/sqlite-wasm package, version 3.53.4-build2. Its npm wrapper is Apache-2.0. The module retains the original SQLite and Emscripten licensing notices. SQLite C and the upstream SAH-pool VFS are public domain. Generated Emscripten glue carries MIT and University of Illinois/NCSA notices.
+The bundled sqlite3.mjs and sqlite3.wasm are built from the pinned official SQLite 3.54.1 sources with the SDK's generic ingress extension. sqlite-source.json records source archive hashes, Emscripten version and commit, build options, extension hash and artifact hashes. Official @sqlite.org/sqlite-wasm 3.53.4-build2 supplies compatible TypeScript definitions only; its runtime assets are not packaged.
 
-The SAH-pool initializer is replaced by the upstream initializer recorded in sqlite-source.json. Packaging then guards twelve disabled debug-log calls before their arguments are allocated. The input and transformed output hashes are both recorded. That file records the source archive, recovery fix, package version and asset hashes. WAL with EXCLUSIVE locking and FULL synchronization remains an enforced storage invariant.
+SQLite C and its official SAH-pool VFS are public domain. The module retains the original SQLite and Emscripten notices, including MIT and University of Illinois/NCSA notices. The official npm type wrapper is Apache-2.0.
 
-Sources: https://sqlite.org/wasm/ and https://github.com/sqlite/sqlite-wasm .
+This source contains the upstream reserved-lock/hot-journal recovery fix ea1d55e202. The build guards disabled SAH debug arguments at thirteen textual sites, including one commented site. The VFS otherwise remains upstream. The loader adds a literal WASM asset URL so bundlers can fingerprint it without a private runtime override. The SDK enforces WAL, EXCLUSIVE locking and FULL synchronization. Experimental write buffering is not included.
+
+Build instructions and the generic extension source are in packages/client/sqlite-native. Sources: https://sqlite.org/wasm/ and https://github.com/sqlite/sqlite-wasm .

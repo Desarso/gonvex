@@ -1,10 +1,11 @@
 import { afterEach, expect, it } from 'vitest';
-import initialize, { type Database } from '@sqlite.org/sqlite-wasm';
+import type {Database} from '@sqlite.org/sqlite-wasm';
+import {initializePinnedSQLite} from '../test/sqlite-wasm-host.mjs';
 import { officialSQLiteDatabase, openOfficialSQLiteHost } from './sqlite-official-host.js';
 import { sqliteSearchName, sqliteTableName, sqliteIdentifier as q } from './sqlite-typed-schema.js';
 import { SQLiteTypedReplicaEngine } from './sqlite-typed-engine.js';
 
-const sqlite3 = await initialize();
+const sqlite3 = await initializePinnedSQLite();
 const databases: Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) if (db.pointer) db.close(); });
 function fixture(budget?: { maxRows: number; maxBytes: number }) {
@@ -308,7 +309,7 @@ it('folds ASCII natively and uses the exact Unicode ingress fallback without nor
   const projected=new SQLiteTypedReplicaEngine(fallback,schema);
   for(const engine of [folded,projected]){await engine.open('owner');await engine.importScope('s',(async function*(){for(const row of rows)yield JSON.stringify([{table:'records',id:row._id,version:1,row}]);})());}
   expect(folded.takeProfile()).toMatchObject({nativeFrames:rows.length,searchProjectionMs:0,normalizationMs:0});
-  expect(native.takeProfile().ingressFoldCalls).toBe(5);
+  expect(native.nativeFastFold).toBe(true);expect(native.takeProfile().ingressFoldCalls).toBe(3);
   const table=sqliteTableName('records');
   const actual=await native.database.getAllAsync(`SELECT s0,s1 FROM ${q(table)} ORDER BY rid`);
   const expected=await portable.database.getAllAsync(`SELECT s0,s1 FROM ${q(table)} ORDER BY rid`);

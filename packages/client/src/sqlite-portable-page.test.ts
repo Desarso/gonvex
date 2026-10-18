@@ -1,11 +1,12 @@
 import { afterEach, expect, it } from 'vitest';
-import initialize, { type Database } from '@sqlite.org/sqlite-wasm';
+import type {Database} from '@sqlite.org/sqlite-wasm';
+import {initializePinnedSQLite} from '../test/sqlite-wasm-host.mjs';
 import type { DataPredicate, DataRead, JsonObject } from '@gonvex/module-sdk';
 import { memoryReadView } from '@gonvex/local-runtime/read-view';
 import { officialSQLiteDatabase } from './sqlite-official-host.js';
 import { SQLiteTypedReplicaEngine } from './sqlite-typed-engine.js';
 import { sqliteTypedReplicaStorage } from './sqlite-typed-row-layout.js';
-const sqlite3=await initialize(), connections:Database[]=[];
+const sqlite3=await initializePinnedSQLite(), connections:Database[]=[];
 afterEach(()=>{for(const db of connections.splice(0))if(db.pointer)db.close();});
 const schema={records:{key:'_id',fields:{_id:{kind:'text'},title:{kind:'text'},rank:{kind:'number'},done:{kind:'boolean'},data:{kind:'json'},payload:{kind:'text'}},indexes:[{columns:['rank']},{columns:['title']},{columns:['done']}]}} as const;
 async function fixture(rows:JsonObject[]) {

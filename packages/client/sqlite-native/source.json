@@ -1,0 +1,37 @@
+{
+  "sqliteVersion": "3.54.1",
+  "emsdk": "4.0.23",
+  "extensionSourceSha256": "c4affcaa5463441c43c0f4d87259b00cfea147ab10f614c08ba31dc87aaf7cc0",
+  "flags": {
+    "optimization": "-O2",
+    "initialMiB": 4,
+    "omit": "kvvfs opfs opfs-wl vtab worker1"
+  },
+  "files": {
+    "sqlite3.mjs": "f1321e2b3e6a4918a8d9e6f37ae33749b79d21be6c04f088995582c6ad2d4861",
+    "sqlite3.wasm": "8d47ed09a418eccd990bf8f24bb06608f3dfbe2b27138ae4ea95aac0dd4956db"
+  },
+  "guardedDebugArguments": true,
+  "archives": {
+    "source": {
+      "url": "https://sqlite.org/2026/sqlite-src-3540100.zip",
+      "sha3_256": "877c6f4996ce7adb368686bce21638de9e3d91534832ad3d9d119037d1bc22ad"
+    },
+    "amalgamation": {
+      "url": "https://sqlite.org/2026/sqlite-amalgamation-3540100.zip",
+      "sha3_256": "92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30"
+    }
+  },
+  "emsdkCommit": "c0bb220cb6e6f4e0fabb6f6db9efd53390ef5e56",
+  "rawModuleSha256": "290c98ee42183765b50455f3a3b5b9ded9bf72ffd0490dd4ce0a2862fb3d3262",
+  "upstreamRecoveryFix": "ea1d55e202",
+  "debugLogSites": 13,
+  "typesPackage": "3.53.4-build2",
+  "vfs": "Official opfs-sahpool without experimental I/O buffering",
+  "runtimeInvariants": {
+    "journal": "WAL",
+    "locking": "EXCLUSIVE",
+    "synchronous": "FULL"
+  },
+  "bundlerAssetURL": true
+}
