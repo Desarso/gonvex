@@ -57,3 +57,9 @@ it('parks counted failures with intent safety intact and blocks an update-requir
 it('refuses stale identity settlement after a network wait, preserving the unknown command for recovery',async()=>{
  const f=await fixture();await f.invoke();const driver=f.delivery(async()=>{f.change();return 2;});await expect(driver.drainOnce()).rejects.toMatchObject({code:'FENCED'});expect((await f.endpoint.journal.page('identity')).entries[0].state).toBe('inflight');expect(await f.safety.count('identity')).toBe(1);expect(await f.db.getFirstAsync('SELECT 1 FROM gv_reducer_delivery_settlements')).toBeNull();
 });
+
+it('notifies rejection only after settlement commits and never lets an observer restore a prediction',async()=>{
+ const f=await fixture();await f.invoke();const observed:unknown[]=[];const rejected=vi.fn(event=>{observed.push(event);throw Error('observer failure');});const send=vi.fn(async()=>{throw new GonvexClientError('authoritative denial',{code:'server',errorClass:'rejected'});}),driver=f.delivery(send,{rejected});
+ await f.runOwner(0,async()=>{});await f.db.execAsync("CREATE TRIGGER fail_rejection BEFORE INSERT ON gv_reducer_delivery_settlements BEGIN SELECT RAISE(ABORT,'settlement rollback');END;");await expect(driver.drainOnce()).rejects.toThrow('settlement rollback');expect(rejected).not.toHaveBeenCalled();expect((await f.endpoint.predictions.entities('s','tasks',['a']))[0].row.n).toBe(2);
+ await f.db.execAsync('DROP TRIGGER fail_rejection');await expect(driver.drainOnce()).resolves.toEqual({sent:1,nextDelay:null});expect(observed).toEqual([{reducerId:'command',path:'increment',error:'authoritative denial',errorClass:'rejected'}]);expect((await f.endpoint.predictions.entities('s','tasks',['a']))[0].row.n).toBe(1);expect(await f.safety.count('identity')).toBe(0);await driver.drainOnce();expect(rejected).toHaveBeenCalledOnce();
+});

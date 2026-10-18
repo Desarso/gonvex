@@ -2354,7 +2354,7 @@ export class GonvexClient {
 
   onSessionScopeChange(handler: () => void) {
     this.sessionScopeHandlers.add(handler);
-    return () => this.sessionScopeHandlers.delete(handler);
+    return () => {this.sessionScopeHandlers.delete(handler);};
   }
 
   onSupportCommand(handler: (command: SupportCommand) => void) {

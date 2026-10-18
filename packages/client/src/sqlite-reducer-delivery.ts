@@ -3,6 +3,7 @@ import type {JsonValue} from '@gonvex/protocol';
 import type {SQLiteOwnerProgramContext} from './sqlite-owner-actor.js';
 import type {SQLiteReducerOwner} from './sqlite-reducer-owner.js';
 import type {SQLiteSafetyJournal} from './sqlite-safety-journal.js';
+import type {ReducerRejectionEvent} from './index.js';
 import type {ReducerOutboxEntry,OutboxErrorClass} from './outbox.js';
 import {outboxBackoffMs} from './outbox.js';
 import {deliveryErrorClass,DEFAULT_OUTBOX_MAX_ATTEMPTS,DEFAULT_OUTBOX_RETRY_MAX_BACKOFF_MS} from './client-error.js';
@@ -14,6 +15,7 @@ type Options={owner:SQLiteOwnerProgramContext;reducer:SQLiteReducerOwner;safety:
  admission():Admission|undefined;
  /** Resolves only after GClient's durable native terminal-watermark fence. */
  send(entry:ReducerOutboxEntry):Promise<JsonValue>;
+ rejected?(event:ReducerRejectionEvent):void;
  updateRequired?(message:string):void;
  now?():number;maxAttempts?:number;maxBackoffMs?:number;
 };
@@ -76,6 +78,7 @@ export class SQLiteReducerDelivery {
    }
    await this.options.reducer.journal.acknowledge(expected.intentScope,accepted);this.check(expected);
   });
+  for(const outcome of outcomes)if(!outcome.accepted&&outcome.classification==='rejected')try{this.options.rejected?.({reducerId:outcome.entry.idempotencyKey,path:outcome.entry.path,error:outcome.error,errorClass:'rejected'});}catch{/* Observers cannot roll back an authoritative settlement. */}
   await this.flushSafety(expected);
   const update=outcomes.find(outcome=>!outcome.accepted&&outcome.classification==='update_required');
   if(update&&!update.accepted){this.updateBlocked=true;this.options.updateRequired?.(update.error);return {sent:entries.length,nextDelay:null};}

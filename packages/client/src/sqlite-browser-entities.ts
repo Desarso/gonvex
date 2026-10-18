@@ -20,6 +20,7 @@ export class SQLiteBrowserEntities {
   return ()=>{if(closed)return;closed=true;if(this.closed)return;for(const entry of selected){entry.subscribers.delete(wrapped);this.bytes-=128;this.release(entry);}};
  }
  entity<T extends ReplicaRow>(entity:string,id:string):T|undefined{return this.entries.get(JSON.stringify([entity,id]))?.row as T|undefined;}
+ counters(){let rows=0,listeners=0;for(const entry of this.entries.values()){rows+=Number(!!entry.row);listeners+=entry.subscribers.size;}return {replicaRows:rows,replicaBytes:this.bytes,replicaMetadataBytes:this.entries.size*512,sdkListeners:listeners};}
  entityVersion(entity:string,id?:string){return id===undefined?this.entityVersions.get(entity)??0:this.entries.get(JSON.stringify([entity,id]))?.version??0;}
  private publish(entry:Entry){entry.version=++this.version;this.entityVersions.set(entry.entity,this.version);for(const listener of entry.subscribers)try{listener();}catch{/* Observer only. */}}
  refresh(){if(this.closed)return;if(this.refreshing){this.again=true;return;}const operation=this.drain();this.refreshing=operation;void operation.then(()=>{if(this.refreshing===operation)this.refreshing=undefined;},()=>{if(this.refreshing===operation)this.refreshing=undefined;});}

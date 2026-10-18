@@ -78,3 +78,12 @@ it('preserves an already displayed first page while its pending stage becomes ca
 it('keeps separately filtered view pages pinned independently while sharing the owner source through distinct leases',async()=>{
  const f=fixture();f.handler=async input=>{if(input.method==='collectionPage')return {rows:[{id:'a',n:input.plan.where.value}],sequence:1,bytes:32,cursor:null,generation:'window'};};const one=f.client.watchReplica({path:'tasks/all'},{},{view:'grid'}),two=f.client.watchReplica({path:'tasks/all'},{},{view:'board'});cleanup.push(()=>{one.close();two.close();});const plan={order:[{field:'n',direction:'asc' as const}],limit:10};const first=await one.queryPage({...plan,where:{field:'n',op:'gte',value:1}}),second=await two.queryPage({...plan,where:{field:'n',op:'gte',value:2}});expect(one.snapshot().page).toBe(first);expect(two.snapshot().page).toBe(second);const opens=f.calls.filter(call=>call.input.method==='watchReplica');expect(opens).toHaveLength(2);expect(opens[0].input.lease).not.toBe(opens[1].input.lease);one.close();await vi.waitFor(()=>expect(f.calls.some(call=>call.input.method==='unwatchReplica'&&call.input.lease===opens[0].input.lease)).toBe(true));expect(two.snapshot().page).toBe(second);
 });
+
+it('binds queued reducer RPCs to the current opaque worker admission key',async()=>{
+ const f=fixture();f.admit('current-admission');await f.client.pollControls();await f.client.invokeReducer({path:'tasks/change'},{id:'a'});expect(f.calls.find(call=>call.input.method==='reducer')?.input.expectedAdmissionKey).toBe('current-admission');
+});
+
+it('delivers each authoritative rejection once and acknowledges only delivered notifications',async()=>{
+ const f=fixture(),events:unknown[]=[];const event={sequence:1,reducerId:'command',path:'tasks/change',error:'denied',errorClass:'rejected'};f.handler=async input=>{if(input.method==='controls')return {tokens:[],status:{},session:'authenticated',failure:null,rejections:[event]};if(input.method==='rejectionsAck')return null;};await f.client.connect();await f.client.pollControls();expect(f.calls.some(call=>call.input.method==='rejectionsAck')).toBe(false);
+ const release=f.client.onReducerRejection(value=>{events.push(value);throw Error('observer failure');});await f.client.pollControls();await f.client.pollControls();expect(events).toEqual([event]);expect(f.calls.filter(call=>call.input.method==='rejectionsAck').every(call=>call.input.sequence===1)).toBe(true);release();
+});

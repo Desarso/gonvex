@@ -8,6 +8,7 @@ import {sqlitePayloadBytes} from './sqlite-admission.js';
 
 type Options=GonvexClientAuth&{controlOnly?:boolean;public?:boolean;ownerHost:SQLiteTransportHost;clientContract?:ClientContract;reserve(bytes:number):()=>void;releaseAuth?:()=>void};
 type ControlWatch={ref:FunctionReference;args:JsonValue;wireId?:string;authSerial?:number;release():void;receive(value:{result:JsonValue}|{error:string}):void};
+type NativeError={id:string;wire?:string;sent:boolean;timer?:ReturnType<typeof setTimeout>;release():void;resolve():void;reject(error:Error):void};
 type Pending={id:string;kind:'query'|'reducer'|'action';path:string;command?:string;control:boolean;public:boolean;wire?:string;sent:boolean;result?:JsonValue;answered:boolean;revision?:number;controlReady:boolean;timer?:ReturnType<typeof setTimeout>;resolve(value:JsonValue):void;reject(error:Error):void;release():void};
 const error=(message:string,code:'auth'|'closed'|'disconnected'|'superseded'|'timeout')=>new GonvexClientError(message,{code});
 /** Dedicated-owner wire transport. It has no legacy replica, IndexedDB engine,
@@ -18,7 +19,7 @@ export class SQLiteNativeTransport {
  private auth:GonvexClientAuth;private socket?:WebSocket;private generation=0;private authSerial=0;private identityRevision=0;
  private latestAuth?:string;private activeAuth?:string;private authInFlight=true;private installing=false;private closed=false;private disposed=false;private quarantined=false;
  private capabilities:ServerCapabilities={};private artifact='';private watermark=0;private watermarkFence='';private session:'unavailable'|'authenticated'='unavailable';
- private readonly ephemeral=crypto.randomUUID();private readonly pending=new Map<string,Pending>();private waiting=0;private readonly controlWatches=new Set<ControlWatch>();
+ private readonly ephemeral=crypto.randomUUID();private readonly pending=new Map<string,Pending>();private waiting=0;private readonly controlWatches=new Set<ControlWatch>();private readonly nativeErrors=new Map<string,NativeError>();
  private tokenCancel?:()=>void;
  private retry?:ReturnType<typeof setTimeout>;private authTimer?:ReturnType<typeof setTimeout>;private refreshed=false;private refreshedToken?:string;private sendTimer?:ReturnType<typeof setTimeout>;private reconnectAttempts=0;private connectionCount=0;private hasEver=false;
  constructor(private readonly url:string,private readonly options:Options){this.auth={project:options.project,tenant:options.tenant,identity:options.identity,token:options.token,fetchToken:options.fetchToken};}
@@ -39,7 +40,7 @@ export class SQLiteNativeTransport {
    this.receive(socket,generation,message);
   }catch(failure){this.options.ownerHost.failed(failure);socket.close();}});
   socket.addEventListener('close',()=>{if(!this.current(socket,generation))return;this.socket=undefined;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.session='unavailable';this.authInFlight=true;this.installing=false;this.clearAuthTimer();this.options.ownerHost.disconnected();
-   this.rejectAll(error('Connection interrupted; the dispatched outcome may be unknown','disconnected'));
+   this.rejectAll(error('Connection interrupted; the dispatched outcome may be unknown','disconnected'));this.rejectNativeErrors(Error('Error report connection interrupted'));
    if(!this.closed&&!this.quarantined){const delay=Math.min(30000,250*2**Math.min(this.reconnectAttempts++,7));this.retry=setTimeout(()=>{this.retry=undefined;this.connect();},delay);}
   });
   // Browser close events own reconnect/error outcomes. An error event does not
@@ -49,7 +50,7 @@ export class SQLiteNativeTransport {
  setAuth(input:GonvexClientAuth){
   if(this.disposed)throw error('Native transport was disposed','closed');
   this.identityRevision++;this.authSerial++;this.quarantined=false;this.auth={...this.auth,...input};this.refreshed=false;this.refreshedToken=undefined;this.latestAuth=undefined;this.activeAuth=undefined;
-  this.rejectAll(error('Credentials changed while the operation was pending','superseded'));
+  this.rejectAll(error('Credentials changed while the operation was pending','superseded'));this.rejectNativeErrors(Error('Error report credentials changed'));
   const socket=this.socket;if(socket?.readyState===1)void this.authenticate(socket,this.generation,false);else this.connect();
  }
  private async authenticate(socket:WebSocket,generation:number,forceRefresh:boolean){
@@ -61,14 +62,14 @@ export class SQLiteNativeTransport {
    const previousScope=this.scope();let token=this.auth.token;if(this.auth.fetchToken){let cancel:(()=>void)|undefined;let fresh:string|null|undefined;try{fresh=await Promise.race([this.auth.fetchToken({forceRefreshToken:forceRefresh}),new Promise<never>((_yes,no)=>{cancel=()=>no(Error('Native token request canceled'));this.tokenCancel=cancel;})]);}finally{if(this.tokenCancel===cancel)this.tokenCancel=undefined;}if(fresh!==null&&fresh!==undefined){token=fresh;if(forceRefresh)this.refreshedToken=fresh;}}
    if(!this.current(socket,generation)||serial!==this.authSerial)return;
    if(token!==undefined&&(typeof token!=='string'||token.length>16384))throw Error('Invalid native authentication token');
-   this.auth={...this.auth,token};if(this.scope()!==previousScope)this.options.ownerHost.authenticating(this.scope(),generation);const id=this.latestAuth=crypto.randomUUID();
+   this.auth={...this.auth,token};if(this.scope()!==previousScope){this.identityRevision++;for(const pending of [...this.pending.values()])if(!pending.public)this.finish(pending,undefined,error('Token identity changed before dispatch','superseded'));this.rejectNativeErrors(Error('Error report token identity changed'));this.options.ownerHost.authenticating(this.scope(),generation);}const id=this.latestAuth=crypto.randomUUID();
    this.sendNow({type:'auth',id,token,project:this.auth.project,tenant:this.auth.tenant,controlOnly:this.options.controlOnly||!this.auth.tenant,...(this.options.public?{public:true}:{}),...(this.options.clientContract?{clientContract:this.options.clientContract.version}:{}),
     capabilities:{replicaNativeRows:1,replicaSetDigest:1,replicaSnapshotPages:1,tenantControl:1,replicaReadyMany:1,replicaWatermark:1}});
    this.flush();
   }catch{if(this.current(socket,generation)&&serial===this.authSerial)socket.close();}
  }
  private receive(socket:WebSocket,generation:number,message:ServerMessage){
-  if(message.type==='session.ready'){this.capabilities=message.capabilities??{};return;}
+  if(message.type==='session.ready'){sqlitePayloadBytes(message.capabilities??{},4096);this.capabilities=Object.freeze({...message.capabilities});return;}
   if(message.type==='client.updateRequired'||message.type==='system.reload'){
    this.options.ownerHost.failed(Object.assign(Error(message.type==='client.updateRequired'?message.reason:'Application module changed'),{code:'SCHEMA_MISMATCH'}));socket.close();return;
   }
@@ -97,7 +98,7 @@ export class SQLiteNativeTransport {
    },failure=>{if(current()){this.options.ownerHost.failed(failure);socket.close();}});return;
   }
   if(message.type.startsWith('replica.')){if(!this.quarantined&&(!this.authInFlight||this.installing))this.options.ownerHost.frame(message,generation);return;}
-  if(!('id'in message)||typeof message.id!=='string')return;
+  if(!('id'in message)||typeof message.id!=='string')return;if(message.type==='error.ack'){const report=this.nativeErrors.get(message.id);if(report?.sent)this.finishNativeError(report,message.error?Error(message.error):undefined);return;}
   const watched=[...this.controlWatches].find(watch=>watch.wireId===message.id&&watch.authSerial===this.authSerial);
   if(watched){if(message.type==='query.result'){sqlitePayloadBytes(message.result,131072);watched.receive({result:message.result});}else if(message.type==='query.error')watched.receive({error:message.error.slice(0,512)});return;}
   const pending=this.pending.get(message.id);if(!pending||!pending.sent)return;
@@ -115,7 +116,7 @@ export class SQLiteNativeTransport {
   }
   this.settle(pending);
  }
- private deny(generation:number,message:string,code?:string){this.options.ownerHost.authError?.(message,{definitive:true,code});this.quarantined=true;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.latestAuth=undefined;this.activeAuth=undefined;this.authInFlight=false;this.installing=false;this.session='unavailable';this.clearAuthTimer();this.options.ownerHost.quarantined?.(generation);for(const pending of [...this.pending.values()])if(!pending.public)this.finish(pending,undefined,error(message,'auth'));this.flush();}
+ private deny(generation:number,message:string,code?:string){this.rejectNativeErrors(Error('Error reporting session was denied'));this.options.ownerHost.authError?.(message,{definitive:true,code});this.quarantined=true;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;this.latestAuth=undefined;this.activeAuth=undefined;this.authInFlight=false;this.installing=false;this.session='unavailable';this.clearAuthTimer();this.options.ownerHost.quarantined?.(generation);for(const pending of [...this.pending.values()])if(!pending.public)this.finish(pending,undefined,error(message,'auth'));this.flush();}
  private settle(pending:Pending){if(!pending.answered)return;if(pending.kind!=='query'){
   if(pending.control&&this.capabilities.controlWatermark===1&&!pending.controlReady)return;
   if(!pending.control&&!this.options.public&&this.capabilities.replicaWatermark===1&&pending.revision!==undefined&&pending.revision>this.watermark)return;
@@ -131,14 +132,22 @@ export class SQLiteNativeTransport {
  }for(const watch of this.controlWatches){
   if(watch.wireId&&watch.authSerial===this.authSerial||this.authInFlight&&watch.ref.authorization!=='public'||this.quarantined&&watch.ref.authorization!=='public')continue;
   if(socket.bufferedAmount>524288){if(!this.sendTimer)this.sendTimer=setTimeout(()=>{this.sendTimer=undefined;this.flush();},5);break;}
-  const id=crypto.randomUUID();this.sendNow({type:'query.subscribe',id,path:watch.ref.path,args:watch.args,scope:'control'});watch.wireId=id;watch.authSerial=this.authSerial;
- }}
+  const id=crypto.randomUUID();try{this.sendNow({type:'query.subscribe',id,path:watch.ref.path,args:watch.args,scope:'control'});}catch{socket.close();return;}watch.wireId=id;watch.authSerial=this.authSerial;
+ }if(!this.authInFlight&&!this.quarantined)for(const report of this.nativeErrors.values()){if(report.sent||!report.wire)continue;if(socket.bufferedAmount>524288){if(!this.sendTimer)this.sendTimer=setTimeout(()=>{this.sendTimer=undefined;this.flush();},5);break;}const wire=report.wire;report.wire=undefined;report.sent=true;clearTimeout(report.timer);report.timer=setTimeout(()=>this.finishNativeError(report,Error('Native error report acknowledgment timed out')),10000);try{socket.send(wire);}catch{this.finishNativeError(report,Error('Native error report send interrupted'));socket.close();}}}
  watchControl(ref:FunctionReference,args:JsonValue,receive:ControlWatch['receive']){
   if(ref.kind!=='query'||ref.scope!=='control'||ref.delivery==='replica')throw new TypeError('Control watches require generated Control queries');
   const bytes=sqlitePayloadBytes({ref:ref.path,args},16384)+512;if(this.controlWatches.size>=32)throw Object.assign(Error('Native control watch allowance exceeded'),{code:'BUDGET'});
   const release=this.options.reserve(bytes),watch:ControlWatch={ref,args,receive,release};try{watch.args=structuredClone(args);this.controlWatches.add(watch);this.connect();this.flush();}catch(error){this.controlWatches.delete(watch);release();throw error;}let closed=false;
   return ()=>{if(closed)return;closed=true;this.controlWatches.delete(watch);release();if(watch.wireId&&watch.authSerial===this.authSerial&&this.socket?.readyState===1)this.sendNow({type:'query.unsubscribe',id:watch.wireId});};
  }
+ async reportError(type:'register'|'envelope'|'heartbeat',payload:unknown):Promise<void>{
+  if(!['register','envelope','heartbeat'].includes(type))return Promise.reject(new TypeError('Invalid native error report kind'));sqlitePayloadBytes(payload,65536);if(this.nativeErrors.size>=16)return Promise.reject(Object.assign(Error('Native error reporting is pending'),{code:'BUDGET'}));
+  if(!payload||typeof payload!=='object'||Array.isArray(payload))throw new TypeError('Native error reports require an object payload');const body=payload as {release?:unknown;environment?:unknown;events?:JsonValue[]};if(type==='register'&&[body.release,body.environment].some(value=>value!==undefined&&(typeof value!=='string'||value.length>512)))throw new TypeError('Invalid error report registration');if(type==='envelope'&&!Array.isArray(body.events))throw new TypeError('Error envelopes require events');
+  const id=crypto.randomUUID(),frame=type==='register'?{type:'error.register',id,release:body.release,environment:body.environment}:type==='heartbeat'?{type:'error.heartbeat',id}:{type:'error.envelope',id,events:body.events},wire=JSON.stringify(frame),release=this.options.reserve(wire.length*2+512);try{this.connect();}catch(error){release();throw error;}
+  return new Promise<void>((resolve,reject)=>{const report:NativeError={id,wire,sent:false,release,resolve,reject};report.timer=setTimeout(()=>this.finishNativeError(report,Error('Native error report timed out')),30000);this.nativeErrors.set(id,report);this.flush();});
+ }
+ private finishNativeError(report:NativeError,failure?:Error){if(this.nativeErrors.get(report.id)!==report)return;this.nativeErrors.delete(report.id);clearTimeout(report.timer);report.wire=undefined;report.release();if(failure)report.reject(failure);else report.resolve();}
+ private rejectNativeErrors(error:Error){for(const report of [...this.nativeErrors.values()])this.finishNativeError(report,error);}
  private finish(pending:Pending,value?:JsonValue,failure?:Error){if(this.pending.get(pending.id)!==pending)return;this.pending.delete(pending.id);clearTimeout(pending.timer);pending.wire=undefined;pending.release();if(failure)pending.reject(failure);else pending.resolve(value!);}
  private rejectAll(reason:Error){for(const pending of [...this.pending.values()])this.finish(pending,undefined,reason);}
  private async invoke<T extends JsonValue>(kind:Pending['kind'],ref:FunctionReference,args:JsonValue,command?:string):Promise<T>{
@@ -162,9 +171,10 @@ export class SQLiteNativeTransport {
  query<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={}):Promise<T>{return this.invoke('query',ref,args);}
  action<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue={}):Promise<T>{return this.invoke('action',ref,args);}
  callOwnerReducer<T extends JsonValue=JsonValue>(ref:FunctionReference,args:JsonValue,command:string):Promise<T>{if(!command||command.length>256)return Promise.reject(Error('Invalid durable command ID'));return this.invoke('reducer',ref,args,command);}
+ serverInfo(){return this.capabilities;}
  authenticationState(){return this.quarantined?'denied':this.activeAuth&&!this.authInFlight?'authenticated':this.socket?'authenticating':'unavailable';}
  localSessionState(){return this.session;}
  connectionState():ConnectionState{const values=[...this.pending.values()];return {isWebSocketConnected:this.socket?.readyState===1,hasEverConnected:this.hasEver,connectionCount:this.connectionCount,connectionRetries:this.reconnectAttempts,hasInflightRequests:!!values.length,inflightReducers:values.filter(p=>p.kind==='reducer').length,inflightActions:values.filter(p=>p.kind==='action').length,inflightOneShotQueries:values.filter(p=>p.kind==='query').length};}
  dispose(){if(this.disposed)return;this.close();for(const watch of this.controlWatches)watch.release();this.controlWatches.clear();this.disposed=true;this.auth={};this.options.releaseAuth?.();}
- close(){if(this.closed)return;this.closed=true;this.identityRevision++;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;clearTimeout(this.sendTimer);this.sendTimer=undefined;this.session='unavailable';this.clearAuthTimer();clearTimeout(this.retry);this.retry=undefined;this.rejectAll(error('Native client closed; a dispatched outcome may be unknown','closed'));const socket=this.socket;this.socket=undefined;socket?.close();this.options.ownerHost.disconnected();}
+ close(){if(this.closed)return;this.closed=true;this.identityRevision++;this.authSerial++;this.tokenCancel?.();this.tokenCancel=undefined;clearTimeout(this.sendTimer);this.sendTimer=undefined;this.session='unavailable';this.clearAuthTimer();clearTimeout(this.retry);this.retry=undefined;this.rejectAll(error('Native client closed; a dispatched outcome may be unknown','closed'));this.rejectNativeErrors(Error('Native error reporting client closed'));const socket=this.socket;this.socket=undefined;socket?.close();this.options.ownerHost.disconnected();}
 }
