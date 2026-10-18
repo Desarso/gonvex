@@ -31,11 +31,13 @@ export class SQLiteNativeIngress {
  private entries=0;
  private wireBytes=0;
  private refusals=0;
+ private releaseBatch?:()=>void;
+ private releasedBytes=0;
  constructor(private readonly options:Options){
   if(!options.scope||options.scope.length>512)throw new TypeError('Invalid snapshot connection scope');
   this.ledger.register('native-snapshot-queue',()=>this.stats());
  }
- stats(){return {name:'native-snapshot-queue',bytes:this.wireBytes+this.entries*metadataBytes,maxBytes:this.ledger.maxBytes,entries:this.entries,maxEntries:maxFrames,evictions:0,refusals:this.refusals};}
+ stats(){return {name:'native-snapshot-queue',bytes:this.wireBytes+this.entries*metadataBytes,maxBytes:this.ledger.maxBytes,entries:this.entries,maxEntries:maxFrames,evictions:0,refusals:this.refusals,releasedBytes:this.releasedBytes};}
  /** Transfers exclusive ownership of the network ArrayBuffer to this actor.
   * The caller must not read or reuse it after calling accept. */
  accept(buffer:ArrayBuffer):Promise<SQLiteSnapshotReceipt>{
@@ -48,13 +50,21 @@ export class SQLiteNativeIngress {
   this.entries++;this.wireBytes+=bytes.byteLength;
   const result=new Promise<SQLiteSnapshotReceipt>((resolve,reject)=>this.pending.push({bytes,resolve,reject}));
   if(!this.draining){this.draining=true;void this.drain();}
+  if(this.pending.length>=4)this.releaseBatch?.();
   return result;
  }
- private release(entry:Pending){this.entries--;this.wireBytes-=entry.bytes.byteLength;releaseOwnedSQLiteBytes(entry.bytes);}
+ private release(entry:Pending){this.entries--;this.wireBytes-=entry.bytes.byteLength;this.releasedBytes+=releaseOwnedSQLiteBytes(entry.bytes);}
  private async drain(){
   try{
    while(this.pending.length&&!this.disposed){
     await this.tasks.yield();
+    // Network events can arrive on separate tasks. Wait at most four ms for
+    // four credits instead of forcing a FULL sync after almost every frame.
+    if(this.pending.length<4&&!this.disposed)await new Promise<void>(resolve=>{
+     const timer=setTimeout(()=>finish(),4);
+     const finish=()=>{clearTimeout(timer);this.releaseBatch=undefined;resolve();};
+     this.releaseBatch=finish;
+    });
     const batch=this.pending;this.pending=[];
     if(!batch.length)continue;
     try{
@@ -65,7 +75,7 @@ export class SQLiteNativeIngress {
       await this.options.database.withTransactionAsync(async()=>{
        for(const entry of batch){
         if(this.disposed)throw closed();
-        const receipt=await this.options.snapshots.appendEncodedReceipt(this.options.scope,entry.bytes);
+        const receipt=await this.options.snapshots.appendEncodedReceipt(this.options.scope,entry.bytes,true);
         // Replaying an earlier page can observe an already complete stage.
         // Only the final page schedules publication, which is itself idempotent.
         if(receipt.progress.complete&&receipt.ack.sequence+1===receipt.progress.nextPage)await this.options.activateVerified?.(receipt);
@@ -85,7 +95,7 @@ export class SQLiteNativeIngress {
   finally{this.draining=false;}
  }
  close(){
-  if(this.disposed)return;this.disposed=true;this.tasks.close();
+  if(this.disposed)return;this.disposed=true;this.tasks.close();this.releaseBatch?.();
   const pending=this.pending;this.pending=[];
   for(const entry of pending){entry.reject(closed());this.release(entry);}
  }

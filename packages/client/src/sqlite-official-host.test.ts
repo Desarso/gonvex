@@ -111,7 +111,7 @@ it('profiles native transaction boundaries using fixed numeric counters and rese
   const result = host.takeProfile();
   expect(result).toMatchObject({ commits: 1, rollbacks: 1 });
   for (const value of Object.values(result)) expect(Number.isFinite(value) && value >= 0).toBe(true);
-  expect(host.takeProfile()).toEqual({ ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
+  expect(host.takeProfile()).toEqual({ execCalls:0,execMs:0,ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 });
   expect((await host.database.getFirstAsync<{ n: number }>('SELECT count(*) n FROM profile_probe'))!.n).toBe(0);
 });
 
@@ -318,4 +318,13 @@ it('folds ASCII natively and uses the exact Unicode ingress fallback without nor
     expect((await folded.page('s',plan)).rows,search).toEqual((await projected.page('s',plan)).rows);
   }
   expect(await folded.integrity()).toBe('ok');
+});
+
+it('reuses the small ingress statement cycle while preserving the same native byte cap',async()=>{
+ const {host}=fixture();host.takeProfile();
+ for(let i=0;i<14;i++)expect(await host.database.getFirstAsync(`SELECT ? value /* metadata-${i} */`,i)).toEqual({value:i});
+ expect(host.takeProfile().prepares).toBe(14);
+ for(let round=0;round<5;round++)for(let i=0;i<14;i++)expect(await host.database.getFirstAsync(`SELECT ? value /* metadata-${i} */`,round+i)).toEqual({value:round+i});
+ expect(host.takeProfile().prepares).toBe(0);expect(host.statementBytes()).toBeLessThanOrEqual(262144);
+ host.close();expect(host.statementBytes()).toBe(0);
 });

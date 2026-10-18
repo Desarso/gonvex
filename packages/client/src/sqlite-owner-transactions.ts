@@ -10,12 +10,19 @@ export function sqliteOwnerTransactions(database: SQLiteReplicaDatabase): SQLite
     get ownerTransactionDepth(){return depth;},
     ...(database.ingressUnicodeFold ? {ingressUnicodeFold:true as const} : {}),
     ...(database.ingressNativeFastFold ? {ingressNativeFastFold:true as const} : {}),
+    ...(database.ingressNativeReceipt ? {ingressNativeReceipt:true as const} : {}),
     ...(database.ingressNativeHash ? {ingressNativeHash:true as const} : {}),
     execAsync:sql=>database.execAsync(sql),
     runAsync:(sql,...params)=>database.runAsync(sql,...params),
     getAllAsync:<T>(sql:string,...params:unknown[])=>database.getAllAsync<T>(sql,...params),
     getFirstAsync:<T>(sql:string,...params:unknown[])=>database.getFirstAsync<T>(sql,...params),
+    async joinOwnerTransactionAsync(run){
+      checkPoison();
+      if(!depth)throw Object.assign(new Error('No active owner transaction to join'),{code:'FENCED'});
+      try{await run();checkPoison();}catch(error){poison??={error};throw error;}
+    },
     async withTransactionAsync(run){
+      checkPoison();
       if(depth>=8)throw new RangeError('SQLite owner transaction nesting exceeds budget');
       if(!depth){
         await database.withTransactionAsync(async()=>{depth++;poison=undefined;try{await run();checkPoison();}finally{depth--;poison=undefined;}});

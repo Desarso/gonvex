@@ -19,6 +19,15 @@ static void gv_fast_lower(sqlite3_context *context,int argc,sqlite3_value **argv
       if((cp>=192&&cp<=214)||(cp>=216&&cp<=222))cp+=32;
       out[used++]=(unsigned char)(192|(cp>>6));out[used++]=(unsigned char)(128|(cp&63));at+=2;continue;
     }
+    if(a>=240&&a<=244){
+      width=4;
+      if(at+width>count||(text[at+1]&192)!=128||(text[at+2]&192)!=128||(text[at+3]&192)!=128)goto fallback;
+      if((a==240&&text[at+1]<144)||(a==244&&text[at+1]>=144))goto fallback;
+      cp=((a&7)<<18)|((text[at+1]&63)<<12)|((text[at+2]&63)<<6)|(text[at+3]&63);
+      /* Emoji and enclosed symbols in this range have no lowercase mapping. */
+      if(cp<0x1f000||cp>0x1faff)goto fallback;
+      out[used++]=text[at++];out[used++]=text[at++];out[used++]=text[at++];out[used++]=text[at++];continue;
+    }
     width=3;
     if(a<224||a>239||at+width>count||(text[at+1]&192)!=128||(text[at+2]&192)!=128)goto fallback;
     cp=((a&15)<<12)|((text[at+1]&63)<<6)|(text[at+2]&63);
@@ -30,7 +39,7 @@ static void gv_fast_lower(sqlite3_context *context,int argc,sqlite3_value **argv
 fallback:
   sqlite3_free(out);sqlite3_result_null(context);
 }
-static void gv_fast_contract(sqlite3_context *context,int argc,sqlite3_value **argv){(void)argc;(void)argv;sqlite3_result_text(context,"ascii-latin1-cjk-v1",-1,SQLITE_STATIC);}
+static void gv_fast_contract(sqlite3_context *context,int argc,sqlite3_value **argv){(void)argc;(void)argv;sqlite3_result_text(context,"ascii-latin1-cjk-emoji-v2",-1,SQLITE_STATIC);}
 /* SHA-256 over exact ingress bytes. Canonical row encoding remains the wire
 ** contract; this function does not normalize, reorder or reinterpret JSON. */
 #include <stdint.h>
@@ -82,12 +91,90 @@ static void gv_sha256(sqlite3_context *context,int argc,sqlite3_value **argv){
  result[64]=0;sqlite3_result_text(context,result,64,SQLITE_TRANSIENT);
 }
 static void gv_hash_contract(sqlite3_context *context,int argc,sqlite3_value **argv){(void)argc;(void)argv;sqlite3_result_text(context,"sha256-v1",-1,SQLITE_STATIC);}
+/* Fixed 4160-byte receipt shared with Rust and TypeScript. All arithmetic is
+** modulo 2^128 on explicitly little-endian bytes; row counts are safe binary64
+** integers encoded as IEEE-754 little endian, matching receipt version 1. */
+#define GV_RECEIPT_BYTES 4160
+#define GV_RECEIPT_XOR 4128
+#define GV_MAX_ROWS UINT64_C(9007199254740991)
+typedef struct gv_receipt_state {unsigned char bytes[GV_RECEIPT_BYTES];unsigned char seed[GV_RECEIPT_BYTES];uint64_t rows;int initialized;int failed;} gv_receipt_state;
+static int gv_receipt_read(sqlite3_value *value,const unsigned char **bytes,uint64_t *rows){
+ const unsigned char *p;uint64_t bits=0;double count;unsigned int i;
+ if(sqlite3_value_type(value)!=SQLITE_BLOB||sqlite3_value_bytes(value)!=GV_RECEIPT_BYTES)return 0;
+ p=sqlite3_value_blob(value);if(!p||p[0]!=1)return 0;
+ for(i=1;i<8;i++)if(p[i])return 0;
+ for(i=0;i<8;i++)bits|=(uint64_t)p[8+i]<<(i*8);
+ memcpy(&count,&bits,8);
+ if(!(count>=0&&count<=(double)GV_MAX_ROWS))return 0;
+ *rows=(uint64_t)count;if((double)*rows!=count)return 0;
+ *bytes=p;return 1;
+}
+static int gv_hex_byte(unsigned char high,unsigned char low){
+ int h=high>='0'&&high<='9'?high-'0':high>='a'&&high<='f'?high-'a'+10:-1;
+ int l=low>='0'&&low<='9'?low-'0':low>='a'&&low<='f'?low-'a'+10:-1;
+ return h<0||l<0?-1:h*16+l;
+}
+static void gv_receipt_step(sqlite3_context *context,int argc,sqlite3_value **argv){
+ gv_receipt_state *state=sqlite3_aggregate_context(context,sizeof(gv_receipt_state));
+ const unsigned char *seed,*hash;unsigned char digest[32];uint64_t rows;int direction,i,base,carry,value;(void)argc;
+ if(!state){sqlite3_result_error_nomem(context);return;}
+ if(state->failed)return;
+ if(!state->initialized){
+  if(!gv_receipt_read(argv[0],&seed,&rows))goto invalid;
+  memcpy(state->bytes,seed,GV_RECEIPT_BYTES);memcpy(state->seed,seed,GV_RECEIPT_BYTES);state->rows=rows;state->initialized=1;
+ }else{
+  if(sqlite3_value_type(argv[0])!=SQLITE_BLOB||sqlite3_value_bytes(argv[0])!=GV_RECEIPT_BYTES)goto invalid;
+  seed=sqlite3_value_blob(argv[0]);if(!seed||memcmp(seed,state->seed,GV_RECEIPT_BYTES))goto invalid;
+ }
+ if(sqlite3_value_type(argv[1])!=SQLITE_TEXT||sqlite3_value_bytes(argv[1])!=64||sqlite3_value_type(argv[2])!=SQLITE_INTEGER)goto invalid;
+ if(sqlite3_value_int64(argv[2])!=1&&sqlite3_value_int64(argv[2])!=-1)goto invalid;
+ direction=sqlite3_value_int(argv[2]);
+ if((direction==1&&state->rows==GV_MAX_ROWS)||(direction==-1&&state->rows==0))goto invalid;
+ hash=sqlite3_value_text(argv[1]);if(!hash){sqlite3_result_error_nomem(context);state->failed=1;return;}
+ for(i=0;i<32;i++){value=gv_hex_byte(hash[i*2],hash[i*2+1]);if(value<0)goto invalid;digest[i]=(unsigned char)value;}
+ for(base=16;base>=0;base=base==16?16+(digest[31]+1)*16:-1){
+  carry=0;for(i=0;i<16;i++){value=state->bytes[base+i]+direction*digest[15-i]+carry;state->bytes[base+i]=(unsigned char)value;carry=value<0?-1:value>255?1:0;}
+  if(base!=16)break;
+ }
+ for(i=0;i<32;i++)state->bytes[GV_RECEIPT_XOR+i]^=digest[i];
+ if(direction==1)state->rows++;else state->rows--;
+ return;
+invalid:
+ state->failed=1;sqlite3_result_error(context,"Invalid native replica receipt operation",-1);
+}
+static void gv_receipt_final(sqlite3_context *context){
+ gv_receipt_state *state=sqlite3_aggregate_context(context,0);double count;uint64_t bits;unsigned int i;
+ if(!state||!state->initialized){sqlite3_result_null(context);return;}
+ if(state->failed){sqlite3_result_error(context,"Invalid native replica receipt operation",-1);return;}
+ count=(double)state->rows;memcpy(&bits,&count,8);
+ for(i=0;i<8;i++)state->bytes[8+i]=(unsigned char)(bits>>(i*8));
+ sqlite3_result_blob(context,state->bytes,GV_RECEIPT_BYTES,SQLITE_TRANSIENT);
+}
+static void gv_receipt_info(sqlite3_context *context,int argc,sqlite3_value **argv){
+ const unsigned char *bytes;uint64_t rows;char out[70];const char *digits="0123456789abcdef";unsigned int i;(void)argc;
+ if(!gv_receipt_read(argv[0],&bytes,&rows)){sqlite3_result_error(context,"Invalid native replica receipt",-1);return;}
+ switch((int)(intptr_t)sqlite3_user_data(context)){
+  case 0:sqlite3_result_int64(context,(sqlite3_int64)rows);return;
+  case 1:
+   memcpy(out,"sum128-v1:",10);for(i=0;i<16;i++){unsigned char b=bytes[31-i];out[10+i*2]=digits[b>>4];out[11+i*2]=digits[b&15];}
+   sqlite3_result_text(context,out,42,SQLITE_TRANSIENT);return;
+  default:
+   memcpy(out,"xor1:",5);for(i=0;i<32;i++){unsigned char b=bytes[GV_RECEIPT_XOR+i];out[5+i*2]=digits[b>>4];out[6+i*2]=digits[b&15];}
+   sqlite3_result_text(context,out,69,SQLITE_TRANSIENT);return;
+ }
+}
+static void gv_receipt_contract(sqlite3_context *context,int argc,sqlite3_value **argv){(void)argc;(void)argv;sqlite3_result_text(context,"sum128-v1/receipt1",-1,SQLITE_STATIC);}
 static int gv_install(sqlite3 *db,char **error,const sqlite3_api_routines *api){
   int rc;(void)error;(void)api;
   rc=sqlite3_create_function_v2(db,"gv_ingress_lower_fast",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_DIRECTONLY,0,gv_fast_lower,0,0,0);
   if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_fast_contract",0,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS,0,gv_fast_contract,0,0,0);
   if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_sha256",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_DIRECTONLY,0,gv_sha256,0,0,0);
   if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_hash_contract",0,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS,0,gv_hash_contract,0,0,0);
+  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_step",3,SQLITE_UTF8|SQLITE_DIRECTONLY,0,0,gv_receipt_step,gv_receipt_final,0);
+  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_count",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_DIRECTONLY,0,gv_receipt_info,0,0,0);
+  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_digest",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_DIRECTONLY,(void *)(intptr_t)1,gv_receipt_info,0,0,0);
+  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_xor",1,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_DIRECTONLY,(void *)(intptr_t)2,gv_receipt_info,0,0,0);
+  if(rc==SQLITE_OK)rc=sqlite3_create_function_v2(db,"gv_ingress_receipt_contract",0,SQLITE_UTF8|SQLITE_DETERMINISTIC|SQLITE_INNOCUOUS,0,gv_receipt_contract,0,0,0);
   return rc;
 }
 int sqlite3_wasm_extra_init(const char *unused){(void)unused;return sqlite3_auto_extension((void(*)(void))gv_install);}

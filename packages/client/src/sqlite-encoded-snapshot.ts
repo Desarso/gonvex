@@ -1,14 +1,14 @@
 import {ByteLedger} from './byte-budget.js';
 import {admitSQLiteUTF8Frame,encodedFrameHasCanonicalStructure} from './sqlite-encoded-frame.js';
-import {fail,sqlitePayloadBytes} from './sqlite-admission.js';
+import {fail} from './sqlite-admission.js';
 import {ReplicaSetDigest} from './replica-set-digest.js';
 import type {SQLiteReplicaDatabase} from './sqlite-replica-storage.js';
-import type {SQLiteSnapshotMetadata,SQLiteSnapshotProgress,SQLiteSnapshotStage,SQLiteSnapshotReceipt} from './sqlite-snapshot-pages.js';
+import type {SQLiteSnapshotMetadata,SQLiteSnapshotProgress,SQLiteSnapshotStage,SQLiteSnapshotReceipt,SQLiteSnapshotDigestState} from './sqlite-snapshot-pages.js';
 
 type Backend={
  initialize():Promise<void>;
  prepare(scope:string,metadata:SQLiteSnapshotMetadata,hash:string):Promise<SQLiteSnapshotStage|SQLiteSnapshotProgress>;
- finish(scope:string,metadata:SQLiteSnapshotMetadata,digest:string|undefined,hash:string,stage:SQLiteSnapshotStage,state:ReplicaSetDigest,rows:number,bytes:number):Promise<SQLiteSnapshotProgress>;
+ finish(scope:string,metadata:SQLiteSnapshotMetadata,digest:string|undefined,hash:string,stage:SQLiteSnapshotStage,state:SQLiteSnapshotDigestState,rows:number,bytes:number):Promise<SQLiteSnapshotProgress>;
 };
 const source='(SELECT value FROM main.gv_snapshot_input WHERE id=1)';
 const field=(name:string)=>`json_extract(${source},'$.${name}')`;
@@ -19,33 +19,38 @@ const metadataSQL=`SELECT hash frameHash,
  ${field('cursor.epoch')} epoch,${kind('cursor.epoch')} epochType,${field('cursor.revision')} revision,${kind('cursor.revision')} revisionType,
  CASE WHEN ${kind('result')} IS NULL AND ${kind('hashes')} IS NULL THEN 0 ELSE 1 END badExtra
  FROM main.gv_snapshot_input WHERE id=1`;
-const rowsSQL=`SELECT CAST(key AS INTEGER) position,value body FROM json_each(${source},'$.canonicalRows')`;
+const rowsSQL=`SELECT CAST(key AS INTEGER) position,value body,type bodyType FROM json_each(${source},'$.canonicalRows')`;
 const keyedSQL=`WITH input AS MATERIALIZED(${rowsSQL}),keyed AS MATERIALIZED(
- SELECT position,body,CASE WHEN json_type(body,?)='text' THEN json_extract(body,?) ELSE body -> ? END id FROM input)`;
+ SELECT position,body,bodyType,CASE WHEN bodyType='text' AND json_valid(body) THEN CASE WHEN json_type(body)='object' THEN CASE WHEN json_type(body,?)='text' THEN json_extract(body,?) ELSE body -> ? END END END id FROM input)`;
 
 /** Native snapshot frames carry canonical JSON row strings. SQLite unescapes
  * that outer transport string exactly; SHA-256 sees the server's canonical
  * row bytes without reserializing numbers or materializing row objects in JS.
- * Only bounded metadata and (id,hash) receipts cross the oo1 bridge. */
+ * The native receipt path returns one fixed summary; older hosts return
+ * bounded (id,hash) frame receipts. */
 export class SQLiteEncodedSnapshotPages {
  private scratch?:Uint8Array;
  private busy=false;
+ private nativeReceiptFrames=0;
+ private nativeReceiptRows=0;
+ private decodedHashRows=0;
  private readonly ledger=new ByteLedger(131072);
  constructor(private readonly db:SQLiteReplicaDatabase,private readonly fence:()=>Promise<unknown>,private readonly backend:Backend){
   this.ledger.register('snapshot-wire-scratch',()=>({name:'snapshot-wire-scratch',bytes:this.scratch?.byteLength??0,maxBytes:131072,entries:Number(!!this.scratch),maxEntries:1,evictions:0,refusals:0}));
  }
- stats(){return {wireBytes:this.ledger.bytes,wireMaxBytes:this.ledger.maxBytes,wireEntries:Number(!!this.scratch)};}
- async appendReceipt(scope:string,input:Uint8Array):Promise<SQLiteSnapshotReceipt>{
+ stats(){return {wireBytes:this.ledger.bytes,wireMaxBytes:this.ledger.maxBytes,wireEntries:Number(!!this.scratch),nativeReceiptFrames:this.nativeReceiptFrames,nativeReceiptRows:this.nativeReceiptRows,decodedHashRows:this.decodedHashRows};}
+ async appendReceipt(scope:string,input:Uint8Array,joinOwnerTransaction=false):Promise<SQLiteSnapshotReceipt>{
   if(!this.db.ingressNativeHash)throw Object.assign(new Error('Native snapshot hashing is unavailable'),{code:'UNSUPPORTED'});
   if(!(input instanceof Uint8Array)||!(input.buffer instanceof ArrayBuffer)||input.byteLength>this.ledger.maxBytes)fail('BUDGET','Snapshot wire frame exceeds budget');
+  if(joinOwnerTransaction&&(!this.db.ownerTransactionDepth||!this.db.joinOwnerTransactionAsync))fail('FENCED','Snapshot batch requires an active owner transaction');
   if(this.busy)fail('FENCED','Snapshot frames must use the owner FIFO');
   this.scratch??=new Uint8Array(this.ledger.maxBytes);this.scratch.set(input);this.busy=true;
-  const owned=this.scratch.subarray(0,input.byteLength);let output!:SQLiteSnapshotProgress,ack!:SQLiteSnapshotReceipt['ack'];
+  const owned=this.scratch.subarray(0,input.byteLength);let output!:SQLiteSnapshotProgress,ack!:SQLiteSnapshotReceipt['ack'],nativeRows=0,decodedRows=0,usedNative=false;
   try{
    admitSQLiteUTF8Frame(owned,262144);
    if(owned.includes(0))fail('INVALID_ROW','Unescaped NUL in snapshot JSON');
    await this.backend.initialize();
-   await this.db.withTransactionAsync(async()=>{
+   const apply=async()=>{
     await this.fence();await this.db.runAsync('DELETE FROM main.gv_snapshot_input');
     try{
      await this.db.runAsync(`WITH wire AS MATERIALIZED(SELECT CAST(? AS TEXT) value)
@@ -68,28 +73,45 @@ export class SQLiteEncodedSnapshotPages {
      if(header.truncatedType!==null){if(!['true','false'].includes(String(header.truncatedType)))fail('INVALID_ROW','Invalid encoded snapshot truncation');metadata.truncated=header.truncatedType==='true';}
      const digest=header.digestType===null?undefined:header.digestType==='text'?header.digest as string:fail('INVALID_ROW','Invalid snapshot digest');
      if(!metadata.last&&digest!==undefined)fail('INVALID_ROW','Snapshot digest arrived before the final frame');
-     sqlitePayloadBytes(metadata,16384);
      ack={type:'replica.snapshotAck',id:metadata.id,snapshotId:metadata.snapshotId,sequence:metadata.sequence};
      const frameHash=header.frameHash as string,prepared=await this.backend.prepare(scope,metadata,frameHash);
      if('snapshotId'in prepared){output=prepared;return;}
      const path='$.'+JSON.stringify(metadata.key);
-     const size=await this.db.getFirstAsync<{n:number;bytes:number;bad:number}>(`SELECT count(*) n,coalesce(sum(length(CAST(value AS BLOB))),0) bytes,
-      coalesce(sum(CASE WHEN type<>'text' OR NOT json_valid(value) THEN 1 WHEN json_type(value)<>'object' THEN 1
-       WHEN NOT coalesce(json_type(value,?) IN ('text','integer','real'),0) THEN 1 ELSE 0 END),0) bad
-      FROM json_each(${source},'$.canonicalRows')`,path);
-     if(!size||size.bad||size.n>512||!metadata.last&&!size.n)fail('INVALID_ROW','Invalid canonical snapshot rows');
      const paths=[path,path,path];
-     if(await this.db.getFirstAsync(`${keyedSQL} SELECT 1 FROM keyed WHERE id IS NULL OR id='' LIMIT 1`,...paths))fail('INVALID_ROW','Snapshot row requires an identity');
-     if(await this.db.getFirstAsync(`${keyedSQL} SELECT 1 FROM keyed GROUP BY id HAVING count(*)>1 LIMIT 1`,...paths))fail('INVALID_ROW','duplicate-snapshot-key');
-     // The bounded incoming frame must drive indexed durable duplicate probes.
-     if(await this.db.getFirstAsync(`${keyedSQL} SELECT 1 FROM keyed w CROSS JOIN gv_snapshot_rows r ON r.scope=? AND r.subscription=? AND r.snapshot=? AND r.id=w.id LIMIT 1`,...paths,scope,metadata.id,metadata.snapshotId))fail('INVALID_ROW','duplicate-snapshot-key');
-     const hashes=await this.db.getAllAsync<{id:string;hash:string}>(`${keyedSQL} INSERT INTO gv_snapshot_rows(scope,subscription,snapshot,id,position,body,hash)
-      SELECT ?,?,?,id,?+position,body,gv_ingress_sha256(body) FROM keyed RETURNING id,hash`,...paths,scope,metadata.id,metadata.snapshotId,prepared.rows);
-     if(hashes.length!==size.n)fail('INVALID_ROW','Snapshot insert receipt differs from the frame');
-     const state=ReplicaSetDigest.decode(prepared.receipt);for(const row of hashes)state.add(row.hash);
+     const size=await this.db.getFirstAsync<{n:number;bytes:number;bad:number;uniqueIds:number;emptyIds:number;overlaps:number}>(`${keyedSQL}
+      SELECT count(*) n,coalesce(sum(length(CAST(body AS BLOB))),0) bytes,
+       coalesce(sum(CASE WHEN bodyType<>'text' OR NOT json_valid(body) THEN 1 WHEN json_type(body)<>'object' THEN 1
+        WHEN NOT coalesce(json_type(body,?) IN ('text','integer','real'),0) THEN 1 ELSE 0 END),0) bad,
+       count(DISTINCT id) uniqueIds,coalesce(sum(id IS NULL OR id=''),0) emptyIds,
+       coalesce(sum(EXISTS(SELECT 1 FROM gv_snapshot_rows r WHERE r.scope=? AND r.subscription=? AND r.snapshot=? AND r.id=keyed.id)),0) overlaps
+      FROM keyed`,...paths,path,scope,metadata.id,metadata.snapshotId);
+     if(!size||size.bad||size.n>512||!metadata.last&&!size.n)fail('INVALID_ROW','Invalid canonical snapshot rows');
+     if(size.emptyIds)fail('INVALID_ROW','Snapshot row requires an identity');
+     if(size.uniqueIds!==size.n||size.overlaps)fail('INVALID_ROW','duplicate-snapshot-key');
+     const insert=`${keyedSQL} INSERT INTO gv_snapshot_rows(scope,subscription,snapshot,id,position,body,hash)
+      SELECT ?,?,?,id,?+position,body,gv_ingress_sha256(body) FROM keyed`;
+     const args=[...paths,scope,metadata.id,metadata.snapshotId,prepared.rows];
+     let state:SQLiteSnapshotDigestState;
+     if(this.db.ingressNativeReceipt){
+      usedNative=true;
+      await this.db.runAsync(insert,...args);
+      const summary=await this.db.getFirstAsync<{receipt:Uint8Array;n:number;digest:string;legacy:string}>(`WITH summary AS MATERIALIZED(
+       SELECT coalesce(gv_ingress_receipt_step(?,hash,1),?) receipt FROM gv_snapshot_rows
+       WHERE scope=? AND subscription=? AND snapshot=? AND position>=? AND position<?)
+       SELECT receipt,gv_ingress_receipt_count(receipt) n,gv_ingress_receipt_digest(receipt) digest,gv_ingress_receipt_xor(receipt) legacy FROM summary`,prepared.receipt,prepared.receipt,scope,metadata.id,metadata.snapshotId,prepared.rows,prepared.rows+size.n);
+      if(!summary||!(summary.receipt instanceof Uint8Array)||summary.receipt.byteLength!==4160)fail('INVALID_ROW','Invalid native snapshot summary');
+      state={count:summary.n,digest:()=>summary.digest,legacyDigest:()=>summary.legacy,encode:()=>summary.receipt};nativeRows=size.n;
+     }else{
+      const hashes=await this.db.getAllAsync<{id:string;hash:string}>(insert+' RETURNING id,hash',...args);
+      if(hashes.length!==size.n)fail('INVALID_ROW','Snapshot insert receipt differs from the frame');
+      const fallback=ReplicaSetDigest.decode(prepared.receipt);for(const row of hashes)fallback.add(row.hash);
+      state=fallback;decodedRows=hashes.length;
+     }
      output=await this.backend.finish(scope,metadata,digest,frameHash,prepared,state,size.n,size.bytes);
     }finally{await this.db.runAsync('DELETE FROM main.gv_snapshot_input');}
-   });return {progress:output,ack};
+   };
+   if(joinOwnerTransaction)await this.db.joinOwnerTransactionAsync!(apply);else await this.db.withTransactionAsync(apply);
+   this.nativeReceiptRows+=nativeRows;this.decodedHashRows+=decodedRows;if(usedNative)this.nativeReceiptFrames++;return {progress:output,ack};
   }finally{owned.fill(0);this.busy=false;}
  }
 }

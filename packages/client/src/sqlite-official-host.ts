@@ -8,7 +8,8 @@ export type OfficialSQLiteHost = {
   statementBytes(): number;
   readonly nativeFastFold:boolean;
   readonly nativeHash:boolean;
-  takeProfile(): { ingressFoldCalls:number; ingressFoldUTF16Bytes:number; prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
+  readonly nativeReceipt:boolean;
+  takeProfile(): { ingressFoldCalls:number; ingressFoldUTF16Bytes:number; execMs:number;execCalls:number;prepareMs: number; prepares: number; bindMs: number; boundTextUTF16Bytes: number; beginMs: number; callbackMs: number; commitMs: number; rollbackMs: number; commits: number; rollbacks: number };
   close(): void;
 };
 
@@ -54,9 +55,9 @@ PRAGMA recursive_triggers=ON; PRAGMA busy_timeout=3000;`);
 export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
   budget = { maxRows: 512, maxBytes: 262_144 }): OfficialSQLiteHost {
   let transaction = false, closed = false, statementBytes = 0;
-  const profile = { ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 };
+  const profile = { execMs:0,execCalls:0,ingressFoldCalls:0, ingressFoldUTF16Bytes:0, prepareMs: 0, prepares: 0, bindMs: 0, boundTextUTF16Bytes: 0, beginMs: 0, callbackMs: 0, commitMs: 0, rollbackMs: 0, commits: 0, rollbacks: 0 };
   const statements = new Map<string, { statement: PreparedStatement; bytes: number }>();
-  const statementBudget = 262144, maxStatements = 4;
+  const statementBudget = 262144, maxStatements = 32;
   function retire(sql: string) {
     const cached = statements.get(sql); if (!cached) return;
     statements.delete(sql); statementBytes -= cached.bytes; cached.statement.finalize();
@@ -93,9 +94,9 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
   }
   function read<T>(sql: string, values: unknown[], first: boolean): T[] {
     check();
-    // Complex repeated validation/page reads share the same four-plan cap.
-    // Tiny one-off metadata reads do not displace those plans.
-    const eligible = sql.length > 512, cached = eligible ? cachedPlan(sql) : undefined;
+    // Metadata, validation and render-page reads share the same byte cap.
+    // Retaining the small ingress cycle avoids allocating a statement per read.
+    const cached = cachedPlan(sql);
     const statement = cached?.statement ?? prepare(sql); let retain = !!cached;
     try {
       bind(statement, values);
@@ -116,7 +117,7 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
         rows.push(Object.fromEntries(entries) as T);
         if (first) break;
       }
-      if (eligible) retain = remember(sql, statement, cached);
+      retain = remember(sql, statement, cached);
       return rows;
     } catch (error) {
       if (cached) { retire(sql); retain = true; }
@@ -124,15 +125,18 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
     } finally { if (!retain) statement.finalize(); }
   }
   let nativeFastFold=false;
-  try{nativeFastFold=db.selectValue('SELECT gv_ingress_fast_contract()')==='ascii-latin1-cjk-v1';}catch(error){if(!/no such function: gv_ingress_fast_contract/.test(String((error as Error).message)))throw error;}
+  try{nativeFastFold=['ascii-latin1-cjk-v1','ascii-latin1-cjk-emoji-v2'].includes(String(db.selectValue('SELECT gv_ingress_fast_contract()')));}catch(error){if(!/no such function: gv_ingress_fast_contract/.test(String((error as Error).message)))throw error;}
   let nativeHash=false;
   try{nativeHash=db.selectValue('SELECT gv_ingress_hash_contract()')==='sha256-v1';}catch(error){if(!/no such function: gv_ingress_hash_contract/.test(String((error as Error).message)))throw error;}
   db.createFunction('gv_ingress_lower', (_context: unknown, value: unknown) => { const text=String(value??''); profile.ingressFoldCalls++; profile.ingressFoldUTF16Bytes+=text.length*2; return text.toLowerCase(); }, { arity: 1, deterministic: true, directOnly: true });
+  let nativeReceipt=false;
+  try{nativeReceipt=db.selectValue('SELECT gv_ingress_receipt_contract()')==='sum128-v1/receipt1';}catch(error){if(!/no such function: gv_ingress_receipt_contract/.test(String((error as Error).message)))throw error;}
   const database: SQLiteReplicaDatabase = {
     ingressUnicodeFold: true,
     ...(nativeFastFold ? {ingressNativeFastFold:true as const} : {}),
+    ...(nativeReceipt ? {ingressNativeReceipt:true as const} : {}),
     ...(nativeHash ? {ingressNativeHash:true as const} : {}),
-    async execAsync(sql) { check(); db.exec(sql); },
+    async execAsync(sql) { check();const began=performance.now();profile.execCalls++;try{db.exec(sql);}finally{profile.execMs+=performance.now()-began;} },
     async runAsync(sql, ...values) {
       check();
       const cached = cachedPlan(sql);
@@ -169,7 +173,7 @@ export function officialSQLiteDatabase(sqlite3: Sqlite3Static, db: Database,
       finally { transaction = false; }
     },
   };
-  return { database, nativeFastFold,nativeHash, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes,
+  return { database, nativeFastFold,nativeHash,nativeReceipt, memoryBytes: () => sqlite3.wasm.heap8u().buffer.byteLength, statementBytes: () => statementBytes,
     takeProfile() { const result = { ...profile }; for (const key of Object.keys(profile) as Array<keyof typeof profile>) profile[key] = 0; return result; },
     close() { if (!closed) { closed = true; for (const sql of statements.keys()) retire(sql); db.close(); } } };
 }

@@ -7,6 +7,7 @@ import {ReplicaSetDigest} from './replica-set-digest.js';
 import {sameSnapshotPageMetadata,type SnapshotPage} from './snapshot-pages.js';
 import {yieldSQLiteTask} from './sqlite-task-yield.js';
 
+export type SQLiteSnapshotDigestState=Pick<ReplicaSetDigest,'count'|'digest'|'legacyDigest'|'encode'>;
 export type SQLiteSnapshotMetadata=Omit<SnapshotPage,'result'|'digest'>;
 export type SQLiteSnapshotStage={metadata:string;next_page:number;rows:number;bytes:number;receipt:Uint8Array;complete:number;digest:string|null;discarded:number};
 export type SQLiteSnapshotReceipt={progress:SQLiteSnapshotProgress;ack:{type:'replica.snapshotAck';id:string;snapshotId:string;sequence:number}};
@@ -85,15 +86,15 @@ export class SQLiteSnapshotPages {
    output=await this.finishFrame(scope,metadata,digest,frameHash,stage,state,result.length,bytes-stage.bytes);
   });return output;
  }
- stats(){return this.encoded?.stats()??{wireBytes:0,wireMaxBytes:131072,wireEntries:0};}
+ stats(){return this.encoded?.stats()??{wireBytes:0,wireMaxBytes:131072,wireEntries:0,nativeReceiptFrames:0,nativeReceiptRows:0,decodedHashRows:0};}
  async appendEncoded(scope:string,input:Uint8Array):Promise<SQLiteSnapshotProgress>{
   return (await this.appendEncodedReceipt(scope,input)).progress;
  }
- async appendEncodedReceipt(scope:string,input:Uint8Array):Promise<SQLiteSnapshotReceipt>{
+ async appendEncodedReceipt(scope:string,input:Uint8Array,joinOwnerTransaction=false):Promise<SQLiteSnapshotReceipt>{
   this.encoded??=new SQLiteEncodedSnapshotPages(this.db,this.fence,{
    initialize:()=>this.initialize(),prepare:(...args)=>this.prepareFrame(...args),finish:(...args)=>this.finishFrame(...args),
   });
-  return this.encoded.appendReceipt(scope,input);
+  return this.encoded.appendReceipt(scope,input,joinOwnerTransaction);
  }
  private async prepareFrame(scope:string,metadata:SQLiteSnapshotMetadata,frameHash:string):Promise<SQLiteSnapshotStage|SQLiteSnapshotProgress>{
   identity(scope,metadata.id,metadata.snapshotId);sqlitePayloadBytes(metadata,16384);
@@ -117,7 +118,7 @@ export class SQLiteSnapshotPages {
   if(metadata.sequence!==stage.next_page)fail('PAGE_CHANGED','Snapshot page arrived out of sequence');
   return stage;
  }
- private async finishFrame(scope:string,metadata:SQLiteSnapshotMetadata,digest:string|undefined,frameHash:string,stage:SQLiteSnapshotStage,state:ReplicaSetDigest,addedRows:number,addedBytes:number):Promise<SQLiteSnapshotProgress>{
+ private async finishFrame(scope:string,metadata:SQLiteSnapshotMetadata,digest:string|undefined,frameHash:string,stage:SQLiteSnapshotStage,state:SQLiteSnapshotDigestState,addedRows:number,addedBytes:number):Promise<SQLiteSnapshotProgress>{
   const rows=stage.rows+addedRows,bytes=stage.bytes+addedBytes;
   if(!Number.isSafeInteger(rows)||!Number.isSafeInteger(bytes)||state.count!==rows||metadata.maxRows&&rows>metadata.maxRows||metadata.maxBytes&&bytes>metadata.maxBytes)fail('BUDGET','snapshot-page-budget-exceeded');
   if(metadata.last){

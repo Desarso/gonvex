@@ -16,8 +16,11 @@ export interface SQLiteReplicaDatabase {
   readonly ingressUnicodeFold?: true;
   readonly ingressNativeFastFold?: true;
   readonly ingressNativeHash?: true;
+  readonly ingressNativeReceipt?: true;
   /** Present only on the owner actor composition host. */
   readonly ownerTransactionDepth?: number;
+  /** Join the actor batch without a savepoint; any error poisons that batch. */
+  joinOwnerTransactionAsync?(task:()=>Promise<void>):Promise<void>;
   execAsync(sql: string): Promise<void>;
   runAsync(sql: string, ...params: unknown[]): Promise<unknown>;
   getFirstAsync<T>(sql: string, ...params: unknown[]): Promise<T | null>;

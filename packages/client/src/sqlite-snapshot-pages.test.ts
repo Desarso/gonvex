@@ -104,7 +104,7 @@ function nativeFixture(){
   const rows=await fixtureValue.host.getAllAsync<T>(sql,...params);
   receipts.push(rows as Record<string,unknown>[]);return rows;
  }};
- return {...fixtureValue,receipts,stager:new SQLiteSnapshotPages(host,fixtureValue.fence)};
+ return {...fixtureValue,host,receipts,stager:new SQLiteSnapshotPages(host,fixtureValue.fence)};
 }
 function encodedPage(rows:JsonValue[],sequence=0,last=false,digest?:string){
  const {result,...metadata}=page(rows,sequence,last,digest);
@@ -126,7 +126,7 @@ it('stages native canonical row strings without delivering row bodies through th
  expect(await stager.appendEncodedReceipt('s',before)).toMatchObject({ack:{type:'replica.snapshotAck',id:'collection',snapshotId:'snapshot',sequence:0},progress:{rows:200,complete:true}});
  expect(receipts).toHaveLength(2);
  for(const batch of receipts){expect(batch).toHaveLength(100);for(const receipt of batch)expect(Object.keys(receipt).sort()).toEqual(['hash','id']);}
- expect(stager.stats()).toEqual({wireBytes:131072,wireMaxBytes:131072,wireEntries:1});
+ expect(stager.stats()).toEqual({wireBytes:131072,wireMaxBytes:131072,wireEntries:1,nativeReceiptFrames:0,nativeReceiptRows:0,decodedHashRows:200});
  expect(db.prepare('SELECT count(*) n FROM gv_snapshot_input').get()!.n).toBe(0);
  expect((await stager.read('s','collection','snapshot')).rows.map(row=>row.row)).toEqual(rows.slice(0,128));
 });
@@ -151,4 +151,31 @@ it('requires native hashing and strict scoped wire metadata before exposing any 
   await expect(stager.appendEncoded('s',new TextEncoder().encode(JSON.stringify(invalid)))).rejects.toMatchObject({code:'INVALID_ROW'});
  expect(db.prepare('SELECT count(*) n FROM gv_snapshot_rows').get()!.n).toBe(0);
  expect(db.prepare('SELECT count(*) n FROM gv_snapshot_input').get()!.n).toBe(0);
+});
+
+it('keeps zero as the server unbounded-budget sentinel while enforcing positive limits in both codecs',async()=>{
+ for(const native of [false,true])for(const budget of ['maxRows','maxBytes']){
+  const test=native?nativeFixture():fixture();
+  const rows=[{id:'a'},{id:'b'}],digest=(await certificate(rows)).digest();
+  const frame={...page(rows,0,true,digest),[budget]:1};
+  const append=(input:any)=>native?test.stager.appendEncoded('s',new TextEncoder().encode(JSON.stringify({...input,type:'replica.snapshotEncodedPage',canonicalRows:input.result.map((row:JsonValue)=>JSON.stringify(row)),result:undefined}))):test.stager.append('s',input);
+  await expect(append(frame)).rejects.toMatchObject({code:'BUDGET'});
+  expect(await append({...frame,maxRows:0,maxBytes:0})).toMatchObject({complete:true,rows:2});
+  const empty={...page([],0,true,new ReplicaSetDigest().digest()),snapshotId:'empty',maxRows:0,maxBytes:0};
+  expect(await append(empty)).toMatchObject({complete:true,rows:0});
+  expect((await test.stager.read('s','collection','empty')).rows).toEqual([]);
+ }
+});
+it('joins an already admitted owner batch and rolls back its prior frame if a later frame fails',async()=>{
+ const test=nativeFixture(),database=sqliteOwnerTransactions(test.host),stager=new SQLiteSnapshotPages(database,test.fence);
+ await stager.ready();
+ await expect(stager.appendEncodedReceipt('s',encodedPage([{id:'a'}]),true)).rejects.toMatchObject({code:'FENCED'});
+ await expect(database.withTransactionAsync(async()=>{
+  await stager.appendEncodedReceipt('s',encodedPage([{id:'a'}]),true);
+  await expect(stager.appendEncodedReceipt('s',encodedPage([{id:'a'}],1,true,'sum128-v1:'+'0'.repeat(32)),true)).rejects.toThrow('duplicate-snapshot-key');
+ })).rejects.toThrow('duplicate-snapshot-key');
+ expect(test.db.prepare('SELECT count(*) n FROM gv_snapshot_rows').get()!.n).toBe(0);
+ expect(test.db.prepare('SELECT count(*) n FROM gv_snapshot_stages').get()!.n).toBe(0);
+ const digest=(await certificate([{id:'a'}])).digest();
+ expect((await stager.appendEncodedReceipt('s',encodedPage([{id:'a'}],0,true,digest))).progress).toMatchObject({complete:true,rows:1});
 });

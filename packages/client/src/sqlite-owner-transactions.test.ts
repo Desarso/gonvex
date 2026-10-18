@@ -38,3 +38,14 @@ it('bounds transaction nesting and permits a subsequent operation after rollback
   await database.withTransactionAsync(()=>database.runAsync('INSERT INTO records VALUES(99)').then(()=>undefined));
   expect(db.prepare('SELECT id FROM records').get()!.id).toBe(99);
 });
+it('joins the actor batch without another savepoint and rolls back even a swallowed joined error',async()=>{
+ const {db,database}=fixture();
+ await expect(database.joinOwnerTransactionAsync!(async()=>{})).rejects.toMatchObject({code:'FENCED'});
+ await expect(database.withTransactionAsync(async()=>{
+  await database.runAsync('INSERT INTO records VALUES(1)');
+  await expect(database.joinOwnerTransactionAsync!(async()=>{await database.runAsync('INSERT INTO records VALUES(2)');throw Error('joined failure');})).rejects.toThrow('joined failure');
+ })).rejects.toThrow('joined failure');
+ expect(db.prepare('SELECT count(*) n FROM records').get()!.n).toBe(0);expect(database.ownerTransactionDepth).toBe(0);
+ await database.withTransactionAsync(async()=>{await database.joinOwnerTransactionAsync!(async()=>{expect(database.ownerTransactionDepth).toBe(1);await database.runAsync('INSERT INTO records VALUES(3)');});});
+ expect(db.prepare('SELECT id FROM records').all()).toEqual([{id:3}]);
+});
